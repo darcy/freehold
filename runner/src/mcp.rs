@@ -95,6 +95,14 @@ async fn mcp_endpoint(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // JSON-RPC batches were removed in protocol 2025-06-18; reject loudly
+    // instead of classifying the array as a notification and silently 204-ing
+    // (a client would hang to its own timeout with no log line).
+    if body.is_array() {
+        tracing::warn!("rejected JSON-RPC batch request (not supported in {PROTOCOL_VERSION})");
+        return rpc_error(None, -32600, "batch requests are not supported".into());
+    }
+
     let incoming_session = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())

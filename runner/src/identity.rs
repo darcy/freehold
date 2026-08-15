@@ -8,7 +8,10 @@
 //!
 //! Security posture:
 //! - `Debug` prints pubkeys only — raw secrets can never reach logs via `{:?}`.
-//! - Secrets are zeroized on drop (in-memory copy hygiene).
+//! - The struct's secret copies are zeroized on drop; intermediate buffers
+//!   (decoded bytes, raw file text, serialized JSON) are `Zeroizing`-wrapped.
+//!   The hex-string getters (`nostr_secret_hex`/`enc_secret_hex`) return
+//!   short-lived plain `String`s that are NOT wiped — keep them out of logs.
 //! - `PartialEq` is NOT constant-time; only tests compare identities today.
 //!   Swap to `subtle::ConstantTimeEq` if secret equality ever crosses a
 //!   security boundary.
@@ -154,7 +157,12 @@ impl Identity {
         n_arr.copy_from_slice(&n);
         e_arr.copy_from_slice(&e);
         // Scalar validity is enforced in from_secrets (single validation point).
-        Self::from_secrets(n_arr, e_arr)
+        let id = Self::from_secrets(n_arr, e_arr)?;
+        // Wipe the stack copies once the struct holds them (the struct's own
+        // copy is zeroized on drop).
+        n_arr.zeroize();
+        e_arr.zeroize();
+        Ok(id)
     }
 
     /// Persist private keys to `dir/identity.json` (mode 0600 on unix).
@@ -211,26 +219,27 @@ impl Identity {
     /// Rotate a copy of the current `identity.json` (`.bak`, then `.bak.N` —
     /// a second `--force` must never clobber the ORIGINAL key's backup).
     ///
-    /// `fs::copy` carries the source's permission bits, so a restored-from-
-    /// tarball 0644 identity would produce a world-readable backup; the copy
-    /// is re-pinned to 0600 explicitly (unix).
+    /// The destination is born at 0600 (unix) and lands via atomic rename —
+    /// the backup's private keys are never exposed in a loose-permission or
+    /// partially-written file, matching `write_to_dir`'s discipline. (`fs::copy`
+    /// would open the destination 0666&~umask → 0644, copy the secrets, then
+    /// apply the source's bits — exactly the short bad window this avoids.)
     pub fn backup_identity(dir: &Path) -> Result<PathBuf, IdentityError> {
         let path = dir.join(IDENTITY_FILE);
         if !path.exists() {
             return Err(IdentityError::NotFound);
         }
+        // TOCTOU note: the rotate-and-copy here is not exclusive against a
+        // concurrent `keys init --force`, but both runs copy the SAME source
+        // (identity.json) and rename is atomic last-wins, so a collision
+        // produces an identical backup, never mixed content.
         let mut target = dir.join(format!("{IDENTITY_FILE}.bak"));
         let mut i = 1;
         while target.exists() {
             target = dir.join(format!("{IDENTITY_FILE}.bak.{i}"));
             i += 1;
         }
-        fs::copy(&path, &target)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
-        }
+        copy_secret_file(&path, &target)?;
         Ok(target)
     }
 
@@ -256,6 +265,50 @@ impl Identity {
         let pubk = X25519PublicKey::from(&StaticSecret::from(self.enc_secret));
         hex::encode(pubk.as_bytes())
     }
+}
+
+/// Copy a secret-bearing file to `dst` with the destination born at 0600
+/// (unix) + atomic rename — no window where the contents sit loose or partial.
+fn copy_secret_file(src: &Path, dst: &Path) -> Result<(), IdentityError> {
+    let name = dst
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("backup");
+    let tmp = dst.with_file_name(format!("{name}.tmp"));
+    let copied = (|| -> std::io::Result<()> {
+        let mut src_f = fs::File::open(src)?;
+        #[cfg(unix)]
+        let mut dst_f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?
+        };
+        #[cfg(not(unix))]
+        let mut dst_f = {
+            // NOTE: non-unix writes use the default umask; 0600 is a unix
+            // guarantee. Unix is the appliance target.
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)?
+        };
+        std::io::copy(&mut src_f, &mut dst_f)?;
+        dst_f.sync_all()
+    })();
+    if copied.is_err() {
+        let _ = fs::remove_file(&tmp);
+        copied?;
+    }
+    if let Err(e) = fs::rename(&tmp, dst) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 fn random_bytes() -> [u8; SECRET_LEN] {

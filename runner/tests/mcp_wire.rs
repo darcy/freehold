@@ -239,6 +239,17 @@ async fn mcp_wire_shape() {
     .expect("loopback origin");
     assert_eq!(allowed.status(), 200);
 
+    // 13. JSON-RPC batch (top-level array) -> explicit -32600, not a silent 204
+    let batch = body_json(post(
+        &agent,
+        &url,
+        json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": {} }]),
+        session.as_deref(),
+        None,
+    )
+    .expect("batch request"));
+    assert_eq!(batch["error"]["code"], -32600);
+
     server.abort();
 }
 

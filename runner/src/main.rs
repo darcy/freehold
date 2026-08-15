@@ -84,6 +84,32 @@ async fn main() -> anyhow::Result<()> {
                 "private keys live in {} (0600) — do not commit",
                 written.display()
             );
+            // load_with gives env vars priority over the file — if they're set,
+            // `runner serve` will NOT use the identity we just wrote. Say so
+            // now, or the printed pubkey looks authoritative and is wrong.
+            match Identity::load_with(
+                &args.state_dir,
+                std::env::var(identity::NSEC_ENV).ok(),
+                std::env::var(identity::ENC_ENV).ok(),
+            ) {
+                Ok(env_id) => println!(
+                    "note: {} and {} are set — `runner serve` will use the ENV \
+                     identity (nostr pubkey {}), not the file above",
+                    identity::NSEC_ENV,
+                    identity::ENC_ENV,
+                    env_id.nostr_pubkey_hex()
+                ),
+                Err(identity::IdentityError::PartialEnv) => println!(
+                    "warning: only one of {}/{} is set — `runner serve` will fail with PartialEnv",
+                    identity::NSEC_ENV,
+                    identity::ENC_ENV
+                ),
+                Err(_) => println!(
+                    "warning: {} and/or {} are set but invalid — `runner serve` will fail",
+                    identity::NSEC_ENV,
+                    identity::ENC_ENV
+                ),
+            }
             Ok(())
         }
         Cmd::Serve(args) => {
