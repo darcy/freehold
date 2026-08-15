@@ -209,17 +209,14 @@ impl Identity {
         // tightens the dir — tighten here so the backup never lands in a
         // world-traversable directory either.
         create_state_dir(dir)?;
-        // TOCTOU note: rotate-and-copy is not exclusive against a concurrent
-        // `keys init --force`, but both runs copy the SAME source
-        // (identity.json), each through its OWN unique temp (open_secret_temp),
-        // and rename is atomic last-wins — a collision produces an identical
-        // backup (from the same source), never mixed or truncated content.
-        let mut target = dir.join(format!("{IDENTITY_FILE}.bak"));
-        let mut i = 1;
-        while target.exists() {
-            target = dir.join(format!("{IDENTITY_FILE}.bak.{i}"));
-            i += 1;
-        }
+        // The backup NAME is reserved with O_EXCL before the copy, so a
+        // concurrent `keys init --force` can never pick the same name for a
+        // different source — the round-7 interleaving (B reads the NEW key and
+        // renames it over A's backup of the OLD key, `.bak.1` never allocated)
+        // is structurally impossible. A crash between reserve and rename
+        // leaves a 0-byte 0600 placeholder (never a partial key); the next
+        // --force rotates past it.
+        let target = reserve_backup_name(dir)?;
         copy_secret_file(&path, &target)?;
         Ok(target)
     }
@@ -287,6 +284,42 @@ fn temp_suffix() -> String {
     rand::rng().fill_bytes(&mut b);
     hex::encode(b)
 }
+
+/// Atomically reserve the next free backup name (`.bak`, then `.bak.N`) by
+/// CREATING it 0600 (unix). `exists()`-then-use would let two concurrent
+/// `--force` runs pick the same name; O_EXCL allocates distinct names.
+/// The reserved file is an empty placeholder — `copy_secret_file` renames
+/// the real backup over it.
+fn reserve_backup_name(dir: &Path) -> Result<PathBuf, IdentityError> {
+    for i in 0..MAX_BACKUPS {
+        let target = match i {
+            0 => dir.join(format!("{IDENTITY_FILE}.bak")),
+            n => dir.join(format!("{IDENTITY_FILE}.bak.{n}")),
+        };
+        let reserved = {
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            opts.open(&target)
+        };
+        match reserved {
+            Ok(_) => return Ok(target),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("too many backups in {dir:?}"),
+    )
+    .into())
+}
+
+const MAX_BACKUPS: usize = 100;
 
 /// Copy a secret-bearing file to `dst` with the destination born at 0600
 /// (unix) + atomic rename — no window where the contents sit loose or partial.

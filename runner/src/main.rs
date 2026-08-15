@@ -183,9 +183,10 @@ mod tests {
 
     #[test]
     fn partial_env_warns_not_silent() {
-        // An INVALID nsec would surface as "unusable" if validation ran before
-        // the partial-env arm — asserting "PartialEnv" proves ordering.
-        let n = note(Some(&"00".repeat(64)), None).expect("partial env warns");
+        // "00".repeat(32) is a 32-byte ALL-ZERO scalar: valid length, invalid
+        // secp256k1 key. It would surface as "unusable" if validation ran
+        // before the partial-env arm — asserting "PartialEnv" proves ordering.
+        let n = note(Some(&"00".repeat(32)), None).expect("partial env warns");
         assert!(n.contains("only one of"), "got: {n}");
         assert!(n.contains("PartialEnv"), "got: {n}");
         assert!(!n.contains("unusable"), "partial check must precede validation: {n}");
@@ -203,9 +204,13 @@ mod tests {
     #[test]
     fn both_env_invalid_warns() {
         let id = Identity::generate();
-        // All-zero nsec is valid hex, invalid scalar — the load path must fail.
-        let n = note(Some(&"00".repeat(64)), Some(&id.enc_secret_hex()))
+        // "00".repeat(32): 32-byte all-zero scalar — VALID length so it gets
+        // past BadLength and must fail on the secp256k1 scalar check. This is
+        // the only coverage of the Err arm; keep it on the scalar path so a
+        // regression dropping validation doesn't stay green.
+        let n = note(Some(&"00".repeat(32)), Some(&id.enc_secret_hex()))
             .expect("both env vars set");
         assert!(n.contains("unusable"), "got: {n}");
+        assert!(n.contains("secp256k1"), "must be the scalar check, got: {n}");
     }
 }
