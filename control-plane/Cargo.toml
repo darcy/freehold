@@ -1,0 +1,19 @@
+[package]
+name = "freehold-control-plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Freehold control plane: provisioner, grants, readiness, local web UI"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "control-plane"
+path = "src/main.rs"
