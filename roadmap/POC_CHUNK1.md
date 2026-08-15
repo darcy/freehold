@@ -44,18 +44,18 @@ read/write round-trip — all via runner, secrets never in agent context.
 
 ### Phase A — Runner core (the engine primitive)
 
-- [ ] [ ] 
+- [x] [x]
 
 A1. Scaffold Rust workspace: `runner` crate + `control-plane` crate (workspace root).
 
-- [ ] [ ] 
+- [x] [x]
 
-A2. Runner identity: generate Nostr keypair + separate encryption keypair. Keypair  
+A2. Runner identity: generate Nostr keypair + separate encryption keypair. Keypair
 generation + storage (private key injected via env var / mounted secret, never committed).
 
-- [ ] [ ] 
+- [x] [x]
 
-A3. Runner MCP tool server skeleton over HTTP: `list`, `exec`, `config`, `status`,  
+A3. Runner MCP tool server skeleton over HTTP: `list`, `exec`, `config`, `status`,
 `snapshot` endpoints. JSON-RPC framing.
 
 - [ ] [ ] 
