@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -73,15 +72,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             if args.force && path.exists() {
-                // Rotate: the ORIGINAL key is the one --force exists to make
-                // survivable — a second --force must not clobber its backup.
-                let mut target = args.state_dir.join("identity.json.bak");
-                let mut i = 1;
-                while target.exists() {
-                    target = args.state_dir.join(format!("identity.json.bak.{i}"));
-                    i += 1;
-                }
-                fs::copy(&path, &target)?;
+                let target = Identity::backup_identity(&args.state_dir)?;
                 println!("backed up old identity to {}", target.display());
             }
             let id = Identity::generate();
@@ -116,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
             // A4: hand `id` to the server — decrypt secrets for exec, sign audit events.
             let (bound, server) = freehold_runner::mcp::serve(&args.addr).await?;
             tracing::info!(addr = %bound, "runner MCP server listening");
+            // A4: replace with an axum graceful-shutdown future once exec has
+            // in-flight work to drain — signal-to-exit is not a drain.
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
                 _ = server => {}

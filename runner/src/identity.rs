@@ -23,7 +23,7 @@ use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const NSEC_ENV: &str = "FREEHOLD_RUNNER_NSEC";
 pub const ENC_ENV: &str = "FREEHOLD_RUNNER_ENC_SECRET";
@@ -72,7 +72,9 @@ impl fmt::Debug for Identity {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+/// The serialized form holds both private keys in cleartext — wipe on drop
+/// covers the load path AND the struct `write_to_dir` serializes.
+#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
 struct IdentityFile {
     nostr_secret_hex: String,
     enc_secret_hex: String,
@@ -81,10 +83,12 @@ struct IdentityFile {
 impl Identity {
     /// Generate a fresh identity: random Nostr secret + random X25519 static secret.
     pub fn generate() -> Self {
-        Self {
-            nostr_secret: random_bytes(),
-            enc_secret: random_bytes(),
-        }
+        // Routed through the validating constructor so the invariant in
+        // `nostr_pubkey_hex` is literal: a random 32-byte scalar that
+        // `SecretKey::from_slice` rejects has probability ≈ 2⁻¹²⁸ (same order
+        // as an RNG failure).
+        Self::from_secrets(random_bytes(), random_bytes())
+            .expect("random secp256k1 scalar is valid")
     }
 
     /// Build from raw secrets. Validates the Nostr scalar so every constructor
@@ -127,7 +131,9 @@ impl Identity {
         if !path.exists() {
             return Err(IdentityError::NotFound);
         }
-        let raw = fs::read_to_string(&path)?;
+        // Zeroizing: the raw file text holds both secrets (this runs on every
+        // `runner serve`).
+        let raw = zeroize::Zeroizing::new(fs::read_to_string(&path)?);
         let parsed: IdentityFile = serde_json::from_str(&raw)?;
         Self::from_hex(&parsed.nostr_secret_hex, &parsed.enc_secret_hex)
     }
@@ -200,6 +206,32 @@ impl Identity {
             return Err(e.into());
         }
         Ok(path)
+    }
+
+    /// Rotate a copy of the current `identity.json` (`.bak`, then `.bak.N` —
+    /// a second `--force` must never clobber the ORIGINAL key's backup).
+    ///
+    /// `fs::copy` carries the source's permission bits, so a restored-from-
+    /// tarball 0644 identity would produce a world-readable backup; the copy
+    /// is re-pinned to 0600 explicitly (unix).
+    pub fn backup_identity(dir: &Path) -> Result<PathBuf, IdentityError> {
+        let path = dir.join(IDENTITY_FILE);
+        if !path.exists() {
+            return Err(IdentityError::NotFound);
+        }
+        let mut target = dir.join(format!("{IDENTITY_FILE}.bak"));
+        let mut i = 1;
+        while target.exists() {
+            target = dir.join(format!("{IDENTITY_FILE}.bak.{i}"));
+            i += 1;
+        }
+        fs::copy(&path, &target)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(target)
     }
 
     pub fn nostr_secret_hex(&self) -> String {
@@ -352,6 +384,53 @@ mod tests {
         id.write_to_dir(dir.path()).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "rewrite must restore 0600 on a looser file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_is_0600_even_from_loose_source() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("state");
+        fs::create_dir_all(&dir).unwrap();
+        // Restore-from-tarball case: identity.json came back 0644.
+        let path = dir.join(IDENTITY_FILE);
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(&path)
+            .unwrap()
+            .write_all(b"old-secret-bytes")
+            .unwrap();
+        let bak = Identity::backup_identity(&dir).unwrap();
+        let mode = fs::metadata(&bak).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "backup must be 0600 regardless of source bits");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_rotates_instead_of_clobbering() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("state");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(IDENTITY_FILE);
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(b"key-v1")
+            .unwrap();
+        let first = Identity::backup_identity(&dir).unwrap();
+        let second = Identity::backup_identity(&dir).unwrap();
+        assert_ne!(first, second, "second backup must not clobber the first");
+        assert_eq!(fs::read_to_string(&first).unwrap(), "key-v1");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "key-v1");
     }
 
     #[test]
