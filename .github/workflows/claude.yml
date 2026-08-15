@@ -29,7 +29,7 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request for bugs, logic errors, and security issues.
+            Review this pull request for bugs, logic errors, and security issues. Don't go crazy with tweaks and refining code comments and nits. Your role is not perfectionist but spotting real issues.
 
             Post inline comments on the files on any specific lines with problems, not a top-level comment.
 
