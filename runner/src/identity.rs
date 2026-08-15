@@ -171,19 +171,14 @@ impl Identity {
     pub fn write_to_dir(&self, dir: &Path) -> Result<PathBuf, IdentityError> {
         create_state_dir(dir)?;
         let path = dir.join(IDENTITY_FILE);
-        let tmp = dir.join(format!("{IDENTITY_FILE}.tmp"));
         // Zeroizing: the serialized form holds both private keys in cleartext.
         let json = zeroize::Zeroizing::new(serde_json::to_string_pretty(&IdentityFile {
             nostr_secret_hex: self.nostr_secret_hex(),
             enc_secret_hex: self.enc_secret_hex(),
         })?);
 
-        let wrote = (|| -> std::io::Result<()> {
-            let mut f = open_secret_temp(&tmp)?;
-            f.write_all(json.as_bytes())?;
-            f.sync_all()
-        })();
-
+        let (mut f, tmp) = open_secret_temp(&path, IDENTITY_FILE)?;
+        let wrote = f.write_all(json.as_bytes()).and_then(|_| f.sync_all());
         if wrote.is_err() {
             // Don't leave secret material in a stray temp file.
             let _ = fs::remove_file(&tmp);
@@ -214,10 +209,11 @@ impl Identity {
         // tightens the dir — tighten here so the backup never lands in a
         // world-traversable directory either.
         create_state_dir(dir)?;
-        // TOCTOU note: the rotate-and-copy here is not exclusive against a
-        // concurrent `keys init --force`, but both runs copy the SAME source
-        // (identity.json) and rename is atomic last-wins, so a collision
-        // produces an identical backup, never mixed content.
+        // TOCTOU note: rotate-and-copy is not exclusive against a concurrent
+        // `keys init --force`, but both runs copy the SAME source
+        // (identity.json), each through its OWN unique temp (open_secret_temp),
+        // and rename is atomic last-wins — a collision produces an identical
+        // backup (from the same source), never mixed or truncated content.
         let mut target = dir.join(format!("{IDENTITY_FILE}.bak"));
         let mut i = 1;
         while target.exists() {
@@ -252,13 +248,21 @@ impl Identity {
     }
 }
 
-/// Open a temp file for secret material, born 0600 (unix) via O_CREAT|O_EXCL.
-/// `mode()` only applies at creation, so a temp stranded by a killed run must
-/// never be reused with its (perhaps loose) existing bits — if it exists,
-/// remove it and retry once. Non-unix continues with the umask caveat (unix is
-/// the appliance target).
-fn open_secret_temp(tmp: &Path) -> std::io::Result<fs::File> {
-    let open = || {
+/// Open a temp file for secret material: born 0600 (unix) via O_CREAT|O_EXCL,
+/// with a UNIQUE per-invocation name (~2⁻³² collision per pair).
+///
+/// Two properties fall out of the random suffix:
+/// - concurrent runs never share an inode, so no run can unlink or write
+///   through another run's temp (the round-6 race);
+/// - a temp stranded by a killed run is never reused with its (possibly loose)
+///   existing bits and never unlinked by a live run — it just stays as a rare,
+///   0600, 0700-dir'd leftover.
+///
+/// On the vanishingly rare actual name collision, `AlreadyExists` re-rolls a
+/// fresh name instead of touching the existing file.
+fn open_secret_temp(dst: &Path, name: &str) -> std::io::Result<(fs::File, PathBuf)> {
+    for _ in 0..4 {
+        let tmp = dst.with_file_name(format!("{name}.tmp.{}", temp_suffix()));
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -266,18 +270,22 @@ fn open_secret_temp(tmp: &Path) -> std::io::Result<fs::File> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        opts.open(tmp)
-    };
-    match open() {
-        Ok(f) => Ok(f),
-        // A stranded temp from a killed run is not something to write secrets
-        // into.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            fs::remove_file(tmp)?;
-            open()
+        match opts.open(&tmp) {
+            Ok(f) => return Ok((f, tmp)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
-        Err(e) => Err(e),
     }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temp name",
+    ))
+}
+
+fn temp_suffix() -> String {
+    let mut b = [0u8; 4];
+    rand::rng().fill_bytes(&mut b);
+    hex::encode(b)
 }
 
 /// Copy a secret-bearing file to `dst` with the destination born at 0600
@@ -287,10 +295,9 @@ fn copy_secret_file(src: &Path, dst: &Path) -> Result<(), IdentityError> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("backup");
-    let tmp = dst.with_file_name(format!("{name}.tmp"));
+    let (mut dst_f, tmp) = open_secret_temp(dst, name)?;
     let copied = (|| -> std::io::Result<()> {
         let mut src_f = fs::File::open(src)?;
-        let mut dst_f = open_secret_temp(&tmp)?;
         std::io::copy(&mut src_f, &mut dst_f)?;
         dst_f.sync_all()
     })();

@@ -183,9 +183,12 @@ mod tests {
 
     #[test]
     fn partial_env_warns_not_silent() {
-        let n = note(Some(&"ab".repeat(64)), None).expect("partial env warns");
+        // An INVALID nsec would surface as "unusable" if validation ran before
+        // the partial-env arm — asserting "PartialEnv" proves ordering.
+        let n = note(Some(&"00".repeat(64)), None).expect("partial env warns");
         assert!(n.contains("only one of"), "got: {n}");
         assert!(n.contains("PartialEnv"), "got: {n}");
+        assert!(!n.contains("unusable"), "partial check must precede validation: {n}");
     }
 
     #[test]
