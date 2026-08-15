@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -34,17 +35,20 @@ enum KeysAction {
 #[derive(Args)]
 struct InitArgs {
     /// State dir for identity files
-    #[arg(long, env = "FREEFOLD_STATE_DIR", default_value = "./.freehold")]
+    #[arg(long, env = "FREEHOLD_STATE_DIR", default_value = "./.freehold")]
     state_dir: PathBuf,
+    /// Replace an existing identity (irreversible — orphaning every grant on it)
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
 struct ServeArgs {
     /// Dir holding the runner identity
-    #[arg(long, env = "FREEFOLD_STATE_DIR", default_value = "./.freehold")]
+    #[arg(long, env = "FREEHOLD_STATE_DIR", default_value = "./.freehold")]
     state_dir: PathBuf,
-    /// Address to bind the MCP server (localhost only)
-    #[arg(long, env = "FREEFOLD_RUNNER_ADDR", default_value = "127.0.0.1:8787")]
+    /// Loopback address to bind the MCP server (non-loopback binds are rejected)
+    #[arg(long, env = "FREEHOLD_RUNNER_ADDR", default_value = "127.0.0.1:8787")]
     addr: String,
 }
 
@@ -61,20 +65,36 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Keys(KeysCmd {
             cmd: KeysAction::Init(args),
         }) => {
+            let path = args.state_dir.join(identity::IDENTITY_FILE);
+            if path.exists() && !args.force {
+                anyhow::bail!(
+                    "identity already exists at {} — pass --force to overwrite (irreversible)",
+                    path.display()
+                );
+            }
+            if args.force && path.exists() {
+                let bak = args.state_dir.join("identity.json.bak");
+                fs::copy(&path, &bak)?;
+                println!("backed up old identity to {}", bak.display());
+            }
             let id = Identity::generate();
-            let path = id.write_to_dir(&args.state_dir)?;
-            println!("wrote identity to {}", path.display());
+            let written = id.write_to_dir(&args.state_dir)?;
+            println!("wrote identity to {}", written.display());
             println!("nostr pubkey (hex):      {}", id.nostr_pubkey_hex());
             println!("encryption pubkey (hex): {}", id.enc_pubkey_hex());
             println!(
-                "private keys live in {}/{} (0600) — do not commit",
-                args.state_dir.display(),
-                identity::IDENTITY_FILE
+                "private keys live in {} (0600) — do not commit",
+                written.display()
             );
             Ok(())
         }
         Cmd::Serve(args) => {
-            let id = Identity::load(&args.state_dir).with_context(|| {
+            let id = Identity::load_with(
+                &args.state_dir,
+                std::env::var(identity::NSEC_ENV).ok(),
+                std::env::var(identity::ENC_ENV).ok(),
+            )
+            .with_context(|| {
                 format!(
                     "no identity found in {} — run `runner keys init`",
                     args.state_dir.display()
@@ -86,9 +106,13 @@ async fn main() -> anyhow::Result<()> {
                 enc_pubkey = %id.enc_pubkey_hex(),
                 "runner starting"
             );
+            // A4: hand `id` to the server — decrypt secrets for exec, sign audit events.
             let (bound, server) = freehold_runner::mcp::serve(&args.addr).await?;
             tracing::info!(addr = %bound, "runner MCP server listening");
-            server.await?;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
+                _ = server => {}
+            }
             Ok(())
         }
     }

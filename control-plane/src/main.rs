@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let addr = std::env::var("FREEFOLD_CP_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let addr = std::env::var("FREEHOLD_CP_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let app = Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthz));

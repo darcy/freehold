@@ -10,15 +10,19 @@
 //! A4, readiness self-check in A5, audit in A6 — until then those tools answer
 //! with a typed `isError` result explaining the pending phase.
 //!
-//! Minimal streamable-HTTP: JSON responses only (no SSE), an `Mcp-Session-Id`
-//! is issued on `initialize` and echoed back, but not yet enforced. If a
-//! third-party MCP client ever needs to drive the runner directly, swap in a
-//! full SDK (e.g. rmcp) — the tool contract is unchanged either way.
+//! Security (pre-A4):
+//! - Binds loopback only: a non-loopback `--addr` is rejected outright.
+//! - `Origin` is validated per the MCP spec's DNS-rebinding rule for local
+//!   servers: non-loopback origins get 403.
+//! - A session id is issued on `initialize` but NOT yet enforced. Real
+//!   enforcement + authentication (runner membership, grants) land with A4/D —
+//!   the endpoint is safe to leave open only because exec does not exist yet.
+//!
+//! Minimal streamable-HTTP: JSON responses only (no SSE). If a third-party MCP
+//! client needs to drive the runner directly, swap in a full SDK (e.g. rmcp) —
+//! the tool contract is unchanged either way.
 
-use std::collections::HashSet;
 use std::sync::Arc;
-
-use parking_lot::Mutex;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -32,25 +36,32 @@ use crate::registry;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "freehold-runner";
+/// Loopback origins allowed by the DNS-rebinding guard (scheme + host only;
+/// any port is fine — local UI ports vary).
+const LOOPBACK_ORIGINS: [&str; 3] = ["http://localhost", "http://127.0.0.1", "http://[::1]"];
 
 #[derive(Clone, Default)]
-pub struct RunnerState {
-    sessions: Arc<Mutex<HashSet<String>>>,
-}
+pub struct RunnerState;
 
 pub fn router() -> Router {
     Router::new()
         .route("/mcp", post(mcp_endpoint))
-        .with_state(Arc::new(RunnerState::default()))
+        .with_state(Arc::new(RunnerState))
 }
 
-/// Bind the MCP server to `addr` (localhost). Returns the bound address and a
-/// task handle; awaiting the handle serves until it errors or is aborted.
+/// Bind the MCP server to `addr` (loopback only). Returns the bound address and
+/// a task handle; the task serves until aborted or the process exits.
 pub async fn serve(
     addr: &str,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
+    if !bound.ip().is_loopback() {
+        return Err(anyhow::anyhow!(
+            "refusing non-loopback bind {bound}: the runner is unauthenticated \
+             until A4/D — bind 127.0.0.1"
+        ));
+    }
     let app = router();
     let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -61,11 +72,21 @@ pub async fn serve(
 }
 
 async fn mcp_endpoint(
-    State(state): State<Arc<RunnerState>>,
+    State(_state): State<Arc<RunnerState>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    // Echo the client's session id back on every response (spec-friendly).
+    // MCP spec: local HTTP servers MUST validate Origin to prevent DNS
+    // rebinding. Browsers send Origin; curl/MCP clients don't (allowed).
+    if let Some(origin) = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .filter(|o| !origin_is_loopback(o))
+    {
+        tracing::warn!(origin, "rejected non-loopback Origin (DNS rebinding guard)");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
     let incoming_session = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
@@ -79,12 +100,27 @@ async fn mcp_endpoint(
         body.get("method").and_then(|v| v.as_str()),
     ) {
         (Some("2.0"), Some(m)) => m,
-        _ => return rpc_error(id, -32600, "invalid request".into()),
+        // JSON-RPC §4.1: never reply to a notification. This also covers the
+        // id:null edge (absent id and literal null both come through as None).
+        _ => {
+            return if notification {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                rpc_error(id, -32600, "invalid request".into())
+            };
+        }
     };
+
+    // Any request-method (non-notification) sent without an id is a
+    // notification by definition — acknowledge and drop. Notifications must
+    // never get a response, including unknown methods (JSON-RPC §4.1).
+    if notification && !method.starts_with("notifications/") {
+        return StatusCode::NO_CONTENT.into_response();
+    }
 
     let mut resp = match method {
         "initialize" => {
-            let session_id = state.new_session_id();
+            let session_id = new_session_id();
             let mut resp = Json(json!({
                 "jsonrpc": "2.0", "id": id,
                 "result": {
@@ -98,40 +134,30 @@ async fn mcp_endpoint(
                 .insert("mcp-session-id", session_id.parse().unwrap());
             resp
         }
-        // Notifications never carry ids — acknowledge and drop.
         "notifications/initialized" | "notifications/cancelled" => {
             return StatusCode::NO_CONTENT.into_response();
         }
-        "ping" => {
-            if notification {
-                return StatusCode::NO_CONTENT.into_response();
-            }
-            rpc_result(id, json!({}))
-        }
+        "ping" => rpc_result(id, json!({})),
         "tools/list" => {
-            if notification {
-                return StatusCode::NO_CONTENT.into_response();
-            }
             rpc_result(id, json!({ "tools": tools() }))
         }
         "tools/call" => {
-            if notification {
-                return StatusCode::NO_CONTENT.into_response();
-            }
             let params = body.get("params").cloned().unwrap_or(Value::Null);
             let name = params.get("name").and_then(Value::as_str).map(String::from);
             let (is_error, text) = match name.as_deref() {
-                Some("list") => (false, serde_json::to_string_pretty(&registry::registered()).unwrap()),
-                Some("config") => (
-                    false,
-                    serde_json::to_string_pretty(&json!({
-                        "name": SERVER_NAME,
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "transport": "mcp-over-http",
-                        "targets": registry::registered(),
-                    }))
-                    .unwrap(),
-                ),
+                Some("list") => match serde_json::to_string_pretty(&registry::registered()) {
+                    Ok(s) => (false, s),
+                    Err(e) => (true, format!("list failed: {e}")),
+                },
+                Some("config") => match serde_json::to_string_pretty(&json!({
+                    "name": SERVER_NAME,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "transport": "mcp-over-http",
+                    "targets": registry::registered(),
+                })) {
+                    Ok(s) => (false, s),
+                    Err(e) => (true, format!("config failed: {e}")),
+                },
                 // Pending phases — typed tool result, not a protocol error.
                 Some("exec") => (
                     true,
@@ -162,21 +188,32 @@ async fn mcp_endpoint(
         other => rpc_error(id, -32601, format!("method not found: {other}")),
     };
 
-    if let Some(sid) = incoming_session {
-        resp.headers_mut()
-            .insert("mcp-session-id", sid.parse().unwrap());
+    // Echo the client's session id back (except on `initialize`, where we just
+    // issued a fresh one — echoing a stale header would clobber it and the
+    // client would never learn its new session).
+    if method != "initialize"
+        && let Some(sid) = incoming_session.and_then(|s| s.parse().ok())
+    {
+        resp.headers_mut().insert("mcp-session-id", sid);
     }
     resp
 }
 
-impl RunnerState {
-    fn new_session_id(&self) -> String {
-        let mut b = [0u8; 16];
-        rand::rng().fill_bytes(&mut b);
-        let sid = hex::encode(b);
-        self.sessions.lock().insert(sid.clone());
-        sid
-    }
+fn new_session_id() -> String {
+    // TODO(A4/D): real session registry + enforcement. Issued now so clients
+    // can pin the header; the value is opaque and stateless until then.
+    let mut b = [0u8; 16];
+    rand::rng().fill_bytes(&mut b);
+    hex::encode(b)
+}
+
+fn origin_is_loopback(origin: &str) -> bool {
+    LOOPBACK_ORIGINS.iter().any(|prefix| {
+        origin == *prefix
+            || origin
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with(':'))
+    })
 }
 
 fn tools() -> Vec<Value> {
@@ -184,7 +221,7 @@ fn tools() -> Vec<Value> {
         json!({
             "name": "list",
             "description": "List the targets this runner can reach.",
-            "inputSchema": {}
+            "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "exec",
@@ -206,7 +243,7 @@ fn tools() -> Vec<Value> {
         json!({
             "name": "config",
             "description": "Non-secret runner configuration.",
-            "inputSchema": {}
+            "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
             "name": "status",
@@ -250,10 +287,44 @@ mod tests {
     }
 
     #[test]
+    fn all_schemas_declare_object_type() {
+        for tool in tools() {
+            assert_eq!(
+                tool["inputSchema"]["type"],
+                "object",
+                "tool {} schema must declare type object, got {}",
+                tool["name"],
+                tool["inputSchema"]["type"]
+            );
+        }
+    }
+
+    #[test]
     fn exec_schema_requires_cmd_and_target() {
-        let exec = tools().into_iter().find(|t| t["name"] == "exec").unwrap();
+        let tools = tools();
+        let exec = tools.iter().find(|t| t["name"] == "exec").unwrap();
         let required = exec["inputSchema"]["required"].as_array().unwrap();
         assert!(required.contains(&json!("cmd")));
         assert!(required.contains(&json!("target")));
+    }
+
+    #[test]
+    fn origin_guard_accepts_loopback_only() {
+        for ok in [
+            "http://localhost",
+            "http://localhost:5173",
+            "http://127.0.0.1:8787",
+            "http://[::1]:8080",
+        ] {
+            assert!(origin_is_loopback(ok), "{ok} should be allowed");
+        }
+        for bad in [
+            "http://evil.example",
+            "https://localhost:5173",
+            "http://10.0.0.5:8787",
+            "null",
+        ] {
+            assert!(!origin_is_loopback(bad), "{bad} should be rejected");
+        }
     }
 }
