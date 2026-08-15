@@ -213,11 +213,20 @@ impl Identity {
         // concurrent `keys init --force` can never pick the same name for a
         // different source — the round-7 interleaving (B reads the NEW key and
         // renames it over A's backup of the OLD key, `.bak.1` never allocated)
-        // is structurally impossible. A crash between reserve and rename
-        // leaves a 0-byte 0600 placeholder (never a partial key); the next
-        // --force rotates past it.
+        // is structurally impossible. Interleaved runs can still install keys
+        // out of chronological order, so the suffix is ALLOCATION order, not
+        // key age — nothing is ever lost, just possibly renumbered. A crash
+        // between reserve and rename leaves a 0-byte 0600 placeholder (never a
+        // partial key); the next --force rotates past it.
         let target = reserve_backup_name(dir)?;
-        copy_secret_file(&path, &target)?;
+        if let Err(e) = copy_secret_file(&path, &target) {
+            // A FAILED copy must not leave an empty file named exactly like a
+            // good backup — recovery via `cp identity.json.bak identity.json`
+            // would restore an empty identity while the real backup sits one
+            // suffix over.
+            let _ = fs::remove_file(&target);
+            return Err(e);
+        }
         Ok(target)
     }
 
@@ -314,7 +323,10 @@ fn reserve_backup_name(dir: &Path) -> Result<PathBuf, IdentityError> {
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
-        format!("too many backups in {dir:?}"),
+        format!(
+            "too many backups (>{MAX_BACKUPS}) in {} — prune identity.json.bak* and retry",
+            dir.display()
+        ),
     )
     .into())
 }
@@ -494,6 +506,28 @@ mod tests {
         let bak = Identity::backup_identity(&dir).unwrap();
         let mode = fs::metadata(&bak).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "backup must be 0600 regardless of source bits");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_backup_leaves_no_empty_placeholder() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("state");
+        fs::create_dir_all(&dir).unwrap();
+        // identity.json as a DIRECTORY: exists() passes, the copy fails
+        // (EISDIR on read) — the exact failure the fix guards against.
+        fs::create_dir(dir.join(IDENTITY_FILE)).unwrap();
+        let err = Identity::backup_identity(&dir).unwrap_err();
+        assert!(matches!(err, IdentityError::Io(_)), "got {err:?}");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "no empty .bak placeholder may remain after a failed copy: {leftovers:?}"
+        );
     }
 
     #[cfg(unix)]
