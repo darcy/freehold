@@ -152,17 +152,14 @@ impl Identity {
         if e.len() != SECRET_LEN {
             return Err(IdentityError::BadLength { which: "encryption", got: e.len() });
         }
-        let mut n_arr = [0u8; SECRET_LEN];
-        let mut e_arr = [0u8; SECRET_LEN];
+        let mut n_arr = zeroize::Zeroizing::new([0u8; SECRET_LEN]);
+        let mut e_arr = zeroize::Zeroizing::new([0u8; SECRET_LEN]);
         n_arr.copy_from_slice(&n);
         e_arr.copy_from_slice(&e);
         // Scalar validity is enforced in from_secrets (single validation point).
-        let id = Self::from_secrets(n_arr, e_arr)?;
-        // Wipe the stack copies once the struct holds them (the struct's own
-        // copy is zeroized on drop).
-        n_arr.zeroize();
-        e_arr.zeroize();
-        Ok(id)
+        // The Zeroizing wrappers wipe on EVERY exit — including the `?`
+        // invalid-scalar path, which is exactly the malformed-NSEC case.
+        Self::from_secrets(*n_arr, *e_arr)
     }
 
     /// Persist private keys to `dir/identity.json` (mode 0600 on unix).
@@ -182,25 +179,9 @@ impl Identity {
         })?);
 
         let wrote = (|| -> std::io::Result<()> {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut f = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)?;
-                f.write_all(json.as_bytes())?;
-                f.sync_all()?;
-            }
-            #[cfg(not(unix))]
-            {
-                // NOTE: non-unix writes use the default umask; mode 0600 is a
-                // unix guarantee. Unix is the appliance target.
-                fs::write(&tmp, json.as_bytes())?;
-            }
-            Ok(())
+            let mut f = open_secret_temp(&tmp)?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()
         })();
 
         if wrote.is_err() {
@@ -229,6 +210,10 @@ impl Identity {
         if !path.exists() {
             return Err(IdentityError::NotFound);
         }
+        // The backup must capture the OLD key, so it runs before write_to_dir
+        // tightens the dir — tighten here so the backup never lands in a
+        // world-traversable directory either.
+        create_state_dir(dir)?;
         // TOCTOU note: the rotate-and-copy here is not exclusive against a
         // concurrent `keys init --force`, but both runs copy the SAME source
         // (identity.json) and rename is atomic last-wins, so a collision
@@ -267,6 +252,34 @@ impl Identity {
     }
 }
 
+/// Open a temp file for secret material, born 0600 (unix) via O_CREAT|O_EXCL.
+/// `mode()` only applies at creation, so a temp stranded by a killed run must
+/// never be reused with its (perhaps loose) existing bits — if it exists,
+/// remove it and retry once. Non-unix continues with the umask caveat (unix is
+/// the appliance target).
+fn open_secret_temp(tmp: &Path) -> std::io::Result<fs::File> {
+    let open = || {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(tmp)
+    };
+    match open() {
+        Ok(f) => Ok(f),
+        // A stranded temp from a killed run is not something to write secrets
+        // into.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::remove_file(tmp)?;
+            open()
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Copy a secret-bearing file to `dst` with the destination born at 0600
 /// (unix) + atomic rename — no window where the contents sit loose or partial.
 fn copy_secret_file(src: &Path, dst: &Path) -> Result<(), IdentityError> {
@@ -277,26 +290,7 @@ fn copy_secret_file(src: &Path, dst: &Path) -> Result<(), IdentityError> {
     let tmp = dst.with_file_name(format!("{name}.tmp"));
     let copied = (|| -> std::io::Result<()> {
         let mut src_f = fs::File::open(src)?;
-        #[cfg(unix)]
-        let mut dst_f = {
-            use std::os::unix::fs::OpenOptionsExt;
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?
-        };
-        #[cfg(not(unix))]
-        let mut dst_f = {
-            // NOTE: non-unix writes use the default umask; 0600 is a unix
-            // guarantee. Unix is the appliance target.
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?
-        };
+        let mut dst_f = open_secret_temp(&tmp)?;
         std::io::copy(&mut src_f, &mut dst_f)?;
         dst_f.sync_all()
     })();

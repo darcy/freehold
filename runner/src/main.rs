@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
@@ -51,6 +51,39 @@ struct ServeArgs {
     addr: String,
 }
 
+/// Operator-facing warning printed after `keys init`: env vars override the
+/// file in `serve`, so if they're set the printed pubkey is not the one that
+/// will run. Pure + testable; fires ONLY when at least one env var is present
+/// (`load_with(None, None)` falls back to the file and prints nothing).
+fn env_shadow_note(
+    nsec: Option<String>,
+    enc: Option<String>,
+    state_dir: &Path,
+) -> Option<String> {
+    match (nsec, enc) {
+        (Some(n), Some(e)) => match Identity::load_with(state_dir, Some(n), Some(e)) {
+            Ok(env_id) => Some(format!(
+                "note: {} and {} are set — `runner serve` will use the ENV \
+                 identity (nostr pubkey {}), not the file above",
+                identity::NSEC_ENV,
+                identity::ENC_ENV,
+                env_id.nostr_pubkey_hex()
+            )),
+            Err(e) => Some(format!(
+                "warning: {} and {} are set but unusable ({e}) — `runner serve` will fail",
+                identity::NSEC_ENV,
+                identity::ENC_ENV
+            )),
+        },
+        (Some(_), None) | (None, Some(_)) => Some(format!(
+            "warning: only one of {}/{} is set — `runner serve` will fail with PartialEnv",
+            identity::NSEC_ENV,
+            identity::ENC_ENV
+        )),
+        (None, None) => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -87,28 +120,14 @@ async fn main() -> anyhow::Result<()> {
             // load_with gives env vars priority over the file — if they're set,
             // `runner serve` will NOT use the identity we just wrote. Say so
             // now, or the printed pubkey looks authoritative and is wrong.
-            match Identity::load_with(
-                &args.state_dir,
+            // Gated on actual env presence: load_with(None, None) falls back to
+            // the file and must not be read as "env is set".
+            if let Some(note) = env_shadow_note(
                 std::env::var(identity::NSEC_ENV).ok(),
                 std::env::var(identity::ENC_ENV).ok(),
+                &args.state_dir,
             ) {
-                Ok(env_id) => println!(
-                    "note: {} and {} are set — `runner serve` will use the ENV \
-                     identity (nostr pubkey {}), not the file above",
-                    identity::NSEC_ENV,
-                    identity::ENC_ENV,
-                    env_id.nostr_pubkey_hex()
-                ),
-                Err(identity::IdentityError::PartialEnv) => println!(
-                    "warning: only one of {}/{} is set — `runner serve` will fail with PartialEnv",
-                    identity::NSEC_ENV,
-                    identity::ENC_ENV
-                ),
-                Err(_) => println!(
-                    "warning: {} and/or {} are set but invalid — `runner serve` will fail",
-                    identity::NSEC_ENV,
-                    identity::ENC_ENV
-                ),
+                println!("{note}");
             }
             Ok(())
         }
@@ -141,5 +160,49 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // (Some, Some) takes the from_hex path — the dir is never touched.
+    fn note(nsec: Option<&str>, enc: Option<&str>) -> Option<String> {
+        env_shadow_note(
+            nsec.map(String::from),
+            enc.map(String::from),
+            &PathBuf::from("/nonexistent"),
+        )
+    }
+
+    #[test]
+    fn no_env_prints_nothing() {
+        assert!(note(None, None).is_none(), "default path must stay silent");
+    }
+
+    #[test]
+    fn partial_env_warns_not_silent() {
+        let n = note(Some(&"ab".repeat(64)), None).expect("partial env warns");
+        assert!(n.contains("only one of"), "got: {n}");
+        assert!(n.contains("PartialEnv"), "got: {n}");
+    }
+
+    #[test]
+    fn both_env_valid_names_the_env_pubkey() {
+        let id = Identity::generate();
+        let n = note(Some(&id.nostr_secret_hex()), Some(&id.enc_secret_hex()))
+            .expect("both env vars set");
+        assert!(n.contains("ENV identity"), "got: {n}");
+        assert!(n.contains(&id.nostr_pubkey_hex()), "must name the env pubkey");
+    }
+
+    #[test]
+    fn both_env_invalid_warns() {
+        let id = Identity::generate();
+        // All-zero nsec is valid hex, invalid scalar — the load path must fail.
+        let n = note(Some(&"00".repeat(64)), Some(&id.enc_secret_hex()))
+            .expect("both env vars set");
+        assert!(n.contains("unusable"), "got: {n}");
     }
 }
