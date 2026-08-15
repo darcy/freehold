@@ -87,11 +87,18 @@ impl Identity {
         }
     }
 
-    pub fn from_secrets(nostr_secret: [u8; SECRET_LEN], enc_secret: [u8; SECRET_LEN]) -> Self {
-        Self {
+    /// Build from raw secrets. Validates the Nostr scalar so every constructor
+    /// path guarantees `nostr_pubkey_hex`'s invariant — invalid scalars
+    /// (all-zero, >= group order) are rejected here, not later.
+    pub fn from_secrets(
+        nostr_secret: [u8; SECRET_LEN],
+        enc_secret: [u8; SECRET_LEN],
+    ) -> Result<Self, IdentityError> {
+        SecretKey::from_slice(&nostr_secret).map_err(|_| IdentityError::InvalidNostrSecret)?;
+        Ok(Self {
             nostr_secret,
             enc_secret,
-        }
+        })
     }
 
     /// Load identity: env vars win, else the state-dir file.
@@ -126,8 +133,10 @@ impl Identity {
     }
 
     fn from_hex(nostr: &str, enc: &str) -> Result<Self, IdentityError> {
-        let n = hex::decode(nostr)?;
-        let e = hex::decode(enc)?;
+        // Zeroizing: decoded bytes are secret material between here and the
+        // struct copy.
+        let n = zeroize::Zeroizing::new(hex::decode(nostr)?);
+        let e = zeroize::Zeroizing::new(hex::decode(enc)?);
         if n.len() != SECRET_LEN {
             return Err(IdentityError::BadLength { which: "nostr", got: n.len() });
         }
@@ -138,12 +147,8 @@ impl Identity {
         let mut e_arr = [0u8; SECRET_LEN];
         n_arr.copy_from_slice(&n);
         e_arr.copy_from_slice(&e);
-        // Reject invalid secp256k1 scalars at load time so every downstream
-        // `expect` on the secret is a genuine invariant, not user-controlled
-        // input. All-zeros and values >= group order fail here with a clean
-        // IdentityError instead of a panic in `runner serve`.
-        SecretKey::from_slice(&n_arr).map_err(|_| IdentityError::InvalidNostrSecret)?;
-        Ok(Self::from_secrets(n_arr, e_arr))
+        // Scalar validity is enforced in from_secrets (single validation point).
+        Self::from_secrets(n_arr, e_arr)
     }
 
     /// Persist private keys to `dir/identity.json` (mode 0600 on unix).
@@ -156,10 +161,11 @@ impl Identity {
         create_state_dir(dir)?;
         let path = dir.join(IDENTITY_FILE);
         let tmp = dir.join(format!("{IDENTITY_FILE}.tmp"));
-        let json = serde_json::to_string_pretty(&IdentityFile {
+        // Zeroizing: the serialized form holds both private keys in cleartext.
+        let json = zeroize::Zeroizing::new(serde_json::to_string_pretty(&IdentityFile {
             nostr_secret_hex: self.nostr_secret_hex(),
             enc_secret_hex: self.enc_secret_hex(),
-        })?;
+        })?);
 
         let wrote = (|| -> std::io::Result<()> {
             #[cfg(unix)]
@@ -188,7 +194,11 @@ impl Identity {
             let _ = fs::remove_file(&tmp);
             wrote?;
         }
-        fs::rename(&tmp, &path)?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            // Same rule: a failed rename must not strand both private keys.
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(path)
     }
 
@@ -229,9 +239,18 @@ fn create_state_dir(dir: &Path) -> Result<(), IdentityError> {
         let mut b = fs::DirBuilder::new();
         b.mode(0o700).recursive(true);
         b.create(dir)?;
-        // Enforce 0700 even on a pre-existing looser-permissioned dir — later
-        // phases store more secret material here.
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        // Only tighten a pre-existing LOOSE dir (a user-supplied --state-dir
+        // pointing at a shared dir shouldn't be silently chmodded if it's
+        // already tight). Later phases store more secret material here.
+        let mode = fs::metadata(dir)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                dir = %dir.display(),
+                mode = format_args!("{mode:o}"),
+                "tightening state dir to 0700 (holds secret material)"
+            );
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
     }
     #[cfg(not(unix))]
     fs::create_dir_all(dir)?;

@@ -203,6 +203,20 @@ async fn mcp_wire_shape() {
     .expect("bogus notification");
     assert_eq!(no_resp.status(), 204);
 
+    // 10b. SPEC notifications we don't handle (progress, roots/list_changed…)
+    //      must also stay unanswered — not fall through to a -32601 reply.
+    for method in ["notifications/progress", "notifications/roots/list_changed"] {
+        let no_resp = post(
+            &agent,
+            &url,
+            json!({ "jsonrpc": "2.0", "method": method }),
+            session.as_deref(),
+            None,
+        )
+        .expect(method);
+        assert_eq!(no_resp.status(), 204, "{method} is a notification — no reply");
+    }
+
     // 11. DNS-rebinding guard: non-loopback Origin -> 403
     let blocked = post(
         &agent,

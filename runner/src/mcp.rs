@@ -37,8 +37,16 @@ use crate::registry;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "freehold-runner";
 /// Loopback origins allowed by the DNS-rebinding guard (scheme + host only;
-/// any port is fine — local UI ports vary).
-const LOOPBACK_ORIGINS: [&str; 3] = ["http://localhost", "http://127.0.0.1", "http://[::1]"];
+/// any port is fine — local UI ports vary; https covers mkcert/Tailscale-cert
+/// local UIs).
+const LOOPBACK_ORIGINS: [&str; 6] = [
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://[::1]",
+    "https://localhost",
+    "https://127.0.0.1",
+    "https://[::1]",
+];
 
 #[derive(Clone, Default)]
 pub struct RunnerState;
@@ -100,8 +108,9 @@ async fn mcp_endpoint(
         body.get("method").and_then(|v| v.as_str()),
     ) {
         (Some("2.0"), Some(m)) => m,
-        // JSON-RPC §4.1: never reply to a notification. This also covers the
-        // id:null edge (absent id and literal null both come through as None).
+        // JSON-RPC §4.1: never reply to a notification — that means an ABSENT
+        // id. An explicit `"id": null` is a request per spec and gets a
+        // null-id reply (it comes through as `Some(Value::Null)`).
         _ => {
             return if notification {
                 StatusCode::NO_CONTENT.into_response()
@@ -111,10 +120,11 @@ async fn mcp_endpoint(
         }
     };
 
-    // Any request-method (non-notification) sent without an id is a
-    // notification by definition — acknowledge and drop. Notifications must
-    // never get a response, including unknown methods (JSON-RPC §4.1).
-    if notification && !method.starts_with("notifications/") {
+    // JSON-RPC §4.1: never reply to a notification. ANY method sent without an
+    // id is one — including spec notifications we don't otherwise handle
+    // (progress, roots/list_changed, …). Dropping here means no match arm can
+    // accidentally answer them.
+    if notification {
         return StatusCode::NO_CONTENT.into_response();
     }
 
@@ -133,9 +143,6 @@ async fn mcp_endpoint(
             resp.headers_mut()
                 .insert("mcp-session-id", session_id.parse().unwrap());
             resp
-        }
-        "notifications/initialized" | "notifications/cancelled" => {
-            return StatusCode::NO_CONTENT.into_response();
         }
         "ping" => rpc_result(id, json!({})),
         "tools/list" => {
@@ -315,12 +322,14 @@ mod tests {
             "http://localhost:5173",
             "http://127.0.0.1:8787",
             "http://[::1]:8080",
+            "https://localhost:8443",
+            "https://127.0.0.1",
         ] {
             assert!(origin_is_loopback(ok), "{ok} should be allowed");
         }
         for bad in [
             "http://evil.example",
-            "https://localhost:5173",
+            "https://evil.example",
             "http://10.0.0.5:8787",
             "null",
         ] {

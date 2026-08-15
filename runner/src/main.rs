@@ -73,9 +73,16 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             if args.force && path.exists() {
-                let bak = args.state_dir.join("identity.json.bak");
-                fs::copy(&path, &bak)?;
-                println!("backed up old identity to {}", bak.display());
+                // Rotate: the ORIGINAL key is the one --force exists to make
+                // survivable — a second --force must not clobber its backup.
+                let mut target = args.state_dir.join("identity.json.bak");
+                let mut i = 1;
+                while target.exists() {
+                    target = args.state_dir.join(format!("identity.json.bak.{i}"));
+                    i += 1;
+                }
+                fs::copy(&path, &target)?;
+                println!("backed up old identity to {}", target.display());
             }
             let id = Identity::generate();
             let written = id.write_to_dir(&args.state_dir)?;
