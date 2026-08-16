@@ -31,6 +31,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::auth;
 use crate::exec::{self, ExecManager};
 use crate::registry;
 use crate::ssh::{SshPool, SshTarget};
@@ -110,8 +111,15 @@ pub async fn serve(
 async fn mcp_endpoint(
     State(state): State<Arc<RunnerState>>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: String,
 ) -> Response {
+    let raw_body = body.clone();
+    let body: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return rpc_error(None, -32700, "parse error".into());
+        }
+    };
     // MCP spec: local HTTP servers MUST validate Origin to prevent DNS
     // rebinding. Browsers send Origin; curl/MCP clients don't (allowed).
     if let Some(origin) = headers
@@ -183,7 +191,28 @@ async fn mcp_endpoint(
         "ping" => rpc_result(id, json!({})),
         "tools/list" => rpc_result(id, json!({ "tools": tools() })),
         "tools/call" => {
+            // Phase D grants: every privileged call must be signed by a
+            // GRANTED agent pubkey. Grants are re-read from the shipped
+            // package so a `control-plane grant` lands without a restart.
             let params = body.get("params").cloned().unwrap_or(Value::Null);
+            let grants = current_grants(&state.ctx.state_dir);
+            let runner_pubkey = state.ctx.identity.nostr_pubkey_hex();
+            let caller = match auth::verify_body(
+                &grants,
+                &runner_pubkey,
+                headers
+                    .get(auth::PUBKEY_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                headers.get(auth::SIG_HEADER).and_then(|v| v.to_str().ok()),
+                headers.get(auth::TS_HEADER).and_then(|v| v.to_str().ok()),
+                &raw_body,
+            ) {
+                Ok(pubkey) => pubkey,
+                Err(e) => {
+                    tracing::warn!(error = %e, "denied tools/call without a valid grant");
+                    return rpc_error(id, -32001, format!("unauthorized: {e}"));
+                }
+            };
             let name = params.get("name").and_then(Value::as_str).map(String::from);
             let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
             let (is_error, text) = match name.as_deref() {
@@ -202,11 +231,11 @@ async fn mcp_endpoint(
                     Ok(s) => (false, s),
                     Err(e) => (true, format!("config failed: {e}")),
                 },
-                Some("exec") => match handle_exec(&state, &arguments).await {
+                Some("exec") => match handle_exec(&state, &arguments, &caller).await {
                     Ok(s) => (false, s),
                     Err(e) => (true, e.to_string()),
                 },
-                Some("status") => match handle_status(&state, &arguments).await {
+                Some("status") => match handle_status(&state, &arguments, &caller).await {
                     Ok(s) => (false, s),
                     Err(e) => (true, e.to_string()),
                 },
@@ -260,7 +289,11 @@ struct ExecArgs {
     timeout_s: Option<u64>,
 }
 
-async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, exec::ExecError> {
+async fn handle_exec(
+    state: &RunnerState,
+    arguments: &Value,
+    caller: &str,
+) -> Result<String, exec::ExecError> {
     let args: ExecArgs = serde_json::from_value(arguments.clone())?;
 
     // Poll an existing streaming session (no cmd required).
@@ -281,7 +314,7 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
     // LOCAL first — a shipped target may not shadow it (ordering must match
     // `status`, where local is checked before the shipped targets).
     if target == "local" {
-        return handle_local_exec(state, &args, cmd).await;
+        return handle_local_exec(state, &args, cmd, caller).await;
     }
 
     // Shipped target (package metadata): dispatch by connector kind.
@@ -312,14 +345,16 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
             exec::redact(&mut result.stdout, &redaction);
             exec::redact(&mut result.stderr, &redaction);
             // The locked model signs EVERY executed command — ssh included.
-            state.exec.audit_cmd(&cmd, &target, &result, started);
+            state
+                .exec
+                .audit_cmd(&cmd, &target, &result, started, Some(caller));
             return Ok(serde_json::to_string_pretty(&result)?);
         }
 
         // API connector (vultr, b2, ...): LOCAL-run process with the target's
         // credential + base URL injected as env vars — the agent writes curl
         // commands; the runner injects creds, redacts values, signs the audit.
-        return handle_api_exec(state, &args, cmd, &target, meta).await;
+        return handle_api_exec(state, &args, cmd, &target, meta, caller).await;
     }
 
     /// The target's credential must be the ONLY requested secret — anything else
@@ -357,6 +392,7 @@ async fn handle_api_exec(
     cmd: String,
     target: &str,
     meta: &freehold_core::secrets::TargetMeta,
+    caller: &str,
 ) -> Result<String, exec::ExecError> {
     let value = exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
     let cred_env = exec::env_name(&meta.secret);
@@ -367,15 +403,19 @@ async fn handle_api_exec(
     ];
 
     if args.stream {
-        let sid = state
-            .exec
-            .start_streaming(&cmd, target, envs.clone(), args.timeout_s);
+        let sid =
+            state
+                .exec
+                .start_streaming(&cmd, target, envs.clone(), args.timeout_s, Some(caller));
         let snap = state.exec.poll(&sid)?;
         return Ok(serde_json::to_string_pretty(&snap)?);
     }
 
     // run() signs the audit; the credential value is redacted from output.
-    let mut result = state.exec.run(&cmd, target, envs, args.timeout_s).await?;
+    let mut result = state
+        .exec
+        .run(&cmd, target, envs, args.timeout_s, Some(caller))
+        .await?;
     let redaction = [(cred_env, value)];
     exec::redact(&mut result.stdout, &redaction);
     exec::redact(&mut result.stderr, &redaction);
@@ -425,22 +465,27 @@ async fn handle_local_exec(
     state: &RunnerState,
     args: &ExecArgs,
     cmd: String,
+    caller: &str,
 ) -> Result<String, exec::ExecError> {
     let target = "local".to_string();
 
     let secrets = exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
 
     if args.stream {
-        let sid = state
-            .exec
-            .start_streaming(&cmd, &target, secrets.clone(), args.timeout_s);
+        let sid = state.exec.start_streaming(
+            &cmd,
+            &target,
+            secrets.clone(),
+            args.timeout_s,
+            Some(caller),
+        );
         let snap = state.exec.poll(&sid)?;
         return Ok(serde_json::to_string_pretty(&snap)?);
     }
 
     let mut result = state
         .exec
-        .run(&cmd, &target, secrets.clone(), args.timeout_s)
+        .run(&cmd, &target, secrets.clone(), args.timeout_s, Some(caller))
         .await?;
     // Secret values must never reach the agent — redact before returning.
     exec::redact(&mut result.stdout, &secrets);
@@ -448,7 +493,11 @@ async fn handle_local_exec(
     Ok(serde_json::to_string_pretty(&result)?)
 }
 
-async fn handle_status(state: &RunnerState, arguments: &Value) -> Result<String, exec::ExecError> {
+async fn handle_status(
+    state: &RunnerState,
+    arguments: &Value,
+    _caller: &str,
+) -> Result<String, exec::ExecError> {
     let target = arguments.get("target").and_then(Value::as_str);
     let requested: Vec<String> = match target {
         Some(t) => vec![t.to_string()],
@@ -506,6 +555,14 @@ async fn ssh_status(
         Ok(false) => Ok("yellow(self-check failed)".into()),
         Err(e) => Ok(format!("red({e})")),
     }
+}
+
+/// Grants shipped with the package, re-read fresh so `control-plane grant`
+/// takes effect without a runner restart. Unreadable package -> fail closed.
+fn current_grants(state_dir: &std::path::Path) -> Vec<String> {
+    freehold_core::secrets::SecretPackage::load(state_dir)
+        .map(|p| p.grants)
+        .unwrap_or_default()
 }
 
 fn new_session_id() -> String {

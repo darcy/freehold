@@ -5,8 +5,9 @@ Kubernetes stack with Buzz Relay as the control plane and a skill framework that
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 **Status:** docs + locked Chunk 1 plan; Phases A (identity, MCP skeleton, exec/readiness/
-audit), B (provisioner), and C1 (SSH connector: in-memory keys, pooled connections, TOFU
-host keys) are implemented and reviewed. Current work is uncommitted until reviewed.
+audit), B (provisioner), C (SSH + vultr + b2 connectors), and D (coarse grants: signed
+calls from whitelisted agent pubkeys) are implemented and reviewed. Current work is
+uncommitted until reviewed.
 
 ## Navigation
 
@@ -66,14 +67,17 @@ no k8s.
   of scope. Epoch/staleness rejection is a named follow-up (tracked post-A4; wire-format
   addition, nothing deployed yet). "Rotation = erase" refers to YOUR copies, not copies
   others held.
-- **The loopback MCP endpoint can exfiltrate decrypted secrets.** With exec live, ANY local
-  process on the runner host can call `exec` with a command that ships `$SECRET` somewhere —
-  redaction only covers what comes back. Real authentication (runner membership, grants)
-  is Phase D; until then the loopback-only bind is the whole boundary.
+- **Loopback exposure narrowed, not gone (D done):** every tools/call now requires a
+  signature from a GRANTED agent pubkey (fail closed) — a random local process can no
+  longer exec. Remaining: session state isn't tied to the grant (a signed request is
+  verified fresh each call), and relay membership (Chunk 2) is the real cut.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime. A TTL reaper is Phase C-sized.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg yet) — a timed-out
   command can leave orphans running.
+- **Grants (D) accepted gap**: a signed call can be replayed against the SAME
+  runner within the 60s window (audience + runner binding closes cross-runner
+  replay; a per-runner replay cache is a Chunk-2/security item).
 - **API connectors (C2/C3) accepted gaps**: streamed exec on an api target
   redacts the injected `<SECRET>_URL` env (the base URL) from output too —
   non-secret, cosmetic; the fix is a redaction list separate from the child

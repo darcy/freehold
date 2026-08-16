@@ -43,6 +43,8 @@ pub enum ProvisionError {
     BadKeyLen(usize),
     #[error("invalid runner name {0:?}: must be a bare name (no '/', no leading '.')")]
     InvalidName(String),
+    #[error("invalid agent pubkey {0:?}: must be 64 hex chars")]
+    InvalidGrant(String),
     #[error("package dir {0} already holds a runner — refusing to clobber")]
     PackageDirInUse(PathBuf),
     #[error("runner {0} already exists")]
@@ -70,6 +72,9 @@ pub struct ProvisionRequest<'a> {
     pub secret: &'a [u8],
     /// Where the runner package (identity.json + secrets.json) is shipped.
     pub runner_dir: &'a Path,
+    /// AGENT pubkeys granted to call this runner (Phase D). Empty ships a
+    /// fail-closed package: nobody may call until a `grant` lands.
+    pub grants: &'a [String],
 }
 
 /// B1 — the algolia-style happy path: existing service + credential → runner
@@ -85,6 +90,12 @@ pub fn provision_runner(
     // `local` is the runner's own target; a shipped target must not shadow it.
     if req.name == "local" {
         return Err(ProvisionError::InvalidName(req.name.to_string()));
+    }
+    // Grants must be real pubkeys or the runner silently denies forever.
+    for g in req.grants {
+        if !is_pubkey(g) {
+            return Err(ProvisionError::InvalidGrant(g.clone()));
+        }
     }
     // Same-name cases first — clearer diagnostics than the dir guard below.
     match store.get_runner(req.name) {
@@ -134,6 +145,7 @@ pub fn provision_runner(
                 secret: req.name.to_string(),
             },
         )]),
+        grants: req.grants.to_vec(),
     };
     if let Err(e) = pkg.write_to_dir(req.runner_dir) {
         // identity.json already landed — remove it so the PackageDirInUse
@@ -211,8 +223,9 @@ pub fn rotate_secret(
     let ciphertext_hex = hex::encode(&sealed);
 
     // Re-ship the package (Chunk 1 invariant: one secret per runner).
-    // Re-ship the package with its target metadata preserved (rotate must not
-    // drop how the runner reaches this service).
+    // Re-ship the package with its target metadata + grants preserved
+    // (rotate must not drop how the runner reaches this service, nor who may
+    // call it).
     let pkg = SecretPackage {
         secrets: BTreeMap::from([(name.to_string(), ciphertext_hex.clone())]),
         targets: BTreeMap::from([(
@@ -223,6 +236,7 @@ pub fn rotate_secret(
                 secret: name.to_string(),
             },
         )]),
+        grants: current_grants(&runner_rec.package_dir)?,
     };
     pkg.write_to_dir(&runner_rec.package_dir)?;
 
@@ -243,6 +257,7 @@ pub fn rotate_secret(
                     secret: name.to_string(),
                 },
             )]),
+            grants: current_grants(&runner_rec.package_dir).unwrap_or_default(),
         };
         match old_pkg.write_to_dir(&runner_rec.package_dir) {
             Ok(()) => tracing::warn!(
@@ -318,6 +333,40 @@ fn remove_shipped_secrets(rec: &RunnerRecord) {
             "revoke: could not remove shipped secrets.json (best-effort)"
         ),
     }
+}
+
+/// Load grants strictly: an unreadable package is an ERROR (silently shipping
+/// a runner nobody may call hides the reason).
+fn current_grants(dir: &std::path::Path) -> Result<Vec<String>, ProvisionError> {
+    Ok(SecretPackage::load(dir).map_err(ProvisionError::Io)?.grants)
+}
+
+/// D2: grant another agent pubkey to call a runner — re-ship the package so
+/// the runner's live grant check picks it up without a restart. Idempotent.
+pub fn grant_agent(
+    store: &StateStore,
+    name: &str,
+    agent_pubkey: &str,
+) -> Result<Vec<String>, ProvisionError> {
+    if !is_pubkey(agent_pubkey) {
+        return Err(ProvisionError::InvalidGrant(agent_pubkey.to_string()));
+    }
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    if rec.status == RunnerStatus::Revoked {
+        return Err(ProvisionError::RunnerRevoked(name.to_string()));
+    }
+    let mut pkg = SecretPackage::load(&rec.package_dir).map_err(ProvisionError::Io)?;
+    if !pkg.grants.iter().any(|g| g == agent_pubkey) {
+        pkg.grants.push(agent_pubkey.to_string());
+        pkg.write_to_dir(&rec.package_dir)?;
+    }
+    Ok(pkg.grants)
+}
+
+fn is_pubkey(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Service-at-a-glance snapshot for the console / CLI.

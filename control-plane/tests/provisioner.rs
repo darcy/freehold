@@ -33,6 +33,7 @@ fn provision(store: &StateStore, name: &str, secret: &[u8], runner_dir: &std::pa
             address: "api.vultr.com",
             secret,
             runner_dir,
+            grants: &[],
         },
     )
     .unwrap();
@@ -52,6 +53,7 @@ fn provision_ships_package_and_cp_state_has_no_plaintext_or_keys() {
             address: "api.vultr.com",
             secret,
             runner_dir: &runner_dir,
+            grants: &[],
         },
     )
     .unwrap();
@@ -181,6 +183,7 @@ fn revoked_runner_cannot_be_rotated_or_reprovisioned() {
                 address: "x",
                 secret: b"x",
                 runner_dir: &runner_dir,
+                grants: &[],
             }
         ),
         Err(ProvisionError::RunnerRevoked(_))
@@ -200,6 +203,7 @@ fn duplicate_provision_is_rejected() {
             address: "x",
             secret: b"x",
             runner_dir: &runner_dir,
+            grants: &[],
         },
     )
     .unwrap_err();
@@ -228,6 +232,7 @@ fn swapped_package_entries_are_rejected() {
             ("b".to_string(), hex::encode(&ct_b)),
         ]),
         targets: BTreeMap::new(),
+        grants: Vec::new(),
     };
     pkg.write_to_dir(&runner_dir).unwrap();
     let loaded = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
@@ -264,6 +269,7 @@ fn package_dir_in_use_is_refused() {
             address: "x",
             secret: b"key-b",
             runner_dir: &runner_dir,
+            grants: &[],
         },
     )
     .unwrap_err();
@@ -381,6 +387,7 @@ fn invalid_names_are_rejected() {
                 address: "x",
                 secret: b"x",
                 runner_dir: &runner_dir,
+                grants: &[],
             },
         )
         .unwrap_err();
@@ -397,6 +404,55 @@ fn unknown_secret_rotate_fails() {
     let err = provisioner::rotate_secret(&store, "nope", b"x").unwrap_err();
     assert!(
         matches!(err, ProvisionError::SecretNotFound(_)),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn provision_ships_grants_and_grant_adds_live() {
+    let (base, store) = setup();
+    let runner_dir = base.path().join("runner");
+    let agent_a = "aa".repeat(32);
+    let agent_b = "bb".repeat(32);
+    provision_runner(
+        &store,
+        &ProvisionRequest {
+            name: "vultr",
+            kind: "vultr",
+            address: "api.vultr.com",
+            secret: b"key",
+            runner_dir: &runner_dir,
+            grants: std::slice::from_ref(&agent_a.clone()),
+        },
+    )
+    .unwrap();
+
+    // Shipped package whitelists exactly the granted pubkey.
+    let shipped = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
+    assert_eq!(shipped.grants, vec![agent_a]);
+
+    // grant_agent adds another pubkey and re-ships (idempotent).
+    let grants = provisioner::grant_agent(&store, "vultr", &agent_b).unwrap();
+    assert_eq!(grants.len(), 2);
+    provisioner::grant_agent(&store, "vultr", &agent_b).unwrap();
+    let re_shipped = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
+    assert_eq!(re_shipped.grants.len(), 2);
+    assert!(re_shipped.grants.contains(&agent_b));
+
+    // Grants are preserved across rotate (the package is rebuilt, not lost).
+    provisioner::rotate_secret(&store, "vultr", b"new-key").unwrap();
+    let after = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
+    assert_eq!(after.grants.len(), 2, "rotate must preserve grants");
+}
+
+#[test]
+fn invalid_grant_pubkeys_are_rejected() {
+    let (base, store) = setup();
+    let runner_dir = base.path().join("runner");
+    provision(&store, "vultr", b"key", &runner_dir);
+    let err = provisioner::grant_agent(&store, "vultr", "not-hex").unwrap_err();
+    assert!(
+        matches!(err, ProvisionError::InvalidGrant(_)),
         "got {err:?}"
     );
 }

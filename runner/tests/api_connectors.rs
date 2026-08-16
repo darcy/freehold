@@ -12,6 +12,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use freehold_runner::crypto;
+mod common;
+
 use freehold_runner::identity::Identity;
 use freehold_runner::mcp::{self, RunnerContext};
 use freehold_runner::secrets::{SecretPackage, TargetMeta};
@@ -232,6 +234,7 @@ fn api_runner_dir(vultr_url: &str, b2_url: &str) -> (tempfile::TempDir, Identity
             ("vultr".to_string(), seal("vultr", b"vltr-token-123")),
             ("b2".to_string(), seal("b2", b"keyid123:appkey456")),
         ]),
+        grants: vec![common::agent_pubkey()],
         targets: BTreeMap::from([
             (
                 "vultr".to_string(),
@@ -272,6 +275,7 @@ async fn vultr_create_list_destroy_over_curl() {
         &format!("http://{vultr_addr}"),
         "http://127.0.0.1:1", // unused
     );
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -281,12 +285,16 @@ async fn vultr_create_list_destroy_over_curl() {
     let url = format!("http://{addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+        let raw = body.to_string();
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
-            .send_json(
-                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }),
-            )
+            .header("x-freehold-pubkey", pubkey)
+            .header("x-freehold-sig", sig)
+            .header("x-freehold-ts", ts)
+            .send(raw.as_str())
             .unwrap()
             .into_body()
             .read_json::<Value>()
@@ -360,6 +368,7 @@ async fn b2_authorize_upload_list_roundtrip() {
     let base = format!("http://{b2_addr}");
 
     let (dir, id) = api_runner_dir("http://127.0.0.1:1", &base);
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -369,12 +378,16 @@ async fn b2_authorize_upload_list_roundtrip() {
     let url = format!("http://{addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+        let raw = body.to_string();
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
-            .send_json(
-                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }),
-            )
+            .header("x-freehold-pubkey", pubkey)
+            .header("x-freehold-sig", sig)
+            .header("x-freehold-ts", ts)
+            .send(raw.as_str())
             .unwrap()
             .into_body()
             .read_json::<Value>()
@@ -426,6 +439,7 @@ async fn api_targets_report_green_and_list() {
     let b2_url = "http://127.0.0.1:1".to_string();
 
     let (dir, id) = api_runner_dir(&format!("http://{vultr_addr}"), &b2_url);
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -435,12 +449,16 @@ async fn api_targets_report_green_and_list() {
     let url = format!("http://{mcp_addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+        let raw = body.to_string();
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
-            .send_json(
-                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }),
-            )
+            .header("x-freehold-pubkey", pubkey)
+            .header("x-freehold-sig", sig)
+            .header("x-freehold-ts", ts)
+            .send(raw.as_str())
             .unwrap()
             .into_body()
             .read_json::<Value>()
@@ -486,6 +504,7 @@ async fn extra_or_missing_secrets_are_rejected() {
     let vultr_state = Arc::new(VultrState::default());
     let vultr_addr = spawn_http(vultr_router(vultr_state.clone())).await;
     let (dir, id) = api_runner_dir(&format!("http://{vultr_addr}"), "http://127.0.0.1:1");
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -495,12 +514,16 @@ async fn extra_or_missing_secrets_are_rejected() {
     let url = format!("http://{addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+        let raw = body.to_string();
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
-            .send_json(
-                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }),
-            )
+            .header("x-freehold-pubkey", pubkey)
+            .header("x-freehold-sig", sig)
+            .header("x-freehold-ts", ts)
+            .send(raw.as_str())
             .unwrap()
             .into_body()
             .read_json::<Value>()

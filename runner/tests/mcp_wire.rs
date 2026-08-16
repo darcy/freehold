@@ -8,19 +8,35 @@ use serde_json::{Value, json};
 use ureq::Body;
 use ureq::http::Response;
 
-/// Identity + empty ciphertext package under one state dir, the way the CP
-/// ships a runner. The temp dir is leaked on purpose: the server task
-/// outlives the test; contents are throwaway test keys.
+mod common;
+
+/// Identity + ciphertext package (GRANTING the shared test agent) under one
+/// state dir, the way the CP ships a runner. The temp dir is leaked on
+/// purpose: the server task outlives the test; contents are throwaway test
+/// keys.
 fn test_ctx() -> RunnerContext {
     let dir = tempfile::tempdir().expect("tempdir").keep();
-    let id = identity::Identity::generate();
+    let id = runner_identity();
     id.write_to_dir(&dir).unwrap();
-    SecretPackage::default().write_to_dir(&dir).unwrap();
+    let pkg = SecretPackage {
+        secrets: Default::default(),
+        targets: Default::default(),
+        grants: vec![common::agent_pubkey()],
+    };
+    pkg.write_to_dir(&dir).unwrap();
     RunnerContext {
-        identity: id,
-        package: SecretPackage::default(),
+        identity: (*id).clone(),
+        package: pkg,
         state_dir: dir,
     }
+}
+
+/// One identity for the whole test process: the signing helper and the ctx
+/// must agree on the runner pubkey (the signature audience).
+fn runner_identity() -> &'static identity::Identity {
+    static RUNNER: std::sync::LazyLock<identity::Identity> =
+        std::sync::LazyLock::new(identity::Identity::generate);
+    &RUNNER
 }
 
 fn post(
@@ -34,6 +50,25 @@ fn post(
         .post(url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json");
+    // Phase D: every tools/call carries the test agent's grant signature.
+    // The signature covers the EXACT bytes transmitted — we send the signed
+    // string, never re-serialize the Value (a JSON re-serialization could
+    // differ byte-for-byte and break verification).
+    if body.get("method").and_then(Value::as_str) == Some("tools/call") {
+        let raw = body.to_string();
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_identity().nostr_pubkey_hex());
+        req = req
+            .header("x-freehold-pubkey", pubkey)
+            .header("x-freehold-sig", sig)
+            .header("x-freehold-ts", ts);
+        if let Some(s) = session {
+            req = req.header("mcp-session-id", s);
+        }
+        if let Some(o) = origin {
+            req = req.header("Origin", o);
+        }
+        return Ok(req.send(raw.as_str())?);
+    }
     if let Some(s) = session {
         req = req.header("mcp-session-id", s);
     }
@@ -45,6 +80,23 @@ fn post(
 
 fn body_json(resp: Response<Body>) -> Value {
     resp.into_body().read_json::<Value>().expect("json body")
+}
+
+/// Same transport, NO grant signature — for negative auth tests.
+fn post_unsigned(
+    agent: &ureq::Agent,
+    url: &str,
+    body: Value,
+    session: Option<&str>,
+) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+    let mut req = agent
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json");
+    if let Some(s) = session {
+        req = req.header("mcp-session-id", s);
+    }
+    Ok(req.send_json(&body)?)
 }
 
 fn rpc(id: u64, method: &str, params: Value) -> Value {
@@ -284,6 +336,25 @@ async fn mcp_wire_shape() {
     assert_eq!(
         snap["result"]["isError"], true,
         "snapshot is pending (Phase C)"
+    );
+
+    // 7e. an UNSIGNED tools/call is denied with a protocol error (Phase D)
+    let denied = body_json(
+        post_unsigned(
+            &agent,
+            &url,
+            rpc(
+                18,
+                "tools/call",
+                json!({ "name": "exec", "arguments": { "cmd": "echo nope", "target": "local" } }),
+            ),
+            session.as_deref(),
+        )
+        .expect("unsigned tools/call"),
+    );
+    assert_eq!(
+        denied["error"]["code"], -32001,
+        "unsigned grants call must be denied: {denied}"
     );
 
     // 8. unknown tool -> typed error, still MCP-compliant

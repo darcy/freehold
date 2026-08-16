@@ -379,17 +379,18 @@ impl ExecManager {
     }
 
     /// Run a non-streaming exec to completion on the local target, then sign
-    /// it into the audit log.
+    /// it into the audit log. `caller` is the verified agent pubkey.
     pub async fn run(
         &self,
         cmd: &str,
         target: &str,
         secrets: Vec<(String, Zeroizing<String>)>,
         timeout_s: Option<u64>,
+        caller: Option<&str>,
     ) -> Result<ExecResult, ExecError> {
         let started = now_secs();
         let result = run_local(cmd, &secrets, timeout_s).await?;
-        self.audit(cmd, target, &result, started);
+        self.audit(cmd, target, &result, started, caller);
         Ok(result)
     }
 
@@ -417,6 +418,7 @@ impl ExecManager {
         target: &str,
         secrets: Vec<(String, Zeroizing<String>)>,
         timeout_s: Option<u64>,
+        caller: Option<&str>,
     ) -> String {
         let id = format!("{:016x}", self.next_id.fetch_add(1, Ordering::SeqCst));
         let secrets = Arc::new(secrets);
@@ -438,13 +440,15 @@ impl ExecManager {
         let started = now_secs();
         let auditor = self.auditor.clone();
         let state_dir = self.state_dir.clone();
+        let caller = caller.map(String::from);
         tokio::spawn(async move {
             let result = run_local_streaming(&cmd, timeout_s, secrets, raw).await;
             match &result {
                 Ok(r) => {
                     *result_slot.lock() = Some(r.clone());
                     if let (Some(a), Some(d)) = (&auditor, &state_dir)
-                        && let Err(e) = write_audit(d, a, &cmd, &target, r, started)
+                        && let Err(e) =
+                            write_audit(d, a, &cmd, &target, r, started, caller.as_deref())
                     {
                         tracing::warn!(error = %e, "audit write failed (exec still succeeded)");
                     }
@@ -477,15 +481,29 @@ impl ExecManager {
 
     /// Sign + append an audit record for any completed exec (used by the MCP
     /// layer for connector paths outside this manager, e.g. ssh).
-    pub fn audit_cmd(&self, cmd: &str, target: &str, result: &ExecResult, started_at: u64) {
-        self.audit(cmd, target, result, started_at)
+    pub fn audit_cmd(
+        &self,
+        cmd: &str,
+        target: &str,
+        result: &ExecResult,
+        started_at: u64,
+        caller: Option<&str>,
+    ) {
+        self.audit(cmd, target, result, started_at, caller)
     }
 
-    fn audit(&self, cmd: &str, target: &str, result: &ExecResult, started_at: u64) {
+    fn audit(
+        &self,
+        cmd: &str,
+        target: &str,
+        result: &ExecResult,
+        started_at: u64,
+        caller: Option<&str>,
+    ) {
         let (Some(auditor), Some(state_dir)) = (&self.auditor, &self.state_dir) else {
             return;
         };
-        if let Err(e) = write_audit(state_dir, auditor, cmd, target, result, started_at) {
+        if let Err(e) = write_audit(state_dir, auditor, cmd, target, result, started_at, caller) {
             tracing::warn!(error = %e, "audit write failed (exec still succeeded)");
         }
     }
@@ -600,10 +618,12 @@ pub fn write_audit(
     target: &str,
     result: &ExecResult,
     started_at: u64,
+    caller: Option<&str>,
 ) -> Result<SignedEvent, ExecError> {
     let content = serde_json::json!({
         "cmd": cmd,
         "target": target,
+        "agent_pubkey": caller.unwrap_or("unknown"),
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
         "started_at": started_at,
@@ -657,6 +677,7 @@ mod tests {
         let pkg = SecretPackage {
             secrets: BTreeMap::from([(secret_name.to_string(), hex::encode(blob))]),
             targets: BTreeMap::new(),
+            grants: Vec::new(),
         };
         pkg.write_to_dir(dir.path()).unwrap();
         (dir, id)
@@ -722,6 +743,7 @@ mod tests {
             "local",
             envs,
             Some(10),
+            None,
         );
         let mut all;
         loop {
@@ -748,7 +770,7 @@ mod tests {
         let pkg = SecretPackage::load(dir.path()).unwrap();
         let envs = resolve_secrets(&id, &pkg, &["tok".to_string()]).unwrap();
         let mgr = ExecManager::new(None, None);
-        let sid = mgr.start_streaming("echo leaked-$TOK", "local", envs, Some(10));
+        let sid = mgr.start_streaming("echo leaked-$TOK", "local", envs, Some(10), None);
         let mut all;
         loop {
             let snap = mgr.poll(&sid).unwrap();
@@ -796,6 +818,7 @@ mod tests {
             "local",
             vec![],
             Some(10),
+            None,
         );
         let mut all;
         let mut attempts = 0;
@@ -824,7 +847,7 @@ mod tests {
         let state_dir = dir.path().to_path_buf();
         let mgr = ExecManager::new(Some(auditor), Some(Arc::from(state_dir.as_path())));
         let _ = mgr
-            .run("echo audited", "local", vec![], None)
+            .run("echo audited", "local", vec![], None, None)
             .await
             .unwrap();
 
