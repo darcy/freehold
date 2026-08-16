@@ -295,12 +295,18 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
                 "streaming over ssh is not implemented yet (C1 ships non-streaming exec)".into(),
             ));
         }
-        // The target's credential MUST be requested — silently dropping a
-        // requested secret list would surface as a confusing service error.
+        // The target's credential MUST be the ONLY requested secret: nothing
+        // injects extras over the channel, so anything else would silently
+        // run unset and surface as a confusing service failure.
         if !args.secrets.contains(&meta.secret) {
             return Err(exec::ExecError::UnknownSecret(format!(
                 "target {target} requires secret {} in `secrets`",
                 meta.secret
+            )));
+        }
+        if let Some(extra) = args.secrets.iter().find(|n| *n != &meta.secret) {
+            return Err(exec::ExecError::UnknownSecret(format!(
+                "target {target} only accepts its own credential {extra:?} —                  ssh does not inject env vars"
             )));
         }
         let value =
@@ -396,9 +402,15 @@ async fn ssh_status(
     name: &str,
     meta: &freehold_core::secrets::TargetMeta,
 ) -> Result<String, exec::ExecError> {
-    let value = exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
-    let endpoint =
-        SshTarget::parse(name, &meta.address).map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+    let value =
+        match exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret) {
+            Ok(v) => v,
+            Err(e) => return Ok(format!("red({e})")),
+        };
+    let endpoint = match SshTarget::parse(name, &meta.address) {
+        Ok(e) => e,
+        Err(e) => return Ok(format!("red({e})")),
+    };
     match state.ssh.self_check(&endpoint, value.as_str()).await {
         Ok(true) => Ok("green".into()),
         Ok(false) => Ok("yellow(self-check failed)".into()),
