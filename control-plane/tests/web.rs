@@ -353,6 +353,9 @@ async fn non_loopback_origin_refused() {
     assert_eq!(status, 200);
     let (status, _) = get_json(&url, "/api/overview", Some("http://localhost"));
     assert_eq!(status, 200);
+    // Bracketed IPv6 loopback with port (serve --addr '[::1]:8080').
+    let (status, _) = get_json(&url, "/api/overview", Some("http://[::1]:8080"));
+    assert_eq!(status, 200);
 
     server.abort();
 }
@@ -390,6 +393,12 @@ async fn admin_page_escapes_remote_readiness_text() {
     assert!(
         html.contains("esc(r.name)") && html.contains("esc(r.mcp_addr)"),
         "row interpolations escape before innerHTML"
+    );
+    // A revoked runner (secrets.json deleted on purpose) must NOT render the
+    // 'package unreadable' chip — that signal is for ACTIVE runners only.
+    assert!(
+        html.contains("revoked — secrets.json removed (B3)"),
+        "revoked rows render their own note, not the unreadable chip"
     );
     server.abort();
 }

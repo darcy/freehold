@@ -93,8 +93,16 @@ fn check_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
     if !matches!(scheme, "http" | "https") {
         return Err(Box::new(forbidden()));
     }
-    let host = rest.split([':', '/']).next().unwrap_or("");
-    if LOOPBACK_HOSTS.contains(&host) {
+    // Bracket-aware: `[::1]:8080` must yield the literal `[::1]`, not `[`.
+    let host = if let Some(rest_after_bracket) = rest.strip_prefix('[') {
+        match rest_after_bracket.split_once(']') {
+            Some((inner, _)) => format!("[{inner}]"),
+            None => return Err(Box::new(forbidden())),
+        }
+    } else {
+        rest.split([':', '/']).next().unwrap_or("").to_string()
+    };
+    if LOOPBACK_HOSTS.contains(&host.as_str()) {
         return Ok(());
     }
     Err(Box::new(
@@ -301,15 +309,18 @@ struct ProvisionReq {
     kind: String,
     address: String,
     secret: String,
-    /// Where the runner package lands; defaults to
-    /// `$FREEHOLD_RUNNER_STATE_DIR/runner/<name>` (or `./.freehold/...`).
+    /// Where the runner package lands (absolute path recommended); defaults
+    /// to `./.freehold/runner/<name>` — the same relative default the CLI
+    /// uses, so a CWD-dependent operator gets exactly CLI behavior and a
+    /// robust one pins an absolute dir.
     #[serde(default)]
     runner_dir: Option<String>,
 }
 
 fn default_runner_dir(name: &str) -> std::path::PathBuf {
-    let base = std::env::var("FREEHOLD_RUNNER_STATE_DIR").unwrap_or_else(|_| "./.freehold".into());
-    std::path::PathBuf::from(base).join("runner").join(name)
+    std::path::PathBuf::from("./.freehold")
+        .join("runner")
+        .join(name)
 }
 
 async fn provision(
@@ -551,7 +562,9 @@ async function refresh() {
     // honest empty list. r.grants[i] comes from the API only after validate
     // (64-hex or console) — still escaped.
     const grants = r.grants === null
-      ? '<span class="chip red">package unreadable — check the runner dir</span>'
+      ? (r.status === "revoked"
+          ? '<span class="muted">revoked — secrets.json removed (B3)</span>'
+          : '<span class="chip red">package unreadable — check the runner dir</span>')
       : r.grants.length
         ? r.grants.map((g) => '<div class="muted">' + esc(g) + "</div>").join("")
         : '<span class="muted">nobody (fail closed)</span>';
