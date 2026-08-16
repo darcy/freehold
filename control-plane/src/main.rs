@@ -53,6 +53,10 @@ struct CommonArgs {
 struct AgentArgs {
     /// Agent name (identity file: <state-dir>/agent-<name>/identity.json)
     name: String,
+    /// Replace an existing agent identity (irreversible — every runner
+    /// granted to the old pubkey must be re-granted)
+    #[arg(long)]
+    force: bool,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }

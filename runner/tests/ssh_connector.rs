@@ -341,6 +341,7 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
     };
     pkg.write_to_dir(dir.path()).unwrap();
 
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: pkg,
@@ -358,7 +359,7 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
     let call = |params: serde_json::Value| -> Result<serde_json::Value, ureq::Error> {
         let body = body("tools/call", params);
         let raw = body.to_string();
-        let (pubkey, sig, ts) = common::signed_headers(&raw);
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")

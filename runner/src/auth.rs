@@ -33,22 +33,31 @@ pub enum AuthError {
     BadSignature,
 }
 
-/// Sign an outgoing request body (client side). The signer holds the agent
-/// private key; only the pubkey travels in headers.
-pub fn sign_body(agent_secret: &[u8; 32], ts: i64, raw_body: &str) -> SignedEvent {
-    let content = signed_content(ts, raw_body);
+/// Sign an outgoing request body (client side). `runner_pubkey` names the
+/// target runner (the AUDIENCE): a signature produced for runner X fails
+/// against runner Y, closing cross-runner replay for agents granted on
+/// several runners. The signer holds the agent private key; only the pubkey
+/// travels in headers.
+pub fn sign_body(
+    agent_secret: &[u8; 32],
+    runner_pubkey: &str,
+    ts: i64,
+    raw_body: &str,
+) -> SignedEvent {
+    let content = signed_content(runner_pubkey, ts, raw_body);
     audit::sign_event(agent_secret, &content).expect("audit signing is infallible")
 }
 
-fn signed_content(ts: i64, raw_body: &str) -> String {
-    format!("{ts}|{raw_body}")
+fn signed_content(runner_pubkey: &str, ts: i64, raw_body: &str) -> String {
+    format!("{runner_pubkey}|{ts}|{raw_body}")
 }
 
-/// Verify a request: pubkey granted, signature valid over `ts|raw_body`,
-/// timestamp within the window. Returns the agent pubkey on success (the
-/// audit record's caller).
+/// Verify a request: pubkey granted, signature valid over
+/// `runner_pubkey|ts|raw_body`, timestamp within the window. Returns the
+/// agent pubkey on success (the audit record's caller).
 pub fn verify_body(
     grants: &[String],
+    runner_pubkey: &str,
     pubkey_header: Option<&str>,
     sig_header: Option<&str>,
     ts_header: Option<&str>,
@@ -69,7 +78,7 @@ pub fn verify_body(
     }
     let event = SignedEvent {
         pubkey: pubkey.to_string(),
-        content: signed_content(ts, raw_body),
+        content: signed_content(runner_pubkey, ts, raw_body),
         sig: sig.to_string(),
     };
     audit::verify_event(&event).map_err(|_| AuthError::BadSignature)?;
@@ -101,27 +110,29 @@ mod tests {
     #[test]
     fn signed_request_verifies() {
         let secret = agent();
+        let runner = pubkey_of(&agent());
         let grants = vec![pubkey_of(&secret)];
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exec","arguments":{}}}"#;
-        let ev = sign_body(&secret, now_secs(), body);
-        assert_eq!(
-            verify_body(
-                &grants,
-                Some(&ev.pubkey),
-                Some(&ev.sig),
-                Some(&now_secs().to_string()),
-                body
-            )
-            .unwrap(),
-            ev.pubkey
-        );
+        let ts = now_secs();
+        let ev = sign_body(&secret, &runner, ts, body);
+        let got = verify_body(
+            &grants,
+            &runner,
+            Some(&ev.pubkey),
+            Some(&ev.sig),
+            Some(&ts.to_string()),
+            body,
+        )
+        .unwrap();
+        assert_eq!(got, ev.pubkey);
     }
 
     #[test]
     fn unsigned_is_rejected() {
         let secret = agent();
+        let runner = pubkey_of(&agent());
         let grants = vec![pubkey_of(&secret)];
-        let err = verify_body(&grants, None, None, None, "body").unwrap_err();
+        let err = verify_body(&grants, &runner, None, None, None, "body").unwrap_err();
         assert_eq!(err, AuthError::MissingHeaders);
     }
 
@@ -129,15 +140,18 @@ mod tests {
     fn ungranted_pubkey_is_rejected() {
         let secret = agent();
         let other = agent();
+        let runner = pubkey_of(&agent());
         let grants = vec![pubkey_of(&other)];
-        let body = "{\"method\":\"tools/call\"}";
-        let ev = sign_body(&secret, now_secs(), body);
+        let body = r#"{"method":"tools/call"}"#;
+        let ts = now_secs();
+        let ev = sign_body(&secret, &runner, ts, body);
         assert!(matches!(
             verify_body(
                 &grants,
+                &runner,
                 Some(&ev.pubkey),
                 Some(&ev.sig),
-                Some(&now_secs().to_string()),
+                Some(&ts.to_string()),
                 body
             ),
             Err(AuthError::NotGranted(_))
@@ -147,15 +161,18 @@ mod tests {
     #[test]
     fn stale_request_is_rejected() {
         let secret = agent();
+        let runner = pubkey_of(&agent());
         let grants = vec![pubkey_of(&secret)];
-        let body = "{\"method\":\"tools/call\"}";
-        let ev = sign_body(&secret, now_secs() - 120, body);
+        let body = r#"{"method":"tools/call"}"#;
+        let ts = now_secs() - 120;
+        let ev = sign_body(&secret, &runner, ts, body);
         assert_eq!(
             verify_body(
                 &grants,
+                &runner,
                 Some(&ev.pubkey),
                 Some(&ev.sig),
-                Some(&(now_secs() - 120).to_string()),
+                Some(&ts.to_string()),
                 body
             ),
             Err(AuthError::Stale)
@@ -165,16 +182,41 @@ mod tests {
     #[test]
     fn tampered_body_is_rejected() {
         let secret = agent();
+        let runner = pubkey_of(&agent());
         let grants = vec![pubkey_of(&secret)];
         let ts = now_secs();
-        let ev = sign_body(&secret, ts, "{\"method\":\"tools/call\",\"a\":1}");
+        let ev = sign_body(&secret, &runner, ts, r#"{"method":"tools/call","a":1}"#);
         assert_eq!(
             verify_body(
                 &grants,
+                &runner,
                 Some(&ev.pubkey),
                 Some(&ev.sig),
                 Some(&ts.to_string()),
-                "{\"method\":\"tools/call\",\"a\":2}"
+                r#"{"method":"tools/call","a":2}"#
+            ),
+            Err(AuthError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn wrong_audience_is_rejected() {
+        let secret = agent();
+        let grants = vec![pubkey_of(&secret)];
+        let runner_a = pubkey_of(&agent());
+        let runner_b = pubkey_of(&agent());
+        let body = r#"{"method":"tools/call"}"#;
+        let ts = now_secs();
+        // A signature produced FOR runner A must fail against runner B.
+        let ev = sign_body(&secret, &runner_a, ts, body);
+        assert_eq!(
+            verify_body(
+                &grants,
+                &runner_b,
+                Some(&ev.pubkey),
+                Some(&ev.sig),
+                Some(&ts.to_string()),
+                body
             ),
             Err(AuthError::BadSignature)
         );

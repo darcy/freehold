@@ -29,8 +29,8 @@ pub fn agent_pubkey() -> String {
 
 /// Sign `raw_body` (the exact bytes the runner will receive) for the test
 /// agent; returns (pubkey, sig, ts) header values.
-pub fn signed_headers(raw_body: &str) -> (String, String, String) {
+pub fn signed_headers(raw_body: &str, runner_pubkey: &str) -> (String, String, String) {
     let ts = auth::now_secs();
-    let ev = auth::sign_body(&TEST_AGENT.0, ts, raw_body);
+    let ev = auth::sign_body(&TEST_AGENT.0, runner_pubkey, ts, raw_body);
     (TEST_AGENT.1.clone(), ev.sig, ts.to_string())
 }

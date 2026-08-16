@@ -16,7 +16,7 @@ mod common;
 /// keys.
 fn test_ctx() -> RunnerContext {
     let dir = tempfile::tempdir().expect("tempdir").keep();
-    let id = identity::Identity::generate();
+    let id = runner_identity();
     id.write_to_dir(&dir).unwrap();
     let pkg = SecretPackage {
         secrets: Default::default(),
@@ -25,10 +25,18 @@ fn test_ctx() -> RunnerContext {
     };
     pkg.write_to_dir(&dir).unwrap();
     RunnerContext {
-        identity: id,
+        identity: (*id).clone(),
         package: pkg,
         state_dir: dir,
     }
+}
+
+/// One identity for the whole test process: the signing helper and the ctx
+/// must agree on the runner pubkey (the signature audience).
+fn runner_identity() -> &'static identity::Identity {
+    static RUNNER: std::sync::LazyLock<identity::Identity> =
+        std::sync::LazyLock::new(identity::Identity::generate);
+    &RUNNER
 }
 
 fn post(
@@ -48,7 +56,7 @@ fn post(
     // differ byte-for-byte and break verification).
     if body.get("method").and_then(Value::as_str) == Some("tools/call") {
         let raw = body.to_string();
-        let (pubkey, sig, ts) = common::signed_headers(&raw);
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_identity().nostr_pubkey_hex());
         req = req
             .header("x-freehold-pubkey", pubkey)
             .header("x-freehold-sig", sig)

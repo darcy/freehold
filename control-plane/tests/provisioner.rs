@@ -446,6 +446,18 @@ fn provision_ships_grants_and_grant_adds_live() {
 }
 
 #[test]
+fn invalid_grant_pubkeys_are_rejected() {
+    let (base, store) = setup();
+    let runner_dir = base.path().join("runner");
+    provision(&store, "vultr", b"key", &runner_dir);
+    let err = provisioner::grant_agent(&store, "vultr", "not-hex").unwrap_err();
+    assert!(
+        matches!(err, ProvisionError::InvalidGrant(_)),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn state_persists_across_reopen() {
     let base = tempfile::tempdir().unwrap();
     let store = StateStore::open(&base.path().join("state")).unwrap();

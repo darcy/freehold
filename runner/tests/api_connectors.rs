@@ -275,6 +275,7 @@ async fn vultr_create_list_destroy_over_curl() {
         &format!("http://{vultr_addr}"),
         "http://127.0.0.1:1", // unused
     );
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -286,7 +287,7 @@ async fn vultr_create_list_destroy_over_curl() {
     let call = |params: Value| -> Value {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
         let raw = body.to_string();
-        let (pubkey, sig, ts) = common::signed_headers(&raw);
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
@@ -367,6 +368,7 @@ async fn b2_authorize_upload_list_roundtrip() {
     let base = format!("http://{b2_addr}");
 
     let (dir, id) = api_runner_dir("http://127.0.0.1:1", &base);
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -378,7 +380,7 @@ async fn b2_authorize_upload_list_roundtrip() {
     let call = |params: Value| -> Value {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
         let raw = body.to_string();
-        let (pubkey, sig, ts) = common::signed_headers(&raw);
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
@@ -437,6 +439,7 @@ async fn api_targets_report_green_and_list() {
     let b2_url = "http://127.0.0.1:1".to_string();
 
     let (dir, id) = api_runner_dir(&format!("http://{vultr_addr}"), &b2_url);
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -448,7 +451,7 @@ async fn api_targets_report_green_and_list() {
     let call = |params: Value| -> Value {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
         let raw = body.to_string();
-        let (pubkey, sig, ts) = common::signed_headers(&raw);
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
@@ -501,6 +504,7 @@ async fn extra_or_missing_secrets_are_rejected() {
     let vultr_state = Arc::new(VultrState::default());
     let vultr_addr = spawn_http(vultr_router(vultr_state.clone())).await;
     let (dir, id) = api_runner_dir(&format!("http://{vultr_addr}"), "http://127.0.0.1:1");
+    let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
@@ -512,7 +516,7 @@ async fn extra_or_missing_secrets_are_rejected() {
     let call = |params: Value| -> Value {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
         let raw = body.to_string();
-        let (pubkey, sig, ts) = common::signed_headers(&raw);
+        let (pubkey, sig, ts) = common::signed_headers(&raw, &runner_pubkey);
         agent
             .post(&url)
             .header("Content-Type", "application/json")

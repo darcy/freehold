@@ -75,6 +75,9 @@ no k8s.
   map for the process lifetime. A TTL reaper is Phase C-sized.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg yet) — a timed-out
   command can leave orphans running.
+- **Grants (D) accepted gap**: a signed call can be replayed against the SAME
+  runner within the 60s window (audience + runner binding closes cross-runner
+  replay; a per-runner replay cache is a Chunk-2/security item).
 - **API connectors (C2/C3) accepted gaps**: streamed exec on an api target
   redacts the injected `<SECRET>_URL` env (the base URL) from output too —
   non-secret, cosmetic; the fix is a redaction list separate from the child

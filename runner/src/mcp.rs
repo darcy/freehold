@@ -196,8 +196,10 @@ async fn mcp_endpoint(
             // package so a `control-plane grant` lands without a restart.
             let params = body.get("params").cloned().unwrap_or(Value::Null);
             let grants = current_grants(&state.ctx.state_dir);
+            let runner_pubkey = state.ctx.identity.nostr_pubkey_hex();
             let caller = match auth::verify_body(
                 &grants,
+                &runner_pubkey,
                 headers
                     .get(auth::PUBKEY_HEADER)
                     .and_then(|v| v.to_str().ok()),

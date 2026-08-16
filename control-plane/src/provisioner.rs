@@ -43,6 +43,8 @@ pub enum ProvisionError {
     BadKeyLen(usize),
     #[error("invalid runner name {0:?}: must be a bare name (no '/', no leading '.')")]
     InvalidName(String),
+    #[error("invalid agent pubkey {0:?}: must be 64 hex chars")]
+    InvalidGrant(String),
     #[error("package dir {0} already holds a runner — refusing to clobber")]
     PackageDirInUse(PathBuf),
     #[error("runner {0} already exists")]
@@ -228,9 +230,7 @@ pub fn rotate_secret(
                 secret: name.to_string(),
             },
         )]),
-        grants: SecretPackage::load(&runner_rec.package_dir)
-            .map(|p| p.grants)
-            .unwrap_or_default(),
+        grants: current_grants(&runner_rec.package_dir)?,
     };
     pkg.write_to_dir(&runner_rec.package_dir)?;
 
@@ -251,9 +251,7 @@ pub fn rotate_secret(
                     secret: name.to_string(),
                 },
             )]),
-            grants: SecretPackage::load(&runner_rec.package_dir)
-                .map(|p| p.grants)
-                .unwrap_or_default(),
+            grants: current_grants(&runner_rec.package_dir).unwrap_or_default(),
         };
         match old_pkg.write_to_dir(&runner_rec.package_dir) {
             Ok(()) => tracing::warn!(
@@ -331,6 +329,12 @@ fn remove_shipped_secrets(rec: &RunnerRecord) {
     }
 }
 
+/// Load grants strictly: an unreadable package is an ERROR (silently shipping
+/// a runner nobody may call hides the reason).
+fn current_grants(dir: &std::path::Path) -> Result<Vec<String>, ProvisionError> {
+    Ok(SecretPackage::load(dir).map_err(ProvisionError::Io)?.grants)
+}
+
 /// D2: grant another agent pubkey to call a runner — re-ship the package so
 /// the runner's live grant check picks it up without a restart. Idempotent.
 pub fn grant_agent(
@@ -338,6 +342,9 @@ pub fn grant_agent(
     name: &str,
     agent_pubkey: &str,
 ) -> Result<Vec<String>, ProvisionError> {
+    if !is_pubkey(agent_pubkey) {
+        return Err(ProvisionError::InvalidGrant(agent_pubkey.to_string()));
+    }
     let rec = store
         .get_runner(name)
         .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
@@ -350,6 +357,10 @@ pub fn grant_agent(
         pkg.write_to_dir(&rec.package_dir)?;
     }
     Ok(pkg.grants)
+}
+
+fn is_pubkey(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Service-at-a-glance snapshot for the console / CLI.
