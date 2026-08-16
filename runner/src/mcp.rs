@@ -284,53 +284,141 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
         return handle_local_exec(state, &args, cmd).await;
     }
 
-    // SSH target (shipped package metadata): verbatim command over the pooled
-    // connection; credential = the target's private key PEM.
+    // Shipped target (package metadata): dispatch by connector kind.
     if let Some(meta) = state.ctx.package.targets.get(&target) {
-        if meta.kind != "ssh" {
-            return Err(exec::ExecError::UnknownTarget(target));
+        require_target_credential(&args.secrets, &target, meta)?;
+
+        // SSH: verbatim command over the pooled connection; credential = the
+        // target's private key PEM.
+        if meta.kind == "ssh" {
+            if args.stream {
+                return Err(exec::ExecError::Ssh(
+                    "streaming over ssh is not implemented yet (C1 ships non-streaming exec)"
+                        .into(),
+                ));
+            }
+            let value =
+                exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
+            let redaction = [(exec::env_name(&meta.secret), value.clone())];
+            let endpoint = SshTarget::parse(&target, &meta.address)
+                .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+            let started = exec::now_secs();
+            let mut result = state
+                .ssh
+                .exec(&endpoint, value.as_str(), &cmd, args.timeout_s)
+                .await
+                .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+            // Same rule as local: secret values never reach the agent.
+            exec::redact(&mut result.stdout, &redaction);
+            exec::redact(&mut result.stderr, &redaction);
+            // The locked model signs EVERY executed command — ssh included.
+            state.exec.audit_cmd(&cmd, &target, &result, started);
+            return Ok(serde_json::to_string_pretty(&result)?);
         }
-        if args.stream {
-            return Err(exec::ExecError::Ssh(
-                "streaming over ssh is not implemented yet (C1 ships non-streaming exec)".into(),
-            ));
-        }
-        // The target's credential MUST be the ONLY requested secret: nothing
-        // injects extras over the channel, so anything else would silently
-        // run unset and surface as a confusing service failure.
-        if !args.secrets.contains(&meta.secret) {
+
+        // API connector (vultr, b2, ...): LOCAL-run process with the target's
+        // credential + base URL injected as env vars — the agent writes curl
+        // commands; the runner injects creds, redacts values, signs the audit.
+        return handle_api_exec(state, &args, cmd, &target, meta).await;
+    }
+
+    /// The target's credential must be the ONLY requested secret — anything else
+    /// would silently run unset on every connector flavor.
+    fn require_target_credential(
+        requested: &[String],
+        target: &str,
+        meta: &freehold_core::secrets::TargetMeta,
+    ) -> Result<(), exec::ExecError> {
+        if !requested.contains(&meta.secret) {
             return Err(exec::ExecError::UnknownSecret(format!(
                 "target {target} requires secret {} in `secrets`",
                 meta.secret
             )));
         }
-        if let Some(extra) = args.secrets.iter().find(|n| *n != &meta.secret) {
+        if let Some(extra) = requested.iter().find(|n| *n != &meta.secret) {
             return Err(exec::ExecError::UnknownSecret(format!(
-                "target {target} accepts only its own credential {} — {extra:?} \
-                 was also requested; ssh does not inject env vars",
+                "target {target} accepts only its own credential {} — {extra:?} was also \
+             requested; no env injection beyond the target credential",
                 meta.secret
             )));
         }
-        let value =
-            exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
-        let redaction = [(exec::env_name(&meta.secret), value.clone())];
-        let endpoint = SshTarget::parse(&target, &meta.address)
-            .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
-        let started = exec::now_secs();
-        let mut result = state
-            .ssh
-            .exec(&endpoint, value.as_str(), &cmd, args.timeout_s)
-            .await
-            .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
-        // Same rule as local: secret values never reach the agent.
-        exec::redact(&mut result.stdout, &redaction);
-        exec::redact(&mut result.stderr, &redaction);
-        // The locked model signs EVERY executed command — ssh included.
-        state.exec.audit_cmd(&cmd, &target, &result, started);
-        return Ok(serde_json::to_string_pretty(&result)?);
+        Ok(())
     }
 
     Err(exec::ExecError::UnknownTarget(target))
+}
+
+/// Run a command on the runner host with the target credential and base URL
+/// in env: `<SECRET>_URL` carries `meta.address`; the credential is the
+/// injected value. `run` (and streaming) sign the audit.
+async fn handle_api_exec(
+    state: &RunnerState,
+    args: &ExecArgs,
+    cmd: String,
+    target: &str,
+    meta: &freehold_core::secrets::TargetMeta,
+) -> Result<String, exec::ExecError> {
+    let value = exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
+    let cred_env = exec::env_name(&meta.secret);
+    let url_env = format!("{cred_env}_URL");
+    let envs = vec![
+        (cred_env.clone(), value.clone()),
+        (url_env, zeroize::Zeroizing::new(meta.address.clone())),
+    ];
+
+    if args.stream {
+        let sid = state
+            .exec
+            .start_streaming(&cmd, target, envs.clone(), args.timeout_s);
+        let snap = state.exec.poll(&sid)?;
+        return Ok(serde_json::to_string_pretty(&snap)?);
+    }
+
+    // run() signs the audit; the credential value is redacted from output.
+    let mut result = state.exec.run(&cmd, target, envs, args.timeout_s).await?;
+    let redaction = [(cred_env, value)];
+    exec::redact(&mut result.stdout, &redaction);
+    exec::redact(&mut result.stderr, &redaction);
+    Ok(serde_json::to_string_pretty(&result)?)
+}
+
+/// Runner's OWN self-check against an API connector: a curl probe with the
+/// credential in env; HTTP 200 = green. Never reports red for the whole
+/// report — every failure folds into the string.
+async fn api_status(
+    state: &RunnerState,
+    meta: &freehold_core::secrets::TargetMeta,
+) -> Result<String, exec::ExecError> {
+    let value =
+        match exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret) {
+            Ok(v) => v,
+            Err(e) => return Ok(format!("red({e})")),
+        };
+    let cred = exec::env_name(&meta.secret);
+    let url_env = format!("{cred}_URL");
+    let envs = vec![
+        (cred.clone(), value.clone()),
+        (
+            url_env.clone(),
+            zeroize::Zeroizing::new(meta.address.clone()),
+        ),
+    ];
+    let cmd = match meta.kind.as_str() {
+        "vultr" => format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' \"${{{url_env}}}/v2/account\" -H \
+             \"Authorization: Bearer ${{{cred}}}\""
+        ),
+        "b2" => format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' -u \"${{{cred}}}\" \
+             \"${{{url_env}}}/b2api/v3/b2_authorize_account\""
+        ),
+        k => return Ok(format!("red(unsupported api kind {k})")),
+    };
+    match state.exec.probe_env(&cmd, &envs).await {
+        Ok(r) if r.stdout.trim() == "200" => Ok("green".into()),
+        Ok(r) => Ok(format!("yellow(probe {})", r.stdout.trim())),
+        Err(e) => Ok(format!("red({e})")),
+    }
 }
 
 async fn handle_local_exec(
@@ -376,10 +464,10 @@ async fn handle_status(state: &RunnerState, arguments: &Value) -> Result<String,
         let state_str = if entry == "local" {
             local_status(state).await?
         } else if let Some(meta) = state.ctx.package.targets.get(&entry) {
-            if meta.kind != "ssh" {
-                "red(unsupported kind)".to_string()
-            } else {
-                ssh_status(state, &entry, meta).await?
+            match meta.kind.as_str() {
+                "ssh" => ssh_status(state, &entry, meta).await?,
+                "vultr" | "b2" => api_status(state, meta).await?,
+                k => format!("red(unsupported kind {k})"),
             }
         } else {
             return Err(exec::ExecError::UnknownTarget(entry));
