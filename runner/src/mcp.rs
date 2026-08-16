@@ -1,27 +1,24 @@
-//! Runner MCP-over-HTTP tool server (Phase A3 — skeleton).
+//! Runner MCP-over-HTTP tool server.
 //!
 //! Locked decision: agent ↔ runner speaks MCP over HTTP even while co-located,
 //! proving the real shape. JSON-RPC 2.0 framing on a single POST endpoint,
 //! protocol subset: `initialize`, `notifications/initialized`, `ping`,
-//! `tools/list`, `tools/call`. Tools mirror the runner contract:
-//! `list`, `exec`, `config`, `status`, `snapshot`.
+//! `tools/list`, `tools/call`.
 //!
-//! Phase A3 delivers transport + registry + framing. `exec` semantics land in
-//! A4, readiness self-check in A5, audit in A6 — until then those tools answer
-//! with a typed `isError` result explaining the pending phase.
+//! Tools (the runner contract): `list`, `exec`, `config`, `status`, `snapshot`.
+//! `exec` is the generic primitive (Phase A4): the agent writes the command,
+//! the runner executes it verbatim on the owned connection, resolves secrets
+//! BY NAME from ciphertext, redacts their values from every response, and
+//! signs the run into the local audit log (A6). `status` is the runner's OWN
+//! readiness self-check (A5). `snapshot` lands with the Phase C connectors.
 //!
-//! Security (pre-A4):
-//! - Binds loopback only: a non-loopback `--addr` is rejected outright.
-//! - `Origin` is validated per the MCP spec's DNS-rebinding rule for local
-//!   servers: non-loopback origins get 403.
+//! Security:
+//! - Binds loopback only; non-loopback `Origin` gets 403 (MCP DNS-rebinding rule).
 //! - A session id is issued on `initialize` but NOT yet enforced. Real
-//!   enforcement + authentication (runner membership, grants) land with A4/D —
-//!   the endpoint is safe to leave open only because exec does not exist yet.
-//!
-//! Minimal streamable-HTTP: JSON responses only (no SSE). If a third-party MCP
-//! client needs to drive the runner directly, swap in a full SDK (e.g. rmcp) —
-//! the tool contract is unchanged either way.
+//!   authentication (runner membership, grants) lands with Phase D — the
+//!   endpoint is safe to run only on loopback until then.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -29,9 +26,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use freehold_core::{audit::Auditor, identity::Identity, secrets::SecretPackage};
 use rand::RngCore;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::exec::{self, ExecManager};
 use crate::registry;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -48,29 +48,54 @@ const LOOPBACK_ORIGINS: [&str; 6] = [
     "https://[::1]",
 ];
 
-#[derive(Clone, Default)]
-pub struct RunnerState;
+/// Everything the runner server needs: identity (decrypt + audit signing),
+/// the ciphertext secret package, and the state dir for the audit log.
+#[derive(Clone)]
+pub struct RunnerContext {
+    pub identity: Identity,
+    pub package: SecretPackage,
+    pub state_dir: PathBuf,
+}
 
-pub fn router() -> Router {
+#[derive(Clone)]
+pub struct RunnerState {
+    pub ctx: Arc<RunnerContext>,
+    pub exec: Arc<ExecManager>,
+}
+
+pub fn router(ctx: RunnerContext) -> Router {
+    let auditor = Arc::new(Auditor::new(
+        hex_to_arr32(&ctx.identity.nostr_secret_hex())
+            .expect("identity secrets are validated at load"),
+    ));
+    let state_dir = ctx.state_dir.clone();
+    let state = RunnerState {
+        ctx: Arc::new(ctx),
+        exec: Arc::new(ExecManager::new(
+            Some(auditor),
+            Some(Arc::from(state_dir.as_path())),
+        )),
+    };
     Router::new()
         .route("/mcp", post(mcp_endpoint))
-        .with_state(Arc::new(RunnerState))
+        .with_state(Arc::new(state))
 }
 
 /// Bind the MCP server to `addr` (loopback only). Returns the bound address and
 /// a task handle; the task serves until aborted or the process exits.
 pub async fn serve(
     addr: &str,
+    ctx: RunnerContext,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     if !bound.ip().is_loopback() {
         return Err(anyhow::anyhow!(
             "refusing non-loopback bind {bound}: the runner is unauthenticated \
-             until A4/D — bind 127.0.0.1"
+             until Phase D — bind 127.0.0.1"
         ));
     }
-    let app = router();
+    let app = router(ctx);
     let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!(error = %e, "MCP server failed");
@@ -80,7 +105,7 @@ pub async fn serve(
 }
 
 async fn mcp_endpoint(
-    State(_state): State<Arc<RunnerState>>,
+    State(state): State<Arc<RunnerState>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -157,6 +182,7 @@ async fn mcp_endpoint(
         "tools/call" => {
             let params = body.get("params").cloned().unwrap_or(Value::Null);
             let name = params.get("name").and_then(Value::as_str).map(String::from);
+            let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
             let (is_error, text) = match name.as_deref() {
                 Some("list") => match serde_json::to_string_pretty(&registry::registered()) {
                     Ok(s) => (false, s),
@@ -171,16 +197,14 @@ async fn mcp_endpoint(
                     Ok(s) => (false, s),
                     Err(e) => (true, format!("config failed: {e}")),
                 },
-                // Pending phases — typed tool result, not a protocol error.
-                Some("exec") => (
-                    true,
-                    "exec not implemented until Phase A4 (owned connection + verbatim command)"
-                        .into(),
-                ),
-                Some("status") => (
-                    true,
-                    "status not implemented until Phase A5 (runner self-check readiness)".into(),
-                ),
+                Some("exec") => match handle_exec(&state, &arguments).await {
+                    Ok(s) => (false, s),
+                    Err(e) => (true, e.to_string()),
+                },
+                Some("status") => match handle_status(&state, &arguments).await {
+                    Ok(s) => (false, s),
+                    Err(e) => (true, e.to_string()),
+                },
                 Some("snapshot") => (
                     true,
                     "snapshot not implemented until Phase C (connector state capture)".into(),
@@ -217,8 +241,85 @@ async fn mcp_endpoint(
     resp
 }
 
+#[derive(Deserialize, Default)]
+struct ExecArgs {
+    cmd: Option<String>,
+    target: Option<String>,
+    #[serde(default)]
+    secrets: Vec<String>,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    timeout_s: Option<u64>,
+}
+
+async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, exec::ExecError> {
+    let args: ExecArgs = serde_json::from_value(arguments.clone())?;
+
+    // Poll an existing streaming session (no cmd required).
+    if let Some(sid) = &args.session_id {
+        let snap = state.exec.poll(sid)?;
+        return Ok(serde_json::to_string_pretty(&snap)?);
+    }
+
+    let cmd = args.cmd.ok_or(exec::ExecError::MissingField("cmd"))?;
+    let target = args.target.ok_or(exec::ExecError::MissingField("target"))?;
+    if target != "local" {
+        return Err(exec::ExecError::UnknownTarget(target));
+    }
+
+    let secrets = exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
+
+    if args.stream {
+        let sid = state
+            .exec
+            .start_streaming(&cmd, &target, secrets.clone(), args.timeout_s);
+        let snap = state.exec.poll(&sid)?;
+        return Ok(serde_json::to_string_pretty(&snap)?);
+    }
+
+    let mut result = state
+        .exec
+        .run(&cmd, &target, secrets.clone(), args.timeout_s)
+        .await?;
+    // Secret values must never reach the agent — redact before returning.
+    exec::redact(&mut result.stdout, &secrets);
+    exec::redact(&mut result.stderr, &secrets);
+    Ok(serde_json::to_string_pretty(&result)?)
+}
+
+async fn handle_status(state: &RunnerState, arguments: &Value) -> Result<String, exec::ExecError> {
+    let target = arguments
+        .get("target")
+        .and_then(Value::as_str)
+        .unwrap_or("local");
+    if target != "local" {
+        return Err(exec::ExecError::UnknownTarget(target.to_string()));
+    }
+    // The runner's OWN self-check: can it reach its service with its creds?
+    match state.exec.self_check("uname -s").await {
+        Ok(r) if r.exit_code == Some(0) => Ok(serde_json::to_string_pretty(&json!({
+            "target": target,
+            "state": "green",
+            "detail": "local exec check passed",
+        }))?),
+        Ok(r) => Ok(serde_json::to_string_pretty(&json!({
+            "target": target,
+            "state": "yellow",
+            "detail": format!("check exited {}", r.exit_code.unwrap_or(-1)),
+        }))?),
+        Err(e) => Ok(serde_json::to_string_pretty(&json!({
+            "target": target,
+            "state": "red",
+            "detail": e.to_string(),
+        }))?),
+    }
+}
+
 fn new_session_id() -> String {
-    // TODO(A4/D): real session registry + enforcement. Issued now so clients
+    // TODO(Phase D): real session registry + enforcement. Issued now so clients
     // can pin the header; the value is opaque and stateless until then.
     let mut b = [0u8; 16];
     rand::rng().fill_bytes(&mut b);
@@ -234,6 +335,13 @@ fn origin_is_loopback(origin: &str) -> bool {
     })
 }
 
+fn hex_to_arr32(s: &str) -> Result<[u8; 32], hex::FromHexError> {
+    let bytes = hex::decode(s)?;
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
 fn tools() -> Vec<Value> {
     vec![
         json!({
@@ -244,8 +352,13 @@ fn tools() -> Vec<Value> {
         json!({
             "name": "exec",
             "description": "Run `cmd` verbatim on `target` via the runner-owned connection. \
-                            Pass secret names (not values) in `secrets`; the runner resolves them \
-                            locally from ciphertext. `stream` returns output as pull-style chunks.",
+                            Pass secret NAMES (not values) in `secrets`; the runner resolves \
+                            them from ciphertext and injects them as env vars named by \
+                            uppercase(secret) (`vultr-api-key` -> `VULTR_API_KEY`). Secret \
+                            values never appear in output or the agent context. `stream: true` \
+                            returns a session id; call exec again with that `session_id` to \
+                            poll accumulated output until `done`. `timeout_s` kills a command \
+                            that overruns.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -253,6 +366,7 @@ fn tools() -> Vec<Value> {
                     "target": { "type": "string" },
                     "secrets": { "type": "array", "items": { "type": "string" } },
                     "stream": { "type": "boolean" },
+                    "session_id": { "type": "string" },
                     "timeout_s": { "type": "integer" }
                 },
                 "required": ["cmd", "target"]

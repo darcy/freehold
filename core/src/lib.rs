@@ -4,6 +4,7 @@
 //! logic: identity keypairs, sealed-box crypto, secret packaging, and the
 //! atomic-0600 file discipline used everywhere secret material touches disk.
 
+pub mod audit;
 pub mod crypto;
 pub mod futil;
 pub mod identity;

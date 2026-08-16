@@ -1,7 +1,8 @@
 //! Targets this runner can reach (the `list` tool).
 //!
-//! Phase A3 ships an empty registry + the wire shape. Phase C adds the real
-//! connectors (ssh, vultr, b2), each a runner flavor over the same core.
+//! Chunk 1 ships the `local` target — a process spawned on the runner's own
+//! host. Phase C adds the connector targets (ssh, vultr, b2), each a runner
+//! flavor over the same `exec` primitive.
 
 use serde::Serialize;
 
@@ -13,5 +14,8 @@ pub struct Target {
 
 /// All targets currently reachable by this runner.
 pub fn registered() -> Vec<Target> {
-    Vec::new()
+    vec![Target {
+        name: "local".into(),
+        kind: "local".into(),
+    }]
 }

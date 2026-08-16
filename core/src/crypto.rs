@@ -14,8 +14,8 @@
 //! only be opened with the same secret name it was sealed with, so entries in
 //! a multi-secret package cannot be swapped. NOT bound: an epoch — blobs stay
 //! valid indefinitely once sealed. Rotation/revoke erase the CP's own copies;
-//! a blob another party kept still opens. Epoch pinning needs the runner-side
-//! read (Phase A4) to reject stale blobs and is recorded as a Chunk-1 gap.
+//! a blob another party kept still opens. Epoch pinning is a named follow-up
+//! (tracked post-A4; wire-format addition, nothing deployed yet).
 //!
 //! Wire format (versioned):
 //! ```text
