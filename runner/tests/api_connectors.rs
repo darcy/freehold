@@ -421,10 +421,9 @@ async fn b2_authorize_upload_list_roundtrip() {
 async fn api_targets_report_green_and_list() {
     let vultr_state = Arc::new(VultrState::default());
     let vultr_addr = spawn_http(vultr_router(vultr_state.clone())).await;
-    let b2_state = Arc::new(B2State::default());
-    let b2_addr = spawn_http(b2_router(b2_state.clone())).await;
-    *b2_state.base_url.lock() = format!("http://{b2_addr}");
-    let b2_url = format!("http://{b2_addr}");
+    // b2 points at a DEAD port on purpose: its probe must fold to red(...)
+    // without failing the report or dragging green targets down.
+    let b2_url = "http://127.0.0.1:1".to_string();
 
     let (dir, id) = api_runner_dir(&format!("http://{vultr_addr}"), &b2_url);
     let ctx = RunnerContext {
@@ -458,7 +457,10 @@ async fn api_targets_report_green_and_list() {
         "list: {list_text}"
     );
 
+    // ONE dead target folds to red; the others stay green; the report itself
+    // still succeeds — the aggregation invariant, exercised for real.
     let status = call(json!({ "name": "status", "arguments": {} }));
+    assert_eq!(status["result"]["isError"], false, "{status}");
     let status_text = status["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
@@ -468,18 +470,13 @@ async fn api_targets_report_green_and_list() {
         "vultr status: {status_text}"
     );
     assert!(
-        status_text.contains("\"b2\": \"green\""),
-        "b2 status: {status_text}"
+        status_text.contains("\"b2\": \"") && !status_text.contains("\"b2\": \"green\""),
+        "dead target must fold to a non-green state: {status_text}"
     );
     assert!(
         status_text.contains("\"local\": \"green\""),
         "local stays green"
     );
-
-    // A missing target errors, but a bad probe on ONE target folds to red
-    // without failing the whole report.
-    let status_bad = call(json!({ "name": "status", "arguments": {} }));
-    assert_eq!(status_bad["result"]["isError"], false);
 
     server.abort();
 }
