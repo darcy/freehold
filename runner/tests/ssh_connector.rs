@@ -376,6 +376,48 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
         "key must never leak"
     );
 
+    // A requested EXTRA secret is rejected: ssh injects no env over the
+    // channel, so it would otherwise run unset and fail confusingly.
+    let extra = call(serde_json::json!({
+        "name": "exec",
+        "arguments": { "cmd": "echo x", "target": "ssh-laptop", "secrets": ["ssh-laptop", "vultr_api_key"] }
+    }))
+    .unwrap()
+    .clone();
+    assert_eq!(
+        extra["result"]["isError"], true,
+        "extra secrets must be rejected"
+    );
+
+    // Redaction is exercised for real: make the remote ECHO the key, so
+    // deleting exec::redact from the ssh branch would fail this test.
+    let leak_cmd = format!("printf %s '{}'", pem);
+    let leak = call(serde_json::json!({
+        "name": "exec",
+        "arguments": { "cmd": leak_cmd, "target": "ssh-laptop", "secrets": ["ssh-laptop"] }
+    }))
+    .unwrap()
+    .clone();
+    let leak_text = leak["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !leak_text.contains("OPENSSH PRIVATE KEY"),
+        "key must be redacted: {leak_text}"
+    );
+    assert!(
+        leak_text.contains("***"),
+        "redaction marker expected: {leak_text}"
+    );
+
+    // The pinned model signs EVERY command — ssh execs included.
+    let audit = std::fs::read_to_string(dir.path().join("audit.log")).ok();
+    assert!(
+        audit.as_deref().is_some_and(|a| a.contains("ssh-laptop")),
+        "ssh execs must land in the audit log"
+    );
+
     // List now includes the ssh target; status reports it green.
     let list = call(serde_json::json!({ "name": "list", "arguments": {} })).unwrap();
     let list_text = list["result"]["content"][0]["text"].as_str().unwrap();

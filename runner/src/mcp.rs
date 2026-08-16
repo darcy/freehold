@@ -306,7 +306,9 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
         }
         if let Some(extra) = args.secrets.iter().find(|n| *n != &meta.secret) {
             return Err(exec::ExecError::UnknownSecret(format!(
-                "target {target} only accepts its own credential {extra:?} —                  ssh does not inject env vars"
+                "target {target} accepts only its own credential {} — {extra:?} \
+                 was also requested; ssh does not inject env vars",
+                meta.secret
             )));
         }
         let value =
