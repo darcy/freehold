@@ -80,12 +80,12 @@ fn provision_ships_package_and_cp_state_has_no_plaintext_or_keys() {
     let rec = store.get_secret("vultr").unwrap();
     let blob = hex::decode(&rec.ciphertext_hex).unwrap();
     let runner_id = Identity::load(&runner_dir).unwrap();
-    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), &blob).unwrap();
+    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), b"vultr", &blob).unwrap();
     assert_eq!(opened, secret, "runner opens its own sealed secret");
 
     // A DIFFERENT key (e.g. a second runner) cannot open it.
     let other = Identity::generate();
-    assert!(crypto::open(&hex32(&other.enc_secret_hex()), &blob).is_err());
+    assert!(crypto::open(&hex32(&other.enc_secret_hex()), b"vultr", &blob).is_err());
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn rotated_secret_reencrypts_and_replaces_everywhere() {
     assert!(!pkg_raw.contains("old-key-value") && !pkg_raw.contains("new-key-value"));
     let blob = hex::decode(&after.ciphertext_hex).unwrap();
     let runner_id = Identity::load(&runner_dir).unwrap();
-    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), &blob).unwrap();
+    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), b"b2", &blob).unwrap();
     assert_eq!(opened, b"new-key-value");
 }
 
@@ -185,7 +185,7 @@ fn package_dir_in_use_is_refused() {
     let runner_id = Identity::load(&runner_dir).unwrap();
     let blob = hex::decode(store.get_secret("a").unwrap().ciphertext_hex).unwrap();
     assert_eq!(
-        crypto::open(&hex32(&runner_id.enc_secret_hex()), &blob).unwrap(),
+        crypto::open(&hex32(&runner_id.enc_secret_hex()), b"a", &blob).unwrap(),
         b"key-a"
     );
 }

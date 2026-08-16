@@ -56,6 +56,17 @@ no k8s.
 - Test targets: VPS (dev/smoke) → old-laptop Proxmox (test/staging, SSH target only) → home
   dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.
 
+## Chunk 1 known gaps (honest scope)
+
+- **No remote revocation of a capability already in a runner's hands.** The CP can stop
+  issuing (revoke blocks provision/rotate), erase its own copies (rotate re-seals, revoke
+  deletes the shipped `secrets.json`), and blobs are pinned to recipient + secret name — but
+  a blob someone else kept still opens, and re-keying (a leaked runner private key) is out
+  of scope. Relay membership revocation = Chunk 2; epoch/staleness rejection lands with the
+  runner-side read in A4. "Rotation = erase" refers to YOUR copies, not copies others held.
+- **State store is single-process** (`StateStore` open→mutate→save is not cross-process
+  atomic; TODO for the Postgres swap at MVP).
+
 ## Build / test
 
 - Workspace: `cargo build`, `cargo test` (once scaffolded in Phase A).

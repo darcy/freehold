@@ -103,7 +103,9 @@ pub fn provision_runner(
 
     let id = identity::Identity::generate();
     let enc_pub = hex_to_arr(&id.enc_pubkey_hex())?;
-    let sealed = crypto::seal(&enc_pub, req.secret)?;
+    // aad = secret NAME: the blob is cryptographically pinned to the entry it
+    // will be filed under, so package entries can't be swapped between names.
+    let sealed = crypto::seal(&enc_pub, req.name.as_bytes(), req.secret)?;
     let ciphertext_hex = hex::encode(&sealed);
     let nostr_pubkey = id.nostr_pubkey_hex();
     let enc_pubkey = id.enc_pubkey_hex();
@@ -170,7 +172,7 @@ pub fn rotate_secret(
     }
 
     let enc_pub = hex_to_arr(&runner_rec.enc_pubkey)?;
-    let sealed = crypto::seal(&enc_pub, new_secret)?;
+    let sealed = crypto::seal(&enc_pub, name.as_bytes(), new_secret)?;
     let ciphertext_hex = hex::encode(&sealed);
 
     // Re-ship the package (Chunk 1 invariant: one secret per runner).

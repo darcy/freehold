@@ -8,6 +8,15 @@
 //! the architecture locks in — crypto tool is orthogonal, and X25519 was
 //! already the runner's identity key type.
 //!
+//! Context binding: the recipient keypair is bound through HKDF `info`
+//! (`eph_pk‖recip_pk`), and the caller-supplied `aad` (the secret NAME the
+//! blob is filed under) is bound through AEAD associated data. A blob can
+//! only be opened with the same secret name it was sealed with, so entries in
+//! a multi-secret package cannot be swapped. NOT bound: an epoch — blobs stay
+//! valid indefinitely once sealed. Rotation/revoke erase the CP's own copies;
+//! a blob another party kept still opens. Epoch pinning needs the runner-side
+//! read (Phase A4) to reject stale blobs and is recorded as a Chunk-1 gap.
+//!
 //! Wire format (versioned):
 //! ```text
 //! [0]       version byte (currently 1)
@@ -16,7 +25,7 @@
 //! [45..]    ChaCha20-Poly1305 ciphertext (tag appended)
 //! ```
 
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
 use rand::RngCore;
@@ -69,9 +78,14 @@ fn derive_key(
 }
 
 /// Seal `plaintext` to `recipient_pubkey` (the runner's X25519 encryption
-/// pubkey). Returns the versioned blob; the caller stores/ships ciphertext
-/// only and drops the plaintext.
-pub fn seal(recipient_pubkey: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+/// pubkey), bound to `aad` — the secret NAME the blob is filed under. Returns
+/// the versioned blob; the caller stores/ships ciphertext only and drops the
+/// plaintext.
+pub fn seal(
+    recipient_pubkey: &[u8; KEY_LEN],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     // Fresh ephemeral key per seal: nonce reuse is impossible across seals
     // even if the random nonce ever repeated.
     let eph_secret = StaticSecret::from(random_bytes());
@@ -82,7 +96,7 @@ pub fn seal(recipient_pubkey: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8
     let key = derive_key(&eph_public, &recipient, &shared)?;
     let nonce = random_nonce();
     let cipher = ChaCha20Poly1305::new(&(*key).into());
-    let ct = cipher.encrypt(&Nonce::from(nonce), plaintext)?;
+    let ct = cipher.encrypt(&Nonce::from(nonce), Payload { msg: plaintext, aad })?;
 
     let mut out = Vec::with_capacity(1 + EPHEMERAL_PUB_LEN + NONCE_LEN + ct.len());
     out.push(FORMAT_VERSION);
@@ -92,12 +106,18 @@ pub fn seal(recipient_pubkey: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Open a sealed blob with the runner's static secret. The ONLY key that can
-/// decrypt a blob is the private half of the pubkey it was sealed to — the
-/// recipient pubkey bound into the key schedule is DERIVED from the secret,
-/// so a blob sealed to a different recipient (or forged via a low-order
-/// ephemeral point) fails here even against a tampered blob.
-pub fn open(recipient_secret: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
+/// Open a sealed blob with the runner's static secret and the secret NAME it
+/// was sealed under. The ONLY key that can decrypt a blob is the private half
+/// of the pubkey it was sealed to — the recipient pubkey bound into the key
+/// schedule is DERIVED from the secret, so a blob sealed to a different
+/// recipient (or forged via a low-order ephemeral point) fails here even
+/// against a tampered blob. The `aad` must match the sealing name, so a blob
+/// filed under the wrong secret name cannot be swapped into place.
+pub fn open(
+    recipient_secret: &[u8; KEY_LEN],
+    aad: &[u8],
+    blob: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     let header = 1 + EPHEMERAL_PUB_LEN + NONCE_LEN;
     if blob.len() < header {
         return Err(CryptoError::BadLength(blob.len()));
@@ -113,7 +133,7 @@ pub fn open(recipient_secret: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>, Cr
 
     let key = derive_key(&eph_public, &recipient_public, &shared)?;
     let cipher = ChaCha20Poly1305::new(&(*key).into());
-    Ok(cipher.decrypt(&nonce, &blob[45..])?)
+    Ok(cipher.decrypt(&nonce, Payload { msg: &blob[45..], aad })?)
 }
 
 fn random_bytes() -> [u8; KEY_LEN] {
@@ -144,8 +164,8 @@ mod tests {
     fn roundtrip() {
         let secret = random_secret();
         let pubkey = X25519PublicKey::from(&secret);
-        let blob = seal(pubkey.as_bytes(), b"vultr-api-key-123").unwrap();
-        let opened = open(secret.to_bytes().as_slice().try_into().unwrap(), &blob).unwrap();
+        let blob = seal(pubkey.as_bytes(), b"vultr", b"vultr-api-key-123").unwrap();
+        let opened = open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob).unwrap();
         assert_eq!(opened, b"vultr-api-key-123");
     }
 
@@ -153,8 +173,8 @@ mod tests {
     fn wrong_key_fails() {
         let secret = random_secret();
         let other = random_secret();
-        let blob = seal(X25519PublicKey::from(&secret).as_bytes(), b"secret").unwrap();
-        let err = open(other.to_bytes().as_slice().try_into().unwrap(), &blob).unwrap_err();
+        let blob = seal(X25519PublicKey::from(&secret).as_bytes(), b"b2", b"secret").unwrap();
+        let err = open(other.to_bytes().as_slice().try_into().unwrap(), b"b2", &blob).unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt(_)), "got {err:?}");
     }
 
@@ -162,11 +182,25 @@ mod tests {
     fn tampered_fails() {
         let secret = random_secret();
         let pubkey = X25519PublicKey::from(&secret);
-        let mut blob = seal(pubkey.as_bytes(), b"secret").unwrap();
+        let mut blob = seal(pubkey.as_bytes(), b"ssh", b"secret").unwrap();
         let last = blob.len() - 1;
         blob[last] ^= 0x01;
-        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), &blob).unwrap_err();
+        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob).unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn blob_is_pinned_to_its_name() {
+        // A blob sealed under one name must not open under another — this is
+        // what stops swapping entries in a multi-secret SecretPackage.
+        let secret = random_secret();
+        let pubkey = X25519PublicKey::from(&secret);
+        let blob = seal(pubkey.as_bytes(), b"vultr", b"api-key").unwrap();
+        let bytes = secret.to_bytes();
+        let key: &[u8; 32] = bytes.as_slice().try_into().unwrap();
+        assert!(open(key, b"vultr", &blob).is_ok());
+        let err = open(key, b"b2", &blob).unwrap_err();
+        assert!(matches!(err, CryptoError::Decrypt(_)), "wrong name must fail: {err:?}");
     }
 
     #[test]
@@ -179,7 +213,7 @@ mod tests {
         blob.extend_from_slice(&[0u8; 32]); // low-order ephemeral pubkey
         blob.extend_from_slice(&[0u8; 12]); // nonce
         blob.extend_from_slice(&[0u8; 16]); // ct
-        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), &blob).unwrap_err();
+        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob).unwrap_err();
         assert!(matches!(err, CryptoError::NonContributory), "got {err:?}");
     }
 
@@ -187,21 +221,21 @@ mod tests {
     fn bad_version_and_short_blob() {
         let secret = random_secret();
         let pubkey = X25519PublicKey::from(&secret);
-        let mut blob = seal(pubkey.as_bytes(), b"secret").unwrap();
+        let mut blob = seal(pubkey.as_bytes(), b"ssh", b"secret").unwrap();
         blob[0] = 99;
         assert!(matches!(
-            open(secret.to_bytes().as_slice().try_into().unwrap(), &blob),
+            open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob),
             Err(CryptoError::BadVersion(99))
         ));
-        assert!(matches!(open(&[0u8; 32], b"short"), Err(CryptoError::BadLength(_))));
+        assert!(matches!(open(&[0u8; 32], b"x", b"short"), Err(CryptoError::BadLength(_))));
     }
 
     #[test]
     fn seals_are_unique_per_call() {
         let secret = random_secret();
         let pubkey = X25519PublicKey::from(&secret);
-        let a = seal(pubkey.as_bytes(), b"same").unwrap();
-        let b = seal(pubkey.as_bytes(), b"same").unwrap();
+        let a = seal(pubkey.as_bytes(), b"a", b"same").unwrap();
+        let b = seal(pubkey.as_bytes(), b"a", b"same").unwrap();
         assert_ne!(a, b, "ephemeral keys must make every seal unique");
     }
 }
