@@ -78,24 +78,24 @@ command, result). Chunk 1: local audit log (no relay yet).
 
 ### Phase B — Secret provisioner (CP-side)
 
-- [ ] [ ] 
+- [x] [x]
 
-B1. Provisioner: given a target + credential, generate runner identity + encryption  
+B1. Provisioner: given a target + credential, generate runner identity + encryption
 keypair, encrypt the credential **to the runner's pubkey**, ship ciphertext to runner  
 config, inject runner private key.
 
-- [ ] [ ] 
+- [x] [x]
 
 B2. **Rotation:** re-encrypt a secret to a fresh key / re-issue to remaining runners.
 
-- [ ] [ ] 
+- [x] [x]
 
-B3. **Revocation (cut-off):** revoke a runner's identity at the CP → runner can no longer  
+B3. **Revocation (cut-off):** revoke a runner's identity at the CP → runner can no longer
 be called/act.
 
-- [ ] [ ] 
+- [x] [x]
 
-B4. Verify: NO master key stored anywhere; CP holds only ciphertext. Plaintext never on  
+B4. Verify: NO master key stored anywhere; CP holds only ciphertext. Plaintext never on
 disk, never in agent context.
 
 ### Phase C — Three connectors (each a runner flavor, same core)

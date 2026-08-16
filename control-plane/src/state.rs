@@ -1,0 +1,189 @@
+//! Control-plane state: runners + secrets.
+//!
+//! The CP is a SECRET PROVISIONER, not a vault — records hold public keys and
+//! ciphertext only. No private keys, no plaintext, no master key. The runner
+//! holds its own injected private key + ciphertext and decrypts locally.
+//!
+//! Chunk 1 invariant: ONE secret per runner (dedicated runner per service =
+//! default), so a runner's package is rebuilt from its single secret on rotate.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const STATE_FILE: &str = "state.json";
+pub const STATE_DIR_ENV: &str = "FREEHOLD_CP_STATE_DIR";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunnerStatus {
+    #[default]
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerRecord {
+    /// Nostr x-only pubkey — the grant/membership identity.
+    pub nostr_pubkey: String,
+    /// X25519 pubkey — the CP seals secrets TO this key. The private half is
+    /// never stored here; holding it would be a master key.
+    pub enc_pubkey: String,
+    pub status: RunnerStatus,
+    /// Where the runner package (identity.json + secrets.json) was shipped.
+    pub package_dir: PathBuf,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretRecord {
+    /// Runner (service) this secret belongs to — one per runner in Chunk 1.
+    pub runner: String,
+    pub kind: String,
+    pub address: String,
+    /// Sealed-box ciphertext (hex), encrypted TO the runner's enc_pubkey.
+    pub ciphertext_hex: String,
+    pub created_at: u64,
+    pub rotated_at: Option<u64>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ControlPlaneState {
+    pub runners: BTreeMap<String, RunnerRecord>,
+    pub secrets: BTreeMap<String, SecretRecord>,
+}
+
+#[derive(Debug, Error)]
+pub enum StateError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("malformed state json: {0}")]
+    Serde(#[from] serde_json::Error),
+    #[error("runner {0} not found")]
+    RunnerNotFound(String),
+    #[error("secret {0} not found")]
+    SecretNotFound(String),
+}
+
+pub struct StateStore {
+    dir: PathBuf,
+    inner: RwLock<ControlPlaneState>,
+}
+
+impl StateStore {
+    /// Open (creating if needed) the CP state under `dir` (0700).
+    pub fn open(dir: &Path) -> Result<Self, StateError> {
+        freehold_core::futil::ensure_private_dir(dir)?;
+        let path = dir.join(STATE_FILE);
+        let state = if path.exists() {
+            let raw = std::fs::read_to_string(&path)?;
+            serde_json::from_str(&raw)?
+        } else {
+            ControlPlaneState::default()
+        };
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            inner: RwLock::new(state),
+        })
+    }
+
+    /// Persist atomically (0600). Call after any mutation.
+    ///
+    /// TODO(Postgres swap at MVP): atomic per-write is NOT atomic across
+    /// open→mutate→save — two concurrent CP invocations on one state dir are
+    /// last-writer-wins on the whole file and can drop a record whose keys
+    /// were already shipped. Package writes also precede state persistence in
+    /// `provision` (in-process rollback on save failure; cross-process
+    /// atomicity still wants an O_EXCL lockfile held across the
+    /// read-modify-write, or a real store).
+    pub fn save(&self) -> Result<(), StateError> {
+        let json = serde_json::to_vec(&*self.inner.read())?;
+        freehold_core::futil::write_0600_atomic(&self.dir.join(STATE_FILE), &json)?;
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> ControlPlaneState {
+        self.inner.read().clone()
+    }
+
+    pub fn get_runner(&self, name: &str) -> Option<RunnerRecord> {
+        self.inner.read().runners.get(name).cloned()
+    }
+
+    pub fn get_secret(&self, name: &str) -> Option<SecretRecord> {
+        self.inner.read().secrets.get(name).cloned()
+    }
+
+    pub fn insert_runner(&self, name: &str, rec: RunnerRecord) {
+        self.inner.write().runners.insert(name.to_string(), rec);
+    }
+
+    pub fn insert_secret(&self, name: &str, rec: SecretRecord) {
+        self.inner.write().secrets.insert(name.to_string(), rec);
+    }
+
+    pub fn set_runner_status(&self, name: &str, status: RunnerStatus) -> Result<(), StateError> {
+        let mut inner = self.inner.write();
+        let rec = inner
+            .runners
+            .get_mut(name)
+            .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+        rec.status = status;
+        Ok(())
+    }
+
+    /// Revert helpers for failed `save()` rollbacks: a long-lived `serve`
+    /// must not persist a phantom mutation (record that never saved, status
+    /// flip that never hit disk) on its NEXT successful write.
+    pub fn remove_runner(&self, name: &str) {
+        self.inner.write().runners.remove(name);
+    }
+
+    pub fn remove_secret(&self, name: &str) {
+        self.inner.write().secrets.remove(name);
+    }
+
+    /// Restore a secret record's ciphertext + rotation stamp (rollback of
+    /// `update_secret_ciphertext`).
+    pub fn set_secret_ciphertext(
+        &self,
+        name: &str,
+        ciphertext_hex: &str,
+        rotated_at: Option<u64>,
+    ) -> Result<(), StateError> {
+        let mut inner = self.inner.write();
+        let rec = inner
+            .secrets
+            .get_mut(name)
+            .ok_or_else(|| StateError::SecretNotFound(name.to_string()))?;
+        rec.ciphertext_hex = ciphertext_hex.to_string();
+        rec.rotated_at = rotated_at;
+        Ok(())
+    }
+
+    pub fn update_secret_ciphertext(
+        &self,
+        name: &str,
+        ciphertext_hex: &str,
+        rotated_at: u64,
+    ) -> Result<(), StateError> {
+        let mut inner = self.inner.write();
+        let rec = inner
+            .secrets
+            .get_mut(name)
+            .ok_or_else(|| StateError::SecretNotFound(name.to_string()))?;
+        rec.ciphertext_hex = ciphertext_hex.to_string();
+        rec.rotated_at = Some(rotated_at);
+        Ok(())
+    }
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
