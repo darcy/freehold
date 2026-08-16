@@ -8,6 +8,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      checks: read
       id-token: write
     steps:
       - name: Checkout repository
@@ -69,4 +70,4 @@ jobs:
 
           # Tools: review commands only — verification lives in CI
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr checks:*)"
