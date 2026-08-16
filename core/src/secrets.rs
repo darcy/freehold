@@ -62,6 +62,10 @@ mod tests {
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o077, 0, "secrets.json must not be group/other readable");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "secrets.json must not be group/other readable"
+        );
     }
 }

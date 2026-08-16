@@ -106,7 +106,11 @@ mod tests {
         let path = dir.path().join("blob");
         write_0600_atomic(&path, b"secret-material").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"secret-material");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "no temp leftovers");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temp leftovers"
+        );
     }
 
     #[cfg(unix)]
@@ -117,6 +121,10 @@ mod tests {
         let path = dir.path().join("blob");
         write_0600_atomic(&path, b"secret-material").unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "secret file must not be group/other readable");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "secret file must not be group/other readable"
+        );
     }
 }

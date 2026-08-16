@@ -3,9 +3,9 @@
 //! proving transport + registry framing — not just that the crate compiles.
 
 use freehold_runner::mcp;
-use serde_json::{json, Value};
-use ureq::http::Response;
+use serde_json::{Value, json};
 use ureq::Body;
+use ureq::http::Response;
 
 fn post(
     agent: &ureq::Agent,
@@ -41,7 +41,9 @@ async fn mcp_wire_shape() {
     let url = format!("http://{addr}/mcp");
     // 4xx (the 403 origin rejection) is a valid transport response in this test.
     let agent = ureq::Agent::new_with_config(
-        ureq::config::Config::builder().http_status_as_error(false).build(),
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .build(),
     );
 
     // 1. initialize handshake (no origin -> allowed, non-browser client)
@@ -73,7 +75,10 @@ async fn mcp_wire_shape() {
         "server must advertise tools capability"
     );
     assert!(
-        !init["result"]["protocolVersion"].as_str().unwrap_or("").is_empty(),
+        !init["result"]["protocolVersion"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
         "server must negotiate a protocol version"
     );
 
@@ -100,7 +105,10 @@ async fn mcp_wire_shape() {
         .get("mcp-session-id")
         .map(|v| v.to_str().expect("ascii session").to_string())
         .expect("fresh session id");
-    assert_ne!(fresh, "stale-session-header", "stale header must not clobber the new id");
+    assert_ne!(
+        fresh, "stale-session-header",
+        "stale header must not clobber the new id"
+    );
 
     // 3. initialized notification (no id -> no body)
     post(
@@ -113,14 +121,16 @@ async fn mcp_wire_shape() {
     .expect("initialized notification");
 
     // 4. tools/list — the full runner contract
-    let tools = body_json(post(
-        &agent,
-        &url,
-        rpc(2, "tools/list", json!({})),
-        session.as_deref(),
-        None,
-    )
-    .expect("tools/list"));
+    let tools = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(2, "tools/list", json!({})),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/list"),
+    );
     let names: Vec<String> = tools["result"]["tools"]
         .as_array()
         .expect("tools array")
@@ -130,66 +140,86 @@ async fn mcp_wire_shape() {
     assert_eq!(names, vec!["list", "exec", "config", "status", "snapshot"]);
 
     // 5. tools/call list — real, returns the (empty) registry
-    let list = body_json(post(
-        &agent,
-        &url,
-        rpc(3, "tools/call", json!({ "name": "list", "arguments": {} })),
-        session.as_deref(),
-        None,
-    )
-    .expect("tools/call list"));
+    let list = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(3, "tools/call", json!({ "name": "list", "arguments": {} })),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/call list"),
+    );
     let text = &list["result"]["content"][0]["text"];
     let targets: Value =
         serde_json::from_str(text.as_str().expect("list text")).expect("targets json");
     assert_eq!(targets, json!([]), "Phase A registry is empty");
 
     // 6. tools/call config — real, non-secret server info
-    let cfg = body_json(post(
-        &agent,
-        &url,
-        rpc(4, "tools/call", json!({ "name": "config", "arguments": {} })),
-        session.as_deref(),
-        None,
-    )
-    .expect("tools/call config"));
+    let cfg = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(
+                4,
+                "tools/call",
+                json!({ "name": "config", "arguments": {} }),
+            ),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/call config"),
+    );
     assert!(
-        cfg["result"]["content"][0]["text"].as_str().unwrap().contains("freehold-runner"),
+        cfg["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("freehold-runner"),
         "config names the runner"
     );
 
     // 7. pending phases answer with typed isError, not protocol errors
     for (id, tool) in [5u64, 6, 7].into_iter().zip(["exec", "status", "snapshot"]) {
-        let call = body_json(post(
-            &agent,
-            &url,
-            rpc(id, "tools/call", json!({ "name": tool, "arguments": {} })),
-            session.as_deref(),
-            None,
-        )
-        .unwrap_or_else(|e| panic!("tools/call {tool}: {e}")));
-        assert_eq!(call["result"]["isError"], true, "{tool} is pending in Phase A");
+        let call = body_json(
+            post(
+                &agent,
+                &url,
+                rpc(id, "tools/call", json!({ "name": tool, "arguments": {} })),
+                session.as_deref(),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("tools/call {tool}: {e}")),
+        );
+        assert_eq!(
+            call["result"]["isError"], true,
+            "{tool} is pending in Phase A"
+        );
     }
 
     // 8. unknown tool -> typed error, still MCP-compliant
-    let unknown = body_json(post(
-        &agent,
-        &url,
-        rpc(8, "tools/call", json!({ "name": "bogus", "arguments": {} })),
-        session.as_deref(),
-        None,
-    )
-    .expect("tools/call bogus"));
+    let unknown = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(8, "tools/call", json!({ "name": "bogus", "arguments": {} })),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/call bogus"),
+    );
     assert_eq!(unknown["result"]["isError"], true);
 
     // 9. unknown method -> JSON-RPC protocol error
-    let bad_method = body_json(post(
-        &agent,
-        &url,
-        rpc(9, "resources/list", json!({})),
-        session.as_deref(),
-        None,
-    )
-    .expect("resources/list"));
+    let bad_method = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(9, "resources/list", json!({})),
+            session.as_deref(),
+            None,
+        )
+        .expect("resources/list"),
+    );
     assert_eq!(bad_method["error"]["code"], -32601);
 
     // 10. notification with an unknown method must NOT get a response (RFC §4.1)
@@ -214,7 +244,11 @@ async fn mcp_wire_shape() {
             None,
         )
         .expect(method);
-        assert_eq!(no_resp.status(), 204, "{method} is a notification — no reply");
+        assert_eq!(
+            no_resp.status(),
+            204,
+            "{method} is a notification — no reply"
+        );
     }
 
     // 11. DNS-rebinding guard: non-loopback Origin -> 403
@@ -226,7 +260,11 @@ async fn mcp_wire_shape() {
         Some("http://evil.example"),
     )
     .expect("evil origin");
-    assert_eq!(blocked.status(), 403, "non-loopback origin must be rejected");
+    assert_eq!(
+        blocked.status(),
+        403,
+        "non-loopback origin must be rejected"
+    );
 
     // 12. loopback Origin (any port, e.g. a local UI) is allowed
     let allowed = post(
@@ -240,14 +278,16 @@ async fn mcp_wire_shape() {
     assert_eq!(allowed.status(), 200);
 
     // 13. JSON-RPC batch (top-level array) -> explicit -32600, not a silent 204
-    let batch = body_json(post(
-        &agent,
-        &url,
-        json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": {} }]),
-        session.as_deref(),
-        None,
-    )
-    .expect("batch request"));
+    let batch = body_json(
+        post(
+            &agent,
+            &url,
+            json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": {} }]),
+            session.as_deref(),
+            None,
+        )
+        .expect("batch request"),
+    );
     assert_eq!(batch["error"]["code"], -32600);
 
     server.abort();
@@ -255,7 +295,9 @@ async fn mcp_wire_shape() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refuses_non_loopback_bind() {
-    let err = mcp::serve("0.0.0.0:0").await.expect_err("must refuse non-loopback bind");
+    let err = mcp::serve("0.0.0.0:0")
+        .await
+        .expect_err("must refuse non-loopback bind");
     assert!(
         err.to_string().contains("non-loopback"),
         "unexpected error: {err}"
