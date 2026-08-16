@@ -138,12 +138,16 @@ Every PR runs two gates:
   `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`. The reviewer cites
   the CI status rather than re-running cargo.
 
-Known quirk: the **first PR that introduces a new workflow file** (one that doesn't exist
-on the default branch yet) skips the AI review — the review GitHub App refuses to issue a
-token for workflows it has never validated on `main` (`workflow_not_found_on_default_branch`).
-The check reports green anyway, because the skip is a graceful no-op. This is by design:
-such a PR can't be AI-reviewed until merged, so CI + a human read carry it. Editing an
-*existing* workflow file (e.g. `claude.yml`) is fine and reviews normally.
+Known quirk: **any PR whose tree changes a workflow file — adding *or* editing, including
+`claude.yml` itself — skips the AI review.** The review GitHub App refuses to issue a token
+for workflows that don't match the default branch (the error may surface as
+`workflow_not_found_on_default_branch`), and the action converts the refusal into a
+graceful green no-op. The check reporting green means "nothing reviewed", not "review
+passed". This is by design (a PR can't be AI-reviewed under a workflow definition it
+defines itself) and it is self-resolving: merge the workflow change and it applies to the
+default branch, after which normal PRs review again. Workflow-changing PRs are carried by
+CI + a human read. Note: workflow content was only loosely enforced early on, so some early
+workflow-editing PRs did get reviewed — that window is closed.
 
 Read `AGENTS.md` before changing code: the locked model (relay-as-scope, generic exec, no
 master key, host flexibility) is not open for reinterpretation. Never commit secrets,
