@@ -215,8 +215,8 @@ Not every service's data belongs in the same place. Four placement tiers, each m
 | **K8s host LXC/VM** | k8s binaries, OS | PBS (machine-level) | Standard rootfs backup, same as any LXC |
 | **control_plane Postgres (PVC on k8s host)** | prompts, grants, service registry, audit | PBS + TrueNAS (scheduled) | Same bucket as any app database — important, not reproducible |
 | **Ephemeral service pods** | agent runtime, scratch | *Not backed up* | `emptyDir`, fully reproducible from AGENTS.md + skill — same logic as excluding `/var/lib/docker` |
-| **Team/project environment LXCs** | rootfs / `/srv` (repo, compose, runner secrets ciphertext) / `/var/lib/docker` | rootfs+`/srv` → PBS+TrueNAS; `/var/lib/docker` → excluded (`backup=0`) | Mirrors the Docker-host LXC pattern exactly — separate mount point for persistent data, exclude the recreatable layer cache |
-| **Data-heavy services** (Nextcloud, Immich, media) | live user datasets | TrueNAS (mounted directly, not local NVMe) + ZFS snapshots + Backblaze off-site | Proxmox stays fast/small; service LXC mounts TrueNAS via NFS/iSCSI rather than storing data locally |
+| **Team/project environment LXCs** | rootfs / `/srv/data` (repo, compose, runner secrets ciphertext) / `/srv/nobackup` (relocated container stores, caches, PVCs excluded by root pinning) | rootfs+`/srv/data` → PBS+TrueNAS; `/srv/nobackup` → excluded (as its own mount point, `backup=0` on the `mpN` entry) | Mirrors the Docker-host LXC pattern — the `/srv` split IS the backup config, implemented as two mount points |
+| **Data-heavy services** (Nextcloud, Immich, media) | live user datasets under `/srv/data/<service>` | TrueNAS (mounted directly, not local NVMe) + ZFS snapshots + Backblaze off-site | Proxmox stays fast/small; service LXC mounts TrueNAS via NFS/iSCSI rather than storing data locally |
 
 A skill declares which tier it needs, and CPA/the provisioning flow places it accordingly:
 
@@ -235,6 +235,39 @@ needs: {database: true, volume: 40Gi, workspace_runner: true}   # colocated git/
 ```
 
 Governing principle, carried over from the appliance's own backup design: **back up what matters, not what's easily recreated.** Anything derivable from a skill install (images, layers, model downloads, build cache) is excluded regardless of tier; anything that represents real work or real state (databases, checked-out repos with uncommitted changes, user data) gets the full PBS-plus-off-site treatment.
+
+### Filesystem layout convention — `/srv/data` vs `/srv/nobackup`
+
+The tiers above encode onto every LXC/VM as a single top-level split, so the backup config is one rule instead of a per-path carve-out list:
+
+```
+/srv/
+├── data/                 # durable application data — THE backup set
+│   ├── nextcloud/        # live user datasets (TrueNAS-backed via NFS/iSCSI)
+│   ├── agents/           # durable agent/harness state that must survive restarts
+│   ├── <service>/        # anything with needs.volume; repos, compose, runner
+│   │                     #   secrets ciphertext
+│   └── ...
+│
+└── nobackup/             # reproducible / disposable — its MOUNT POINT carries
+                          #   backup=0 (the flag lives on the mpN entry, not
+                          #   on a directory — see below)
+    ├── docker/           # container stores: daemon roots RELOCATED here (or
+    ├── containerd/       #   bind-mounted), so the exclude is structural, not
+    ├── rancher/          #   a fragile path list — but ONLY the daemon root:
+    │                     #   k3s/rancher state is reconstructible from
+    │                     #   control_plane Postgres (deterministic pods +
+    │                     #   config-as-data); durable PVCs are pinned under
+    │                     #   /srv/data, never the daemon root
+    ├── caches/
+    └── scratch/
+```
+
+*   **The backup rule is the split, implemented as two MOUNT POINTS.** `/srv/data` and `/srv/nobackup` are separate `mpN:` volume mounts, not plain directories inside the rootfs — and the flag must be set on BOTH entries, because vzdump's default excludes volume mount points: `mp0: …,mp=/srv/data,backup=1` (rootfs + `/srv/data` = the PBS job) and `mp1: …,mp=/srv/nobackup,backup=0` (`/srv/nobackup` never in it). On a box that can't add the second mount point, `vzdump --exclude-path /srv/nobackup` is the rootfs fallback. Nothing under `/srv/nobackup` is individually "important" — if it needs a carve-out, it was filed in the wrong half.
+*   **Container stores relocate under `/srv/nobackup`** (`docker`/`containerd`/`rancher` daemon roots), mirroring the existing "exclude `/var/lib/docker`" Docker-host LXC pattern — but by layout, not by config list.
+*   **Durable PVCs are pinned under `/srv/data` — never the daemon root.** k3s's default `local-path` provisioner stores PVCs *under the rancher root* (`/var/lib/rancher/k3s/storage/…`); relocating that whole root would drag the control_plane Postgres PVC — the thing every "reconstructible from" claim depends on — into the excluded half, silently. Configure provisioner roots explicitly: disposable volumes on a `nobackup`-rooted storage class, durable ones pinned to `/srv/data/k8s-volumes`.
+*   **Data-heavy services mount TrueNAS under `/srv/data/<service>`** — backed by TrueNAS snapshots + Backblaze off-site, not by PBS rootfs copies.
+*   **Skills map onto it:** `needs: {volume: …}` → `/srv/data/<service>`; a scratch-only service (nothing durable) → `/srv/nobackup/<service>` or a pod `emptyDir`. `needs.volume` is the declaration that something is durable — absence means disposable by default.
 
 ---
 
