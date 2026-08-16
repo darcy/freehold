@@ -6,10 +6,11 @@ configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 **Status:** docs + locked Chunk 1 plan; Phases A (identity, MCP skeleton, exec/readiness/
 audit), B (provisioner), C (SSH + vultr + b2 connectors), D (coarse grants), E
-(orchestrator: the scripted CPA stand-in — onboard/readiness/exec/demo), and F (local
+(orchestrator: the scripted CPA stand-in — onboard/readiness/exec/demo), F (local
 admin/ops web UI: services-at-a-glance with LIVE readiness via a console agent, and
-runner/secret/grant management) are implemented and reviewed. Current work is
-uncommitted until reviewed.
+runner/secret/grant management), and G (the acceptance script: `cargo run -p
+freehold-acceptance` reproduces every Chunk-1 acceptance criterion hermetic on
+loopback) are implemented and reviewed. Current work is uncommitted until reviewed.
 
 ## Navigation
 
@@ -56,7 +57,9 @@ no k8s.
 - Rust workspace: `core` (identity, auth — the shared signed-call protocol, sealed-box
   crypto, secret packaging, atomic-0600 fs), `runner` (+ ssh connector via russh,
   in-memory keys), `control-plane` (provisioner + local admin/ops web console), and
-  `orchestrator` (scripted CPA stand-in: signed MCP client + onboarding/demo flows) crates.
+  `orchestrator` (scripted CPA stand-in: signed MCP client + onboarding/demo flows),
+  `testkit` (hermetic fixtures: mock Vultr/B2 APIs + in-process sshd), and `acceptance`
+  (the Chunk 1 acceptance script) crates.
 - MCP over HTTP for agent↔runner even though co-located — proves the real shape.
 - Test targets: VPS (dev/smoke) → old-laptop Proxmox (test/staging, SSH target only) → home
   dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.

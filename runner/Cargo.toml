@@ -24,6 +24,7 @@ zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 ed25519-dalek = "3"
+freehold-testkit = { path = "../testkit" }
 tempfile = "3"
 ureq = { version = "3", features = ["json"] }
 

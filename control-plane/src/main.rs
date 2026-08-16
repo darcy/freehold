@@ -5,6 +5,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -249,7 +250,7 @@ async fn main() -> Result<()> {
             let console = Console::load_or_create(&args.state_dir)?;
             tracing::info!(pubkey = %console.pubkey(), "console agent ready");
             let addr = args.addr;
-            let app = web::router(store, console);
+            let app = web::router(Arc::new(store), console);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             tracing::info!(%addr, "control plane console listening");
             axum::serve(listener, app)

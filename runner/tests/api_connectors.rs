@@ -1,27 +1,18 @@
 //! C2/C3 API connector tests (Vultr, Backblaze B2) against IN-PROCESS mock
-//! HTTP servers. The runner injects the target credential + base URL as env
-//! vars; the agent writes curl commands; values are redacted; every exec is
-//! audited. No real network.
+//! HTTP servers (shared fixtures in `freehold-testkit`). The runner injects
+//! the target credential + base URL as env vars; the agent writes curl
+//! commands; values are redacted; every exec is audited. No real network.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::extract::{Path as AxPath, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{delete, get, post};
-use axum::{Json, Router};
 use freehold_runner::crypto;
-mod common;
-
-use freehold_runner::identity::Identity;
 use freehold_runner::mcp::{self, RunnerContext};
 use freehold_runner::secrets::{SecretPackage, TargetMeta};
-use parking_lot::Mutex;
-use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use freehold_testkit::mock::{
+    B2_CRED, B2State, VULTR_TOKEN, VultrState, b2_router, spawn_http, vultr_router,
+};
 
-use std::collections::BTreeMap;
+mod common;
 
 fn hex32(s: &str) -> [u8; 32] {
     let b = hex::decode(s).unwrap();
@@ -30,194 +21,9 @@ fn hex32(s: &str) -> [u8; 32] {
     arr
 }
 
-#[derive(Default)]
-struct VultrState {
-    instances: Mutex<Vec<(String, String)>>, // (id, label)
-    next: AtomicU64,
-}
-
-fn vultr_router(state: Arc<VultrState>) -> Router {
-    async fn list(
-        State(state): State<Arc<VultrState>>,
-        headers: HeaderMap,
-    ) -> Result<Json<Value>, StatusCode> {
-        let auth = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if auth != "Bearer vltr-token-123" {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        let files: Vec<Value> = state
-            .instances
-            .lock()
-            .iter()
-            .map(|(id, label)| json!({ "id": id, "label": label }))
-            .collect();
-        Ok(Json(json!({ "instances": files })))
-    }
-
-    async fn create(
-        State(state): State<Arc<VultrState>>,
-        headers: HeaderMap,
-    ) -> Result<Json<Value>, StatusCode> {
-        if headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            != "Bearer vltr-token-123"
-        {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        let id = format!("inst-{}", state.next.fetch_add(1, Ordering::SeqCst));
-        state.instances.lock().push((id.clone(), "mock".into()));
-        Ok(Json(json!({ "instance": { "id": id, "label": "mock" } })))
-    }
-
-    async fn destroy(
-        AxPath(id): AxPath<String>,
-        State(state): State<Arc<VultrState>>,
-        headers: HeaderMap,
-    ) -> StatusCode {
-        if headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            != "Bearer vltr-token-123"
-        {
-            return StatusCode::UNAUTHORIZED;
-        }
-        state.instances.lock().retain(|(i, _)| *i != id);
-        StatusCode::NO_CONTENT
-    }
-
-    async fn account(headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
-        if headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            != "Bearer vltr-token-123"
-        {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        Ok(Json(json!({ "account": {} })))
-    }
-
-    Router::new()
-        .route("/v2/instances", get(list).post(create))
-        .route("/v2/instances/{id}", delete(destroy))
-        .route("/v2/account", get(account))
-        .with_state(state)
-}
-
-#[derive(Default)]
-struct B2State {
-    files: Mutex<Vec<String>>, // uploaded bodies
-    next: AtomicU64,
-    /// Set after the mock binds (the authorize response must hand the client
-    /// a reachable apiUrl).
-    base_url: Mutex<String>,
-}
-
-fn b2_router(state: Arc<B2State>) -> Router {
-    async fn authorize(
-        State(state): State<Arc<B2State>>,
-        headers: HeaderMap,
-    ) -> Result<Json<Value>, StatusCode> {
-        let auth = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if auth != "Basic a2V5aWQxMjM6YXBwa2V5NDU2" {
-            // basic base64("keyid123:appkey456")
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        let base = state.base_url.lock();
-        Ok(Json(json!({
-            "apiUrl": *base,
-            "authToken": "token-abc",
-            "downloadUrl": format!("{base}/download"),
-        })))
-    }
-
-    async fn get_upload_url(
-        State(state): State<Arc<B2State>>,
-        headers: HeaderMap,
-    ) -> Result<Json<Value>, StatusCode> {
-        if headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            != "token-abc"
-        {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        let base = state.base_url.lock();
-        Ok(Json(json!({
-            "uploadUrl": format!("{base}/b2api/v3/b2_upload_file"),
-            "authorizationToken": "upload-tok",
-        })))
-    }
-
-    async fn upload(
-        State(state): State<Arc<B2State>>,
-        headers: HeaderMap,
-        body: String,
-    ) -> Result<Json<Value>, StatusCode> {
-        if headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            != "upload-tok"
-        {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        let id = format!("file-{}", state.next.fetch_add(1, Ordering::SeqCst));
-        state.files.lock().push(body.clone());
-        Ok(Json(
-            json!({ "fileId": id, "fileName": format!("{id}.txt") }),
-        ))
-    }
-
-    async fn list_names(
-        State(state): State<Arc<B2State>>,
-        headers: HeaderMap,
-        body: String,
-    ) -> Result<Json<Value>, StatusCode> {
-        if headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            != "token-abc"
-        {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        let files: Vec<Value> = state
-            .files
-            .lock()
-            .iter()
-            .enumerate()
-            .map(|(i, _)| json!({ "fileId": format!("file-{i}") }))
-            .collect();
-        Ok(Json(json!({ "files": files, "bucketId_echo": body })))
-    }
-
-    Router::new()
-        .route("/b2api/v3/b2_authorize_account", get(authorize))
-        .route("/b2api/v3/b2_get_upload_url", post(get_upload_url))
-        .route("/b2api/v3/b2_upload_file", post(upload))
-        .route("/b2api/v3/b2_list_file_names", post(list_names))
-        .with_state(state)
-}
-
-async fn spawn_http(app: Router) -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    addr
-}
+use freehold_runner::identity::Identity;
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// A CP-shaped package with a vultr + a b2 target; returns (dir, identity).
 fn api_runner_dir(vultr_url: &str, b2_url: &str) -> (tempfile::TempDir, Identity) {
@@ -231,8 +37,8 @@ fn api_runner_dir(vultr_url: &str, b2_url: &str) -> (tempfile::TempDir, Identity
     };
     let pkg = SecretPackage {
         secrets: BTreeMap::from([
-            ("vultr".to_string(), seal("vultr", b"vltr-token-123")),
-            ("b2".to_string(), seal("b2", b"keyid123:appkey456")),
+            ("vultr".to_string(), seal("vultr", VULTR_TOKEN.as_bytes())),
+            ("b2".to_string(), seal("b2", B2_CRED.as_bytes())),
         ]),
         grants: vec![common::agent_pubkey()],
         targets: BTreeMap::from([
@@ -545,7 +351,3 @@ async fn extra_or_missing_secrets_are_rejected() {
 
     server.abort();
 }
-
-// Keep HashMap referenced for parity with the state shapes (mock list).
-#[allow(unused)]
-fn _touch(_: &HashMap<String, String>) {}

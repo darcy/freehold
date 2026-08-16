@@ -922,6 +922,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "freehold-acceptance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "freehold-control-plane",
+ "freehold-core",
+ "freehold-runner",
+ "freehold-testkit",
+ "hex",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "freehold-control-plane"
 version = "0.1.0"
 dependencies = [
@@ -991,6 +1009,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "freehold-core",
+ "freehold-testkit",
  "hex",
  "parking_lot",
  "rand 0.9.5",
@@ -1004,6 +1023,21 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "zeroize",
+]
+
+[[package]]
+name = "freehold-testkit"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ed25519-dalek",
+ "hex",
+ "parking_lot",
+ "rand 0.9.5",
+ "russh",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
