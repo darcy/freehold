@@ -253,6 +253,12 @@ fn revoke_removes_shipped_credential() {
 #[test]
 fn revoke_save_failure_restores_prior_status() {
     use std::os::unix::fs::PermissionsExt;
+    // 0o500 only blocks writes for non-root — skip honestly in a root
+    // container (e.g. `docker run rust`) instead of failing.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: root ignores read-only dir perms");
+        return;
+    }
     let base = tempfile::tempdir().unwrap();
     let state_dir = base.path().join("state");
     let store = StateStore::open(&state_dir).unwrap();
@@ -277,10 +283,15 @@ fn revoke_is_idempotent_and_never_grants() {
     let runner_dir = base.path().join("runner");
     provision(&store, "ssh", b"key", &runner_dir);
     provisioner::revoke_runner(&store, "ssh").unwrap();
-    // Second revoke short-circuits before any save — a failed save can't
-    // un-revoke a Revoked record.
+    // A secrets.json that reappeared (config mgmt restore) must be removed by
+    // re-revoking — the idempotent path still attempts the cleanup.
+    freehold_core::secrets::SecretPackage::default().write_to_dir(&runner_dir).unwrap();
     let rec = provisioner::revoke_runner(&store, "ssh").unwrap();
     assert_eq!(rec.status, RunnerStatus::Revoked);
+    assert!(
+        !runner_dir.join(freehold_core::secrets::SECRETS_FILE).exists(),
+        "re-revoke must clean a reappeared secrets.json"
+    );
     assert!(provisioner::rotate_secret(&store, "ssh", b"x").is_err(), "still revoked");
 }
 

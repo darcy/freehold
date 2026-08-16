@@ -201,23 +201,26 @@ pub fn rotate_secret(
     if let Err(e) = store.save() {
         // Roll back memory (serve must not persist the phantom ciphertext
         // later) and re-ship the OLD package, so the runner doesn't end up
-        // with a credential the CP never recorded. The old value may already
-        // be invalidated upstream — say so, or the operator reads a bare
-        // save error while the runner silently fell back to a dead key.
-        tracing::warn!(
-            name,
-            "rotate: save failed ({e}) — rolled the package back to the previous \
-             credential, which may already be invalid upstream"
-        );
+        // with a credential the CP never recorded. Each branch says exactly
+        // what happened — never claim a rollback that didn't land.
         let _ = store.set_secret_ciphertext(name, &before.ciphertext_hex, before.rotated_at);
         let old_pkg = SecretPackage {
             secrets: BTreeMap::from([(name.to_string(), before.ciphertext_hex.clone())]),
         };
-        if let Err(restore_err) = old_pkg.write_to_dir(&runner_rec.package_dir) {
-            tracing::warn!(
-                error = %restore_err,
-                "rotate: could not restore the previous package after failed save"
-            );
+        match old_pkg.write_to_dir(&runner_rec.package_dir) {
+            Ok(()) => tracing::warn!(
+                name,
+                error = %e,
+                "rotate: save failed — rolled the package back to the previous \
+                 credential, which may already be invalid upstream"
+            ),
+            Err(restore_err) => tracing::warn!(
+                name,
+                error = %e,
+                restore_error = %restore_err,
+                "rotate: save failed AND the previous package could not be restored — \
+                 the runner keeps the NEW credential that the CP never recorded"
+            ),
         }
         return Err(e.into());
     }
@@ -242,8 +245,12 @@ pub fn revoke_runner(store: &StateStore, name: &str) -> Result<RunnerRecord, Pro
         .get_runner(name)
         .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
     if prior.status == RunnerStatus::Revoked {
-        // Idempotent: already revoked — early return so a failed save can
-        // never have anything to undo against a Revoked record.
+        // Idempotent on the STATE: skip the flip + save (a failed save can
+        // never undo a Revoked record), but still re-attempt the best-effort
+        // cleanup — re-running revoke is the natural retry after a transient
+        // unlink failure, and secrets.json may have reappeared via config
+        // management.
+        remove_shipped_secrets(&prior);
         return Ok(prior);
     }
     store.set_runner_status(name, RunnerStatus::Revoked)?;
@@ -254,7 +261,17 @@ pub fn revoke_runner(store: &StateStore, name: &str) -> Result<RunnerRecord, Pro
         return Err(e.into());
     }
 
-    let secrets_path = prior.package_dir.join(freehold_core::secrets::SECRETS_FILE);
+    remove_shipped_secrets(&prior);
+    store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()).into())
+}
+
+/// Best-effort removal of the shipped credential capability. Failure is
+/// warned, never fatal — the CP may not own the package dir (read-only
+/// mount, runner's uid), and the status flip is the guarantee that matters.
+fn remove_shipped_secrets(rec: &RunnerRecord) {
+    let secrets_path = rec.package_dir.join(freehold_core::secrets::SECRETS_FILE);
     match std::fs::remove_file(&secrets_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -264,10 +281,6 @@ pub fn revoke_runner(store: &StateStore, name: &str) -> Result<RunnerRecord, Pro
             "revoke: could not remove shipped secrets.json (best-effort)"
         ),
     }
-
-    store
-        .get_runner(name)
-        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()).into())
 }
 
 /// Service-at-a-glance snapshot for the console / CLI.

@@ -493,6 +493,7 @@ dependencies = [
  "clap",
  "freehold-core",
  "hex",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
