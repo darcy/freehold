@@ -5,9 +5,9 @@ Kubernetes stack with Buzz Relay as the control plane and a skill framework that
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 **Status:** docs + locked Chunk 1 plan; Phases A (identity, MCP skeleton, exec/readiness/
-audit), B (provisioner), C (SSH + vultr + b2 connectors), and D (coarse grants: signed
-calls from whitelisted agent pubkeys) are implemented and reviewed. Current work is
-uncommitted until reviewed.
+audit), B (provisioner), C (SSH + vultr + b2 connectors), D (coarse grants), and E
+(orchestrator: the scripted CPA stand-in — onboard/readiness/exec/demo) are implemented
+and reviewed. Current work is uncommitted until reviewed.
 
 ## Navigation
 
@@ -52,8 +52,8 @@ secret provisioner + coarse grants + readiness. Connectors: SSH, Vultr, Backblaz
 no k8s.
 
 - Rust workspace: `core` (identity, sealed-box crypto, secret packaging, atomic-0600 fs),
-  `runner` (+ ssh connector via russh, in-memory keys — plaintext never on disk),
-  `control-plane` crates.
+  `runner` (+ ssh connector via russh, in-memory keys), `control-plane`, and `orchestrator`
+  (scripted CPA stand-in: signed MCP client + onboarding/demo flows) crates.
 - MCP over HTTP for agent↔runner even though co-located — proves the real shape.
 - Test targets: VPS (dev/smoke) → old-laptop Proxmox (test/staging, SSH target only) → home
   dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.
@@ -91,6 +91,11 @@ no k8s.
   secrets are rejected explicitly — the honest contract while that's unimplemented).
 - **State store is single-process** (`StateStore` open→mutate→save is not cross-process
   atomic; TODO for the Postgres swap at MVP).
+- **Orchestrator (E) accepted gaps**: `onboard` has no rollback — a hard-fail at the
+  readiness gate leaves CP state + the shipped package on disk and a re-run hits
+  `RunnerExists`/`PackageDirInUse` (operator cleans up by hand); the in-process runner
+  task is only aborted on the success path (harmless in the CLI, matters if `onboard`
+  is ever called twice in one process).
 
 ## Build / test
 

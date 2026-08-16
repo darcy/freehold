@@ -962,6 +962,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "freehold-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "freehold-control-plane",
+ "freehold-core",
+ "freehold-runner",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "freehold-runner"
 version = "0.1.0"
 dependencies = [
