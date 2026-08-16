@@ -116,7 +116,12 @@ pub fn provision_runner(
     let pkg = SecretPackage {
         secrets: BTreeMap::from([(req.name.to_string(), ciphertext_hex.clone())]),
     };
-    pkg.write_to_dir(req.runner_dir)?;
+    if let Err(e) = pkg.write_to_dir(req.runner_dir) {
+        // identity.json already landed — remove it so the PackageDirInUse
+        // guard doesn't lock the dir against the CP's own leftovers on retry.
+        let _ = std::fs::remove_file(req.runner_dir.join(identity::IDENTITY_FILE));
+        return Err(e.into());
+    }
 
     // Record pubkeys + ciphertext ONLY. `id` is dropped here and zeroized;
     // the plaintext `req.secret` was sealed and never stored.
@@ -143,11 +148,15 @@ pub fn provision_runner(
         },
     );
     if let Err(e) = store.save() {
-        // Roll back the just-shipped package: the dir was EMPTY before (the
+        // Roll back disk AND memory: the dir was EMPTY before (the
         // PackageDirInUse guard), so removing what we wrote is safe and leaves
-        // no orphan runner holding a credential the CP has no record of.
+        // no orphan runner with a credential the CP has no record of. The
+        // in-memory revert keeps a long-lived `serve` from persisting a
+        // phantom record on its next successful save.
         let _ = std::fs::remove_file(req.runner_dir.join(identity::IDENTITY_FILE));
         let _ = std::fs::remove_file(req.runner_dir.join(freehold_core::secrets::SECRETS_FILE));
+        store.remove_runner(req.name);
+        store.remove_secret(req.name);
         return Err(e.into());
     }
 
@@ -167,10 +176,10 @@ pub fn rotate_secret(
     name: &str,
     new_secret: &[u8],
 ) -> Result<SecretRecord, ProvisionError> {
-    let runner = store
+    let before = store
         .get_secret(name)
-        .map(|s| s.runner)
         .ok_or_else(|| ProvisionError::SecretNotFound(name.to_string()))?;
+    let runner = before.runner.clone();
     let runner_rec = store
         .get_runner(&runner)
         .ok_or_else(|| StateError::RunnerNotFound(runner.clone()))?;
@@ -189,7 +198,22 @@ pub fn rotate_secret(
     pkg.write_to_dir(&runner_rec.package_dir)?;
 
     store.update_secret_ciphertext(name, &ciphertext_hex, now_secs())?;
-    store.save()?;
+    if let Err(e) = store.save() {
+        // Roll back memory (serve must not persist the phantom ciphertext
+        // later) and re-ship the OLD package, so the runner doesn't end up
+        // with a credential the CP never recorded.
+        let _ = store.set_secret_ciphertext(name, &before.ciphertext_hex, before.rotated_at);
+        let old_pkg = SecretPackage {
+            secrets: BTreeMap::from([(name.to_string(), before.ciphertext_hex.clone())]),
+        };
+        if let Err(restore_err) = old_pkg.write_to_dir(&runner_rec.package_dir) {
+            tracing::warn!(
+                error = %restore_err,
+                "rotate: could not restore the previous package after failed save"
+            );
+        }
+        return Err(e.into());
+    }
 
     store
         .get_secret(name)
@@ -208,7 +232,12 @@ pub fn revoke_runner(store: &StateStore, name: &str) -> Result<RunnerRecord, Pro
     // package dir (read-only mount, runner's uid), and a cleanup failure must
     // not keep the runner active.
     store.set_runner_status(name, RunnerStatus::Revoked)?;
-    store.save()?;
+    if let Err(e) = store.save() {
+        // Revert memory so serve's next save doesn't persist a revocation
+        // that never hit disk.
+        let _ = store.set_runner_status(name, RunnerStatus::Active);
+        return Err(e.into());
+    }
 
     let secrets_path = store
         .get_runner(name)

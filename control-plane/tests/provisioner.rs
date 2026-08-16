@@ -77,16 +77,19 @@ fn provision_ships_package_and_cp_state_has_no_plaintext_or_keys() {
     assert!(state_raw.contains(&res.nostr_pubkey), "pubkeys are expected in state");
     assert!(state_raw.contains(&res.enc_pubkey), "pubkeys are expected in state");
 
-    // The CP cannot decrypt — only the runner's injected key can.
-    let rec = store.get_secret("vultr").unwrap();
-    let blob = hex::decode(&rec.ciphertext_hex).unwrap();
+    // The CP cannot decrypt — only the runner's injected key can. The blob is
+    // opened through the SHIPPED package, under the map key it was filed
+    // under (aad = name contract, exercised through the real path).
     let runner_id = Identity::load(&runner_dir).unwrap();
-    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), b"vultr", &blob).unwrap();
+    let pkg = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
+    let (entry_name, entry_ct) = pkg.secrets.iter().next().unwrap();
+    let blob = hex::decode(entry_ct).unwrap();
+    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), entry_name.as_bytes(), &blob).unwrap();
     assert_eq!(opened, secret, "runner opens its own sealed secret");
 
     // A DIFFERENT key (e.g. a second runner) cannot open it.
     let other = Identity::generate();
-    assert!(crypto::open(&hex32(&other.enc_secret_hex()), b"vultr", &blob).is_err());
+    assert!(crypto::open(&hex32(&other.enc_secret_hex()), entry_name.as_bytes(), &blob).is_err());
 }
 
 #[test]
@@ -101,12 +104,15 @@ fn rotated_secret_reencrypts_and_replaces_everywhere() {
     assert_ne!(before, after.ciphertext_hex, "rotation must produce fresh ciphertext");
     assert!(after.rotated_at.is_some());
 
-    // Package re-shipped; the runner's SAME key opens the new ciphertext.
+    // Package re-shipped; the runner's SAME key opens the new ciphertext via
+    // the shipped package's map key (aad = name, real path).
     let pkg_raw = fs::read_to_string(runner_dir.join("secrets.json")).unwrap();
     assert!(!pkg_raw.contains("old-key-value") && !pkg_raw.contains("new-key-value"));
-    let blob = hex::decode(&after.ciphertext_hex).unwrap();
     let runner_id = Identity::load(&runner_dir).unwrap();
-    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), b"b2", &blob).unwrap();
+    let pkg = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
+    let (entry_name, entry_ct) = pkg.secrets.iter().next().unwrap();
+    let blob = hex::decode(entry_ct).unwrap();
+    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), entry_name.as_bytes(), &blob).unwrap();
     assert_eq!(opened, b"new-key-value");
 }
 
@@ -165,8 +171,9 @@ fn duplicate_provision_is_rejected() {
 #[test]
 fn swapped_package_entries_are_rejected() {
     // The aad = map-key contract, made structural: seal two secrets for one
-    // runner under DIFFERENT names, ship them as a two-entry package, and
-    // prove neither blob opens under the other's name (swap defense).
+    // runner under DIFFERENT names, ship them as a two-entry package, LOAD it
+    // back through the real path, and prove each entry opens only under its
+    // own map key — a swapped entry fails.
     let base = tempfile::tempdir().unwrap();
     let runner_dir = base.path().join("runner");
     freehold_core::futil::ensure_private_dir(&runner_dir).unwrap();
@@ -181,12 +188,16 @@ fn swapped_package_entries_are_rejected() {
         ]),
     };
     pkg.write_to_dir(&runner_dir).unwrap();
+    let loaded = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
 
     let key = hex32(&id.enc_secret_hex());
-    assert_eq!(crypto::open(&key, b"a", &ct_a).unwrap(), b"cred-a");
-    assert_eq!(crypto::open(&key, b"b", &ct_b).unwrap(), b"cred-b");
-    assert!(crypto::open(&key, b"b", &ct_a).is_err(), "swapped entry must fail");
-    assert!(crypto::open(&key, b"a", &ct_b).is_err(), "swapped entry must fail");
+    let blob_a = hex::decode(&loaded.secrets["a"]).unwrap();
+    let blob_b = hex::decode(&loaded.secrets["b"]).unwrap();
+    assert_eq!(crypto::open(&key, b"a", &blob_a).unwrap(), b"cred-a");
+    assert_eq!(crypto::open(&key, b"b", &blob_b).unwrap(), b"cred-b");
+    // The swap: open entry a's blob under b's name (and vice versa).
+    assert!(crypto::open(&key, b"b", &blob_a).is_err(), "swapped entry must fail");
+    assert!(crypto::open(&key, b"a", &blob_b).is_err(), "swapped entry must fail");
 }
 
 #[test]

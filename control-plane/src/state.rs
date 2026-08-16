@@ -135,6 +135,35 @@ impl StateStore {
         Ok(())
     }
 
+    /// Revert helpers for failed `save()` rollbacks: a long-lived `serve`
+    /// must not persist a phantom mutation (record that never saved, status
+    /// flip that never hit disk) on its NEXT successful write.
+    pub fn remove_runner(&self, name: &str) {
+        self.inner.write().runners.remove(name);
+    }
+
+    pub fn remove_secret(&self, name: &str) {
+        self.inner.write().secrets.remove(name);
+    }
+
+    /// Restore a secret record's ciphertext + rotation stamp (rollback of
+    /// `update_secret_ciphertext`).
+    pub fn set_secret_ciphertext(
+        &self,
+        name: &str,
+        ciphertext_hex: &str,
+        rotated_at: Option<u64>,
+    ) -> Result<(), StateError> {
+        let mut inner = self.inner.write();
+        let rec = inner
+            .secrets
+            .get_mut(name)
+            .ok_or_else(|| StateError::SecretNotFound(name.to_string()))?;
+        rec.ciphertext_hex = ciphertext_hex.to_string();
+        rec.rotated_at = rotated_at;
+        Ok(())
+    }
+
     pub fn update_secret_ciphertext(
         &self,
         name: &str,
