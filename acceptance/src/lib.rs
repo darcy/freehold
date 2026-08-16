@@ -822,7 +822,7 @@ async fn rotation_check(
     store: &StateStore,
     agent: &Agent,
     runner_pubkey: &str,
-    mcp_url: &str,
+    _mcp_url: &str,
     pkg_dir: &Path,
     b2_state: &B2State,
 ) -> R<String> {
@@ -844,13 +844,18 @@ async fn rotation_check(
     if shipped.secrets.get("b2") != Some(&after.ciphertext_hex) {
         return Err("shipped package ciphertext != state ciphertext after rotate".into());
     }
-    // The re-sealed credential still works end-to-end.
+    // The RE-SHIPPED ciphertext must decrypt with the runner's injected key.
+    // A runner booted BEFORE the rotate holds the pre-rotation package in
+    // memory (only grants are re-read from disk), so restart it: the new
+    // process decrypts the rotated blob with its unchanged injected key.
+    let (new_mcp, new_server) = serve_runner(pkg_dir).await?;
     b2_state.files.lock().clear();
-    let uploaded = exec(agent, runner_pubkey, mcp_url, "b2", B2_UPLOAD_CMD, &["b2"])?;
+    let uploaded = exec(agent, runner_pubkey, &new_mcp, "b2", B2_UPLOAD_CMD, &["b2"])?;
+    new_server.abort();
     if !uploaded.contains("file-0") {
         return Err(format!("post-rotate round-trip failed: {uploaded}"));
     }
-    Ok("fresh ciphertext on rotate (new nonce); rotated_at stamped; package re-shipped; round-trip still works".into())
+    Ok("fresh ciphertext on rotate (new nonce); rotated_at stamped; package re-shipped; a restarted runner decrypts the NEW blob with its injected key".into())
 }
 
 fn read_audit(dirs: &[&Path]) -> String {

@@ -77,6 +77,11 @@ no k8s.
   signature from a GRANTED agent pubkey (fail closed) — a random local process can no
   longer exec. Remaining: session state isn't tied to the grant (a signed request is
   verified fresh each call), and relay membership (Chunk 2) is the real cut.
+- **Rotate/re-grant do not reach a RUNNING runner** (G-surfaced): the runner holds its
+  package in memory from boot (only GRANTS are re-read from disk per call). A rotate
+  re-ships new ciphertext that a RESTARTED runner decrypts, but the live runner keeps
+  serving the old in-memory credential until restart — same class as the revocation
+  gap; the acceptance script proves rotation by restarting the runner.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime. A TTL reaper is Phase C-sized.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg yet) — a timed-out
