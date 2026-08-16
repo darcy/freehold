@@ -399,6 +399,16 @@ impl ExecManager {
         run_local(cmd, &[], None).await
     }
 
+    /// Local run WITHOUT audit: self-check probes against owned services
+    /// (a probe is not a privileged exec record).
+    pub async fn probe_env(
+        &self,
+        cmd: &str,
+        envs: &[(String, Zeroizing<String>)],
+    ) -> Result<ExecResult, ExecError> {
+        run_local(cmd, envs, None).await
+    }
+
     /// Start a streaming exec on the local target; returns the session id.
     /// Audit is signed when the spawned task completes.
     pub fn start_streaming(

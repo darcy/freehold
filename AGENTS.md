@@ -74,6 +74,10 @@ no k8s.
   map for the process lifetime. A TTL reaper is Phase C-sized.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg yet) — a timed-out
   command can leave orphans running.
+- **API connectors (C2/C3) accepted gaps**: streamed exec on an api target
+  redacts the injected `<SECRET>_URL` env (the base URL) from output too —
+  non-secret, cosmetic; the fix is a redaction list separate from the child
+  env list.
 - **SSH connector (C1) accepted gaps**: one command at a time per pooled connection (a
   concurrent exec waits unboundedly — per-command channels are the real fix); a wedged
   connection stays pooled after a timeout; ssh timeouts return empty output where local
