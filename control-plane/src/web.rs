@@ -94,7 +94,7 @@ fn check_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
         return Err(Box::new(forbidden()));
     }
     let host = rest.split([':', '/']).next().unwrap_or("");
-    if LOOPBACK_HOSTS.iter().any(|l| *l == host) {
+    if LOOPBACK_HOSTS.contains(&host) {
         return Ok(());
     }
     Err(Box::new(
