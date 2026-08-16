@@ -87,10 +87,30 @@ fn console_pubkey(base: &str) -> String {
         .to_string()
 }
 
-fn runner_pkg_dir(name: &str) -> std::path::PathBuf {
-    std::env::current_dir()
-        .unwrap()
-        .join(format!(".freehold/runner/{name}"))
+/// Provision helper: package lands under the TEST tempdir (never the crate
+/// CWD), so a failing assert can't poison the next run.
+fn provision(
+    base: &tempfile::TempDir,
+    url: &str,
+    name: &str,
+    kind: &str,
+    address: &str,
+    secret: &str,
+) {
+    let runner_dir = base.path().join("runner").join(name);
+    let (status, res) = post(
+        url,
+        "/api/provision",
+        json!({
+            "name": name,
+            "kind": kind,
+            "address": address,
+            "secret": secret,
+            "runner_dir": runner_dir.to_string_lossy(),
+        }),
+        None,
+    );
+    assert_eq!(status, 200, "{res}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -100,15 +120,8 @@ async fn provision_rotate_grant_revoke_lifecycle() {
     let console_pk = console_pubkey(&url);
 
     // ---- provision via the UI: console is auto-granted --------------------
-    let (status, res) = post(
-        &url,
-        "/api/provision",
-        json!({"name": "pg", "kind": "ssh", "address": "10.0.0.5", "secret": "sekrit-pg-99"}),
-        None,
-    );
-    assert_eq!(status, 200, "{res}");
-    assert_eq!(res["granted"], json!([console_pk]));
-    assert_eq!(res["name"], "pg");
+    provision(&base, &url, "pg", "ssh", "10.0.0.5", "sekrit-pg-99");
+    let pkg_dir = base.path().join("runner").join("pg");
 
     let (_, ov) = get_json(&url, "/api/overview", None);
     assert_no_plaintext(&ov, &["sekrit-pg-99"]);
@@ -124,7 +137,7 @@ async fn provision_rotate_grant_revoke_lifecycle() {
     assert_eq!(pg["grants"], json!([console_pk]));
     // The overview's grant list comes from the SHIPPED package: the runner
     // would authorize the console right now.
-    let shipped = SecretPackage::load(&runner_pkg_dir("pg")).unwrap();
+    let shipped = SecretPackage::load(&pkg_dir).unwrap();
     assert_eq!(shipped.grants, vec![console_pk.clone()]);
 
     // ---- rotate: new value, still never echoed ----------------------------
@@ -162,7 +175,7 @@ async fn provision_rotate_grant_revoke_lifecycle() {
         .unwrap();
     assert!(pg3["grants"].as_array().unwrap().contains(&json!(AGENT_B)));
     assert_eq!(
-        SecretPackage::load(&runner_pkg_dir("pg")).unwrap().grants,
+        SecretPackage::load(&pkg_dir).unwrap().grants,
         vec![console_pk, AGENT_B.to_string()]
     );
 
@@ -204,7 +217,6 @@ async fn provision_rotate_grant_revoke_lifecycle() {
     assert_eq!(status, 409);
 
     server.abort();
-    let _ = std::fs::remove_dir_all(runner_pkg_dir("pg"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -212,17 +224,18 @@ async fn live_readiness_probe_via_console() {
     let base = tempfile::tempdir().unwrap();
     let (url, server) = boot_web(base.path()).await;
 
-    let (status, res) = post(
+    provision(
+        &base,
         &url,
-        "/api/provision",
-        json!({"name": "pv", "kind": "vultr", "address": "http://127.0.0.1:1", "secret": "vultr-key-7"}),
-        None,
+        "pv",
+        "vultr",
+        "http://127.0.0.1:1",
+        "vultr-key-7",
     );
-    assert_eq!(status, 200, "{res}");
+    let pkg_dir = base.path().join("runner").join("pv");
 
     // Serve the shipped package in-process (the real runner code path), then
     // register its MCP addr in the UI.
-    let pkg_dir = runner_pkg_dir("pv");
     let runner_id = Identity::load(&pkg_dir).unwrap();
     let pkg = SecretPackage::load(&pkg_dir).unwrap();
     let ctx = RunnerContext {
@@ -259,7 +272,6 @@ async fn live_readiness_probe_via_console() {
 
     rserver.abort();
     server.abort();
-    let _ = std::fs::remove_dir_all(pkg_dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -269,14 +281,15 @@ async fn ungranted_console_cannot_read_runner() {
 
     // Provision via CLI semantics-equivalent: an agent granted to the runner
     // WITHOUT the console (simulate a pre-UI runner by stripping the grant).
-    let (status, _) = post(
+    provision(
+        &base,
         &url,
-        "/api/provision",
-        json!({"name": "locked", "kind": "b2", "address": "http://127.0.0.1:2", "secret": "b2-key-42"}),
-        None,
+        "locked",
+        "b2",
+        "http://127.0.0.1:2",
+        "b2-key-42",
     );
-    assert_eq!(status, 200);
-    let pkg_dir = runner_pkg_dir("locked");
+    let pkg_dir = base.path().join("runner").join("locked");
     let mut pkg = SecretPackage::load(&pkg_dir).unwrap();
     pkg.grants.clear();
     pkg.write_to_dir(&pkg_dir).unwrap();
@@ -313,7 +326,6 @@ async fn ungranted_console_cannot_read_runner() {
 
     rserver.abort();
     server.abort();
-    let _ = std::fs::remove_dir_all(pkg_dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -321,13 +333,7 @@ async fn non_loopback_origin_refused() {
     let base = tempfile::tempdir().unwrap();
     let (url, server) = boot_web(base.path()).await;
 
-    let (status, _) = post(
-        &url,
-        "/api/provision",
-        json!({"name": "x", "secret": "x", "kind": "ssh", "address": "1.2.3.4"}),
-        None,
-    );
-    assert_eq!(status, 200);
+    provision(&base, &url, "x", "ssh", "1.2.3.4", "x");
 
     // A page served anywhere else must not be able to drive (or even READ)
     // the console: DNS-rebinding guard on reads and writes.
@@ -340,10 +346,50 @@ async fn non_loopback_origin_refused() {
         Some("http://evil.example"),
     );
     assert_eq!(status, 403);
-    // Loopback origin (any port) is fine.
+    // Loopback origin (any port) is fine — INCLUDING a port-less one (a
+    // browser sending `Origin: http://localhost` when the console serves :80
+    // must not 403).
     let (status, _) = get_json(&url, "/api/overview", Some("http://127.0.0.1:9999"));
+    assert_eq!(status, 200);
+    let (status, _) = get_json(&url, "/api/overview", Some("http://localhost"));
     assert_eq!(status, 200);
 
     server.abort();
-    let _ = std::fs::remove_dir_all(runner_pkg_dir("x"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_page_escapes_remote_readiness_text() {
+    // The BLOCKING-fix scaffold: the page must escape every interpolated
+    // value before innerHTML — readiness strings are remote-derived via
+    // connector errors and are the XSS reach.
+    let base = tempfile::tempdir().unwrap();
+    let (url, server) = boot_web(base.path()).await;
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let mut html = String::new();
+    use std::io::Read;
+    agent
+        .get(&format!("{url}/"))
+        .call()
+        .unwrap()
+        .into_body()
+        .as_reader()
+        .read_to_string(&mut html)
+        .unwrap();
+    assert!(
+        html.contains("function esc("),
+        "page must ship the escape helper"
+    );
+    assert!(
+        html.contains("esc(t)") && html.contains("chip(s)"),
+        "readiness keys/values render through esc()"
+    );
+    assert!(
+        html.contains("esc(r.name)") && html.contains("esc(r.mcp_addr)"),
+        "row interpolations escape before innerHTML"
+    );
+    server.abort();
 }

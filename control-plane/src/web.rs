@@ -34,9 +34,17 @@ use crate::console::Console;
 use crate::provisioner::{self, ProvisionError, ProvisionRequest};
 use crate::state::{RunnerStatus, StateStore};
 
-/// Loopback origins allowed by the DNS-rebinding guard (scheme + host only;
-/// any port is fine). The console never leaves the machine.
-const LOOPBACK_ORIGINS: [&str; 3] = ["http://localhost", "http://127.0.0.1", "http://[::1]"];
+/// Loopback hosts allowed by the DNS-rebinding guard (http/https only; any
+/// port is fine). The console never leaves the machine.
+const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
+
+fn forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": "cross-origin request refused (console is loopback-only)"})),
+    )
+        .into_response()
+}
 
 /// Per-probe deadline: readiness is a glance, not a hang.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
@@ -76,12 +84,17 @@ fn check_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
     let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
         return Ok(());
     };
-    // Strip the port for the comparison; the runner guard uses scheme+host.
-    let without_port = origin
-        .rsplit_once(':')
-        .map(|(head, _port)| head.to_string())
-        .unwrap_or_else(|| origin.to_string());
-    if LOOPBACK_ORIGINS.iter().any(|l| *l == without_port) {
+    // scheme + host only (port optional): browsers may send a port-less
+    // loopback Origin when the console serves port 80 — that is NOT an
+    // attacker and must not 403.
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return Err(Box::new(forbidden()));
+    };
+    if !matches!(scheme, "http" | "https") {
+        return Err(Box::new(forbidden()));
+    }
+    let host = rest.split([':', '/']).next().unwrap_or("");
+    if LOOPBACK_HOSTS.iter().any(|l| *l == host) {
         return Ok(());
     }
     Err(Box::new(
@@ -119,14 +132,19 @@ fn state_error(e: crate::state::StateError) -> (StatusCode, Json<Value>) {
     }
 }
 
-/// Sign a tools/call body as the console agent for `runner_pubkey`.
-fn sign_call(console: &Console, runner_pubkey: &str, raw: &str) -> SignedEvent {
-    // The console's signing secret: hex string -> bytes, wiped on drop.
-    let secret_hex = console.identity.nostr_secret_hex();
+/// Sign a tools/call body as the console agent for `runner_pubkey`. `ts` is
+/// bound by the CALLER so the `x-freehold-ts` header carries the SAME value
+/// the signature covers (a second clock read could straddle a second
+/// boundary and fail the runner's verification).
+fn sign_call(console: &Console, runner_pubkey: &str, ts: i64, raw: &str) -> SignedEvent {
+    // The console's signing secret: hex string -> bytes, everything wiped on
+    // drop — the hex string, the decoded buffer, and the array.
+    let secret_hex = Zeroizing::new(console.identity.nostr_secret_hex());
+    let decoded =
+        Zeroizing::new(hex::decode(&*secret_hex).expect("console identity secret is valid hex"));
     let mut secret = Zeroizing::new([0u8; 32]);
-    let decoded = hex::decode(&secret_hex).expect("console identity secret is valid hex");
     secret.copy_from_slice(&decoded);
-    auth::sign_body(&secret, runner_pubkey, auth::now_secs(), raw)
+    auth::sign_body(&secret, runner_pubkey, ts, raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +155,8 @@ fn sign_call(console: &Console, runner_pubkey: &str, raw: &str) -> SignedEvent {
 
 fn probe_targets(console: Console, runner_pubkey: &str, addr: &str) -> Value {
     let raw = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"status","arguments":{}}}"#;
-    let ev = sign_call(&console, runner_pubkey, raw);
+    let ts = auth::now_secs();
+    let ev = sign_call(&console, runner_pubkey, ts, raw);
     let url = if addr.contains("://") {
         addr.to_string()
     } else {
@@ -153,7 +172,7 @@ fn probe_targets(console: Console, runner_pubkey: &str, addr: &str) -> Value {
         .post(&url)
         .header(auth::PUBKEY_HEADER, ev.pubkey)
         .header(auth::SIG_HEADER, ev.sig)
-        .header(auth::TS_HEADER, auth::now_secs().to_string())
+        .header(auth::TS_HEADER, ts.to_string())
         .send(raw)
     {
         Ok(r) => r,
@@ -173,6 +192,10 @@ fn probe_targets(console: Console, runner_pubkey: &str, addr: &str) -> Value {
             return json!({"note": "console not granted — grant the console pubkey in the UI"});
         }
         return json!({"error": format!("{code}: {msg}")});
+    }
+    if body["result"].get("isError").and_then(Value::as_bool) == Some(true) {
+        let text = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+        return json!({"error": text});
     }
     let text = body["result"]["content"][0]["text"].as_str().unwrap_or("");
     match serde_json::from_str::<Value>(text) {
@@ -233,9 +256,11 @@ async fn overview(
     let mut runners = Vec::with_capacity(snapshot.runners.len());
     for (name, rec) in &snapshot.runners {
         let secret = snapshot.secrets.get(name);
-        let grants = SecretPackage::load(&rec.package_dir)
-            .map(|p| p.grants)
-            .unwrap_or_default();
+        // grants are read from the SHIPPED package (what the runner actually
+        // authorizes). An UNREADABLE package is an anomaly — null, rendered
+        // distinctly from an honest empty grant list ("nobody (fail
+        // closed)").
+        let grants = SecretPackage::load(&rec.package_dir).ok().map(|p| p.grants);
         runners.push(json!({
             "name": name,
             "status": match rec.status { RunnerStatus::Active => "active", RunnerStatus::Revoked => "revoked" },
@@ -276,6 +301,15 @@ struct ProvisionReq {
     kind: String,
     address: String,
     secret: String,
+    /// Where the runner package lands; defaults to
+    /// `$FREEHOLD_RUNNER_STATE_DIR/runner/<name>` (or `./.freehold/...`).
+    #[serde(default)]
+    runner_dir: Option<String>,
+}
+
+fn default_runner_dir(name: &str) -> std::path::PathBuf {
+    let base = std::env::var("FREEHOLD_RUNNER_STATE_DIR").unwrap_or_else(|_| "./.freehold".into());
+    std::path::PathBuf::from(base).join("runner").join(name)
 }
 
 async fn provision(
@@ -289,7 +323,10 @@ async fn provision(
     // every pubkey NOT on the list.
     let console_pk = state.console.pubkey();
     let secret = Zeroizing::new(req.secret);
-    let runner_dir = std::path::PathBuf::from(format!("./.freehold/runner/{}", req.name));
+    let runner_dir = req
+        .runner_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| default_runner_dir(&req.name));
     let res = provisioner::provision_runner(
         &state.store,
         &ProvisionRequest {
@@ -480,6 +517,15 @@ async function api(path, body) {
   return j;
 }
 
+// BLOCKING-fix: EVERY interpolated string passes through esc() — runner
+// names, pubkeys, readiness text (remote-derived via connector errors) and
+// mcp addrs are all attacker-influenced input. Never concatenate raw.
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 function chip(state) {
   let cls = "gray";
   if (typeof state === "string") {
@@ -487,37 +533,46 @@ function chip(state) {
     else if (state.startsWith("yellow")) cls = "yellow";
     else if (state.startsWith("red")) cls = "red";
   }
-  return '<span class="chip ' + cls + '">' + state + "</span>";
+  return '<span class="chip ' + cls + '">' + esc(state) + "</span>";
 }
 
 async function refresh() {
   const o = await api("/api/overview");
   $("#console-line").textContent = "console agent: " + o.console_pubkey;
   const rows = o.runners.map((r) => {
-    const readiness = r.readiness
-      ? Object.entries(r.readiness).map(([t, s]) => t + " " + chip(s)).join(" ")
+    const rd = r.readiness;
+    const readiness = rd && Object.keys(rd).length
+      ? Object.entries(rd).map(([t, s]) =>
+          (t === "error" || t === "note")
+            ? '<span class="chip gray">' + esc(t + ": " + s) + "</span>"
+            : esc(t) + " " + chip(s)).join(" ")
       : '<span class="muted">—</span>';
-    const grants = r.grants.length
-      ? r.grants.map((g) => '<div class="muted">' + g + "</div>").join("")
-      : '<span class="muted">nobody (fail closed)</span>';
+    // grants null = package UNREADABLE (a real anomaly), distinct from an
+    // honest empty list. r.grants[i] comes from the API only after validate
+    // (64-hex or console) — still escaped.
+    const grants = r.grants === null
+      ? '<span class="chip red">package unreadable — check the runner dir</span>'
+      : r.grants.length
+        ? r.grants.map((g) => '<div class="muted">' + esc(g) + "</div>").join("")
+        : '<span class="muted">nobody (fail closed)</span>';
     const secret = r.secret
-      ? r.secret.name + " · " + r.secret.kind + " · " + r.secret.address +
+      ? esc(r.secret.name) + " · " + esc(r.secret.kind) + " · " + esc(r.secret.address) +
         (r.secret.rotated_at ? " · rotated" : "")
       : '<span class="muted">—</span>';
     return `<tr>
-      <td><b>${r.name}</b><div class="muted">${r.nostr_pubkey.slice(0, 16)}…</div></td>
+      <td><b>${esc(r.name)}</b><div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
       <td>${r.status === "revoked" ? chip("red(revoked)") : chip("green(active)")}</td>
       <td>${secret}</td>
       <td>${readiness}</td>
       <td>${grants}</td>
       <td>
         <div class="row">
-          <input class="mcp" placeholder="mcp addr" value="${r.mcp_addr || ""}" data-name="${r.name}">
-          <button data-act="addr" data-name="${r.name}" data-nostr="${r.nostr_pubkey}">set addr</button>
-          <button data-act="rotate" data-name="${r.name}">rotate</button>
-          <button data-act="grant" data-name="${r.name}">grant</button>
-          <button data-act="ungrant" data-name="${r.name}">ungrant</button>
-          ${r.status === "revoked" ? "" : '<button class="danger" data-act="revoke" data-name="' + r.name + '">revoke</button>'}
+          <input class="mcp" placeholder="mcp addr" value="${esc(r.mcp_addr)}" data-name="${esc(r.name)}">
+          <button data-act="addr" data-name="${esc(r.name)}" data-nostr="${esc(r.nostr_pubkey)}">set addr</button>
+          <button data-act="rotate" data-name="${esc(r.name)}">rotate</button>
+          <button data-act="grant" data-name="${esc(r.name)}">grant</button>
+          <button data-act="ungrant" data-name="${esc(r.name)}">ungrant</button>
+          ${r.status === "revoked" ? "" : '<button class="danger" data-act="revoke" data-name="' + esc(r.name) + '">revoke</button>'}
         </div>
       </td>
     </tr>`;
