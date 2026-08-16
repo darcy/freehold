@@ -151,28 +151,37 @@ async fn run_local(
     let out_task = tokio::spawn(read_to_string(child.stdout.take().expect("piped stdout")));
     let err_task = tokio::spawn(read_to_string(child.stderr.take().expect("piped stderr")));
 
-    let status = match timeout_s {
+    let (exit_code, timed_out) = match timeout_s {
         Some(t) => match tokio::time::timeout(Duration::from_secs(t), child.wait()).await {
-            Ok(st) => st?,
+            Ok(Ok(st)) => (st.code(), false),
+            Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                return Ok(ExecResult {
-                    // Bounded: descendants holding the pipes must not hang us.
-                    stdout: join_read_bounded(out_task).await,
-                    stderr: join_read_bounded(err_task).await,
-                    exit_code: None,
-                    timed_out: true,
-                });
+                (None, true)
             }
         },
-        None => child.wait().await?,
+        None => match child.wait().await {
+            Ok(st) => (st.code(), false),
+            Err(e) => return Err(e.into()),
+        },
     };
+
+    // With a timeout requested, the WHOLE exec is bounded: a forked daemon
+    // inheriting the pipe must not extend it past the grace (the
+    // `sh -c "cmd &"` case, where the shell itself exits instantly). Without
+    // a timeout, wait for the complete output.
+    let (stdout, stderr) = if timeout_s.is_some() {
+        bounded_collect(out_task, err_task).await
+    } else {
+        (join_read(out_task).await?, join_read(err_task).await?)
+    };
+
     Ok(ExecResult {
-        stdout: join_read(out_task).await?,
-        stderr: join_read(err_task).await?,
-        exit_code: status.code(),
-        timed_out: false,
+        stdout,
+        stderr,
+        exit_code,
+        timed_out,
     })
 }
 
@@ -191,14 +200,27 @@ async fn join_read(
     }
 }
 
-/// Await a reader with a bounded grace (used AFTER a kill where a descendant
-/// may hold the pipe open forever). Returns whatever the reader produced in
-/// time; an overrun yields an empty string rather than hanging the caller.
-async fn join_read_bounded(task: tokio::task::JoinHandle<std::io::Result<String>>) -> String {
-    match tokio::time::timeout(JOIN_GRACE, task).await {
-        Ok(Ok(Ok(s))) => s,
+fn reader_value(r: Result<std::io::Result<String>, tokio::task::JoinError>) -> String {
+    match r {
+        Ok(Ok(s)) => s,
         _ => String::new(),
     }
+}
+
+/// Collect both readers under ONE grace deadline. Used whenever a timeout was
+/// requested: a forked daemon inheriting both pipes must not extend the exec
+/// past the grace on either stream.
+async fn bounded_collect(
+    out_task: tokio::task::JoinHandle<std::io::Result<String>>,
+    err_task: tokio::task::JoinHandle<std::io::Result<String>>,
+) -> (String, String) {
+    let both = async {
+        let (o, e) = tokio::join!(out_task, err_task);
+        (reader_value(o), reader_value(e))
+    };
+    tokio::time::timeout(JOIN_GRACE, both)
+        .await
+        .unwrap_or_else(|_| (String::new(), String::new()))
 }
 
 async fn read_to_string<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> std::io::Result<String> {
@@ -705,6 +727,23 @@ mod tests {
             all.contains("leaked-***"),
             "redaction marker expected: {all}"
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_bounds_even_when_the_shell_exits_early() {
+        // `sh -c "sleep 5 & echo bg"` exits instantly but the forked daemon
+        // inherits the pipe — without a bounded join this hangs forever even
+        // though the timeout never fires.
+        let start = std::time::Instant::now();
+        let res = run_local("sleep 5 & echo bg-started", &[], Some(1))
+            .await
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "must not hang on a forked daemon holding the pipe"
+        );
+        assert_eq!(res.exit_code, Some(0), "sh itself exited cleanly");
+        assert!(!res.timed_out, "the shell exited before the timeout");
     }
 
     #[tokio::test]
