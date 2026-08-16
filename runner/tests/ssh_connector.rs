@@ -1,6 +1,8 @@
 //! C1 SSH connector tests against an IN-PROCESS russh SSH server — a real
 //! ssh daemon (kex, host keys, exec channel) without any external dependency.
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -335,6 +337,7 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
                 secret: "ssh-laptop".to_string(),
             },
         )]),
+        grants: vec![common::agent_pubkey()],
     };
     pkg.write_to_dir(dir.path()).unwrap();
 
@@ -353,10 +356,16 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
     );
     let body = |method: &str, params: serde_json::Value| serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let call = |params: serde_json::Value| -> Result<serde_json::Value, ureq::Error> {
+        let body = body("tools/call", params);
+        let raw = body.to_string();
+        let (pubkey, sig, ts) = common::signed_headers(&raw);
         agent
             .post(&url)
             .header("Content-Type", "application/json")
-            .send_json(body("tools/call", params))
+            .header("x-freehold-pubkey", pubkey)
+            .header("x-freehold-sig", sig)
+            .header("x-freehold-ts", ts)
+            .send(raw.as_str())
             .map(|r| r.into_body().read_json::<serde_json::Value>().unwrap())
     };
 

@@ -27,6 +27,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Create an agent identity (private key stays in the CP state dir, 0600)
+    AgentCreate(AgentArgs),
+    /// Grant another agent pubkey to a runner (re-ships the package)
+    Grant(GrantArgs),
     /// Provision a runner for an existing service; credential is read from stdin
     Provision(ProvisionArgs),
     /// Rotate a secret: re-seal the NEW credential (stdin) to the runner key
@@ -46,6 +50,24 @@ struct CommonArgs {
 }
 
 #[derive(Args)]
+struct AgentArgs {
+    /// Agent name (identity file: <state-dir>/agent-<name>/identity.json)
+    name: String,
+    #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
+    state_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct GrantArgs {
+    /// Runner to grant
+    name: String,
+    /// Agent pubkey (Nostr x-only hex) allowed to call the runner
+    pubkey: String,
+    #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
+    state_dir: PathBuf,
+}
+
+#[derive(Args)]
 struct ProvisionArgs {
     /// Service/runner name (one secret per runner in Chunk 1)
     name: String,
@@ -53,6 +75,9 @@ struct ProvisionArgs {
     kind: String,
     #[arg(long)]
     address: String,
+    /// Agent pubkey(s) granted to call this runner (repeatable)
+    #[arg(long)]
+    grant: Vec<String>,
     /// Where the runner package lands; defaults to ./.freehold/runner/<name>
     #[arg(long, env = "FREEHOLD_RUNNER_STATE_DIR")]
     runner_dir: Option<PathBuf>,
@@ -93,6 +118,28 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().cmd {
+        Cmd::AgentCreate(args) => {
+            let store = StateStore::open(&args.state_dir)
+                .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
+            let agent_dir = args.state_dir.join(format!("agent-{}", args.name));
+            let id = freehold_core::identity::Identity::generate();
+            let written = id.write_to_dir(&agent_dir)?;
+            println!("created agent {}", args.name);
+            println!("  agent pubkey (hex): {}", id.nostr_pubkey_hex());
+            println!("  identity:           {}", written.display());
+            let _ = store;
+            Ok(())
+        }
+        Cmd::Grant(args) => {
+            let store = StateStore::open(&args.state_dir)
+                .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
+            let grants = provisioner::grant_agent(&store, &args.name, &args.pubkey)?;
+            println!("runner {} grants: {}", args.name, grants.len());
+            for g in &grants {
+                println!("  {}", g);
+            }
+            Ok(())
+        }
         Cmd::Provision(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
@@ -111,8 +158,15 @@ async fn main() -> Result<()> {
                     address: &args.address,
                     secret: secret.as_bytes(),
                     runner_dir: &runner_dir,
+                    grants: &args.grant,
                 },
             )?;
+            if args.grant.is_empty() {
+                println!(
+                    "  note: no agents granted — the runner denies all calls until `control-plane grant {} <pubkey>`",
+                    args.name
+                );
+            }
             println!("provisioned runner {0} (active)", res.name);
             println!("  nostr pubkey:      {}", res.nostr_pubkey);
             println!("  encryption pubkey: {}", res.enc_pubkey);

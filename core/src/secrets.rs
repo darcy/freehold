@@ -32,6 +32,11 @@ pub struct SecretPackage {
     /// target name -> connector metadata (local is implicit; kind: ssh, …)
     #[serde(default)]
     pub targets: BTreeMap<String, TargetMeta>,
+    /// AGENT pubkeys (Nostr x-only, hex) allowed to call this runner.
+    /// Enforced locally at the MCP boundary; ports to relay membership in
+    /// Chunk 2. Empty = nobody may call (fail closed).
+    #[serde(default)]
+    pub grants: Vec<String>,
 }
 
 impl SecretPackage {
@@ -68,6 +73,7 @@ mod tests {
                     secret: "vultr".into(),
                 },
             )]),
+            grants: vec!["agent-pubkey".into()],
         };
         pkg.write_to_dir(dir.path()).unwrap();
         let loaded = SecretPackage::load(dir.path()).unwrap();
