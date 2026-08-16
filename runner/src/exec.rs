@@ -465,6 +465,12 @@ impl ExecManager {
         Ok(snap)
     }
 
+    /// Sign + append an audit record for any completed exec (used by the MCP
+    /// layer for connector paths outside this manager, e.g. ssh).
+    pub fn audit_cmd(&self, cmd: &str, target: &str, result: &ExecResult, started_at: u64) {
+        self.audit(cmd, target, result, started_at)
+    }
+
     fn audit(&self, cmd: &str, target: &str, result: &ExecResult, started_at: u64) {
         let (Some(auditor), Some(state_dir)) = (&self.auditor, &self.state_dir) else {
             return;
@@ -559,7 +565,7 @@ async fn run_local_streaming(
 
 pub const AUDIT_FILE: &str = "audit.log";
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

@@ -221,23 +221,18 @@ async fn timeout_bounds_ssh_exec() {
     let pool = make_pool(dir.path());
 
     let start = std::time::Instant::now();
-    match pool
+    let res = pool
         .exec(&target("t", &addr), &pem, "sleep 30", Some(1))
         .await
-    {
-        Ok(r) => panic!(
-            "expected timeout, got Ok after {:?}: {r:?}",
-            start.elapsed()
-        ),
-        Err(err) => {
-            eprintln!("err after {:?}: {err}", start.elapsed());
-            assert!(err.to_string().contains("timed out"), "got: {err}");
-        }
-    }
+        .unwrap_or_else(|e| panic!("ssh exec must not hard-error on timeout, got {e}"));
     assert!(
         start.elapsed() < Duration::from_secs(10),
-        "ssh timeout must actually bound"
+        "ssh timeout must actually bound (took {:?})",
+        start.elapsed()
     );
+    // Same contract as local: Ok with timed_out: true, not an Err.
+    assert!(res.timed_out, "timeout must be reported on the result");
+    assert_eq!(res.exit_code, None);
 }
 
 fn known_label(host: &str, port: u16) -> String {

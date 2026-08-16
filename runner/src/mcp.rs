@@ -269,8 +269,20 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
         return Ok(serde_json::to_string_pretty(&snap)?);
     }
 
-    let cmd = args.cmd.ok_or(exec::ExecError::MissingField("cmd"))?;
-    let target = args.target.ok_or(exec::ExecError::MissingField("target"))?;
+    let cmd = args
+        .cmd
+        .clone()
+        .ok_or(exec::ExecError::MissingField("cmd"))?;
+    let target = args
+        .target
+        .clone()
+        .ok_or(exec::ExecError::MissingField("target"))?;
+
+    // LOCAL first — a shipped target may not shadow it (ordering must match
+    // `status`, where local is checked before the shipped targets).
+    if target == "local" {
+        return handle_local_exec(state, &args, cmd).await;
+    }
 
     // SSH target (shipped package metadata): verbatim command over the pooled
     // connection; credential = the target's private key PEM.
@@ -283,11 +295,20 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
                 "streaming over ssh is not implemented yet (C1 ships non-streaming exec)".into(),
             ));
         }
+        // The target's credential MUST be requested — silently dropping a
+        // requested secret list would surface as a confusing service error.
+        if !args.secrets.contains(&meta.secret) {
+            return Err(exec::ExecError::UnknownSecret(format!(
+                "target {target} requires secret {} in `secrets`",
+                meta.secret
+            )));
+        }
         let value =
             exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
         let redaction = [(exec::env_name(&meta.secret), value.clone())];
         let endpoint = SshTarget::parse(&target, &meta.address)
             .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+        let started = exec::now_secs();
         let mut result = state
             .ssh
             .exec(&endpoint, value.as_str(), &cmd, args.timeout_s)
@@ -296,12 +317,20 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
         // Same rule as local: secret values never reach the agent.
         exec::redact(&mut result.stdout, &redaction);
         exec::redact(&mut result.stderr, &redaction);
+        // The locked model signs EVERY executed command — ssh included.
+        state.exec.audit_cmd(&cmd, &target, &result, started);
         return Ok(serde_json::to_string_pretty(&result)?);
     }
 
-    if target != "local" {
-        return Err(exec::ExecError::UnknownTarget(target));
-    }
+    Err(exec::ExecError::UnknownTarget(target))
+}
+
+async fn handle_local_exec(
+    state: &RunnerState,
+    args: &ExecArgs,
+    cmd: String,
+) -> Result<String, exec::ExecError> {
+    let target = "local".to_string();
 
     let secrets = exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
 

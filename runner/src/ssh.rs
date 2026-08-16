@@ -103,24 +103,51 @@ impl SshTarget {
 struct HostKeyStore {
     path: PathBuf,
     inner: Mutex<HashMap<String, String>>,
+    /// The store EXISTS but is unreadable/corrupt — fail closed: every
+    /// verification rejects until it is repaired, rather than silently
+    /// re-pinning whatever key shows up next (the loss that matters).
+    corrupt: bool,
 }
 
 impl HostKeyStore {
     fn load(dir: &Path) -> Self {
         let path = dir.join(KNOWN_HOSTS_FILE);
-        let inner = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
-            .unwrap_or_default();
+        let (inner, corrupt) = match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<HashMap<String, String>>(&raw) {
+                Ok(map) => (map, false),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "known_hosts.json corrupt — failing closed on host-key checks"
+                    );
+                    (HashMap::new(), true)
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (HashMap::new(), false),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "known_hosts.json unreadable — failing closed on host-key checks"
+                );
+                (HashMap::new(), true)
+            }
+        };
         Self {
             path,
             inner: Mutex::new(inner),
+            corrupt,
         }
     }
 
     /// Returns Ok(true) if the key is known and matches; Ok(true) and stores
-    /// it on first contact; Err(HostKeyChanged) if a DIFFERENT key shows up.
+    /// it on first contact; Err(HostKeyChanged) if a DIFFERENT key shows up
+    /// or the store is corrupt.
     fn verify_or_add(&self, key: &str, pubkey: &PublicKey) -> Result<bool, SshError> {
+        if self.corrupt {
+            return Err(SshError::HostKeyChanged(key.to_string()));
+        }
         let stored = pubkey
             .to_openssh()
             .map_err(|e| SshError::Key(e.to_string()))?
@@ -224,10 +251,14 @@ impl SshPool {
     ) -> Result<ExecResult, SshError> {
         let key = decode_secret_key(key_pem, None)?;
         let conn = self.handle(target, &key).await?;
-        let run_conn = conn.clone();
+
+        // Serialize per target: only one command at a time on the pooled
+        // connection. Lock acquisition is OUTSIDE the command timeout — a
+        // busy target must not surface as a spurious timeout for a healthy
+        // host (and must not evict the in-use connection).
+        let handle = conn.lock().await;
 
         let run = async move {
-            let handle = run_conn.lock().await;
             let mut channel = handle.channel_open_session().await?;
             channel.exec(false, cmd).await?;
             let mut stdout = Vec::new();
@@ -260,7 +291,12 @@ impl SshPool {
         let result = match timeout_s {
             Some(t) => match tokio::time::timeout(Duration::from_secs(t), run).await {
                 Ok(r) => r,
-                Err(_) => Err(SshError::TimedOut(t)),
+                Err(_) => Ok(ExecResult {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    timed_out: true,
+                }),
             },
             None => run.await,
         };

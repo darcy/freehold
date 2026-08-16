@@ -82,6 +82,10 @@ pub fn provision_runner(
     if req.name.is_empty() || req.name.contains('/') || req.name.starts_with('.') {
         return Err(ProvisionError::InvalidName(req.name.to_string()));
     }
+    // `local` is the runner's own target; a shipped target must not shadow it.
+    if req.name == "local" {
+        return Err(ProvisionError::InvalidName(req.name.to_string()));
+    }
     // Same-name cases first — clearer diagnostics than the dir guard below.
     match store.get_runner(req.name) {
         Some(r) if r.status == RunnerStatus::Revoked => {

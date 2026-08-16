@@ -203,7 +203,7 @@ fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
     // sized buffer keeps that unlikely for real credentials.
     let mut buf = Zeroizing::new(String::with_capacity(256));
     std::io::stdin().read_to_string(&mut buf)?;
-    let value = Zeroizing::new(buf.trim_end_matches(['\r', '\n', ' ']).to_string());
+    let value = Zeroizing::new(buf.trim_end_matches(['\r', '\n']).to_string());
     if value.is_empty() {
         anyhow::bail!("empty secret");
     }

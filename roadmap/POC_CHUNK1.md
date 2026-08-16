@@ -100,7 +100,7 @@ disk, never in agent context.
 
 ### Phase C — Three connectors (each a runner flavor, same core)
 
-- [ ] [ ] 
+- [x] [x] 
 
 C1. **SSH** to local machine (old-laptop Proxmox): persistent ssh connection pool  
 (ControlMaster/ControlPersist) for cheap repeated commands.
