@@ -91,6 +91,12 @@ pub fn provision_runner(
     if req.name == "local" {
         return Err(ProvisionError::InvalidName(req.name.to_string()));
     }
+    // Grants must be real pubkeys or the runner silently denies forever.
+    for g in req.grants {
+        if !is_pubkey(g) {
+            return Err(ProvisionError::InvalidGrant(g.clone()));
+        }
+    }
     // Same-name cases first — clearer diagnostics than the dir guard below.
     match store.get_runner(req.name) {
         Some(r) if r.status == RunnerStatus::Revoked => {

@@ -126,6 +126,19 @@ async fn main() -> Result<()> {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let agent_dir = args.state_dir.join(format!("agent-{}", args.name));
+            let agent_id = agent_dir.join(freehold_core::identity::IDENTITY_FILE);
+            if agent_id.exists() && !args.force {
+                anyhow::bail!(
+                    "agent {} already exists at {} — pass --force to replace (irreversible: \
+                     every runner granted to the old pubkey must be re-granted)",
+                    args.name,
+                    agent_id.display()
+                );
+            }
+            if args.force && agent_id.exists() {
+                let target = freehold_core::identity::Identity::backup_identity(&agent_dir)?;
+                println!("backed up old agent identity to {}", target.display());
+            }
             let id = freehold_core::identity::Identity::generate();
             let written = id.write_to_dir(&agent_dir)?;
             println!("created agent {}", args.name);
