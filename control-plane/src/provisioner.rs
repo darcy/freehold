@@ -19,7 +19,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use freehold_core::{crypto, identity, secrets::SecretPackage};
+use freehold_core::{
+    crypto, identity,
+    secrets::{SecretPackage, TargetMeta},
+};
 use thiserror::Error;
 
 use crate::state::{RunnerRecord, RunnerStatus, SecretRecord, StateError, StateStore, now_secs};
@@ -119,6 +122,14 @@ pub fn provision_runner(
     id.write_to_dir(req.runner_dir)?;
     let pkg = SecretPackage {
         secrets: BTreeMap::from([(req.name.to_string(), ciphertext_hex.clone())]),
+        targets: BTreeMap::from([(
+            req.name.to_string(),
+            TargetMeta {
+                kind: req.kind.to_string(),
+                address: req.address.to_string(),
+                secret: req.name.to_string(),
+            },
+        )]),
     };
     if let Err(e) = pkg.write_to_dir(req.runner_dir) {
         // identity.json already landed — remove it so the PackageDirInUse
@@ -196,8 +207,18 @@ pub fn rotate_secret(
     let ciphertext_hex = hex::encode(&sealed);
 
     // Re-ship the package (Chunk 1 invariant: one secret per runner).
+    // Re-ship the package with its target metadata preserved (rotate must not
+    // drop how the runner reaches this service).
     let pkg = SecretPackage {
         secrets: BTreeMap::from([(name.to_string(), ciphertext_hex.clone())]),
+        targets: BTreeMap::from([(
+            name.to_string(),
+            TargetMeta {
+                kind: before.kind.clone(),
+                address: before.address.clone(),
+                secret: name.to_string(),
+            },
+        )]),
     };
     pkg.write_to_dir(&runner_rec.package_dir)?;
 
@@ -210,6 +231,14 @@ pub fn rotate_secret(
         let _ = store.set_secret_ciphertext(name, &before.ciphertext_hex, before.rotated_at);
         let old_pkg = SecretPackage {
             secrets: BTreeMap::from([(name.to_string(), before.ciphertext_hex.clone())]),
+            targets: BTreeMap::from([(
+                name.to_string(),
+                TargetMeta {
+                    kind: before.kind.clone(),
+                    address: before.address.clone(),
+                    secret: name.to_string(),
+                },
+            )]),
         };
         match old_pkg.write_to_dir(&runner_rec.package_dir) {
             Ok(()) => tracing::warn!(

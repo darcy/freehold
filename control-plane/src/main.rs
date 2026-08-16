@@ -3,6 +3,7 @@
 //! Subcommands: provision (B1), rotate-secret (B2), revoke (B3), list,
 //! and serve (the local admin/ops web surface, still a skeleton).
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -192,16 +193,17 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Read a one-line secret from stdin, zeroized on drop. Never echoed, never
+/// Read the secret from stdin (ALL of it — SSH private keys are multi-line
+/// PEM, API keys are single lines), zeroized on drop. Never echoed, never
 /// logged, never persisted as plaintext. Every copy (read buffer, trimmed
 /// value) is under `Zeroizing` — a core dump or heap spray reads nothing.
 fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
     eprintln!("{prompt}");
-    // with_capacity: read_line can still realloc mid-read and orphan a
-    // partial copy; a sized buffer makes that unlikely for real credentials.
-    let mut line = Zeroizing::new(String::with_capacity(256));
-    std::io::stdin().read_line(&mut line)?;
-    let value = Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_string());
+    // with_capacity: reads can still realloc and orphan a partial copy; a
+    // sized buffer keeps that unlikely for real credentials.
+    let mut buf = Zeroizing::new(String::with_capacity(256));
+    std::io::stdin().read_to_string(&mut buf)?;
+    let value = Zeroizing::new(buf.trim_end_matches(['\r', '\n', ' ']).to_string());
     if value.is_empty() {
         anyhow::bail!("empty secret");
     }
