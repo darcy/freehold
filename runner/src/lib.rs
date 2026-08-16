@@ -10,7 +10,6 @@
 
 pub use freehold_core::{audit, crypto, identity, secrets};
 
-pub mod auth;
 pub mod exec;
 pub mod mcp;
 pub mod registry;

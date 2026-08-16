@@ -139,11 +139,11 @@ orchestrator calling the runner (proves plumbing, not reasoning).
 
 ### Phase F — Local web UI
 
-- [ ] [ ] 
+- [x] [x] 
 
 F1. Local web UI (`localhost`): services-at-a-glance + readiness (green/yellow/red).
 
-- [ ] [ ] 
+- [x] [x] 
 
 F2. Manage runners / secrets / grants from the UI. Admin/ops view, NOT chat.
 

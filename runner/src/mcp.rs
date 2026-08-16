@@ -31,10 +31,10 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::auth;
 use crate::exec::{self, ExecManager};
 use crate::registry;
 use crate::ssh::{SshPool, SshTarget};
+use freehold_core::auth;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "freehold-runner";

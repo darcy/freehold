@@ -5,9 +5,11 @@ Kubernetes stack with Buzz Relay as the control plane and a skill framework that
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 **Status:** docs + locked Chunk 1 plan; Phases A (identity, MCP skeleton, exec/readiness/
-audit), B (provisioner), C (SSH + vultr + b2 connectors), D (coarse grants), and E
-(orchestrator: the scripted CPA stand-in — onboard/readiness/exec/demo) are implemented
-and reviewed. Current work is uncommitted until reviewed.
+audit), B (provisioner), C (SSH + vultr + b2 connectors), D (coarse grants), E
+(orchestrator: the scripted CPA stand-in — onboard/readiness/exec/demo), and F (local
+admin/ops web UI: services-at-a-glance with LIVE readiness via a console agent, and
+runner/secret/grant management) are implemented and reviewed. Current work is
+uncommitted until reviewed.
 
 ## Navigation
 
@@ -51,9 +53,10 @@ Prove the engine room standalone: local control plane (web UI) + runners as MCP 
 secret provisioner + coarse grants + readiness. Connectors: SSH, Vultr, Backblaze B2. No Buzz,
 no k8s.
 
-- Rust workspace: `core` (identity, sealed-box crypto, secret packaging, atomic-0600 fs),
-  `runner` (+ ssh connector via russh, in-memory keys), `control-plane`, and `orchestrator`
-  (scripted CPA stand-in: signed MCP client + onboarding/demo flows) crates.
+- Rust workspace: `core` (identity, auth — the shared signed-call protocol, sealed-box
+  crypto, secret packaging, atomic-0600 fs), `runner` (+ ssh connector via russh,
+  in-memory keys), `control-plane` (provisioner + local admin/ops web console), and
+  `orchestrator` (scripted CPA stand-in: signed MCP client + onboarding/demo flows) crates.
 - MCP over HTTP for agent↔runner even though co-located — proves the real shape.
 - Test targets: VPS (dev/smoke) → old-laptop Proxmox (test/staging, SSH target only) → home
   dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.

@@ -929,6 +929,7 @@ dependencies = [
  "axum",
  "clap",
  "freehold-core",
+ "freehold-runner",
  "hex",
  "libc",
  "parking_lot",
@@ -939,6 +940,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ureq",
  "zeroize",
 ]
 

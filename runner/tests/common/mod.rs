@@ -4,7 +4,7 @@
 
 use std::sync::LazyLock;
 
-use freehold_runner::auth;
+use freehold_core::auth;
 use rand::RngCore;
 
 fn random_secret() -> [u8; 32] {
