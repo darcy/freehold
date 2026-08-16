@@ -125,9 +125,10 @@ async fn ungranted_agent_is_denied() {
     )
     .unwrap();
     let err = stranger_client.exec("local", "echo nope", &[]).unwrap_err();
+    let msg = format!("{err:?}");
     assert!(
-        matches!(err, freehold_orchestrator::client::ClientError::Rpc(_)),
-        "expected json-rpc denial, got {err:?}"
+        msg.contains("-32001") && msg.contains("unauthorized"),
+        "denial must carry the code AND the reason, got: {msg}"
     );
     server.abort();
 }
@@ -156,6 +157,11 @@ async fn demo_steps_run_and_report_failures() {
             secrets: vec![],
         },
         flows::DemoStep {
+            target: "local".into(),
+            cmd: "exit 3".into(),
+            secrets: vec![],
+        },
+        flows::DemoStep {
             target: "missing-target".into(),
             cmd: "echo nope".into(),
             secrets: vec![],
@@ -164,8 +170,12 @@ async fn demo_steps_run_and_report_failures() {
     let results = flows::run_demo(&client, &steps).unwrap();
     assert!(results[0].ok && results[0].stdout_head.contains("step-one"));
     assert!(results[1].ok && results[1].stdout_head.contains("step-two"));
-    assert!(!results[2].ok, "unknown target must fail the step");
-    assert!(results[2].error.is_some());
+    assert!(
+        !results[2].ok && results[2].exit_code == Some(3),
+        "a non-zero exit must be reported as a FAILED step"
+    );
+    assert!(!results[3].ok, "unknown target must fail the step");
+    assert!(results[3].error.is_some());
 
     server.abort();
 }

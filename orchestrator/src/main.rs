@@ -107,7 +107,23 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            println!("ONBOARDED {} (engine room green)", report.name);
+            let service_state = report
+                .readiness
+                .get(&report.name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let verdict = if service_state == "green" {
+                format!(
+                    "ONBOARDED {} (engine room green, service green)",
+                    report.name
+                )
+            } else {
+                format!(
+                    "ONBOARDED {} (engine room alive; SERVICE NOT GREEN: {service_state} —                      inspect the credential/address)",
+                    report.name
+                )
+            };
+            println!("{verdict}");
             println!("  agent pubkey:      {}", report.agent_pubkey);
             println!("  runner nostr:      {}", report.nostr_pubkey);
             println!("  runner enc pubkey: {}", report.enc_pubkey);

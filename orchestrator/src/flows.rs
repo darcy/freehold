@@ -39,7 +39,7 @@ pub fn agent_auth(dir: &Path) -> Result<AgentAuth, FlowError> {
 /// Connect to a RUNNING runner at `addr`, authenticating as the agent.
 pub fn connect(addr: &str, agent_dir: &Path, runner_pubkey: &str) -> Result<McpClient, FlowError> {
     let auth = agent_auth(agent_dir)?;
-    let url = if addr.starts_with("http://") {
+    let url = if addr.contains("://") {
         addr.to_string()
     } else {
         format!("http://{addr}/mcp")
@@ -106,7 +106,8 @@ pub async fn onboard(
     )?;
     let readiness = client.readiness()?;
     // Hard failure: onboarding without the local self-check green means the
-    // engine room isn't alive.
+    // engine room isn't alive. The TARGET's readiness is REPORTED, not
+    // asserted — a red target onboards but the report says so.
     if readiness.get("local").and_then(Value::as_str) != Some("green") {
         return Err(FlowError::Client(crate::client::ClientError::ToolError(
             format!("local self-check not green after onboarding: {readiness:?}"),
@@ -155,7 +156,7 @@ pub fn run_demo(client: &McpClient, steps: &[DemoStep]) -> Result<Vec<StepResult
             Ok(out) => results.push(StepResult {
                 index: idx,
                 target: step.target.clone(),
-                ok: !out.timed_out,
+                ok: !out.timed_out && out.exit_code == Some(0),
                 exit_code: out.exit_code,
                 stdout_head: out.stdout.chars().take(160).collect(),
                 stderr_head: out.stderr.chars().take(80).collect(),

@@ -12,8 +12,8 @@ use thiserror::Error;
 pub enum ClientError {
     #[error("http error: {0}")]
     Http(String),
-    #[error("json-rpc error: {0:?}")]
-    Rpc(Option<Value>),
+    #[error("json-rpc error: {0}")]
+    Rpc(String),
     #[error("tool returned isError: {0}")]
     ToolError(String),
     #[error("runner pubkey must be 64 hex chars for the signature audience")]
@@ -26,6 +26,13 @@ pub enum ClientError {
 pub struct AgentAuth {
     pub secret: [u8; 32],
     pub pubkey: String,
+}
+
+impl Drop for AgentAuth {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.secret.zeroize();
+    }
 }
 
 impl AgentAuth {
@@ -61,6 +68,7 @@ impl McpClient {
             agent: ureq::Agent::new_with_config(
                 ureq::config::Config::builder()
                     .http_status_as_error(false)
+                    .timeout_global(Some(std::time::Duration::from_secs(30)))
                     .build(),
             ),
         })
@@ -97,7 +105,12 @@ impl McpClient {
         });
         let resp = self.raw(body)?;
         if let Some(err) = resp.get("error") {
-            return Err(ClientError::Rpc(err.get("code").cloned()));
+            let code = err.get("code").and_then(Value::as_i64).unwrap_or(-1);
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("(no message)");
+            return Err(ClientError::Rpc(format!("{code}: {msg}")));
         }
         let result = &resp["result"];
         if result.get("isError").and_then(Value::as_bool) == Some(true) {

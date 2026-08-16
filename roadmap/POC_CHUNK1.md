@@ -115,24 +115,24 @@ C3. **Backblaze B2** connector: read/write round-trip (S3-compatible).
 
 ### Phase D — Grants (coarse)
 
-- [ ] [ ] 
+- [x] [x] 
 
 D1. Grant model: agent ↔ runner (whitelist Nostr pubkeys of who may call a runner).  
 Enforced locally (identity stand-in; port to relay membership in Chunk 2).
 
-- [ ] [ ] 
+- [x] [x] 
 
 D2. Dedicated runner per service = default. Sharing via grants allowed (coarse; no  
 target-scoped permissions yet).
 
 ### Phase E — Scripted orchestrator (CPA stand-in)
 
-- [ ] [ ] 
+- [x] [x] 
 
 E1. Orchestrator drives the onboarding flow: given "existing service at IP X + key Y" →  
 create runner → provision secret → self-check → 🟢 → grant to agent stub → report readiness.
 
-- [ ] [ ] 
+- [x] [x] 
 
 E2. Scripted demo steps: SSH exec, Vultr create/destroy, B2 round-trip, via the  
 orchestrator calling the runner (proves plumbing, not reasoning).
