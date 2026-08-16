@@ -1,0 +1,26 @@
+[package]
+name = "freehold-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Freehold shared core: identity keypairs, sealed-box crypto, secret packages"
+
+[dependencies]
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+hex = "0.4"
+hkdf = { version = "0.12", features = ["std"] }
+rand = "0.9"
+secp256k1 = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+name = "freehold_core"

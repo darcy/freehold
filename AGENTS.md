@@ -4,7 +4,9 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-**Status:** docs + locked Chunk 1 plan; code begins at Phase A (Rust workspace scaffold).
+**Status:** docs + locked Chunk 1 plan; Phases A (workspace, identity, MCP skeleton) and B
+(provisioner: seal/ship/rotate/revoke, no master key) are implemented and reviewed in
+progress. Both phases were merged to main via PRs; current work is uncommitted until reviewed.
 
 ## Navigation
 
@@ -48,7 +50,8 @@ Prove the engine room standalone: local control plane (web UI) + runners as MCP 
 secret provisioner + coarse grants + readiness. Connectors: SSH, Vultr, Backblaze B2. No Buzz,
 no k8s.
 
-- Rust workspace: `runner` crate + `control-plane` crate.
+- Rust workspace: `core` (identity, sealed-box crypto, secret packaging, atomic-0600 fs),
+  `runner`, `control-plane` crates.
 - MCP over HTTP for agent↔runner even though co-located — proves the real shape.
 - Test targets: VPS (dev/smoke) → old-laptop Proxmox (test/staging, SSH target only) → home
   dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.

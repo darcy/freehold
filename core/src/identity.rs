@@ -18,7 +18,6 @@
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rand::RngCore;
@@ -164,31 +163,19 @@ impl Identity {
 
     /// Persist private keys to `dir/identity.json` (mode 0600 on unix).
     ///
-    /// Atomic: writes to a 0600 temp file, fsyncs, then renames over the target.
-    /// A pre-existing looser-permissioned file is replaced by a 0600 inode; a
-    /// crash mid-write never leaves a partial identity.
-    /// The state dir itself is created 0700 (unix).
+    /// Delegates to the shared futil discipline: unique 0600-at-birth temp +
+    /// fsync + atomic rename. A pre-existing looser-permissioned file is
+    /// replaced by a 0600 inode; a crash mid-write never leaves a partial
+    /// identity. The state dir itself is created 0700.
     pub fn write_to_dir(&self, dir: &Path) -> Result<PathBuf, IdentityError> {
-        create_state_dir(dir)?;
+        crate::futil::ensure_private_dir(dir)?;
         let path = dir.join(IDENTITY_FILE);
         // Zeroizing: the serialized form holds both private keys in cleartext.
         let json = zeroize::Zeroizing::new(serde_json::to_string_pretty(&IdentityFile {
             nostr_secret_hex: self.nostr_secret_hex(),
             enc_secret_hex: self.enc_secret_hex(),
         })?);
-
-        let (mut f, tmp) = open_secret_temp(&path, IDENTITY_FILE)?;
-        let wrote = f.write_all(json.as_bytes()).and_then(|_| f.sync_all());
-        if wrote.is_err() {
-            // Don't leave secret material in a stray temp file.
-            let _ = fs::remove_file(&tmp);
-            wrote?;
-        }
-        if let Err(e) = fs::rename(&tmp, &path) {
-            // Same rule: a failed rename must not strand both private keys.
-            let _ = fs::remove_file(&tmp);
-            return Err(e.into());
-        }
+        crate::futil::write_0600_atomic(&path, json.as_bytes())?;
         Ok(path)
     }
 
@@ -208,7 +195,7 @@ impl Identity {
         // The backup must capture the OLD key, so it runs before write_to_dir
         // tightens the dir — tighten here so the backup never lands in a
         // world-traversable directory either.
-        create_state_dir(dir)?;
+        crate::futil::ensure_private_dir(dir)?;
         // The backup NAME is reserved with O_EXCL before the copy, so a
         // concurrent `keys init --force` can never pick the same name for a
         // different source — the round-7 interleaving (B reads the NEW key and
@@ -267,31 +254,7 @@ impl Identity {
 /// On the vanishingly rare actual name collision, `AlreadyExists` re-rolls a
 /// fresh name instead of touching the existing file.
 fn open_secret_temp(dst: &Path, name: &str) -> std::io::Result<(fs::File, PathBuf)> {
-    for _ in 0..4 {
-        let tmp = dst.with_file_name(format!("{name}.tmp.{}", temp_suffix()));
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        match opts.open(&tmp) {
-            Ok(f) => return Ok((f, tmp)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "could not allocate a unique temp name",
-    ))
-}
-
-fn temp_suffix() -> String {
-    let mut b = [0u8; 4];
-    rand::rng().fill_bytes(&mut b);
-    hex::encode(b)
+    crate::futil::open_secret_temp(dst, name)
 }
 
 /// Atomically reserve the next free backup name (`.bak`, then `.bak.N`) by
@@ -363,34 +326,10 @@ fn random_bytes() -> [u8; SECRET_LEN] {
     b
 }
 
-fn create_state_dir(dir: &Path) -> Result<(), IdentityError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        let mut b = fs::DirBuilder::new();
-        b.mode(0o700).recursive(true);
-        b.create(dir)?;
-        // Only tighten a pre-existing LOOSE dir (a user-supplied --state-dir
-        // pointing at a shared dir shouldn't be silently chmodded if it's
-        // already tight). Later phases store more secret material here.
-        let mode = fs::metadata(dir)?.permissions().mode();
-        if mode & 0o077 != 0 {
-            tracing::warn!(
-                dir = %dir.display(),
-                mode = format_args!("{mode:o}"),
-                "tightening state dir to 0700 (holds secret material)"
-            );
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-        }
-    }
-    #[cfg(not(unix))]
-    fs::create_dir_all(dir)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn nsec_zero() -> String {
         "00".repeat(32)
