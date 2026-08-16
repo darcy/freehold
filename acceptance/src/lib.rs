@@ -496,52 +496,87 @@ pub async fn run_checks() -> Vec<Check> {
         }
     }
 
-    // G3 -- the security invariants.
-    let audit_blob = read_audit(&[&svc_dir, &ssh_dir, &vultr_dir, &b2_dir]);
-    let outputs_blob = [
-        readiness(&agent, &ssh_job, &ssh_url)
-            .unwrap_or_default()
-            .to_string(),
-        readiness(&agent, &vultr_job, &vultr_mcp)
-            .unwrap_or_default()
-            .to_string(),
-        readiness(&agent, &b2_job, &b2_mcp)
-            .unwrap_or_default()
-            .to_string(),
-        exec(
-            &agent,
-            &vultr_job,
-            &vultr_mcp,
-            "vultr",
-            "echo tok=$VULTR",
-            &["vultr"],
-        )
-        .unwrap_or_default(),
-    ]
-    .join("\n");
+    // G3 -- the security invariants. Every dimension must PROVE itself: a
+    // silent empty scan (missing audit, failed status) fails the check.
+    let mut status_evidence: Vec<String> = Vec::new();
+    let mut status_problems: Vec<String> = Vec::new();
+    for (label, nostr, url) in [
+        ("ssh", &ssh_job, &ssh_url),
+        ("vultr", &vultr_job, &vultr_mcp),
+        ("b2", &b2_job, &b2_mcp),
+    ] {
+        match readiness(&agent, nostr, url) {
+            Ok(map)
+                if map
+                    .get("local")
+                    .and_then(Value::as_str)
+                    .map(|s| s.starts_with("green"))
+                    .unwrap_or(false) =>
+            {
+                status_evidence.push(format!("{label}:{map}"));
+            }
+            Ok(map) => status_problems.push(format!("{label}:UNEXPECTED({map})")),
+            Err(e) => status_problems.push(format!("{label}:ERROR({e})")),
+        }
+    }
+    let status_ok = status_problems.is_empty();
 
-    // G3.1 secrets never in agent context.
+    // The audit log must EXIST and record our runs — a swallowed read or a
+    // redirected audit path fails instead of passing silently.
+    let mut audit_blob = String::new();
+    let mut audit_missing: Vec<String> = Vec::new();
+    for d in [&svc_dir, &ssh_dir, &vultr_dir, &b2_dir] {
+        match std::fs::read_to_string(d.join("audit.log")) {
+            Ok(content) => audit_blob.push_str(&content),
+            Err(_) => audit_missing.push(d.display().to_string()),
+        }
+    }
+    let audit_ok = audit_missing.is_empty() && !audit_blob.is_empty();
+
+    let redaction_out = exec(
+        &agent,
+        &vultr_job,
+        &vultr_mcp,
+        "vultr",
+        "echo tok=$VULTR",
+        &["vultr"],
+    )
+    .unwrap_or_default();
+
+    // G3.1 secrets never in agent context (exec output, status views, audit).
+    let evidence = format!(
+        "{}\n{}\n{}",
+        status_evidence.join("\n"),
+        audit_blob,
+        redaction_out
+    );
     let mut leaked = Vec::new();
     for secret in [VULTR_TOKEN, B2_CRED] {
-        if outputs_blob.contains(secret) || audit_blob.contains(secret) {
+        if evidence.contains(secret) {
             leaked.push(secret.to_string());
         }
     }
-    if outputs_blob.contains("OPENSSH PRIVATE KEY") || audit_blob.contains("OPENSSH PRIVATE KEY") {
+    if evidence.contains("OPENSSH PRIVATE KEY") {
         leaked.push("ssh private key pem".into());
     }
-    let redaction_ok = outputs_blob.contains("tok=***");
-    if leaked.is_empty() && redaction_ok {
+    let redaction_ok = redaction_out.contains("tok=***");
+    if leaked.is_empty() && redaction_ok && status_ok && audit_ok {
         checks.push(Check::pass(
             "G3.1",
-            "secrets never in agent context (outputs, status, audit; redaction proven)",
-            "no plaintext; echo $VULTR -> ***",
+            "secrets never in agent context (exec, status, audit; redaction proven)",
+            format!(
+                "status={status_evidence:?}; audit={} byte(s); echo $VULTR -> ***",
+                audit_blob.len()
+            ),
         ));
     } else {
         checks.push(Check::fail(
             "G3.1",
-            "secrets never in agent context (outputs, status, audit; redaction proven)",
-            format!("leaked={leaked:?} redaction_ok={redaction_ok}"),
+            "secrets never in agent context (exec, status, audit; redaction proven)",
+            format!(
+                "leaked={leaked:?} redaction_ok={redaction_ok} status_ok={status_ok} ({status_problems:?}) audit_missing={audit_missing:?} audit_empty={}",
+                audit_blob.is_empty()
+            ),
         ));
     }
 
@@ -589,37 +624,59 @@ pub async fn run_checks() -> Vec<Check> {
         Err(e) => checks.push(Check::fail("G3.3", "no master key anywhere", e)),
     }
 
-    // G3.4 revoking membership cuts off.
-    match provisioner::revoke_runner(&store, "vultr") {
-        Ok(_) => {
-            let cut = exec(
-                &agent,
-                &vultr_job,
-                &vultr_mcp,
-                "vultr",
-                "curl -sS \"$VULTR_URL/v2/instances\" -H \"Authorization: Bearer $VULTR\"",
-                &["vultr"],
-            );
-            let rotate_blocked =
-                provisioner::rotate_secret(&store, "vultr", VULTR_TOKEN.as_bytes()).is_err();
-            match (cut, rotate_blocked) {
-                (Err(e), true) => checks.push(Check::pass(
-                    "G3.4",
-                    "revoking membership cuts off the runner",
-                    format!("post-revoke exec denied ({e}); rotate blocked"),
-                )),
-                (cut_res, rot) => checks.push(Check::fail(
-                    "G3.4",
-                    "revoking membership cuts off the runner",
-                    format!("exec after revoke: {cut_res:?}; rotate blocked: {rot}"),
-                )),
-            }
-        }
-        Err(e) => checks.push(Check::fail(
+    // G3.4 revoking membership cuts off. Evidence gates: the runner must be
+    // ALIVE before revoke (its own status probe), and the post-revoke denial
+    // must be the fail-closed grant denial — not a timeout, not a connection
+    // refused on a dead endpoint.
+    let runner_alive = matches!(
+        readiness(&agent, &vultr_job, &vultr_mcp),
+        Ok(m) if m.get("local").and_then(Value::as_str) == Some("green")
+    );
+    if !runner_alive {
+        checks.push(Check::fail(
             "G3.4",
             "revoking membership cuts off the runner",
-            format!("revoke failed: {e}"),
-        )),
+            "runner never came up — cannot prove cutoff",
+        ));
+    } else {
+        match provisioner::revoke_runner(&store, "vultr") {
+            Ok(_) => {
+                let cut = exec(
+                    &agent,
+                    &vultr_job,
+                    &vultr_mcp,
+                    "vultr",
+                    "curl -sS \"$VULTR_URL/v2/instances\" -H \"Authorization: Bearer $VULTR\"",
+                    &["vultr"],
+                );
+                let rotate_blocked =
+                    provisioner::rotate_secret(&store, "vultr", VULTR_TOKEN.as_bytes()).is_err();
+                match (cut, rotate_blocked) {
+                    (Err(e), true) if e.contains("not granted") => {
+                        checks.push(Check::pass(
+                            "G3.4",
+                            "revoking membership cuts off the runner",
+                            format!("post-revoke exec denied with the fail-closed grant denial ({e}); rotate blocked"),
+                        ))
+                    }
+                    (Err(_), true) => checks.push(Check::fail(
+                        "G3.4",
+                        "revoking membership cuts off the runner",
+                        "denied, but NOT the fail-closed grant reason",
+                    )),
+                    (cut_res, rot) => checks.push(Check::fail(
+                        "G3.4",
+                        "revoking membership cuts off the runner",
+                        format!("exec after revoke: {cut_res:?}; rotate blocked: {rot}"),
+                    )),
+                }
+            }
+            Err(e) => checks.push(Check::fail(
+                "G3.4",
+                "revoking membership cuts off the runner",
+                format!("revoke failed: {e}"),
+            )),
+        }
     }
 
     // G3.5 rotation re-encrypts.
@@ -856,13 +913,6 @@ async fn rotation_check(
         return Err(format!("post-rotate round-trip failed: {uploaded}"));
     }
     Ok("fresh ciphertext on rotate (new nonce); rotated_at stamped; package re-shipped; a restarted runner decrypts the NEW blob with its injected key".into())
-}
-
-fn read_audit(dirs: &[&Path]) -> String {
-    dirs.iter()
-        .map(|d| std::fs::read_to_string(d.join("audit.log")).unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]
