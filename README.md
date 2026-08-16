@@ -127,8 +127,24 @@ are ticked as work lands.
 
 ## Contributing / review
 
-Every PR runs two gates: **CI** (`ci.yml`: build, test, clippy -D warnings, rustfmt) and an
-**AI review** (`claude.yml`) that reports only BLOCKING/IMPORTANT findings with a one-line
-`MERGE-READY` / `NEEDS WORK` verdict — nits stay silent. Read `AGENTS.md` before changing
-code: the locked model (relay-as-scope, generic exec, no master key, host flexibility) is
-not open for reinterpretation. Never commit secrets, private keys, or plaintext credentials.
+Every PR runs two gates:
+
+- **CI** (`ci.yml`): `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on the
+  workspace (toolchain pinned to the declared `rust-version`). Green/red, no exceptions.
+- **AI review** (`claude.yml`): reviews for real problems only. Findings are tiered in the
+  top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER (named
+  follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
+  BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
+  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`. The reviewer cites
+  the CI status rather than re-running cargo.
+
+Known quirk: the **first PR that introduces a new workflow file** (one that doesn't exist
+on the default branch yet) skips the AI review — the review GitHub App refuses to issue a
+token for workflows it has never validated on `main` (`workflow_not_found_on_default_branch`).
+The check reports green anyway, because the skip is a graceful no-op. This is by design:
+such a PR can't be AI-reviewed until merged, so CI + a human read carry it. Editing an
+*existing* workflow file (e.g. `claude.yml`) is fine and reviews normally.
+
+Read `AGENTS.md` before changing code: the locked model (relay-as-scope, generic exec, no
+master key, host flexibility) is not open for reinterpretation. Never commit secrets,
+private keys, or plaintext credentials.
