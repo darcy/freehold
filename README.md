@@ -5,10 +5,14 @@ AI-agent-operated — that lands a Proxmox VE / VPS + Kubernetes stack with Buzz
 control plane and a skill framework that installs and configures self-hosted OSS. The agent
 is the wall-breaker: you don't manage servers, you *ask*.
 
-**Status: Chunk 1 (POC) in progress.** The engine room is being proven standalone before
-Buzz (Chunk 2) and Kubernetes (MVP) come in. Phases A (workspace, identity, MCP skeleton)
-and B (secret provisioner: seal/ship/rotate/revoke — no master key) are merged; phases
-C–H (connectors, grants, orchestrator, web UI, acceptance) are next.
+**Status: Chunk 1 (POC) implemented — phases A–G merged, H (test/promote) next.**
+The engine room is proven standalone before Buzz (Chunk 2) and Kubernetes (MVP) come in:
+identity + MCP skeleton (A), secret provisioner — seal/ship/rotate/revoke, no master key
+(B), SSH + Vultr + B2 connectors (C), coarse grants — signed calls only (D), the scripted
+orchestrator CPA stand-in (E), the local admin/ops web console (F), and the acceptance
+script that proves it all hermetic on loopback (G). Phase H is operator work on real
+hardware (old-laptop Proxmox as an SSH target, then home dogfood) — no code changes
+expected unless the test surfaces fixes.
 
 ## Design in one paragraph
 
@@ -25,77 +29,113 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 ## Repository layout (what things do in the code)
 
 ```
-Cargo.toml            workspace: core + runner + control-plane
+Cargo.toml            workspace: core, runner, control-plane, orchestrator, testkit, acceptance
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
-roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md (phase checklists A–H)
-core/                 freehold-core — shared by both crates, no product logic
+roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md (phase checklists A–H, ticked)
+core/                 freehold-core — shared by every crate, no product logic
   src/identity.rs     Nostr (secp256k1) + X25519 keypairs; env-inject or 0600 file
+  src/auth.rs         the signed-call protocol: BIP-340 signatures over
+                      `runner_pubkey|ts|raw_body` — the runner verifies, every
+                      client signs with the same primitives
   src/crypto.rs       sealed box TO a runner's X25519 pubkey: ephemeral X25519 +
                       HKDF-SHA256 + ChaCha20-Poly1305; recipient AND secret-name bound;
                       low-order-point forgery rejected; versioned wire format
-  src/secrets.rs      SecretPackage: the runner's on-disk secrets.json (name → ciphertext)
+  src/secrets.rs      SecretPackage: the runner's on-disk secrets.json (name → ciphertext,
+                      target metadata, agent grants)
+  src/audit.rs        BIP-340-signed audit log (0600), caller pubkey recorded
   src/futil.rs        atomic file discipline: unique 0600-at-birth temp + fsync + rename;
                       0700 state dirs — used everywhere secret material touches disk
 runner/               freehold-runner — the privileged connector bridge
-  src/mcp.rs          MCP-over-HTTP tool server (JSON-RPC 2.0): initialize / ping /
-                      tools/list / tools/call. Contract tools: list, exec, config,
-                      status, snapshot. exec/status/snapshot are pending (A4/A5/C).
-  src/registry.rs     targets the runner can reach (empty until Phase C connectors)
+  src/mcp.rs          MCP-over-HTTP tool server (JSON-RPC 2.0). Contract tools: list,
+                      exec, config, status, snapshot — all live. Every tools/call is
+                      signed by a GRANTED agent pubkey or fails closed (D).
+  src/exec.rs         the ONE generic primitive: exec(cmd, target, timeout) — local
+                      process or an owned connection; secret values resolved BY NAME
+                      from ciphertext, redacted from every response, audited
+  src/ssh.rs          russh connector: in-memory keys, pooled connections, TOFU host keys
   src/main.rs         CLI: `runner keys init`, `runner serve`
 control-plane/        freehold-control-plane — the engine room
   src/state.rs        runners + secrets store (atomic 0600 JSON; pubkeys + ciphertext only)
   src/provisioner.rs  B1 provision (generate identity → seal → ship → record pubkeys),
-                      B2 rotate-secret (re-seal a NEW credential), B3 revoke (cut-off +
-                      removes shipped secrets.json), with save-failure rollback
-  src/main.rs         CLI: provision / rotate-secret / revoke / list / serve
+                      B2 rotate-secret, B3 revoke, D grant/revoke-grant (re-ship package),
+                      with save-failure rollback
+  src/console.rs      the console AGENT: the CP's own identity (0600) that signs
+                      readiness probes against each runner — no side door, the
+                      runner still fails closed
+  src/web.rs          Phase F: loopback admin/ops web console (axum) — services at a
+                      glance with LIVE readiness, and provision/rotate/revoke/grant
+                      management. Not chat (Buzz owns conversation).
+  src/main.rs         CLI: provision / rotate-secret / revoke / list / grant / agent-create /
+                      serve (the web console)
+orchestrator/         freehold-orchestrator — the scripted CPA stand-in (E): a signed
+                      MCP client + onboard/readiness/exec/demo flows
+testkit/              freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
+                      an in-process russh sshd (shared by the connector tests)
+acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G): 9 checks,
+                      G1 happy path + G2 three connectors via the runner + G3 security
+                      invariants; `cargo run -p freehold-acceptance`
 ```
 
 ## Security model (no master key)
 
-- The CP never holds a private key (runner identities are dropped and zeroized) and never
-  holds plaintext (credentials are read from stdin, sealed, forgotten).
+- The CP never holds a private key that decrypts anything, and never holds plaintext
+  (credentials are sealed, forgotten). The only key under the CP state dir is the console
+  AGENT key — it signs readiness probes and is provably not the encryption recipient of
+  any runner (G3.3 checks this).
 - The runner holds ciphertext + its own injected private key; only that key opens its
   blobs, and a blob only opens under the secret name it was sealed with.
 - Rotation re-seals a NEW credential (the erase lever for your copies); revocation blocks
   provision/rotate and deletes the shipped credential. Honest limits are written down in
   `AGENTS.md` (no remote revocation of a capability someone else kept; re-keying and
-  epoch/staleness are named follow-ups, tracked post-A4).
+  epoch/staleness are named follow-ups; a RUNNING runner keeps its in-memory credential
+  until restart — rotate/re-grant reach the next boot).
 
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 60 tests across core / runner / control-plane
+cargo test --workspace        # 90 tests across core / runner / control-plane / orchestrator / acceptance
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --all --check       # CI gate
+cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
 ```
 
 ### Runner: identity + MCP server
 
 ```sh
-cargo run -p freehold-runner -- keys init          # writes ./.freehold/identity.json (0600)
-cargo run -p freehold-runner -- serve              # MCP over HTTP on 127.0.0.1:8787
+cargo run -p freehold-runner -- keys init     # writes ./.freehold/identity.json (0600)
+cargo run -p freehold-runner -- serve         # MCP over HTTP, default 127.0.0.1:8787
+                                              # (FREEHOLD_RUNNER_ADDR, loopback only)
 ```
 
-Manual handshake (session-id is per connection):
+The runner refuses non-loopback binds and non-loopback Origins (DNS-rebinding guard). Every
+`exec`/`config`/`status`/`snapshot` call must be signed by a GRANTED agent pubkey or it
+fails closed — the `control-plane grant <runner> <pubkey>` whitelist lives in the shipped
+package and is re-read from disk per call.
+
+### The console: provision a service, watch it go green (the F flow)
 
 ```sh
-curl -s -X POST http://127.0.0.1:8787/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
-curl -s -X POST http://127.0.0.1:8787/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'   # → list, exec, config, status, snapshot
+cargo run -p freehold-control-plane -- serve --state-dir ./.freehold/control-plane
+# open http://127.0.0.1:8080 — admin/ops only (chat is Buzz's job, Chunk 2)
 ```
 
-The runner refuses non-loopback binds and non-loopback Origins (DNS-rebinding guard). Real
-`exec` lands in Phase A4; until then exec/status/snapshot answer with a typed "pending
-phase" result.
+Paste a credential into the provision form (or `curl` the API). The console ships the
+runner package, registers the runner's MCP address, and the overview shows the runner's OWN
+self-check per target — 🟢/🟡/🔴 — probed through the same signed MCP channel an agent
+uses. Manage: rotate, revoke, grant/revoke-grant, set MCP addr.
 
-### Control plane: provision a service (B1 happy path)
+### Control plane CLI: provision a service (B1 happy path)
 
 ```sh
+cargo run -p freehold-control-plane -- agent-create my-agent --state-dir ./.freehold/control-plane   # the agent identity (0600)
+
 echo -n 'vultr-api-key-9876' | cargo run -p freehold-control-plane -- provision vultr \
   --kind vultr --address api.vultr.com --state-dir ./.freehold/control-plane
+
+# grant the agent, then it may call the runner (everything else fails closed):
+cargo run -p freehold-control-plane -- grant vultr <agent-pubkey> --state-dir ./.freehold/control-plane
 ```
 
 What just happened (verify it yourself):
@@ -103,7 +143,7 @@ What just happened (verify it yourself):
 - `.freehold/runner/vultr/identity.json` — the runner's injected private keys (0600)
 - `.freehold/runner/vultr/secrets.json` — the API key as sealed ciphertext only
 - `.freehold/control-plane/state.json` — pubkeys + ciphertext only; grep for the API key
-  and for `nostr_secret`/`enc_secret`: **zero matches** (B4's no-master-key proof)
+  and for `nostr_secret`/`enc_secret`: **zero matches** (the no-master-key proof)
 
 ```sh
 # rotate the credential (reads the NEW value from stdin; re-seals to the same runner key)
@@ -118,6 +158,24 @@ cargo run -p freehold-control-plane -- list --state-dir ./.freehold/control-plan
 
 Provision refuses to clobber: a name that exists, or a `--runner-dir` that already holds a
 package, errors instead of destroying a runner's key.
+
+### The orchestrator: the scripted CPA stand-in (E)
+
+```sh
+# onboard an existing service: provision -> ship -> self-check (hard-fails unless green) -> grant -> report
+echo -n 'vultr-api-key-9876' | cargo run -p freehold-orchestrator -- onboard blog \
+  --kind vultr --address api.vultr.com --agent-dir ./.freehold/control-plane/agent-my-agent \
+  --cp-state-dir ./.freehold/control-plane
+
+# drive a RUNNING runner with signed calls:
+cargo run -p freehold-orchestrator -- exec --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
+  --target blog --cmd 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"'
+
+cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
+  --steps steps.json   # [{target, cmd, secrets?, timeout_s?}]
+```
 
 ## Roadmap
 
@@ -137,6 +195,9 @@ Every PR runs two gates:
   BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
   `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`. The reviewer cites
   the CI status rather than re-running cargo.
+- **README drift**: when a PR changes something the README documents (subcommands, tools,
+  crates, test counts, status lines), the reviewer adds one `README:` line to the top-level
+  comment — a signal to update it or not, never a blocker, never nitpicked.
 
 Known quirk: **any PR whose tree changes a workflow file — adding *or* editing, including
 `claude.yml` itself — skips the AI review.** The review GitHub App refuses to issue a token

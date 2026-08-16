@@ -45,6 +45,15 @@ jobs:
             naming, comment-wording, or "could simplify" suggestions — no
             perfectionism.
 
+            README drift (signal only, never a blocker): if this PR changes
+            something the README documents (new subcommands, tools, crates,
+            test counts, status lines, CLI shapes), add ONE line to the
+            top-level comment under "README:" saying what should be updated.
+            This is a signal for the developer to update or ignore — it is
+            NEVER BLOCKING or IMPORTANT, never posted inline, and never
+            nitpicked for wording. Mention it once per PR, not in re-review
+            rounds.
+
             Severity tiers, stated in the top-level comment only:
             - BLOCKING: must fix before merge (security, data loss, silent breakage)
             - IMPORTANT: should fix in this PR (operator-facing wrong behavior,
