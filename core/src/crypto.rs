@@ -182,10 +182,16 @@ mod tests {
     fn tampered_fails() {
         let secret = random_secret();
         let pubkey = X25519PublicKey::from(&secret);
+        // aad must MATCH on both sides here — the assertion is about the
+        // bit-flip, not a name mismatch (a mismatch would pass vacuously).
         let mut blob = seal(pubkey.as_bytes(), b"ssh", b"secret").unwrap();
+        assert!(
+            open(secret.to_bytes().as_slice().try_into().unwrap(), b"ssh", &blob).is_ok(),
+            "pre-tamper open must succeed"
+        );
         let last = blob.len() - 1;
         blob[last] ^= 0x01;
-        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob).unwrap_err();
+        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), b"ssh", &blob).unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt(_)), "got {err:?}");
     }
 
@@ -224,7 +230,7 @@ mod tests {
         let mut blob = seal(pubkey.as_bytes(), b"ssh", b"secret").unwrap();
         blob[0] = 99;
         assert!(matches!(
-            open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob),
+            open(secret.to_bytes().as_slice().try_into().unwrap(), b"ssh", &blob),
             Err(CryptoError::BadVersion(99))
         ));
         assert!(matches!(open(&[0u8; 32], b"x", b"short"), Err(CryptoError::BadLength(_))));

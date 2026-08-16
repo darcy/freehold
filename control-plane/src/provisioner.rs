@@ -142,7 +142,14 @@ pub fn provision_runner(
             rotated_at: None,
         },
     );
-    store.save()?;
+    if let Err(e) = store.save() {
+        // Roll back the just-shipped package: the dir was EMPTY before (the
+        // PackageDirInUse guard), so removing what we wrote is safe and leaves
+        // no orphan runner holding a credential the CP has no record of.
+        let _ = std::fs::remove_file(req.runner_dir.join(identity::IDENTITY_FILE));
+        let _ = std::fs::remove_file(req.runner_dir.join(freehold_core::secrets::SECRETS_FILE));
+        return Err(e.into());
+    }
 
     Ok(ProvisionResult {
         name: req.name.to_string(),
@@ -196,15 +203,27 @@ pub fn rotate_secret(
 /// cut and lands in Chunk 2). If the credential was exposed, rotate it at the
 /// service provider: rotation inside the CP is blocked for revoked runners.
 pub fn revoke_runner(store: &StateStore, name: &str) -> Result<RunnerRecord, ProvisionError> {
-    let rec = store
-        .get_runner(name)
-        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
-    let secrets_path = rec.package_dir.join(freehold_core::secrets::SECRETS_FILE);
-    if secrets_path.exists() {
-        std::fs::remove_file(&secrets_path)?;
-    }
+    // State flip FIRST: blocking provision/rotate is the guarantee revoke can
+    // actually make. The unlink below is best-effort — the CP may not own the
+    // package dir (read-only mount, runner's uid), and a cleanup failure must
+    // not keep the runner active.
     store.set_runner_status(name, RunnerStatus::Revoked)?;
     store.save()?;
+
+    let secrets_path = store
+        .get_runner(name)
+        .map(|r| r.package_dir.join(freehold_core::secrets::SECRETS_FILE))
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    match std::fs::remove_file(&secrets_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            error = %e,
+            path = %secrets_path.display(),
+            "revoke: could not remove shipped secrets.json (best-effort)"
+        ),
+    }
+
     store
         .get_runner(name)
         .ok_or_else(|| StateError::RunnerNotFound(name.to_string()).into())

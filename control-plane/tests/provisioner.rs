@@ -2,6 +2,7 @@
 //! no-master-key proof (B4) — the CP state holds no plaintext and no private
 //! keys; only the runner's own injected key can open its ciphertext.
 
+use std::collections::BTreeMap;
 use std::fs;
 
 use freehold_control_plane::provisioner::{
@@ -159,6 +160,33 @@ fn duplicate_provision_is_rejected() {
     )
     .unwrap_err();
     assert!(matches!(err, ProvisionError::RunnerExists(_)), "got {err:?}");
+}
+
+#[test]
+fn swapped_package_entries_are_rejected() {
+    // The aad = map-key contract, made structural: seal two secrets for one
+    // runner under DIFFERENT names, ship them as a two-entry package, and
+    // prove neither blob opens under the other's name (swap defense).
+    let base = tempfile::tempdir().unwrap();
+    let runner_dir = base.path().join("runner");
+    freehold_core::futil::ensure_private_dir(&runner_dir).unwrap();
+    let id = Identity::generate();
+    let pubk = hex32(&id.enc_pubkey_hex());
+    let ct_a = crypto::seal(&pubk, b"a", b"cred-a").unwrap();
+    let ct_b = crypto::seal(&pubk, b"b", b"cred-b").unwrap();
+    let pkg = freehold_core::secrets::SecretPackage {
+        secrets: BTreeMap::from([
+            ("a".to_string(), hex::encode(&ct_a)),
+            ("b".to_string(), hex::encode(&ct_b)),
+        ]),
+    };
+    pkg.write_to_dir(&runner_dir).unwrap();
+
+    let key = hex32(&id.enc_secret_hex());
+    assert_eq!(crypto::open(&key, b"a", &ct_a).unwrap(), b"cred-a");
+    assert_eq!(crypto::open(&key, b"b", &ct_b).unwrap(), b"cred-b");
+    assert!(crypto::open(&key, b"b", &ct_a).is_err(), "swapped entry must fail");
+    assert!(crypto::open(&key, b"a", &ct_b).is_err(), "swapped entry must fail");
 }
 
 #[test]

@@ -95,8 +95,10 @@ impl StateStore {
     /// TODO(Postgres swap at MVP): atomic per-write is NOT atomic across
     /// open→mutate→save — two concurrent CP invocations on one state dir are
     /// last-writer-wins on the whole file and can drop a record whose keys
-    /// were already shipped. Needs an O_EXCL lockfile held across the
-    /// read-modify-write, or a real store.
+    /// were already shipped. Package writes also precede state persistence in
+    /// `provision` (in-process rollback on save failure; cross-process
+    /// atomicity still wants an O_EXCL lockfile held across the
+    /// read-modify-write, or a real store).
     pub fn save(&self) -> Result<(), StateError> {
         let json = serde_json::to_vec(&*self.inner.read())?;
         freehold_core::futil::write_0600_atomic(&self.dir.join(STATE_FILE), &json)?;
