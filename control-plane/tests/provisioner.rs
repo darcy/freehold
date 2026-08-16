@@ -59,6 +59,12 @@ fn provision_ships_package_and_cp_state_has_no_plaintext_or_keys() {
     // Package shipped: identity (both privkeys) + ciphertext-only secrets.json.
     assert!(runner_dir.join("identity.json").exists());
     assert!(runner_dir.join("secrets.json").exists());
+    // Target metadata shipped so the runner knows how to reach the service.
+    let shipped = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
+    let meta = shipped.targets.get("vultr").expect("target meta");
+    assert_eq!(meta.kind, "vultr");
+    assert_eq!(meta.address, "api.vultr.com");
+    assert_eq!(meta.secret, "vultr");
     let pkg_raw = fs::read_to_string(runner_dir.join("secrets.json")).unwrap();
     assert!(
         !pkg_raw.contains(std::str::from_utf8(secret).unwrap()),
@@ -221,6 +227,7 @@ fn swapped_package_entries_are_rejected() {
             ("a".to_string(), hex::encode(&ct_a)),
             ("b".to_string(), hex::encode(&ct_b)),
         ]),
+        targets: BTreeMap::new(),
     };
     pkg.write_to_dir(&runner_dir).unwrap();
     let loaded = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();

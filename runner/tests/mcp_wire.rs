@@ -262,7 +262,7 @@ async fn mcp_wire_shape() {
         status["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("\"state\": \"green\""),
+            .contains("\"local\": \"green\""),
         "local self-check must be green"
     );
 

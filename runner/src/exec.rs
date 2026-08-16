@@ -56,8 +56,10 @@ pub enum ExecError {
     SecretDecrypt(String, crypto::CryptoError),
     #[error("secret {0} is not valid utf-8")]
     SecretNotUtf8(String),
-    #[error("unknown target: {0} (known: local)")]
+    #[error("unknown target: {0} (known: local, or a shipped ssh target)")]
     UnknownTarget(String),
+    #[error("ssh error: {0}")]
+    Ssh(String),
     #[error("session {0} not found")]
     SessionNotFound(String),
     #[error("command timed out after {0}s")]
@@ -128,6 +130,26 @@ pub fn resolve_secrets(
         out.push((env_name(name), Zeroizing::new(value)));
     }
     Ok(out)
+}
+
+/// Decrypt ONE secret by name (used by connectors that need the raw value —
+/// e.g. an SSH private key PEM — not an env injection).
+pub fn resolve_secret_value(
+    identity: &Identity,
+    pkg: &SecretPackage,
+    name: &str,
+) -> Result<Zeroizing<String>, ExecError> {
+    let ct_hex = pkg
+        .secrets
+        .get(name)
+        .ok_or_else(|| ExecError::UnknownSecret(name.to_string()))?;
+    let blob = hex::decode(ct_hex)?;
+    let enc_key = hex_to_arr(&identity.enc_secret_hex())?;
+    let value = crypto::open(&enc_key, name.as_bytes(), &blob)
+        .map_err(|e| ExecError::SecretDecrypt(name.to_string(), e))?;
+    Ok(Zeroizing::new(
+        String::from_utf8(value).map_err(|_| ExecError::SecretNotUtf8(name.to_string()))?,
+    ))
 }
 
 /// Replace every occurrence of a secret value with `***`. Applied to ALL
@@ -443,6 +465,12 @@ impl ExecManager {
         Ok(snap)
     }
 
+    /// Sign + append an audit record for any completed exec (used by the MCP
+    /// layer for connector paths outside this manager, e.g. ssh).
+    pub fn audit_cmd(&self, cmd: &str, target: &str, result: &ExecResult, started_at: u64) {
+        self.audit(cmd, target, result, started_at)
+    }
+
     fn audit(&self, cmd: &str, target: &str, result: &ExecResult, started_at: u64) {
         let (Some(auditor), Some(state_dir)) = (&self.auditor, &self.state_dir) else {
             return;
@@ -537,7 +565,7 @@ async fn run_local_streaming(
 
 pub const AUDIT_FILE: &str = "audit.log";
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -618,6 +646,7 @@ mod tests {
         let blob = crypto::seal(&enc_pub, secret_name.as_bytes(), secret_value.as_bytes()).unwrap();
         let pkg = SecretPackage {
             secrets: BTreeMap::from([(secret_name.to_string(), hex::encode(blob))]),
+            targets: BTreeMap::new(),
         };
         pkg.write_to_dir(dir.path()).unwrap();
         (dir, id)

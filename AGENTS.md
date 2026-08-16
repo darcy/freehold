@@ -4,9 +4,9 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-**Status:** docs + locked Chunk 1 plan; Phases A (workspace, identity, MCP skeleton, generic
-exec A4, readiness A5, audit A6) and B (provisioner: seal/ship/rotate/revoke, no master
-key) are implemented and reviewed. Current work is uncommitted until reviewed.
+**Status:** docs + locked Chunk 1 plan; Phases A (identity, MCP skeleton, exec/readiness/
+audit), B (provisioner), and C1 (SSH connector: in-memory keys, pooled connections, TOFU
+host keys) are implemented and reviewed. Current work is uncommitted until reviewed.
 
 ## Navigation
 
@@ -51,7 +51,8 @@ secret provisioner + coarse grants + readiness. Connectors: SSH, Vultr, Backblaz
 no k8s.
 
 - Rust workspace: `core` (identity, sealed-box crypto, secret packaging, atomic-0600 fs),
-  `runner`, `control-plane` crates.
+  `runner` (+ ssh connector via russh, in-memory keys — plaintext never on disk),
+  `control-plane` crates.
 - MCP over HTTP for agent↔runner even though co-located — proves the real shape.
 - Test targets: VPS (dev/smoke) → old-laptop Proxmox (test/staging, SSH target only) → home
   dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.
@@ -73,6 +74,13 @@ no k8s.
   map for the process lifetime. A TTL reaper is Phase C-sized.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg yet) — a timed-out
   command can leave orphans running.
+- **SSH connector (C1) accepted gaps**: one command at a time per pooled connection (a
+  concurrent exec waits unboundedly — per-command channels are the real fix); a wedged
+  connection stays pooled after a timeout; ssh timeouts return empty output where local
+  returns partial; no IPv6 in `SshTarget::parse`; pooled connections aren't
+  re-authenticated after a rotate; half-open connections surface as an error rather than a
+  transparent reconnect; ssh injects NO secret env over the channel (extra requested
+  secrets are rejected explicitly — the honest contract while that's unimplemented).
 - **State store is single-process** (`StateStore` open→mutate→save is not cross-process
   atomic; TODO for the Postgres swap at MVP).
 

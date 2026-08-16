@@ -13,3 +13,4 @@ pub use freehold_core::{audit, crypto, identity, secrets};
 pub mod exec;
 pub mod mcp;
 pub mod registry;
+pub mod ssh;

@@ -14,10 +14,24 @@ use crate::futil;
 
 pub const SECRETS_FILE: &str = "secrets.json";
 
+/// Non-secret per-target metadata the CP ships alongside the ciphertext so
+/// the runner can enumerate what it reaches and how to connect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetMeta {
+    pub kind: String,
+    /// Connector-specific address (e.g. `user@host:port` for ssh).
+    pub address: String,
+    /// Which entry in `secrets` holds this target's credential.
+    pub secret: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretPackage {
     /// secret name -> sealed-box ciphertext (hex)
     pub secrets: BTreeMap<String, String>,
+    /// target name -> connector metadata (local is implicit; kind: ssh, …)
+    #[serde(default)]
+    pub targets: BTreeMap<String, TargetMeta>,
 }
 
 impl SecretPackage {
@@ -46,6 +60,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pkg = SecretPackage {
             secrets: BTreeMap::from([("vultr".into(), "ciphertext-hex".into())]),
+            targets: BTreeMap::from([(
+                "vultr".into(),
+                TargetMeta {
+                    kind: "vultr".into(),
+                    address: "api.vultr.com".into(),
+                    secret: "vultr".into(),
+                },
+            )]),
         };
         pkg.write_to_dir(dir.path()).unwrap();
         let loaded = SecretPackage::load(dir.path()).unwrap();

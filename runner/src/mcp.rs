@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 
 use crate::exec::{self, ExecManager};
 use crate::registry;
+use crate::ssh::{SshPool, SshTarget};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "freehold-runner";
@@ -61,6 +62,7 @@ pub struct RunnerContext {
 pub struct RunnerState {
     pub ctx: Arc<RunnerContext>,
     pub exec: Arc<ExecManager>,
+    pub ssh: Arc<SshPool>,
 }
 
 pub fn router(ctx: RunnerContext) -> Router {
@@ -75,6 +77,7 @@ pub fn router(ctx: RunnerContext) -> Router {
             Some(auditor),
             Some(Arc::from(state_dir.as_path())),
         )),
+        ssh: Arc::new(SshPool::new(&state_dir)),
     };
     Router::new()
         .route("/mcp", post(mcp_endpoint))
@@ -184,7 +187,9 @@ async fn mcp_endpoint(
             let name = params.get("name").and_then(Value::as_str).map(String::from);
             let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
             let (is_error, text) = match name.as_deref() {
-                Some("list") => match serde_json::to_string_pretty(&registry::registered()) {
+                Some("list") => match serde_json::to_string_pretty(&registry::registered(
+                    &state.ctx.package.targets,
+                )) {
                     Ok(s) => (false, s),
                     Err(e) => (true, format!("list failed: {e}")),
                 },
@@ -192,7 +197,7 @@ async fn mcp_endpoint(
                     "name": SERVER_NAME,
                     "version": env!("CARGO_PKG_VERSION"),
                     "transport": "mcp-over-http",
-                    "targets": registry::registered(),
+                    "targets": registry::registered(&state.ctx.package.targets),
                 })) {
                     Ok(s) => (false, s),
                     Err(e) => (true, format!("config failed: {e}")),
@@ -264,11 +269,76 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
         return Ok(serde_json::to_string_pretty(&snap)?);
     }
 
-    let cmd = args.cmd.ok_or(exec::ExecError::MissingField("cmd"))?;
-    let target = args.target.ok_or(exec::ExecError::MissingField("target"))?;
-    if target != "local" {
-        return Err(exec::ExecError::UnknownTarget(target));
+    let cmd = args
+        .cmd
+        .clone()
+        .ok_or(exec::ExecError::MissingField("cmd"))?;
+    let target = args
+        .target
+        .clone()
+        .ok_or(exec::ExecError::MissingField("target"))?;
+
+    // LOCAL first — a shipped target may not shadow it (ordering must match
+    // `status`, where local is checked before the shipped targets).
+    if target == "local" {
+        return handle_local_exec(state, &args, cmd).await;
     }
+
+    // SSH target (shipped package metadata): verbatim command over the pooled
+    // connection; credential = the target's private key PEM.
+    if let Some(meta) = state.ctx.package.targets.get(&target) {
+        if meta.kind != "ssh" {
+            return Err(exec::ExecError::UnknownTarget(target));
+        }
+        if args.stream {
+            return Err(exec::ExecError::Ssh(
+                "streaming over ssh is not implemented yet (C1 ships non-streaming exec)".into(),
+            ));
+        }
+        // The target's credential MUST be the ONLY requested secret: nothing
+        // injects extras over the channel, so anything else would silently
+        // run unset and surface as a confusing service failure.
+        if !args.secrets.contains(&meta.secret) {
+            return Err(exec::ExecError::UnknownSecret(format!(
+                "target {target} requires secret {} in `secrets`",
+                meta.secret
+            )));
+        }
+        if let Some(extra) = args.secrets.iter().find(|n| *n != &meta.secret) {
+            return Err(exec::ExecError::UnknownSecret(format!(
+                "target {target} accepts only its own credential {} — {extra:?} \
+                 was also requested; ssh does not inject env vars",
+                meta.secret
+            )));
+        }
+        let value =
+            exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
+        let redaction = [(exec::env_name(&meta.secret), value.clone())];
+        let endpoint = SshTarget::parse(&target, &meta.address)
+            .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+        let started = exec::now_secs();
+        let mut result = state
+            .ssh
+            .exec(&endpoint, value.as_str(), &cmd, args.timeout_s)
+            .await
+            .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+        // Same rule as local: secret values never reach the agent.
+        exec::redact(&mut result.stdout, &redaction);
+        exec::redact(&mut result.stderr, &redaction);
+        // The locked model signs EVERY executed command — ssh included.
+        state.exec.audit_cmd(&cmd, &target, &result, started);
+        return Ok(serde_json::to_string_pretty(&result)?);
+    }
+
+    Err(exec::ExecError::UnknownTarget(target))
+}
+
+async fn handle_local_exec(
+    state: &RunnerState,
+    args: &ExecArgs,
+    cmd: String,
+) -> Result<String, exec::ExecError> {
+    let target = "local".to_string();
 
     let secrets = exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
 
@@ -291,30 +361,62 @@ async fn handle_exec(state: &RunnerState, arguments: &Value) -> Result<String, e
 }
 
 async fn handle_status(state: &RunnerState, arguments: &Value) -> Result<String, exec::ExecError> {
-    let target = arguments
-        .get("target")
-        .and_then(Value::as_str)
-        .unwrap_or("local");
-    if target != "local" {
-        return Err(exec::ExecError::UnknownTarget(target.to_string()));
+    let target = arguments.get("target").and_then(Value::as_str);
+    let requested: Vec<String> = match target {
+        Some(t) => vec![t.to_string()],
+        None => {
+            let mut names: Vec<String> = state.ctx.package.targets.keys().cloned().collect();
+            names.push("local".into());
+            names
+        }
+    };
+
+    let mut report: serde_json::Map<String, Value> = serde_json::Map::new();
+    for entry in requested {
+        let state_str = if entry == "local" {
+            local_status(state).await?
+        } else if let Some(meta) = state.ctx.package.targets.get(&entry) {
+            if meta.kind != "ssh" {
+                "red(unsupported kind)".to_string()
+            } else {
+                ssh_status(state, &entry, meta).await?
+            }
+        } else {
+            return Err(exec::ExecError::UnknownTarget(entry));
+        };
+        report.insert(entry, Value::String(state_str));
     }
-    // The runner's OWN self-check: can it reach its service with its creds?
+    Ok(serde_json::to_string_pretty(&report)?)
+}
+
+/// Runner's OWN self-check against the local host.
+async fn local_status(state: &RunnerState) -> Result<String, exec::ExecError> {
     match state.exec.self_check("uname -s").await {
-        Ok(r) if r.exit_code == Some(0) => Ok(serde_json::to_string_pretty(&json!({
-            "target": target,
-            "state": "green",
-            "detail": "local exec check passed",
-        }))?),
-        Ok(r) => Ok(serde_json::to_string_pretty(&json!({
-            "target": target,
-            "state": "yellow",
-            "detail": format!("check exited {}", r.exit_code.unwrap_or(-1)),
-        }))?),
-        Err(e) => Ok(serde_json::to_string_pretty(&json!({
-            "target": target,
-            "state": "red",
-            "detail": e.to_string(),
-        }))?),
+        Ok(r) if r.exit_code == Some(0) => Ok("green".into()),
+        Ok(r) => Ok(format!("yellow(exit {})", r.exit_code.unwrap_or(-1))),
+        Err(e) => Ok(format!("red({e})")),
+    }
+}
+
+/// Runner's OWN self-check against an ssh target.
+async fn ssh_status(
+    state: &RunnerState,
+    name: &str,
+    meta: &freehold_core::secrets::TargetMeta,
+) -> Result<String, exec::ExecError> {
+    let value =
+        match exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret) {
+            Ok(v) => v,
+            Err(e) => return Ok(format!("red({e})")),
+        };
+    let endpoint = match SshTarget::parse(name, &meta.address) {
+        Ok(e) => e,
+        Err(e) => return Ok(format!("red({e})")),
+    };
+    match state.ssh.self_check(&endpoint, value.as_str()).await {
+        Ok(true) => Ok("green".into()),
+        Ok(false) => Ok("yellow(self-check failed)".into()),
+        Err(e) => Ok(format!("red({e})")),
     }
 }
 
