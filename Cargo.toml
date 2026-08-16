@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["core", "runner", "control-plane", "orchestrator"]
+members = ["core", "runner",
+    "testkit", "control-plane", "orchestrator",
+    "acceptance"]
 
 [workspace.package]
 version = "0.1.0"

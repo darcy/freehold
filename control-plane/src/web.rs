@@ -55,7 +55,7 @@ struct WebState {
     console: Console,
 }
 
-pub fn router(store: StateStore, console: Console) -> Router {
+pub fn router(store: Arc<StateStore>, console: Console) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
@@ -67,10 +67,7 @@ pub fn router(store: StateStore, console: Console) -> Router {
         .route("/api/revoke-grant", post(revoke_grant))
         .route("/api/runner-addr", post(runner_addr))
         .layer(DefaultBodyLimit::max(256 * 1024))
-        .with_state(WebState {
-            store: Arc::new(store),
-            console,
-        })
+        .with_state(WebState { store, console })
 }
 
 // ---------------------------------------------------------------------------

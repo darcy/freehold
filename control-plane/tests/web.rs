@@ -6,6 +6,7 @@
 //! live readiness against an in-process runner, and the DNS-rebinding guard.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use freehold_control_plane::console::Console;
 use freehold_control_plane::state::StateStore;
@@ -23,7 +24,7 @@ async fn boot_web(base: &std::path::Path) -> (String, tokio::task::JoinHandle<()
     let cp_dir = base.join("cp");
     let store = StateStore::open(&cp_dir).unwrap();
     let console = Console::load_or_create(&cp_dir).unwrap();
-    let app = web::router(store, console);
+    let app = web::router(Arc::new(store), console);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {

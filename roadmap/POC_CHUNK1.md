@@ -149,15 +149,15 @@ F2. Manage runners / secrets / grants from the UI. Admin/ops view, NOT chat.
 
 ### Phase G — Acceptance script
 
-- [ ] [ ] 
+- [x] [x] 
 
 G1. The algolia-style happy path (existing service → runner → 🟢 → grant → green view).
 
-- [ ] [ ] 
+- [x] [x] 
 
 G2. SSH exec, Vultr create/destroy, B2 round-trip — all via runner.
 
-- [ ] [ ] 
+- [x] [x] 
 
 G3. Verify: secrets never in agent context; runner holds only ciphertext + injected key;  
 no master key; revoking membership cuts off; rotation re-encrypts.
