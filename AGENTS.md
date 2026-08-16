@@ -77,6 +77,11 @@ no k8s.
   signature from a GRANTED agent pubkey (fail closed) — a random local process can no
   longer exec. Remaining: session state isn't tied to the grant (a signed request is
   verified fresh each call), and relay membership (Chunk 2) is the real cut.
+- **Backups outlive "rotation = erase your copies"** (review-surfaced): `/srv/data` is part
+  of the PBS + TrueNAS + Backblaze set and can hold runner secrets ciphertext, so a revoke
+  that deletes the shipped `secrets.json` still leaves the old blob in every off-site
+  snapshot — same class as "a blob someone else kept still opens"; backup retention is a
+  named copy-holder follow-up.
 - **Rotate/re-grant do not reach a RUNNING runner** (G-surfaced): the runner holds its
   package in memory from boot (only GRANTS are re-read from disk per call). A rotate
   re-ships new ciphertext that a RESTARTED runner decrypts, but the live runner keeps

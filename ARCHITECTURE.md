@@ -215,7 +215,7 @@ Not every service's data belongs in the same place. Four placement tiers, each m
 | **K8s host LXC/VM** | k8s binaries, OS | PBS (machine-level) | Standard rootfs backup, same as any LXC |
 | **control_plane Postgres (PVC on k8s host)** | prompts, grants, service registry, audit | PBS + TrueNAS (scheduled) | Same bucket as any app database — important, not reproducible |
 | **Ephemeral service pods** | agent runtime, scratch | *Not backed up* | `emptyDir`, fully reproducible from AGENTS.md + skill — same logic as excluding `/var/lib/docker` |
-| **Team/project environment LXCs** | rootfs / `/srv/data` (repo, compose, runner secrets ciphertext) / `/srv/nobackup` (relocated container stores, caches) | rootfs+`/srv/data` → PBS+TrueNAS; `/srv/nobackup` → excluded (`backup=0`) | Mirrors the Docker-host LXC pattern — the `/srv` split IS the backup config |
+| **Team/project environment LXCs** | rootfs / `/srv/data` (repo, compose, runner secrets ciphertext) / `/srv/nobackup` (relocated container stores, caches, PVCs excluded by root pinning) | rootfs+`/srv/data` → PBS+TrueNAS; `/srv/nobackup` → excluded (as its own mount point, `backup=0` on the `mpN` entry) | Mirrors the Docker-host LXC pattern — the `/srv` split IS the backup config, implemented as two mount points |
 | **Data-heavy services** (Nextcloud, Immich, media) | live user datasets under `/srv/data/<service>` | TrueNAS (mounted directly, not local NVMe) + ZFS snapshots + Backblaze off-site | Proxmox stays fast/small; service LXC mounts TrueNAS via NFS/iSCSI rather than storing data locally |
 
 A skill declares which tier it needs, and CPA/the provisioning flow places it accordingly:
@@ -249,18 +249,23 @@ The tiers above encode onto every LXC/VM as a single top-level split, so the bac
 │   │                     #   secrets ciphertext
 │   └── ...
 │
-└── nobackup/             # reproducible / disposable — excluded (backup=0)
+└── nobackup/             # reproducible / disposable — its MOUNT POINT carries
+                          #   backup=0 (the flag lives on the mpN entry, not
+                          #   on a directory — see below)
     ├── docker/           # container stores: daemon roots RELOCATED here (or
     ├── containerd/       #   bind-mounted), so the exclude is structural, not
-    ├── rancher/          #   a fragile path list (k3s/rancher state is
-    │                     #   reconstructible from control_plane Postgres —
-    │                     #   deterministic pods + config-as-data)
+    ├── rancher/          #   a fragile path list — but ONLY the daemon root:
+    │                     #   k3s/rancher state is reconstructible from
+    │                     #   control_plane Postgres (deterministic pods +
+    │                     #   config-as-data); durable PVCs are pinned under
+    │                     #   /srv/data, never the daemon root
     ├── caches/
     └── scratch/
 ```
 
-*   **The backup rule is the split:** rootfs + `/srv/data` = the PBS job; `/srv/nobackup` is never in it. Nothing under `/srv/nobackup` is individually "important" — if it needs a carve-out, it was filed in the wrong half.
+*   **The backup rule is the split, implemented as two MOUNT POINTS.** `/srv/data` and `/srv/nobackup` are separate `mpN:` volume mounts, not plain directories inside the rootfs — `backup=0` is a property of the `nobackup` mount-point entry (`mp1: …,mp=/srv/nobackup,backup=0`), which is the only way Proxmox honors it. vzdump takes each mount point on its own terms: rootfs + `/srv/data` = the PBS job; `/srv/nobackup` never in it. On a box that can't add the second mount point, `vzdump --exclude-path /srv/nobackup` is the rootfs fallback. Nothing under `/srv/nobackup` is individually "important" — if it needs a carve-out, it was filed in the wrong half.
 *   **Container stores relocate under `/srv/nobackup`** (`docker`/`containerd`/`rancher` daemon roots), mirroring the existing "exclude `/var/lib/docker`" Docker-host LXC pattern — but by layout, not by config list.
+*   **Durable PVCs are pinned under `/srv/data` — never the daemon root.** k3s's default `local-path` provisioner stores PVCs *under the rancher root* (`/var/lib/rancher/k3s/storage/…`); relocating that whole root would drag the control_plane Postgres PVC — the thing every "reconstructible from" claim depends on — into the excluded half, silently. Configure provisioner roots explicitly: disposable volumes on a `nobackup`-rooted storage class, durable ones pinned to `/srv/data/k8s-volumes`.
 *   **Data-heavy services mount TrueNAS under `/srv/data/<service>`** — backed by TrueNAS snapshots + Backblaze off-site, not by PBS rootfs copies.
 *   **Skills map onto it:** `needs: {volume: …}` → `/srv/data/<service>`; a scratch-only service (nothing durable) → `/srv/nobackup/<service>` or a pod `emptyDir`. `needs.volume` is the declaration that something is durable — absence means disposable by default.
 
