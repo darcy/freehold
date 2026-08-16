@@ -40,6 +40,8 @@ pub enum ProvisionError {
     BadKeyLen(usize),
     #[error("invalid runner name {0:?}: must be a bare name (no '/', no leading '.')")]
     InvalidName(String),
+    #[error("package dir {0} already holds a runner — refusing to clobber")]
+    PackageDirInUse(PathBuf),
     #[error("runner {0} already exists")]
     RunnerExists(String),
     #[error("runner {0} is revoked — provision a new service or restore it")]
@@ -77,12 +79,26 @@ pub fn provision_runner(
     if req.name.is_empty() || req.name.contains('/') || req.name.starts_with('.') {
         return Err(ProvisionError::InvalidName(req.name.to_string()));
     }
+    // Same-name cases first — clearer diagnostics than the dir guard below.
     match store.get_runner(req.name) {
         Some(r) if r.status == RunnerStatus::Revoked => {
             return Err(ProvisionError::RunnerRevoked(req.name.to_string()))
         }
         Some(_) => return Err(ProvisionError::RunnerExists(req.name.to_string())),
         None => {}
+    }
+    // `runner_dir` is caller-supplied (and FREEHOLD_RUNNER_STATE_DIR applies
+    // to EVERY provision) — shipping a second runner into a dir that already
+    // holds a package silently destroys the first runner's private key and
+    // ciphertext while CP state still lists it active with undecryptable
+    // ciphertext. Refuse instead.
+    if req.runner_dir.join(identity::IDENTITY_FILE).exists() {
+        return Err(ProvisionError::PackageDirInUse(req.runner_dir.to_path_buf()));
+    }
+    for rec in store.snapshot().runners.values() {
+        if rec.package_dir == req.runner_dir {
+            return Err(ProvisionError::PackageDirInUse(req.runner_dir.to_path_buf()));
+        }
     }
 
     let id = identity::Identity::generate();
@@ -172,11 +188,18 @@ pub fn rotate_secret(
 }
 
 /// B3 — the cut-off lever. Revoked runners refuse re-provision/rotate and read
-/// as revoked in `list`. (With the relay, this becomes Nostr membership
-/// revocation; rotation above is the separate "erase" lever.)
+/// as revoked in `list`. The shipped `secrets.json` is removed so the stored
+/// credential capability dies with membership; `identity.json` stays (the
+/// runner's own identity — with the relay, membership revocation is the real
+/// cut and lands in Chunk 2). If the credential was exposed, rotate it at the
+/// service provider: rotation inside the CP is blocked for revoked runners.
 pub fn revoke_runner(store: &StateStore, name: &str) -> Result<RunnerRecord, ProvisionError> {
-    if store.get_runner(name).is_none() {
-        return Err(StateError::RunnerNotFound(name.to_string()).into());
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    let secrets_path = rec.package_dir.join(freehold_core::secrets::SECRETS_FILE);
+    if secrets_path.exists() {
+        std::fs::remove_file(&secrets_path)?;
     }
     store.set_runner_status(name, RunnerStatus::Revoked)?;
     store.save()?;

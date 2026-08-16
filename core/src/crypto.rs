@@ -36,10 +36,36 @@ pub enum CryptoError {
     BadVersion(u8),
     #[error("sealed blob too short to parse ({0} bytes)")]
     BadLength(usize),
+    #[error("non-contributory X25519 exchange (low-order point)")]
+    NonContributory,
     #[error("kdf error: {0}")]
     Kdf(#[from] hkdf::InvalidLength),
     #[error("decryption failed: {0}")]
     Decrypt(#[from] chacha20poly1305::Error),
+}
+
+/// Sealed-box key schedule:
+/// `AEAD_key = HKDF-SHA256(salt=SALT, ikm=DH(eph_sk, recip_pk), info=eph_pk ‖ recip_pk)`.
+/// Binding both public keys into `info` pins a blob to the recipient it was
+/// sealed to; rejecting non-contributory DH stops low-order-point forgery
+/// (an all-zero shared secret would otherwise yield a PREDICTABLE key to
+/// anyone who can write secrets.json, without knowing either private key).
+fn derive_key(
+    eph_public: &X25519PublicKey,
+    recipient_public: &X25519PublicKey,
+    shared: &x25519_dalek::SharedSecret,
+) -> Result<zeroize::Zeroizing<[u8; KEY_LEN]>, CryptoError> {
+    if !shared.was_contributory() {
+        return Err(CryptoError::NonContributory);
+    }
+    let mut info = [0u8; EPHEMERAL_PUB_LEN * 2];
+    info[..EPHEMERAL_PUB_LEN].copy_from_slice(eph_public.as_bytes());
+    info[EPHEMERAL_PUB_LEN..].copy_from_slice(recipient_public.as_bytes());
+
+    let ikm = zeroize::Zeroizing::new(*shared.as_bytes());
+    let mut key = zeroize::Zeroizing::new([0u8; KEY_LEN]);
+    Hkdf::<Sha256>::new(Some(SALT), ikm.as_ref()).expand(&info, &mut *key)?;
+    Ok(key)
 }
 
 /// Seal `plaintext` to `recipient_pubkey` (the runner's X25519 encryption
@@ -53,10 +79,7 @@ pub fn seal(recipient_pubkey: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8
     let recipient = X25519PublicKey::from(*recipient_pubkey);
     let shared = eph_secret.diffie_hellman(&recipient);
 
-    let ikm = zeroize::Zeroizing::new(*shared.as_bytes());
-    let mut key = zeroize::Zeroizing::new([0u8; KEY_LEN]);
-    Hkdf::<Sha256>::new(Some(SALT), ikm.as_ref()).expand(&[], &mut *key)?;
-
+    let key = derive_key(&eph_public, &recipient, &shared)?;
     let nonce = random_nonce();
     let cipher = ChaCha20Poly1305::new(&(*key).into());
     let ct = cipher.encrypt(&Nonce::from(nonce), plaintext)?;
@@ -70,7 +93,10 @@ pub fn seal(recipient_pubkey: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8
 }
 
 /// Open a sealed blob with the runner's static secret. The ONLY key that can
-/// decrypt a blob is the private half of the pubkey it was sealed to.
+/// decrypt a blob is the private half of the pubkey it was sealed to — the
+/// recipient pubkey bound into the key schedule is DERIVED from the secret,
+/// so a blob sealed to a different recipient (or forged via a low-order
+/// ephemeral point) fails here even against a tampered blob.
 pub fn open(recipient_secret: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let header = 1 + EPHEMERAL_PUB_LEN + NONCE_LEN;
     if blob.len() < header {
@@ -82,12 +108,10 @@ pub fn open(recipient_secret: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>, Cr
     let eph_public = X25519PublicKey::from(<[u8; EPHEMERAL_PUB_LEN]>::try_from(&blob[1..33]).unwrap());
     let nonce = Nonce::from(<[u8; NONCE_LEN]>::try_from(&blob[33..45]).unwrap());
     let secret = StaticSecret::from(*recipient_secret);
+    let recipient_public = X25519PublicKey::from(&secret);
     let shared = secret.diffie_hellman(&eph_public);
 
-    let ikm = zeroize::Zeroizing::new(*shared.as_bytes());
-    let mut key = zeroize::Zeroizing::new([0u8; KEY_LEN]);
-    Hkdf::<Sha256>::new(Some(SALT), ikm.as_ref()).expand(&[], &mut *key)?;
-
+    let key = derive_key(&eph_public, &recipient_public, &shared)?;
     let cipher = ChaCha20Poly1305::new(&(*key).into());
     Ok(cipher.decrypt(&nonce, &blob[45..])?)
 }
@@ -143,6 +167,20 @@ mod tests {
         blob[last] ^= 0x01;
         let err = open(secret.to_bytes().as_slice().try_into().unwrap(), &blob).unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn forged_low_order_ephemeral_is_rejected() {
+        // Attacker-writable secret: a blob whose ephemeral pubkey is a
+        // low-order point (all-zero). Pre-binding, this yields an all-zero
+        // shared secret -> PREDICTABLE AEAD key -> a forgeable credential.
+        let secret = random_secret();
+        let mut blob = vec![FORMAT_VERSION];
+        blob.extend_from_slice(&[0u8; 32]); // low-order ephemeral pubkey
+        blob.extend_from_slice(&[0u8; 12]); // nonce
+        blob.extend_from_slice(&[0u8; 16]); // ct
+        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), &blob).unwrap_err();
+        assert!(matches!(err, CryptoError::NonContributory), "got {err:?}");
     }
 
     #[test]

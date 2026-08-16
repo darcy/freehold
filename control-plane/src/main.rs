@@ -133,6 +133,8 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let rec = provisioner::revoke_runner(&store, &args.name)?;
             println!("revoked runner {} (was {})", args.name, rec.nostr_pubkey);
+            println!("note: the shipped secrets.json was removed, but the credential itself may");
+            println!("      still be valid at the service — rotate it upstream if it was exposed");
             Ok(())
         }
         Cmd::List(args) => {
@@ -185,16 +187,19 @@ async fn main() -> Result<()> {
 }
 
 /// Read a one-line secret from stdin, zeroized on drop. Never echoed, never
-/// logged, never persisted as plaintext.
+/// logged, never persisted as plaintext. Every copy (read buffer, trimmed
+/// value) is under `Zeroizing` — a core dump or heap spray reads nothing.
 fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
     eprintln!("{prompt}");
-    let mut line = String::new();
+    // with_capacity: read_line can still realloc mid-read and orphan a
+    // partial copy; a sized buffer makes that unlikely for real credentials.
+    let mut line = Zeroizing::new(String::with_capacity(256));
     std::io::stdin().read_line(&mut line)?;
-    let value = line.trim_end_matches(['\r', '\n']).to_string();
+    let value = Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_string());
     if value.is_empty() {
         anyhow::bail!("empty secret");
     }
-    Ok(Zeroizing::new(value))
+    Ok(value)
 }
 
 async fn root() -> Json<Value> {

@@ -162,6 +162,55 @@ fn duplicate_provision_is_rejected() {
 }
 
 #[test]
+fn package_dir_in_use_is_refused() {
+    let (base, store) = setup();
+    let runner_dir = base.path().join("shared");
+    provision(&store, "a", b"key-a", &runner_dir);
+    // Same dir via explicit path (the FREEHOLD_RUNNER_STATE_DIR footgun):
+    // shipping b here would replace a's identity.json + secrets.json while
+    // state still lists a active with undecryptable ciphertext.
+    let err = provision_runner(
+        &store,
+        &ProvisionRequest {
+            name: "b",
+            kind: "vultr",
+            address: "x",
+            secret: b"key-b",
+            runner_dir: &runner_dir,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ProvisionError::PackageDirInUse(_)), "got {err:?}");
+    // a's package is intact and still decryptable.
+    let runner_id = Identity::load(&runner_dir).unwrap();
+    let blob = hex::decode(store.get_secret("a").unwrap().ciphertext_hex).unwrap();
+    assert_eq!(
+        crypto::open(&hex32(&runner_id.enc_secret_hex()), &blob).unwrap(),
+        b"key-a"
+    );
+}
+
+#[test]
+fn revoke_removes_shipped_credential() {
+    let (base, store) = setup();
+    let runner_dir = base.path().join("runner");
+    provision(&store, "ssh", b"key", &runner_dir);
+    assert!(runner_dir.join("identity.json").exists());
+    assert!(runner_dir.join(freehold_core::secrets::SECRETS_FILE).exists());
+
+    provisioner::revoke_runner(&store, "ssh").unwrap();
+    assert_eq!(store.get_runner("ssh").unwrap().status, RunnerStatus::Revoked);
+    assert!(
+        !runner_dir.join(freehold_core::secrets::SECRETS_FILE).exists(),
+        "revoke must remove the shipped credential capability"
+    );
+    assert!(
+        runner_dir.join("identity.json").exists(),
+        "the runner's own identity stays"
+    );
+}
+
+#[test]
 fn invalid_names_are_rejected() {
     let (base, store) = setup();
     let runner_dir = base.path().join("runner");
