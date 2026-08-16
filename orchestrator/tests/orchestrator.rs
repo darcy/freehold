@@ -92,7 +92,7 @@ async fn onboard_then_signed_exec_roundtrip() {
     // Now the live runner (serve the shipped dir) + a signed exec on local.
     let (client, server) =
         serve_client(&base.path().join("runner"), &adir, &report.runner_pubkey).await;
-    let out = client.exec("local", "echo onboard-ok", &[]).unwrap();
+    let out = client.exec("local", "echo onboard-ok", &[], 60).unwrap();
     assert_eq!(out.stdout.trim(), "onboard-ok");
     assert_eq!(out.exit_code, Some(0));
 
@@ -124,7 +124,9 @@ async fn ungranted_agent_is_denied() {
         report.runner_pubkey.clone(),
     )
     .unwrap();
-    let err = stranger_client.exec("local", "echo nope", &[]).unwrap_err();
+    let err = stranger_client
+        .exec("local", "echo nope", &[], 60)
+        .unwrap_err();
     let msg = format!("{err:?}");
     assert!(
         msg.contains("-32001") && msg.contains("unauthorized"),
@@ -150,21 +152,31 @@ async fn demo_steps_run_and_report_failures() {
             target: "local".into(),
             cmd: "echo step-one".into(),
             secrets: vec![],
+            timeout_s: 60,
         },
         flows::DemoStep {
             target: "local".into(),
             cmd: "printf step-two".into(),
             secrets: vec![],
+            timeout_s: 60,
         },
         flows::DemoStep {
             target: "local".into(),
             cmd: "exit 3".into(),
             secrets: vec![],
+            timeout_s: 60,
+        },
+        flows::DemoStep {
+            target: "local".into(),
+            cmd: "sleep 5".into(),
+            secrets: vec![],
+            timeout_s: 1,
         },
         flows::DemoStep {
             target: "missing-target".into(),
             cmd: "echo nope".into(),
             secrets: vec![],
+            timeout_s: 60,
         },
     ];
     let results = flows::run_demo(&client, &steps).unwrap();
@@ -174,8 +186,12 @@ async fn demo_steps_run_and_report_failures() {
         !results[2].ok && results[2].exit_code == Some(3),
         "a non-zero exit must be reported as a FAILED step"
     );
-    assert!(!results[3].ok, "unknown target must fail the step");
-    assert!(results[3].error.is_some());
+    assert!(
+        results[3].timed_out && !results[3].ok,
+        "a step overrunning timeout_s must report TIMEOUT, not a client-side error"
+    );
+    assert!(!results[4].ok, "unknown target must fail the step");
+    assert!(results[4].error.is_some());
 
     server.abort();
 }

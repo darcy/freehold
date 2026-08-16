@@ -74,6 +74,9 @@ struct ExecArgs {
     target: String,
     /// Command (verbatim)
     cmd: String,
+    /// Runner-side watchdog in seconds (client deadline sits above it)
+    #[arg(long, default_value_t = 60)]
+    timeout: u64,
 }
 
 #[derive(Args)]
@@ -119,7 +122,7 @@ async fn main() -> Result<()> {
                 )
             } else {
                 format!(
-                    "ONBOARDED {} (engine room alive; SERVICE NOT GREEN: {service_state} —                      inspect the credential/address)",
+                    "ONBOARDED {} (engine room alive; SERVICE NOT GREEN: {service_state})",
                     report.name
                 )
             };
@@ -145,7 +148,7 @@ async fn main() -> Result<()> {
                 &args.common.runner_pubkey,
             )?;
             let secret_refs: Vec<&str> = args.secret.iter().map(String::as_str).collect();
-            let out = client.exec(&args.target, &args.cmd, &secret_refs)?;
+            let out = client.exec(&args.target, &args.cmd, &secret_refs, args.timeout)?;
             print!("{}", out.stdout);
             if !out.stderr.is_empty() {
                 eprint!("{}", out.stderr);
@@ -176,7 +179,13 @@ async fn main() -> Result<()> {
             let results = flows::run_demo(&client, &steps)?;
             let mut failed = 0;
             for r in &results {
-                let mark = if r.ok { "ok" } else { "FAIL" };
+                let mark = if r.ok {
+                    "ok"
+                } else if r.timed_out {
+                    "TIMEOUT"
+                } else {
+                    "FAIL"
+                };
                 if !r.ok {
                     failed += 1;
                 }

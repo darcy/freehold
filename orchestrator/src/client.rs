@@ -57,6 +57,10 @@ pub struct McpClient {
 }
 
 impl McpClient {
+    /// Global timeout for non-exec calls (status probes): a wedged runner
+    /// must not hang the orchestrator forever.
+    const BASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     pub fn new(url: String, auth: AgentAuth, runner_pubkey: String) -> Result<Self, ClientError> {
         if runner_pubkey.len() != 64 || !runner_pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ClientError::BadAudience);
@@ -68,21 +72,38 @@ impl McpClient {
             agent: ureq::Agent::new_with_config(
                 ureq::config::Config::builder()
                     .http_status_as_error(false)
-                    .timeout_global(Some(std::time::Duration::from_secs(30)))
+                    .timeout_global(Some(Self::BASE_TIMEOUT))
                     .build(),
             ),
         })
     }
 
+    /// A request agent whose HTTP deadline is `runner_timeout + margin`.
+    /// The RUNNER's `timeout_s` watchdog is the honest deadline — the client
+    /// must outlive it so a slow command surfaces as `timed_out: true`, not
+    /// as a client-side Http error while the command keeps running.
+    fn exec_agent(runner_timeout_s: u64) -> ureq::Agent {
+        ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(std::time::Duration::from_secs(runner_timeout_s + 30)))
+                .build(),
+        )
+    }
+
     fn raw(&self, body: Value) -> Result<Value, ClientError> {
+        self.raw_with(&self.agent, body)
+    }
+
+    /// Sign and send, using `agent` (caller picks the deadline).
+    fn raw_with(&self, agent: &ureq::Agent, body: Value) -> Result<Value, ClientError> {
         let raw = body.to_string();
         // Sign a single timestamp — the header must carry the SAME ts the
         // signature covers.
         let ts = auth::now_secs();
         let ev = auth::sign_body(&self.auth.secret, &self.runner_pubkey, ts, &raw);
         let (pubkey, sig) = (self.auth.pubkey.clone(), ev.sig);
-        let resp = self
-            .agent
+        let resp = agent
             .post(&self.url)
             .header("Content-Type", "application/json")
             .header(auth::PUBKEY_HEADER, pubkey)
@@ -136,20 +157,47 @@ impl McpClient {
         serde_json::from_value(status).map_err(|e| ClientError::ToolError(format!("status: {e}")))
     }
 
-    /// Run exec; returns stdout when successful.
+    /// Run exec with a runner-side watchdog of `timeout_s`. The client HTTP
+    /// deadline is set above it (exec_agent), so a slow command is reported
+    /// by the RUNNER as `timed_out: true` — never as a client-side error with
+    /// the command still running.
     pub fn exec(
         &self,
         target: &str,
         cmd: &str,
         secrets: &[&str],
+        timeout_s: u64,
     ) -> Result<ExecOutcome, ClientError> {
         let arguments = json!({
             "cmd": cmd,
             "target": target,
             "secrets": secrets,
+            "timeout_s": timeout_s,
         });
-        let resp = self.call("exec", arguments)?;
-        let text = resp["result"]["content"][0]["text"]
+        let agent = Self::exec_agent(timeout_s);
+        let resp = self.raw_with(
+            &agent,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "exec", "arguments": arguments }
+            }),
+        )?;
+        if let Some(err) = resp.get("error") {
+            let code = err.get("code").and_then(Value::as_i64).unwrap_or(-1);
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("(no message)");
+            return Err(ClientError::Rpc(format!("{code}: {msg}")));
+        }
+        let result = &resp["result"];
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            let text = result["content"][0]["text"].as_str().unwrap_or("(no text)");
+            return Err(ClientError::ToolError(text.to_string()));
+        }
+        let text = result["content"][0]["text"]
             .as_str()
             .ok_or_else(|| ClientError::ToolError("missing exec text".into()))?;
         let out: ExecOutcome = serde_json::from_str(text)

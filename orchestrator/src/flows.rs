@@ -133,6 +133,13 @@ pub struct DemoStep {
     pub cmd: String,
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Runner-side watchdog; a step that overruns reports TIMEOUT (default 60s).
+    #[serde(default = "default_timeout")]
+    pub timeout_s: u64,
+}
+
+fn default_timeout() -> u64 {
+    60
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +147,7 @@ pub struct StepResult {
     pub index: usize,
     pub target: String,
     pub ok: bool,
+    pub timed_out: bool,
     pub exit_code: Option<i32>,
     pub stdout_head: String,
     pub stderr_head: String,
@@ -151,12 +159,13 @@ pub fn run_demo(client: &McpClient, steps: &[DemoStep]) -> Result<Vec<StepResult
     for (idx, step) in steps.iter().enumerate() {
         let secret_refs: Vec<&str> = step.secrets.iter().map(String::as_str).collect();
         let outcome: Result<ExecOutcome, crate::client::ClientError> =
-            client.exec(&step.target, &step.cmd, &secret_refs);
+            client.exec(&step.target, &step.cmd, &secret_refs, step.timeout_s);
         match outcome {
             Ok(out) => results.push(StepResult {
                 index: idx,
                 target: step.target.clone(),
                 ok: !out.timed_out && out.exit_code == Some(0),
+                timed_out: out.timed_out,
                 exit_code: out.exit_code,
                 stdout_head: out.stdout.chars().take(160).collect(),
                 stderr_head: out.stderr.chars().take(80).collect(),
@@ -166,6 +175,7 @@ pub fn run_demo(client: &McpClient, steps: &[DemoStep]) -> Result<Vec<StepResult
                 index: idx,
                 target: step.target.clone(),
                 ok: false,
+                timed_out: false,
                 exit_code: None,
                 stdout_head: String::new(),
                 stderr_head: String::new(),
