@@ -62,8 +62,17 @@ no k8s.
   issuing (revoke blocks provision/rotate), erase its own copies (rotate re-seals, revoke
   deletes the shipped `secrets.json`), and blobs are pinned to recipient + secret name — but
   a blob someone else kept still opens, and re-keying (a leaked runner private key) is out
-  of scope. Relay membership revocation = Chunk 2; epoch/staleness rejection lands with the
-  runner-side read in A4. "Rotation = erase" refers to YOUR copies, not copies others held.
+  of scope. Epoch/staleness rejection is a named follow-up (tracked post-A4; wire-format
+  addition, nothing deployed yet). "Rotation = erase" refers to YOUR copies, not copies
+  others held.
+- **The loopback MCP endpoint can exfiltrate decrypted secrets.** With exec live, ANY local
+  process on the runner host can call `exec` with a command that ships `$SECRET` somewhere —
+  redaction only covers what comes back. Real authentication (runner membership, grants)
+  is Phase D; until then the loopback-only bind is the whole boundary.
+- **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
+  map for the process lifetime. A TTL reaper is Phase C-sized.
+- **`timeout_s` kills the shell, not its descendants** (no setsid/killpg yet) — a timed-out
+  command can leave orphans running.
 - **State store is single-process** (`StateStore` open→mutate→save is not cross-process
   atomic; TODO for the Postgres swap at MVP).
 

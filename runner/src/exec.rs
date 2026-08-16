@@ -118,6 +118,13 @@ pub fn resolve_secrets(
         let value = crypto::open(&enc_key, name.as_bytes(), &blob)
             .map_err(|e| ExecError::SecretDecrypt(name.clone(), e))?;
         let value = String::from_utf8(value).map_err(|_| ExecError::SecretNotUtf8(name.clone()))?;
+        if value.len() < MIN_REDACT_LEN {
+            // Too short to redact reliably — make the gap visible (name only).
+            tracing::warn!(
+                secret = %name,
+                "secret shorter than {MIN_REDACT_LEN} chars cannot be redacted from output"
+            );
+        }
         out.push((env_name(name), Zeroizing::new(value)));
     }
     Ok(out)
@@ -151,8 +158,9 @@ async fn run_local(
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 return Ok(ExecResult {
-                    stdout: join_read(out_task).await?,
-                    stderr: join_read(err_task).await?,
+                    // Bounded: descendants holding the pipes must not hang us.
+                    stdout: join_read_bounded(out_task).await,
+                    stderr: join_read_bounded(err_task).await,
                     exit_code: None,
                     timed_out: true,
                 });
@@ -168,6 +176,10 @@ async fn run_local(
     })
 }
 
+/// Grace period after a kill: the killed command may have descendants still
+/// holding the pipe; never wait on them forever.
+const JOIN_GRACE: Duration = Duration::from_secs(2);
+
 /// Await a spawned stdout/stderr reader, mapping the join error into ExecError.
 async fn join_read(
     task: tokio::task::JoinHandle<std::io::Result<String>>,
@@ -179,10 +191,65 @@ async fn join_read(
     }
 }
 
+/// Await a reader with a bounded grace (used AFTER a kill where a descendant
+/// may hold the pipe open forever). Returns whatever the reader produced in
+/// time; an overrun yields an empty string rather than hanging the caller.
+async fn join_read_bounded(task: tokio::task::JoinHandle<std::io::Result<String>>) -> String {
+    match tokio::time::timeout(JOIN_GRACE, task).await {
+        Ok(Ok(Ok(s))) => s,
+        _ => String::new(),
+    }
+}
+
 async fn read_to_string<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> std::io::Result<String> {
     let mut s = String::new();
     r.read_to_string(&mut s).await?;
     Ok(s)
+}
+
+/// Streaming UTF-8 decoder with a trailing-byte carry: a multi-byte char
+/// split across two reads must not drop the whole chunk (the 4 KB-drop bug).
+#[derive(Default)]
+struct Utf8Carry {
+    pending: Vec<u8>,
+}
+
+impl Utf8Carry {
+    fn push(&mut self, bytes: &[u8], out: &mut String) {
+        self.pending.extend_from_slice(bytes);
+        match std::str::from_utf8(&self.pending) {
+            Ok(s) => {
+                out.push_str(s);
+                self.pending.clear();
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                if valid_up_to > 0 {
+                    out.push_str(
+                        std::str::from_utf8(&self.pending[..valid_up_to])
+                            .expect("valid_up_to is a UTF-8 boundary"),
+                    );
+                }
+                match e.error_len() {
+                    // Invalid sequence: drop it, keep the rest.
+                    Some(n) => {
+                        self.pending.drain(..valid_up_to + n);
+                    }
+                    // Incomplete at the end: keep the tail for the next read.
+                    None => {
+                        self.pending.drain(..valid_up_to);
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self, out: &mut String) {
+        if !self.pending.is_empty() {
+            out.push_str(&String::from_utf8_lossy(&self.pending));
+            self.pending.clear();
+        }
+    }
 }
 
 fn spawn(
@@ -211,6 +278,9 @@ pub struct StreamSnapshot {
     pub output: String,
     pub done: bool,
     pub result: Option<ExecResult>,
+    /// Set when the streaming exec itself failed to start/run — distinguishes
+    /// a genuine failure from a command that simply printed nothing.
+    pub error: Option<String>,
 }
 
 struct Session {
@@ -218,17 +288,24 @@ struct Session {
     secrets: Arc<Vec<(String, Zeroizing<String>)>>,
     done: Arc<AtomicBool>,
     result: Arc<Mutex<Option<ExecResult>>>,
+    error: Arc<Mutex<Option<String>>>,
 }
 
 impl Session {
     fn snapshot(&self, session_id: &str) -> StreamSnapshot {
+        // Load `done` BEFORE cloning the buffer: the stream task appends the
+        // final bytes and only then stores `done` — reading `done` first
+        // guarantees the snapshot never sees `done: true` with a truncated
+        // tail (the poll that deletes the session would otherwise lose it).
+        let done = self.done.load(Ordering::SeqCst);
         let mut output = self.raw_output.lock().clone();
         redact(&mut output, self.secrets.as_slice());
         StreamSnapshot {
             session_id: session_id.to_string(),
             output,
-            done: self.done.load(Ordering::SeqCst),
+            done,
             result: self.result.lock().clone(),
+            error: self.error.lock().clone(),
         }
     }
 }
@@ -294,12 +371,14 @@ impl ExecManager {
             secrets: secrets.clone(),
             done: Arc::new(AtomicBool::new(false)),
             result: Arc::new(Mutex::new(None)),
+            error: Arc::new(Mutex::new(None)),
         });
         self.sessions.lock().insert(id.clone(), session.clone());
 
         let raw = session.raw_output.clone();
         let done = session.done.clone();
         let result_slot = session.result.clone();
+        let error_slot = session.error.clone();
         let cmd = cmd.to_string();
         let target = target.to_string();
         let started = now_secs();
@@ -316,7 +395,11 @@ impl ExecManager {
                         tracing::warn!(error = %e, "audit write failed (exec still succeeded)");
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "streaming exec failed"),
+                Err(e) => {
+                    // Surface the failure to the agent: done + error, not a
+                    // look-alike of a silent-empty command.
+                    *error_slot.lock() = Some(e.to_string());
+                }
             }
             done.store(true, Ordering::SeqCst);
         });
@@ -364,32 +447,36 @@ async fn run_local_streaming(
     let sink_a = sink.clone();
     let stdout_reader = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
+        let mut carry = Utf8Carry::default();
         loop {
             match stdout.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Ok(s) = std::str::from_utf8(&buf[..n]) {
-                        sink_a.lock().push_str(s);
-                    }
+                    let mut out = sink_a.lock();
+                    carry.push(&buf[..n], &mut out);
                 }
                 Err(_) => break,
             }
         }
+        let mut out = sink_a.lock();
+        carry.finish(&mut out);
     });
     let sink_b = sink.clone();
     let stderr_reader = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
+        let mut carry = Utf8Carry::default();
         loop {
             match stderr.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Ok(s) = std::str::from_utf8(&buf[..n]) {
-                        sink_b.lock().push_str(s);
-                    }
+                    let mut out = sink_b.lock();
+                    carry.push(&buf[..n], &mut out);
                 }
                 Err(_) => break,
             }
         }
+        let mut out = sink_b.lock();
+        carry.finish(&mut out);
     });
 
     let (exit_code, timed_out) = match timeout_s {
@@ -407,7 +494,12 @@ async fn run_local_streaming(
             Err(e) => return Err(e.into()),
         },
     };
-    let _ = tokio::join!(stdout_reader, stderr_reader);
+    // Bounded even here: a descendant holding the pipe after a kill must not
+    // keep `done` from ever being set.
+    let _ = tokio::time::timeout(JOIN_GRACE, async {
+        let _ = (stdout_reader.await, stderr_reader.await);
+    })
+    .await;
 
     Ok(ExecResult {
         stdout: String::new(),
@@ -430,6 +522,13 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Sign and append one audit record for a completed exec. The runner's Nostr
 /// key signs `{cmd, target, exit_code, timed_out, started_at, duration_ms}`;
 /// appended as a JSON line to `<state_dir>/audit.log` (0600). This same event
@@ -448,7 +547,7 @@ pub fn write_audit(
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
         "started_at": started_at,
-        "duration_ms": now_secs().saturating_sub(started_at).saturating_mul(1000),
+        "duration_ms": now_millis().saturating_sub(started_at.saturating_mul(1000)),
     })
     .to_string();
 
@@ -606,6 +705,38 @@ mod tests {
             all.contains("leaked-***"),
             "redaction marker expected: {all}"
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_survives_multibyte_chunk_boundaries() {
+        // Multi-byte UTF-8 straddling a 4096-byte read boundary must not drop
+        // the whole chunk (the 4 KB-drop bug): 5000 'é' outputs ~15 KB, so
+        // several characters cross boundaries.
+        let mgr = ExecManager::new(None, None);
+        let sid = mgr.start_streaming(
+            "python3 -c \"print('é' * 5000)\"",
+            "local",
+            vec![],
+            Some(10),
+        );
+        let mut all;
+        let mut attempts = 0;
+        loop {
+            let snap = mgr.poll(&sid).unwrap();
+            all = snap.output.clone();
+            if snap.done {
+                break;
+            }
+            attempts += 1;
+            assert!(attempts < 200, "stream never finished");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let e_count = all.matches('é').count();
+        assert_eq!(
+            e_count, 5000,
+            "all multibyte chars must survive: {e_count}/5000"
+        );
+        assert!(!all.contains('\u{fffd}'), "no replacement chars in output");
     }
 
     #[tokio::test]

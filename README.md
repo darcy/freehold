@@ -59,14 +59,14 @@ control-plane/        freehold-control-plane — the engine room
 - Rotation re-seals a NEW credential (the erase lever for your copies); revocation blocks
   provision/rotate and deletes the shipped credential. Honest limits are written down in
   `AGENTS.md` (no remote revocation of a capability someone else kept; re-keying and
-  epoch/staleness land in A4 + Chunk 2).
+  epoch/staleness are named follow-ups, tracked post-A4).
 
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 53 tests across core / runner / control-plane
+cargo test --workspace        # 60 tests across core / runner / control-plane
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --all --check       # CI gate
 ```
