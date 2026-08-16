@@ -21,20 +21,52 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
           allowed_bots: "dependabot[bot]"
-          # Enable progress trjpgacking
+          # Track review rounds in a single parent comment
           track_progress: true
 
-          # Your custom review instructions
+          # Focused review: verifier-first, severity tiers, no nits
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request for bugs, logic errors, and security issues. Don't go crazy with tweaks and refining code comments and nits. Your role is not perfectionist but spotting real issues.
+            Verifier first: run the repo's own checks and cite the actual output
+            in the top-level summary. BLOCKING if they fail (don't say
+            "unverified" — run them):
+              - cargo test --workspace
+              - cargo clippy --workspace --all-targets
 
-            Post inline comments on the files on any specific lines with problems, not a top-level comment.
+            Scope: only real problems — security holes, data loss, silent
+            failures, clear logic bugs, contract/API mismatches, tests that pass
+            vacuously. Read AGENTS.md first: it locks the architecture. Flag
+            violations of the locked model, but never re-litigate accepted
+            decisions (e.g. JSON state store, rotation-as-re-issue,
+            single-process state) unless they are actually wrong. No style,
+            naming, comment-wording, or "could simplify" suggestions — no
+            perfectionism.
 
-            Use top-level comments for general observations or praise.
+            Severity tiers, stated in the top-level comment only:
+            - BLOCKING: must fix before merge (security, data loss, silent breakage)
+            - IMPORTANT: should fix in this PR (operator-facing wrong behavior,
+              correctness edge, vacuous test)
+            - DEFER: real but acceptable now — a named follow-up for the PR body
+              or AGENTS.md known-gaps. Never block on it, never re-raise it in
+              later rounds.
+            - NIT: do not post. Nits stay silent.
 
-          # Tools for comprehensive PR review
+            Post inline comments ONLY for BLOCKING and IMPORTANT items, on the
+            exact lines. Everything else — including brief praise — goes in the
+            single top-level comment.
+
+            Re-review (synchronize pushes): scope each round to (1) whether the
+            previous round's BLOCKING/IMPORTANT items are actually closed, and
+            (2) genuine regressions introduced by the fix. Once no BLOCKING or
+            IMPORTANT items remain, stop: do not keep finding marginal issues in
+            code you already approved. Deferred items belong in AGENTS.md or the
+            PR body as follow-ups, not in new review rounds.
+
+            End the top-level comment with a one-line verdict:
+            "MERGE-READY: <reason>" or "NEEDS WORK: <n> BLOCKING, <m> IMPORTANT"
+
+          # Tools: review commands plus the checks the repo actually runs
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(cargo test:*),Bash(cargo clippy:*)"
