@@ -43,8 +43,7 @@ backbone for agents.
     no mgmt channel by design, idle auto-reap, emptyDir, no PVC v1) — PUBLIC RELEASE target.
     
 *   **Agent placement:** POC = Buzz agents via buzz-acp (local); public release = k8s pods.  
-    Runners are SEPARATE from Buzz (the control plane installs them; the plumbing works  
-    independent of the fabric).
+    Runners are separate — see the Runners section below.
     
 *   **We do NOT build a chat UI / agent-management surface** — Buzz provides it.
     
@@ -114,8 +113,9 @@ ssh-machine | vultr | backblaze | proxmox | lxc | external/saas.
 `list` (what targets can I reach), `exec(cmd, target, stream?)`, `config`, `status`, `snapshot`.
 
 *   **Readiness = the runner's OWN self-check**, not the agent's. Green/yellow/red = "runner can  
-    reach its service with its creds." CPA validates by asking the runner to self-check — so CPA  
-    doesn't need a grant to every runner it provisions.
+    reach its service with its creds." Like every MCP call, the readiness probe is signed and  
+    GRANTED — the runner fails closed (Phase D). The CP's console holds its own agent identity,  
+    auto-granted to runners it provisions; readiness is never an unauthenticated side door.
     
 
 ### Runner identity & secrets (provisioner model)
@@ -138,10 +138,13 @@ ssh-machine | vultr | backblaze | proxmox | lxc | external/saas.
     only ciphertext. This trades the old "runner holds zero secrets at rest" for per-runner  
     containment; the better trade for personal/family-first on owned hardware.
     
-*   **On-demand decryption is an OPT-IN strategy** for runners on external/less-trusted targets  
-    (a cloud VPS we don't control). Secret-resolution is entirely internal to the runner — the  
-    agent↔runner MCP interface is identical either way, so a runner can be swapped between  
-    "decrypt locally" and "ask the store" without touching the agent or the tool contract.
+*   **On-demand decryption is a FUTURE opt-in**, NOT part of the shipped no-master-key model.  
+    If adopted for runners on external/less-trusted targets (a cloud VPS we don't control), the  
+    store would hold each runner's OWN encryption key — per-runner containment only, never a  
+    master key; the CP still holds nothing but ciphertext. Secret-resolution is entirely  
+    internal to the runner either way, so a runner can be swapped between "decrypt locally" and  
+    "ask the store" without touching the agent or the tool contract. Tracked in Future items  
+    ("Vault for dynamic secrets").
     
 
 ### Revocation & audit
@@ -177,13 +180,75 @@ Buzz's deterministic pods are the model for disposable agent fleets (public rele
 without seeing": agent references a credential BY NAME; runner resolves it. Plaintext never  
 in context window → no exfiltration even if agent compromised/confused.
 
+## Agent placement — two categories, not one
+
+Public release doesn't put every agent in the same kind of pod. Two distinct placement categories:
+
+* **Ephemeral service-expert pods** — for managing external/remote things (Vultr, B2, LiteLLM, Buzz itself). Classic bare-pod model: `emptyDir`, no PVC, idle auto-reap. Stateless by design — nothing on the pod matters if it dies, because everything that matters lives behind a **runner**, not on the pod. Agent restarts freely to pick up a prompt change.
+
+* **Long-lived team/project environment LXCs** — for coding-agent work: dev and QA agents with real repo access, running `git`/`docker compose` directly against checked-out code. These are **not** k8s pods. `buzz-acp` + the harness (Goose/Claude Code/opencode/etc.) run natively on the LXC's own filesystem — this matches Buzz's own supported "Relay Bridge" pattern for headless server-side agents. Multiple agent identities (dev, QA) can be granted onto the same LXC via coarse grants, sharing one filesystem/DB/compose stack intentionally — but different teams/projects get separate LXCs so DB migrations and compute never collide across them.
+
+**Prompt sourcing is the same in both cases and is intentionally NOT volume-paired to the agent.** AGENTS.md / system prompt lives as a row in the `control_plane` Postgres database (see Database model below), authored/updated by CPA. On every pod start or LXC agent restart, the current prompt is pulled fresh from that row — via ConfigMap mount (pods) or direct read at process start (LXC) — and handed to the harness at session creation. This means a prompt tweak is just "CP updates its row, restart the agent process" — no volume to keep in sync, no drift risk, and the source of truth is something already in the storage-reliability plan.
+
+**The runner boundary looks different in each category, and that's intentional:**
+
+* In the ephemeral case, the runner may genuinely be a separate process/target — it's brokering to a remote API the pod has no other way to reach.
+* In the team-environment case, **the runner is colocated on the same LXC as the agent.** It is not a network hop. It's a local daemon (Unix socket) that holds decrypted git-deploy-key / registry-token secrets in memory only, exposed to the agent's own `git`/`docker` invocations via their native credential-helper protocols:
+
+```
+git config --system credential.helper '/usr/local/bin/team-runner-cred'
+# helper calls out to /run/runner.sock — local only, plaintext never on disk
+```
+
+This preserves "secrets never in agent context" without forcing coding work through a remote `exec()` hop — the agent runs commands locally like a developer would; only the runner's own outbound call (fetching from the actual git remote / registry) ever leaves the box. Provisioning, rotation, and revocation follow the identical CP-provisioner model as every other runner.
+
+*Harness working state (session history, tool caches — whatever a given harness accumulates beyond the checked-out repo itself) is NOT assumed durable via the Buzz relay.* Buzz's relay-native memory covers channel history and its own agent memory; it does not absorb the local state of externally-run harnesses. Anything that needs to survive a restart belongs on the LXC's own volume, covered by the storage tiers below — not assumed to be relay-backed.
+
+---
+
+## Storage & backup placement (per-service, driven by the skill's `needs:`)
+
+Not every service's data belongs in the same place. Four placement tiers, each mapping onto the existing Proxmox / PBS / TrueNAS / Backblaze layering used for the appliance's own backup strategy:
+
+| Tier | What lives here | Backed up via | Notes |
+|---|---|---|---|
+| **K8s host LXC/VM** | k8s binaries, OS | PBS (machine-level) | Standard rootfs backup, same as any LXC |
+| **control_plane Postgres (PVC on k8s host)** | prompts, grants, service registry, audit | PBS + TrueNAS (scheduled) | Same bucket as any app database — important, not reproducible |
+| **Ephemeral service pods** | agent runtime, scratch | *Not backed up* | `emptyDir`, fully reproducible from AGENTS.md + skill — same logic as excluding `/var/lib/docker` |
+| **Team/project environment LXCs** | rootfs / `/srv` (repo, compose, runner secrets ciphertext) / `/var/lib/docker` | rootfs+`/srv` → PBS+TrueNAS; `/var/lib/docker` → excluded (`backup=0`) | Mirrors the Docker-host LXC pattern exactly — separate mount point for persistent data, exclude the recreatable layer cache |
+| **Data-heavy services** (Nextcloud, Immich, media) | live user datasets | TrueNAS (mounted directly, not local NVMe) + ZFS snapshots + Backblaze off-site | Proxmox stays fast/small; service LXC mounts TrueNAS via NFS/iSCSI rather than storing data locally |
+
+A skill declares which tier it needs, and CPA/the provisioning flow places it accordingly:
+
+```yaml
+name: install-nextcloud
+target: lxc
+needs: {database: true, volume: 20Gi, mount: truenas-nfs}
+---
+name: install-litellm
+target: pod
+needs: {database: true}   # no mount — ephemeral, no PVC
+---
+name: provision-team-env
+target: lxc
+needs: {database: true, volume: 40Gi, workspace_runner: true}   # colocated git/registry runner
+```
+
+Governing principle, carried over from the appliance's own backup design: **back up what matters, not what's easily recreated.** Anything derivable from a skill install (images, layers, model downloads, build cache) is excluded regardless of tier; anything that represents real work or real state (databases, checked-out repos with uncommitted changes, user data) gets the full PBS-plus-off-site treatment.
+
+---
+
+## Fourth connector flavor: workspace/git runner
+
+Alongside SSH / Vultr / Backblaze: a **workspace runner** for team/project environment LXCs — holds git deploy keys and container-registry tokens as ciphertext, decrypts locally, and serves them through native credential-helper protocols (`git credential.helper`, `docker credHelpers`) rather than the generic `exec()` primitive. Same identity, provisioning, rotation, and audit model as every other runner; the difference is purely in how the secret is surfaced to the caller (local credential-helper socket vs. remote exec). Not required for Chunk 1's three connectors, but the same core (Phase A–B) covers it — worth flagging as the connector to add once team environments are in scope. **Status: proposed, not locked.** AGENTS.md's locked model defines ONE generic `exec` primitive; adopting the credential-helper surface needs an explicit locked-model carve-out before team environments enter scope.
+
 ## Grants — agent ↔ runner (not 1:1)
 
 *   **A runner is scoped to a credential/target**, not an agent. **An agent is granted runners.**  
     The grant is the real concept (many-to-many via grants).
     
-*   **Dedicated runner per service = the happy-path default** (buy isolation + surgical revocation
-    *   clean audit: revoke the LiteLLM runner, cut off only LiteLLM).
+*   **Dedicated runner per service = the happy-path default** (buy isolation + surgical  
+    revocation; clean audit: revoke the LiteLLM runner, cut off only LiteLLM).
         
 *   **Sharing via grants allowed:** master agent needs many runners (create LXCs, create agents);  
     shared infra (one Proxmox runner) is granted to multiple experts. Following Buzz's approach of  
@@ -434,12 +499,12 @@ health → report to user.
 
 **POC (pre-MVP, NO k8s):**
 
-1.  **Chunk 1 — Local control plane + runners + secrets + connectors:** local web UI (master  
-    agent); runner as MCP tool server with generic `exec`; secret PROVISIONER in the control  
-    plane (encrypt-to-runner-key + ship + rotate + membership; no master key); connect to  
-    SSH local machine + Vultr + Backblaze; readiness model (runner self-check); coarse grants.  
-    Runners separate from Buzz. Runs locally, connects to remote services.  
-    TEST against old-laptop Proxmox.
+1.  **Chunk 1 — Local control plane + runners + secrets + connectors:** local web UI  
+    (admin/ops console — NOT chat; Buzz owns conversation); runner as MCP tool server with  
+    generic `exec`; secret PROVISIONER in the control plane (encrypt-to-runner-key + ship +  
+    rotate + membership; no master key); connect to SSH local machine + Vultr + Backblaze;  
+    readiness model (runner self-check); coarse grants. Runners separate from Buzz. Runs  
+    locally, connects to remote services. TEST against old-laptop Proxmox.
     
 2.  **Chunk 2 — Create the management relay (Buzz):** install creates a new relay → becomes the  
     control plane's scope; agents get Nostr identity; fabric + shared memory light up.

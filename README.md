@@ -195,9 +195,10 @@ Every PR runs two gates:
   BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
   `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`. The reviewer cites
   the CI status rather than re-running cargo.
-- **README drift**: when a PR changes something the README documents (subcommands, tools,
-  crates, test counts, status lines), the reviewer adds one `README:` line to the top-level
-  comment — a signal to update it or not, never a blocker, never nitpicked.
+- **README / ARCHITECTURE drift**: when a PR changes something those docs document (or drifts
+  from a locked decision in `ARCHITECTURE.md`), the reviewer adds one `README:` /
+  `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a
+  blocker, never nitpicked.
 
 Known quirk: **any PR whose tree changes a workflow file — adding *or* editing, including
 `claude.yml` itself — skips the AI review.** The review GitHub App refuses to issue a token
