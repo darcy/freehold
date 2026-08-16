@@ -206,6 +206,12 @@ async fn provision_rotate_grant_revoke_lifecycle() {
         .find(|r| r["name"] == "pg")
         .unwrap();
     assert_eq!(pg5["status"], "revoked");
+    // revoke deletes the shipped secrets.json on PURPOSE — grants must read
+    // as null, not as an empty fail-closed list.
+    assert!(
+        pg5["grants"].is_null(),
+        "revoked runner must report grants == null: {pg5}"
+    );
 
     // Idempotency / guards: revoked runner refuses rotate.
     let (status, _) = post(

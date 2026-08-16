@@ -99,6 +99,11 @@ no k8s.
   `RunnerExists`/`PackageDirInUse` (operator cleans up by hand); the in-process runner
   task is only aborted on the success path (harmless in the CLI, matters if `onboard`
   is ever called twice in one process).
+- **Web console (F) accepted gaps**: a secret posted to `/api/provision` or
+  `/api/rotate` exists unzeroized as axum body bytes + a serde `String` before
+  `Zeroizing` takes ownership (loopback, TLS-free — same exposure as the CLI's stdin
+  path); the console's signing key is re-derived (hex-decode) on every readiness probe
+  rather than held once (bounded, but a zeroize-fast path would re-derive it once).
 
 ## Build / test
 
