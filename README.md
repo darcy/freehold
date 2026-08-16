@@ -127,8 +127,28 @@ are ticked as work lands.
 
 ## Contributing / review
 
-Every PR runs two gates: **CI** (`ci.yml`: build, test, clippy -D warnings, rustfmt) and an
-**AI review** (`claude.yml`) that reports only BLOCKING/IMPORTANT findings with a one-line
-`MERGE-READY` / `NEEDS WORK` verdict — nits stay silent. Read `AGENTS.md` before changing
-code: the locked model (relay-as-scope, generic exec, no master key, host flexibility) is
-not open for reinterpretation. Never commit secrets, private keys, or plaintext credentials.
+Every PR runs two gates:
+
+- **CI** (`ci.yml`): `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on the
+  workspace (toolchain pinned to the declared `rust-version`). Green/red, no exceptions.
+- **AI review** (`claude.yml`): reviews for real problems only. Findings are tiered in the
+  top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER (named
+  follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
+  BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
+  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`. The reviewer cites
+  the CI status rather than re-running cargo.
+
+Known quirk: **any PR whose tree changes a workflow file — adding *or* editing, including
+`claude.yml` itself — skips the AI review.** The review GitHub App refuses to issue a token
+for workflows that don't match the default branch (the error may surface as
+`workflow_not_found_on_default_branch`), and the action converts the refusal into a
+graceful green no-op. The check reporting green means "nothing reviewed", not "review
+passed". This is by design (a PR can't be AI-reviewed under a workflow definition it
+defines itself) and it is self-resolving: merge the workflow change and it applies to the
+default branch, after which normal PRs review again. Workflow-changing PRs are carried by
+CI + a human read. Note: workflow content was only loosely enforced early on, so some early
+workflow-editing PRs did get reviewed — that window is closed.
+
+Read `AGENTS.md` before changing code: the locked model (relay-as-scope, generic exec, no
+master key, host flexibility) is not open for reinterpretation. Never commit secrets,
+private keys, or plaintext credentials.
