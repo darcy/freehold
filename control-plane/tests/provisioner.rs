@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use freehold_control_plane::provisioner::{
-    self, provision_runner, ProvisionError, ProvisionRequest,
+    self, ProvisionError, ProvisionRequest, provision_runner,
 };
 use freehold_control_plane::state::{RunnerStatus, StateStore};
 use freehold_core::{crypto, identity::Identity};
@@ -72,10 +72,19 @@ fn provision_ships_package_and_cp_state_has_no_plaintext_or_keys() {
         "plaintext must never land in CP state"
     );
     for key in ["nostr_secret", "enc_secret", "private", "secret_hex"] {
-        assert!(!state_raw.contains(key), "CP state must not serialize private keys ({key})");
+        assert!(
+            !state_raw.contains(key),
+            "CP state must not serialize private keys ({key})"
+        );
     }
-    assert!(state_raw.contains(&res.nostr_pubkey), "pubkeys are expected in state");
-    assert!(state_raw.contains(&res.enc_pubkey), "pubkeys are expected in state");
+    assert!(
+        state_raw.contains(&res.nostr_pubkey),
+        "pubkeys are expected in state"
+    );
+    assert!(
+        state_raw.contains(&res.enc_pubkey),
+        "pubkeys are expected in state"
+    );
 
     // The CP cannot decrypt — only the runner's injected key can. The blob is
     // opened through the SHIPPED package, under the map key it was filed
@@ -84,12 +93,24 @@ fn provision_ships_package_and_cp_state_has_no_plaintext_or_keys() {
     let pkg = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
     let (entry_name, entry_ct) = pkg.secrets.iter().next().unwrap();
     let blob = hex::decode(entry_ct).unwrap();
-    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), entry_name.as_bytes(), &blob).unwrap();
+    let opened = crypto::open(
+        &hex32(&runner_id.enc_secret_hex()),
+        entry_name.as_bytes(),
+        &blob,
+    )
+    .unwrap();
     assert_eq!(opened, secret, "runner opens its own sealed secret");
 
     // A DIFFERENT key (e.g. a second runner) cannot open it.
     let other = Identity::generate();
-    assert!(crypto::open(&hex32(&other.enc_secret_hex()), entry_name.as_bytes(), &blob).is_err());
+    assert!(
+        crypto::open(
+            &hex32(&other.enc_secret_hex()),
+            entry_name.as_bytes(),
+            &blob
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -101,7 +122,10 @@ fn rotated_secret_reencrypts_and_replaces_everywhere() {
     let before = store.get_secret("b2").unwrap().ciphertext_hex;
     provisioner::rotate_secret(&store, "b2", b"new-key-value").unwrap();
     let after = store.get_secret("b2").unwrap();
-    assert_ne!(before, after.ciphertext_hex, "rotation must produce fresh ciphertext");
+    assert_ne!(
+        before, after.ciphertext_hex,
+        "rotation must produce fresh ciphertext"
+    );
     assert!(after.rotated_at.is_some());
 
     // Package re-shipped; the runner's SAME key opens the new ciphertext via
@@ -112,7 +136,12 @@ fn rotated_secret_reencrypts_and_replaces_everywhere() {
     let pkg = freehold_core::secrets::SecretPackage::load(&runner_dir).unwrap();
     let (entry_name, entry_ct) = pkg.secrets.iter().next().unwrap();
     let blob = hex::decode(entry_ct).unwrap();
-    let opened = crypto::open(&hex32(&runner_id.enc_secret_hex()), entry_name.as_bytes(), &blob).unwrap();
+    let opened = crypto::open(
+        &hex32(&runner_id.enc_secret_hex()),
+        entry_name.as_bytes(),
+        &blob,
+    )
+    .unwrap();
     assert_eq!(opened, b"new-key-value");
 }
 
@@ -123,7 +152,10 @@ fn revoked_runner_cannot_be_rotated_or_reprovisioned() {
     provision(&store, "vultr", b"key", &runner_dir);
 
     provisioner::revoke_runner(&store, "vultr").unwrap();
-    assert_eq!(store.get_runner("vultr").unwrap().status, RunnerStatus::Revoked);
+    assert_eq!(
+        store.get_runner("vultr").unwrap().status,
+        RunnerStatus::Revoked
+    );
     assert_eq!(
         store.get_runner("vultr").unwrap().nostr_pubkey.len(),
         64,
@@ -165,7 +197,10 @@ fn duplicate_provision_is_rejected() {
         },
     )
     .unwrap_err();
-    assert!(matches!(err, ProvisionError::RunnerExists(_)), "got {err:?}");
+    assert!(
+        matches!(err, ProvisionError::RunnerExists(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -196,8 +231,14 @@ fn swapped_package_entries_are_rejected() {
     assert_eq!(crypto::open(&key, b"a", &blob_a).unwrap(), b"cred-a");
     assert_eq!(crypto::open(&key, b"b", &blob_b).unwrap(), b"cred-b");
     // The swap: open entry a's blob under b's name (and vice versa).
-    assert!(crypto::open(&key, b"b", &blob_a).is_err(), "swapped entry must fail");
-    assert!(crypto::open(&key, b"a", &blob_b).is_err(), "swapped entry must fail");
+    assert!(
+        crypto::open(&key, b"b", &blob_a).is_err(),
+        "swapped entry must fail"
+    );
+    assert!(
+        crypto::open(&key, b"a", &blob_b).is_err(),
+        "swapped entry must fail"
+    );
 }
 
 #[test]
@@ -219,7 +260,10 @@ fn package_dir_in_use_is_refused() {
         },
     )
     .unwrap_err();
-    assert!(matches!(err, ProvisionError::PackageDirInUse(_)), "got {err:?}");
+    assert!(
+        matches!(err, ProvisionError::PackageDirInUse(_)),
+        "got {err:?}"
+    );
     // a's package is intact and still decryptable.
     let runner_id = Identity::load(&runner_dir).unwrap();
     let blob = hex::decode(store.get_secret("a").unwrap().ciphertext_hex).unwrap();
@@ -235,12 +279,21 @@ fn revoke_removes_shipped_credential() {
     let runner_dir = base.path().join("runner");
     provision(&store, "ssh", b"key", &runner_dir);
     assert!(runner_dir.join("identity.json").exists());
-    assert!(runner_dir.join(freehold_core::secrets::SECRETS_FILE).exists());
+    assert!(
+        runner_dir
+            .join(freehold_core::secrets::SECRETS_FILE)
+            .exists()
+    );
 
     provisioner::revoke_runner(&store, "ssh").unwrap();
-    assert_eq!(store.get_runner("ssh").unwrap().status, RunnerStatus::Revoked);
+    assert_eq!(
+        store.get_runner("ssh").unwrap().status,
+        RunnerStatus::Revoked
+    );
     assert!(
-        !runner_dir.join(freehold_core::secrets::SECRETS_FILE).exists(),
+        !runner_dir
+            .join(freehold_core::secrets::SECRETS_FILE)
+            .exists(),
         "revoke must remove the shipped credential capability"
     );
     assert!(
@@ -272,9 +325,15 @@ fn revoke_save_failure_restores_prior_status() {
 
     // Memory reverted to the PRIOR status; disk untouched (still active) —
     // a failed revoke must never have flipped anything.
-    assert_eq!(store.get_runner("ssh").unwrap().status, RunnerStatus::Active);
+    assert_eq!(
+        store.get_runner("ssh").unwrap().status,
+        RunnerStatus::Active
+    );
     let reopened = StateStore::open(&state_dir).unwrap();
-    assert_eq!(reopened.get_runner("ssh").unwrap().status, RunnerStatus::Active);
+    assert_eq!(
+        reopened.get_runner("ssh").unwrap().status,
+        RunnerStatus::Active
+    );
 }
 
 #[test]
@@ -285,14 +344,21 @@ fn revoke_is_idempotent_and_never_grants() {
     provisioner::revoke_runner(&store, "ssh").unwrap();
     // A secrets.json that reappeared (config mgmt restore) must be removed by
     // re-revoking — the idempotent path still attempts the cleanup.
-    freehold_core::secrets::SecretPackage::default().write_to_dir(&runner_dir).unwrap();
+    freehold_core::secrets::SecretPackage::default()
+        .write_to_dir(&runner_dir)
+        .unwrap();
     let rec = provisioner::revoke_runner(&store, "ssh").unwrap();
     assert_eq!(rec.status, RunnerStatus::Revoked);
     assert!(
-        !runner_dir.join(freehold_core::secrets::SECRETS_FILE).exists(),
+        !runner_dir
+            .join(freehold_core::secrets::SECRETS_FILE)
+            .exists(),
         "re-revoke must clean a reappeared secrets.json"
     );
-    assert!(provisioner::rotate_secret(&store, "ssh", b"x").is_err(), "still revoked");
+    assert!(
+        provisioner::rotate_secret(&store, "ssh", b"x").is_err(),
+        "still revoked"
+    );
 }
 
 #[test]
@@ -311,7 +377,10 @@ fn invalid_names_are_rejected() {
             },
         )
         .unwrap_err();
-        assert!(matches!(err, ProvisionError::InvalidName(_)), "{bad:?} -> {err:?}");
+        assert!(
+            matches!(err, ProvisionError::InvalidName(_)),
+            "{bad:?} -> {err:?}"
+        );
     }
 }
 
@@ -319,7 +388,10 @@ fn invalid_names_are_rejected() {
 fn unknown_secret_rotate_fails() {
     let (_, store) = setup();
     let err = provisioner::rotate_secret(&store, "nope", b"x").unwrap_err();
-    assert!(matches!(err, ProvisionError::SecretNotFound(_)), "got {err:?}");
+    assert!(
+        matches!(err, ProvisionError::SecretNotFound(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]

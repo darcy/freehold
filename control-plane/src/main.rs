@@ -6,11 +6,11 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use axum::{routing::get, Json, Router};
+use axum::{Json, Router, routing::get};
 use clap::{Args, Parser, Subcommand};
 use freehold_control_plane::provisioner::{self, ProvisionRequest};
-use freehold_control_plane::state::{RunnerStatus, StateStore, STATE_DIR_ENV};
-use serde_json::{json, Value};
+use freehold_control_plane::state::{RunnerStatus, STATE_DIR_ENV, StateStore};
+use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -87,8 +87,7 @@ struct ServeArgs {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -96,9 +95,9 @@ async fn main() -> Result<()> {
         Cmd::Provision(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
-            let runner_dir = args.runner_dir.unwrap_or_else(|| {
-                PathBuf::from(format!("./.freehold/runner/{}", args.name))
-            });
+            let runner_dir = args
+                .runner_dir
+                .unwrap_or_else(|| PathBuf::from(format!("./.freehold/runner/{}", args.name)));
             let secret = read_secret_stdin(&format!(
                 "paste credential for {} ({} @ {}): ",
                 args.name, args.kind, args.address
@@ -117,13 +116,16 @@ async fn main() -> Result<()> {
             println!("  nostr pubkey:      {}", res.nostr_pubkey);
             println!("  encryption pubkey: {}", res.enc_pubkey);
             println!("  package:           {}", res.package_dir.display());
-            println!("  (credential sealed to the runner's key — the CP holds no plaintext, no private keys)");
+            println!(
+                "  (credential sealed to the runner's key — the CP holds no plaintext, no private keys)"
+            );
             Ok(())
         }
         Cmd::RotateSecret(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
-            let new_secret = read_secret_stdin(&format!("paste NEW credential for {}: ", args.name))?;
+            let new_secret =
+                read_secret_stdin(&format!("paste NEW credential for {}: ", args.name))?;
             provisioner::rotate_secret(&store, &args.name, new_secret.as_bytes())?;
             println!("rotated secret {}", args.name);
             Ok(())
@@ -141,7 +143,9 @@ async fn main() -> Result<()> {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let state = provisioner::snapshot(&store);
-            println!("RUNNER            STATUS    KIND      ADDRESS            NOSTR PUBKEY (first 12)");
+            println!(
+                "RUNNER            STATUS    KIND      ADDRESS            NOSTR PUBKEY (first 12)"
+            );
             for (name, r) in &state.runners {
                 let s = state.secrets.get(name);
                 println!(
@@ -157,7 +161,9 @@ async fn main() -> Result<()> {
                 );
             }
             if state.runners.is_empty() {
-                println!("(no runners — run `control-plane provision <name> --kind ... --address ...`)");
+                println!(
+                    "(no runners — run `control-plane provision <name> --kind ... --address ...`)"
+                );
             }
             println!(
                 "{} runner(s), {} secret(s) — all ciphertext, no plaintext in state",

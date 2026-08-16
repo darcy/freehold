@@ -30,7 +30,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use rand::RngCore;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::registry;
 
@@ -153,9 +153,7 @@ async fn mcp_endpoint(
             resp
         }
         "ping" => rpc_result(id, json!({})),
-        "tools/list" => {
-            rpc_result(id, json!({ "tools": tools() }))
-        }
+        "tools/list" => rpc_result(id, json!({ "tools": tools() })),
         "tools/call" => {
             let params = body.get("params").cloned().unwrap_or(Value::Null);
             let name = params.get("name").and_then(Value::as_str).map(String::from);
@@ -176,7 +174,8 @@ async fn mcp_endpoint(
                 // Pending phases — typed tool result, not a protocol error.
                 Some("exec") => (
                     true,
-                    "exec not implemented until Phase A4 (owned connection + verbatim command)".into(),
+                    "exec not implemented until Phase A4 (owned connection + verbatim command)"
+                        .into(),
                 ),
                 Some("status") => (
                     true,
@@ -188,7 +187,11 @@ async fn mcp_endpoint(
                 ),
                 Some(other) => (true, format!("unknown tool: {other}")),
                 None => {
-                    return rpc_error(id, -32602, "invalid params: tools/call requires name".into());
+                    return rpc_error(
+                        id,
+                        -32602,
+                        "invalid params: tools/call requires name".into(),
+                    );
                 }
             };
             Json(json!({
@@ -305,11 +308,9 @@ mod tests {
     fn all_schemas_declare_object_type() {
         for tool in tools() {
             assert_eq!(
-                tool["inputSchema"]["type"],
-                "object",
+                tool["inputSchema"]["type"], "object",
                 "tool {} schema must declare type object, got {}",
-                tool["name"],
-                tool["inputSchema"]["type"]
+                tool["name"], tool["inputSchema"]["type"]
             );
         }
     }

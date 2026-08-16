@@ -96,7 +96,13 @@ pub fn seal(
     let key = derive_key(&eph_public, &recipient, &shared)?;
     let nonce = random_nonce();
     let cipher = ChaCha20Poly1305::new(&(*key).into());
-    let ct = cipher.encrypt(&Nonce::from(nonce), Payload { msg: plaintext, aad })?;
+    let ct = cipher.encrypt(
+        &Nonce::from(nonce),
+        Payload {
+            msg: plaintext,
+            aad,
+        },
+    )?;
 
     let mut out = Vec::with_capacity(1 + EPHEMERAL_PUB_LEN + NONCE_LEN + ct.len());
     out.push(FORMAT_VERSION);
@@ -125,7 +131,8 @@ pub fn open(
     if blob[0] != FORMAT_VERSION {
         return Err(CryptoError::BadVersion(blob[0]));
     }
-    let eph_public = X25519PublicKey::from(<[u8; EPHEMERAL_PUB_LEN]>::try_from(&blob[1..33]).unwrap());
+    let eph_public =
+        X25519PublicKey::from(<[u8; EPHEMERAL_PUB_LEN]>::try_from(&blob[1..33]).unwrap());
     let nonce = Nonce::from(<[u8; NONCE_LEN]>::try_from(&blob[33..45]).unwrap());
     let secret = StaticSecret::from(*recipient_secret);
     let recipient_public = X25519PublicKey::from(&secret);
@@ -133,7 +140,13 @@ pub fn open(
 
     let key = derive_key(&eph_public, &recipient_public, &shared)?;
     let cipher = ChaCha20Poly1305::new(&(*key).into());
-    Ok(cipher.decrypt(&nonce, Payload { msg: &blob[45..], aad })?)
+    Ok(cipher.decrypt(
+        &nonce,
+        Payload {
+            msg: &blob[45..],
+            aad,
+        },
+    )?)
 }
 
 fn random_bytes() -> [u8; KEY_LEN] {
@@ -165,7 +178,12 @@ mod tests {
         let secret = random_secret();
         let pubkey = X25519PublicKey::from(&secret);
         let blob = seal(pubkey.as_bytes(), b"vultr", b"vultr-api-key-123").unwrap();
-        let opened = open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob).unwrap();
+        let opened = open(
+            secret.to_bytes().as_slice().try_into().unwrap(),
+            b"vultr",
+            &blob,
+        )
+        .unwrap();
         assert_eq!(opened, b"vultr-api-key-123");
     }
 
@@ -174,7 +192,12 @@ mod tests {
         let secret = random_secret();
         let other = random_secret();
         let blob = seal(X25519PublicKey::from(&secret).as_bytes(), b"b2", b"secret").unwrap();
-        let err = open(other.to_bytes().as_slice().try_into().unwrap(), b"b2", &blob).unwrap_err();
+        let err = open(
+            other.to_bytes().as_slice().try_into().unwrap(),
+            b"b2",
+            &blob,
+        )
+        .unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt(_)), "got {err:?}");
     }
 
@@ -186,12 +209,22 @@ mod tests {
         // bit-flip, not a name mismatch (a mismatch would pass vacuously).
         let mut blob = seal(pubkey.as_bytes(), b"ssh", b"secret").unwrap();
         assert!(
-            open(secret.to_bytes().as_slice().try_into().unwrap(), b"ssh", &blob).is_ok(),
+            open(
+                secret.to_bytes().as_slice().try_into().unwrap(),
+                b"ssh",
+                &blob
+            )
+            .is_ok(),
             "pre-tamper open must succeed"
         );
         let last = blob.len() - 1;
         blob[last] ^= 0x01;
-        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), b"ssh", &blob).unwrap_err();
+        let err = open(
+            secret.to_bytes().as_slice().try_into().unwrap(),
+            b"ssh",
+            &blob,
+        )
+        .unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt(_)), "got {err:?}");
     }
 
@@ -206,7 +239,10 @@ mod tests {
         let key: &[u8; 32] = bytes.as_slice().try_into().unwrap();
         assert!(open(key, b"vultr", &blob).is_ok());
         let err = open(key, b"b2", &blob).unwrap_err();
-        assert!(matches!(err, CryptoError::Decrypt(_)), "wrong name must fail: {err:?}");
+        assert!(
+            matches!(err, CryptoError::Decrypt(_)),
+            "wrong name must fail: {err:?}"
+        );
     }
 
     #[test]
@@ -219,7 +255,12 @@ mod tests {
         blob.extend_from_slice(&[0u8; 32]); // low-order ephemeral pubkey
         blob.extend_from_slice(&[0u8; 12]); // nonce
         blob.extend_from_slice(&[0u8; 16]); // ct
-        let err = open(secret.to_bytes().as_slice().try_into().unwrap(), b"vultr", &blob).unwrap_err();
+        let err = open(
+            secret.to_bytes().as_slice().try_into().unwrap(),
+            b"vultr",
+            &blob,
+        )
+        .unwrap_err();
         assert!(matches!(err, CryptoError::NonContributory), "got {err:?}");
     }
 
@@ -230,10 +271,17 @@ mod tests {
         let mut blob = seal(pubkey.as_bytes(), b"ssh", b"secret").unwrap();
         blob[0] = 99;
         assert!(matches!(
-            open(secret.to_bytes().as_slice().try_into().unwrap(), b"ssh", &blob),
+            open(
+                secret.to_bytes().as_slice().try_into().unwrap(),
+                b"ssh",
+                &blob
+            ),
             Err(CryptoError::BadVersion(99))
         ));
-        assert!(matches!(open(&[0u8; 32], b"x", b"short"), Err(CryptoError::BadLength(_))));
+        assert!(matches!(
+            open(&[0u8; 32], b"x", b"short"),
+            Err(CryptoError::BadLength(_))
+        ));
     }
 
     #[test]

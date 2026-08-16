@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use freehold_core::{crypto, identity, secrets::SecretPackage};
 use thiserror::Error;
 
-use crate::state::{now_secs, RunnerRecord, RunnerStatus, SecretRecord, StateError, StateStore};
+use crate::state::{RunnerRecord, RunnerStatus, SecretRecord, StateError, StateStore, now_secs};
 
 #[derive(Debug, Error)]
 pub enum ProvisionError {
@@ -82,7 +82,7 @@ pub fn provision_runner(
     // Same-name cases first — clearer diagnostics than the dir guard below.
     match store.get_runner(req.name) {
         Some(r) if r.status == RunnerStatus::Revoked => {
-            return Err(ProvisionError::RunnerRevoked(req.name.to_string()))
+            return Err(ProvisionError::RunnerRevoked(req.name.to_string()));
         }
         Some(_) => return Err(ProvisionError::RunnerExists(req.name.to_string())),
         None => {}
@@ -93,11 +93,15 @@ pub fn provision_runner(
     // ciphertext while CP state still lists it active with undecryptable
     // ciphertext. Refuse instead.
     if req.runner_dir.join(identity::IDENTITY_FILE).exists() {
-        return Err(ProvisionError::PackageDirInUse(req.runner_dir.to_path_buf()));
+        return Err(ProvisionError::PackageDirInUse(
+            req.runner_dir.to_path_buf(),
+        ));
     }
     for rec in store.snapshot().runners.values() {
         if rec.package_dir == req.runner_dir {
-            return Err(ProvisionError::PackageDirInUse(req.runner_dir.to_path_buf()));
+            return Err(ProvisionError::PackageDirInUse(
+                req.runner_dir.to_path_buf(),
+            ));
         }
     }
 

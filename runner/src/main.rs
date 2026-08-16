@@ -5,7 +5,11 @@ use clap::{Args, Parser, Subcommand};
 use freehold_runner::identity::{self, Identity};
 
 #[derive(Parser)]
-#[command(name = "runner", version, about = "Freehold runner: privileged MCP tool server")]
+#[command(
+    name = "runner",
+    version,
+    about = "Freehold runner: privileged MCP tool server"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -55,11 +59,7 @@ struct ServeArgs {
 /// file in `serve`, so if they're set the printed pubkey is not the one that
 /// will run. Pure + testable; fires ONLY when at least one env var is present
 /// (`load_with(None, None)` falls back to the file and prints nothing).
-fn env_shadow_note(
-    nsec: Option<String>,
-    enc: Option<String>,
-    state_dir: &Path,
-) -> Option<String> {
+fn env_shadow_note(nsec: Option<String>, enc: Option<String>, state_dir: &Path) -> Option<String> {
     match (nsec, enc) {
         (Some(n), Some(e)) => match Identity::load_with(state_dir, Some(n), Some(e)) {
             Ok(env_id) => Some(format!(
@@ -88,8 +88,7 @@ fn env_shadow_note(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -189,7 +188,10 @@ mod tests {
         let n = note(Some(&"00".repeat(32)), None).expect("partial env warns");
         assert!(n.contains("only one of"), "got: {n}");
         assert!(n.contains("PartialEnv"), "got: {n}");
-        assert!(!n.contains("unusable"), "partial check must precede validation: {n}");
+        assert!(
+            !n.contains("unusable"),
+            "partial check must precede validation: {n}"
+        );
     }
 
     #[test]
@@ -198,7 +200,10 @@ mod tests {
         let n = note(Some(&id.nostr_secret_hex()), Some(&id.enc_secret_hex()))
             .expect("both env vars set");
         assert!(n.contains("ENV identity"), "got: {n}");
-        assert!(n.contains(&id.nostr_pubkey_hex()), "must name the env pubkey");
+        assert!(
+            n.contains(&id.nostr_pubkey_hex()),
+            "must name the env pubkey"
+        );
     }
 
     #[test]
@@ -208,9 +213,12 @@ mod tests {
         // past BadLength and must fail on the secp256k1 scalar check. This is
         // the only coverage of the Err arm; keep it on the scalar path so a
         // regression dropping validation doesn't stay green.
-        let n = note(Some(&"00".repeat(32)), Some(&id.enc_secret_hex()))
-            .expect("both env vars set");
+        let n =
+            note(Some(&"00".repeat(32)), Some(&id.enc_secret_hex())).expect("both env vars set");
         assert!(n.contains("unusable"), "got: {n}");
-        assert!(n.contains("secp256k1"), "must be the scalar check, got: {n}");
+        assert!(
+            n.contains("secp256k1"),
+            "must be the scalar check, got: {n}"
+        );
     }
 }

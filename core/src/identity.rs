@@ -109,7 +109,11 @@ impl Identity {
 
     /// Load identity: env vars win, else the state-dir file.
     pub fn load(dir: &Path) -> Result<Self, IdentityError> {
-        Self::load_with(dir, std::env::var(NSEC_ENV).ok(), std::env::var(ENC_ENV).ok())
+        Self::load_with(
+            dir,
+            std::env::var(NSEC_ENV).ok(),
+            std::env::var(ENC_ENV).ok(),
+        )
     }
 
     /// Load identity from explicit env values. Split out so tests exercise
@@ -146,10 +150,16 @@ impl Identity {
         let n = zeroize::Zeroizing::new(hex::decode(nostr)?);
         let e = zeroize::Zeroizing::new(hex::decode(enc)?);
         if n.len() != SECRET_LEN {
-            return Err(IdentityError::BadLength { which: "nostr", got: n.len() });
+            return Err(IdentityError::BadLength {
+                which: "nostr",
+                got: n.len(),
+            });
         }
         if e.len() != SECRET_LEN {
-            return Err(IdentityError::BadLength { which: "encryption", got: e.len() });
+            return Err(IdentityError::BadLength {
+                which: "encryption",
+                got: e.len(),
+            });
         }
         let mut n_arr = zeroize::Zeroizing::new([0u8; SECRET_LEN]);
         let mut e_arr = zeroize::Zeroizing::new([0u8; SECRET_LEN]);
@@ -299,10 +309,7 @@ const MAX_BACKUPS: usize = 100;
 /// Copy a secret-bearing file to `dst` with the destination born at 0600
 /// (unix) + atomic rename — no window where the contents sit loose or partial.
 fn copy_secret_file(src: &Path, dst: &Path) -> Result<(), IdentityError> {
-    let name = dst
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("backup");
+    let name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("backup");
     let (mut dst_f, tmp) = open_secret_temp(dst, name)?;
     let copied = (|| -> std::io::Result<()> {
         let mut src_f = fs::File::open(src)?;
@@ -383,7 +390,11 @@ mod tests {
         let id = Identity::generate();
         let path = id.write_to_dir(&dir).unwrap();
         let file_mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(file_mode & 0o077, 0, "private keys must not be group/other readable");
+        assert_eq!(
+            file_mode & 0o077,
+            0,
+            "private keys must not be group/other readable"
+        );
         let dir_mode = fs::metadata(&dir).unwrap().permissions().mode();
         assert_eq!(dir_mode & 0o077, 0, "state dir should be 0700");
     }
@@ -399,7 +410,11 @@ mod tests {
         let id = Identity::generate();
         id.write_to_dir(&dir).unwrap();
         let mode = fs::metadata(&dir).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "pre-existing loose state dir must be tightened to 0700");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "pre-existing loose state dir must be tightened to 0700"
+        );
     }
 
     #[cfg(unix)]
@@ -421,7 +436,11 @@ mod tests {
             .unwrap();
         id.write_to_dir(dir.path()).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "rewrite must restore 0600 on a looser file");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "rewrite must restore 0600 on a looser file"
+        );
     }
 
     #[cfg(unix)]
@@ -444,7 +463,11 @@ mod tests {
             .unwrap();
         let bak = Identity::backup_identity(&dir).unwrap();
         let mode = fs::metadata(&bak).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "backup must be 0600 regardless of source bits");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "backup must be 0600 regardless of source bits"
+        );
     }
 
     #[cfg(unix)]
@@ -520,7 +543,10 @@ mod tests {
     #[test]
     fn missing_identity_errors() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(Identity::load(dir.path()), Err(IdentityError::NotFound)));
+        assert!(matches!(
+            Identity::load(dir.path()),
+            Err(IdentityError::NotFound)
+        ));
     }
 
     #[test]
@@ -539,12 +565,18 @@ mod tests {
         let id = Identity::generate();
         let err = Identity::from_hex(&"ab".repeat(16), &id.enc_secret_hex()).unwrap_err();
         match err {
-            IdentityError::BadLength { which: "nostr", got: 16 } => {}
+            IdentityError::BadLength {
+                which: "nostr",
+                got: 16,
+            } => {}
             other => panic!("expected nostr/16, got {other:?}"),
         }
         let err = Identity::from_hex(&id.nostr_secret_hex(), &"ab".repeat(17)).unwrap_err();
         match err {
-            IdentityError::BadLength { which: "encryption", got: 17 } => {}
+            IdentityError::BadLength {
+                which: "encryption",
+                got: 17,
+            } => {}
             other => panic!("expected encryption/17, got {other:?}"),
         }
     }
@@ -554,6 +586,9 @@ mod tests {
         let id = Identity::generate();
         // All-zero nsec is valid hex + valid length but NOT a valid secp256k1 key.
         let err = Identity::from_hex(&nsec_zero(), &id.enc_secret_hex()).unwrap_err();
-        assert!(matches!(err, IdentityError::InvalidNostrSecret), "got {err:?}");
+        assert!(
+            matches!(err, IdentityError::InvalidNostrSecret),
+            "got {err:?}"
+        );
     }
 }
