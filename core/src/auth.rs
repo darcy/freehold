@@ -1,4 +1,6 @@
-//! Caller authentication (Phase D — coarse grants).
+//! Caller authentication (Phase D — coarse grants). Shared protocol code:
+//! the RUNNER verifies, and every client (orchestrator, the CP console)
+//! signs with the same primitives.
 //!
 //! Every privileged MCP call must be signed by a GRANTED agent pubkey
 //! (whitelist shipped in the SecretPackage). Signatures are BIP-340
@@ -9,7 +11,7 @@
 //! The runner FAILS CLOSED: no grants shipped (or an unreadable package)
 //! means nobody may call.
 
-use freehold_core::audit::{self, SignedEvent};
+use crate::audit::{self, SignedEvent};
 use thiserror::Error;
 
 pub const TS_WINDOW_SECS: i64 = 60;

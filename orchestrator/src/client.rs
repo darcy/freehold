@@ -1,9 +1,9 @@
 //! A minimal MCP-over-HTTP CLIENT that signs every tools/call with the agent
-//! identity (grants enforce it runner-side). Reuses `runner::auth` — the
+//! identity (grants enforce it runner-side). Reuses `freehold_core::auth` — the
 //! exact verifier the runner runs — so the orchestrator provably speaks the
 //! same wire contract.
 
-use freehold_runner::auth;
+use freehold_core::auth;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;

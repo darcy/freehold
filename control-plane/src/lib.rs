@@ -6,5 +6,7 @@
 //! secrets locally. No master key: the CP never holds a private key or a
 //! plaintext credential.
 
+pub mod console;
 pub mod provisioner;
 pub mod state;
+pub mod web;

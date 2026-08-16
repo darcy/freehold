@@ -7,11 +7,11 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use axum::{Json, Router, routing::get};
 use clap::{Args, Parser, Subcommand};
+use freehold_control_plane::console::Console;
 use freehold_control_plane::provisioner::{self, ProvisionRequest};
 use freehold_control_plane::state::{RunnerStatus, STATE_DIR_ENV, StateStore};
-use serde_json::{Value, json};
+use freehold_control_plane::web;
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -245,15 +245,13 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Serve(args) => {
-            // A1 skeleton: routes land with Phase F (console). State is opened
-            // so the later UI has the same guarantees.
-            let _store = StateStore::open(&args.state_dir)?;
+            let store = StateStore::open(&args.state_dir)?;
+            let console = Console::load_or_create(&args.state_dir)?;
+            tracing::info!(pubkey = %console.pubkey(), "console agent ready");
             let addr = args.addr;
-            let app = Router::new()
-                .route("/", get(root))
-                .route("/healthz", get(healthz));
+            let app = web::router(store, console);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
-            tracing::info!(%addr, "control plane listening");
+            tracing::info!(%addr, "control plane console listening");
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     tokio::signal::ctrl_c().await.ok();
@@ -279,16 +277,4 @@ fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
         anyhow::bail!("empty secret");
     }
     Ok(value)
-}
-
-async fn root() -> Json<Value> {
-    Json(json!({
-        "name": "freehold-control-plane",
-        "status": "bootstrap",
-        "services": []
-    }))
-}
-
-async fn healthz() -> &'static str {
-    "ok"
 }

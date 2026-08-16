@@ -36,6 +36,11 @@ pub struct RunnerRecord {
     /// Where the runner package (identity.json + secrets.json) was shipped.
     pub package_dir: PathBuf,
     pub created_at: u64,
+    /// The runner's MCP listen address (Phase F, console polling). The CP
+    /// does not discover this — the operator sets it once in the UI and the
+    /// console signs live readiness probes against it. Unset = no probe.
+    #[serde(default)]
+    pub mcp_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +128,16 @@ impl StateStore {
 
     pub fn insert_secret(&self, name: &str, rec: SecretRecord) {
         self.inner.write().secrets.insert(name.to_string(), rec);
+    }
+
+    pub fn set_runner_mcp_addr(&self, name: &str, addr: Option<String>) -> Result<(), StateError> {
+        let mut inner = self.inner.write();
+        let rec = inner
+            .runners
+            .get_mut(name)
+            .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+        rec.mcp_addr = addr;
+        Ok(())
     }
 
     pub fn set_runner_status(&self, name: &str, status: RunnerStatus) -> Result<(), StateError> {

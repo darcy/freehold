@@ -165,6 +165,7 @@ pub fn provision_runner(
             status: RunnerStatus::Active,
             package_dir: req.runner_dir.to_path_buf(),
             created_at: now,
+            mcp_addr: None,
         },
     );
     store.insert_secret(
@@ -360,6 +361,32 @@ pub fn grant_agent(
     let mut pkg = SecretPackage::load(&rec.package_dir).map_err(ProvisionError::Io)?;
     if !pkg.grants.iter().any(|g| g == agent_pubkey) {
         pkg.grants.push(agent_pubkey.to_string());
+        pkg.write_to_dir(&rec.package_dir)?;
+    }
+    Ok(pkg.grants)
+}
+
+/// D2 mirror: revoke an agent pubkey from a runner — re-ship the package
+/// minus that grant so the runner's live grant check drops it without a
+/// restart. Idempotent (absent grant = no-op). The last grant revoked leaves
+/// the package fail-closed: nobody may call until a new grant lands.
+pub fn revoke_grant(
+    store: &StateStore,
+    name: &str,
+    agent_pubkey: &str,
+) -> Result<Vec<String>, ProvisionError> {
+    if !is_pubkey(agent_pubkey) {
+        return Err(ProvisionError::InvalidGrant(agent_pubkey.to_string()));
+    }
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    if rec.status == RunnerStatus::Revoked {
+        return Err(ProvisionError::RunnerRevoked(name.to_string()));
+    }
+    let mut pkg = SecretPackage::load(&rec.package_dir).map_err(ProvisionError::Io)?;
+    if pkg.grants.iter().any(|g| g == agent_pubkey) {
+        pkg.grants.retain(|g| g != agent_pubkey);
         pkg.write_to_dir(&rec.package_dir)?;
     }
     Ok(pkg.grants)
