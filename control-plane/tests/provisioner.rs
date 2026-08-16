@@ -249,6 +249,41 @@ fn revoke_removes_shipped_credential() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn revoke_save_failure_restores_prior_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile::tempdir().unwrap();
+    let state_dir = base.path().join("state");
+    let store = StateStore::open(&state_dir).unwrap();
+    let runner_dir = base.path().join("runner");
+    provision(&store, "ssh", b"key", &runner_dir);
+
+    // Force save() to fail: state dir read-only (fails as non-root).
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let _err = provisioner::revoke_runner(&store, "ssh").unwrap_err();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Memory reverted to the PRIOR status; disk untouched (still active) —
+    // a failed revoke must never have flipped anything.
+    assert_eq!(store.get_runner("ssh").unwrap().status, RunnerStatus::Active);
+    let reopened = StateStore::open(&state_dir).unwrap();
+    assert_eq!(reopened.get_runner("ssh").unwrap().status, RunnerStatus::Active);
+}
+
+#[test]
+fn revoke_is_idempotent_and_never_grants() {
+    let (base, store) = setup();
+    let runner_dir = base.path().join("runner");
+    provision(&store, "ssh", b"key", &runner_dir);
+    provisioner::revoke_runner(&store, "ssh").unwrap();
+    // Second revoke short-circuits before any save — a failed save can't
+    // un-revoke a Revoked record.
+    let rec = provisioner::revoke_runner(&store, "ssh").unwrap();
+    assert_eq!(rec.status, RunnerStatus::Revoked);
+    assert!(provisioner::rotate_secret(&store, "ssh", b"x").is_err(), "still revoked");
+}
+
 #[test]
 fn invalid_names_are_rejected() {
     let (base, store) = setup();

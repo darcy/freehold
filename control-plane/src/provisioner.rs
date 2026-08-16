@@ -201,7 +201,14 @@ pub fn rotate_secret(
     if let Err(e) = store.save() {
         // Roll back memory (serve must not persist the phantom ciphertext
         // later) and re-ship the OLD package, so the runner doesn't end up
-        // with a credential the CP never recorded.
+        // with a credential the CP never recorded. The old value may already
+        // be invalidated upstream — say so, or the operator reads a bare
+        // save error while the runner silently fell back to a dead key.
+        tracing::warn!(
+            name,
+            "rotate: save failed ({e}) — rolled the package back to the previous \
+             credential, which may already be invalid upstream"
+        );
         let _ = store.set_secret_ciphertext(name, &before.ciphertext_hex, before.rotated_at);
         let old_pkg = SecretPackage {
             secrets: BTreeMap::from([(name.to_string(), before.ciphertext_hex.clone())]),
@@ -231,18 +238,23 @@ pub fn revoke_runner(store: &StateStore, name: &str) -> Result<RunnerRecord, Pro
     // actually make. The unlink below is best-effort — the CP may not own the
     // package dir (read-only mount, runner's uid), and a cleanup failure must
     // not keep the runner active.
+    let prior = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    if prior.status == RunnerStatus::Revoked {
+        // Idempotent: already revoked — early return so a failed save can
+        // never have anything to undo against a Revoked record.
+        return Ok(prior);
+    }
     store.set_runner_status(name, RunnerStatus::Revoked)?;
     if let Err(e) = store.save() {
-        // Revert memory so serve's next save doesn't persist a revocation
-        // that never hit disk.
-        let _ = store.set_runner_status(name, RunnerStatus::Active);
+        // Restore the PRIOR status (not a hardcoded Active): a failed save
+        // must never GRANT capability to a runner that was already revoked.
+        let _ = store.set_runner_status(name, prior.status);
         return Err(e.into());
     }
 
-    let secrets_path = store
-        .get_runner(name)
-        .map(|r| r.package_dir.join(freehold_core::secrets::SECRETS_FILE))
-        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    let secrets_path = prior.package_dir.join(freehold_core::secrets::SECRETS_FILE);
     match std::fs::remove_file(&secrets_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
