@@ -54,6 +54,16 @@ jobs:
             nitpicked for wording. Mention it once per PR, not in re-review
             rounds.
 
+            ARCHITECTURE drift (signal only, never a blocker): if this PR
+            drifts from ARCHITECTURE.md — changes or violates something the
+            architecture doc locks or documents (connector flavors, agent
+            placement, secret paths, the readiness model, the provisioner /
+            no-master-key shape) — add ONE line to the top-level comment
+            under "ARCHITECTURE:" saying what should be updated or why the
+            doc is now stale. Same rules as README drift: a signal, NEVER
+            BLOCKING or IMPORTANT, never posted inline, never nitpicked for
+            wording, mentioned once per PR (not in re-review rounds).
+
             Severity tiers, stated in the top-level comment only:
             - BLOCKING: must fix before merge (security, data loss, silent breakage)
             - IMPORTANT: should fix in this PR (operator-facing wrong behavior,
