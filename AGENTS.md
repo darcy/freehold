@@ -91,6 +91,11 @@ no k8s.
   secrets are rejected explicitly — the honest contract while that's unimplemented).
 - **State store is single-process** (`StateStore` open→mutate→save is not cross-process
   atomic; TODO for the Postgres swap at MVP).
+- **Orchestrator (E) accepted gaps**: `onboard` has no rollback — a hard-fail at the
+  readiness gate leaves CP state + the shipped package on disk and a re-run hits
+  `RunnerExists`/`PackageDirInUse` (operator cleans up by hand); the in-process runner
+  task is only aborted on the success path (harmless in the CLI, matters if `onboard`
+  is ever called twice in one process).
 
 ## Build / test
 
