@@ -215,8 +215,8 @@ Not every service's data belongs in the same place. Four placement tiers, each m
 | **K8s host LXC/VM** | k8s binaries, OS | PBS (machine-level) | Standard rootfs backup, same as any LXC |
 | **control_plane Postgres (PVC on k8s host)** | prompts, grants, service registry, audit | PBS + TrueNAS (scheduled) | Same bucket as any app database — important, not reproducible |
 | **Ephemeral service pods** | agent runtime, scratch | *Not backed up* | `emptyDir`, fully reproducible from AGENTS.md + skill — same logic as excluding `/var/lib/docker` |
-| **Team/project environment LXCs** | rootfs / `/srv` (repo, compose, runner secrets ciphertext) / `/var/lib/docker` | rootfs+`/srv` → PBS+TrueNAS; `/var/lib/docker` → excluded (`backup=0`) | Mirrors the Docker-host LXC pattern exactly — separate mount point for persistent data, exclude the recreatable layer cache |
-| **Data-heavy services** (Nextcloud, Immich, media) | live user datasets | TrueNAS (mounted directly, not local NVMe) + ZFS snapshots + Backblaze off-site | Proxmox stays fast/small; service LXC mounts TrueNAS via NFS/iSCSI rather than storing data locally |
+| **Team/project environment LXCs** | rootfs / `/srv/data` (repo, compose, runner secrets ciphertext) / `/srv/nobackup` (relocated container stores, caches) | rootfs+`/srv/data` → PBS+TrueNAS; `/srv/nobackup` → excluded (`backup=0`) | Mirrors the Docker-host LXC pattern — the `/srv` split IS the backup config |
+| **Data-heavy services** (Nextcloud, Immich, media) | live user datasets under `/srv/data/<service>` | TrueNAS (mounted directly, not local NVMe) + ZFS snapshots + Backblaze off-site | Proxmox stays fast/small; service LXC mounts TrueNAS via NFS/iSCSI rather than storing data locally |
 
 A skill declares which tier it needs, and CPA/the provisioning flow places it accordingly:
 
@@ -235,6 +235,34 @@ needs: {database: true, volume: 40Gi, workspace_runner: true}   # colocated git/
 ```
 
 Governing principle, carried over from the appliance's own backup design: **back up what matters, not what's easily recreated.** Anything derivable from a skill install (images, layers, model downloads, build cache) is excluded regardless of tier; anything that represents real work or real state (databases, checked-out repos with uncommitted changes, user data) gets the full PBS-plus-off-site treatment.
+
+### Filesystem layout convention — `/srv/data` vs `/srv/nobackup`
+
+The tiers above encode onto every LXC/VM as a single top-level split, so the backup config is one rule instead of a per-path carve-out list:
+
+```
+/srv/
+├── data/                 # durable application data — THE backup set
+│   ├── nextcloud/        # live user datasets (TrueNAS-backed via NFS/iSCSI)
+│   ├── agents/           # durable agent/harness state that must survive restarts
+│   ├── <service>/        # anything with needs.volume; repos, compose, runner
+│   │                     #   secrets ciphertext
+│   └── ...
+│
+└── nobackup/             # reproducible / disposable — excluded (backup=0)
+    ├── docker/           # container stores: daemon roots RELOCATED here (or
+    ├── containerd/       #   bind-mounted), so the exclude is structural, not
+    ├── rancher/          #   a fragile path list (k3s/rancher state is
+    │                     #   reconstructible from control_plane Postgres —
+    │                     #   deterministic pods + config-as-data)
+    ├── caches/
+    └── scratch/
+```
+
+*   **The backup rule is the split:** rootfs + `/srv/data` = the PBS job; `/srv/nobackup` is never in it. Nothing under `/srv/nobackup` is individually "important" — if it needs a carve-out, it was filed in the wrong half.
+*   **Container stores relocate under `/srv/nobackup`** (`docker`/`containerd`/`rancher` daemon roots), mirroring the existing "exclude `/var/lib/docker`" Docker-host LXC pattern — but by layout, not by config list.
+*   **Data-heavy services mount TrueNAS under `/srv/data/<service>`** — backed by TrueNAS snapshots + Backblaze off-site, not by PBS rootfs copies.
+*   **Skills map onto it:** `needs: {volume: …}` → `/srv/data/<service>`; a scratch-only service (nothing durable) → `/srv/nobackup/<service>` or a pod `emptyDir`. `needs.volume` is the declaration that something is durable — absence means disposable by default.
 
 ---
 
