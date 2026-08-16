@@ -4,9 +4,9 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-**Status:** docs + locked Chunk 1 plan; Phases A (workspace, identity, MCP skeleton) and B
-(provisioner: seal/ship/rotate/revoke, no master key) are implemented and reviewed in
-progress. Both phases were merged to main via PRs; current work is uncommitted until reviewed.
+**Status:** docs + locked Chunk 1 plan; Phases A (workspace, identity, MCP skeleton, generic
+exec A4, readiness A5, audit A6) and B (provisioner: seal/ship/rotate/revoke, no master
+key) are implemented and reviewed. Current work is uncommitted until reviewed.
 
 ## Navigation
 

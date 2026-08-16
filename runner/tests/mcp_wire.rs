@@ -2,10 +2,26 @@
 //! A real JSON-RPC client (ureq) does the full handshake and calls tools,
 //! proving transport + registry framing — not just that the crate compiles.
 
-use freehold_runner::mcp;
+use freehold_runner::mcp::{self, RunnerContext};
+use freehold_runner::{identity, secrets::SecretPackage};
 use serde_json::{Value, json};
 use ureq::Body;
 use ureq::http::Response;
+
+/// Identity + empty ciphertext package under one state dir, the way the CP
+/// ships a runner. The temp dir is leaked on purpose: the server task
+/// outlives the test; contents are throwaway test keys.
+fn test_ctx() -> RunnerContext {
+    let dir = tempfile::tempdir().expect("tempdir").keep();
+    let id = identity::Identity::generate();
+    id.write_to_dir(&dir).unwrap();
+    SecretPackage::default().write_to_dir(&dir).unwrap();
+    RunnerContext {
+        identity: id,
+        package: SecretPackage::default(),
+        state_dir: dir,
+    }
+}
 
 fn post(
     agent: &ureq::Agent,
@@ -37,7 +53,9 @@ fn rpc(id: u64, method: &str, params: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_wire_shape() {
-    let (addr, server) = mcp::serve("127.0.0.1:0").await.expect("bind server");
+    let (addr, server) = mcp::serve("127.0.0.1:0", test_ctx())
+        .await
+        .expect("bind server");
     let url = format!("http://{addr}/mcp");
     // 4xx (the 403 origin rejection) is a valid transport response in this test.
     let agent = ureq::Agent::new_with_config(
@@ -153,7 +171,11 @@ async fn mcp_wire_shape() {
     let text = &list["result"]["content"][0]["text"];
     let targets: Value =
         serde_json::from_str(text.as_str().expect("list text")).expect("targets json");
-    assert_eq!(targets, json!([]), "Phase A registry is empty");
+    assert_eq!(
+        targets,
+        json!([{ "name": "local", "kind": "local" }]),
+        "runner reaches local"
+    );
 
     // 6. tools/call config — real, non-secret server info
     let cfg = body_json(
@@ -178,23 +200,91 @@ async fn mcp_wire_shape() {
         "config names the runner"
     );
 
-    // 7. pending phases answer with typed isError, not protocol errors
-    for (id, tool) in [5u64, 6, 7].into_iter().zip(["exec", "status", "snapshot"]) {
-        let call = body_json(
-            post(
-                &agent,
-                &url,
-                rpc(id, "tools/call", json!({ "name": tool, "arguments": {} })),
-                session.as_deref(),
-                None,
-            )
-            .unwrap_or_else(|e| panic!("tools/call {tool}: {e}")),
-        );
-        assert_eq!(
-            call["result"]["isError"], true,
-            "{tool} is pending in Phase A"
-        );
-    }
+    // 7. exec is REAL for the local target: verbatim command, output returned
+    let exec = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(5, "tools/call", json!({ "name": "exec", "arguments": { "cmd": "echo hello-from-exec", "target": "local" } })),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/call exec"),
+    );
+    assert_eq!(
+        exec["result"]["isError"], false,
+        "exec must succeed: {exec}"
+    );
+    assert!(
+        exec["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("hello-from-exec"),
+        "exec output must contain the command result"
+    );
+
+    // 7b. exec on an unknown target -> typed error
+    let bad_target = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(
+                6,
+                "tools/call",
+                json!({ "name": "exec", "arguments": { "cmd": "echo x", "target": "vultr" } }),
+            ),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/call exec bad target"),
+    );
+    assert_eq!(
+        bad_target["result"]["isError"], true,
+        "unknown target must fail"
+    );
+
+    // 7c. status self-check for local -> green
+    let status = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(
+                7,
+                "tools/call",
+                json!({ "name": "status", "arguments": { "target": "local" } }),
+            ),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/call status"),
+    );
+    assert!(
+        status["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"state\": \"green\""),
+        "local self-check must be green"
+    );
+
+    // 7d. snapshot still pending -> typed error (Phase C connectors)
+    let snap = body_json(
+        post(
+            &agent,
+            &url,
+            rpc(
+                8,
+                "tools/call",
+                json!({ "name": "snapshot", "arguments": {} }),
+            ),
+            session.as_deref(),
+            None,
+        )
+        .expect("tools/call snapshot"),
+    );
+    assert_eq!(
+        snap["result"]["isError"], true,
+        "snapshot is pending (Phase C)"
+    );
 
     // 8. unknown tool -> typed error, still MCP-compliant
     let unknown = body_json(
@@ -214,7 +304,7 @@ async fn mcp_wire_shape() {
         post(
             &agent,
             &url,
-            rpc(9, "resources/list", json!({})),
+            rpc(10, "resources/list", json!({})),
             session.as_deref(),
             None,
         )
@@ -255,7 +345,7 @@ async fn mcp_wire_shape() {
     let blocked = post(
         &agent,
         &url,
-        rpc(20, "tools/list", json!({})),
+        rpc(11, "tools/list", json!({})),
         session.as_deref(),
         Some("http://evil.example"),
     )
@@ -270,7 +360,7 @@ async fn mcp_wire_shape() {
     let allowed = post(
         &agent,
         &url,
-        rpc(21, "tools/list", json!({})),
+        rpc(12, "tools/list", json!({})),
         session.as_deref(),
         Some("http://localhost:5173"),
     )
@@ -295,7 +385,7 @@ async fn mcp_wire_shape() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refuses_non_loopback_bind() {
-    let err = mcp::serve("0.0.0.0:0")
+    let err = mcp::serve("0.0.0.0:0", test_ctx())
         .await
         .expect_err("must refuse non-loopback bind");
     assert!(

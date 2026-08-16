@@ -58,20 +58,20 @@ generation + storage (private key injected via env var / mounted secret, never c
 A3. Runner MCP tool server skeleton over HTTP: `list`, `exec`, `config`, `status`,
 `snapshot` endpoints. JSON-RPC framing.
 
-- [ ] [ ] 
+- [x] [x] 
 
 A4. **Generic** `exec(cmd, target, stream?)` — the heart:  
-- [ ] takes raw command verbatim (no semantic interpretation)  
-- [ ] runs on target via the owned connection  
-- [ ] returns output; streaming mode for long-running/live commands (pull-style chunk  
+- [x] takes raw command verbatim (no semantic interpretation)  
+- [x] runs on target via the owned connection  
+- [x] returns output; streaming mode for long-running/live commands (pull-style chunk  
 buffer in the runner; agent polls chunks)
 
-- [ ] [ ] 
+- [x] [x] 
 
 A5. **Self-check → readiness** primitive: runner attempts to reach its service with its  
 creds, reports green/yellow/red.
 
-- [ ] [ ] 
+- [x] [x] 
 
 A6. **Audit:** runner signs a Nostr event per executed command (agent pubkey, target,  
 command, result). Chunk 1: local audit log (no relay yet).

@@ -148,8 +148,32 @@ async fn main() -> anyhow::Result<()> {
                 enc_pubkey = %id.enc_pubkey_hex(),
                 "runner starting"
             );
-            // A4: hand `id` to the server — decrypt secrets for exec, sign audit events.
-            let (bound, server) = freehold_runner::mcp::serve(&args.addr).await?;
+            // The secret package (ciphertext only) ships next to the identity;
+            // exec resolves secret NAMES from it, en route to A4's plumbing.
+            let package = match freehold_runner::secrets::SecretPackage::load(&args.state_dir) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "no secrets package found — exec runs without secrets");
+                    freehold_runner::secrets::SecretPackage::default()
+                }
+            };
+            // Log NAMES only — never values.
+            if !package.secrets.is_empty() {
+                tracing::info!(
+                    secrets = ?package.secrets.keys().cloned().collect::<Vec<_>>(),
+                    "runner holds ciphertext for {} secret(s)",
+                    package.secrets.len()
+                );
+            }
+            let (bound, server) = freehold_runner::mcp::serve(
+                &args.addr,
+                freehold_runner::mcp::RunnerContext {
+                    identity: id,
+                    package,
+                    state_dir: args.state_dir.clone(),
+                },
+            )
+            .await?;
             tracing::info!(addr = %bound, "runner MCP server listening");
             // A4: replace with an axum graceful-shutdown future once exec has
             // in-flight work to drain — signal-to-exit is not a drain.
