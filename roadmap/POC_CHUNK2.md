@@ -186,10 +186,10 @@ D4. Grants keep the Chunk-1 model: coarse agent↔runner whitelists of real Nost
 Relay **membership is necessary but NOT sufficient** — a member must still be explicitly
 granted to a runner; grants do not collapse into "in the scope." What changes: the whitelist
 lives on the relay instead of local state, and its validity derives from relay membership (a
-grant references a member). **Deliberate choice, decided here:** grants are re-read LIVE from
-relay events (subscribe/poll, same per-call freshness as today) — this CLOSES the Chunk-1
-gap "rotate/re-grant don't reach a running runner." If instead they are read at boot, the gap
-persists. Pick one deliberately; the runner-side mechanic lands in D1's grant event design.
+grant references a member). **Decided here:** grants are re-read LIVE from relay events
+(subscribe/poll, same per-call freshness as today) — this CLOSES the Chunk-1 gap
+"rotate/re-grant don't reach a running runner" (boot-read was rejected for exactly that
+reason). The runner-side mechanic lands in D1's grant event design.
 
 - [ ] [ ]
 

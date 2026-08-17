@@ -330,6 +330,7 @@ Modes:
 ```
 
 *   Local = web UI at localhost; deployed = web UI at [https://box](https://box). Same app, different mode.
+    (Chunk 2: deployed keeps loopback + SSH tunnel until console authn/TLS lands — see Future items.)
     
 *   Only true split = the RUNNER boundary. Everything above the runner can run anywhere.
     
@@ -588,6 +589,11 @@ MVP done = public release (k8s + control plane + console + skills, Proxmox + VPS
     
 *   Security hardening (privilege escalation, audit, approval gates); on-demand decryption opt-in  
     for external/less-trusted runners; Vault for dynamic secrets
+    
+*   **Console authentication + TLS (deployed exposure):** Chunk 2 deliberately keeps the console
+    loopback-only on the deployed target, with operator access via SSH tunnel (and the CP refuses
+    a non-loopback bind without an authn/TLS story — C3). A real non-loopback console posture
+    (the "deployed = web UI at https://box" line elsewhere in this doc) is gated on that story.
     
 *   Multi-user / multi-tenant (relay-as-scope enables this)
     
