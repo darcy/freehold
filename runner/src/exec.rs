@@ -674,16 +674,28 @@ pub fn write_audit(
 /// result must NEVER wait on a wedged relay. Failure is surfaced (warn) and
 /// the local spool stays authoritative — never silently dropped, never a
 /// hard failure of the executed command.
+/// Publish one audit event and REPORT the outcome. Sync + testable on the
+/// calling thread (the surfaced rule is a unit-testable contract, not a
+/// thread artifact): both the publish error and success are observable.
+pub fn report_audit_publish(relay_url: &str, secret: &[u8; 32], event_json: &str) {
+    match freehold_core::relay_http::publish_event_json(relay_url, secret, event_json) {
+        Ok(()) => {}
+        Err(e) => tracing::warn!(error = %e, "audit relay publish failed — local spool only"),
+    }
+}
+
+/// Fire the publish detached (spawn_blocking): the agent's exec result must
+/// NEVER wait on a wedged relay. The join failure is ALSO surfaced — the
+/// surfaced rule covers the task boundary too.
 pub fn spawn_audit_publish(relay_url: &str, auditor: &Auditor, event: serde_json::Value) {
     let url = relay_url.to_string();
     let secret = auditor.secret();
     let ev = event.to_string();
     tokio::spawn(async move {
-        let _ = tokio::task::spawn_blocking(move || {
-            freehold_core::relay_http::publish_event_json(&url, &secret, &ev)
-        })
-        .await
-        .map_err(|e| tracing::warn!(error = %e, "audit publish task panicked"));
+        match tokio::task::spawn_blocking(move || report_audit_publish(&url, &secret, &ev)).await {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(error = %e, "audit publish task panicked/failed"),
+        }
     });
 }
 

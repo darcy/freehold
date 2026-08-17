@@ -939,6 +939,39 @@ mod tests {
 mod d5_tests {
     use super::*;
 
+    /// A tracing writer capturing everything into a Vec, plus a handle to
+    /// read it after the subscriber guard drops and the flush settles.
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct CapWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
+        type Writer = SharedBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedBuf(self.0.clone())
+        }
+    }
+
+    fn tracing_capture() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        impl FnOnce() -> Vec<u8>,
+    ) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = buf.clone();
+        (buf.clone(), move || std::mem::take(&mut *w.lock().unwrap()))
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn audit_events_publish_to_the_relay_and_stay_spooled() {
         use freehold_testkit::relay as fake_relay;
@@ -1071,7 +1104,7 @@ mod d5_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let ctx = RunnerContext {
-            identity: rid,
+            identity: rid.clone(),
             package: SecretPackage::default(),
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
@@ -1096,8 +1129,40 @@ mod d5_tests {
             .header(auth::TS_HEADER, ts)
             .send(raw);
         assert!(resp.is_ok(), "exec succeeds with /events blocked: {resp:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        let captured = {
+            // The surfaced rule, unit-level: report_audit_publish is sync and
+            // emits its warn on THIS thread — captured directly.
+            let (writer, handle) = tracing_capture();
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::WARN)
+                    .with_writer(CapWriter(writer))
+                    .finish(),
+            );
+            let runner_secret = rid.clone().secret_seed();
+            crate::exec::report_audit_publish(
+                &relay_url,
+                &runner_secret,
+                &serde_json::json!({ "kind": 48001 }).to_string(),
+            );
+            drop(guard);
+            handle()
+        };
 
+        // The publish WAS attempted (the fake records the caller before the
+        // block_events check) — this is not a silently-dropped relay_url.
+        assert!(
+            state.authed_callers.lock().len() >= 2,
+            "query + the attempted /events publish both authenticated: {:?}",
+            state.authed_callers.lock().clone()
+        );
+        // ...and the failure was SURFACED, never silently swallowed.
+        assert!(
+            String::from_utf8_lossy(&captured).contains("audit relay publish failed"),
+            "surfaced warn expected; captured: {}",
+            String::from_utf8_lossy(&captured)
+        );
         // The local spool is still authoritative — never silently dropped.
         let spooled = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
         assert!(spooled.contains("deg-spool"), "spool: {spooled}");
