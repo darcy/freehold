@@ -70,6 +70,25 @@ peer) instead of calling the runner itself → result comes back through Buzz.
 
 ## Ordered steps
 
+### Phase 0 — Buzz surface research (the external-system gate)
+
+Buzz is a real product with opinions about workspaces, membership, agents, and memory — it
+is NOT a blank event store. Every port design decision in D–F keys off what it actually
+exposes, so the surface is resolved BEFORE the schema is written.
+
+- [ ] [ ]
+
+01. Read Buzz's actual integration surfaces we must consume: workspace + member model
+(invite/join, or open?), agent identity (keys/roles), event kinds (arbitrary/custom, or
+fixed?), rooms/DMs, and any native agent memory. Deliverable: a short written note naming
+exactly what the port consumes per capability.
+
+- [ ] [ ]
+
+02. Decide per capability — membership, grants, memory, audit, delegation — whether it rides
+Buzz's native concept or a custom kind we define ON the relay. This is the input D1's event
+schema must match: no kind is designed against an assumption.
+
 ### Phase A — Bootstrap provisioning (runner-direct, pre-relay)
 
 - [ ] [ ]
@@ -133,7 +152,9 @@ this in the console code, not implicitly.
 
 D1. Define the relay event kinds for the port: membership (who is in the scope), grants
 (agent↔runner, membership-derived), memory (agent state that persists across runs), and
-audit. Schema is part of this item — the event kinds are the new contract.
+audit. Schema is part of this item — the event kinds are the new contract — and must match
+the Phase 0 surface (native Buzz concept where one exists, custom kind where we define it;
+never a kind designed against an assumption).
 
 - [ ] [ ]
 
@@ -194,6 +215,11 @@ memory, not in-process state).
 
 ### Phase G — Acceptance script
 
+CI runs the checks against hermetic fixtures — a mock relay in `testkit` (same pattern as
+the mock Vultr/B2/sshd) — with the REAL relay on the promote path (VPS → laptop). The
+G1–G6 script is parameterized the same way `freehold-acceptance` already is; no local
+dev loop is introduced by adding fixtures.
+
 - [ ] [ ]
 
 G1. Fresh run: provision target → relay up → CP up on same target → CP is a relay member.
@@ -217,9 +243,11 @@ G5. Memory persists across a CP restart.
 
 - [ ] [ ]
 
-G6. Chunk 1's security invariants still hold under the deployed/relay regime: a non-member
-pubkey is denied (fail-closed, now membership-derived), runners hold ciphertext-only + their
-own injected key, no master key anywhere. The port must not silently weaken the security story.
+G6. RE-ADAPT Chunk 1's acceptance invariants (G3.1–G3.3: secrets never in agent context,
+ciphertext-only + injected key, no master key) to the relay regime via the existing
+`freehold-acceptance` harness — the port's delta is the only new surface: fail-closed
+becomes membership-derived (a non-member pubkey is denied), everything else must still
+hold unchanged.
 
 ### Phase H — Test / promote
 
