@@ -44,9 +44,10 @@ provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessar
     relay; a request and its result are correlated by event references (reply/quote). Pull-style
     like exec streaming; push later. No second HTTP surface for agent↔agent in Chunk 2.
 
-*   **POC agents run scripted** (buzz-acp harness). "Real relay peer agent" means a
-    relay-addressable identity running the harness — NOT a real reasoning agent (POC remains
-    pre-reasoning; the proven wire + delegation shape is the point).
+*   **POC agents run scripted, joining the relay with their own NIP-42 client** — NOT a real
+    reasoning agent (POC remains pre-reasoning; the proven wire + delegation shape is the
+    point). Phase-0 research (BUZZ_SURFACE.md) corrected an assumption: `buzz-acp` targets LLM
+    agents (goose/codex/claude) and is the Chunk-3+ harness path; E1 carries the same wording.
 
 *   **No local-machine dev loop.** VPS and Proxmox are the two real targets, matching the
     existing promote flow (VPS smoke → old-laptop Proxmox test → home).
@@ -76,18 +77,22 @@ Buzz is a real product with opinions about workspaces, membership, agents, and m
 is NOT a blank event store. Every port design decision in D–F keys off what it actually
 exposes, so the surface is resolved BEFORE the schema is written.
 
-- [ ] [ ]
+- [x] [x]
 
 01. Read Buzz's actual integration surfaces we must consume: workspace + member model
 (invite/join, or open?), agent identity (keys/roles), event kinds (arbitrary/custom, or
 fixed?), rooms/DMs, and any native agent memory. Deliverable: a short written note naming
 exactly what the port consumes per capability.
 
-- [ ] [ ]
+- [x] [x]
 
 02. Decide per capability — membership, grants, memory, audit, delegation — whether it rides
 Buzz's native concept or a custom kind we define ON the relay. This is the input D1's event
 schema must match: no kind is designed against an assumption.
+
+**Deliverable:** `roadmap/BUZZ_SURFACE.md` — the surface note naming exactly what the port
+consumes per capability. Native kinds found for most of it (membership 13534, agent memory
+30174, audit 48001, jobs 43001–43006, DMs 41001); only GRANTS needs a freehold custom kind.
 
 ### Phase A — Bootstrap provisioning (runner-direct, pre-relay)
 
@@ -206,8 +211,8 @@ G3.1 check adapts to read relay events while still asserting the local spool.
 - [ ] [ ]
 
 E1. Promote the provisioning capability used in Phase A (e.g. `@proxmox` or `@vultr`) from
-"runner CPA calls directly" to a real relay-addressable peer agent — a relay identity running
-the scripted harness (buzz-acp), NOT a reasoning agent.
+"runner CPA calls directly" to a real relay-addressable peer agent — a relay identity with its
+own NIP-42 client (scripted; `buzz-acp`/LLM harness is Chunk-3+), NOT a reasoning agent.
 
 - [ ] [ ]
 

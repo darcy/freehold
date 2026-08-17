@@ -20,8 +20,9 @@ loopback) are implemented and reviewed. Current work is uncommitted until review
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–3, MVP chunks 4–6.
 - `roadmap/POC.md` — POC scope, goal, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK1.md` — detailed Chunk 1 build plan. **Locked, ready to execute.**
-- `roadmap/POC_CHUNK2.md` — detailed Chunk 2 build plan (relay/CP deployment + identity port;
-  under review). The
+- `roadmap/POC_CHUNK2.md` — detailed Chunk 2 build plan (relay/CP deployment + identity port). The
+- `roadmap/BUZZ_SURFACE.md` — Phase-0 deliverable: the Buzz relay's actual surfaces and the
+  per-capability port decision (native kinds vs our custom kinds).
   phase checklists (A–H) are the source of truth for implementation progress.
 
 ## Locked model — do not change without an explicit user decision
