@@ -32,6 +32,25 @@ pub struct RelayDeploySpec {
     pub http_port: u16,
     /// Which block/buzz ref to fetch (tag or SHA; default = pinned SHA).
     pub buzz_ref: String,
+    /// Deploy INTO this LXC on the target (the target is the PVE host, the
+    /// LXC holds docker). None = deploy directly on the target host. When
+    /// set, every command is wrapped `pct exec <lxc> -- sh -c '<cmd>'` and
+    /// the deploy dir is a path INSIDE the guest.
+    pub lxc: Option<u32>,
+    /// The relay OWNER Nostr pubkey (64-hex) — written into `RELAY_OWNER_PUBKEY`
+    /// in the compose .env. The bundle's run.sh refuses to start with CHANGE_ME
+    /// placeholders; the owner is the CP's identity (Phase C member admin).
+    pub owner_pubkey: String,
+}
+
+/// Wrap a target command for execution inside an LXC via the host runner.
+/// The command must be single-quote-FREE (the payload is single-quoted for
+/// the guest `sh -c`); the guest then sees double quotes/`$()` normally.
+fn lxc_cmd(lxc: Option<u32>, cmd: &str) -> String {
+    match lxc {
+        Some(id) => format!("pct exec {id} -- sh -c '{cmd}'"),
+        None => cmd.to_string(),
+    }
 }
 
 #[derive(Debug)]
@@ -77,12 +96,13 @@ fn exec_to_ok(
     Ok(out)
 }
 
-/// B1 gate: docker + the compose plugin must exist on the target.
-fn check_docker(client: &McpClient, target: &str) -> Result<(), BootstrapError> {
+/// B1 gate: docker + the compose plugin must exist on the target (or inside
+/// the target's LXC when `lxc` is set — that is where the bootstrap puts it).
+fn check_docker(client: &McpClient, target: &str, lxc: Option<u32>) -> Result<(), BootstrapError> {
     match exec_to_ok(
         client,
         target,
-        "command -v docker && docker compose version",
+        &lxc_cmd(lxc, "command -v docker && docker compose version"),
         "docker presence",
         60,
     ) {
@@ -108,8 +128,16 @@ pub async fn deploy_relay(
     // A ref interpolates straight into curl's URL — tags/SHAs legitimately
     // contain '/', but anything shell-hostile must be rejected.
     crate::bootstrap::plain_path(&spec.buzz_ref)?;
+    // The owner pubkey lands in the compose .env unquoted; it must be a bare
+    // 64-hex Nostr pubkey (run.sh itself rejects anything shorter/else).
+    if spec.owner_pubkey.len() != 64 || !spec.owner_pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(BootstrapError::Verify(format!(
+            "owner pubkey must be a 64-character hex Nostr pubkey (got {:?})",
+            spec.owner_pubkey
+        )));
+    }
 
-    check_docker(client, target)?;
+    check_docker(client, target, spec.lxc)?;
 
     // Fetch the PINNED bundle. No `rm -rf` anywhere: the overlay is
     // refreshed by tar's overwrite, while `.env` (which carries
@@ -121,25 +149,63 @@ pub async fn deploy_relay(
         dir = spec.deploy_dir,
         ref = spec.buzz_ref,
     );
-    exec_to_ok(client, target, &dl, "download bundle", 180)?;
+    exec_to_ok(
+        client,
+        target,
+        &lxc_cmd(spec.lxc, &dl),
+        "download bundle",
+        180,
+    )?;
     let extract = format!(
         "tar -xzf {dir}/buzz.tar.gz -C {dir} --strip-components=1",
         dir = spec.deploy_dir
     );
-    exec_to_ok(client, target, &extract, "extract bundle", 180)?;
+    exec_to_ok(
+        client,
+        target,
+        &lxc_cmd(spec.lxc, &extract),
+        "extract bundle",
+        180,
+    )?;
 
     // Install per the upstream bundle contract: .env ONCE (preserve the
-    // signing identity), then the port, then run.sh. The cold first pull of
-    // Postgres/Redis/MinIO/relay/Caddy gets a real timeout (600s), not the
-    // default.
+    // signing identity), then the port + the owner + per-key secrets, then
+    // run.sh. The cold first pull of Postgres/Redis/MinIO/relay/Caddy gets a
+    // real timeout (600s), not the default.
+    // Single-quote-free on purpose: the whole command is single-quoted when
+    // wrapped for `pct exec ... sh -c`.
+    // Entropy: each secret comes from /dev/urandom (od -N32 -> 64 hex), NOT a
+    // timestamp — `sha256(date +%s%N)` is guessable within a bound run (the
+    // relay's first signed event leaks the boot time) and BUZZ_RELAY_PRIVATE_KEY
+    // is the relay's signing key (forging kind 13534 = self-admission).
     let install = format!(
         "set -e; cd {dir}/deploy/compose && (test -f .env || cp .env.example .env) && \
-         (grep -q '^BUZZ_HTTP_PORT=' .env && sed -i 's/^BUZZ_HTTP_PORT=.*/BUZZ_HTTP_PORT={port}/' .env \
-          || echo 'BUZZ_HTTP_PORT={port}' >> .env) && ./run.sh start",
+         (grep -q \"^BUZZ_HTTP_PORT=\" .env && \
+          sed -i \"s/^BUZZ_HTTP_PORT=.*/BUZZ_HTTP_PORT={port}/\" .env || \
+          echo \"BUZZ_HTTP_PORT={port}\" >> .env) && \
+         (grep -q \"^RELAY_OWNER_PUBKEY=\" .env && \
+          sed -i \"s/^RELAY_OWNER_PUBKEY=.*/RELAY_OWNER_PUBKEY={owner}/\" .env || \
+          echo \"RELAY_OWNER_PUBKEY={owner}\" >> .env) && \
+         for k in BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET POSTGRES_PASSWORD \
+         REDIS_PASSWORD BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY; do \
+         if grep -q \"^$k=CHANGE_ME\" .env; then \
+         v=$(od -An -N32 -tx1 /dev/urandom | tr -d \"\\n \"); \
+         sed -i \"s/^$k=CHANGE_ME.*/$k=$v/\" .env; \
+         fi; done && \
+         (grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in \
+         {dir}/deploy/compose/.env\" >&2 && exit 1 || true) && \
+         ./run.sh start",
         dir = spec.deploy_dir,
         port = spec.http_port,
+        owner = spec.owner_pubkey,
     );
-    exec_to_ok(client, target, &install, "run.sh start", 600)?;
+    exec_to_ok(
+        client,
+        target,
+        &lxc_cmd(spec.lxc, &install),
+        "run.sh start",
+        600,
+    )?;
 
     // B2: the relay's OWN health on the loopback we just verified. Poll,
     // keeping the last non-transient error so expiry says WHY.
@@ -150,7 +216,13 @@ pub async fn deploy_relay(
             "curl -fsS http://127.0.0.1:{port}/_liveness",
             port = spec.http_port
         );
-        match exec_to_ok(client, target, &probe, "relay liveness", 30) {
+        match exec_to_ok(
+            client,
+            target,
+            &lxc_cmd(spec.lxc, &probe),
+            "relay liveness",
+            30,
+        ) {
             Ok(_) => {
                 healthy = true;
                 break;

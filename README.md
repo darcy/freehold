@@ -186,14 +186,19 @@ cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
   --steps steps.json   # [{target, cmd, secrets?, timeout_s?}]
 
 # C2/A2: bootstrap-provision a target through a provisioning runner (runner-direct)
+#   --vmid is OPTIONAL (the driver picks the next free cluster id); sizing
+#   --rootfs-gb 16 (default) / --memory-mb 2048 (default) fit the relay stack.
 cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --name relaybox \
-  --vmid 100 --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
-  --runner-pubkey <runner-nostr>    # template ensure (pveam, idempotent) + pct on the PVE host; docker+compose installed in the guest
+  --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
+  --runner-pubkey <runner-nostr>    # arch-matched template ensure (pveam, idempotent) + pct on the PVE host; docker+compose installed in the guest
 
 # C2/B: deploy the Buzz relay onto the target (docker gate -> bundle -> compose -> liveness)
+#   --owner-pubkey is REQUIRED (written to RELAY_OWNER_PUBKEY; the relay refuses
+#   to start with CHANGE_ME placeholders). --lxc <vmid> deploys INTO the container.
 cargo run -p freehold-orchestrator -- deploy-relay --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
-  --target proxmox-box --name relay-box --http-port 3000
+  --target proxmox-box --name relay-box --http-port 3000 \
+  --owner-pubkey <64-hex-owner> [--lxc 100]
 ```
 
 ## Roadmap

@@ -67,6 +67,9 @@ exit 1
 // runs the driver's install-if-missing wrapper ("docker already present").
 const HAPPY_PCT: &str = r#"
 case "$1" in
+  list)   echo "VMID Status Lock Name"
+          echo "100 stopped taken"
+          echo "102 stopped other"; exit 0;;
   create) echo "204"; exit 0;;
   start)  echo "204"; exit 0;;
   exec)
@@ -84,13 +87,15 @@ case "$1" in
 esac
 "#;
 /// The PVE catalog + download endpoint: `pveam update` syncs, `available`
-/// lists two debian-12 standard templates (12.7 and the NEWER 12.10),
-/// `download` succeeds. Columns mirror the REAL pveam output: `system` is
-/// the FIRST token, the template name the SECOND (the driver parses nth(1)).
+/// lists a NEWER-version ARM64 template the driver MUST skip (real catalogs
+/// mix arches — observed live) plus two debian-12 amd64 rows (12.7 and the
+/// NEWER 12.10), `download` succeeds. Columns mirror the REAL pveam output:
+/// `system` is the FIRST token, the template name the SECOND (nth(1)).
 const PVEAM: &str = r#"
 case "$1" in
   update)    echo "ok"; exit 0;;
-  available) echo "system debian-12-standard_12.7-1_amd64.tar.zst 227M 0"
+  available) echo "system debian-13-standard_13.6-1_arm64.tar.zst 123M 0"
+             echo "system debian-12-standard_12.7-1_amd64.tar.zst 227M 0"
              echo "system debian-12-standard_12.10-1_amd64.tar.zst 228M 0"; exit 0;;
   download)  echo "204"; exit 0;;
   *)         echo "unknown pveam $*" >&2; exit 2;;
@@ -214,6 +219,7 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
         &[
             ("pvesm", HAPPY_PVESM),
             ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
             // pveam NOT planted: the happy store already holds a template,
             // so ensurement must reuse it — any pveam call would 127.
             ("pveam", "exit 127\n"),
@@ -226,9 +232,11 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
         "proxmox-box",
         &ProxmoxLxcSpec {
             hostname: "testhost-101".into(),
-            vmid: 101,
+            vmid: Some(101),
             template: None, // exercises template ensurement via pvesm
             storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
             bridge: "vmbr0".into(),
         },
     )
@@ -261,7 +269,7 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
         "the container must come out UNPRIVILEGED (its host will hold relay + CP): {cmds}"
     );
     assert!(
-        cmds.contains("--features keyctl=1,nesting=1"),
+        cmds.contains("--features fuse=1,keyctl=1,nesting=1"),
         "nesting+keyctl are required for docker-in-LXC: {cmds}"
     );
     assert!(cmds.contains("pct start 101"), "start: {cmds}");
@@ -305,9 +313,11 @@ exit 0
         "proxmox-box",
         &ProxmoxLxcSpec {
             hostname: "boom".into(),
-            vmid: 102,
+            vmid: Some(102),
             template: Some("debian-12-standard_12.7-1_amd64.tar.zst".into()),
             storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
             bridge: "vmbr0".into(),
         },
     )
@@ -337,6 +347,7 @@ async fn proxmox_lxc_downloads_template_when_missing() {
         &[
             ("pvesm", "echo 'Volid Format Type Size VMID'; exit 0\n"),
             ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
             ("pveam", PVEAM),
         ],
     );
@@ -347,9 +358,11 @@ async fn proxmox_lxc_downloads_template_when_missing() {
         "proxmox-box",
         &ProxmoxLxcSpec {
             hostname: "testhost-101".into(),
-            vmid: 104,
+            vmid: Some(104),
             template: None,
             storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
             bridge: "vmbr0".into(),
         },
     )
@@ -364,7 +377,11 @@ async fn proxmox_lxc_downloads_template_when_missing() {
     );
     assert!(
         cmds.contains("pveam download local debian-12-standard_12.10-1"),
-        "downloads the NEWEST version by numeric compare (12.10 > 12.7): {cmds}"
+        "downloads the NEWEST HOST-ARCH version (12.10 > 12.7): {cmds}"
+    );
+    assert!(
+        !cmds.contains("arm64"),
+        "the NEWER arm64 row must be skipped (host arch filter): {cmds}"
     );
     assert!(
         cmds.contains("pct create 104") && cmds.contains("debian-12-standard_12.10-1"),
@@ -380,13 +397,124 @@ async fn proxmox_lxc_downloads_template_when_missing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_picks_free_vmid_when_omitted() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
+            ("pvesh", "echo 101; exit 0\n"),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let res = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "testhost-101".into(),
+            vmid: None, // cluster nextid says 101
+            template: None,
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr0".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let cmds = std::fs::read_to_string(&log).unwrap();
+    assert!(cmds.contains("pct list"), "duplicate-name check: {cmds}");
+    assert!(
+        cmds.contains("pvesh get /cluster/nextid"),
+        "cluster-wide nextid used (shared vmid namespace): {cmds}"
+    );
+    assert!(cmds.contains("pct create 101"), "nextid picked: {cmds}");
+    assert!(
+        !cmds.contains("pct create 100") && !cmds.contains("pct create 102"),
+        "an in-use vmid must never be reused: {cmds}"
+    );
+    assert_eq!(res.id, "101", "result reports the picked vmid: {res:?}");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_refuses_duplicate_hostname() {
+    let base = tempfile::tempdir().unwrap();
+    // pct list shows a container ALREADY named relay-box: a second bootstrap
+    // with the same --name must be refused, never duplicated.
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            (
+                "pct",
+                r#"
+if [ "$1" = "list" ]; then
+  echo "VMID Status Lock Name"
+  echo "100 running relay-box"
+  exit 0
+fi
+case "$1" in
+  create) echo "204"; exit 0;;
+  start)  echo "204"; exit 0;;
+  exec)   echo "testhost-101"; echo "Linux"; echo "root"; exit 0;;
+  *)      echo "unknown pct $*" >&2; exit 2;;
+esac
+"#,
+            ),
+            ("uname", "echo x86_64\n"),
+            ("pvesh", "echo 100; exit 0\n"),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let err = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "relay-box".into(),
+            vmid: None,
+            template: None,
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr0".into(),
+        },
+    )
+    .await
+    .expect_err("an existing same-name container must refuse re-creation");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("already exists") && msg.contains("relay-box"),
+        "duplicate-name error: {msg}"
+    );
+    let cmds = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !cmds.contains("pct create"),
+        "must not create when the name is taken: {cmds}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn proxmox_lxc_docker_daemon_failure_is_reported() {
     let base = tempfile::tempdir().unwrap();
     // docker info repeatedly fails: the driver must try the fuse-overlayfs
     // fallback, and AFTER it still surface the daemon error with a hint.
     let (bin, _ba) = plant_bin(
         &base.path().join("pct.log"),
-        &[("pvesm", HAPPY_PVESM), ("pct", PCT_EXEC_DOCKER_FAIL)],
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", PCT_EXEC_DOCKER_FAIL),
+            ("uname", "echo x86_64\n"),
+        ],
     );
     let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
@@ -395,9 +523,11 @@ async fn proxmox_lxc_docker_daemon_failure_is_reported() {
         "proxmox-box",
         &ProxmoxLxcSpec {
             hostname: "testhost-101".into(),
-            vmid: 105,
+            vmid: Some(105),
             template: None,
             storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
             bridge: "vmbr0".into(),
         },
     )
@@ -436,9 +566,11 @@ async fn proxmox_lxc_vmid_below_100_is_rejected() {
         "proxmox-box",
         &ProxmoxLxcSpec {
             hostname: "lowid".into(),
-            vmid: 99,
+            vmid: Some(99),
             template: Some("debian-12-standard_12.7-1_amd64.tar.zst".into()),
             storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
             bridge: "vmbr0".into(),
         },
     )
