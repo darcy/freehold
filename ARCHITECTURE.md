@@ -541,6 +541,7 @@ health → report to user.
     
 2.  **Chunk 2 — Create the management relay (Buzz):** install creates a new relay → becomes the  
     control plane's scope; agents get Nostr identity; fabric + shared memory light up.
+    Detailed phase plan: `roadmap/POC_CHUNK2.md`.
     
 3.  **Chunk 3 — Skill framework v1 + relay-scoped service agents:** skill schema + runner; first  
     skills (tailscale, pihole); spawn per-service expert agents IN the management relay; build  

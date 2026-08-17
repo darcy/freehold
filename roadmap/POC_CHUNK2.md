@@ -129,7 +129,11 @@ B3. This relay becomes the control plane's ONE scope going forward (relay-as-sco
 - [ ] [ ]
 
 C1. Deploy CP app onto the same target, now running in **OPERATE mode** instead of localhost
-(Chunk 1 was effectively local/BOOTSTRAP-adjacent).
+(Chunk 1 was effectively local/BOOTSTRAP-adjacent). **The console STAYS bound to loopback on
+the deployed target** — OPERATE mode means the process + its data live on the box, NOT that
+the UI is network-exposed. The console has no authentication (loopback-only by design,
+Chunk 1); operator access from elsewhere is an SSH tunnel
+(`ssh -L 8080:127.0.0.1:8080 target`).
 
 - [ ] [ ]
 
@@ -138,7 +142,12 @@ the CP adds itself as a member").
 
 - [ ] [ ]
 
-C3. Verify CP's local web UI is now served from the deployed target, not localhost.
+C3. Verify the console is served from the deployed target and reachable ONLY via the
+loopback tunnel: `curl` on the box's own 127.0.0.1 works; a remote attempt at the box's LAN
+address is refused. **The CP refuses to bind a non-loopback address without an authn/TLS
+story** — the guard is part of this item. Console authentication + TLS for real non-loopback
+exposure is a named security-hardening follow-up (ARCHITECTURE Future items), NOT in this
+chunk.
 
 - [ ] [ ]
 
@@ -158,25 +167,39 @@ never a kind designed against an assumption).
 
 - [ ] [ ]
 
-D2. Re-register Chunk 1's three runners (SSH/Vultr/B2) under real Nostr identities on the
-relay, replacing the local-registry stand-in.
+D2. Re-register Chunk 1's three runners (SSH/Vultr/B2) on the relay, replacing the
+local-registry stand-in. **The identity material is UNCHANGED** — the existing Nostr keypairs
+and encryption pubkeys stay exactly as shipped (sealed blobs are pinned to the recipient enc
+pubkey + secret name; new keys would silently kill every shipped `secrets.json`). What moves
+is the RECORD: membership + grants now live on the relay instead of local state.json.
 
 - [ ] [ ]
 
 D3. Master agent (`@freehold`) gets a real identity in the relay; memory becomes relay-persisted
-(relay event store) instead of local/ephemeral.
+(relay event store) instead of local/ephemeral. **Memory event payloads are encrypted** — a
+relay operator is not a reader of agent memory; exact kind/scheme decided in D1 against the
+Phase 0 surface.
 
 - [ ] [ ]
 
-D4. Grants are re-pointed from the local whitelist to **membership-derived** validity: being a
-relay member of the scope is what makes a pubkey callable. The whitelist pubkeys were already
-real Nostr keys — the change is that validity now derives from relay membership.
+D4. Grants keep the Chunk-1 model: coarse agent↔runner whitelists of real Nostr pubkeys.
+Relay **membership is necessary but NOT sufficient** — a member must still be explicitly
+granted to a runner; grants do not collapse into "in the scope." What changes: the whitelist
+lives on the relay instead of local state, and its validity derives from relay membership (a
+grant references a member). **Deliberate choice, decided here:** grants are re-read LIVE from
+relay events (subscribe/poll, same per-call freshness as today) — this CLOSES the Chunk-1
+gap "rotate/re-grant don't reach a running runner." If instead they are read at boot, the gap
+persists. Pick one deliberately; the runner-side mechanic lands in D1's grant event design.
 
 - [ ] [ ]
 
-D5. **Audit moves to the relay** (per the locked model: the runner signs a Nostr event for
-every executed command into the relay). Chunk 1's local audit.log is replaced by relay events;
-the acceptance script's G3.1 check adapts to read them.
+D5. **Audit becomes additive, not a replacement:** the same BIP-340-signed event is spooled
+locally (Chunk 1's `audit.log` stays) AND published to the relay once live (the locked model:
+the runner signs a Nostr event for every executed command into the relay). Phases A/B run
+PRE-relay and are the chunk's most privileged execs — they must be audited before any sink
+exists. Fail-closed rules: local append can never fail silently; relay publish failure
+degrades to local-spool-only and is surfaced, never silently dropped. The acceptance script's
+G3.1 check adapts to read relay events while still asserting the local spool.
 
 ### Phase E — Prove delegation mode
 
@@ -244,10 +267,13 @@ G5. Memory persists across a CP restart.
 - [ ] [ ]
 
 G6. RE-ADAPT Chunk 1's acceptance invariants (G3.1–G3.3: secrets never in agent context,
-ciphertext-only + injected key, no master key) to the relay regime via the existing
-`freehold-acceptance` harness — the port's delta is the only new surface: fail-closed
-becomes membership-derived (a non-member pubkey is denied), everything else must still
-hold unchanged.
+ciphertext-only + injected key, no master key) via the existing `freehold-acceptance`
+harness under the relay regime, testing the port's DELTA only:
+(a) a NON-MEMBER pubkey is denied;
+(b) a MEMBER-but-ungranted pubkey is denied — the case that actually catches a
+grants-collapse regression (D4);
+(c) the console is unreachable off-loopback without the tunnel (C1/C3 bind guard).
+Everything else must still hold unchanged.
 
 ### Phase H — Test / promote
 

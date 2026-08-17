@@ -180,7 +180,7 @@ cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
 ## Roadmap
 
 `roadmap/` holds the chunked plan: POC chunks 1–3 (engine room → Buzz relay scope → skills)
-then MVP chunks 4–6 (k8s, console, installer). Phase checklists in `roadmap/POC_CHUNK1.md`
+then MVP chunks 4–6 (k8s, console, installer). Phase checklists in `roadmap/POC_CHUNK1.md` (and `roadmap/POC_CHUNK2.md`, in draft)
 are ticked as work lands.
 
 ## Contributing / review
