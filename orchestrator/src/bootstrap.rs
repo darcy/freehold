@@ -44,12 +44,21 @@ pub enum TargetKind {
 #[derive(Debug, Clone)]
 pub struct ProxmoxLxcSpec {
     pub hostname: String,
-    pub vmid: u32,
+    /// Container vmid; None = the driver picks the lowest free id >= 100
+    /// (`pct list`).
+    pub vmid: Option<u32>,
     /// Template name (e.g. `debian-12-standard_12.7-1_amd64.tar.zst`). If
-    /// None, the flow ensures a Debian template: reuse the newest present or
-    /// `pveam update` + download the newest available.
+    /// None, the flow ensures a Debian template matching the HOST arch:
+    /// reuse the newest present or `pveam update` + download the newest
+    /// available.
     pub template: Option<String>,
     pub storage: String,
+    /// Rootfs size in GB on `storage` (the relay stack needs room for
+    /// images; the pct default of 4G is too tight).
+    pub rootfs_gb: u32,
+    /// RAM in MB (the compose stack — Postgres/Redis/MinIO/relay/Caddy —
+    /// needs more than the pct default of 512 and OOMs otherwise).
+    pub memory_mb: u32,
     pub bridge: String,
 }
 
@@ -164,6 +173,7 @@ fn ensure_debian_template(
         plain(t)?;
         return Ok(t.clone());
     }
+    let arch = host_arch(client, target)?;
 
     // pvesm plain table: header + rows of `<volid> <format> <type> <size> <vmid>`.
     let list = exec(
@@ -173,6 +183,10 @@ fn ensure_debian_template(
         120,
     )?;
     expect_ok(&list, "template list")?;
+    // `_<arch>.tar.[gz|zst]` — the catalog and store mix amd64 and arm64
+    // rows for the SAME release; an arm64 guest cannot spawn on x86_64
+    // (observed live). Only the host's arch is a candidate.
+    let arch_suffix = format!("_{arch}.tar.");
     let present = list
         .stdout
         .lines()
@@ -183,7 +197,7 @@ fn ensure_debian_template(
                 .strip_prefix(&format!("{TEMPLATE_STORAGE}:vztmpl/"))
                 .map(str::to_string)
         })
-        .filter(|n| n.contains("debian-") && n.contains("standard_"))
+        .filter(|n| n.contains("debian-") && n.contains("standard_") && n.contains(&arch_suffix))
         .filter_map(|n| template_version(&n).map(|v| (v, n)));
     if let Some((_, name)) = present.clone().max_by(|a, b| a.0.cmp(&b.0)) {
         plain(&name)?;
@@ -207,6 +221,7 @@ fn ensure_debian_template(
             n.contains("debian-")
                 && n.contains("standard_")
                 && (n.ends_with(".tar.zst") || n.ends_with(".tar.gz"))
+                && n.contains(&arch_suffix)
         })
         .filter_map(|n| template_version(&n).map(|v| (v, n)))
         .max_by(|a, b| a.0.cmp(&b.0))
@@ -239,8 +254,10 @@ pub async fn bootstrap_proxmox_lxc(
 ) -> Result<BootstrapResult, BootstrapError> {
     // Template ensurement: reuse the newest Debian template already in the
     // store; only when none is present, sync the catalog (`pveam update`) and
-    // download the newest available. Idempotent — a re-run with a template
-    // present makes NO pveam calls.
+    // download the newest available. The template MUST match the HOST arch —
+    // the pveam catalog mixes amd64/arm64 rows and an arm64 guest cannot
+    // spawn on x86_64 (observed live: `Failed to spawn container`).
+    // Idempotent — a re-run with a template present makes NO pveam calls.
     let tpl = ensure_debian_template(client, target, &spec.template)?;
 
     plain(&spec.hostname)?;
@@ -250,13 +267,20 @@ pub async fn bootstrap_proxmox_lxc(
     plain(&spec.storage)?;
     plain(&spec.bridge)?;
 
-    // Bounds check the vmid (PVE convention: systems are 100+).
-    if spec.vmid < 100 {
-        return Err(BootstrapError::Verify(format!(
-            "vmid {} is below the PVE system range (100+); pick a free id",
-            spec.vmid
-        )));
-    }
+    // Explicit vmid must be in the PVE system range; an omitted one is picked
+    // as the lowest free id >= 100 via `pct list` (idempotent: re-runs reuse
+    // an existing container of that name only when the id is still free).
+    let vmid = match spec.vmid {
+        Some(v) => {
+            if v < 100 {
+                return Err(BootstrapError::Verify(format!(
+                    "vmid {v} is below the PVE system range (100+); pick a free id"
+                )));
+            }
+            v
+        }
+        None => pick_free_vmid(client, target)?,
+    };
 
     // --unprivileged 1 is explicit, not the CLI default: pct's CLI defaults
     // to PRIVILEGED, and this container will host the relay + control plane
@@ -266,20 +290,25 @@ pub async fn bootstrap_proxmox_lxc(
     // --features nesting=1 is what lets dockerd (overlay2) run inside the
     // unprivileged container — without it docker-in-LXC fails at the mount
     // namespace boundary. keyctl=1 is required alongside for docker itself
-    // (kernel keyring access inside the guest).
+    // (kernel keyring access inside the guest). fuse=1 exposes /dev/fuse, the
+    // fuse-overlayfs storage-driver device (observed live: docker in the
+    // guest failed with `fuse: device not found` until it was set).
     let create = format!(
-        "pct create {vmid} local:vztmpl/{tpl} --storage {storage} --hostname {host} \
-         --unprivileged 1 --features keyctl=1,nesting=1 --net0 name=eth0,bridge={bridge},ip=dhcp",
-        vmid = spec.vmid,
+        "pct create {vmid} local:vztmpl/{tpl} --rootfs {storage}:{rootfs_gb} \
+         --memory {memory_mb} --hostname {host} --unprivileged 1 \
+         --features fuse=1,keyctl=1,nesting=1 --net0 name=eth0,bridge={bridge},ip=dhcp",
+        vmid = vmid,
         tpl = tpl,
         storage = spec.storage,
+        rootfs_gb = spec.rootfs_gb,
+        memory_mb = spec.memory_mb,
         host = spec.hostname,
         bridge = spec.bridge,
     );
     let out = exec(client, target, &create, 120)?;
     expect_ok(&out, "pct create")?;
 
-    let start = format!("pct start {vmid}", vmid = spec.vmid);
+    let start = format!("pct start {vmid}", vmid = vmid);
     let out = exec(client, target, &start, 120)?;
     expect_ok(&out, "pct start")?;
 
@@ -287,7 +316,7 @@ pub async fn bootstrap_proxmox_lxc(
     // host, `pct exec`; the guest answers. No IP guessing.
     let verify = format!(
         "pct exec {vmid} -- sh -c 'hostname && uname -s && whoami'",
-        vmid = spec.vmid
+        vmid = vmid
     );
     let out = exec(client, target, &verify, 120)?;
     expect_ok(&out, "pct exec verify")?;
@@ -301,22 +330,61 @@ pub async fn bootstrap_proxmox_lxc(
 
     // Get ahead of docker-in-LXC: the guest hosts the relay, so it needs
     // docker + compose BEFORE Phase B's deploy gate runs.
-    ensure_guest_docker(client, target, spec.vmid).await?;
+    ensure_guest_docker(client, target, vmid).await?;
 
     Ok(BootstrapResult {
         kind: TargetKind::ProxmoxLxc,
-        id: spec.vmid.to_string(),
+        id: vmid.to_string(),
         name: spec.hostname.clone(),
         detail: format!(
-            "lxc {vmid} ({hostname}) created from {tpl} on {storage}, started, and the \
-             guest verified via `pct exec` (kernel {kernel}); docker+compose ready",
-            vmid = spec.vmid,
+            "lxc {vmid} ({hostname}) created from {tpl} on {storage} ({rootfs_gb}G rootfs), \
+             started, and the guest verified via `pct exec` (kernel {kernel}); \
+             docker+compose ready",
+            vmid = vmid,
             hostname = spec.hostname,
             tpl = tpl,
             storage = spec.storage,
+            rootfs_gb = spec.rootfs_gb,
             kernel = out.stdout.lines().nth(1).unwrap_or("?")
         ),
     })
+}
+
+/// Map the host arch to the template arch suffix. `uname -m` on PVE: x86_64
+/// or aarch64 (arm64 alias included for safety). Anything else fails closed.
+fn host_arch(client: &McpClient, target: &str) -> Result<&'static str, BootstrapError> {
+    let out = exec(client, target, "uname -m", 120)?;
+    expect_ok(&out, "uname -m")?;
+    match out.stdout.trim() {
+        "x86_64" => Ok("amd64"),
+        "aarch64" | "arm64" => Ok("arm64"),
+        other => Err(BootstrapError::Verify(format!(
+            "unsupported host arch {other:?} (expected x86_64 or aarch64)"
+        ))),
+    }
+}
+
+/// The lowest free vmid >= 100 per `pct list` (plain table:
+/// `<vmid> <status> <type> <name>`; header skipped). Picks the first gap.
+fn pick_free_vmid(client: &McpClient, target: &str) -> Result<u32, BootstrapError> {
+    let out = exec(client, target, "pct list", 120)?;
+    expect_ok(&out, "pct list")?;
+    let mut used: Vec<u32> = out
+        .stdout
+        .lines()
+        .skip(1) // header
+        .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+        .collect();
+    used.sort_unstable();
+    let mut vmid = 100;
+    for id in used {
+        if id == vmid {
+            vmid += 1;
+        } else if id > vmid {
+            break;
+        }
+    }
+    Ok(vmid)
 }
 
 /// Ensure docker + compose run inside the guest. Install-if-missing is one

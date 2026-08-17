@@ -55,6 +55,15 @@ struct DeployRelayArgs {
     /// block/buzz ref to fetch (tag or SHA; pinned SHA by default)
     #[arg(long, default_value = relay::DEFAULT_BUZZ_REF)]
     buzz_ref: String,
+    /// Deploy INTO this LXC on the target (the target is the PVE host; the
+    /// LXC is where docker lives after `freehold bootstrap proxmox-lxc`).
+    /// Omitted = deploy directly on the target host.
+    #[arg(long)]
+    lxc: Option<u32>,
+    /// Relay OWNER Nostr pubkey (64-hex) — written to RELAY_OWNER_PUBKEY;
+    /// the bundle's run.sh refuses to start with CHANGE_ME placeholders.
+    #[arg(long)]
+    owner_pubkey: String,
 }
 
 #[derive(Args)]
@@ -71,9 +80,18 @@ struct BootstrapArgs {
     /// LXC hostname (proxmox-lxc) / instance label (vultr-vps)
     #[arg(long)]
     name: String,
-    /// LXC vmid (proxmox-lxc; must be >= 100)
+    /// LXC vmid (proxmox-lxc; must be >= 100 when given; omitted = the
+    /// driver picks the lowest free id via `pct list`)
     #[arg(long)]
     vmid: Option<u32>,
+    /// LXC rootfs size in GB (proxmox-lxc; the relay stack needs room for
+    /// docker images — the pct default of 4G is too tight)
+    #[arg(long, default_value_t = 16)]
+    rootfs_gb: u32,
+    /// LXC memory in MB (proxmox-lxc; the 5-service compose stack OOMs at
+    /// the pct default of 512)
+    #[arg(long, default_value_t = 2048)]
+    memory_mb: u32,
     /// LXC template name in storage 'local'; auto-detect when omitted
     #[arg(long)]
     template: Option<String>,
@@ -238,6 +256,8 @@ async fn main() -> Result<()> {
                     deploy_dir: args.deploy_dir.clone(),
                     http_port: args.http_port,
                     buzz_ref: args.buzz_ref.clone(),
+                    lxc: args.lxc,
+                    owner_pubkey: args.owner_pubkey.clone(),
                 },
             )
             .await?;
@@ -261,14 +281,13 @@ async fn main() -> Result<()> {
             )?;
             let res = match args.kind.as_str() {
                 "proxmox-lxc" => {
-                    let vmid = args
-                        .vmid
-                        .ok_or_else(|| anyhow::anyhow!("--vmid is required for proxmox-lxc"))?;
                     let spec = bootstrap::ProxmoxLxcSpec {
                         hostname: args.name.clone(),
-                        vmid,
+                        vmid: args.vmid, // None = driver picks the lowest free >= 100
                         template: args.template.clone(),
                         storage: args.storage.clone(),
+                        rootfs_gb: args.rootfs_gb,
+                        memory_mb: args.memory_mb,
                         bridge: args.bridge.clone(),
                     };
                     bootstrap::bootstrap_proxmox_lxc(&client, &args.target, &spec).await?

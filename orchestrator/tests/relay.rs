@@ -155,6 +155,8 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
             deploy_dir: dir_s,
             http_port: 3000,
             buzz_ref: DEFAULT_BUZZ_REF.into(),
+            lxc: None,
+            owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
         },
     )
     .await
@@ -184,6 +186,8 @@ async fn relay_deploy_missing_docker_gives_remediation() {
             deploy_dir: base.path().join("relay").display().to_string(),
             http_port: 3000,
             buzz_ref: DEFAULT_BUZZ_REF.into(),
+            lxc: None,
+            owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
         },
     )
     .await
