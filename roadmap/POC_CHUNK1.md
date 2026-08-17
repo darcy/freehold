@@ -164,7 +164,7 @@ no master key; revoking membership cuts off; rotation re-encrypts.
 
 ### Phase H — Test / promote
 
-- [ ] [ ] 
+- [x] [x] 
 
 H1. Run against old-laptop Proxmox (SSH target) — safe target.
 
