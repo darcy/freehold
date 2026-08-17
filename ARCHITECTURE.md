@@ -42,8 +42,10 @@ backbone for agents.
 *   Deterministic k8s agent pods (bare Pods, digest-pinned sprig, per-attempt envFrom Secret,  
     no mgmt channel by design, idle auto-reap, emptyDir, no PVC v1) — PUBLIC RELEASE target.
     
-*   **Agent placement:** POC = Buzz agents via buzz-acp (local); public release = k8s pods.  
-    Runners are separate — see the Runners section below.
+*   **Agent placement:** POC = scripted agents joining the relay via their own NIP-42 client
+    (the `buzz-acp` harness targets LLM agents and is the Chunk-3+ path — see
+    `roadmap/BUZZ_SURFACE.md`); public release = k8s pods. Runners are separate — see the
+    Runners section below.
     
 *   **We do NOT build a chat UI / agent-management surface** — Buzz provides it.
     

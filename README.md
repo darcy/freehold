@@ -31,7 +31,8 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 ```
 Cargo.toml            workspace: core, runner, control-plane, orchestrator, testkit, acceptance
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
-roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md (phase checklists A–H, ticked)
+roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
+                      ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
 core/                 freehold-core — shared by every crate, no product logic
   src/identity.rs     Nostr (secp256k1) + X25519 keypairs; env-inject or 0600 file
   src/auth.rs         the signed-call protocol: BIP-340 signatures over

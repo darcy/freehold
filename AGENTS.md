@@ -10,7 +10,10 @@ audit), B (provisioner), C (SSH + vultr + b2 connectors), D (coarse grants), E
 admin/ops web UI: services-at-a-glance with LIVE readiness via a console agent, and
 runner/secret/grant management), and G (the acceptance script: `cargo run -p
 freehold-acceptance` reproduces every Chunk-1 acceptance criterion hermetic on
-loopback) are implemented and reviewed. Current work is uncommitted until reviewed.
+loopback) are implemented and reviewed; H1 (old-laptop Proxmox as a real SSH target)
+is DONE — the laptop is onboarded as a runner and execs green. Chunk 2 is started:
+Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) is DONE; the A–H build
+plan is in `roadmap/POC_CHUNK2.md`. Current work is uncommitted until reviewed.
 
 ## Navigation
 
@@ -20,9 +23,9 @@ loopback) are implemented and reviewed. Current work is uncommitted until review
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–3, MVP chunks 4–6.
 - `roadmap/POC.md` — POC scope, goal, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK1.md` — detailed Chunk 1 build plan. **Locked, ready to execute.**
-- `roadmap/POC_CHUNK2.md` — detailed Chunk 2 build plan (relay/CP deployment + identity port;
-  under review). The
-  phase checklists (A–H) are the source of truth for implementation progress.
+- `roadmap/POC_CHUNK2.md` — detailed Chunk 2 build plan (relay/CP deployment + identity port).
+- `roadmap/BUZZ_SURFACE.md` — Phase 0 deliverable: the Buzz relay's actual surfaces and the
+  per-capability port decision (native kinds vs our own custom kinds).
 
 ## Locked model — do not change without an explicit user decision
 
