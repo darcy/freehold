@@ -68,6 +68,33 @@ pub fn parse_grants_content(content: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// Shared bridge query primitive: POST /query with a filters ARRAY (the
+/// real bridge shape — verified live), NIP-98 auth, status checked, body
+/// parsed as an event array. Returns the raw events; callers verify authors
+/// and signatures locally.
+pub fn query_events(
+    relay_url: &str,
+    auth_secret: &[u8; 32],
+    filters: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
+    let headers = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
+    let mut resp = agent()
+        .post(&url)
+        .header("Authorization", &headers)
+        .header("Content-Type", "application/json")
+        .send(filters.to_string())
+        .map_err(|e| format!("query request failed: {e}"))?;
+    let body = resp
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("query read: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("query returned HTTP {}: {body}", resp.status()));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("query parse: {e}: {body}"))
+}
+
 /// Fetch the CURRENT grant list for a runner from the relay.
 /// NIP-98 auth (signer = the caller's secret), filter kind 30180 / max
 /// created_at, then match the `d`-tag to `runner_pubkey_hex`.

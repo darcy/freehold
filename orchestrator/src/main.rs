@@ -39,6 +39,11 @@ enum Cmd {
     RelayMember(RelayMemberArgs),
     /// D3: the agent's encrypted relay memory (kind 30174, self-sealed)
     Memory(MemoryArgs),
+    /// E: the CPA delegates a task to a relay-addressable peer agent
+    Delegate(DelegateArgs),
+    /// E: the peer agent — watches for delegated requests, execs them via
+    /// the runner (runner-direct), posts the results
+    DelegatePeer(DelegatePeerArgs),
 }
 
 #[derive(Args)]
@@ -135,6 +140,58 @@ struct MemoryArgs {
     /// Agent identity dir (the CPA's keypair — memory seals to its enc key)
     #[arg(long)]
     agent_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct DelegateArgs {
+    /// CPAs identity dir
+    #[arg(long)]
+    agent_dir: PathBuf,
+    #[arg(long)]
+    relay_url: String,
+    /// The auto-ops channel id (uuid) — created idempotently on first use
+    #[arg(long, default_value = "00000000-0000-4000-8000-00000000f0ee")]
+    channel: String,
+    /// The peer agent's Nostr pubkey (64-hex)
+    #[arg(long)]
+    peer: String,
+    /// The task (a shell command the peer runs via the runner)
+    #[arg(long)]
+    task: String,
+    /// Seconds to wait for the peer's result
+    #[arg(long, default_value_t = 90)]
+    timeout_secs: u64,
+}
+
+#[derive(Args)]
+struct DelegatePeerArgs {
+    /// The peer agent's identity dir
+    #[arg(long)]
+    agent_dir: PathBuf,
+    #[arg(long)]
+    relay_url: String,
+    #[arg(long, default_value = "00000000-0000-4000-8000-00000000f0ee")]
+    channel: String,
+    /// The runner's MCP address (the peer execs tasks runner-direct)
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    runner_addr: String,
+    /// The runner's Nostr pubkey (signature audience)
+    #[arg(long)]
+    runner_pubkey: String,
+    /// The runner TARGET name for the exec (e.g. proxmox-box)
+    #[arg(long)]
+    target: String,
+    /// The ONLY delegator allowed to request execs (the CPA's pubkey,
+    /// 64-hex) — REQUIRED, fail-closed: the peer proxies for NOBODY else
+    /// (any-member requests would hollow out the grant model).
+    #[arg(long)]
+    requester: String,
+    /// Seconds to watch for requests (0 = single pass)
+    #[arg(long, default_value_t = 0)]
+    watch: u64,
+    /// Poll interval seconds
+    #[arg(long, default_value_t = 3)]
+    interval: u64,
 }
 
 #[derive(Args)]
@@ -424,6 +481,177 @@ async fn main() -> Result<()> {
                     "memory action must be set|get (got {other:?})"
                 )),
             }
+        }
+        Cmd::Delegate(args) => {
+            use freehold_core::{delegate, identity::Identity};
+            let id = Identity::load(&args.agent_dir)
+                .with_context(|| format!("loading CPA identity in {}", args.agent_dir.display()))?;
+            if args.peer.len() != 64 || !args.peer.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(anyhow::anyhow!("--peer must be a 64-hex Nostr pubkey"));
+            }
+            delegate::ensure_channel(
+                &args.relay_url,
+                &id.secret_seed(),
+                &args.channel,
+                "freehold-auto-ops",
+            )
+            .map_err(anyhow::Error::msg)?;
+            let job_id = hex::encode(rand::random::<[u8; 16]>());
+            let since = freehold_core::auth::now_secs();
+            delegate::post_message(
+                &args.relay_url,
+                &id.secret_seed(),
+                &args.channel,
+                &args.peer,
+                &delegate::request_content(&job_id, &args.task),
+            )
+            .map_err(anyhow::Error::msg)?;
+            println!("DELEGATE: job {job_id} -> peer; task: {}", args.task);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(args.timeout_secs);
+            loop {
+                // Unfiltered channel poll (a #p-FILTERED kind-9 query hung
+                // on the live relay for the CPA identity — the peer uses its
+                // working p-filtered path); the result is accepted only from
+                // the PEER by id.
+                for (_, content, author) in
+                    delegate::poll_stream(&args.relay_url, &id.secret_seed(), &args.channel, since)
+                        .map_err(anyhow::Error::msg)?
+                {
+                    if author == args.peer
+                        && let Some(env) = delegate::parse_envelope(&content)
+                        && env.ty == delegate::JOB_RESULT
+                        && env.id == job_id
+                    {
+                        if env.ok == Some(true) {
+                            println!("DELEGATE: ok\n{}", env.out.unwrap_or_default());
+                        } else {
+                            println!("DELEGATE: FAILED\n{}", env.out.unwrap_or_default());
+                            std::process::exit(1);
+                        }
+                        return Ok(());
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow::anyhow!(
+                        "delegation timed out after {}s waiting for peer {:.12}",
+                        args.timeout_secs,
+                        args.peer
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+        Cmd::DelegatePeer(args) => {
+            use freehold_core::{delegate, identity::Identity};
+            let id = Identity::load(&args.agent_dir).with_context(|| {
+                format!("loading peer identity in {}", args.agent_dir.display())
+            })?;
+            let me = id.nostr_pubkey_hex();
+            delegate::ensure_channel(
+                &args.relay_url,
+                &id.secret_seed(),
+                &args.channel,
+                "freehold-auto-ops",
+            )
+            .map_err(anyhow::Error::msg)?;
+            println!(
+                "DELEGATE-PEER {} watching {}s on channel {}",
+                me, args.watch, args.channel
+            );
+            if args.requester.len() != 64 || !args.requester.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return Err(anyhow::anyhow!("--requester must be a 64-hex Nostr pubkey"));
+            }
+            let start = std::time::Instant::now();
+            let mut since = freehold_core::auth::now_secs();
+            let mut last_ts = since;
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let client = flows::connect(&args.runner_addr, &args.agent_dir, &args.runner_pubkey)?;
+            loop {
+                let polled = delegate::poll_stream_p(
+                    &args.relay_url,
+                    &id.secret_seed(),
+                    &args.channel,
+                    &me,
+                    since,
+                )
+                .map_err(anyhow::Error::msg)?;
+                for (ts, content, requester) in polled {
+                    // FAIL-CLOSED: only the authorized delegator's requests
+                    // run — the peer proxies for nobody else (any-member
+                    // requests would hollow out the grant model).
+                    if requester != args.requester {
+                        println!(
+                            "DELEGATE-PEER: ignoring request from {} (not the authorized requester)",
+                            &requester[..12]
+                        );
+                        continue;
+                    }
+                    // Advance the poll window ONLY from the authorized
+                    // requester's events, clamped to a small clock-skew —
+                    // a rejected member must not be able to drag `since`
+                    // forward with an absurd created_at (verified review
+                    // regression).
+                    let now = freehold_core::auth::now_secs();
+                    last_ts = last_ts.max(ts.min(now + 60));
+                    if let Some(env) = delegate::parse_envelope(&content)
+                        && env.ty == delegate::JOB_REQUEST
+                        && !seen.contains(&env.id)
+                        && let Some(task) = &env.task
+                    {
+                        seen.insert(env.id.clone());
+                        // The target's OWN credential is the secret name
+                        // (the standard shape; without it the ssh handshake
+                        // stalls — verified live).
+                        println!("DELEGATE-PEER: job {} -> runner-direct exec", env.id);
+                        let (ok, res) =
+                            match client.exec(&args.target, task, &[args.target.as_str()], 120) {
+                                Ok(o) => {
+                                    let mut text = String::new();
+                                    if o.exit_code == Some(0) {
+                                        text.push_str(&o.stdout);
+                                    } else {
+                                        text.push_str(&format!(
+                                            "exit {:?}\n{}",
+                                            o.exit_code, o.stdout
+                                        ));
+                                        if !o.stderr.is_empty() {
+                                            text.push_str(&format!("\n{}", o.stderr));
+                                        }
+                                    }
+                                    // ok comes from the EXIT CODE, never the
+                                    // output text (a 0-exit command whose
+                                    // stdout begins "exit " must succeed).
+                                    (o.exit_code == Some(0), text)
+                                }
+                                Err(e) => (false, format!("runner exec failed: {e}")),
+                            };
+                        delegate::post_message(
+                            &args.relay_url,
+                            &id.secret_seed(),
+                            &args.channel,
+                            &requester,
+                            &delegate::result_content(&env.id, ok, &res),
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                    }
+                }
+                // Advance only to the MAX PROCESSED timestamp — never past
+                // it: requests published while an exec was in flight stay
+                // visible on the next poll (seen dedupes by id).
+                if last_ts > since {
+                    since = last_ts;
+                }
+                if args.watch == 0
+                    || std::time::Instant::now().duration_since(start).as_secs() >= args.watch
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(args.interval));
+            }
+            println!("DELEGATE-PEER: done");
+            Ok(())
         }
         Cmd::Readiness(args) => {
             let client = flows::connect(&args.addr, &args.agent_dir, &args.runner_pubkey)?;

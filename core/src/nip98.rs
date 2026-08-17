@@ -22,6 +22,12 @@ fn now_secs() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+fn random_bytes() -> [u8; 24] {
+    let mut b = [0u8; 24];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut b);
+    b
+}
 use sha2::{Digest, Sha256};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -124,6 +130,13 @@ pub fn nip98_auth(
     url: &str,
     now_secs: i64,
 ) -> Result<String, &'static str> {
+    // A random `nonce` tag makes rapid same-second publishes distinct: the
+    // relay's NIP-98 replay set dedupes by event id, so two auth events in
+    // the same second with identical fields would collide ("replay
+    // detected", verified live). Extra tags don't affect the u/method/sig
+    // checks the relay performs. ONE nonce feeds both the signature and the
+    // JSON (id/sig must agree with the emitted fields).
+    let nonce = hex::encode(random_bytes());
     let (pubkey, id, sig) = sign_event(
         secret,
         KIND_HTTP_AUTH,
@@ -131,6 +144,7 @@ pub fn nip98_auth(
         vec![
             vec!["u".into(), url.into()],
             vec!["method".into(), method.into()],
+            vec!["nonce".into(), nonce.clone()],
         ],
         "",
     )?;
@@ -139,7 +153,11 @@ pub fn nip98_auth(
         "pubkey": pubkey,
         "created_at": now_secs,
         "kind": KIND_HTTP_AUTH,
-        "tags": [["u", url], ["method", method]],
+        "tags": [
+            ["u", url],
+            ["method", method],
+            ["nonce", nonce],
+        ],
         "content": "",
         "sig": sig,
     });

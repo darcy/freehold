@@ -212,7 +212,7 @@ G3.1 check adapts to read relay events while still asserting the local spool.
 
 ### Phase E — Prove delegation mode
 
-- [ ] [ ]
+- [x] [ ]
 
 E1. Promote the provisioning capability used in Phase A (e.g. `@proxmox` or `@vultr`) from
 "runner CPA calls directly" to a real relay-addressable peer agent — a relay identity with its

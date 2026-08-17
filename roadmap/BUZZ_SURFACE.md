@@ -153,6 +153,17 @@ own nostr keypair — sender == receiver == agent; the relay only ever stores ci
 d-tag = sha256(\`<agent-pk>#<key>\`) (64-hex, deterministic per agent+key, replaceable),
 content = the NIP-44 payload, reads filter \`authors=[self]+#d\` with local sig verify.
 
+## 9.7 Delegation wire (found live, Phase E)
+
+The NATIVE job kinds (43001-43006) are NOT in the ingest scope match (like our 30180 — an
+ingest-patch gate). Delegation therefore rides the accepted paths: NIP-29 channel messages
+(kind 9) in a CPA-created OPEN channel (kind 9007 create, `h`+`name`+`visibility=open`
+— "public" is REJECTED, verified live). Request/result correlate by an id echoed in
+content envelopes. Route findings: a **#p-FILTERED kind-9 query hung** on the live relay for
+the requester identity (the p-filtered path worked for the executor); the requester polls
+unfiltered and filters by author/id client-side. Result: CPA -> relay -> peer -> runner-direct
+-> relay -> CPA — the phase's mode transition — proven live.
+
 ## 10. Known gaps / verify-before-design
 
 - **Private-channel member management has no REST/event API yet** (Buzz's own listed gap) —

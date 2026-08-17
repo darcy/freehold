@@ -120,20 +120,41 @@ async fn query(
                 .collect()
         })
         .unwrap_or_default();
-    let event_d = |e: &Value| -> Vec<String> {
+    let p_tags: Vec<String> = filter["#p"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let h_tags: Vec<String> = filter["#h"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Generic single-letter-tag filter (#d/#p/#h fully mirrored; the real
+    // bridge supports any single-letter index).
+    let tag_vals = |e: &Value, letter: &str| -> Vec<String> {
         e["tags"]
             .as_array()
             .map(|t| {
                 t.iter()
                     .filter(|t| {
                         t.as_array()
-                            .is_some_and(|t| t.first().is_some_and(|k| k == "d"))
+                            .is_some_and(|t| t.first().is_some_and(|k| k == letter))
                     })
                     .filter_map(|t| t.as_array().and_then(|t| t.get(1)).and_then(Value::as_str))
                     .map(String::from)
                     .collect()
             })
             .unwrap_or_default()
+    };
+    let filter_tag = |e: &Value, letter: &str, want: &[String]| -> bool {
+        want.is_empty() || tag_vals(e, letter).iter().any(|v| want.contains(v))
     };
     let events: Value = Value::Array(
         state
@@ -145,7 +166,9 @@ async fn query(
                     || e["kind"]
                         .as_u64()
                         .is_some_and(|k| kinds.contains(&(k as u32))))
-                    && (d_tags.is_empty() || event_d(e).iter().any(|d| d_tags.contains(d)))
+                    && filter_tag(e, "d", &d_tags)
+                    && filter_tag(e, "p", &p_tags)
+                    && filter_tag(e, "h", &h_tags)
             })
             .cloned()
             .collect::<Vec<_>>(),
