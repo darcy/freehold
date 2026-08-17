@@ -273,6 +273,10 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
         cmds.contains("export DEBIAN_FRONTEND=noninteractive"),
         "debconf noninteractive must actually reach apt (exported): {cmds}"
     );
+    assert!(
+        cmds.contains("download.docker.com/linux/debian/gpg"),
+        "bookworm fallback to Docker's own repo present: {cmds}"
+    );
     assert!(cmds.contains("pct exec 101"), "verify: {cmds}");
 
     server.abort();

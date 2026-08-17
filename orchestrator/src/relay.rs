@@ -89,9 +89,11 @@ fn check_docker(client: &McpClient, target: &str) -> Result<(), BootstrapError> 
         Ok(_) => Ok(()),
         Err(e) => Err(BootstrapError::Verify(format!(
             "docker + compose plugin are missing on the target: {e}\n\
-             remediation: install them (e.g. `apt-get install docker.io \
-             docker-compose-plugin`), or run `freehold bootstrap` — it installs \
-             docker+compose inside the provisioned LXC."
+             remediation: install them (Debian 13+: `apt-get install docker.io \
+             docker-compose-v2`; Debian 12: docker-compose-v2 from \
+             bookworm-backports or download.docker.com's `docker-compose-plugin`), \
+             or run `freehold bootstrap` — it installs docker+compose inside the \
+             provisioned LXC."
         ))),
     }
 }

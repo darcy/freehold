@@ -330,16 +330,28 @@ async fn ensure_guest_docker(
     target: &str,
     vmid: u32,
 ) -> Result<(), BootstrapError> {
-    // Docker + compose v2 from DEBIAN's own apt (docker-compose-v2 is the
-    // Debian name; docker-compose-plugin is download.docker.com's). The
-    // install-if-missing guard makes re-runs and retries free. Retried 3x
-    // because `pct start` may succeed before the guest has a DHCP lease —
-    // apt-get against no network fails on the first attempt.
+    // Docker + compose v2, on BOTH current Debian releases that PVE templates
+    // come in: debian-13/trixie carries `docker-compose-v2` in main, but
+    // debian-12/bookworm does NOT (only v1 `docker-compose`, which is not the
+    // `docker compose` plugin). When the Debian name is unavailable, fall
+    // back to download.docker.com's own `docker-compose-plugin` (Docker's
+    // official channel for bookworm). The install-if-missing guard makes
+    // re-runs and retries free. Retried 3x because `pct start` may succeed
+    // before the guest has a DHCP lease — apt against no network fails on
+    // the first attempt.
     let install = format!(
         "pct exec {vmid} -- sh -c 'export DEBIAN_FRONTEND=noninteractive; \
          if ! docker compose version >/dev/null 2>&1; then \
-         apt-get update >/dev/null && \
-         apt-get install -y docker.io docker-compose-v2 >/dev/null; fi; \
+         apt-get update >/dev/null 2>&1; \
+         if ! apt-get install -y docker.io docker-compose-v2 >/dev/null 2>&1; then \
+         apt-get install -y curl gpg >/dev/null 2>&1 && \
+         curl -fsSL https://download.docker.com/linux/debian/gpg | \
+         gpg --dearmor -o /usr/share/keyrings/docker.gpg && \
+         echo \"deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] \
+         https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) \
+         stable\" > /etc/apt/sources.list.d/docker.list && \
+         apt-get update >/dev/null 2>&1 && \
+         apt-get install -y docker.io docker-compose-plugin >/dev/null 2>&1; fi; fi; \
          docker compose version'",
         vmid = vmid
     );
