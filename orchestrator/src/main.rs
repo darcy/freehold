@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use freehold_orchestrator::flows;
+use freehold_orchestrator::{bootstrap, flows};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -29,6 +29,48 @@ enum Cmd {
     Readiness(CommonArgs),
     /// E2: run scripted exec steps (JSON file) against a running runner
     Demo(DemoArgs),
+    /// C2/A2: bootstrap-provision a target through a provisioning runner
+    Bootstrap(BootstrapArgs),
+}
+
+#[derive(Args)]
+struct BootstrapArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target kind: proxmox-lxc | vultr-vps
+    #[arg(long)]
+    kind: String,
+    /// Target to drive provisioning through (a runner targeting the PVE host
+    /// for proxmox-lxc, the vultr runner for vultr-vps)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// LXC hostname (proxmox-lxc) / instance label (vultr-vps)
+    #[arg(long)]
+    name: String,
+    /// LXC vmid (proxmox-lxc; must be >= 100)
+    #[arg(long)]
+    vmid: Option<u32>,
+    /// LXC template name in storage 'local'; auto-detect when omitted
+    #[arg(long)]
+    template: Option<String>,
+    /// LXC storage (proxmox-lxc)
+    #[arg(long, default_value = "local-lvm")]
+    storage: String,
+    /// LXC network bridge (proxmox-lxc)
+    #[arg(long, default_value = "vmbr0")]
+    bridge: String,
+    /// Vultr region (vultr-vps)
+    #[arg(long, default_value = "atl")]
+    region: String,
+    /// Vultr plan (vultr-vps)
+    #[arg(long, default_value = "vhf-1c-1gb")]
+    plan: String,
+    /// Vultr OS id (vultr-vps; Debian 12 = 1743)
+    #[arg(long, default_value_t = 1743)]
+    os_id: u32,
+    /// Destroy the VPS after verifying (vultr-vps; for tests/cleanup)
+    #[arg(long)]
+    destroy: bool,
 }
 
 #[derive(Args)]
@@ -164,6 +206,49 @@ async fn main() -> Result<()> {
             for (target, state) in &report {
                 println!("{target:<16} {state}");
             }
+            Ok(())
+        }
+        Cmd::Bootstrap(args) => {
+            let client = flows::connect(
+                &args.common.addr,
+                &args.common.agent_dir,
+                &args.common.runner_pubkey,
+            )?;
+            let res = match args.kind.as_str() {
+                "proxmox-lxc" => {
+                    let vmid = args
+                        .vmid
+                        .ok_or_else(|| anyhow::anyhow!("--vmid is required for proxmox-lxc"))?;
+                    let spec = bootstrap::ProxmoxLxcSpec {
+                        hostname: args.name.clone(),
+                        vmid,
+                        template: args.template.clone(),
+                        storage: args.storage.clone(),
+                        bridge: args.bridge.clone(),
+                    };
+                    bootstrap::bootstrap_proxmox_lxc(&client, &args.target, &spec).await?
+                }
+                "vultr-vps" => {
+                    let spec = bootstrap::VultrVpsSpec {
+                        label: args.name.clone(),
+                        region: args.region.clone(),
+                        plan: args.plan.clone(),
+                        os_id: args.os_id,
+                        destroy_after: args.destroy,
+                    };
+                    bootstrap::bootstrap_vultr_vps(&client, &args.target, &spec).await?
+                }
+                other => anyhow::bail!("unknown --kind {other:?} (proxmox-lxc | vultr-vps)"),
+            };
+            println!(
+                "BOOTSTRAPPED {} ({}): {}",
+                res.name,
+                match res.kind {
+                    bootstrap::TargetKind::ProxmoxLxc => "proxmox-lxc",
+                    bootstrap::TargetKind::VultrVps => "vultr-vps",
+                },
+                res.detail
+            );
             Ok(())
         }
         Cmd::Demo(args) => {

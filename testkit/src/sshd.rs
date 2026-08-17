@@ -14,6 +14,16 @@ use russh::server::{self, Auth, ChannelOpenHandle, Handler as ServerHandler, Msg
 use russh::{Channel, ChannelId};
 use tokio::net::TcpListener;
 
+/// Options for the in-process sshd.
+#[derive(Debug, Clone, Default)]
+pub struct SshdOpts {
+    pub reject_all_keys: bool,
+    /// A directory PREPENDED to PATH for every exec'd command. Lets a test
+    /// plant stub binaries (e.g. a fake `pvesh`/`pct`) WITHOUT mutating the
+    /// process-global PATH — safe under concurrent tokio tests.
+    pub path_prefix: Option<std::path::PathBuf>,
+}
+
 pub fn random_ed25519() -> PrivateKey {
     // ssh-key pins its own rand_core (older than rand 0.9); build the signing
     // key from our own randomness via ed25519-dalek and convert up.
@@ -40,6 +50,7 @@ pub struct ServerState {
 #[derive(Clone)]
 struct TestServer {
     state: ServerState,
+    path_prefix: Option<std::path::PathBuf>,
 }
 
 impl server::Server for TestServer {
@@ -84,11 +95,18 @@ impl ServerHandler for TestServer {
         let cmd = String::from_utf8_lossy(data);
         // async child: a blocking Command::output() on a worker thread would
         // stall the runtime (and the client's timeout timers).
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd.as_ref())
-            .output()
-            .await?;
+        let mut child = tokio::process::Command::new("sh");
+        if let Some(prefix) = &self.path_prefix {
+            child.env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    prefix.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+        }
+        let output = child.arg("-c").arg(cmd.as_ref()).output().await?;
         session
             .handle()
             .data(channel, output.stdout)
@@ -112,9 +130,19 @@ impl ServerHandler for TestServer {
 /// address and the connection counter. The accept-loop task dies with the
 /// test runtime.
 pub async fn spawn_server(reject_all_keys: bool) -> (SocketAddr, Arc<ServerState>) {
+    spawn_server_with(SshdOpts {
+        reject_all_keys,
+        path_prefix: None,
+    })
+    .await
+}
+
+/// Boot an in-process sshd with full options (per-server PATH override for
+/// test stubs).
+pub async fn spawn_server_with(opts: SshdOpts) -> (SocketAddr, Arc<ServerState>) {
     let state = Arc::new(ServerState {
         connections: Arc::new(AtomicUsize::new(0)),
-        reject_all_keys,
+        reject_all_keys: opts.reject_all_keys,
     });
     let mut config = server::Config::default();
     config.keys.push(random_ed25519());
@@ -130,6 +158,7 @@ pub async fn spawn_server(reject_all_keys: bool) -> (SocketAddr, Arc<ServerState
             };
             let handler = TestServer {
                 state: (*server_state).clone(),
+                path_prefix: opts.path_prefix.clone(),
             };
             let config = config.clone();
             tokio::spawn(async move {

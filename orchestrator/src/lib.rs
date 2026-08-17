@@ -6,5 +6,6 @@
 //! steps. It is NOT a reasoning agent — the script walks the flows the
 //! acceptance criteria demand, proving plumbing rather than judgment.
 
+pub mod bootstrap;
 pub mod client;
 pub mod flows;

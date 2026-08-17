@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::extract::{Path as AxPath, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -54,7 +54,9 @@ pub fn vultr_router(state: Arc<VultrState>) -> Router {
         }
         let id = format!("inst-{}", state.next.fetch_add(1, Ordering::SeqCst));
         state.instances.lock().push((id.clone(), "mock".into()));
-        Ok(Json(json!({ "instance": { "id": id, "label": "mock" } })))
+        Ok(Json(json!({
+            "instance": { "id": id, "label": "mock", "status": "active", "main_ip": "10.0.0.1" }
+        })))
     }
 
     async fn destroy(
@@ -76,9 +78,31 @@ pub fn vultr_router(state: Arc<VultrState>) -> Router {
         Ok(Json(json!({ "account": {} })))
     }
 
+    async fn instance(
+        AxPath(id): AxPath<String>,
+        State(state): State<Arc<VultrState>>,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, StatusCode> {
+        if !vultr_ok(&headers) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let row = state
+            .instances
+            .lock()
+            .iter()
+            .find(|(i, _)| *i == id)
+            .cloned();
+        match row {
+            Some((id, label)) => Ok(Json(json!({
+                "instance": { "id": id, "label": label, "status": "active", "main_ip": "10.0.0.1" }
+            }))),
+            None => Err(StatusCode::NOT_FOUND),
+        }
+    }
+
     Router::new()
         .route("/v2/instances", get(list).post(create))
-        .route("/v2/instances/{id}", delete(destroy))
+        .route("/v2/instances/{id}", get(instance).delete(destroy))
         .route("/v2/account", get(account))
         .with_state(state)
 }

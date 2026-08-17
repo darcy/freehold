@@ -12,8 +12,11 @@ runner/secret/grant management), and G (the acceptance script: `cargo run -p
 freehold-acceptance` reproduces every Chunk-1 acceptance criterion hermetic on
 loopback) are implemented and reviewed; H1 (old-laptop Proxmox as a real SSH target)
 is DONE — the laptop is onboarded as a runner and execs green. Chunk 2 is started:
-Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) is DONE; the A–H build
-plan is in `roadmap/POC_CHUNK2.md`. Current work is uncommitted until reviewed.
+Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) and Phase A (bootstrap
+provisioning: `orchestrator bootstrap` with proxmox-lxc + vultr-vps drivers,
+hermetic-tested, dry-run verified against the laptop) are DONE; the A–H build plan
+is in `roadmap/POC_CHUNK2.md`. Phase B (deploy Buzz) is gated on the user: an LXC
+template download on the laptop (and a real Vultr token for the VPS leg). Current work is uncommitted until reviewed.
 
 ## Navigation
 
