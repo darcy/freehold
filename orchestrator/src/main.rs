@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use freehold_orchestrator::{bootstrap, flows, relay};
+use freehold_orchestrator::{bootstrap, deploy_cp, flows, relay, relay_member};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -33,6 +33,10 @@ enum Cmd {
     Bootstrap(BootstrapArgs),
     /// C2/B: deploy the Buzz relay onto the target through a provisioning runner
     DeployRelay(DeployRelayArgs),
+    /// C1: deploy the control plane onto the target box (OPERATE mode)
+    DeployCp(DeployCpArgs),
+    /// C2: add a relay member through the relay-admin runner (buzz-admin)
+    RelayMember(RelayMemberArgs),
 }
 
 #[derive(Args)]
@@ -64,6 +68,54 @@ struct DeployRelayArgs {
     /// the bundle's run.sh refuses to start with CHANGE_ME placeholders.
     #[arg(long)]
     owner_pubkey: String,
+}
+
+#[derive(Args)]
+struct DeployCpArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target runner (the box where the relay lives)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Remote state dir on the box (also holds the seeded console identity)
+    #[arg(long, default_value = deploy_cp::DEFAULT_CP_STATE_DIR)]
+    state_dir: String,
+    /// Remote dir for the shipped binary
+    #[arg(long, default_value = deploy_cp::DEFAULT_CP_BIN_DIR)]
+    bin_dir: String,
+    /// Loopback bind for the console (C3: non-loopback is refused)
+    #[arg(long, default_value = deploy_cp::DEFAULT_CP_BIND)]
+    bind: String,
+    /// LOCAL path of the built control-plane binary
+    #[arg(long)]
+    binary: PathBuf,
+    /// LOCAL console identity.json to seed (the relay owner/member identity)
+    #[arg(long)]
+    identity: PathBuf,
+    /// The relay this CP helped create (the ONE scope; C4 posture record)
+    #[arg(long)]
+    relay_url: String,
+}
+
+#[derive(Args)]
+struct RelayMemberArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target runner (the box holding the relay host)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Nostr pubkey (64-hex) to add as a relay member
+    #[arg(long)]
+    pubkey: String,
+    /// Role: member (default) or admin (owner comes from RELAY_OWNER_PUBKEY)
+    #[arg(long)]
+    role: Option<String>,
+    /// The LXC on the box holding the relay compose stack
+    #[arg(long)]
+    lxc: Option<u32>,
+    /// Compose project dir on the relay host
+    #[arg(long, default_value = relay_member::DEFAULT_BUZZ_COMPOSE_DIR)]
+    compose_dir: String,
 }
 
 #[derive(Args)]
@@ -263,6 +315,48 @@ async fn main() -> Result<()> {
             .await?;
             println!("RELAY: {}", res.relay_url);
             println!("  {}", res.detail);
+            Ok(())
+        }
+        Cmd::DeployCp(args) => {
+            let client = flows::connect(
+                &args.common.addr,
+                &args.common.agent_dir,
+                &args.common.runner_pubkey,
+            )?;
+            let res = deploy_cp::deploy_cp(
+                &client,
+                &args.target,
+                &deploy_cp::DeployCpSpec {
+                    state_dir: args.state_dir.clone(),
+                    bin_dir: args.bin_dir.clone(),
+                    bind_addr: args.bind.clone(),
+                    binary_path: args.binary.clone(),
+                    identity_path: args.identity.clone(),
+                    relay_url: args.relay_url.clone(),
+                },
+            )
+            .await?;
+            println!("CONTROL PLANE: {}", res.detail);
+            Ok(())
+        }
+        Cmd::RelayMember(args) => {
+            let client = flows::connect(
+                &args.common.addr,
+                &args.common.agent_dir,
+                &args.common.runner_pubkey,
+            )?;
+            let res = relay_member::relay_member_add(
+                &client,
+                &args.target,
+                &relay_member::RelayMemberAddSpec {
+                    pubkey: args.pubkey.clone(),
+                    role: args.role.clone(),
+                    lxc: args.lxc,
+                    compose_dir: args.compose_dir.clone(),
+                },
+            )
+            .await?;
+            println!("RELAY MEMBER: {}", res.detail);
             Ok(())
         }
         Cmd::Readiness(args) => {

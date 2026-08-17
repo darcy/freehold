@@ -1,0 +1,185 @@
+//! Phase C (Chunk 2), C1: deploy the control plane onto the target BOX in
+//! OPERATE mode — the process + its data live on the box; the console stays
+//! loopback-bound (C3); operator access from elsewhere is an SSH tunnel.
+//!
+//! Transport: the runner's ONE primitive is `exec` (locked model: no scp, no
+//! semantic tools). The binary and the console identity therefore travel as
+//! base64 — written in chunks on the box, decoded, verified by byte size —
+//! and the process is started detached (`setsid nohup`) and probed at
+//! `/healthz` on the loopback bind.
+//!
+//! Identity: the shipped console identity is the SAME keypair the relay
+//! owner/member was derived from (relay-add D2 keeps identity material
+//! unchanged); a fresh identity on the box would no longer be the owner.
+
+use std::path::PathBuf;
+
+use base64::Engine as _;
+
+use crate::bootstrap::{BootstrapError, exec_to_ok, plain_path};
+use crate::client::McpClient;
+
+pub const DEFAULT_CP_STATE_DIR: &str = "/srv/freehold/control-plane";
+pub const DEFAULT_CP_BIN_DIR: &str = "/srv/freehold/bin";
+pub const DEFAULT_CP_BIND: &str = "127.0.0.1:8080";
+
+/// base64 chunk size written per exec (kept well under the transport frame;
+/// a chunk is one `printf` of pure base64 — shell-safe).
+const CHUNK: usize = 24_000;
+
+#[derive(Debug, Clone)]
+pub struct DeployCpSpec {
+    /// Remote absolute state dir (holds state.json + `console/identity.json`).
+    pub state_dir: String,
+    /// Remote dir for the shipped binary.
+    pub bin_dir: String,
+    /// Loopback bind for the console (C3: validated loopback-only).
+    pub bind_addr: String,
+    /// LOCAL path of the built control-plane binary to ship.
+    pub binary_path: PathBuf,
+    /// LOCAL console identity.json to seed (the relay owner/member identity).
+    pub identity_path: PathBuf,
+    /// The relay this CP helped create — the ONE scope (C4 posture).
+    pub relay_url: String,
+}
+
+#[derive(Debug)]
+pub struct DeployCpResult {
+    pub state_dir: String,
+    pub bind_addr: String,
+    pub detail: String,
+}
+
+pub async fn deploy_cp(
+    client: &McpClient,
+    target: &str,
+    spec: &DeployCpSpec,
+) -> Result<DeployCpResult, BootstrapError> {
+    plain_path(&spec.state_dir)?;
+    crate::relay::safe_deploy_dir(&spec.state_dir)?;
+    plain_path(&spec.bin_dir)?;
+    crate::relay::safe_deploy_dir(&spec.bin_dir)?;
+    // Same guard the CP itself enforces at serve time — fail the deploy early
+    // instead of shipping a config the box will refuse.
+    freehold_control_plane::validate_loopback_bind(&spec.bind_addr)
+        .map_err(BootstrapError::Verify)?;
+
+    let binary = std::fs::read(&spec.binary_path)?;
+    let identity = std::fs::read(&spec.identity_path)?;
+
+    exec_to_ok(
+        client,
+        target,
+        &format!(
+            "mkdir -p {sd}/console && mkdir -p {bd}",
+            sd = spec.state_dir,
+            bd = spec.bin_dir
+        ),
+        "mkdir deploy dirs",
+        30,
+    )?;
+
+    // Identity is small: one exec. Seeding it means Console::load_or_create
+    // finds it and keeps the owner/member keypair (never regenerates).
+    let id_b64 = base64::engine::general_purpose::STANDARD.encode(&identity);
+    exec_to_ok(
+        client,
+        target,
+        &format!(
+            "printf '%s' '{id_b64}' | base64 -d > {sd}/console/identity.json && \
+             chmod 600 {sd}/console/identity.json",
+            id_b64 = id_b64,
+            sd = spec.state_dir,
+        ),
+        "ship console identity",
+        30,
+    )?;
+
+    // Binary as base64 chunks appended to one .b64 file, then decoded once.
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&binary);
+    let mut sent = 0usize;
+    while sent < b64.len() {
+        let end = (sent + CHUNK).min(b64.len());
+        let piece = &b64[sent..end];
+        exec_to_ok(
+            client,
+            target,
+            &format!(
+                "printf '%s' '{piece}' >> {bd}/control-plane.b64",
+                piece = piece,
+                bd = spec.bin_dir
+            ),
+            "ship binary chunk",
+            60,
+        )?;
+        sent = end;
+    }
+    let out = exec_to_ok(
+        client,
+        target,
+        &format!(
+            "base64 -d {bd}/control-plane.b64 > {bd}/control-plane && \
+             chmod 755 {bd}/control-plane && rm {bd}/control-plane.b64 && \
+             wc -c < {bd}/control-plane",
+            bd = spec.bin_dir,
+        ),
+        "decode + verify binary",
+        60,
+    )?;
+    let remote_size: usize = out.stdout.trim().parse().map_err(|_| {
+        BootstrapError::Verify(format!("remote binary size not a number: {:?}", out.stdout))
+    })?;
+    if remote_size != binary.len() {
+        return Err(BootstrapError::Verify(format!(
+            "shipped binary size mismatch: remote {remote_size} vs local {}",
+            binary.len()
+        )));
+    }
+
+    // Start detached (setsid: not killed when the exec channel closes) and
+    // probe the loopback /healthz — the CP's OWN liveness.
+    let start = format!(
+        "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba} \
+         >> {sd}/serve.log 2>&1 < /dev/null &",
+        bd = spec.bin_dir,
+        sd = spec.state_dir,
+        ba = spec.bind_addr,
+    );
+    exec_to_ok(client, target, &start, "start control plane", 30)?;
+
+    let mut healthy = false;
+    let mut last_err: Option<String> = None;
+    for _ in 0..15 {
+        let probe = format!("curl -fsS -m 3 http://{ba}/healthz", ba = spec.bind_addr);
+        match exec_to_ok(client, target, &probe, "cp healthz", 20) {
+            Ok(_) => {
+                healthy = true;
+                break;
+            }
+            Err(e) => last_err = Some(e.to_string()),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    if !healthy {
+        return Err(BootstrapError::Verify(format!(
+            "control plane did not answer /healthz on {} within the poll window{}",
+            spec.bind_addr,
+            last_err
+                .map(|e| format!(" (last probe error: {e})"))
+                .unwrap_or_default()
+        )));
+    }
+
+    Ok(DeployCpResult {
+        state_dir: spec.state_dir.clone(),
+        bind_addr: spec.bind_addr.clone(),
+        detail: format!(
+            "control plane deployed in OPERATE mode: state {sd}, console loopback {ba} \
+             (reach it via `ssh -L 8080:127.0.0.1:8080 root@<box>`); relay scope {relay} \
+             (C4: relay authoritative post-port, local state = offline cache mirror)",
+            sd = spec.state_dir,
+            ba = spec.bind_addr,
+            relay = spec.relay_url,
+        ),
+    })
+}

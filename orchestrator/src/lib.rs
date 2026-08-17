@@ -8,5 +8,7 @@
 
 pub mod bootstrap;
 pub mod client;
+pub mod deploy_cp;
 pub mod flows;
 pub mod relay;
+pub mod relay_member;

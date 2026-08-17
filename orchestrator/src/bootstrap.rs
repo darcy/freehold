@@ -88,6 +88,18 @@ fn exec(
     Ok(client.exec(target, cmd, &[target], timeout_s)?)
 }
 
+pub(crate) fn exec_to_ok(
+    client: &McpClient,
+    target: &str,
+    cmd: &str,
+    step: &str,
+    timeout_s: u64,
+) -> Result<ExecOutcome, BootstrapError> {
+    let out = exec(client, target, cmd, timeout_s)?;
+    expect_ok(&out, step)?;
+    Ok(out)
+}
+
 pub(crate) fn expect_ok(out: &ExecOutcome, step: &str) -> Result<(), BootstrapError> {
     if out.timed_out {
         return Err(BootstrapError::Step {

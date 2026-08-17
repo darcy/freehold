@@ -246,6 +246,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Serve(args) => {
+            // C3 (Chunk 2): loopback-only bind, enforced here AND at deploy
+            // time — the console has no authn on the HTTP surface.
+            freehold_control_plane::validate_loopback_bind(&args.addr)
+                .map_err(anyhow::Error::msg)?;
             let store = StateStore::open(&args.state_dir)?;
             let console = Console::load_or_create(&args.state_dir)?;
             tracing::info!(pubkey = %console.pubkey(), "console agent ready");

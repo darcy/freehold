@@ -131,7 +131,7 @@ B3. This relay becomes the control plane's ONE scope going forward (relay-as-sco
 
 ### Phase C — Deploy the control plane onto the same target
 
-- [ ] [ ]
+- [x] [ ]
 
 C1. Deploy CP app onto the same target, now running in **OPERATE mode** instead of localhost
 (Chunk 1 was effectively local/BOOTSTRAP-adjacent). **The console STAYS bound to loopback on
@@ -140,12 +140,12 @@ the UI is network-exposed. The console has no authentication (loopback-only by d
 Chunk 1); operator access from elsewhere is an SSH tunnel
 (`ssh -L 8080:127.0.0.1:8080 target`).
 
-- [ ] [ ]
+- [x] [ ]
 
 C2. CP self-adds as a member of the relay it just helped create ("bootstrap is self-scoping:
 the CP adds itself as a member").
 
-- [ ] [ ]
+- [x] [ ]
 
 C3. Verify the console is served from the deployed target and reachable ONLY via the
 loopback tunnel: `curl` on the box's own 127.0.0.1 works; a remote attempt at the box's LAN
@@ -154,7 +154,7 @@ story** — the guard is part of this item. Console authentication + TLS for rea
 exposure is a named security-hardening follow-up (ARCHITECTURE Future items), NOT in this
 chunk.
 
-- [ ] [ ]
+- [x] [ ]
 
 C4. Decide the console's data source post-port: the RELAY is authoritative for
 membership/grants; local state becomes a cache mirror (readable offline, write-through). State
