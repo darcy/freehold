@@ -46,7 +46,12 @@ kind-30174 engrams, NIP-44 v2 SELF-encrypted (only the agent's own key can
 decrypt; the relay stores ciphertext only), d-tag = sha256(agentpk#key),
 live-verified set/get through the real relay (the ONE D item with no ingest
 patch gate — the engram wire rules are recorded in BUZZ_SURFACE §9.6).
-`freehold memory set|get`. D5 (audit publishing) is DONE: the runner's audit row is now a kind-48001
+`freehold memory set|get`. E (delegation) is DONE: the CPA delegates a
+task over the relay to a peer agent that execs it runner-direct —
+CPA -> relay (kind-9 channel in a created OPEN channel) -> peer -> runner ->
+relay -> CPA — proven LIVE; requests/results correlate by id (BUZZ_SURFACE
+§9.7; the peer's exec uses the target's own credential, the CPA polls
+unfiltered because a #p-filtered kind-9 query hung for its identity). D5 (audit publishing) is DONE: the runner's audit row is now a kind-48001
 NIP-01 event (id + BIP-340 over the id) — the SAME bytes spooled locally
 (0600, fail-closed read, never silent) AND published to the relay when
 --relay-url is set (detached so a wedged relay never delays the agent's
