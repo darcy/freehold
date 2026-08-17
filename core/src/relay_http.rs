@@ -17,6 +17,17 @@ use crate::nip98::{GRANTS_KIND, nip98_auth};
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Deterministic 64-hex engram address for (agent pubkey, memory key) —
+/// buzz requires 64 lowercase hex chars for engram d-tags (verified live).
+fn memory_d_tag(agent_pk: &str, key: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(agent_pk.as_bytes());
+    h.update(b"#");
+    h.update(key.as_bytes());
+    hex::encode(h.finalize())
+}
+
 /// Bounded, status-as-response agent: 4xx/5xx come back as responses (so the
 /// relay's rejection REASON can be surfaced) and every request is time-bounded
 /// (a wedged relay must fail closed, never hang the runner forever).
@@ -70,17 +81,18 @@ pub fn query_grants(
     // buzz bridge is POST-only (GET /query is 405). The #d filter means the
     // runner's own events can't fall off a 100-row page of unrelated kinds.
     let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
-    let filter = serde_json::json!({
+    // Buzz /query takes an ARRAY of NIP-01 filters (raw_filters: Vec<Value>).
+    let filters = serde_json::json!([{
         "kinds": [GRANTS_KIND],
         "#d": [runner_pubkey_hex],
         "limit": 100,
-    });
+    }]);
     let headers = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
     let mut resp = agent()
         .post(&url)
         .header("Authorization", &headers)
         .header("Content-Type", "application/json")
-        .send(filter.to_string())
+        .send(filters.to_string())
         .map_err(|e| format!("grant query request failed: {e}"))?;
     let body = resp
         .body_mut()
@@ -237,6 +249,140 @@ pub fn publish_grants(
         ));
     }
     Ok(())
+}
+
+/// Phase D3: write (replace) one encrypted memory engram for an agent.
+/// Kind 30174 (NATIVE engram — accepted by the stock buzz ingest, no patch
+/// gate), `d`-tag = `<agent pubkey>#<key>` (per-agent + per-key current
+/// value; replaceable — a re-write supersedes, nothing appends). Content is
+/// the sealed envelope; the relay only ever sees ciphertext.
+pub fn write_memory(
+    relay_url: &str,
+    agent_nostr_secret: &[u8; 32],
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let (pk, _id, _sig) = crate::nip98::sign_event(agent_nostr_secret, 1, now_secs(), vec![], "")
+        .map_err(|e| e.to_string())?;
+    let content =
+        crate::memory::seal_memory(agent_nostr_secret, value).map_err(|e| e.to_string())?;
+    // Buzz's engram validation: d-tag MUST be 64 lowercase hex (the memory
+    // address) and exactly one `p` tag (the owner counterparty) — both
+    // verified live. The address is derived from (agent, key) so per-agent +
+    // per-key current values stay replaceable and unique.
+    let d_tag = memory_d_tag(&pk, key);
+    // Buzz's engram validation REQUIRES exactly one `p` tag (the owner
+    // counterparty, 64-hex) — verified live: missing -> 400.
+    let (pubkey, id, sig) = crate::nip98::sign_event(
+        agent_nostr_secret,
+        crate::memory::MEMORY_KIND,
+        now_secs(),
+        vec![
+            vec!["d".into(), d_tag.clone()],
+            vec!["p".into(), pk.clone()],
+        ],
+        &content,
+    )
+    .map_err(|e| e.to_string())?;
+    let event = serde_json::json!({
+        "id": id,
+        "pubkey": pubkey,
+        "created_at": now_secs(),
+        "kind": crate::memory::MEMORY_KIND,
+        "tags": [["d", d_tag], ["p", pk]],
+        "content": content,
+        "sig": sig,
+    });
+    publish_event_json(relay_url, agent_nostr_secret, &event.to_string())
+}
+
+/// Read the agent's OWN memory value for `key` (kind-30174, newest wins).
+/// The author is verified locally; the d-tag is agent-scoped so no other
+/// member's event can collide, and the payload decrypts only with the
+/// agent's enc key.
+pub fn read_memory(
+    relay_url: &str,
+    agent_nostr_secret: &[u8; 32],
+    key: &str,
+) -> Result<Option<String>, String> {
+    let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
+    let (pk, _id, _sig) = crate::nip98::sign_event(agent_nostr_secret, 1, now_secs(), vec![], "")
+        .map_err(|e| e.to_string())?;
+    let d_tag = memory_d_tag(&pk, key);
+    let filters = serde_json::json!([{
+        "kinds": [crate::memory::MEMORY_KIND],
+        "#d": [d_tag],
+        "authors": [pk],
+        "limit": 20,
+    }]);
+    let headers =
+        nip98_auth(agent_nostr_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
+    let mut resp = agent()
+        .post(&url)
+        .header("Authorization", &headers)
+        .header("Content-Type", "application/json")
+        .send(filters.to_string())
+        .map_err(|e| format!("memory query request failed: {e}"))?;
+    let body = resp
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("memory query read: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "memory query returned HTTP {}: {body}",
+            resp.status()
+        ));
+    }
+    let events: Vec<Value> =
+        serde_json::from_str(&body).map_err(|e| format!("memory query parse: {e}: {body}"))?;
+    let mut best: Option<(i64, String)> = None;
+    for ev in events.iter() {
+        let author = ev["pubkey"].as_str().unwrap_or("");
+        if author != pk {
+            continue;
+        }
+        let created_at = ev["created_at"].as_i64().unwrap_or(0);
+        // Local signature verify (id + BIP-340) over the event fields.
+        let tags: Vec<Vec<String>> = ev["tags"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .map(|a| {
+                        a.as_array()
+                            .map(|x| {
+                                x.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let content = ev["content"].as_str().unwrap_or("");
+        if crate::nip98::verify_event(
+            author,
+            created_at,
+            crate::memory::MEMORY_KIND,
+            &tags,
+            content,
+            ev["sig"].as_str().unwrap_or(""),
+        )
+        .is_err()
+        {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(t, _)| created_at >= *t) {
+            best = Some((created_at, content.to_string()));
+        }
+    }
+    match best {
+        Some((_, sealed)) => crate::memory::open_memory(agent_nostr_secret, &sealed)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

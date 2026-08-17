@@ -182,7 +182,7 @@ and encryption pubkeys stay exactly as shipped (sealed blobs are pinned to the r
 pubkey + secret name; new keys would silently kill every shipped `secrets.json`). What moves
 is the RECORD: membership + grants now live on the relay instead of local state.json.
 
-- [ ] [ ]
+- [x] [ ]
 
 D3. Master agent (`@freehold`) gets a real identity in the relay; memory becomes relay-persisted
 (relay event store) instead of local/ephemeral. **Memory event payloads are encrypted** — a

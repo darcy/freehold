@@ -97,7 +97,12 @@ async fn query(
         Err(e) => return (StatusCode::UNAUTHORIZED, Json(json!({ "error": e }))),
     };
     state.authed_callers.lock().push(caller);
-    let filter: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    // The real bridge takes an ARRAY of filters (mirrored).
+    let body_val: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let filter: &Value = body_val
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or(&Value::Null);
     let kinds: Vec<u32> = filter["kinds"]
         .as_array()
         .map(|a| {
