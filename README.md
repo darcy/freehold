@@ -160,7 +160,7 @@ cargo run -p freehold-control-plane -- list --state-dir ./.freehold/control-plan
 Provision refuses to clobber: a name that exists, or a `--runner-dir` that already holds a
 package, errors instead of destroying a runner's key.
 
-### The orchestrator: the scripted CPA stand-in (E)
+### freehold: the CLI (the scripted CPA stand-in)
 
 ```sh
 # onboard an existing service: provision -> ship -> self-check (hard-fails unless green) -> grant -> report

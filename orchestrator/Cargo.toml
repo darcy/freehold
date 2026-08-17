@@ -25,5 +25,5 @@ freehold-testkit = { path = "../testkit" }
 tempfile = "3"
 
 [[bin]]
-name = "orchestrator"
+name = "freehold"
 path = "src/main.rs"

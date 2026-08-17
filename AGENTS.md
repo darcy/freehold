@@ -13,13 +13,15 @@ freehold-acceptance` reproduces every Chunk-1 acceptance criterion hermetic on
 loopback) are implemented and reviewed; H1 (old-laptop Proxmox as a real SSH target)
 is DONE — the laptop is onboarded as a runner and execs green. Chunk 2 is started:
 Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) and Phase A (bootstrap
-provisioning: `orchestrator bootstrap` with proxmox-lxc + vultr-vps drivers,
+provisioning: `freehold bootstrap` with proxmox-lxc + vultr-vps drivers,
 hermetic-tested, dry-run verified against the laptop) are DONE; the A–H build plan
 is in `roadmap/POC_CHUNK2.md`. Phase B (deploy-relay driver: docker gate,
 curl+tar bundle fetch, compose start, /_liveness verify, scope claim) is
-implemented and hermetic-tested; the REAL deploy is gated on the user:
-docker+compose on the PVE host (or inside the Phase-A LXC), plus an LXC
-template download (and a real Vultr token for the VPS leg). Current work is uncommitted until reviewed.
+implemented and hermetic-tested. The proxmox-lxc bootstrap is idempotent
+(template ensure + docker+compose in the guest); the CLI is `freehold`.
+The REAL deploy is gated on the user only for the live laptop run: the
+Debian template downloads automatically and docker lands inside the LXC,
+but a real Vultr token is still needed for the VPS leg. Current work is uncommitted until reviewed.
 
 ## Navigation
 

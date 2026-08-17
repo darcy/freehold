@@ -90,8 +90,8 @@ fn check_docker(client: &McpClient, target: &str) -> Result<(), BootstrapError> 
         Err(e) => Err(BootstrapError::Verify(format!(
             "docker + compose plugin are missing on the target: {e}\n\
              remediation: install them (e.g. `apt-get install docker.io \
-             docker-compose-plugin`), or deploy inside the Phase-A LXC after \
-             installing docker there — the PVE host currently has neither."
+             docker-compose-plugin`), or run `freehold bootstrap` — it installs \
+             docker+compose inside the provisioned LXC."
         ))),
     }
 }
