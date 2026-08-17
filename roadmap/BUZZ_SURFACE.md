@@ -37,8 +37,14 @@ S3/MinIO (Blossom media), plus CLI/ACP/desktop clients.
   publishes a **kind 13534 membership list event, signed by `BUZZ_RELAY_PRIVATE_KEY`** (NIP-43
   membership list). The relay enforces membership: EVENT/REQ require NIP-42 auth, and
   channel-scoped events run a `check_channel_membership` step in the ingest pipeline.
-- So "CP self-adds as a member" = the CP becomes a community member via the same membership
-  mechanism (13534), and **being a member is already enforced at the protocol layer**.
+- **Consequence for "CP self-adds":** a membership write needs the RELAY signing key, so the CP
+  cannot self-add with its own keypair. Bootstrap/onboarding membership writes happen THROUGH
+  the relay-admin runner — CPA drives generic exec of `buzz-admin add-member <pubkey>` on the
+  relay host (the architecture's "runner that can reach and manage both the relay and the CP").
+  **The CP never holds `BUZZ_RELAY_PRIVATE_KEY`** — same no-extra-trust discipline as the
+  no-master-key model; the relay's signing key stays on the relay's own host.
+- **Being a member is enforced at the protocol layer** (auth + channel ingest), regardless of
+  who performs the add.
 
 ## 4. Auth & wire surface
 
@@ -71,7 +77,10 @@ Kinds are u32; custom range 40000+ is sanctioned. Used kinds we must NOT collide
 | 20001 | Presence (ephemeral) |
 
 Free for us (D1 picks from, e.g.): 40500–40899, 41100–41999, 42100–42999, 43100–44099,
-44300–44999, 45100–45999, 46100–47999, 48200–48999, 49100–49999.
+44300–44999, 45100–45999, 46100–47999, 48200–48999, 49100–49999. **All ≥40000 are
+append-only (NIP-16: replaceable = 10000–19999, addressable = 30000–39999).** Anything that
+must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable range with a
+`d`-tag — NOT a 40000+ kind, or revocations would append history instead of replace.
 
 ## 6. Agent surface (buzz-acp / buzz-cli)
 
@@ -110,7 +119,7 @@ Free for us (D1 picks from, e.g.): 40500–40899, 41100–41999, 42100–42999, 
 | Capability | Decision | Native surface | Custom needed? |
 |---|---|---|---|
 | **Membership** | NATIVE | kind 13534 (relay-signed); `buzz-admin add-member`; relay enforces at auth + channel ingest | No |
-| **Grants** | CUSTOM | none for agent↔runner; (buzz-acp author gate is per-AGENT inbound, not runner grants) | **Yes — freehold grant-list kind (e.g. 47001, replaceable), per runner; runner re-reads live per call (closes the running-runner gap)** |
+| **Grants** | CUSTOM | none for agent↔runner; (buzz-acp author gate is per-AGENT inbound, not runner grants) | **Yes — a freehold grant-list kind in the ADDRESSABLE range (30000–39999, e.g. 30180), `d`-tag = runner pubkey: one current list per runner; a new event with the same d-tag REPLACES it, so revocation never appends (fail-stale is the wrong direction). Runner re-reads live per call (REQ with the d-tag filter) → closes the running-runner gap** |
 | **Memory** | NATIVE + encrypted payloads | kind 30174 engram + event-log FTS | Payload encryption is ours (D3) |
 | **Audit** | NATIVE | kind 48001 audit entry + relay hash-chain; local spool stays (D5) | No |
 | **Delegation** | NATIVE | kinds 43001–43006 job request/result/error (or @mention+reply as simplest path) | No |
@@ -119,8 +128,10 @@ Free for us (D1 picks from, e.g.): 40500–40899, 41100–41999, 42100–42999, 
 ## 10. Known gaps / verify-before-design
 
 - **Private-channel member management has no REST/event API yet** (Buzz's own listed gap) —
-  channel membership currently via `create_channel` (creator auto-member). F's room/DM setup
-  must work within this.
+  channel membership currently via `create_channel` (creator auto-member). Concrete F risk: a
+  runner or agent onboarded AFTER a private channel exists cannot be added to it — F must
+  create its channels deliberately at bootstrap/onboarding time, or accept public channels for
+  the POC. The §9 "Surface: No custom needed" row is scoped to this constraint.
 - Engram (30174) schema and job-kind (43001/43004) payload contract: read `buzz-core` in D1
   before adopting — adoption assumes the schema fits; a custom kind stays the fallback.
 - Closed-relay mode (`RELAY_OWNER_PUBKEY`) may already give us "non-member cannot even
