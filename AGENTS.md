@@ -18,10 +18,17 @@ hermetic-tested, dry-run verified against the laptop) are DONE; the A–H build 
 is in `roadmap/POC_CHUNK2.md`. Phase B (deploy-relay driver: docker gate,
 curl+tar bundle fetch, compose start, /_liveness verify, scope claim) is
 implemented and hermetic-tested. The proxmox-lxc bootstrap is idempotent
-(template ensure + docker+compose in the guest); the CLI is `freehold`.
-The REAL deploy is gated on the user only for the live laptop run: the
-Debian template downloads automatically and docker lands inside the LXC,
-but a real Vultr token is still needed for the VPS leg. Current work is uncommitted until reviewed.
+(template ensure by host arch + docker+compose in the guest); the CLI is
+`freehold`. Phase B and the LIVE relay deploy are DONE: LXC 100 `relay-box`
+(deb-13 amd64, unprivileged, `fuse=1,keyctl=1,nesting=1`, 16G/2G) runs the
+Buzz compose stack — relay/postgres/redis/minio all healthy, `/_liveness` ok
+on loopback AND the LAN (192.168.30.248:3000). Phase C is DONE: the control
+plane is deployed in OPERATE mode on the box (`/srv/freehold`, loopback
+127.0.0.1:8080, binary shipped as base64 through the runner's exec-only
+primitive), the CPA is a relay member (owner = console pubkey, member =
+h1-agent), and loopback-only is enforced + verified. A real Vultr token is
+still needed for the VPS leg. Work ships via branches, pending a GitHub
+outage before the PR/review cycle.
 
 ## Navigation
 

@@ -40,6 +40,10 @@ enum Cmd {
     Revoke(RevokeArgs),
     /// List runners + secrets at a glance
     List(CommonArgs),
+    /// Print this state dir's console identity PUBKEY (64-hex, pubkey only —
+    /// never the secret). Used by deploy-cp to name the box's fresh identity
+    /// for relay-member add.
+    Identity(CommonArgs),
     /// Serve the local admin/ops web surface
     Serve(ServeArgs),
 }
@@ -212,6 +216,15 @@ async fn main() -> Result<()> {
             println!("      still be valid at the service — rotate it upstream if it was exposed");
             Ok(())
         }
+        Cmd::Identity(args) => {
+            // load_or_create: a fresh state dir gets a NEW identity here
+            // (the box never receives a pre-made keypair — see deploy-cp).
+            let console = Console::load_or_create(&args.state_dir).with_context(|| {
+                format!("loading console identity in {}", args.state_dir.display())
+            })?;
+            println!("{}", console.pubkey());
+            Ok(())
+        }
         Cmd::List(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
@@ -246,6 +259,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Serve(args) => {
+            // C3 (Chunk 2): loopback-only bind, enforced here AND at deploy
+            // time — the console has no authn on the HTTP surface.
+            freehold_control_plane::validate_loopback_bind(&args.addr)
+                .map_err(anyhow::Error::msg)?;
             let store = StateStore::open(&args.state_dir)?;
             let console = Console::load_or_create(&args.state_dir)?;
             tracing::info!(pubkey = %console.pubkey(), "console agent ready");

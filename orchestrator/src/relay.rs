@@ -12,7 +12,7 @@
 //! 4. liveness poll on the relay port (B2) — the relay's OWN health.
 //! 5. report the relay URL; the CP's membership/recording lands in Phase C.
 
-use crate::client::{ExecOutcome, McpClient};
+use crate::client::McpClient;
 
 use crate::bootstrap::BootstrapError;
 
@@ -46,7 +46,7 @@ pub struct RelayDeploySpec {
 /// Wrap a target command for execution inside an LXC via the host runner.
 /// The command must be single-quote-FREE (the payload is single-quoted for
 /// the guest `sh -c`); the guest then sees double quotes/`$()` normally.
-fn lxc_cmd(lxc: Option<u32>, cmd: &str) -> String {
+pub(crate) fn lxc_cmd(lxc: Option<u32>, cmd: &str) -> String {
     match lxc {
         Some(id) => format!("pct exec {id} -- sh -c '{cmd}'"),
         None => cmd.to_string(),
@@ -63,7 +63,7 @@ pub struct RelayDeployResult {
 /// overlay refresh) on a system the operator may run as root. `plain_path`
 /// stops injection; this stops deleting the wrong thing: absolute, no `..`,
 /// at least two components (never `/`, never `/srv`).
-fn safe_deploy_dir(s: &str) -> Result<(), BootstrapError> {
+pub(crate) fn safe_deploy_dir(s: &str) -> Result<(), BootstrapError> {
     crate::bootstrap::plain_path(s)?;
     if !s.starts_with('/') {
         return Err(BootstrapError::Verify(format!(
@@ -84,22 +84,10 @@ fn safe_deploy_dir(s: &str) -> Result<(), BootstrapError> {
     Ok(())
 }
 
-fn exec_to_ok(
-    client: &McpClient,
-    target: &str,
-    cmd: &str,
-    step: &str,
-    timeout_s: u64,
-) -> Result<ExecOutcome, BootstrapError> {
-    let out = client.exec(target, cmd, &[target], timeout_s)?;
-    crate::bootstrap::expect_ok(&out, step)?;
-    Ok(out)
-}
-
 /// B1 gate: docker + the compose plugin must exist on the target (or inside
 /// the target's LXC when `lxc` is set — that is where the bootstrap puts it).
 fn check_docker(client: &McpClient, target: &str, lxc: Option<u32>) -> Result<(), BootstrapError> {
-    match exec_to_ok(
+    match crate::bootstrap::exec_to_ok(
         client,
         target,
         &lxc_cmd(lxc, "command -v docker && docker compose version"),
@@ -149,7 +137,7 @@ pub async fn deploy_relay(
         dir = spec.deploy_dir,
         ref = spec.buzz_ref,
     );
-    exec_to_ok(
+    crate::bootstrap::exec_to_ok(
         client,
         target,
         &lxc_cmd(spec.lxc, &dl),
@@ -160,7 +148,7 @@ pub async fn deploy_relay(
         "tar -xzf {dir}/buzz.tar.gz -C {dir} --strip-components=1",
         dir = spec.deploy_dir
     );
-    exec_to_ok(
+    crate::bootstrap::exec_to_ok(
         client,
         target,
         &lxc_cmd(spec.lxc, &extract),
@@ -199,7 +187,7 @@ pub async fn deploy_relay(
         port = spec.http_port,
         owner = spec.owner_pubkey,
     );
-    exec_to_ok(
+    crate::bootstrap::exec_to_ok(
         client,
         target,
         &lxc_cmd(spec.lxc, &install),
@@ -216,7 +204,7 @@ pub async fn deploy_relay(
             "curl -fsS http://127.0.0.1:{port}/_liveness",
             port = spec.http_port
         );
-        match exec_to_ok(
+        match crate::bootstrap::exec_to_ok(
             client,
             target,
             &lxc_cmd(spec.lxc, &probe),

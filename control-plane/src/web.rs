@@ -14,6 +14,13 @@
 //!   re-sealed), and are zeroized — never stored, never logged, never echoed
 //!   back. The overview shows secret NAMES and rotation stamps only.
 //! - This is the admin/ops console, NOT chat. Buzz owns conversation.
+//!
+//! ## Data source (Chunk 2, C4 — decided here)
+//! Post identity-port (Phase D), the RELAY is authoritative for membership
+//! and grants; `state.json` is a cache mirror — readable offline, write-
+//! through to the relay. Until D lands, `state.json` is the source of
+//! record and every route below reads it directly; the deploy-cp driver
+//! records the relay scope (the ONE scope for this console) in its result.
 
 use std::sync::Arc;
 use std::time::Duration;
