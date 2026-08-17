@@ -83,11 +83,13 @@ pub fn router(ctx: RunnerContext) -> Router {
             .expect("identity secrets are validated at load"),
     ));
     let state_dir = ctx.state_dir.clone();
+    let relay_url = ctx.relay_url.clone();
     let state = RunnerState {
         ctx: Arc::new(ctx),
         exec: Arc::new(ExecManager::new(
             Some(auditor),
             Some(Arc::from(state_dir.as_path())),
+            relay_url,
         )),
         ssh: Arc::new(SshPool::new(&state_dir)),
     };
@@ -930,5 +932,188 @@ mod tests {
         ] {
             assert!(!origin_is_loopback(bad), "{bad} should be rejected");
         }
+    }
+}
+
+#[cfg(test)]
+mod d5_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_events_publish_to_the_relay_and_stay_spooled() {
+        use freehold_testkit::relay as fake_relay;
+        let (relay_url, state, relay_task) = fake_relay::spawn().await;
+
+        let rid = Identity::generate();
+        let runner_pk = rid.nostr_pubkey_hex();
+        let console_secret = [42u8; 32];
+        let a = Identity::generate();
+        let ap = a.nostr_pubkey_hex();
+        let (console_pk, _id, _sig) =
+            freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "").unwrap();
+        fake_relay::publish_grants(
+            &state,
+            &console_secret,
+            &runner_pk,
+            std::slice::from_ref(&ap),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = RunnerContext {
+            identity: rid,
+            package: SecretPackage::default(),
+            state_dir: dir.path().to_path_buf(),
+            relay_url: Some(relay_url.clone()),
+            grant_author: Some(console_pk),
+        };
+        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let url = format!("http://{addr}/mcp");
+
+        // Granted agent runs a LOCAL exec (no ssh fixture needed).
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "exec", "arguments": { "target": "local", "cmd": "echo d5-audit" } }
+        });
+        let raw = body.to_string();
+        let ts = freehold_core::auth::now_secs();
+        let ev = freehold_core::auth::sign_body(&a.secret_seed(), &runner_pk, ts, &raw);
+        let resp = ureq::post(&url)
+            .header("Content-Type", "application/json")
+            .header(auth::PUBKEY_HEADER, ap.clone())
+            .header(auth::SIG_HEADER, ev.sig)
+            .header(auth::TS_HEADER, ts)
+            .send(raw);
+        assert!(resp.is_ok(), "exec must succeed: {resp:?}");
+        // Let the DETACHED publish land.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        // The relay holds a kind-48001 event by the RUNNER with a valid
+        // id + BIP-340 signature and the audited command in content.
+        let events = state.events.lock().clone();
+        let audit = events
+            .iter()
+            .find(|e| e["kind"].as_u64() == Some(48001))
+            .expect("relay received the audit event");
+        assert_eq!(
+            audit["pubkey"].as_str().unwrap(),
+            runner_pk,
+            "runner-signed"
+        );
+        let audit_tags: Vec<Vec<String>> = audit["tags"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .map(|a| {
+                        a.as_array()
+                            .map(|x| {
+                                x.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        freehold_core::nip98::verify_event(
+            audit["pubkey"].as_str().unwrap(),
+            audit["created_at"].as_i64().unwrap(),
+            48001,
+            &audit_tags,
+            audit["content"].as_str().unwrap(),
+            audit["sig"].as_str().unwrap(),
+        )
+        .expect("relay copy verifies");
+        assert!(
+            audit["content"].as_str().unwrap().contains("d5-audit"),
+            "content: {}",
+            audit["content"]
+        );
+        assert_eq!(audit["tags"][0][0], "p");
+        assert_eq!(audit["tags"][0][1], ap, "caller indexed as p-tag");
+
+        // The LOCAL spool holds the SAME event.
+        let spooled = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(spooled.contains("d5-audit"), "spool: {spooled}");
+        assert!(
+            spooled.contains(audit["id"].as_str().unwrap()),
+            "same event id spooled + published: {spooled}"
+        );
+
+        server.abort();
+        relay_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_degrades_to_spool_only_when_relay_events_fail() {
+        use freehold_testkit::relay as fake_relay;
+        // Relay UP (so grants resolve — the relay is the grants source), but
+        // POST /events is blocked: the audit publish degrades to spool-only.
+        let (relay_url, state, relay_task) = fake_relay::spawn().await;
+        *state.block_events.lock() = true;
+
+        let rid = Identity::generate();
+        let runner_pk = rid.nostr_pubkey_hex();
+        let console_secret = [43u8; 32];
+        let a = Identity::generate();
+        let ap = a.nostr_pubkey_hex();
+        let (console_pk, _id, _sig) =
+            freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "").unwrap();
+        fake_relay::publish_grants(
+            &state,
+            &console_secret,
+            &runner_pk,
+            std::slice::from_ref(&ap),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = RunnerContext {
+            identity: rid,
+            package: SecretPackage::default(),
+            state_dir: dir.path().to_path_buf(),
+            relay_url: Some(relay_url.clone()),
+            grant_author: Some(console_pk),
+        };
+        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let url = format!("http://{addr}/mcp");
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "exec", "arguments": { "target": "local", "cmd": "echo deg-spool" } }
+        });
+        let raw = body.to_string();
+        let ts = freehold_core::auth::now_secs();
+        let ev = freehold_core::auth::sign_body(&a.secret_seed(), &runner_pk, ts, &raw);
+        let resp = ureq::post(&url)
+            .header("Content-Type", "application/json")
+            .header(auth::PUBKEY_HEADER, ap)
+            .header(auth::SIG_HEADER, ev.sig)
+            .header(auth::TS_HEADER, ts)
+            .send(raw);
+        assert!(resp.is_ok(), "exec succeeds with /events blocked: {resp:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        // The local spool is still authoritative — never silently dropped.
+        let spooled = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(spooled.contains("deg-spool"), "spool: {spooled}");
+        // And NOTHING reached the relay's store (the blocked publish failed).
+        let kinds: Vec<u64> = state
+            .events
+            .lock()
+            .iter()
+            .map(|e| e["kind"].as_u64().unwrap_or(0))
+            .collect();
+        assert!(
+            !kinds.contains(&48001),
+            "no audit event may reach a failing bridge (store has {kinds:?})"
+        );
+
+        server.abort();
+        relay_task.abort();
     }
 }

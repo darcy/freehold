@@ -160,6 +160,36 @@ pub fn query_grants(
     }
 }
 
+/// Publish an ALREADY-SIGNED Nostr event JSON to the bridge (POST /events,
+/// NIP-98 auth as `auth_secret`). The event bytes are exactly what the
+/// sender spooled — the relay copy and the local copy are the SAME event
+/// (kind 48001 audit rows travel this way).
+pub fn publish_event_json(
+    relay_url: &str,
+    auth_secret: &[u8; 32],
+    event_json: &str,
+) -> Result<(), String> {
+    let url = format!("{relay}/events", relay = relay_url.trim_end_matches('/'));
+    let auth = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
+    let mut resp = agent()
+        .post(&url)
+        .header("Authorization", &auth)
+        .header("Content-Type", "application/json")
+        .send(event_json.to_string())
+        .map_err(|e| format!("event publish request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let body = resp
+            .body_mut()
+            .read_to_string()
+            .unwrap_or_else(|_| "(unreadable body)".into());
+        return Err(format!(
+            "event publish returned HTTP {}: {body}",
+            resp.status()
+        ));
+    }
+    Ok(())
+}
+
 /// Publish (or replace) the runner's grant list on the relay as a
 /// kind-30180 event with `d`-tag = runner pubkey. Same d-tag + newer
 /// created_at = replacement (revocation shrinks the list; it never appends).

@@ -18,6 +18,8 @@ pub enum AuditError {
     Hex(#[from] hex::FromHexError),
     #[error("audit message too large for signing ({0} bytes; max 64)")]
     MessageTooLarge(usize),
+    #[error("audit event build failed: {0}")]
+    Message(String),
 }
 
 /// A signed audit record: `content` is opaque JSON produced by the runner,
@@ -85,6 +87,37 @@ impl Auditor {
     /// Sign a content string; zeroize-safe wrapper over `sign_event`.
     pub fn sign(&self, content: &str) -> Result<SignedEvent, AuditError> {
         sign_event(&self.secret, content)
+    }
+
+    /// Build a kind-N NIP-01 audit event (Phase D5): id over the canonical
+    /// event serialization, BIP-340 signature over the id — the SAME event
+    /// that gets spooled locally AND published to the relay (kind 48001 for
+    /// exec audit; the relay's own verifier accepts exactly this shape).
+    pub fn event(
+        &self,
+        kind: u32,
+        tags: Vec<Vec<String>>,
+        content: &str,
+    ) -> Result<serde_json::Value, AuditError> {
+        let created_at = crate::auth::now_secs();
+        let (pubkey, id, sig) =
+            crate::nip98::sign_event(&self.secret, kind, created_at, tags.clone(), content)
+                .map_err(|e| AuditError::Message(e.to_string()))?;
+        Ok(serde_json::json!({
+            "id": id,
+            "pubkey": pubkey,
+            "created_at": created_at,
+            "kind": kind,
+            "tags": tags,
+            "content": content,
+            "sig": sig,
+        }))
+    }
+
+    /// The raw secret seed (copied out of the zeroized holder) — needed for
+    /// relay NIP-98 publish auth; temporary, zeroized on drop.
+    pub fn secret(&self) -> [u8; 32] {
+        *self.secret
     }
 }
 
