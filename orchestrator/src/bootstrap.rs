@@ -267,9 +267,9 @@ pub async fn bootstrap_proxmox_lxc(
     plain(&spec.storage)?;
     plain(&spec.bridge)?;
 
-    // Explicit vmid must be in the PVE system range; an omitted one is picked
-    // as the lowest free id >= 100 via `pct list` (idempotent: re-runs reuse
-    // an existing container of that name only when the id is still free).
+    // Explicit vmid must be in the PVE system range; an omitted one is
+    // picked cluster-wide (`pvesh get /cluster/nextid`) — and a same-name
+    // container is REFUSED, never duplicated.
     let vmid = match spec.vmid {
         Some(v) => {
             if v < 100 {
@@ -279,7 +279,7 @@ pub async fn bootstrap_proxmox_lxc(
             }
             v
         }
-        None => pick_free_vmid(client, target)?,
+        None => pick_free_vmid(client, target, &spec.hostname)?,
     };
 
     // --unprivileged 1 is explicit, not the CLI default: pct's CLI defaults
@@ -364,25 +364,39 @@ fn host_arch(client: &McpClient, target: &str) -> Result<&'static str, Bootstrap
     }
 }
 
-/// The lowest free vmid >= 100 per `pct list` (plain table:
-/// `<vmid> <status> <type> <name>`; header skipped). Picks the first gap.
-fn pick_free_vmid(client: &McpClient, target: &str) -> Result<u32, BootstrapError> {
-    let out = exec(client, target, "pct list", 120)?;
-    expect_ok(&out, "pct list")?;
-    let mut used: Vec<u32> = out
-        .stdout
-        .lines()
-        .skip(1) // header
-        .filter_map(|line| line.split_whitespace().next()?.parse().ok())
-        .collect();
-    used.sort_unstable();
-    let mut vmid = 100;
-    for id in used {
-        if id == vmid {
-            vmid += 1;
-        } else if id > vmid {
-            break;
+/// Pick a vmid when the operator omitted `--vmid`. Two real constraints:
+/// 1. NAMES are unique on the box — a second `bootstrap --name relay-box`
+///    must NOT create a duplicate host answering the same name. `pct list`
+///    (plain table `<vmid> <status> <type> <name>`) is checked first and a
+///    same-hostname container is refused outright (the operator targets the
+///    existing one with `--vmid` or picks a new name).
+/// 2. The vmid namespace is SHARED with QEMU VMs, which `pct list` misses —
+///    so the id comes from `pvesh get /cluster/nextid` (the canonical
+///    cluster-wide next free id), not a pct-only scan.
+fn pick_free_vmid(client: &McpClient, target: &str, hostname: &str) -> Result<u32, BootstrapError> {
+    let list = exec(client, target, "pct list", 120)?;
+    expect_ok(&list, "pct list")?;
+    for line in list.stdout.lines().skip(1) {
+        let name = line.split_whitespace().nth(3).unwrap_or("");
+        if name == hostname {
+            return Err(BootstrapError::Verify(format!(
+                "a container named {hostname:?} already exists on this host; pass --vmid to \
+                 target it, or pick a different --name"
+            )));
         }
+    }
+    let next = exec(client, target, "pvesh get /cluster/nextid", 120)?;
+    expect_ok(&next, "cluster nextid")?;
+    let vmid: u32 = next.stdout.trim().parse().map_err(|_| {
+        BootstrapError::Verify(format!(
+            "pvesh nextid did not yield a number: {:?}",
+            next.stdout
+        ))
+    })?;
+    if vmid < 100 {
+        return Err(BootstrapError::Verify(format!(
+            "pvesh nextid returned a vmid below the PVE system range: {vmid}"
+        )));
     }
     Ok(vmid)
 }

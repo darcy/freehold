@@ -169,11 +169,15 @@ pub async fn deploy_relay(
     )?;
 
     // Install per the upstream bundle contract: .env ONCE (preserve the
-    // signing identity), then the port + a generated signing key, then
+    // signing identity), then the port + the owner + per-key secrets, then
     // run.sh. The cold first pull of Postgres/Redis/MinIO/relay/Caddy gets a
     // real timeout (600s), not the default.
     // Single-quote-free on purpose: the whole command is single-quoted when
     // wrapped for `pct exec ... sh -c`.
+    // Entropy: each secret comes from /dev/urandom (od -N32 -> 64 hex), NOT a
+    // timestamp — `sha256(date +%s%N)` is guessable within a bound run (the
+    // relay's first signed event leaks the boot time) and BUZZ_RELAY_PRIVATE_KEY
+    // is the relay's signing key (forging kind 13534 = self-admission).
     let install = format!(
         "set -e; cd {dir}/deploy/compose && (test -f .env || cp .env.example .env) && \
          (grep -q \"^BUZZ_HTTP_PORT=\" .env && \
@@ -185,7 +189,8 @@ pub async fn deploy_relay(
          for k in BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET POSTGRES_PASSWORD \
          REDIS_PASSWORD BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY; do \
          if grep -q \"^$k=CHANGE_ME\" .env; then \
-         sed -i \"s/^$k=CHANGE_ME.*/$k=$(date +%s%N | sha256sum | cut -d\" \" -f1)/\" .env; \
+         v=$(od -An -N32 -tx1 /dev/urandom | tr -d \"\\n \"); \
+         sed -i \"s/^$k=CHANGE_ME.*/$k=$v/\" .env; \
          fi; done && \
          (grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in \
          {dir}/deploy/compose/.env\" >&2 && exit 1 || true) && \

@@ -219,6 +219,7 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
         &[
             ("pvesm", HAPPY_PVESM),
             ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
             // pveam NOT planted: the happy store already holds a template,
             // so ensurement must reuse it — any pveam call would 127.
             ("pveam", "exit 127\n"),
@@ -346,6 +347,7 @@ async fn proxmox_lxc_downloads_template_when_missing() {
         &[
             ("pvesm", "echo 'Volid Format Type Size VMID'; exit 0\n"),
             ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
             ("pveam", PVEAM),
         ],
     );
@@ -399,7 +401,12 @@ async fn proxmox_lxc_picks_free_vmid_when_omitted() {
     let base = tempfile::tempdir().unwrap();
     let (bin, _ba) = plant_bin(
         &base.path().join("pct.log"),
-        &[("pvesm", HAPPY_PVESM), ("pct", HAPPY_PCT)],
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
+            ("pvesh", "echo 101; exit 0\n"),
+        ],
     );
     let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
@@ -408,7 +415,7 @@ async fn proxmox_lxc_picks_free_vmid_when_omitted() {
         "proxmox-box",
         &ProxmoxLxcSpec {
             hostname: "testhost-101".into(),
-            vmid: None, // 100 and 102 are taken in the stub -> picks 101
+            vmid: None, // cluster nextid says 101
             template: None,
             storage: "local-lvm".into(),
             rootfs_gb: 16,
@@ -420,16 +427,78 @@ async fn proxmox_lxc_picks_free_vmid_when_omitted() {
     .unwrap();
 
     let cmds = std::fs::read_to_string(&log).unwrap();
-    assert!(cmds.contains("pct list"), "vmids probed: {cmds}");
+    assert!(cmds.contains("pct list"), "duplicate-name check: {cmds}");
     assert!(
-        cmds.contains("pct create 101"),
-        "lowest free vmid (100 taken, 102 taken) picked: {cmds}"
+        cmds.contains("pvesh get /cluster/nextid"),
+        "cluster-wide nextid used (shared vmid namespace): {cmds}"
     );
+    assert!(cmds.contains("pct create 101"), "nextid picked: {cmds}");
     assert!(
         !cmds.contains("pct create 100") && !cmds.contains("pct create 102"),
         "an in-use vmid must never be reused: {cmds}"
     );
     assert_eq!(res.id, "101", "result reports the picked vmid: {res:?}");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_refuses_duplicate_hostname() {
+    let base = tempfile::tempdir().unwrap();
+    // pct list shows a container ALREADY named relay-box: a second bootstrap
+    // with the same --name must be refused, never duplicated.
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            (
+                "pct",
+                r#"
+if [ "$1" = "list" ]; then
+  echo "VMID Status Lock Name"
+  echo "100 running - relay-box"
+  exit 0
+fi
+case "$1" in
+  create) echo "204"; exit 0;;
+  start)  echo "204"; exit 0;;
+  exec)   echo "testhost-101"; echo "Linux"; echo "root"; exit 0;;
+  *)      echo "unknown pct $*" >&2; exit 2;;
+esac
+"#,
+            ),
+            ("uname", "echo x86_64\n"),
+            ("pvesh", "echo 100; exit 0\n"),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let err = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "relay-box".into(),
+            vmid: None,
+            template: None,
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr0".into(),
+        },
+    )
+    .await
+    .expect_err("an existing same-name container must refuse re-creation");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("already exists") && msg.contains("relay-box"),
+        "duplicate-name error: {msg}"
+    );
+    let cmds = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !cmds.contains("pct create"),
+        "must not create when the name is taken: {cmds}"
+    );
 
     server.abort();
 }
@@ -441,7 +510,11 @@ async fn proxmox_lxc_docker_daemon_failure_is_reported() {
     // fallback, and AFTER it still surface the daemon error with a hint.
     let (bin, _ba) = plant_bin(
         &base.path().join("pct.log"),
-        &[("pvesm", HAPPY_PVESM), ("pct", PCT_EXEC_DOCKER_FAIL)],
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", PCT_EXEC_DOCKER_FAIL),
+            ("uname", "echo x86_64\n"),
+        ],
     );
     let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 

@@ -45,6 +45,9 @@ S3/MinIO (Blossom media), plus CLI/ACP/desktop clients.
   no-master-key model; the relay's signing key stays on the relay's own host.
 - **Being a member is enforced at the protocol layer** (auth + channel ingest), regardless of
   who performs the add.
+- **Decided live (Phase C, deploy-relay):** `RELAY_OWNER_PUBKEY` = the CP's console identity
+  pubkey (the owner is auto-membered as `owner`); the CPA `@freehold` is added explicitly as a
+  `member`. `deploy-relay --owner-pubkey` writes it into the compose `.env`.
 
 ## 4. Auth & wire surface
 

@@ -28,10 +28,14 @@ fn plant_bin(scripts: &[(&str, &str)]) -> (std::path::PathBuf, tempfile::TempDir
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
+    // Every stub invocation appends `$0 $*` to <bin>/../cmds.log — the
+    // lxc-wrap test counts wrapped commands from it.
+    let log = dir.path().join("cmds.log");
     for (name, body) in scripts {
         let p = bin.join(name);
         let mut f = std::fs::File::create(&p).unwrap();
         writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "echo \"$0 $*\" >> '{}'", log.display()).unwrap();
         write!(f, "{body}").unwrap();
         let mut perms = std::fs::metadata(&p).unwrap().permissions();
         perms.set_mode(0o755);
@@ -124,23 +128,28 @@ async fn fixture(
 
 const DOCKER_OK: &str = "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then echo 'Docker Compose version v2.24.4'; exit 0; fi; exit 0\n";
 const CURL_OK: &str = "case \"$*\" in *archive/*.tar.gz*) exit 0;; *\"/_liveness\"*) echo OK; exit 0;; *) exit 1;; esac\n";
-const CP_OK: &str = "touch \"$2\" 2>/dev/null; exit 0\n";
-
+// (the legacy `cp` stub was removed — a REAL `cp` copies .env.example so the
+//  CHANGE_ME sweep + leftover guard execute against real content)
 #[tokio::test(flavor = "multi_thread")]
 async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("relay");
     let dir_s = dir.display().to_string();
+    // The tar stub materializes a REAL .env.example with CHANGE_ME values so
+    // the install's per-key sweep + leftover guard actually execute; `cp` is
+    // NOT stubbed, so a real `cp` copies it into .env first.
     let tar_stub = format!(
         "mkdir -p {dir}/deploy/compose && printf '#!/bin/sh\\necho RUNSH-OK\\nexit 0\\n' \
-         > {dir}/deploy/compose/run.sh && chmod +x {dir}/deploy/compose/run.sh && exit 0\n",
+         > {dir}/deploy/compose/run.sh && chmod +x {dir}/deploy/compose/run.sh && \
+         printf 'BUZZ_RELAY_PRIVATE_KEY=CHANGE_ME_64_HEX\\nBUZZ_GIT_HOOK_HMAC_SECRET=CHANGE_ME_64_HEX\\n\
+         POSTGRES_PASSWORD=CHANGE_ME_PW\\nREDIS_PASSWORD=CHANGE_ME_PW\\nBUZZ_S3_ACCESS_KEY=CHANGE_ME_AK\\n\
+         BUZZ_S3_SECRET_KEY=CHANGE_ME_SK\\n' > {dir}/deploy/compose/.env.example && exit 0\n",
         dir = dir_s
     );
     let scripts: Vec<(&str, String)> = vec![
         ("docker", DOCKER_OK.into()),
         ("curl", CURL_OK.into()),
         ("tar", tar_stub),
-        ("cp", CP_OK.into()),
     ];
     let stubs: Vec<(&str, &str)> = scripts.iter().map(|(n, b)| (*n, b.as_str())).collect();
     let (bin, _ba) = plant_bin(&stubs);
@@ -165,6 +174,69 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
     assert_eq!(res.relay_url, "http://relay-box:3000");
     assert!(res.detail.contains("healthy"), "{res:?}");
     assert!(res.detail.contains("ONE scope"), "{res:?}");
+    // The sweep REALLY ran against real content: every placeholder replaced,
+    // and the generated secrets are 64-hex (od -N32 from /dev/urandom).
+    let env = std::fs::read_to_string(dir.join("deploy/compose/.env")).unwrap();
+    assert!(!env.contains("=CHANGE_ME"), "placeholders swept: {env}");
+    assert!(
+        env.lines()
+            .filter(|l| {
+                l.starts_with("BUZZ_RELAY_PRIVATE_KEY=") || l.starts_with("BUZZ_S3_SECRET_KEY=")
+            })
+            .all(|l| l.rsplit('=').next().unwrap().len() == 64),
+        "urandom 64-hex secrets: {env}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_deploy_lxc_mode_wraps_every_command_in_pct_exec() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("relay");
+    let dir_s = dir.display().to_string();
+    let tar_stub = format!(
+        "mkdir -p {dir}/deploy/compose && printf '#!/bin/sh\\necho RUNSH-OK\\nexit 0\\n' \
+         > {dir}/deploy/compose/run.sh && chmod +x {dir}/deploy/compose/run.sh && \
+         printf 'BUZZ_RELAY_PRIVATE_KEY=CHANGE_ME_64_HEX\\n' \
+         > {dir}/deploy/compose/.env.example && exit 0\n",
+        dir = dir_s
+    );
+    let scripts: Vec<(&str, String)> = vec![
+        ("docker", DOCKER_OK.into()),
+        ("curl", CURL_OK.into()),
+        ("tar", tar_stub),
+        (
+            "pct",
+            "if [ \"$1\" = \"exec\" ]; then echo \"in-guest ok\"; exit 0; fi; exit 2\n".into(),
+        ),
+    ];
+    let stubs: Vec<(&str, &str)> = scripts.iter().map(|(n, b)| (*n, b.as_str())).collect();
+    let (bin, _ba) = plant_bin(&stubs);
+    let (client, _target, server, keep1, _keep2) = fixture(base.path(), &bin).await;
+    let _ = (keep1, _keep2);
+
+    let res = deploy_relay(
+        &client,
+        "relay-box",
+        &RelayDeploySpec {
+            relay_name: "relay-box".into(),
+            deploy_dir: dir_s,
+            http_port: 3000,
+            buzz_ref: DEFAULT_BUZZ_REF.into(),
+            lxc: Some(100),
+            owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
+        },
+    )
+    .await
+    .expect("lxc-mode deploy must succeed");
+
+    assert!(res.detail.contains("healthy"), "{res:?}");
+    // All FIVE exec sites (gate, download, extract, install, liveness) went
+    // through the pct exec wrapper — the exact quoting that broke live.
+    let log = std::fs::read_to_string(bin.parent().unwrap().join("cmds.log")).unwrap();
+    let wrapped = log.matches("pct exec 100 -- sh -c").count();
+    assert_eq!(wrapped, 5, "every command wrapped into the LXC: {log}");
 
     server.abort();
 }
