@@ -89,10 +89,7 @@ struct DeployCpArgs {
     /// LOCAL path of the built control-plane binary
     #[arg(long)]
     binary: PathBuf,
-    /// LOCAL console identity.json to seed (the relay owner/member identity)
-    #[arg(long)]
-    identity: PathBuf,
-    /// The relay this CP helped create (the ONE scope; C4 posture record)
+    /// The relay this CP helps serve (the ONE scope; C4 posture record)
     #[arg(long)]
     relay_url: String,
 }
@@ -331,7 +328,6 @@ async fn main() -> Result<()> {
                     bin_dir: args.bin_dir.clone(),
                     bind_addr: args.bind.clone(),
                     binary_path: args.binary.clone(),
-                    identity_path: args.identity.clone(),
                     relay_url: args.relay_url.clone(),
                 },
             )

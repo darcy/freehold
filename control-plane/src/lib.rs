@@ -25,10 +25,15 @@ use std::net::IpAddr;
 /// SSH tunnel (`ssh -L 8080:127.0.0.1:8080 <box>`), not a network bind.
 /// Accepts `127.*`, `localhost`, `::1` with optional `[v6]:port` brackets.
 pub fn validate_loopback_bind(addr: &str) -> Result<(), String> {
-    let host = addr
+    // STRICT: the whole string must be `host:port` with a parseable u16 port —
+    // `127.0.0.1:8080; rm -rf /` fails at the port parse and is never
+    // interpolated (the address is operator-supplied today, CPA-driven later).
+    let (host, port) = addr
         .rsplit_once(':')
-        .map(|(h, _)| h.trim_start_matches('[').trim_end_matches(']'))
-        .unwrap_or(addr);
+        .ok_or_else(|| format!("{addr:?} is not a host:port address"))?;
+    port.parse::<u16>()
+        .map_err(|_| format!("{addr:?} has a non-numeric or absent port"))?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
     let loopback = host == "localhost"
         || host == "::1"
         || host
@@ -70,16 +75,40 @@ mod tests {
             "192.168.30.224:8080",
             "10.0.0.1:80",
             ":::8080",
+            "[::]:8080",
         ] {
             let err = validate_loopback_bind(addr).unwrap_err();
-            assert!(err.contains("loopback-only"), "{addr}: {err}");
+            assert!(
+                err.contains("loopback-only") || err.contains("non-numeric"),
+                "{addr}: {err}"
+            );
         }
     }
 
     #[test]
-    fn ambiguous_without_port_is_refused_or_127() {
-        // no port → host = whole string; 127-prefixed passes, anything else fails
-        assert!(validate_loopback_bind("127.0.0.1").is_ok());
-        assert!(validate_loopback_bind("192.168.1.1").is_err());
+    fn injection_tails_are_refused() {
+        // a `; <shell>` tail past the port must NEVER pass the guard
+        for addr in [
+            "127.0.0.1:8080; rm -rf /",
+            "127.0.0.1:8080 && id",
+            "localhost:8080:extra",
+            "127.0.0.1:99999",
+            "127.0.0.1:80 80",
+        ] {
+            assert!(
+                validate_loopback_bind(addr).is_err(),
+                "{addr} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_port_is_refused() {
+        for addr in ["127.0.0.1", "localhost", ""] {
+            assert!(
+                validate_loopback_bind(addr).is_err(),
+                "{addr:?} must be refused"
+            );
+        }
     }
 }

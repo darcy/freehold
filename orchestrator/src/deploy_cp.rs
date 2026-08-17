@@ -3,14 +3,17 @@
 //! loopback-bound (C3); operator access from elsewhere is an SSH tunnel.
 //!
 //! Transport: the runner's ONE primitive is `exec` (locked model: no scp, no
-//! semantic tools). The binary and the console identity therefore travel as
-//! base64 — written in chunks on the box, decoded, verified by byte size —
-//! and the process is started detached (`setsid nohup`) and probed at
-//! `/healthz` on the loopback bind.
+//! semantic tools). The binary therefore travels as base64 — written in
+//! chunks on the box, decoded, verified by byte size — and the process is
+//! started detached (`setsid nohup`), probed at `/healthz`, and KILL-CHECKED
+//! by pid (`kill -0`) so a serve that dies right after binding is surfaced.
 //!
-//! Identity: the shipped console identity is the SAME keypair the relay
-//! owner/member was derived from (relay-add D2 keeps identity material
-//! unchanged); a fresh identity on the box would no longer be the owner.
+//! Identity: NO keypair is shipped, ever. The box's `serve` (via
+//! `Console::load_or_create`) generates a fresh identity; its PUBKEY is read
+//! back with `control-plane identity` (pubkey-only output) so the operator /
+//! CPA can add it as a relay member. A pre-made keypair would land in the
+//! runner's verbatim audit log + `ps` — the locked rule "never put secrets
+//! in logs" (relay owner private keys must never leave the operator's side).
 
 use std::path::PathBuf;
 
@@ -33,13 +36,12 @@ pub struct DeployCpSpec {
     pub state_dir: String,
     /// Remote dir for the shipped binary.
     pub bin_dir: String,
-    /// Loopback bind for the console (C3: validated loopback-only).
+    /// Loopback bind for the console (C3: validated loopback-only, STRICT
+    /// host:port — no shell tail can ride the port).
     pub bind_addr: String,
     /// LOCAL path of the built control-plane binary to ship.
     pub binary_path: PathBuf,
-    /// LOCAL console identity.json to seed (the relay owner/member identity).
-    pub identity_path: PathBuf,
-    /// The relay this CP helped create — the ONE scope (C4 posture).
+    /// The relay this CP helps serve — the ONE scope (C4 posture).
     pub relay_url: String,
 }
 
@@ -47,6 +49,9 @@ pub struct DeployCpSpec {
 pub struct DeployCpResult {
     pub state_dir: String,
     pub bind_addr: String,
+    /// The box's FRESH console pubkey (generated on the box; never shipped).
+    /// Add it as a relay member (`freehold relay-member --pubkey <this>`).
+    pub pubkey: String,
     pub detail: String,
 }
 
@@ -65,13 +70,12 @@ pub async fn deploy_cp(
         .map_err(BootstrapError::Verify)?;
 
     let binary = std::fs::read(&spec.binary_path)?;
-    let identity = std::fs::read(&spec.identity_path)?;
 
     exec_to_ok(
         client,
         target,
         &format!(
-            "mkdir -p {sd}/console && mkdir -p {bd}",
+            "mkdir -p {sd}/console && mkdir -p {bd} && rm -f {bd}/control-plane.b64",
             sd = spec.state_dir,
             bd = spec.bin_dir
         ),
@@ -79,23 +83,25 @@ pub async fn deploy_cp(
         30,
     )?;
 
-    // Identity is small: one exec. Seeding it means Console::load_or_create
-    // finds it and keeps the owner/member keypair (never regenerates).
-    let id_b64 = base64::engine::general_purpose::STANDARD.encode(&identity);
+    // Stop any PRIOR serve instance BEFORE writing over the binary — writing
+    // a running executable fails with ETXTBSY and wedges the upgrade path.
+    // Deterministic pidfile (written by the start step), no pkill/pattern
+    // matching. `; true` guarantees the stop itself never fails the deploy.
     exec_to_ok(
         client,
         target,
         &format!(
-            "printf '%s' '{id_b64}' | base64 -d > {sd}/console/identity.json && \
-             chmod 600 {sd}/console/identity.json",
-            id_b64 = id_b64,
+            "p=$(cat {sd}/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" \
+             >/dev/null 2>&1; rm -f {sd}/serve.pid; true",
             sd = spec.state_dir,
         ),
-        "ship console identity",
+        "stop prior control plane",
         30,
     )?;
 
-    // Binary as base64 chunks appended to one .b64 file, then decoded once.
+    // Binary as base64 chunks appended to one .b64 file, then decoded once
+    // (the .b64 was truncated in the mkdir step, so an interrupted deploy
+    // can never wedge the next one behind a false size mismatch).
     let b64 = base64::engine::general_purpose::STANDARD.encode(&binary);
     let mut sent = 0usize;
     while sent < b64.len() {
@@ -136,16 +142,20 @@ pub async fn deploy_cp(
         )));
     }
 
-    // Start detached (setsid: not killed when the exec channel closes) and
-    // probe the loopback /healthz — the CP's OWN liveness.
+    // Start detached (setsid: not killed when the exec channel closes),
+    // echo the pid, then probe loopback /healthz AND kill -0 the pid — a
+    // serve that died (e.g. address already in use) is never reported as up.
     let start = format!(
         "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba} \
-         >> {sd}/serve.log 2>&1 < /dev/null &",
+         >> {sd}/serve.log 2>&1 < /dev/null & echo $! | tee {sd}/serve.pid",
         bd = spec.bin_dir,
         sd = spec.state_dir,
         ba = spec.bind_addr,
     );
-    exec_to_ok(client, target, &start, "start control plane", 30)?;
+    let out = exec_to_ok(client, target, &start, "start control plane", 30)?;
+    let pid: u32 = out.stdout.trim().parse().map_err(|_| {
+        BootstrapError::Verify(format!("start did not yield a pid: {:?}", out.stdout))
+    })?;
 
     let mut healthy = false;
     let mut last_err: Option<String> = None;
@@ -169,6 +179,35 @@ pub async fn deploy_cp(
                 .unwrap_or_default()
         )));
     }
+    let alive = format!("kill -0 {pid} >/dev/null 2>&1", pid = pid);
+    exec_to_ok(client, target, &alive, "control plane still alive", 10).map_err(|_| {
+        BootstrapError::Verify(format!(
+            "control plane answered /healthz but the started process (pid {pid}) is gone — \
+                 check {sd}/serve.log (e.g. address already in use)",
+            pid = pid,
+            sd = spec.state_dir,
+        ))
+    })?;
+
+    // The box generated its own identity (brand new keypair); read back ONLY
+    // the pubkey so the operator/CPA can add it as a relay member.
+    let out = exec_to_ok(
+        client,
+        target,
+        &format!(
+            "{bd}/control-plane identity --state-dir {sd}",
+            bd = spec.bin_dir,
+            sd = spec.state_dir,
+        ),
+        "console identity pubkey",
+        30,
+    )?;
+    let pubkey = out.stdout.trim().to_string();
+    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(BootstrapError::Verify(format!(
+            "console identity pubkey readback is not 64-hex: {pubkey:?}"
+        )));
+    }
 
     Ok(DeployCpResult {
         state_dir: spec.state_dir.clone(),
@@ -176,10 +215,15 @@ pub async fn deploy_cp(
         detail: format!(
             "control plane deployed in OPERATE mode: state {sd}, console loopback {ba} \
              (reach it via `ssh -L 8080:127.0.0.1:8080 root@<box>`); relay scope {relay} \
-             (C4: relay authoritative post-port, local state = offline cache mirror)",
+             (C4: relay authoritative post-port, local state = offline cache mirror); \
+             the box's console identity ({pk:?}) GENERATED ON THE BOX — add it as a relay \
+             member with `freehold relay-member --pubkey {pk}`",
             sd = spec.state_dir,
             ba = spec.bind_addr,
             relay = spec.relay_url,
+            pk = &pubkey,
         ),
+        // detail is built BEFORE the move (struct fields evaluate in order)
+        pubkey,
     })
 }

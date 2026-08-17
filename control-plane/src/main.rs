@@ -40,6 +40,10 @@ enum Cmd {
     Revoke(RevokeArgs),
     /// List runners + secrets at a glance
     List(CommonArgs),
+    /// Print this state dir's console identity PUBKEY (64-hex, pubkey only —
+    /// never the secret). Used by deploy-cp to name the box's fresh identity
+    /// for relay-member add.
+    Identity(CommonArgs),
     /// Serve the local admin/ops web surface
     Serve(ServeArgs),
 }
@@ -210,6 +214,15 @@ async fn main() -> Result<()> {
             println!("revoked runner {} (was {})", args.name, rec.nostr_pubkey);
             println!("note: the shipped secrets.json was removed, but the credential itself may");
             println!("      still be valid at the service — rotate it upstream if it was exposed");
+            Ok(())
+        }
+        Cmd::Identity(args) => {
+            // load_or_create: a fresh state dir gets a NEW identity here
+            // (the box never receives a pre-made keypair — see deploy-cp).
+            let console = Console::load_or_create(&args.state_dir).with_context(|| {
+                format!("loading console identity in {}", args.state_dir.display())
+            })?;
+            println!("{}", console.pubkey());
             Ok(())
         }
         Cmd::List(args) => {

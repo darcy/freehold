@@ -96,7 +96,7 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 95 tests across core / runner / control-plane / orchestrator / acceptance
+cargo test --workspace        # 110 tests across core / runner / control-plane / orchestrator / acceptance
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --all --check       # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
@@ -199,6 +199,19 @@ cargo run -p freehold-orchestrator -- deploy-relay --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
   --target proxmox-box --name relay-box --http-port 3000 \
   --owner-pubkey <64-hex-owner> [--lxc 100]
+# C1: deploy the control plane onto the box in OPERATE mode (loopback-only).
+# The box GENERATES its own identity (a keypair is never shipped — the
+# runner logs every exec verbatim); --binary is a local release build.
+cargo run -p freehold-orchestrator -- deploy-cp --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
+  --target proxmox-box --binary target/release/control-plane \
+  --relay-url http://relay-box:3000
+
+# C2: add the box's fresh console pubkey as a relay member (via buzz-admin
+# in the relay LXC — the CP never holds the relay signing key).
+cargo run -p freehold-orchestrator -- relay-member --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
+  --pubkey <fresh-console-pubkey> --lxc 100
 ```
 
 ## Roadmap
