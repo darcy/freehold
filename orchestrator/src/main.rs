@@ -181,6 +181,11 @@ struct DelegatePeerArgs {
     /// The runner TARGET name for the exec (e.g. proxmox-box)
     #[arg(long)]
     target: String,
+    /// The ONLY delegator allowed to request execs (the CPA's pubkey,
+    /// 64-hex) — REQUIRED, fail-closed: the peer proxies for NOBODY else
+    /// (any-member requests would hollow out the grant model).
+    #[arg(long)]
+    requester: String,
     /// Seconds to watch for requests (0 = single pass)
     #[arg(long, default_value_t = 0)]
     watch: u64,
@@ -554,20 +559,36 @@ async fn main() -> Result<()> {
                 "DELEGATE-PEER {} watching {}s on channel {}",
                 me, args.watch, args.channel
             );
+            if args.requester.len() != 64 || !args.requester.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return Err(anyhow::anyhow!("--requester must be a 64-hex Nostr pubkey"));
+            }
             let start = std::time::Instant::now();
             let mut since = freehold_core::auth::now_secs();
+            let mut last_ts = since;
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let client = flows::connect(&args.runner_addr, &args.agent_dir, &args.runner_pubkey)?;
             loop {
-                for (_, content, requester) in delegate::poll_stream_p(
+                let polled = delegate::poll_stream_p(
                     &args.relay_url,
                     &id.secret_seed(),
                     &args.channel,
                     &me,
                     since,
                 )
-                .map_err(anyhow::Error::msg)?
-                {
+                .map_err(anyhow::Error::msg)?;
+                for (ts, content, requester) in polled {
+                    last_ts = last_ts.max(ts);
+                    // FAIL-CLOSED: only the authorized delegator's requests
+                    // run — the peer proxies for nobody else (any-member
+                    // requests would hollow out the grant model).
+                    if requester != args.requester {
+                        println!(
+                            "DELEGATE-PEER: ignoring request from {} (not the authorized requester)",
+                            &requester[..12]
+                        );
+                        continue;
+                    }
                     if let Some(env) = delegate::parse_envelope(&content)
                         && env.ty == delegate::JOB_REQUEST
                         && !seen.contains(&env.id)
@@ -577,7 +598,8 @@ async fn main() -> Result<()> {
                         // The target's OWN credential is the secret name
                         // (the standard shape; without it the ssh handshake
                         // stalls — verified live).
-                        let res =
+                        println!("DELEGATE-PEER: job {} -> runner-direct exec", env.id);
+                        let (ok, res) =
                             match client.exec(&args.target, task, &[args.target.as_str()], 120) {
                                 Ok(o) => {
                                     let mut text = String::new();
@@ -592,12 +614,13 @@ async fn main() -> Result<()> {
                                             text.push_str(&format!("\n{}", o.stderr));
                                         }
                                     }
-                                    text
+                                    // ok comes from the EXIT CODE, never the
+                                    // output text (a 0-exit command whose
+                                    // stdout begins "exit " must succeed).
+                                    (o.exit_code == Some(0), text)
                                 }
-                                Err(e) => format!("runner exec failed: {e}"),
+                                Err(e) => (false, format!("runner exec failed: {e}")),
                             };
-                        let ok =
-                            !res.starts_with("runner exec failed") && !res.starts_with("exit ");
                         delegate::post_message(
                             &args.relay_url,
                             &id.secret_seed(),
@@ -608,7 +631,12 @@ async fn main() -> Result<()> {
                         .map_err(anyhow::Error::msg)?;
                     }
                 }
-                since = freehold_core::auth::now_secs();
+                // Advance only to the MAX PROCESSED timestamp — never past
+                // it: requests published while an exec was in flight stay
+                // visible on the next poll (seen dedupes by id).
+                if last_ts > since {
+                    since = last_ts;
+                }
                 if args.watch == 0
                     || std::time::Instant::now().duration_since(start).as_secs() >= args.watch
                 {
