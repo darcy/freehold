@@ -160,6 +160,7 @@ async fn serve_runner(pkg_dir: &Path) -> R<(String, tokio::task::JoinHandle<()>)
     let pkg = SecretPackage::load(pkg_dir).map_err(|e| e.to_string())?;
     let ctx = RunnerContext {
         relay_url: None,
+        grant_author: None,
         identity: id,
         package: pkg,
         state_dir: pkg_dir.to_path_buf(),

@@ -10,15 +10,13 @@
 //! Author/URL binding matches the real bridge: the `u`-tag must equal the
 //! request URL (scheme://host:port/path?query).
 
-use std::collections::HashMap;
-
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header::HOST};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -76,20 +74,18 @@ fn verify_from_headers(headers: &HeaderMap, uri: &str) -> Result<String, String>
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| "no host header".to_string())?;
     let url = format!("http://{host}{uri}");
-    let method = if uri.starts_with("/events") {
-        "POST"
-    } else {
-        "GET"
-    };
-    freehold_core::nip98::verify_nip98(auth, method, &url)
+    // Both bridge surfaces are POST on the real relay (GET /query is 405).
+    freehold_core::nip98::verify_nip98(auth, "POST", &url)
 }
 
 async fn query(
     State(state): State<SharedRelay>,
     headers: HeaderMap,
     uri: axum::extract::OriginalUri,
-    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    // POST /query with a NIP-01 filter body — the real bridge shape. Mirror
+    // the filter semantics for the cases we use: `kinds` + `#d`.
     let caller = match verify_from_headers(
         &headers,
         uri.path_and_query().map(|p| p.as_str()).unwrap_or("/query"),
@@ -98,20 +94,50 @@ async fn query(
         Err(e) => return (StatusCode::UNAUTHORIZED, Json(json!({ "error": e }))),
     };
     state.authed_callers.lock().push(caller);
-    let kinds: Vec<u32> = params
-        .get("kinds")
-        .map(|k| k.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+    let filter: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let kinds: Vec<u32> = filter["kinds"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|k| k.as_u64())
+                .map(|k| k as u32)
+                .collect()
+        })
         .unwrap_or_default();
+    let d_tags: Vec<String> = filter["#d"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let event_d = |e: &Value| -> Vec<String> {
+        e["tags"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .filter(|t| {
+                        t.as_array()
+                            .is_some_and(|t| t.first().is_some_and(|k| k == "d"))
+                    })
+                    .filter_map(|t| t.as_array().and_then(|t| t.get(1)).and_then(Value::as_str))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let events: Value = Value::Array(
         state
             .events
             .lock()
             .iter()
             .filter(|e| {
-                kinds.is_empty()
+                (kinds.is_empty()
                     || e["kind"]
                         .as_u64()
-                        .is_some_and(|k| kinds.contains(&(k as u32)))
+                        .is_some_and(|k| kinds.contains(&(k as u32))))
+                    && (d_tags.is_empty() || event_d(e).iter().any(|d| d_tags.contains(d)))
             })
             .cloned()
             .collect::<Vec<_>>(),
@@ -152,7 +178,7 @@ async fn publish(
 pub async fn spawn() -> (String, SharedRelay, tokio::task::JoinHandle<()>) {
     let state = shared();
     let app = Router::new()
-        .route("/query", get(query))
+        .route("/query", post(query))
         .route("/events", post(publish))
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

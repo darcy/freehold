@@ -483,6 +483,8 @@ async fn grant_publish_writes_replaceable_relay_grant_list() {
 
     let (relay_url, state, _task) = freehold_testkit::relay::spawn().await;
     let console_dir = base.path().join("cp-state");
+    // The console identity must EXIST (the publish path refuses to mint one)
+    freehold_control_plane::console::Console::load_or_create(&console_dir).unwrap();
 
     let a = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
     let b = "2221222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";

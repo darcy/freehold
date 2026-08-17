@@ -60,7 +60,14 @@ pub struct RunnerContext {
     pub identity: Identity,
     pub package: SecretPackage,
     pub state_dir: PathBuf,
+    /// Relay grants source (Phase D): when set, grants are read live as
+    /// kind-30180 events by `expected_author` (the console/owner pubkey —
+    /// the grant list's trust anchor) instead of the shipped package.
     pub relay_url: Option<String>,
+    /// The grant-list AUTHOR pubkey (64-hex) — REQUIRED when relay_url is
+    /// set (fail-fast at serve; a grant list accepted from any member would
+    /// be a self-admission hole).
+    pub grant_author: Option<String>,
 }
 
 #[derive(Clone)]
@@ -101,6 +108,13 @@ pub async fn serve(
         return Err(anyhow::anyhow!(
             "refusing non-loopback bind {bound}: the runner is unauthenticated \
              until Phase D — bind 127.0.0.1"
+        ));
+    }
+    if ctx.relay_url.is_some() && ctx.grant_author.is_none() {
+        return Err(anyhow::anyhow!(
+            "--grant-author is REQUIRED when --relay-url is set (the grant \
+             list's trust anchor; accepting grants from any member is a \
+             self-admission hole)"
         ));
     }
     let app = router(ctx);
@@ -207,6 +221,7 @@ async fn mcp_endpoint(
                 current_grants(
                     &grant_ctx.state_dir,
                     grant_ctx.relay_url.as_deref(),
+                    grant_ctx.grant_author.as_deref(),
                     &grant_ctx.identity,
                 )
             })
@@ -578,6 +593,7 @@ async fn ssh_status(
 fn current_grants(
     state_dir: &std::path::Path,
     relay_url: Option<&str>,
+    grant_author: Option<&str>,
     identity: &Identity,
 ) -> Vec<String> {
     // Phase D: with a relay configured, the relay is the grants authority —
@@ -587,9 +603,16 @@ fn current_grants(
     // package.
     if let Some(url) = relay_url {
         let secret = identity.secret_seed();
+        // serve() fail-fasts, but current_grants stays defensive: no author
+        // -> no grants -> deny (never accept an unanchored list).
+        let Some(author) = grant_author else {
+            tracing::warn!("relay grants requested without --grant-author — failing closed");
+            return Vec::new();
+        };
         return match freehold_core::relay_http::query_grants(
             url,
             &identity.nostr_pubkey_hex(),
+            author,
             &secret,
         ) {
             Ok(grants) => grants,
@@ -791,28 +814,60 @@ mod tests {
             b.nostr_pubkey_hex(),
             c.nostr_pubkey_hex(),
         );
+        let (console_pk, _id, _sig) =
+            freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "").unwrap();
         fake_relay::publish_grants(
             &state,
             &console_secret,
             &runner_pk,
             &[ap.clone(), bp.clone()],
         );
+        // A ROGUE member publishes their own "grant" for this runner with a
+        // NEWER created_at — the author gate must ignore it entirely.
+        let rogue = Identity::generate();
+        let rogue_pk = rogue.nostr_pubkey_hex();
+        let rogue_ts = freehold_core::auth::now_secs() + 10;
+        let rogue_content = serde_json::json!({ "grants": [rogue_pk], "schema": 1 }).to_string();
+        let (rogue_author, rogue_id, rogue_sig) = freehold_core::nip98::sign_event(
+            &rogue.secret_seed(),
+            30180,
+            rogue_ts,
+            vec![vec!["d".into(), runner_pk.clone()]],
+            &rogue_content,
+        )
+        .unwrap();
+        state.events.lock().push(serde_json::json!({
+            "id": rogue_id,
+            "pubkey": rogue_author,
+            "created_at": rogue_ts,
+            "kind": 30180,
+            "tags": [["d", runner_pk]],
+            "content": rogue_content,
+            "sig": rogue_sig,
+        }));
 
         let dir = tempfile::tempdir().unwrap();
         let ctx = RunnerContext {
-            identity: rid,
+            identity: rid.clone(),
             package: SecretPackage::default(),
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
+            grant_author: Some(console_pk.clone()),
         };
         let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
         let url = format!("http://{addr}/mcp");
 
         mcp_list(&url, &a, &runner_pk).expect("A is granted");
         mcp_list(&url, &b, &runner_pk).expect("B is granted");
-        // never-granted agent denied
+        // never-granted agent denied (and the rogue's newer-but-unanchored
+        // event must NOT have granted it)
         let err = mcp_list(&url, &c, &runner_pk).unwrap_err();
         assert!(err.contains("unauthorized"), "{err}");
+        let err = mcp_list(&url, &rogue, &runner_pk).unwrap_err();
+        assert!(
+            err.contains("unauthorized"),
+            "rogue-author grant list must be ignored: {err}"
+        );
 
         // REVOKE B: publish a REPLACED (shrunk) list — the runner reads it
         // fresh per call, so B is denied WITHOUT any restart.
@@ -843,6 +898,7 @@ mod tests {
             state_dir: dir.path().to_path_buf(),
             // nothing listens on :1 — the grant query must fail closed
             relay_url: Some("http://127.0.0.1:1".into()),
+            grant_author: Some(a.nostr_pubkey_hex()),
         };
         let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
         let url = format!("http://{addr}/mcp");

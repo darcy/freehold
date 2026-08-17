@@ -63,54 +63,101 @@ pub fn parse_grants_content(content: &str) -> Result<Vec<String>, String> {
 pub fn query_grants(
     relay_url: &str,
     runner_pubkey_hex: &str,
+    expected_author: &str,
     auth_secret: &[u8; 32],
 ) -> Result<Vec<String>, String> {
-    let url = format!(
-        "{relay}/query?kinds={kind}&limit=100",
-        relay = relay_url.trim_end_matches('/'),
-        kind = GRANTS_KIND,
-    );
-    let headers = nip98_auth(auth_secret, "GET", &url, now_secs()).map_err(|e| e.to_string())?;
+    // Wire: POST /query with a NIP-01 filter BODY (kinds/#d/limit) — the
+    // buzz bridge is POST-only (GET /query is 405). The #d filter means the
+    // runner's own events can't fall off a 100-row page of unrelated kinds.
+    let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
+    let filter = serde_json::json!({
+        "kinds": [GRANTS_KIND],
+        "#d": [runner_pubkey_hex],
+        "limit": 100,
+    });
+    let headers = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
     let mut resp = agent()
-        .get(&url)
+        .post(&url)
         .header("Authorization", &headers)
-        .call()
+        .header("Content-Type", "application/json")
+        .send(filter.to_string())
         .map_err(|e| format!("grant query request failed: {e}"))?;
     let body = resp
         .body_mut()
         .read_to_string()
         .map_err(|e| format!("grant query read: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "grant query returned HTTP {}: {body}",
+            resp.status()
+        ));
+    }
     let events: Vec<Value> =
         serde_json::from_str(&body).map_err(|e| format!("grant query parse: {e}: {body}"))?;
-    let mut best: Option<(i64, Vec<String>)> = None;
-    for ev in events {
-        let d_tags: Vec<&str> = ev["tags"]
-            .as_array()
-            .map(|tags| {
-                tags.iter()
-                    .filter(|t| {
-                        t.as_array()
-                            .is_some_and(|t| t.first().is_some_and(|k| k == "d"))
-                    })
-                    .filter_map(|t| t.as_array().and_then(|t| t.get(1)).and_then(Value::as_str))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !d_tags.contains(&runner_pubkey_hex) {
+
+    // Trust: only events by `expected_author` (the console/owner, D1's named
+    // grant publisher) whose Schnorr signature verifies LOCALLY are
+    // candidates. Addressable events are keyed (kind, author, d-tag) — a
+    // rogue member could otherwise publish {"grants":[self]} with a newer
+    // created_at and take over exec; the author gate is the trust anchor.
+    // Pick the NEWEST trusted candidate, then parse ONLY the winner — a
+    // malformed NON-winner warns and skips (it must never lock the runner
+    // out); a malformed winner fails closed (only the trusted author could
+    // have written it).
+    let mut best: Option<(i64, &Value)> = None;
+    for ev in events.iter() {
+        let author = ev["pubkey"].as_str().unwrap_or("");
+        if author != expected_author {
             continue;
         }
         let created_at = ev["created_at"].as_i64().unwrap_or(0);
+        let tags: Vec<Vec<String>> = ev["tags"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .map(|a| {
+                        a.as_array()
+                            .map(|x| {
+                                x.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let content = ev["content"].as_str().unwrap_or("");
-        let grants = parse_grants_content(content)?;
+        if crate::nip98::verify_event(
+            author,
+            created_at,
+            GRANTS_KIND,
+            &tags,
+            content,
+            ev["sig"].as_str().unwrap_or(""),
+        )
+        .is_err()
+        {
+            tracing::warn!(
+                author,
+                created_at,
+                "grant event failed local signature verify — skipped"
+            );
+            continue;
+        }
         // Later event wins, INCLUDING on a created_at tie: the bridge returns
         // events in insertion order, and a replace-publish in the same second
         // otherwise wouldn't supersede the list it replaces (revokes would
         // silently not land).
-        if best.as_ref().is_none_or(|(t, _)| created_at >= *t) {
-            best = Some((created_at, grants));
+        if best.is_none_or(|(t, _)| created_at >= t) {
+            best = Some((created_at, ev));
         }
     }
-    Ok(best.map(|(_, g)| g).unwrap_or_default())
+    match best {
+        Some((_, winner)) => parse_grants_content(winner["content"].as_str().unwrap_or("")),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Publish (or replace) the runner's grant list on the relay as a

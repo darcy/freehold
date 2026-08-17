@@ -407,7 +407,9 @@ pub fn publish_grants(
     let rec = store
         .get_runner(name)
         .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
-    let console = crate::console::Console::load_or_create(state_dir)
+    // Privileged write: a FRESH/wrong state dir must not mint a new console
+    // key that signs publishes nobody recognizes — load, don't create.
+    let console = crate::console::Console::load(state_dir)
         .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
     freehold_core::relay_http::publish_grants(
         relay_url,

@@ -92,6 +92,7 @@ async fn fixture(
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
         relay_url: None,
+        grant_author: None,
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
     let client = McpClient::new(

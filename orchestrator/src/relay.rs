@@ -210,7 +210,12 @@ pub async fn deploy_relay(
             .trim_start_matches("https://")
             .trim_end_matches('/'),
         rws = format!(
-            "ws://{}",
+            "{}://{}",
+            if spec.relay_url.trim_start().starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            },
             spec.relay_url
                 .trim_start_matches("http://")
                 .trim_start_matches("https://")

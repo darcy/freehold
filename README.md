@@ -96,7 +96,7 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 110 tests across core / runner / control-plane / orchestrator / acceptance
+cargo test --workspace        # 122 tests across core / runner / control-plane / orchestrator / acceptance
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --all --check       # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
@@ -198,7 +198,7 @@ cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --name relayb
 cargo run -p freehold-orchestrator -- deploy-relay --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
   --target proxmox-box --name relay-box --http-port 3000 \
-  --owner-pubkey <64-hex-owner> [--lxc 100]
+  --owner-pubkey <64-hex-owner> --relay-url http://192.168.30.248:3000 [--lxc 100]
 # C1: deploy the control plane onto the box in OPERATE mode (loopback-only).
 # The box GENERATES its own identity (a keypair is never shipped — the
 # runner logs every exec verbatim); --binary is a local release build.
@@ -212,6 +212,13 @@ cargo run -p freehold-orchestrator -- deploy-cp --addr 127.0.0.1:8787 \
 cargo run -p freehold-orchestrator -- relay-member --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
   --pubkey <fresh-console-pubkey> --lxc 100
+
+# D: relay-backed grants — the CP publishes grant lists (kind 30180) to the
+# relay; the runner reads them LIVE (--relay-url + --grant-author, the console
+# pubkey that signs the list; revokes land without a runner restart).
+FREEHOLD_RELAY_URL=http://<relay> cargo run -p freehold-control-plane -- grant my-runner <agent-pk>
+FREEHOLD_RELAY_URL=http://<relay> cargo run -p freehold-control-plane -- revoke-grant my-runner <agent-pk>
+cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner   --relay-url http://<relay> --grant-author <console-pk>
 ```
 
 ## Roadmap

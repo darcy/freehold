@@ -14,6 +14,14 @@
 
 use base64::Engine as _;
 use secp256k1::{Keypair, Secp256k1, SecretKey, schnorr};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 use sha2::{Digest, Sha256};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -180,6 +188,12 @@ pub fn verify_nip98(
     if kind != KIND_HTTP_AUTH {
         return Err(format!("wrong kind {kind}"));
     }
+    // NIP-98 freshness: the auth event must be within the standard ~60s
+    // window — a captured header must not replay forever.
+    let now = now_secs();
+    if now.abs_diff(created_at) > 60 {
+        return Err("auth event timestamp outside the 60s window".to_string());
+    }
     let url_ok = tags.iter().any(|t| {
         t.first().is_some_and(|k| k == "u") && t.get(1).map(String::as_str) == Some(expected_url)
     });
@@ -237,7 +251,8 @@ mod tests {
 
     #[test]
     fn nip98_auth_roundtrip() {
-        let auth = nip98_auth(&seed(), "GET", "http://relay:3000/query", 42).unwrap();
+        let now = now_secs();
+        let auth = nip98_auth(&seed(), "GET", "http://relay:3000/query", now).unwrap();
         assert!(auth.starts_with("Nostr "));
         let pubkey = verify_nip98(&auth, "GET", "http://relay:3000/query").unwrap();
         assert_eq!(pubkey.len(), 64);
@@ -245,6 +260,9 @@ mod tests {
         assert!(verify_nip98(&auth, "GET", "http://other:3000/query").is_err());
         // bound to the method: a mismatched method must fail
         assert!(verify_nip98(&auth, "POST", "http://relay:3000/query").is_err());
+        // freshness: a stale auth event must not replay
+        let stale = nip98_auth(&seed(), "GET", "http://relay:3000/query", now - 120).unwrap();
+        assert!(verify_nip98(&stale, "GET", "http://relay:3000/query").is_err());
     }
 
     #[test]

@@ -29,6 +29,7 @@ fn test_ctx() -> RunnerContext {
         package: pkg,
         state_dir: dir,
         relay_url: None,
+        grant_author: None,
     }
 }
 
