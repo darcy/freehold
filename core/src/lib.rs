@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod auth;
 pub mod crypto;
+pub mod delegate;
 pub mod futil;
 pub mod identity;
 pub mod memory;
