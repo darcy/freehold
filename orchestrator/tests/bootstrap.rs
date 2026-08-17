@@ -68,8 +68,8 @@ exit 1
 const HAPPY_PCT: &str = r#"
 case "$1" in
   list)   echo "VMID Status Lock Name"
-          echo "100 stopped - taken"
-          echo "102 stopped - other"; exit 0;;
+          echo "100 stopped taken"
+          echo "102 stopped other"; exit 0;;
   create) echo "204"; exit 0;;
   start)  echo "204"; exit 0;;
   exec)
@@ -456,7 +456,7 @@ async fn proxmox_lxc_refuses_duplicate_hostname() {
                 r#"
 if [ "$1" = "list" ]; then
   echo "VMID Status Lock Name"
-  echo "100 running - relay-box"
+  echo "100 running relay-box"
   exit 0
 fi
 case "$1" in

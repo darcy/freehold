@@ -376,8 +376,10 @@ fn host_arch(client: &McpClient, target: &str) -> Result<&'static str, Bootstrap
 fn pick_free_vmid(client: &McpClient, target: &str, hostname: &str) -> Result<u32, BootstrapError> {
     let list = exec(client, target, "pct list", 120)?;
     expect_ok(&list, "pct list")?;
+    // The name is the LAST token: the Lock column is blank for an unlocked
+    // container, so the normal row is only three fields (`nth(3)` = None).
     for line in list.stdout.lines().skip(1) {
-        let name = line.split_whitespace().nth(3).unwrap_or("");
+        let name = line.split_whitespace().last().unwrap_or("");
         if name == hostname {
             return Err(BootstrapError::Verify(format!(
                 "a container named {hostname:?} already exists on this host; pass --vmid to \

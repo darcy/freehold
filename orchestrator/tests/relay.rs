@@ -273,3 +273,61 @@ async fn relay_deploy_missing_docker_gives_remediation() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_deploy_fails_when_unswept_placeholder_remains() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("relay");
+    let dir_s = dir.display().to_string();
+    // A FUTURE bundle could add a new placeholder key the sweep doesn't know
+    // about — the leftover guard must trip (fail closed) instead of letting
+    // run.sh start with a CHANGE_ME value.
+    let tar_stub = format!(
+        "mkdir -p {dir}/deploy/compose && printf '#!/bin/sh\\necho RUNSH-OK\\nexit 0\\n' \
+         > {dir}/deploy/compose/run.sh && chmod +x {dir}/deploy/compose/run.sh && \
+         printf 'BUZZ_RELAY_PRIVATE_KEY=CHANGE_ME_64_HEX\\nSOMETHING_NEW=CHANGE_ME_X\\n' \
+         > {dir}/deploy/compose/.env.example && exit 0\n",
+        dir = dir_s
+    );
+    let scripts: Vec<(&str, String)> = vec![
+        ("docker", DOCKER_OK.into()),
+        ("curl", CURL_OK.into()),
+        ("tar", tar_stub),
+    ];
+    let stubs: Vec<(&str, &str)> = scripts.iter().map(|(n, b)| (*n, b.as_str())).collect();
+    let (bin, _ba) = plant_bin(&stubs);
+    let (client, _target, server, keep1, _keep2) = fixture(base.path(), &bin).await;
+    let _ = (keep1, _keep2);
+
+    let err = deploy_relay(
+        &client,
+        "relay-box",
+        &RelayDeploySpec {
+            relay_name: "relay-box".into(),
+            deploy_dir: dir_s,
+            http_port: 3000,
+            buzz_ref: DEFAULT_BUZZ_REF.into(),
+            lxc: None,
+            owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
+        },
+    )
+    .await
+    .expect_err("an unswept placeholder must fail the deploy");
+
+    // Fail-closed contract: the install step dies (exit 1) BEFORE run.sh
+    // starts. The fixture sshd discards stderr, so assert the step+exit and
+    // that the unswept key is still IN the .env — the guard's real output
+    // (the placeholder message) was verified against the live relay.
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("step 'run.sh start' failed") && msg.contains("exit Some(1)"),
+        "fail-closed at run.sh start: {msg}"
+    );
+    let env = std::fs::read_to_string(dir.join("deploy/compose/.env")).unwrap();
+    assert!(
+        env.lines().any(|l| l == "SOMETHING_NEW=CHANGE_ME_X"),
+        "unknown placeholder key left untouched (that is what trips the guard): {env}"
+    );
+
+    server.abort();
+}
