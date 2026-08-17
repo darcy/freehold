@@ -560,9 +560,26 @@ async fn ssh_status(
 /// Grants shipped with the package, re-read fresh so `control-plane grant`
 /// takes effect without a runner restart. Unreadable package -> fail closed.
 fn current_grants(state_dir: &std::path::Path) -> Vec<String> {
-    freehold_core::secrets::SecretPackage::load(state_dir)
-        .map(|p| p.grants)
-        .unwrap_or_default()
+    // The runner can boot WHILE `control-plane provision` is still writing
+    // the package (temp + atomic rename). Retrying a few times means a
+    // just-shipped package is not denied with a misleading "not granted";
+    // still fail closed (empty grants) if it genuinely never appears.
+    for attempt in 0..5 {
+        match freehold_core::secrets::SecretPackage::load(state_dir) {
+            Ok(p) => return p.grants,
+            Err(e) if attempt < 4 => {
+                tracing::warn!(error = %e, dir = %state_dir.display(), attempt,
+                    "grant check: package not visible yet — retrying");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %state_dir.display(),
+                    "grant check: could not load the shipped package — failing closed");
+                return Vec::new();
+            }
+        }
+    }
+    Vec::new()
 }
 
 fn new_session_id() -> String {

@@ -49,9 +49,12 @@ struct DeployRelayArgs {
     /// Where the official compose bundle lands on the target
     #[arg(long, default_value = "/srv/buzz-relay")]
     deploy_dir: String,
-    /// Relay HTTP port (matches the compose .env BUZZ_HTTP_PORT)
+    /// Relay HTTP port (WRITTEN into the compose .env BUZZ_HTTP_PORT)
     #[arg(long, default_value_t = 3000)]
     http_port: u16,
+    /// block/buzz ref to fetch (tag or SHA; pinned SHA by default)
+    #[arg(long, default_value = relay::DEFAULT_BUZZ_REF)]
+    buzz_ref: String,
 }
 
 #[derive(Args)]
@@ -234,6 +237,7 @@ async fn main() -> Result<()> {
                     relay_name: args.name.clone(),
                     deploy_dir: args.deploy_dir.clone(),
                     http_port: args.http_port,
+                    buzz_ref: args.buzz_ref.clone(),
                 },
             )
             .await?;

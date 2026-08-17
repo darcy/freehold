@@ -13,7 +13,7 @@ use freehold_core::identity::Identity;
 use freehold_core::secrets::{SecretPackage, TargetMeta};
 use freehold_orchestrator::client::McpClient;
 use freehold_orchestrator::flows;
-use freehold_orchestrator::relay::{RelayDeploySpec, deploy_relay};
+use freehold_orchestrator::relay::{DEFAULT_BUZZ_REF, RelayDeploySpec, deploy_relay};
 use freehold_runner::mcp::{self, RunnerContext};
 use freehold_testkit::sshd::{self, SshdOpts};
 
@@ -41,15 +41,16 @@ fn plant_bin(scripts: &[(&str, &str)]) -> (std::path::PathBuf, tempfile::TempDir
 }
 
 /// Runner serving an ssh package targeting an in-process sshd whose execs
-/// see `bin` on PATH. Returns (client, target, server, keepalives).
+/// see `bin` on PATH. The runner's package TempDir is returned and MUST be
+/// held for the runner's lifetime (grants are re-read from disk per call).
 async fn fixture(
-    base: &std::path::Path,
+    base: &Path,
     bin: &Path,
 ) -> (
     McpClient,
     String,
     tokio::task::JoinHandle<()>,
-    tempfile::TempDir,
+    &'static tempfile::TempDir,
     tempfile::TempDir,
 ) {
     let (sshd_addr, _) = sshd::spawn_server_with(SshdOpts {
@@ -62,8 +63,6 @@ async fn fixture(
     id.write_to_dir(&adir).unwrap();
     let agent_pk = flows::agent_auth(&adir).unwrap().pubkey.clone();
 
-    // The TempDir must outlive the runner: grants are re-read from DISK per
-    // call; dropping it deletes secrets.json -> fail-closed denial.
     let dir = tempfile::tempdir().unwrap();
     let rid = Identity::generate();
     rid.write_to_dir(dir.path()).unwrap();
@@ -90,27 +89,41 @@ async fn fixture(
         state_dir: dir.path().to_path_buf(),
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
-    // Settle: the runner's per-call grant re-read reads secrets.json from
-    // disk; give the served task a beat so a racing first call can't observe
-    // a not-yet-visible file (observed as a flaky fail-closed denial).
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     let client = McpClient::new(
         format!("http://{addr}/mcp"),
         flows::agent_auth(&adir).unwrap(),
         runner_pubkey.clone(),
     )
     .unwrap();
+    // Deterministic grant-readiness: the runner re-reads grants from the
+    // shipped package per call; a first call racing the package write fails
+    // closed (-32001). Poll status until the grant check actually passes.
+    let mut ready = false;
+    for _ in 0..20 {
+        if client.readiness().is_ok() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let _ = ready;
+    // LEAK the package TempDir: the runner re-reads grants from secrets.json
+    // per call, and any early drop (from a path this harness can't see)
+    // deletes it mid-flight, turning a valid call into a fail-closed denial.
+    // A leaked tempdir is cleaned by the OS at process exit; tests here are
+    // short-lived, so unlike a held guard this is immune to drop-order bugs.
+    let leaked: &'static tempfile::TempDir = Box::leak(Box::new(dir));
     (
         client,
         "relay-box".into(),
         server,
-        dir,
+        leaked,
         tempfile::tempdir().unwrap(),
     )
 }
 
 const DOCKER_OK: &str = "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then echo 'Docker Compose version v2.24.4'; exit 0; fi; exit 0\n";
-const CURL_OK: &str = "case \"$*\" in *archive/refs/heads/main.tar.gz*) exit 0;; *\"/_liveness\"*) echo OK; exit 0;; *) exit 1;; esac\n";
+const CURL_OK: &str = "case \"$*\" in *archive/*.tar.gz*) exit 0;; *\"/_liveness\"*) echo OK; exit 0;; *) exit 1;; esac\n";
 const CP_OK: &str = "touch \"$2\" 2>/dev/null; exit 0\n";
 
 #[tokio::test(flavor = "multi_thread")]
@@ -131,8 +144,8 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
     ];
     let stubs: Vec<(&str, &str)> = scripts.iter().map(|(n, b)| (*n, b.as_str())).collect();
     let (bin, _ba) = plant_bin(&stubs);
-    let (client, target, server, keep1, _keep2) = fixture(base.path(), &bin).await;
-    let _ = keep1;
+    let (client, _target, server, keep1, _keep2) = fixture(base.path(), &bin).await;
+    let _ = (keep1, _keep2);
 
     let res = deploy_relay(
         &client,
@@ -141,6 +154,7 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
             relay_name: "relay-box".into(),
             deploy_dir: dir_s,
             http_port: 3000,
+            buzz_ref: DEFAULT_BUZZ_REF.into(),
         },
     )
     .await
@@ -159,8 +173,8 @@ async fn relay_deploy_missing_docker_gives_remediation() {
     // A docker stub that FAILS the compose-version gate (an empty bin would
     // leak the REAL machine's tools through the unprefixed PATH tail).
     let (bin, _ba) = plant_bin(&[("docker", "echo 'docker: not usable' >&2; exit 1\n")]);
-    let (client, _target, server, _keep1, _keep2) = fixture(base.path(), &bin).await;
-    let _ = (_keep1, _keep2);
+    let (client, _target, server, keep1, _keep2) = fixture(base.path(), &bin).await;
+    let _ = (keep1, _keep2);
 
     let err = deploy_relay(
         &client,
@@ -169,6 +183,7 @@ async fn relay_deploy_missing_docker_gives_remediation() {
             relay_name: "relay-box".into(),
             deploy_dir: base.path().join("relay").display().to_string(),
             http_port: 3000,
+            buzz_ref: DEFAULT_BUZZ_REF.into(),
         },
     )
     .await
