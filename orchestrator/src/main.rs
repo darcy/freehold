@@ -578,7 +578,6 @@ async fn main() -> Result<()> {
                 )
                 .map_err(anyhow::Error::msg)?;
                 for (ts, content, requester) in polled {
-                    last_ts = last_ts.max(ts);
                     // FAIL-CLOSED: only the authorized delegator's requests
                     // run — the peer proxies for nobody else (any-member
                     // requests would hollow out the grant model).
@@ -589,6 +588,13 @@ async fn main() -> Result<()> {
                         );
                         continue;
                     }
+                    // Advance the poll window ONLY from the authorized
+                    // requester's events, clamped to a small clock-skew —
+                    // a rejected member must not be able to drag `since`
+                    // forward with an absurd created_at (verified review
+                    // regression).
+                    let now = freehold_core::auth::now_secs();
+                    last_ts = last_ts.max(ts.min(now + 60));
                     if let Some(env) = delegate::parse_envelope(&content)
                         && env.ty == delegate::JOB_REQUEST
                         && !seen.contains(&env.id)
