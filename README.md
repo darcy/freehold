@@ -162,6 +162,14 @@ package, errors instead of destroying a runner's key.
 
 ### freehold: the CLI (the scripted CPA stand-in)
 
+The binary is `freehold`; the cargo package is `freehold-orchestrator`. Build with the
+workspace (`cargo build`, binary at `target/debug/freehold`) or install it into PATH once:
+
+```sh
+cargo install --path orchestrator   # -> ~/.cargo/bin/freehold
+freehold --help
+```
+
 ```sh
 # onboard an existing service: provision -> ship -> self-check (hard-fails unless green) -> grant -> report
 echo -n 'vultr-api-key-9876' | cargo run -p freehold-orchestrator -- onboard blog \
