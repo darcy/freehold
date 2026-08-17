@@ -1130,6 +1130,15 @@ mod d5_tests {
             .send(raw);
         assert!(resp.is_ok(), "exec succeeds with /events blocked: {resp:?}");
         tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        // The EXEC's own DETACHED publish must already have hit the bridge:
+        // at this point authed_callers holds the grants query + that publish
+        // (recorded before the block check) — before we manufacture anything.
+        let pre_block = state.authed_callers.lock().len();
+        assert!(
+            pre_block >= 2,
+            "the exec's detached publish was attempted (grants query + events attempt): {:?}",
+            state.authed_callers.lock().clone()
+        );
         let captured = {
             // The surfaced rule, unit-level: report_audit_publish is sync and
             // emits its warn on THIS thread — captured directly.
@@ -1150,11 +1159,12 @@ mod d5_tests {
             handle()
         };
 
-        // The publish WAS attempted (the fake records the caller before the
-        // block_events check) — this is not a silently-dropped relay_url.
-        assert!(
-            state.authed_callers.lock().len() >= 2,
-            "query + the attempted /events publish both authenticated: {:?}",
+        // The manufactured direct call is the ONLY addition beyond the
+        // exec's own authenticated attempt.
+        assert_eq!(
+            state.authed_callers.lock().len(),
+            pre_block + 1,
+            "only the direct report_audit_publish added a caller: {:?}",
             state.authed_callers.lock().clone()
         );
         // ...and the failure was SURFACED, never silently swallowed.
