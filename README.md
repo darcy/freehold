@@ -96,7 +96,7 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 90 tests across core / runner / control-plane / orchestrator / acceptance
+cargo test --workspace        # 95 tests across core / runner / control-plane / orchestrator / acceptance
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --all --check       # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
@@ -176,6 +176,11 @@ cargo run -p freehold-orchestrator -- exec --addr 127.0.0.1:8787 \
 cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
   --steps steps.json   # [{target, cmd, secrets?, timeout_s?}]
+
+# C2/A2: bootstrap-provision a target through a provisioning runner (runner-direct)
+cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --name relaybox \
+  --vmid 100 --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
+  --runner-pubkey <runner-nostr>    # pvesm/pct on the PVE host; verify via pct exec
 ```
 
 ## Roadmap

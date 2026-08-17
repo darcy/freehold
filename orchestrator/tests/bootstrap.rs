@@ -1,13 +1,16 @@
 //! Phase A bootstrap tests — hermetic, end-to-end through the REAL runner:
 //! - proxmox-lxc: the driver execs `pvesm`/`pct` over a real ssh channel to
-//!   the in-process sshd, which runs the commands with a FAKE pvesm/pct on
-//!   PATH (the test plants stubs that mimic the PVE host). The template
+//!   the in-process sshd, which runs the commands with FAKE `pvesm`/`pct`
+//!   planted in a per-test bin dir. The sshd prepends that dir to PATH for
+//!   ITS OWN execs only (testkit `SshdOpts.path_prefix`) — no process-global
+//!   env mutation, safe under concurrent tokio tests. The template
 //!   discovery, create, start, and `pct exec` verify all run as if the
 //!   laptop were answering.
 //! - vultr-vps: the proven curl driver against the testkit Vultr mock.
 
 use std::io::Write;
-use std::sync::Mutex;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use freehold_core::crypto;
 use freehold_core::identity::Identity;
@@ -19,11 +22,7 @@ use freehold_orchestrator::client::McpClient;
 use freehold_orchestrator::flows;
 use freehold_runner::mcp::{self, RunnerContext};
 use freehold_testkit::mock::{self, VultrState};
-use freehold_testkit::sshd;
-
-/// PATH is process-global; the fake pvesm/pct must be first for every test
-/// in this file. Serialize the tests so the mutation cannot race.
-static PATH_LOCK: Mutex<()> = Mutex::new(());
+use freehold_testkit::sshd::{self, SshdOpts};
 
 fn hex32(s: &str) -> [u8; 32] {
     let b = hex::decode(s).unwrap();
@@ -32,8 +31,47 @@ fn hex32(s: &str) -> [u8; 32] {
     arr
 }
 
-/// Boot a runner serving a CP-shaped package for target `name` (ssh kind,
-/// key = the PEM for the in-process sshd). Returns (url, runner_pubkey, task).
+/// Plant executable stub scripts into a fresh bin dir; returns
+/// (bin_dir, keepalive). Every script first appends `$0 $*` to `log`.
+fn plant_bin(log: &Path, scripts: &[(&str, &str)]) -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let logp = log.to_path_buf();
+    for (name, body) in scripts {
+        let p = bin.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "echo \"$0 $*\" >> '{}'", logp.display()).unwrap();
+        write!(f, "{body}").unwrap();
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&p, perms).unwrap();
+    }
+    (bin, dir)
+}
+
+/// A happy PVE host: one template cached; create/start/exec succeed and the
+/// guest answers hostname + Linux via `pct exec`.
+const HAPPY_PVESM: &str = r#"
+if [ "$1" = "list" ]; then
+  echo "Volid Format Type Size VMID"
+  echo "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst dir vztmpl 227829836 -"
+  exit 0
+fi
+exit 1
+"#;
+const HAPPY_PCT: &str = r#"
+case "$1" in
+  create) echo "204"; exit 0;;
+  start)  echo "204"; exit 0;;
+  exec)   echo "testhost-101"; echo "Linux"; echo "root"; exit 0;;
+  *)      echo "unknown pct $*" >&2; exit 2;;
+esac
+"#;
+
+/// Boot a runner serving a CP-shaped ssh package; returns
+/// (keepalive, url, runner_pubkey, server).
 async fn serve_ssh_runner(
     name: &str,
     sshd_addr: &std::net::SocketAddr,
@@ -76,61 +114,7 @@ async fn serve_ssh_runner(
     (dir, format!("http://{addr}/mcp"), runner_pubkey, server)
 }
 
-/// A fake `pvesm`/`pct` bin that mimics a PVE host for our driver's command
-/// shapes, logging every invocation so the sequence is assertable.
-fn plant_stub_bin(log: &std::path::Path) -> (tempfile::TempDir, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let logp = log.to_path_buf();
-
-    let write_script = |name: &str, body: &str| {
-        let p = bin.join(name);
-        let mut f = std::fs::File::create(&p).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "echo \"$0 $*\" >> '{}'", logp.display()).unwrap();
-        write!(f, "{body}").unwrap();
-        let mut perms = std::fs::metadata(&p).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&p, perms).unwrap();
-    };
-
-    write_script(
-        "pvesm",
-        r#"
-if [ "$1" = "list" ]; then
-  echo "Volid Format Type Size VMID"
-  echo "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst dir vztmpl 227829836 -"
-  exit 0
-fi
-exit 1
-"#,
-    );
-    write_script(
-        "pct",
-        r#"
-case "$1" in
-  create) echo "204"; exit 0;;
-  start)  echo "204"; exit 0;;
-  exec)   echo "testhost-101"; echo "Linux"; echo "root"; exit 0;;
-  *)      echo "unknown pct $*" >&2; exit 2;;
-esac
-"#,
-    );
-    // Failure-path variant is created on demand by the failing test.
-    let mut path = String::from(bin.to_string_lossy());
-    unsafe {
-        std::env::set_var(
-            "PATH",
-            format!("{path}:{}", std::env::var("PATH").unwrap_or_default()),
-        );
-    }
-    let _ = &mut path;
-    (dir, "ignored".into())
-}
-
-fn client(agent_dir: &std::path::Path, url: &str, runner_pubkey: &str) -> McpClient {
+fn client(agent_dir: &Path, url: &str, runner_pubkey: &str) -> McpClient {
     McpClient::new(
         url.to_string(),
         flows::agent_auth(agent_dir).unwrap(),
@@ -146,20 +130,40 @@ fn agent_dir(base: &std::path::Path) -> std::path::PathBuf {
     dir
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::await_holding_lock)] // the PATH_LOCK deliberately spans the test: PATH is process-global
-async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
-    let _guard = PATH_LOCK.lock().unwrap();
-    let base = tempfile::tempdir().unwrap();
-    let log = base.path().join("pct.log");
-    let (_stub, _) = plant_stub_bin(&log);
-
-    let adir = agent_dir(base.path());
+/// Common fixture for a proxmox-lxc driver test: an sshd with `bin` on its
+/// PATH, a runner targeting it, and a ready client. Returns the pct.log
+/// path + the client.
+async fn proxmox_fixture(
+    base: &Path,
+    bin: &Path,
+) -> (
+    PathBuf,
+    tempfile::TempDir,
+    McpClient,
+    tokio::task::JoinHandle<()>,
+) {
+    let log = base.join("pct.log");
+    let (sshd_addr, _) = sshd::spawn_server_with(SshdOpts {
+        reject_all_keys: false,
+        path_prefix: Some(bin.to_path_buf()),
+    })
+    .await;
+    let adir = agent_dir(base);
     let agent_pk = flows::agent_auth(&adir).unwrap().pubkey.clone();
-    let (sshd_addr, _) = sshd::spawn_server(false).await;
-    let (pkg_dir, url, rpk, server) = serve_ssh_runner("proxmox-box", &sshd_addr, &agent_pk).await;
-    let _ = pkg_dir;
+    let (_runner_dir, url, rpk, server) =
+        serve_ssh_runner("proxmox-box", &sshd_addr, &agent_pk).await;
     let client = client(&adir, &url, &rpk);
+    (log, _runner_dir, client, server)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _bin_alive) = plant_bin(
+        &base.path().join("pct.log"),
+        &[("pvesm", HAPPY_PVESM), ("pct", HAPPY_PCT)],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
     let res = bootstrap_proxmox_lxc(
         &client,
@@ -194,19 +198,22 @@ async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::await_holding_lock)] // the PATH_LOCK deliberately spans the test: PATH is process-global
 async fn proxmox_lxc_create_failure_is_reported_with_output() {
-    let _guard = PATH_LOCK.lock().unwrap();
     let base = tempfile::tempdir().unwrap();
-    let log = base.path().join("pct.log");
-    let _stub = plant_stub_log_fail(&log);
-
-    let adir = agent_dir(base.path());
-    let agent_pk = flows::agent_auth(&adir).unwrap().pubkey.clone();
-    let (sshd_addr, _) = sshd::spawn_server(false).await;
-    let (pkg_dir, url, rpk, server) = serve_ssh_runner("proxmox-box", &sshd_addr, &agent_pk).await;
-    let _ = pkg_dir;
-    let client = client(&adir, &url, &rpk);
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            (
+                "pct",
+                r#"
+if [ "$1" = "create" ]; then echo "create failed for real"; exit 1; fi
+exit 0
+"#,
+            ),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
     let err = bootstrap_proxmox_lxc(
         &client,
@@ -225,47 +232,90 @@ async fn proxmox_lxc_create_failure_is_reported_with_output() {
     let msg = format!("{err}");
     assert!(msg.contains("pct create"), "step named: {msg}");
     assert!(msg.contains("create failed"), "output preserved: {msg}");
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("pct create 102"),
+        "the failing command actually ran"
+    );
 
     server.abort();
 }
 
-/// Failure-path stub: pct create exits non-zero after logging.
-fn plant_stub_log_fail(log: &std::path::Path) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let logp = log.to_path_buf();
-
-    let write_script = |name: &str, body: &str| {
-        let p = bin.join(name);
-        let mut f = std::fs::File::create(&p).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "echo \"$0 $*\" >> '{}'", logp.display()).unwrap();
-        write!(f, "{body}").unwrap();
-        let mut perms = std::fs::metadata(&p).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&p, perms).unwrap();
-    };
-    write_script("pvesm", "echo \"Volid Format Type Size VMID\"; exit 0\n");
-    write_script(
-        "pct",
-        r#"
-if [ "$1" = "create" ]; then echo "create failed for real"; exit 1; fi
-exit 0
-"#,
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_no_template_gate_gives_remediation() {
+    let base = tempfile::tempdir().unwrap();
+    // Empty template store: pvesm reports header only; pct absent entirely —
+    // the driver must stop at the gate and never invoke create.
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[("pvesm", "echo 'Volid Format Type Size VMID'; exit 0\n")],
     );
-    unsafe {
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.to_string_lossy(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
-    }
-    dir
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let err = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "nogate".into(),
+            vmid: 103,
+            template: None,
+            storage: "local-lvm".into(),
+            bridge: "vmbr0".into(),
+        },
+    )
+    .await
+    .expect_err("empty template store must stop at the gate");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no LXC template") && msg.contains("pveam download"),
+        "operator remediation expected: {msg}"
+    );
+    let cmds = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !cmds.contains("pct create"),
+        "must not attempt create: {cmds}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_vmid_below_100_is_rejected() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[("pvesm", HAPPY_PVESM), ("pct", HAPPY_PCT)],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let err = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "lowid".into(),
+            vmid: 99,
+            template: Some("debian-12-standard_12.7-1_amd64.tar.zst".into()),
+            storage: "local-lvm".into(),
+            bridge: "vmbr0".into(),
+        },
+    )
+    .await
+    .expect_err("vmid below 100 must be rejected");
+
+    assert!(
+        format!("{err}").contains("below the PVE system range"),
+        "{err}"
+    );
+    // rejected before any exec; the log may not exist at all.
+    let cmds = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !cmds.contains("pct create"),
+        "must not attempt create: {cmds}"
+    );
+
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -273,8 +323,6 @@ async fn vultr_vps_bootstrap_creates_polls_destroys() {
     let base = tempfile::tempdir().unwrap();
     let vultr_state = std::sync::Arc::new(VultrState::default());
     let vultr_addr = mock::spawn_http(mock::vultr_router(vultr_state.clone())).await;
-    let vultr_url = format!("http://{vultr_addr}");
-    let _ = &vultr_url;
 
     // Serve a vultr-target runner (same shape the G2.2 acceptance used).
     let dir = base.path().join("runner");

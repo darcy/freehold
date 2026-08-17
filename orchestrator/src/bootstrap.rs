@@ -73,6 +73,13 @@ fn exec(client: &McpClient, target: &str, cmd: &str) -> Result<ExecOutcome, Boot
 }
 
 fn expect_ok(out: &ExecOutcome, step: &str) -> Result<(), BootstrapError> {
+    if out.timed_out {
+        return Err(BootstrapError::Step {
+            step: step.to_string(),
+            exit: None,
+            output: "TIMED OUT (runner watchdog killed the command)".into(),
+        });
+    }
     match out.exit_code {
         Some(0) => Ok(()),
         code => Err(BootstrapError::Step {
@@ -80,6 +87,21 @@ fn expect_ok(out: &ExecOutcome, step: &str) -> Result<(), BootstrapError> {
             exit: code,
             output: format!("stdout: {}\nstderr: {}", out.stdout, out.stderr),
         }),
+    }
+}
+
+/// Operator-supplied values are interpolated into commands the runner
+/// executes. Reject anything outside a conservative safe alphabet so a value
+/// can never break out of the shell or a quoted JSON body.
+fn plain(s: &str) -> Result<(), BootstrapError> {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        Ok(())
+    } else {
+        Err(BootstrapError::Verify(format!(
+            "unexpected characters in value {s:?} (allowed: [A-Za-z0-9._-])"
+        )))
     }
 }
 
@@ -121,6 +143,13 @@ pub async fn bootstrap_proxmox_lxc(
             }
         }
     };
+
+    plain(&spec.hostname)?;
+    if let Some(t) = &spec.template {
+        plain(t)?;
+    }
+    plain(&spec.storage)?;
+    plain(&spec.bridge)?;
 
     // Bounds check the vmid (PVE convention: systems are 100+).
     if spec.vmid < 100 {
@@ -186,6 +215,9 @@ pub async fn bootstrap_vultr_vps(
     target: &str,
     spec: &VultrVpsSpec,
 ) -> Result<BootstrapResult, BootstrapError> {
+    plain(&spec.label)?;
+    plain(&spec.region)?;
+    plain(&spec.plan)?;
     let create = format!(
         "curl -sS -X POST \"$VULTR_URL/v2/instances\" -H \"Authorization: Bearer $VULTR\" \
          -H 'Content-Type: application/json' -d '{{\"region\":\"{region}\",\"plan\":\"{plan}\",\
@@ -204,45 +236,68 @@ pub async fn bootstrap_vultr_vps(
         .ok_or_else(|| BootstrapError::Verify(format!("no instance id: {}", out.stdout)))?
         .to_string();
 
-    // Poll until the instance reports active (bounded; the mock is instant,
-    // a real Vultr box takes a couple of minutes).
-    let mut detail = String::new();
-    for _ in 0..60 {
+    // Poll until the instance is reachable (bounded; the mock is instant, a
+    // real Vultr box takes a couple of minutes). 'active' alone is NOT
+    // enough: Vultr reports 0.0.0.0 until the IP is assigned. destroy_after
+    // ALWAYS destroys — including on every post-create failure — so a test or
+    // a bad run can never leak a billed instance.
+    let mut detail: Option<String> = None;
+    let mut poll_err: Option<String> = None;
+    'poll: for _ in 0..60 {
         let poll = format!(
             "curl -sS \"$VULTR_URL/v2/instances/{id}\" -H \"Authorization: Bearer $VULTR\"",
             id = id
         );
-        let out = exec(client, target, &poll)?;
-        expect_ok(&out, "vultr poll")?;
-        let status: Value = serde_json::from_str(out.stdout.trim())
-            .map_err(|e| BootstrapError::Verify(format!("poll parse: {e}")))?;
-        let instance = &status["instance"];
-        let state = instance["status"].as_str().unwrap_or("");
-        if state == "active" {
-            let ip = instance["main_ip"].as_str().unwrap_or("(pending)");
-            detail = format!(
-                "vultr instance {id} active; main_ip {ip}; label {}",
-                spec.label
-            );
-            break;
+        match exec(client, target, &poll).and_then(|out| {
+            expect_ok(&out, "vultr poll")?;
+            let status: Value = serde_json::from_str(out.stdout.trim())
+                .map_err(|e| BootstrapError::Verify(format!("poll parse: {e}")))?;
+            let instance = &status["instance"];
+            let state = instance["status"].as_str().unwrap_or("");
+            let ip = instance["main_ip"].as_str().unwrap_or("");
+            if state == "active" && !ip.is_empty() && ip != "0.0.0.0" {
+                detail = Some(format!(
+                    "vultr instance {id} active; main_ip {ip}; label {}",
+                    spec.label
+                ));
+            }
+            Ok(())
+        }) {
+            Ok(()) => {
+                if detail.is_some() {
+                    break 'poll;
+                }
+                // a successful round clears any earlier transient error
+                poll_err = None;
+            }
+            Err(e) => poll_err = Some(e.to_string()),
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
-    if detail.is_empty() {
-        return Err(BootstrapError::Verify(format!(
-            "instance {id} did not reach active within the poll window"
-        )));
-    }
+    let mut detail = match detail {
+        Some(d) => d,
+        None => match poll_err {
+            // destroy (if requested) still runs below, before we return.
+            Some(e) => format!("polling failed: {e}"),
+            None => format!("instance {id} did not become reachable within the poll window"),
+        },
+    };
 
     if spec.destroy_after {
+        // --fail: curl exits non-zero on any HTTP >= 400, so a 401/404/500
+        // destroy can NEVER report "; destroyed" while the instance lives.
         let destroy = format!(
-            "curl -sS -X DELETE \"$VULTR_URL/v2/instances/{id}\" -H \"Authorization: Bearer $VULTR\" \
-             -o /dev/null -w done",
+            "curl -sS --fail -X DELETE \"$VULTR_URL/v2/instances/{id}\" \
+             -H \"Authorization: Bearer $VULTR\" -o /dev/null -w done",
             id = id
         );
         let out = exec(client, target, &destroy)?;
         expect_ok(&out, "vultr destroy")?;
         detail.push_str("; destroyed");
+    }
+
+    if !detail.contains("main_ip") {
+        return Err(BootstrapError::Verify(detail));
     }
 
     Ok(BootstrapResult {
