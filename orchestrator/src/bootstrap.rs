@@ -343,15 +343,15 @@ async fn ensure_guest_docker(
         "pct exec {vmid} -- sh -c 'export DEBIAN_FRONTEND=noninteractive; \
          if ! docker compose version >/dev/null 2>&1; then \
          apt-get update >/dev/null 2>&1; \
-         if ! apt-get install -y docker.io docker-compose-v2 >/dev/null 2>&1; then \
-         apt-get install -y curl gpg >/dev/null 2>&1 && \
+         if ! apt-get install -y docker.io docker-compose-v2 >/dev/null; then \
+         apt-get install -y curl gpg >/dev/null && \
          curl -fsSL https://download.docker.com/linux/debian/gpg | \
-         gpg --dearmor -o /usr/share/keyrings/docker.gpg && \
+         gpg --batch --yes --dearmor -o /usr/share/keyrings/docker.gpg && \
          echo \"deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] \
          https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) \
          stable\" > /etc/apt/sources.list.d/docker.list && \
          apt-get update >/dev/null 2>&1 && \
-         apt-get install -y docker.io docker-compose-plugin >/dev/null 2>&1; fi; fi; \
+         apt-get install -y docker.io docker-compose-plugin >/dev/null; fi; fi; \
          docker compose version'",
         vmid = vmid
     );
