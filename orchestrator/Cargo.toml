@@ -20,6 +20,8 @@ ureq = { version = "3", features = ["json"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+freehold-runner = { path = "../runner" }
+freehold-testkit = { path = "../testkit" }
 tempfile = "3"
 
 [[bin]]

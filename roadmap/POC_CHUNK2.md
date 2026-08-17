@@ -96,12 +96,12 @@ consumes per capability. Native kinds found for most of it (membership 13534, ag
 
 ### Phase A — Bootstrap provisioning (runner-direct, pre-relay)
 
-- [ ] [ ]
+- [x] [x]
 
 A1. Confirm/choose the primary target type for this chunk's build+test pass — VPS first for
 iteration speed, matching the existing promote flow, then validated against old-laptop Proxmox.
 
-- [ ] [ ]
+- [x] [x]
 
 A2. CPA (still scripted/orchestrator, no real reasoning yet) calls the relevant provisioning
 runner **directly** — no agent fabric exists yet — to stand up the target. Capabilities:
@@ -109,7 +109,7 @@ runner **directly** — no agent fabric exists yet — to stand up the target. C
 runner drives `pvesh`/`pct` on the laptop host (generic exec — the agent writes the commands;
 no new Proxmox connector is built).
 
-- [ ] [ ]
+- [x] [x]
 
 A3. Verify target reachable (SSH/API) before proceeding — the same self-check pattern as
 Chunk 1's runner readiness, applied to the freshly provisioned box.

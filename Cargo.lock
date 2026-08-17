@@ -990,6 +990,7 @@ dependencies = [
  "freehold-control-plane",
  "freehold-core",
  "freehold-runner",
+ "freehold-testkit",
  "hex",
  "serde",
  "serde_json",
