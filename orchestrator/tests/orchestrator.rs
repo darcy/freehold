@@ -56,6 +56,7 @@ async fn serve_client(
         state_dir: runner_dir.to_path_buf(),
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     let client = McpClient::new(
         format!("http://{addr}/mcp"),
         flows::agent_auth(agent_dir).unwrap(),

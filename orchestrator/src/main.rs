@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use freehold_orchestrator::{bootstrap, flows};
+use freehold_orchestrator::{bootstrap, flows, relay};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -31,6 +31,27 @@ enum Cmd {
     Demo(DemoArgs),
     /// C2/A2: bootstrap-provision a target through a provisioning runner
     Bootstrap(BootstrapArgs),
+    /// C2/B: deploy the Buzz relay onto the target through a provisioning runner
+    DeployRelay(DeployRelayArgs),
+}
+
+#[derive(Args)]
+struct DeployRelayArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to deploy through (the runner holding the SSH credential to
+    /// the PVE host / relay LXC)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Relay hostname (reported; the operator maps it to the box)
+    #[arg(long, default_value = "relay-box")]
+    name: String,
+    /// Where the official compose bundle lands on the target
+    #[arg(long, default_value = "/srv/buzz-relay")]
+    deploy_dir: String,
+    /// Relay HTTP port (matches the compose .env BUZZ_HTTP_PORT)
+    #[arg(long, default_value_t = 3000)]
+    http_port: u16,
 }
 
 #[derive(Args)]
@@ -199,6 +220,26 @@ async fn main() -> Result<()> {
                 anyhow::bail!("command timed out");
             }
             std::process::exit(out.exit_code.unwrap_or(1));
+        }
+        Cmd::DeployRelay(args) => {
+            let client = flows::connect(
+                &args.common.addr,
+                &args.common.agent_dir,
+                &args.common.runner_pubkey,
+            )?;
+            let res = relay::deploy_relay(
+                &client,
+                &args.target,
+                &relay::RelayDeploySpec {
+                    relay_name: args.name.clone(),
+                    deploy_dir: args.deploy_dir.clone(),
+                    http_port: args.http_port,
+                },
+            )
+            .await?;
+            println!("RELAY: {}", res.relay_url);
+            println!("  {}", res.detail);
+            Ok(())
         }
         Cmd::Readiness(args) => {
             let client = flows::connect(&args.addr, &args.agent_dir, &args.runner_pubkey)?;
