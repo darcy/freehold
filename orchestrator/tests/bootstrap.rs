@@ -52,7 +52,8 @@ fn plant_bin(log: &Path, scripts: &[(&str, &str)]) -> (PathBuf, tempfile::TempDi
 }
 
 /// A happy PVE host: one template cached; create/start/exec succeed and the
-/// guest answers hostname + Linux via `pct exec`.
+/// guest answers hostname + Linux via `pct exec`, with docker+compose
+/// already installed (`docker info` answers "Server Version").
 const HAPPY_PVESM: &str = r#"
 if [ "$1" = "list" ]; then
   echo "Volid Format Type Size VMID"
@@ -61,11 +62,57 @@ if [ "$1" = "list" ]; then
 fi
 exit 1
 "#;
+// Dispatch on the exec argv: `docker info` is `pct exec <id> -- docker info`
+// ($4=docker), the sh -c payloads arrive in $6. The compose-version payload
+// runs the driver's install-if-missing wrapper ("docker already present").
 const HAPPY_PCT: &str = r#"
 case "$1" in
   create) echo "204"; exit 0;;
   start)  echo "204"; exit 0;;
-  exec)   echo "testhost-101"; echo "Linux"; echo "root"; exit 0;;
+  exec)
+    case "$4" in
+      docker) echo "Server Version: 27.0"; exit 0;;
+      *)
+        case "$6" in
+          *"compose version"*) echo "Docker Compose version v2.24.4"; exit 0;;
+          *) echo "testhost-101"; echo "Linux"; echo "root"; exit 0;;
+        esac
+        ;;
+    esac
+    ;;
+  *)      echo "unknown pct $*" >&2; exit 2;;
+esac
+"#;
+/// The PVE catalog + download endpoint: `pveam update` syncs, `available`
+/// lists two debian-12 standard templates (12.7 and the NEWER 12.10),
+/// `download` succeeds. Columns mirror the REAL pveam output: `system` is
+/// the FIRST token, the template name the SECOND (the driver parses nth(1)).
+const PVEAM: &str = r#"
+case "$1" in
+  update)    echo "ok"; exit 0;;
+  available) echo "system debian-12-standard_12.7-1_amd64.tar.zst 227M 0"
+             echo "system debian-12-standard_12.10-1_amd64.tar.zst 228M 0"; exit 0;;
+  download)  echo "204"; exit 0;;
+  *)         echo "unknown pveam $*" >&2; exit 2;;
+esac
+"#;
+/// A guest whose docker daemon never comes up: compose (the install probe)
+/// answers, but `docker info` fails — the fallback path must engage.
+const PCT_EXEC_DOCKER_FAIL: &str = r#"
+case "$1" in
+  create) echo "204"; exit 0;;
+  start)  echo "204"; exit 0;;
+  exec)
+    case "$4" in
+      docker) echo "cannot connect to the Docker daemon at unix:///var/run/docker.sock"; exit 1;;
+      *)
+        case "$6" in
+          *"compose version"*) echo "Docker Compose version v2.24.4"; exit 0;;
+          *) echo "testhost-101"; echo "Linux"; echo "root"; exit 0;;
+        esac
+        ;;
+    esac
+    ;;
   *)      echo "unknown pct $*" >&2; exit 2;;
 esac
 "#;
@@ -160,11 +207,17 @@ async fn proxmox_fixture(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
+async fn proxmox_lxc_reuses_present_template_docker_ready() {
     let base = tempfile::tempdir().unwrap();
     let (bin, _bin_alive) = plant_bin(
         &base.path().join("pct.log"),
-        &[("pvesm", HAPPY_PVESM), ("pct", HAPPY_PCT)],
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", HAPPY_PCT),
+            // pveam NOT planted: the happy store already holds a template,
+            // so ensurement must reuse it — any pveam call would 127.
+            ("pveam", "exit 127\n"),
+        ],
     );
     let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
@@ -174,7 +227,7 @@ async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
         &ProxmoxLxcSpec {
             hostname: "testhost-101".into(),
             vmid: 101,
-            template: None, // exercises template discovery via pvesm
+            template: None, // exercises template ensurement via pvesm
             storage: "local-lvm".into(),
             bridge: "vmbr0".into(),
         },
@@ -186,10 +239,19 @@ async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
         res.kind,
         freehold_orchestrator::bootstrap::TargetKind::ProxmoxLxc
     );
-    assert!(res.detail.contains("verified via `pct exec`"), "{res:?}");
-    // The full driver sequence ran over real ssh: discovery -> create -> start -> exec.
+    assert!(
+        res.detail.contains("docker+compose ready"),
+        "docker readiness reported: {res:?}"
+    );
+    // The full driver sequence ran over real ssh: ensure -> create -> start ->
+    // exec verify -> docker install/verify. Template came from the STORE, so
+    // no pveam call happened (idempotent).
     let cmds = std::fs::read_to_string(&log).unwrap();
-    assert!(cmds.contains("pvesm list"), "template discovery: {cmds}");
+    assert!(cmds.contains("pvesm list local"), "template check: {cmds}");
+    assert!(
+        !cmds.contains("pveam"),
+        "present template must be REUSED, no pveam calls: {cmds}"
+    );
     assert!(
         cmds.contains("pct create 101") && cmds.contains("debian-12-standard"),
         "create with detected template: {cmds}"
@@ -198,7 +260,23 @@ async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
         cmds.contains("--unprivileged 1"),
         "the container must come out UNPRIVILEGED (its host will hold relay + CP): {cmds}"
     );
+    assert!(
+        cmds.contains("--features keyctl=1,nesting=1"),
+        "nesting+keyctl are required for docker-in-LXC: {cmds}"
+    );
     assert!(cmds.contains("pct start 101"), "start: {cmds}");
+    assert!(
+        cmds.contains("docker.io docker-compose-v2"),
+        "Debian docker+compose-v2 install wrapper present: {cmds}"
+    );
+    assert!(
+        cmds.contains("export DEBIAN_FRONTEND=noninteractive"),
+        "debconf noninteractive must actually reach apt (exported): {cmds}"
+    );
+    assert!(
+        cmds.contains("download.docker.com/linux/debian/gpg"),
+        "bookworm fallback to Docker's own repo present: {cmds}"
+    );
     assert!(cmds.contains("pct exec 101"), "verify: {cmds}");
 
     server.abort();
@@ -250,13 +328,65 @@ exit 0
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn proxmox_lxc_no_template_gate_gives_remediation() {
+async fn proxmox_lxc_downloads_template_when_missing() {
     let base = tempfile::tempdir().unwrap();
-    // Empty template store: pvesm reports header only; pct absent entirely —
-    // the driver must stop at the gate and never invoke create.
+    // Empty template store: pvesm reports header only, so ensurement must
+    // sync the catalog and download the NEWEST available debian template.
     let (bin, _ba) = plant_bin(
         &base.path().join("pct.log"),
-        &[("pvesm", "echo 'Volid Format Type Size VMID'; exit 0\n")],
+        &[
+            ("pvesm", "echo 'Volid Format Type Size VMID'; exit 0\n"),
+            ("pct", HAPPY_PCT),
+            ("pveam", PVEAM),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let res = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "testhost-101".into(),
+            vmid: 104,
+            template: None,
+            storage: "local-lvm".into(),
+            bridge: "vmbr0".into(),
+        },
+    )
+    .await
+    .expect("empty store must download instead of blocking");
+
+    let cmds = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        cmds.matches("pveam update").count(),
+        1,
+        "catalog sync exactly once: {cmds}"
+    );
+    assert!(
+        cmds.contains("pveam download local debian-12-standard_12.10-1"),
+        "downloads the NEWEST version by numeric compare (12.10 > 12.7): {cmds}"
+    );
+    assert!(
+        cmds.contains("pct create 104") && cmds.contains("debian-12-standard_12.10-1"),
+        "create uses the downloaded template: {cmds}"
+    );
+    assert!(
+        res.detail.contains("debian-12-standard_12.10-1")
+            && res.detail.contains("docker+compose ready"),
+        "result names the downloaded template + docker: {res:?}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_docker_daemon_failure_is_reported() {
+    let base = tempfile::tempdir().unwrap();
+    // docker info repeatedly fails: the driver must try the fuse-overlayfs
+    // fallback, and AFTER it still surface the daemon error with a hint.
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[("pvesm", HAPPY_PVESM), ("pct", PCT_EXEC_DOCKER_FAIL)],
     );
     let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
@@ -264,25 +394,29 @@ async fn proxmox_lxc_no_template_gate_gives_remediation() {
         &client,
         "proxmox-box",
         &ProxmoxLxcSpec {
-            hostname: "nogate".into(),
-            vmid: 103,
+            hostname: "testhost-101".into(),
+            vmid: 105,
             template: None,
             storage: "local-lvm".into(),
             bridge: "vmbr0".into(),
         },
     )
     .await
-    .expect_err("empty template store must stop at the gate");
+    .expect_err("a daemon that never starts must fail the bootstrap");
 
     let msg = format!("{err}");
     assert!(
-        msg.contains("no LXC template") && msg.contains("pveam download"),
-        "operator remediation expected: {msg}"
+        msg.contains("cannot connect") && msg.contains("consider a privileged container"),
+        "raw daemon error + hint surfaced: {msg}"
     );
-    let cmds = std::fs::read_to_string(&log).unwrap_or_default();
+    let cmds = std::fs::read_to_string(&log).unwrap();
     assert!(
-        !cmds.contains("pct create"),
-        "must not attempt create: {cmds}"
+        cmds.contains("fuse-overlayfs"),
+        "the fuse fallback must have run: {cmds}"
+    );
+    assert!(
+        cmds.contains("daemon.json"),
+        "storage-driver pin written: {cmds}"
     );
 
     server.abort();

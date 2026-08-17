@@ -10,9 +10,9 @@ use zeroize::Zeroizing;
 
 #[derive(Parser)]
 #[command(
-    name = "orchestrator",
+    name = "freehold",
     version,
-    about = "Freehold orchestrator: scripted CPA stand-in that drives the engine room"
+    about = "Freehold CLI: the scripted CPA stand-in that drives the engine room"
 )]
 struct Cli {
     #[command(subcommand)]
