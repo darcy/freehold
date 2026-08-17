@@ -103,6 +103,9 @@ pub async fn deploy_relay(
 ) -> Result<RelayDeployResult, BootstrapError> {
     crate::bootstrap::plain(&spec.relay_name)?;
     safe_deploy_dir(&spec.deploy_dir)?;
+    // A ref interpolates straight into curl's URL — tags/SHAs legitimately
+    // contain '/', but anything shell-hostile must be rejected.
+    crate::bootstrap::plain_path(&spec.buzz_ref)?;
 
     check_docker(client, target)?;
 
