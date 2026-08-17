@@ -37,6 +37,8 @@ enum Cmd {
     DeployCp(DeployCpArgs),
     /// C2: add a relay member through the relay-admin runner (buzz-admin)
     RelayMember(RelayMemberArgs),
+    /// D3: the agent's encrypted relay memory (kind 30174, self-sealed)
+    Memory(MemoryArgs),
 }
 
 #[derive(Args)]
@@ -118,6 +120,21 @@ struct RelayMemberArgs {
     /// Compose project dir on the relay host
     #[arg(long, default_value = relay_member::DEFAULT_BUZZ_COMPOSE_DIR)]
     compose_dir: String,
+}
+
+#[derive(Args)]
+struct MemoryArgs {
+    /// set <key> <value> | get <key>
+    action: String,
+    key: String,
+    /// Value only for `set`
+    value: Option<String>,
+    /// Relay URL (http://host:port)
+    #[arg(long)]
+    relay_url: String,
+    /// Agent identity dir (the CPA's keypair — memory seals to its enc key)
+    #[arg(long)]
+    agent_dir: PathBuf,
 }
 
 #[derive(Args)]
@@ -360,6 +377,53 @@ async fn main() -> Result<()> {
             .await?;
             println!("RELAY MEMBER: {}", res.detail);
             Ok(())
+        }
+        Cmd::Memory(args) => {
+            use freehold_core::identity::Identity;
+            let id = Identity::load(&args.agent_dir).with_context(|| {
+                format!("loading agent identity in {}", args.agent_dir.display())
+            })?;
+            match args.action.as_str() {
+                "set" => {
+                    let value = args
+                        .value
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("memory set requires <value>"))?;
+                    freehold_core::relay_http::write_memory(
+                        &args.relay_url,
+                        &id.secret_seed(),
+                        &args.key,
+                        value,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    println!(
+                        "MEMORY: {} = <sealed> (kind 30174, self-encrypted)",
+                        args.key
+                    );
+                    Ok(())
+                }
+                "get" => {
+                    let v = freehold_core::relay_http::read_memory(
+                        &args.relay_url,
+                        &id.secret_seed(),
+                        &args.key,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    match v {
+                        Some(v) => {
+                            println!("{v}");
+                            Ok(())
+                        }
+                        None => {
+                            println!("(no memory under {})", args.key);
+                            Ok(())
+                        }
+                    }
+                }
+                other => Err(anyhow::anyhow!(
+                    "memory action must be set|get (got {other:?})"
+                )),
+            }
         }
         Cmd::Readiness(args) => {
             let client = flows::connect(&args.addr, &args.agent_dir, &args.runner_pubkey)?;

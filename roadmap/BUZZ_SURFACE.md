@@ -138,6 +138,21 @@ config allowlist. A custom freehold kind therefore requires a one-line ingest pa
 (add the kind to the `UsersWrite` arm) + a relay image rebuild — a named deployment step,
 not a config flip. Grants events cannot land on a stock buzz image until that lands.
 
+## 9.6 Engram (30174) ingest rules (found live, Phase D3)
+
+The stock ingest ACCEPTS kind-30174 (no patch gate — D3 was live-verifiable), but with
+hard validation (all observed live):
+- content MUST be a valid **NIP-44 v2 payload** (base64; other base64 or JSON wrappers
+  get \`agent-engram content is not valid base64 (length)\` / \`too short for NIP-44 v2\`);
+- exactly one \`p\` tag (the owner counterparty, 64-hex); a composite-d-tag (\`pk#key\`)
+  is refused (\`agent-engram d tag must be 64 lowercase hex chars\`);
+- reads require \`authors=[self]\` or \`#p=[self]\` (\`restricted: agent-engram reads...\`).
+
+Freehold outcome: memory = NIP-44 v2 SELF-encryption (conversation key from the agent's
+own nostr keypair — sender == receiver == agent; the relay only ever stores ciphertext),
+d-tag = sha256(\`<agent-pk>#<key>\`) (64-hex, deterministic per agent+key, replaceable),
+content = the NIP-44 payload, reads filter \`authors=[self]+#d\` with local sig verify.
+
 ## 10. Known gaps / verify-before-design
 
 - **Private-channel member management has no REST/event API yet** (Buzz's own listed gap) —

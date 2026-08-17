@@ -238,6 +238,13 @@ impl Identity {
         self.nostr_secret
     }
 
+    /// The raw 32-byte X25519 encryption secret — used to self-seal agent
+    /// memory (Phase D3) and to open sealed secret blobs. Temporary copy;
+    /// zeroized with the identity.
+    pub fn enc_secret(&self) -> [u8; 32] {
+        self.enc_secret
+    }
+
     pub fn enc_secret_hex(&self) -> String {
         hex::encode(self.enc_secret)
     }

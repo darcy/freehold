@@ -41,7 +41,12 @@ live: console/owner + CPA + box identity + the RUNNER itself are relay
 members under the box's real URL community (the relay's example.com URL
 placeholders are now fixed by deploy-relay — written with a new --relay-url
 flag). D3 (encrypted memory) and D5 (audit publishing) are the next slices.
-D5 (audit publishing) is DONE: the runner's audit row is now a kind-48001
+D3 (encrypted memory) is DONE: the CPA's memory lives on the relay as
+kind-30174 engrams, NIP-44 v2 SELF-encrypted (only the agent's own key can
+decrypt; the relay stores ciphertext only), d-tag = sha256(agentpk#key),
+live-verified set/get through the real relay (the ONE D item with no ingest
+patch gate — the engram wire rules are recorded in BUZZ_SURFACE §9.6).
+`freehold memory set|get`. D5 (audit publishing) is DONE: the runner's audit row is now a kind-48001
 NIP-01 event (id + BIP-340 over the id) — the SAME bytes spooled locally
 (0600, fail-closed read, never silent) AND published to the relay when
 --relay-url is set (detached so a wedged relay never delays the agent's

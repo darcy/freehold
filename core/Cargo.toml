@@ -20,9 +20,9 @@ tracing = "0.1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
 ureq = "3"
+nostr = { version = "0.38", default-features = false, features = ["std", "nip44"] }
 
 [dev-dependencies]
-nostr = "0.38"
 tempfile = "3"
 
 [lib]
