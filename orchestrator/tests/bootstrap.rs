@@ -162,6 +162,7 @@ async fn serve_ssh_runner(
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
+        relay_url: None,
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
     // Settle: the runner re-reads grants from disk per call; a racing first
@@ -626,6 +627,7 @@ async fn vultr_vps_env_prefix_derives_from_target_name() {
         identity: id,
         package: SecretPackage::load(&dir).unwrap(),
         state_dir: dir.to_path_buf(),
+        relay_url: None,
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
     let client = client(&adir, &format!("http://{addr}/mcp"), &runner_pubkey);
@@ -683,6 +685,7 @@ async fn vultr_vps_bootstrap_creates_polls_destroys() {
         identity: id,
         package: SecretPackage::load(&dir).unwrap(),
         state_dir: dir.to_path_buf(),
+        relay_url: None,
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
     let client = client(&adir, &format!("http://{addr}/mcp"), &runner_pubkey);

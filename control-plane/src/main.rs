@@ -32,6 +32,8 @@ enum Cmd {
     AgentCreate(AgentArgs),
     /// Grant another agent pubkey to a runner (re-ships the package)
     Grant(GrantArgs),
+    /// Revoke two agent pubkey from to a runner (re-ships + relay replace)
+    RevokeGrant(RevokeGrantArgs),
     /// Provision a runner for an existing service; credential is read from stdin
     Provision(ProvisionArgs),
     /// Rotate a secret: re-seal the NEW credential (stdin) to the runner key
@@ -72,6 +74,9 @@ struct GrantArgs {
     name: String,
     /// Agent pubkey (Nostr x-only hex) allowed to call the runner
     pubkey: String,
+    /// Relay to publish the new grant list to (Phase D; kind 30180)
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -103,9 +108,25 @@ struct RotateArgs {
 }
 
 #[derive(Args)]
+struct RevokeGrantArgs {
+    /// Runner to revoke the grant from
+    name: String,
+    /// Agent pubkey (Nostr x-only hex) to drop
+    pubkey: String,
+    /// Relay to publish the shrunk list to (Phase D)
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
+    #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
+    state_dir: PathBuf,
+}
+
+#[derive(Args)]
 struct RevokeArgs {
     /// Runner name to revoke (cut-off)
     name: String,
+    /// Relay to publish an EMPTY grant list to (cut-off for relay-backed runners)
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -156,6 +177,10 @@ async fn main() -> Result<()> {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let grants = provisioner::grant_agent(&store, &args.name, &args.pubkey)?;
+            if let Some(relay) = &args.relay_url {
+                provisioner::publish_grants(&store, relay, &args.name, &grants, &args.state_dir)?;
+                println!("published {} to the relay ({relay})", args.name);
+            }
             println!("runner {} grants: {}", args.name, grants.len());
             for g in &grants {
                 println!("  {}", g);
@@ -207,10 +232,32 @@ async fn main() -> Result<()> {
             println!("rotated secret {}", args.name);
             Ok(())
         }
+        Cmd::RevokeGrant(args) => {
+            let store = StateStore::open(&args.state_dir)
+                .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
+            let grants = provisioner::revoke_grant(&store, &args.name, &args.pubkey)?;
+            if let Some(relay) = &args.relay_url {
+                provisioner::publish_grants(&store, relay, &args.name, &grants, &args.state_dir)?;
+                println!("published {} grants to the relay ({relay})", args.name);
+            }
+            println!("runner {} grants: {}", args.name, grants.len());
+            for g in &grants {
+                println!("  {}", g);
+            }
+            Ok(())
+        }
         Cmd::Revoke(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let rec = provisioner::revoke_runner(&store, &args.name)?;
+            if let Some(relay) = &args.relay_url {
+                // cut-off on the relay too: an EMPTY grant list denies every caller
+                provisioner::publish_grants(&store, relay, &args.name, &[], &args.state_dir)?;
+                println!(
+                    "published empty grants for {} to the relay ({relay})",
+                    args.name
+                );
+            }
             println!("revoked runner {} (was {})", args.name, rec.nostr_pubkey);
             println!("note: the shipped secrets.json was removed, but the credential itself may");
             println!("      still be valid at the service — rotate it upstream if it was exposed");

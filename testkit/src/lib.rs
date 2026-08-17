@@ -3,4 +3,5 @@
 //! no real Vultr/B2/SSH dependency anywhere.
 
 pub mod mock;
+pub mod relay;
 pub mod sshd;

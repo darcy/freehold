@@ -68,6 +68,11 @@ struct DeployRelayArgs {
     /// the bundle's run.sh refuses to start with CHANGE_ME placeholders.
     #[arg(long)]
     owner_pubkey: String,
+    /// The relay's OWN resolvable URL (http://host:port) — written into
+    /// BUZZ_DOMAIN/RELAY_URL/media so the relay binds the REAL community
+    /// (the example.com placeholders are not literal CHANGE_ME).
+    #[arg(long)]
+    relay_url: String,
 }
 
 #[derive(Args)]
@@ -307,6 +312,7 @@ async fn main() -> Result<()> {
                     buzz_ref: args.buzz_ref.clone(),
                     lxc: args.lxc,
                     owner_pubkey: args.owner_pubkey.clone(),
+                    relay_url: args.relay_url.clone(),
                 },
             )
             .await?;

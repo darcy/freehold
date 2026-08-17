@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "Freehold shared core: identity keypairs, sealed-box crypto, secret packages"
 
 [dependencies]
+base64 = "0.22"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 hex = "0.4"
 hkdf = { version = "0.12", features = ["std"] }
@@ -18,8 +19,10 @@ thiserror = "2"
 tracing = "0.1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
+ureq = "3"
 
 [dev-dependencies]
+nostr = "0.38"
 tempfile = "3"
 
 [lib]

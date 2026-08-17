@@ -231,6 +231,13 @@ impl Identity {
         hex::encode(self.nostr_secret)
     }
 
+    /// The raw 32-byte Nostr secret seed (secp256k1 signing key) — used for
+    /// BIP-340 Schnorr signatures (NIP-98 / relay events). Temporary borrow;
+    /// zeroized with the identity.
+    pub fn secret_seed(&self) -> [u8; 32] {
+        self.nostr_secret
+    }
+
     pub fn enc_secret_hex(&self) -> String {
         hex::encode(self.enc_secret)
     }

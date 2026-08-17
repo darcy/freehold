@@ -9,4 +9,6 @@ pub mod auth;
 pub mod crypto;
 pub mod futil;
 pub mod identity;
+pub mod nip98;
+pub mod relay_http;
 pub mod secrets;

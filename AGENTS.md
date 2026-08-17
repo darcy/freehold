@@ -26,9 +26,23 @@ on loopback AND the LAN (192.168.30.248:3000). Phase C is DONE: the control
 plane is deployed in OPERATE mode on the box (`/srv/freehold`, loopback
 127.0.0.1:8080, binary shipped as base64 through the runner's exec-only
 primitive), the CPA is a relay member (owner = console pubkey, member =
-h1-agent), and loopback-only is enforced + verified. A real Vultr token is
-still needed for the VPS leg. Work ships via branches, pending a GitHub
-outage before the PR/review cycle.
+h1-agent), and loopback-only is enforced + verified. Phase D (identity
+port) slice 1 is DONE: the grant-list kind (30180, addressable, d-tag =
+runner pubkey, replaceable) is defined + implemented end-to-end — CP
+publishes via NIP-98 POST /events, the runner reads the CURRENT list live
+per call via NIP-98 GET /query (fail-closed on relay outage; revoke lands
+WITHOUT a runner restart — hermetic proof included; NIP-98 signatures
+cross-verified byte-for-byte with rust-nostr, the crate the relay uses).
+The relay's ingest restrict-list refuses custom kinds by default (a
+BUZZ_SURFACE correction, §9.5) — the LIVE grant-publish + relay-backed
+runner flip are GATED on a one-line ingest patch + relay image rebuild (a
+named deployment step). D2 (membership records on the relay) is partially
+live: console/owner + CPA + box identity + the RUNNER itself are relay
+members under the box's real URL community (the relay's example.com URL
+placeholders are now fixed by deploy-relay — written with a new --relay-url
+flag). D3 (encrypted memory) and D5 (audit publishing) are the next slices.
+A real Vultr token is still needed for the VPS leg. Work ships via branches,
+pending a GitHub outage before the PR/review cycle.
 
 ## Navigation
 

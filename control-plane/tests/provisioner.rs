@@ -473,3 +473,59 @@ fn state_persists_across_reopen() {
         store.get_secret("ssh").unwrap().ciphertext_hex
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grant_publish_writes_replaceable_relay_grant_list() {
+    let (base, store) = setup();
+    let runner_dir = base.path().join("runner");
+    provision(&store, "relaybox", b"sekrit", &runner_dir);
+    let rec = store.get_runner("relaybox").unwrap();
+
+    let (relay_url, state, _task) = freehold_testkit::relay::spawn().await;
+    let console_dir = base.path().join("cp-state");
+
+    let a = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
+    let b = "2221222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
+    provisioner::grant_agent(&store, "relaybox", a).unwrap();
+    provisioner::publish_grants(
+        &store,
+        &relay_url,
+        "relaybox",
+        &[a.into(), b.into()],
+        &console_dir,
+    )
+    .unwrap();
+
+    // The fake relay received exactly one kind-30180 event with the runner's
+    // d-tag and the FULL list.
+    let events = state.events.lock().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["kind"].as_u64(), Some(30180));
+    assert_eq!(events[0]["tags"][0].as_array().unwrap()[0], "d");
+    assert_eq!(
+        events[0]["tags"][0].as_array().unwrap()[1],
+        rec.nostr_pubkey
+    );
+    let content =
+        serde_json::from_str::<serde_json::Value>(events[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        content["grants"].as_array().unwrap(),
+        &serde_json::json!([a, b]).as_array().unwrap().clone()
+    );
+
+    // Revoke = publish a SHRUNK list with the SAME d-tag (replaceable): a
+    // second event supersedes the first; nothing appends history.
+    provisioner::publish_grants(&store, &relay_url, "relaybox", &[a.into()], &console_dir).unwrap();
+    let events = state.events.lock().clone();
+    assert_eq!(events.len(), 2);
+    let content =
+        serde_json::from_str::<serde_json::Value>(events[1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        content["grants"].as_array().unwrap(),
+        &serde_json::json!([a]).as_array().unwrap().clone()
+    );
+    assert_eq!(
+        events[1]["tags"][0].as_array().unwrap()[1],
+        rec.nostr_pubkey
+    );
+}
