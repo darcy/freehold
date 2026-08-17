@@ -271,12 +271,14 @@ pub fn write_memory(
     // verified live. The address is derived from (agent, key) so per-agent +
     // per-key current values stay replaceable and unique.
     let d_tag = memory_d_tag(&pk, key);
-    // Buzz's engram validation REQUIRES exactly one `p` tag (the owner
-    // counterparty, 64-hex) — verified live: missing -> 400.
+    // ONE created_at for the signature AND the event JSON — a boundary-
+    // crossed timestamp makes id/sig disagree with the fields (intermittent
+    // 400 or a read-side verify drop).
+    let ts = now_secs();
     let (pubkey, id, sig) = crate::nip98::sign_event(
         agent_nostr_secret,
         crate::memory::MEMORY_KIND,
-        now_secs(),
+        ts,
         vec![
             vec!["d".into(), d_tag.clone()],
             vec!["p".into(), pk.clone()],
@@ -287,7 +289,7 @@ pub fn write_memory(
     let event = serde_json::json!({
         "id": id,
         "pubkey": pubkey,
-        "created_at": now_secs(),
+        "created_at": ts,
         "kind": crate::memory::MEMORY_KIND,
         "tags": [["d", d_tag], ["p", pk]],
         "content": content,
