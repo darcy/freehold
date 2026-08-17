@@ -27,6 +27,9 @@ use tokio::net::TcpListener;
 pub struct RelayState {
     pub events: Mutex<Vec<Value>>,
     pub authed_callers: Mutex<Vec<String>>,
+    /// When true, POST /events returns 500 — exercises the publish-failure
+    /// degradation (audit spool-only) without disturbing grants reads.
+    pub block_events: Mutex<bool>,
 }
 
 pub type SharedRelay = Arc<RelayState>;
@@ -161,6 +164,12 @@ async fn publish(
         Err(e) => return (StatusCode::UNAUTHORIZED, Json(json!({ "error": e }))),
     };
     state.authed_callers.lock().push(caller);
+    if *state.block_events.lock() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "events blocked" })),
+        );
+    }
     let ev: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {

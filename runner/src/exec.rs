@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use freehold_core::audit::{Auditor, SignedEvent};
+use freehold_core::audit::Auditor;
 use freehold_core::{crypto, identity::Identity, secrets::SecretPackage};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -360,21 +360,29 @@ pub struct ExecManager {
     next_id: AtomicU64,
     auditor: Option<Arc<Auditor>>,
     state_dir: Option<Arc<Path>>,
+    /// Relay for Phase D5 audit publishing (kind 48001, same event as the
+    /// local spool); None = local spool only.
+    relay_url: Option<String>,
 }
 
 impl Default for ExecManager {
     fn default() -> Self {
-        Self::new(None, None)
+        Self::new(None, None, None)
     }
 }
 
 impl ExecManager {
-    pub fn new(auditor: Option<Arc<Auditor>>, state_dir: Option<Arc<Path>>) -> Self {
+    pub fn new(
+        auditor: Option<Arc<Auditor>>,
+        state_dir: Option<Arc<Path>>,
+        relay_url: Option<String>,
+    ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             auditor,
             state_dir,
+            relay_url,
         }
     }
 
@@ -503,8 +511,16 @@ impl ExecManager {
         let (Some(auditor), Some(state_dir)) = (&self.auditor, &self.state_dir) else {
             return;
         };
-        if let Err(e) = write_audit(state_dir, auditor, cmd, target, result, started_at, caller) {
-            tracing::warn!(error = %e, "audit write failed (exec still succeeded)");
+        match write_audit(state_dir, auditor, cmd, target, result, started_at, caller) {
+            Ok(event) => {
+                // Phase D5: additive relay copy, detached + surfaced on failure.
+                if let Some(url) = &self.relay_url {
+                    spawn_audit_publish(url, auditor, event);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "audit write failed (exec still succeeded)");
+            }
         }
     }
 }
@@ -607,10 +623,12 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Sign and append one audit record for a completed exec. The runner's Nostr
-/// key signs `{cmd, target, exit_code, timed_out, started_at, duration_ms}`;
-/// appended as a JSON line to `<state_dir>/audit.log` (0600). This same event
-/// shape ports to a relay in Chunk 2.
+/// Sign and append one audit record for a completed exec. Phase D5: the
+/// event is a NIP-01 kind-48001 event (id over the canonical serialization,
+/// BIP-340 signature over the id) — the SAME bytes spooled here as JSON line
+/// to `<state_dir>/audit.log` (0600) AND published to the relay when
+/// `relay_url` is set (additive; publish failure degrades to spool-only and
+/// is surfaced, never silent-ok).
 pub fn write_audit(
     state_dir: &Path,
     auditor: &Auditor,
@@ -619,7 +637,7 @@ pub fn write_audit(
     result: &ExecResult,
     started_at: u64,
     caller: Option<&str>,
-) -> Result<SignedEvent, ExecError> {
+) -> Result<serde_json::Value, ExecError> {
     let content = serde_json::json!({
         "cmd": cmd,
         "target": target,
@@ -631,7 +649,10 @@ pub fn write_audit(
     })
     .to_string();
 
-    let event = auditor.sign(&content)?;
+    let tags = caller
+        .map(|c| vec![vec!["p".to_string(), c.to_string()]])
+        .unwrap_or_default();
+    let event = auditor.event(48001, tags, &content)?;
     freehold_core::futil::ensure_private_dir(state_dir)?;
     let path = state_dir.join(AUDIT_FILE);
     let mut opts = std::fs::OpenOptions::new();
@@ -647,6 +668,35 @@ pub fn write_audit(
     f.write_all(b"\n")?;
     f.flush()?;
     Ok(event)
+}
+
+/// Fire the spooled audit event at the relay, detached: the agent's exec
+/// result must NEVER wait on a wedged relay. Failure is surfaced (warn) and
+/// the local spool stays authoritative — never silently dropped, never a
+/// hard failure of the executed command.
+/// Publish one audit event and REPORT the outcome. Sync + testable on the
+/// calling thread (the surfaced rule is a unit-testable contract, not a
+/// thread artifact): both the publish error and success are observable.
+pub fn report_audit_publish(relay_url: &str, secret: &[u8; 32], event_json: &str) {
+    match freehold_core::relay_http::publish_event_json(relay_url, secret, event_json) {
+        Ok(()) => {}
+        Err(e) => tracing::warn!(error = %e, "audit relay publish failed — local spool only"),
+    }
+}
+
+/// Fire the publish detached (spawn_blocking): the agent's exec result must
+/// NEVER wait on a wedged relay. The join failure is ALSO surfaced — the
+/// surfaced rule covers the task boundary too.
+pub fn spawn_audit_publish(relay_url: &str, auditor: &Auditor, event: serde_json::Value) {
+    let url = relay_url.to_string();
+    let secret = auditor.secret();
+    let ev = event.to_string();
+    tokio::spawn(async move {
+        match tokio::task::spawn_blocking(move || report_audit_publish(&url, &secret, &ev)).await {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(error = %e, "audit publish task panicked/failed"),
+        }
+    });
 }
 
 #[inline]
@@ -737,7 +787,7 @@ mod tests {
         let (dir, id) = sealed_runner_dir("b2", "b2key-123456");
         let pkg = SecretPackage::load(dir.path()).unwrap();
         let envs = resolve_secrets(&id, &pkg, &["b2".to_string()]).unwrap();
-        let mgr = ExecManager::new(None, None);
+        let mgr = ExecManager::new(None, None, None);
         let sid = mgr.start_streaming(
             "for i in 1 2 3 4 5; do echo line-$i; sleep 0.05; done",
             "local",
@@ -769,7 +819,7 @@ mod tests {
         let (dir, id) = sealed_runner_dir("tok", "super-secret-token-9911");
         let pkg = SecretPackage::load(dir.path()).unwrap();
         let envs = resolve_secrets(&id, &pkg, &["tok".to_string()]).unwrap();
-        let mgr = ExecManager::new(None, None);
+        let mgr = ExecManager::new(None, None, None);
         let sid = mgr.start_streaming("echo leaked-$TOK", "local", envs, Some(10), None);
         let mut all;
         loop {
@@ -812,7 +862,7 @@ mod tests {
         // Multi-byte UTF-8 straddling a 4096-byte read boundary must not drop
         // the whole chunk (the 4 KB-drop bug): 5000 'é' outputs ~15 KB, so
         // several characters cross boundaries.
-        let mgr = ExecManager::new(None, None);
+        let mgr = ExecManager::new(None, None, None);
         let sid = mgr.start_streaming(
             "python3 -c \"print('é' * 5000)\"",
             "local",
@@ -845,27 +895,34 @@ mod tests {
         let (dir, id) = sealed_runner_dir("k", "key-value-12345678");
         let auditor = Arc::new(Auditor::new(hex_to_arr(&id.nostr_secret_hex()).unwrap()));
         let state_dir = dir.path().to_path_buf();
-        let mgr = ExecManager::new(Some(auditor), Some(Arc::from(state_dir.as_path())));
+        let mgr = ExecManager::new(Some(auditor), Some(Arc::from(state_dir.as_path())), None);
         let _ = mgr
             .run("echo audited", "local", vec![], None, None)
             .await
             .unwrap();
 
         let raw = std::fs::read_to_string(dir.path().join(AUDIT_FILE)).unwrap();
-        let event: SignedEvent = serde_json::from_str(raw.trim()).unwrap();
+        let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        // Phase D5: the spooled row is a kind-48001 NIP-01 event (id + BIP-340
+        // over the id) — the SAME shape the relay stores; G3.1's existence
+        // check keeps passing, and the row is relay-verifiable as-is.
+        assert_eq!(event["kind"].as_u64(), Some(48001));
+        assert_eq!(event["pubkey"].as_str().unwrap(), &id.nostr_pubkey_hex());
+        assert!(event["content"].as_str().unwrap().contains("audited"));
         assert!(
-            freehold_core::audit::verify_event(&event).is_ok(),
-            "audit event must verify against the runner pubkey"
+            event["content"]
+                .as_str()
+                .unwrap()
+                .contains("\"target\":\"local\"")
         );
-        assert!(
-            event.content.contains("audited"),
-            "content: {}",
-            event.content
-        );
-        assert!(
-            event.content.contains("\"target\":\"local\""),
-            "content: {}",
-            event.content
-        );
+        freehold_core::nip98::verify_event(
+            event["pubkey"].as_str().unwrap(),
+            event["created_at"].as_i64().unwrap(),
+            event["kind"].as_u64().unwrap() as u32,
+            &[],
+            event["content"].as_str().unwrap(),
+            event["sig"].as_str().unwrap(),
+        )
+        .expect("kind-48001 row verifies (id + BIP-340)");
     }
 }

@@ -200,7 +200,7 @@ grant references a member). **Decided here:** grants are re-read LIVE from relay
 "rotate/re-grant don't reach a running runner" (boot-read was rejected for exactly that
 reason). The runner-side mechanic lands in D1's grant event design.
 
-- [ ] [ ]
+- [x] [ ]
 
 D5. **Audit becomes additive, not a replacement:** the same BIP-340-signed event is spooled
 locally (Chunk 1's `audit.log` stays) AND published to the relay once live (the locked model:

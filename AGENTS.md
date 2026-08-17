@@ -41,8 +41,15 @@ live: console/owner + CPA + box identity + the RUNNER itself are relay
 members under the box's real URL community (the relay's example.com URL
 placeholders are now fixed by deploy-relay — written with a new --relay-url
 flag). D3 (encrypted memory) and D5 (audit publishing) are the next slices.
-A real Vultr token is still needed for the VPS leg. Work ships via branches,
-pending a GitHub outage before the PR/review cycle.
+D5 (audit publishing) is DONE: the runner's audit row is now a kind-48001
+NIP-01 event (id + BIP-340 over the id) — the SAME bytes spooled locally
+(0600, fail-closed read, never silent) AND published to the relay when
+--relay-url is set (detached so a wedged relay never delays the agent's
+exec; publish failure degrades to spool-only and is surfaced). D3
+(encrypted memory) and E (delegation) are next; the live grant-publish +
+relay-backed runner flip stay gated on the relay's ingest patch
+(BUZZ_SURFACE §9.5). A real Vultr token is still needed for the VPS leg.
+Work ships via branches, pending a GitHub outage before the PR/review cycle.
 
 ## Navigation
 
