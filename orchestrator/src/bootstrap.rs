@@ -159,9 +159,14 @@ pub async fn bootstrap_proxmox_lxc(
         )));
     }
 
+    // --unprivileged 1 is explicit, not the CLI default: pct's CLI defaults
+    // to PRIVILEGED, and this container will host the relay + control plane
+    // (runner ciphertext, relay membership) — a root escape inside it must
+    // not land as host root on the PVE machine. Nothing downstream needs
+    // privileged (A3 verifies via `pct exec` through the host).
     let create = format!(
         "pct create {vmid} local:vztmpl/{tpl} --storage {storage} --hostname {host} \
-         --net0 name=eth0,bridge={bridge},ip=dhcp",
+         --unprivileged 1 --net0 name=eth0,bridge={bridge},ip=dhcp",
         vmid = spec.vmid,
         tpl = tpl,
         storage = spec.storage,
@@ -218,10 +223,30 @@ pub async fn bootstrap_vultr_vps(
     plain(&spec.label)?;
     plain(&spec.region)?;
     plain(&spec.plan)?;
+    // The runner injects the credential as <ENV> and the base URL as
+    // <ENV>_URL, where ENV derives from the TARGET's name (exec::env_name:
+    // alnum upcased, everything else '_'). Derive here too, so the driver
+    // works for any target name — not just literals named `vultr`.
+    let env = target
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    // Shell tokens; the substituted values are strings, so no format-brace
+    // conflict: the shell expands ${BOX} / ${BOX_URL} at exec time.
+    let env_cred = format!("${{{env}}}");
+    let env_url = format!("${{{}_URL}}", env);
     let create = format!(
-        "curl -sS -X POST \"$VULTR_URL/v2/instances\" -H \"Authorization: Bearer $VULTR\" \
+        "curl -sS -X POST \"{env_url}/v2/instances\" -H \"Authorization: Bearer {env_cred}\" \
          -H 'Content-Type: application/json' -d '{{\"region\":\"{region}\",\"plan\":\"{plan}\",\
          \"os_id\":{os_id},\"label\":\"{label}\"}}'",
+        env_url = env_url,
+        env_cred = env_cred,
         region = spec.region,
         plan = spec.plan,
         os_id = spec.os_id,
@@ -242,10 +267,13 @@ pub async fn bootstrap_vultr_vps(
     // ALWAYS destroys — including on every post-create failure — so a test or
     // a bad run can never leak a billed instance.
     let mut detail: Option<String> = None;
+    let mut verified = false;
     let mut poll_err: Option<String> = None;
     'poll: for _ in 0..60 {
         let poll = format!(
-            "curl -sS \"$VULTR_URL/v2/instances/{id}\" -H \"Authorization: Bearer $VULTR\"",
+            "curl -sS \"{env_url}/v2/instances/{id}\" -H \"Authorization: Bearer {env_cred}\"",
+            env_url = env_url,
+            env_cred = env_cred,
             id = id
         );
         match exec(client, target, &poll).and_then(|out| {
@@ -260,11 +288,12 @@ pub async fn bootstrap_vultr_vps(
                     "vultr instance {id} active; main_ip {ip}; label {}",
                     spec.label
                 ));
+                verified = true;
             }
             Ok(())
         }) {
             Ok(()) => {
-                if detail.is_some() {
+                if verified {
                     break 'poll;
                 }
                 // a successful round clears any earlier transient error
@@ -286,17 +315,28 @@ pub async fn bootstrap_vultr_vps(
     if spec.destroy_after {
         // --fail: curl exits non-zero on any HTTP >= 400, so a 401/404/500
         // destroy can NEVER report "; destroyed" while the instance lives.
+        // Destroy is the one step whose silent failure costs money. Check the
+        // HTTP code explicitly: curl exits 0 on many transport-time errors and
+        // a body-less `-o /dev/null` cannot otherwise be trusted.
         let destroy = format!(
-            "curl -sS --fail -X DELETE \"$VULTR_URL/v2/instances/{id}\" \
-             -H \"Authorization: Bearer $VULTR\" -o /dev/null -w done",
+            "curl -sS -X DELETE \"{env_url}/v2/instances/{id}\" \
+             -H \"Authorization: Bearer {env_cred}\" -o /dev/null -w '%{{http_code}}'",
+            env_url = env_url,
+            env_cred = env_cred,
             id = id
         );
         let out = exec(client, target, &destroy)?;
         expect_ok(&out, "vultr destroy")?;
+        let code = out.stdout.trim();
+        if !code.starts_with('2') {
+            return Err(BootstrapError::Verify(format!(
+                "destroy of instance {id} returned HTTP {code} — the instance may still be running"
+            )));
+        }
         detail.push_str("; destroyed");
     }
 
-    if !detail.contains("main_ip") {
+    if !verified {
         return Err(BootstrapError::Verify(detail));
     }
 

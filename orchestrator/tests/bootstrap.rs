@@ -191,6 +191,10 @@ async fn proxmox_lxc_bootstrap_creates_starts_verifies() {
         cmds.contains("pct create 101") && cmds.contains("debian-12-standard"),
         "create with detected template: {cmds}"
     );
+    assert!(
+        cmds.contains("--unprivileged 1"),
+        "the container must come out UNPRIVILEGED (its host will hold relay + CP): {cmds}"
+    );
     assert!(cmds.contains("pct start 101"), "start: {cmds}");
     assert!(cmds.contains("pct exec 101"), "verify: {cmds}");
 
@@ -314,6 +318,65 @@ async fn proxmox_lxc_vmid_below_100_is_rejected() {
         !cmds.contains("pct create"),
         "must not attempt create: {cmds}"
     );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vultr_vps_env_prefix_derives_from_target_name() {
+    // The runner injects the credential as <ENV>/<ENV>_URL named after the
+    // TARGET. A target named `box` (kind vultr) must drive with $BOX/$BOX_URL,
+    // not hardcoded $VULTR_URL which would expand empty.
+    let base = tempfile::tempdir().unwrap();
+    let vultr_state = std::sync::Arc::new(VultrState::default());
+    let vultr_addr = mock::spawn_http(mock::vultr_router(vultr_state.clone())).await;
+
+    let dir = base.path().join("runner");
+    let id = Identity::generate();
+    id.write_to_dir(&dir).unwrap();
+    let adir = agent_dir(base.path());
+    let agent_pk = flows::agent_auth(&adir).unwrap().pubkey.clone();
+    let enc = hex32(&id.enc_pubkey_hex());
+    let sealed = hex::encode(crypto::seal(&enc, b"box", mock::VULTR_TOKEN.as_bytes()).unwrap());
+    let pkg = SecretPackage {
+        secrets: std::collections::BTreeMap::from([("box".to_string(), sealed)]),
+        targets: std::collections::BTreeMap::from([(
+            "box".to_string(),
+            TargetMeta {
+                kind: "vultr".into(),
+                address: format!("http://{vultr_addr}"),
+                secret: "box".into(),
+            },
+        )]),
+        grants: vec![agent_pk.clone()],
+    };
+    pkg.write_to_dir(&dir).unwrap();
+    let runner_pubkey = id.nostr_pubkey_hex();
+    let ctx = RunnerContext {
+        identity: id,
+        package: SecretPackage::load(&dir).unwrap(),
+        state_dir: dir.to_path_buf(),
+    };
+    let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let client = client(&adir, &format!("http://{addr}/mcp"), &runner_pubkey);
+
+    let res = bootstrap_vultr_vps(
+        &client,
+        "box", // target named `box`, NOT `vultr` — env must be BOX/BOX_URL
+        &VultrVpsSpec {
+            label: "env-prefix-test".into(),
+            region: "atl".into(),
+            plan: "vhf-1c-1gb".into(),
+            os_id: 1743,
+            destroy_after: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(res.detail.contains("active"), "{res:?}");
+    assert!(res.detail.contains("destroyed"), "{res:?}");
+    let _ = vultr_state.instances.lock().is_empty();
 
     server.abort();
 }
