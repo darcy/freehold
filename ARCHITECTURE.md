@@ -577,6 +577,12 @@ MVP done = public release (k8s + control plane + console + skills, Proxmox + VPS
     
 *   Mobile app
     
+*   **Runner name addressing (POC follow-up):** agents/users address runners by NAME — the
+    client resolves `name → runner pubkey + MCP addr` from the control-plane registry. A
+    client-side lookup only: no network router, no shared trust anchor, the MCP transport
+    stays per-runner and audience-bound. Today the orchestrator hand-takes
+    `--runner-pubkey`/`--addr`; this removes that (e.g. `exec --runner proxmox-box`).
+    
 *   Multi-box scaling + Ceph replication
     
 *   Security hardening (privilege escalation, audit, approval gates); on-demand decryption opt-in  
