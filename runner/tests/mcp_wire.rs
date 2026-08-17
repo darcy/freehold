@@ -28,6 +28,8 @@ fn test_ctx() -> RunnerContext {
         identity: (*id).clone(),
         package: pkg,
         state_dir: dir,
+        relay_url: None,
+        grant_author: None,
     }
 }
 

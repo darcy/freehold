@@ -51,12 +51,23 @@ const LOOPBACK_ORIGINS: [&str; 6] = [
 ];
 
 /// Everything the runner server needs: identity (decrypt + audit signing),
-/// the ciphertext secret package, and the state dir for the audit log.
+/// the ciphertext secret package, the state dir for the audit log, and the
+/// relay this runner belongs to (Phase D: grants are read LIVE from the
+/// relay once configured; None = the shipped-package grants are the source,
+/// so loopback-only/local runners keep working before any relay exists).
 #[derive(Clone)]
 pub struct RunnerContext {
     pub identity: Identity,
     pub package: SecretPackage,
     pub state_dir: PathBuf,
+    /// Relay grants source (Phase D): when set, grants are read live as
+    /// kind-30180 events by `expected_author` (the console/owner pubkey —
+    /// the grant list's trust anchor) instead of the shipped package.
+    pub relay_url: Option<String>,
+    /// The grant-list AUTHOR pubkey (64-hex) — REQUIRED when relay_url is
+    /// set (fail-fast at serve; a grant list accepted from any member would
+    /// be a self-admission hole).
+    pub grant_author: Option<String>,
 }
 
 #[derive(Clone)]
@@ -97,6 +108,13 @@ pub async fn serve(
         return Err(anyhow::anyhow!(
             "refusing non-loopback bind {bound}: the runner is unauthenticated \
              until Phase D — bind 127.0.0.1"
+        ));
+    }
+    if ctx.relay_url.is_some() && ctx.grant_author.is_none() {
+        return Err(anyhow::anyhow!(
+            "--grant-author is REQUIRED when --relay-url is set (the grant \
+             list's trust anchor; accepting grants from any member is a \
+             self-admission hole)"
         ));
     }
     let app = router(ctx);
@@ -195,7 +213,20 @@ async fn mcp_endpoint(
             // GRANTED agent pubkey. Grants are re-read from the shipped
             // package so a `control-plane grant` lands without a restart.
             let params = body.get("params").cloned().unwrap_or(Value::Null);
-            let grants = current_grants(&state.ctx.state_dir);
+            // Phase D grants may hit the relay over blocking HTTP — run on the
+            // blocking pool so a slow/unreachable relay can never starve the
+            // async workers (or deadlock against a co-located relay server).
+            let grant_ctx = state.ctx.clone();
+            let grants = tokio::task::spawn_blocking(move || {
+                current_grants(
+                    &grant_ctx.state_dir,
+                    grant_ctx.relay_url.as_deref(),
+                    grant_ctx.grant_author.as_deref(),
+                    &grant_ctx.identity,
+                )
+            })
+            .await
+            .expect("grant check task panicked");
             let runner_pubkey = state.ctx.identity.nostr_pubkey_hex();
             let caller = match auth::verify_body(
                 &grants,
@@ -559,7 +590,41 @@ async fn ssh_status(
 
 /// Grants shipped with the package, re-read fresh so `control-plane grant`
 /// takes effect without a runner restart. Unreadable package -> fail closed.
-fn current_grants(state_dir: &std::path::Path) -> Vec<String> {
+fn current_grants(
+    state_dir: &std::path::Path,
+    relay_url: Option<&str>,
+    grant_author: Option<&str>,
+    identity: &Identity,
+) -> Vec<String> {
+    // Phase D: with a relay configured, the relay is the grants authority —
+    // read the runner's CURRENT kind-30180 list fresh per call (a revoke
+    // lands without a restart; same per-call freshness the package path
+    // gave). Any relay error FAILS CLOSED (no grants), like an unreadable
+    // package.
+    if let Some(url) = relay_url {
+        let secret = identity.secret_seed();
+        // serve() fail-fasts, but current_grants stays defensive: no author
+        // -> no grants -> deny (never accept an unanchored list).
+        let Some(author) = grant_author else {
+            tracing::warn!("relay grants requested without --grant-author — failing closed");
+            return Vec::new();
+        };
+        return match freehold_core::relay_http::query_grants(
+            url,
+            &identity.nostr_pubkey_hex(),
+            author,
+            &secret,
+        ) {
+            Ok(grants) => grants,
+            Err(e) => {
+                tracing::warn!(error = %e, relay = %url,
+                    "grant check: relay unreachable/failed — failing closed (empty grants)");
+                Vec::new()
+            }
+        };
+    }
+
+    // No relay: the shipped package grants are the source of record.
     // The runner can boot WHILE `control-plane provision` is still writing
     // the package (temp + atomic rename). Retrying a few times means a
     // just-shipped package is not denied with a misleading "not granted";
@@ -700,6 +765,149 @@ mod tests {
         let required = exec["inputSchema"]["required"].as_array().unwrap();
         assert!(required.contains(&json!("cmd")));
         assert!(required.contains(&json!("target")));
+    }
+
+    /// Sign + POST an MCP tools/call (`list`) as `agent` against the runner.
+    fn mcp_list(url: &str, agent: &Identity, runner_pk: &str) -> Result<(), String> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list", "arguments": {} }
+        });
+        let raw = body.to_string();
+        let ts = freehold_core::auth::now_secs();
+        let ev = freehold_core::auth::sign_body(&agent.secret_seed(), runner_pk, ts, &raw);
+        let mut resp = ureq::post(url)
+            .header("Content-Type", "application/json")
+            .header(auth::PUBKEY_HEADER, agent.nostr_pubkey_hex())
+            .header(auth::SIG_HEADER, ev.sig)
+            .header(auth::TS_HEADER, ts)
+            .send(raw.clone())
+            .map_err(|e| e.to_string())?;
+        let v: Value = resp
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("read: {e}"))?;
+        if let Some(err) = v.get("error") {
+            return Err(err["message"]
+                .as_str()
+                .unwrap_or("(no message)")
+                .to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grants_are_read_live_from_relay_and_revoke_lands_without_restart() {
+        use freehold_testkit::relay as fake_relay;
+        let (relay_url, state, relay_task) = fake_relay::spawn().await;
+
+        let rid = Identity::generate();
+        let runner_pk = rid.nostr_pubkey_hex();
+        let console_secret = [9u8; 32];
+        let a = Identity::generate();
+        let b = Identity::generate();
+        let c = Identity::generate();
+        let (ap, bp, _cp) = (
+            a.nostr_pubkey_hex(),
+            b.nostr_pubkey_hex(),
+            c.nostr_pubkey_hex(),
+        );
+        let (console_pk, _id, _sig) =
+            freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "").unwrap();
+        fake_relay::publish_grants(
+            &state,
+            &console_secret,
+            &runner_pk,
+            &[ap.clone(), bp.clone()],
+        );
+        // A ROGUE member publishes their own "grant" for this runner with a
+        // NEWER created_at — the author gate must ignore it entirely.
+        let rogue = Identity::generate();
+        let rogue_pk = rogue.nostr_pubkey_hex();
+        let rogue_ts = freehold_core::auth::now_secs() + 10;
+        let rogue_content = serde_json::json!({ "grants": [rogue_pk], "schema": 1 }).to_string();
+        let (rogue_author, rogue_id, rogue_sig) = freehold_core::nip98::sign_event(
+            &rogue.secret_seed(),
+            30180,
+            rogue_ts,
+            vec![vec!["d".into(), runner_pk.clone()]],
+            &rogue_content,
+        )
+        .unwrap();
+        state.events.lock().push(serde_json::json!({
+            "id": rogue_id,
+            "pubkey": rogue_author,
+            "created_at": rogue_ts,
+            "kind": 30180,
+            "tags": [["d", runner_pk]],
+            "content": rogue_content,
+            "sig": rogue_sig,
+        }));
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = RunnerContext {
+            identity: rid.clone(),
+            package: SecretPackage::default(),
+            state_dir: dir.path().to_path_buf(),
+            relay_url: Some(relay_url.clone()),
+            grant_author: Some(console_pk.clone()),
+        };
+        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let url = format!("http://{addr}/mcp");
+
+        mcp_list(&url, &a, &runner_pk).expect("A is granted");
+        mcp_list(&url, &b, &runner_pk).expect("B is granted");
+        // never-granted agent denied (and the rogue's newer-but-unanchored
+        // event must NOT have granted it)
+        let err = mcp_list(&url, &c, &runner_pk).unwrap_err();
+        assert!(err.contains("unauthorized"), "{err}");
+        let err = mcp_list(&url, &rogue, &runner_pk).unwrap_err();
+        assert!(
+            err.contains("unauthorized"),
+            "rogue-author grant list must be ignored: {err}"
+        );
+
+        // REVOKE B: publish a REPLACED (shrunk) list — the runner reads it
+        // fresh per call, so B is denied WITHOUT any restart.
+        fake_relay::publish_grants(
+            &state,
+            &console_secret,
+            &runner_pk,
+            std::slice::from_ref(&ap),
+        );
+        let err = mcp_list(&url, &b, &runner_pk).unwrap_err();
+        assert!(err.contains("unauthorized"), "B revoked live: {err}");
+        // A still granted after the replacement
+        mcp_list(&url, &a, &runner_pk).expect("A still granted");
+
+        server.abort();
+        relay_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_unreachable_fails_closed_to_no_grants() {
+        let rid = Identity::generate();
+        let runner_pk = rid.nostr_pubkey_hex();
+        let a = Identity::generate();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = RunnerContext {
+            identity: rid,
+            package: SecretPackage::default(),
+            state_dir: dir.path().to_path_buf(),
+            // nothing listens on :1 — the grant query must fail closed
+            relay_url: Some("http://127.0.0.1:1".into()),
+            grant_author: Some(a.nostr_pubkey_hex()),
+        };
+        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let url = format!("http://{addr}/mcp");
+        let err = mcp_list(&url, &a, &runner_pk).unwrap_err();
+        assert!(
+            err.contains("unauthorized"),
+            "relay outage must deny (fail closed): {err}"
+        );
+        server.abort();
     }
 
     #[test]

@@ -162,13 +162,17 @@ this in the console code, not implicitly.
 
 ### Phase D — Port identity onto real relay membership
 
-- [ ] [ ]
+- [x] [ ]
 
 D1. Define the relay event kinds for the port: membership (who is in the scope), grants
 (agent↔runner, membership-derived), memory (agent state that persists across runs), and
 audit. Schema is part of this item — the event kinds are the new contract — and must match
 the Phase 0 surface (native Buzz concept where one exists, custom kind where we define it;
-never a kind designed against an assumption).
+never a kind designed against an assumption). **Grant list (kind 30180):** addressable
+30000–39999, `d`-tag = runner pubkey, content `{"grants":[<64-hex agent>...],"schema":1}`,
+replaceable (a re-publish REPLACES — revocation never appends). Published by the console
+identity (NIP-98 POST /events), read live by the runner (NIP-98 GET /query, newest
+created_at wins incl. same-second).`**
 
 - [ ] [ ]
 
@@ -185,7 +189,7 @@ D3. Master agent (`@freehold`) gets a real identity in the relay; memory becomes
 relay operator is not a reader of agent memory; exact kind/scheme decided in D1 against the
 Phase 0 surface.
 
-- [ ] [ ]
+- [x] [ ]
 
 D4. Grants keep the Chunk-1 model: coarse agent↔runner whitelists of real Nostr pubkeys.
 Relay **membership is necessary but NOT sufficient** — a member must still be explicitly

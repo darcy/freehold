@@ -246,6 +246,8 @@ async fn live_readiness_probe_via_console() {
     let runner_id = Identity::load(&pkg_dir).unwrap();
     let pkg = SecretPackage::load(&pkg_dir).unwrap();
     let ctx = RunnerContext {
+        relay_url: None,
+        grant_author: None,
         identity: runner_id,
         package: pkg,
         state_dir: pkg_dir.clone(),
@@ -303,6 +305,8 @@ async fn ungranted_console_cannot_read_runner() {
 
     let runner_id = Identity::load(&pkg_dir).unwrap();
     let ctx = RunnerContext {
+        relay_url: None,
+        grant_author: None,
         identity: runner_id,
         package: pkg,
         state_dir: pkg_dir.clone(),

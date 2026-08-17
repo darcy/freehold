@@ -392,6 +392,34 @@ pub fn revoke_grant(
     Ok(pkg.grants)
 }
 
+/// Phase D: publish the runner's CURRENT grant list to the relay as a
+/// kind-30180 event (addressable, d-tag = runner pubkey — a re-publish
+/// REPLACES). Called after grant/revoke so the relay's list and the shipped
+/// package agree; the runner reads the relay live. Relay errors surface
+/// (never silently swallowed) — the local package is still updated.
+pub fn publish_grants(
+    store: &StateStore,
+    relay_url: &str,
+    name: &str,
+    grants: &[String],
+    state_dir: &std::path::Path,
+) -> Result<(), ProvisionError> {
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    // Privileged write: a FRESH/wrong state dir must not mint a new console
+    // key that signs publishes nobody recognizes — load, don't create.
+    let console = crate::console::Console::load(state_dir)
+        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
+    freehold_core::relay_http::publish_grants(
+        relay_url,
+        &console.identity.secret_seed(),
+        &rec.nostr_pubkey,
+        grants,
+    )
+    .map_err(|e| ProvisionError::Io(std::io::Error::other(format!("relay publish: {e}"))))
+}
+
 fn is_pubkey(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }

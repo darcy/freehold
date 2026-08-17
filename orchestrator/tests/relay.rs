@@ -91,6 +91,8 @@ async fn fixture(
         identity: rid,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
+        relay_url: None,
+        grant_author: None,
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
     let client = McpClient::new(
@@ -143,7 +145,9 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
          > {dir}/deploy/compose/run.sh && chmod +x {dir}/deploy/compose/run.sh && \
          printf 'BUZZ_RELAY_PRIVATE_KEY=CHANGE_ME_64_HEX\\nBUZZ_GIT_HOOK_HMAC_SECRET=CHANGE_ME_64_HEX\\n\
          POSTGRES_PASSWORD=CHANGE_ME_PW\\nREDIS_PASSWORD=CHANGE_ME_PW\\nBUZZ_S3_ACCESS_KEY=CHANGE_ME_AK\\n\
-         BUZZ_S3_SECRET_KEY=CHANGE_ME_SK\\n' > {dir}/deploy/compose/.env.example && exit 0\n",
+         BUZZ_S3_SECRET_KEY=CHANGE_ME_SK\\nBUZZ_DOMAIN=buzz.example.com\\nRELAY_URL=wss://buzz.example.com\\n\
+         BUZZ_MEDIA_BASE_URL=https://buzz.example.com/media\\nBUZZ_MEDIA_SERVER_DOMAIN=buzz.example.com\\n' \
+         > {dir}/deploy/compose/.env.example && exit 0\n",
         dir = dir_s
     );
     let scripts: Vec<(&str, String)> = vec![
@@ -166,6 +170,7 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
             buzz_ref: DEFAULT_BUZZ_REF.into(),
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
+            relay_url: "http://relay-box:3000".into(),
         },
     )
     .await
@@ -185,6 +190,14 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
             })
             .all(|l| l.rsplit('=').next().unwrap().len() == 64),
         "urandom 64-hex secrets: {env}"
+    );
+    // The relay's OWN URL replaced the example.com placeholders (NOT literal
+    // CHANGE_ME — the secret sweep would miss them without these seds).
+    assert!(
+        env.contains("BUZZ_DOMAIN=relay-box")
+            && env.contains("RELAY_URL=ws://relay-box:3000")
+            && env.contains("BUZZ_MEDIA_BASE_URL=http://relay-box:3000/media"),
+        "real relay URL written: {env}"
     );
 
     server.abort();
@@ -226,6 +239,7 @@ async fn relay_deploy_lxc_mode_wraps_every_command_in_pct_exec() {
             buzz_ref: DEFAULT_BUZZ_REF.into(),
             lxc: Some(100),
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
+            relay_url: "http://relay-box:3000".into(),
         },
     )
     .await
@@ -260,6 +274,7 @@ async fn relay_deploy_missing_docker_gives_remediation() {
             buzz_ref: DEFAULT_BUZZ_REF.into(),
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
+            relay_url: "http://relay-box:3000".into(),
         },
     )
     .await
@@ -309,6 +324,7 @@ async fn relay_deploy_fails_when_unswept_placeholder_remains() {
             buzz_ref: DEFAULT_BUZZ_REF.into(),
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
+            relay_url: "http://relay-box:3000".into(),
         },
     )
     .await

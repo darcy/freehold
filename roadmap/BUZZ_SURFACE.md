@@ -128,6 +128,16 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 | **Delegation** | NATIVE | kinds 43001–43006 job request/result/error (or @mention+reply as simplest path) | No |
 | **Surface (F)** | NATIVE | stream channels (kind 9) + DMs (41001); scripted @freehold CPA via its own NIP-42 client | No |
 
+## 9.5 Ingest surface correction (found live, Phase D)
+
+The §9 "custom kinds are sanctioned" claim is about the KIND REGISTRY (adding a kind breaks
+nothing) — NOT the ingest gate: `crates/buzz-relay/src/handlers/ingest.rs` `scopes()` has a
+HARDCODED match of accepted kinds, and any kind outside it is refused with `restricted:
+unknown event kind` (verified live: publishing our 30180 got exactly that). There is no
+config allowlist. A custom freehold kind therefore requires a one-line ingest patch
+(add the kind to the `UsersWrite` arm) + a relay image rebuild — a named deployment step,
+not a config flip. Grants events cannot land on a stock buzz image until that lands.
+
 ## 10. Known gaps / verify-before-design
 
 - **Private-channel member management has no REST/event API yet** (Buzz's own listed gap) —

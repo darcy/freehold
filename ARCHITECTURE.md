@@ -290,6 +290,14 @@ Alongside SSH / Vultr / Backblaze: a **workspace runner** for team/project envir
     **whitelisting Nostr pubkeys** of who may call a given agent/runner — revisit finer-grained  
     (target-scoped) permissions later; keep grants COARSE for Chunk 1 (agent ↔ runner, maybe  
     per-tool).
+
+*   **Grants authority (Phase D):** once a runner serves with `--relay-url`, the relay's
+    **kind-30180 grant list (d-tag = runner pubkey) is AUTHORITATIVE** and is read LIVE per call
+    (a revoke lands without a restart — closes the Chunk-1 running-runner gap); the shipped
+    package becomes the offline mirror. **Trust anchor:** only kind-30180 events authored by
+    the console/owner pubkey (`--grant-author`, NIP-98-signed publish) whose Schnorr signature
+    verifies locally are accepted — never any member's word. Without `--relay-url`, the
+    package list is the source (loopback/local runners).
     
 
 ## Control plane — the management layer / engine room (our build)

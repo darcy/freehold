@@ -53,6 +53,14 @@ struct ServeArgs {
     /// Loopback address to bind the MCP server (non-loopback binds are rejected)
     #[arg(long, env = "FREEHOLD_RUNNER_ADDR", default_value = "127.0.0.1:8787")]
     addr: String,
+    /// The relay this runner belongs to (Phase D: grants read LIVE from it
+    /// as kind-30180 events; omit for package-only grants — local/loopback).
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
+    /// The grant-list AUTHOR pubkey (64-hex) — the console/owner identity
+    /// that publishes kind-30180 grants. REQUIRED with --relay-url (fail-fast).
+    #[arg(long, env = "FREEHOLD_GRANT_AUTHOR")]
+    grant_author: Option<String>,
 }
 
 /// Operator-facing warning printed after `keys init`: env vars override the
@@ -171,6 +179,8 @@ async fn main() -> anyhow::Result<()> {
                     identity: id,
                     package,
                     state_dir: args.state_dir.clone(),
+                    relay_url: args.relay_url.clone(),
+                    grant_author: args.grant_author.clone(),
                 },
             )
             .await?;

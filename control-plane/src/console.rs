@@ -20,6 +20,10 @@ pub const CONSOLE_DIR: &str = "console";
 
 #[derive(Debug, Error)]
 pub enum ConsoleError {
+    #[error(
+        "console identity missing in {0} (run `control-plane serve` once or point --state-dir at the real CP state)"
+    )]
+    MissingIdentity(String),
     #[error("identity error: {0}")]
     Identity(#[from] identity::IdentityError),
     #[error("io error: {0}")]
@@ -34,6 +38,20 @@ pub struct Console {
 impl Console {
     pub fn pubkey(&self) -> String {
         self.identity.nostr_pubkey_hex()
+    }
+
+    /// Load an EXISTING console identity — hard error when absent. For
+    /// privileged writes (relay grant publishing, Phase D): a wrong or fresh
+    /// --state-dir must never silently mint a NEW key that signs publishes
+    /// nobody recognizes.
+    pub fn load(state_dir: &Path) -> Result<Self, ConsoleError> {
+        let dir = state_dir.join(CONSOLE_DIR);
+        if !dir.join(identity::IDENTITY_FILE).exists() {
+            return Err(ConsoleError::MissingIdentity(dir.display().to_string()));
+        }
+        Ok(Self {
+            identity: Identity::load(&dir)?,
+        })
     }
 
     /// Load the console identity, creating it if this is the first run.

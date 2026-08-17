@@ -41,6 +41,12 @@ pub struct RelayDeploySpec {
     /// in the compose .env. The bundle's run.sh refuses to start with CHANGE_ME
     /// placeholders; the owner is the CP's identity (Phase C member admin).
     pub owner_pubkey: String,
+    /// The relay's OWN resolvable URL (e.g. `http://192.168.30.248:3000`) —
+    /// written into BUZZ_DOMAIN/RELAY_URL/media URLs. The bundle's
+    /// example.com placeholders are NOT literal CHANGE_ME, so the secret
+    /// sweep never touched them; a relay that identifies as buzz.example.com
+    /// binds a phantom community and the HTTP bridge 404s real hosts.
+    pub relay_url: String,
 }
 
 /// Wrap a target command for execution inside an LXC via the host runner.
@@ -174,6 +180,18 @@ pub async fn deploy_relay(
          (grep -q \"^RELAY_OWNER_PUBKEY=\" .env && \
           sed -i \"s/^RELAY_OWNER_PUBKEY=.*/RELAY_OWNER_PUBKEY={owner}/\" .env || \
           echo \"RELAY_OWNER_PUBKEY={owner}\" >> .env) && \
+         (grep -q \"^BUZZ_DOMAIN=\" .env && \
+          sed -i \"s|^BUZZ_DOMAIN=.*|BUZZ_DOMAIN={rhost}|\" .env || \
+          echo \"BUZZ_DOMAIN={rhost}\" >> .env) && \
+         (grep -q \"^RELAY_URL=\" .env && \
+          sed -i \"s|^RELAY_URL=.*|RELAY_URL={rws}|\" .env || \
+          echo \"RELAY_URL={rws}\" >> .env) && \
+         (grep -q \"^BUZZ_MEDIA_BASE_URL=\" .env && \
+          sed -i \"s|^BUZZ_MEDIA_BASE_URL=.*|BUZZ_MEDIA_BASE_URL={rhttp}/media|\" .env || \
+          echo \"BUZZ_MEDIA_BASE_URL={rhttp}/media\" >> .env) && \
+         (grep -q \"^BUZZ_MEDIA_SERVER_DOMAIN=\" .env && \
+          sed -i \"s|^BUZZ_MEDIA_SERVER_DOMAIN=.*|BUZZ_MEDIA_SERVER_DOMAIN={rhost}|\" .env || \
+          echo \"BUZZ_MEDIA_SERVER_DOMAIN={rhost}\" >> .env) && \
          for k in BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET POSTGRES_PASSWORD \
          REDIS_PASSWORD BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY; do \
          if grep -q \"^$k=CHANGE_ME\" .env; then \
@@ -186,6 +204,24 @@ pub async fn deploy_relay(
         dir = spec.deploy_dir,
         port = spec.http_port,
         owner = spec.owner_pubkey,
+        rhost = spec
+            .relay_url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .trim_end_matches('/'),
+        rws = format!(
+            "{}://{}",
+            if spec.relay_url.trim_start().starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            },
+            spec.relay_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+        ),
+        rhttp = spec.relay_url.trim_end_matches('/'),
     );
     crate::bootstrap::exec_to_ok(
         client,
