@@ -116,16 +116,16 @@ Chunk 1's runner readiness, applied to the freshly provisioned box.
 
 ### Phase B — Deploy the Buzz relay
 
-- [ ] [ ]
+- [x] [x]
 
 B1. Install the self-hosted Nostr relay stack onto the target (Postgres, Redis, S3/MinIO
 backend per the Architecture doc), driven by the provisioning runner's exec.
 
-- [ ] [ ]
+- [x] [x]
 
 B2. Confirm relay is reachable and healthy (its own self-check, distinct from CP readiness).
 
-- [ ] [ ]
+- [x] [x]
 
 B3. This relay becomes the control plane's ONE scope going forward (relay-as-scope).
 

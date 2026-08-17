@@ -111,6 +111,9 @@ async fn serve_ssh_runner(
         state_dir: dir.path().to_path_buf(),
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    // Settle: the runner re-reads grants from disk per call; a racing first
+    // call could observe a not-yet-visible secrets.json (flaky fail-closed).
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     (dir, format!("http://{addr}/mcp"), runner_pubkey, server)
 }
 

@@ -72,7 +72,7 @@ fn exec(client: &McpClient, target: &str, cmd: &str) -> Result<ExecOutcome, Boot
     Ok(client.exec(target, cmd, &[target], 120)?)
 }
 
-fn expect_ok(out: &ExecOutcome, step: &str) -> Result<(), BootstrapError> {
+pub(crate) fn expect_ok(out: &ExecOutcome, step: &str) -> Result<(), BootstrapError> {
     if out.timed_out {
         return Err(BootstrapError::Step {
             step: step.to_string(),
@@ -93,7 +93,7 @@ fn expect_ok(out: &ExecOutcome, step: &str) -> Result<(), BootstrapError> {
 /// Operator-supplied values are interpolated into commands the runner
 /// executes. Reject anything outside a conservative safe alphabet so a value
 /// can never break out of the shell or a quoted JSON body.
-fn plain(s: &str) -> Result<(), BootstrapError> {
+pub(crate) fn plain(s: &str) -> Result<(), BootstrapError> {
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
@@ -101,6 +101,20 @@ fn plain(s: &str) -> Result<(), BootstrapError> {
     } else {
         Err(BootstrapError::Verify(format!(
             "unexpected characters in value {s:?} (allowed: [A-Za-z0-9._-])"
+        )))
+    }
+}
+
+/// A filesystem PATH variant: `/` is legitimate, everything shell-hostile
+/// (`;|&$`'\"` etc.) is not — these values are interpolated into commands.
+pub(crate) fn plain_path(s: &str) -> Result<(), BootstrapError> {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        Ok(())
+    } else {
+        Err(BootstrapError::Verify(format!(
+            "unexpected characters in path {s:?} (allowed: [A-Za-z0-9._-/])"
         )))
     }
 }

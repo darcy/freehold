@@ -181,6 +181,11 @@ cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
 cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --name relaybox \
   --vmid 100 --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
   --runner-pubkey <runner-nostr>    # pvesm/pct on the PVE host; verify via pct exec
+
+# C2/B: deploy the Buzz relay onto the target (docker gate -> bundle -> compose -> liveness)
+cargo run -p freehold-orchestrator -- deploy-relay --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
+  --target proxmox-box --name relay-box --http-port 3000
 ```
 
 ## Roadmap
