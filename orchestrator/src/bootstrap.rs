@@ -186,6 +186,7 @@ fn ensure_debian_template(
         .filter(|n| n.contains("debian-") && n.contains("standard_"))
         .filter_map(|n| template_version(&n).map(|v| (v, n)));
     if let Some((_, name)) = present.clone().max_by(|a, b| a.0.cmp(&b.0)) {
+        plain(&name)?;
         return Ok(name);
     }
 
@@ -196,10 +197,12 @@ fn ensure_debian_template(
     expect_ok(&update, "pveam update")?;
     let available = exec(client, target, "pveam available --section system", 120)?;
     expect_ok(&available, "pveam available")?;
+    // Columns: `<section> <template> <size> <needs-reboot>` — the FIRST token
+    // is the section (`system`), the template name is the SECOND.
     let name = available
         .stdout
         .lines()
-        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
         .filter(|n| {
             n.contains("debian-")
                 && n.contains("standard_")
@@ -215,6 +218,9 @@ fn ensure_debian_template(
                     .into(),
             )
         })?;
+    // The name came from the host's own catalog, not the operator, but it
+    // still lands in a shell command — same guard as every other value.
+    plain(&name)?;
     let download = exec(
         client,
         target,
@@ -259,10 +265,11 @@ pub async fn bootstrap_proxmox_lxc(
     // privileged (A3 verifies via `pct exec` through the host).
     // --features nesting=1 is what lets dockerd (overlay2) run inside the
     // unprivileged container — without it docker-in-LXC fails at the mount
-    // namespace boundary.
+    // namespace boundary. keyctl=1 is required alongside for docker itself
+    // (kernel keyring access inside the guest).
     let create = format!(
         "pct create {vmid} local:vztmpl/{tpl} --storage {storage} --hostname {host} \
-         --unprivileged 1 --features nesting=1 --net0 name=eth0,bridge={bridge},ip=dhcp",
+         --unprivileged 1 --features keyctl=1,nesting=1 --net0 name=eth0,bridge={bridge},ip=dhcp",
         vmid = spec.vmid,
         tpl = tpl,
         storage = spec.storage,
@@ -294,7 +301,7 @@ pub async fn bootstrap_proxmox_lxc(
 
     // Get ahead of docker-in-LXC: the guest hosts the relay, so it needs
     // docker + compose BEFORE Phase B's deploy gate runs.
-    ensure_guest_docker(client, target, spec.vmid)?;
+    ensure_guest_docker(client, target, spec.vmid).await?;
 
     Ok(BootstrapResult {
         kind: TargetKind::ProxmoxLxc,
@@ -318,17 +325,46 @@ pub async fn bootstrap_proxmox_lxc(
 /// info`; when the default overlay2 driver fails inside the unprivileged
 /// container, fall back to fuse-overlayfs (the canonical fix), restart, and
 /// re-verify. A second failure surfaces the raw output with a hint.
-fn ensure_guest_docker(client: &McpClient, target: &str, vmid: u32) -> Result<(), BootstrapError> {
+async fn ensure_guest_docker(
+    client: &McpClient,
+    target: &str,
+    vmid: u32,
+) -> Result<(), BootstrapError> {
+    // Docker + compose v2 from DEBIAN's own apt (docker-compose-v2 is the
+    // Debian name; docker-compose-plugin is download.docker.com's). The
+    // install-if-missing guard makes re-runs and retries free. Retried 3x
+    // because `pct start` may succeed before the guest has a DHCP lease —
+    // apt-get against no network fails on the first attempt.
     let install = format!(
-        "pct exec {vmid} -- sh -c 'DEBIAN_FRONTEND=noninteractive; \
+        "pct exec {vmid} -- sh -c 'export DEBIAN_FRONTEND=noninteractive; \
          if ! docker compose version >/dev/null 2>&1; then \
          apt-get update >/dev/null && \
-         apt-get install -y docker.io docker-compose-plugin >/dev/null; fi; \
+         apt-get install -y docker.io docker-compose-v2 >/dev/null; fi; \
          docker compose version'",
         vmid = vmid
     );
-    let out = exec(client, target, &install, 600)?;
-    expect_ok(&out, "guest docker install")?;
+    let mut install_err: Option<BootstrapError> = None;
+    for attempt in 0..3 {
+        match exec(client, target, &install, 600).and_then(|out| {
+            expect_ok(&out, "guest docker install")?;
+            Ok(())
+        }) {
+            Ok(()) => {
+                install_err = None;
+                break;
+            }
+            Err(e) => install_err = Some(e),
+        }
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        }
+    }
+    if let Some(e) = install_err {
+        return Err(BootstrapError::Verify(format!(
+            "guest docker/compose install failed after 3 attempts (the guest may still be \
+             getting its DHCP lease): {e}"
+        )));
+    }
 
     let info = format!("pct exec {vmid} -- docker info", vmid = vmid);
     // A non-zero exit arrives as Ok(outcome), so BOTH a transport error and a
@@ -347,7 +383,8 @@ fn ensure_guest_docker(client: &McpClient, target: &str, vmid: u32) -> Result<()
     // overlay2 can fail to mount inside this unprivileged/NESTED guest:
     // fuse-overlayfs is the drop-in storage driver for exactly that.
     let fallback = format!(
-        "pct exec {vmid} -- sh -c 'apt-get install -y fuse-overlayfs >/dev/null && \
+        "pct exec {vmid} -- sh -c 'export DEBIAN_FRONTEND=noninteractive; \
+         apt-get install -y fuse-overlayfs >/dev/null && \
          mkdir -p /etc/docker && \
          printf \"{{\\\"storage-driver\\\":\\\"fuse-overlayfs\\\"}}\\n\" \
          > /etc/docker/daemon.json && \
@@ -355,8 +392,16 @@ fn ensure_guest_docker(client: &McpClient, target: &str, vmid: u32) -> Result<()
          service docker restart >/dev/null 2>&1'",
         vmid = vmid
     );
-    let out = exec(client, target, &fallback, 600)?;
-    expect_ok(&out, "guest docker fuse fallback")?;
+    // Even a failed fallback must surface the ORIGINAL daemon error + hint.
+    if let Err(e) = exec(client, target, &fallback, 600).and_then(|out| {
+        expect_ok(&out, "guest docker fuse fallback")?;
+        Ok(())
+    }) {
+        return Err(BootstrapError::Verify(format!(
+            "fuse-overlayfs fallback failed in the guest ({e}); original daemon error: \
+             ({first}); consider a privileged container"
+        )));
+    }
 
     match exec(client, target, &info, 120) {
         Ok(out) => match expect_ok(&out, "guest docker info (after fallback)") {

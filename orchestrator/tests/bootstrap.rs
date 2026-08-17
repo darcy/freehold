@@ -85,12 +85,13 @@ esac
 "#;
 /// The PVE catalog + download endpoint: `pveam update` syncs, `available`
 /// lists two debian-12 standard templates (12.7 and the NEWER 12.10),
-/// `download` succeeds. Every call lands in the shared log.
+/// `download` succeeds. Columns mirror the REAL pveam output: `system` is
+/// the FIRST token, the template name the SECOND (the driver parses nth(1)).
 const PVEAM: &str = r#"
 case "$1" in
   update)    echo "ok"; exit 0;;
-  available) echo "debian-12-standard_12.7-1_amd64.tar.zst 227M system"
-             echo "debian-12-standard_12.10-1_amd64.tar.zst 228M system"; exit 0;;
+  available) echo "system debian-12-standard_12.7-1_amd64.tar.zst 227M 0"
+             echo "system debian-12-standard_12.10-1_amd64.tar.zst 228M 0"; exit 0;;
   download)  echo "204"; exit 0;;
   *)         echo "unknown pveam $*" >&2; exit 2;;
 esac
@@ -260,13 +261,17 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
         "the container must come out UNPRIVILEGED (its host will hold relay + CP): {cmds}"
     );
     assert!(
-        cmds.contains("--features nesting=1"),
-        "nesting is required for docker-in-LXC: {cmds}"
+        cmds.contains("--features keyctl=1,nesting=1"),
+        "nesting+keyctl are required for docker-in-LXC: {cmds}"
     );
     assert!(cmds.contains("pct start 101"), "start: {cmds}");
     assert!(
-        cmds.contains("docker.io docker-compose-plugin"),
-        "docker install wrapper present: {cmds}"
+        cmds.contains("docker.io docker-compose-v2"),
+        "Debian docker+compose-v2 install wrapper present: {cmds}"
+    );
+    assert!(
+        cmds.contains("export DEBIAN_FRONTEND=noninteractive"),
+        "debconf noninteractive must actually reach apt (exported): {cmds}"
     );
     assert!(cmds.contains("pct exec 101"), "verify: {cmds}");
 
