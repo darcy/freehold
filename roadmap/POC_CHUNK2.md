@@ -1,0 +1,256 @@
+# Chunk 2 — Detailed Build Plan
+
+Status: locked decisions from discussion; ready to structure into steps.  
+Scope: POC, brings in Buzz relay + real control plane deployment. NO Kubernetes. NO general
+provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessary — see below).
+
+## Locked decisions
+
+*   **The master/control agent (CPA) is handled as `@freehold`** in the relay — not
+    `@control-plane` or similar. The agent is the product's voice; users talk to `@freehold`.
+
+*   **CP and relay share ONE target.** Not split across separate services for the POC — a
+    `@buzz-relay` agent would have almost nothing to do besides "add an agent," which doesn't
+    justify its own identity/grants/readiness surface yet. Extractable later if a real reason
+    shows up (substrate swap, multi-relay, etc.).
+
+*   **Two operating modes for CPA, not two capabilities:**
+    *   **Runner-direct mode** — CPA calls runners straight, no delegation, no relay dependency.
+        This is what bootstrap *is* (nothing to delegate to yet) and it's also what "emergency
+        fix Buzz" is (if Buzz is down, delegation isn't available either). Same capability, two
+        triggers.
+    *   **Delegation mode** — relay is up, real peer agents exist, CPA orchestrates by asking
+        agents to do things instead of calling runners itself. Steady-state, and what Chunk 3's
+        onboarding pattern assumes.
+
+*   **Chunk 2's actual job is proving the transition from runner-direct → delegation mode**,
+    not just "relay is up."
+
+*   **The provisioning agent is the vehicle for that proof**, not a synthetic one. CPA uses the
+    provisioning runner (e.g. `@proxmox` or `@vultr`, whichever target) runner-direct for
+    bootstrap, then — once the relay is live — talks to that same capability as a real
+    relay-addressable peer agent. One concrete thing proves both modes.
+
+*   **Provisioning logic is owned by the expert (agent/runner), not CPA.** CPA doesn't know
+    Proxmox/Vultr internals; it asks.
+
+*   **Identity porting happens here.** Chunk 1's standalone keypairs + local registry get
+    ported onto real Nostr relay membership (per Chunk 1's own locked decision: "Ports onto
+    relay membership in Chunk 2"). Precise scope of the port: the KEYS are already real Nostr
+    keypairs — the stand-in is the LOCAL REGISTRY (grants + runners in local state.json). The
+    port moves membership/grants/memory/audit onto relay events.
+
+*   **Delegation wire contract is relay events in the POC:** agents exchange rooms/DMs on the
+    relay; a request and its result are correlated by event references (reply/quote). Pull-style
+    like exec streaming; push later. No second HTTP surface for agent↔agent in Chunk 2.
+
+*   **POC agents run scripted** (buzz-acp harness). "Real relay peer agent" means a
+    relay-addressable identity running the harness — NOT a real reasoning agent (POC remains
+    pre-reasoning; the proven wire + delegation shape is the point).
+
+*   **No local-machine dev loop.** VPS and Proxmox are the two real targets, matching the
+    existing promote flow (VPS smoke → old-laptop Proxmox test → home).
+
+## Goal (one sentence)
+
+Prove the mode transition: CPA (`@freehold`) provisions a target runner-direct, stands up Buzz
++ CP on it, ports Chunk 1's identity model onto real relay membership, and then delegates its
+first real task to a now-relay-addressable peer agent — instead of calling a runner directly.
+
+## Demo that defines done
+
+CPA (runner-direct) provisions an LXC/VPS → deploys Buzz relay onto it → deploys CP onto the
+same target (OPERATE mode) → CP joins the relay as a member → Chunk 1's runners (SSH/Vultr/B2)
+get re-registered under real Nostr identities on the relay instead of the local stand-in
+registry → a user talks to `@freehold` in Buzz (room/DM) and asks it to do something involving
+the provisioning capability → CPA delegates that ask to the provisioning agent (now a relay
+peer) instead of calling the runner itself → result comes back through Buzz.
+
+---
+
+## Ordered steps
+
+### Phase A — Bootstrap provisioning (runner-direct, pre-relay)
+
+- [ ] [ ]
+
+A1. Confirm/choose the primary target type for this chunk's build+test pass — VPS first for
+iteration speed, matching the existing promote flow, then validated against old-laptop Proxmox.
+
+- [ ] [ ]
+
+A2. CPA (still scripted/orchestrator, no real reasoning yet) calls the relevant provisioning
+runner **directly** — no agent fabric exists yet — to stand up the target. Capabilities:
+`vultr create/destroy` via the EXISTING vultr runner (VPS); for Proxmox, the EXISTING ssh
+runner drives `pvesh`/`pct` on the laptop host (generic exec — the agent writes the commands;
+no new Proxmox connector is built).
+
+- [ ] [ ]
+
+A3. Verify target reachable (SSH/API) before proceeding — the same self-check pattern as
+Chunk 1's runner readiness, applied to the freshly provisioned box.
+
+### Phase B — Deploy the Buzz relay
+
+- [ ] [ ]
+
+B1. Install the self-hosted Nostr relay stack onto the target (Postgres, Redis, S3/MinIO
+backend per the Architecture doc), driven by the provisioning runner's exec.
+
+- [ ] [ ]
+
+B2. Confirm relay is reachable and healthy (its own self-check, distinct from CP readiness).
+
+- [ ] [ ]
+
+B3. This relay becomes the control plane's ONE scope going forward (relay-as-scope).
+
+### Phase C — Deploy the control plane onto the same target
+
+- [ ] [ ]
+
+C1. Deploy CP app onto the same target, now running in **OPERATE mode** instead of localhost
+(Chunk 1 was effectively local/BOOTSTRAP-adjacent).
+
+- [ ] [ ]
+
+C2. CP self-adds as a member of the relay it just helped create ("bootstrap is self-scoping:
+the CP adds itself as a member").
+
+- [ ] [ ]
+
+C3. Verify CP's local web UI is now served from the deployed target, not localhost.
+
+- [ ] [ ]
+
+C4. Decide the console's data source post-port: the RELAY is authoritative for
+membership/grants; local state becomes a cache mirror (readable offline, write-through). State
+this in the console code, not implicitly.
+
+### Phase D — Port identity onto real relay membership
+
+- [ ] [ ]
+
+D1. Define the relay event kinds for the port: membership (who is in the scope), grants
+(agent↔runner, membership-derived), memory (agent state that persists across runs), and
+audit. Schema is part of this item — the event kinds are the new contract.
+
+- [ ] [ ]
+
+D2. Re-register Chunk 1's three runners (SSH/Vultr/B2) under real Nostr identities on the
+relay, replacing the local-registry stand-in.
+
+- [ ] [ ]
+
+D3. Master agent (`@freehold`) gets a real identity in the relay; memory becomes relay-persisted
+(relay event store) instead of local/ephemeral.
+
+- [ ] [ ]
+
+D4. Grants are re-pointed from the local whitelist to **membership-derived** validity: being a
+relay member of the scope is what makes a pubkey callable. The whitelist pubkeys were already
+real Nostr keys — the change is that validity now derives from relay membership.
+
+- [ ] [ ]
+
+D5. **Audit moves to the relay** (per the locked model: the runner signs a Nostr event for
+every executed command into the relay). Chunk 1's local audit.log is replaced by relay events;
+the acceptance script's G3.1 check adapts to read them.
+
+### Phase E — Prove delegation mode
+
+- [ ] [ ]
+
+E1. Promote the provisioning capability used in Phase A (e.g. `@proxmox` or `@vultr`) from
+"runner CPA calls directly" to a real relay-addressable peer agent — a relay identity running
+the scripted harness (buzz-acp), NOT a reasoning agent.
+
+- [ ] [ ]
+
+E2. CPA (`@freehold`), now relay-connected, delegates a provisioning-flavored ask to that agent
+over relay events (request event → reply event, correlated) instead of calling the runner
+itself — the actual mode-transition proof, not a new capability.
+
+- [ ] [ ]
+
+E3. Confirm the result flows back through the agent, not a direct runner response — this is
+what distinguishes delegation mode from Phase A's runner-direct call.
+
+### Phase F — Buzz as the interaction surface
+
+- [ ] [ ]
+
+F1. User can open a room/DM with `@freehold` in Buzz (not the local script from Chunk 1).
+
+- [ ] [ ]
+
+F2. User asks `@freehold` (via Buzz) to do the Phase E task; verify it triggers delegation to
+the peer agent rather than a local script call.
+
+- [ ] [ ]
+
+F3. Confirm memory persists across a restart of the CP process (proving relay-persisted
+memory, not in-process state).
+
+### Phase G — Acceptance script
+
+- [ ] [ ]
+
+G1. Fresh run: provision target → relay up → CP up on same target → CP is a relay member.
+
+- [ ] [ ]
+
+G2. Chunk 1's three connectors (SSH/Vultr/B2) still work, now under real relay identities.
+
+- [ ] [ ]
+
+G3. A real delegation happens at least once (CPA → peer agent, not CPA → runner directly) and
+is demonstrably distinct from bootstrap's runner-direct calls.
+
+- [ ] [ ]
+
+G4. User can talk to `@freehold` via Buzz room/DM and get the delegated result back.
+
+- [ ] [ ]
+
+G5. Memory persists across a CP restart.
+
+- [ ] [ ]
+
+G6. Chunk 1's security invariants still hold under the deployed/relay regime: a non-member
+pubkey is denied (fail-closed, now membership-derived), runners hold ciphertext-only + their
+own injected key, no master key anywhere. The port must not silently weaken the security story.
+
+### Phase H — Test / promote
+
+- [ ] [ ]
+
+H1. Build/iterate against VPS first (fast, disposable, matches dev/smoke pattern).
+
+- [ ] [ ]
+
+H2. Validate the same flow against old-laptop Proxmox — LXC provisioning via the ssh runner
+driving `pvesh`/`pct` (no new connector) — proving bootstrap isn't VPS-only, without yet
+building the general Chunk-6 provisioner picker.
+
+- [ ] [ ]
+
+H3. Do **not** promote to home dogfood yet — Chunk 3 (skill framework + real expert agents) is
+the more meaningful dogfood milestone; Chunk 2 is infrastructure-proving.
+
+---
+
+## Open items carried forward (not blocking, but worth tracking)
+
+*   Whether "emergency fix Buzz" as a CPA capability gets exercised/tested in Chunk 2, or just
+    architecturally reserved for later — Chunk 2 doesn't need to break Buzz on purpose to prove
+    runner-direct fallback still works, but it's worth a mental note that the capability should
+    still be *possible* post-Chunk-2.
+*   Chunk 6 will need to generalize Phase A's single-target bootstrap into the real "pick a
+    provisioner" picker (VPS vs Proxmox vs Incus) — Chunk 2 deliberately hardcodes one path per
+    target type, same way Chunk 1 hardcoded a scripted orchestrator instead of real reasoning.
+*   **Existing relay onboarding** (a user's own Buzz relay becomes a service via a relay
+    runner, per the architecture's locked model) is Roadmap-Chunk-3 work — consciously deferred
+    here, not omitted.
+*   **Agent naming in the relay** — `@freehold` is the CPA; peer experts are `@<service>`.
+    Naming/mention conventions beyond that land with Chunk 3's fabric work.
