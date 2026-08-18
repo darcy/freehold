@@ -52,6 +52,25 @@ provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessar
     relay-agnostic. The only new surface in attach mode is a liveness +
     membership-feasibility check before proceeding.
 
+*   **The DOMAIN is the identity — never the IP.** Buzz resolves the community from the
+    REQUEST HOST (row-zero host binding; an unmapped host is REFUSED — BUZZ_SURFACE §9.8).
+    Bootstrap therefore REQUIRES `--domain` with a BLOCKING gate (Phase A4): create the
+    target → IP known → print the resolver hint (LAN DNS, or `/etc/hosts` for the POC) →
+    poll until the domain resolves to that IP → only then write `BUZZ_DOMAIN`/`relay_url`
+    = `<domain>` and continue. The domain is permanent; the resolver is swappable (real
+    DNS later). The current IP-anchored community is DISPOSABLE and is re-provisioned
+    under the domain at the fresh-run re-test.
+
+*   **TLS = the domain cert.** Default: a LOCAL CA cert issued for the domain (a LAN-only
+    box has no Let's Encrypt path). When the operator provides a DNS provider API key: LE
+    via DNS-01 (works behind NAT). `wss://` (and `https://` for the console) everywhere
+    once the domain is live.
+
+*   **One operator pubkey at bootstrap.** `--operator-pubkey` (supersedes
+    `--installer-pubkey`): relay invite on create-new, membership/auth anchor on
+    attach-existing, and the console's INITIAL admin whitelist entry (C3.5). Fail-closed:
+    nobody is an operator or console admin until it is provided.
+
 *   **The provisioning capability is the vehicle for that proof — DUPLICATED, not promoted.**
     The local provisioning expert boots the target + relay runner-direct. Once the relay is
     live, a NEW, separately-provisioned runner identity is minted INSIDE the relay for a NEW
@@ -148,6 +167,14 @@ A2. The **local provisioning expert** (the orchestrator's bootstrap mode — a n
 A3. Verify target reachable (SSH/API) before proceeding — the same self-check pattern as
 Chunk 1's runner readiness, applied to the freshly provisioned box.
 
+- [ ] [ ]
+
+A4. **Domain gate (blocking).** Require `--domain`. After the target is up with an IP,
+    print the IP + the domain + the resolver hint ("map <domain> → <IP> in LAN DNS, or
+    /etc/hosts for the POC") and POLL until the domain resolves to that IP (bounded
+    retry). The install does NOT proceed until the resolver is tied to it — the domain,
+    not the IP, becomes the community's identity from event zero.
+
 ### Phase B — Deploy the Buzz relay
 
 - [x] [x]
@@ -168,6 +195,13 @@ backend per the Architecture doc), driven by the provisioning runner's exec.
 - [x] [x]
 
 B2. Confirm relay is reachable and healthy (its own self-check, distinct from CP readiness).
+
+- [ ] [ ]
+
+B2b. **TLS on the domain.** Issue the domain cert (local CA by default; LE DNS-01 when a
+     DNS provider key is given); write `BUZZ_DOMAIN`/`relay_url` = `https://<domain>`
+     (`wss://`); the relay serves TLS with the domain cert, and refuses non-domain hosts
+     (the strict host map is a feature).
 
 - [x] [x]
 
@@ -201,6 +235,19 @@ loopback tunnel: `curl` on the box's own 127.0.0.1 works; a remote attempt at th
 address is refused. **The CP refuses to bind a non-loopback address without an authn/TLS
 story** — the guard is part of this item. Console authentication + TLS for real non-loopback
 exposure is a named security-hardening follow-up (ARCHITECTURE Future items), NOT in this
+
+- [ ] [ ]
+
+C3.5. **Console authentication (NIP-98 operator login).** The bootstrap seeds the ADMIN
+      whitelist with `--operator-pubkey`. Login: server issues a challenge `{nonce, ts}`
+      (60s freshness) → the operator signs it with their nsec → the server verifies the
+      signature, strips the pubkey, checks it is in the admin whitelist → issues a session
+      cookie (httponly, SameSite=Strict, Secure once TLS is up). Every `/api/*` call
+      requires the session; Origin-check + login rate-limit. The bind guard becomes
+      AUTHN-CONDITIONAL: authn + admin whitelist configured → the console may bind the LAN
+      (reachable over the network with operator auth); otherwise the loopback-only refusal
+      (C3) stays byte-for-byte. TLS (the domain cert) removes the need for ip-binding and
+      short-TTL session gymnastics.
 chunk.
 
 - [x] [ ]
@@ -337,8 +384,10 @@ dev loop is introduced by adding fixtures.
 
 - [ ] [ ]
 
-H1. Fresh run (create-new): provision target → relay up → CP up on same target → CP is a
-    relay member. PLUS attach-existing run: point the CP at a pre-existing relay (skip
+H1. Fresh run (create-new): provision target → relay up (TLS on the DOMAIN, `wss://`,
+    non-domain hosts refused) → CP up on ITS own LXC → CP is a relay member. The A4
+    domain gate is asserted (install never proceeds without the domain resolving to the
+    target IP). PLUS attach-existing run: point the CP at a pre-existing relay (skip
     creation) → CP is a member, same acceptance.
 
 - [ ] [ ]

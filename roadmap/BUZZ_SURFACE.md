@@ -181,3 +181,22 @@ unfiltered and filters by author/id client-side. Result: CPA -> relay -> peer ->
 
 - `github.com/block/buzz` — README, `ARCHITECTURE.md`, `crates/buzz-core/src/kind.rs`,
   `crates/buzz-acp/README.md`, `deploy/compose/README.md` (all `main`, 2026-08-17).
+
+
+## 9.8 Domain is identity — tenant host binding (found in source, Phase B)
+
+The community is resolved from the REQUEST HOST, not from a config knob alone:
+
+- `buzz-relay/src/tenant.rs` ("Row-zero host binding"): `req.community = resolve_host(connection.host)`
+  through a DB mapping (`Db::resolve_host`); `normalize_host` canonicalizes; an UNMAPPED host
+  is a non-success (restricted/refused), never a silent accept.
+- `CommunityLabel` is a UUID; the tenant context carries `.host()`; community-provisioning and
+  host binding land in `handlers/community_provisioning.rs`.
+- Media URLs are built from `config.relay_url + tenant.host()` — the canonical URL config
+  anchors the domain; the request host must match.
+
+Consequence (POC): an IP-hosted community IS IP-identity. Bootstrap must force a domain from
+event zero (A4 gate) and clients must connect by the domain — the strict host map then
+REFUSES IP connects, which is the desired enforcement. The first live deploy was IP-anchored
+(ws://192.168.30.248:3000) and is treated as disposable: killed + re-provisioned under a
+domain at the fresh-run re-test.

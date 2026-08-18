@@ -62,6 +62,14 @@ NO buzz ingest patch is planned: the relay-grants mode stays dormant/
 hermetic, and grants operate via the shipped-package flow (web UI + CP
 CLI). A real Vultr token is still needed for the VPS leg.
 Work ships via branches, pending a GitHub outage before the PR/review cycle.
+Post-review corrections (locked): the CP deploys to its OWN LXC and ATTACHES to the
+relay (Buzz = substrate, co-location never assumed; naming: the PVE host vs the local
+workstation). Bootstrap REQUIRES a domain (identity) with a blocking resolution gate
+(A4); TLS = local CA on the domain by default, LE DNS-01 with a provider key; console
+auth = NIP-98 operator login, admin seeded by --operator-pubkey; the bind guard becomes
+authn-conditional. The live IP-anchored relay community is disposable: the re-test kills
+it and bootstraps fresh under a domain.
+
 
 ## Navigation
 
