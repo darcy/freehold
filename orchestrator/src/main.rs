@@ -323,8 +323,9 @@ struct BootstrapArgs {
     /// Vultr region (vultr-vps)
     #[arg(long, default_value = "atl")]
     region: String,
-    /// Vultr plan (vultr-vps)
-    #[arg(long, default_value = "vhf-1c-1gb")]
+    /// Vultr plan (vultr-vps). vc2-1c-1gb is the universally-sold entry
+    /// plan — the old default vhf-1c-1gb 400s in many regions (seen live).
+    #[arg(long, default_value = "vc2-1c-1gb")]
     plan: String,
     /// Vultr OS id (vultr-vps; Debian 12 = 1743)
     #[arg(long, default_value_t = 1743)]
