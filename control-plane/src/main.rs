@@ -140,6 +140,11 @@ struct ServeArgs {
     /// empty => the loopback-only posture (C3) holds.
     #[arg(long)]
     admin_pubkeys: Option<String>,
+    /// The console's PUBLIC host (e.g. cp-freehold.example) when fronted by
+    /// a proxy — the DNS-rebinding guard also allows this origin so the UI
+    /// works over the domain.
+    #[arg(long)]
+    public_origin: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -352,7 +357,7 @@ async fn main() -> Result<()> {
             let console = Console::load_or_create(&args.state_dir)?;
             tracing::info!(pubkey = %console.pubkey(), "console agent ready");
             let addr = args.addr;
-            let app = web::router(Arc::new(store), console, auth);
+            let app = web::router(Arc::new(store), console, auth, args.public_origin.clone());
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             tracing::info!(%addr, "control plane console listening");
             axum::serve(listener, app)

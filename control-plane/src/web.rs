@@ -68,6 +68,10 @@ struct WebState {
     /// Operator auth; None = the loopback-only posture (C3) — every /api
     /// route stays open on loopback. Some = NIP-98 login is required.
     auth: Option<Arc<Auth>>,
+    /// The console's PUBLIC origin (host, e.g. cp-freehold.example) when it
+    /// is fronted by a proxy — the DNS-rebinding guard ALSO allows this
+    /// origin so the browser UI works over the domain (C3.5).
+    public_origin: Option<String>,
 }
 /// Operator auth. Present ONLY when an admin whitelist is configured (the
 /// bootstrap seeds it with --operator-pubkey). Absent => the loopback-only
@@ -270,7 +274,12 @@ async fn login(State(state): State<WebState>, Json(req): Json<LoginRequest>) -> 
     resp
 }
 
-pub fn router(store: Arc<StateStore>, console: Console, auth: Option<Arc<Auth>>) -> Router {
+pub fn router(
+    store: Arc<StateStore>,
+    console: Console,
+    auth: Option<Arc<Auth>>,
+    public_origin: Option<String>,
+) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
@@ -288,6 +297,7 @@ pub fn router(store: Arc<StateStore>, console: Console, auth: Option<Arc<Auth>>)
             store,
             console,
             auth,
+            public_origin,
         })
 }
 
@@ -298,7 +308,7 @@ pub fn router(store: Arc<StateStore>, console: Console, auth: Option<Arc<Auth>>)
 /// DNS-rebinding guard: a page hosted anywhere else must not be able to drive
 /// this loopback console. A missing Origin (curl, hand-rolled clients) is
 /// allowed; a PRESENT non-loopback Origin is refused.
-fn check_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
+fn check_origin(headers: &HeaderMap, public_origin: Option<&str>) -> Result<(), Box<Response>> {
     let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
         return Ok(());
     };
@@ -322,6 +332,18 @@ fn check_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
     };
     if LOOPBACK_HOSTS.contains(&host.as_str()) {
         return Ok(());
+    }
+    // C3.5: the operator's configured public domain (fronted by a proxy) is
+    // a legitimate origin for the UI — anyone else is still refused.
+    if let Some(pub_host) = public_origin {
+        let pub_host = match pub_host.rsplit_once("://") {
+            Some((_, h)) => h,
+            None => pub_host,
+        };
+        let pub_host = pub_host.split(':').next().unwrap_or(pub_host);
+        if host == pub_host {
+            return Ok(());
+        }
     }
     Err(Box::new(
         (
@@ -463,7 +485,7 @@ async fn overview(
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     require_session(&state, &headers).map_err(|b| *b)?;
-    check_origin(&headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     let snapshot = state.store.snapshot();
     let console_pk = state.console.pubkey();
 
@@ -548,7 +570,7 @@ async fn provision(
     Json(req): Json<ProvisionReq>,
 ) -> Result<Json<Value>, Response> {
     require_session(&state, &headers).map_err(|b| *b)?;
-    check_origin(&headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     // The console grants ITSELF: the UI can only ever ask the runner what the
     // operator can also ask from the CLI. The runner still fails closed for
     // every pubkey NOT on the list.
@@ -592,7 +614,7 @@ async fn rotate(
     Json(req): Json<SecretReq>,
 ) -> Result<Json<Value>, Response> {
     require_session(&state, &headers).map_err(|b| *b)?;
-    check_origin(&headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     let secret = Zeroizing::new(req.secret);
     provisioner::rotate_secret(&state.store, &req.name, secret.as_bytes())
         .map_err(|e| action_error(e).into_response())?;
@@ -610,7 +632,7 @@ async fn revoke(
     Json(req): Json<NameReq>,
 ) -> Result<Json<Value>, Response> {
     require_session(&state, &headers).map_err(|b| *b)?;
-    check_origin(&headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     provisioner::revoke_runner(&state.store, &req.name)
         .map_err(|e| action_error(e).into_response())?;
     Ok(Json(json!({"ok": true, "name": req.name})))
@@ -628,7 +650,7 @@ async fn grant(
     Json(req): Json<GrantReq>,
 ) -> Result<Json<Value>, Response> {
     require_session(&state, &headers).map_err(|b| *b)?;
-    check_origin(&headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     let grants = provisioner::grant_agent(&state.store, &req.name, &req.pubkey)
         .map_err(|e| action_error(e).into_response())?;
     Ok(Json(
@@ -642,7 +664,7 @@ async fn revoke_grant(
     Json(req): Json<GrantReq>,
 ) -> Result<Json<Value>, Response> {
     require_session(&state, &headers).map_err(|b| *b)?;
-    check_origin(&headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     let grants = provisioner::revoke_grant(&state.store, &req.name, &req.pubkey)
         .map_err(|e| action_error(e).into_response())?;
     Ok(Json(
@@ -662,7 +684,7 @@ async fn runner_addr(
     Json(req): Json<AddrReq>,
 ) -> Result<Json<Value>, Response> {
     require_session(&state, &headers).map_err(|b| *b)?;
-    check_origin(&headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     state
         .store
         .set_runner_mcp_addr(&req.name, Some(req.addr))
@@ -867,6 +889,42 @@ $("#provision-form").onsubmit = async (ev) => {
 
 refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
 </script>
+<div id="login-overlay" style="display:none;position:fixed;inset:0;z-index:9;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
+  <div style="max-width:36rem;padding:2rem">
+    <h2>operator login required</h2>
+    <p class="muted">This console is authenticated (NIP-98). Log in with your own key — the nsec never touches this box:</p>
+    <pre id="login-cmd"></pre>
+    <p class="muted">…then paste the full printed cookie line below:</p>
+    <input id="login-cookie" placeholder="fh_session=…; Path=/; HttpOnly; SameSite=Strict" style="width:100%;box-sizing:border-box">
+    <button id="login-submit" style="margin-top:.6rem">log in</button>
+    <div id="login-err" class="muted"></div>
+  </div>
+</div>
+<script>
+(async function () {
+  try {
+    await api("/api/overview");
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (msg.includes("401") || msg.includes("unauthenticated")) {
+      document.getElementById("login-overlay").style.display = "flex";
+      document.getElementById("login-overlay").style["align-items"] = "center";
+      document.getElementById("login-overlay").style["justify-content"] = "center";
+      document.getElementById("login-cmd").textContent =
+        "freehold console-login --url " + location.origin + " --nsec <YOUR_64_HEX_NSEC>";
+      document.getElementById("login-submit").onclick = () => {
+        const v = document.getElementById("login-cookie").value.trim();
+        const token = v.startsWith("fh_session=")
+          ? v.slice("fh_session=".length).split(";")[0].trim()
+          : v;
+        if (!token) { document.getElementById("login-err").textContent = "paste the cookie first"; return; }
+        document.cookie = "fh_session=" + token + "; Path=/; SameSite=Strict";
+        location.reload();
+      };
+    }
+  }
+})();
+</script>
 </body>
 </html>"##;
 
@@ -897,7 +955,7 @@ mod auth_tests {
         let dir = tempdir().unwrap();
         let store = StateStore::open(dir.path()).unwrap();
         let console = crate::console::Console::load_or_create(dir.path()).unwrap();
-        let app = router(Arc::new(store), console, auth);
+        let app = router(Arc::new(store), console, auth, None);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1060,6 +1118,21 @@ mod auth_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 401, "garbage signature is rejected");
+    }
+
+    #[test]
+    fn public_origin_allowed_in_guard() {
+        let mut h = HeaderMap::new();
+        h.insert("origin", "https://cp-freehold.example".parse().unwrap());
+        assert!(check_origin(&h, Some("cp-freehold.example")).is_ok());
+        assert!(
+            check_origin(&h, None).is_err(),
+            "no public origin => refused"
+        );
+        h.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(check_origin(&h, Some("cp-freehold.example")).is_err());
+        // scheme-stripped host input (deploy-cp passes a bare host)
+        assert!(check_origin(&h, Some("cp-freehold.example:8443")).is_err());
     }
 
     #[test]

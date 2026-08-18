@@ -176,7 +176,7 @@ async fn boot_console(
     console: Console,
 ) -> (String, tokio::task::JoinHandle<()>) {
     // auth=None: the acceptance harness exercises the loopback posture.
-    let app = web::router(store, console, None);
+    let app = web::router(store, console, None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
