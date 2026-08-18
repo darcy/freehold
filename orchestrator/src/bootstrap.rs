@@ -76,6 +76,9 @@ pub struct BootstrapResult {
     pub kind: TargetKind,
     pub id: String,
     pub name: String,
+    /// The target's first global IPv4, when the driver can learn it (the
+    /// A4 domain gate requires it so the DOMAIN — never the IP — is verified).
+    pub ip: Option<String>,
     pub detail: String,
 }
 
@@ -344,10 +347,30 @@ pub async fn bootstrap_proxmox_lxc(
     // docker + compose BEFORE Phase B's deploy gate runs.
     ensure_guest_docker(client, target, vmid).await?;
 
+    // A4 support — the domain gate needs the guest's IP so the install can
+    // require the DOMAIN to resolve to it (the IP is never the identity).
+    // `pct exec <vmid> -- ip -4 -o addr` needs no shell quoting.
+    let ip = exec(
+        client,
+        target,
+        &format!("pct exec {vmid} -- ip -4 -o addr"),
+        60,
+    )
+    .map(|out| {
+        out.stdout
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find(|w| w[0] == "inet" && !w[1].starts_with("127."))
+            .and_then(|w| w[1].split('/').next().map(str::to_owned))
+    })
+    .unwrap_or(None);
+
     Ok(BootstrapResult {
         kind: TargetKind::ProxmoxLxc,
         id: vmid.to_string(),
         name: spec.hostname.clone(),
+        ip,
         detail: format!(
             "lxc {vmid} ({hostname}) created from {tpl} on {storage} ({rootfs_gb}G rootfs), \
              started, and the guest verified via `pct exec` (kernel {kernel}); \
@@ -587,6 +610,7 @@ pub async fn bootstrap_vultr_vps(
     let mut detail: Option<String> = None;
     let mut verified = false;
     let mut poll_err: Option<String> = None;
+    let mut main_ip = String::new();
     'poll: for _ in 0..60 {
         let poll = format!(
             "curl -sS \"{env_url}/v2/instances/{id}\" -H \"Authorization: Bearer {env_cred}\"",
@@ -601,6 +625,9 @@ pub async fn bootstrap_vultr_vps(
             let instance = &status["instance"];
             let state = instance["status"].as_str().unwrap_or("");
             let ip = instance["main_ip"].as_str().unwrap_or("");
+            if !ip.is_empty() && ip != "0.0.0.0" {
+                main_ip = ip.to_string();
+            }
             if state == "active" && !ip.is_empty() && ip != "0.0.0.0" {
                 detail = Some(format!(
                     "vultr instance {id} active; main_ip {ip}; label {}",
@@ -662,8 +689,53 @@ pub async fn bootstrap_vultr_vps(
         kind: TargetKind::VultrVps,
         id,
         name: spec.label.clone(),
+        ip: (!main_ip.is_empty()).then_some(main_ip),
         detail,
     })
+}
+
+/// A4 — the DOMAIN GATE (blocking): after the target is up, the install
+/// waits until `domain` resolves to `want_ip` (LAN DNS, or /etc/hosts for
+/// the POC). The domain is the community's identity (BUZZ_SURFACE §9.8);
+/// an IP-hosted community IS IP-identity, which is exactly what this gate
+/// prevents from ever happening.
+pub fn wait_for_domain_resolution(
+    domain: &str,
+    want_ip: &str,
+    wait_secs: u64,
+    mut resolve: impl FnMut(&str) -> Option<std::net::IpAddr>,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> Result<(), BootstrapError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    let hint = format!("map '{domain} {want_ip}' in your LAN DNS (or /etc/hosts for the POC)");
+    loop {
+        match resolve(domain) {
+            Some(ip) if ip.to_string() == want_ip => {
+                println!("DOMAIN-GATE: {domain} resolves to {want_ip} — continuing");
+                return Ok(());
+            }
+            Some(ip) => println!("DOMAIN-GATE: {domain} resolves to {ip}, want {want_ip} — {hint}"),
+            None => println!("DOMAIN-GATE: {domain} does not resolve yet — {hint}"),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(BootstrapError::Verify(format!(
+                "domain gate: {domain} never resolved to {want_ip} within {wait_secs}s — {hint}"
+            )));
+        }
+        sleep(std::time::Duration::from_secs(5));
+    }
+}
+
+/// Resolve a domain to its first address (honors the system resolver,
+/// including /etc/hosts).
+pub fn resolve_ip(domain: &str) -> Option<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    (domain, 0).to_socket_addrs().ok()?.map(|sa| sa.ip()).next()
+}
+
+/// A bare 64-hex Nostr pubkey (the kind the relay env expects).
+pub fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -704,5 +776,83 @@ mod tests {
             Some(vec![12, 7])
         );
         assert_eq!(template_version(""), None);
+    }
+}
+
+#[cfg(test)]
+mod domain_gate_tests {
+    use super::*;
+    use std::net::IpAddr;
+    use std::time::Duration;
+
+    fn no_sleep(_: Duration) {}
+    fn ip(s: &str) -> Option<IpAddr> {
+        s.parse().ok()
+    }
+
+    #[test]
+    fn first_hit_passes() {
+        let r = wait_for_domain_resolution(
+            "relay.example",
+            "10.0.0.5",
+            0,
+            |_| ip("10.0.0.5"),
+            no_sleep,
+        );
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    #[test]
+    fn hits_after_misses_passes() {
+        let mut n = 0;
+        let r = wait_for_domain_resolution(
+            "relay.example",
+            "10.0.0.5",
+            60,
+            |_| {
+                n += 1;
+                if n < 3 { None } else { ip("10.0.0.5") }
+            },
+            no_sleep,
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn never_resolves_fails_with_hint() {
+        let e = wait_for_domain_resolution("relay.example", "10.0.0.5", 0, |_| None, no_sleep)
+            .unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("relay.example"), "{msg}");
+        assert!(msg.contains("10.0.0.5"), "{msg}");
+        assert!(msg.contains("/etc/hosts"), "{msg}");
+    }
+
+    #[test]
+    fn wrong_ip_fails() {
+        let e = wait_for_domain_resolution(
+            "relay.example",
+            "10.0.0.5",
+            0,
+            |_| ip("10.0.0.9"),
+            no_sleep,
+        )
+        .unwrap_err();
+        assert!(msg_has(e, "10.0.0.5"));
+    }
+
+    fn msg_has(e: BootstrapError, needle: &str) -> bool {
+        e.to_string().contains(needle)
+    }
+
+    #[test]
+    fn hex64_validates() {
+        let good = "8b31e8f0aa563344fc148e5608c73b6415605aa03eeded3275d25715872a30d8";
+        assert!(is_hex64(good));
+        assert!(!is_hex64(&good[..63]));
+        assert!(!is_hex64(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        ));
     }
 }
