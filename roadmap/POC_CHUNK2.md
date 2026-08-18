@@ -260,7 +260,7 @@ G1. Fresh run: provision target → relay up → CP up on same target → CP is 
 
 G2. Chunk 1's three connectors (SSH/Vultr/B2) still work, now under real relay identities.
 
-- [ ] [ ]
+- [x] [ ]
 
 G3. A real delegation happens at least once (CPA → peer agent, not CPA → runner directly) and
 is demonstrably distinct from bootstrap's runner-direct calls.

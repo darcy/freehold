@@ -687,6 +687,26 @@ pub async fn run_checks() -> Vec<Check> {
         Err(e) => checks.push(Check::fail("G3.5", "rotation re-encrypts", e)),
     }
 
+    // G4 (Chunk 2) — the relay-backed identity story: grants read live from
+    // the relay (revoke lands without a restart), encrypted memory, audit
+    // published as kind-48001 (same bytes as the spool), and delegation
+    // CPA -> relay -> peer -> runner-direct -> relay -> CPA.
+    {
+        let g4_base = tempfile::tempdir().map_err(|e| e.to_string()).unwrap();
+        match g4_chunk2_relay(g4_base.path()).await {
+            Ok(detail) => checks.push(Check::pass(
+                "G4",
+                "chunk 2 relay story: grants/revoke-live, encrypted memory, relay audit, delegation",
+                detail,
+            )),
+            Err(e) => checks.push(Check::fail(
+                "G4",
+                "chunk 2 relay story: grants/revoke-live, encrypted memory, relay audit, delegation",
+                e,
+            )),
+        }
+    }
+
     web_server.abort();
     ssh_server.abort();
     vultr_server.abort();
@@ -917,6 +937,269 @@ async fn rotation_check(
     Ok("fresh ciphertext on rotate (new nonce); rotated_at stamped; package re-shipped; a restarted runner decrypts the NEW blob with its injected key".into())
 }
 
+/// Signed MCP tools/call via the runner URL (the helpers the relay-backed
+/// checks need); returns Ok(()) on a tool-level ok, Err with the denial text.
+fn mcp_call(
+    url: &str,
+    agent: &Identity,
+    runner_pk: &str,
+    name: &str,
+    arguments: Value,
+) -> Result<Value, String> {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments }
+    });
+    let raw = body.to_string();
+    let ts = auth::now_secs();
+    let ev = auth::sign_body(&agent.secret_seed(), runner_pk, ts, &raw);
+    let mut resp = ureq::post(url)
+        .header("Content-Type", "application/json")
+        .header(auth::PUBKEY_HEADER, agent.nostr_pubkey_hex())
+        .header(auth::SIG_HEADER, ev.sig)
+        .header(auth::TS_HEADER, ts)
+        .send(raw)
+        .map_err(|e| e.to_string())?;
+    let v: Value = resp
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("read: {e}"))?;
+    if let Some(err) = v.get("error") {
+        return Err(err["message"]
+            .as_str()
+            .unwrap_or("(no message)")
+            .to_string());
+    }
+    Ok(v)
+}
+
+async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
+    use freehold_testkit::relay as fake_relay;
+    let (relay_url, relay_state, relay_task) = fake_relay::spawn().await;
+
+    // A relay-backed runner with an SSH target (the in-process sshd).
+    let (sshd_addr, _sshd) = sshd::spawn_server(false).await;
+    let (_key, pem) = sshd::client_key_pem();
+    let runner_id = Identity::generate();
+    let runner_pk = runner_id.nostr_pubkey_hex();
+    let enc_bytes: [u8; 32] = hex::decode(runner_id.enc_pubkey_hex())
+        .map_err(|e| e.to_string())?
+        .try_into()
+        .map_err(|_| "enc pubkey len".to_string())?;
+    let sealed = hex::encode(
+        freehold_core::crypto::seal(&enc_bytes, b"proxmox-box", pem.as_bytes())
+            .map_err(|e| e.to_string())?,
+    );
+    let pkg_dir = base.join("runner");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    let pkg = SecretPackage {
+        secrets: std::collections::BTreeMap::from([("proxmox-box".to_string(), sealed)]),
+        targets: std::collections::BTreeMap::from([(
+            "proxmox-box".to_string(),
+            freehold_core::secrets::TargetMeta {
+                kind: "ssh".into(),
+                address: format!("testuser@127.0.0.1:{}", sshd_addr.port()),
+                secret: "proxmox-box".to_string(),
+            },
+        )]),
+        grants: vec![],
+    };
+    pkg.write_to_dir(&pkg_dir).map_err(|e| e.to_string())?;
+    runner_id
+        .write_to_dir(&pkg_dir)
+        .map_err(|e| e.to_string())?;
+
+    let console_secret = [11u8; 32];
+    let (console_pk, _i, _s) = freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "")
+        .map_err(|e| e.to_string())?;
+    let a = Identity::generate();
+    let b = Identity::generate();
+    let peer = Identity::generate();
+    let (ap, bp, peer_pk) = (
+        a.nostr_pubkey_hex(),
+        b.nostr_pubkey_hex(),
+        peer.nostr_pubkey_hex(),
+    );
+    fake_relay::publish_grants(
+        &relay_state,
+        &console_secret,
+        &runner_pk,
+        &[ap.clone(), bp.clone(), peer_pk.clone()],
+    );
+
+    let ctx = RunnerContext {
+        identity: runner_id,
+        package: pkg,
+        state_dir: pkg_dir.clone(),
+        relay_url: Some(relay_url.clone()),
+        grant_author: Some(console_pk),
+    };
+    let (addr, server) = mcp::serve("127.0.0.1:0", ctx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let url = format!("http://{addr}/mcp");
+    let exec_args = |cmd: &str| {
+        json!({
+            "cmd": cmd,
+            "target": "proxmox-box",
+            "secrets": ["proxmox-box"],
+            "timeout_s": 30,
+        })
+    };
+
+    // G4.1 — relay grants gate + live revoke WITHOUT a restart.
+    let x = Identity::generate();
+    mcp_call(&url, &a, &runner_pk, "exec", exec_args("echo g4a"))
+        .map_err(|e| format!("granted agent denied: {e}"))?;
+    mcp_call(&url, &b, &runner_pk, "exec", exec_args("echo g4b"))
+        .map_err(|e| format!("granted B denied: {e}"))?;
+    let denied = mcp_call(&url, &x, &runner_pk, "exec", exec_args("echo g4x"))
+        .err()
+        .ok_or("never-granted agent was allowed?!")?;
+    if !denied.contains("unauthorized") {
+        return Err(format!("denial unexpected: {denied}"));
+    }
+    // REVOKE B: publish a replaced (shrunk) list — the runner reads it live,
+    // so B is denied without any restart.
+    fake_relay::publish_grants(
+        &relay_state,
+        &console_secret,
+        &runner_pk,
+        &[ap.clone(), peer_pk.clone()],
+    );
+    mcp_call(&url, &b, &runner_pk, "exec", exec_args("echo g4b"))
+        .err()
+        .ok_or("B still granted after revoke?!")?;
+    mcp_call(&url, &a, &runner_pk, "exec", exec_args("echo g4a-again"))
+        .map_err(|e| format!("A lost after revoke: {e}"))?;
+
+    // G4.2 — encrypted memory on the relay (A's own). The canary is a LONG
+    // unique string: a short one can collide inside the NIP-44 base64
+    // (letters+digits both appear in the alphabet) — verified review finding.
+    let canary = "chunk2-memory-canary-9f7c1b4e";
+    freehold_core::relay_http::write_memory(&relay_url, &a.secret_seed(), "phase", canary)
+        .map_err(|e| e.to_string())?;
+    let mem = freehold_core::relay_http::read_memory(&relay_url, &a.secret_seed(), "phase")
+        .map_err(|e| e.to_string())?;
+    if mem.as_deref() != Some(canary) {
+        return Err(format!("memory roundtrip failed: {mem:?}"));
+    }
+    let stored = relay_state.events.lock().clone();
+    // Only the MEMORY (30174) events are checked — audit/request contents
+    // legitimately carry the g4 task names.
+    if stored.iter().any(|e| {
+        e["kind"].as_u64() == Some(30174)
+            && e["content"].as_str().is_some_and(|c| c.contains(canary))
+    }) {
+        return Err("memory plaintext leaked to the relay!".into());
+    }
+
+    // G4.3 — exec audit published (kind 48001, verified) AND spooled. The
+    // publish is DETACHED (spawn_blocking) — re-snapshot with a bounded poll
+    // so a slow runner doesn't produce a false red ("no audit event").
+    let mut audit_events: Vec<Value> = Vec::new();
+    // The publish is DETACHED — re-snapshot the LIVE relay state each try
+    // (a static pre-loop snapshot would make the poll vacuous, review
+    // caught).
+    for _ in 0..10 {
+        audit_events = relay_state
+            .events
+            .lock()
+            .iter()
+            .filter(|e| e["kind"].as_u64() == Some(48001))
+            .cloned()
+            .collect();
+        if !audit_events.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let ev = audit_events
+        .last()
+        .ok_or("no audit event reached the relay")?;
+    let tags: Vec<Vec<String>> = serde_json::from_value(ev["tags"].clone()).unwrap_or_default();
+    freehold_core::nip98::verify_event(
+        ev["pubkey"].as_str().unwrap(),
+        ev["created_at"].as_i64().unwrap(),
+        48001,
+        &tags,
+        ev["content"].as_str().unwrap(),
+        ev["sig"].as_str().unwrap(),
+    )
+    .map_err(|e| format!("relay audit event does not verify: {e}"))?;
+    let spool = std::fs::read_to_string(pkg_dir.join("audit.log")).map_err(|e| e.to_string())?;
+    if !spool.contains(ev["id"].as_str().unwrap()) {
+        return Err("spool and relay disagree on the audit event".into());
+    }
+
+    // G4.4 — DELEGATION over the relay: CPA (a) -> peer -> runner -> peer -> a.
+    let channel = "00000000-0000-4000-8000-00000000f0ee";
+    freehold_core::delegate::ensure_channel(
+        &relay_url,
+        &a.secret_seed(),
+        channel,
+        "freehold-auto-ops",
+    )
+    .map_err(|e| e.to_string())?;
+    let job_id = "g4-job-1".to_string();
+    let since = auth::now_secs();
+    freehold_core::delegate::post_message(
+        &relay_url,
+        &a.secret_seed(),
+        channel,
+        &peer_pk,
+        &freehold_core::delegate::request_content(&job_id, "echo delegated-g4"),
+    )
+    .map_err(|e| e.to_string())?;
+    let msgs = freehold_core::delegate::poll_stream_p(
+        &relay_url,
+        &peer.secret_seed(),
+        channel,
+        &peer_pk,
+        since,
+    )
+    .map_err(|e| e.to_string())?;
+    let req = freehold_core::delegate::parse_envelope(&msgs.first().ok_or("peer saw nothing")?.1)
+        .ok_or("bad request envelope")?;
+    let task = req.task.ok_or("no task")?;
+    let exec = mcp_call(&url, &peer, &runner_pk, "exec", exec_args(&task))
+        .map_err(|e| format!("peer exec failed: {e}"))?;
+    let out = exec["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    freehold_core::delegate::post_message(
+        &relay_url,
+        &peer.secret_seed(),
+        channel,
+        &a.nostr_pubkey_hex(),
+        &freehold_core::delegate::result_content(&job_id, out.contains("delegated-g4"), &out),
+    )
+    .map_err(|e| e.to_string())?;
+    let replies =
+        freehold_core::delegate::poll_stream(&relay_url, &a.secret_seed(), channel, since)
+            .map_err(|e| e.to_string())?;
+    let got = replies
+        .iter()
+        .filter(|(_, _, author)| *author == peer_pk)
+        .filter_map(|(_, c, _)| freehold_core::delegate::parse_envelope(c))
+        .find(|env| env.ty == freehold_core::delegate::JOB_RESULT && env.id == job_id)
+        .ok_or("CPA never received the delegated result")?;
+    if got.ok != Some(true) || !got.out.as_deref().unwrap_or("").contains("delegated-g4") {
+        return Err(format!("delegated result wrong: {got:?}"));
+    }
+
+    server.abort();
+    relay_task.abort();
+    Ok(
+        "relay grants gate + live revoke (B denied without restart); memory encrypted roundtrip; \
+        audit kind-48001 verifies + spools identically; delegation CPA->peer->runner->CPA ok"
+            .into(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,6 +1228,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        assert_eq!(checks.len(), 9, "nine checks: G1.1, G2.1-3, G3.1-5");
+        assert_eq!(checks.len(), 10, "nine chunk-1 checks + G4");
     }
 }
