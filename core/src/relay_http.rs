@@ -433,3 +433,30 @@ mod tests {
         assert!(parse_grants_content(r#"{"grants":["short"]}"#).is_err());
     }
 }
+
+/// Publish a profile (kind 0 metadata) for an identity so clients render a
+/// NAME instead of a bare hex pubkey. Replaceable per author (NIP-01:
+/// kind 0 is replaceable); the relay's roster stays authoritative for
+/// membership — this only gives the agents a face.
+pub fn publish_profile(
+    relay_url: &str,
+    secret: &[u8; 32],
+    name: &str,
+    about: &str,
+) -> Result<(), String> {
+    let ts = now_secs();
+    let content = serde_json::json!({ "name": name, "about": about, "display_name": name })
+        .to_string();
+    let (pubkey, id, sig) = crate::nip98::sign_event(secret, 0, ts, vec![], &content)
+        .map_err(|e| e.to_string())?;
+    let event = serde_json::json!({
+        "id": id,
+        "pubkey": pubkey,
+        "created_at": ts,
+        "kind": 0,
+        "tags": [],
+        "content": content,
+        "sig": sig,
+    });
+    publish_event_json(relay_url, secret, &event.to_string())
+}

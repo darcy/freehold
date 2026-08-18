@@ -44,6 +44,8 @@ enum Cmd {
     /// E: the peer agent — watches for delegated requests, execs them via
     /// the runner (runner-direct), posts the results
     DelegatePeer(DelegatePeerArgs),
+    /// Relay surface: publish a profile (kind 0) so clients show a name
+    RelayProfile(RelayProfileArgs),
 }
 
 #[derive(Args)]
@@ -196,6 +198,20 @@ struct DelegatePeerArgs {
     /// Poll interval seconds
     #[arg(long, default_value_t = 3)]
     interval: u64,
+}
+
+#[derive(Args)]
+struct RelayProfileArgs {
+    /// Identity dir (the agent whose profile this is)
+    #[arg(long)]
+    agent_dir: PathBuf,
+    #[arg(long)]
+    relay_url: String,
+    /// Display name (e.g. "freehold" for the CPA)
+    #[arg(long)]
+    name: String,
+    #[arg(long, default_value = "")]
+    about: String,
 }
 
 #[derive(Args)]
@@ -656,6 +672,25 @@ async fn main() -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(args.interval));
             }
             println!("DELEGATE-PEER: done");
+            Ok(())
+        }
+        Cmd::RelayProfile(args) => {
+            use freehold_core::identity::Identity;
+            let id = Identity::load(&args.agent_dir).with_context(|| {
+                format!("loading identity in {}", args.agent_dir.display())
+            })?;
+            freehold_core::relay_http::publish_profile(
+                &args.relay_url,
+                &id.secret_seed(),
+                &args.name,
+                &args.about,
+            )
+            .map_err(anyhow::Error::msg)?;
+            println!(
+                "PROFILE: {} is now {:?} on the relay",
+                &id.nostr_pubkey_hex()[..12],
+                args.name
+            );
             Ok(())
         }
         Cmd::Readiness(args) => {
