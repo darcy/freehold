@@ -165,7 +165,7 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
         "relay-box",
         &RelayDeploySpec {
             relay_name: "relay-box".into(),
-            deploy_dir: dir_s,
+            deploy_dir: dir_s.clone(),
             http_port: 3000,
             buzz_ref: DEFAULT_BUZZ_REF.into(),
             lxc: None,
@@ -235,7 +235,7 @@ async fn relay_deploy_lxc_mode_wraps_every_command_in_pct_exec() {
         "relay-box",
         &RelayDeploySpec {
             relay_name: "relay-box".into(),
-            deploy_dir: dir_s,
+            deploy_dir: dir_s.clone(),
             http_port: 3000,
             buzz_ref: DEFAULT_BUZZ_REF.into(),
             lxc: Some(100),
@@ -259,8 +259,9 @@ async fn relay_deploy_lxc_mode_wraps_every_command_in_pct_exec() {
     assert!(
         log.contains(
             "buzz-admin add-member --pubkey 1111111111111111111111111111111111111111111111111111111111111111"
-        ),
-        "the installer was invited: {log}"
+        )
+            && log.contains(&format!("cd {dir_s}/deploy/compose")),
+        "the installer invite went to the SAME compose dir as the deploy: {log}"
     );
 
     server.abort();
@@ -331,7 +332,7 @@ async fn relay_deploy_fails_when_unswept_placeholder_remains() {
         "relay-box",
         &RelayDeploySpec {
             relay_name: "relay-box".into(),
-            deploy_dir: dir_s,
+            deploy_dir: dir_s.clone(),
             http_port: 3000,
             buzz_ref: DEFAULT_BUZZ_REF.into(),
             lxc: None,

@@ -198,7 +198,8 @@ cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --name relayb
 cargo run -p freehold-orchestrator -- deploy-relay --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
   --target proxmox-box --name relay-box --http-port 3000 \
-  --owner-pubkey <64-hex-owner> --relay-url http://192.168.30.248:3000 [--lxc 100]
+  --owner-pubkey <64-hex-owner> --relay-url http://192.168.30.248:3000 [--lxc 100] \
+  --installer-pubkey <your-64-hex>   # invite the human operator once live
 # C1: deploy the control plane onto the box in OPERATE mode (loopback-only).
 # The box GENERATES its own identity (a keypair is never shipped — the
 # runner logs every exec verbatim); --binary is a local release build.

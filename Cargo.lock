@@ -1092,6 +1092,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
  "ureq",
  "zeroize",
 ]

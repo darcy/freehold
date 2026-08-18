@@ -135,6 +135,13 @@ pub async fn deploy_relay(
             spec.owner_pubkey
         )));
     }
+    if let Some(pk) = &spec.installer_pubkey
+        && (pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err(BootstrapError::Verify(format!(
+            "installer pubkey must be a 64-character hex Nostr pubkey (got {pk:?})"
+        )));
+    }
 
     check_docker(client, target, spec.lxc)?;
 
@@ -272,18 +279,26 @@ pub async fn deploy_relay(
 
     // Invite the INSTALLER: after the relay is up, make the human a member
     // (the acceptance's invite step — machines alone shouldn't own the
-    // community). Runs through the relay-admin runner; idempotent.
+    // community). Runs through the relay-admin runner at the SAME compose
+    // dir the bundle landed in (`spec.deploy_dir`). An already-invited
+    // member (buzz-admin exits non-zero on re-add) DEGRADES to a SURFACED
+    // warn — re-runs must never sink a healthy deploy at the final step.
     if let Some(installer) = &spec.installer_pubkey {
         crate::bootstrap::plain(installer)?;
-        let invite =
-            crate::relay_member::add_member_cmd("/srv/buzz-relay/deploy/compose", installer, None);
-        crate::bootstrap::exec_to_ok(
+        let invite_dir = format!("{}/deploy/compose", spec.deploy_dir);
+        let invite = crate::relay_member::add_member_cmd(&invite_dir, installer, None);
+        if let Err(e) = crate::bootstrap::exec_to_ok(
             client,
             target,
             &lxc_cmd(spec.lxc, &invite),
             "invite installer",
             120,
-        )?;
+        ) {
+            tracing::warn!(
+                error = %e,
+                "installer invite failed — the relay is up and the deploy stands"
+            );
+        }
     }
 
     // B3: the scope claim. Liveness is proven on the target's loopback; the
