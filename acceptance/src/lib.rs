@@ -1075,12 +1075,15 @@ async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
     mcp_call(&url, &a, &runner_pk, "exec", exec_args("echo g4a-again"))
         .map_err(|e| format!("A lost after revoke: {e}"))?;
 
-    // G4.2 — encrypted memory on the relay (A's own).
-    freehold_core::relay_http::write_memory(&relay_url, &a.secret_seed(), "phase", "g4")
+    // G4.2 — encrypted memory on the relay (A's own). The canary is a LONG
+    // unique string: a short one can collide inside the NIP-44 base64
+    // (letters+digits both appear in the alphabet) — verified review finding.
+    let canary = "chunk2-memory-canary-9f7c1b4e";
+    freehold_core::relay_http::write_memory(&relay_url, &a.secret_seed(), "phase", canary)
         .map_err(|e| e.to_string())?;
     let mem = freehold_core::relay_http::read_memory(&relay_url, &a.secret_seed(), "phase")
         .map_err(|e| e.to_string())?;
-    if mem.as_deref() != Some("g4") {
+    if mem.as_deref() != Some(canary) {
         return Err(format!("memory roundtrip failed: {mem:?}"));
     }
     let stored = relay_state.events.lock().clone();
@@ -1092,12 +1095,21 @@ async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
         return Err("memory plaintext leaked to the relay!".into());
     }
 
-    // G4.3 — exec audit published (kind 48001, verified) AND spooled.
-    let audit_events: Vec<Value> = stored
-        .iter()
-        .filter(|e| e["kind"].as_u64() == Some(48001))
-        .cloned()
-        .collect();
+    // G4.3 — exec audit published (kind 48001, verified) AND spooled. The
+    // publish is DETACHED (spawn_blocking) — re-snapshot with a bounded poll
+    // so a slow runner doesn't produce a false red ("no audit event").
+    let mut audit_events: Vec<Value> = Vec::new();
+    for _ in 0..10 {
+        audit_events = stored
+            .iter()
+            .filter(|e| e["kind"].as_u64() == Some(48001))
+            .cloned()
+            .collect();
+        if !audit_events.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let ev = audit_events
         .last()
         .ok_or("no audit event reached the relay")?;
