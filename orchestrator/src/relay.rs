@@ -298,9 +298,7 @@ pub async fn deploy_relay(
             // println/eprintln) — a tracing::warn would vanish, and a silent
             // invite failure would tell the operator they're a member when
             // they aren't. eprintln it for real.
-            eprintln!(
-                "WARN: installer invite failed — the relay is up and the deploy stands: {e}"
-            );
+            eprintln!("WARN: installer invite failed — the relay is up and the deploy stands: {e}");
         }
     }
 
