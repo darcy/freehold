@@ -515,10 +515,31 @@ async fn main() -> Result<()> {
                         }
                         None => Vec::new(),
                     },
+                    public_origin: {
+                        // Convention: the console's public host is
+                        // cp-<relay-host> when the relay runs behind a
+                        // domain; IP/LAN relays get no public origin.
+                        let host = args
+                            .relay_url
+                            .trim_start_matches("https://")
+                            .trim_start_matches("http://")
+                            .trim_end_matches('/');
+                        let is_domain =
+                            host.contains('.') && !host.chars().next().is_some_and(|c| c.is_ascii_digit());
+                        is_domain.then(|| format!("cp-{host}"))
+                    },
                 },
             )
             .await?;
             println!("CONTROL PLANE: {}", res.detail);
+            let cphost = args
+                .relay_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_end_matches('/');
+            if cphost.contains('.') && !cphost.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                println!("  console URL (convention): https://cp-{cphost}");
+            }
             Ok(())
         }
         Cmd::ConsoleLogin(args) => {

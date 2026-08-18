@@ -52,6 +52,9 @@ pub struct DeployCpSpec {
     /// wrapped in `pct exec`, so state + binary land inside the guest and the
     /// loopback console binds the GUEST's 127.0.0.1.
     pub lxc: Option<u32>,
+    /// The console's PUBLIC host (convention: cp-<relay-host>) when the relay
+    /// is fronted by a proxy — the DNS-rebinding guard also allows it.
+    pub public_origin: Option<String>,
 }
 
 #[derive(Debug)]
@@ -175,13 +178,19 @@ pub async fn deploy_cp(
     } else {
         format!(" --admin-pubkeys {}", spec.admin_pubkeys.join(","))
     };
+    let origin_flag = spec
+        .public_origin
+        .as_ref()
+        .map(|o| format!(" --public-origin {o}"))
+        .unwrap_or_default();
     let start = format!(
-        "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba}{admin_flag} \
+        "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba}{admin_flag}{origin_flag} \
          >> {sd}/serve.log 2>&1 < /dev/null & echo $! | tee {sd}/serve.pid",
         bd = spec.bin_dir,
         sd = spec.state_dir,
         ba = spec.bind_addr,
         admin_flag = admin_flag,
+        origin_flag = origin_flag,
     );
     let out = exec_to_ok(
         client,

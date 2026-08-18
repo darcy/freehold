@@ -754,6 +754,7 @@ async fn deploy_cp_ships_binary_starts_and_reads_fresh_pubkey() {
             relay_url: "http://relay-box:3000".into(),
             admin_pubkeys: vec![],
             lxc: None,
+            public_origin: None,
         },
     )
     .await
@@ -809,6 +810,7 @@ async fn deploy_cp_refuses_non_loopback_bind() {
             relay_url: "http://relay-box:3000".into(),
             admin_pubkeys: vec![],
             lxc: None,
+            public_origin: None,
         },
     )
     .await
@@ -863,6 +865,7 @@ async fn deploy_cp_with_admin_relaxes_loopback_guard() {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ],
             lxc: None,
+            public_origin: None,
         },
     )
     .await
@@ -1000,6 +1003,7 @@ async fn deploy_cp_lxc_mode_runs_every_remote_command_in_the_guest() {
         "proxmox-box",
         &deploy_cp::DeployCpSpec {
             lxc: Some(100),
+            public_origin: None,
             state_dir: sd.clone(),
             bin_dir: bd.clone(),
             bind_addr: "127.0.0.1:8080".into(),
