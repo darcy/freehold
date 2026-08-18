@@ -65,9 +65,10 @@ struct DeployRelayArgs {
     /// the PVE host / relay LXC)
     #[arg(long, default_value = "proxmox-box")]
     target: String,
-    /// Relay hostname (reported; the operator maps it to the box)
-    #[arg(long, default_value = "relay-box")]
-    name: String,
+    /// Relay hostname (reported; defaults to <normalized-domain>-relay
+    /// when --domain is given)
+    #[arg(long)]
+    name: Option<String>,
     /// Where the official compose bundle lands on the target
     #[arg(long, default_value = "/srv/buzz-relay")]
     deploy_dir: String,
@@ -287,9 +288,10 @@ struct BootstrapArgs {
     /// for proxmox-lxc, the vultr runner for vultr-vps)
     #[arg(long, default_value = "proxmox-box")]
     target: String,
-    /// LXC hostname (proxmox-lxc) / instance label (vultr-vps)
-    #[arg(long)]
-    name: String,
+    /// Role of this target: 'relay' or 'cp' — the LXC name is derived from
+    /// the domain: <normalized-domain>-relay / -cp (--name is gone).
+    #[arg(long, default_value = "relay")]
+    role: String,
     /// LXC vmid (proxmox-lxc; must be >= 100 when given; omitted = the
     /// driver picks the lowest free id via `pct list`)
     #[arg(long)]
@@ -477,7 +479,15 @@ async fn main() -> Result<()> {
                 &client,
                 &args.target,
                 &relay::RelayDeploySpec {
-                    relay_name: args.name.clone(),
+                    relay_name: args
+                        .name
+                        .clone()
+                        .or_else(|| {
+                            args.domain
+                                .as_deref()
+                                .and_then(|d| bootstrap::domain_lxc_name(d, "relay").ok())
+                        })
+                        .unwrap_or_else(|| "relay-box".to_string()),
                     deploy_dir: args.deploy_dir.clone(),
                     http_port: args.http_port,
                     buzz_ref: args.buzz_ref.clone(),
@@ -988,7 +998,8 @@ async fn main() -> Result<()> {
             let res = match args.kind.as_str() {
                 "proxmox-lxc" => {
                     let spec = bootstrap::ProxmoxLxcSpec {
-                        hostname: args.name.clone(),
+                        hostname: bootstrap::domain_lxc_name(&args.domain, &args.role)
+                            .map_err(anyhow::Error::msg)?,
                         vmid: args.vmid, // None = driver picks the lowest free >= 100
                         template: args.template.clone(),
                         storage: args.storage.clone(),
@@ -1000,7 +1011,8 @@ async fn main() -> Result<()> {
                 }
                 "vultr-vps" => {
                     let spec = bootstrap::VultrVpsSpec {
-                        label: args.name.clone(),
+                        label: bootstrap::domain_lxc_name(&args.domain, &args.role)
+                            .map_err(anyhow::Error::msg)?,
                         region: args.region.clone(),
                         plan: args.plan.clone(),
                         os_id: args.os_id,
