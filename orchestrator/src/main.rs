@@ -44,6 +44,14 @@ enum Cmd {
     /// E: the peer agent — watches for delegated requests, execs them via
     /// the runner (runner-direct), posts the results
     DelegatePeer(DelegatePeerArgs),
+    /// Relay surface: publish a profile (kind 0) so clients show a name
+    RelayProfile(RelayProfileArgs),
+    /// Relay surface: join a channel (kind 9021) — agents join #freehold
+    /// by default after a deploy
+    RelayJoin(RelayJoinArgs),
+    /// Relay surface: the bootstrap step — ensures the #freehold channel
+    /// exists (open, deterministic id) and joins every listed agent to it
+    RelaySetup(RelaySetupArgs),
 }
 
 #[derive(Args)]
@@ -196,6 +204,45 @@ struct DelegatePeerArgs {
     /// Poll interval seconds
     #[arg(long, default_value_t = 3)]
     interval: u64,
+}
+
+#[derive(Args)]
+struct RelayProfileArgs {
+    /// Identity dir (the agent whose profile this is)
+    #[arg(long)]
+    agent_dir: PathBuf,
+    #[arg(long)]
+    relay_url: String,
+    /// Display name (e.g. "freehold" for the CPA)
+    #[arg(long)]
+    name: String,
+    #[arg(long, default_value = "")]
+    about: String,
+}
+
+#[derive(Args)]
+struct RelayJoinArgs {
+    /// Identity dir (the agent joining)
+    #[arg(long)]
+    agent_dir: PathBuf,
+    #[arg(long)]
+    relay_url: String,
+    /// Channel id (uuid) — e.g. the #freehold channel
+    #[arg(long)]
+    channel: String,
+}
+
+#[derive(Args)]
+struct RelaySetupArgs {
+    #[arg(long)]
+    relay_url: String,
+    /// #freehold channel id (deterministic; clients render the NAME from
+    /// the channel metadata, so the id only needs to be stable)
+    #[arg(long, default_value = "00000000-0000-4000-8000-00000000f0ef")]
+    channel: String,
+    /// Comma-separated agent identity dirs to join (first = the creator/@freehold)
+    #[arg(long)]
+    agents: String,
 }
 
 #[derive(Args)]
@@ -656,6 +703,110 @@ async fn main() -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(args.interval));
             }
             println!("DELEGATE-PEER: done");
+            Ok(())
+        }
+        Cmd::RelayProfile(args) => {
+            use freehold_core::identity::Identity;
+            let id = Identity::load(&args.agent_dir)
+                .with_context(|| format!("loading identity in {}", args.agent_dir.display()))?;
+            freehold_core::relay_http::publish_profile(
+                &args.relay_url,
+                &id.secret_seed(),
+                &args.name,
+                &args.about,
+            )
+            .map_err(anyhow::Error::msg)?;
+            println!(
+                "PROFILE: {} is now {:?} on the relay",
+                &id.nostr_pubkey_hex()[..12],
+                args.name
+            );
+            Ok(())
+        }
+        Cmd::RelayJoin(args) => {
+            use freehold_core::identity::Identity;
+            let id = Identity::load(&args.agent_dir)
+                .with_context(|| format!("loading identity in {}", args.agent_dir.display()))?;
+            freehold_core::relay_http::join_channel(
+                &args.relay_url,
+                &id.secret_seed(),
+                &args.channel,
+            )
+            .map_err(anyhow::Error::msg)?;
+            println!(
+                "JOIN: {} joined channel {}",
+                &id.nostr_pubkey_hex()[..12],
+                args.channel
+            );
+            Ok(())
+        }
+        Cmd::RelaySetup(args) => {
+            use freehold_core::identity::Identity;
+            let dirs: Vec<PathBuf> = args
+                .agents
+                .split(',')
+                .map(|d| d.trim())
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+                .collect();
+            if dirs.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "--agents must list at least one identity dir"
+                ));
+            }
+            // Creator = the first agent (the CPA): ensures the OPEN
+            // #freehold channel exists (idempotent re-create).
+            let creator = Identity::load(&dirs[0])
+                .with_context(|| format!("loading {}", dirs[0].display()))?;
+            freehold_core::delegate::ensure_channel(
+                &args.relay_url,
+                &creator.secret_seed(),
+                &args.channel,
+                "freehold",
+            )
+            .map_err(anyhow::Error::msg)?;
+            // Join every agent (open channel: the relay lands them on the
+            // roster).
+            for dir in &dirs {
+                let id =
+                    Identity::load(dir).with_context(|| format!("loading {}", dir.display()))?;
+                freehold_core::relay_http::join_channel(
+                    &args.relay_url,
+                    &id.secret_seed(),
+                    &args.channel,
+                )
+                .map_err(anyhow::Error::msg)?;
+                println!("JOIN: {} -> #freehold", &id.nostr_pubkey_hex()[..12]);
+            }
+            // Greet as the CPA so the client shows content + authors —
+            // idempotent: one greeting per channel, re-runs don't spam.
+            let since = freehold_core::auth::now_secs() - 3600;
+            // UNFILTERED poll (the #p-filtered kind-9 query is documented as
+            // hanging for the CPA identity — BUZZ_SURFACE §9.7) and
+            // best-effort: a probe failure must never sink a setup whose
+            // channel + joins already succeeded.
+            let prior = freehold_core::delegate::poll_stream(
+                &args.relay_url,
+                &creator.secret_seed(),
+                &args.channel,
+                since,
+            )
+            .unwrap_or_default();
+            let already_greeted = prior.iter().any(|(_, c, _)| {
+                freehold_core::delegate::parse_envelope(c).is_none()
+                    && c.contains("freehold agents online")
+            });
+            if !already_greeted {
+                freehold_core::delegate::post_message(
+                    &args.relay_url,
+                    &creator.secret_seed(),
+                    &args.channel,
+                &creator.nostr_pubkey_hex(),
+                "freehold agents online — @freehold, @peer, @console, @runner. Ask for a delegated task anytime.",
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
+            println!("SETUP: #freehold ready — agents joined + greeted");
             Ok(())
         }
         Cmd::Readiness(args) => {

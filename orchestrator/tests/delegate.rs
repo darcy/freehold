@@ -95,3 +95,113 @@ async fn cpa_delegates_to_peer_and_gets_the_result_back() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agents_join_the_freehold_channel_and_the_greeting_is_signed() {
+    let cpa = Identity::generate();
+    let peer = Identity::generate();
+    let (relay_url, state, server) = freehold_testkit::relay::spawn().await;
+    let channel = "00000000-0000-4000-8000-00000000f0ef";
+
+    // The bootstrap setup step: ensure the OPEN #freehold channel, join each
+    // agent, greet as the CPA.
+    delegate::ensure_channel(&relay_url, &cpa.secret_seed(), channel, "freehold").unwrap();
+    freehold_core::relay_http::join_channel(&relay_url, &cpa.secret_seed(), channel).unwrap();
+    freehold_core::relay_http::join_channel(&relay_url, &peer.secret_seed(), channel).unwrap();
+    delegate::post_message(
+        &relay_url,
+        &cpa.secret_seed(),
+        channel,
+        &cpa.nostr_pubkey_hex(),
+        "freehold agents online",
+    )
+    .unwrap();
+
+    let events = state.events.lock().clone();
+    let kinds = |k: u64| {
+        events
+            .iter()
+            .filter(|e| e["kind"].as_u64() == Some(k))
+            .count()
+    };
+    assert_eq!(kinds(9007), 1, "channel ensured once");
+    assert_eq!(kinds(9021), 2, "both agents joined");
+    assert_eq!(kinds(9), 1, "the greeting");
+    let greeting = events
+        .iter()
+        .find(|e| e["kind"].as_u64() == Some(9))
+        .unwrap();
+    assert_eq!(
+        greeting["pubkey"].as_str().unwrap(),
+        &cpa.nostr_pubkey_hex()
+    );
+    assert_eq!(greeting["tags"][0][0], "h");
+    assert_eq!(greeting["tags"][0][1], channel);
+    // The channel create is OPEN (any member may post — no roster gate).
+    let create = events
+        .iter()
+        .find(|e| e["kind"].as_u64() == Some(9007))
+        .unwrap();
+    assert!(create["content"].as_str().is_some());
+    let create_tags: Vec<Vec<String>> =
+        serde_json::from_value(create["tags"].clone()).unwrap_or_default();
+    assert!(
+        create_tags
+            .iter()
+            .any(|t| t.first() == Some(&"visibility".to_string())
+                && t.get(1) == Some(&"open".to_string()))
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn profile_publish_lands_kind_zero_with_the_name() {
+    let id = Identity::generate();
+    let (relay_url, state, server) = freehold_testkit::relay::spawn().await;
+
+    freehold_core::relay_http::publish_profile(
+        &relay_url,
+        &id.secret_seed(),
+        "freehold",
+        "the CPA",
+    )
+    .unwrap();
+
+    let events = state.events.lock().clone();
+    let profile = events
+        .iter()
+        .find(|e| e["kind"].as_u64() == Some(0))
+        .expect("kind-0 profile published");
+    assert_eq!(profile["pubkey"].as_str().unwrap(), id.nostr_pubkey_hex());
+    let content: serde_json::Value =
+        serde_json::from_str(profile["content"].as_str().unwrap()).unwrap();
+    assert_eq!(content["name"], "freehold");
+    // The event is self-consistent: the emitted id MUST equal the recomputed
+    // preimage (a disagreeing id would fail clients even though the sig
+    // verifies) and the BIP-340 check passes.
+    let recomputed = freehold_core::nip98::event_id(
+        profile["pubkey"].as_str().unwrap(),
+        profile["created_at"].as_i64().unwrap(),
+        0,
+        &[],
+        profile["content"].as_str().unwrap(),
+    );
+    assert_eq!(
+        hex::encode(recomputed),
+        profile["id"].as_str().unwrap(),
+        "id must match the signed preimage"
+    );
+    freehold_core::nip98::verify_event(
+        profile["pubkey"].as_str().unwrap(),
+        profile["created_at"].as_i64().unwrap(),
+        0,
+        &[],
+        profile["content"].as_str().unwrap(),
+        profile["sig"].as_str().unwrap(),
+    )
+    .expect("profile verifies");
+    let _ = id;
+
+    server.abort();
+}
