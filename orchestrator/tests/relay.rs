@@ -171,7 +171,8 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
-            installer_pubkey: None,
+            operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
         },
     )
     .await
@@ -241,9 +242,8 @@ async fn relay_deploy_lxc_mode_wraps_every_command_in_pct_exec() {
             lxc: Some(100),
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
-            installer_pubkey: Some(
-                "1111111111111111111111111111111111111111111111111111111111111111".into(),
-            ),
+            operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
         },
     )
     .await
@@ -287,7 +287,8 @@ async fn relay_deploy_missing_docker_gives_remediation() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
-            installer_pubkey: None,
+            operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
         },
     )
     .await
@@ -338,7 +339,8 @@ async fn relay_deploy_fails_when_unswept_placeholder_remains() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
-            installer_pubkey: None,
+            operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
         },
     )
     .await

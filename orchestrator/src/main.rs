@@ -88,10 +88,10 @@ struct DeployRelayArgs {
     /// (the example.com placeholders are not literal CHANGE_ME).
     #[arg(long)]
     relay_url: String,
-    /// The INSTALLER's Nostr pubkey (64-hex) — invite the human operator to
-    /// the relay once it comes up (the acceptance's invite step).
+    /// The OPERATOR's Nostr pubkey (64-hex) — invite the human operator to
+    /// the relay once it comes up (fail-closed: required).
     #[arg(long)]
-    installer_pubkey: Option<String>,
+    operator_pubkey: String,
 }
 
 #[derive(Args)]
@@ -292,6 +292,21 @@ struct BootstrapArgs {
     /// Destroy the VPS after verifying (vultr-vps; for tests/cleanup)
     #[arg(long)]
     destroy: bool,
+
+    /// The OPERATOR's Nostr pubkey (64-hex) — relay invite (create-new) /
+    /// attach auth (attach-existing) + console admin seed (fail-closed:
+    /// required at bootstrap).
+    #[arg(long)]
+    operator_pubkey: String,
+
+    /// The relay's identity DOMAIN (never an IP): the install BLOCKS (A4)
+    /// until it resolves to the provisioned target's IP.
+    #[arg(long)]
+    domain: String,
+
+    /// Seconds to wait for the domain to resolve to the target IP (A4).
+    #[arg(long, default_value_t = 300)]
+    domain_wait_secs: u64,
 }
 
 #[derive(Args)]
@@ -438,7 +453,7 @@ async fn main() -> Result<()> {
                     lxc: args.lxc,
                     owner_pubkey: args.owner_pubkey.clone(),
                     relay_url: args.relay_url.clone(),
-                    installer_pubkey: args.installer_pubkey.clone(),
+                    operator_pubkey: args.operator_pubkey.clone(),
                 },
             )
             .await?;
@@ -823,6 +838,13 @@ async fn main() -> Result<()> {
                 &args.common.agent_dir,
                 &args.common.runner_pubkey,
             )?;
+            let domain = args.domain.clone();
+            if !bootstrap::is_hex64(&args.operator_pubkey) {
+                anyhow::bail!(
+                    "--operator-pubkey must be a 64-character hex Nostr pubkey (got {:?})",
+                    args.operator_pubkey
+                );
+            }
             let res = match args.kind.as_str() {
                 "proxmox-lxc" => {
                     let spec = bootstrap::ProxmoxLxcSpec {
@@ -848,6 +870,23 @@ async fn main() -> Result<()> {
                 }
                 other => anyhow::bail!("unknown --kind {other:?} (proxmox-lxc | vultr-vps)"),
             };
+            let want_ip = res.ip.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the {kind} driver did not report a target IP — the domain gate (A4) cannot proceed",
+                    kind = args.kind
+                )
+            })?;
+            println!(
+                "DOMAIN-GATE: target is up at {want_ip}; require '{domain}' to resolve there \
+                 (map it in your LAN DNS, or /etc/hosts for the POC)"
+            );
+            bootstrap::wait_for_domain_resolution(
+                &domain,
+                want_ip,
+                args.domain_wait_secs,
+                bootstrap::resolve_ip,
+                std::thread::sleep,
+            )?;
             println!(
                 "BOOTSTRAPPED {} ({}): {}",
                 res.name,

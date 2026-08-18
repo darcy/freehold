@@ -47,11 +47,11 @@ pub struct RelayDeploySpec {
     /// sweep never touched them; a relay that identifies as buzz.example.com
     /// binds a phantom community and the HTTP bridge 404s real hosts.
     pub relay_url: String,
-    /// The INSTALLER's Nostr pubkey (64-hex): invite the human operator to
+    /// The OPERATOR's Nostr pubkey (64-hex): invite the human operator to
     /// the relay right after it comes up (buzz-admin add-member through the
-    /// relay LXC). Part of the acceptance — bootstrap leaves the installer
-    /// a member, not just the machines.
-    pub installer_pubkey: Option<String>,
+    /// relay LXC) — fail-closed: required; machines alone shouldn't own the
+    /// community.
+    pub operator_pubkey: String,
 }
 
 /// Wrap a target command for execution inside an LXC via the host runner.
@@ -135,11 +135,10 @@ pub async fn deploy_relay(
             spec.owner_pubkey
         )));
     }
-    if let Some(pk) = &spec.installer_pubkey
-        && (pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()))
-    {
+    if !crate::bootstrap::is_hex64(&spec.operator_pubkey) {
         return Err(BootstrapError::Verify(format!(
-            "installer pubkey must be a 64-character hex Nostr pubkey (got {pk:?})"
+            "operator pubkey must be a 64-character hex Nostr pubkey (got {:?})",
+            spec.operator_pubkey
         )));
     }
 
@@ -277,21 +276,22 @@ pub async fn deploy_relay(
         )));
     }
 
-    // Invite the INSTALLER: after the relay is up, make the human a member
+    // Invite the OPERATOR: after the relay is up, make the human a member
     // (the acceptance's invite step — machines alone shouldn't own the
     // community). Runs through the relay-admin runner at the SAME compose
     // dir the bundle landed in (`spec.deploy_dir`). An already-invited
     // member (buzz-admin exits non-zero on re-add) DEGRADES to a SURFACED
     // warn — re-runs must never sink a healthy deploy at the final step.
-    if let Some(installer) = &spec.installer_pubkey {
-        crate::bootstrap::plain(installer)?;
+    {
+        let operator = &spec.operator_pubkey;
+        crate::bootstrap::plain(operator)?;
         let invite_dir = format!("{}/deploy/compose", spec.deploy_dir);
-        let invite = crate::relay_member::add_member_cmd(&invite_dir, installer, None);
+        let invite = crate::relay_member::add_member_cmd(&invite_dir, operator, None);
         if let Err(e) = crate::bootstrap::exec_to_ok(
             client,
             target,
             &lxc_cmd(spec.lxc, &invite),
-            "invite installer",
+            "invite operator",
             120,
         ) {
             // The freehold binary has NO tracing subscriber (it reports via
