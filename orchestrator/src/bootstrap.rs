@@ -744,6 +744,35 @@ pub fn resolve_ip(domain: &str) -> Option<std::net::IpAddr> {
     (domain, 0).to_socket_addrs().ok()?.map(|sa| sa.ip()).next()
 }
 
+/// The standard LXC naming: normalize `--domain` (dots -> dashes) and
+/// append the role suffix: `<domain>-relay` / `<domain>-cp`
+/// (e.g. freehold-test.darcydev.net -> freehold-test-darcydev-net-relay).
+/// PVE validates CT hostnames as DNS names — underscores are REJECTED
+/// (observed live: 'pct set --hostname ..._...' -> invalid format), so the
+/// separator is a dash. Length capped at 63.
+pub fn domain_lxc_name(domain: &str, suffix: &str) -> Result<String, String> {
+    let normalized = domain.replace('.', "-");
+    if normalized.is_empty() || normalized.len() > 48 {
+        return Err(format!("domain {domain:?} yields an invalid LXC name"));
+    }
+    if !normalized
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(format!(
+            "domain {domain:?} contains characters not allowed in an LXC name"
+        ));
+    }
+    if suffix.is_empty()
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(format!("invalid role suffix {suffix:?}"));
+    }
+    Ok(format!("{normalized}-{suffix}"))
+}
+
 /// A bare 64-hex Nostr pubkey (the kind the relay env expects).
 pub fn is_hex64(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
@@ -853,6 +882,24 @@ mod domain_gate_tests {
             no_sleep,
         );
         assert!(r.is_ok(), "{r:?}");
+    }
+
+    #[test]
+    fn lxc_name_follows_domain_convention() {
+        assert_eq!(
+            domain_lxc_name("freehold-test.darcydev.net", "relay").unwrap(),
+            "freehold-test-darcydev-net-relay"
+        );
+        assert_eq!(
+            domain_lxc_name("freehold-test.darcydev.net", "cp").unwrap(),
+            "freehold-test-darcydev-net-cp"
+        );
+        assert!(domain_lxc_name("", "relay").is_err());
+        assert!(domain_lxc_name("bad space.net", "relay").is_err());
+        assert!(domain_lxc_name("freehold-test.darcydev.net", "evil!").is_err());
+        // length cap: a 60-char domain must not overflow the LXC name budget
+        let long = format!("{}.net", "a".repeat(58));
+        assert!(domain_lxc_name(&long, "relay").is_err());
     }
 
     #[test]
