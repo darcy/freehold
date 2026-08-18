@@ -1103,6 +1103,7 @@ fn bech32_5to8(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// bech32 8-bit bytes -> 5-bit groups (the test round-trip).
+#[cfg(test)]
 fn bech32_8to5(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len() * 8 / 5 + 1);
     let mut acc: u32 = 0;
