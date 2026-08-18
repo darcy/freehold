@@ -170,7 +170,7 @@ A2. The **local provisioning expert** (the orchestrator's bootstrap mode — a n
 A3. Verify target reachable (SSH/API) before proceeding — the same self-check pattern as
 Chunk 1's runner readiness, applied to the freshly provisioned box.
 
-- [ ] [ ]
+- [x] [ ]
 
 A4. **Domain gate (blocking).** Require `--domain`. After the target is up with an IP,
     print the IP + the domain + the resolver hint ("map <domain> → <IP> in LAN DNS, or
@@ -389,6 +389,8 @@ dev loop is introduced by adding fixtures.
 
 H1. Fresh run (create-new): provision target → relay up (TLS on the DOMAIN, `wss://`,
     non-domain hosts refused) → CP up on ITS own LXC → CP is a relay member. The A4
+    [x] create-new leg proven LIVE under freehold-test.darcydev.net (relay LXC +
+    CP LXC + domain gate + operator login + memory + delegation). The A4
     domain gate is asserted (install never proceeds without the domain resolving to the
     target IP). PLUS attach-existing run: point the CP at a pre-existing relay (skip
     creation) → CP is a member, same acceptance.

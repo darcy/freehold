@@ -14,19 +14,24 @@ H1 (the PVE host as a real SSH target)
 is DONE — the PVE host is onboarded as a runner and execs green.
 Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) and Phase A (bootstrap
 provisioning: `freehold bootstrap` with proxmox-lxc + vultr-vps drivers,
-hermetic-tested, dry-run verified against the PVE host) are DONE
+hermetic-tested, dry-run verified against the PVE host) are DONE;
+the domain gate (A4) requires `--domain` and blocks until it RESOLVES
+(directly, or at an operator-managed proxy that forwards to the target)
 is in `roadmap/POC_CHUNK2.md`. Phase B (deploy-relay driver: docker gate,
 curl+tar bundle fetch, compose start, /_liveness verify, scope claim) is
 implemented and hermetic-tested. The proxmox-lxc bootstrap is idempotent
 (template ensure by host arch + docker+compose in the guest); the CLI is
 `freehold`. Phase B and the LIVE relay deploy are DONE: LXC 100 `relay-box`
-(deb-13 amd64, unprivileged, `fuse=1,keyctl=1,nesting=1`, 16G/2G) runs the
-Buzz compose stack — relay/postgres/redis/minio all healthy, `/_liveness` ok
-on loopback AND the LAN (192.168.30.248:3000). Phase C is DONE: the control
-is deployed in OPERATE mode on the PVE host (`/srv/freehold`, loopback
-127.0.0.1:8080, binary shipped as base64 through the runner's exec-only
-primitive), the CPA is a relay member (owner = console pubkey, member =
-h1-agent), and loopback-only is enforced + verified. Phase D (identity
+(deb-13 amd64, unprivileged, 16G) runs the Buzz compose stack; Phase C is
+DONE: the control
+is deployed in OPERATE mode in ITS OWN LXC (`cp-box` 102, `/srv/freehold`,
+binary shipped as base64 through the runner's exec-only primitive — every
+remote command routes through `pct exec`, per the CP-off-the-host decision);
+the console has NIP-98 operator auth (admin whitelist seeded by
+`--operator-pubkey`, bind guard authn-conditional, UI login panel,
+`--public-origin cp-<relay-domain>` behind the operator's proxy), and the
+operator logs in with their OWN nsec (`console-login --nsec nsec1...`) —
+the key never leaves their machine. Phase D (identity
 port) slice 1 is DONE: the grant-list kind (30180, addressable, d-tag =
 runner pubkey, replaceable) is defined + implemented end-to-end — CP
 publishes via NIP-98 POST /events, the runner reads the CURRENT list live
@@ -39,10 +44,13 @@ DECISION (post-Phase-D review): freehold does NOT patch buzz — relay-grants
 grant flow remains the shipped-package one (web console UI +
 `control-plane grant` / `revoke-grant` / `revoke`, re-shipped and re-read by
 the runner per call — revoke lands without a restart). D2 (membership records on the relay) is partially
-live: console/owner + CPA + box identity + the RUNNER itself are relay
-members under the box's real URL community (the relay's example.com URL
-placeholders are now fixed by deploy-relay — written with a new --relay-url
-flag). D3 (encrypted memory) and D5 (audit publishing) are the next slices.
+live under the DOMAIN community (`freehold-test.darcydev.net`, operator
+nginx on the tailnet forwards the hostname to the relay LXC — the relay's
+strict host map makes the domain the only door; deploy-relay writes
+BUZZ_DOMAIN/RELAY_URL from --relay-url / --domain; TLS rides the proxy, or
+the local-CA posture when --domain is used without it). The IP-anchored
+first live relay was KILLED and the full stack re-provisioned fresh under
+the domain (A4 gate verified both the direct-DNS and proxy cases). D5 (audit publishing) is DONE. D3 (encrypted memory) is DONE:
 D3 (encrypted memory) is DONE: the CPA's memory lives on the relay as
 kind-30174 engrams, NIP-44 v2 SELF-encrypted (only the agent's own key can
 decrypt; the relay stores ciphertext only), d-tag = sha256(agentpk#key),
@@ -67,8 +75,11 @@ relay (Buzz = substrate, co-location never assumed; naming: the PVE host vs the 
 workstation). Bootstrap REQUIRES a domain (identity) with a blocking resolution gate
 (A4); TLS = local CA on the domain by default, LE DNS-01 with a provider key; console
 auth = NIP-98 operator login, admin seeded by --operator-pubkey; the bind guard becomes
-authn-conditional. The live IP-anchored relay community is disposable: the re-test kills
-it and bootstraps fresh under a domain.
+authn-conditional. The live IP-anchored relay community WAS killed and the full stack
+RE-PROVISIONED fresh under `freehold-test.darcydev.net` (relay LXC 100 @
+192.168.30.238:3000 behind the operator's tailnet nginx; CP in its own LXC 102 @
+192.168.30.254:8080; console admin = the operator's new key b2ab89...; memory +
+delegation re-proven live under the domain; the old PVE-host CP stopped).
 
 
 ## Navigation
