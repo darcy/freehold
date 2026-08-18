@@ -670,12 +670,29 @@ pub async fn bootstrap_vultr_vps(
             env_cred = env_cred,
             id = id
         );
-        let out = exec(client, target, &destroy, 120)?;
-        expect_ok(&out, "vultr destroy")?;
-        let code = out.stdout.trim();
-        if !code.starts_with('2') {
+        // Vultr destroys transitionally: a delete issued right after
+        // verification can 409 while the instance settles (seen live). Retry
+        // a bounded number of times before giving up — a MISSED destroy is
+        // the one failure that keeps billing.
+        let mut destroyed = false;
+        for attempt in 0..5 {
+            let out = exec(client, target, &destroy, 120)?;
+            expect_ok(&out, "vultr destroy")?;
+            let code = out.stdout.trim();
+            if code.starts_with('2') {
+                destroyed = true;
+                break;
+            }
+            tracing::info!(
+                "destroy of {id} returned HTTP {code} (attempt {}) — retrying",
+                attempt + 1
+            );
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+        if !destroyed {
             return Err(BootstrapError::Verify(format!(
-                "destroy of instance {id} returned HTTP {code} — the instance may still be running"
+                "destroy of instance {id} never confirmed (HTTP not 2xx after retries) — \
+                 the instance may still be running and billing"
             )));
         }
         detail.push_str("; destroyed");
