@@ -37,13 +37,26 @@ pub fn agent_auth(dir: &Path) -> Result<AgentAuth, FlowError> {
 }
 
 /// Connect to a RUNNING runner at `addr`, authenticating as the agent.
+/// The MCP endpoint is /mcp in BOTH --addr forms (a scheme is just the
+/// caller being explicit — it must not silently change the path). Without
+/// this, a schemed --addr posts to `/` and gets an EMPTY 404 -> "json: EOF"
+/// with no runner-side log at all (seen live on debug runners).
+pub fn connect_url(addr: &str) -> String {
+    let base = addr.trim_end_matches('/');
+    let with_scheme = if base.contains("://") {
+        base.to_string()
+    } else {
+        format!("http://{base}")
+    };
+    if with_scheme.ends_with("/mcp") {
+        with_scheme
+    } else {
+        format!("{with_scheme}/mcp")
+    }
+}
 pub fn connect(addr: &str, agent_dir: &Path, runner_pubkey: &str) -> Result<McpClient, FlowError> {
     let auth = agent_auth(agent_dir)?;
-    let url = if addr.contains("://") {
-        addr.to_string()
-    } else {
-        format!("http://{addr}/mcp")
-    };
+    let url = connect_url(addr);
     Ok(McpClient::new(url, auth, runner_pubkey.to_string())?)
 }
 
@@ -186,4 +199,55 @@ pub fn run_demo(client: &McpClient, steps: &[DemoStep]) -> Result<Vec<StepResult
         }
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod connect_url_tests {
+    use super::*;
+
+    fn auth() -> AgentAuth {
+        AgentAuth {
+            secret: [0u8; 32],
+            pubkey: "1111111111111111111111111111111111111111111111111111111111111111".into(),
+        }
+    }
+
+    fn url_for(addr: &str) -> String {
+        McpClient::new(
+            connect_url(addr),
+            auth(),
+            "2222222222222222222222222222222222222222222222222222222222222222".into(),
+        )
+        .unwrap()
+        .url
+    }
+
+    #[test]
+    fn schemeless_addr_gets_mcp_path() {
+        assert_eq!(url_for("127.0.0.1:8787"), "http://127.0.0.1:8787/mcp");
+    }
+
+    #[test]
+    fn schemed_addr_also_gets_mcp_path() {
+        assert_eq!(
+            url_for("http://127.0.0.1:8790"),
+            "http://127.0.0.1:8790/mcp"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_tolerated() {
+        assert_eq!(
+            url_for("http://127.0.0.1:8790/"),
+            "http://127.0.0.1:8790/mcp"
+        );
+    }
+
+    #[test]
+    fn explicit_mcp_path_not_duplicated() {
+        assert_eq!(
+            url_for("http://127.0.0.1:8790/mcp"),
+            "http://127.0.0.1:8790/mcp"
+        );
+    }
 }
