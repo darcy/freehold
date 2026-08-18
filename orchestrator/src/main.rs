@@ -1083,65 +1083,27 @@ async fn main() -> Result<()> {
     }
 }
 
-/// bech32 5-bit groups -> 8-bit bytes (MSB-first, per the bech32 spec);
-/// non-zero padding in the final partial byte is rejected.
-fn bech32_5to8(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(data.len() * 5 / 8);
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    for &v in data {
-        acc = (acc << 5) | (u32::from(v) & 0x1f);
-        bits += 5;
-        while bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    if bits > 0 && (acc & ((1u32 << bits) - 1)) != 0 {
-        return Err("nsec1 payload has non-zero padding".to_string());
-    }
-    Ok(out)
-}
-
-/// bech32 8-bit bytes -> 5-bit groups (the test round-trip).
-#[cfg(test)]
-fn bech32_8to5(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len() * 8 / 5 + 1);
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    for &b in bytes {
-        acc = (acc << 8) | u32::from(b);
-        bits += 8;
-        while bits >= 5 {
-            bits -= 5;
-            out.push(((acc >> bits) & 0x1f) as u8);
-        }
-    }
-    if bits > 0 {
-        out.push(((acc << (5 - bits)) & 0x1f) as u8);
-    }
-    out
-}
-
 /// The operator's Nostr secret in EITHER standard form:
 /// - Bech32 (`nsec1...` — what users actually hold), or
 /// - bare 64-hex (the byte form internal identity files use).
+///
+/// bech32 0.11's `decode` ALREADY returns 8-bit bytes — the payload IS the
+/// secret; no 5->8 bit repack (a hand-rolled repack here silently remasked
+/// bytes to 5 bits and turned every 32-byte key into a 20-byte one).
 fn nsec_to_secret(s: &str) -> Result<[u8; 32], String> {
     if s.strip_prefix("nsec1").is_some() {
-        let (hrp, data) = bech32::decode(s).map_err(|e| format!("bad nsec1 encoding: {e}"))?;
+        let (hrp, bytes) = bech32::decode(s).map_err(|e| format!("bad nsec1 encoding: {e}"))?;
         if hrp.as_str() != "nsec" {
             return Err(format!("not an nsec hrp (got {hrp})"));
         }
-        let bytes = bech32_5to8(&data)?;
         let len = bytes.len();
-        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        bytes.try_into().map_err(|_| {
             format!(
                 "nsec1 payload is {len} bytes, not 32 — a Nostr nsec is a 32-BYTE secret \
-                 (~63 chars, nsec1 + bech32). This is a TRUNCATED copy or a non-Nostr key: \
-                 re-copy the FULL nsec from your wallet (check: `echo -n <key> | wc -c` = 63)"
+                     (~63 chars, nsec1 + bech32). Re-copy the FULL nsec from your wallet \
+                     (check: `echo -n <key> | wc -c` = 63)"
             )
-        })?;
-        Ok(arr)
+        })
     } else if crate::bootstrap::is_hex64(s) {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&hex::decode(s).map_err(|e| e.to_string())?);
@@ -1176,14 +1138,33 @@ mod nsec_tests {
 
     #[test]
     fn bech32_nsec_roundtrips() {
-        use super::bech32_8to5;
+        // 0.11 encode/decode are both byte-based: encode(bytes) -> bech32,
+        // decode returns the same bytes.
         let seed = seed();
-        let data = bech32_8to5(&seed);
         let encoded =
-            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("nsec").unwrap(), &data).unwrap();
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("nsec").unwrap(), &seed).unwrap();
         assert!(encoded.starts_with("nsec1"), "{encoded}");
+        let (hrp, bytes) = bech32::decode(&encoded).unwrap();
+        assert_eq!(hrp.as_str(), "nsec");
+        assert_eq!(bytes, seed);
         let back = nsec_to_secret(&encoded).unwrap();
         assert_eq!(back, seed);
+    }
+
+    #[test]
+    fn real_world_nsec_decodes_to_32() {
+        // A standard nostr.com-generated nsec must decode to exactly 32 bytes.
+        let s = "nsec1vvlcvff8xj5rvs87xjgresyury76f8duwcsanh0t5uruvnz0tt4q635xfu";
+        assert!(s.len() == 63, "{}", s.len());
+        let secret = nsec_to_secret(s).unwrap();
+        assert_eq!(secret.len(), 32);
+        // and its pubkey hex is the npub we were given
+        let (pubkey, _, _) =
+            freehold_core::nip98::sign_event(&secret, 27235, 0, vec![], "").unwrap();
+        assert_eq!(
+            pubkey,
+            "b2ab894abfbce853e39bf9a44d59d4c3698453a72f7349ff0f75801e040eacf7"
+        );
     }
 
     #[test]
