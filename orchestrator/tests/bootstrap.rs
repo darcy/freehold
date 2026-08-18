@@ -1063,7 +1063,7 @@ async fn deploy_cp_co_locates_runner_when_asked() {
     let curl_ok = "echo ok; exit 0\n";
     let systemctl_ok = "echo active; exit 0\n";
     let systemdrun_ok = "echo \"Running as unit: freehold-runner.service\"; exit 0\n";
-    let (bin, ba) = plant_bin(
+    let (bin, _ba) = plant_bin(
         &base.path().join("cmds.log"),
         &[
             ("pct", exec_thru_pct),
@@ -1078,7 +1078,7 @@ async fn deploy_cp_co_locates_runner_when_asked() {
     std::fs::create_dir_all(&pkg_dir).unwrap();
     let rid = Identity::generate();
     rid.write_to_dir(&pkg_dir).unwrap();
-    let enc = hex::decode(&rid.enc_pubkey_hex()).unwrap();
+    let enc = hex::decode(rid.enc_pubkey_hex()).unwrap();
     let mut enc32 = [0u8; 32];
     enc32.copy_from_slice(&enc);
     let sealed = hex::encode(freehold_core::crypto::seal(&enc32, b"t", b"cred").unwrap());
