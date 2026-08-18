@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use freehold_control_plane::provisioner::{
-    self, ProvisionError, ProvisionRequest, provision_runner,
+    self, ProvisionError, ProvisionRequest, adopt_runner, provision_runner,
 };
 use freehold_control_plane::state::{RunnerStatus, StateStore};
 use freehold_core::{crypto, identity::Identity};
@@ -530,4 +530,71 @@ async fn grant_publish_writes_replaceable_relay_grant_list() {
         events[1]["tags"][0].as_array().unwrap()[1],
         rec.nostr_pubkey
     );
+}
+
+#[test]
+fn adopt_runner_registers_existing_package_without_reshipping() {
+    use std::collections::BTreeMap;
+    let base = tempfile::tempdir().unwrap();
+    let store_dir = base.path().join("cp");
+    let store = StateStore::open(&store_dir).unwrap();
+
+    // Build a runner's EXISTING shipped package: identity + sealed credential
+    // + grants, exactly as provision would have left it.
+    let package_dir = base.path().join("runner");
+    freehold_core::futil::ensure_private_dir(&package_dir).unwrap();
+    let rid = Identity::generate();
+    rid.write_to_dir(&package_dir).unwrap();
+    let enc = hex32(&rid.enc_pubkey_hex());
+    let sealed = hex::encode(crypto::seal(&enc, b"relay-box", b"the-ssh-key").unwrap());
+    let pkg = freehold_core::secrets::SecretPackage {
+        secrets: BTreeMap::from([("relay-box".to_string(), sealed)]),
+        targets: BTreeMap::from([(
+            "relay-box".to_string(),
+            freehold_core::secrets::TargetMeta {
+                kind: "ssh".into(),
+                address: "root@192.168.30.224".into(),
+                secret: "relay-box".into(),
+            },
+        )]),
+        grants: vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+    };
+    pkg.write_to_dir(&package_dir).unwrap();
+
+    // ADOPT: nothing re-shipped — the record is rebuilt from the package.
+    let runner = adopt_runner(
+        &store,
+        "proxmox-box",
+        "ssh",
+        "root@192.168.30.224",
+        &package_dir,
+        Some("127.0.0.1:8787".into()),
+    )
+    .unwrap();
+
+    assert_eq!(runner.nostr_pubkey, rid.nostr_pubkey_hex());
+    assert_eq!(runner.enc_pubkey, rid.enc_pubkey_hex());
+    assert_eq!(runner.status, RunnerStatus::Active);
+    assert_eq!(runner.mcp_addr.as_deref(), Some("127.0.0.1:8787"));
+    assert_eq!(runner.package_dir, package_dir);
+    // the secret record carries the sealed credential + target meta
+    let rec = store.get_runner("proxmox-box").unwrap();
+    assert_eq!(rec.nostr_pubkey, runner.nostr_pubkey);
+    let pkg_again = freehold_core::secrets::SecretPackage::load(&package_dir).unwrap();
+    assert_eq!(pkg_again.grants.len(), 1, "grants read from the package");
+    // the package is untouched by adopt (same sealed blob)
+    let pkg_rec = store.get_secret("proxmox-box").unwrap();
+    assert_eq!(pkg_rec.ciphertext_hex, pkg_again.secrets["relay-box"]);
+
+    // re-adopt is refused (RunnerExists — the operator cleans up by hand)
+    let dup = adopt_runner(
+        &store,
+        "proxmox-box",
+        "ssh",
+        "root@192.168.30.224",
+        &package_dir,
+        None,
+    )
+    .unwrap_err();
+    assert!(dup.to_string().contains("already exists"), "{dup}");
 }

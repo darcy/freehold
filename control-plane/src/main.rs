@@ -30,6 +30,9 @@ struct Cli {
 enum Cmd {
     /// Create an agent identity (private key stays in the CP state dir, 0600)
     AgentCreate(AgentArgs),
+    /// C2/D2: ADOPT an EXISTING runner into the console registry from its
+    /// shipped package (no credential re-shipping, no re-sealing).
+    Adopt(AdoptArgs),
     /// Grant another agent pubkey to a runner (re-ships the package)
     Grant(GrantArgs),
     /// Revoke two agent pubkey from to a runner (re-ships + relay replace)
@@ -79,6 +82,24 @@ struct GrantArgs {
     relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct AdoptArgs {
+    #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
+    state_dir: PathBuf,
+    /// Service/runner name (must match the package's own name)
+    name: String,
+    #[arg(long)]
+    kind: String,
+    #[arg(long)]
+    address: String,
+    /// The runner's existing package dir (identity.json + secrets.json)
+    #[arg(long)]
+    package_dir: PathBuf,
+    /// The runner's MCP listen address (console readiness probing)
+    #[arg(long)]
+    mcp_addr: Option<String>,
 }
 
 #[derive(Args)]
@@ -195,6 +216,26 @@ async fn main() -> Result<()> {
             for g in &grants {
                 println!("  {}", g);
             }
+            Ok(())
+        }
+        Cmd::Adopt(args) => {
+            let store = StateStore::open(&args.state_dir)
+                .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
+            let runner = provisioner::adopt_runner(
+                &store,
+                &args.name,
+                &args.kind,
+                &args.address,
+                &args.package_dir,
+                args.mcp_addr.clone(),
+            )?;
+            println!(
+                "adopted runner {} (active) from its shipped package",
+                runner.nostr_pubkey
+            );
+            println!("  package:           {}", runner.package_dir.display());
+            println!("  mcp addr:          {:?}", runner.mcp_addr);
+            println!("  (credential stays sealed in the package; adopt ships nothing)");
             Ok(())
         }
         Cmd::Provision(args) => {
