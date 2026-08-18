@@ -177,8 +177,21 @@ async fn profile_publish_lands_kind_zero_with_the_name() {
     let content: serde_json::Value =
         serde_json::from_str(profile["content"].as_str().unwrap()).unwrap();
     assert_eq!(content["name"], "freehold");
-    // The event is self-consistent (id + BIP-340) — the wire shape clients
-    // trust.
+    // The event is self-consistent: the emitted id MUST equal the recomputed
+    // preimage (a disagreeing id would fail clients even though the sig
+    // verifies) and the BIP-340 check passes.
+    let recomputed = freehold_core::nip98::event_id(
+        profile["pubkey"].as_str().unwrap(),
+        profile["created_at"].as_i64().unwrap(),
+        0,
+        &[],
+        profile["content"].as_str().unwrap(),
+    );
+    assert_eq!(
+        hex::encode(recomputed),
+        profile["id"].as_str().unwrap(),
+        "id must match the signed preimage"
+    );
     freehold_core::nip98::verify_event(
         profile["pubkey"].as_str().unwrap(),
         profile["created_at"].as_i64().unwrap(),

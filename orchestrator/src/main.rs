@@ -781,14 +781,17 @@ async fn main() -> Result<()> {
             // Greet as the CPA so the client shows content + authors —
             // idempotent: one greeting per channel, re-runs don't spam.
             let since = freehold_core::auth::now_secs() - 3600;
-            let prior = freehold_core::delegate::poll_stream_p(
+            // UNFILTERED poll (the #p-filtered kind-9 query is documented as
+            // hanging for the CPA identity — BUZZ_SURFACE §9.7) and
+            // best-effort: a probe failure must never sink a setup whose
+            // channel + joins already succeeded.
+            let prior = freehold_core::delegate::poll_stream(
                 &args.relay_url,
                 &creator.secret_seed(),
                 &args.channel,
-                &creator.nostr_pubkey_hex(),
                 since,
             )
-            .map_err(anyhow::Error::msg)?;
+            .unwrap_or_default();
             let already_greeted = prior.iter().any(|(_, c, _)| {
                 freehold_core::delegate::parse_envelope(c).is_none()
                     && c.contains("freehold agents online")
