@@ -745,7 +745,9 @@ async fn main() -> Result<()> {
             let dirs: Vec<PathBuf> = args
                 .agents
                 .split(',')
-                .map(|d| PathBuf::from(d.trim()))
+                .map(|d| d.trim())
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
                 .collect();
             if dirs.is_empty() {
                 return Err(anyhow::anyhow!(
@@ -776,15 +778,31 @@ async fn main() -> Result<()> {
                 .map_err(anyhow::Error::msg)?;
                 println!("JOIN: {} -> #freehold", &id.nostr_pubkey_hex()[..12]);
             }
-            // Greet as the CPA so the client shows content + authors.
-            freehold_core::delegate::post_message(
+            // Greet as the CPA so the client shows content + authors —
+            // idempotent: one greeting per channel, re-runs don't spam.
+            let since = freehold_core::auth::now_secs() - 3600;
+            let prior = freehold_core::delegate::poll_stream_p(
                 &args.relay_url,
                 &creator.secret_seed(),
                 &args.channel,
                 &creator.nostr_pubkey_hex(),
-                "freehold agents online — @freehold, @peer, @console, @runner. Ask for a delegated task anytime.",
+                since,
             )
             .map_err(anyhow::Error::msg)?;
+            let already_greeted = prior.iter().any(|(_, c, _)| {
+                freehold_core::delegate::parse_envelope(c).is_none()
+                    && c.contains("freehold agents online")
+            });
+            if !already_greeted {
+                freehold_core::delegate::post_message(
+                    &args.relay_url,
+                    &creator.secret_seed(),
+                    &args.channel,
+                &creator.nostr_pubkey_hex(),
+                "freehold agents online — @freehold, @peer, @console, @runner. Ask for a delegated task anytime.",
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
             println!("SETUP: #freehold ready — agents joined + greeted");
             Ok(())
         }

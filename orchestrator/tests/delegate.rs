@@ -154,3 +154,41 @@ async fn agents_join_the_freehold_channel_and_the_greeting_is_signed() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn profile_publish_lands_kind_zero_with_the_name() {
+    let id = Identity::generate();
+    let (relay_url, state, server) = freehold_testkit::relay::spawn().await;
+
+    freehold_core::relay_http::publish_profile(
+        &relay_url,
+        &id.secret_seed(),
+        "freehold",
+        "the CPA",
+    )
+    .unwrap();
+
+    let events = state.events.lock().clone();
+    let profile = events
+        .iter()
+        .find(|e| e["kind"].as_u64() == Some(0))
+        .expect("kind-0 profile published");
+    assert_eq!(profile["pubkey"].as_str().unwrap(), id.nostr_pubkey_hex());
+    let content: serde_json::Value =
+        serde_json::from_str(profile["content"].as_str().unwrap()).unwrap();
+    assert_eq!(content["name"], "freehold");
+    // The event is self-consistent (id + BIP-340) — the wire shape clients
+    // trust.
+    freehold_core::nip98::verify_event(
+        profile["pubkey"].as_str().unwrap(),
+        profile["created_at"].as_i64().unwrap(),
+        0,
+        &[],
+        profile["content"].as_str().unwrap(),
+        profile["sig"].as_str().unwrap(),
+    )
+    .expect("profile verifies");
+    let _ = id;
+
+    server.abort();
+}
