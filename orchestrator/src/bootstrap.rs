@@ -730,10 +730,7 @@ pub fn wait_for_domain_resolution(
 /// including /etc/hosts).
 pub fn resolve_ip(domain: &str) -> Option<std::net::IpAddr> {
     use std::net::ToSocketAddrs;
-    (domain, 0)
-        .to_socket_addrs()
-        .ok()?
-        .find_map(|sa| Some(sa.ip()))
+    (domain, 0).to_socket_addrs().ok()?.map(|sa| sa.ip()).next()
 }
 
 /// A bare 64-hex Nostr pubkey (the kind the relay env expects).
