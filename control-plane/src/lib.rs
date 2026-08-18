@@ -51,6 +51,11 @@ pub fn validate_loopback_bind(addr: &str) -> Result<(), String> {
     }
 }
 
+/// A bare 64-hex Nostr pubkey (the console admin-whitelist format).
+pub fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_loopback_bind;

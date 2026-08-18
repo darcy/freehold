@@ -752,6 +752,7 @@ async fn deploy_cp_ships_binary_starts_and_reads_fresh_pubkey() {
             bind_addr: "127.0.0.1:8080".into(),
             binary_path: fake_bin.clone(),
             relay_url: "http://relay-box:3000".into(),
+            admin_pubkeys: vec![],
         },
     )
     .await
@@ -805,6 +806,7 @@ async fn deploy_cp_refuses_non_loopback_bind() {
             bind_addr: "0.0.0.0:8080".into(),
             binary_path: fake_bin,
             relay_url: "http://relay-box:3000".into(),
+            admin_pubkeys: vec![],
         },
     )
     .await
@@ -821,6 +823,48 @@ async fn deploy_cp_refuses_non_loopback_bind() {
         "no commands may run when the bind is refused: {cmds}"
     );
 
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deploy_cp_with_admin_relaxes_loopback_guard() {
+    // C3.5: with a console admin whitelist configured, the deploy MAY use a
+    // non-loopback bind — authn replaces network unreachability.
+    let base = tempfile::tempdir().unwrap();
+    let marker = base.path().join("started.marker");
+    let fake_bin = base.path().join("control-plane");
+    std::fs::write(
+        &fake_bin,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  identity) echo 1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff; exit 0;;\n  serve) echo started >> '{}'; sleep 300;;\n  *) exit 1;;\nesac\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("cp.log"),
+        &[("curl", "echo ok; exit 0\n")],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let sd = base.path().join("deploy/cp").display().to_string();
+    let bd = base.path().join("deploy/bin").display().to_string();
+    let res = deploy_cp::deploy_cp(
+        &client,
+        "proxmox-box",
+        &deploy_cp::DeployCpSpec {
+            state_dir: sd.clone(),
+            bin_dir: bd.clone(),
+            bind_addr: "0.0.0.0:8080".into(),
+            binary_path: fake_bin.clone(),
+            relay_url: "http://relay-box:3000".into(),
+            admin_pubkeys: vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ],
+        },
+    )
+    .await
+    .expect("admin-configured deploy must allow the non-loopback bind");
+    assert!(res.detail.contains("OPERATE mode"), "{res:?}");
     server.abort();
 }
 

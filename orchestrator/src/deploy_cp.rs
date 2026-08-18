@@ -43,6 +43,10 @@ pub struct DeployCpSpec {
     pub binary_path: PathBuf,
     /// The relay this CP helps serve — the ONE scope (C4 posture).
     pub relay_url: String,
+    /// Operator/admin Nostr pubkeys (64-hex) seeding the console's NIP-98
+    /// auth whitelist (C3.5). Non-empty => the console may bind non-loopback
+    /// and the deploy's own loopback guard is relaxed.
+    pub admin_pubkeys: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -65,9 +69,13 @@ pub async fn deploy_cp(
     plain_path(&spec.bin_dir)?;
     crate::relay::safe_deploy_dir(&spec.bin_dir)?;
     // Same guard the CP itself enforces at serve time — fail the deploy early
-    // instead of shipping a config the box will refuse.
-    freehold_control_plane::validate_loopback_bind(&spec.bind_addr)
-        .map_err(BootstrapError::Verify)?;
+    // instead of shipping a config the box will refuse. C3.5: an admin
+    // whitelist (NIP-98 console auth) RELAXES the guard — the console may
+    // bind the LAN; without authn the loopback-only refusal stays.
+    if spec.admin_pubkeys.is_empty() {
+        freehold_control_plane::validate_loopback_bind(&spec.bind_addr)
+            .map_err(BootstrapError::Verify)?;
+    }
 
     let binary = std::fs::read(&spec.binary_path)?;
 
@@ -145,12 +153,18 @@ pub async fn deploy_cp(
     // Start detached (setsid: not killed when the exec channel closes),
     // echo the pid, then probe loopback /healthz AND kill -0 the pid — a
     // serve that died (e.g. address already in use) is never reported as up.
+    let admin_flag = if spec.admin_pubkeys.is_empty() {
+        String::new()
+    } else {
+        format!(" --admin-pubkeys {}", spec.admin_pubkeys.join(","))
+    };
     let start = format!(
-        "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba} \
+        "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba}{admin_flag} \
          >> {sd}/serve.log 2>&1 < /dev/null & echo $! | tee {sd}/serve.pid",
         bd = spec.bin_dir,
         sd = spec.state_dir,
         ba = spec.bind_addr,
+        admin_flag = admin_flag,
     );
     let out = exec_to_ok(client, target, &start, "start control plane", 30)?;
     let pid: u32 = out.stdout.trim().parse().map_err(|_| {

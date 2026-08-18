@@ -59,8 +59,11 @@ pub struct SecretRecord {
 pub struct ControlPlaneState {
     pub runners: BTreeMap<String, RunnerRecord>,
     pub secrets: BTreeMap<String, SecretRecord>,
+    /// Console operator/admin whitelist (64-hex Nostr pubkeys). Non-empty
+    /// => NIP-98 console auth is ON and the bind guard relaxes (C3.5).
+    #[serde(default)]
+    pub admins: Vec<String>,
 }
-
 #[derive(Debug, Error)]
 pub enum StateError {
     #[error("io error: {0}")]
@@ -128,6 +131,14 @@ impl StateStore {
 
     pub fn insert_secret(&self, name: &str, rec: SecretRecord) {
         self.inner.write().secrets.insert(name.to_string(), rec);
+    }
+
+    pub fn admins(&self) -> Vec<String> {
+        self.inner.read().admins.clone()
+    }
+
+    pub fn set_admins(&self, admins: Vec<String>) {
+        self.inner.write().admins = admins;
     }
 
     pub fn set_runner_mcp_addr(&self, name: &str, addr: Option<String>) -> Result<(), StateError> {
