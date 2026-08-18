@@ -171,6 +171,7 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            installer_pubkey: None,
         },
     )
     .await
@@ -240,17 +241,27 @@ async fn relay_deploy_lxc_mode_wraps_every_command_in_pct_exec() {
             lxc: Some(100),
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            installer_pubkey: Some(
+                "1111111111111111111111111111111111111111111111111111111111111111".into(),
+            ),
         },
     )
     .await
     .expect("lxc-mode deploy must succeed");
 
     assert!(res.detail.contains("healthy"), "{res:?}");
-    // All FIVE exec sites (gate, download, extract, install, liveness) went
-    // through the pct exec wrapper — the exact quoting that broke live.
+    // All SIX exec sites (gate, download, extract, install, liveness, and the
+    // INSTALLER invite) went through the pct exec wrapper — the exact
+    // quoting that broke live.
     let log = std::fs::read_to_string(bin.parent().unwrap().join("cmds.log")).unwrap();
     let wrapped = log.matches("pct exec 100 -- sh -c").count();
-    assert_eq!(wrapped, 5, "every command wrapped into the LXC: {log}");
+    assert_eq!(wrapped, 6, "every command wrapped into the LXC: {log}");
+    assert!(
+        log.contains(
+            "buzz-admin add-member --pubkey 1111111111111111111111111111111111111111111111111111111111111111"
+        ),
+        "the installer was invited: {log}"
+    );
 
     server.abort();
 }
@@ -275,6 +286,7 @@ async fn relay_deploy_missing_docker_gives_remediation() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            installer_pubkey: None,
         },
     )
     .await
@@ -325,6 +337,7 @@ async fn relay_deploy_fails_when_unswept_placeholder_remains() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            installer_pubkey: None,
         },
     )
     .await

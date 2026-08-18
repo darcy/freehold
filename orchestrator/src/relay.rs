@@ -47,6 +47,11 @@ pub struct RelayDeploySpec {
     /// sweep never touched them; a relay that identifies as buzz.example.com
     /// binds a phantom community and the HTTP bridge 404s real hosts.
     pub relay_url: String,
+    /// The INSTALLER's Nostr pubkey (64-hex): invite the human operator to
+    /// the relay right after it comes up (buzz-admin add-member through the
+    /// relay LXC). Part of the acceptance — bootstrap leaves the installer
+    /// a member, not just the machines.
+    pub installer_pubkey: Option<String>,
 }
 
 /// Wrap a target command for execution inside an LXC via the host runner.
@@ -263,6 +268,22 @@ pub async fn deploy_relay(
                 .map(|e| format!(" (last probe error: {e})"))
                 .unwrap_or_default()
         )));
+    }
+
+    // Invite the INSTALLER: after the relay is up, make the human a member
+    // (the acceptance's invite step — machines alone shouldn't own the
+    // community). Runs through the relay-admin runner; idempotent.
+    if let Some(installer) = &spec.installer_pubkey {
+        crate::bootstrap::plain(installer)?;
+        let invite =
+            crate::relay_member::add_member_cmd("/srv/buzz-relay/deploy/compose", installer, None);
+        crate::bootstrap::exec_to_ok(
+            client,
+            target,
+            &lxc_cmd(spec.lxc, &invite),
+            "invite installer",
+            120,
+        )?;
     }
 
     // B3: the scope claim. Liveness is proven on the target's loopback; the
