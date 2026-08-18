@@ -1081,6 +1081,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bech32",
  "clap",
  "freehold-control-plane",
  "freehold-core",

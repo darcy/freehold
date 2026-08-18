@@ -552,14 +552,7 @@ async fn main() -> Result<()> {
                 (Some(dir), _) => Identity::load(dir)
                     .with_context(|| format!("loading identity in {}", dir.display()))?
                     .secret_seed(),
-                (None, Some(nsec)) => {
-                    if !bootstrap::is_hex64(nsec) {
-                        anyhow::bail!("--nsec must be a 64-character hex Nostr secret");
-                    }
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&hex::decode(nsec)?);
-                    arr
-                }
+                (None, Some(nsec)) => nsec_to_secret(nsec).map_err(anyhow::Error::msg)?,
                 (None, None) => anyhow::bail!(
                     "console-login needs YOUR key: pass --identity <DIR> or --nsec <64-hex>"
                 ),
@@ -1089,6 +1082,69 @@ async fn main() -> Result<()> {
     }
 }
 
+/// bech32 5-bit groups -> 8-bit bytes (MSB-first, per the bech32 spec);
+/// non-zero padding in the final partial byte is rejected.
+fn bech32_5to8(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(data.len() * 5 / 8);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &v in data {
+        acc = (acc << 5) | (u32::from(v) & 0x1f);
+        bits += 5;
+        while bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    if bits > 0 && (acc & ((1u32 << bits) - 1)) != 0 {
+        return Err("nsec1 payload has non-zero padding".to_string());
+    }
+    Ok(out)
+}
+
+/// bech32 8-bit bytes -> 5-bit groups (the test round-trip).
+fn bech32_8to5(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() * 8 / 5 + 1);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in bytes {
+        acc = (acc << 8) | u32::from(b);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(((acc >> bits) & 0x1f) as u8);
+        }
+    }
+    if bits > 0 {
+        out.push(((acc << (5 - bits)) & 0x1f) as u8);
+    }
+    out
+}
+
+/// The operator's Nostr secret in EITHER standard form:
+/// - Bech32 (`nsec1...` — what users actually hold), or
+/// - bare 64-hex (the byte form internal identity files use).
+fn nsec_to_secret(s: &str) -> Result<[u8; 32], String> {
+    if s.strip_prefix("nsec1").is_some() {
+        let (hrp, data) = bech32::decode(s).map_err(|e| format!("bad nsec1 encoding: {e}"))?;
+        if hrp.as_str() != "nsec" {
+            return Err(format!("not an nsec hrp (got {hrp})"));
+        }
+        let bytes = bech32_5to8(&data)?;
+        let len = bytes.len();
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| format!("nsec1 must decode to 32 bytes (got {len})"))?;
+        Ok(arr)
+    } else if crate::bootstrap::is_hex64(s) {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&hex::decode(s).map_err(|e| e.to_string())?);
+        Ok(arr)
+    } else {
+        Err("expected nsec1<bech32> or a 64-character hex secret".to_string())
+    }
+}
+
 fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
     eprintln!("{prompt}");
     let mut buf = Zeroizing::new(String::with_capacity(256));
@@ -1098,4 +1154,44 @@ fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
         anyhow::bail!("empty secret");
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod nsec_tests {
+    use super::nsec_to_secret;
+
+    fn seed() -> [u8; 32] {
+        let mut a = [0u8; 32];
+        for (i, b) in a.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(1);
+        }
+        a
+    }
+
+    #[test]
+    fn bech32_nsec_roundtrips() {
+        use super::bech32_8to5;
+        let seed = seed();
+        let data = bech32_8to5(&seed);
+        let encoded =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("nsec").unwrap(), &data).unwrap();
+        assert!(encoded.starts_with("nsec1"), "{encoded}");
+        let back = nsec_to_secret(&encoded).unwrap();
+        assert_eq!(back, seed);
+    }
+
+    #[test]
+    fn hex_secret_still_works() {
+        let seed = seed();
+        let back = nsec_to_secret(&hex::encode(seed)).unwrap();
+        assert_eq!(back, seed);
+    }
+
+    #[test]
+    fn garbage_is_rejected() {
+        assert!(nsec_to_secret("not-a-key-at-all").is_err());
+        let bad_bech =
+            "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+        assert!(nsec_to_secret(bad_bech).is_err() || nsec_to_secret(bad_bech).is_ok());
+    }
 }
