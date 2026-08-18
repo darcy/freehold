@@ -12,6 +12,20 @@ use crate::client::McpClient;
 
 pub const DEFAULT_BUZZ_COMPOSE_DIR: &str = "/srv/buzz-relay/deploy/compose";
 
+/// Build the `buzz-admin add-member` command (all single-quote-free:
+/// relay::lxc_cmd wraps the payload in single quotes when deploying into
+/// the LXC). `role` is the PLAIN value ("admin" or "member"). Shared by
+/// the CLI and by deploy-relay's installer invite.
+pub(crate) fn add_member_cmd(compose_dir: &str, pubkey: &str, role: Option<&str>) -> String {
+    let role_suffix = role.map_or(String::new(), |r| format!(" --role {r}"));
+    format!(
+        "cd {dir} && docker compose exec -T relay buzz-admin add-member --pubkey {pk}{role_suffix}",
+        dir = compose_dir,
+        pk = pubkey,
+        role_suffix = role_suffix,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct RelayMemberAddSpec {
     /// Nostr pubkey to add — 64-hex (buzz-admin also accepts npub).
@@ -43,28 +57,15 @@ pub async fn relay_member_add(
         )));
     }
     plain_path(&spec.compose_dir)?;
-    let role = match &spec.role {
-        None => String::new(),
-        Some(r) => {
-            if r != "admin" && r != "member" {
-                return Err(BootstrapError::Verify(format!(
-                    "relay member role must be 'member' or 'admin' (got {r:?})"
-                )));
-            }
-            format!("--role {r}")
-        }
-    };
-
-    // All single-quote-free: relay::lxc_cmd wraps the payload in single
-    // quotes when deploying into the LXC.
-    let cmd = format!(
-        "cd {dir} && docker compose exec -T relay buzz-admin add-member --pubkey {pk} {role}",
-        dir = spec.compose_dir,
-        pk = spec.pubkey,
-        role = role,
-    )
-    .trim_end()
-    .to_string();
+    if let Some(r) = spec.role.as_deref()
+        && r != "admin"
+        && r != "member"
+    {
+        return Err(BootstrapError::Verify(format!(
+            "relay member role must be 'member' or 'admin' (got {r:?})"
+        )));
+    }
+    let cmd = add_member_cmd(&spec.compose_dir, &spec.pubkey, spec.role.as_deref());
     let out = crate::bootstrap::exec_to_ok(
         client,
         target,

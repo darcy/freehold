@@ -80,6 +80,10 @@ struct DeployRelayArgs {
     /// (the example.com placeholders are not literal CHANGE_ME).
     #[arg(long)]
     relay_url: String,
+    /// The INSTALLER's Nostr pubkey (64-hex) — invite the human operator to
+    /// the relay once it comes up (the acceptance's invite step).
+    #[arg(long)]
+    installer_pubkey: Option<String>,
 }
 
 #[derive(Args)]
@@ -387,6 +391,7 @@ async fn main() -> Result<()> {
                     lxc: args.lxc,
                     owner_pubkey: args.owner_pubkey.clone(),
                     relay_url: args.relay_url.clone(),
+                    installer_pubkey: args.installer_pubkey.clone(),
                 },
             )
             .await?;
