@@ -1134,9 +1134,13 @@ fn nsec_to_secret(s: &str) -> Result<[u8; 32], String> {
         }
         let bytes = bech32_5to8(&data)?;
         let len = bytes.len();
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| format!("nsec1 must decode to 32 bytes (got {len})"))?;
+        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+            format!(
+                "nsec1 payload is {len} bytes, not 32 — a Nostr nsec is a 32-BYTE secret \
+                 (~63 chars, nsec1 + bech32). This is a TRUNCATED copy or a non-Nostr key: \
+                 re-copy the FULL nsec from your wallet (check: `echo -n <key> | wc -c` = 63)"
+            )
+        })?;
         Ok(arr)
     } else if crate::bootstrap::is_hex64(s) {
         let mut arr = [0u8; 32];
