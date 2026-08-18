@@ -29,7 +29,7 @@ secrets, and memory.
     relay's scope → create a runner that can reach and manage both the relay and the CP →
     the CP adds itself as a member. Create-new: the CP literally creates its own scope and
     the runner it needs to operate it. Attach-existing reaches the same end state via the
-    relay's own member management; relay-creation is a skippable, idempotent step.
+    relay's own member management; relay-creation is a skippable, idempotent step. The
     
 
 ## Buzz — the user-facing surface AND required substrate for the fabric
@@ -606,10 +606,13 @@ MVP done = public release (k8s + control plane + console + skills, Proxmox + VPS
 *   Security hardening (privilege escalation, audit, approval gates); on-demand decryption opt-in  
     for external/less-trusted runners; Vault for dynamic secrets
     
-*   **Console authentication + TLS (deployed exposure):** Chunk 2 deliberately keeps the console
-    loopback-only on the deployed target, with operator access via SSH tunnel (and the CP refuses
-    a non-loopback bind without an authn/TLS story — C3). A real non-loopback console posture
-    (the "deployed = web UI at https://box" line elsewhere in this doc) is gated on that story.
+*   **Console authentication + TLS:** the console gains NIP-98 operator login IN Chunk 2
+    (admin whitelist seeded by --operator-pubkey at bootstrap), making the bind guard
+    authn-conditional (loopback-only refusal until authn + an admin are configured; LAN
+    bind once they are). TLS = the domain cert: local CA by default (LAN-only), Let's
+    Encrypt DNS-01 when a DNS provider key is given. A real public posture (the
+    "deployed = web UI at https://box" line elsewhere in this doc) is then optional,
+    not gated.
     
 *   Multi-user / multi-tenant (relay-as-scope enables this)
     
