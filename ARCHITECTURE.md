@@ -22,10 +22,14 @@ secrets, and memory.
     create a relay runner (connector to that relay's API) → validate → create an  
     `@myrelay` expert agent → grant → add to a channel. No nested-scope machinery.
     
-*   **Bootstrap is self-scoping:** first install = create the Buzz relay → create the  
-    control plane → create a runner that can reach and manage both the relay and the CP →  
-    the CP adds itself as a member. The CP literally creates its own scope and the runner  
-    it needs to operate it.
+*   **Bootstrap is self-scoping:** first install BRANCHES — CREATE a new Buzz relay on the
+    target, or **attach-existing** (attach to the operator's existing relay — its PRIMARY/management relay
+    pre-existing at bootstrap; this is NOT the "existing relay = service" bullet below,
+    which is Chunk-3 SECONDARY-relay onboarding) → create/deploy the control plane onto that
+    relay's scope → create a runner that can reach and manage both the relay and the CP →
+    the CP adds itself as a member. Create-new: the CP literally creates its own scope and
+    the runner it needs to operate it. Attach-existing reaches the same end state via the
+    relay's own member management; relay-creation is a skippable, idempotent step.
     
 
 ## Buzz — the user-facing surface AND required substrate for the fabric
@@ -380,7 +384,7 @@ Anything × anything composes. K8s layer runs identically regardless of host.
 
 *   Provisioning ≠ installing. VPS provisions; Proxmox is install-only.
     
-*   Install creates a new management relay (Buzz required).
+*   Install creates a new management relay OR attaches to an existing one (Buzz required; relay-creation is a skippable idempotent step).
     
 *   Unified control plane app; bootstrap is a MODE, not a script.
     
