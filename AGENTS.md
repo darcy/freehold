@@ -10,11 +10,11 @@ audit), B (provisioner), C (SSH + vultr + b2 connectors), D (coarse grants), E
 admin/ops web UI: services-at-a-glance with LIVE readiness via a console agent, and
 runner/secret/grant management), and G (the acceptance script: `cargo run -p
 freehold-acceptance` reproduces every Chunk-1 acceptance criterion hermetic on
-loopback) are implemented and reviewed; H1 (old-laptop Proxmox as a real SSH target)
-is DONE — the laptop is onboarded as a runner and execs green. Chunk 2 is started:
+H1 (the PVE host as a real SSH target)
+is DONE — the PVE host is onboarded as a runner and execs green.
 Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) and Phase A (bootstrap
 provisioning: `freehold bootstrap` with proxmox-lxc + vultr-vps drivers,
-hermetic-tested, dry-run verified against the laptop) are DONE; the A–H build plan
+hermetic-tested, dry-run verified against the PVE host) are DONE
 is in `roadmap/POC_CHUNK2.md`. Phase B (deploy-relay driver: docker gate,
 curl+tar bundle fetch, compose start, /_liveness verify, scope claim) is
 implemented and hermetic-tested. The proxmox-lxc bootstrap is idempotent
@@ -23,7 +23,7 @@ implemented and hermetic-tested. The proxmox-lxc bootstrap is idempotent
 (deb-13 amd64, unprivileged, `fuse=1,keyctl=1,nesting=1`, 16G/2G) runs the
 Buzz compose stack — relay/postgres/redis/minio all healthy, `/_liveness` ok
 on loopback AND the LAN (192.168.30.248:3000). Phase C is DONE: the control
-plane is deployed in OPERATE mode on the box (`/srv/freehold`, loopback
+is deployed in OPERATE mode on the PVE host (`/srv/freehold`, loopback
 127.0.0.1:8080, binary shipped as base64 through the runner's exec-only
 primitive), the CPA is a relay member (owner = console pubkey, member =
 h1-agent), and loopback-only is enforced + verified. Phase D (identity
@@ -77,7 +77,9 @@ Work ships via branches, pending a GitHub outage before the PR/review cycle.
 
 ## Locked model — do not change without an explicit user decision
 
-- **One control plane = exactly ONE relay scope** (relay-as-scope). A user's existing relay is
+- **One control plane = exactly ONE relay scope** (relay-as-scope). The CP lives on its OWN target
+  (a dedicated LXC/box) and ATTACHES to the relay — co-location with the relay is convenience,
+  never assumed; the CP does not depend on managing the relay. A user's existing relay is
   onboarded as a service, not a nested scope. No "control plane of control planes".
 - **Agent = brain; runner = dumb privileged hands.** ONE generic primitive: `exec(cmd, target,
   stream?)`. NO semantic tools (`tail_log`, `create_server`, … don't exist). Streaming is a
@@ -114,7 +116,7 @@ no k8s.
   `testkit` (hermetic fixtures: mock Vultr/B2 APIs + in-process sshd), and `acceptance`
   (the Chunk 1 acceptance script) crates.
 - MCP over HTTP for agent↔runner even though co-located — proves the real shape.
-- Test targets: VPS (dev/smoke) → old-laptop Proxmox (test/staging, SSH target only) → home
+VPS (dev/smoke) → PVE host (test/staging, SSH target only) → home
   dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.
 
 ## Chunk 1 known gaps (honest scope)

@@ -9,10 +9,12 @@ provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessar
 *   **The master/control agent (CPA) is handled as `@freehold`** in the relay — not
     `@control-plane` or similar. The agent is the product's voice; users talk to `@freehold`.
 
-*   **CP and relay share ONE target.** Not split across separate services for the POC — a
-    `@buzz-relay` agent would have almost nothing to do besides "add an agent," which doesn't
-    justify its own identity/grants/readiness surface yet. Extractable later if a real reason
-    shows up (substrate swap, multi-relay, etc.).
+*   **CP and relay share a SCOPE, not a machine.** One CP = exactly one relay scope
+    (relay-as-scope). The CP deploys to its OWN target (a dedicated LXC/box the operator
+    chooses) and ATTACHES to the relay — same LXC only if co-location is chosen, never
+    assumed, and the CP does not depend on managing the relay. A `@buzz-relay` management
+    agent is not part of the POC (it would have almost nothing to do besides "add an
+    agent") — extractable later if a real reason shows up (substrate swap, multi-relay).
 
 *   **One CPA mode: relay-native.** The master/control agent (`@freehold`) exists ONLY as a
     relay-addressable peer inside the relay scope. There is no "runner-direct CPA" — the CPA
@@ -31,10 +33,13 @@ provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessar
 
 *   **Chunk 2's actual job is proving the transition from local runner-direct bootstrap to
     delegation mode**, not just "relay is up."
-*   **`freehold` is the SERVICE: Buzz + the control plane bundled on one target** (relay
-    stack, CP app incl. its grant-management console) — the deployable unit Phases B/C build.
-    `@freehold` is the AGENT IDENTITY that lives inside that service once it is up (Phase D).
-    The service and the agent are not the same thing.
+*   **`freehold` is the SERVICE: the control plane** — agent (`@freehold`) +
+    grant-management console + provisioner — deployed as its own unit on its OWN target
+    (a dedicated LXC/box). Buzz is the SUBSTRATE it attaches to: same host, different
+    infrastructure, or a relay the operator does not manage at all. The relay is NOT part
+    of the service unit; co-location is convenience, and the CP never assumes it owns the
+    relay. `@freehold` is the AGENT IDENTITY that lives inside the service once it is up
+    (Phase D).
 *   **Bootstrap treats "create the relay" and "deploy the CP onto a relay" as DECOUPLED,
     idempotent steps:** create-new (stand up a fresh relay on the target, the original path)
     or **attach-existing** (operator already runs a relay — its PRIMARY/management relay
@@ -73,12 +78,12 @@ provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessar
     agents (goose/codex/claude) and is the Chunk-3+ harness path; E1 carries the same wording.
 
 *   **No local-machine dev loop.** VPS and Proxmox are the two real targets, matching the
-    existing promote flow (VPS smoke → old-laptop Proxmox test → home).
+existing promote flow (VPS smoke → PVE host test → home).
 
 ## Goal (one sentence)
 
 Prove the mode transition: the local provisioning expert boots a target + relay (create-new
-or attach-existing), the control plane deploys onto the relay scope (the `freehold` service,
+the control plane deploys onto its own dedicated target (the `freehold` service,
 OPERATE mode), Chunk 1's identity model ports onto real relay membership, and the CPA
 (`@freehold`) delegates its first real task to a NEW relay-addressable peer agent — instead
 of any runner-direct call.
@@ -86,8 +91,8 @@ of any runner-direct call.
 ## Demo that defines done
 
 Local provisioning expert provisions an LXC/VPS → deploys the Buzz relay onto it (create-new;
-attach-existing skips this) → deploys CP onto the same target = the `freehold` service
-(OPERATE mode; console loopback-only) → CP joins the relay as a member → Chunk 1's runners
+→ deploys the CP onto its OWN dedicated LXC = the `freehold` service
+(OPERATE mode; console loopback-only until authn lands) → CP joins the relay as a member
 (SSH/Vultr/B2) get re-registered under real Nostr identities on the relay instead of the
 local stand-in registry → a NEW provisioning runner identity is minted inside the relay,
 re-encrypted credentials, granted to a relay-addressable peer agent (a DUPLICATE, not a
@@ -127,7 +132,7 @@ consumes per capability. Native kinds found for most of it (membership 13534, ag
 - [x] [x]
 
 A1. Confirm/choose the primary target type for this chunk's build+test pass — VPS first for
-iteration speed, matching the existing promote flow, then validated against old-laptop Proxmox.
+iteration speed, matching the existing promote flow, then validated against the PVE host.
 
 - [x] [x]
 
@@ -135,7 +140,7 @@ A2. The **local provisioning expert** (the orchestrator's bootstrap mode — a n
     runner-shaped local tool, NOT the CPA: the CPA has no local existence in any mode) calls
     the relevant provisioning runner **directly** — no agent fabric exists yet — to stand up
     the target. Capabilities: `vultr create/destroy` via the EXISTING vultr runner (VPS);
-    for Proxmox, the EXISTING ssh runner drives `pvesh`/`pct` on the laptop host (generic
+    for Proxmox, the EXISTING ssh runner drives `pvesh`/`pct` on the PVE host (generic
     exec — the tool writes the commands; no new Proxmox connector is built).
 
 - [x] [x]
@@ -169,15 +174,17 @@ B2. Confirm relay is reachable and healthy (its own self-check, distinct from CP
 B3. This relay becomes the control plane's ONE scope going forward (relay-as-scope) —
     create-new only; attach-existing already HAS its scope: the operator's relay.
 
-### Phase C — Deploy the control plane onto the relay scope (completes the `freehold` service)
+### Phase C — Deploy the control plane onto its own target (the `freehold` service)
 
 - [x] [ ]
 
-C1. Deploy CP app onto the same target, now running in **OPERATE mode** instead of localhost
-(Chunk 1 was effectively local/BOOTSTRAP-adjacent). **The console STAYS bound to loopback on
-the deployed target** — OPERATE mode means the process + its data live on the box, NOT that
-the UI is network-exposed. The console has no authentication (loopback-only by design,
-Chunk 1); operator access from elsewhere is an SSH tunnel
+C1. Deploy the CP app onto its OWN target (a dedicated LXC/box the operator chooses — a
+    different LXC than the relay's by default; the CP attaches to whatever relay it is
+    pointed at, managed or not), now running in **OPERATE mode** instead of localhost
+    (Chunk 1 was effectively local/BOOTSTRAP-adjacent). **The console is loopback-bound on
+    the deployed target** — OPERATE mode means the process + its data live on the target,
+    NOT that the UI is network-exposed. TODAY the console has no authentication:
+    loopback-only, and operator access from elsewhere is an SSH tunnel
 (`ssh -L 8080:127.0.0.1:8080 target`).
 
 - [x] [ ]
@@ -324,7 +331,7 @@ memory, not in-process state).
 ### Phase H — Acceptance script
 
 CI runs the checks against hermetic fixtures — a mock relay in `testkit` (same pattern as
-the mock Vultr/B2/sshd) — with the REAL relay on the promote path (VPS → laptop). The
+the mock Vultr/B2/sshd) — with the REAL relay on the promote path (VPS → PVE host). The
 H1–H6 script is parameterized the same way `freehold-acceptance` already is; no local
 dev loop is introduced by adding fixtures.
 
@@ -370,7 +377,7 @@ I1. Build/iterate against VPS first (fast, disposable, matches dev/smoke pattern
 
 - [ ] [ ]
 
-I2. Validate the same flow against old-laptop Proxmox — LXC provisioning via the ssh runner
+I2. Validate the same flow against the PVE host — LXC provisioning via the ssh runner
 driving `pvesh`/`pct` (no new connector) — proving bootstrap isn't VPS-only, without yet
 building the general Chunk-6 provisioner picker.
 

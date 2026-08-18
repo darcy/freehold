@@ -12,7 +12,7 @@ Scope: POC, pre-Buzz, NO k8s, NO real reasoning agent.
     
 *   **Agent:** scripted orchestrator (CPA stand-in) driving the onboarding flow. No real agent.
     
-*   **Test targets:** old-laptop Proxmox (SSH target) + real Vultr + real B2.
+*   **Test targets:** PVE host (SSH target) + real Vultr + real B2.
     
 *   **Identity stand-in:** standalone keypairs + local registry (no relay yet). Grants whitelist  
     pubkeys, enforced locally. Ports onto relay membership in Chunk 2.
@@ -102,7 +102,7 @@ disk, never in agent context.
 
 - [x] [x] 
 
-C1. **SSH** to local machine (old-laptop Proxmox): persistent ssh connection pool  
+C1. **SSH** to local machine (PVE host): persistent ssh connection pool
 (ControlMaster/ControlPersist) for cheap repeated commands.
 
 - [ ] [ ] 
@@ -166,11 +166,11 @@ no master key; revoking membership cuts off; rotation re-encrypts.
 
 - [x] [x] 
 
-H1. Run against old-laptop Proxmox (SSH target) — safe target.
+H1. Run against the PVE host (SSH target) — safe target.
 
 - [ ] [ ] 
 
-H2. Promote to home dogfood once green on the laptop.
+H2. Promote to home dogfood once green on the PVE host.
 
 ## Chunk 1 acceptance (from POC Steps doc)
 
