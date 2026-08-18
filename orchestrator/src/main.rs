@@ -129,6 +129,13 @@ struct DeployCpArgs {
     /// a different LXC than the relay's by default (omitted = the target host).
     #[arg(long)]
     lxc: Option<u32>,
+    /// LOCAL path of the built freehold-runner binary (co-locates the CP's
+    /// own runner: ship + systemd unit + adopt + self-grant).
+    #[arg(long)]
+    runner_binary: Option<PathBuf>,
+    /// LOCAL dir of an EXISTING runner package to co-locate + adopt.
+    #[arg(long)]
+    runner_package: Option<PathBuf>,
     /// The OPERATOR's Nostr pubkey (64-hex) — seeds the console's NIP-98
     /// admin whitelist (C3.5) and relaxes the loopback-only bind guard.
     #[arg(long)]
@@ -530,6 +537,8 @@ async fn main() -> Result<()> {
                         }
                         None => Vec::new(),
                     },
+                    runner_binary: args.runner_binary.clone(),
+                    runner_package: args.runner_package.clone(),
                     public_origin: {
                         // Convention: the console's public host is
                         // cp-<relay-host> when the relay runs behind a
