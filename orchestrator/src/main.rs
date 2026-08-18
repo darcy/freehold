@@ -141,7 +141,11 @@ struct ConsoleLoginArgs {
     url: String,
     /// YOUR identity dir (its nsec signs the NIP-98 login; never leaves)
     #[arg(long)]
-    identity: PathBuf,
+    identity: Option<PathBuf>,
+    /// YOUR Nostr secret (64-hex) — signs the login directly; never leaves
+    /// your machine. Either --identity or --nsec is required.
+    #[arg(long)]
+    nsec: Option<String>,
 }
 
 #[derive(Args)]
@@ -544,8 +548,22 @@ async fn main() -> Result<()> {
         }
         Cmd::ConsoleLogin(args) => {
             use freehold_core::identity::Identity;
-            let id = Identity::load(&args.identity)
-                .with_context(|| format!("loading identity in {}", args.identity.display()))?;
+            let secret: [u8; 32] = match (&args.identity, &args.nsec) {
+                (Some(dir), _) => Identity::load(dir)
+                    .with_context(|| format!("loading identity in {}", dir.display()))?
+                    .secret_seed(),
+                (None, Some(nsec)) => {
+                    if !bootstrap::is_hex64(nsec) {
+                        anyhow::bail!("--nsec must be a 64-character hex Nostr secret");
+                    }
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&hex::decode(nsec)?);
+                    arr
+                }
+                (None, None) => anyhow::bail!(
+                    "console-login needs YOUR key: pass --identity <DIR> or --nsec <64-hex>"
+                ),
+            };
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .http_status_as_error(false)
                 .timeout_global(Some(std::time::Duration::from_secs(15)))
@@ -578,14 +596,9 @@ async fn main() -> Result<()> {
                 vec!["u".into(), base.clone()],
                 vec!["method".into(), "login".into()],
             ];
-            let (pubkey, _, sig) = freehold_core::nip98::sign_event(
-                &id.secret_seed(),
-                27235,
-                ts,
-                tags.clone(),
-                &nonce,
-            )
-            .map_err(anyhow::Error::msg)?;
+            let (pubkey, _, sig) =
+                freehold_core::nip98::sign_event(&secret, 27235, ts, tags.clone(), &nonce)
+                    .map_err(anyhow::Error::msg)?;
             let body = serde_json::json!({
                 "nonce": nonce,
                 "pubkey": pubkey,
