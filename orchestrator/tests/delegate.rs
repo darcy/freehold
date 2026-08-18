@@ -95,3 +95,62 @@ async fn cpa_delegates_to_peer_and_gets_the_result_back() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agents_join_the_freehold_channel_and_the_greeting_is_signed() {
+    let cpa = Identity::generate();
+    let peer = Identity::generate();
+    let (relay_url, state, server) = freehold_testkit::relay::spawn().await;
+    let channel = "00000000-0000-4000-8000-00000000f0ef";
+
+    // The bootstrap setup step: ensure the OPEN #freehold channel, join each
+    // agent, greet as the CPA.
+    delegate::ensure_channel(&relay_url, &cpa.secret_seed(), channel, "freehold").unwrap();
+    freehold_core::relay_http::join_channel(&relay_url, &cpa.secret_seed(), channel).unwrap();
+    freehold_core::relay_http::join_channel(&relay_url, &peer.secret_seed(), channel).unwrap();
+    delegate::post_message(
+        &relay_url,
+        &cpa.secret_seed(),
+        channel,
+        &cpa.nostr_pubkey_hex(),
+        "freehold agents online",
+    )
+    .unwrap();
+
+    let events = state.events.lock().clone();
+    let kinds = |k: u64| {
+        events
+            .iter()
+            .filter(|e| e["kind"].as_u64() == Some(k))
+            .count()
+    };
+    assert_eq!(kinds(9007), 1, "channel ensured once");
+    assert_eq!(kinds(9021), 2, "both agents joined");
+    assert_eq!(kinds(9), 1, "the greeting");
+    let greeting = events
+        .iter()
+        .find(|e| e["kind"].as_u64() == Some(9))
+        .unwrap();
+    assert_eq!(
+        greeting["pubkey"].as_str().unwrap(),
+        &cpa.nostr_pubkey_hex()
+    );
+    assert_eq!(greeting["tags"][0][0], "h");
+    assert_eq!(greeting["tags"][0][1], channel);
+    // The channel create is OPEN (any member may post — no roster gate).
+    let create = events
+        .iter()
+        .find(|e| e["kind"].as_u64() == Some(9007))
+        .unwrap();
+    assert!(create["content"].as_str().is_some());
+    let create_tags: Vec<Vec<String>> =
+        serde_json::from_value(create["tags"].clone()).unwrap_or_default();
+    assert!(
+        create_tags
+            .iter()
+            .any(|t| t.first() == Some(&"visibility".to_string())
+                && t.get(1) == Some(&"open".to_string()))
+    );
+
+    server.abort();
+}
