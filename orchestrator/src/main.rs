@@ -142,8 +142,9 @@ struct ConsoleLoginArgs {
     /// YOUR identity dir (its nsec signs the NIP-98 login; never leaves)
     #[arg(long)]
     identity: Option<PathBuf>,
-    /// YOUR Nostr secret (64-hex) — signs the login directly; never leaves
-    /// your machine. Either --identity or --nsec is required.
+    /// YOUR Nostr secret — nsec1<bech32> (what you actually hold) or bare
+    /// 64-hex; signs the login directly and never leaves your machine.
+    /// Either --identity or --nsec is required.
     #[arg(long)]
     nsec: Option<String>,
 }
