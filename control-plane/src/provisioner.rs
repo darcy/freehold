@@ -203,6 +203,62 @@ pub fn provision_runner(
 /// B2 — rotate a secret: re-seal the NEW value to the runner's existing
 /// encryption key, re-ship the package, update state. `new_secret` (the fresh
 /// credential) replaces the old one everywhere; the old value is gone.
+/// ADOPT an EXISTING runner into the console registry — no credential is
+/// shipped and nothing is re-sealed: the runner's own package directory
+/// (identity.json + secrets.json) already holds its keypair and the sealed
+/// credential. The record is rebuilt from that package so the console can
+/// list the runner, probe its LIVE readiness over MCP, and grant/revoke it
+/// (grants still re-ship into the SAME package dir — the runner re-reads
+/// them per call).
+pub fn adopt_runner(
+    store: &StateStore,
+    name: &str,
+    kind: &str,
+    address: &str,
+    package_dir: &std::path::Path,
+    mcp_addr: Option<String>,
+) -> Result<RunnerRecord, ProvisionError> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return Err(ProvisionError::InvalidName(name.to_string()));
+    }
+    if store.get_runner(name).is_some() {
+        return Err(ProvisionError::RunnerExists(name.to_string()));
+    }
+    let id = identity::Identity::load(package_dir)?;
+    let pkg = freehold_core::secrets::SecretPackage::load(package_dir)?;
+    // The record's ciphertext = the sealed credential the package holds for
+    // its (first) target — the same blob rotate would re-seal on top of.
+    let ciphertext_hex = pkg
+        .targets
+        .values()
+        .next()
+        .and_then(|t| pkg.secrets.get(&t.secret).cloned())
+        .unwrap_or_default();
+    let created_at = now_secs();
+    let runner = RunnerRecord {
+        nostr_pubkey: id.nostr_pubkey_hex(),
+        enc_pubkey: id.enc_pubkey_hex(),
+        status: RunnerStatus::Active,
+        package_dir: package_dir.to_path_buf(),
+        created_at,
+        mcp_addr,
+    };
+    // The Chunk-1 model: one SecretRecord per runner, carrying the target
+    // kind/address and the sealed credential (rotate re-seals on top of it).
+    let secret = SecretRecord {
+        runner: name.to_string(),
+        kind: kind.to_string(),
+        address: address.to_string(),
+        ciphertext_hex,
+        created_at,
+        rotated_at: None,
+    };
+    store.insert_runner(name, runner.clone());
+    store.insert_secret(name, secret);
+    store.save()?;
+    Ok(runner)
+}
+
 pub fn rotate_secret(
     store: &StateStore,
     name: &str,
