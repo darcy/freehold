@@ -1090,7 +1090,8 @@ async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
     // Only the MEMORY (30174) events are checked — audit/request contents
     // legitimately carry the g4 task names.
     if stored.iter().any(|e| {
-        e["kind"].as_u64() == Some(30174) && e["content"].as_str().is_some_and(|c| c.contains("g4"))
+        e["kind"].as_u64() == Some(30174)
+            && e["content"].as_str().is_some_and(|c| c.contains(canary))
     }) {
         return Err("memory plaintext leaked to the relay!".into());
     }
@@ -1099,8 +1100,13 @@ async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
     // publish is DETACHED (spawn_blocking) — re-snapshot with a bounded poll
     // so a slow runner doesn't produce a false red ("no audit event").
     let mut audit_events: Vec<Value> = Vec::new();
+    // The publish is DETACHED — re-snapshot the LIVE relay state each try
+    // (a static pre-loop snapshot would make the poll vacuous, review
+    // caught).
     for _ in 0..10 {
-        audit_events = stored
+        audit_events = relay_state
+            .events
+            .lock()
             .iter()
             .filter(|e| e["kind"].as_u64() == Some(48001))
             .cloned()
