@@ -58,7 +58,7 @@ Goal: prove the engine room works standalone (before Buzz is in the picture).
     
 *   **No Buzz yet.** Master agent works directly in the control plane.
     
-*   Test against the old-laptop Proxmox (safe target), then promote to home.
+*   Test against the PVE host (safe target), then promote to home.
     
 
 ### Chunk 1 acceptance
@@ -134,10 +134,10 @@ optional-but-working as a managed child service.
 
 1.  **VPS (dev/smoke):** fast iteration on runner, agent, skills, plumbing.
     
-2.  **Old-laptop Proxmox (test/staging):** real Proxmox API + LXC lifecycle, safe.
+2.  **PVE host (test/staging):** real Proxmox API + LXC lifecycle, safe.
     
 3.  **Home Proxmox (prod):** daily driver; dogfooded daily; never the first test.  
-    Promotion: code → VPS smoke → old-laptop test → home. Installer/runner must install to  
+Promotion: code → VPS smoke → PVE host test → home. Installer/runner must install to
     VPS as easily as Proxmox from day one (no Proxmox-only shortcuts).
     
 

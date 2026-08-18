@@ -62,7 +62,7 @@ behalf via privileged runners, with a management relay as the scope.
     
 *   **NO Kubernetes** in POC.
     
-*   Environments: VPS dev/smoke + old-laptop Proxmox test + home dogfood.
+*   Environments: VPS dev/smoke + PVE host test + home dogfood.
     
 *   POC acceptance: master agent manages SSH machine / Vultr / Backblaze via runner + installs  
     skills (tailscale, pihole) with readiness view; management relay is the scope.
@@ -101,7 +101,7 @@ The public release builds on the POC and adds the Kubernetes substrate. Core pro
     
 *   **Management relay** as the scope for agents + secrets + runners.
     
-*   **Environments:** VPS dev/smoke + old-laptop Proxmox test + home dogfood.
+*   **Environments:** VPS dev/smoke + PVE host test + home dogfood.
     
 *   **Bootstrap mode:** install onto existing Proxmox + install onto a VPS (advanced).
     
@@ -137,7 +137,7 @@ The public release builds on the POC and adds the Kubernetes substrate. Core pro
     
 *   LiteLLM routes agent models; Postgres holds control-plane + service state.
     
-*   Runs safely on old-laptop test box AND home box (dogfooded daily).
+*   Runs safely on PVE host test box AND home box (dogfooded daily).
     
 
 ## Future items (prioritize later)
@@ -157,7 +157,7 @@ The public release builds on the POC and adds the Kubernetes substrate. Core pro
     
 *   **Mobile app** — phone as a client to the control plane.
     
-*   **Multi-box scaling + Ceph replication** — old laptops join the cluster.
+*   **Multi-box scaling + Ceph replication** — PVE hosts join the cluster.
     
 *   **Security hardening** — finer-grained target-scoped grants, privilege escalation, audit,  
     approval gates on the runner; on-demand decryption opt-in for external/less-trusted  

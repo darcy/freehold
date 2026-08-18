@@ -367,12 +367,12 @@ Anything × anything composes. K8s layer runs identically regardless of host.
 *   **VPS (dev/smoke):** fast, cheap, disposable. Tests runner abstraction, agent logic, skill  
     plumbing. Also IS the VPS/cloud product driver dev env (same path).
     
-*   **Old-laptop Proxmox (test/staging):** real Proxmox API + LXC lifecycle BEFORE production.  
+*   **PVE host (test/staging):** real Proxmox API + LXC lifecycle BEFORE production.
     Low-end hardware = proof point for "appliance on modest hardware." Primary Proxmox dev target.
     
 *   **Home Proxmox (prod):** real daily driver; dogfooded daily. Never the first test.
     
-*   **Later:** old laptops join as cluster nodes for multi-box scaling + Ceph.
+*   **Later:** PVE hosts join as cluster nodes for multi-box scaling + Ceph.
     
 *   **Discipline:** installer/runner must install to a VPS as easily as Proxmox from day one.
     
@@ -388,7 +388,9 @@ Anything × anything composes. K8s layer runs identically regardless of host.
     
 *   Unified control plane app; bootstrap is a MODE, not a script.
     
-*   Co-locate control plane + runner with target for MVP. "Local CP + remote k8s" = not MVP.
+*   Co-locate the control plane + its runner with the CP's OWN target LXC/box for MVP — the
+    relay is an ATTACH (own LXC, different infra, or unmanaged), never a co-location requirement.
+    "Local CP + remote k8s" = not MVP.
     
 *   Pre-installed box = phase 2/3. Future: local CP can provision another Proxmox box (software).
     
@@ -552,7 +554,7 @@ health → report to user.
     generic `exec`; secret PROVISIONER in the control plane (encrypt-to-runner-key + ship +  
     rotate + membership; no master key); connect to SSH local machine + Vultr + Backblaze;  
     readiness model (runner self-check); coarse grants. Runners separate from Buzz. Runs  
-    locally, connects to remote services. TEST against old-laptop Proxmox.
+locally, connects to remote services. TEST against the PVE host.
     
 2.  **Chunk 2 — Create the management relay (Buzz):** install creates a new relay → becomes the  
     control plane's scope; agents get Nostr identity; fabric + shared memory light up.
