@@ -252,7 +252,7 @@ the mock Vultr/B2/sshd) — with the REAL relay on the promote path (VPS → lap
 G1–G6 script is parameterized the same way `freehold-acceptance` already is; no local
 dev loop is introduced by adding fixtures.
 
-- [ ] [ ]
+- [x] [ ]
 
 G1. Fresh run: provision target → relay up → CP up on same target → CP is a relay member.
 
