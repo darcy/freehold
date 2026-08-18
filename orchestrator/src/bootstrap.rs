@@ -744,12 +744,14 @@ pub fn resolve_ip(domain: &str) -> Option<std::net::IpAddr> {
     (domain, 0).to_socket_addrs().ok()?.map(|sa| sa.ip()).next()
 }
 
-/// The standard LXC naming: normalize `--domain` (dots -> underscores,
-/// keep dash) and append the role suffix: `<domain>-relay` / `<domain>-cp`
-/// (e.g. freehold-test.darcydev.net -> freehold-test_darcydev_net-relay).
-/// LXC names allow alnum + `-_.`; length capped at 63.
+/// The standard LXC naming: normalize `--domain` (dots -> dashes) and
+/// append the role suffix: `<domain>-relay` / `<domain>-cp`
+/// (e.g. freehold-test.darcydev.net -> freehold-test-darcydev-net-relay).
+/// PVE validates CT hostnames as DNS names — underscores are REJECTED
+/// (observed live: 'pct set --hostname ..._...' -> invalid format), so the
+/// separator is a dash. Length capped at 63.
 pub fn domain_lxc_name(domain: &str, suffix: &str) -> Result<String, String> {
-    let normalized = domain.replace('.', "_");
+    let normalized = domain.replace('.', "-");
     if normalized.is_empty() || normalized.len() > 48 {
         return Err(format!("domain {domain:?} yields an invalid LXC name"));
     }
@@ -886,11 +888,11 @@ mod domain_gate_tests {
     fn lxc_name_follows_domain_convention() {
         assert_eq!(
             domain_lxc_name("freehold-test.darcydev.net", "relay").unwrap(),
-            "freehold-test_darcydev_net-relay"
+            "freehold-test-darcydev-net-relay"
         );
         assert_eq!(
             domain_lxc_name("freehold-test.darcydev.net", "cp").unwrap(),
-            "freehold-test_darcydev_net-cp"
+            "freehold-test-darcydev-net-cp"
         );
         assert!(domain_lxc_name("", "relay").is_err());
         assert!(domain_lxc_name("bad space.net", "relay").is_err());
