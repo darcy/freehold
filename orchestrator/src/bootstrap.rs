@@ -714,12 +714,23 @@ pub fn wait_for_domain_resolution(
                 println!("DOMAIN-GATE: {domain} resolves to {want_ip} — continuing");
                 return Ok(());
             }
-            Some(ip) => println!("DOMAIN-GATE: {domain} resolves to {ip}, want {want_ip} — {hint}"),
+            Some(ip) => {
+                // The domain's identity is established — it resolves. It may
+                // legitimately point at an OPERATOR-MANAGED PROXY (e.g. an
+                // nginx on the tailnet) that forwards to this target rather
+                // than at the target directly. Proceed, but say so loudly:
+                // a silently-wrong resolver would strand every client.
+                println!(
+                    "DOMAIN-GATE: {domain} resolves to {ip} — continuing. NOTE: that is NOT the \
+                     target {want_ip}; if {ip} is a proxy, ensure it forwards {domain} to {want_ip}"
+                );
+                return Ok(());
+            }
             None => println!("DOMAIN-GATE: {domain} does not resolve yet — {hint}"),
         }
         if std::time::Instant::now() >= deadline {
             return Err(BootstrapError::Verify(format!(
-                "domain gate: {domain} never resolved to {want_ip} within {wait_secs}s — {hint}"
+                "domain gate: {domain} still does not resolve within {wait_secs}s — {hint}"
             )));
         }
         sleep(std::time::Duration::from_secs(5));
@@ -830,20 +841,18 @@ mod domain_gate_tests {
     }
 
     #[test]
-    fn wrong_ip_fails() {
-        let e = wait_for_domain_resolution(
+    fn resolves_elsewhere_proceeds_with_warning() {
+        // An operator-managed proxy (e.g. nginx on a tailnet) legitimately
+        // owns the domain's A record; the gate must proceed once the domain
+        // RESOLVES, warning loudly that the target IP differs.
+        let r = wait_for_domain_resolution(
             "relay.example",
             "10.0.0.5",
             0,
-            |_| ip("10.0.0.9"),
+            |_| ip("100.64.0.9"),
             no_sleep,
-        )
-        .unwrap_err();
-        assert!(msg_has(e, "10.0.0.5"));
-    }
-
-    fn msg_has(e: BootstrapError, needle: &str) -> bool {
-        e.to_string().contains(needle)
+        );
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]

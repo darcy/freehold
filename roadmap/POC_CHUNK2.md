@@ -56,10 +56,13 @@ provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessar
     REQUEST HOST (row-zero host binding; an unmapped host is REFUSED — BUZZ_SURFACE §9.8).
     Bootstrap therefore REQUIRES `--domain` with a BLOCKING gate (Phase A4): create the
     target → IP known → print the resolver hint (LAN DNS, or `/etc/hosts` for the POC) →
-    poll until the domain resolves to that IP → only then write `BUZZ_DOMAIN`/`relay_url`
-    = `<domain>` and continue. The domain is permanent; the resolver is swappable (real
-    DNS later). The current IP-anchored community is DISPOSABLE and is re-provisioned
-    under the domain at the fresh-run re-test.
+    poll until the domain RESOLVES → only then write `BUZZ_DOMAIN`/`relay_url`
+    = `<domain>` and continue. The resolution may point DIRECTLY at the target IP (the
+    strict case) OR at an OPERATOR-MANAGED PROXY that forwards to it (e.g. nginx on a
+    tailnet) — the gate proceeds on ANY resolution, warning loudly when the target
+    differs so a silently-wrong resolver can't strand clients. The domain is permanent;
+    the resolver is swappable (real DNS later). The current IP-anchored community is
+    DISPOSABLE and is re-provisioned under the domain at the fresh-run re-test.
 
 *   **TLS = the domain cert.** Default: a LOCAL CA cert issued for the domain (a LAN-only
     box has no Let's Encrypt path). When the operator provides a DNS provider API key: LE
