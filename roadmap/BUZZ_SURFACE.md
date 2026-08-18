@@ -134,9 +134,10 @@ The §9 "custom kinds are sanctioned" claim is about the KIND REGISTRY (adding a
 nothing) — NOT the ingest gate: `crates/buzz-relay/src/handlers/ingest.rs` `scopes()` has a
 HARDCODED match of accepted kinds, and any kind outside it is refused with `restricted:
 unknown event kind` (verified live: publishing our 30180 got exactly that). There is no
-config allowlist. A custom freehold kind therefore requires a one-line ingest patch
-(add the kind to the `UsersWrite` arm) + a relay image rebuild — a named deployment step,
-not a config flip. Grants events cannot land on a stock buzz image until that lands.
+config allowlist. DECISION (post-Phase-D review): freehold does NOT patch buzz. The
+custom grant kind (30180) stays a DORMANT, hermetic-tested capability, usable only if a
+relay implementation ever accepts it; the OPERATIONAL grant flow is the shipped-package
+one (web console + `control-plane grant`/`revoke-grant`, re-read by the runner per call).
 
 ## 9.6 Engram (30174) ingest rules (found live, Phase D3)
 

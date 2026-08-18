@@ -33,10 +33,12 @@ publishes via NIP-98 POST /events, the runner reads the CURRENT list live
 per call via NIP-98 GET /query (fail-closed on relay outage; revoke lands
 WITHOUT a runner restart — hermetic proof included; NIP-98 signatures
 cross-verified byte-for-byte with rust-nostr, the crate the relay uses).
-The relay's ingest restrict-list refuses custom kinds by default (a
-BUZZ_SURFACE correction, §9.5) — the LIVE grant-publish + relay-backed
-runner flip are GATED on a one-line ingest patch + relay image rebuild (a
-named deployment step). D2 (membership records on the relay) is partially
+The relay's ingest restrict-list refuses custom kinds (BUZZ_SURFACE §9.5).
+DECISION (post-Phase-D review): freehold does NOT patch buzz — relay-grants
+(kind-30180) stays a DORMANT, hermetic-tested optional mode; the OPERATIONAL
+grant flow remains the shipped-package one (web console UI +
+`control-plane grant` / `revoke-grant` / `revoke`, re-shipped and re-read by
+the runner per call — revoke lands without a restart). D2 (membership records on the relay) is partially
 live: console/owner + CPA + box identity + the RUNNER itself are relay
 members under the box's real URL community (the relay's example.com URL
 placeholders are now fixed by deploy-relay — written with a new --relay-url
@@ -55,10 +57,10 @@ unfiltered because a #p-filtered kind-9 query hung for its identity). D5 (audit 
 NIP-01 event (id + BIP-340 over the id) — the SAME bytes spooled locally
 (0600, fail-closed read, never silent) AND published to the relay when
 --relay-url is set (detached so a wedged relay never delays the agent's
-exec; publish failure degrades to spool-only and is surfaced). D3
-(encrypted memory) and E (delegation) are next; the live grant-publish +
-relay-backed runner flip stay gated on the relay's ingest patch
-(BUZZ_SURFACE §9.5). A real Vultr token is still needed for the VPS leg.
+exec; publish failure degrades to spool-only and is surfaced). D3 (encrypted memory) and E (delegation) landed after this — both live.
+NO buzz ingest patch is planned: the relay-grants mode stays dormant/
+hermetic, and grants operate via the shipped-package flow (web UI + CP
+CLI). A real Vultr token is still needed for the VPS leg.
 Work ships via branches, pending a GitHub outage before the PR/review cycle.
 
 ## Navigation

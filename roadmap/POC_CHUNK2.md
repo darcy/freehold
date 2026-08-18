@@ -172,7 +172,10 @@ never a kind designed against an assumption). **Grant list (kind 30180):** addre
 30000–39999, `d`-tag = runner pubkey, content `{"grants":[<64-hex agent>...],"schema":1}`,
 replaceable (a re-publish REPLACES — revocation never appends). Published by the console
 identity (NIP-98 POST /events), read live by the runner (NIP-98 GET /query, newest
-created_at wins incl. same-second).`**
+created_at wins incl. same-second).`** **Operational scope:**
+grants run via the shipped-package flow (web console + CP CLI, re-read per call); the
+kind-30180 relay path is DORMANT/optional — buzz's ingest restrict-list refuses custom
+kinds (BUZZ_SURFACE §9.5) and freehold does NOT patch buzz.`**
 
 - [ ] [ ]
 
