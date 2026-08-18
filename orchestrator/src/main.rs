@@ -95,6 +95,11 @@ struct DeployRelayArgs {
     /// the relay once it comes up (fail-closed: required).
     #[arg(long)]
     operator_pubkey: String,
+    /// The forced identity DOMAIN (never an IP): writes BUZZ_DOMAIN/RELAY_URL
+    /// = the domain (wss) AND provisions the TLS local-CA posture (own
+    /// openssl CA + server cert; import ca.crt on your devices).
+    #[arg(long)]
+    domain: Option<String>,
 }
 
 #[derive(Args)]
@@ -119,6 +124,10 @@ struct DeployCpArgs {
     /// The relay this CP helps serve (the ONE scope; C4 posture record)
     #[arg(long)]
     relay_url: String,
+    /// Deploy INTO this LXC on the target — the CP lives in its OWN guest,
+    /// a different LXC than the relay's by default (omitted = the target host).
+    #[arg(long)]
+    lxc: Option<u32>,
     /// The OPERATOR's Nostr pubkey (64-hex) — seeds the console's NIP-98
     /// admin whitelist (C3.5) and relaxes the loopback-only bind guard.
     #[arg(long)]
@@ -471,6 +480,7 @@ async fn main() -> Result<()> {
                     owner_pubkey: args.owner_pubkey.clone(),
                     relay_url: args.relay_url.clone(),
                     operator_pubkey: args.operator_pubkey.clone(),
+                    domain: args.domain.clone(),
                 },
             )
             .await?;
@@ -488,6 +498,7 @@ async fn main() -> Result<()> {
                 &client,
                 &args.target,
                 &deploy_cp::DeployCpSpec {
+                    lxc: args.lxc,
                     state_dir: args.state_dir.clone(),
                     bin_dir: args.bin_dir.clone(),
                     bind_addr: args.bind.clone(),

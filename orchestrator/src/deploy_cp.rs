@@ -47,6 +47,11 @@ pub struct DeployCpSpec {
     /// auth whitelist (C3.5). Non-empty => the console may bind non-loopback
     /// and the deploy's own loopback guard is relaxed.
     pub admin_pubkeys: Vec<String>,
+    /// Deploy INTO this LXC on the target (the CP lives in its OWN guest —
+    /// a different LXC than the relay's by default). Every remote command is
+    /// wrapped in `pct exec`, so state + binary land inside the guest and the
+    /// loopback console binds the GUEST's 127.0.0.1.
+    pub lxc: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -82,10 +87,13 @@ pub async fn deploy_cp(
     exec_to_ok(
         client,
         target,
-        &format!(
-            "mkdir -p {sd}/console && mkdir -p {bd} && rm -f {bd}/control-plane.b64",
-            sd = spec.state_dir,
-            bd = spec.bin_dir
+        &crate::relay::lxc_cmd(
+            spec.lxc,
+            &format!(
+                "mkdir -p {sd}/console && mkdir -p {bd} && rm -f {bd}/control-plane.b64",
+                sd = spec.state_dir,
+                bd = spec.bin_dir
+            ),
         ),
         "mkdir deploy dirs",
         30,
@@ -98,10 +106,13 @@ pub async fn deploy_cp(
     exec_to_ok(
         client,
         target,
-        &format!(
-            "p=$(cat {sd}/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" \
-             >/dev/null 2>&1; rm -f {sd}/serve.pid; true",
-            sd = spec.state_dir,
+        &crate::relay::lxc_cmd(
+            spec.lxc,
+            &format!(
+                "p=$(cat {sd}/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" \
+                 >/dev/null 2>&1; rm -f {sd}/serve.pid; true",
+                sd = spec.state_dir,
+            ),
         ),
         "stop prior control plane",
         30,
@@ -118,10 +129,13 @@ pub async fn deploy_cp(
         exec_to_ok(
             client,
             target,
-            &format!(
-                "printf '%s' '{piece}' >> {bd}/control-plane.b64",
-                piece = piece,
-                bd = spec.bin_dir
+            &crate::relay::lxc_cmd(
+                spec.lxc,
+                &format!(
+                    "printf %s \"{piece}\" >> {bd}/control-plane.b64",
+                    piece = piece,
+                    bd = spec.bin_dir
+                ),
             ),
             "ship binary chunk",
             60,
@@ -131,11 +145,14 @@ pub async fn deploy_cp(
     let out = exec_to_ok(
         client,
         target,
-        &format!(
-            "base64 -d {bd}/control-plane.b64 > {bd}/control-plane && \
-             chmod 755 {bd}/control-plane && rm {bd}/control-plane.b64 && \
-             wc -c < {bd}/control-plane",
-            bd = spec.bin_dir,
+        &crate::relay::lxc_cmd(
+            spec.lxc,
+            &format!(
+                "base64 -d {bd}/control-plane.b64 > {bd}/control-plane && \
+                 chmod 755 {bd}/control-plane && rm {bd}/control-plane.b64 && \
+                 wc -c < {bd}/control-plane",
+                bd = spec.bin_dir,
+            ),
         ),
         "decode + verify binary",
         60,
@@ -166,7 +183,13 @@ pub async fn deploy_cp(
         ba = spec.bind_addr,
         admin_flag = admin_flag,
     );
-    let out = exec_to_ok(client, target, &start, "start control plane", 30)?;
+    let out = exec_to_ok(
+        client,
+        target,
+        &crate::relay::lxc_cmd(spec.lxc, &start),
+        "start control plane",
+        30,
+    )?;
     let pid: u32 = out.stdout.trim().parse().map_err(|_| {
         BootstrapError::Verify(format!("start did not yield a pid: {:?}", out.stdout))
     })?;
@@ -175,7 +198,13 @@ pub async fn deploy_cp(
     let mut last_err: Option<String> = None;
     for _ in 0..15 {
         let probe = format!("curl -fsS -m 3 http://{ba}/healthz", ba = spec.bind_addr);
-        match exec_to_ok(client, target, &probe, "cp healthz", 20) {
+        match exec_to_ok(
+            client,
+            target,
+            &crate::relay::lxc_cmd(spec.lxc, &probe),
+            "cp healthz",
+            20,
+        ) {
             Ok(_) => {
                 healthy = true;
                 break;
@@ -194,7 +223,14 @@ pub async fn deploy_cp(
         )));
     }
     let alive = format!("kill -0 {pid} >/dev/null 2>&1", pid = pid);
-    exec_to_ok(client, target, &alive, "control plane still alive", 10).map_err(|_| {
+    exec_to_ok(
+        client,
+        target,
+        &crate::relay::lxc_cmd(spec.lxc, &alive),
+        "control plane still alive",
+        10,
+    )
+    .map_err(|_| {
         BootstrapError::Verify(format!(
             "control plane answered /healthz but the started process (pid {pid}) is gone — \
                  check {sd}/serve.log (e.g. address already in use)",
@@ -208,10 +244,13 @@ pub async fn deploy_cp(
     let out = exec_to_ok(
         client,
         target,
-        &format!(
-            "{bd}/control-plane identity --state-dir {sd}",
-            bd = spec.bin_dir,
-            sd = spec.state_dir,
+        &crate::relay::lxc_cmd(
+            spec.lxc,
+            &format!(
+                "{bd}/control-plane identity --state-dir {sd}",
+                bd = spec.bin_dir,
+                sd = spec.state_dir,
+            ),
         ),
         "console identity pubkey",
         30,

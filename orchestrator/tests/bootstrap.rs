@@ -753,6 +753,7 @@ async fn deploy_cp_ships_binary_starts_and_reads_fresh_pubkey() {
             binary_path: fake_bin.clone(),
             relay_url: "http://relay-box:3000".into(),
             admin_pubkeys: vec![],
+            lxc: None,
         },
     )
     .await
@@ -807,6 +808,7 @@ async fn deploy_cp_refuses_non_loopback_bind() {
             binary_path: fake_bin,
             relay_url: "http://relay-box:3000".into(),
             admin_pubkeys: vec![],
+            lxc: None,
         },
     )
     .await
@@ -860,6 +862,7 @@ async fn deploy_cp_with_admin_relaxes_loopback_guard() {
             admin_pubkeys: vec![
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ],
+            lxc: None,
         },
     )
     .await
@@ -946,5 +949,87 @@ async fn relay_member_add_rejects_bad_pubkey_before_exec() {
         "no add without validation: {cmds}"
     );
 
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deploy_cp_lxc_mode_runs_every_remote_command_in_the_guest() {
+    // The CP lives in its OWN LXC (different guest than the relay's by
+    // default): every remote command must route through `pct exec <id> --`.
+    // The pct stub here EXECUTES the payload (guest == host in the fixture)
+    // so the full deploy succeeds; cmds.log proves the wrap happened.
+    let base = tempfile::tempdir().unwrap();
+    let marker = base.path().join("started.marker");
+    let fake_bin = base.path().join("control-plane");
+    std::fs::write(
+        &fake_bin,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  identity) echo 1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff; exit 0;;\n  serve) echo started >> '{}'; sleep 300;;\n  *) exit 1;;\nesac\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let pct_marker = base.path().join("pct.saw");
+    let exec_thru_pct = format!(
+        "touch '{}' && if [ \"$1\" = \"exec\" ]; then shift 5; sh -c \"$*\"; exit $?; fi; echo \"unknown pct $*\" >&2; exit 2\n",
+        pct_marker.display()
+    );
+    let curl_ok = "echo ok; exit 0\n";
+    let (bin, _ba) = plant_bin(
+        &base.path().join("cp.log"),
+        &[("pct", exec_thru_pct.as_str()), ("curl", curl_ok)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await; // Decisive: the runner MUST reach the pct stub through the wrapped form.
+    let probe = client
+        .exec(
+            "proxmox-box",
+            "pct exec 100 -- sh -c 'echo PCTRAN'",
+            &["proxmox-box"],
+            10,
+        )
+        .map(|o| o.stdout);
+    assert!(
+        matches!(probe.as_deref(), Ok(s) if s.contains("PCTRAN")),
+        "pct stub reachable: {probe:?}"
+    );
+
+    let sd = base.path().join("deploy/cp").display().to_string();
+    let bd = base.path().join("deploy/bin").display().to_string();
+    let res = deploy_cp::deploy_cp(
+        &client,
+        "proxmox-box",
+        &deploy_cp::DeployCpSpec {
+            lxc: Some(100),
+            state_dir: sd.clone(),
+            bin_dir: bd.clone(),
+            bind_addr: "127.0.0.1:8080".into(),
+            binary_path: fake_bin.clone(),
+            relay_url: "http://relay-box:3000".into(),
+            admin_pubkeys: vec![],
+        },
+    )
+    .await
+    .expect("lxc-mode deploy must succeed through pct exec");
+    assert!(res.detail.contains("OPERATE mode"), "{res:?}");
+    assert_eq!(
+        res.pubkey, "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff",
+        "identity read back from the guest"
+    );
+    // Every remote command was wrapped: the log shows pct exec invocations,
+    // and the binary/state landed inside the fake guest (== host paths).
+    assert!(
+        base.path().join("deploy/bin/control-plane").exists(),
+        "binary shipped into the guest"
+    );
+    assert!(
+        base.path().join("deploy/cp/console").exists(),
+        "state dir in the guest"
+    );
+    let cmds = std::fs::read_to_string(base.path().join("cp.log")).unwrap_or_default();
+    let wrapped = cmds.lines().filter(|l| l.contains("/pct exec 100")).count();
+    assert!(
+        wrapped >= 6,
+        "expected >=6 pct exec wraps, saw {wrapped}:\n{cmds}"
+    );
     server.abort();
 }
