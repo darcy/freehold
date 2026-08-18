@@ -911,7 +911,7 @@ refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
       document.getElementById("login-overlay").style["align-items"] = "center";
       document.getElementById("login-overlay").style["justify-content"] = "center";
       document.getElementById("login-cmd").textContent =
-        "freehold console-login --url " + location.origin + " --nsec <YOUR_64_HEX_NSEC>";
+        "freehold console-login --url " + location.origin + " --nsec <nsec1… or 64-hex>";
       document.getElementById("login-submit").onclick = () => {
         const v = document.getElementById("login-cookie").value.trim();
         const token = v.startsWith("fh_session=")
