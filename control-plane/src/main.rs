@@ -135,6 +135,11 @@ struct RevokeArgs {
 struct ServeArgs {
     #[arg(long, env = "FREEHOLD_CP_ADDR", default_value = "127.0.0.1:8080")]
     addr: String,
+    /// Comma-separated operator/admin Nostr pubkeys (64-hex). Non-empty =>
+    /// NIP-98 console auth is ON and a non-loopback bind is allowed (C3.5);
+    /// empty => the loopback-only posture (C3) holds.
+    #[arg(long)]
+    admin_pubkeys: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -306,15 +311,48 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Serve(args) => {
-            // C3 (Chunk 2): loopback-only bind, enforced here AND at deploy
-            // time — the console has no authn on the HTTP surface.
-            freehold_control_plane::validate_loopback_bind(&args.addr)
-                .map_err(anyhow::Error::msg)?;
             let store = StateStore::open(&args.state_dir)?;
+            // C3.5 — console authentication (NIP-98 operator login). The
+            // admin whitelist is seeded at first serve via --admin-pubkeys
+            // (the bootstrap's --operator-pubkey); it persists in state.json
+            // so a restart keeps it. Auth ON relaxes the bind guard; auth
+            // OFF keeps the loopback-only refusal (C3) byte-for-byte.
+            let mut admins: Vec<String> = Vec::new();
+            if let Some(raw) = &args.admin_pubkeys {
+                for pk in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if !freehold_control_plane::is_hex64(pk) {
+                        anyhow::bail!(
+                            "--admin-pubkeys entries must be 64-hex Nostr pubkeys (got {pk:?})"
+                        );
+                    }
+                    admins.push(pk.to_string());
+                }
+                if !admins.is_empty() {
+                    store.set_admins(admins.clone());
+                    store.save()?;
+                }
+            } else {
+                admins = store.admins();
+            }
+            let auth = if admins.is_empty() {
+                None
+            } else {
+                tracing::info!(
+                    admins = admins.len(),
+                    "console auth enabled (NIP-98) — non-loopback bind allowed"
+                );
+                Some(std::sync::Arc::new(web::Auth::new(admins)))
+            };
+            if auth.is_none() {
+                // C3: the unauthenticated console stays loopback-only,
+                // enforced here AND at deploy time.
+                freehold_control_plane::validate_loopback_bind(&args.addr)
+                    .map_err(anyhow::Error::msg)?;
+            }
             let console = Console::load_or_create(&args.state_dir)?;
             tracing::info!(pubkey = %console.pubkey(), "console agent ready");
             let addr = args.addr;
-            let app = web::router(Arc::new(store), console);
+            let app = web::router(Arc::new(store), console, auth);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             tracing::info!(%addr, "control plane console listening");
             axum::serve(listener, app)

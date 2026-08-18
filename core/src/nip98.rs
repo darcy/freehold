@@ -28,6 +28,14 @@ fn random_bytes() -> [u8; 24] {
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut b);
     b
 }
+
+/// Random hex string of `bytes` bytes (console login challenges + session
+/// tokens).
+pub fn random_hex(bytes: usize) -> String {
+    let mut b = vec![0u8; bytes];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut b);
+    hex::encode(b)
+}
 use sha2::{Digest, Sha256};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;

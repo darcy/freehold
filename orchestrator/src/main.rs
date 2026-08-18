@@ -35,6 +35,9 @@ enum Cmd {
     DeployRelay(DeployRelayArgs),
     /// C1: deploy the control plane onto the target box (OPERATE mode)
     DeployCp(DeployCpArgs),
+    /// C3.5: log into a console over NIP-98 with YOUR identity; prints the
+    /// session cookie for use in a browser or curl.
+    ConsoleLogin(ConsoleLoginArgs),
     /// C2: add a relay member through the relay-admin runner (buzz-admin)
     RelayMember(RelayMemberArgs),
     /// D3: the agent's encrypted relay memory (kind 30174, self-sealed)
@@ -116,6 +119,20 @@ struct DeployCpArgs {
     /// The relay this CP helps serve (the ONE scope; C4 posture record)
     #[arg(long)]
     relay_url: String,
+    /// The OPERATOR's Nostr pubkey (64-hex) — seeds the console's NIP-98
+    /// admin whitelist (C3.5) and relaxes the loopback-only bind guard.
+    #[arg(long)]
+    operator_pubkey: Option<String>,
+}
+
+#[derive(Args)]
+struct ConsoleLoginArgs {
+    /// Console base URL (e.g. http://freehold.example:8080)
+    #[arg(long)]
+    url: String,
+    /// YOUR identity dir (its nsec signs the NIP-98 login; never leaves)
+    #[arg(long)]
+    identity: PathBuf,
 }
 
 #[derive(Args)]
@@ -476,10 +493,94 @@ async fn main() -> Result<()> {
                     bind_addr: args.bind.clone(),
                     binary_path: args.binary.clone(),
                     relay_url: args.relay_url.clone(),
+                    admin_pubkeys: match &args.operator_pubkey {
+                        Some(pk) => {
+                            if !bootstrap::is_hex64(pk) {
+                                anyhow::bail!(
+                                    "--operator-pubkey must be a 64-character hex Nostr pubkey (got {pk:?})"
+                                );
+                            }
+                            vec![pk.clone()]
+                        }
+                        None => Vec::new(),
+                    },
                 },
             )
             .await?;
             println!("CONTROL PLANE: {}", res.detail);
+            Ok(())
+        }
+        Cmd::ConsoleLogin(args) => {
+            use freehold_core::identity::Identity;
+            let id = Identity::load(&args.identity)
+                .with_context(|| format!("loading identity in {}", args.identity.display()))?;
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .build()
+                .into();
+            let base = args.url.trim_end_matches('/').to_string();
+            let ch_resp = agent
+                .get(&format!("{base}/api/auth/challenge"))
+                .call()
+                .with_context(|| format!("GET {base}/api/auth/challenge — console reachable?"))?;
+            if ch_resp.status() != 200 {
+                anyhow::bail!(
+                    "challenge failed (HTTP {}): {}",
+                    ch_resp.status(),
+                    ch_resp.into_body().read_to_string().unwrap_or_default()
+                );
+            }
+            let ch: serde_json::Value =
+                serde_json::from_str(&ch_resp.into_body().read_to_string().unwrap_or_default())
+                    .with_context(|| "parsing challenge response")?;
+            let nonce = ch["nonce"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("challenge response missing nonce: {ch}"))?
+                .to_string();
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let tags = vec![
+                vec!["u".into(), base.clone()],
+                vec!["method".into(), "login".into()],
+            ];
+            let (pubkey, _, sig) = freehold_core::nip98::sign_event(
+                &id.secret_seed(),
+                27235,
+                ts,
+                tags.clone(),
+                &nonce,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let body = serde_json::json!({
+                "nonce": nonce,
+                "pubkey": pubkey,
+                "created_at": ts,
+                "tags": tags,
+                "sig": sig,
+            });
+            let resp = agent
+                .post(&format!("{base}/api/auth/login"))
+                .header("Content-Type", "application/json")
+                .send(body.to_string())
+                .with_context(|| "POST /api/auth/login")?;
+            let status = resp.status();
+            let cookie = resp
+                .headers()
+                .get("set-cookie")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+            if status != 200 {
+                let text = resp.into_body().read_to_string().unwrap_or_default();
+                anyhow::bail!("login failed (HTTP {status}): {text}");
+            }
+            let cookie = cookie
+                .ok_or_else(|| anyhow::anyhow!("login response carried no session cookie"))?;
+            println!("console session for {pubkey} @ {base}");
+            println!("{cookie}");
+            println!("use it with: curl -H 'Cookie: {cookie}' {base}/api/overview");
             Ok(())
         }
         Cmd::RelayMember(args) => {
