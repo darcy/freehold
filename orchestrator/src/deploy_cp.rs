@@ -55,6 +55,15 @@ pub struct DeployCpSpec {
     /// The console's PUBLIC host (convention: cp-<relay-host>) when the relay
     /// is fronted by a proxy — the DNS-rebinding guard also allows it.
     pub public_origin: Option<String>,
+    /// LOCAL path of the built `freehold-runner` binary (the CO-LOCATED
+    /// runner: the architecture rule is the CP's own runner lives on the
+    /// CP's target). When given with `runner_package`, the deploy ships the
+    /// runner into the guest, starts it as a systemd unit, ADOPTS it into
+    /// the console registry and self-grants the console.
+    pub runner_binary: Option<PathBuf>,
+    /// LOCAL dir of an EXISTING runner package (identity.json + secrets.json
+    /// + known_hosts.json) to co-locate + adopt on this deploy.
+    pub runner_package: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -65,6 +74,92 @@ pub struct DeployCpResult {
     /// Add it as a relay member (`freehold relay-member --pubkey <this>`).
     pub pubkey: String,
     pub detail: String,
+}
+
+/// Ship a LOCAL file to the target as base64 chunks through the runner's
+/// exec-only primitive (decoded + size-verified remotely; lxc-wrapped; the
+/// .b64 is truncated first so an interrupted ship never wedges the next one).
+async fn ship_file(
+    client: &McpClient,
+    target: &str,
+    spec: &DeployCpSpec,
+    local_path: &PathBuf,
+    remote_final: &str,
+    step: &str,
+) -> Result<(), BootstrapError> {
+    let bytes = std::fs::read(local_path)?;
+    let remote_b64 = format!("{remote_final}.b64");
+    exec_to_ok(
+        client,
+        target,
+        &crate::relay::lxc_cmd(spec.lxc, &format!("rm -f {remote_b64} && : > {remote_b64}")),
+        &format!("reset {step}"),
+        30,
+    )?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let mut sent = 0usize;
+    while sent < b64.len() {
+        let end = (sent + CHUNK).min(b64.len());
+        let piece = &b64[sent..end];
+        exec_to_ok(
+            client,
+            target,
+            &crate::relay::lxc_cmd(spec.lxc, &format!("printf %s \"{piece}\" >> {remote_b64}")),
+            &format!("ship {step} chunk"),
+            60,
+        )?;
+        sent = end;
+    }
+    let out = exec_to_ok(
+        client,
+        target,
+        &crate::relay::lxc_cmd(
+            spec.lxc,
+            &format!(
+                "base64 -d {remote_b64} > {remote_final} &&                  chmod 755 {remote_final} && rm {remote_b64} &&                  wc -c < {remote_final}"
+            ),
+        ),
+        &format!("decode + verify {step}"),
+        60,
+    )?;
+    let remote_size: usize = out.stdout.trim().parse().map_err(|_| {
+        BootstrapError::Verify(format!("remote size not a number: {:?}", out.stdout))
+    })?;
+    if remote_size != bytes.len() {
+        return Err(BootstrapError::Verify(format!(
+            "shipped {step} size mismatch: remote {remote_size} vs local {}",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Ship a SMALL file (identity/known_hosts/secrets) in ONE exec.
+async fn ship_small_file(
+    client: &McpClient,
+    target: &str,
+    spec: &DeployCpSpec,
+    local_path: &PathBuf,
+    remote_final: &str,
+    step: &str,
+) -> Result<(), BootstrapError> {
+    let bytes = std::fs::read(local_path)?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let parent = remote_final.rsplit_once('/').map(|(p, _)| p).unwrap_or(".");
+    exec_to_ok(
+        client,
+        target,
+        &crate::relay::lxc_cmd(
+            spec.lxc,
+            &format!(
+                "mkdir -p {parent} && printf %s \"{b64}\" | base64 -d > {remote_final} \
+                 && chmod 600 {remote_final}"
+            ),
+        ),
+        step,
+        60,
+    )?;
+    Ok(())
 }
 
 pub async fn deploy_cp(
@@ -84,8 +179,6 @@ pub async fn deploy_cp(
         freehold_control_plane::validate_loopback_bind(&spec.bind_addr)
             .map_err(BootstrapError::Verify)?;
     }
-
-    let binary = std::fs::read(&spec.binary_path)?;
 
     exec_to_ok(
         client,
@@ -121,54 +214,16 @@ pub async fn deploy_cp(
         30,
     )?;
 
-    // Binary as base64 chunks appended to one .b64 file, then decoded once
-    // (the .b64 was truncated in the mkdir step, so an interrupted deploy
-    // can never wedge the next one behind a false size mismatch).
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&binary);
-    let mut sent = 0usize;
-    while sent < b64.len() {
-        let end = (sent + CHUNK).min(b64.len());
-        let piece = &b64[sent..end];
-        exec_to_ok(
-            client,
-            target,
-            &crate::relay::lxc_cmd(
-                spec.lxc,
-                &format!(
-                    "printf %s \"{piece}\" >> {bd}/control-plane.b64",
-                    piece = piece,
-                    bd = spec.bin_dir
-                ),
-            ),
-            "ship binary chunk",
-            60,
-        )?;
-        sent = end;
-    }
-    let out = exec_to_ok(
+    // Ship the control-plane binary (base64 chunks through exec-only).
+    ship_file(
         client,
         target,
-        &crate::relay::lxc_cmd(
-            spec.lxc,
-            &format!(
-                "base64 -d {bd}/control-plane.b64 > {bd}/control-plane && \
-                 chmod 755 {bd}/control-plane && rm {bd}/control-plane.b64 && \
-                 wc -c < {bd}/control-plane",
-                bd = spec.bin_dir,
-            ),
-        ),
-        "decode + verify binary",
-        60,
-    )?;
-    let remote_size: usize = out.stdout.trim().parse().map_err(|_| {
-        BootstrapError::Verify(format!("remote binary size not a number: {:?}", out.stdout))
-    })?;
-    if remote_size != binary.len() {
-        return Err(BootstrapError::Verify(format!(
-            "shipped binary size mismatch: remote {remote_size} vs local {}",
-            binary.len()
-        )));
-    }
+        spec,
+        &spec.binary_path,
+        &format!("{bd}/control-plane", bd = spec.bin_dir),
+        "control-plane binary",
+    )
+    .await?;
 
     // Start detached (setsid: not killed when the exec channel closes),
     // echo the pid, then probe loopback /healthz AND kill -0 the pid — a
@@ -269,6 +324,100 @@ pub async fn deploy_cp(
         return Err(BootstrapError::Verify(format!(
             "console identity pubkey readback is not 64-hex: {pubkey:?}"
         )));
+    }
+
+    // CO-LOCATED RUNNER (the architecture rule: the CP's own runner lives on
+    // the CP's target). When a runner binary + an EXISTING package are given,
+    // ship both, start the runner as a systemd unit, ADOPT it into the
+    // console registry and self-grant the console — the dogfood state becomes
+    // the deploy. Skipped entirely when not requested.
+    if let (Some(rb), Some(rp)) = (&spec.runner_binary, &spec.runner_package) {
+        let runner_name = rp
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "runner".to_string());
+        let runner_dir = format!("{}/runner/{runner_name}", spec.state_dir);
+        ship_file(
+            client,
+            target,
+            spec,
+            rb,
+            &format!("{}/freehold-runner", spec.bin_dir),
+            "runner binary",
+        )
+        .await?;
+        for f in ["identity.json", "secrets.json", "known_hosts.json"] {
+            let lp = rp.join(f);
+            if lp.exists() {
+                ship_small_file(
+                    client,
+                    target,
+                    spec,
+                    &lp,
+                    &format!("{runner_dir}/{f}"),
+                    &format!("runner {f}"),
+                )
+                .await?;
+            }
+        }
+        exec_to_ok(
+            client,
+            target,
+            &crate::relay::lxc_cmd(
+                spec.lxc,
+                &format!(
+                    "systemctl reset-failed freehold-runner 2>/dev/null; \
+                     systemd-run --unit=freehold-runner --collect {bd}/freehold-runner serve \
+                       --state-dir {rd} >/dev/null 2>&1; sleep 2; \
+                     systemctl is-active freehold-runner",
+                    bd = spec.bin_dir,
+                    rd = runner_dir,
+                ),
+            ),
+            "start co-located runner",
+            60,
+        )?;
+        let (kind, address) = {
+            let raw = std::fs::read_to_string(rp.join("secrets.json")).unwrap_or_default();
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            let t = v["targets"]
+                .as_object()
+                .and_then(|m| m.values().next())
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            (
+                t["kind"].as_str().unwrap_or("ssh").to_string(),
+                t["address"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        let adopt = format!(
+            "{bd}/control-plane adopt --kind {kind} --address {address} --package-dir {rd} \
+             --state-dir {sd} --mcp-addr 127.0.0.1:8787 {runner_name}",
+            bd = spec.bin_dir,
+            rd = runner_dir,
+            sd = spec.state_dir,
+        );
+        exec_to_ok(
+            client,
+            target,
+            &crate::relay::lxc_cmd(spec.lxc, &adopt),
+            "adopt co-located runner",
+            60,
+        )?;
+        let grant = format!(
+            "{bd}/control-plane grant --state-dir {sd} {runner_name} {console_pk}",
+            bd = spec.bin_dir,
+            sd = spec.state_dir,
+            console_pk = pubkey,
+        );
+        exec_to_ok(
+            client,
+            target,
+            &crate::relay::lxc_cmd(spec.lxc, &grant),
+            "self-grant console to co-located runner",
+            60,
+        )?;
     }
 
     Ok(DeployCpResult {

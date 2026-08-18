@@ -755,6 +755,8 @@ async fn deploy_cp_ships_binary_starts_and_reads_fresh_pubkey() {
             admin_pubkeys: vec![],
             lxc: None,
             public_origin: None,
+            runner_binary: None,
+            runner_package: None,
         },
     )
     .await
@@ -811,6 +813,8 @@ async fn deploy_cp_refuses_non_loopback_bind() {
             admin_pubkeys: vec![],
             lxc: None,
             public_origin: None,
+            runner_binary: None,
+            runner_package: None,
         },
     )
     .await
@@ -866,6 +870,8 @@ async fn deploy_cp_with_admin_relaxes_loopback_guard() {
             ],
             lxc: None,
             public_origin: None,
+            runner_binary: None,
+            runner_package: None,
         },
     )
     .await
@@ -1004,6 +1010,8 @@ async fn deploy_cp_lxc_mode_runs_every_remote_command_in_the_guest() {
         &deploy_cp::DeployCpSpec {
             lxc: Some(100),
             public_origin: None,
+            runner_binary: None,
+            runner_package: None,
             state_dir: sd.clone(),
             bin_dir: bd.clone(),
             bind_addr: "127.0.0.1:8080".into(),
@@ -1035,5 +1043,94 @@ async fn deploy_cp_lxc_mode_runs_every_remote_command_in_the_guest() {
         wrapped >= 6,
         "expected >=6 pct exec wraps, saw {wrapped}:\n{cmds}"
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deploy_cp_co_locates_runner_when_asked() {
+    use freehold_core::identity::Identity;
+    let base = tempfile::tempdir().unwrap();
+    // fake control-plane handles the NEW subcommands (adopt/grant) the
+    // co-location steps run in-guest
+    let fake_bin = base.path().join("control-plane");
+    std::fs::write(
+        &fake_bin,
+        "#!/bin/sh\ncase \"$1\" in\n  identity) echo 1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff; exit 0;;\n  serve) echo started >> '%s'; sleep 300;;\n  adopt) echo ADOPTED; exit 0;;\n  grant) echo GRANTED; exit 0;;\n  *) exit 1;;\nesac\n"
+            .replace("%s", &base.path().join("started.marker").display().to_string()),
+    )
+    .unwrap();
+    let exec_thru_pct = "if [ \"$1\" = \"exec\" ]; then shift 5; sh -c \"$*\"; exit $?; fi; echo \"unknown pct $*\" >&2; exit 2\n";
+    let curl_ok = "echo ok; exit 0\n";
+    let systemctl_ok = "echo active; exit 0\n";
+    let systemdrun_ok = "echo \"Running as unit: freehold-runner.service\"; exit 0\n";
+    let (bin, ba) = plant_bin(
+        &base.path().join("cmds.log"),
+        &[
+            ("pct", exec_thru_pct),
+            ("curl", curl_ok),
+            ("systemctl", systemctl_ok),
+            ("systemd-run", systemdrun_ok),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    // a REAL runner package for the co-located runner
+    let pkg_dir = base.path().join("my-runner-pkg");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    let rid = Identity::generate();
+    rid.write_to_dir(&pkg_dir).unwrap();
+    let enc = hex::decode(&rid.enc_pubkey_hex()).unwrap();
+    let mut enc32 = [0u8; 32];
+    enc32.copy_from_slice(&enc);
+    let sealed = hex::encode(freehold_core::crypto::seal(&enc32, b"t", b"cred").unwrap());
+    let pkg = freehold_core::secrets::SecretPackage {
+        secrets: std::collections::BTreeMap::from([("t".to_string(), sealed)]),
+        targets: std::collections::BTreeMap::from([(
+            "t".to_string(),
+            freehold_core::secrets::TargetMeta {
+                kind: "ssh".into(),
+                address: "root@192.168.30.224".into(),
+                secret: "t".into(),
+            },
+        )]),
+        grants: vec![],
+    };
+    pkg.write_to_dir(&pkg_dir).unwrap();
+    let fake_runner = base.path().join("freehold-runner");
+    std::fs::write(&fake_runner, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let sd = base.path().join("deploy/cp").display().to_string();
+    let bd = base.path().join("deploy/bin").display().to_string();
+    let res = deploy_cp::deploy_cp(
+        &client,
+        "proxmox-box",
+        &deploy_cp::DeployCpSpec {
+            lxc: Some(100),
+            state_dir: sd.clone(),
+            bin_dir: bd.clone(),
+            bind_addr: "127.0.0.1:8080".into(),
+            binary_path: fake_bin.clone(),
+            relay_url: "http://relay-box:3000".into(),
+            admin_pubkeys: vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ],
+            public_origin: None,
+            runner_binary: Some(fake_runner.clone()),
+            runner_package: Some(pkg_dir.clone()),
+        },
+    )
+    .await
+    .expect("co-located runner deploy must succeed");
+    assert!(res.detail.contains("OPERATE mode"), "{res:?}");
+    // The runner really landed in the guest paths + the unit + adopt + grant ran
+    assert!(base.path().join("deploy/bin/freehold-runner").exists());
+    assert!(
+        base.path()
+            .join("deploy/cp/runner/my-runner-pkg/identity.json")
+            .exists()
+    );
+    let cmds = std::fs::read_to_string(base.path().join("cmds.log")).unwrap_or_default();
+    assert!(cmds.contains("systemd-run"), "runner unit start: {cmds}");
+    assert!(cmds.contains("adopt"), "adopt step ran: {cmds}");
+    assert!(cmds.contains("grant"), "self-grant step ran: {cmds}");
     server.abort();
 }
