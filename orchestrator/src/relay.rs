@@ -52,6 +52,11 @@ pub struct RelayDeploySpec {
     /// relay LXC) — fail-closed: required; machines alone shouldn't own the
     /// community.
     pub operator_pubkey: String,
+    /// The forced identity DOMAIN (never an IP — BUZZ_SURFACE §9.8). When
+    /// set: the .env BUZZ_DOMAIN/RELAY_URL/media become <domain> /
+    /// wss(s)://<domain>, AND a LOCAL CA TLS posture is provisioned (own
+    /// openssl CA + server cert, Caddyfile `tls` directive, certs mount).
+    pub domain: Option<String>,
 }
 
 /// Wrap a target command for execution inside an LXC via the host runner.
@@ -141,6 +146,17 @@ pub async fn deploy_relay(
             spec.operator_pubkey
         )));
     }
+    if let Some(d) = &spec.domain {
+        crate::bootstrap::plain(d)?;
+        if !d
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+        {
+            return Err(BootstrapError::Verify(format!(
+                "domain must be a bare DNS name (got {d:?})"
+            )));
+        }
+    }
 
     check_docker(client, target, spec.lxc)?;
 
@@ -215,24 +231,33 @@ pub async fn deploy_relay(
         dir = spec.deploy_dir,
         port = spec.http_port,
         owner = spec.owner_pubkey,
-        rhost = spec
-            .relay_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .trim_end_matches('/'),
-        rws = format!(
-            "{}://{}",
-            if spec.relay_url.trim_start().starts_with("https://") {
-                "wss"
-            } else {
-                "ws"
-            },
+        rhost = spec.domain.clone().unwrap_or_else(|| {
             spec.relay_url
                 .trim_start_matches("http://")
                 .trim_start_matches("https://")
                 .trim_end_matches('/')
+                .to_string()
+        }),
+        rws = format!(
+            "{}://{}",
+            if spec.domain.is_some() || spec.relay_url.trim_start().starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            },
+            spec.domain.clone().unwrap_or_else(|| {
+                spec.relay_url
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://")
+                    .trim_end_matches('/')
+                    .to_string()
+            })
         ),
-        rhttp = spec.relay_url.trim_end_matches('/'),
+        rhttp = spec
+            .domain
+            .as_ref()
+            .map(|d| format!("https://{d}"))
+            .unwrap_or_else(|| { spec.relay_url.trim_end_matches('/').to_string() }),
     );
     crate::bootstrap::exec_to_ok(
         client,
@@ -241,6 +266,46 @@ pub async fn deploy_relay(
         "run.sh start",
         600,
     )?;
+
+    // TLS on the domain (local CA posture — Docs-B): an OWN openssl CA +
+    // domain server cert (idempotent via existence guard), the bundle's tiny
+    // Caddyfile becomes the domain site with the cert, and compose gains the
+    // certs mount. Let's Encrypt DNS-01 is NOT wired here: the stock
+    // caddy:2-alpine image ships no DNS provider modules (a custom image is
+    // a named follow-up when a provider key exists). Clients trust ca.crt.
+    if let Some(domain) = &spec.domain {
+        let compose = format!("{cdir}/deploy/compose", cdir = spec.deploy_dir);
+        let tls = format!(
+            "set -e; cd {compose} && mkdir -p certs && \
+             if [ ! -f certs/ca.crt ]; then \
+             openssl req -x509 -newkey rsa:3072 -keyout certs/ca.key -out certs/ca.crt -days 3650 -nodes \
+               -subj \"/CN=freehold local CA\" && \
+             openssl req -newkey rsa:3072 -keyout certs/{d}.key -out /tmp/{d}.csr -nodes \
+               -subj \"/CN={d}\" && \
+             printf \"subjectAltName=DNS:{d}\\n\" > /tmp/{d}.ext && \
+             openssl x509 -req -in /tmp/{d}.csr -CA certs/ca.crt -CAkey certs/ca.key \
+               -CAcreateserial -out certs/{d}.crt -days 825 -extfile /tmp/{d}.ext && \
+             rm -f /tmp/{d}.csr /tmp/{d}.ext; fi && \
+             printf \"%s\\n\" \"{d} {{\" \
+               \"  encode zstd gzip\" \
+               \"  tls /etc/caddy/certs/{d}.crt /etc/caddy/certs/{d}.key\" \
+               \"  reverse_proxy relay:3000\" \
+               \"}}\" > Caddyfile && \
+             (grep -q \"certs:/etc/caddy/certs\" compose.caddy.yml || \
+              sed -i \"s#- ./Caddyfile:/etc/caddy/Caddyfile:ro#- ./Caddyfile:/etc/caddy/Caddyfile:ro\\n      - ./certs:/etc/caddy/certs:ro#\" compose.caddy.yml) && \
+             docker compose up -d >/dev/null 2>&1 && \
+             echo TLS-LOCAL-CA-{d}",
+            compose = compose,
+            d = domain,
+        );
+        crate::bootstrap::exec_to_ok(
+            client,
+            target,
+            &lxc_cmd(spec.lxc, &tls),
+            "tls local CA",
+            120,
+        )?;
+    }
 
     // B2: the relay's OWN health on the loopback we just verified. Poll,
     // keeping the last non-transient error so expiry says WHY.
@@ -305,17 +370,30 @@ pub async fn deploy_relay(
     // B3: the scope claim. Liveness is proven on the target's loopback; the
     // URL is the operator's NAME mapping for the box (it is the ONE scope
     // for the CP once Phase C adds membership — nothing persists here).
-    let relay_url = format!(
-        "http://{host}:{port}",
-        host = spec.relay_name,
-        port = spec.http_port
-    );
+    let (relay_url, tls_note) = match &spec.domain {
+        Some(d) => (
+            format!("https://{d}"),
+            format!(
+                " TLS on the domain via the LOCAL CA ({cdir}/deploy/compose/certs/ca.crt — \
+                 import it into your devices to trust https://{d} + wss://{d})",
+                cdir = spec.deploy_dir
+            ),
+        ),
+        None => (
+            format!(
+                "http://{host}:{port}",
+                host = spec.relay_name,
+                port = spec.http_port
+            ),
+            String::new(),
+        ),
+    };
     Ok(RelayDeployResult {
         relay_url: relay_url.clone(),
         detail: format!(
             "Buzz relay deployed from the pinned bundle ({dir}, ref {ref}) and healthy at \
-             {relay_url} (loopback-proven) — becomes the control plane's ONE scope once \
-             Phase C records membership",
+             {relay_url} (loopback-proven){tls_note} — becomes the control plane's ONE scope \
+             once Phase C records membership",
             dir = spec.deploy_dir,
             ref = spec.buzz_ref,
         ),

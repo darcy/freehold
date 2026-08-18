@@ -171,6 +171,7 @@ async fn relay_deploy_gates_on_docker_and_verifies_liveness() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            domain: None,
             operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
                 .into(),
         },
@@ -242,6 +243,7 @@ async fn relay_deploy_lxc_mode_wraps_every_command_in_pct_exec() {
             lxc: Some(100),
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            domain: None,
             operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
                 .into(),
         },
@@ -287,6 +289,7 @@ async fn relay_deploy_missing_docker_gives_remediation() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            domain: None,
             operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
                 .into(),
         },
@@ -339,6 +342,7 @@ async fn relay_deploy_fails_when_unswept_placeholder_remains() {
             lxc: None,
             owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
             relay_url: "http://relay-box:3000".into(),
+            domain: None,
             operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
                 .into(),
         },
@@ -360,6 +364,91 @@ async fn relay_deploy_fails_when_unswept_placeholder_remains() {
         env.lines().any(|l| l == "SOMETHING_NEW=CHANGE_ME_X"),
         "unknown placeholder key left untouched (that is what trips the guard): {env}"
     );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_deploy_with_domain_provisions_tls_local_ca() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("relay");
+    let dir_s = dir.display().to_string();
+    let tar_stub = format!(
+        "mkdir -p {dir}/deploy/compose && \
+         printf '#!/bin/sh\\necho RUNSH-OK\\nexit 0\\n' > {dir}/deploy/compose/run.sh && \
+         chmod +x {dir}/deploy/compose/run.sh && \
+         printf 'BUZZ_RELAY_PRIVATE_KEY=CHANGE_ME_64_HEX\\nBUZZ_DOMAIN=buzz.example.com\\n' \
+           > {dir}/deploy/compose/.env.example && \
+         printf 'services:\\n  caddy:\\n    volumes:\\n      - ./Caddyfile:/etc/caddy/Caddyfile:ro\\n' \
+           > {dir}/deploy/compose/compose.caddy.yml && \
+         printf '{{$BUZZ_DOMAIN}} {{\\n  encode zstd gzip\\n  reverse_proxy relay:3000\\n}}\\n' \
+           > {dir}/deploy/compose/Caddyfile && exit 0\n",
+        dir = dir_s
+    );
+    let openssl_stub = format!(
+        "mkdir -p {dir}/deploy/compose/certs && \
+         touch {dir}/deploy/compose/certs/ca.crt {dir}/deploy/compose/certs/ca.key \
+              {dir}/deploy/compose/certs/relay.example.crt {dir}/deploy/compose/certs/relay.example.key && exit 0\n",
+        dir = dir_s
+    );
+    let docker_up = "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"version\" ]; then echo 'Docker Compose version v2.24.4'; exit 0; fi; if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"up\" ]; then echo UP-OK; exit 0; fi; exit 0\n";
+    let scripts: Vec<(&str, String)> = vec![
+        ("docker", docker_up.into()),
+        ("curl", CURL_OK.into()),
+        ("tar", tar_stub),
+        ("openssl", openssl_stub),
+    ];
+    let stubs: Vec<(&str, &str)> = scripts.iter().map(|(n, b)| (*n, b.as_str())).collect();
+    let (bin, _ba) = plant_bin(&stubs);
+    let (client, _target, server, keep1, _keep2) = fixture(base.path(), &bin).await;
+    let _ = (keep1, _keep2);
+
+    let res = deploy_relay(
+        &client,
+        "relay-box",
+        &RelayDeploySpec {
+            relay_name: "relay-box".into(),
+            deploy_dir: dir_s.clone(),
+            http_port: 3000,
+            buzz_ref: DEFAULT_BUZZ_REF.into(),
+            lxc: None,
+            owner_pubkey: "072696bde8f03234433ddcc3587464e92a51f5d6906ade6b2aab2e1313010371".into(),
+            relay_url: "http://relay-box:3000".into(),
+            operator_pubkey: "1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
+            domain: Some("relay.example".into()),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.relay_url, "https://relay.example");
+    assert!(res.detail.contains("LOCAL CA"), "{res:?}");
+    assert!(res.detail.contains("relay.example"), "{res:?}");
+
+    // The DOMAIN is the identity: .env carries the domain + wss/https URLs.
+    let env = std::fs::read_to_string(dir.join("deploy/compose/.env")).unwrap();
+    assert!(env.contains("BUZZ_DOMAIN=relay.example"), "{env}");
+    assert!(env.contains("RELAY_URL=wss://relay.example"), "{env}");
+    assert!(
+        env.contains("BUZZ_MEDIA_BASE_URL=https://relay.example/media"),
+        "{env}"
+    );
+    assert!(
+        env.contains("BUZZ_MEDIA_SERVER_DOMAIN=relay.example"),
+        "{env}"
+    );
+
+    // The TLS local-CA posture landed: certs materialized, the Caddyfile
+    // serves the domain cert, compose mounts the certs dir.
+    let certs = dir.join("deploy/compose/certs");
+    assert!(certs.join("ca.crt").exists() && certs.join("relay.example.crt").exists());
+    let caddy = std::fs::read_to_string(dir.join("deploy/compose/Caddyfile")).unwrap();
+    assert!(
+        caddy.contains("tls /etc/caddy/certs/relay.example.crt"),
+        "{caddy}"
+    );
+    let compose = std::fs::read_to_string(dir.join("deploy/compose/compose.caddy.yml")).unwrap();
+    assert!(compose.contains("./certs:/etc/caddy/certs:ro"), "{compose}");
 
     server.abort();
 }
