@@ -640,7 +640,8 @@ pub async fn bootstrap_vultr_vps(
             }
             if state == "active" && !ip.is_empty() && ip != "0.0.0.0" {
                 detail = Some(format!(
-                    "vultr instance {id} active; main_ip {ip}; label {} (domain identity)",
+                    "vultr instance {id} active; main_ip {ip}; label {} — PVE host on Vultr \
+                     (LXC-only appliance, domain identity)",
                     spec.label
                 ));
                 verified = true;
@@ -1135,7 +1136,7 @@ pub async fn bootstrap_hetzner_vps(
             )));
         }
         let detail = format!(
-            "hetzner server {id} ({}) active + destroyed (domain identity)",
+            "hetzner server {id} ({}) active + destroyed — PVE host probe (domain identity)",
             spec.label
         );
         return Ok(BootstrapResult {
@@ -1148,7 +1149,8 @@ pub async fn bootstrap_hetzner_vps(
     }
 
     let detail = format!(
-        "hetzner server {id} active; ipv4 {main_ip}; label {} (domain identity)",
+        "hetzner server {id} active; ipv4 {main_ip}; label {} — PVE host on Hetzner \
+                     (LXC-only appliance, domain identity)",
         spec.label
     );
     Ok(BootstrapResult {

@@ -288,7 +288,9 @@ struct RelaySetupArgs {
 struct BootstrapArgs {
     #[command(flatten)]
     common: CommonArgs,
-    /// Target kind: proxmox-lxc | vultr-vps
+    /// Target kind: proxmox-lxc | vultr-vps | hetzner-vps. The vps kinds
+    /// provision a Proxmox-on-Cloud-Compute HOST (LXC-only appliance) —
+    /// then the same proxmox-lxc flows run against it.
     #[arg(long)]
     kind: String,
     /// Target to drive provisioning through (a runner targeting the PVE host
