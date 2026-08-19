@@ -550,3 +550,121 @@ Proxmox-on-Cloud path (spike finding follow-up):
   the appliance already uses; no nested virt needed, matching the
   LXC/pod-shaped design. Chunk-3 deterministic-manifest work builds on a
   verified substrate.
+
+## Chunk 2.6 — Relay-authoritative grants & runner lifecycle (event-sourced state)
+
+**Status:** DRAFTED. A new chunk, not an amendment: it introduces a subsystem
+(relay-side command→snapshot processing + CP/runner projection folding),
+changes a deployed contract (kind 30180), and carries two decision gates
+(G-1, G-2 below) — it is NOT a retrofit of Chunk 2's existing paths.
+
+### Goal (one sentence)
+
+Make the management relay the single author of grants and runner-lifecycle
+records — as Buzz-native, addressable snapshots — with CP's store and every
+consumer reduced to rebuildable projections, and close the grant-revocation
+staleness gap with an explicit mechanism.
+
+### Why this shape (the context, corrected against the codebase)
+
+Chunk 2 already shipped HALF of this: grants live on the relay as an
+addressable, replaceable kind (30180, `d` = runner pubkey, author-gated to
+the console, Schnorr-verified locally), and the runner's per-call grant check
+queries the relay live (fail-closed; package grants = boot/fallback). What is
+still CP-owned single-process FILE state (`StateStore`, not Postgres — the
+TODO(Postgres swap at MVP) never landed) is: runner identity/lifecycle
+(`RUNNER_PROFILE`), and the write path (CP computes + publishes directly).
+Buzz's relay-signed membership (kind 13534: "the relay decides, we only
+request") is the indigenous pattern to inherit — the plan of record, and the
+same architecture as channel membership 9000→39002/13534.
+
+### Locked design — Buzz's three-part pattern
+
+1. **Command event** — CP (or a runner self-reporting its own profile)
+   publishes a short, imperative, present-tense command. Append-only log
+   entries, never "the state."
+2. **Relay-side effect** — the relay processes the command, decides the
+   resulting state. Snapshot writes happen ONLY in the relay's handler:
+   read-current → merge → republish full content, never partial diffs
+   (Buzz's own partial-replaceable-write bug, #3663).
+3. **Addressable snapshot** — the relay publishes the current-state record
+   (`d`-scoped, replaceable). This is the only thing consumers read.
+
+- [ ] G-1 — **LIVE THE RELAY (DECISION GATE — OPEN):** side-effect handlers
+      for OUR kinds must run inside the relay process. Lock: fork, upstream
+      contribution, or "only kinds Buzz natively equips" — before any code.
+      This re-opens the DECLINED #34 buzz-patch line with a real reason
+      (handlers in the relay, not an ingest consumer); the decision changes
+      the deployed bundle + attach-world compatibility story.
+- [ ] G-2 — **Freshness mechanism (DECISION GATE — RECOMMENDED: TTL primary).**
+      Grants carry a short TTL renewed by re-observing the relay —
+      deterministic staleness, and the same class as the already-named
+      epoch/staleness follow-up (tie them together). NOTE: this flips the
+      current fail-closed-on-relay-down posture to fail-open-within-TTL —
+      an explicit posture trade, paired with membership cut-off + secret
+      rotation as the second line.
+- [ ] Kind policy: snapshots are addressable → they MUST live in the shared
+      30000–39999 registry (the 40000+ "free" ranges are append-only only,
+      BUZZ_SURFACE §5 — unusable for state). Coordinate against Buzz's
+      `ALL_KINDS` per their CONTRIBUTING.md; 30180 stays the grants kind
+      unless G-1 forces a break.
+
+### Naming convention (locked)
+
+State records are noun-named kinds (`RUNNER_PROFILE`, `RUNNER_GRANT`);
+commands are imperative present-tense (`provision-runner`, `grant-runner`,
+`revoke-runner-grant`, `rotate-secret`). Derived from how Buzz names its own
+kinds; we do NOT draft past-tense verb names.
+
+### Deltas from the Chunk-2 build (the real scope)
+
+- [ ] `RUNNER_PROFILE` — runner identity/lifecycle as a relay-authoritative
+      addressable record (today: CP file records only). Rotation reflects in
+      the profile's key-material field (CIPHERTEXT only — the relay is not a
+      reader of secrets; mirror the engram posture). Read-visibility: relay
+      members (NIP-29 roster), stated as part of the contract.
+- [ ] Relay-side handlers + auth scope for the command kinds (only CP, and a
+      runner for its own profile — mirrors Buzz's `required_scope_for_kind()`).
+- [ ] CP: publish command → fold observed snapshots into a rebuildable
+      projection. Idempotent replay is a HARD requirement. On respawn the
+      rebuilt CP's NEW console pubkey must be re-admitted to the relay roster
+      + 30180 author-gate — "disposable" includes that re-trust step.
+- [ ] Runner: replace query-per-call with subscription to its own
+      `RUNNER_GRANT`/`RUNNER_PROFILE` — the marginal win for grants is small
+      (exec must check freshness anyway under G-2); the real win is profile/
+      presence/lifecycle for the readiness view.
+- [ ] Migration of the LIVE fleet: both relays + consoles + runners (incl.
+      the attach world). 30180's content contract is live and parsed by
+      runner + CP + tests; lock a dual-source read during cutover, and
+      document when an attach/existing relay lacks our kinds (snapshots
+      absent → fail-closed).
+- [ ] Web UI readiness view: reads CP's projection; confirm the projection
+      API surface stays stable.
+
+### Verification / acceptance (hermetic, in testkit)
+
+- [ ] Partial-write regression in the #3663 shape against `RUNNER_GRANT`
+      (the rallying test for why the relay owns the merge).
+- [ ] Replay-idempotency: append-only command-log replay + snapshot
+      re-fetch converge to the same state (repeatable, deterministic).
+- [ ] G-2 freshness: partition run — stale grant honored within TTL, denied
+      after; rotate + revoke land on a RUNNING runner without restart
+      (extends the existing live-grant test).
+- [ ] `runner-exec` receipts reuse Buzz's own `KIND_AUDIT_ENTRY` (48001) path
+      — do NOT introduce a parallel exec-log kind.
+- [ ] Migration/dual-read: mixed-source fleet behaves identically to
+      relay-only before cutover completes.
+
+### Known costs (honest)
+
+Relays are not transactional (ordering/exactly-once semantics differ from
+Postgres; self-hosted mitigates but is a different reliability model);
+projection folding is real work on both consumers; G-1 introduces upstream
+coupling or fork maintenance; this reworks the grant/lifecycle path, not an
+additive feature — budget as such.
+
+### Sequence
+
+G-1 → G-2 → state move (kinds + handlers → CP fold → runner subscription →
+migration → acceptance). Land before Chunk 3 builds per-service agents on a
+changing foundation; Chunk 3's self-discovering agents are the payoff.

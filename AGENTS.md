@@ -122,6 +122,14 @@ delegation re-proven live under the domain; the old PVE-host CP stopped).
 - **K8s fixed; hosting substrate pluggable.** Two orthogonal axes: SKILLS (what to install) ×
   HOST (where the appliance lives). Anything × anything composes.
 
+## Next (drafted)
+- **Chunk 2.6** — relay-authoritative grants & runner lifecycle (event-sourced
+  state): Buzz's three-part pattern (command → relay side-effect → addressable
+  snapshot), CP/runner become projections, TTL-based revocation freshness.
+  Drafted in `roadmap/POC_CHUNK2.md` §Chunk 2.6; gates G-1 (fork-vs-
+  contribution, re-opens the declined buzz-patch line) and G-2 (freshness)
+  are OPEN.
+
 ## Chunk 1 (current work)
 
 Prove the engine room standalone: local control plane (web UI) + runners as MCP tool servers +
