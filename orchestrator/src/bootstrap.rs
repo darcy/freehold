@@ -60,6 +60,12 @@ pub struct ProxmoxLxcSpec {
     /// needs more than the pct default of 512 and OOMs otherwise).
     pub memory_mb: u32,
     pub bridge: String,
+    /// Optional STATIC guest IP (CIDR) + gateway on `bridge` — for
+    /// Proxmox-on-Cloud-Compute hosts where the cloud DHCP won't lease to
+    /// LXC veths (spike finding): guests use a private bridge + static IPs +
+    /// host NAT/DNAT. None = dhcp (the LAN/home default).
+    pub net_ip: Option<String>,
+    pub net_gw: Option<String>,
 }
 
 pub struct VultrVpsSpec {
@@ -321,14 +327,20 @@ pub async fn bootstrap_proxmox_lxc(
     let create = format!(
         "pct create {vmid} local:vztmpl/{tpl} --rootfs {storage}:{rootfs_gb} \
          --memory {memory_mb} --hostname {host} --unprivileged 1 \
-         --features fuse=1,keyctl=1,nesting=1 --net0 name=eth0,bridge={bridge},ip=dhcp",
+         --features fuse=1,keyctl=1,nesting=1 --net0 {net0}",
         vmid = vmid,
         tpl = tpl,
         storage = spec.storage,
         rootfs_gb = spec.rootfs_gb,
         memory_mb = spec.memory_mb,
         host = spec.hostname,
-        bridge = spec.bridge,
+        net0 = match (&spec.net_ip, &spec.net_gw) {
+            (Some(ip), Some(gw)) => format!(
+                "name=eth0,bridge={},ip={},gw={},type=veth",
+                spec.bridge, ip, gw
+            ),
+            _ => format!("name=eth0,bridge={},ip=dhcp,type=veth", spec.bridge),
+        },
     );
     let out = exec(client, target, &create, 120)?;
     expect_ok(&out, "pct create")?;
