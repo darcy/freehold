@@ -13,7 +13,7 @@ freehold-acceptance` reproduces every Chunk-1 acceptance criterion hermetic on
 H1 (the PVE host as a real SSH target)
 is DONE — the PVE host is onboarded as a runner and execs green.
 Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) and Phase A (bootstrap
-provisioning: `freehold bootstrap` with proxmox-lxc + vultr-vps drivers,
+provisioning: `freehold bootstrap` with proxmox-lxc + vultr-vps + hetzner-vps drivers,
 hermetic-tested, dry-run verified against the PVE host) are DONE;
 the domain gate (A4) requires `--domain` and blocks until it RESOLVES
 (directly, or at an operator-managed proxy that forwards to the target)

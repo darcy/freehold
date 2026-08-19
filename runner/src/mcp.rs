@@ -485,6 +485,10 @@ async fn api_status(
             "curl -sS -o /dev/null -w '%{{http_code}}' -u \"${{{cred}}}\" \
              \"${{{url_env}}}/b2api/v3/b2_authorize_account\""
         ),
+        "hetzner" => format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' \"${{{url_env}}}/v1/servers\" -H \
+             \"Authorization: Bearer ${{{cred}}}\""
+        ),
         k => return Ok(format!("red(unsupported api kind {k})")),
     };
     match state.exec.probe_env(&cmd, &envs).await {
@@ -548,7 +552,7 @@ async fn handle_status(
         } else if let Some(meta) = state.ctx.package.targets.get(&entry) {
             match meta.kind.as_str() {
                 "ssh" => ssh_status(state, &entry, meta).await?,
-                "vultr" | "b2" => api_status(state, meta).await?,
+                "vultr" | "b2" | "hetzner" => api_status(state, meta).await?,
                 k => format!("red(unsupported kind {k})"),
             }
         } else {
