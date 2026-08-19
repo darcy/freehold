@@ -161,7 +161,7 @@ iteration speed, matching the existing promote flow, then validated against the 
 A2. The **local provisioning expert** (the orchestrator's bootstrap mode — a narrow,
     runner-shaped local tool, NOT the CPA: the CPA has no local existence in any mode) calls
     the relevant provisioning runner **directly** — no agent fabric exists yet — to stand up
-    the target. Capabilities: `vultr create/destroy` via the EXISTING vultr runner (VPS);
+    the target. Capabilities: `vultr create/destroy` + `hetzner create/destroy` via the EXISTING API runners (VPS);
     for Proxmox, the EXISTING ssh runner drives `pvesh`/`pct` on the PVE host (generic
     exec — the tool writes the commands; no new Proxmox connector is built).
 
