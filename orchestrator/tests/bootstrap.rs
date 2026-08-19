@@ -1281,7 +1281,7 @@ async fn proxmox_lxc_static_net_for_cloud_pve() {
         ],
     );
     let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
-    let res = bootstrap_proxmox_lxc(
+    let _res = bootstrap_proxmox_lxc(
         &client,
         "proxmox-box",
         &ProxmoxLxcSpec {
