@@ -532,3 +532,21 @@ Findings (all became driver/docs hardening):
   cloud-init `chpasswd: expire: false` avoids the forced root-password
   change, and the private-only + DNAT-off-the-NIC variant avoids the
   bridge-move lockout entirely (Vultr kept the public bridge move).
+
+## k8s substrate verification (POST-2.5 — closes the "k3s unproven" flag)
+
+The Chunk-3/MVP "deterministic k8s pods" substrate was verified INSIDE the
+Proxmox-on-Cloud path (spike finding follow-up):
+
+- k3s node READY in an UNPRIVILEGED LXC on the cloud PVE host (10.10.0.7,
+  static private IP; v1.36.3+k3s1, containerd). The ONE required flag:
+  `INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true"`
+  — the kubelet otherwise dies without /dev/kmsg (absent in the unprivileged
+  LXC; even a device-cgroup allow does NOT materialize it — userns).
+- Real workload: nginx pod Running (image pulled through the LXC's NAT
+  egress); pod-ip:200, cluster-ip:200, NodePort:200 — both inside the LXC
+  and from the PVE host (10.10.0.7:31500 -> pod).
+- Conclusion: the k8s layer rides the same static-net LXC + NAT/DNAT path
+  the appliance already uses; no nested virt needed, matching the
+  LXC/pod-shaped design. Chunk-3 deterministic-manifest work builds on a
+  verified substrate.
