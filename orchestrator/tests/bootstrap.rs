@@ -242,6 +242,8 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
             rootfs_gb: 16,
             memory_mb: 2048,
             bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
         },
     )
     .await
@@ -323,6 +325,8 @@ exit 0
             rootfs_gb: 16,
             memory_mb: 2048,
             bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
         },
     )
     .await
@@ -368,6 +372,8 @@ async fn proxmox_lxc_downloads_template_when_missing() {
             rootfs_gb: 16,
             memory_mb: 2048,
             bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
         },
     )
     .await
@@ -425,6 +431,8 @@ async fn proxmox_lxc_picks_free_vmid_when_omitted() {
             rootfs_gb: 16,
             memory_mb: 2048,
             bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
         },
     )
     .await
@@ -488,6 +496,8 @@ esac
             rootfs_gb: 16,
             memory_mb: 2048,
             bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
         },
     )
     .await
@@ -533,6 +543,8 @@ async fn proxmox_lxc_docker_daemon_failure_is_reported() {
             rootfs_gb: 16,
             memory_mb: 2048,
             bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
         },
     )
     .await
@@ -576,6 +588,8 @@ async fn proxmox_lxc_vmid_below_100_is_rejected() {
             rootfs_gb: 16,
             memory_mb: 2048,
             bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
         },
     )
     .await
@@ -1252,5 +1266,46 @@ async fn hetzner_vps_falls_back_to_available_server_type_in_location() {
     .unwrap();
     assert!(res.detail.contains("active"), "{res:?}");
     assert!(res.detail.contains("destroyed"), "{res:?}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_static_net_for_cloud_pve() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let _res = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "testhost-101".into(),
+            vmid: Some(101),
+            template: None,
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr1".into(),
+            net_ip: Some("10.10.0.6/24".into()),
+            net_gw: Some("10.10.0.1".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let cmds = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        cmds.contains("ip=10.10.0.6/24,gw=10.10.0.1"),
+        "static net0 on the private bridge: {cmds}"
+    );
+    assert!(
+        !cmds.contains("bridge=vmbr1,ip=dhcp"),
+        "no dhcp on the private bridge: {cmds}"
+    );
     server.abort();
 }

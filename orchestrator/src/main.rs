@@ -322,6 +322,12 @@ struct BootstrapArgs {
     /// LXC network bridge (proxmox-lxc)
     #[arg(long, default_value = "vmbr0")]
     bridge: String,
+    /// STATIC guest IP (CIDR) + gateway for Proxmox-on-Cloud-Compute hosts
+    /// (private bridge + host NAT; cloud DHCP won't lease to LXC veths).
+    #[arg(long)]
+    lxc_ip: Option<String>,
+    #[arg(long)]
+    lxc_gw: Option<String>,
     /// Vultr region (vultr-vps)
     #[arg(long, default_value = "atl")]
     region: String,
@@ -1027,6 +1033,8 @@ async fn main() -> Result<()> {
                         rootfs_gb: args.rootfs_gb,
                         memory_mb: args.memory_mb,
                         bridge: args.bridge.clone(),
+                        net_ip: args.lxc_ip.clone(),
+                        net_gw: args.lxc_gw.clone(),
                     };
                     bootstrap::bootstrap_proxmox_lxc(&client, &args.target, &spec).await?
                 }
