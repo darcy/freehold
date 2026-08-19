@@ -385,6 +385,14 @@ Anything × anything composes. K8s layer runs identically regardless of host.
 *   Provisioning ≠ installing. VPS provisions; Proxmox is install-only.
     
 *   Install creates a new management relay OR attaches to an existing one (Buzz required; relay-creation is a skippable idempotent step).
+*   **"VPS" = Proxmox-on-Cloud-Compute (LXC-only).** Vultr Cloud Compute and
+    Hetzner Cloud instances have no nested hardware virtualization — Proxmox
+    on them manages LXC containers, not KVM VMs. The whole stack is
+    container/pod-shaped, so the VPS host collapses into the Proxmox host
+    driver: provision an amd64 instance, custom-ISO PVE install, then the
+    same LXC flows (relay + cp LXCs + services as more LXCs). A real-VM
+    requirement routes to Bare Metal (Vultr BM / Hetzner dedicated), never
+    the VPS host. (Chunk 2.5.)
     
 *   Unified control plane app; bootstrap is a MODE, not a script.
     
