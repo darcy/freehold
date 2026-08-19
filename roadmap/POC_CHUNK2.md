@@ -550,3 +550,59 @@ Proxmox-on-Cloud path (spike finding follow-up):
   the appliance already uses; no nested virt needed, matching the
   LXC/pod-shaped design. Chunk-3 deterministic-manifest work builds on a
   verified substrate.
+
+## Chunk 2.6 — Relay-authoritative runner lifecycle (RUNNER_PROFILE + rebuild)
+
+**Status:** IMPLEMENTED + VERIFIED (see checkboxes). Scope decision: the
+CP-stays-writer slice — the low-risk 90% that defers G-1 (relay-side
+handlers / fork-vs-contribution) until true multi-writers appear.
+
+### What landed (additive; no deployed contract changed)
+
+- [x] New addressable kind **30181 `RUNNER_PROFILE`** (core): a runner's
+      lifecycle snapshot — identity pubkeys, connector kind/address, status,
+      secret NAME only. Carry's revoke as a status flip and rotate as a
+      `rotated_at` flip: SAME d-tag (runner pubkey), REPLACE never append.
+      Kind discipline: 30000–39999 addressable registry, next to 30180
+      (BUZZ_SURFACE §5). Collision-checked against the documented used set
+      (30174–30179 taken; 30181 free).
+- [x] CP publishes the profile at EVERY lifecycle mutation (`--relay-url`
+      on provision/adopt/rotate/revoke): provision/adopt publish "active",
+      rotate flips `rotated_at`, revoke flips `status` (+ the existing
+      empty-grants cut-off). Author-gated to the console, Schnorr-verified
+      locally — same trust anchor as grants (a rogue member cannot mint or
+      clobber runner records).
+- [x] `control-plane rebuild --relay-url` — the disposable-CP fold: query
+      ALL profiles, reconstruct the store deterministically + idempotently
+      (re-run converges to the same state). Restored records carry NO
+      ciphertext/package path — the relay never holds secret material;
+      `adopt` per runner re-arms the package (documented re-trust step: a
+      rebuilt CP's new console pubkey reads nothing until re-admitted).
+- [x] **G-2 (freshness) resolved for this slice:** grants stay
+      query-per-call, fail-closed on relay-down — no cache, so no TTL
+      needed and NO posture flip. Subscription+TTL only becomes relevant if
+      a cache is introduced later; that is its own gate.
+- [x] **G-1 (fork-vs-contribution) DEFERRED, not resolved:** no Buzz
+      changes shipped. Runner self-reporting / relay-side handlers wait
+      until a real multi-writer need (Chunk 3 self-discovering agents).
+- [x] **Migration:** additive-only (new kind; 30180 contract untouched;
+      old runners ignore the new kind). The live fleet needs no cutover.
+
+### Verification (hermetic, all green)
+
+- [x] Unit: parse/accept-reject, newest-wins-per-runner replace semantics,
+      rogue-author ignored (merge fn is shared with the HTTP query, so the
+      REAL path is tested).
+- [x] Integration (fake relay with real NIP-98 + signature verify):
+      publish→query roundtrip over HTTP; revoke REPLACES (never appends);
+      rogue author can't mint/clobber; rebuild is deterministic +
+      idempotent (two folds → identical records AND identical state.json),
+      restored records carry no ciphertext/package path.
+- [x] Workspace: full `cargo test` green, clippy 0, fmt clean.
+
+### Outcome mapped to the Chunk 2.6 plan
+
+The drift party list is now relay-first: grants (30180) + lifecycle (30181)
+are both relay-published addressable records; CP's file store is a foldable
+projection, not the durable source of runner truth. CP loss = rebuild +
+re-adopt, not data loss. Runner per-call grants + author gate unchanged.
