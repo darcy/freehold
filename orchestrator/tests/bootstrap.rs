@@ -1197,3 +1197,60 @@ async fn hetzner_vps_bootstrap_creates_polls_destroys() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hetzner_vps_falls_back_to_available_server_type_in_location() {
+    let base = tempfile::tempdir().unwrap();
+    let htz_state = std::sync::Arc::new(mock::HetznerState::default());
+    let htz_addr = mock::spawn_http(mock::hetzner_router(htz_state.clone())).await;
+    let dir = base.path().join("runner");
+    let id = Identity::generate();
+    id.write_to_dir(&dir).unwrap();
+    let adir = agent_dir(base.path());
+    let agent_pk = flows::agent_auth(&adir).unwrap().pubkey.clone();
+    let enc = hex32(&id.enc_pubkey_hex());
+    let sealed =
+        hex::encode(crypto::seal(&enc, b"hetzner", mock::HETZNER_TOKEN.as_bytes()).unwrap());
+    let pkg = SecretPackage {
+        secrets: std::collections::BTreeMap::from([("hetzner".to_string(), sealed)]),
+        targets: std::collections::BTreeMap::from([(
+            "hetzner".to_string(),
+            TargetMeta {
+                kind: "hetzner".into(),
+                address: format!("http://{htz_addr}"),
+                secret: "hetzner".into(),
+            },
+        )]),
+        grants: vec![agent_pk.clone()],
+    };
+    pkg.write_to_dir(&dir).unwrap();
+    let runner_pubkey = id.nostr_pubkey_hex();
+    let ctx = RunnerContext {
+        identity: id,
+        package: SecretPackage::load(&dir).unwrap(),
+        state_dir: dir.to_path_buf(),
+        relay_url: None,
+        grant_author: None,
+    };
+    let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let client = client(&adir, &format!("http://{addr}/mcp"), &runner_pubkey);
+
+    // cax11 is asked but unavailable in fsn1 (the mock's types) — the driver
+    // must discover cpx11 and create with it.
+    let res = bootstrap_hetzner_vps(
+        &client,
+        "hetzner",
+        &HetznerVpsSpec {
+            label: "fallback-test".into(),
+            location: "fsn1".into(),
+            server_type: "cax11".into(),
+            image: "ubuntu-22.04".into(),
+            destroy_after: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(res.detail.contains("active"), "{res:?}");
+    assert!(res.detail.contains("destroyed"), "{res:?}");
+    server.abort();
+}
