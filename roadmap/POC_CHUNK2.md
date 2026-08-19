@@ -492,14 +492,10 @@ V2. **Networking path (the one new subsystem).** Cloud PVE has a SINGLE
     Client reachability is domain → proxy → host public IP → DNAT → LXC.
     The home-flow "LXC on the LAN with its own IP" pattern does not apply.
 
-- [ ] [ ]
+- [x] [x]
 
-V3. **The spike (de-risking, live on BOTH providers).** One Vultr Cloud
-    instance + one Hetzner Cloud instance: PVE install → bridge/DNAT → two
-    LXCs (relay + cp) → full appliance (deploy-relay with the domain,
-    deploy-cp, console member, operator login) → domain through the proxy.
-    Every live-run finding folds back as driver hardening (same as
-    #53/#55).
+V3. **The spike (de-risking, live on BOTH providers).** COMPLETE — see the
+    Chunk-2.5 LIVE VERIFICATION note below.
 
 - [ ] [ ]
 
@@ -510,3 +506,29 @@ V4. **Skill-schema flag.** `target: lxc | pod | either` assumes no skill
 Storage mapping (instance root disk + optional attached block volume as the
 LVG) and the amd64-only note ride V2/V3 — decided in the spike, not in
 advance. Bare-metal is a documented escape hatch, NOT an MVP path.
+
+## Chunk 2.5 — LIVE VERIFICATION (both providers)
+
+The full appliance ran on Proxmox-on-Cloud-Compute on Vultr (45.76.255.185)
+AND Hetzner (178.156.179.204): PVE-on-Debian-13 (apt route), two static-IP
+LXCs (relay + cp) on a private bridge, relay + CP deployed, console a relay
+member, operator NIP-98 login — relay and console both reachable PUBLICLY
+through host DNAT (`/_liveness` ok). No nested KVM exists on either cloud
+(`cpuinfo` confirms) — the LXC/pod appliance needs none.
+
+Findings (all became driver/docs hardening):
+- Cloud DHCP will NOT lease to LXC veths -> guests need STATIC IPs on a
+  private bridge + host NAT (driver: --lxc-ip/--lxc-gw, #58).
+- pve-firewall's nftables PERSIST after `systemctl stop` (14 drop rules) —
+  flush them (or never start it on a single-host spike) or every guest
+  loses egress, silently.
+- download.proxmox.com serves CN=enterprise.proxmox.com -> apt over http;
+  the trixie release key exists ONLY on enterprise.proxmox.com (the docs
+  URL 404s). The apt-route needs: /etc/hosts node -> non-loopback IP
+  (pmxcfs refuses 127.0.1.1), the pve node lxc/qemu-server dirs, no vmbr0
+  by default. Debian 13's compose v2 package is `docker-compose`
+  (not docker-compose-v2). Guest DNS needs a relay (dnsmasq on vmbr1) —
+  the host's resolver won't answer NAT'd guests. Hetzner: NIC = eth0,
+  cloud-init `chpasswd: expire: false` avoids the forced root-password
+  change, and the private-only + DNAT-off-the-NIC variant avoids the
+  bridge-move lockout entirely (Vultr kept the public bridge move).
