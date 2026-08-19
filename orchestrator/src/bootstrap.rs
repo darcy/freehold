@@ -70,6 +70,16 @@ pub struct VultrVpsSpec {
     pub destroy_after: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct HetznerVpsSpec {
+    /// Instance name (the domain-derived label — the domain IS the identity).
+    pub label: String,
+    pub location: String,
+    pub server_type: String,
+    pub image: String,
+    pub destroy_after: bool,
+}
+
 /// Bootstrap result for the report.
 #[derive(Debug)]
 pub struct BootstrapResult {
@@ -585,7 +595,7 @@ pub async fn bootstrap_vultr_vps(
     let create = format!(
         "curl -sS -X POST \"{env_url}/v2/instances\" -H \"Authorization: Bearer {env_cred}\" \
          -H 'Content-Type: application/json' -d '{{\"region\":\"{region}\",\"plan\":\"{plan}\",\
-         \"os_id\":{os_id},\"label\":\"{label}\"}}'",
+         \"os_id\":{os_id},\"label\":\"{label}\",\"hostname\":\"{label}\"}}'",
         env_url = env_url,
         env_cred = env_cred,
         region = spec.region,
@@ -630,7 +640,7 @@ pub async fn bootstrap_vultr_vps(
             }
             if state == "active" && !ip.is_empty() && ip != "0.0.0.0" {
                 detail = Some(format!(
-                    "vultr instance {id} active; main_ip {ip}; label {}",
+                    "vultr instance {id} active; main_ip {ip}; label {} (domain identity)",
                     spec.label
                 ));
                 verified = true;
@@ -928,4 +938,150 @@ mod domain_gate_tests {
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
         ));
     }
+}
+
+/// The hetzner-vps driver — Hetzner Cloud, same wire discipline as vultr:
+/// the runner injects <SECRET> (<ENV>_URL = the target's address), the
+/// driver writes plain curl shapes. create -> poll (running) -> report;
+/// optional destroy for tests/cleanup. A MISSED destroy keeps billing —
+/// the destroy retries transient non-2xx like the vultr driver.
+pub async fn bootstrap_hetzner_vps(
+    client: &McpClient,
+    target: &str,
+    spec: &HetznerVpsSpec,
+) -> Result<BootstrapResult, BootstrapError> {
+    plain(&spec.label)?;
+    plain(&spec.location)?;
+    plain(&spec.server_type)?;
+    plain(&spec.image)?;
+    let env = target
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let env_cred = format!("${{{env}}}");
+    let env_url = format!("${{{}_URL}}", env);
+
+    let create = format!(
+        "curl -sS -X POST \"{env_url}/v1/servers\" -H \"Authorization: Bearer {env_cred}\" \
+         -H 'Content-Type: application/json' -d '{{\"name\":\"{label}\",\"server_type\":\"{server_type}\",\
+         \"image\":\"{image}\",\"location\":\"{location}\",\"hostname\":\"{label}\"}}'",
+        env_url = env_url,
+        env_cred = env_cred,
+        label = spec.label,
+        server_type = spec.server_type,
+        image = spec.image,
+        location = spec.location,
+    );
+    let out = exec(client, target, &create, 120)?;
+    expect_ok(&out, "hetzner create")?;
+    let created: Value = serde_json::from_str(out.stdout.trim())
+        .map_err(|e| BootstrapError::Verify(format!("create response parse: {e}")))?;
+    let id = created["server"]["id"]
+        .as_u64()
+        .map(|n| n.to_string())
+        .ok_or_else(|| {
+            BootstrapError::Verify(format!(
+                "no server id in create response: {}",
+                out.stdout.trim()
+            ))
+        })?;
+
+    let mut verified = false;
+    let mut poll_err: Option<String> = None;
+    let mut main_ip = String::new();
+    for _ in 0..120 {
+        let poll = format!(
+            "curl -sS \"{env_url}/v1/servers/{id}\" -H \"Authorization: Bearer {env_cred}\"",
+            env_url = env_url,
+            env_cred = env_cred,
+            id = id.as_str()
+        );
+        match exec(client, target, &poll, 120).and_then(|out| {
+            expect_ok(&out, "hetzner poll")?;
+            let v: Value = serde_json::from_str(out.stdout.trim())
+                .map_err(|e| BootstrapError::Verify(format!("poll parse: {e}")))?;
+            let server = &v["server"];
+            let status = server["status"].as_str().unwrap_or("");
+            let ip = server["public_net"]["ipv4"]["ip"].as_str().unwrap_or("");
+            if status == "running" && !ip.is_empty() {
+                main_ip = ip.to_string();
+                verified = true;
+            }
+            Ok(())
+        }) {
+            Ok(()) => {
+                if verified {
+                    break;
+                }
+                poll_err = None;
+            }
+            Err(e) => poll_err = Some(e.to_string()),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    if !verified {
+        return Err(BootstrapError::Verify(match poll_err {
+            Some(e) => format!("server {id} did not become running: {e}"),
+            None => format!("server {id} did not become running within the poll window"),
+        }));
+    }
+
+    if spec.destroy_after {
+        let destroy = format!(
+            "curl -sS -X DELETE \"{env_url}/v1/servers/{id}\" -H \
+             \"Authorization: Bearer {env_cred}\" -o /dev/null -w '%{{http_code}}'",
+            env_url = env_url,
+            env_cred = env_cred,
+            id = id.as_str()
+        );
+        let mut destroyed = false;
+        for attempt in 0..5 {
+            let out = exec(client, target, &destroy, 120)?;
+            expect_ok(&out, "hetzner destroy")?;
+            let code = out.stdout.trim();
+            if code.starts_with('2') || code == "404" {
+                destroyed = true;
+                break;
+            }
+            tracing::info!(
+                "destroy of server {id} returned HTTP {code} (attempt {}) — retrying",
+                attempt + 1
+            );
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+        if !destroyed {
+            return Err(BootstrapError::Verify(format!(
+                "destroy of server {id} never confirmed — the server may still be running and billing"
+            )));
+        }
+        let detail = format!(
+            "hetzner server {id} ({}) active + destroyed (domain identity)",
+            spec.label
+        );
+        return Ok(BootstrapResult {
+            kind: TargetKind::VultrVps, // shared API-target family (reporting-only)
+            id,
+            name: spec.label.clone(),
+            ip: (!main_ip.is_empty()).then_some(main_ip),
+            detail,
+        });
+    }
+
+    let detail = format!(
+        "hetzner server {id} active; ipv4 {main_ip}; label {} (domain identity)",
+        spec.label
+    );
+    Ok(BootstrapResult {
+        kind: TargetKind::VultrVps, // shared API-target family (reporting-only)
+        id,
+        name: spec.label.clone(),
+        ip: (!main_ip.is_empty()).then_some(main_ip),
+        detail,
+    })
 }

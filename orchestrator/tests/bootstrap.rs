@@ -16,7 +16,8 @@ use freehold_core::crypto;
 use freehold_core::identity::Identity;
 use freehold_core::secrets::{SecretPackage, TargetMeta};
 use freehold_orchestrator::bootstrap::{
-    ProxmoxLxcSpec, VultrVpsSpec, bootstrap_proxmox_lxc, bootstrap_vultr_vps,
+    HetznerVpsSpec, ProxmoxLxcSpec, VultrVpsSpec, bootstrap_hetzner_vps, bootstrap_proxmox_lxc,
+    bootstrap_vultr_vps,
 };
 use freehold_orchestrator::client::McpClient;
 use freehold_orchestrator::flows;
@@ -1132,5 +1133,67 @@ async fn deploy_cp_co_locates_runner_when_asked() {
     assert!(cmds.contains("systemd-run"), "runner unit start: {cmds}");
     assert!(cmds.contains("adopt"), "adopt step ran: {cmds}");
     assert!(cmds.contains("grant"), "self-grant step ran: {cmds}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hetzner_vps_bootstrap_creates_polls_destroys() {
+    let base = tempfile::tempdir().unwrap();
+    let htz_state = std::sync::Arc::new(mock::HetznerState::default());
+    let htz_addr = mock::spawn_http(mock::hetzner_router(htz_state.clone())).await;
+
+    let dir = base.path().join("runner");
+    let id = Identity::generate();
+    id.write_to_dir(&dir).unwrap();
+    let adir = agent_dir(base.path());
+    let agent_pk = flows::agent_auth(&adir).unwrap().pubkey.clone();
+    let enc = hex32(&id.enc_pubkey_hex());
+    let sealed =
+        hex::encode(crypto::seal(&enc, b"hetzner", mock::HETZNER_TOKEN.as_bytes()).unwrap());
+    let pkg = SecretPackage {
+        secrets: std::collections::BTreeMap::from([("hetzner".to_string(), sealed)]),
+        targets: std::collections::BTreeMap::from([(
+            "hetzner".to_string(),
+            TargetMeta {
+                kind: "hetzner".into(),
+                address: format!("http://{htz_addr}"),
+                secret: "hetzner".into(),
+            },
+        )]),
+        grants: vec![agent_pk.clone()],
+    };
+    pkg.write_to_dir(&dir).unwrap();
+    let runner_pubkey = id.nostr_pubkey_hex();
+    let ctx = RunnerContext {
+        identity: id,
+        package: SecretPackage::load(&dir).unwrap(),
+        state_dir: dir.to_path_buf(),
+        relay_url: None,
+        grant_author: None,
+    };
+    let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let client = client(&adir, &format!("http://{addr}/mcp"), &runner_pubkey);
+
+    let res = bootstrap_hetzner_vps(
+        &client,
+        "hetzner",
+        &HetznerVpsSpec {
+            label: "bootstrap-test".into(),
+            location: "fsn1".into(),
+            server_type: "cx22".into(),
+            image: "ubuntu-22.04".into(),
+            destroy_after: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(res.detail.contains("active"), "{res:?}");
+    assert!(res.detail.contains("destroyed"), "{res:?}");
+    assert!(
+        htz_state.servers.lock().is_empty(),
+        "destroy-after must remove the server from the mock"
+    );
+
     server.abort();
 }

@@ -200,3 +200,90 @@ pub async fn spawn_http(app: Router) -> SocketAddr {
     });
     addr
 }
+
+#[derive(Default)]
+pub struct HetznerState {
+    /// (id, name) of live servers.
+    pub servers: Mutex<Vec<(String, String)>>,
+    pub next: AtomicU64,
+}
+
+pub const HETZNER_TOKEN: &str = "htz-token-123";
+
+fn hetzner_ok(headers: &HeaderMap) -> bool {
+    headers.get("authorization").and_then(|v| v.to_str().ok())
+        == Some(&format!("Bearer {HETZNER_TOKEN}"))
+}
+
+pub fn hetzner_router(state: Arc<HetznerState>) -> Router {
+    async fn create(
+        State(state): State<Arc<HetznerState>>,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, StatusCode> {
+        if !hetzner_ok(&headers) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let n = state.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let id = n.to_string();
+        state
+            .servers
+            .lock()
+            .push((id.clone(), format!("server-{n}")));
+        Ok(Json(json!({ "server": {
+            "id": n,
+            "name": format!("server-{n}"),
+            "status": "initializing",
+            "public_net": { "ipv4": { "ip": format!("10.0.0.{n}") } }
+        } })))
+    }
+
+    async fn instance(
+        State(state): State<Arc<HetznerState>>,
+        AxPath(id): AxPath<String>,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, StatusCode> {
+        if !hetzner_ok(&headers) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if !state.servers.lock().iter().any(|(sid, _)| sid == &id) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Ok(Json(json!({
+            "server": { "id": id, "status": "running",
+                        "public_net": { "ipv4": { "ip": format!("10.0.0.{id}") } } }
+        })))
+    }
+
+    async fn destroy(
+        State(state): State<Arc<HetznerState>>,
+        AxPath(id): AxPath<String>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        if !hetzner_ok(&headers) {
+            return StatusCode::UNAUTHORIZED;
+        }
+        let mut servers = state.servers.lock();
+        let before = servers.len();
+        servers.retain(|(sid, _)| sid != &id);
+        if servers.len() == before {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::NO_CONTENT
+        }
+    }
+
+    Router::new()
+        .route("/v1/servers", get(status_list).post(create))
+        .route("/v1/servers/{id}", get(instance).delete(destroy))
+        .with_state(state)
+}
+
+async fn status_list(
+    State(_): State<Arc<HetznerState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    if !hetzner_ok(&headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(Json(json!({ "servers": [] })))
+}

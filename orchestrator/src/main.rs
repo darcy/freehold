@@ -330,6 +330,15 @@ struct BootstrapArgs {
     /// Vultr OS id (vultr-vps; Debian 12 = 1743)
     #[arg(long, default_value_t = 1743)]
     os_id: u32,
+    /// Hetzner location (hetzner-vps)
+    #[arg(long, default_value = "fsn1")]
+    location: String,
+    /// Hetzner server type (hetzner-vps)
+    #[arg(long, default_value = "cx22")]
+    server_type: String,
+    /// Hetzner OS image (hetzner-vps)
+    #[arg(long, default_value = "ubuntu-22.04")]
+    image: String,
     /// Destroy the VPS after verifying (vultr-vps; for tests/cleanup)
     #[arg(long)]
     destroy: bool,
@@ -1030,7 +1039,20 @@ async fn main() -> Result<()> {
                     };
                     bootstrap::bootstrap_vultr_vps(&client, &args.target, &spec).await?
                 }
-                other => anyhow::bail!("unknown --kind {other:?} (proxmox-lxc | vultr-vps)"),
+                "hetzner-vps" => {
+                    let spec = bootstrap::HetznerVpsSpec {
+                        label: bootstrap::domain_lxc_name(&args.domain, &args.role)
+                            .map_err(anyhow::Error::msg)?,
+                        location: args.location.clone(),
+                        server_type: args.server_type.clone(),
+                        image: args.image.clone(),
+                        destroy_after: args.destroy,
+                    };
+                    bootstrap::bootstrap_hetzner_vps(&client, &args.target, &spec).await?
+                }
+                other => anyhow::bail!(
+                    "unknown --kind {other:?} (proxmox-lxc | vultr-vps | hetzner-vps)"
+                ),
             };
             let want_ip = res.ip.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
