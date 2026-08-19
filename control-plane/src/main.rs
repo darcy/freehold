@@ -11,7 +11,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use freehold_control_plane::console::Console;
 use freehold_control_plane::provisioner::{self, ProvisionRequest};
-use freehold_control_plane::state::{RunnerStatus, STATE_DIR_ENV, StateStore};
+use freehold_control_plane::state::{
+    RunnerRecord, RunnerStatus, STATE_DIR_ENV, SecretRecord, StateStore,
+};
 use freehold_control_plane::web;
 use zeroize::Zeroizing;
 
@@ -45,6 +47,13 @@ enum Cmd {
     Revoke(RevokeArgs),
     /// List runners + secrets at a glance
     List(CommonArgs),
+    /// Chunk 2.6: REBUILD the CP view from the relay's runner-profile
+    /// snapshots (kind 30181) — a respawned CP folds instead of carrying
+    /// state ("disposable CP"). Idempotent: same relay → same store; a
+    /// re-run converges. Restored records carry NO ciphertext/package path
+    /// (the relay never holds secret material) — re-run `adopt` per runner
+    /// to re-arm the package.
+    Rebuild(RebuildArgs),
     /// Print this state dir's console identity PUBKEY (64-hex, pubkey only —
     /// never the secret). Used by deploy-cp to name the box's fresh identity
     /// for relay-member add.
@@ -100,6 +109,9 @@ struct AdoptArgs {
     /// The runner's MCP listen address (console readiness probing)
     #[arg(long)]
     mcp_addr: Option<String>,
+    /// Relay to publish the runner-profile snapshot to (Chunk 2.6, kind 30181)
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
 }
 
 #[derive(Args)]
@@ -116,6 +128,9 @@ struct ProvisionArgs {
     /// Where the runner package lands; defaults to ./.freehold/runner/<name>
     #[arg(long, env = "FREEHOLD_RUNNER_STATE_DIR")]
     runner_dir: Option<PathBuf>,
+    /// Relay to publish the runner-profile snapshot to (Chunk 2.6, kind 30181)
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -124,6 +139,10 @@ struct ProvisionArgs {
 struct RotateArgs {
     /// Secret name to rotate
     name: String,
+    /// Relay to re-publish the runner-profile to (Chunk 2.6, kind 30181 —
+    /// rotation reflects as a `rotated_at` flip)
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -145,9 +164,19 @@ struct RevokeGrantArgs {
 struct RevokeArgs {
     /// Runner name to revoke (cut-off)
     name: String,
-    /// Relay to publish an EMPTY grant list to (cut-off for relay-backed runners)
+    /// Relay to publish an EMPTY grant list + the revoked runner-profile to
+    /// (cut-off for relay-backed runners; Chunk 2.6 status flip)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
+    #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
+    state_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct RebuildArgs {
+    /// Relay to fold runner profiles from (Chunk 2.6)
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: String,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -236,6 +265,10 @@ async fn main() -> Result<()> {
             println!("  package:           {}", runner.package_dir.display());
             println!("  mcp addr:          {:?}", runner.mcp_addr);
             println!("  (credential stays sealed in the package; adopt ships nothing)");
+            if let Some(relay) = &args.relay_url {
+                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
+                println!("published runner profile to the relay ({relay})");
+            }
             Ok(())
         }
         Cmd::Provision(args) => {
@@ -272,6 +305,10 @@ async fn main() -> Result<()> {
             println!(
                 "  (credential sealed to the runner's key — the CP holds no plaintext, no private keys)"
             );
+            if let Some(relay) = &args.relay_url {
+                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
+                println!("published runner profile to the relay ({relay})");
+            }
             Ok(())
         }
         Cmd::RotateSecret(args) => {
@@ -280,6 +317,10 @@ async fn main() -> Result<()> {
             let new_secret =
                 read_secret_stdin(&format!("paste NEW credential for {}: ", args.name))?;
             provisioner::rotate_secret(&store, &args.name, new_secret.as_bytes())?;
+            if let Some(relay) = &args.relay_url {
+                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
+                println!("published runner profile to the relay ({relay})");
+            }
             println!("rotated secret {}", args.name);
             Ok(())
         }
@@ -302,16 +343,78 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let rec = provisioner::revoke_runner(&store, &args.name)?;
             if let Some(relay) = &args.relay_url {
-                // cut-off on the relay too: an EMPTY grant list denies every caller
+                // cut-off on the relay too: an EMPTY grant list denies every caller,
+                // and the profile's status flip makes the revocation visible to folds.
                 provisioner::publish_grants(&store, relay, &args.name, &[], &args.state_dir)?;
+                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
                 println!(
-                    "published empty grants for {} to the relay ({relay})",
+                    "published empty grants + revoked profile for {} to the relay ({relay})",
                     args.name
                 );
             }
             println!("revoked runner {} (was {})", args.name, rec.nostr_pubkey);
             println!("note: the shipped secrets.json was removed, but the credential itself may");
             println!("      still be valid at the service — rotate it upstream if it was exposed");
+            Ok(())
+        }
+        Cmd::Rebuild(args) => {
+            use std::collections::BTreeMap;
+            let store = StateStore::open(&args.state_dir)
+                .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
+            // load_or_create mirrors Identity: a fresh CP gets its identity
+            // at first use, but the FOLD is author-gated — a new console's
+            // pubkey isn't the snapshots' author, so it reads nothing until
+            // it's re-admitted (the documented re-trust step).
+            let console = Console::load_or_create(&args.state_dir).with_context(|| {
+                format!("loading console identity in {}", args.state_dir.display())
+            })?;
+            let profiles = freehold_core::relay_http::query_runner_profiles(
+                &args.relay_url,
+                &console.identity.nostr_pubkey_hex(),
+                &console.identity.secret_seed(),
+            )
+            .map_err(|e| anyhow::anyhow!("profile query failed: {e}"))?;
+            let mut runners = BTreeMap::new();
+            let mut secrets = BTreeMap::new();
+            for p in &profiles {
+                let status = if p.status == "revoked" {
+                    RunnerStatus::Revoked
+                } else {
+                    RunnerStatus::Active
+                };
+                runners.insert(
+                    p.name.clone(),
+                    RunnerRecord {
+                        nostr_pubkey: p.nostr_pubkey.clone(),
+                        enc_pubkey: p.enc_pubkey.clone(),
+                        status,
+                        package_dir: std::path::PathBuf::new(),
+                        created_at: p.created_at,
+                        mcp_addr: None,
+                    },
+                );
+                secrets.insert(
+                    p.name.clone(),
+                    SecretRecord {
+                        runner: p.name.clone(),
+                        kind: p.kind.clone(),
+                        address: p.address.clone(),
+                        ciphertext_hex: String::new(),
+                        created_at: p.created_at,
+                        rotated_at: p.rotated_at,
+                    },
+                );
+            }
+            let restored = runners.len();
+            store.rebuild_from(runners, secrets)?;
+            println!(
+                "rebuilt {} runner record(s) from the relay ({})",
+                restored, args.relay_url
+            );
+            println!(
+                "  restored records carry no ciphertext/package path (the relay holds no secret \
+                 material) — re-run `adopt` per runner to re-arm the package"
+            );
             Ok(())
         }
         Cmd::Identity(args) => {

@@ -18,6 +18,8 @@ use axum::http::{HeaderMap, StatusCode, header::HOST};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
+use freehold_core::nip98::RUNNER_PROFILE_KIND;
+use freehold_core::relay_http::RunnerProfile;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -62,6 +64,30 @@ pub fn publish_grants(
         "created_at": ts,
         "kind": 30180,
         "tags": [["d", runner_pk]],
+        "content": content,
+        "sig": sig,
+    }));
+}
+
+/// Sign + store a kind-30181 runner-lifecycle snapshot for a runner (the
+/// fake acts as the console/owner when tests drive the WRITE side).
+pub fn publish_profile(state: &SharedRelay, console_secret: &[u8; 32], profile: &RunnerProfile) {
+    let ts = freehold_core::auth::now_secs();
+    let content = serde_json::to_string(profile).expect("serialize profile");
+    let (pubkey, id, sig) = freehold_core::nip98::sign_event(
+        console_secret,
+        RUNNER_PROFILE_KIND,
+        ts,
+        vec![vec!["d".into(), profile.nostr_pubkey.clone()]],
+        &content,
+    )
+    .expect("sign profile event");
+    state.events.lock().push(json!({
+        "id": id,
+        "pubkey": pubkey,
+        "created_at": ts,
+        "kind": RUNNER_PROFILE_KIND,
+        "tags": [["d", profile.nostr_pubkey]],
         "content": content,
         "sig": sig,
     }));

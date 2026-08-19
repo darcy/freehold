@@ -25,7 +25,7 @@ pub enum RunnerStatus {
     Revoked,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerRecord {
     /// Nostr x-only pubkey — the grant/membership identity.
     pub nostr_pubkey: String,
@@ -43,7 +43,7 @@ pub struct RunnerRecord {
     pub mcp_addr: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRecord {
     /// Runner (service) this secret belongs to — one per runner in Chunk 1.
     pub runner: String,
@@ -55,7 +55,7 @@ pub struct SecretRecord {
     pub rotated_at: Option<u64>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPlaneState {
     pub runners: BTreeMap<String, RunnerRecord>,
     pub secrets: BTreeMap<String, SecretRecord>,
@@ -188,6 +188,25 @@ impl StateStore {
         rec.ciphertext_hex = ciphertext_hex.to_string();
         rec.rotated_at = rotated_at;
         Ok(())
+    }
+
+    /// Chunk 2.6: replace the runner/secret views wholesale — `rebuild`
+    /// folds the relay's addressable snapshots into a fresh projection.
+    /// Deterministic + idempotent: same input → same state; a re-run
+    /// converges (no partial/stale records survive). Restored records
+    /// carry NO ciphertext or package path (the relay never holds secret
+    /// material) — `adopt` per runner re-arms the package.
+    pub fn rebuild_from(
+        &self,
+        runners: BTreeMap<String, RunnerRecord>,
+        secrets: BTreeMap<String, SecretRecord>,
+    ) -> Result<(), StateError> {
+        {
+            let mut inner = self.inner.write();
+            inner.runners = runners;
+            inner.secrets = secrets;
+        }
+        self.save()
     }
 
     pub fn update_secret_ciphertext(

@@ -448,6 +448,52 @@ pub fn revoke_grant(
     Ok(pkg.grants)
 }
 
+/// Chunk 2.6: publish the runner's CURRENT lifecycle snapshot to the relay
+/// as a kind-30181 event (addressable, d-tag = runner pubkey — a
+/// re-publish REPLACES: provision/adopt publish "active", rotate flips
+/// `rotated_at`, revoke flips `status`). The relay copy is the rebuildable
+/// projection a respawned CP folds from ("disposable CP"). Carries identity
+/// pubkeys, connector kind/address, and the secret NAME only — never
+/// ciphertext/plaintext (the relay is not a holder of secret material).
+pub fn publish_runner_profile(
+    store: &StateStore,
+    relay_url: &str,
+    name: &str,
+    state_dir: &std::path::Path,
+) -> Result<(), ProvisionError> {
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    let sec = store
+        .get_secret(name)
+        .ok_or_else(|| StateError::SecretNotFound(name.to_string()))?;
+    // Privileged write: a FRESH/wrong state dir must not mint a new console
+    // key that signs publishes nobody recognizes — load, don't create.
+    let console = crate::console::Console::load(state_dir)
+        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
+    let profile = freehold_core::relay_http::RunnerProfile {
+        name: name.to_string(),
+        kind: sec.kind,
+        address: sec.address,
+        status: match rec.status {
+            RunnerStatus::Active => "active",
+            RunnerStatus::Revoked => "revoked",
+        }
+        .to_string(),
+        nostr_pubkey: rec.nostr_pubkey,
+        enc_pubkey: rec.enc_pubkey,
+        secret: name.to_string(), // secret NAME only — never material
+        created_at: rec.created_at,
+        rotated_at: sec.rotated_at,
+    };
+    freehold_core::relay_http::publish_runner_profile(
+        relay_url,
+        &console.identity.secret_seed(),
+        &profile,
+    )
+    .map_err(|e| ProvisionError::Io(std::io::Error::other(format!("relay publish profile: {e}"))))
+}
+
 /// Phase D: publish the runner's CURRENT grant list to the relay as a
 /// kind-30180 event (addressable, d-tag = runner pubkey — a re-publish
 /// REPLACES). Called after grant/revoke so the relay's list and the shipped

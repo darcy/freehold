@@ -42,6 +42,11 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 
 pub const KIND_HTTP_AUTH: u32 = 27235;
 pub const GRANTS_KIND: u32 = 30180;
+/// Runner lifecycle snapshot (Chunk 2.6): addressable per runner pubkey
+/// (d-tag), replaceable — re-publishing REPLACES, so a revoke lands as a
+/// status flip, never appended history. Same registry discipline as 30180
+/// (30000–39999 addressable range, BUZZ_SURFACE §5).
+pub const RUNNER_PROFILE_KIND: u32 = 30181;
 
 /// pkcs7-style canonical event array, JSON without whitespace.
 fn canonical_event_bytes(

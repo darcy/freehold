@@ -13,8 +13,9 @@
 //! per BUZZ_SURFACE §5/§9: grants are CURRENT STATE, so a revoke must
 //! REPLACE, not append (an append-only kind would fail-stale on revoke).
 
-use crate::nip98::{GRANTS_KIND, nip98_auth};
+use crate::nip98::{GRANTS_KIND, RUNNER_PROFILE_KIND, nip98_auth};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Deterministic 64-hex engram address for (agent pubkey, memory key) —
@@ -44,6 +45,204 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// A runner's current lifecycle snapshot (kind 30181, addressable):
+/// identity pubkeys, connector kind/address, status, and the secret NAME
+/// only — never material. The relay holds no secrets; the profile is the
+/// rebuildable projection a respawned CP folds from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerProfile {
+    pub name: String,
+    /// Connector kind (ssh / vultr-vps / hetzner-vps / api / local) + service
+    /// address — the runner's single target.
+    pub kind: String,
+    pub address: String,
+    /// "active" | "revoked" — revocation lands as a REPLACE of this record,
+    /// never an append.
+    pub status: String,
+    pub nostr_pubkey: String,
+    pub enc_pubkey: String,
+    /// Secret NAME only (`CP = secret provisioner`: agents reference secrets
+    /// by name; plaintext/ciphertext never rides this event).
+    pub secret: String,
+    pub created_at: u64,
+    pub rotated_at: Option<u64>,
+}
+
+/// Parse the content of a stored kind-30181 runner-profile event.
+/// Rejects shape drift loudly (a malformed winner fails the query closed,
+/// mirroring the grants contract).
+pub fn parse_profile_content(content: &str) -> Result<RunnerProfile, String> {
+    let v: Value = serde_json::from_str(content).map_err(|e| format!("profile content: {e}"))?;
+    let get = |k: &str| -> Result<String, String> {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| format!("profile missing string field {k}"))
+    };
+    let profile = RunnerProfile {
+        name: get("name")?,
+        kind: get("kind")?,
+        address: get("address")?,
+        status: get("status")?,
+        nostr_pubkey: get("nostr_pubkey")?,
+        enc_pubkey: get("enc_pubkey")?,
+        secret: get("secret")?,
+        created_at: v
+            .get("created_at")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "profile missing created_at".to_string())?,
+        rotated_at: v.get("rotated_at").and_then(Value::as_u64),
+    };
+    if profile.status != "active" && profile.status != "revoked" {
+        return Err(format!("profile bad status {:?}", profile.status));
+    }
+    if profile.nostr_pubkey.len() != 64 || profile.enc_pubkey.len() != 64 {
+        return Err("profile pubkey not 64-hex".to_string());
+    }
+    if profile.name.is_empty() {
+        return Err("profile empty name".to_string());
+    }
+    Ok(profile)
+}
+
+/// Publish (or replace) a runner's lifecycle snapshot (kind 30181,
+/// `d`-tag = the runner's nostr pubkey). Same d-tag + newer created_at =
+/// replacement: provision, adopt, rotate (rotated_at flip), and revoke
+/// (status flip) all re-publish the SAME d-tag — nothing appends history.
+pub fn publish_runner_profile(
+    relay_url: &str,
+    console_secret: &[u8; 32],
+    profile: &RunnerProfile,
+) -> Result<(), String> {
+    let ts = now_secs();
+    let content = serde_json::to_string(profile).map_err(|e| e.to_string())?;
+    let (pubkey, id, sig) = crate::nip98::sign_event(
+        console_secret,
+        RUNNER_PROFILE_KIND,
+        ts,
+        vec![vec!["d".into(), profile.nostr_pubkey.clone()]],
+        &content,
+    )
+    .map_err(|e| e.to_string())?;
+    let event = serde_json::json!({
+        "id": id,
+        "pubkey": pubkey,
+        "created_at": ts,
+        "kind": RUNNER_PROFILE_KIND,
+        "tags": [["d", profile.nostr_pubkey]],
+        "content": content,
+        "sig": sig,
+    });
+    publish_event_json(relay_url, console_secret, &event.to_string())
+}
+
+/// Fetch the CURRENT lifecycle snapshot of EVERY runner from the relay
+/// (kind 30181). Author-gated + locally signature-verified like grants; per
+/// runner pubkey the NEWEST trusted event wins (replaceable semantics), so
+/// the result is the deterministic projection a respawned CP folds from.
+/// Sorted by name for a stable fold.
+pub fn query_runner_profiles(
+    relay_url: &str,
+    expected_author: &str,
+    auth_secret: &[u8; 32],
+) -> Result<Vec<RunnerProfile>, String> {
+    let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
+    let filters = serde_json::json!([{
+        "kinds": [RUNNER_PROFILE_KIND],
+        "limit": 1000,
+    }]);
+    let headers = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
+    let mut resp = agent()
+        .post(&url)
+        .header("Authorization", &headers)
+        .header("Content-Type", "application/json")
+        .send(filters.to_string())
+        .map_err(|e| format!("profile query request failed: {e}"))?;
+    let body = resp
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("profile query read: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "profile query returned HTTP {}: {body}",
+            resp.status()
+        ));
+    }
+    let events: Vec<Value> =
+        serde_json::from_str(&body).map_err(|e| format!("profile query parse: {e}: {body}"))?;
+    merge_runner_profiles(&events, expected_author)
+}
+
+/// The trust + dedupe core shared by the HTTP query and its tests: keep
+/// only events by `expected_author` (the console) whose Schnorr signature
+/// verifies locally, then per runner pubkey (d-tag) keep the NEWEST —
+/// replaceable semantics, so a revoke REPLACES, never appends. Deterministic
+/// (sorted by name) — the fold a respawned CP replays.
+fn merge_runner_profiles(
+    events: &[Value],
+    expected_author: &str,
+) -> Result<Vec<RunnerProfile>, String> {
+    let mut best: BTreeMap<String, (i64, RunnerProfile)> = BTreeMap::new();
+    for ev in events {
+        let author = ev["pubkey"].as_str().unwrap_or("");
+        if author != expected_author {
+            continue;
+        }
+        let created_at = ev["created_at"].as_i64().unwrap_or(0);
+        let tags: Vec<Vec<String>> = ev["tags"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .map(|a| {
+                        a.as_array()
+                            .map(|x| {
+                                x.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let content = ev["content"].as_str().unwrap_or("");
+        if crate::nip98::verify_event(
+            author,
+            created_at,
+            RUNNER_PROFILE_KIND,
+            &tags,
+            content,
+            ev["sig"].as_str().unwrap_or(""),
+        )
+        .is_err()
+        {
+            tracing::warn!(
+                author,
+                created_at,
+                "runner profile event failed local signature verify — skipped"
+            );
+            continue;
+        }
+        // The d-tag = the runner being profiled; a profile without one
+        // can't be attributed to a runner (skip, warn).
+        let Some(d) = tags
+            .iter()
+            .find(|t| t.first().is_some_and(|k| k == "d"))
+            .and_then(|t| t.get(1))
+        else {
+            tracing::warn!(author, created_at, "runner profile missing d-tag — skipped");
+            continue;
+        };
+        // Later (or same-second, later-inserted) event wins per runner.
+        if best.get(d).is_none_or(|(t, _)| created_at >= *t) {
+            let profile = parse_profile_content(content)?;
+            best.insert(d.clone(), (created_at, profile));
+        }
+    }
+    Ok(best.into_values().map(|(_, p)| p).collect())
 }
 
 /// Parse the content of a stored kind-30180 grant event:
@@ -483,5 +682,94 @@ mod tests {
         assert!(parse_grants_content(r#"{"grants":[42]}"#).is_err());
         assert!(parse_grants_content(r#"{"nope":1}"#).is_err());
         assert!(parse_grants_content(r#"{"grants":["short"]}"#).is_err());
+    }
+
+    #[test]
+    fn parse_profile_content_accepts_and_rejects() {
+        let pk = "a".repeat(64);
+        let enc = "b".repeat(64);
+        let ok = format!(
+            r#"{{"name":"ssh","kind":"ssh","address":"host:22","status":"active","nostr_pubkey":"{pk}","enc_pubkey":"{enc}","secret":"ssh","created_at":5,"rotated_at":null}}"#
+        );
+        let p = parse_profile_content(&ok).unwrap();
+        assert_eq!(p.name, "ssh");
+        assert_eq!(p.status, "active");
+        assert_eq!(p.rotated_at, None);
+        // A rotate flips rotated_at; the parse must survive the Option.
+        let rotated = ok.replace("\"rotated_at\":null", "\"rotated_at\":7");
+        assert_eq!(parse_profile_content(&rotated).unwrap().rotated_at, Some(7));
+        // Bad status, missing field, short pubkey, empty name — all rejected.
+        assert!(parse_profile_content(&ok.replace("\"active\"", "\"banana\"")).is_err());
+        assert!(parse_profile_content(r#"{"nope":1}"#).is_err());
+        assert!(parse_profile_content(&ok.replace(&pk, "short")).is_err());
+        assert!(parse_profile_content(&ok.replace("\"name\":\"ssh\"", "\"name\":\"\"")).is_err());
+    }
+
+    #[test]
+    fn profile_newest_wins_per_runner_and_rogue_author_is_ignored() {
+        // Three trusted events for two runners (runner A twice: active then
+        // revoked -> REPLACE), plus a rogue-author event for runner A with a
+        // NEWER timestamp -> must NOT win.
+        let secret = [7u8; 32];
+        let (author, _, _) = crate::nip98::sign_event(&secret, 1, 1, vec![], "").unwrap();
+        let mk = |p: &RunnerProfile, t: i64, who: &[u8; 32]| -> Value {
+            let content = serde_json::to_string(p).unwrap();
+            let (pk, id, sig) = crate::nip98::sign_event(
+                who,
+                RUNNER_PROFILE_KIND,
+                t,
+                vec![vec!["d".into(), p.nostr_pubkey.clone()]],
+                &content,
+            )
+            .unwrap();
+            serde_json::json!({
+                "id": id, "pubkey": pk, "created_at": t,
+                "kind": RUNNER_PROFILE_KIND,
+                "tags": [["d", p.nostr_pubkey]],
+                "content": content, "sig": sig,
+            })
+        };
+        let a = RunnerProfile {
+            name: "alpha".into(),
+            kind: "ssh".into(),
+            address: "h1:22".into(),
+            status: "active".into(),
+            nostr_pubkey: "a".repeat(64),
+            enc_pubkey: "e".repeat(64),
+            secret: "alpha".into(),
+            created_at: 1,
+            rotated_at: None,
+        };
+        // Distinct d-tag (nostr pubkey) — alpha and beta are different runners.
+        let b = RunnerProfile {
+            name: "beta".into(),
+            nostr_pubkey: "b".repeat(64),
+            ..a.clone()
+        };
+        let rogue = RunnerProfile {
+            status: "revoked".into(),
+            ..a.clone()
+        };
+
+        let mut events = vec![
+            mk(&a, 10, &secret),
+            mk(&b, 10, &secret),
+            mk(&rogue, 999, &[1u8; 32]),
+        ];
+        // Per-runner newest wins: push a REPLACED (revoked) alpha AFTER.
+        let revoked = RunnerProfile {
+            status: "revoked".into(),
+            ..a.clone()
+        };
+        events.insert(2, mk(&revoked, 11, &secret));
+
+        let out = merge_runner_profiles(&events, &author).unwrap();
+        assert_eq!(out.len(), 2);
+        let alpha = out.iter().find(|p| p.name == "alpha").unwrap();
+        assert_eq!(
+            alpha.status, "revoked",
+            "newest alpha must win (replace, not append)"
+        );
+        assert!(out.iter().any(|p| p.name == "beta" && p.status == "active"));
     }
 }
