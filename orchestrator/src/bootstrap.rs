@@ -945,6 +945,27 @@ mod domain_gate_tests {
 /// driver writes plain curl shapes. create -> poll (running) -> report;
 /// optional destroy for tests/cleanup. A MISSED destroy keeps billing —
 /// the destroy retries transient non-2xx like the vultr driver.
+fn build_hetzner_create(
+    env_url: &str,
+    env_cred: &str,
+    label: &str,
+    location: &str,
+    server_type: &str,
+    image: &str,
+) -> String {
+    format!(
+        "curl -sS -X POST \"{env_url}/v1/servers\" -H \"Authorization: Bearer {env_cred}\" \
+         -H 'Content-Type: application/json' -d '{{\"name\":\"{label}\",\"server_type\":\"{server_type}\",\
+         \"image\":\"{image}\",\"location\":\"{location}\",\"hostname\":\"{label}\"}}'",
+        env_url = env_url,
+        env_cred = env_cred,
+        label = label,
+        server_type = server_type,
+        image = image,
+        location = location,
+    )
+}
+
 pub async fn bootstrap_hetzner_vps(
     client: &McpClient,
     target: &str,
@@ -967,30 +988,83 @@ pub async fn bootstrap_hetzner_vps(
     let env_cred = format!("${{{env}}}");
     let env_url = format!("${{{}_URL}}", env);
 
-    let create = format!(
-        "curl -sS -X POST \"{env_url}/v1/servers\" -H \"Authorization: Bearer {env_cred}\" \
-         -H 'Content-Type: application/json' -d '{{\"name\":\"{label}\",\"server_type\":\"{server_type}\",\
-         \"image\":\"{image}\",\"location\":\"{location}\",\"hostname\":\"{label}\"}}'",
-        env_url = env_url,
-        env_cred = env_cred,
-        label = spec.label,
-        server_type = spec.server_type,
-        image = spec.image,
-        location = spec.location,
+    // The Hetzner catalog churns: the asked-for type may be deprecated or
+    // unavailable in the location (seen live: cx22 deprecated, cax/cpx
+    // unavailable in an account's EU DCs). On an invalid_input create, query
+    // availability and retry ONCE with a known-working type before failing.
+    let mut create = build_hetzner_create(
+        &env_url,
+        &env_cred,
+        &spec.label,
+        &spec.location,
+        &spec.server_type,
+        &spec.image,
     );
-    let out = exec(client, target, &create, 120)?;
+    let mut out = exec(client, target, &create, 120)?;
     expect_ok(&out, "hetzner create")?;
-    let created: Value = serde_json::from_str(out.stdout.trim())
+    let mut created: Value = serde_json::from_str(out.stdout.trim())
         .map_err(|e| BootstrapError::Verify(format!("create response parse: {e}")))?;
-    let id = created["server"]["id"]
-        .as_u64()
-        .map(|n| n.to_string())
-        .ok_or_else(|| {
-            BootstrapError::Verify(format!(
-                "no server id in create response: {}",
-                out.stdout.trim()
-            ))
-        })?;
+    let mut id = created["server"]["id"].clone();
+
+    if id.is_null() {
+        // Ask the API which types the LOCATION actually sells; pick the first
+        // non-deprecated one with availability there.
+        let avail = format!(
+            "curl -sS \"{env_url}/v1/server_types?per_page=100\" -H              \"Authorization: Bearer {env_cred}\"",
+            env_url = env_url,
+            env_cred = env_cred,
+        );
+        let ao = exec(client, target, &avail, 120)?;
+        let av: Value = serde_json::from_str(ao.stdout.trim())
+            .map_err(|e| BootstrapError::Verify(format!("availability parse: {e}")))?;
+        let fallback = av["server_types"]
+            .as_array()
+            .and_then(|types| {
+                types.iter().find(|t| {
+                    !t["deprecated"].as_bool().unwrap_or(false)
+                        && t["locations"]
+                            .as_array()
+                            .map(|ls| {
+                                ls.iter().any(|l| {
+                                    l["name"].as_str() == Some(spec.location.as_str())
+                                        && l["available"].as_bool().unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                })
+            })
+            .and_then(|t| t["name"].as_str().map(str::to_owned));
+        let fallback = match fallback {
+            Some(t) => t,
+            _ => {
+                return Err(BootstrapError::Verify(format!(
+                    "hetzner create failed ({}): no available server type {:?} in location {}",
+                    out.stdout.trim(),
+                    spec.server_type,
+                    spec.location
+                )));
+            }
+        };
+        create = build_hetzner_create(
+            &env_url,
+            &env_cred,
+            &spec.label,
+            &spec.location,
+            &fallback,
+            &spec.image,
+        );
+        out = exec(client, target, &create, 120)?;
+        expect_ok(&out, "hetzner create (availability fallback)")?;
+        created = serde_json::from_str(out.stdout.trim())
+            .map_err(|e| BootstrapError::Verify(format!("create response parse: {e}")))?;
+        id = created["server"]["id"].clone()
+    }
+    let id = id.as_u64().map(|n| n.to_string()).ok_or_else(|| {
+        BootstrapError::Verify(format!(
+            "no server id in create response: {}",
+            out.stdout.trim()
+        ))
+    })?;
 
     let mut verified = false;
     let mut poll_err: Option<String> = None;

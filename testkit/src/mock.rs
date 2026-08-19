@@ -215,6 +215,25 @@ fn hetzner_ok(headers: &HeaderMap) -> bool {
         == Some(&format!("Bearer {HETZNER_TOKEN}"))
 }
 
+/// cax11 unavailable in fsn1, cpx11 available — the driver's availability
+/// fallback must pick cpx11 for a fsn1 request.
+async fn hetzner_server_types(
+    State(_): State<Arc<HetznerState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    if !hetzner_ok(&headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(Json(json!({ "server_types": [
+        { "name": "cax11", "deprecated": false, "locations": [
+            { "name": "fsn1", "available": false }
+        ]},
+        { "name": "cpx11", "deprecated": false, "locations": [
+            { "name": "fsn1", "available": true }
+        ]}
+    ] })))
+}
+
 pub fn hetzner_router(state: Arc<HetznerState>) -> Router {
     async fn create(
         State(state): State<Arc<HetznerState>>,
@@ -275,6 +294,7 @@ pub fn hetzner_router(state: Arc<HetznerState>) -> Router {
     Router::new()
         .route("/v1/servers", get(status_list).post(create))
         .route("/v1/servers/{id}", get(instance).delete(destroy))
+        .route("/v1/server_types", get(hetzner_server_types))
         .with_state(state)
 }
 
