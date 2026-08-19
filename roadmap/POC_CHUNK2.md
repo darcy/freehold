@@ -63,6 +63,19 @@ provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessar
     differs so a silently-wrong resolver can't strand clients. The domain is permanent;
     the resolver is swappable (real DNS later). The current IP-anchored community is
     DISPOSABLE and is re-provisioned under the domain at the fresh-run re-test.
+*   **VPS = Proxmox-on-Cloud-Compute (LXC-only) — Vultr AND Hetzner Cloud.**
+    Both providers' cloud instances are KVM-virtualized with NO nested
+    hardware virtualization, so Proxmox on them manages LXC containers but
+    canNOT run KVM/QEMU VMs. Our stack is fully container/pod-shaped (CP,
+    relay, service agents, LiteLLM, k3s-in-a-nested-LXC all LXC/pod), so the
+    constraint is known-and-fine: an amd64 instance, custom-ISO PVE install,
+    two LXCs (relay + cp) on the one host, more LXCs as services grow. The
+    "vps" host collapses into the Proxmox host driver — the driver becomes
+    "provision a PVE host on <provider>", then the SAME LXC flows run
+    verbatim. ARM cloud instances (e.g. Hetzner cax*) are a separate
+    architecture and are NOT the VPS path. A service that genuinely needs a
+    real KVM VM routes to BARE METAL (Vultr BM or Hetzner dedicated), never
+    the VPS host — a separate box, managed independently.
 
 *   **TLS = the domain cert.** Default: a LOCAL CA cert issued for the domain (a LAN-only
     box has no Let's Encrypt path). When the operator provides a DNS provider API key: LE
@@ -454,3 +467,46 @@ the more meaningful dogfood milestone; Chunk 2 is infrastructure-proving.
     above); the two cases are deliberately distinct.
 *   **Agent naming in the relay** — `@freehold` is the CPA; peer experts are `@<service>`.
     Naming/mention conventions beyond that land with Chunk 3's fabric work.
+
+---
+
+## Chunk 2.5 — VPS = Proxmox-on-Cloud-Compute (refactor + spike)
+
+Scope: unify the VPS legs onto the Proxmox host driver and PROVE the whole
+appliance on a cloud PVE host live.
+
+- [ ] [ ]
+
+V1. **Driver reshape.** `bootstrap --kind vultr-vps | hetzner-vps` becomes
+    "provision a PVE-capable HOST on <provider>": create the amd64 instance,
+    custom-ISO-boot the Proxmox VE installer (unattended answer file), wait
+    for PVE to respond — then the existing `bootstrap proxmox-lxc`,
+    `deploy-relay`, `deploy-cp` flows run IDENTICALLY. No VM-per-service
+    host driver exists anymore.
+
+- [ ] [ ]
+
+V2. **Networking path (the one new subsystem).** Cloud PVE has a SINGLE
+    public NIC: vmbr0 over eth0; a PRIVATE bridge (vmbr1) for LXC-to-LXC;
+    DNAT on the public IP to the relay LXC's Caddy and the CP console.
+    Client reachability is domain → proxy → host public IP → DNAT → LXC.
+    The home-flow "LXC on the LAN with its own IP" pattern does not apply.
+
+- [ ] [ ]
+
+V3. **The spike (de-risking, live on BOTH providers).** One Vultr Cloud
+    instance + one Hetzner Cloud instance: PVE install → bridge/DNAT → two
+    LXCs (relay + cp) → full appliance (deploy-relay with the domain,
+    deploy-cp, console member, operator login) → domain through the proxy.
+    Every live-run finding folds back as driver hardening (same as
+    #53/#55).
+
+- [ ] [ ]
+
+V4. **Skill-schema flag.** `target: lxc | pod | either` assumes no skill
+    declares a hard KVM-VM requirement; if one ever does, it routes to Bare
+    Metal, not the VPS host. Noted, not built.
+
+Storage mapping (instance root disk + optional attached block volume as the
+LVG) and the amd64-only note ride V2/V3 — decided in the spike, not in
+advance. Bare-metal is a documented escape hatch, NOT an MVP path.
