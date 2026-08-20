@@ -448,14 +448,89 @@ pub fn revoke_grant(
     Ok(pkg.grants)
 }
 
-/// Chunk 2.6: publish the runner's CURRENT lifecycle snapshot to the relay
-/// as a kind-30181 event (addressable, d-tag = runner pubkey — a
-/// re-publish REPLACES: provision/adopt publish "active", rotate flips
-/// `rotated_at`, revoke flips `status`). The relay copy is the rebuildable
-/// projection a respawned CP folds from ("disposable CP"). Carries identity
-/// pubkeys, connector kind/address, and the secret NAME only — never
-/// ciphertext/plaintext (the relay is not a holder of secret material).
-pub fn publish_runner_profile(
+/// Chunk 2.6.1: sync the runner's NIP-29 channel to the relay — create the
+/// private channel (kind 9007, owner = the CP console), add the RUNNER
+/// itself as a member (kind 9000; the runner reads its own roster back as
+/// its whitelist), and publish the runner's profile as the channel's group
+/// METADATA (kind 39000 — the rebuildable projection a respawned CP folds
+/// from). Idempotent: a re-run re-asserts the same h channel + membership
+/// and REPLACES the meta. Provision/adopt (active) and rotate (rotated_at
+/// flip) both travel here; revoke uses `revoke_runner_channel`.
+pub fn sync_runner_channel(
+    store: &StateStore,
+    relay_url: &str,
+    name: &str,
+    state_dir: &std::path::Path,
+) -> Result<(), ProvisionError> {
+    // Privileged writes: a FRESH/wrong state dir must not mint a new console
+    // key that signs publishes nobody recognizes — load, don't create.
+    let console = crate::console::Console::load(state_dir)
+        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
+    let secret = console.identity.secret_seed();
+    let profile = runner_meta(store, name)?;
+    let rpk = profile.nostr_pubkey.clone();
+    freehold_core::relay_http::create_runner_channel(relay_url, &secret, &rpk, name)
+        .map_err(|e| relay_err("create channel", e))?;
+    freehold_core::relay_http::put_user(relay_url, &secret, &rpk, &rpk)
+        .map_err(|e| relay_err("member runner", e))?;
+    freehold_core::relay_http::publish_runner_meta(relay_url, &secret, &profile)
+        .map_err(|e| relay_err("publish meta", e))
+}
+
+/// Chunk 2.6.1: grant — add the agent's pubkey as a member of the runner's
+/// channel (kind 9000). The relay re-publishes the roster; the runner's next
+/// whitelist read (per call) includes the agent WITHOUT a restart.
+pub fn put_user_membership(
+    store: &StateStore,
+    relay_url: &str,
+    name: &str,
+    agent_pubkey: &str,
+    state_dir: &std::path::Path,
+) -> Result<(), ProvisionError> {
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    let console = crate::console::Console::load(state_dir)
+        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
+    freehold_core::relay_http::put_user(
+        relay_url,
+        &console.identity.secret_seed(),
+        &rec.nostr_pubkey,
+        agent_pubkey,
+    )
+    .map_err(|e| relay_err("put-user", e))
+}
+
+/// Chunk 2.6.1: revoke-grant — remove the agent's pubkey from the runner's
+/// channel (kind 9001).
+pub fn remove_user_membership(
+    store: &StateStore,
+    relay_url: &str,
+    name: &str,
+    agent_pubkey: &str,
+    state_dir: &std::path::Path,
+) -> Result<(), ProvisionError> {
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    let console = crate::console::Console::load(state_dir)
+        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
+    freehold_core::relay_http::remove_user(
+        relay_url,
+        &console.identity.secret_seed(),
+        &rec.nostr_pubkey,
+        agent_pubkey,
+    )
+    .map_err(|e| relay_err("remove-user", e))
+}
+
+/// Chunk 2.6.1: revoke (cut-off) ON the relay — remove the RUNNER itself
+/// from its channel (its roster read then fails/returns empty — the
+/// enforcement-point denial), best-effort remove the shipped-package grants,
+/// then REPLACE the meta with the revoked status (the fold's visible
+/// record). Idempotent: missing members are no-ops; a revoked re-run just
+/// re-asserts the empty-ish roster + revoked meta.
+pub fn revoke_runner_channel(
     store: &StateStore,
     relay_url: &str,
     name: &str,
@@ -464,14 +539,43 @@ pub fn publish_runner_profile(
     let rec = store
         .get_runner(name)
         .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
+    let console = crate::console::Console::load(state_dir)
+        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
+    let secret = console.identity.secret_seed();
+    let rpk = rec.nostr_pubkey.clone();
+    // The cut-off: the runner must no longer be able to read its whitelist.
+    freehold_core::relay_http::remove_user(relay_url, &secret, &rpk, &rpk)
+        .map_err(|e| relay_err("remove runner", e))?;
+    // Agents granted via the shipped package — best-effort: the package may
+    // already be gone (a prior revoke removed secrets.json), and each
+    // individual failure must not block the status flip.
+    if let Ok(pkg) = SecretPackage::load(&rec.package_dir) {
+        for g in &pkg.grants {
+            if let Err(e) = freehold_core::relay_http::remove_user(relay_url, &secret, &rpk, g) {
+                tracing::warn!(agent = %g, error = %e, "revoke: best-effort member removal failed");
+            }
+        }
+    }
+    let profile = runner_meta(store, name)?;
+    freehold_core::relay_http::publish_runner_meta(relay_url, &secret, &profile)
+        .map_err(|e| relay_err("publish revoked meta", e))
+}
+
+/// Build the runner's CURRENT profile from state (the kind-39000 meta
+/// content): identity pubkeys, connector kind/address, status, secret NAME
+/// only — never ciphertext/plaintext (the relay is not a holder of secret
+/// material).
+fn runner_meta(
+    store: &StateStore,
+    name: &str,
+) -> Result<freehold_core::relay_http::RunnerProfile, ProvisionError> {
+    let rec = store
+        .get_runner(name)
+        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
     let sec = store
         .get_secret(name)
         .ok_or_else(|| StateError::SecretNotFound(name.to_string()))?;
-    // Privileged write: a FRESH/wrong state dir must not mint a new console
-    // key that signs publishes nobody recognizes — load, don't create.
-    let console = crate::console::Console::load(state_dir)
-        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
-    let profile = freehold_core::relay_http::RunnerProfile {
+    Ok(freehold_core::relay_http::RunnerProfile {
         name: name.to_string(),
         kind: sec.kind,
         address: sec.address,
@@ -485,41 +589,11 @@ pub fn publish_runner_profile(
         secret: name.to_string(), // secret NAME only — never material
         created_at: rec.created_at,
         rotated_at: sec.rotated_at,
-    };
-    freehold_core::relay_http::publish_runner_profile(
-        relay_url,
-        &console.identity.secret_seed(),
-        &profile,
-    )
-    .map_err(|e| ProvisionError::Io(std::io::Error::other(format!("relay publish profile: {e}"))))
+    })
 }
 
-/// Phase D: publish the runner's CURRENT grant list to the relay as a
-/// kind-30180 event (addressable, d-tag = runner pubkey — a re-publish
-/// REPLACES). Called after grant/revoke so the relay's list and the shipped
-/// package agree; the runner reads the relay live. Relay errors surface
-/// (never silently swallowed) — the local package is still updated.
-pub fn publish_grants(
-    store: &StateStore,
-    relay_url: &str,
-    name: &str,
-    grants: &[String],
-    state_dir: &std::path::Path,
-) -> Result<(), ProvisionError> {
-    let rec = store
-        .get_runner(name)
-        .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
-    // Privileged write: a FRESH/wrong state dir must not mint a new console
-    // key that signs publishes nobody recognizes — load, don't create.
-    let console = crate::console::Console::load(state_dir)
-        .map_err(|e| StateError::Io(std::io::Error::other(e.to_string())))?;
-    freehold_core::relay_http::publish_grants(
-        relay_url,
-        &console.identity.secret_seed(),
-        &rec.nostr_pubkey,
-        grants,
-    )
-    .map_err(|e| ProvisionError::Io(std::io::Error::other(format!("relay publish: {e}"))))
+fn relay_err(op: &str, e: String) -> ProvisionError {
+    ProvisionError::Io(std::io::Error::other(format!("relay {op}: {e}")))
 }
 
 fn is_pubkey(s: &str) -> bool {

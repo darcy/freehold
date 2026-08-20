@@ -475,7 +475,9 @@ fn state_persists_across_reopen() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grant_publish_writes_replaceable_relay_grant_list() {
+async fn grant_and_revoke_are_channel_membership_commands() {
+    use freehold_core::nip98::{PUT_USER_KIND, REMOVE_USER_KIND};
+
     let (base, store) = setup();
     let runner_dir = base.path().join("runner");
     provision(&store, "relaybox", b"sekrit", &runner_dir);
@@ -488,48 +490,62 @@ async fn grant_publish_writes_replaceable_relay_grant_list() {
 
     let a = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
     let b = "2221222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
+    // The channel must exist before membership commands (owner gate).
+    provisioner::sync_runner_channel(&store, &relay_url, "relaybox", &console_dir).unwrap();
     provisioner::grant_agent(&store, "relaybox", a).unwrap();
-    provisioner::publish_grants(
-        &store,
-        &relay_url,
-        "relaybox",
-        &[a.into(), b.into()],
-        &console_dir,
-    )
-    .unwrap();
+    provisioner::grant_agent(&store, "relaybox", b).unwrap();
+    provisioner::put_user_membership(&store, &relay_url, "relaybox", a, &console_dir).unwrap();
+    provisioner::put_user_membership(&store, &relay_url, "relaybox", b, &console_dir).unwrap();
 
-    // The fake relay received exactly one kind-30180 event with the runner's
-    // d-tag and the FULL list.
+    // The relay executed kind-9000 put-user commands (h = the derived
+    // channel; p = the granted agent) — membership, not a grant event.
     let events = state.events.lock().clone();
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0]["kind"].as_u64(), Some(30180));
-    assert_eq!(events[0]["tags"][0].as_array().unwrap()[0], "d");
-    assert_eq!(
-        events[0]["tags"][0].as_array().unwrap()[1],
-        rec.nostr_pubkey
-    );
-    let content =
-        serde_json::from_str::<serde_json::Value>(events[0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        content["grants"].as_array().unwrap(),
-        &serde_json::json!([a, b]).as_array().unwrap().clone()
-    );
+    let puts: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"].as_u64() == Some(PUT_USER_KIND as u64))
+        .collect();
+    assert_eq!(puts.len(), 3, "{events:?}"); // the runner + a + b
+    let p_tags = |e: &serde_json::Value| -> Vec<String> {
+        e["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t[0] == "p")
+            .map(|t| t[1].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(p_tags(puts[1]).contains(&a.to_string()) || p_tags(puts[2]).contains(&a.to_string()));
+    // All members land on the relay-signed roster (the runner whitelist) —
+    // read back over the REAL query wire, verified against the relay pubkey.
+    let console = freehold_control_plane::console::Console::load(&console_dir).unwrap();
+    let roster = || -> Vec<String> {
+        freehold_core::relay_http::query_channel_roster(
+            &relay_url,
+            &freehold_testkit::relay::relay_pubkey(),
+            &rec.nostr_pubkey,
+            &console.identity.secret_seed(),
+        )
+        .unwrap()
+    };
+    let members = roster();
+    assert!(members.contains(&a.to_string()));
+    assert!(members.contains(&b.to_string()));
+    assert!(members.contains(&rec.nostr_pubkey), "the runner itself");
 
-    // Revoke = publish a SHRUNK list with the SAME d-tag (replaceable): a
-    // second event supersedes the first; nothing appends history.
-    provisioner::publish_grants(&store, &relay_url, "relaybox", &[a.into()], &console_dir).unwrap();
+    // Revoke = a kind-9001 remove-user command; the next roster drops b.
+    provisioner::remove_user_membership(&store, &relay_url, "relaybox", b, &console_dir).unwrap();
     let events = state.events.lock().clone();
-    assert_eq!(events.len(), 2);
-    let content =
-        serde_json::from_str::<serde_json::Value>(events[1]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        content["grants"].as_array().unwrap(),
-        &serde_json::json!([a]).as_array().unwrap().clone()
+    let removes: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"].as_u64() == Some(REMOVE_USER_KIND as u64))
+        .collect();
+    assert_eq!(removes.len(), 1);
+    let members = roster();
+    assert!(
+        !members.contains(&b.to_string()),
+        "b revoked from the roster"
     );
-    assert_eq!(
-        events[1]["tags"][0].as_array().unwrap()[1],
-        rec.nostr_pubkey
-    );
+    assert!(members.contains(&a.to_string()), "a still a member");
 }
 
 #[test]

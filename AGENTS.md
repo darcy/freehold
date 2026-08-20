@@ -5,7 +5,10 @@ Kubernetes stack with Buzz Relay as the control plane and a skill framework that
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 **Status:** Chunk 2 complete + Chunk 2.6 runner-lifecycle slice IMPLEMENTED
-(RUNNER_PROFILE kind 30181 published at every lifecycle mutation;
+and SUPERSEDED by Chunk 2.6.1 — runners-as-NIP-29-channels, IMPLEMENTED hermetic
+(no custom kinds: 9007 create / 9000-9001 membership / 39000 meta / 39002 relay-signed
+roster = the whitelist; G-1 resolved = native-kinds-only; live relay gates G-A/G-C open).
+Legacy: (RUNNER_PROFILE kind 30181 published at every lifecycle mutation;
 `control-plane rebuild` = the disposable-CP fold, deterministic+idempotent;
 G-2 resolved query-per-call fail-closed; G-1 fork-vs-contribution deferred).
 Docs + locked Chunk 1 plan; Phases A (identity, MCP skeleton, exec/readiness/
@@ -86,19 +89,26 @@ RE-PROVISIONED fresh under `freehold-test.darcydev.net` (relay LXC 100 @
 delegation re-proven live under the domain; the old PVE-host CP stopped).
 
 
-## Next (documented)
-- **Chunk 2.6.1 — Runners-as-Channels, Grants-as-Membership** (locked plan
-  in roadmap §Chunk 2.6.1): supersedes Chunk 2.6's custom-kind wire format
-  (30181 withdrawn — the relay's hardcoded INGEST allowlist in
-  `ingest.rs::scopes()` refuses it, NOT the ALL_KINDS registry). G-1
-  resolved = **native-kinds-only** (fork + upstream rejected; zero Buzz
-  changes). Mapping: runner = private NIP-29 channel, grant = channel
-  member, the runner's whitelist = its own relay-SIGNED 39002 roster; the
-  CP drives membership via buzz-admin on the relay-admin runner (CP cannot
-  self-author membership writes, §3.2). Gates: G-A headless buzz-admin
-  drive, G-B grant-implies-audit-read (redacted receipts only), G-C
-  rotation/status home pending the 39000/39001 allowlist check. Carryover:
-  fold/rebuild architecture + CP-sole-commander + test posture.
+## Next (implemented)
+- **Chunk 2.6.1 — Runners-as-Channels, Grants-as-Membership** (roadmap
+  §Chunk 2.6.1): IMPLEMENTED hermetic — supersedes 2.6's custom-kind wire
+  format (30181 + 30180 surfaces DELETED; the relay's hardcoded INGEST
+  allowlist in `ingest.rs::scopes()` refused them — NOT the ALL_KINDS
+  registry). G-1 resolved = **native-kinds-only** (fork + upstream
+  rejected; zero Buzz changes). Mapping: runner = private NIP-29 channel
+  (9007), grant/revoke = 9000 put-user / 9001 remove-user (owner-gated),
+  the runner's whitelist = its own relay-SIGNED 39002 roster read per call
+  (fail-closed; trust anchor = `--relay-pubkey`, the relay's key — not the
+  console's), profile/status/rotation = 39000 group metadata, `rebuild`
+  folds 39000 (same guarantees). CP cannot self-author membership writes
+  (§3.2 — it COMMANDS, the relay mints). Web UI: console relay scope
+  persisted (`serve --relay-url/--relay-pubkey`), lifecycle actions sync
+  channels, `GET /api/runner/<name>/channel` shows profile + verified
+  roster + messages without operator membership. OPEN live gates (need
+  relay access, not code): G-A headless drive path, G-C 39000/39002 ingest
+  allowlist read, audit-receipts-as-channel-messages (D5 48001 stays
+  operational; G-B redaction is its release gate). Testkit fake relay now
+  models the NIP-29 contract incl. 403 membership gating.
 
 ## Navigation
 

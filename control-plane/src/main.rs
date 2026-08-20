@@ -47,8 +47,8 @@ enum Cmd {
     Revoke(RevokeArgs),
     /// List runners + secrets at a glance
     List(CommonArgs),
-    /// Chunk 2.6: REBUILD the CP view from the relay's runner-profile
-    /// snapshots (kind 30181) — a respawned CP folds instead of carrying
+    /// Chunk 2.6.1: REBUILD the CP view from the relay's runner channel
+    /// metadata (kind 39000) — a respawned CP folds instead of carrying
     /// state ("disposable CP"). Idempotent: same relay → same store; a
     /// re-run converges. Restored records carry NO ciphertext/package path
     /// (the relay never holds secret material) — re-run `adopt` per runner
@@ -109,7 +109,7 @@ struct AdoptArgs {
     /// The runner's MCP listen address (console readiness probing)
     #[arg(long)]
     mcp_addr: Option<String>,
-    /// Relay to publish the runner-profile snapshot to (Chunk 2.6, kind 30181)
+    /// Relay to sync the runner's NIP-29 channel to (Chunk 2.6.1)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
 }
@@ -128,7 +128,7 @@ struct ProvisionArgs {
     /// Where the runner package lands; defaults to ./.freehold/runner/<name>
     #[arg(long, env = "FREEHOLD_RUNNER_STATE_DIR")]
     runner_dir: Option<PathBuf>,
-    /// Relay to publish the runner-profile snapshot to (Chunk 2.6, kind 30181)
+    /// Relay to sync the runner's NIP-29 channel to (Chunk 2.6.1)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
@@ -139,8 +139,7 @@ struct ProvisionArgs {
 struct RotateArgs {
     /// Secret name to rotate
     name: String,
-    /// Relay to re-publish the runner-profile to (Chunk 2.6, kind 30181 —
-    /// rotation reflects as a `rotated_at` flip)
+    /// Relay to re-sync (rotated_at flip in the channel meta) (Chunk 2.6.1)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
@@ -164,8 +163,7 @@ struct RevokeGrantArgs {
 struct RevokeArgs {
     /// Runner name to revoke (cut-off)
     name: String,
-    /// Relay to publish an EMPTY grant list + the revoked runner-profile to
-    /// (cut-off for relay-backed runners; Chunk 2.6 status flip)
+    /// Relay to revoke the runner channel on (Chunk 2.6.1 cut-off)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
@@ -174,7 +172,7 @@ struct RevokeArgs {
 
 #[derive(Args)]
 struct RebuildArgs {
-    /// Relay to fold runner profiles from (Chunk 2.6)
+    /// Relay to fold runner channel metadata from (Chunk 2.6.1)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: String,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
@@ -185,6 +183,16 @@ struct RebuildArgs {
 struct ServeArgs {
     #[arg(long, env = "FREEHOLD_CP_ADDR", default_value = "127.0.0.1:8080")]
     addr: String,
+    /// The relay scope this console operates as (Chunk 2.6.1): the web UI
+    /// syncs runner channels / membership against it and serves the runner
+    /// channel view. Persisted in state.json.
+    #[arg(long, env = "FREEHOLD_RELAY_URL")]
+    relay_url: Option<String>,
+    /// The RELAY's nostr pubkey (Chunk 2.6.1) — the trust anchor that signs
+    /// membership rosters; required for the runner channel view. Persisted
+    /// in state.json.
+    #[arg(long, env = "FREEHOLD_RELAY_PUBKEY")]
+    relay_pubkey: Option<String>,
     /// Comma-separated operator/admin Nostr pubkeys (64-hex). Non-empty =>
     /// NIP-98 console auth is ON and a non-loopback bind is allowed (C3.5);
     /// empty => the loopback-only posture (C3) holds.
@@ -238,8 +246,19 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let grants = provisioner::grant_agent(&store, &args.name, &args.pubkey)?;
             if let Some(relay) = &args.relay_url {
-                provisioner::publish_grants(&store, relay, &args.name, &grants, &args.state_dir)?;
-                println!("published {} to the relay ({relay})", args.name);
+                // Chunk 2.6.1: grants are channel MEMBERSHIP — the next
+                // roster read by the runner (per call) includes the agent.
+                provisioner::put_user_membership(
+                    &store,
+                    relay,
+                    &args.name,
+                    &args.pubkey,
+                    &args.state_dir,
+                )?;
+                println!(
+                    "added {} to the runner channel on the relay ({relay})",
+                    args.name
+                );
             }
             println!("runner {} grants: {}", args.name, grants.len());
             for g in &grants {
@@ -266,8 +285,8 @@ async fn main() -> Result<()> {
             println!("  mcp addr:          {:?}", runner.mcp_addr);
             println!("  (credential stays sealed in the package; adopt ships nothing)");
             if let Some(relay) = &args.relay_url {
-                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
-                println!("published runner profile to the relay ({relay})");
+                provisioner::sync_runner_channel(&store, relay, &args.name, &args.state_dir)?;
+                println!("synced runner channel on the relay ({relay})");
             }
             Ok(())
         }
@@ -306,8 +325,8 @@ async fn main() -> Result<()> {
                 "  (credential sealed to the runner's key — the CP holds no plaintext, no private keys)"
             );
             if let Some(relay) = &args.relay_url {
-                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
-                println!("published runner profile to the relay ({relay})");
+                provisioner::sync_runner_channel(&store, relay, &args.name, &args.state_dir)?;
+                println!("synced runner channel on the relay ({relay})");
             }
             Ok(())
         }
@@ -318,8 +337,10 @@ async fn main() -> Result<()> {
                 read_secret_stdin(&format!("paste NEW credential for {}: ", args.name))?;
             provisioner::rotate_secret(&store, &args.name, new_secret.as_bytes())?;
             if let Some(relay) = &args.relay_url {
-                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
-                println!("published runner profile to the relay ({relay})");
+                // rotated_at flipped in state by rotate_secret — the meta
+                // re-publish carries the fresh stamp (Chunk 2.6.1).
+                provisioner::sync_runner_channel(&store, relay, &args.name, &args.state_dir)?;
+                println!("synced runner channel on the relay ({relay})");
             }
             println!("rotated secret {}", args.name);
             Ok(())
@@ -329,8 +350,17 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let grants = provisioner::revoke_grant(&store, &args.name, &args.pubkey)?;
             if let Some(relay) = &args.relay_url {
-                provisioner::publish_grants(&store, relay, &args.name, &grants, &args.state_dir)?;
-                println!("published {} grants to the relay ({relay})", args.name);
+                provisioner::remove_user_membership(
+                    &store,
+                    relay,
+                    &args.name,
+                    &args.pubkey,
+                    &args.state_dir,
+                )?;
+                println!(
+                    "removed {} from the runner channel on the relay ({relay})",
+                    args.name
+                );
             }
             println!("runner {} grants: {}", args.name, grants.len());
             for g in &grants {
@@ -343,14 +373,11 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
             let rec = provisioner::revoke_runner(&store, &args.name)?;
             if let Some(relay) = &args.relay_url {
-                // cut-off on the relay too: an EMPTY grant list denies every caller,
-                // and the profile's status flip makes the revocation visible to folds.
-                provisioner::publish_grants(&store, relay, &args.name, &[], &args.state_dir)?;
-                provisioner::publish_runner_profile(&store, relay, &args.name, &args.state_dir)?;
-                println!(
-                    "published empty grants + revoked profile for {} to the relay ({relay})",
-                    args.name
-                );
+                // cut-off on the relay too: removing the RUNNER from its own
+                // channel denies every caller (its roster read fails closed),
+                // and the meta's status flip makes the revoke visible to folds.
+                provisioner::revoke_runner_channel(&store, relay, &args.name, &args.state_dir)?;
+                println!("revoked {} on the relay ({relay})", args.name);
             }
             println!("revoked runner {} (was {})", args.name, rec.nostr_pubkey);
             println!("note: the shipped secrets.json was removed, but the credential itself may");
@@ -368,12 +395,12 @@ async fn main() -> Result<()> {
             let console = Console::load_or_create(&args.state_dir).with_context(|| {
                 format!("loading console identity in {}", args.state_dir.display())
             })?;
-            let profiles = freehold_core::relay_http::query_runner_profiles(
+            let profiles = freehold_core::relay_http::query_runner_metas(
                 &args.relay_url,
                 &console.identity.nostr_pubkey_hex(),
                 &console.identity.secret_seed(),
             )
-            .map_err(|e| anyhow::anyhow!("profile query failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("meta query failed: {e}"))?;
             let mut runners = BTreeMap::new();
             let mut secrets = BTreeMap::new();
             for p in &profiles {
@@ -482,6 +509,22 @@ async fn main() -> Result<()> {
                 }
             } else {
                 admins = store.admins();
+            }
+            if let Some(url) = &args.relay_url {
+                store.set_relay_url(Some(url.clone()))?;
+                tracing::info!(relay = %url, "console relay scope set");
+            }
+            if let Some(pk) = &args.relay_pubkey {
+                if !freehold_control_plane::is_hex64(pk) {
+                    anyhow::bail!("--relay-pubkey must be a 64-hex Nostr pubkey (got {pk:?})");
+                }
+                store.set_relay_pubkey(Some(pk.clone()))?;
+                tracing::info!("console relay pubkey set");
+            }
+            if (args.relay_url.is_some()) != (args.relay_pubkey.is_some()) {
+                anyhow::bail!(
+                    "--relay-url and --relay-pubkey must be set TOGETHER (the roster view                      verifies relay-signed snapshots; one without the other is a misconfig)"
+                );
             }
             let auth = if admins.is_empty() {
                 None

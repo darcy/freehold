@@ -84,7 +84,7 @@ async fn vultr_create_list_destroy_over_curl() {
     let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
@@ -179,7 +179,7 @@ async fn b2_authorize_upload_list_roundtrip() {
     let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
@@ -252,7 +252,7 @@ async fn api_targets_report_green_and_list() {
     let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
@@ -319,7 +319,7 @@ async fn extra_or_missing_secrets_are_rejected() {
     let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),

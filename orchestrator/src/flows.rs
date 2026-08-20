@@ -105,7 +105,7 @@ pub async fn onboard(
     let pkg = SecretPackage::load(runner_dir)?;
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: runner_id.clone(),
         package: pkg,
         state_dir: runner_dir.to_path_buf(),

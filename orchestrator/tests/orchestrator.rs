@@ -52,7 +52,7 @@ async fn serve_client(
     let pkg = SecretPackage::load(runner_dir).unwrap();
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: runner_id,
         package: pkg,
         state_dir: runner_dir.to_path_buf(),

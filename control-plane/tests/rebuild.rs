@@ -1,18 +1,21 @@
-//! Chunk 2.6 — runner-lifecycle snapshots (kind 30181): the CP publishes a
-//! replaceable profile per runner at every lifecycle mutation, the relay is
-//! the rebuildable projection source, and `rebuild` folds it into a fresh
-//! CP deterministically + idempotently.
+//! Chunk 2.6.1 — runners as NIP-29 channels: the CP syncs each runner's
+//! private channel (create + membership + metadata) at every lifecycle
+//! mutation, the relay holds the relay-signed roster + replaceable channel
+//! metas as the rebuildable projection, and `rebuild` folds the metas into
+//! a fresh CP deterministically + idempotently.
 //!
 //! The fake relay (testkit) implements the real wire contract: NIP-98 auth,
-//! POST /query with a filters array, POST /events. Trust (author gate +
-//! local Schnorr verify) is exercised, not hand-waved.
+//! POST /query with a filters array, POST /events, and the channel/membership
+//! semantics. Trust (author gate + local Schnorr verify) is exercised, not
+//! hand-waved.
 
 use std::path::Path;
 
 use freehold_control_plane::console::Console;
 use freehold_control_plane::provisioner;
 use freehold_control_plane::state::{RunnerRecord, RunnerStatus, SecretRecord, StateStore};
-use freehold_core::relay_http::{RunnerProfile, query_runner_profiles};
+use freehold_core::nip98::GROUP_META_KIND;
+use freehold_core::relay_http::{RunnerProfile, query_runner_metas};
 use freehold_testkit::relay as fake_relay;
 
 fn hex64(c: char) -> String {
@@ -54,23 +57,24 @@ fn console_in(dir: &Path) -> Console {
     Console::load_or_create(dir).unwrap()
 }
 
-/// Real wire: provisioner publish (HTTP POST /events) -> relay_http query
-/// (HTTP POST /query) round-trips the FULL profile.
+/// Real wire: provisioner channel sync (HTTP POST /events: create +
+/// member + meta) -> relay_http query (HTTP POST /query) round-trips the
+/// FULL profile as the channel's group metadata.
 #[tokio::test(flavor = "multi_thread")]
-async fn publish_and_query_profile_roundtrip() {
+async fn channel_sync_and_query_meta_roundtrip() {
     let base = tempfile::tempdir().unwrap();
     let store = store_with(base.path().join("cp")); // note: below opens its own dir
     let cp_state = base.path().join("cp-state");
     let console = console_in(&cp_state);
     let (relay_url, _state, _task) = fake_relay::spawn().await;
 
-    // Records + secret for the runner, then publish the profile via the
-    // real provisioner path (console-signed, kind 30181).
+    // Records + secret for the runner, then sync the channel via the real
+    // provisioner path (console-signed channel create + put-user + meta).
     insert_runner(&store, "relaybox", RunnerStatus::Active);
-    provisioner::publish_runner_profile(&store, &relay_url, "relaybox", &cp_state).unwrap();
+    provisioner::sync_runner_channel(&store, &relay_url, "relaybox", &cp_state).unwrap();
 
-    // The relay's current view: exactly one profile, full content fidelity.
-    let profiles = query_runner_profiles(
+    // The relay's current view: exactly one meta, full content fidelity.
+    let profiles = query_runner_metas(
         &relay_url,
         &console.identity.nostr_pubkey_hex(),
         &console.identity.secret_seed(),
@@ -86,12 +90,30 @@ async fn publish_and_query_profile_roundtrip() {
     assert_eq!(p.enc_pubkey, hex64('b'));
     assert_eq!(p.secret, "relaybox"); // secret NAME only — never material
     assert_eq!(p.rotated_at, Some(7));
+
+    // The runner the CP membered can read its own roster (the whitelist).
+    let roster = freehold_core::relay_http::query_channel_roster(
+        &relay_url,
+        &fake_relay::relay_pubkey(),
+        &hex64('r'),
+        &console.identity.secret_seed(),
+    )
+    .unwrap();
+    assert!(
+        roster.contains(&hex64('r')),
+        "the runner must be a member of its own channel"
+    );
+    assert!(
+        roster.contains(&console.identity.nostr_pubkey_hex()),
+        "the console owner is a member of the channel it created"
+    );
 }
 
-/// Revocation REPLACES the profile (status flip, same d-tag) — the relay
-/// never accumulates per-runner history a stale fold could resurrect.
+/// Revocation REPLACES the meta (status flip, same h) AND cuts the runner
+/// off its own roster — the relay never accumulates per-runner history a
+/// stale fold could resurrect, and the runner's whitelist read fails closed.
 #[tokio::test(flavor = "multi_thread")]
-async fn revoke_replaces_profile_never_appends() {
+async fn revoke_flips_meta_and_cuts_off_the_runner() {
     let base = tempfile::tempdir().unwrap();
     let store = store_with(base.path().join("cp"));
     let cp_state = base.path().join("cp-state");
@@ -99,23 +121,35 @@ async fn revoke_replaces_profile_never_appends() {
     let (relay_url, state, _task) = fake_relay::spawn().await;
 
     insert_runner(&store, "relaybox", RunnerStatus::Active);
-    provisioner::publish_runner_profile(&store, &relay_url, "relaybox", &cp_state).unwrap();
-    let events_after_active = state.events.lock().len();
+    provisioner::sync_runner_channel(&store, &relay_url, "relaybox", &cp_state).unwrap();
+    let metas_after_active = state
+        .events
+        .lock()
+        .iter()
+        .filter(|e| e["kind"].as_u64() == Some(GROUP_META_KIND as u64))
+        .count();
 
-    // Revoke: the CP flips the record, then re-publishes the SAME d-tag.
+    // Revoke: the CP flips the record, then revokes the channel (removes the
+    // runner from its own roster + REPLACES the meta's status).
     store
         .set_runner_status("relaybox", RunnerStatus::Revoked)
         .unwrap();
-    provisioner::publish_runner_profile(&store, &relay_url, "relaybox", &cp_state).unwrap();
+    provisioner::revoke_runner_channel(&store, &relay_url, "relaybox", &cp_state).unwrap();
 
     let events = state.events.lock().clone();
-    assert_eq!(events.len(), events_after_active + 1, "replace, not append");
-    assert_eq!(events[1]["kind"].as_u64(), Some(30181));
-    assert_eq!(events[1]["tags"][0].as_array().unwrap()[1], hex64('r'));
+    let metas = events
+        .iter()
+        .filter(|e| e["kind"].as_u64() == Some(GROUP_META_KIND as u64))
+        .count();
+    assert_eq!(
+        metas,
+        metas_after_active + 1,
+        "the revoke re-publishes the meta ONE more time (same h — replace,          never appended history)"
+    );
 
-    // The fold sees ONE profile, revoked (query with the real console key).
+    // The fold sees ONE meta, revoked (query with the real console key).
     let console = Console::load(&cp_state).unwrap();
-    let profiles = query_runner_profiles(
+    let profiles = query_runner_metas(
         &relay_url,
         &console.identity.nostr_pubkey_hex(),
         &console.identity.secret_seed(),
@@ -123,13 +157,28 @@ async fn revoke_replaces_profile_never_appends() {
     .unwrap();
     assert_eq!(profiles.len(), 1, "one record per runner, newest wins");
     assert_eq!(profiles[0].status, "revoked");
+
+    // The cut-off: the revoked runner is no longer on its own roster — its
+    // whitelist read returns empty (deny-all), the enforcement point.
+    let roster = freehold_core::relay_http::query_channel_roster(
+        &relay_url,
+        &fake_relay::relay_pubkey(),
+        &hex64('r'),
+        &console.identity.secret_seed(),
+    )
+    .unwrap();
+    assert!(
+        !roster.contains(&hex64('r')),
+        "revoked runner exits its own channel"
+    );
 }
 
-/// A rogue member's NEWER profile (any author, any number) is ignored: the
-/// author gate + local signature verify are the trust anchor for folds.
+/// A rogue member's NEWER channel meta (any author, any number) is
+/// ignored: the author gate + local signature verify are the trust anchor
+/// for folds — exactly as a rogue 9000 put-user is refused at the relay.
 #[tokio::test(flavor = "multi_thread")]
-async fn rogue_author_cannot_mint_or_clobber_profiles() {
-    use freehold_core::nip98::{RUNNER_PROFILE_KIND, sign_event};
+async fn rogue_author_cannot_mint_or_clobber_metas() {
+    use freehold_core::nip98::{GROUP_META_KIND, sign_event};
 
     let base = tempfile::tempdir().unwrap();
     let store = store_with(base.path().join("cp"));
@@ -138,9 +187,11 @@ async fn rogue_author_cannot_mint_or_clobber_profiles() {
     let (relay_url, state, _task) = fake_relay::spawn().await;
 
     insert_runner(&store, "relaybox", RunnerStatus::Active);
-    provisioner::publish_runner_profile(&store, &relay_url, "relaybox", &cp_state).unwrap();
+    provisioner::sync_runner_channel(&store, &relay_url, "relaybox", &cp_state).unwrap();
 
-    // Rogue mints a "revoked" profile with a much newer timestamp.
+    // Rogue mints a "revoked" meta for the SAME channel with a much newer
+    // timestamp (h = the derived channel id).
+    let h = freehold_core::relay_http::runner_channel_id(&hex64('r'));
     let rogue_secret = [3u8; 32];
     let rogue = RunnerProfile {
         name: "relaybox".into(),
@@ -157,9 +208,9 @@ async fn rogue_author_cannot_mint_or_clobber_profiles() {
     let content = serde_json::to_string(&rogue).unwrap();
     let (pk, id, sig) = sign_event(
         &rogue_secret,
-        RUNNER_PROFILE_KIND,
+        GROUP_META_KIND,
         ts,
-        vec![vec!["d".into(), hex64('r')]],
+        vec![vec!["h".into(), h.clone()], vec!["d".into(), h.clone()]],
         &content,
     )
     .unwrap();
@@ -167,13 +218,13 @@ async fn rogue_author_cannot_mint_or_clobber_profiles() {
         "id": id,
         "pubkey": pk,
         "created_at": ts,
-        "kind": RUNNER_PROFILE_KIND,
-        "tags": [["d", hex64('r')]],
+        "kind": GROUP_META_KIND,
+        "tags": [["h", h.clone()], ["d", h]],
         "content": content,
         "sig": sig,
     }));
 
-    let profiles = query_runner_profiles(
+    let profiles = query_runner_metas(
         &relay_url,
         &console.identity.nostr_pubkey_hex(),
         &console.identity.secret_seed(),
@@ -182,7 +233,7 @@ async fn rogue_author_cannot_mint_or_clobber_profiles() {
     assert_eq!(profiles.len(), 1);
     assert_eq!(
         profiles[0].status, "active",
-        "rogue-author profile must be ignored despite being newer"
+        "rogue-author meta must be ignored despite being newer"
     );
     assert_eq!(profiles[0].address, "host:22");
 }
@@ -192,7 +243,7 @@ async fn rogue_author_cannot_mint_or_clobber_profiles() {
 /// SAME state — the replay requirement, not a nice-to-have.
 #[tokio::test(flavor = "multi_thread")]
 async fn rebuild_folds_snapshots_idempotently() {
-    use freehold_core::relay_http::publish_runner_profile as core_publish;
+    use freehold_core::relay_http::publish_runner_meta as core_publish;
 
     let base = tempfile::tempdir().unwrap();
     let src_store = store_with(base.path().join("cp"));
@@ -210,7 +261,7 @@ async fn rebuild_folds_snapshots_idempotently() {
     .enumerate()
     {
         insert_runner(&src_store, name, status);
-        provisioner::publish_runner_profile(&src_store, &relay_url, name, &cp_state).unwrap();
+        provisioner::sync_runner_channel(&src_store, &relay_url, name, &cp_state).unwrap();
         let profiles = {
             // Re-sign through the core publish so rotated_at differs per runner.
             let rec = src_store.get_runner(name).unwrap();
@@ -244,7 +295,7 @@ async fn rebuild_folds_snapshots_idempotently() {
     let fold_twice = base.path().join("fold2");
     let fold = |dir: &Path| -> (StateStore, Vec<(String, RunnerStatus, Option<u64>)>) {
         let store = StateStore::open(dir).unwrap();
-        let profiles = query_runner_profiles(
+        let profiles = query_runner_metas(
             &relay_url,
             &console.identity.nostr_pubkey_hex(),
             &console_secret,

@@ -41,12 +41,18 @@ use sha2::{Digest, Sha256};
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 pub const KIND_HTTP_AUTH: u32 = 27235;
-pub const GRANTS_KIND: u32 = 30180;
-/// Runner lifecycle snapshot (Chunk 2.6): addressable per runner pubkey
-/// (d-tag), replaceable — re-publishing REPLACES, so a revoke lands as a
-/// status flip, never appended history. Same registry discipline as 30180
-/// (30000–39999 addressable range, BUZZ_SURFACE §5).
-pub const RUNNER_PROFILE_KIND: u32 = 30181;
+
+// Chunk 2.6.1 — NIP-29 channel/membership kinds (native to stock buzz, no
+// ingest patch): a runner IS a private channel, grants ARE membership.
+// 9007 create (h = the runner's deterministic channel id) the channel and
+// the creator (the CP console) is the owner; the relay executes 9000
+// put-user / 9001 remove-user and re-publishes the relay-SIGNED roster
+// (39002, p-tags = members); the runner's whitelist = its own roster.
+pub const CHANNEL_CREATE_KIND: u32 = 9007;
+pub const PUT_USER_KIND: u32 = 9000;
+pub const REMOVE_USER_KIND: u32 = 9001;
+pub const GROUP_META_KIND: u32 = 39000;
+pub const GROUP_MEMBERS_KIND: u32 = 39002;
 
 /// pkcs7-style canonical event array, JSON without whitespace.
 fn canonical_event_bytes(
@@ -253,7 +259,7 @@ mod tests {
     fn sign_verify_roundtrip() {
         let (pubkey, _id, sig) = sign_event(
             &seed(),
-            GRANTS_KIND,
+            30180,
             1,
             vec![vec!["d".into(), "abc".into()]],
             "{}",
@@ -262,7 +268,7 @@ mod tests {
         let ok = verify_event(
             &pubkey,
             1,
-            GRANTS_KIND,
+            30180,
             &[vec!["d".into(), "abc".into()]],
             "{}",
             &sig,
@@ -272,7 +278,7 @@ mod tests {
         let bad = verify_event(
             &pubkey,
             1,
-            GRANTS_KIND,
+            30180,
             &[vec!["d".into(), "abc".into()]],
             "{} ",
             &sig,
@@ -340,7 +346,7 @@ mod tests {
             content,
         )
         .unwrap();
-        // EXACTLY how publish_grants builds it: serde_json escapes the JSON
+        // EXACTLY how the relay events are built: serde_json escapes the JSON
         // content inside the content STRING.
         let json = serde_json::json!({
             "id": id,

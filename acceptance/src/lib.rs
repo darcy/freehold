@@ -160,7 +160,7 @@ async fn serve_runner(pkg_dir: &Path) -> R<(String, tokio::task::JoinHandle<()>)
     let pkg = SecretPackage::load(pkg_dir).map_err(|e| e.to_string())?;
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: id,
         package: pkg,
         state_dir: pkg_dir.to_path_buf(),
@@ -1013,7 +1013,7 @@ async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     let console_secret = [11u8; 32];
-    let (console_pk, _i, _s) = freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "")
+    let (_console_pk, _i, _s) = freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "")
         .map_err(|e| e.to_string())?;
     let a = Identity::generate();
     let b = Identity::generate();
@@ -1023,19 +1023,28 @@ async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
         b.nostr_pubkey_hex(),
         peer.nostr_pubkey_hex(),
     );
-    fake_relay::publish_grants(
-        &relay_state,
+    // Chunk 2.6.1: the whitelist IS the runner's channel roster. Seed the
+    // channel (console creates it) + the runner + the granted agents.
+    freehold_core::relay_http::create_runner_channel(
+        &relay_url,
         &console_secret,
         &runner_pk,
-        &[ap.clone(), bp.clone(), peer_pk.clone()],
-    );
+        "relaybox",
+    )
+    .map_err(|e| e.to_string())?;
+    freehold_core::relay_http::put_user(&relay_url, &console_secret, &runner_pk, &runner_pk)
+        .map_err(|e| e.to_string())?;
+    for m in [ap.clone(), bp.clone(), peer_pk.clone()] {
+        freehold_core::relay_http::put_user(&relay_url, &console_secret, &runner_pk, &m)
+            .map_err(|e| e.to_string())?;
+    }
 
     let ctx = RunnerContext {
         identity: runner_id,
         package: pkg,
         state_dir: pkg_dir.clone(),
         relay_url: Some(relay_url.clone()),
-        grant_author: Some(console_pk),
+        relay_pubkey: Some(fake_relay::relay_pubkey()),
     };
     let (addr, server) = mcp::serve("127.0.0.1:0", ctx)
         .await
@@ -1062,14 +1071,10 @@ async fn g4_chunk2_relay(base: &Path) -> Result<String, String> {
     if !denied.contains("unauthorized") {
         return Err(format!("denial unexpected: {denied}"));
     }
-    // REVOKE B: publish a replaced (shrunk) list — the runner reads it live,
-    // so B is denied without any restart.
-    fake_relay::publish_grants(
-        &relay_state,
-        &console_secret,
-        &runner_pk,
-        &[ap.clone(), peer_pk.clone()],
-    );
+    // REVOKE B: remove B from the channel — the runner re-reads its roster
+    // live, so B is denied without any restart.
+    freehold_core::relay_http::remove_user(&relay_url, &console_secret, &runner_pk, &bp)
+        .map_err(|e| e.to_string())?;
     mcp_call(&url, &b, &runner_pk, "exec", exec_args("echo g4b"))
         .err()
         .ok_or("B still granted after revoke?!")?;

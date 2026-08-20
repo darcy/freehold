@@ -63,6 +63,18 @@ pub struct ControlPlaneState {
     /// => NIP-98 console auth is ON and the bind guard relaxes (C3.5).
     #[serde(default)]
     pub admins: Vec<String>,
+    /// The relay this console operates as (Chunk 2.6.1): set by `serve
+    /// --relay-url` (and by provision/rotate/revoke publishing in the CLI);
+    /// the web UI drives channel/membership sync against it. The runner
+    /// lifecycle + grants live on the relay as NIP-29 channels (see
+    /// core::relay_http); state.json is the local mirror, not the source.
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    /// The RELAY's nostr pubkey (Chunk 2.6.1): the trust anchor that signs
+    /// membership rosters. Required alongside `relay_url` for the web UI's
+    /// verified roster view; the runner enforces with its own copy.
+    #[serde(default)]
+    pub relay_pubkey: Option<String>,
 }
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -149,6 +161,23 @@ impl StateStore {
             .ok_or_else(|| StateError::RunnerNotFound(name.to_string()))?;
         rec.mcp_addr = addr;
         Ok(())
+    }
+
+    /// Persist the relay scope for this console (Chunk 2.6.1). The web UI
+    /// syncs runner channels against it; a restart keeps it.
+    pub fn set_relay_url(&self, relay_url: Option<String>) -> Result<(), StateError> {
+        self.inner.write().relay_url = relay_url;
+        self.save()
+    }
+
+    pub fn set_relay_pubkey(&self, relay_pubkey: Option<String>) -> Result<(), StateError> {
+        self.inner.write().relay_pubkey = relay_pubkey;
+        self.save()
+    }
+
+    /// The state dir itself (the console identity + packages live beside it).
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     pub fn set_runner_status(&self, name: &str, status: RunnerStatus) -> Result<(), StateError> {
