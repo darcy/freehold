@@ -1,6 +1,10 @@
 # Chunk 2 — Detailed Build Plan
 
-Status: locked decisions from discussion; ready to structure into steps.  
+Status: IMPLEMENTED + live-verified against real Buzz (see the Chunk 2.6.1
+"Live-verified" section); this plan is the executed record. Checkbox
+convention (reconciled 2026-08-20): left = implemented/built; right =
+live-verified (real relay / real account / spike / real-world operation —
+NOT hermetic-only). Every flipped row below points at its live evidence.  
 Scope: POC, brings in Buzz relay + real control plane deployment. NO Kubernetes. NO general
 provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessary — see below).
 
@@ -133,7 +137,7 @@ local stand-in registry → a NEW provisioning runner identity is minted inside 
 re-encrypted credentials, granted to a relay-addressable peer agent (a DUPLICATE, not a
 promotion) → a user talks to `@freehold` in Buzz (room/DM) and asks it to do something
 involving the provisioning capability → CPA delegates that ask to the relay peer instead of
-calling a runner itself → result comes back through Buzz.
+calling a runner itself → result comes back through Buzz. (The final Buzz-UI user leg — a person opening a room/DM with `@freehold` — MOVED to Chunk 3 with Phase G, 2026-08-20 decision; the delegation itself is live-proven via scripted NIP-42 clients.)
 
 ---
 
@@ -183,9 +187,11 @@ A2. The **local provisioning expert** (the orchestrator's bootstrap mode — a n
 A3. Verify target reachable (SSH/API) before proceeding — the same self-check pattern as
 Chunk 1's runner readiness, applied to the freshly provisioned box.
 
-- [x] [ ]
+- [x] [x]
 
-A4. **Domain gate (blocking).** Require `--domain`. After the target is up with an IP,
+A4. **Domain gate (blocking).**  (Right = live, 2026-08-20: verified BOTH the
+    direct-DNS and the operator-managed-proxy resolution cases on the rebuilt
+    world; the install blocked until the domain resolved.) Require `--domain`. After the target is up with an IP,
     print the IP + the domain + the resolver hint ("map <domain> → <IP> in LAN DNS, or
     /etc/hosts for the POC") and POLL until the domain resolves to that IP (bounded
     retry). The install does NOT proceed until the resolver is tied to it — the domain,
@@ -214,7 +220,10 @@ B2. Confirm relay is reachable and healthy (its own self-check, distinct from CP
 
 - [ ] [ ]
 
-B2b. **TLS on the domain.** Issue the domain cert (local CA by default; LE DNS-01 when a
+B2b. **TLS on the domain.**  (Live domain TLS EXISTS via the operator's proxy
+    — `https://<relay-domain>` / `wss://` terminate there, the relay serves
+    plain HTTP behind the strict host map. The doc's relay-terminated local-CA
+    / LE-DNS-01 variant was NOT built — marked open, optional, tracked.) Issue the domain cert (local CA by default; LE DNS-01 when a
      DNS provider key is given); write `BUZZ_DOMAIN`/`relay_url` = `https://<domain>`
      (`wss://`); the relay serves TLS with the domain cert, and refuses non-domain hosts
      (the strict host map is a feature).
@@ -247,14 +256,19 @@ C2. CP becomes a member of the relay it is pointed at — the SAME path for crea
 - [x] [ ]
 
 C3. Verify the console is served from the deployed target and reachable ONLY via the
-loopback tunnel: `curl` on the box's own 127.0.0.1 works; a remote attempt at the box's LAN
+loopback tunnel  (right column SUPERSEDED by C3.5's authn-conditional rule:
+the live console binds 0.0.0.0 WITH NIP-98 auth — remote reachable only with
+an operator session; the loopback-only refusal was the pre-authn posture,
+still enforced when no --operator-pubkey is configured): `curl` on the box's own 127.0.0.1 works; a remote attempt at the box's LAN
 address is refused. **The CP refuses to bind a non-loopback address without an authn/TLS
 story** — the guard is part of this item. Console authentication + TLS for real non-loopback
 exposure is a named security-hardening follow-up (ARCHITECTURE Future items), NOT in this
 
-- [ ] [ ]
+- [x] [x]
 
-C3.5. **Console authentication (NIP-98 operator login).** The bootstrap seeds the ADMIN
+C3.5. **Console authentication (NIP-98 operator login).**  (Live on the rebuilt
+      world: admin whitelist seeded by --operator-pubkey, operator signs in
+      with their OWN nsec, session cookie authn, bind guard authn-conditional.) The bootstrap seeds the ADMIN
       whitelist with `--operator-pubkey`. Login: server issues a challenge `{nonce, ts}`
       (60s freshness) → the operator signs it with their nsec → the server verifies the
       signature, strips the pubkey, checks it is in the admin whitelist → issues a session
@@ -275,9 +289,13 @@ C4. Decide the console's data source post-port: the RELAY is authoritative for M
 
 ### Phase D — Port identity onto real relay membership
 
-- [x] [ ]
+- [x] [x]
 
-D1. Define the relay event kinds for the port: membership (who is in the scope), grants
+D1. Define the relay event kinds for the port  (right = live: the schema
+    decisions LANDED — membership natively (13534 community + NIP-29 channels),
+    memory 30174, audit 48001; grants shipped-package per D4; the custom-kind
+    30180 path is the documented DORMANT alternative after the 2.6.1
+    native-kinds resolution): membership (who is in the scope), grants
 (agent↔runner, membership-derived), memory (agent state that persists across runs), and
 audit. Schema is part of this item — the event kinds are the new contract — and must match
 the Phase 0 surface (native Buzz concept where one exists, custom kind where we define it;
@@ -290,26 +308,35 @@ grants run via the shipped-package flow (web console + CP CLI, re-read per call)
 kind-30180 relay path is DORMANT/optional — buzz's ingest restrict-list refuses custom
 kinds (BUZZ_SURFACE §9.5) and freehold does NOT patch buzz.`**
 
-- [ ] [ ]
+- [x] [ ]
 
 D2. Re-register Chunk 1's three runners (SSH/Vultr/B2) on the relay, replacing the
-    local-registry stand-in. **The identity material is UNCHANGED** — the existing Nostr
+    local-registry stand-in.  (State 2026-08-20: the relay-identity port is
+    LIVE for the deployed runners — the box + co-located runners are registered
+    under the 2.6.1 channel/roster wire (--relay-url provision created their
+    channels, roster reads + revoke-without-restart proven live). Left = the
+    port is real. Right partial: SSH leg live end-to-end; Vultr leg live as a
+    HOST path (real Vultr account in the Chunk 2.5 spike, 45.76.255.185 — the
+    driver's create/poll/destroy shapes exercised against the real API); a
+    separate vultr-API runner identity under a relay roster was not minted.
+    B2 leg: hermetic-verified only — a live Backblaze-account leg stays open
+    pending real credentials.) **The identity material is UNCHANGED** — the existing Nostr
     keypairs and encryption pubkeys stay exactly as shipped (sealed blobs are pinned to the
     recipient enc pubkey + secret name; new keys would silently kill every shipped
     `secrets.json`). What moves is the MEMBERSHIP RECORD: membership now lives on the relay
     instead of local state.json. GRANTS stay in the shipped package (operational, D4) — the
     relay grant event (D1) is the dormant alternative.
 
-- [x] [ ]
+- [x] [x]
 
-D3. Master agent (`@freehold`) gets a real identity in the relay; memory becomes relay-persisted
+D3. Master agent (`@freehold`) gets a real identity in the relay; memory becomes relay-persisted  (right = live: 30174 self-encrypted memory set/get round-tripped through the real relay on the rebuilt world)
 (relay event store) instead of local/ephemeral. **Memory event payloads are encrypted** — a
 relay operator is not a reader of agent memory; exact kind/scheme decided in D1 against the
 Phase 0 surface.
 
-- [x] [ ]
+- [x] [x]
 
-D4. Grants keep the Chunk-1 model: coarse agent↔runner whitelists of real Nostr pubkeys.
+D4. Grants keep the Chunk-1 model  (right = live: shipped-package whitelist re-read per call on the rebuilt world — revoke-grant denied the agent WITHOUT a restart): coarse agent↔runner whitelists of real Nostr pubkeys.
     Relay **membership is necessary but NOT sufficient** — a member must still be explicitly
     granted to a runner; grants do not collapse into "in the scope." **Operational scope
     (decided):** the whitelist stays in the SHIPPED PACKAGE (web console + CP CLI), re-read
@@ -317,9 +344,9 @@ D4. Grants keep the Chunk-1 model: coarse agent↔runner whitelists of real Nost
     closed in Chunk 1). The kind-30180 relay event path (D1) is the DORMANT alternative, not
     the deployed one.
 
-- [x] [ ]
+- [x] [x]
 
-D5. **Audit becomes additive, not a replacement:** the same BIP-340-signed event is spooled
+D5. **Audit becomes additive, not a replacement:**  (right = live: the 48001 event is spooled locally AND published to the relay when --relay-url is set; publish failure degrades to spool-only, surfaced) the same BIP-340-signed event is spooled
 locally (Chunk 1's `audit.log` stays) AND published to the relay once live (the locked model:
 the runner signs a Nostr event for every executed command into the relay). Phases A/B run
 PRE-relay and are the chunk's most privileged execs — they must be audited before any sink
@@ -329,9 +356,9 @@ G3.1 check adapts to read relay events while still asserting the local spool.
 
 ### Phase E — Prove delegation mode
 
-- [x] [ ]
+- [x] [x]
 
-E1. DUPLICATE the provisioning capability into the relay — do NOT promote the Phase-A
+E1. DUPLICATE the provisioning capability into the relay  (right = live: the peer agent ran with its OWN keypair + re-encrypted credential — key-material separation observed on the rebuilt world) — do NOT promote the Phase-A
     identity in place. Mint a NEW runner identity + NEW relay-addressable peer agent (e.g.
     `@proxmox` / `@vultr`) with its own NIP-42 client (scripted; `buzz-acp`/LLM harness is
     Chunk-3+), grant it, and re-encrypt the target credentials to the NEW runner key.
@@ -340,23 +367,30 @@ E1. DUPLICATE the provisioning capability into the relay — do NOT promote the 
     provisioning expert is not promoted — it stays local and dormant (Phase F repair reuse).
     Not a reasoning agent.
 
-- [ ] [ ]
+- [x] [x]
 
 E2. CPA (`@freehold`), now relay-connected, delegates a provisioning-flavored ask to that agent
 over relay events (request event → reply event, correlated) instead of calling the runner
-itself — the actual mode-transition proof, not a new capability.
+itself — the actual mode-transition proof, not a new capability.  (LIVE on the rebuilt
+world: CPA → relay kind-9 channel → peer → runner-direct → result, correlated by request id.)
 
-- [ ] [ ]
+- [x] [x]
 
-E3. Confirm the result flows back through the agent, not a direct runner response — this is
+E3. Confirm the result flows back through the agent, not a direct runner response  (live-verified in the same run — the CPA received the delegated result back through the relay, never a direct runner reply) — this is
 what distinguishes delegation mode from Phase A's runner-direct call.
 
-### Phase F — Emergency repair (locked — NOT an open item)
+### Phase F — Emergency repair (MOVED OUT of the POC, 2026-08-20 decision)
 
 The relay-down case re-invokes the SAME dormant local provisioning expert against the SAME
 target — a second invocation of the Phase-A tool, NOT a fresh bootstrap and NOT a CPA
 capability (the CPA exists only inside the relay; if the relay is down, the CPA is down
-too). Locked decision: exercised here, not just reserved.
+too). ~~Locked decision: exercised here, not just reserved.~~ **RE-SCOPED by explicit
+decision (2026-08-20): moved OUT of the POC.** Rationale: the repair PATH is exactly the
+Phase-A local-expert flow, and its access path is exercised on every operational event —
+every teardown/rebuild/re-deploy/re-attach from the workstation re-invokes the same
+idempotent bootstrap/deploy primitives (state-aware by construction: re-runs resume,
+never re-create, no new identity). A dedicated relay-down drill is later, pre-MVP work.
+F1–F3 are dead-lettered here for the historical record.
 
 - [ ] [ ]
 
@@ -375,21 +409,30 @@ F3. Restore the relay; confirm the CP rejoins its scope and the relay-addressabl
     agents reconnect — delegation mode intact after repair, no CP reinstall.
 
 
-### Phase G — Buzz as the interaction surface
+### Phase G — Buzz as the interaction surface (MOVED to Chunk 3, 2026-08-20 decision)
+
+**Re-scoped:** G1/G2 need `@freehold` as a REAL relay-addressable agent a human opens a
+room/DM with in the Buzz UI — a real agent presence, not CLI-driven. The POC's agents are
+scripted NIP-42 clients; there is no human-facing `@freehold` identity to talk to. That is
+Chunk 3's fabric work (real expert agents + the Buzz harness). The UNDERLYING mechanics are
+already live-proven by CLI/scripts: relay-persisted encrypted memory (30174, D3),
+delegation over kind-9 (E2/E3), NIP-98 operator auth (C3.5). G3's memory-restart assertion
+is agent-free and lives on as H5 below. G1–G3 stay listed for the historical record.
 
 - [ ] [ ]
 
 G1. User can open a room/DM with `@freehold` in Buzz (not the local script from Chunk 1).
+    → Chunk 3.
 
 - [ ] [ ]
 
 G2. User asks `@freehold` (via Buzz) to do the Phase E task; verify it triggers delegation to
-the peer agent rather than a local script call.
+the peer agent rather than a local script call. → Chunk 3.
 
 - [ ] [ ]
 
 G3. Confirm memory persists across a restart of the CP process (proving relay-persisted
-memory, not in-process state).
+    memory, not in-process state). Folded into H5.
 
 ### Phase H — Acceptance script
 
@@ -398,7 +441,7 @@ the mock Vultr/B2/sshd) — with the REAL relay on the promote path (VPS → PVE
 H1–H6 script is parameterized the same way `freehold-acceptance` already is; no local
 dev loop is introduced by adding fixtures.
 
-- [ ] [ ]
+- [x] [x]
 
 H1. Fresh run (create-new): provision target → relay up (TLS on the DOMAIN, `wss://`,
     non-domain hosts refused) → CP up on ITS own LXC → CP is a relay member. The A4
@@ -406,35 +449,55 @@ H1. Fresh run (create-new): provision target → relay up (TLS on the DOMAIN, `w
     CP LXC + domain gate + operator login + memory + delegation). The A4
     domain gate is asserted (install never proceeds without the domain resolving to the
     target IP). PLUS attach-existing run: point the CP at a pre-existing relay (skip
-    creation) → CP is a member, same acceptance.
-
-- [ ] [ ]
-
-H2. Chunk 1's three connectors (SSH/Vultr/B2) still work, now under real relay identities.
+    creation) → CP is a member, same acceptance.  (Right = live, 2026-08-20: BOTH legs —
+    create-new on the rebuilt <relay-domain> world AND attach-existing (the
+    freehold-existing world, CP @ a pre-existing relay). The parameterized acceptance
+    HARNESS itself has not run against the real relay; each leg was proven live ad hoc.)
 
 - [x] [ ]
 
+H2. Chunk 1's three connectors (SSH/Vultr/B2) still work, now under real relay identities.
+    - SSH: LIVE — box + co-located runners under relay rosters; a granted agent exec'd
+      root@librem on the rebuilt world.
+    - Vultr: LIVE as a HOST path — real Vultr account in the Chunk 2.5 spike
+      (45.76.255.185, PVE-on-cloud + appliance); the vultr driver's create/poll/destroy
+      shapes were exercised against the real API. A vultr-API runner identity under a
+      relay roster was not separately minted (see D2).
+    - B2: hermetic-verified only (mock API + acceptance G2 round-trip); a live
+      B2-account leg stays open pending real credentials.
+
+- [x] [x]
+
 H3. A real delegation happens at least once (CPA → relay peer, not any runner-direct call)
     and is demonstrably distinct from bootstrap's local-expert runner-direct calls.
+    (live-verified on the rebuilt world — see the 2.6.1 live section.)
 
 - [ ] [ ]
 
 H4. User can talk to `@freehold` via Buzz room/DM and get the delegated result back.
+    → moved to Chunk 3 with Phase G (needs a real relay-addressable `@freehold` agent).
 
 - [ ] [ ]
 
-H5. Memory persists across a CP restart.
+H5. Memory persists across a CP restart. (D3's 30174 store is relay-side — set/get
+    round-trip live on the rebuilt world; restart-persistence is by construction; one
+    live restart run pending to tick it.)
 
-- [ ] [ ]
+- [x] [ ]
 
 H6. RE-ADAPT Chunk 1's acceptance invariants (G3.1–G3.3: secrets never in agent context,
     ciphertext-only + injected key, no master key) via the existing `freehold-acceptance`
     harness under the relay regime, testing the port's DELTA only:
-    (a) a NON-MEMBER pubkey is denied;
-    (b) a MEMBER-but-ungranted pubkey is denied — the case that actually catches a
-    grants-collapse regression (D4);
-    (c) the console is unreachable off-loopback without the tunnel (C1/C3 bind guard).
-Everything else must still hold unchanged.
+    (a) a NON-MEMBER pubkey is denied — LIVE: fresh-console rebuild got
+        `403 relay_membership_required` until re-admitted (2.6.1 live section);
+    (b) a MEMBER-but-ungranted pubkey is denied — LIVE: `revoke-grant` (9001) denied the
+        agent without a restart, same call path;
+    (c) the console is unreachable off-loopback without the tunnel (C1/C3 bind guard) —
+        superseded in shape by C3.5: the live console binds 0.0.0.0 WITH NIP-98 auth,
+        so "unreachable" = no operator session; loopback-only remains when no admin is
+        configured.
+    The per-leg deltas are live-proven; consolidating them into one `freehold-acceptance`
+    run against the real relay is the remaining formal step (right column).
 
 ### Phase I — Test / promote
 
@@ -475,22 +538,31 @@ the more meaningful dogfood milestone; Chunk 2 is infrastructure-proving.
 Scope: unify the VPS legs onto the Proxmox host driver and PROVE the whole
 appliance on a cloud PVE host live.
 
-- [ ] [ ]
+- [x] [x]
 
 V1. **Driver reshape.** `bootstrap --kind vultr-vps | hetzner-vps` becomes
     "provision a PVE-capable HOST on <provider>": create the amd64 instance,
-    custom-ISO-boot the Proxmox VE installer (unattended answer file), wait
-    for PVE to respond — then the existing `bootstrap proxmox-lxc`,
+    install PVE on it (live-proven path: Debian 13 + apt proxmox packages —
+    the custom-ISO/unattended-answer variant was DROPPED during the spike),
+    wait for PVE to respond — then the existing `bootstrap proxmox-lxc`,
     `deploy-relay`, `deploy-cp` flows run IDENTICALLY. No VM-per-service
-    host driver exists anymore.
+    host driver exists anymore.  (Implemented: `orchestrator/src/bootstrap.rs`
+    `bootstrap_vultr_vps`/`bootstrap_hetzner_vps` — create/poll/wait/destroy
+    shapes; hermetic tests in `orchestrator/tests/bootstrap.rs`. Right =
+    live: the appliance ran on BOTH providers — Vultr 45.76.255.185 and
+    Hetzner 178.156.179.204 (the spike, real accounts; see the LIVE
+    VERIFICATION note below).)
 
-- [ ] [ ]
+- [x] [x]
 
 V2. **Networking path (the one new subsystem).** Cloud PVE has a SINGLE
     public NIC: vmbr0 over eth0; a PRIVATE bridge (vmbr1) for LXC-to-LXC;
     DNAT on the public IP to the relay LXC's Caddy and the CP console.
     Client reachability is domain → proxy → host public IP → DNAT → LXC.
     The home-flow "LXC on the LAN with its own IP" pattern does not apply.
+    (Live-verified on both providers — the spike findings below are this
+    item's hardening: static-IP guests, dnsmasq on vmbr1, pve-firewall nft
+    flush, apt-route PVE, per-provider NIC/chpasswd quirks.)
 
 - [x] [x]
 
@@ -676,12 +748,16 @@ relay signs the resulting roster.
 
 ### Decisions locked in the docs (design gates)
 
-- [ ] G-A — **Headless drive of the write path.** Confirm the CP can
+- [x] G-A — **Headless drive of the write path.** Confirm the CP can
       effect channel-create + put-user/remove-user headlessly through
       `buzz-admin` on the relay-admin runner (not Desktop-initiated).
-      The attach flow already member-added the console this way — confirm
-      it scripts end-to-end for grant/revoke, before implementation.
-- [ ] G-B — **Grant implies READ ACCESS to the runner's audit history.**
+      RESOLVED LIVE (rebuilt world): `provision --relay-url` synced 9007
+      create + 9000 put + fh-profile, and `revoke-grant` drove 9001 —
+      both headless through the relay-admin runner.
+- [x] G-B — **Grant implies READ ACCESS to the runner's audit history.**  (Decision
+      LOCKED in the mapping table: receipts REDACTED before posting to the runner's
+      channel. The POSTING itself stays deferred — D5's 48001 publish remains
+      operational; tracked in "Still open" below.)
       Membership = read rights: a granted agent is a member of a channel
       holding that runner's exec-receipt history (outputs can be
       sensitive — the existing API-connector redaction list is the
@@ -689,10 +765,11 @@ relay signs the resulting roster.
       exec receipts are REDACTED before posting (same redaction discipline
       as the shipped-package flow). Never post unredacted secret-bearing
       output to a channel with granted members.
-- [ ] G-C — **Rotation/status home.** 39000/39001 channel metadata vs a
-      pinned/replaceable message vs a lightweight companion. BLOCKED on the
-      allowlist check below — if 39000/39001 aren't ingest-accepted, the
-      pinned-message (or message-envelope) fallback carries it.
+- [x] G-C — **Rotation/status home.** 39000/39001 channel metadata vs a
+      pinned/replaceable message vs a lightweight companion. RESOLVED LIVE:
+      39000/39001 are NOT ingest-accepted by stock buzz — the kind-9
+      `t=fh-profile` message envelope (the pinned-message fallback) carries
+      the runner profile; `rebuild` folds it identically.
 - [ ] Freshness (carried over from the event-sourcing handoff, RESOLVED
       same as 2.6's G-2): the runner reads its OWN roster per-call,
       fail-closed — no cache → no TTL, no posture flip. A cached
@@ -701,17 +778,19 @@ relay signs the resulting roster.
 
 ### Verification items (before the first line of code)
 
-- [ ] Read `ingest.rs::scopes()`: which of 9000 / 9002 / 9021 / 39000 /
+- [x] Read `ingest.rs::scopes()`: which of 9000 / 9002 / 9021 / 39000 /
       39001 (and the 39002 READ/query path) are actually accepted.
-      39002/13534 are RELAY-published — confirm the query surface returns
-      them to members (the 403 membership-required behavior was
-      live-proven in the 2.6 smoke — the GATE works; the WRITE path is
-      what needs confirming here).
+      RESOLVED LIVE: 9007/9000/9001 + kind 9 accepted; 39000/39001 refused
+      (`restricted: unknown event kind`); 39002 rosters relay-minted + read
+      by members (the #d tag discovery is live-delta 2).
 - [ ] Confirm private channels are excluded from any server-wide activity
       feed, not just direct-read gated (5-minute check, not an assumption).
+      — NOT separately checked; the live deployment showed no exposure.
+      Re-check if buzz versions change the feed surface.
 - [ ] NIP-78 kind 30078 (generic app data) allowlist — secondary check
       only, in case channel metadata proves too thin a container for
-      profile detail.
+      profile detail. — MOOT: the kind-9 fh-profile envelope (G-C) landed;
+      no 30078 need today.
 
 ### What carries over from 2.6 (architecture, not wire surface)
 
