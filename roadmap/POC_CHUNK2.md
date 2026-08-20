@@ -553,19 +553,26 @@ Proxmox-on-Cloud path (spike finding follow-up):
 
 ## Chunk 2.6 — Relay-authoritative runner lifecycle (RUNNER_PROFILE + rebuild)
 
-**Status:** IMPLEMENTED + VERIFIED (see checkboxes). Scope decision: the
-CP-stays-writer slice — the low-risk 90% that defers G-1 (relay-side
-handlers / fork-vs-contribution) until true multi-writers appear.
+**Status:** IMPLEMENTED, hermetic-VERIFIED. Scope decision: the
+CP-stays-writer slice — the low-risk 90%. Live relay PUBLISHING is
+DORMANT against stock Buzz (the same gate as grants): the relay's ingest
+allowlist is hardcoded (`buzz-relay/src/handlers/ingest.rs::scopes()`,
+BUZZ_SURFACE §9.5 — "there is no config allowlist"), so kind 30181
+(like 30180) is refused with `restricted: unknown event kind` until G-1
+is resolved. `rebuild` + the author gate are LIVE-READY and the gate was
+proven live (a fresh console folds nothing — 403 membership-required —
+until re-admitted).
 
 ### What landed (additive; no deployed contract changed)
 
 - [x] New addressable kind **30181 `RUNNER_PROFILE`** (core): a runner's
       lifecycle snapshot — identity pubkeys, connector kind/address, status,
-      secret NAME only. Carry's revoke as a status flip and rotate as a
+      secret NAME only. Carries revoke as a status flip and rotate as a
       `rotated_at` flip: SAME d-tag (runner pubkey), REPLACE never append.
       Kind discipline: 30000–39999 addressable registry, next to 30180
-      (BUZZ_SURFACE §5). Collision-checked against the documented used set
-      (30174–30179 taken; 30181 free).
+      (BUZZ_SURFACE §5). Number collision-checked against the documented
+      used set (30174–30179 taken; 30181 free) — free NUMBER, but note
+      ingest acceptance is a SEPARATE gate (G-1; see Status).
 - [x] CP publishes the profile at EVERY lifecycle mutation (`--relay-url`
       on provision/adopt/rotate/revoke): provision/adopt publish "active",
       rotate flips `rotated_at`, revoke flips `status` (+ the existing
@@ -602,7 +609,14 @@ handlers / fork-vs-contribution) until true multi-writers appear.
 
 ### Outcome mapped to the Chunk 2.6 plan
 
-The drift party list is now relay-first: grants (30180) + lifecycle (30181)
-are both relay-published addressable records; CP's file store is a foldable
-projection, not the durable source of runner truth. CP loss = rebuild +
-re-adopt, not data loss. Runner per-call grants + author gate unchanged.
+Code-complete + hermetic-verified: 30180 (grants) and 30181 (lifecycle)
+are both implementable as relay-published addressable records, and CP's
+file store is foldable into a projection (`rebuild`). What stays true
+TODAY against a stock relay: the operational grant flow is the
+shipped-package per-call read (30180 relay publish is dormant, per
+BUZZ_SURFACE §9.5); 30181 publishing is dormant for the same reason.
+CP loss is rebuild + re-adopt ONLY once G-1 lets the profiles reach the
+relay. Until then CP's file store remains the durable record. This keeps
+Chunk 2.6 honest: it does NOT silently turn `--relay-url` into a
+working live path — it makes the profile path EXIST, tested, and
+gated exactly like grants.
