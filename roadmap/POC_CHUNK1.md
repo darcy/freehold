@@ -1,6 +1,8 @@
 # Chunk 1 — Detailed Build Plan
 
-Status: locked decisions, ready to execute.  
+Status: EXECUTED — the engine room is merged and acceptance-green (hermetic + on the PVE
+host as a real SSH target). Remaining open legs tracked at C2/C3 (B2 live-account) and H2
+(home dogfood, deferred to Chunk 3). Checkboxes: left = implemented, right = live-verified.  
 Scope: POC, pre-Buzz, NO k8s, NO real reasoning agent.
 
 ## Locked decisions
@@ -105,11 +107,15 @@ disk, never in agent context.
 C1. **SSH** to local machine (PVE host): persistent ssh connection pool
 (ControlMaster/ControlPersist) for cheap repeated commands.
 
-- [ ] [ ] 
+- [x] [x]  (right = LIVE via the Chunk 2.5 spike: real Vultr account, PVE-on-cloud
+instance at 45.76.255.185; the bootstrap vultr-vps driver's create/poll/destroy shapes
+were exercised against the real API — see POC_CHUNK2 "Chunk 2.5" section)
 
 C2. **Vultr** connector: create/destroy/status a server.
 
-- [ ] [ ] 
+- [x] [ ]  (right open: hermetic-verified only — mock B2 API + acceptance G2
+round-trip through the runner; a live B2-account leg needs real Backblaze credentials.
+Same state as POC_CHUNK2 D2/H2's B2 leg.)
 
 C3. **Backblaze B2** connector: read/write round-trip (S3-compatible).
 
@@ -168,7 +174,9 @@ no master key; revoking membership cuts off; rotation re-encrypts.
 
 H1. Run against the PVE host (SSH target) — safe target.
 
-- [ ] [ ] 
+- [ ] [ ]  (DEFERRED by explicit Chunk-2 decision — POC_CHUNK2 Phase I3:
+"do not promote to home dogfood yet — Chunk 3 (skill framework + real expert agents) is
+the more meaningful dogfood milestone.")
 
 H2. Promote to home dogfood once green on the PVE host.
 

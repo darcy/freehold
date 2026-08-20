@@ -14,7 +14,12 @@ grants — signed calls only (D), the scripted orchestrator CPA stand-in (E), th
 admin/ops web console (F), and the acceptance script that proves it all hermetic on
 loopback (G). Chunk 2 added the relay scope end-to-end: bootstrap-provisioned LXCs under a
 domain identity, NIP-98 console auth (operator logs in with their own nsec), encrypted
-memory (30174), delegation, and a runner lifecycle proven live against a real buzz relay.
+memory (30174), delegation, and a runner lifecycle proven live against a real buzz relay. POC scope boundary
+(2026-08-20): the emergency-repair drill (Phase F) and the Buzz-UI interaction surface
+(meeting `@freehold` in a room/DM — Phase G) are scoped OUT of the POC — repair reuses
+the same idempotent local-expert flow exercised on every re-deploy, and the Buzz-UI leg
+needs a real relay-addressable agent (Chunk 3). The B2 connector leg is
+hermetic-verified; a live Backblaze account test stays open.
 
 ## Design in one paragraph
 
@@ -400,7 +405,7 @@ sequenceDiagram
 ## Roadmap
 
 `roadmap/` holds the chunked plan: POC chunks 1–3 (engine room → Buzz relay scope → skills)
-then MVP chunks 4–6 (k8s, console, installer). Phase checklists in `roadmap/POC_CHUNK1.md` (and `roadmap/POC_CHUNK2.md`, in draft)
+then MVP chunks 4–6 (k8s, console, installer). Phase checklists in `roadmap/POC_CHUNK1.md` and `roadmap/POC_CHUNK2.md` (ticked)
 are ticked as work lands.
 
 ## Contributing / review

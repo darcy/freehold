@@ -90,6 +90,15 @@ RE-PROVISIONED fresh under `<relay-domain>` (relay LXC 100 @
 192.168.30.238:3000 behind the operator's tailnet nginx; CP in its own LXC 102 @
 192.168.30.254:8080; console admin = the operator's new key b2ab89...; memory +
 delegation re-proven live under the domain; the old PVE-host CP stopped).
+Post-Chunk-2 scope decisions (2026-08-20): Phase G (Buzz as the interaction surface —
+opening a room/DM with @freehold in the Buzz UI) MOVED to Chunk 3 (needs a real
+relay-addressable agent, not CLI-driven); Phase F (emergency-repair drill) moved OUT of
+the POC (the repair path is the same idempotent local-expert flow exercised on every
+rebuild/re-deploy; a dedicated relay-down drill is later pre-MVP work). Connector/D2
+truth-check (2026-08-20): SSH + Vultr + B2 are all real connector code, hermetic-tested;
+the Vultr leg is LIVE via the Chunk 2.5 spike (real account, 45.76.255.185); the B2 leg
+is hermetic-only pending real Backblaze credentials; CHECKBOXES in POC_CHUNK1/POC_CHUNK2
+were re-anchored to match (implemented | live-verified).
 
 
 ## Next (implemented)
