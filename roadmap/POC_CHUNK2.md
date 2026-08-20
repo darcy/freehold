@@ -402,7 +402,7 @@ dev loop is introduced by adding fixtures.
 
 H1. Fresh run (create-new): provision target → relay up (TLS on the DOMAIN, `wss://`,
     non-domain hosts refused) → CP up on ITS own LXC → CP is a relay member. The A4
-    [x] create-new leg proven LIVE under freehold-test.darcydev.net (relay LXC +
+    [x] create-new leg proven LIVE under <relay-domain> (relay LXC +
     CP LXC + domain gate + operator login + memory + delegation). The A4
     domain gate is asserted (install never proceeds without the domain resolving to the
     target IP). PLUS attach-existing run: point the CP at a pre-existing relay (skip
@@ -808,7 +808,7 @@ three places, all now in the code:
    mode therefore = `freehold relay-member` (community) + the channel
    put-user (via `control-plane ... --relay-url`).
 
-LIVE PROOF on the rebuilt relay (https://freehold-test.darcydev.net):
+LIVE PROOF on the rebuilt relay (https://<relay-domain>):
 `provision --relay-url` sync (9007 create + 9000 put + fh-profile msg)
 green → owner-console `rebuild` folds 1 record from real buzz → runner
 started with `--relay-url --relay-pubkey <relay key>` read its roster LIVE
