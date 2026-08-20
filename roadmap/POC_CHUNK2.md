@@ -553,6 +553,10 @@ Proxmox-on-Cloud path (spike finding follow-up):
 
 ## Chunk 2.6 — Relay-authoritative runner lifecycle (RUNNER_PROFILE + rebuild)
 
+**SUPERSEDED (wire format) by Chunk 2.6.1 below:** the custom-kind 30181
+surface is withdrawn (ingest-gated against stock Buzz); the fold/rebuild
+ARCHITECTURE carries over retargeted at NIP-29 membership events.
+
 **Status:** IMPLEMENTED, hermetic-VERIFIED. Scope decision: the
 CP-stays-writer slice — the low-risk 90%. Live relay PUBLISHING is
 DORMANT against stock Buzz (the same gate as grants): the relay's ingest
@@ -620,3 +624,121 @@ relay. Until then CP's file store remains the durable record. This keeps
 Chunk 2.6 honest: it does NOT silently turn `--relay-url` into a
 working live path — it makes the profile path EXIST, tested, and
 gated exactly like grants.
+
+
+## Chunk 2.6.1 — Runners-as-Channels, Grants-as-Membership (supersedes 2.6's wire format)
+
+**Status:** DOCUMENTED (locked plan; implementation deferred). Supersedes
+Chunk 2.6's custom-kind wire format (RUNNER_PROFILE 30181 / would-be
+RUNNER_GRANT). Resolves G-1: **native-kinds-only**. Zero changes to Buzz —
+preserves the locked "freehold does NOT patch buzz" decision. Fork:
+rejected (we don't patch Buzz). Upstream contribution: rejected for OUR
+critical path (Block's PR/review timeline as a dependency on the
+foundation Chunk 3 builds on — not acceptable).
+
+### Why native-kinds-only is the resolution
+
+Chunk 2.6's live smoke hit the designed gate: buzz's ingest allowlist is
+HARDCODED in `crates/buzz-relay/src/handlers/ingest.rs` `scopes()`
+(BUZZ_SURFACE §9.5 — "there is no config allowlist"; NOT the `ALL_KINDS`
+registry in `buzz-core/src/kind.rs`, which is just the kind-number
+registry). Any kind outside `scopes()` is refused:
+`restricted: unknown event kind` (30181 live-proved, 30180 before it).
+
+NIP-29 channels/membership are already allowlisted in stock Buzz and are
+EXACTLY the "signed command → relay side effect → addressable snapshot"
+shape Chunk 2.6's design wanted (the indigenous pattern — kind 9000/9002
+commands → relay-side membership check → relay-SIGNED 39002 roster,
+BUZZ_SURFACE §3.2/§5).
+
+### The mapping
+
+| Concept | Native Buzz mechanism | Kinds |
+|---|---|---|
+| A runner | a PRIVATE channel (`#runner-<name>`) | 9007 create |
+| A grant | add the agent's pubkey as a channel member | 9000 put-user → 39002 roster |
+| A revoke | remove the agent's pubkey | 9000 remove-user → 39002 roster |
+| Runner's whitelist | query the runner's OWN channel roster (relay-signed) | 39002 read |
+| Audit trail | exec receipts posted as channel messages | kind 9 |
+| Runner profile detail | channel metadata OR pinned message (G-C below) | 39000/39001 (allowlist pending) |
+
+**CORRECTED signing path (vs the draft handoff):** CP does NOT self-author
+membership writes — "a membership write needs the RELAY signing key, so
+the CP cannot self-add with its own keypair" (BUZZ_SURFACE §3.2). The CP
+DRIVES them via `buzz-admin add-member/remove-member` EXEC'd on the
+relay-admin runner (the same primitive the attach flow used to member the
+console). CP-as-sole-writer survives as "CP is the sole COMMANDER"; the
+relay signs the resulting roster.
+
+### Decisions locked in the docs (design gates)
+
+- [ ] G-A — **Headless drive of the write path.** Confirm the CP can
+      effect channel-create + put-user/remove-user headlessly through
+      `buzz-admin` on the relay-admin runner (not Desktop-initiated).
+      The attach flow already member-added the console this way — confirm
+      it scripts end-to-end for grant/revoke, before implementation.
+- [ ] G-B — **Grant implies READ ACCESS to the runner's audit history.**
+      Membership = read rights: a granted agent is a member of a channel
+      holding that runner's exec-receipt history (outputs can be
+      sensitive — the existing API-connector redaction list is the
+      precedent). DECISION: grant carries audit-history read by design;
+      exec receipts are REDACTED before posting (same redaction discipline
+      as the shipped-package flow). Never post unredacted secret-bearing
+      output to a channel with granted members.
+- [ ] G-C — **Rotation/status home.** 39000/39001 channel metadata vs a
+      pinned/replaceable message vs a lightweight companion. BLOCKED on the
+      allowlist check below — if 39000/39001 aren't ingest-accepted, the
+      pinned-message (or message-envelope) fallback carries it.
+- [ ] Freshness (carried over from the event-sourcing handoff, RESOLVED
+      same as 2.6's G-2): the runner reads its OWN roster per-call,
+      fail-closed — no cache → no TTL, no posture flip. A cached
+      membership + TTL/check-in is its own gate if a cache is ever
+      introduced.
+
+### Verification items (before the first line of code)
+
+- [ ] Read `ingest.rs::scopes()`: which of 9000 / 9002 / 9021 / 39000 /
+      39001 (and the 39002 READ/query path) are actually accepted.
+      39002/13534 are RELAY-published — confirm the query surface returns
+      them to members (the 403 membership-required behavior was
+      live-proven in the 2.6 smoke — the GATE works; the WRITE path is
+      what needs confirming here).
+- [ ] Confirm private channels are excluded from any server-wide activity
+      feed, not just direct-read gated (5-minute check, not an assumption).
+- [ ] NIP-78 kind 30078 (generic app data) allowlist — secondary check
+      only, in case channel metadata proves too thin a container for
+      profile detail.
+
+### What carries over from 2.6 (architecture, not wire surface)
+
+- [x] Deterministic, idempotent fold/rebuild (two folds → identical state)
+      — same guarantee, retargeted at channel/membership events.
+- [x] CP-as-sole-writer (the single writer that avoids Buzz's #3663
+      partial-replace race) — CP remains the sole COMMANDER.
+- [x] Test posture: unit parse/reject/rogue-ignored + integration rebuild
+      idempotency — same shapes, retargeted at membership events.
+- [x] **What 2.6's code loses on implementation:** kind 30181 + its
+      publish/query/merge + the `--relay-url` profile wiring + the profile
+      source of `rebuild` (rebuild survives, re-sourced). The #63
+      dormant-publish honesty becomes moot: this path needs NO relay-side
+      change at all.
+
+### Explicitly out of scope (unchanged from prior decisions)
+
+- The exec call as a relay event — still rejected (receipts post to the
+  channel; the request/response stays MCP-over-HTTP).
+- Secret delivery over NIP-44/17 gift-wrap — separate decision.
+- Upstream contribution to Buzz — off the table per this chunk's G-1
+  resolution; revisit only if a future need can't be expressed with
+  native primitives.
+
+### Sequencing
+
+G-A + allowlist check first (they can fail the design); then G-C's home;
+then implementation (channel ops → runner roster read → CP fold re-source
+→ remove 30181 surface → web-UI read path); live smoke against the real
+relay (the smoke 2.6 couldn't run now has a sanctioned route). Land
+before Chunk 3 builds per-service agents on the grant model — its
+onboarding flow (CPA creates runner → grants agent → agent works in Buzz)
+maps directly onto create-channel → add-member; building Chunk 3 on the
+withdrawn custom-kind model would be a second rework.

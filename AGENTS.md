@@ -86,6 +86,20 @@ RE-PROVISIONED fresh under `freehold-test.darcydev.net` (relay LXC 100 @
 delegation re-proven live under the domain; the old PVE-host CP stopped).
 
 
+## Next (documented)
+- **Chunk 2.6.1 — Runners-as-Channels, Grants-as-Membership** (locked plan
+  in roadmap §Chunk 2.6.1): supersedes Chunk 2.6's custom-kind wire format
+  (30181 withdrawn — the relay's hardcoded INGEST allowlist in
+  `ingest.rs::scopes()` refuses it, NOT the ALL_KINDS registry). G-1
+  resolved = **native-kinds-only** (fork + upstream rejected; zero Buzz
+  changes). Mapping: runner = private NIP-29 channel, grant = channel
+  member, the runner's whitelist = its own relay-SIGNED 39002 roster; the
+  CP drives membership via buzz-admin on the relay-admin runner (CP cannot
+  self-author membership writes, §3.2). Gates: G-A headless buzz-admin
+  drive, G-B grant-implies-audit-read (redacted receipts only), G-C
+  rotation/status home pending the 39000/39001 allowlist check. Carryover:
+  fold/rebuild architecture + CP-sole-commander + test posture.
+
 ## Navigation
 
 - `VISION.md` — narrative, single source of truth for the "why".
