@@ -5,14 +5,16 @@ AI-agent-operated — that lands a Proxmox VE / VPS + Kubernetes stack with Buzz
 control plane and a skill framework that installs and configures self-hosted OSS. The agent
 is the wall-breaker: you don't manage servers, you *ask*.
 
-**Status: Chunk 1 (POC) implemented — phases A–G merged, H (test/promote) next.**
-The engine room is proven standalone before Buzz (Chunk 2) and Kubernetes (MVP) come in:
-identity + MCP skeleton (A), secret provisioner — seal/ship/rotate/revoke, no master key
-(B), SSH + Vultr + B2 connectors (C), coarse grants — signed calls only (D), the scripted
-orchestrator CPA stand-in (E), the local admin/ops web console (F), and the acceptance
-script that proves it all hermetic on loopback (G). Phase H is operator work on real
-hardware (old-laptop Proxmox as an SSH target, then home dogfood) — no code changes
-expected unless the test surfaces fixes.
+**Status: Chunk 1 (engine room) merged; Chunk 2 live — the runner lifecycle is
+runners-as-NIP-29-channels (Chunk 2.6.1), implemented and LIVE-VERIFIED against a stock
+buzz relay (no custom kinds, no buzz patch; G-1 resolved = native-kinds-only).**
+Chunk 1 proved the engine room standalone: identity + MCP skeleton (A), secret provisioner
+— seal/ship/rotate/revoke, no master key (B), SSH + Vultr + B2 connectors (C), coarse
+grants — signed calls only (D), the scripted orchestrator CPA stand-in (E), the local
+admin/ops web console (F), and the acceptance script that proves it all hermetic on
+loopback (G). Chunk 2 added the relay scope end-to-end: bootstrap-provisioned LXCs under a
+domain identity, NIP-98 console auth (operator logs in with their own nsec), encrypted
+memory (30174), delegation, and a runner lifecycle proven live against a real buzz relay.
 
 ## Design in one paragraph
 
@@ -66,10 +68,12 @@ control-plane/        freehold-control-plane — the engine room
   src/web.rs          Phase F: loopback admin/ops web console (axum) — services at a
                       glance with LIVE readiness, and provision/rotate/revoke/grant
                       management. Not chat (Buzz owns conversation).
-  src/main.rs         CLI: provision / rotate-secret / revoke / list / grant / agent-create /
-                      serve (the web console)
-orchestrator/         freehold-orchestrator — the scripted CPA stand-in (E): a signed
-                      MCP client + onboard/readiness/exec/demo flows
+  src/main.rs         CLI: provision / rotate-secret / revoke / grant / revoke-grant /
+                      list / adopt / rebuild / identity / agent-create / serve (web console)
+orchestrator/         freehold-orchestrator — the `freehold` CLI: a signed MCP client +
+                      the world-bring-up drivers (bootstrap proxmox-lxc / vultr-vps /
+                      hetzner-vps, deploy-relay, deploy-cp, relay-member, console-login)
+                      and the agent surface (onboard/exec/demo, memory, delegate)
 testkit/              freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
                       an in-process russh sshd (shared by the connector tests)
 acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G): 9 checks,
@@ -112,8 +116,11 @@ cargo run -p freehold-runner -- serve         # MCP over HTTP, default 127.0.0.1
 
 The runner refuses non-loopback binds and non-loopback Origins (DNS-rebinding guard). Every
 `exec`/`config`/`status`/`snapshot` call must be signed by a GRANTED agent pubkey or it
-fails closed — the `control-plane grant <runner> <pubkey>` whitelist lives in the shipped
-package and is re-read from disk per call.
+fails closed. The whitelist has two sources: the shipped package (re-read from disk per
+call, `control-plane grant <runner> <pubkey>` with no relay configured) or — Chunk 2.6.1 —
+the runner's OWN channel roster on the relay (`--relay-url` + `--relay-pubkey`): grants ARE
+channel membership, read live per call from the relay-signed kind-39002 snapshot, so a
+revoke lands without a restart.
 
 ### The console: provision a service, watch it go green (the F flow)
 
@@ -185,41 +192,209 @@ cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
   --steps steps.json   # [{target, cmd, secrets?, timeout_s?}]
 
-# C2/A2: bootstrap-provision a target through a provisioning runner (runner-direct)
-#   --vmid is OPTIONAL (the driver picks the next free cluster id); sizing
-#   --rootfs-gb 16 (default) / --memory-mb 2048 (default) fit the relay stack.
-cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --name relaybox \
+# World bring-up, one step at a time (every command routes through the
+# provisioning runner — the workstation never holds a PVE credential itself).
+#   bootstrap: create + start + verify a fresh LXC via pct on the PVE host,
+#   install docker+compose in the guest, then BLOCK on the A4 domain gate
+#   (the domain must resolve to the target IP or the operator's proxy).
+#   --role relay|cp derives the LXC name from --domain; pass --lxc-ip/--lxc-gw
+#   for a STATIC guest address (cloud DHCP won't lease to LXC veths).
+cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --role relay \
+  --vmid 100 --lxc-ip <lan-ip>/24 --lxc-gw <lan-gw> --domain <relay-domain> \
+  --operator-pubkey <your-64-hex> --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
+
+cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --role cp \
+  --vmid 102 --lxc-ip <lan-ip>/24 --lxc-gw <lan-gw> --domain <relay-domain> \
+  --operator-pubkey <your-64-hex> --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
+
+#   deploy-cp: ship the control-plane binary (base64 chunks) + a co-located
+#   runner package into the cp LXC, start serve (console identity is MINTED
+#   ON THE BOX — a keypair is never shipped), adopt + self-grant the runner.
+#   --admin whitelist (NIP-98) relaxes the loopback-only bind guard.
+cargo run -p freehold-orchestrator -- deploy-cp --target proxmox-box --lxc 102 \
+  --binary target/release/control-plane --runner-binary target/release/runner \
+  --runner-package ./.freehold/runner/proxmox-box-ish --bind 0.0.0.0:8080 \
+  --relay-url https://<relay-domain> --operator-pubkey <your-64-hex> \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
-  --runner-pubkey <runner-nostr>    # arch-matched template ensure (pveam, idempotent) + pct on the PVE host; docker+compose installed in the guest
+  --runner-pubkey <runner-nostr>
 
-# C2/B: deploy the Buzz relay onto the target (docker gate -> bundle -> compose -> liveness)
-#   --owner-pubkey is REQUIRED (written to RELAY_OWNER_PUBKEY; the relay refuses
-#   to start with CHANGE_ME placeholders). --lxc <vmid> deploys INTO the container.
-cargo run -p freehold-orchestrator -- deploy-relay --addr 127.0.0.1:8787 \
-  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
-  --target proxmox-box --name relay-box --http-port 3000 \
-  --owner-pubkey <64-hex-owner> --relay-url http://192.168.30.248:3000 [--lxc 100] \
-  --operator-pubkey <your-64-hex>  # invite the operator / seed console admin
-# C1: deploy the control plane onto the box in OPERATE mode (loopback-only).
-# The box GENERATES its own identity (a keypair is never shipped — the
-# runner logs every exec verbatim); --binary is a local release build.
-cargo run -p freehold-orchestrator -- deploy-cp --addr 127.0.0.1:8787 \
-  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
-  --target proxmox-box --binary target/release/control-plane \
-  --relay-url http://relay-box:3000
+#   deploy-relay: docker gate -> curl+tar bundle (pinned buzz ref) -> compose
+#   .env (BUZZ_DOMAIN/RELAY_URL = the domain, RELAY_OWNER_PUBKEY = the CP
+#   console, operator invite, local-CA TLS) -> compose up -> /_liveness.
+#   Run AFTER deploy-cp: --owner-pubkey is the freshly minted console pubkey.
+cargo run -p freehold-orchestrator -- deploy-relay --target proxmox-box --lxc 100 \
+  --owner-pubkey <fresh-console-pubkey> --operator-pubkey <your-64-hex> \
+  --domain <relay-domain> --relay-url https://<relay-domain> \
+  --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
+  --runner-pubkey <runner-nostr>
 
-# C2: add the box's fresh console pubkey as a relay member (via buzz-admin
-# in the relay LXC — the CP never holds the relay signing key).
-cargo run -p freehold-orchestrator -- relay-member --addr 127.0.0.1:8787 \
-  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
-  --pubkey <fresh-console-pubkey> --lxc 100
+#   relay-member: community membership is the SECOND layer (channel
+#   membership via 9000/9001 is not enough for relay queries). Add the fresh
+#   console pubkey / operator keys / runners / agents via buzz-admin in the
+#   relay LXC — the CP never holds the relay signing key.
+cargo run -p freehold-orchestrator -- relay-member --target proxmox-box --lxc 100 \
+  --pubkey <pubkey-or-operator-key> --addr 127.0.0.1:8787 \
+  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
 
-# D: relay-backed grants — the CP publishes grant lists (kind 30180) to the
-# relay; the runner reads them LIVE (--relay-url + --grant-author, the console
-# pubkey that signs the list; revokes land without a runner restart).
-FREEHOLD_RELAY_URL=http://<relay> cargo run -p freehold-control-plane -- grant my-runner <agent-pk>
-FREEHOLD_RELAY_URL=http://<relay> cargo run -p freehold-control-plane -- revoke-grant my-runner <agent-pk>
-cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner   --relay-url http://<relay> --grant-author <console-pk>
+#   console-login: the operator logs in with THEIR OWN nsec (NIP-98) — the
+#   key never leaves their machine. Works over the proxy (cp-<relay-domain>).
+cargo run -p freehold-orchestrator -- console-login \
+  --url https://cp-<relay-domain> --nsec nsec1...
+
+#   grants (Chunk 2.6.1): grants ARE channel membership. With FREEHOLD_RELAY_URL
+#   set, grant/revoke-grant publish put-user / remove-user to the runner's
+#   channel; the runner re-reads its relay-signed roster per call.
+FREEHOLD_RELAY_URL=https://<relay-domain> cargo run -p freehold-control-plane -- grant my-runner <agent-pk> --state-dir ./.freehold/control-plane
+FREEHOLD_RELAY_URL=https://<relay-domain> cargo run -p freehold-control-plane -- revoke-grant my-runner <agent-pk> --state-dir ./.freehold/control-plane
+
+#   a relay-configured runner (whitelist = its own channel roster, verified
+#   against the relay's pubkey):
+cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner \
+  --relay-url https://<relay-domain> --relay-pubkey <relay-signing-pubkey>
+
+#   rebuild (disposable CP): fold a respawned CP from the relay's
+#   runner-profile channel messages (kind 9, t=fh-profile) — deterministic +
+#   idempotent, author-gated (a fresh console reads nothing until re-admitted).
+cargo run -p freehold-control-plane -- rebuild --relay-url https://<relay-domain> \
+  --state-dir /tmp/fresh-cp
+```
+
+## Bootstrap flow (from zero to a live world)
+
+Every command routes through a **provisioning runner** (one `exec(cmd, target)` — the same
+primitive agents use), so the workstation never holds a PVE credential of its own: the
+runner's injected SSH key is the only door. The domain is identity (never an IP): the A4
+gate blocks until `--domain` resolves to the target or to the operator's proxy. Consoles
+**mint their identity on the box** (a keypair is never shipped); the relay runs under the
+domain with owner = the CP console.
+
+**The same story as a sequence:** four lifelines — operator, PVE host (where the runner
+lives), relay LXC, cp LXC. Solid arrows = commands (the runner executes them over SSH);
+dotted arrowheads = replies that end their command; dotted-open (async) = a report sent
+while the bootstrap call is still in flight through the A4 gate.
+
+```mermaid
+sequenceDiagram
+    participant OP as operator
+    participant PVE as "PVE host (runner)"
+    participant R as "relay LXC (new-relay only)<br/>attach flow reuses an existing relay"
+    participant C as cp LXC
+
+    OP->>PVE: bootstrap --role relay + cp (signed MCP via the runner)
+    PVE->>R: create + start + verify + docker+compose (relay LXC)
+    PVE->>C: create + start + verify + docker+compose (cp LXC)
+    PVE--)OP: assigned IPs reported — bootstrap still waiting on the A4 gate
+    Note over OP: operator maps domain.example to the LXC IP (DNS or proxy) — manual
+    OP->>OP: CLI waits until domain.example resolves (A4 gate)
+    OP->>PVE: gate passes — deploy-cp
+    PVE->>C: ship binaries · serve :8080 · mint console key · adopt runner
+    C-->>OP: console pubkey + cp-domain.example
+    OP->>PVE: gate passes — deploy-relay (owner = the console)
+    PVE->>R: fetch bundle · compose up · /_liveness
+    R-->>OP: relay live at domain.example
+    OP->>PVE: relay-member — operator + runners + agents pubkeys
+    PVE->>R: buzz-admin add-member (per pubkey)
+    OP->>C: console-login — own nsec (NIP-98)
+    C-->>OP: live world: relay + console wired
+```
+
+The reload path (`freehold rebuild --relay-url`) folds a respawned/rebuild CP from the
+relay's runner-profile channel messages (kind 9, `t=fh-profile`) — deterministic,
+idempotent, and author-gated.
+
+## Runner setup + grant (from credential to first exec)
+
+**What happens when a runner is first set up and an agent is granted:** the control plane
+generates the runner's identity, seals the credential TO the runner's key, ships a package
+with ciphertext + the runner's private key (recording only pubkeys + ciphertext — no
+plaintext, no master key), then creates the runner's private NIP-29 channel in the relay
+and members the runner. A grant **adds the agent to that channel**; the runner's whitelist
+is its own relay-signed roster, read per call.
+
+```mermaid
+sequenceDiagram
+    participant OP as operator
+    participant CP as control plane
+    participant RUN as "runner box (my-runner)"
+    participant BR as "box runner (proxmox-box)"
+    participant REL as buzz relay
+    participant AG as agent
+
+    OP->>CP: provision my-runner --kind ssh<br/>--address root@host (credential pasted)
+    CP->>CP: generate runner identity<br/>(Nostr + encryption keypairs)
+    CP->>CP: seal credential to the runner's<br/>encryption pubkey — ciphertext only
+    CP->>RUN: write the package onto the runner's box<br/>(identity.json + secrets.json — ciphertext, targets)
+    CP->>CP: record pubkeys + ciphertext in state.json<br/>(no plaintext, no private keys)
+    CP->>REL: create the runner's private channel (9007)<br/>h = sha256(runner pk) — owner = the console
+    CP->>REL: member the runner itself (9000 put-user)<br/>— the channel layer
+    CP->>BR: relay-member add — the runner's pubkey<br/>(community layer)
+    BR->>REL: buzz-admin add-member (kind 13534) —<br/>without it, roster reads 403
+    CP->>REL: publish the runner profile<br/>(kind-9 fh-profile message)
+    RUN->>RUN: runner serve --relay-url<br/>(whitelist = its own channel roster)
+    CP->>RUN: readiness probe (signed MCP)
+    RUN-->>CP: green
+    OP->>CP: grant my-runner agent-pubkey
+    alt relay configured (the channel flow)
+        CP->>REL: add the agent to the channel (9000 put-user)
+        REL->>REL: re-mint the roster (39002, relay-signed)
+        RUN->>REL: read own roster — agent is a member (per call)
+    else no relay (shipped-package grants)
+        CP->>RUN: re-ship the package with the new grant
+        RUN->>RUN: re-reads grants from the package (per call)
+    end
+    AG->>RUN: tools/call (signed) — first exec
+    RUN-->>AG: result (credential injected, output redacted)
+```
+
+With a relay, the grant is a channel membership write (`put-user`); without one, it is a
+package re-ship — both land without a runner restart, and revoke is the inverse
+(`remove-user` / re-ship minus the grant). Membership is TWO layers: the channel (9000)
+grants the whitelist, but the runner also needs COMMUNITY membership (relay-member →
+buzz-admin, kind 13534) before ANY of its relay reads work — non-members get
+`403 relay_membership_required` and the runner fails closed. The community add is driven
+through the box runner (proxmox-box, the provisioning/relay-admin runner who holds the
+credential into the relay LXC), not by my-runner itself.
+
+## Runtime: one exec call (runner → exec → grant)
+
+The data path behind any agent action: an agent signs a call, the runner verifies the
+signature AND the grant before touching anything, secrets resolve BY NAME from the sealed
+package (decrypt in memory, forget), and the op is audited. Grants are read FRESH per call —
+from the shipped package, or live from the runner's own relay-signed roster when a relay is
+configured — so `grant`/`revoke` land without a runner restart.
+
+**What happens on one exec call:** an agent's signed call reaches the runner, which
+verifies the signature and the grant before decrypting the credential by name and running
+the command on the target — the whitelist is read fresh per call (package, or the relay
+roster when configured), so revokes land without a restart. Solid arrows = calls; dotted
+arrowheads = replies; dotted-open = detached (the audit publish never delays the exec).
+
+```mermaid
+sequenceDiagram
+    participant AG as agent
+    participant R as runner
+    participant REL as buzz relay
+    participant T as target
+
+    AG->>R: tools/call — signed (runner|ts|body)
+    R->>R: verify signature + audience
+    alt whitelist: relay roster (--relay-url + --relay-pubkey)
+        R->>REL: read own channel roster (kind 39002, #d)
+        REL-->>R: members — relay-signed
+    else whitelist: shipped package (no relay)
+        R->>R: grants from secrets.json — re-read per call
+    end
+    alt not granted
+        R-->>AG: denied (-32001) — fail closed
+    else granted
+        R->>R: resolve secret by name · decrypt in memory · forget
+        R->>T: exec(cmd) — credential injected, output redacted
+        T-->>R: output
+        R-->>AG: result
+        R--)REL: audit 48001 (detached)
+    end
 ```
 
 ## Roadmap

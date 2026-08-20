@@ -206,5 +206,5 @@ The community is resolved from the REQUEST HOST, not from a config knob alone:
 Consequence (POC): an IP-hosted community IS IP-identity. Bootstrap must force a domain from
 event zero (A4 gate) and clients must connect by the domain — the strict host map then
 REFUSES IP connects, which is the desired enforcement. The first live deploy was IP-anchored
-(ws://192.168.30.248:3000) and is treated as disposable: killed + re-provisioned under a
+(ws://<lan-test-ip>:3000) and is treated as disposable: killed + re-provisioned under a
 domain at the fresh-run re-test.

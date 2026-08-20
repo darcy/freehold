@@ -54,7 +54,7 @@ DECISION (post-Phase-D review): freehold does NOT patch buzz — relay-grants
 grant flow remains the shipped-package one (web console UI +
 `control-plane grant` / `revoke-grant` / `revoke`, re-shipped and re-read by
 the runner per call — revoke lands without a restart). D2 (membership records on the relay) is partially
-live under the DOMAIN community (`freehold-test.darcydev.net`, operator
+live under the DOMAIN community (`<relay-domain>`, operator
 nginx on the tailnet forwards the hostname to the relay LXC — the relay's
 strict host map makes the domain the only door; deploy-relay writes
 BUZZ_DOMAIN/RELAY_URL from --relay-url / --domain; TLS rides the proxy, or
@@ -86,7 +86,7 @@ workstation). Bootstrap REQUIRES a domain (identity) with a blocking resolution 
 (A4); TLS = local CA on the domain by default, LE DNS-01 with a provider key; console
 auth = NIP-98 operator login, admin seeded by --operator-pubkey; the bind guard becomes
 authn-conditional. The live IP-anchored relay community WAS killed and the full stack
-RE-PROVISIONED fresh under `freehold-test.darcydev.net` (relay LXC 100 @
+RE-PROVISIONED fresh under `<relay-domain>` (relay LXC 100 @
 192.168.30.238:3000 behind the operator's tailnet nginx; CP in its own LXC 102 @
 192.168.30.254:8080; console admin = the operator's new key b2ab89...; memory +
 delegation re-proven live under the domain; the old PVE-host CP stopped).
