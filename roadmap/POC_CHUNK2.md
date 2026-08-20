@@ -628,13 +628,17 @@ gated exactly like grants.
 
 ## Chunk 2.6.1 — Runners-as-Channels, Grants-as-Membership (supersedes 2.6's wire format)
 
-**Status:** DOCUMENTED (locked plan; implementation deferred). Supersedes
-Chunk 2.6's custom-kind wire format (RUNNER_PROFILE 30181 / would-be
-RUNNER_GRANT). Resolves G-1: **native-kinds-only**. Zero changes to Buzz —
-preserves the locked "freehold does NOT patch buzz" decision. Fork:
-rejected (we don't patch Buzz). Upstream contribution: rejected for OUR
-critical path (Block's PR/review timeline as a dependency on the
-foundation Chunk 3 builds on — not acceptable).
+**Status:** IMPLEMENTED, hermetic-VERIFIED. Supersedes Chunk 2.6's
+custom-kind wire format (RUNNER_PROFILE 30181 / would-be RUNNER_GRANT —
+both withdrawn; the 30180/30181 publish/query/merge surfaces are gone).
+Resolves G-1: **native-kinds-only**. Zero changes to Buzz — preserves the
+locked "freehold does NOT patch buzz" decision. Fork: rejected (we don't
+patch Buzz). Upstream contribution: rejected for OUR critical path
+(Block's PR/review timeline as a dependency on the foundation Chunk 3
+builds on — not acceptable). LIVE gates (G-A, the ingest-allowlist read,
+the 39002 read path on a real relay) remain OPEN — hermetic tests model
+the NIP-29 contract; the live relay has not been re-touched from this
+workstation (no SSH path).
 
 ### Why native-kinds-only is the resolution
 
@@ -732,7 +736,64 @@ relay signs the resulting roster.
   resolution; revisit only if a future need can't be expressed with
   native primitives.
 
-### Sequencing
+### Implemented (this chunk)
+
+- `core` — NIP-29 kinds (9007 create / 9000 put-user / 9001 remove-user /
+  39000 group metadata / 39002 roster); `runner_channel_id` = sha256(runner
+  pubkey) (deterministic — the runner self-computes its channel for the
+  whitelist read); `create_runner_channel`, `put_user`, `remove_user`,
+  `publish_runner_meta` (kind 39000, same profile schema as 2.6's 30181),
+  `query_runner_metas` (author-gated fold, newest per h wins), and
+  `query_channel_roster` (39002 filtered by the runner's own h, verified
+  LOCAL vs the relay pubkey — only the relay mints rosters; absent/empty =
+  deny). The 30180/30181 custom-kind publish/query/merge paths were
+  DELETED (clean cutover — no dormant shim).
+- `testkit` — the fake relay now EXECUTES the channel semantics: 9007
+  create (creator = owner + auto-member; idempotent re-create), 9000/9001
+  owner-gated membership commands re-publishing a RELAY-SIGNED 39002
+  roster, client-authored 39002 refused, and non-member roster reads get
+  `403 relay_membership_required` (the LIVE enforcement). Fixture relay
+  keypair (`relay_pubkey()` = the runner-side trust anchor).
+- `control-plane` — provision/adopt: create + member the runner + meta;
+  grant/revoke-grant: put-user/remove-user; rotate: meta `rotated_at`
+  flip; revoke: remove the RUNNER from its own roster (the enforcement
+  point — its whitelist read fails closed) + best-effort package grants +
+  revoked meta; `rebuild` folds kind-39000 metas (same fold/rebuild
+  guarantees, re-sourced). Web UI: the console's relay scope persists
+  (`serve --relay-url/--relay-pubkey` → state.json); every lifecycle
+  action syncs the channel when configured, and `GET
+  /api/runner/<name>/channel` shows the operator the profile + roster
+  (verified vs the relay pubkey) + recent channel messages WITHOUT the
+  operator being a member (CP reads on its behalf).
+- `runner` — the relay whitelist is the runner's OWN channel roster read
+  fresh per call (`--relay-pubkey` replaces `--grant-author` as the trust
+  anchor — the relay, not the console, signs the whitelist now), fail-
+  closed as before.
+- Tests: core unit (meta newest-wins + rogue-author-ignored; roster
+  newest-wins + rogue-minted-ignored) + integration (channel sync → meta
+  roundtrip + runner membership; revoke flips meta AND cuts the runner off
+  its own roster; rogue 39000 clobber attempt ignored; grant/revoke are
+  membership commands with a live roster read-back; rebuild
+  folds idempotently; runner grants live + revoke-without-restart; audit
+  publish keeps working over a roster-configured relay). Full workspace
+  green, clippy 0, fmt clean.
+
+### Remaining (live gates — need relay access, not code)
+
+- G-A: confirm the CP can effect 9007/9000/9001 headlessly through the
+  live relay path (the hermetic model enforces owner-gated membership; the
+  real buzz bridge / buzz-admin route from BUZZ_SURFACE §3.2 must be
+  verified end-to-end).
+- Ingest-allowlist read: confirm stock buzz `scopes()` accepts 9007/9000/
+  9001/39000 (the doc's G-C — rotation/status live in 39000; if metadata
+  is refused, the pinned-message fallback carries it) and that 39002
+  roster reads resolve for members.
+- Audit receipts as channel messages (kind 9) + G-B redaction: DESIGNED in
+  the mapping table, NOT yet posted — the D5 48001 publish stays operational
+  until the channel read/write surface is live-verified; redacting receipts
+  before posting is a release gate on this row.
+
+### Sequencing note
 
 G-A + allowlist check first (they can fail the design); then G-C's home;
 then implementation (channel ops → runner roster read → CP fold re-source

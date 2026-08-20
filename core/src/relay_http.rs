@@ -1,19 +1,28 @@
-//! Relay HTTP bridge access (Phase D — grants on the relay).
+//! Relay HTTP bridge access (Chunk 2.6.1 — runners as NIP-29 channels).
 //!
 //! The buzz HTTP bridge (BUZZ_SURFACE §4) requires NIP-98 auth on `/events`
-//! and `/query`. This module owns the two operations the grant port needs:
-//! reading a runner's CURRENT grant list (kind 30180, addressable,
-//! `d`-tag = runner pubkey — a new event with the same d-tag REPLACES the
-//! list, so revocation never appends history) and publishing it.
+//! and `/query`. The runner lifecycle + grants live on NATIVE NIP-29
+//! machinery (no custom kind, no ingest patch — G-1 resolved):
+//!
+//! - A runner IS a private channel: `h` = sha256(runner nostr pubkey)
+//!   (deterministic — the runner self-computes its channel id).
+//! - The CP (console) creates the channel (kind 9007) and is the owner;
+//!   it adds the runner + granted agents as members (kind 9000 put-user,
+//!   kind 9001 remove-user for revoke). The relay EXECUTES membership and
+//!   re-publishes the RELAY-SIGNED roster (kind 39002, p-tags = members).
+//! - The runner's whitelist = its own roster: one 39002 query, verified
+//!   locally against the relay pubkey (the roster's trust anchor).
+//! - The runner's profile (kind/address/status/secret NAME) is the channel's
+//!   group metadata (kind 39000, replaceable per (author, h)) — the fold a
+//!   respawned CP replays ("disposable CP").
 //!
 //! Fail-closed contract: any query failure is an Err; callers (the runner)
 //! treat it as "no grants" — the relay is authoritative once configured.
-//!
-//! The kind lives in the addressable range (30000–39999, NIP-16 replaceable)
-//! per BUZZ_SURFACE §5/§9: grants are CURRENT STATE, so a revoke must
-//! REPLACE, not append (an append-only kind would fail-stale on revoke).
 
-use crate::nip98::{GRANTS_KIND, RUNNER_PROFILE_KIND, nip98_auth};
+use crate::nip98::{
+    CHANNEL_CREATE_KIND, GROUP_MEMBERS_KIND, GROUP_META_KIND, PUT_USER_KIND, REMOVE_USER_KIND,
+    nip98_auth,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -47,10 +56,11 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// A runner's current lifecycle snapshot (kind 30181, addressable):
-/// identity pubkeys, connector kind/address, status, and the secret NAME
-/// only — never material. The relay holds no secrets; the profile is the
-/// rebuildable projection a respawned CP folds from.
+/// A runner's current lifecycle snapshot — carried as the channel's group
+/// METADATA (kind 39000, replaceable per (author, h)): identity pubkeys,
+/// connector kind/address, status, and the secret NAME only — never
+/// material. The relay holds no secrets; the meta is the rebuildable
+/// projection a respawned CP folds from.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunnerProfile {
     pub name: String,
@@ -70,9 +80,9 @@ pub struct RunnerProfile {
     pub rotated_at: Option<u64>,
 }
 
-/// Parse the content of a stored kind-30181 runner-profile event.
-/// Rejects shape drift loudly (a malformed winner fails the query closed,
-/// mirroring the grants contract).
+/// Parse the content of a stored kind-39000 runner-metadata event.
+/// Rejects shape drift loudly (a malformed winner fails the query closed —
+/// only the trusted console author could have written it).
 pub fn parse_profile_content(content: &str) -> Result<RunnerProfile, String> {
     let v: Value = serde_json::from_str(content).map_err(|e| format!("profile content: {e}"))?;
     let get = |k: &str| -> Result<String, String> {
@@ -107,22 +117,147 @@ pub fn parse_profile_content(content: &str) -> Result<RunnerProfile, String> {
     Ok(profile)
 }
 
-/// Publish (or replace) a runner's lifecycle snapshot (kind 30181,
-/// `d`-tag = the runner's nostr pubkey). Same d-tag + newer created_at =
-/// replacement: provision, adopt, rotate (rotated_at flip), and revoke
-/// (status flip) all re-publish the SAME d-tag — nothing appends history.
-pub fn publish_runner_profile(
+/// Deterministic channel id for a runner: sha256(runner nostr pubkey),
+/// 64 lowercase hex — the `h` tag of the runner's private NIP-29 channel.
+/// Pure function of the pubkey: the runner self-computes its channel id for
+/// the roster query (its whitelist) with no CP round-trip, and a rebuilt CP
+/// re-derives it for every folded record.
+pub fn runner_channel_id(runner_nostr_pubkey: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(runner_nostr_pubkey.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Create (or re-assert) the runner's private channel (kind 9007, NIP-29
+/// v2): tags `h` + `name` + `visibility=private` — the exact shape the live
+/// delegation flow proved (BUZZ_SURFACE §9.7, minus the `open` visibility).
+/// The creator (the CP console) is the owner and auto-member of every
+/// runner channel it makes. Idempotent: the relay treats a re-create of an
+/// existing `h` as a no-op (membership unchanged), so re-provision +
+/// rebuild converge.
+pub fn create_runner_channel(
+    relay_url: &str,
+    console_secret: &[u8; 32],
+    runner_nostr_pubkey: &str,
+    name: &str,
+) -> Result<(), String> {
+    let h = runner_channel_id(runner_nostr_pubkey);
+    let ts = now_secs();
+    let (pubkey, id, sig) = crate::nip98::sign_event(
+        console_secret,
+        CHANNEL_CREATE_KIND,
+        ts,
+        vec![
+            vec!["h".into(), h.clone()],
+            vec!["name".into(), format!("#runner-{name}")],
+            vec!["visibility".into(), "private".into()],
+        ],
+        "",
+    )
+    .map_err(|e| e.to_string())?;
+    let event = serde_json::json!({
+        "id": id,
+        "pubkey": pubkey,
+        "created_at": ts,
+        "kind": CHANNEL_CREATE_KIND,
+        "tags": [["h", h], ["name", format!("#runner-{name}")], ["visibility", "private"]],
+        "content": "",
+        "sig": sig,
+    });
+    publish_event_json(relay_url, console_secret, &event.to_string())
+}
+
+/// Add a member to a runner channel (kind 9000 put-user, NIP-29): the
+/// granted AGENT (or the runner itself at provision). Idempotent — adding
+/// an existing member is a no-op. The relay owns membership (the CP cannot
+/// self-author a membership write; it issues the command and the relay
+/// executes + re-publishes the relay-signed roster).
+pub fn put_user(
+    relay_url: &str,
+    console_secret: &[u8; 32],
+    runner_nostr_pubkey: &str,
+    member_pubkey: &str,
+) -> Result<(), String> {
+    membership_command(
+        relay_url,
+        console_secret,
+        PUT_USER_KIND,
+        runner_nostr_pubkey,
+        member_pubkey,
+    )
+}
+
+/// Remove a member from a runner channel (kind 9001 remove-user):
+/// grant revocation, and the cut-off (removing the RUNNER itself leaves it
+/// unable to read its roster — fail-closed deny).
+pub fn remove_user(
+    relay_url: &str,
+    console_secret: &[u8; 32],
+    runner_nostr_pubkey: &str,
+    member_pubkey: &str,
+) -> Result<(), String> {
+    membership_command(
+        relay_url,
+        console_secret,
+        REMOVE_USER_KIND,
+        runner_nostr_pubkey,
+        member_pubkey,
+    )
+}
+
+/// Shared 9000/9001 command publish: `h` = the runner's channel, `p` = the
+/// member being added/removed. The relay verifies the caller is the channel
+/// owner, applies the change, and re-publishes the roster.
+fn membership_command(
+    relay_url: &str,
+    console_secret: &[u8; 32],
+    kind: u32,
+    runner_nostr_pubkey: &str,
+    member_pubkey: &str,
+) -> Result<(), String> {
+    let h = runner_channel_id(runner_nostr_pubkey);
+    let ts = now_secs();
+    let (pubkey, id, sig) = crate::nip98::sign_event(
+        console_secret,
+        kind,
+        ts,
+        vec![
+            vec!["h".into(), h.clone()],
+            vec!["p".into(), member_pubkey.into()],
+        ],
+        "",
+    )
+    .map_err(|e| e.to_string())?;
+    let event = serde_json::json!({
+        "id": id,
+        "pubkey": pubkey,
+        "created_at": ts,
+        "kind": kind,
+        "tags": [["h", h], ["p", member_pubkey]],
+        "content": "",
+        "sig": sig,
+    });
+    publish_event_json(relay_url, console_secret, &event.to_string())
+}
+
+/// Publish (or replace) the runner's profile as the channel's group
+/// metadata (kind 39000, `h` = the runner's channel id). Same h + newer
+/// created_at = replacement: provision, adopt, rotate (rotated_at flip), and
+/// revoke (status flip) all re-publish the SAME h — nothing appends history.
+pub fn publish_runner_meta(
     relay_url: &str,
     console_secret: &[u8; 32],
     profile: &RunnerProfile,
 ) -> Result<(), String> {
+    let h = runner_channel_id(&profile.nostr_pubkey);
     let ts = now_secs();
     let content = serde_json::to_string(profile).map_err(|e| e.to_string())?;
     let (pubkey, id, sig) = crate::nip98::sign_event(
         console_secret,
-        RUNNER_PROFILE_KIND,
+        GROUP_META_KIND,
         ts,
-        vec![vec!["d".into(), profile.nostr_pubkey.clone()]],
+        vec![vec!["h".into(), h.clone()], vec!["d".into(), h.clone()]],
         &content,
     )
     .map_err(|e| e.to_string())?;
@@ -130,57 +265,41 @@ pub fn publish_runner_profile(
         "id": id,
         "pubkey": pubkey,
         "created_at": ts,
-        "kind": RUNNER_PROFILE_KIND,
-        "tags": [["d", profile.nostr_pubkey]],
+        "kind": GROUP_META_KIND,
+        "tags": [["h", h], ["d", h]],
         "content": content,
         "sig": sig,
     });
     publish_event_json(relay_url, console_secret, &event.to_string())
 }
 
-/// Fetch the CURRENT lifecycle snapshot of EVERY runner from the relay
-/// (kind 30181). Author-gated + locally signature-verified like grants; per
-/// runner pubkey the NEWEST trusted event wins (replaceable semantics), so
-/// the result is the deterministic projection a respawned CP folds from.
-/// Sorted by name for a stable fold.
-pub fn query_runner_profiles(
+/// Fetch the CURRENT profile of EVERY runner from the relay (kind 39000).
+/// Author-gated + locally signature-verified like the grant path; per
+/// channel (`h` tag) the NEWEST trusted event wins (replaceable semantics),
+/// so a revoke REPLACES, never appends. Sorted by name for a stable fold —
+/// the projection a respawned CP replays.
+pub fn query_runner_metas(
     relay_url: &str,
     expected_author: &str,
     auth_secret: &[u8; 32],
 ) -> Result<Vec<RunnerProfile>, String> {
-    let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
     let filters = serde_json::json!([{
-        "kinds": [RUNNER_PROFILE_KIND],
+        "kinds": [GROUP_META_KIND],
         "limit": 1000,
     }]);
-    let headers = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
-    let mut resp = agent()
-        .post(&url)
-        .header("Authorization", &headers)
-        .header("Content-Type", "application/json")
-        .send(filters.to_string())
-        .map_err(|e| format!("profile query request failed: {e}"))?;
-    let body = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("profile query read: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "profile query returned HTTP {}: {body}",
-            resp.status()
-        ));
-    }
-    let events: Vec<Value> =
-        serde_json::from_str(&body).map_err(|e| format!("profile query parse: {e}: {body}"))?;
-    merge_runner_profiles(&events, expected_author)
+    let events = query_events(relay_url, auth_secret, filters)?;
+    merge_runner_metas(&events, expected_author)
 }
 
 /// The trust + dedupe core shared by the HTTP query and its tests: keep
 /// only events by `expected_author` (the console) whose Schnorr signature
-/// verifies locally, then per runner pubkey (d-tag) keep the NEWEST —
+/// verifies locally, then per channel (`h` tag) keep the NEWEST —
 /// replaceable semantics, so a revoke REPLACES, never appends. Deterministic
-/// (sorted by name) — the fold a respawned CP replays.
-fn merge_runner_profiles(
+/// (sorted by name) — the fold a respawned CP replays. A meta without an `h`
+/// tag can't be attributed to a runner's channel (skip, warn); a malformed
+/// WINNER fails the fold closed (only the trusted author could have written
+/// it), a malformed non-winner warns and skips.
+fn merge_runner_metas(
     events: &[Value],
     expected_author: &str,
 ) -> Result<Vec<RunnerProfile>, String> {
@@ -191,28 +310,16 @@ fn merge_runner_profiles(
             continue;
         }
         let created_at = ev["created_at"].as_i64().unwrap_or(0);
-        let tags: Vec<Vec<String>> = ev["tags"]
-            .as_array()
-            .map(|t| {
-                t.iter()
-                    .map(|a| {
-                        a.as_array()
-                            .map(|x| {
-                                x.iter()
-                                    .filter_map(Value::as_str)
-                                    .map(String::from)
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let (tags, h) = parse_tags(ev);
+        let Some(h) = h else {
+            tracing::warn!(author, created_at, "runner meta missing h tag — skipped");
+            continue;
+        };
         let content = ev["content"].as_str().unwrap_or("");
         if crate::nip98::verify_event(
             author,
             created_at,
-            RUNNER_PROFILE_KIND,
+            GROUP_META_KIND,
             &tags,
             content,
             ev["sig"].as_str().unwrap_or(""),
@@ -222,49 +329,121 @@ fn merge_runner_profiles(
             tracing::warn!(
                 author,
                 created_at,
-                "runner profile event failed local signature verify — skipped"
+                "runner meta failed local signature verify — skipped"
             );
             continue;
         }
-        // The d-tag = the runner being profiled; a profile without one
-        // can't be attributed to a runner (skip, warn).
-        let Some(d) = tags
-            .iter()
-            .find(|t| t.first().is_some_and(|k| k == "d"))
-            .and_then(|t| t.get(1))
-        else {
-            tracing::warn!(author, created_at, "runner profile missing d-tag — skipped");
-            continue;
-        };
-        // Later (or same-second, later-inserted) event wins per runner.
-        if best.get(d).is_none_or(|(t, _)| created_at >= *t) {
+        // Later (or same-second, later-inserted) event wins per channel.
+        if best.get(&h).is_none_or(|(t, _)| created_at >= *t) {
             let profile = parse_profile_content(content)?;
-            best.insert(d.clone(), (created_at, profile));
+            best.insert(h, (created_at, profile));
         }
     }
-    Ok(best.into_values().map(|(_, p)| p).collect())
+    let mut out: Vec<RunnerProfile> = best.into_values().map(|(_, p)| p).collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
 }
 
-/// Parse the content of a stored kind-30180 grant event:
-/// `{"grants": ["<agent hex>", ...], "schema": 1}`.
-pub fn parse_grants_content(content: &str) -> Result<Vec<String>, String> {
-    let v: Value = serde_json::from_str(content).map_err(|e| format!("grant content: {e}"))?;
-    let grants = v
-        .get("grants")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "grant event content has no grants array".to_string())?;
-    grants
-        .iter()
-        .map(|g| {
-            let s = g
-                .as_str()
-                .ok_or_else(|| "grant entry is not a string".to_string())?;
-            if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("grant entry is not 64-hex: {s:?}"));
-            }
-            Ok(s.to_string())
+/// Parse a relay event's tags into (tag array, `h` tag value).
+fn parse_tags(ev: &Value) -> (Vec<Vec<String>>, Option<String>) {
+    let tags: Vec<Vec<String>> = ev["tags"]
+        .as_array()
+        .map(|t| {
+            t.iter()
+                .map(|a| {
+                    a.as_array()
+                        .map(|x| {
+                            x.iter()
+                                .filter_map(Value::as_str)
+                                .map(String::from)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
         })
-        .collect()
+        .unwrap_or_default();
+    let h = tags
+        .iter()
+        .find(|t| t.first().is_some_and(|k| k == "h"))
+        .and_then(|t| t.get(1))
+        .cloned();
+    (tags, h)
+}
+
+/// Read the runner's CURRENT roster (its exec whitelist) from the relay:
+/// kinds [39002] filtered by `#h` = the runner's own channel. The roster is
+/// RELAY-SIGNED — the trust anchor is `relay_pubkey` (the relay identity
+/// that mints membership snapshots), verified LOCALLY; newest per channel
+/// wins. Members = the `p` tags. An absent/empty roster = no members =
+/// fail-closed deny at the caller. Any query/verification failure is an Err.
+pub fn query_channel_roster(
+    relay_url: &str,
+    relay_pubkey: &str,
+    runner_nostr_pubkey: &str,
+    auth_secret: &[u8; 32],
+) -> Result<Vec<String>, String> {
+    let h = runner_channel_id(runner_nostr_pubkey);
+    let filters = serde_json::json!([{
+        "kinds": [GROUP_MEMBERS_KIND],
+        "#h": [h],
+        "limit": 100,
+    }]);
+    let events = query_events(relay_url, auth_secret, filters)?;
+    merge_roster(&events, relay_pubkey, &h)
+}
+
+/// Trust + dedupe core for rosters: keep only events authored by
+/// `relay_pubkey` whose Schnorr signature verifies locally (a rogue member
+/// cannot mint or clobber a roster — only the relay signs them), then per
+/// channel keep the NEWEST; members = the `p` tags, sorted for determinism.
+fn merge_roster(
+    events: &[Value],
+    relay_pubkey: &str,
+    channel_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut newest: Option<(i64, Vec<String>)> = None;
+    for ev in events {
+        let author = ev["pubkey"].as_str().unwrap_or("");
+        if author != relay_pubkey {
+            continue;
+        }
+        let created_at = ev["created_at"].as_i64().unwrap_or(0);
+        let (tags, h) = parse_tags(ev);
+        if h.as_deref() != Some(channel_id) {
+            continue;
+        }
+        let content = ev["content"].as_str().unwrap_or("");
+        if crate::nip98::verify_event(
+            author,
+            created_at,
+            GROUP_MEMBERS_KIND,
+            &tags,
+            content,
+            ev["sig"].as_str().unwrap_or(""),
+        )
+        .is_err()
+        {
+            tracing::warn!(
+                author,
+                created_at,
+                "roster failed local signature verify — skipped"
+            );
+            continue;
+        }
+        let members: Vec<String> = tags
+            .iter()
+            .filter(|t| t.first().is_some_and(|k| k == "p"))
+            .filter_map(|t| t.get(1).cloned())
+            .collect();
+        if newest.as_ref().is_none_or(|(t, _)| created_at >= *t) {
+            newest = Some((created_at, members));
+        }
+    }
+    let mut members = newest.map(|(_, m)| m).unwrap_or_default();
+    members.sort();
+    members.dedup();
+    Ok(members)
 }
 
 /// Shared bridge query primitive: POST /query with a filters ARRAY (the
@@ -294,110 +473,6 @@ pub fn query_events(
     serde_json::from_str(&body).map_err(|e| format!("query parse: {e}: {body}"))
 }
 
-/// Fetch the CURRENT grant list for a runner from the relay.
-/// NIP-98 auth (signer = the caller's secret), filter kind 30180 / max
-/// created_at, then match the `d`-tag to `runner_pubkey_hex`.
-pub fn query_grants(
-    relay_url: &str,
-    runner_pubkey_hex: &str,
-    expected_author: &str,
-    auth_secret: &[u8; 32],
-) -> Result<Vec<String>, String> {
-    // Wire: POST /query with a NIP-01 filter BODY (kinds/#d/limit) — the
-    // buzz bridge is POST-only (GET /query is 405). The #d filter means the
-    // runner's own events can't fall off a 100-row page of unrelated kinds.
-    let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
-    // Buzz /query takes an ARRAY of NIP-01 filters (raw_filters: Vec<Value>).
-    let filters = serde_json::json!([{
-        "kinds": [GRANTS_KIND],
-        "#d": [runner_pubkey_hex],
-        "limit": 100,
-    }]);
-    let headers = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
-    let mut resp = agent()
-        .post(&url)
-        .header("Authorization", &headers)
-        .header("Content-Type", "application/json")
-        .send(filters.to_string())
-        .map_err(|e| format!("grant query request failed: {e}"))?;
-    let body = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("grant query read: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "grant query returned HTTP {}: {body}",
-            resp.status()
-        ));
-    }
-    let events: Vec<Value> =
-        serde_json::from_str(&body).map_err(|e| format!("grant query parse: {e}: {body}"))?;
-
-    // Trust: only events by `expected_author` (the console/owner, D1's named
-    // grant publisher) whose Schnorr signature verifies LOCALLY are
-    // candidates. Addressable events are keyed (kind, author, d-tag) — a
-    // rogue member could otherwise publish {"grants":[self]} with a newer
-    // created_at and take over exec; the author gate is the trust anchor.
-    // Pick the NEWEST trusted candidate, then parse ONLY the winner — a
-    // malformed NON-winner warns and skips (it must never lock the runner
-    // out); a malformed winner fails closed (only the trusted author could
-    // have written it).
-    let mut best: Option<(i64, &Value)> = None;
-    for ev in events.iter() {
-        let author = ev["pubkey"].as_str().unwrap_or("");
-        if author != expected_author {
-            continue;
-        }
-        let created_at = ev["created_at"].as_i64().unwrap_or(0);
-        let tags: Vec<Vec<String>> = ev["tags"]
-            .as_array()
-            .map(|t| {
-                t.iter()
-                    .map(|a| {
-                        a.as_array()
-                            .map(|x| {
-                                x.iter()
-                                    .filter_map(Value::as_str)
-                                    .map(String::from)
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let content = ev["content"].as_str().unwrap_or("");
-        if crate::nip98::verify_event(
-            author,
-            created_at,
-            GRANTS_KIND,
-            &tags,
-            content,
-            ev["sig"].as_str().unwrap_or(""),
-        )
-        .is_err()
-        {
-            tracing::warn!(
-                author,
-                created_at,
-                "grant event failed local signature verify — skipped"
-            );
-            continue;
-        }
-        // Later event wins, INCLUDING on a created_at tie: the bridge returns
-        // events in insertion order, and a replace-publish in the same second
-        // otherwise wouldn't supersede the list it replaces (revokes would
-        // silently not land).
-        if best.is_none_or(|(t, _)| created_at >= t) {
-            best = Some((created_at, ev));
-        }
-    }
-    match best {
-        Some((_, winner)) => parse_grants_content(winner["content"].as_str().unwrap_or("")),
-        None => Ok(Vec::new()),
-    }
-}
-
 /// Publish an ALREADY-SIGNED Nostr event JSON to the bridge (POST /events,
 /// NIP-98 auth as `auth_secret`). The event bytes are exactly what the
 /// sender spooled — the relay copy and the local copy are the SAME event
@@ -422,55 +497,6 @@ pub fn publish_event_json(
             .unwrap_or_else(|_| "(unreadable body)".into());
         return Err(format!(
             "event publish returned HTTP {}: {body}",
-            resp.status()
-        ));
-    }
-    Ok(())
-}
-
-/// Publish (or replace) the runner's grant list on the relay as a
-/// kind-30180 event with `d`-tag = runner pubkey. Same d-tag + newer
-/// created_at = replacement (revocation shrinks the list; it never appends).
-pub fn publish_grants(
-    relay_url: &str,
-    console_secret: &[u8; 32],
-    runner_pubkey_hex: &str,
-    grants: &[String],
-) -> Result<(), String> {
-    let url = format!("{relay}/events", relay = relay_url.trim_end_matches('/'));
-    let auth = nip98_auth(console_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
-    let ts = now_secs();
-    let content = serde_json::json!({ "grants": grants, "schema": 1 }).to_string();
-    let (pubkey, id, sig) = crate::nip98::sign_event(
-        console_secret,
-        GRANTS_KIND,
-        ts,
-        vec![vec!["d".into(), runner_pubkey_hex.into()]],
-        &content,
-    )
-    .map_err(|e| e.to_string())?;
-    let event = serde_json::json!({
-        "id": id,
-        "pubkey": pubkey,
-        "created_at": ts,
-        "kind": GRANTS_KIND,
-        "tags": [["d", runner_pubkey_hex]],
-        "content": content,
-        "sig": sig,
-    });
-    let mut resp = agent()
-        .post(&url)
-        .header("Authorization", &auth)
-        .header("Content-Type", "application/json")
-        .send(event.to_string())
-        .map_err(|e| format!("grant publish request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let body = resp
-            .body_mut()
-            .read_to_string()
-            .unwrap_or_else(|_| "(unreadable body)".into());
-        return Err(format!(
-            "grant publish returned HTTP {}: {body}",
             resp.status()
         ));
     }
@@ -670,21 +696,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_grants_content_accepts_and_rejects() {
-        assert_eq!(
-            parse_grants_content(&format!(
-                r#"{{"grants":["{}"],"schema":1}}"#,
-                "a".repeat(64)
-            ))
-            .unwrap(),
-            vec!["a".repeat(64)]
-        );
-        assert!(parse_grants_content(r#"{"grants":[42]}"#).is_err());
-        assert!(parse_grants_content(r#"{"nope":1}"#).is_err());
-        assert!(parse_grants_content(r#"{"grants":["short"]}"#).is_err());
-    }
-
-    #[test]
     fn parse_profile_content_accepts_and_rejects() {
         let pk = "a".repeat(64);
         let enc = "b".repeat(64);
@@ -706,29 +717,14 @@ mod tests {
     }
 
     #[test]
-    fn profile_newest_wins_per_runner_and_rogue_author_is_ignored() {
-        // Three trusted events for two runners (runner A twice: active then
-        // revoked -> REPLACE), plus a rogue-author event for runner A with a
-        // NEWER timestamp -> must NOT win.
+    fn meta_newest_wins_per_channel_and_rogue_author_is_ignored() {
+        // Events for two channels (alpha twice: active then revoked ->
+        // REPLACE), plus a rogue-author event for alpha's channel with a
+        // NEWER timestamp -> must NOT win. The channel id is derived from
+        // the runner pubkey, NEVER the name — two runners with the same
+        // name would otherwise clobber each other's profile.
         let secret = [7u8; 32];
         let (author, _, _) = crate::nip98::sign_event(&secret, 1, 1, vec![], "").unwrap();
-        let mk = |p: &RunnerProfile, t: i64, who: &[u8; 32]| -> Value {
-            let content = serde_json::to_string(p).unwrap();
-            let (pk, id, sig) = crate::nip98::sign_event(
-                who,
-                RUNNER_PROFILE_KIND,
-                t,
-                vec![vec!["d".into(), p.nostr_pubkey.clone()]],
-                &content,
-            )
-            .unwrap();
-            serde_json::json!({
-                "id": id, "pubkey": pk, "created_at": t,
-                "kind": RUNNER_PROFILE_KIND,
-                "tags": [["d", p.nostr_pubkey]],
-                "content": content, "sig": sig,
-            })
-        };
         let a = RunnerProfile {
             name: "alpha".into(),
             kind: "ssh".into(),
@@ -740,30 +736,52 @@ mod tests {
             created_at: 1,
             rotated_at: None,
         };
-        // Distinct d-tag (nostr pubkey) — alpha and beta are different runners.
         let b = RunnerProfile {
             name: "beta".into(),
             nostr_pubkey: "b".repeat(64),
             ..a.clone()
         };
+        // Distinct runner pubkey -> distinct channel id (the h tag).
+        assert_ne!(
+            runner_channel_id(&a.nostr_pubkey),
+            runner_channel_id(&b.nostr_pubkey)
+        );
+
+        let mk = |p: &RunnerProfile, t: i64, who: &[u8; 32]| -> Value {
+            let content = serde_json::to_string(p).unwrap();
+            let h = runner_channel_id(&p.nostr_pubkey);
+            let (pk, id, sig) = crate::nip98::sign_event(
+                who,
+                GROUP_META_KIND,
+                t,
+                vec![vec!["h".into(), h.clone()], vec!["d".into(), h.clone()]],
+                &content,
+            )
+            .unwrap();
+            serde_json::json!({
+                "id": id, "pubkey": pk, "created_at": t,
+                "kind": GROUP_META_KIND,
+                "tags": [["h", h], ["d", h]],
+                "content": content, "sig": sig,
+            })
+        };
         let rogue = RunnerProfile {
             status: "revoked".into(),
             ..a.clone()
         };
-
         let mut events = vec![
             mk(&a, 10, &secret),
             mk(&b, 10, &secret),
             mk(&rogue, 999, &[1u8; 32]),
         ];
-        // Per-runner newest wins: push a REPLACED (revoked) alpha AFTER.
+        // Per-channel newest wins: push a REPLACED (revoked) alpha AFTER.
         let revoked = RunnerProfile {
             status: "revoked".into(),
             ..a.clone()
         };
         events.insert(2, mk(&revoked, 11, &secret));
 
-        let out = merge_runner_profiles(&events, &author).unwrap();
+        let out = merge_runner_metas(&events, &author).unwrap();
         assert_eq!(out.len(), 2);
         let alpha = out.iter().find(|p| p.name == "alpha").unwrap();
         assert_eq!(
@@ -771,5 +789,55 @@ mod tests {
             "newest alpha must win (replace, not append)"
         );
         assert!(out.iter().any(|p| p.name == "beta" && p.status == "active"));
+        // Deterministic fold: sorted by name regardless of event order.
+        assert_eq!(out[0].name, "alpha");
+        assert_eq!(out[1].name, "beta");
+    }
+
+    #[test]
+    fn roster_newest_wins_and_rogue_signed_roster_is_ignored() {
+        // The roster's trust anchor is the RELAY pubkey: only relay-authored
+        // (Schnorr-verified) events are candidates. A rogue member posting a
+        // NEWER "roster" granting themselves is ignored outright.
+        let relay_secret = [42u8; 32];
+        let (relay_pk, _, _) = crate::nip98::sign_event(&relay_secret, 1, 1, vec![], "").unwrap();
+        let mk = |who: &[u8; 32], t: i64, channel: &str, members: &[&str]| -> Value {
+            let tags: Vec<Vec<String>> = std::iter::once(vec!["h".into(), channel.into()])
+                .chain(members.iter().map(|m| vec!["p".into(), m.to_string()]))
+                .collect();
+            let (pk, id, sig) =
+                crate::nip98::sign_event(who, GROUP_MEMBERS_KIND, t, tags.clone(), "").unwrap();
+            serde_json::json!({
+                "id": id, "pubkey": pk, "created_at": t,
+                "kind": GROUP_MEMBERS_KIND,
+                "tags": tags,
+                "content": "", "sig": sig,
+            })
+        };
+        let (runner_pk, alice) = ("r".repeat(64), "a".repeat(64));
+        let channel = runner_channel_id(&runner_pk);
+        let rogue = [1u8; 32];
+        let (rogue_pk, _, _) = crate::nip98::sign_event(&rogue, 1, 1, vec![], "").unwrap();
+
+        let events = vec![
+            mk(&relay_secret, 10, &channel, &[&runner_pk, &alice]),
+            // Same channel: ROSTER REPLACE (revoke bob) — newest wins.
+            mk(&relay_secret, 11, &channel, &[&runner_pk]),
+            // A rogue "roster" with a NEWER timestamp, and a corrupted-signature
+            // relay-signed one — both ignored.
+            mk(&rogue, 999, &channel, &[&runner_pk, &rogue_pk]),
+        ];
+        let out = merge_roster(&events, &relay_pk, &channel).unwrap();
+        assert_eq!(out, vec![runner_pk.clone()]);
+        assert!(!out.contains(&alice), "alice revoked by the newer roster");
+        assert!(
+            !out.contains(&rogue_pk),
+            "rogue cannot mint a roster — only the relay signs them"
+        );
+
+        // Different channel: nothing leaks across.
+        let other = runner_channel_id(&("x".repeat(64)));
+        let out = merge_roster(&events, &relay_pk, &other).unwrap();
+        assert!(out.is_empty());
     }
 }

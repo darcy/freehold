@@ -52,22 +52,23 @@ const LOOPBACK_ORIGINS: [&str; 6] = [
 
 /// Everything the runner server needs: identity (decrypt + audit signing),
 /// the ciphertext secret package, the state dir for the audit log, and the
-/// relay this runner belongs to (Phase D: grants are read LIVE from the
-/// relay once configured; None = the shipped-package grants are the source,
-/// so loopback-only/local runners keep working before any relay exists).
+/// relay this runner belongs to (Chunk 2.6.1: the whitelist is read LIVE
+/// from the runner's OWN NIP-29 channel roster once configured; None = the
+/// shipped-package grants are the source, so loopback-only/local runners
+/// keep working before any relay exists).
 #[derive(Clone)]
 pub struct RunnerContext {
     pub identity: Identity,
     pub package: SecretPackage,
     pub state_dir: PathBuf,
-    /// Relay grants source (Phase D): when set, grants are read live as
-    /// kind-30180 events by `expected_author` (the console/owner pubkey —
-    /// the grant list's trust anchor) instead of the shipped package.
+    /// Relay whitelist source (Chunk 2.6.1): when set, grants are the
+    /// RELAY-SIGNED roster of the runner's own channel (kind 39002,
+    /// `h` = sha256 of the runner pubkey) instead of the shipped package.
     pub relay_url: Option<String>,
-    /// The grant-list AUTHOR pubkey (64-hex) — REQUIRED when relay_url is
-    /// set (fail-fast at serve; a grant list accepted from any member would
-    /// be a self-admission hole).
-    pub grant_author: Option<String>,
+    /// The RELAY's nostr pubkey (64-hex) — the roster's trust anchor —
+    /// REQUIRED when relay_url is set (fail-fast at serve; a roster
+    /// accepted from any other author would be a self-admission hole).
+    pub relay_pubkey: Option<String>,
 }
 
 #[derive(Clone)]
@@ -112,11 +113,11 @@ pub async fn serve(
              until Phase D — bind 127.0.0.1"
         ));
     }
-    if ctx.relay_url.is_some() && ctx.grant_author.is_none() {
+    if ctx.relay_url.is_some() && ctx.relay_pubkey.is_none() {
         return Err(anyhow::anyhow!(
-            "--grant-author is REQUIRED when --relay-url is set (the grant \
-             list's trust anchor; accepting grants from any member is a \
-             self-admission hole)"
+            "--relay-pubkey is REQUIRED when --relay-url is set (the roster's \
+             trust anchor; accepting a whitelist signed by any other author \
+             is a self-admission hole)"
         ));
     }
     let app = router(ctx);
@@ -223,7 +224,7 @@ async fn mcp_endpoint(
                 current_grants(
                     &grant_ctx.state_dir,
                     grant_ctx.relay_url.as_deref(),
-                    grant_ctx.grant_author.as_deref(),
+                    grant_ctx.relay_pubkey.as_deref(),
                     &grant_ctx.identity,
                 )
             })
@@ -599,29 +600,29 @@ async fn ssh_status(
 fn current_grants(
     state_dir: &std::path::Path,
     relay_url: Option<&str>,
-    grant_author: Option<&str>,
+    relay_pubkey: Option<&str>,
     identity: &Identity,
 ) -> Vec<String> {
-    // Phase D: with a relay configured, the relay is the grants authority —
-    // read the runner's CURRENT kind-30180 list fresh per call (a revoke
-    // lands without a restart; same per-call freshness the package path
-    // gave). Any relay error FAILS CLOSED (no grants), like an unreadable
-    // package.
+    // Chunk 2.6.1: with a relay configured, the whitelist is the runner's
+    // own channel ROSTER — read fresh per call (a revoke lands without a
+    // restart; same per-call freshness the package path gave). The roster
+    // is relay-signed; any query/verification error FAILS CLOSED (no
+    // grants), like an unreadable package.
     if let Some(url) = relay_url {
         let secret = identity.secret_seed();
-        // serve() fail-fasts, but current_grants stays defensive: no author
-        // -> no grants -> deny (never accept an unanchored list).
-        let Some(author) = grant_author else {
-            tracing::warn!("relay grants requested without --grant-author — failing closed");
+        // serve() fail-fasts, but current_grants stays defensive: no anchor
+        // -> no whitelist -> deny (never accept an unanchored roster).
+        let Some(relay_key) = relay_pubkey else {
+            tracing::warn!("relay whitelist requested without --relay-pubkey — failing closed");
             return Vec::new();
         };
-        return match freehold_core::relay_http::query_grants(
+        return match freehold_core::relay_http::query_channel_roster(
             url,
+            relay_key,
             &identity.nostr_pubkey_hex(),
-            author,
             &secret,
         ) {
-            Ok(grants) => grants,
+            Ok(members) => members,
             Err(e) => {
                 tracing::warn!(error = %e, relay = %url,
                     "grant check: relay unreachable/failed — failing closed (empty grants)");
@@ -651,6 +652,31 @@ fn current_grants(
         }
     }
     Vec::new()
+}
+
+/// Testkit helper: provision a runner's channel on the fake relay with the
+/// console key (create the channel + member the runner + the granted
+/// agents) — the Chunk 2.6.1 fixture replacing the old publish_grants.
+#[cfg(test)]
+fn seed_runner_channel(
+    relay_url: &str,
+    console_secret: &[u8; 32],
+    runner_pk: &str,
+    members: &[&str],
+) {
+    freehold_core::relay_http::create_runner_channel(
+        relay_url,
+        console_secret,
+        runner_pk,
+        "runner",
+    )
+    .expect("create channel");
+    freehold_core::relay_http::put_user(relay_url, console_secret, runner_pk, runner_pk)
+        .expect("member runner");
+    for m in members {
+        freehold_core::relay_http::put_user(relay_url, console_secret, runner_pk, m)
+            .expect("member grant");
+    }
 }
 
 fn new_session_id() -> String {
@@ -807,7 +833,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn grants_are_read_live_from_relay_and_revoke_lands_without_restart() {
         use freehold_testkit::relay as fake_relay;
-        let (relay_url, state, relay_task) = fake_relay::spawn().await;
+        let (relay_url, _state, relay_task) = fake_relay::spawn().await;
 
         let rid = Identity::generate();
         let runner_pk = rid.nostr_pubkey_hex();
@@ -820,37 +846,26 @@ mod tests {
             b.nostr_pubkey_hex(),
             c.nostr_pubkey_hex(),
         );
-        let (console_pk, _id, _sig) =
-            freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "").unwrap();
-        fake_relay::publish_grants(
-            &state,
-            &console_secret,
-            &runner_pk,
-            &[ap.clone(), bp.clone()],
-        );
-        // A ROGUE member publishes their own "grant" for this runner with a
-        // NEWER created_at — the author gate must ignore it entirely.
+        // Chunk 2.6.1: grants ARE channel membership. Seed the runner's
+        // channel: the console creates it, members the runner + A + B.
+        seed_runner_channel(&relay_url, &console_secret, &runner_pk, &[&ap, &bp]);
+
+        // A ROGUE agent cannot grant THEMSELVES: membership commands are
+        // owner-gated at the relay (and rosters are relay-signed — the
+        // runner's local verification ignores anything else). The fake
+        // enforces the write gate; the runner enforces the read gate.
         let rogue = Identity::generate();
         let rogue_pk = rogue.nostr_pubkey_hex();
-        let rogue_ts = freehold_core::auth::now_secs() + 10;
-        let rogue_content = serde_json::json!({ "grants": [rogue_pk], "schema": 1 }).to_string();
-        let (rogue_author, rogue_id, rogue_sig) = freehold_core::nip98::sign_event(
-            &rogue.secret_seed(),
-            30180,
-            rogue_ts,
-            vec![vec!["d".into(), runner_pk.clone()]],
-            &rogue_content,
-        )
-        .unwrap();
-        state.events.lock().push(serde_json::json!({
-            "id": rogue_id,
-            "pubkey": rogue_author,
-            "created_at": rogue_ts,
-            "kind": 30180,
-            "tags": [["d", runner_pk]],
-            "content": rogue_content,
-            "sig": rogue_sig,
-        }));
+        assert!(
+            freehold_core::relay_http::put_user(
+                &relay_url,
+                &rogue.secret_seed(),
+                &runner_pk,
+                &rogue_pk,
+            )
+            .is_err(),
+            "relay must refuse a non-owner put-user"
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let ctx = RunnerContext {
@@ -858,7 +873,7 @@ mod tests {
             package: SecretPackage::default(),
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
-            grant_author: Some(console_pk.clone()),
+            relay_pubkey: Some(fake_relay::relay_pubkey()),
         };
         let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
         let url = format!("http://{addr}/mcp");
@@ -875,14 +890,10 @@ mod tests {
             "rogue-author grant list must be ignored: {err}"
         );
 
-        // REVOKE B: publish a REPLACED (shrunk) list — the runner reads it
-        // fresh per call, so B is denied WITHOUT any restart.
-        fake_relay::publish_grants(
-            &state,
-            &console_secret,
-            &runner_pk,
-            std::slice::from_ref(&ap),
-        );
+        // REVOKE B: remove B from the channel — the runner re-reads its
+        // roster per call, so B is denied WITHOUT any restart.
+        freehold_core::relay_http::remove_user(&relay_url, &console_secret, &runner_pk, &bp)
+            .expect("revoke B");
         let err = mcp_list(&url, &b, &runner_pk).unwrap_err();
         assert!(err.contains("unauthorized"), "B revoked live: {err}");
         // A still granted after the replacement
@@ -904,7 +915,7 @@ mod tests {
             state_dir: dir.path().to_path_buf(),
             // nothing listens on :1 — the grant query must fail closed
             relay_url: Some("http://127.0.0.1:1".into()),
-            grant_author: Some(a.nostr_pubkey_hex()),
+            relay_pubkey: Some("a".repeat(64)),
         };
         let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
         let url = format!("http://{addr}/mcp");
@@ -986,14 +997,7 @@ mod d5_tests {
         let console_secret = [42u8; 32];
         let a = Identity::generate();
         let ap = a.nostr_pubkey_hex();
-        let (console_pk, _id, _sig) =
-            freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "").unwrap();
-        fake_relay::publish_grants(
-            &state,
-            &console_secret,
-            &runner_pk,
-            std::slice::from_ref(&ap),
-        );
+        seed_runner_channel(&relay_url, &console_secret, &runner_pk, &[&ap]);
 
         let dir = tempfile::tempdir().unwrap();
         let ctx = RunnerContext {
@@ -1001,7 +1005,7 @@ mod d5_tests {
             package: SecretPackage::default(),
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
-            grant_author: Some(console_pk),
+            relay_pubkey: Some(fake_relay::relay_pubkey()),
         };
         let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
         let url = format!("http://{addr}/mcp");
@@ -1087,24 +1091,18 @@ mod d5_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn audit_degrades_to_spool_only_when_relay_events_fail() {
         use freehold_testkit::relay as fake_relay;
-        // Relay UP (so grants resolve — the relay is the grants source), but
-        // POST /events is blocked: the audit publish degrades to spool-only.
+        // Relay UP (so the whitelist resolves — the roster is the grants
+        // source), but POST /events is blocked: the audit publish degrades
+        // to spool-only. The channel seed (writes) happens BEFORE the block.
         let (relay_url, state, relay_task) = fake_relay::spawn().await;
-        *state.block_events.lock() = true;
 
         let rid = Identity::generate();
         let runner_pk = rid.nostr_pubkey_hex();
         let console_secret = [43u8; 32];
         let a = Identity::generate();
         let ap = a.nostr_pubkey_hex();
-        let (console_pk, _id, _sig) =
-            freehold_core::nip98::sign_event(&console_secret, 1, 1, vec![], "").unwrap();
-        fake_relay::publish_grants(
-            &state,
-            &console_secret,
-            &runner_pk,
-            std::slice::from_ref(&ap),
-        );
+        seed_runner_channel(&relay_url, &console_secret, &runner_pk, &[&ap]);
+        *state.block_events.lock() = true;
 
         let dir = tempfile::tempdir().unwrap();
         let ctx = RunnerContext {
@@ -1112,7 +1110,7 @@ mod d5_tests {
             package: SecretPackage::default(),
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
-            grant_author: Some(console_pk),
+            relay_pubkey: Some(fake_relay::relay_pubkey()),
         };
         let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
         let url = format!("http://{addr}/mcp");

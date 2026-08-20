@@ -139,6 +139,14 @@ custom grant kind (30180) stays a DORMANT, hermetic-tested capability, usable on
 relay implementation ever accepts it; the OPERATIONAL grant flow is the shipped-package
 one (web console + `control-plane grant`/`revoke-grant`, re-read by the runner per call).
 
+**SUPERSEDED (Chunk 2.6.1, roadmap §Chunk 2.6.1):** the custom grant/profile kinds are
+WITHDRAWN in favor of NATIVE NIP-29 channels — runner = private channel (9007 create),
+grants = membership (9000 put-user / 9001 remove-user, owner-gated), whitelist = the
+runner's own RELAY-SIGNED 39002 roster, profile/status = 39000 group metadata. No custom
+kind, no ingest-patch gate; the remaining live question is exactly which of these NIP-29
+kinds the stock `scopes()` accepts (a config-agnostic allowlist read — G-A/G-C in the
+roadmap), not whether any custom kind can pass at all.
+
 ## 9.6 Engram (30174) ingest rules (found live, Phase D3)
 
 The stock ingest ACCEPTS kind-30174 (no patch gate — D3 was live-verifiable), but with

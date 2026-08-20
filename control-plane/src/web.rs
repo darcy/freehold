@@ -292,6 +292,7 @@ pub fn router(
         .route("/api/grant", post(grant))
         .route("/api/revoke-grant", post(revoke_grant))
         .route("/api/runner-addr", post(runner_addr))
+        .route("/api/runner/{name}/channel", get(runner_channel))
         .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state(WebState {
             store,
@@ -592,6 +593,15 @@ async fn provision(
         },
     )
     .map_err(|e| action_error(e).into_response())?;
+    // Chunk 2.6.1: with a relay scope configured, provision the runner's
+    // NIP-29 channel too (create + member the runner + publish the meta).
+    // A relay failure surfaces (the local package is still shipped) — the
+    // operator must not believe the relay side silently worked.
+    let relay = relay_url(&state);
+    if let Some(url) = &relay {
+        provisioner::sync_runner_channel(&state.store, url, &req.name, state.store.dir())
+            .map_err(|e| action_error(e).into_response())?;
+    }
     Ok(Json(json!({
         "ok": true,
         "name": res.name,
@@ -599,6 +609,7 @@ async fn provision(
         "enc_pubkey": res.enc_pubkey,
         "package_dir": res.package_dir,
         "granted": [console_pk],
+        "relay": relay,
     })))
 }
 
@@ -618,7 +629,13 @@ async fn rotate(
     let secret = Zeroizing::new(req.secret);
     provisioner::rotate_secret(&state.store, &req.name, secret.as_bytes())
         .map_err(|e| action_error(e).into_response())?;
-    Ok(Json(json!({"ok": true, "name": req.name})))
+    // Chunk 2.6.1: rotated_at already flipped in state — re-sync the meta.
+    let relay = relay_url(&state);
+    if let Some(url) = &relay {
+        provisioner::sync_runner_channel(&state.store, url, &req.name, state.store.dir())
+            .map_err(|e| action_error(e).into_response())?;
+    }
+    Ok(Json(json!({"ok": true, "name": req.name, "relay": relay})))
 }
 
 #[derive(Deserialize)]
@@ -635,7 +652,14 @@ async fn revoke(
     check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     provisioner::revoke_runner(&state.store, &req.name)
         .map_err(|e| action_error(e).into_response())?;
-    Ok(Json(json!({"ok": true, "name": req.name})))
+    // Chunk 2.6.1: cut the runner off on the relay too (exit membership +
+    // revoked meta).
+    let relay = relay_url(&state);
+    if let Some(url) = &relay {
+        provisioner::revoke_runner_channel(&state.store, url, &req.name, state.store.dir())
+            .map_err(|e| action_error(e).into_response())?;
+    }
+    Ok(Json(json!({"ok": true, "name": req.name, "relay": relay})))
 }
 
 #[derive(Deserialize)]
@@ -653,8 +677,21 @@ async fn grant(
     check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     let grants = provisioner::grant_agent(&state.store, &req.name, &req.pubkey)
         .map_err(|e| action_error(e).into_response())?;
+    // Chunk 2.6.1: grants are channel MEMBERSHIP — the runner's next roster
+    // read (per call) includes the agent without a restart.
+    let relay = relay_url(&state);
+    if let Some(url) = &relay {
+        provisioner::put_user_membership(
+            &state.store,
+            url,
+            &req.name,
+            &req.pubkey,
+            state.store.dir(),
+        )
+        .map_err(|e| action_error(e).into_response())?;
+    }
     Ok(Json(
-        json!({"ok": true, "name": req.name, "granted": grants}),
+        json!({"ok": true, "name": req.name, "granted": grants, "relay": relay}),
     ))
 }
 
@@ -667,9 +704,119 @@ async fn revoke_grant(
     check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     let grants = provisioner::revoke_grant(&state.store, &req.name, &req.pubkey)
         .map_err(|e| action_error(e).into_response())?;
+    let relay = relay_url(&state);
+    if let Some(url) = &relay {
+        provisioner::remove_user_membership(
+            &state.store,
+            url,
+            &req.name,
+            &req.pubkey,
+            state.store.dir(),
+        )
+        .map_err(|e| action_error(e).into_response())?;
+    }
     Ok(Json(
-        json!({"ok": true, "name": req.name, "granted": grants}),
+        json!({"ok": true, "name": req.name, "granted": grants, "relay": relay}),
     ))
+}
+
+/// The console's configured relay scope (state.json), if any.
+fn relay_url(state: &WebState) -> Option<String> {
+    state.store.snapshot().relay_url
+}
+
+/// Chunk 2.6.1 — the operator's runner-channel view: the CP queries the
+/// relay WITH ITS OWN membership (the operator is NEVER a channel member)
+/// and renders the runner's profile + roster (verified against the relay
+/// pubkey) + recent channel messages. Read-only; no relay write happens
+/// here.
+async fn runner_channel(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    let st = state.store.snapshot();
+    let relay_url = st.relay_url.ok_or_else(|| {
+        bad_request("relay not configured — run `serve --relay-url`").into_response()
+    })?;
+    let relay_pubkey = st.relay_pubkey.ok_or_else(|| {
+        bad_request("relay pubkey not configured — run `serve --relay-pubkey`").into_response()
+    })?;
+    let rec = st.runners.get(&name).ok_or_else(|| {
+        state_error(crate::state::StateError::RunnerNotFound(name.clone())).into_response()
+    })?;
+    let console = state.console.clone();
+    let runner_pk = rec.nostr_pubkey.clone();
+    let channel_id = freehold_core::relay_http::runner_channel_id(&runner_pk);
+    let channel_id_read = channel_id.clone();
+    // Blocking HTTP (ureq is sync) — isolate on a blocking task.
+    let (members, profile, messages) = tokio::task::spawn_blocking(move || {
+        let secret = console.identity.secret_seed();
+        let roster = freehold_core::relay_http::query_channel_roster(
+            &relay_url,
+            &relay_pubkey,
+            &runner_pk,
+            &secret,
+        )
+        .map_err(|e| e.to_string());
+        let metas =
+            freehold_core::relay_http::query_runner_metas(&relay_url, &console.pubkey(), &secret)
+                .map_err(|e| e.to_string());
+        let profile = metas.as_ref().ok().and_then(|ms| {
+            ms.iter()
+                .find(|m| m.nostr_pubkey == runner_pk)
+                .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        });
+        let msgs = freehold_core::relay_http::query_events(
+            &relay_url,
+            &secret,
+            serde_json::json!([{
+                "kinds": [9],
+                "#h": [channel_id_read],
+                "limit": 25,
+            }]),
+        )
+        .map(|evs| {
+            evs.iter()
+                .map(|e| {
+                    json!({
+                        "pubkey": e["pubkey"].as_str().unwrap_or(""),
+                        "created_at": e["created_at"].as_i64().unwrap_or(0),
+                        "content": e["content"].as_str().unwrap_or(""),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|e| e.to_string());
+        (roster, profile, msgs)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        (
+            Err("read task panicked".into()),
+            None,
+            Err("read task panicked".into()),
+        )
+    });
+    Ok(Json(json!({
+        "name": name,
+        "channel": channel_id,
+        "members": match members {
+            Ok(ms) => json!(ms),
+            Err(e) => json!({"error": e}),
+        },
+        "profile": profile,
+        "messages": match messages {
+            Ok(ms) => json!(ms),
+            Err(e) => json!({"error": e}),
+        },
+    })))
+}
+
+fn bad_request(msg: &str) -> axum::response::Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
 }
 
 #[derive(Deserialize)]

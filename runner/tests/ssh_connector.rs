@@ -216,7 +216,7 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
     let runner_pubkey = id.nostr_pubkey_hex();
     let ctx = RunnerContext {
         relay_url: None,
-        grant_author: None,
+        relay_pubkey: None,
         identity: id,
         package: pkg,
         state_dir: dir.path().to_path_buf(),
