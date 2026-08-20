@@ -64,6 +64,22 @@ jobs:
             BLOCKING or IMPORTANT, never posted inline, never nitpicked for
             wording, mentioned once per PR (not in re-review rounds).
 
+            Mermaid diagram accuracy (README): the README's sequence diagrams
+            document real wiring — bootstrap (9007 create, 9000 put-user, the
+            kind-13534 COMMUNITY membership layer via buzz-admin run in the
+            relay LXC through the box runner, the A4 domain gate checked on the
+            OPERATOR machine after a manual DNS mapping, relay LXC optional for
+            the attach flow), runner setup + grant (channel membership vs the
+            shipped-package grants path, secret sealed TO the runner's key), and
+            the exec call path (roster whitelist read per call, detached 48001
+            audit). When a PR edits a diagram or changes behavior those diagrams
+            depict, verify the diagram against the code it claims to show —
+            kinds, arrows, lifelines, and steps must match the actual flow (the
+            mermaid grammar used is 10.9.1; DO NOT re-render it, review the
+            claims). A diagram/code mismatch is IMPORTANT — it misdocuments the
+            product for every future reader — and gets an inline comment on the
+            diagram lines. Diagram layout, styling, or wording is NIT (silent).
+
             Severity tiers, stated in the top-level comment only:
             - BLOCKING: must fix before merge (security, data loss, silent breakage)
             - IMPORTANT: should fix in this PR (operator-facing wrong behavior,
