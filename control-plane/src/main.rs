@@ -47,12 +47,12 @@ enum Cmd {
     Revoke(RevokeArgs),
     /// List runners + secrets at a glance
     List(CommonArgs),
-    /// Chunk 2.6.1: REBUILD the CP view from the relay's runner channel
-    /// metadata (kind 39000) — a respawned CP folds instead of carrying
-    /// state ("disposable CP"). Idempotent: same relay → same store; a
-    /// re-run converges. Restored records carry NO ciphertext/package path
-    /// (the relay never holds secret material) — re-run `adopt` per runner
-    /// to re-arm the package.
+    /// Chunk 2.6.1: REBUILD the CP view from the relay's runner-profile
+    /// channel messages (kind 9, t=fh-profile) — a respawned CP folds
+    /// instead of carrying state ("disposable CP"). Idempotent: same relay
+    /// → same store; a re-run converges. Restored records carry NO
+    /// ciphertext/package path (the relay never holds secret material) —
+    /// re-run `adopt` per runner to re-arm the package.
     Rebuild(RebuildArgs),
     /// Print this state dir's console identity PUBKEY (64-hex, pubkey only —
     /// never the secret). Used by deploy-cp to name the box's fresh identity
