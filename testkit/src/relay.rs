@@ -116,6 +116,9 @@ fn tag_vals(e: &Value, letter: &str) -> Vec<String> {
 }
 
 /// Relay-sign a kind-39002 roster snapshot for a channel and store it.
+/// LIVE-VERIFIED shape (rebuild 2026-08-20): the roster's channel
+/// attribution is a `d` tag (the dashed channel UUID) + one `p` tag per
+/// member — NOT an `h` tag — and the author is the relay key.
 fn publish_roster(state: &SharedRelay, channel_id: &str) {
     let members: Vec<String> = {
         let chans = state.channels.lock();
@@ -125,7 +128,7 @@ fn publish_roster(state: &SharedRelay, channel_id: &str) {
             .unwrap_or_default()
     };
     let ts = freehold_core::auth::now_secs();
-    let tags: Vec<Vec<String>> = std::iter::once(vec!["h".into(), channel_id.into()])
+    let tags: Vec<Vec<String>> = std::iter::once(vec!["d".into(), channel_id.into()])
         .chain(members.iter().map(|m| vec!["p".into(), m.clone()]))
         .collect();
     let (pubkey, id, sig) =
@@ -264,13 +267,19 @@ async fn query(
     };
     // Member gate: roster reads for a channel require the caller to be a
     // member of it (the LIVE enforcement: non-members get 403). Applies
-    // whenever the filter targets kind 39002 for a specific channel.
-    let roster_gate = kinds.contains(&GROUP_MEMBERS_KIND) && !h_tags.is_empty();
+    // whenever the filter targets kind 39002 via #h or #d (the live shape
+    // uses #d — the roster's tag; #h is kept for the historical shape).
+    let roster_ids: Vec<String> = if !d_tags.is_empty() {
+        d_tags.clone()
+    } else {
+        h_tags.clone()
+    };
+    let roster_gate = kinds.contains(&GROUP_MEMBERS_KIND) && !roster_ids.is_empty();
     if roster_gate {
         let chans = state.channels.lock();
-        let ok = h_tags.iter().all(|h| {
+        let ok = roster_ids.iter().all(|id| {
             chans
-                .get(h)
+                .get(id)
                 .is_some_and(|c| c.members.contains(&caller) || c.owner == caller)
         });
         if !ok {

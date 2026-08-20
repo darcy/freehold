@@ -5,9 +5,12 @@ Kubernetes stack with Buzz Relay as the control plane and a skill framework that
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 **Status:** Chunk 2 complete + Chunk 2.6 runner-lifecycle slice IMPLEMENTED
-and SUPERSEDED by Chunk 2.6.1 — runners-as-NIP-29-channels, IMPLEMENTED hermetic
-(no custom kinds: 9007 create / 9000-9001 membership / 39000 meta / 39002 relay-signed
-roster = the whitelist; G-1 resolved = native-kinds-only; live relay gates G-A/G-C open).
+and SUPERSEDED by Chunk 2.6.1 — runners-as-NIP-29-channels, IMPLEMENTED + LIVE-VERIFIED
+on a REBUILT world (relay/CPs torn down + recreated same-IPs; proxy untouched):
+9007 create + 9000/9001 membership + kind-9 fh-profile envelope ACCEPTED by stock buzz
+uuid channel ids (client-suggested) + #d roster filter + 39002 relay-signed roster =
+whitelist, read LIVE per call; community membership (relay-member) is a two-layer
+prerequisite; rebuild folds from real buzz; G-1 resolved = native-kinds-only.
 Legacy: (RUNNER_PROFILE kind 30181 published at every lifecycle mutation;
 `control-plane rebuild` = the disposable-CP fold, deterministic+idempotent;
 G-2 resolved query-per-call fail-closed; G-1 fork-vs-contribution deferred).

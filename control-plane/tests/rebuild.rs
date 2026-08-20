@@ -14,8 +14,7 @@ use std::path::Path;
 use freehold_control_plane::console::Console;
 use freehold_control_plane::provisioner;
 use freehold_control_plane::state::{RunnerRecord, RunnerStatus, SecretRecord, StateStore};
-use freehold_core::nip98::GROUP_META_KIND;
-use freehold_core::relay_http::{RunnerProfile, query_runner_metas};
+use freehold_core::relay_http::{PROFILE_MESSAGE_TAG, RunnerProfile, query_runner_metas};
 use freehold_testkit::relay as fake_relay;
 
 fn hex64(c: char) -> String {
@@ -51,6 +50,27 @@ fn insert_runner(store: &StateStore, name: &str, status: RunnerStatus) {
             rotated_at: Some(7),
         },
     );
+}
+
+/// Count the runner-profile channel messages (kind 9 + t=fh-profile).
+fn profile_msgs(state: &fake_relay::SharedRelay) -> usize {
+    state
+        .events
+        .lock()
+        .iter()
+        .filter(|e| {
+            e["kind"].as_u64() == Some(9)
+                && e["tags"].as_array().is_some_and(|t| {
+                    t.iter().any(|tag| {
+                        tag.as_array().is_some_and(|t| {
+                            t.first().is_some_and(|k| k == "t")
+                                && t.get(1).and_then(serde_json::Value::as_str)
+                                    == Some(PROFILE_MESSAGE_TAG)
+                        })
+                    })
+                })
+        })
+        .count()
 }
 
 fn console_in(dir: &Path) -> Console {
@@ -122,12 +142,7 @@ async fn revoke_flips_meta_and_cuts_off_the_runner() {
 
     insert_runner(&store, "relaybox", RunnerStatus::Active);
     provisioner::sync_runner_channel(&store, &relay_url, "relaybox", &cp_state).unwrap();
-    let metas_after_active = state
-        .events
-        .lock()
-        .iter()
-        .filter(|e| e["kind"].as_u64() == Some(GROUP_META_KIND as u64))
-        .count();
+    let metas_after_active = profile_msgs(&state);
 
     // Revoke: the CP flips the record, then revokes the channel (removes the
     // runner from its own roster + REPLACES the meta's status).
@@ -136,15 +151,11 @@ async fn revoke_flips_meta_and_cuts_off_the_runner() {
         .unwrap();
     provisioner::revoke_runner_channel(&store, &relay_url, "relaybox", &cp_state).unwrap();
 
-    let events = state.events.lock().clone();
-    let metas = events
-        .iter()
-        .filter(|e| e["kind"].as_u64() == Some(GROUP_META_KIND as u64))
-        .count();
+    let metas = profile_msgs(&state);
     assert_eq!(
         metas,
         metas_after_active + 1,
-        "the revoke re-publishes the meta ONE more time (same h — replace,          never appended history)"
+        "the revoke re-publishes the profile ONE more time (same h — replace, never appended history)"
     );
 
     // The fold sees ONE meta, revoked (query with the real console key).
@@ -178,7 +189,7 @@ async fn revoke_flips_meta_and_cuts_off_the_runner() {
 /// for folds — exactly as a rogue 9000 put-user is refused at the relay.
 #[tokio::test(flavor = "multi_thread")]
 async fn rogue_author_cannot_mint_or_clobber_metas() {
-    use freehold_core::nip98::{GROUP_META_KIND, sign_event};
+    use freehold_core::nip98::sign_event;
 
     let base = tempfile::tempdir().unwrap();
     let store = store_with(base.path().join("cp"));
@@ -208,9 +219,13 @@ async fn rogue_author_cannot_mint_or_clobber_metas() {
     let content = serde_json::to_string(&rogue).unwrap();
     let (pk, id, sig) = sign_event(
         &rogue_secret,
-        GROUP_META_KIND,
+        9,
         ts,
-        vec![vec!["h".into(), h.clone()], vec!["d".into(), h.clone()]],
+        vec![
+            vec!["h".into(), h.clone()],
+            vec!["d".into(), h.clone()],
+            vec!["t".into(), PROFILE_MESSAGE_TAG.into()],
+        ],
         &content,
     )
     .unwrap();
@@ -218,8 +233,8 @@ async fn rogue_author_cannot_mint_or_clobber_metas() {
         "id": id,
         "pubkey": pk,
         "created_at": ts,
-        "kind": GROUP_META_KIND,
-        "tags": [["h", h.clone()], ["d", h]],
+        "kind": 9,
+        "tags": [["h", h.clone()], ["d", h], ["t", PROFILE_MESSAGE_TAG]],
         "content": content,
         "sig": sig,
     }));

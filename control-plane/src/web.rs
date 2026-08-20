@@ -780,6 +780,19 @@ async fn runner_channel(
         )
         .map(|evs| {
             evs.iter()
+                .filter(|e| {
+                    // The runner-profile envelope rides kind-9 messages; it
+                    // is NOT chat — filtered out of the operator view.
+                    !e["tags"].as_array().is_some_and(|t| {
+                        t.iter().any(|tag| {
+                            tag.as_array().is_some_and(|t| {
+                                t.first().is_some_and(|k| k == "t")
+                                    && t.get(1).and_then(serde_json::Value::as_str)
+                                        == Some(freehold_core::relay_http::PROFILE_MESSAGE_TAG)
+                            })
+                        })
+                    })
+                })
                 .map(|e| {
                     json!({
                         "pubkey": e["pubkey"].as_str().unwrap_or(""),
