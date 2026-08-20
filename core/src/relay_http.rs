@@ -12,16 +12,16 @@
 //!   re-publishes the RELAY-SIGNED roster (kind 39002, p-tags = members).
 //! - The runner's whitelist = its own roster: one 39002 query, verified
 //!   locally against the relay pubkey (the roster's trust anchor).
-//! - The runner's profile (kind/address/status/secret NAME) is the channel's
-//!   group metadata (kind 39000, replaceable per (author, h)) — the fold a
-//!   respawned CP replays ("disposable CP").
+//! - The runner's profile (kind/address/status/secret NAME) rides a kind-9
+//!   CHANNEL MESSAGE marked `t`=fh-profile (live-verified: kind 39000 is
+//!   NOT in the stock buzz ingest scope) — the fold a respawned CP replays
+//!   ("disposable CP"), newest-per-channel.
 //!
 //! Fail-closed contract: any query failure is an Err; callers (the runner)
 //! treat it as "no grants" — the relay is authoritative once configured.
 
 use crate::nip98::{
-    CHANNEL_CREATE_KIND, GROUP_MEMBERS_KIND, GROUP_META_KIND, PUT_USER_KIND, REMOVE_USER_KIND,
-    nip98_auth,
+    CHANNEL_CREATE_KIND, GROUP_MEMBERS_KIND, PUT_USER_KIND, REMOVE_USER_KIND, nip98_auth,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -118,15 +118,30 @@ pub fn parse_profile_content(content: &str) -> Result<RunnerProfile, String> {
 }
 
 /// Deterministic channel id for a runner: sha256(runner nostr pubkey),
-/// 64 lowercase hex — the `h` tag of the runner's private NIP-29 channel.
+/// TRUNCATED to 16 bytes = 32 lowercase hex — a UUID-parseable value.
 /// Pure function of the pubkey: the runner self-computes its channel id for
 /// the roster query (its whitelist) with no CP round-trip, and a rebuilt CP
 /// re-derives it for every folded record.
+///
+/// LIVE-VERIFIED (rebuild 2026-08-20): buzz's `extract_channel_id` parses
+/// the `h` tag as a `uuid::Uuid` (`Option<Uuid>`) — a 64-hex sha256 is
+/// None → `invalid: channel-scoped events must include an h tag` on 9000.
+/// A 32-hex value parses; `create_channel_with_id` then honors the
+/// CLIENT-SUGGESTED channel id (duplicate → idempotent accept:false), so
+/// channels stay deterministic per runner pubkey (128-bit collision space).
 pub fn runner_channel_id(runner_nostr_pubkey: &str) -> String {
     use sha2::{Digest as _, Sha256};
     let mut h = Sha256::new();
     h.update(runner_nostr_pubkey.as_bytes());
-    hex::encode(h.finalize())
+    let hexs = hex::encode(&h.finalize()[..16]);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hexs[0..8],
+        &hexs[8..12],
+        &hexs[12..16],
+        &hexs[16..20],
+        &hexs[20..32]
+    )
 }
 
 /// Create (or re-assert) the runner's private channel (kind 9007, NIP-29
@@ -241,10 +256,15 @@ fn membership_command(
     publish_event_json(relay_url, console_secret, &event.to_string())
 }
 
-/// Publish (or replace) the runner's profile as the channel's group
-/// metadata (kind 39000, `h` = the runner's channel id). Same h + newer
-/// created_at = replacement: provision, adopt, rotate (rotated_at flip), and
-/// revoke (status flip) all re-publish the SAME h — nothing appends history.
+/// Marker tag on the runner-profile channel message.
+pub const PROFILE_MESSAGE_TAG: &str = "fh-profile";
+
+/// Publish (or replace) the runner's profile as a kind-9 channel message
+/// marked `t`=`fh-profile` — the "pinned message" envelope. LIVE-VERIFIED:
+/// kind 39000 (group metadata) is NOT in the stock buzz ingest scope
+/// (`restricted: unknown event kind`), but kind-9 channel messages ride.
+/// Same h + newer created_at = replacement (the fold keeps the newest per
+/// channel — nothing appends history, same replace semantics as before).
 pub fn publish_runner_meta(
     relay_url: &str,
     console_secret: &[u8; 32],
@@ -255,9 +275,13 @@ pub fn publish_runner_meta(
     let content = serde_json::to_string(profile).map_err(|e| e.to_string())?;
     let (pubkey, id, sig) = crate::nip98::sign_event(
         console_secret,
-        GROUP_META_KIND,
+        9,
         ts,
-        vec![vec!["h".into(), h.clone()], vec!["d".into(), h.clone()]],
+        vec![
+            vec!["h".into(), h.clone()],
+            vec!["d".into(), h.clone()],
+            vec!["t".into(), PROFILE_MESSAGE_TAG.into()],
+        ],
         &content,
     )
     .map_err(|e| e.to_string())?;
@@ -265,26 +289,27 @@ pub fn publish_runner_meta(
         "id": id,
         "pubkey": pubkey,
         "created_at": ts,
-        "kind": GROUP_META_KIND,
-        "tags": [["h", h], ["d", h]],
+        "kind": 9,
+        "tags": [["h", h], ["d", h], ["t", PROFILE_MESSAGE_TAG]],
         "content": content,
         "sig": sig,
     });
     publish_event_json(relay_url, console_secret, &event.to_string())
 }
 
-/// Fetch the CURRENT profile of EVERY runner from the relay (kind 39000).
-/// Author-gated + locally signature-verified like the grant path; per
-/// channel (`h` tag) the NEWEST trusted event wins (replaceable semantics),
-/// so a revoke REPLACES, never appends. Sorted by name for a stable fold —
-/// the projection a respawned CP replays.
+/// Fetch the CURRENT profile of EVERY runner from the relay (kind-9
+/// channel messages marked `t`=fh-profile). Author-gated + locally
+/// signature-verified like the grant path; per channel (`h` tag) the NEWEST
+/// trusted event wins (replaceable semantics), so a revoke REPLACES, never
+/// appends. Sorted by name for a stable fold.
 pub fn query_runner_metas(
     relay_url: &str,
     expected_author: &str,
     auth_secret: &[u8; 32],
 ) -> Result<Vec<RunnerProfile>, String> {
     let filters = serde_json::json!([{
-        "kinds": [GROUP_META_KIND],
+        "kinds": [9],
+        "#t": [PROFILE_MESSAGE_TAG],
         "limit": 1000,
     }]);
     let events = query_events(relay_url, auth_secret, filters)?;
@@ -319,7 +344,7 @@ fn merge_runner_metas(
         if crate::nip98::verify_event(
             author,
             created_at,
-            GROUP_META_KIND,
+            9,
             &tags,
             content,
             ev["sig"].as_str().unwrap_or(""),
@@ -329,7 +354,7 @@ fn merge_runner_metas(
             tracing::warn!(
                 author,
                 created_at,
-                "runner meta failed local signature verify — skipped"
+                "runner meta message failed local signature verify — skipped"
             );
             continue;
         }
@@ -372,25 +397,30 @@ fn parse_tags(ev: &Value) -> (Vec<Vec<String>>, Option<String>) {
 }
 
 /// Read the runner's CURRENT roster (its exec whitelist) from the relay:
-/// kinds [39002] filtered by `#h` = the runner's own channel. The roster is
+/// kinds [39002] filtered by `#d` = the runner's own channel. The roster is
 /// RELAY-SIGNED — the trust anchor is `relay_pubkey` (the relay identity
-/// that mints membership snapshots), verified LOCALLY; newest per channel
-/// wins. Members = the `p` tags. An absent/empty roster = no members =
-/// fail-closed deny at the caller. Any query/verification failure is an Err.
+/// that mints membership snapshots), verified LOCALLY; newest wins. Members
+/// = the `p` tags. An absent/empty roster = no members = fail-closed deny
+/// at the caller. Any query/verification failure is an Err.
+///
+/// LIVE-VERIFIED shape (rebuild 2026-08-20): buzz mints 39002 with a `d`
+/// tag (the dashed channel UUID) + one `p`-tag per member (pk, "", role)
+/// — NOT an `h` tag; NIP-01 filters match tags string-exactly, so the
+/// filter is `#d` (dashed), never `#h`.
 pub fn query_channel_roster(
     relay_url: &str,
     relay_pubkey: &str,
     runner_nostr_pubkey: &str,
     auth_secret: &[u8; 32],
 ) -> Result<Vec<String>, String> {
-    let h = runner_channel_id(runner_nostr_pubkey);
+    let chan = runner_channel_id(runner_nostr_pubkey);
     let filters = serde_json::json!([{
         "kinds": [GROUP_MEMBERS_KIND],
-        "#h": [h],
+        "#d": [chan],
         "limit": 100,
     }]);
     let events = query_events(relay_url, auth_secret, filters)?;
-    merge_roster(&events, relay_pubkey, &h)
+    merge_roster(&events, relay_pubkey, &chan)
 }
 
 /// Trust + dedupe core for rosters: keep only events authored by
@@ -409,8 +439,14 @@ fn merge_roster(
             continue;
         }
         let created_at = ev["created_at"].as_i64().unwrap_or(0);
-        let (tags, h) = parse_tags(ev);
-        if h.as_deref() != Some(channel_id) {
+        let (tags, _h) = parse_tags(ev);
+        // The roster's channel attribution is its `d` tag (live-verified).
+        let d = tags
+            .iter()
+            .find(|t| t.first().is_some_and(|k| k == "d"))
+            .and_then(|t| t.get(1))
+            .cloned();
+        if d.as_deref() != Some(channel_id) {
             continue;
         }
         let content = ev["content"].as_str().unwrap_or("");
@@ -752,16 +788,20 @@ mod tests {
             let h = runner_channel_id(&p.nostr_pubkey);
             let (pk, id, sig) = crate::nip98::sign_event(
                 who,
-                GROUP_META_KIND,
+                9,
                 t,
-                vec![vec!["h".into(), h.clone()], vec!["d".into(), h.clone()]],
+                vec![
+                    vec!["h".into(), h.clone()],
+                    vec!["d".into(), h.clone()],
+                    vec!["t".into(), PROFILE_MESSAGE_TAG.into()],
+                ],
                 &content,
             )
             .unwrap();
             serde_json::json!({
                 "id": id, "pubkey": pk, "created_at": t,
-                "kind": GROUP_META_KIND,
-                "tags": [["h", h], ["d", h]],
+                "kind": 9,
+                "tags": [["h", h], ["d", h], ["t", PROFILE_MESSAGE_TAG]],
                 "content": content, "sig": sig,
             })
         };
@@ -802,7 +842,7 @@ mod tests {
         let relay_secret = [42u8; 32];
         let (relay_pk, _, _) = crate::nip98::sign_event(&relay_secret, 1, 1, vec![], "").unwrap();
         let mk = |who: &[u8; 32], t: i64, channel: &str, members: &[&str]| -> Value {
-            let tags: Vec<Vec<String>> = std::iter::once(vec!["h".into(), channel.into()])
+            let tags: Vec<Vec<String>> = std::iter::once(vec!["d".into(), channel.into()])
                 .chain(members.iter().map(|m| vec!["p".into(), m.to_string()]))
                 .collect();
             let (pk, id, sig) =

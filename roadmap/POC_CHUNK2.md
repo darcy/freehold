@@ -778,20 +778,50 @@ relay signs the resulting roster.
   publish keeps working over a roster-configured relay). Full workspace
   green, clippy 0, fmt clean.
 
-### Remaining (live gates — need relay access, not code)
+### Live-verified against real Buzz (rebuild 2026-08-20 — relay/CPs torn down
+### and rebuilt on the SAME IPs, proxy untouched; G-A/G-C deltas landed)
 
-- G-A: confirm the CP can effect 9007/9000/9001 headlessly through the
-  live relay path (the hermetic model enforces owner-gated membership; the
-  real buzz bridge / buzz-admin route from BUZZ_SURFACE §3.2 must be
-  verified end-to-end).
-- Ingest-allowlist read: confirm stock buzz `scopes()` accepts 9007/9000/
-  9001/39000 (the doc's G-C — rotation/status live in 39000; if metadata
-  is refused, the pinned-message fallback carries it) and that 39002
-  roster reads resolve for members.
-- Audit receipts as channel messages (kind 9) + G-B redaction: DESIGNED in
-  the mapping table, NOT yet posted — the D5 48001 publish stays operational
-  until the channel read/write surface is live-verified; redacting receipts
-  before posting is a release gate on this row.
+The hermetic fake relay proved our contract; real buzz corrected it in
+three places, all now in the code:
+
+1. **Channel ids are UUIDs, client-suggested.** buzz's `extract_channel_id`
+   parses `h` as `uuid::Uuid` (a 64-hex sha256 → None →
+   `invalid: channel-scoped events must include an h tag`). `runner_channel_id`
+   is now sha256 truncated to 16 bytes formatted as a DASHED uuid; buzz's
+   `create_channel_with_id` HONORS the client id (duplicate → idempotent
+   accept:false) — deterministic per-runner channels confirmed live
+   (channel row id == sha256(runner pk)[:16]).
+2. **Rosters carry a `d` tag, not `h`.** Buzz mints 39002 with
+   `["d", <dashed uuid>]` + one `p`-tag per member (`pk`, "", role),
+   relay-signed (author == BUZZ_RELAY_PRIVATE_KEY pubkey — the runner's
+   `--relay-pubkey` anchor). NIP-01 tag filters match STRING-EXACTLY, so
+   `query_channel_roster` filters `#d` (dashed) — `#h` matches nothing.
+3. **Kind 39000 (group metadata) is NOT in the buzz ingest scope**
+   (`restricted: unknown event kind`); kind 9 (channel message) rides. The
+   runner profile is now a kind-9 message tagged `t`=`fh-profile` (the
+   pinned-message fallback from G-C) — `rebuild` folds it identically.
+4. **TWO membership layers** (found live): 9000/9001 execute CHANNEL
+   membership, but every relay QUERY additionally requires COMMUNITY
+   membership (`buzz-admin add-member` / `freehold relay-member`) — a
+   runner/agent not community-membered gets `403 relay_membership_required`
+   and the runner fails closed (correct exposure). Provisioning in relay
+   mode therefore = `freehold relay-member` (community) + the channel
+   put-user (via `control-plane ... --relay-url`).
+
+LIVE PROOF on the rebuilt relay (https://freehold-test.darcydev.net):
+`provision --relay-url` sync (9007 create + 9000 put + fh-profile msg)
+green → owner-console `rebuild` folds 1 record from real buzz → runner
+started with `--relay-url --relay-pubkey <relay key>` read its roster LIVE
+and a granted agent exec'd root@librem → `revoke-grant` (9001) denied the
+agent WITHOUT a restart (same call path, real relay). Fresh-console rebuild
+stays gated (`403 relay_membership_required`) until re-admitted. Memory
+(30174 self-encrypted) + delegation (CPA→relay kind-9→peer→runner-direct)
+re-proven on the rebuilt world.
+
+Still open (deployment posture, not code): audit receipts as channel
+messages (kind 9) + G-B redaction — DESIGNED in the mapping table, NOT yet
+posted; the D5 48001 publish stays operational. And relay-mode runners
+require the community-membership step at provisioning (no auto-member).
 
 ### Sequencing note
 
