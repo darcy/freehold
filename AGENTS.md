@@ -97,6 +97,12 @@ Chunk 3; landed strip = first expert on the staged LXC harness), onboarding inve
 cost gate), LiteLLM re-targets kube (LXC deploy = reference, torn down only after the kube
 deploy passes C5 + soak). Phase-0 items 01-06 resolved (POC_CHUNK3_SURFACE.md); github/
 websearch/litellm runner flavors + risk_level merged (#72/#73).
+Terraform is adopted as the BOOTSTRAP substrate driver (POC_CHUNK3 v5 supersession):
+each bootstrap --kind = one TF plan, executed through the provisioning runner's exec;
+runner-injected TF_VAR secrets only (never tfvars), TF-generated secrets acknowledged in
+state (state = sensitive, /srv/data 0600 or encrypted backend), host-sysadmin steps as
+remote-exec in the plans, and a post-apply guard that state contains no operator-supplied
+variable values. G6's teardown/rebuild = terraform destroy/apply + the verify harness.
 Post-Chunk-2 scope decisions (2026-08-20): Phase G (Buzz as the interaction surface —
 opening a room/DM with @freehold in the Buzz UI) MOVED to Chunk 3 (needs a real
 relay-addressable agent, not CLI-driven); Phase F (emergency-repair drill) moved OUT of
