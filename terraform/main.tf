@@ -53,8 +53,9 @@ variable "template_id" {
 
 provider "proxmox" {
   endpoint = var.proxmox_api_url
+  # full token id (user@realm!tokenid) IS the username; the secret is api_token
   username = var.proxmox_api_token_id
-  token    = var.proxmox_api_token
+  api_token = var.proxmox_api_token
   insecure = true # self-signed PVE cert (LAN-only appliance) — fine for the POC
 }
 
