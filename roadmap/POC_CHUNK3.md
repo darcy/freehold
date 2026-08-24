@@ -44,11 +44,23 @@ recorded explicitly, not silently.
   torn down after its soak window — per the blue/green narrowing rule, never before.
 * **Terraform is the expert's write-down artifact, not an infra gate (C6, softened).** The
   goal: the expert captures what it learned so it doesn't re-derive it — location
-  `/srv/data/agents/<expert>/` unchanged, "skills may ship a starter" unchanged. Terraform-
-  proper is reserved for where a real cloud-resource graph exists (future Vultr/Hetzner-
-  provisioned pieces — no consumer in Chunk 3); for Chunk 3's actual LXC/kube targets the
-  artifact is declarative capture in whatever form fits (script, manifest, .tf with
-  remote-exec if the expert finds it natural).
+  `/srv/data/agents/<expert>/` unchanged, "skills may ship a starter" unchanged. For Chunk
+  3's actual LXC/kube service targets the artifact is declarative capture in whatever form
+  fits (script, manifest, .tf with remote-exec if the expert finds it natural).
+* **Terraform becomes the BOOTSTRAP substrate driver — SUPERSEDES C6's "no Terraform
+  consumer in Chunk 3" line (the substrate IS the consumer).** Each `bootstrap --kind`
+  (proxmox-lxc, vultr-vps, hetzner-vps, k3s, litellm-kube) = one Terraform plan;
+  `freehold bootstrap` stays the operator surface and executes the plans THROUGH the
+  provisioning runner's exec (the runner's injected key remains the only door). Disciplines,
+  all locked: (1) runner-exec only — never a workstation-side terraform with its own
+  credentials; (2) operator-supplied secrets enter ONLY as runner-injected env
+  (`TF_VAR_*`), never tfvars/provider-block literals; TF-GENERATED secrets (random_password,
+  kube tokens, provider-returned keys) are acknowledged to live in state, so state is
+  sensitive-by-default — encrypted backend or `/srv/data` at 0600; (3) host-sysadmin steps
+  (kernel modules, sysctls, LXC features, cluster DNS pins) ride remote-exec inside the
+  plans (C6's in-scope remote-exec decision); (4) the no-master-key acceptance gains a
+  guard: after every apply, TF state contains none of the operator-supplied variable
+  values; (5) service installs stay agent-improvised + write-down (unchanged).
 * **Blue/green narrows unilateral destroy.** Once a service has a live, currently-serving
   instance, the expert's normal mode is never destroy-in-place: new version alongside →
   verify (C5) → flip a traffic pointer the expert owns → soak → remove old. Destroy-in-place
@@ -173,8 +185,12 @@ NOT widened by the onboarding inversion.
 * [ ] C4. Readiness 🟢/🟡/🔴, postcondition-gated (unchanged).
 * [ ] C5. Independent postcondition, unchanged from v3 (implemented as `verify:` — per-skill
       external check run by CPA via a runner after the agent reports done).
-* [ ] C6. Declarative-capture artifact, softened per the new locked decision (Terraform where
-      a real resource graph exists — deferred; script/manifest capture otherwise).
+* [ ] C6. Declarative-capture artifact, softened per the new locked decision (service layer:
+      script/manifest capture; Terraform-proper reserved for cloud-resource graphs).
+* [ ] C7. **Terraform bootstrap substrate** (per the new locked decision): `terraform/` plans
+      per kind (proxmox-lxc, k3s, litellm-kube, later vultr-vps/hetzner-vps), executed via
+      the runner's exec with the four disciplines; G6's teardown/rebuild runs on
+      `terraform destroy` / `terraform apply` + the verify harness.
 
 ## Phase D — Retry/escalation budget
 
