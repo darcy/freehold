@@ -60,7 +60,9 @@ behalf via privileged runners, with a management relay as the scope.
     
 *   **Agent placement:** POC = Buzz agents via buzz-acp (local); k8s pods later (public release).
     
-*   **NO Kubernetes** in POC.
+*   **NO Kubernetes** in POC — SUPERSEDED FOR CHUNK 3 FORWARD (2026-08-24, see
+    roadmap/POC_CHUNK3.md v5: agents deploy as deterministic pods on a pulled-forward
+    k3s substrate; still true for Chunks 1–2).
     
 *   Environments: VPS dev/smoke + PVE host test + home dogfood.
     

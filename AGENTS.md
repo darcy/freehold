@@ -90,6 +90,13 @@ RE-PROVISIONED fresh under `<relay-domain>` (relay LXC 100 @
 192.168.30.238:3000 behind the operator's tailnet nginx; CP in its own LXC 102 @
 192.168.30.254:8080; console admin = the operator's new key b2ab89...; memory +
 delegation re-proven live under the domain; the old PVE-host CP stopped).
+Chunk 3 plan in draft v5 (roadmap/POC_CHUNK3.md, unapproved): agents-as-pods on a
+k8s substrate pulled forward from MVP (supersedes ROADMAP's NO-Kubernetes-in-POC for
+Chunk 3; landed strip = first expert on the staged LXC harness), onboarding inversion
+(expert first, reasons about its target, asks CPA; CPA resolves the named hardware peer +
+cost gate), LiteLLM re-targets kube (LXC deploy = reference, torn down only after the kube
+deploy passes C5 + soak). Phase-0 items 01-06 resolved (POC_CHUNK3_SURFACE.md); github/
+websearch/litellm runner flavors + risk_level merged (#72/#73).
 Post-Chunk-2 scope decisions (2026-08-20): Phase G (Buzz as the interaction surface —
 opening a room/DM with @freehold in the Buzz UI) MOVED to Chunk 3 (needs a real
 relay-addressable agent, not CLI-driven); Phase F (emergency-repair drill) moved OUT of
