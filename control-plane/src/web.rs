@@ -517,6 +517,7 @@ async fn overview(
             "nostr_pubkey": rec.nostr_pubkey,
             "enc_pubkey": rec.enc_pubkey,
             "mcp_addr": rec.mcp_addr,
+            "risk": rec.risk_level,
             "secret": secret.map(|s| json!({
                 "name": s.runner,
                 "kind": s.kind,
@@ -557,6 +558,10 @@ struct ProvisionReq {
     /// robust one pins an absolute dir.
     #[serde(default)]
     runner_dir: Option<String>,
+    /// Runner risk class (safe|risky-install|risky-host); kind default when
+    /// absent (POC_CHUNK3 §0.02).
+    #[serde(default)]
+    risk: Option<String>,
 }
 
 fn default_runner_dir(name: &str) -> std::path::PathBuf {
@@ -590,6 +595,7 @@ async fn provision(
             secret: secret.as_bytes(),
             runner_dir: &runner_dir,
             grants: std::slice::from_ref(&console_pk),
+            risk_level: req.risk.as_deref(),
         },
     )
     .map_err(|e| action_error(e).into_response())?;
@@ -906,7 +912,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <div class="card">
   <form id="provision-form" class="form-grid">
     <input name="name" placeholder="runner/service name" required>
-    <input name="kind" placeholder="kind (ssh|vultr|b2)" required>
+    <input name="kind" placeholder="kind (ssh|vultr|b2|github|websearch|hetzner|litellm)" required>
+    <input name="risk" placeholder="risk (safe|risky-install|risky-host) — optional">
     <input name="address" placeholder="address" required>
     <button type="submit">provision</button>
     <input name="secret" placeholder="credential (pasted once, sealed, never stored)" required
@@ -915,7 +922,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 </div>
 
 <table>
-<thead><tr><th>runner</th><th>status</th><th>secret</th><th>readiness</th><th>grants</th><th></th></tr></thead>
+<thead><tr><th>runner</th><th>status</th><th>risk</th><th>secret</th><th>readiness</th><th>grants</th><th></th></tr></thead>
 <tbody id="rows"></tbody>
 </table>
 
@@ -982,6 +989,7 @@ async function refresh() {
     return `<tr>
       <td><b>${esc(r.name)}</b><div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
       <td>${r.status === "revoked" ? chip("red(revoked)") : chip("green(active)")}</td>
+      <td>${r.risk ? chip(esc(r.risk)) : '<span class="muted">?</span>'}</td>
       <td>${secret}</td>
       <td>${readiness}</td>
       <td>${grants}</td>
@@ -997,7 +1005,7 @@ async function refresh() {
       </td>
     </tr>`;
   }).join("");
-  $("#rows").innerHTML = rows || '<tr><td colspan="6" class="muted">no runners yet — provision one above</td></tr>';
+  $("#rows").innerHTML = rows || '<tr><td colspan="7" class="muted">no runners yet — provision one above</td></tr>';
   bindActions();
 }
 
@@ -1041,6 +1049,7 @@ $("#provision-form").onsubmit = async (ev) => {
   try {
     await api("/api/provision", {
       name: f.get("name"), kind: f.get("kind"), address: f.get("address"), secret: f.get("secret"),
+      risk: f.get("risk") || undefined,
     });
     ev.target.reset();
     await refresh();

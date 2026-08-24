@@ -41,6 +41,11 @@ pub struct RunnerRecord {
     /// console signs live readiness probes against it. Unset = no probe.
     #[serde(default)]
     pub mcp_addr: Option<String>,
+    /// safe | risky-install | risky-host — visible at grant time in the
+    /// console (POC_CHUNK3 §0.02). Kind-default at provision, overridable,
+    /// preserved through rebuild (rides the fh-profile `risk` field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

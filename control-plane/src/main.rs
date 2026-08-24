@@ -128,6 +128,10 @@ struct ProvisionArgs {
     /// Where the runner package lands; defaults to ./.freehold/runner/<name>
     #[arg(long, env = "FREEHOLD_RUNNER_STATE_DIR")]
     runner_dir: Option<PathBuf>,
+    /// Runner risk class override (safe|risky-install|risky-host); a
+    /// kind-based default applies when unset (POC_CHUNK3 §0.02).
+    #[arg(long)]
+    risk: Option<String>,
     /// Relay to sync the runner's NIP-29 channel to (Chunk 2.6.1)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
@@ -276,6 +280,7 @@ async fn main() -> Result<()> {
                 &args.address,
                 &args.package_dir,
                 args.mcp_addr.clone(),
+                None,
             )?;
             println!(
                 "adopted runner {} (active) from its shipped package",
@@ -309,6 +314,7 @@ async fn main() -> Result<()> {
                     secret: secret.as_bytes(),
                     runner_dir: &runner_dir,
                     grants: &args.grant,
+                    risk_level: args.risk.as_deref(),
                 },
             )?;
             if args.grant.is_empty() {
@@ -418,6 +424,7 @@ async fn main() -> Result<()> {
                         package_dir: std::path::PathBuf::new(),
                         created_at: p.created_at,
                         mcp_addr: None,
+                        risk_level: p.risk.clone(),
                     },
                 );
                 secrets.insert(

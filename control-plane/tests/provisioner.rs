@@ -34,6 +34,7 @@ fn provision(store: &StateStore, name: &str, secret: &[u8], runner_dir: &std::pa
             secret,
             runner_dir,
             grants: &[],
+            risk_level: None,
         },
     )
     .unwrap();
@@ -54,6 +55,7 @@ fn provision_ships_package_and_cp_state_has_no_plaintext_or_keys() {
             secret,
             runner_dir: &runner_dir,
             grants: &[],
+            risk_level: None,
         },
     )
     .unwrap();
@@ -184,6 +186,7 @@ fn revoked_runner_cannot_be_rotated_or_reprovisioned() {
                 secret: b"x",
                 runner_dir: &runner_dir,
                 grants: &[],
+                risk_level: None,
             }
         ),
         Err(ProvisionError::RunnerRevoked(_))
@@ -204,6 +207,7 @@ fn duplicate_provision_is_rejected() {
             secret: b"x",
             runner_dir: &runner_dir,
             grants: &[],
+            risk_level: None,
         },
     )
     .unwrap_err();
@@ -270,6 +274,7 @@ fn package_dir_in_use_is_refused() {
             secret: b"key-b",
             runner_dir: &runner_dir,
             grants: &[],
+            risk_level: None,
         },
     )
     .unwrap_err();
@@ -388,6 +393,7 @@ fn invalid_names_are_rejected() {
                 secret: b"x",
                 runner_dir: &runner_dir,
                 grants: &[],
+                risk_level: None,
             },
         )
         .unwrap_err();
@@ -423,6 +429,7 @@ fn provision_ships_grants_and_grant_adds_live() {
             secret: b"key",
             runner_dir: &runner_dir,
             grants: std::slice::from_ref(&agent_a.clone()),
+            risk_level: None,
         },
     )
     .unwrap();
@@ -585,6 +592,7 @@ fn adopt_runner_registers_existing_package_without_reshipping() {
         "root@192.168.30.224",
         &package_dir,
         Some("127.0.0.1:8787".into()),
+        None,
     )
     .unwrap();
 
@@ -609,6 +617,7 @@ fn adopt_runner_registers_existing_package_without_reshipping() {
         "ssh",
         "root@192.168.30.224",
         &package_dir,
+        None,
         None,
     )
     .unwrap_err();

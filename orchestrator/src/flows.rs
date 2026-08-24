@@ -96,6 +96,7 @@ pub async fn onboard(
             secret,
             runner_dir,
             grants: std::slice::from_ref(&agent.pubkey),
+            risk_level: None,
         },
     )?;
 

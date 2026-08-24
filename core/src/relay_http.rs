@@ -78,6 +78,10 @@ pub struct RunnerProfile {
     pub secret: String,
     pub created_at: u64,
     pub rotated_at: Option<u64>,
+    /// safe | risky-install | risky-host — the runner class (POC_CHUNK3).
+    /// Absent on profiles published before the field existed = unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
 }
 
 /// Parse the content of a stored kind-39000 runner-metadata event.
@@ -104,6 +108,7 @@ pub fn parse_profile_content(content: &str) -> Result<RunnerProfile, String> {
             .and_then(Value::as_u64)
             .ok_or_else(|| "profile missing created_at".to_string())?,
         rotated_at: v.get("rotated_at").and_then(Value::as_u64),
+        risk: v.get("risk").and_then(Value::as_str).map(String::from),
     };
     if profile.status != "active" && profile.status != "revoked" {
         return Err(format!("profile bad status {:?}", profile.status));
@@ -771,6 +776,7 @@ mod tests {
             secret: "alpha".into(),
             created_at: 1,
             rotated_at: None,
+            risk: None,
         };
         let b = RunnerProfile {
             name: "beta".into(),
