@@ -13,7 +13,9 @@ use std::path::Path;
 
 use freehold_control_plane::console::Console;
 use freehold_control_plane::provisioner;
-use freehold_control_plane::state::{RunnerRecord, RunnerStatus, SecretRecord, StateStore};
+use freehold_control_plane::state::{
+    RunnerRecord, RunnerStatus, SecretRecord, StateStore, now_secs,
+};
 use freehold_core::relay_http::{PROFILE_MESSAGE_TAG, RunnerProfile, query_runner_metas};
 use freehold_testkit::relay as fake_relay;
 
@@ -37,6 +39,7 @@ fn insert_runner(store: &StateStore, name: &str, status: RunnerStatus) {
             package_dir: Path::new("/tmp/pkg").to_path_buf(),
             created_at: 5,
             mcp_addr: None,
+            risk_level: None,
         },
     );
     store.insert_secret(
@@ -214,6 +217,7 @@ async fn rogue_author_cannot_mint_or_clobber_metas() {
         secret: "relaybox".into(),
         created_at: 5,
         rotated_at: None,
+        risk: None,
     };
     let ts = freehold_core::auth::now_secs() + 100;
     let content = serde_json::to_string(&rogue).unwrap();
@@ -295,6 +299,7 @@ async fn rebuild_folds_snapshots_idempotently() {
                 enc_pubkey: rec.enc_pubkey,
                 secret: name.to_string(),
                 created_at: 10 + i as u64,
+                risk: None,
                 rotated_at: if status == RunnerStatus::Revoked {
                     Some(9)
                 } else {
@@ -332,6 +337,7 @@ async fn rebuild_folds_snapshots_idempotently() {
                     package_dir: Path::new("").to_path_buf(),
                     created_at: p.created_at,
                     mcp_addr: None,
+                    risk_level: p.risk.clone(),
                 },
             );
             secrets.insert(
@@ -393,4 +399,79 @@ async fn rebuild_folds_snapshots_idempotently() {
             .values()
             .all(|r| r.package_dir.as_os_str().is_empty())
     );
+}
+
+/// The fh-profile `risk` field rides rebuild: the fold carries the class
+/// label the operator set at provision (POC_CHUNK3 §0.02), not just pubkeys.
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_carries_risk_label() {
+    use freehold_core::relay_http::publish_runner_meta as core_publish;
+
+    let base = tempfile::tempdir().unwrap();
+    let src_store = store_with(base.path().join("cp"));
+    let cp_state = base.path().join("cp-state");
+    let console = console_in(&cp_state);
+    let (relay_url, _state, _task) = fake_relay::spawn().await;
+    let console_secret = console.identity.secret_seed();
+
+    insert_runner(&src_store, "gamma", RunnerStatus::Active);
+    provisioner::sync_runner_channel(&src_store, &relay_url, "gamma", &cp_state).unwrap();
+    let rec = src_store.get_runner("gamma").unwrap();
+    let sec = src_store.get_secret("gamma").unwrap();
+    let profile = RunnerProfile {
+        name: "gamma".to_string(),
+        kind: sec.kind,
+        address: sec.address,
+        status: "active".into(),
+        nostr_pubkey: rec.nostr_pubkey,
+        enc_pubkey: rec.enc_pubkey,
+        secret: "gamma".to_string(),
+        created_at: now_secs() + 100, // NEWEST — wins the per-channel fold
+        rotated_at: None,
+        risk: Some("risky-host".into()),
+    };
+    core_publish(&relay_url, &console_secret, &profile).unwrap();
+
+    let store = StateStore::open(&base.path().join("fold")).unwrap();
+    let profiles = query_runner_metas(
+        &relay_url,
+        &console.identity.nostr_pubkey_hex(),
+        &console_secret,
+    )
+    .unwrap();
+    let mut runners = std::collections::BTreeMap::new();
+    let mut secrets = std::collections::BTreeMap::new();
+    for p in &profiles {
+        runners.insert(
+            p.name.clone(),
+            RunnerRecord {
+                nostr_pubkey: p.nostr_pubkey.clone(),
+                enc_pubkey: p.enc_pubkey.clone(),
+                status: if p.status == "revoked" {
+                    RunnerStatus::Revoked
+                } else {
+                    RunnerStatus::Active
+                },
+                package_dir: Path::new("").to_path_buf(),
+                created_at: p.created_at,
+                mcp_addr: None,
+                risk_level: p.risk.clone(),
+            },
+        );
+        secrets.insert(
+            p.name.clone(),
+            SecretRecord {
+                runner: p.name.clone(),
+                kind: p.kind.clone(),
+                address: p.address.clone(),
+                ciphertext_hex: String::new(),
+                created_at: p.created_at,
+                rotated_at: p.rotated_at,
+            },
+        );
+    }
+    store.rebuild_from(runners, secrets).unwrap();
+    let folded = store.get_runner("gamma").unwrap();
+    assert_eq!(folded.risk_level.as_deref(), Some("risky-host"));
+    assert_eq!(folded.created_at, now_secs() + 100);
 }

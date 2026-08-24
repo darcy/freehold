@@ -75,6 +75,21 @@ pub struct ProvisionRequest<'a> {
     /// AGENT pubkeys granted to call this runner (Phase D). Empty ships a
     /// fail-closed package: nobody may call until a `grant` lands.
     pub grants: &'a [String],
+    /// Runner risk class override (safe | risky-install | risky-host); the
+    /// kind-based default applies when None (POC_CHUNK3 §0.02).
+    pub risk_level: Option<&'a str>,
+}
+
+/// Kind-based risk default: API-scoped targets are safe; ssh is the
+/// install class by default (the PVE-host runner is marked risky-host by an
+/// explicit override at provision); unknown kinds = no label.
+fn default_risk(kind: &str) -> Option<&'static str> {
+    match kind {
+        "vultr" | "b2" | "hetzner" | "github" | "websearch" | "litellm" => Some("safe"),
+        "ssh" => Some("risky-install"),
+        "local" => Some("safe"),
+        _ => None,
+    }
 }
 
 /// B1 — the algolia-style happy path: existing service + credential → runner
@@ -166,6 +181,10 @@ pub fn provision_runner(
             package_dir: req.runner_dir.to_path_buf(),
             created_at: now,
             mcp_addr: None,
+            risk_level: req
+                .risk_level
+                .map(String::from)
+                .or_else(|| default_risk(req.kind).map(String::from)),
         },
     );
     store.insert_secret(
@@ -217,6 +236,7 @@ pub fn adopt_runner(
     address: &str,
     package_dir: &std::path::Path,
     mcp_addr: Option<String>,
+    risk_level: Option<String>,
 ) -> Result<RunnerRecord, ProvisionError> {
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
         return Err(ProvisionError::InvalidName(name.to_string()));
@@ -242,6 +262,7 @@ pub fn adopt_runner(
         package_dir: package_dir.to_path_buf(),
         created_at,
         mcp_addr,
+        risk_level,
     };
     // The Chunk-1 model: one SecretRecord per runner, carrying the target
     // kind/address and the sealed credential (rotate re-seals on top of it).
@@ -589,6 +610,7 @@ fn runner_meta(
         secret: name.to_string(), // secret NAME only — never material
         created_at: rec.created_at,
         rotated_at: sec.rotated_at,
+        risk: rec.risk_level.clone(),
     })
 }
 

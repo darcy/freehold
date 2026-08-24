@@ -242,6 +242,7 @@ fn provision(
             secret,
             runner_dir,
             grants,
+            risk_level: None, // acceptance legs use the kind-based default
         },
     )
     .map_err(|e| e.to_string())
@@ -395,6 +396,98 @@ pub async fn run_checks() -> Vec<Check> {
         }
     };
 
+    let github_addr = mock::spawn_http(mock::github_router()).await;
+    let github_url = format!("http://{github_addr}");
+    let github_dir = base.path().join("runners/github-token");
+    let (github_mcp, _github_server, github_job) = match provision(
+        &store,
+        "github-token",
+        "github",
+        &github_url,
+        mock::GITHUB_TOKEN.as_bytes(),
+        std::slice::from_ref(&agent_pubkey),
+        &github_dir,
+    ) {
+        Ok(_) => match serve_runner(&github_dir).await {
+            Ok((url, task)) => {
+                let nostr = Identity::load(&github_dir)
+                    .map(|i| i.nostr_pubkey_hex())
+                    .unwrap_or_default();
+                (url, task, nostr)
+            }
+            Err(e) => {
+                checks.push(Check::fail(
+                    "G2.4",
+                    "GitHub API via the runner",
+                    format!("serve: {e}"),
+                ));
+                (
+                    "http://127.0.0.1:1/mcp".into(),
+                    tokio::task::spawn(async {}),
+                    String::new(),
+                )
+            }
+        },
+        Err(e) => {
+            checks.push(Check::fail(
+                "G2.4",
+                "GitHub API via the runner",
+                format!("provision/serve: {e}"),
+            ));
+            (
+                "http://127.0.0.1:1/mcp".into(),
+                tokio::task::spawn(async {}),
+                String::new(),
+            )
+        }
+    };
+
+    let websearch_addr = mock::spawn_http(mock::websearch_router()).await;
+    let websearch_url = format!("http://{websearch_addr}");
+    let websearch_dir = base.path().join("runners/websearch");
+    let (websearch_mcp, _websearch_server, websearch_job) = match provision(
+        &store,
+        "websearch",
+        "websearch",
+        &websearch_url,
+        mock::WEBSEARCH_KEY.as_bytes(),
+        std::slice::from_ref(&agent_pubkey),
+        &websearch_dir,
+    ) {
+        Ok(_) => match serve_runner(&websearch_dir).await {
+            Ok((url, task)) => {
+                let nostr = Identity::load(&websearch_dir)
+                    .map(|i| i.nostr_pubkey_hex())
+                    .unwrap_or_default();
+                (url, task, nostr)
+            }
+            Err(e) => {
+                checks.push(Check::fail(
+                    "G2.5",
+                    "Websearch query via the runner",
+                    format!("serve: {e}"),
+                ));
+                (
+                    "http://127.0.0.1:1/mcp".into(),
+                    tokio::task::spawn(async {}),
+                    String::new(),
+                )
+            }
+        },
+        Err(e) => {
+            checks.push(Check::fail(
+                "G2.5",
+                "Websearch query via the runner",
+                format!("provision/serve: {e}"),
+            ));
+            (
+                "http://127.0.0.1:1/mcp".into(),
+                tokio::task::spawn(async {}),
+                String::new(),
+            )
+        }
+    };
+
     let b2_state = Arc::new(B2State::default());
     let b2_addr = mock::spawn_http(mock::b2_router(b2_state.clone())).await;
     let b2_url = format!("http://{b2_addr}");
@@ -484,6 +577,22 @@ pub async fn run_checks() -> Vec<Check> {
     }
 
     // G2.3
+    if !github_job.is_empty() {
+        match github_read(&agent, &github_job, &github_mcp).await {
+            Ok(detail) => checks.push(Check::pass("G2.4", "GitHub API via the runner", detail)),
+            Err(e) => checks.push(Check::fail("G2.4", "GitHub API via the runner", e)),
+        }
+    }
+    if !websearch_job.is_empty() {
+        match websearch_query(&agent, &websearch_job, &websearch_mcp).await {
+            Ok(detail) => checks.push(Check::pass(
+                "G2.5",
+                "Websearch query via the runner",
+                detail,
+            )),
+            Err(e) => checks.push(Check::fail("G2.5", "Websearch query via the runner", e)),
+        }
+    }
     if !b2_job.is_empty() {
         match b2_roundtrip(&agent, &b2_job, &b2_mcp).await {
             Ok(detail) => checks.push(Check::pass(
@@ -851,6 +960,42 @@ async fn b2_roundtrip(agent: &Agent, runner_pubkey: &str, mcp_url: &str) -> R<St
         return Err("b2 credential leaked through the round-trip".into());
     }
     Ok("authorize -> upload -> list names, all via the runner; credential clean".into())
+}
+
+async fn github_read(agent: &Agent, runner_pubkey: &str, mcp_url: &str) -> R<String> {
+    let out = exec(
+        agent,
+        runner_pubkey,
+        mcp_url,
+        "github-token",
+        "curl -sS \"$GITHUB_TOKEN_URL/user\" -H \"Authorization: token $GITHUB_TOKEN\"",
+        &["github-token"],
+    )?;
+    if !out.contains("mock-user") {
+        return Err(format!("github user output: {out}"));
+    }
+    if out.contains("ghp-mock-123") {
+        return Err("github PAT leaked through the exec".into());
+    }
+    Ok("GET /user via the runner with PAT auth; credential clean".into())
+}
+
+async fn websearch_query(agent: &Agent, runner_pubkey: &str, mcp_url: &str) -> R<String> {
+    let out = exec(
+        agent,
+        runner_pubkey,
+        mcp_url,
+        "websearch",
+        "curl -sS \"$WEBSEARCH_URL/search?q=freehold&format=json\"",
+        &["websearch"],
+    )?;
+    if !out.contains("freehold mock hit") {
+        return Err(format!("websearch output: {out}"));
+    }
+    if out.contains("ws-mock-123") {
+        return Err("websearch key leaked through the exec".into());
+    }
+    Ok("SearXNG-style JSON query via the runner; credential clean".into())
 }
 
 async fn no_master_key(cp_dir: &Path) -> R<String> {
@@ -1234,6 +1379,10 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        assert_eq!(checks.len(), 10, "nine chunk-1 checks + G4");
+        assert_eq!(
+            checks.len(),
+            12,
+            "ten chunk-1 checks (ssh/vultr/b2/github/websearch) + G4"
+        );
     }
 }

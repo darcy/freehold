@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::extract::{Path as AxPath, State};
+use axum::extract::{Path as AxPath, Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -306,4 +306,53 @@ async fn status_list(
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(Json(json!({ "servers": [] })))
+}
+
+pub const GITHUB_TOKEN: &str = "ghp-mock-123";
+
+fn github_ok(headers: &HeaderMap) -> bool {
+    headers.get("authorization").and_then(|v| v.to_str().ok())
+        == Some(&format!("token {GITHUB_TOKEN}"))
+}
+
+pub fn github_router() -> Router {
+    async fn user(headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+        if !github_ok(&headers) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(Json(json!({ "login": "mock-user", "id": 1 })))
+    }
+    async fn repo(
+        AxPath(parts): AxPath<String>,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, StatusCode> {
+        if !github_ok(&headers) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        let mut p = parts.split('/');
+        let owner = p.next().unwrap_or("?");
+        let repo = p.next().unwrap_or("?");
+        Ok(Json(
+            json!({ "full_name": format!("{owner}/{repo}"), "private": false }),
+        ))
+    }
+    Router::new()
+        .route("/user", get(user))
+        .route("/repos/{owner}/{repo}", get(repo))
+}
+
+pub const WEBSEARCH_KEY: &str = "ws-mock-123";
+
+pub fn websearch_router() -> Router {
+    async fn search(
+        Query(q): Query<std::collections::HashMap<String, String>>,
+    ) -> Result<Json<Value>, StatusCode> {
+        if q.get("format").map(String::as_str) != Some("json") {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Ok(Json(json!({
+            "results": [{ "title": "freehold mock hit", "url": "https://example.com/fh" }]
+        })))
+    }
+    Router::new().route("/search", get(search))
 }
