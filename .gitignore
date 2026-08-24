@@ -1,2 +1,7 @@
 /target/
 **/.freehold/
+
+# terraform state is sensitive — never committed
+*.tfstate
+*.tfstate.*
+.terraform/
