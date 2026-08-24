@@ -97,6 +97,12 @@ Goal: bring in the interaction surface + memory backbone; establish the scope.
 
 ## Chunk 3 — Skill framework v1 + relay-scoped service agents
 
+NOTE (2026-08-24): the detailed plan is `roadmap/POC_CHUNK3.md` (draft v5). It SUPERSEDES
+the onboarding order below (expert created first, reasons about its own target, asks CPA —
+CPA resolves the named hardware peer; the old CPA-provisions-target-first order is replaced
+for Chunk 3 forward) and adds k8s-as-pods to Chunk 3 (superseding ROADMAP's NO-Kubernetes-
+in-POC for this chunk). This section stays the short goal/acceptance summary.
+
 Goal: agents can install/configure services, with per-service experts in the relay scope.
 
 *   **Skill schema + runner** — declarative playbooks (target: lxc | pod | either).
