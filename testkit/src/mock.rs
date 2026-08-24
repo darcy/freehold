@@ -341,6 +341,33 @@ pub fn github_router() -> Router {
         .route("/repos/{owner}/{repo}", get(repo))
 }
 
+pub const LITELLM_ADMIN_KEY: &str = "sk-lite-master-123";
+
+fn litellm_admin_ok(headers: &HeaderMap) -> bool {
+    headers.get("authorization").and_then(|v| v.to_str().ok())
+        == Some(&format!("Bearer {LITELLM_ADMIN_KEY}"))
+}
+
+pub fn litellm_router() -> Router {
+    async fn liveliness() -> Json<Value> {
+        Json(json!({ "status": "ok" }))
+    }
+    async fn key_generate(headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+        if !litellm_admin_ok(&headers) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(Json(json!({
+            "key": "sk-live-mock-123",
+            "key_alias": "agent-x",
+            "agent_id": "agent-x",
+            "expires": null
+        })))
+    }
+    Router::new()
+        .route("/health/liveliness", get(liveliness))
+        .route("/key/generate", post(key_generate))
+}
+
 pub const WEBSEARCH_KEY: &str = "ws-mock-123";
 
 pub fn websearch_router() -> Router {
