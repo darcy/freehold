@@ -1,127 +1,107 @@
 # freehold bootstrap substrate — Terraform plans per kind (C7, POC_CHUNK3 v5).
 #
-# Execution discipline (locked): terraform runs ON the provisioning box (the PVE
-# host / librem) through the runner's exec (`scripts/tf.sh`); every credential
-# arrives as a runner-injected env var (TF_VAR_*), NEVER via tfvars or provider
-# literals. TF-generated secrets (random_password etc.) live in state, so state
-# is sensitive: keep it under /srv/data at 0600 or in an encrypted backend.
+# Execution discipline (locked): terraform runs ON the provisioning box (the
+# PVE host / librem) through the runner's exec (`scripts/tf.sh`); every
+# credential arrives as a runner-injected env var (TF_VAR_*), NEVER via tfvars
+# or provider literals. TF-generated secrets live in state, so state is
+# sensitive: keep it under /srv/data at 0600 or in an encrypted backend.
 # Post-apply guard: assert state contains no operator-supplied variable value.
 #
-# Provider creds: a PVE API token minted ONCE through the runner exec
-# (pveum user add freehold-tf@pve --password ... ; pveum aclmod / --user
-# freehold-tf@pve --role Administrator) — the token value then rides the
-# runner's secret plane, never the repo.
+# NOTE (2026-08-24): the bpg/proxmox container provider underwent a schema
+# rewrite (template_file_id/network_device removed by 0.66.0; the new clone+
+# network_interface form and a VM.Audit ACL quirk blocked import). Until the
+# provider integration is re-solved (next session: pin a pre-rewrite release
+# or adopt the clone-based flow), the substrate is managed EXEC-FIRST per the
+# plan's remote-exec discipline: null_resource + local-exec provisioners call
+# the proven pct/kubectl flows on the box; terraform provides real state,
+# ordering, and destroy-timing. The provider block is retained (pinned 0.66.0)
+# for the follow-up integration.
 
 terraform {
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
-      version = "~> 0.66"
+      version = "0.66.0"
     }
   }
   backend "local" {
-    # path defaults to ./terraform.tfstate — relocate to /srv/data/freehold-tf
-    # (0600) on the provisioning box per the storage-tier rule.
+    # STABLE path (survives code reships): /srv/data/freehold-tf/terraform.tfstate
+    # at 0600 — the storage-tier rule for sensitive state.
+    path = "../terraform.tfstate"
   }
 }
 
 variable "proxmox_api_url" {
-  type        = string
-  description = "PVE API endpoint (e.g. https://127.0.0.1:8006 when run on the PVE host)"
+  type    = string
+  default = "https://127.0.0.1:8006"
 }
-
 variable "proxmox_api_token_id" {
-  type        = string
-  description = "PVE API token id, e.g. freehold-tf@pve!bootstrap"
+  type    = string
+  default = "freehold-tf@pve!bootstrap"
 }
-
 variable "proxmox_api_token" {
-  type        = string
-  sensitive   = true
-  description = "PVE API token secret — runner-injected TF_VAR, never committed"
+  type      = string
+  sensitive = true
+  default   = ""
 }
-
 variable "node_name" {
   type    = string
   default = "librem"
 }
-
 variable "template_id" {
   type    = string
   default = "local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst"
 }
-
-provider "proxmox" {
-  endpoint = var.proxmox_api_url
-  # full token id (user@realm!tokenid) IS the username; the secret is api_token
-  username = var.proxmox_api_token_id
-  api_token = var.proxmox_api_token
-  insecure = true # self-signed PVE cert (LAN-only appliance) — fine for the POC
-}
-
-# ---- kind: k3s (the substrate node for C0) ---------------------------------
-resource "proxmox_virtual_environment_container" "k3s" {
-  vm_id           = 107
-  node_name       = var.node_name
-  template_file_id = var.template_id
-  description     = "k3s cluster node (Chunk-3 C0 substrate) — managed by terraform"
-  started         = true
-  unprivileged    = true
-  features {
-    nesting = true
-    keyctl  = true
-  }
-  memory {
-    dedicated = 4096
-  }
-  cpu {
-    cores = 4
-  }
-  disk {
-    datastore_id = "local-lvm"
-    size         = 20
-  }
-  network_device {
-    bridge = "vmbr0"
-    ipv4 = {
-      address = "192.168.30.243/24"
-      gateway = "192.168.30.1"
-    }
-  }
-  # The one-time k3s bring-up — host/kernel prep happens ON the PVE host (this
-  # box), the k3s install + unit fix happen in the guest. All through exec.
-  provisioner "local-exec" {
-    command = "${path.module}/scripts/k3s-bringup.sh ${self.vm_id}"
-  }
-}
-
-# ---- kind: litellm-kube (C0 — the kube workloads for LiteLLM + Postgres) ----
-# The kube manifests live in terraform/manifests/ (litellm + postgres with the
-# PVC pinned to /srv/data/k8s-volumes); kubectl runs on the k3s node via the
-# runner chain. Secret values (master key, provider key) are TF_VAR-injected
-# env of the kubectl step, never files-in-repo.
-resource "null_resource" "litellm_kube" {
-  triggers = {
-    manifests   = sha256(join("", [for f in fileset(path.module, "manifests/*.yaml") : file(f)]))
-    master_key  = var.litellm_master_key
-    provider_key = var.litellm_provider_key
-  }
-  provisioner "local-exec" {
-    command = "${path.module}/scripts/kube-apply.sh ${var.k3s_vmid} ${var.litellm_master_key} ${var.litellm_provider_key}"
-  }
-}
-
 variable "k3s_vmid" {
   type    = number
   default = 107
 }
-
 variable "litellm_master_key" {
   type      = string
   sensitive = true
 }
-
 variable "litellm_provider_key" {
   type      = string
   sensitive = true
+}
+
+# ---- kind: k3s (the substrate node for C0) — exec-first --------------------
+# Create: pct create with the exact live shape (static IP, rootfs, unprivileged,
+# features nesting+keyctl), idempotent (skip if already present), then the
+# k3s-bringup script (gotchas encoded). Destroy: pct stop && pct destroy.
+resource "null_resource" "k3s_lxc" {
+  triggers = {
+    vmid        = var.k3s_vmid
+    template_id = var.template_id
+    node        = var.node_name
+  }
+  provisioner "local-exec" {
+    command = "${path.module}/scripts/k3s-lxc.sh ${var.k3s_vmid} ${var.template_id} ${var.node_name} apply"
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "${path.module}/scripts/k3s-lxc.sh ${self.triggers.vmid} ${self.triggers.template_id} ${self.triggers.node} destroy"
+  }
+}
+
+# ---- kind: litellm-kube (C0 — kube workloads for LiteLLM + Postgres) -------
+# Create: kubectl apply of terraform/manifests + rollout + model registration
+# (the deterministic C5 legs that depend only on the operator-provided keys).
+# Destroy: kubectl delete namespace litellm (the kube layer is disposable; the
+# durable PVC on /srv/data/k8s-volumes is recreated empty by the apply).
+resource "null_resource" "litellm_kube" {
+  depends_on = [null_resource.k3s_lxc]
+  triggers = {
+    manifests    = sha256(join("", [for f in fileset(path.module, "manifests/*.yaml") : file(f)]))
+    master_key   = var.litellm_master_key
+    provider_key = var.litellm_provider_key
+    vmid         = var.k3s_vmid
+  }
+  provisioner "local-exec" {
+    command = "${path.module}/scripts/kube-apply.sh ${var.k3s_vmid} ${var.litellm_master_key} ${var.litellm_provider_key}"
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "${path.module}/scripts/kube-destroy.sh ${self.triggers.vmid}"
+  }
 }

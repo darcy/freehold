@@ -17,6 +17,7 @@ sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null
 pct exec "$VMID" -- bash -c '
   set -euo pipefail
   export PATH=/usr/local/bin:/root/.cargo/bin:$PATH
+  K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
   # deps incl. the rust toolchain for later agent-free tooling
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq
@@ -53,10 +54,15 @@ UNIT
     systemctl daemon-reload
     systemctl restart k3s
   fi
+  # WAIT for the k3s API before any kubectl op (the install returns early)
+  for i in $(seq 1 30); do
+    $K get nodes >/dev/null 2>&1 && break
+    sleep 10
+  done
+  $K get nodes 2>&1 | tail -2 | head -1
   # durable volume root: the locked carve-out (never the default local-path root)
   mkdir -p /srv/data/k8s-volumes
   # cluster DNS: public upstream (the LAN router hijacks some A records)
-  K=/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml
   $K get cm coredns -n kube-system -o jsonpath="{.data.Corefile}" > /tmp/corefile || true
   grep -q "1.1.1.1" /tmp/corefile 2>/dev/null || {
     sed -i "s|forward . /etc/resolv.conf|forward . 1.1.1.1 8.8.8.8|" /tmp/corefile
@@ -79,10 +85,4 @@ LP
   # the api.fireworks.ai pin (provider egress — the router DNS answers wrong)
   $K patch deploy litellm -n litellm --type=strategic -p "{\"spec\":{\"template\":{\"spec\":{\"hostAliases\":[{\"ip\":\"35.207.52.96\",\"hostnames\":[\"api.fireworks.ai\"]}]}}}}" 2>/dev/null || true
 '
-# wait for the node
-for i in $(seq 1 20); do
-  OUT=$(pct exec "$VMID" -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -c Ready || true)
-  [ "$OUT" -ge 1 ] && break
-  sleep 10
-done
-echo "k3s node: $(pct exec "$VMID" -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>&1 | tail -2 | head -1)"
+echo "WAIT_NODE_RUNS_LATER"
