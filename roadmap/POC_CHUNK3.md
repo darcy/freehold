@@ -118,34 +118,46 @@ brokered through an audited, classed runner or contained to a disposable environ
 
 Same spirit as Chunk 2's `BUZZ_SURFACE.md`: resolve the open design questions before writing
 agent-facing schema against assumptions.
+**Status: RESOLVED (2026-08-23) — deliverable at `roadmap/POC_CHUNK3_SURFACE.md`.**
+Items 01–06 below are the decision record; each carries its resolution + note section.
+Phases A–F consume the note; where a phase line still says "decide/confirm", the note wins.
 
 * [ ] 01. Enumerate Chunk 3's actual capability needs (github, websearch, package-manager
       fetch, DNS lookups — whatever tailscale/pihole installs require) and classify each as a
       runner: safe (API-scoped) or risky (exec/SSH-shaped). Note: the `hetzner` api-target
       flavor already exists alongside ssh/vultr/b2 — the list starts there, not from zero.
-* [ ] 02. Decide where the safe/risky flag lives (runner metadata field? skill schema?) and
-      how the console surfaces it — visible at grant time, not discoverable by reading code.
-* [ ] 03. CONSUME, don't re-decide: channel membership is the gate (locked above);
-      `--respond-to` = `allowlist` synced by the CPA. Verify buzz-acp's allowlist shape — the ONE mechanic to
-      confirm is whether it is LIVE-RELOADABLE (file rewrite + reload signal) or
-      STARTUP-ONLY (read once at launch); B3's sync mechanism and B4's acceptance branch on
-      the answer.
-* [ ] 04. LiteLLM credential home per the locked decision (CP-minted per-agent key, ciphertext
-      in the CP store, surfaced at spawn via the colocated runner): confirm the LiteLLM admin
-      API mints per-agent keys (read LiteLLM's docs/source; if it can't, fall back to one
-      shared key minted by the operator — record which).
-* [ ] 05. AUDIT SURFACE (carried gap #6, resolved here — Phase A4 consumes it): decide
-      whether the operational audit stays on kind-48001 + local spool (RECOMMENDED: native
-      kind, relay hash-chain per BUZZ_SURFACE §8, already live) or additionally posts
-      redacted kind-9 receipts to the runner's channel (G-B). Default: 48001 stays
-      operational; kind-9 receipts deferred. A4 implements whichever this item picks.
-* [ ] 06. Prompt-injection standing answer is LOCKED (membership-bounded, see above); this
-      item only records it in the note so future multi-member-channel work reopens it
-      deliberately.
+      **(RESOLVED → SURFACE §1: github, websearch, install-ssh, PVE-host ssh, litellm —
+      list + classes + credential/env conventions in the note.)**
+* [x] 02. RESOLVED → SURFACE §1: `RunnerRecord.risk_level: Option<String>` in
+      `control-plane/src/state.rs` (`"safe" | "risky-install" | "risky-host"`; None =
+      unknown), set at provision time — kind-based default (api kinds = safe, ssh =
+      risky-install) with an explicit `--risk` override at provision (the PVE-host runner is
+      marked `risky-host` that way) — rendered in the console overview.
+* [x] 03. RESOLVED → SURFACE §2: **STARTUP-ONLY.** `--respond-to` /
+      `--respond-to-allowlist` (env `BUZZ_ACP_RESPOND_TO[_ALLOWLIST]`) are spawn-time
+      CLI/env, validated once at startup (config.rs:460-481, lib.rs:1945); NO hot-reload, no
+      signal, no file watch — allowlist changes REQUIRE a buzz-acp process restart. Owner is
+      always implicitly allowlisted; the flag is required for `allowlist` mode. Mention =
+      kind 9 with `#p` == agent pubkey; channel reads are `#h`-scoped (non-member 403
+      transparent). BONUS: DMs are owner-only regardless of allowlist (buzz-acp's own DM
+      hardening) — the allowlist governs channel mentions only.
+* [x] 04. RESOLVED → SURFACE §3: master-key `POST /key/generate` mints per-agent keys
+      (`agent_id`, `key_alias`, `max_budget`; `models` optional = all models; keys mintable
+      BEFORE provider models exist). Auth = master key ONLY (no scoped admin keys).
+      `DATABASE_URL` REQUIRED at startup; proxy :4000; lifecycle via `PATCH /key/update` +
+      `POST /key/delete`. No shared-key fallback needed. F3 wires a `litellm` api-runner that
+      holds the master key as ciphertext.
+* [x] 05. RESOLVED → SURFACE §5: operational audit stays **kind-48001 + the local spool**;
+      kind-9 redacted channel receipts (G-B) DEFERRED (duplicate path, no Chunk-3 consumer).
+      A4 implements the existing 48001 + spool path — no new kind, no channel posting.
+* [x] 06. RECORDED → SURFACE §6: private channels default to operator + CPA membership, so
+      the injection surface IS operator prompts; buzz-acp's DM hardening (owner-only DMs)
+      extends it. Multi-member channels later re-open content-level defense as future work.
 
-**Deliverable:** a short note (mirroring `BUZZ_SURFACE.md`'s format) naming the capability
-runner list + safe/risky classification, the --respond-to sync mechanic, the LiteLLM key
-path, and the audit-surface decision.
+**Deliverable (DONE):** `roadmap/POC_CHUNK3_SURFACE.md` — capability runner list +
+safe/risky classification, the --respond-to resolution (startup-only → restart-sync), the
+LiteLLM key path, the harness tool-disable matrix (goose ✓, claude-code ✓, codex ✗), and
+the audit-surface decision.
 
 ## Phase A — Capability runners (outbound default-deny, generalized)
 
@@ -159,8 +171,9 @@ path, and the audit-surface decision.
 * [ ] A4. Audit captures capability-runner calls per Phase 0.05's decision (48001 + spool
       today; kind-9 receipts only if 0.05 picked them).
 * [ ] A5. Harness-native web tools disabled at spawn for every expert (base tools only) —
-      the enforcement guarantee; verify goose/codex/claude spawn configs support tool
-      allowlists (per Phase 0.01's note).
+      the enforcement guarantee. (RESOLVED → SURFACE §4: goose ✓ — `extensions[].enabled:
+      false` + `available_tools`; claude-code ✓ — `permissions.deny: ["Bash","WebSearch",
+      "Write"]`; codex ✗ — NO tool-deny mechanism — see A5b.)
 * [ ] A5b. **Harness-native shell/exec/file-write tools are disabled — the actual
       enforcement, not the web-tools clause.** goose/claude-code/codex ship a native
       shell/bash tool as a BASE tool (not a web tool), so A5's web-only wording would
@@ -175,6 +188,11 @@ path, and the audit-surface decision.
       config and ENUMERATE its tools — assert no tool can run a command or write a file
       on the harness LXC directly; only MCP calls to granted runners survive. Any native
       shell/exec/file-write tool present = A5/A5b FAILS.
+      **Harness verdict (SURFACE §4): goose and claude-code comply; CODEX IS EXCLUDED** —
+      it has no tool-deny mechanism (approval_policy/sandbox_mode gates only), so a codex
+      expert would retain ungoverned shell access on the harness LXC and fail this gate by
+      construction. Codex returns only inside an OS-level container sandbox (future work,
+      not POC).
 * [ ] A6. **Install runners — how an expert reaches the service LXC it installs into.** One
       SSH runner per disposable service LXC (`<service>-install`): the process is colocated
       on the harness LXC (in-memory ssh key — the ARCHITECTURE colocated-runner shape), the
@@ -198,21 +216,20 @@ path, and the audit-surface decision.
 * [ ] B2. Adding a person/agent to that channel is the ONLY way to gain talk access — same
       shape as a runner grant (9000 put-user), same revoke shape (9001 remove-user), both
       live-proven on stock buzz in 2.6.1.
-* [ ] B3. CPA syncs the `--respond-to allowlist` on every membership change, per 0.03's
-      confirmed mechanic: (a) live-reloadable → rewrite + reload signal; (b) startup-only →
-      restart that agent's process (bounded cost — the agent is ephemeral; relay-side
-      membership already landed live; the reply-gate lags one process lifetime, documented).
-      CPA START also reconciles allowlist ← current roster (idempotent fold, the
+* [x] B3. RESOLVED → SURFACE §2 (startup-only): the allowlist is SPAWN-TIME STATE. The CPA
+      derives `--respond-to-allowlist` from the channel roster at every (re)spawn and
+      RESTARTS the agent's buzz-acp unit on membership change — relay-side 9000/9001
+      membership lands instantly; the reply-gate lags one process lifetime (documented).
+      CPA START reconciles unit params ← current roster idempotently (the
       `control-plane rebuild` shape), so a crash between the membership write and the sync
       settles on next start — no permanent drift, no manual fix.
-* [ ] B4. Verify BOTH layers, branching on 0.03's answer: a non-member's @mention write
-      is REFUSED (403 at ingest — assert the 403, not just "no response"; holds for either
-      allowlist shape); a member added to the channel gets replies — WITHOUT an agent
-      restart only if the allowlist is live-reloadable, otherwise after the CPA-applied
-      restart (state which, per 0.03); a member absent from the allowlist sees the channel
-      but gets no reply (documented failure mode). The restart-free property is asserted for
-      the RELAY side (9000 lands live); the reply-gate may legitimately lag, and that lag is
-      documented, never silently relied on.
+* [x] B4. RESOLVED → SURFACE §2. Verify BOTH layers: a non-member's @mention write is
+      REFUSED (403 at ingest — assert the 403, not just "no response"); a member added to
+      the channel gets replies AFTER the CPA-applied buzz-acp restart (the restart-free
+      property is asserted for the RELAY side — 9000 lands live — and for the channel READ
+      path; the reply-gate legitimately lags one process lifetime, documented); a member
+      absent from the allowlist sees the channel but gets no reply (documented failure
+      mode). DM hardening (owner-only DMs) is buzz-acp's own — assert it as a bonus.
 
 ## Phase C — Skill framework v1 (agent-improvised, disposability-bounded)
 
@@ -250,9 +267,10 @@ path, and the audit-surface decision.
 ## Phase E — Spawn per-service expert agents (relay-scoped, real reasoning)
 
 * [ ] E1. ONE dedicated agent-harness LXC on the PVE host (per the locked placement decision);
-      `@tailscale`, `@pihole` spawned as real buzz-acp-harnessed agents (goose/claude
-      code/codex — the Chunk-3+ path per BUZZ_SURFACE §6), one process per identity; each
-      harness runs with NATIVE WEB TOOLS DISABLED (A5).
+      `@tailscale`, `@pihole` spawned as real buzz-acp-harnessed agents on **goose or
+      claude-code** (the Chunk-3+ path per BUZZ_SURFACE §6; CODEX EXCLUDED — no tool-deny
+      mechanism, SURFACE §4), one process per identity; each harness runs with NATIVE WEB
+      AND SHELL TOOLS DISABLED (A5/A5b).
 * [ ] E2. Onboarding pattern from ARCHITECTURE executes for real: CPA provisions the service
       LXC → creates runner(s) (capability + credential, Phase A — including the `<service>-install` SSH runner reaching the service LXC, A6) → validates 🟢 → creates the
       private channel (Phase B) → grants → writes AGENTS.md (POC prompt source: file on the
@@ -269,9 +287,12 @@ path, and the audit-surface decision.
 * [ ] F2. Operator-configures LiteLLM (provider keys, routing) as a ONE-TIME manual setup for
       POC (locked; CP-driven-as-skill is post-POC). LiteLLM's own keys never enter the CP
       store.
-* [ ] F3. Per-agent model credential: CP mints via LiteLLM admin API → stores ciphertext →
-      harness-LXC colocated runner surfaces it at spawn env (never on disk, per the locked
-      pod-model precedent).
+* [ ] F3. Per-agent model credential: minted via a **`litellm` api-runner** (safe class)
+      holding the master key as ciphertext (`litellm-admin-key` → `LITELLM_ADMIN_KEY`,
+      address `http://<litellm-lxc>:4000`) — the spawn flow calls `POST /key/generate`
+      (`agent_id=`, `key_alias=`, `max_budget=`) THROUGH the runner; the response key is
+      stored ciphertext in the CP store and surfaced at spawn env by the harness-LXC
+      colocated runner (never on disk, never in any agent's context — SURFACE §3).
 
 ## Phase G — Acceptance / real dogfood UAT
 
