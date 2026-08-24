@@ -442,6 +442,52 @@ pub async fn run_checks() -> Vec<Check> {
         }
     };
 
+    let litellm_addr = mock::spawn_http(mock::litellm_router()).await;
+    let litellm_url = format!("http://{litellm_addr}");
+    let litellm_dir = base.path().join("runners/litellm-admin-key");
+    let (litellm_mcp, _litellm_server, litellm_job) = match provision(
+        &store,
+        "litellm-admin-key",
+        "litellm",
+        &litellm_url,
+        mock::LITELLM_ADMIN_KEY.as_bytes(),
+        std::slice::from_ref(&agent_pubkey),
+        &litellm_dir,
+    ) {
+        Ok(_) => match serve_runner(&litellm_dir).await {
+            Ok((url, task)) => {
+                let nostr = Identity::load(&litellm_dir)
+                    .map(|i| i.nostr_pubkey_hex())
+                    .unwrap_or_default();
+                (url, task, nostr)
+            }
+            Err(e) => {
+                checks.push(Check::fail(
+                    "G2.6",
+                    "LiteLLM admin via the runner",
+                    format!("serve: {e}"),
+                ));
+                (
+                    "http://127.0.0.1:1/mcp".into(),
+                    tokio::task::spawn(async {}),
+                    String::new(),
+                )
+            }
+        },
+        Err(e) => {
+            checks.push(Check::fail(
+                "G2.6",
+                "LiteLLM admin via the runner",
+                format!("provision/serve: {e}"),
+            ));
+            (
+                "http://127.0.0.1:1/mcp".into(),
+                tokio::task::spawn(async {}),
+                String::new(),
+            )
+        }
+    };
+
     let websearch_addr = mock::spawn_http(mock::websearch_router()).await;
     let websearch_url = format!("http://{websearch_addr}");
     let websearch_dir = base.path().join("runners/websearch");
@@ -591,6 +637,12 @@ pub async fn run_checks() -> Vec<Check> {
                 detail,
             )),
             Err(e) => checks.push(Check::fail("G2.5", "Websearch query via the runner", e)),
+        }
+    }
+    if !litellm_job.is_empty() {
+        match litellm_mint_key(&agent, &litellm_job, &litellm_mcp).await {
+            Ok(detail) => checks.push(Check::pass("G2.6", "LiteLLM admin via the runner", detail)),
+            Err(e) => checks.push(Check::fail("G2.6", "LiteLLM admin via the runner", e)),
         }
     }
     if !b2_job.is_empty() {
@@ -998,6 +1050,24 @@ async fn websearch_query(agent: &Agent, runner_pubkey: &str, mcp_url: &str) -> R
     Ok("SearXNG-style JSON query via the runner; credential clean".into())
 }
 
+async fn litellm_mint_key(agent: &Agent, runner_pubkey: &str, mcp_url: &str) -> R<String> {
+    let out = exec(
+        agent,
+        runner_pubkey,
+        mcp_url,
+        "litellm-admin-key",
+        "curl -sS -X POST \"$LITELLM_ADMIN_KEY_URL/key/generate\" -H \"Authorization: Bearer $LITELLM_ADMIN_KEY\" -H \"Content-Type: application/json\" -d '{\"agent_id\":\"agent-x\",\"key_alias\":\"agent-x\",\"max_budget\":10}'",
+        &["litellm-admin-key"],
+    )?;
+    if !out.contains("sk-live-mock-123") {
+        return Err(format!("key generate output: {out}"));
+    }
+    if out.contains("sk-lite-master-123") {
+        return Err("litellm master key leaked through the exec".into());
+    }
+    Ok("minted a per-agent key via the runner; master key clean".into())
+}
+
 async fn no_master_key(cp_dir: &Path) -> R<String> {
     let state_raw =
         std::fs::read_to_string(cp_dir.join("state.json")).map_err(|e| e.to_string())?;
@@ -1381,8 +1451,8 @@ mod tests {
         );
         assert_eq!(
             checks.len(),
-            12,
-            "ten chunk-1 checks (ssh/vultr/b2/github/websearch) + G4"
+            13,
+            "eleven chunk-1 checks (ssh/vultr/b2/github/websearch/litellm) + G4"
         );
     }
 }

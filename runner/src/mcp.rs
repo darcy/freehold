@@ -498,6 +498,11 @@ async fn api_status(
             "curl -sS -o /dev/null -w '%{{http_code}}' \
              \"${{{url_env}}}/search?q=freehold&format=json\""
         ),
+        "litellm" => format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' \
+             \"${{{url_env}}}/health/liveliness\" -H \
+             \"Authorization: Bearer ${{{cred}}}\""
+        ),
         k => return Ok(format!("red(unsupported api kind {k})")),
     };
     match state.exec.probe_env(&cmd, &envs).await {
@@ -561,7 +566,7 @@ async fn handle_status(
         } else if let Some(meta) = state.ctx.package.targets.get(&entry) {
             match meta.kind.as_str() {
                 "ssh" => ssh_status(state, &entry, meta).await?,
-                "vultr" | "b2" | "hetzner" | "github" | "websearch" => {
+                "vultr" | "b2" | "hetzner" | "github" | "websearch" | "litellm" => {
                     api_status(state, meta).await?
                 }
                 k => format!("red(unsupported kind {k})"),
