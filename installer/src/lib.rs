@@ -293,10 +293,11 @@ pub fn stage_grant(a: &Answers) -> Result<()> {
 /// process). Reuses an already-listening serve on the same address.
 /// Returns the pid (or "— (reused)").
 pub fn stage_serve(a: &Answers) -> Result<String> {
-    if port_open(&a.serve) {
-        return Ok("— (reused)".to_string());
-    }
-    std::fs::create_dir_all(serve_log().parent().unwrap())?;
+    // ALWAYS a fresh serve for the CURRENT package: a listener on the addr
+    // may be a STALE serve (from an earlier world) holding old identities
+    // in memory — reusing it makes every signed call fail with
+    // "signature does not verify".
+    kill_serve_on(&a.serve);
     let pkg = runner_pkgs().join(&a.runner);
     if !pkg.join("identity.json").exists() {
         bail!(
@@ -331,6 +332,29 @@ pub fn stage_serve(a: &Answers) -> Result<String> {
         a.serve,
         serve_log().display()
     );
+}
+
+/// Kill any runner serve bound to this MCP address (kills stale-world
+/// serves; a fresh one is spawned by stage_serve right after).
+pub fn kill_serve_on(addr: &str) {
+    let pat = format!("runner serve.*--addr {}", regex_escape(addr));
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", &pat])
+        .output();
+    // give the port a moment to release
+    std::thread::sleep(std::time::Duration::from_millis(400));
+}
+
+fn regex_escape(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_string()
+            } else {
+                format!("\\{}", c)
+            }
+        })
+        .collect()
 }
 
 pub fn port_open(addr: &str) -> bool {
