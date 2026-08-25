@@ -1,37 +1,18 @@
-//! freehold-install — the one-shot interactive bring-up wrapper.
-//!
-//! Composes the EXISTING CLI binaries (`control-plane`, `runner`, `freehold`)
-//! into a guided install: collect the few decisions with sane defaults, walk
-//! the operator through installing the SSH door, start the runner in the
-//! background, verify the door REALLY works, then boot + deploy relay and CP
-//! LXCs on the Proxmox host — with a progress line per stage.
-//!
-//! Designed for the NEW-install path (relay + cp on a Proxmox host as LXC
-//! guests). The underlying stages are idempotent where it matters: a re-run
-//! reuses an existing runner package and re-verifies the door.
-//!
-//! How to run (from the repo root — nothing writes outside `./.freehold` and
-//! the repo's `target/`):
-//!
-//!     cargo build --workspace --bins   # once (the wrapper runs the sibling
-//!                                      # binaries directly; it cannot invoke
-//!                                      # cargo itself while `cargo run`
-//!                                      # holds the build lock)
-//!     ./target/debug/freehold-install
+//! freehold-install — the standalone (dialoguer) front-end over the shared
+//! bring-up stages (freehold_installer::stages). The `freehold` TUI's
+//! bootstrap mode drives the same stages with its own widgets.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use freehold_installer::config;
+use freehold_installer::{
+    Answers, DoorProbe, ensure_bins, mint_identity, ops_pubkey, print_tail, relay_pubkey_nip11,
+    stage_bootstrap, stage_deploy_cp, stage_deploy_relay, stage_grant, stage_provision,
+    stage_serve, verify_door_once,
+};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::fs;
-use std::net::TcpStream;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
-
-const STATE_DIR: &str = "./.freehold/control-plane";
-const OPS_DIR: &str = "./.freehold/control-plane/agent-ops";
-const RUNNER_PKGS: &str = "./.freehold/runner";
-const SERVE_LOG: &str = "./.freehold/installer/serve.log";
+use std::path::Path;
+use std::time::Duration;
 
 const BANNER: &str = r#"
   ╭──────────────────────────────────────────────────────────────╮
@@ -50,69 +31,6 @@ const BANNER: &str = r#"
   ╰──────────────────────────────────────────────────────────────╯
 "#;
 
-struct Answers {
-    host: String,        // root@192.168.30.224
-    runner: String,      // proxmox-box
-    serve: String,       // 127.0.0.1:8787
-    domain: String,      // freehold-test.darcydev.net
-    relay_vmid: u32,     // 100
-    relay_ip: String,    // 192.168.30.238/24
-    relay_gw: String,    // 192.168.30.1
-    cp_vmid: u32,        // 102
-    cp_ip: String,       // 192.168.30.254/24
-    rootfs_gb: u32,      // 16
-    memory_mb: u32,      // 2048
-    operator_pk: String, // 64-hex (npub converted by the CLIs; we keep hex)
-    operator_generated: bool,
-    operator_dir: PathBuf,
-}
-
-fn repo_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("installer under repo root")
-}
-
-fn bin(name: &str) -> PathBuf {
-    repo_root().join("target").join("debug").join(name)
-}
-
-/// Release build — the deploy-cp stage ships these to the box as base64;
-/// debug binaries are ~15x larger and turn the ship into a 10-minute stall.
-fn rel_bin(name: &str) -> PathBuf {
-    repo_root().join("target").join("release").join(name)
-}
-
-/// The wrapper drives the REAL sibling binaries (as the user would by hand).
-/// We cannot spawn `cargo` from under `cargo run` (target-dir lock), so the
-/// bins must exist; give the exact one-liner when they don't.
-fn ensure_bins() -> Result<()> {
-    let debug_bins = ["control-plane", "runner", "freehold"];
-    let release_bins = ["control-plane", "runner"];
-    let missing: Vec<_> = debug_bins
-        .iter()
-        .filter(|b| !bin(b).exists())
-        .map(|b| format!("target/debug/{b}"))
-        .chain(
-            release_bins
-                .iter()
-                .filter(|b| !rel_bin(b).exists())
-                .map(|b| format!("target/release/{b}")),
-        )
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    bail!(
-        "sibling binaries missing: {}\n  build them once, then run the installer directly:\n    cargo build --workspace --bins && cargo build --release --bin control-plane --bin runner\n    ./target/debug/freehold-install",
-        missing
-            .iter()
-            .map(|b| format!("target/debug/{b}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-}
-
 fn spinner(msg: impl Into<String>) -> ProgressBar {
     let p = ProgressBar::new_spinner();
     p.set_style(
@@ -125,32 +43,12 @@ fn spinner(msg: impl Into<String>) -> ProgressBar {
     p
 }
 
-/// Run a sibling binary, capturing stdout+stderr. Returns (ok, output).
-fn run(bin_path: &Path, args: &[&str]) -> Result<(bool, String)> {
-    let out = Command::new(bin_path)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to spawn {}", bin_path.display()))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.success(), text))
-}
-
-fn print_tail(text: &str, n: usize) {
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    for l in lines.iter().rev().take(n).rev() {
-        eprintln!("    {l}");
-    }
-}
-
 fn confirm(prompt: &str, default: bool) -> Result<bool> {
     Ok(Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(prompt)
         .default(default)
         .interact()?)
 }
-
-// ---------------------------------------------------------------- prompts
 
 fn ask<T>(prompt: &str, default: T) -> Result<T>
 where
@@ -168,29 +66,22 @@ fn collect() -> Result<Answers> {
     println!("  First, a few details about your world. Defaults are shown in [brackets].");
     println!();
 
-    let host = ask(
-        "Proxmox host (address the runner will SSH into)",
-        "root@192.168.30.224".to_string(),
-    )?;
-    let runner = ask("Runner name", "proxmox-box".to_string())?;
-    let serve = ask(
-        "Runner MCP address (loopback)",
-        "127.0.0.1:8787".to_string(),
-    )?;
-    let domain = ask(
+    let mut a = Answers::defaults();
+
+    a.host = ask("Proxmox host (address the runner will SSH into)", a.host)?;
+    a.runner = ask("Runner name", a.runner)?;
+    a.serve = ask("Runner MCP address (loopback)", a.serve)?;
+    a.domain = ask(
         "Relay domain (must resolve to your host — the identity gate)",
-        "freehold-test.darcydev.net".to_string(),
+        a.domain,
     )?;
-    let relay_vmid = ask("Relay LXC vmid", 100u32)?;
-    let relay_ip = ask("Relay LXC IP (CIDR)", "192.168.30.238/24".to_string())?;
-    let cp_vmid = ask("Control-plane LXC vmid", 102u32)?;
-    let cp_ip = ask(
-        "Control-plane LXC IP (CIDR)",
-        "192.168.30.254/24".to_string(),
-    )?;
-    let relay_gw = ask("LXC gateway", "192.168.30.1".to_string())?;
-    let rootfs_gb = ask("LXC rootfs size (GB)", 16u32)?;
-    let memory_mb = ask("LXC memory (MB)", 2048u32)?;
+    a.relay_vmid = ask("Relay LXC vmid", a.relay_vmid)?;
+    a.relay_ip = ask("Relay LXC IP (CIDR)", a.relay_ip)?;
+    a.cp_vmid = ask("Control-plane LXC vmid", a.cp_vmid)?;
+    a.cp_ip = ask("Control-plane LXC IP (CIDR)", a.cp_ip)?;
+    a.relay_gw = ask("LXC gateway", a.relay_gw)?;
+    a.rootfs_gb = ask("LXC rootfs size (GB)", a.rootfs_gb)?;
+    a.memory_mb = ask("LXC memory (MB)", a.memory_mb)?;
 
     println!();
     let have_key = Select::with_theme(&ColorfulTheme::default())
@@ -200,127 +91,31 @@ fn collect() -> Result<Answers> {
         .default(0)
         .interact()?;
 
-    let (operator_pk, operator_generated, operator_dir) = if have_key == 0 {
+    if have_key == 0 {
         let npub: String = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Your Nostr public key (npub1… or 64 hex)")
             .interact_text()?;
-        let pk = freehold_core::identity::parse_pubkey_input(&npub)
+        a.operator_pk = freehold_core::identity::parse_pubkey_input(&npub)
             .map_err(|e| anyhow::anyhow!("invalid pubkey: {e}"))?;
-        (pk, false, PathBuf::new())
     } else {
-        let dir = PathBuf::from("./.freehold/control-plane/operator");
+        let dir = freehold_installer::operator_dir();
         let id = mint_identity(&dir)?;
+        a.operator_pk = id.nostr_pubkey_hex();
+        a.operator_generated = true;
+        a.operator_dir = dir;
         println!();
         println!("  Generated a fresh identity for you:");
-        println!("    pubkey: {}", id.nostr_pubkey_hex());
+        println!("    pubkey: {}", a.operator_pk);
         println!(
             "    stored: {} (0600 — this IS your key, keep it safe)",
-            dir.display()
+            a.operator_dir.display()
         );
         println!("  You'll log into the console with it (no secrets on screen).");
-        (id.nostr_pubkey_hex(), true, dir)
-    };
+    }
 
-    Ok(Answers {
-        host,
-        runner,
-        serve,
-        domain,
-        relay_vmid,
-        relay_ip,
-        relay_gw,
-        cp_vmid,
-        cp_ip,
-        rootfs_gb,
-        memory_mb,
-        operator_pk,
-        operator_generated,
-        operator_dir,
-    })
+    Ok(a)
 }
 
-fn mint_identity(dir: &Path) -> Result<freehold_core::identity::Identity> {
-    fs::create_dir_all(dir)?;
-    if dir.join("identity.json").exists() {
-        return freehold_core::identity::Identity::load(dir).map_err(Into::into);
-    }
-    let p = spinner("minting operator identity…");
-    let (ok, out) = run(
-        &bin("runner"),
-        &["keys", "init", "--state-dir", dir.to_str().unwrap()],
-    )?;
-    p.finish_and_clear();
-    if !ok {
-        bail!("keys init failed:\n{out}");
-    }
-    freehold_core::identity::Identity::load(dir).map_err(Into::into)
-}
-
-// ---------------------------------------------------------------- stages
-
-fn ensure_ops_agent() -> Result<freehold_core::identity::Identity> {
-    let dir = PathBuf::from(OPS_DIR);
-    if !dir.join("identity.json").exists() {
-        fs::create_dir_all(&dir)?;
-        let p = spinner("minting the ops-agent identity (drives the runner)…");
-        let (ok, out) = run(&bin("runner"), &["keys", "init", "--state-dir", OPS_DIR])?;
-        p.finish_and_clear();
-        if !ok {
-            bail!("ops-agent keys init failed:\n{out}");
-        }
-    }
-    freehold_core::identity::Identity::load(&dir).map_err(Into::into)
-}
-
-/// Stage 1 — provision the SSH door into the PVE host. A fresh runner gets
-/// its keypair generated in-process; an existing one is reused (the public
-/// key was already printed at ITS provisioning; the door is verified live in
-/// stage 3 either way).
-fn stage_provision(a: &Answers, agent_pk: &str) -> Result<Option<String>> {
-    let p = spinner("provisioning the runner…");
-    let (ok, out) = run(
-        &bin("control-plane"),
-        &[
-            "provision",
-            &a.runner,
-            "--kind",
-            "ssh",
-            "--address",
-            &a.host,
-            "--state-dir",
-            STATE_DIR,
-            "--grant",
-            agent_pk,
-        ],
-    )?;
-    p.finish_and_clear();
-
-    if ok {
-        // The public key line the operator must install on the target.
-        let pubkey = out
-            .lines()
-            .find(|l| l.trim_start().starts_with("ssh-ed25519"))
-            .map(|l| l.trim().to_string());
-        println!(
-            "  ✓ runner provisioned — package at ./.freehold/runner/{}",
-            a.runner
-        );
-        Ok(pubkey)
-    } else if out.contains("already exists")
-        || out.contains("RunnerExists")
-        || out.contains("PackageDirInUse")
-    {
-        println!(
-            "  ✓ runner {} already exists — reusing its package (door re-verified below)",
-            a.runner
-        );
-        Ok(None)
-    } else {
-        bail!("provision failed:\n{out}");
-    }
-}
-
-/// Wait for the operator to install the key, then keep them honest.
 fn door_gate(a: &Answers, pubkey: &str) -> Result<()> {
     loop {
         println!();
@@ -349,112 +144,36 @@ fn door_gate(a: &Answers, pubkey: &str) -> Result<()> {
     }
 }
 
-/// Stage 2 — the runner serves in the background (detached; survives this
-/// process). Reuses an already-listening serve on the same address.
-fn stage_serve(a: &Answers) -> Result<String> {
-    if port_open(&a.serve) {
-        println!(
-            "  ✓ a runner is already serving on {} — reusing it",
-            a.serve
-        );
-        return Ok("— (reused)".to_string());
-    }
-    fs::create_dir_all(Path::new("./.freehold/installer"))?;
-    let pkg = PathBuf::from(format!("{RUNNER_PKGS}/{}", a.runner));
-    if !pkg.join("identity.json").exists() {
-        bail!(
-            "runner package {} is missing — the provision stage created it, something is off",
-            pkg.display()
-        );
-    }
-    let p = spinner("starting the runner in the background…");
-    // Detached + nohup'd: survives the installer exiting. Log lives in ./.freehold.
-    let sh = format!(
-        "nohup '{}' serve --state-dir {} --addr {} > {} 2>&1 & echo $!",
-        bin("runner").display(),
-        pkg.display(),
-        a.serve,
-        SERVE_LOG
-    );
-    // -c with the built-in; the outer sh exits immediately.
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(&sh)
-        .output()
-        .with_context(|| "spawn detached serve")?;
-    let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if port_open(&a.serve) {
-            p.finish_and_clear();
-            println!(
-                "  ✓ runner serving on {} (pid {pid}, log {SERVE_LOG})",
-                a.serve
-            );
-            return Ok(pid);
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    p.finish_and_clear();
-    bail!(
-        "the runner didn't come up on {} within 20s — see {SERVE_LOG} for why",
-        a.serve
-    );
-}
-
-fn port_open(addr: &str) -> bool {
-    let (host, port) = addr.split_once(':').unwrap_or((addr, "8787"));
-    TcpStream::connect((host, port.parse().unwrap_or(8787))).is_ok()
-}
-
-/// Stage 3 — the moment of truth: drive a REAL exec through the runner; the
-/// runner's SSH key must be accepted by the host. On auth failure, loop until
-/// the operator has fixed authorized_keys (they asked for exactly this loop).
-/// Repeated failures after several attempts: the runner package itself may
-/// hold an unloadable/stale key — a fresh provision is the fix, not more
-/// authorized_keys edits.
-fn stage_verify_door(a: &Answers) -> Result<()> {
+fn verify_loop(a: &Answers) -> Result<()> {
     let mut failures = 0u32;
     loop {
         let p = spinner("testing the SSH door through the runner…");
-        let (ok, out) = run(
-            &bin("freehold"),
-            &[
-                "exec",
-                "--addr",
-                &a.serve,
-                "--agent-dir",
-                OPS_DIR,
-                &a.runner,
-                "echo freehold-door-ok",
-            ],
-        )?;
+        let probe = verify_door_once(a)?;
         p.finish_and_clear();
 
-        if ok && out.contains("freehold-door-ok") {
-            println!("  ✓ the door works — {} is reachable", a.host);
-            return Ok(());
+        match probe {
+            DoorProbe::Ok => {
+                println!("  ✓ the door works — {} is reachable", a.host);
+                return Ok(());
+            }
+            DoorProbe::AuthFailed(out) | DoorProbe::Failed(out) => {
+                println!("  ✗ the exec failed (auth or otherwise)");
+                print_tail(&out, 6);
+                failures += 1;
+                if failures >= 3 {
+                    println!();
+                    println!("  Still failing after {failures} tries. If this runner predates the");
+                    println!(
+                        "  ssh-key serialization fix, its PRIVATE key may be unloadable by the"
+                    );
+                    println!("  SSH client — authorized_keys edits can't help that.");
+                    println!(
+                        "  Fresh start:  rm -rf ./.freehold && ./target/debug/freehold-install"
+                    );
+                    println!();
+                }
+            }
         }
-        let reason = if out.contains("authentication failed") {
-            "authentication failed — the runner's key was rejected"
-        } else if !ok {
-            "the exec call failed"
-        } else {
-            "the exec returned without our marker"
-        };
-        println!("  ✗ {reason}");
-        failures += 1;
-        if failures >= 3 {
-            println!();
-            println!("  Still failing after {failures} tries. If this runner predates the");
-            println!("  ssh-key serialization fix, its PRIVATE key may be unloadable by the");
-            println!("  SSH client — authorized_keys edits can't help that.");
-            println!("  Fresh start:  rm -rf ./.freehold && ./target/debug/freehold-install");
-            println!();
-        }
-        print_tail(&out, 6);
-        println!();
         let answer: String = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Fix authorized_keys on the host, then press ENTER to retry ('q' to quit)")
             .allow_empty(true)
@@ -465,116 +184,14 @@ fn stage_verify_door(a: &Answers) -> Result<()> {
     }
 }
 
-fn stage(name: &str, args: &[&str], ok_msg: &str) -> Result<()> {
+fn run_stage<T>(name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let p = spinner(name);
-    let (ok, out) = run(&bin("freehold"), args)?;
+    let res = f();
     p.finish_and_clear();
-    if ok {
-        println!("  ✓ {ok_msg}");
-        Ok(())
-    } else {
-        bail!("{name} failed:\n{out}");
-    }
+    res
 }
 
-fn stage_bootstrap(a: &Answers, role: &str, vmid: u32, ip: &str) -> Result<()> {
-    stage(
-        &format!("booting the {role} LXC (vmid {vmid}) — domain resolve gate, docker, template…"),
-        &[
-            "bootstrap",
-            "--kind",
-            "proxmox-lxc",
-            "--role",
-            role,
-            "--target",
-            &a.runner,
-            "--domain",
-            &a.domain,
-            "--vmid",
-            &vmid.to_string(),
-            "--rootfs-gb",
-            &a.rootfs_gb.to_string(),
-            "--memory-mb",
-            &a.memory_mb.to_string(),
-            "--lxc-ip",
-            ip,
-            "--lxc-gw",
-            &a.relay_gw,
-            "--operator-pubkey",
-            &a.operator_pk,
-        ],
-        &format!("{role} LXC {vmid} created and ready on the host"),
-    )
-}
-
-fn stage_deploy_relay(a: &Answers) -> Result<()> {
-    stage(
-        "deploying the Buzz relay into the LXC (compose bundle, liveness)…",
-        &[
-            "deploy-relay",
-            "--target",
-            &a.runner,
-            "--lxc",
-            &a.relay_vmid.to_string(),
-            "--domain",
-            &a.domain,
-            "--relay-url",
-            &format!("https://{}", a.domain),
-            "--owner-pubkey",
-            &a.operator_pk,
-            "--operator-pubkey",
-            &a.operator_pk,
-        ],
-        &format!("relay live at https://{}", a.domain),
-    )
-}
-
-fn stage_deploy_cp(a: &Answers) -> Result<()> {
-    stage(
-        "deploying the control plane into its LXC (release ship, console)…",
-        &[
-            "deploy-cp",
-            "--target",
-            &a.runner,
-            "--lxc",
-            &a.cp_vmid.to_string(),
-            "--relay-url",
-            &format!("https://{}", a.domain),
-            "--binary",
-            &rel_bin("control-plane").display().to_string(),
-            "--runner-binary",
-            &rel_bin("runner").display().to_string(),
-            "--operator-pubkey",
-            &a.operator_pk,
-        ],
-        &format!("control plane live at https://cp-{}", a.domain),
-    )
-}
-
-/// Best-effort: NIP-11 gives us the relay's signing pubkey (the trust anchor
-/// for the runner whitelist). Not fatal — the operator can read it from the
-/// relay's data dir later.
-fn relay_pubkey_nip11(domain: &str) -> Option<String> {
-    let p = spinner("reading the relay's signing key (NIP-11)…");
-    let out = Command::new("curl")
-        .args([
-            "-sk",
-            "--max-time",
-            "8",
-            "-H",
-            "Accept: application/nostr+json",
-            &format!("https://{domain}/"),
-        ])
-        .output()
-        .ok();
-    p.finish_and_clear();
-    let text = out.and_then(|o| String::from_utf8(o.stdout).ok())?;
-    let pk: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let pk = pk.get("pubkey")?.as_str()?.to_string();
-    if pk.len() == 64 { Some(pk) } else { None }
-}
-
-fn summary(a: &Answers, serve_pid: &str) {
+fn summary(a: &Answers, serve_pid: &str, cfg_path: &Path) {
     println!();
     println!("  ╭─────────────────────────────────────────────────────────╮");
     println!("  │                    Freehold is up                      │");
@@ -599,6 +216,7 @@ fn summary(a: &Answers, serve_pid: &str) {
             a.operator_dir.display()
         );
     }
+    println!("  config:         {}", cfg_path.display());
     println!();
     println!("  Log into the console (browser):");
     if a.operator_generated {
@@ -624,7 +242,6 @@ fn main() -> Result<()> {
     }
     let answers = collect()?;
 
-    // ——— summary + go ———
     println!();
     println!("  ───────────────── Setting up ─────────────────");
     println!("  host:            {}", answers.host);
@@ -645,46 +262,46 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // ——— the run ———
-    let _ops = ensure_ops_agent()?;
-    let agent_pk = freehold_core::identity::Identity::load(Path::new(OPS_DIR))?.nostr_pubkey_hex();
-
-    let pubkey = stage_provision(&answers, &agent_pk)?;
+    let agent_pk = ops_pubkey()?;
+    let pubkey = run_stage("provisioning the runner…", || {
+        stage_provision(&answers, &agent_pk)
+    })?;
     if let Some(pk) = pubkey {
         door_gate(&answers, &pk)?;
     }
 
-    // Belt + suspenders: re-grant the ops agent so the door test passes even
-    // on a reused package that predates the default grant.
-    let p = spinner("granting the ops agent…");
-    let (ok, out) = run(
-        &bin("control-plane"),
-        &["grant", &answers.runner, "--state-dir", STATE_DIR],
-    )?;
-    p.finish_and_clear();
-    if !ok {
-        bail!("grant failed:\n{out}");
-    }
+    run_stage("granting the ops agent…", || stage_grant(&answers))?;
     println!("  ✓ ops agent granted on {}", answers.runner);
-
-    let serve_pid = stage_serve(&answers)?;
-    stage_verify_door(&answers)?;
-    stage_bootstrap(&answers, "relay", answers.relay_vmid, &answers.relay_ip)?;
-    stage_bootstrap(&answers, "cp", answers.cp_vmid, &answers.cp_ip)?;
-    stage_deploy_relay(&answers)?;
-    stage_deploy_cp(&answers)?;
+    let serve_pid = run_stage("starting the runner in the background…", || {
+        stage_serve(&answers)
+    })?;
+    verify_loop(&answers)?;
+    run_stage("booting the relay LXC…", || {
+        stage_bootstrap(&answers, "relay", answers.relay_vmid, &answers.relay_ip)
+    })?;
+    run_stage("booting the cp LXC…", || {
+        stage_bootstrap(&answers, "cp", answers.cp_vmid, &answers.cp_ip)
+    })?;
+    run_stage("deploying the Buzz relay…", || {
+        stage_deploy_relay(&answers)
+    })?;
+    run_stage("deploying the control plane…", || {
+        stage_deploy_cp(&answers)
+    })?;
 
     if let Some(rpk) = relay_pubkey_nip11(&answers.domain) {
         println!("  ✓ relay signing key: {rpk}");
-        println!("    (use it as --relay-pubkey when serving runners against the relay)");
     } else {
         println!(
-            "  (couldn't read the relay's signing key via NIP-11 — read it from the relay's data dir when you need --relay-pubkey)"
+            "  (relay signing key unreadable via NIP-11 — read it from the relay's data dir when you need --relay-pubkey)"
         );
     }
 
-    // Serve PID: not tracked across the detached spawn in this pass; the
-    // summary reads it from the log path convention instead.
-    summary(&answers, &serve_pid);
+    let cfg_path = config::Config::default_path();
+    let cfg = config::Config::from_answers(&answers);
+    cfg.save(&cfg_path)?;
+    println!("  ✓ wrote config {}", cfg_path.display());
+
+    summary(&answers, &serve_pid, &cfg_path);
     Ok(())
 }
