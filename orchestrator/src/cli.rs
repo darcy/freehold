@@ -432,7 +432,15 @@ fn resolve_door(common: &CommonArgs, target: &str) -> anyhow::Result<(PathBuf, S
     let runner_pubkey = match &common.runner_pubkey {
         Some(pk) => pk.clone(),
         None => {
-            let pkg = PathBuf::from(format!("./.freehold/runner/{target}"));
+            // home-first (the freehold home owns the world now); cwd-relative
+            // stays as a legacy fallback for hand-rolled setups.
+            let home_pkg = freehold_installer::runner_pkgs().join(target);
+            let legacy_pkg = PathBuf::from(format!("./.freehold/runner/{target}"));
+            let pkg = if home_pkg.join("identity.json").exists() {
+                home_pkg
+            } else {
+                legacy_pkg
+            };
             freehold_core::identity::Identity::load(&pkg)
                 .map(|id| id.nostr_pubkey_hex())
                 .map_err(|_| {
@@ -498,9 +506,14 @@ async fn cli_body() -> Result<()> {
                 .as_bytes()
                 .to_vec()
             };
-            let runner_dir = args
-                .runner_dir
-                .unwrap_or_else(|| PathBuf::from(format!("./.freehold/runner/{}", args.name)));
+            let runner_dir = args.runner_dir.unwrap_or_else(|| {
+                let home = freehold_installer::runner_pkgs().join(&args.name);
+                if home.join("identity.json").exists() {
+                    home
+                } else {
+                    PathBuf::from(format!("./.freehold/runner/{}", args.name))
+                }
+            });
             let report = flows::onboard(
                 &args.name,
                 &args.kind,
