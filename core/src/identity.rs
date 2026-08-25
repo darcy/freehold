@@ -143,7 +143,7 @@ pub fn generate_ssh_keypair(comment: &str) -> Result<(Vec<u8>, String), String> 
     let pem = private
         .to_openssh(LineEnding::LF)
         .map_err(|e| e.to_string())?;
-    let public = ssh_key::public::PublicKey::new(KeyData::Ed25519(pair.public.clone()), comment);
+    let public = ssh_key::public::PublicKey::new(KeyData::Ed25519(pair.public), comment);
     let pub_line = public.to_openssh().map_err(|e| e.to_string())?;
     Ok((pem.as_bytes().to_vec(), pub_line))
 }
