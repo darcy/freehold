@@ -20,6 +20,7 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use rand::RngCore;
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -129,33 +130,66 @@ fn decode_bech32_pubkey(s: &str) -> Result<String, String> {
     Ok(hex::encode(out))
 }
 
-/// Generate an ed25519 SSH keypair FOR A RUNNER (ssh-keygen, present on the
-/// appliance host): the operator installs the PUBLIC half on the target's
-/// authorized_keys; the PRIVATE half becomes the runner's sealed credential.
+fn ssh_string(v: &mut Vec<u8>, s: &[u8]) {
+    v.extend_from_slice(&(s.len() as u32).to_be_bytes());
+    v.extend_from_slice(s);
+}
+
+/// Generate an ed25519 SSH keypair FOR A RUNNER, IN PROCESS — no ssh-keygen
+/// binary dependency (spawning it proved unreliable in this environment). The
+/// operator installs the PUBLIC half on the target's authorized_keys; the
+/// PRIVATE half (openssh-key-v1 PEM) becomes the runner's sealed credential.
 /// Returns (private_key_pem, public_key_line).
 pub fn generate_ssh_keypair(comment: &str) -> Result<(Vec<u8>, String), String> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("fh-key-{nonce}"));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let key = dir.join("id");
-    let out = std::process::Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-C", comment, "-f"])
-        .arg(&key)
-        .output()
-        .map_err(|e| format!("ssh-keygen not available: {e}"))?;
-    let _ = std::fs::remove_dir_all(&dir);
-    if !out.status.success() {
-        return Err(format!(
-            "ssh-keygen failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+    let seed: [u8; 32] = rand::random();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubk = signing.verifying_key().to_bytes();
+
+    // public key wire blob: string "ssh-ed25519" + string pubkey
+    let mut blob = Vec::new();
+    ssh_string(&mut blob, b"ssh-ed25519");
+    ssh_string(&mut blob, &pubk);
+
+    // private key wire blob: checkint x2, keytype, pubkey, (seed||pubkey), comment
+    let check = rand::random::<u32>();
+    let mut priv_blob = Vec::new();
+    priv_blob.extend_from_slice(&check.to_be_bytes());
+    priv_blob.extend_from_slice(&check.to_be_bytes());
+    ssh_string(&mut priv_blob, b"ssh-ed25519");
+    ssh_string(&mut priv_blob, &pubk);
+    let mut keymaterial = Vec::with_capacity(64);
+    keymaterial.extend_from_slice(&seed);
+    keymaterial.extend_from_slice(&pubk);
+    ssh_string(&mut priv_blob, &keymaterial);
+    ssh_string(&mut priv_blob, comment.as_bytes());
+    // padding to a multiple of 8 (padlen bytes, values 1..=padlen)
+    let padlen = 8 - (priv_blob.len() % 8);
+    for i in 0..padlen {
+        priv_blob.push((i + 1) as u8);
     }
-    let privk = std::fs::read(&key).map_err(|e| e.to_string())?;
-    let pubk = std::fs::read_to_string(dir.join("id.pub")).map_err(|e| e.to_string())?;
-    Ok((privk, pubk.trim().to_string()))
+
+    let mut container = Vec::new();
+    container.extend_from_slice(b"openssh-key-v1\0");
+    ssh_string(&mut container, b"none"); // ciphername
+    ssh_string(&mut container, b"none"); // kdfname
+    ssh_string(&mut container, b""); // kdfoptions
+    container.extend_from_slice(&1u32.to_be_bytes()); // nkeys
+    ssh_string(&mut container, &blob);
+    ssh_string(&mut container, &priv_blob);
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&container);
+    let mut pem = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    for chunk in b64.as_bytes().chunks(70) {
+        pem.push_str(std::str::from_utf8(chunk).map_err(|e| e.to_string())?);
+        pem.push('\n');
+    }
+    pem.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+
+    let pub_line = format!(
+        "ssh-ed25519 {} {comment}",
+        base64::engine::general_purpose::STANDARD.encode(pubk)
+    );
+    Ok((pem.into_bytes(), pub_line))
 }
 
 const SECRET_LEN: usize = 32;
@@ -738,10 +772,10 @@ mod tests {
 #[cfg(test)]
 mod pubkey_input_tests {
     use super::parse_pubkey_input;
+    use base64::Engine as _;
 
     #[test]
     fn npub_decodes_to_hex() {
-        // the operator's own npub (nsec1vvlcv.../npub1rhq8... pair)
         let hex =
             parse_pubkey_input("npub1rhq8vy85qxftpnhs6qyv4dljapsqq6p2mchv5k79963dqjmd59tsnsg30j")
                 .unwrap();
@@ -753,10 +787,47 @@ mod pubkey_input_tests {
 
     #[test]
     fn hex_passthrough_and_errors() {
-        let h = "53df4d2c4d2971d8665ff791b64155c584c9206e34b4897d920a356e4d061d31";
+        let h = "1dc07610f40192b0cef0d008cab7f2e86000682ade2eca5bc52ea2d04b6da157";
         assert_eq!(parse_pubkey_input(h).unwrap(), h);
-        assert!(parse_pubkey_input("npub1rhqSY85").is_err()); // bad checksum
+        assert!(parse_pubkey_input("npub1rhqSY85").is_err());
         assert!(parse_pubkey_input("not-a-pubkey").is_err());
         assert!(parse_pubkey_input("ABC").is_err());
+    }
+
+    fn ssh_read<'a>(c: &'a [u8], pos: &mut usize) -> &'a [u8] {
+        let len = u32::from_be_bytes(c[*pos..*pos + 4].try_into().unwrap()) as usize;
+        *pos += 4;
+        let s = &c[*pos..*pos + len];
+        *pos += len;
+        s
+    }
+
+    #[test]
+    fn ssh_keypair_generates_and_parses() {
+        let (privk, pubk) = super::generate_ssh_keypair("fh-test").unwrap();
+        let text = String::from_utf8_lossy(&privk);
+        assert!(text.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(text.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+        let b64: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
+        let container = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .unwrap();
+        assert!(container.starts_with(b"openssh-key-v1\0"));
+        let mut pos = 15;
+        ssh_read(&container, &mut pos); // cipher
+        ssh_read(&container, &mut pos); // kdf
+        ssh_read(&container, &mut pos); // kdfoptions
+        let nkeys = u32::from_be_bytes(container[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        assert_eq!(nkeys, 1);
+        let pubblob = ssh_read(&container, &mut pos);
+        assert_eq!(&pubblob[4..15], b"ssh-ed25519");
+        assert_eq!(
+            u32::from_be_bytes(pubblob[0..4].try_into().unwrap()) as usize,
+            b"ssh-ed25519".len()
+        );
+        let _privblob = ssh_read(&container, &mut pos);
+        assert!(pubk.starts_with("ssh-ed25519 "));
+        assert!(pubk.ends_with("fh-test"));
     }
 }
