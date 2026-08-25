@@ -7,6 +7,7 @@
 //! acceptance criteria demand, proving plumbing rather than judgment.
 
 pub mod bootstrap;
+pub mod cli;
 pub mod client;
 pub mod deploy_cp;
 pub mod flows;

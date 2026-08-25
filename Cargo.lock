@@ -1491,6 +1491,7 @@ dependencies = [
  "crossterm",
  "freehold-core",
  "freehold-installer",
+ "freehold-orchestrator",
  "ratatui",
  "serde",
  "toml",

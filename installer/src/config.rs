@@ -19,12 +19,12 @@ pub struct Config {
     pub operator_pubkey: String,
     /// Where the operator's key lives (minted at bootstrap or pointed at).
     pub operator_identity: Option<PathBuf>,
-    /// Where the local CP state + runner packages live.
-    pub state_dir: PathBuf,
     pub runner: RunnerRef,
     pub lxc: LxcSpec,
-    /// The desired stages the configure pipeline converges to.
-    pub desired: Vec<String>,
+    /// The pieces of the world WE operate (relay/cp today; k3s, litellm
+    /// later). A relay we were INVITED to would appear in `relay_url` but
+    /// not here — we don't manage it.
+    pub managed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -43,13 +43,12 @@ pub struct LxcSpec {
     pub cp: LxcGuest,
 }
 
+/// A managed LXC's CONNECT/status coordinates — bootstrap-time sizing
+/// (rootfs/memory/gateway) is not config; it's decided once at create.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LxcGuest {
     pub vmid: u32,
     pub ip: String,
-    pub gw: String,
-    pub rootfs_gb: u32,
-    pub memory_mb: u32,
 }
 
 impl Config {
@@ -92,29 +91,22 @@ impl Config {
             cp_url: format!("https://cp-{}", a.domain),
             operator_pubkey: a.operator_pk.clone(),
             operator_identity: a.operator_generated.then(|| a.operator_dir.clone()),
-            state_dir: crate::state_dir(),
             runner: RunnerRef {
                 addr: a.serve.clone(),
-                pubkey: String::new(), // filled once the runner is provisioned
+                pubkey: crate::resolve_runner_pubkey(&a.runner),
                 target: a.runner.clone(),
             },
             lxc: LxcSpec {
                 relay: LxcGuest {
                     vmid: a.relay_vmid,
                     ip: a.relay_ip.clone(),
-                    gw: a.relay_gw.clone(),
-                    rootfs_gb: a.rootfs_gb,
-                    memory_mb: a.memory_mb,
                 },
                 cp: LxcGuest {
                     vmid: a.cp_vmid,
                     ip: a.cp_ip.clone(),
-                    gw: a.relay_gw.clone(),
-                    rootfs_gb: a.rootfs_gb,
-                    memory_mb: a.memory_mb,
                 },
             },
-            desired: vec!["relay".into(), "cp".into()],
+            managed: vec!["relay".into(), "cp".into()],
         }
     }
 }

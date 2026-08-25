@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 freehold-installer = { path = "../installer" }
 freehold-core = { path = "../core" }
+freehold-orchestrator = { path = "../orchestrator" }
 anyhow = "1"
 ratatui = "0.30"
 crossterm = "0.29"
