@@ -219,6 +219,10 @@ pub fn ops_pubkey() -> Result<String> {
 /// key was already printed at ITS provisioning; the door is verified live in
 /// stage 3 either way).
 pub fn stage_provision(a: &Answers, agent_pk: &str) -> Result<Option<String>> {
+    // The runner package lands in the FREEHOLD HOME (absolute) — the CLI's
+    // relative default (./.freehold/runner/<name>) would collide with any
+    // stale cwd-local state.
+    let runner_dir = runner_pkgs().join(&a.runner);
     let (ok, out) = run(
         &bin("control-plane"),
         &[
@@ -230,6 +234,8 @@ pub fn stage_provision(a: &Answers, agent_pk: &str) -> Result<Option<String>> {
             &a.host,
             "--state-dir",
             state_dir().to_str().unwrap(),
+            "--runner-dir",
+            runner_dir.to_str().unwrap(),
             "--grant",
             agent_pk,
         ],
@@ -244,6 +250,7 @@ pub fn stage_provision(a: &Answers, agent_pk: &str) -> Result<Option<String>> {
     } else if out.contains("already exists")
         || out.contains("RunnerExists")
         || out.contains("PackageDirInUse")
+        || out.contains("already holds a runner")
     {
         Ok(None)
     } else {
