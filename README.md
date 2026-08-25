@@ -111,10 +111,17 @@ cargo fmt --all --check       # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
 ```
 
-### The TUI (`freehold` — no args)
+### The appliance (`freehold` — one binary, two surfaces)
 
-The ratatui front-end is the primary surface. Mode is auto-detected from
-`~/.config/freehold/config.toml`:
+```sh
+freehold                      # no args → the TUI (ratatui)
+freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
+freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
+freehold deploy-relay …       #   memory, console-login, grant …)
+freehold --help               # both surfaces
+```
+
+**TUI modes** (auto-detected from `~/.config/freehold/config.toml`):
 
 - **bootstrap** — no config: a form collects host/runner/domain/LXC parameters,
   your operator key (paste npub or mint one), then runs the bring-up stages
@@ -125,18 +132,39 @@ The ratatui front-end is the primary surface. Mode is auto-detected from
   show their tail; `r` retries.
 - **running** — everything reachable: "Good to go!" + live liveness dots.
 
-```sh
-cargo build --workspace --bins && cargo build --release --bin control-plane --bin runner
-./target/debug/freehold          # the TUI
-./target/debug/freehold-install  # same stages, dialoguer (non-TUI) front-end
-```
+The same session flows bootstrap → configure → running as the world converges.
 
-Both front-ends drive the SAME stage library (`freehold_installer::*`) and the
-same world binaries — no duplicated logic. Re-runs are safe: an existing runner
-package is reused, the door is re-verified, and a matching LXC is reused (a
-foreign container on the vmid is refused). The CLI surface (`cargo run -p
-freehold-orchestrator -- exec …`) is unchanged — its bin is now
-`freehold-orchestrator` (the `freehold` name belongs to the TUI).
+The TUI drives the SAME stage library (`freehold_installer::*`) and world
+binaries as the `freehold-install` script (dialoguer front-end, still there);
+no duplicated logic. Re-runs are safe: an existing runner package is reused,
+the door is re-verified, and a matching LXC is reused (a foreign container on
+the vmid is refused).
+
+#### The config (`~/.config/freehold/config.toml`)
+
+The world lives under `~/.freehold` (override: `FREEHOLD_HOME`); nothing about
+it is configured. The config is the CONNECTION/DESIRE profile:
+
+```toml
+domain = "freehold-test.darcydev.net"
+relay_url = "https://freehold-test.darcydev.net"
+cp_url = "https://cp-freehold-test.darcydev.net"
+operator_pubkey = "1dc07610…"
+managed = ["relay", "cp"]      # what WE operate — an invited relay wouldn't be here
+
+[runner]                       # the provisioning door (the exec path into the host)
+addr = "127.0.0.1:8787"
+pubkey = "f7510b07…"           # the runner's own identity (filled at config-write)
+target = "proxmox-box"
+
+[lxc.relay]                    # connect/status coords only; sizing is bootstrap-time
+vmid = 100
+ip = "192.168.30.238/24"
+
+[lxc.cp]
+vmid = 102
+ip = "192.168.30.254/24"
+```
 
 ### Runner: identity + MCP server
 

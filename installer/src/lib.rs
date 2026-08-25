@@ -17,30 +17,37 @@ use std::time::{Duration, Instant};
 // World paths are anchored to the REPO ROOT (never cwd-relative): the TUI,
 // the installer, and tests run from different working directories, and a
 // relative path silently mints a fresh identity instead of reusing the grant.
+pub fn freehold_home() -> std::path::PathBuf {
+    if let Some(h) = std::env::var_os("FREEHOLD_HOME") {
+        return PathBuf::from(h);
+    }
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into())).join(".freehold")
+}
 pub fn state_dir() -> std::path::PathBuf {
-    repo_root().join(".freehold").join("control-plane")
+    freehold_home().join("control-plane")
 }
 pub fn ops_dir() -> std::path::PathBuf {
-    repo_root()
-        .join(".freehold")
-        .join("control-plane")
-        .join("agent-ops")
+    freehold_home().join("control-plane").join("agent-ops")
 }
 pub fn runner_pkgs() -> std::path::PathBuf {
-    repo_root().join(".freehold").join("runner")
+    freehold_home().join("runner")
 }
 pub fn serve_log() -> std::path::PathBuf {
-    repo_root()
-        .join(".freehold")
-        .join("installer")
-        .join("serve.log")
+    freehold_home().join("installer").join("serve.log")
 }
 /// Where a minted operator identity lands (the operator keeps this dir).
 pub fn operator_dir() -> std::path::PathBuf {
-    repo_root()
-        .join(".freehold")
-        .join("control-plane")
-        .join("operator")
+    freehold_home().join("control-plane").join("operator")
+}
+
+/// The RUNNER's own Nostr pubkey, read from its package identity (public —
+/// this is the key agents SIGN TO, and the trust anchor for exec). Empty
+/// string when the package doesn't exist yet (pre-provision).
+pub fn resolve_runner_pubkey(name: &str) -> String {
+    let pkg = runner_pkgs().join(name);
+    freehold_core::identity::Identity::load(&pkg)
+        .map(|id| id.nostr_pubkey_hex())
+        .unwrap_or_default()
 }
 
 pub mod config;
@@ -81,11 +88,11 @@ impl Answers {
             domain: cfg.domain.clone(),
             relay_vmid: cfg.lxc.relay.vmid,
             relay_ip: cfg.lxc.relay.ip.clone(),
-            relay_gw: cfg.lxc.relay.gw.clone(),
+            relay_gw: "192.168.30.1".into(), // bootstrap-time only, not config
             cp_vmid: cfg.lxc.cp.vmid,
             cp_ip: cfg.lxc.cp.ip.clone(),
-            rootfs_gb: cfg.lxc.relay.rootfs_gb,
-            memory_mb: cfg.lxc.relay.memory_mb,
+            rootfs_gb: 16, // bootstrap-time only
+            memory_mb: 2048,
             operator_pk: cfg.operator_pubkey.clone(),
             operator_generated: cfg.operator_identity.is_some(),
             operator_dir: cfg.operator_identity.clone().unwrap_or_default(),

@@ -1,15 +1,12 @@
-//! freehold — the TUI.
+//! freehold — ONE binary, two surfaces.
 //!
-//! `freehold` (no args) opens a terminal UI over the freehold world:
-//!
-//!   - no `~/.config/freehold/config.toml`  → bootstrap mode (collect inputs,
-//!     provision the SSH door, start the runner, write the config)
-//!   - config present, world not converged  → configure mode (idempotent
-//!     pipeline: relay/cp LXCs, deploy relay + cp)
-//!   - config present, everything reachable → running mode ("Good to go!")
-//!
-//! The web console and this TUI are siblings over the same CP API (phase 2);
-//! today the TUI drives the same stage binaries the CLI does.
+//! - no args → the TUI (ratatui: bootstrap/configure/running modes, config at
+//!   ~/.config/freehold/config.toml)
+//! - `freehold <subcommand> …` → the CLI (exec, bootstrap, deploy-relay,
+//!   deploy-cp, relay-member, memory, console-login, grant… — the scripted
+//!   CPA surface, shared with the freehold-orchestrator bin)
+//!   - `freehold --config <path>`   → the TUI with an explicit config
+//!   - `freehold --help`            → this help
 
 mod app;
 mod modes;
@@ -19,38 +16,36 @@ use std::path::PathBuf;
 
 fn usage() {
     eprintln!(
-        "freehold — the freehold appliance TUI\n\n\
-         USAGE:\n    freehold [--config <path>]\n\n\
+        "freehold — the freehold appliance (one binary, two surfaces)\n\n\
+         TUI (no args):\n    freehold [--config <path>]\n\n\
          Modes (auto-detected):\n    bootstrap   no config at ~/.config/freehold/config.toml\n    configure   config present, world not converged\n    running     config present, everything reachable\n\
-         Keys: q / Esc / Ctrl-C quit · ↑/↓ navigate · Enter confirm"
+         Keys: q / Esc / Ctrl-C quit · ↑/↓ navigate · Enter confirm\n\n\
+         CLI (subcommand as the first arg):\n    freehold exec <target> \"<cmd>\"\n    freehold bootstrap --kind proxmox-lxc --role relay --domain …\n    freehold deploy-relay / deploy-cp / relay-member …\n    … (see `freehold <subcommand> --help`)\n"
     );
 }
 
-fn parse_args() -> Result<Option<PathBuf>> {
-    let mut args = std::env::args().skip(1);
-    let mut cfg_path = None;
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "-h" | "--help" => {
-                usage();
-                std::process::exit(0);
-            }
-            "--config" => {
-                cfg_path = Some(PathBuf::from(args.next().context("--config needs a path")?));
-            }
-            other => {
-                anyhow::bail!("unknown argument {other:?} — see --help");
-            }
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => run_tui(freehold_installer::config::Config::default_path()),
+        Some("-h") | Some("--help") => {
+            usage();
+            Ok(())
         }
+        Some("--config") => {
+            let path = args
+                .get(1)
+                .map(PathBuf::from)
+                .context("--config needs a path")?;
+            run_tui(path)
+        }
+        Some(_) => freehold_orchestrator::cli::dispatch(),
     }
-    Ok(cfg_path)
 }
 
 use anyhow::Context;
 
-fn main() -> Result<()> {
-    let cfg_path = parse_args()?.unwrap_or_else(freehold_installer::config::Config::default_path);
-
+fn run_tui(cfg_path: PathBuf) -> Result<()> {
     let mut terminal = ratatui::init();
     let res = app::run(&mut terminal, cfg_path);
     ratatui::restore();
