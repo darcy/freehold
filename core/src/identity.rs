@@ -755,7 +755,7 @@ mod pubkey_input_tests {
         let text = String::from_utf8_lossy(&privk);
         assert!(text.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
         // the crate itself must round-trip our key (russh uses the same crate)
-        let parsed = ssh_key::private::PrivateKey::from_openssh(&text).unwrap();
+        let parsed = ssh_key::private::PrivateKey::from_openssh(text.as_bytes()).unwrap();
         assert!(matches!(
             parsed.key_data(),
             ssh_key::private::KeypairData::Ed25519(_)
