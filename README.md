@@ -36,7 +36,7 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 ## Repository layout (what things do in the code)
 
 ```
-Cargo.toml            workspace: core, runner, control-plane, orchestrator, testkit, acceptance
+Cargo.toml            workspace: core, runner, control-plane, orchestrator, testkit, acceptance, installer
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -110,6 +110,22 @@ cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --all --check       # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
 ```
+
+### One-shot bring-up (new install)
+
+`freehold-install` is the interactive wrapper over the base CLIs: it collects
+the few decisions (host, runner, domain, LCX ids/IPs, your operator key — or
+mint one), walks you through installing the SSH door, starts the runner in the
+background, VERIFIES the door with a real exec, then boots + deploys the relay
+and control-plane LXCs on the Proxmox host — progress line per stage:
+
+```sh
+cargo build --workspace --bins && cargo build --release --bin control-plane --bin runner
+./target/debug/freehold-install
+```
+
+Re-runs are safe: an existing runner package is reused, the door is re-verified,
+and a matching LXC is reused (a foreign container on the vmid is refused).
 
 ### Runner: identity + MCP server
 

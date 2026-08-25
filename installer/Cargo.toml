@@ -1,0 +1,17 @@
+[package]
+name = "freehold-installer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "freehold-install"
+path = "src/main.rs"
+
+[dependencies]
+freehold-core = { path = "../core" }
+anyhow = "1"
+dialoguer = "0.11"
+indicatif = "0.17"
+serde_json = "1"
