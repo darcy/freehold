@@ -187,7 +187,7 @@ pub fn generate_ssh_keypair(comment: &str) -> Result<(Vec<u8>, String), String> 
 
     let pub_line = format!(
         "ssh-ed25519 {} {comment}",
-        base64::engine::general_purpose::STANDARD.encode(&pubk)
+        base64::engine::general_purpose::STANDARD.encode(pubk)
     );
     Ok((pem.into_bytes(), pub_line))
 }
