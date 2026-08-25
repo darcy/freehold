@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "Freehold orchestrator: the scripted CPA stand-in that drives the engine room"
 
 [dependencies]
+freehold-installer = { path = "../installer" }
 anyhow = "1"
 base64 = "0.22"
 bech32 = "0.11"

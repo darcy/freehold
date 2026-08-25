@@ -1428,6 +1428,7 @@ dependencies = [
  "clap",
  "freehold-control-plane",
  "freehold-core",
+ "freehold-installer",
  "freehold-runner",
  "freehold-testkit",
  "hex",

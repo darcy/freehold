@@ -51,6 +51,7 @@ pub fn resolve_runner_pubkey(name: &str) -> String {
 }
 
 pub mod config;
+pub mod teardown;
 
 /// Everything a bring-up needs to know about the world, once collected.
 #[derive(Debug, Clone)]
