@@ -252,6 +252,20 @@ pub fn stage_provision(a: &Answers, agent_pk: &str) -> Result<Option<String>> {
         || out.contains("PackageDirInUse")
         || out.contains("already holds a runner")
     {
+        // reuse is only safe when the PACKAGE is actually there — a leftover
+        // state record with a deleted package would cascade on every later
+        // stage (grant/verify resolve the missing package).
+        if !runner_dir.join("identity.json").exists() {
+            bail!(
+                "a runner '{}' record exists but its package at {} is gone — \
+                 wipe the world for a clean re-bootstrap:\n  rm -rf ~/.freehold\n\
+                 (or revoke the record: control-plane revoke {} --state-dir {})",
+                a.runner,
+                runner_dir.display(),
+                a.runner,
+                state_dir().display()
+            );
+        }
         Ok(None)
     } else {
         bail!("provision failed:\n{out}");
