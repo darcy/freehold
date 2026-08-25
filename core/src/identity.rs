@@ -30,6 +30,134 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub const NSEC_ENV: &str = "FREEHOLD_RUNNER_NSEC";
 pub const ENC_ENV: &str = "FREEHOLD_RUNNER_ENC_SECRET";
 pub const IDENTITY_FILE: &str = "identity.json";
+
+/// Accept an operator/agent pubkey as npub1<bech32> (what users actually hold)
+/// or 64-hex (what the wire uses); returns the 64-hex form. BIP-173 checksum
+/// verified. This is the single input path for --operator-pubkey / --owner /
+/// relay-member pubkeys: the CLI should never ask for a value the user does
+/// not have — they have npub, not hex.
+pub fn parse_pubkey_input(input: &str) -> Result<String, String> {
+    let t = input.trim();
+    if t.starts_with("npub1") {
+        decode_bech32_pubkey(t)
+    } else if t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(t.to_ascii_lowercase())
+    } else {
+        Err(format!(
+            "pubkey must be npub1<bech32> or 64-hex, got {input:?}"
+        ))
+    }
+}
+
+const BECH32_CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+fn bech32_polymod_step(mut acc: u32, v: u32) -> u32 {
+    let b = (acc >> 25) as u8;
+    acc = ((acc & 0x1ff_ffff) << 5) ^ v;
+    const G: [u32; 5] = [
+        0x3b6a_57b2,
+        0x2650_8e6d,
+        0x1ea1_19fa,
+        0x3d42_33dd,
+        0x2a14_62b3,
+    ];
+    for (i, g) in G.iter().enumerate() {
+        if (b >> i) & 1 == 1 {
+            acc ^= g;
+        }
+    }
+    acc
+}
+
+fn decode_bech32_pubkey(s: &str) -> Result<String, String> {
+    let s = s.to_ascii_lowercase();
+    let pos = s
+        .rfind('1')
+        .ok_or_else(|| "npub must contain a '1' separator".to_string())?;
+    let (hrp, data) = (&s[..pos], &s[pos + 1..]);
+    if hrp != "npub" {
+        return Err(format!("expected npub1... prefix, got {hrp}1..."));
+    }
+    if data.len() < 6 {
+        return Err("npub too short".to_string());
+    }
+    // BIP-173 checksum runs over the EXPANDED hrp (high bits, 0, low bits).
+    let mut vals: Vec<u32> = Vec::with_capacity(hrp.len() * 2 + 1 + data.len());
+    for b in hrp.bytes() {
+        vals.push((b >> 5) as u32);
+    }
+    vals.push(0);
+    for b in hrp.bytes() {
+        vals.push((b & 31) as u32);
+    }
+    for c in data.bytes() {
+        vals.push(
+            BECH32_CHARSET
+                .iter()
+                .position(|&x| x == c)
+                .map(|p| p as u32)
+                .ok_or_else(|| format!("invalid bech32 char {c:?}"))?,
+        );
+    }
+    let mut acc: u32 = 1;
+    for v in vals {
+        acc = bech32_polymod_step(acc, v);
+    }
+    if acc != 1 {
+        return Err("bad bech32 checksum (typo?)".to_string());
+    }
+    let raw = &data[..data.len() - 6];
+    let mut bits: u32 = 0;
+    let mut accv: u32 = 0;
+    let mut out = Vec::new();
+    for c in raw.bytes() {
+        let v = BECH32_CHARSET
+            .iter()
+            .position(|&x| x == c)
+            .map(|p| p as u32)
+            .ok_or_else(|| format!("invalid bech32 char {c:?}"))?;
+        accv = (accv << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((accv >> bits) & 0xff) as u8);
+        }
+    }
+    if out.len() != 32 {
+        return Err(format!("npub payload is {} bytes, expected 32", out.len()));
+    }
+    Ok(hex::encode(out))
+}
+
+/// Generate an ed25519 SSH keypair FOR A RUNNER (ssh-keygen, present on the
+/// appliance host): the operator installs the PUBLIC half on the target's
+/// authorized_keys; the PRIVATE half becomes the runner's sealed credential.
+/// Returns (private_key_pem, public_key_line).
+pub fn generate_ssh_keypair(comment: &str) -> Result<(Vec<u8>, String), String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("fh-key-{nonce}"));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let key = dir.join("id");
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-C", comment, "-f"])
+        .arg(&key)
+        .output()
+        .map_err(|e| format!("ssh-keygen not available: {e}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if !out.status.success() {
+        return Err(format!(
+            "ssh-keygen failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let privk = std::fs::read(&key).map_err(|e| e.to_string())?;
+    let pubk = std::fs::read_to_string(dir.join("id.pub")).map_err(|e| e.to_string())?;
+    Ok((privk, pubk.trim().to_string()))
+}
+
 const SECRET_LEN: usize = 32;
 
 #[derive(Debug, Error)]
@@ -604,5 +732,31 @@ mod tests {
             matches!(err, IdentityError::InvalidNostrSecret),
             "got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod pubkey_input_tests {
+    use super::parse_pubkey_input;
+
+    #[test]
+    fn npub_decodes_to_hex() {
+        // the operator's own npub (nsec1vvlcv.../npub1rhq8... pair)
+        let hex =
+            parse_pubkey_input("npub1rhq8vy85qxftpnhs6qyv4dljapsqq6p2mchv5k79963dqjmd59tsnsg30j")
+                .unwrap();
+        assert_eq!(
+            hex,
+            "1dc07610f40192b0cef0d008cab7f2e86000682ade2eca5bc52ea2d04b6da157"
+        );
+    }
+
+    #[test]
+    fn hex_passthrough_and_errors() {
+        let h = "53df4d2c4d2971d8665ff791b64155c584c9206e34b4897d920a356e4d061d31";
+        assert_eq!(parse_pubkey_input(h).unwrap(), h);
+        assert!(parse_pubkey_input("npub1rhqSY85").is_err()); // bad checksum
+        assert!(parse_pubkey_input("not-a-pubkey").is_err());
+        assert!(parse_pubkey_input("ABC").is_err());
     }
 }

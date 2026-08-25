@@ -391,21 +391,53 @@ struct CommonArgs {
     /// Running runner MCP address (host:port or full URL)
     #[arg(long, default_value = "127.0.0.1:8787")]
     addr: String,
-    /// Agent identity dir (from `control-plane agent-create`)
-    #[arg(long)]
+    /// Agent identity dir (minted on demand if missing)
+    #[arg(long, default_value = "./.freehold/control-plane/agent-ops")]
     agent_dir: PathBuf,
-    /// The RUNNER's Nostr pubkey (signature audience)
+    /// The RUNNER's Nostr pubkey — RESOLVED from ./.freehold/runner/<target>
+    /// when omitted (you can't know it before provisioning; freehold reads it)
     #[arg(long)]
-    runner_pubkey: String,
+    runner_pubkey: Option<String>,
+}
+
+/// Resolve the "door" every command drives through: the agent identity that
+/// signs (minted on demand) + the runner's pubkey (read from the runner's own
+/// package). The operator is never asked for values they don't have.
+fn resolve_door(common: &CommonArgs, target: &str) -> anyhow::Result<(PathBuf, String)> {
+    if !common
+        .agent_dir
+        .join(freehold_core::identity::IDENTITY_FILE)
+        .exists()
+    {
+        std::fs::create_dir_all(&common.agent_dir)?;
+        let id = freehold_core::identity::Identity::generate();
+        id.write_to_dir(&common.agent_dir)?;
+    }
+    let runner_pubkey = match &common.runner_pubkey {
+        Some(pk) => pk.clone(),
+        None => {
+            let pkg = PathBuf::from(format!("./.freehold/runner/{target}"));
+            freehold_core::identity::Identity::load(&pkg)
+                .map(|id| id.nostr_pubkey_hex())
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "runner '{target}' not found at {} — provision it first:\n  freehold provision {target} --kind ssh --address root@<host>\n(the provision prints the PUBLIC key to add to <host>'s authorized_keys),\nthen serve it:  freehold-runner serve --state-dir {}",
+                        pkg.display(), pkg.display()
+                    )
+                })?
+        }
+    };
+    Ok((common.agent_dir.clone(), runner_pubkey))
 }
 
 #[derive(Args)]
 struct ExecArgs {
     #[command(flatten)]
     common: CommonArgs,
-    /// Secret names to request (must be the target's own credential)
+    /// Secret names to request (must be the target's own credential;
+    /// defaults to the target name — the provision convention)
     #[arg(long, short)]
-    secret: Vec<String>,
+    secret: Option<Vec<String>>,
     /// Target
     target: String,
     /// Command (verbatim)
@@ -428,10 +460,18 @@ struct DemoArgs {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Onboard(args) => {
-            let secret = read_secret_stdin(&format!(
-                "paste credential for {} ({} @ {}): ",
-                args.name, args.kind, args.address
-            ))?;
+            let secret: Vec<u8> = if args.kind == "ssh" {
+                freehold_core::identity::generate_ssh_keypair(&args.name)
+                    .map_err(|e| anyhow::anyhow!("ssh keygen: {e}"))?
+                    .0
+            } else {
+                read_secret_stdin(&format!(
+                    "paste credential for {} ({} @ {}): ",
+                    args.name, args.kind, args.address
+                ))?
+                .as_bytes()
+                .to_vec()
+            };
             let runner_dir = args
                 .runner_dir
                 .unwrap_or_else(|| PathBuf::from(format!("./.freehold/runner/{}", args.name)));
@@ -439,7 +479,7 @@ async fn main() -> Result<()> {
                 &args.name,
                 &args.kind,
                 &args.address,
-                secret.as_bytes(),
+                &secret,
                 &args.agent_dir,
                 &args.cp_state_dir,
                 &runner_dir,
@@ -478,12 +518,13 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Exec(args) => {
-            let client = flows::connect(
-                &args.common.addr,
-                &args.common.agent_dir,
-                &args.common.runner_pubkey,
-            )?;
-            let secret_refs: Vec<&str> = args.secret.iter().map(String::as_str).collect();
+            let (agent_dir, runner_pubkey) = resolve_door(&args.common, &args.target)?;
+            let client = flows::connect(&args.common.addr, &agent_dir, &runner_pubkey)?;
+            let secrets = args
+                .secret
+                .clone()
+                .unwrap_or_else(|| vec![args.target.clone()]);
+            let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
             let out = client.exec(&args.target, &args.cmd, &secret_refs, args.timeout)?;
             print!("{}", out.stdout);
             if !out.stderr.is_empty() {
@@ -495,11 +536,13 @@ async fn main() -> Result<()> {
             std::process::exit(out.exit_code.unwrap_or(1));
         }
         Cmd::DeployRelay(args) => {
-            let client = flows::connect(
-                &args.common.addr,
-                &args.common.agent_dir,
-                &args.common.runner_pubkey,
-            )?;
+            let (agent_dir, runner_pubkey) = resolve_door(&args.common, &args.target)?;
+            let client = flows::connect(&args.common.addr, &agent_dir, &runner_pubkey)?;
+            let owner_pubkey = freehold_core::identity::parse_pubkey_input(&args.owner_pubkey)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let operator_pubkey =
+                freehold_core::identity::parse_pubkey_input(&args.operator_pubkey)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             let res = relay::deploy_relay(
                 &client,
                 &args.target,
@@ -517,9 +560,9 @@ async fn main() -> Result<()> {
                     http_port: args.http_port,
                     buzz_ref: args.buzz_ref.clone(),
                     lxc: args.lxc,
-                    owner_pubkey: args.owner_pubkey.clone(),
+                    owner_pubkey,
                     relay_url: args.relay_url.clone(),
-                    operator_pubkey: args.operator_pubkey.clone(),
+                    operator_pubkey,
                     domain: args.domain.clone(),
                 },
             )
@@ -529,11 +572,14 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::DeployCp(args) => {
-            let client = flows::connect(
-                &args.common.addr,
-                &args.common.agent_dir,
-                &args.common.runner_pubkey,
-            )?;
+            let (agent_dir, runner_pubkey) = resolve_door(&args.common, &args.target)?;
+            let client = flows::connect(&args.common.addr, &agent_dir, &runner_pubkey)?;
+            let operator_pubkey = args
+                .operator_pubkey
+                .as_deref()
+                .map(freehold_core::identity::parse_pubkey_input)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let res = deploy_cp::deploy_cp(
                 &client,
                 &args.target,
@@ -544,17 +590,7 @@ async fn main() -> Result<()> {
                     bind_addr: args.bind.clone(),
                     binary_path: args.binary.clone(),
                     relay_url: args.relay_url.clone(),
-                    admin_pubkeys: match &args.operator_pubkey {
-                        Some(pk) => {
-                            if !bootstrap::is_hex64(pk) {
-                                anyhow::bail!(
-                                    "--operator-pubkey must be a 64-character hex Nostr pubkey (got {pk:?})"
-                                );
-                            }
-                            vec![pk.clone()]
-                        }
-                        None => Vec::new(),
-                    },
+                    admin_pubkeys: operator_pubkey.map(|pk| vec![pk]).unwrap_or_default(),
                     runner_binary: args.runner_binary.clone(),
                     runner_package: args.runner_package.clone(),
                     public_origin: {
@@ -566,8 +602,8 @@ async fn main() -> Result<()> {
                             .trim_start_matches("https://")
                             .trim_start_matches("http://")
                             .trim_end_matches('/');
-                        let is_domain =
-                            host.contains('.') && !host.chars().next().is_some_and(|c| c.is_ascii_digit());
+                        let is_domain = host.contains('.')
+                            && !host.chars().next().is_some_and(|c| c.is_ascii_digit());
                         is_domain.then(|| format!("cp-{host}"))
                     },
                 },
@@ -660,16 +696,15 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::RelayMember(args) => {
-            let client = flows::connect(
-                &args.common.addr,
-                &args.common.agent_dir,
-                &args.common.runner_pubkey,
-            )?;
+            let (agent_dir, runner_pubkey) = resolve_door(&args.common, &args.target)?;
+            let client = flows::connect(&args.common.addr, &agent_dir, &runner_pubkey)?;
+            let pubkey = freehold_core::identity::parse_pubkey_input(&args.pubkey)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let res = relay_member::relay_member_add(
                 &client,
                 &args.target,
                 &relay_member::RelayMemberAddSpec {
-                    pubkey: args.pubkey.clone(),
+                    pubkey,
                     role: args.role.clone(),
                     lxc: args.lxc,
                     compose_dir: args.compose_dir.clone(),
@@ -1002,7 +1037,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Readiness(args) => {
-            let client = flows::connect(&args.addr, &args.agent_dir, &args.runner_pubkey)?;
+            let (agent_dir, runner_pubkey) = resolve_door(&args, "proxmox-box")?;
+            let client = flows::connect(&args.addr, &agent_dir, &runner_pubkey)?;
             let report = client.readiness()?;
             for (target, state) in &report {
                 println!("{target:<16} {state}");
@@ -1010,18 +1046,13 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Bootstrap(args) => {
-            let client = flows::connect(
-                &args.common.addr,
-                &args.common.agent_dir,
-                &args.common.runner_pubkey,
-            )?;
+            let (agent_dir, runner_pubkey) = resolve_door(&args.common, &args.target)?;
+            let client = flows::connect(&args.common.addr, &agent_dir, &runner_pubkey)?;
             let domain = args.domain.clone();
-            if !bootstrap::is_hex64(&args.operator_pubkey) {
-                anyhow::bail!(
-                    "--operator-pubkey must be a 64-character hex Nostr pubkey (got {:?})",
-                    args.operator_pubkey
-                );
-            }
+            // fail-closed gate: --operator-pubkey must be a real pubkey
+            // (npub or hex); the value itself is consumed by deploy-relay.
+            freehold_core::identity::parse_pubkey_input(&args.operator_pubkey)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let res = match args.kind.as_str() {
                 "proxmox-lxc" => {
                     let spec = bootstrap::ProxmoxLxcSpec {
@@ -1093,11 +1124,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Demo(args) => {
-            let client = flows::connect(
-                &args.common.addr,
-                &args.common.agent_dir,
-                &args.common.runner_pubkey,
-            )?;
+            // demo has no target flag — the runner is the common door (box)
+            let (agent_dir, runner_pubkey) = resolve_door(&args.common, "proxmox-box")?;
+            let client = flows::connect(&args.common.addr, &agent_dir, &runner_pubkey)?;
             let raw = std::fs::read_to_string(&args.steps)
                 .with_context(|| format!("reading {}", args.steps.display()))?;
             let steps: Vec<flows::DemoStep> = serde_json::from_str(&raw)
