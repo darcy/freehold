@@ -307,6 +307,7 @@ async fn proxmox_lxc_create_failure_is_reported_with_output() {
                 "pct",
                 r#"
 if [ "$1" = "create" ]; then echo "create failed for real"; exit 1; fi
+if [ "$1" = "config" ]; then echo "Configuration file 'lxc/$2.conf' does not exist" >&2; exit 1; fi
 exit 0
 "#,
             ),
@@ -341,6 +342,128 @@ exit 0
             .contains("pct create 102"),
         "the failing command actually ran"
     );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_reuses_existing_matching_container() {
+    // A re-run (installer retry, partial bring-up) hits a vmid that ALREADY
+    // exists with OUR hostname: the driver must reuse it — no `pct create`,
+    // still started + verified + docker-ensured. A foreign container with
+    // the same vmid is refused loudly instead.
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            (
+                "pct",
+                r#"
+case "$1" in
+  config) echo "hostname: boom"; echo "memory: 4096"; exit 0;;
+  status) echo "state: running"; exit 0;;
+  start)  echo "204"; exit 0;;
+  exec)
+    case "$4" in
+      docker) echo "Server Version: 27.0"; exit 0;;
+      *)
+        case "$6" in
+          *"compose version"*) echo "Docker Compose version v2.24.4"; exit 0;;
+          *) echo "boom"; echo "Linux"; echo "root"; exit 0;;
+        esac
+        ;;
+    esac
+    ;;
+  *) echo "unknown pct $*" >&2; exit 2;;
+esac
+"#,
+            ),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let res = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "boom".into(),
+            vmid: Some(102),
+            template: Some("debian-12-standard_12.7-1_amd64.tar.zst".into()),
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
+        },
+    )
+    .await
+    .expect("reuse must succeed");
+
+    assert_eq!(res.id, "102");
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !log.contains("pct create 102"),
+        "an existing matching container is NOT recreated: {log}"
+    );
+    assert!(
+        log.contains("pct config 102"),
+        "probe ran before deciding: {log}"
+    );
+    assert!(log.contains("pct exec 102"), "guest still verified: {log}");
+    assert!(
+        log.contains("download.docker.com"),
+        "docker ensure still runs on reuse: {log}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_refuses_foreign_container_on_vmid() {
+    // Same vmid, DIFFERENT hostname: never touch it.
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            (
+                "pct",
+                r#"
+if [ "$1" = "config" ]; then echo "hostname: someone-elses-box"; exit 0; fi
+if [ "$1" = "create" ]; then echo "SHOULD NOT HAPPEN"; exit 0; fi
+exit 0
+"#,
+            ),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let err = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "boom".into(),
+            vmid: Some(102),
+            template: Some("debian-12-standard_12.7-1_amd64.tar.zst".into()),
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
+        },
+    )
+    .await
+    .expect_err("a foreign container on the vmid must be refused");
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("someone-elses-box"),
+        "names the conflict: {msg}"
+    );
+    assert!(msg.contains("destroy it"), "actionable: {msg}");
 
     server.abort();
 }

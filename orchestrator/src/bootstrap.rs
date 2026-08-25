@@ -313,6 +313,32 @@ pub async fn bootstrap_proxmox_lxc(
         None => pick_free_vmid(client, target, &spec.hostname)?,
     };
 
+    // Idempotent create — re-runs (and the installer's re-run after a
+    // partial bring-up) must not fail on an existing guest. If the vmid
+    // ALREADY exists with OUR hostname, reuse it (start + verify + docker
+    // still run against it); a foreign container is refused outright.
+    let reuse = match exec(client, target, &format!("pct config {vmid}"), 30)?.exit_code {
+        Some(0) => {
+            let name = exec(client, target, &format!("pct config {vmid}"), 30)?
+                .stdout
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("hostname: "))
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            if name == spec.hostname {
+                true
+            } else {
+                return Err(BootstrapError::Verify(format!(
+                    "vmid {vmid} already exists as container {name:?} (expected {hostname:?}) — \
+                     destroy it on the host or pick a different --vmid",
+                    hostname = spec.hostname
+                )));
+            }
+        }
+        _ => false, // no such vmid — fresh create below
+    };
+
     // --unprivileged 1 is explicit, not the CLI default: pct's CLI defaults
     // to PRIVILEGED, and this container will host the relay + control plane
     // (runner ciphertext, relay membership) — a root escape inside it must
@@ -342,12 +368,21 @@ pub async fn bootstrap_proxmox_lxc(
             _ => format!("name=eth0,bridge={},ip=dhcp,type=veth", spec.bridge),
         },
     );
-    let out = exec(client, target, &create, 120)?;
-    expect_ok(&out, "pct create")?;
+    if !reuse {
+        let out = exec(client, target, &create, 120)?;
+        expect_ok(&out, "pct create")?;
+    } else {
+        tracing::info!(vmid, hostname = %spec.hostname, "reusing existing LXC");
+    }
 
     let start = format!("pct start {vmid}", vmid = vmid);
-    let out = exec(client, target, &start, 120)?;
-    expect_ok(&out, "pct start")?;
+    let running = exec(client, target, &format!("pct status {vmid}"), 30)?
+        .stdout
+        .contains("status: running");
+    if !running {
+        let out = exec(client, target, &start, 120)?;
+        expect_ok(&out, "pct start")?;
+    }
 
     // A3 — reachability self-check: the runner asks the guest, through the
     // host, `pct exec`; the guest answers. No IP guessing.
