@@ -1,0 +1,198 @@
+//! Configure mode — config present, world not converged: an idempotent
+//! check-then-run pipeline over the relay/cp LXCs + deploys. Every stage
+//! probes first and only runs what's missing; failed stages show their tail
+//! and can be retried (r).
+
+use super::StageRunner;
+use freehold_installer::config::{Config, url_reachable};
+use freehold_installer::{
+    Answers, probe_lxc, stage_bootstrap, stage_deploy_cp, stage_deploy_relay,
+};
+use std::path::PathBuf;
+
+#[derive(Clone, PartialEq)]
+pub enum CStatus {
+    Pending,
+    Check,
+    Run,
+    Ok,
+    Failed,
+}
+
+pub struct CStage {
+    pub name: &'static str,
+    pub status: CStatus,
+    pub tail: String,
+}
+
+pub struct ConfigureState {
+    pub cfg_path: PathBuf,
+    pub cfg: Config,
+    pub answers: Answers,
+    pub stages: Vec<CStage>,
+    pub cur: usize,
+    pub notice: String,
+    pub transitioning: bool,
+    runner: StageRunner,
+    job: Option<usize>,
+}
+
+impl ConfigureState {
+    pub fn new(cfg_path: PathBuf) -> Self {
+        // The mode probe decided Configure; a missing/invalid config here
+        // still renders defaults (worst case the user re-bootstraps).
+        let cfg = match Config::load(&cfg_path) {
+            Ok(Some(cfg)) => cfg,
+            _ => Config::from_answers(&Answers::defaults()),
+        };
+        Self::with_cfg(cfg_path, cfg)
+    }
+
+    pub fn with_cfg(cfg_path: PathBuf, cfg: Config) -> Self {
+        let answers = Answers::from_config(&cfg);
+        let stages = vec![
+            CStage {
+                name: "relay LXC (boot if missing)",
+                status: CStatus::Pending,
+                tail: String::new(),
+            },
+            CStage {
+                name: "control-plane LXC (boot if missing)",
+                status: CStatus::Pending,
+                tail: String::new(),
+            },
+            CStage {
+                name: "deploy the Buzz relay",
+                status: CStatus::Pending,
+                tail: String::new(),
+            },
+            CStage {
+                name: "deploy the control plane",
+                status: CStatus::Pending,
+                tail: String::new(),
+            },
+        ];
+        Self {
+            cfg_path,
+            cfg,
+            answers,
+            stages,
+            cur: 0,
+            notice: String::new(),
+            transitioning: false,
+            runner: StageRunner::new(),
+            job: None,
+        }
+    }
+
+    /// Rebuild stage state from the (possibly rewritten) config.
+    pub fn restart(&mut self) {
+        if let Ok(Some(cfg)) = Config::load(&self.cfg_path) {
+            self.cfg = cfg;
+            self.answers = Answers::from_config(&self.cfg);
+        }
+        for s in &mut self.stages {
+            s.status = CStatus::Pending;
+            s.tail.clear();
+        }
+        self.cur = 0;
+        self.transitioning = false;
+        self.notice.clear();
+    }
+
+    pub fn on_key(&mut self, code: crossterm::event::KeyCode) {
+        if code == crossterm::event::KeyCode::Char('r') {
+            self.restart();
+        }
+    }
+
+    // ------------------------------------------------------------ flow
+
+    fn spawn_check(&mut self, i: usize) {
+        let a = self.answers.clone();
+        let cfg = self.cfg.clone();
+        self.stages[i].status = CStatus::Check;
+        self.job = Some(i);
+        self.runner.spawn(move || {
+            let present = match i {
+                0 => probe_lxc(&a, cfg.lxc.relay.vmid)?,
+                1 => probe_lxc(&a, cfg.lxc.cp.vmid)?,
+                2 => url_reachable(&cfg.relay_url),
+                3 => url_reachable(&cfg.cp_url),
+                _ => false,
+            };
+            Ok(if present { "1".into() } else { "0".into() })
+        });
+    }
+
+    fn spawn_run(&mut self, i: usize) {
+        let a = self.answers.clone();
+        self.stages[i].status = CStatus::Run;
+        self.job = Some(i);
+        self.runner.spawn(move || match i {
+            0 => {
+                stage_bootstrap(&a, "relay", a.relay_vmid, &a.relay_ip)?;
+                Ok(format!("relay LXC {} ready", a.relay_vmid))
+            }
+            1 => {
+                stage_bootstrap(&a, "cp", a.cp_vmid, &a.cp_ip)?;
+                Ok(format!("cp LXC {} ready", a.cp_vmid))
+            }
+            2 => {
+                stage_deploy_relay(&a)?;
+                Ok(format!("relay live at https://{}", a.domain))
+            }
+            3 => {
+                stage_deploy_cp(&a)?;
+                Ok(format!("control plane live at https://cp-{}", a.domain))
+            }
+            _ => unreachable!(),
+        });
+    }
+
+    /// Returns true when everything converged (app transitions to running).
+    pub fn tick(&mut self) -> bool {
+        while let Ok(super::RawMsg::Done { ok, out }) = self.runner.rx.try_recv() {
+            let Some(i) = self.job.take() else { continue };
+            match self.stages[i].status {
+                CStatus::Check => {
+                    if ok && out == "1" {
+                        self.stages[i].status = CStatus::Ok;
+                        self.stages[i].tail = "already present".into();
+                    } else if ok {
+                        self.spawn_run(i);
+                    } else {
+                        self.stages[i].status = CStatus::Failed;
+                        self.stages[i].tail = out;
+                        self.notice = "check failed — r to retry".into();
+                    }
+                }
+                CStatus::Run | CStatus::Failed | CStatus::Pending | CStatus::Ok => {
+                    if ok {
+                        self.stages[i].status = CStatus::Ok;
+                        self.stages[i].tail = out;
+                    } else {
+                        self.stages[i].status = CStatus::Failed;
+                        self.stages[i].tail = out;
+                        self.notice = "stage failed — r to retry".into();
+                    }
+                }
+            }
+        }
+        // advance
+        if self.cur < self.stages.len() {
+            match self.stages[self.cur].status {
+                CStatus::Pending => self.spawn_check(self.cur),
+                CStatus::Ok => {
+                    self.cur += 1;
+                    if self.cur >= self.stages.len() {
+                        self.notice = "world converged — entering running mode".into();
+                        self.transitioning = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.transitioning
+    }
+}

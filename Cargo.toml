@@ -2,7 +2,7 @@
 resolver = "2"
 members = ["core", "runner",
     "testkit", "control-plane", "orchestrator",
-    "acceptance", "installer"]
+    "acceptance", "installer", "tui"]
 
 [workspace.package]
 version = "0.1.0"
