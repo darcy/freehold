@@ -52,6 +52,9 @@ enum Cmd {
     DelegatePeer(DelegatePeerArgs),
     /// Relay surface: publish a profile (kind 0) so clients show a name
     RelayProfile(RelayProfileArgs),
+    /// Tear the managed world down: destroy the LXCs, remove the runner's
+    /// key from the host LAST (after verification), then local cleanup.
+    Teardown(TeardownArgs),
     /// Relay surface: join a channel (kind 9021) — agents join #freehold
     /// by default after a deploy
     RelayJoin(RelayJoinArgs),
@@ -143,6 +146,16 @@ struct DeployCpArgs {
     /// admin whitelist (C3.5) and relaxes the loopback-only bind guard.
     #[arg(long)]
     operator_pubkey: Option<String>,
+}
+
+#[derive(Args)]
+struct TeardownArgs {
+    /// Config path (default: ~/.config/freehold/config.toml)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Skip the confirmation prompt (scripting/CI only)
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -943,6 +956,44 @@ async fn cli_body() -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_secs(args.interval));
             }
             println!("DELEGATE-PEER: done");
+            Ok(())
+        }
+        Cmd::Teardown(args) => {
+            let cfg_path = args
+                .config
+                .unwrap_or_else(freehold_installer::config::Config::default_path);
+            let Some(plan) = freehold_installer::teardown::plan(&cfg_path)? else {
+                println!("nothing to tear down — no config at {}", cfg_path.display());
+                return Ok(());
+            };
+            println!();
+            println!("  Tearing down {}:", plan.domain);
+            println!("    managed:     {:?}", plan.managed);
+            for (role, vmid) in &plan.lxcs {
+                println!("    destroy:     {role} LXC {vmid}");
+            }
+            println!("    world:       {}", plan.world_home.display());
+            println!("    config:      {}", plan.config_path.display());
+            println!(
+                "    door:        the {} runner's key → removed from the host LAST",
+                plan.door_target
+            );
+            println!();
+            if !args.yes {
+                // Auth seam (deferred per plan): this typed "yes" becomes the
+                // operator-signature check once teardown is proven.
+                let mut line = String::new();
+                use std::io::{BufRead, Write};
+                print!("Type 'yes' to destroy the managed world: ");
+                std::io::stdout().flush()?;
+                std::io::stdin().lock().read_line(&mut line)?;
+                let ok = line.trim() == "yes";
+                if !ok {
+                    println!("aborted.");
+                    return Ok(());
+                }
+            }
+            println!("{}", freehold_installer::teardown::run(&cfg_path, true)?);
             Ok(())
         }
         Cmd::RelayProfile(args) => {
