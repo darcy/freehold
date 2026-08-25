@@ -43,12 +43,14 @@ pub struct LxcSpec {
     pub cp: LxcGuest,
 }
 
-/// A managed LXC's CONNECT/status coordinates — bootstrap-time sizing
-/// (rootfs/memory/gateway) is not config; it's decided once at create.
+/// A managed LXC's CONNECT/status coordinates. Filled in by the configure
+/// pipeline right after the boot (the vmid is auto-picked; the IP is what
+/// DHCP assigned); unknown (None) before creation. Sizing (rootfs/memory)
+/// is bootstrap-time only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LxcGuest {
-    pub vmid: u32,
-    pub ip: String,
+    pub vmid: Option<u32>,
+    pub ip: Option<String>,
 }
 
 impl Config {

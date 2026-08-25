@@ -44,26 +44,6 @@ impl Form {
                     value: d.domain,
                 },
                 Field {
-                    label: "Relay LXC vmid",
-                    value: d.relay_vmid.to_string(),
-                },
-                Field {
-                    label: "Relay LXC IP (CIDR)",
-                    value: d.relay_ip,
-                },
-                Field {
-                    label: "Control-plane LXC vmid",
-                    value: d.cp_vmid.to_string(),
-                },
-                Field {
-                    label: "Control-plane LXC IP (CIDR)",
-                    value: d.cp_ip,
-                },
-                Field {
-                    label: "LXC gateway",
-                    value: d.relay_gw,
-                },
-                Field {
                     label: "LXC rootfs size (GB)",
                     value: d.rootfs_gb.to_string(),
                 },
@@ -91,13 +71,14 @@ impl Form {
             runner: v(1),
             serve: v(2),
             domain: v(3),
-            relay_vmid: num(4)?,
-            relay_ip: v(5),
-            cp_vmid: num(6)?,
-            cp_ip: v(7),
-            relay_gw: v(8),
-            rootfs_gb: num(9)?,
-            memory_mb: num(10)?,
+            // vmids + ips are auto-picked/assigned; the config records them
+            // after the boot (write-back).
+            relay_vmid: None,
+            relay_ip: None,
+            cp_vmid: None,
+            cp_ip: None,
+            rootfs_gb: num(4)?,
+            memory_mb: num(5)?,
             operator_pk: String::new(),
             operator_generated: false,
             operator_dir: PathBuf::new(),

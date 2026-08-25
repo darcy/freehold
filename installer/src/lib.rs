@@ -64,11 +64,11 @@ pub struct Answers {
     pub serve: String,
     /// Relay identity domain (A4 gate)
     pub domain: String,
-    pub relay_vmid: u32,
-    pub relay_ip: String,
-    pub relay_gw: String,
-    pub cp_vmid: u32,
-    pub cp_ip: String,
+    /// Auto-picked by the driver when None (stored in the config after boot).
+    pub relay_vmid: Option<u32>,
+    pub relay_ip: Option<String>,
+    pub cp_vmid: Option<u32>,
+    pub cp_ip: Option<String>,
     pub rootfs_gb: u32,
     pub memory_mb: u32,
     /// Operator Nostr pubkey (64-hex)
@@ -89,7 +89,6 @@ impl Answers {
             domain: cfg.domain.clone(),
             relay_vmid: cfg.lxc.relay.vmid,
             relay_ip: cfg.lxc.relay.ip.clone(),
-            relay_gw: "192.168.30.1".into(), // bootstrap-time only, not config
             cp_vmid: cfg.lxc.cp.vmid,
             cp_ip: cfg.lxc.cp.ip.clone(),
             rootfs_gb: 16, // bootstrap-time only
@@ -107,11 +106,10 @@ impl Answers {
             runner: "proxmox-box".into(),
             serve: "127.0.0.1:8787".into(),
             domain: "freehold-test.darcydev.net".into(),
-            relay_vmid: 100,
-            relay_ip: "192.168.30.238/24".into(),
-            relay_gw: "192.168.30.1".into(),
-            cp_vmid: 102,
-            cp_ip: "192.168.30.254/24".into(),
+            relay_vmid: None,
+            relay_ip: None,
+            cp_vmid: None,
+            cp_ip: None,
             rootfs_gb: 16,
             memory_mb: 2048,
             operator_pk: String::new(),
@@ -329,8 +327,80 @@ pub enum DoorProbe {
     Failed(String),
 }
 
+/// Find the vmid of the role's container on the host (`pct list` name match
+/// on the `-<role>` suffix) — used to write the ACTUAL vmid back into the
+/// config after an auto-picked boot.
+pub fn find_lxc_vmid(a: &Answers, role: &str) -> Result<u32> {
+    let (ok, out) = run(
+        &bin("freehold-orchestrator"),
+        &[
+            "exec",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            ops_dir().to_str().unwrap(),
+            &a.runner,
+            "pct list",
+        ],
+    )?;
+    if !ok {
+        bail!("pct list unreadable through the runner:\n{out}");
+    }
+    let suffix = format!("-{role}");
+    for line in out.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if let (Some(name), Some(vmid)) = (cols.last(), cols.first())
+            && name.ends_with(&suffix)
+        {
+            return vmid
+                .parse()
+                .map_err(|_| anyhow::anyhow!("unparseable vmid {vmid:?} in {line:?}"));
+        }
+    }
+    bail!("no container named *{suffix} found on the host:\n{out}")
+}
+
+/// The guest's current IPv4 (CIDR) — read back after a DHCP boot.
+pub fn read_lxc_ip(a: &Answers, vmid: u32) -> Result<String> {
+    let (ok, out) = run(
+        &bin("freehold-orchestrator"),
+        &[
+            "exec",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            ops_dir().to_str().unwrap(),
+            &a.runner,
+            &format!("pct exec {vmid} -- ip -4 -o addr show eth0"),
+        ],
+    )?;
+    if !ok {
+        bail!("ip readback failed on LXC {vmid}:\n{out}");
+    }
+    out.split_whitespace()
+        .find(|t| t.contains('/'))
+        .map(|t| t.to_string())
+        .filter(|t| t != "127.0.0.1/8")
+        .ok_or_else(|| anyhow::anyhow!("no ipv4 on LXC {vmid} eth0:\n{out}"))
+}
+
+/// Persist the real post-boot coordinates into the config.
+pub fn write_back_lxc(a: &Answers, cfg: &mut config::Config, role: &str) -> Result<()> {
+    let vmid = find_lxc_vmid(a, role)?;
+    let ip = read_lxc_ip(a, vmid)?;
+    let guest = if role == "relay" {
+        &mut cfg.lxc.relay
+    } else {
+        &mut cfg.lxc.cp
+    };
+    guest.vmid = Some(vmid);
+    guest.ip = Some(ip);
+    Ok(())
+}
+
 /// Is the LXC with this vmid present on the target host (via the runner)?
-pub fn probe_lxc(a: &Answers, vmid: u32) -> Result<bool> {
+pub fn probe_lxc(a: &Answers, vmid: Option<u32>) -> Result<bool> {
+    let Some(vmid) = vmid else { return Ok(false) };
     let (ok, out) = run(
         &bin("freehold-orchestrator"),
         &[
@@ -384,38 +454,49 @@ pub fn stage_any(name: &str, args: &[&str], ok_msg: &str) -> Result<String> {
     }
 }
 
-pub fn stage_bootstrap(a: &Answers, role: &str, vmid: u32, ip: &str) -> Result<()> {
+/// Boot the role's LXC. The vmid is AUTO-PICKED (lowest free via
+/// `pvesh /cluster/nextid`) when None; the guest IP is DHCP-assigned and the
+/// A4 domain gate verifies the domain resolves to it. Both are read back and
+/// stored in the config by the configure pipeline after the boot.
+pub fn stage_bootstrap(a: &Answers, role: &str, vmid: Option<u32>) -> Result<()> {
+    let mut args: Vec<String> = vec![
+        "bootstrap".into(),
+        "--kind".into(),
+        "proxmox-lxc".into(),
+        "--role".into(),
+        role.into(),
+        "--target".into(),
+        a.runner.clone(),
+        "--domain".into(),
+        a.domain.clone(),
+        "--rootfs-gb".into(),
+        a.rootfs_gb.to_string(),
+        "--memory-mb".into(),
+        a.memory_mb.to_string(),
+        "--operator-pubkey".into(),
+        a.operator_pk.clone(),
+    ];
+    let label = match vmid {
+        Some(v) => {
+            args.push("--vmid".into());
+            args.push(v.to_string());
+            format!("(vmid {v})")
+        }
+        None => "(auto vmid, dhcp ip)".into(),
+    };
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     stage_any(
-        &format!("booting the {role} LXC (vmid {vmid})"),
-        &[
-            "bootstrap",
-            "--kind",
-            "proxmox-lxc",
-            "--role",
-            role,
-            "--target",
-            &a.runner,
-            "--domain",
-            &a.domain,
-            "--vmid",
-            &vmid.to_string(),
-            "--rootfs-gb",
-            &a.rootfs_gb.to_string(),
-            "--memory-mb",
-            &a.memory_mb.to_string(),
-            "--lxc-ip",
-            ip,
-            "--lxc-gw",
-            &a.relay_gw,
-            "--operator-pubkey",
-            &a.operator_pk,
-        ],
-        &format!("{role} LXC {vmid} created and ready"),
+        &format!("booting the {role} LXC {label}"),
+        &arg_refs,
+        &format!("{role} LXC booted"),
     )?;
     Ok(())
 }
 
 pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
+    let relay_vmid = a
+        .relay_vmid
+        .ok_or_else(|| anyhow::anyhow!("relay LXC not booted yet — no vmid to deploy into"))?;
     stage_any(
         "deploy-relay",
         &[
@@ -423,7 +504,7 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
             "--target",
             &a.runner,
             "--lxc",
-            &a.relay_vmid.to_string(),
+            &relay_vmid.to_string(),
             "--domain",
             &a.domain,
             "--relay-url",
@@ -439,6 +520,9 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
 }
 
 pub fn stage_deploy_cp(a: &Answers) -> Result<()> {
+    let cp_vmid = a
+        .cp_vmid
+        .ok_or_else(|| anyhow::anyhow!("cp LXC not booted yet — no vmid to deploy into"))?;
     stage_any(
         "deploy-cp",
         &[
@@ -446,7 +530,7 @@ pub fn stage_deploy_cp(a: &Answers) -> Result<()> {
             "--target",
             &a.runner,
             "--lxc",
-            &a.cp_vmid.to_string(),
+            &cp_vmid.to_string(),
             "--relay-url",
             &format!("https://{}", a.domain),
             "--binary",

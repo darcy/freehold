@@ -75,11 +75,7 @@ fn collect() -> Result<Answers> {
         "Relay domain (must resolve to your host — the identity gate)",
         a.domain,
     )?;
-    a.relay_vmid = ask("Relay LXC vmid", a.relay_vmid)?;
-    a.relay_ip = ask("Relay LXC IP (CIDR)", a.relay_ip)?;
-    a.cp_vmid = ask("Control-plane LXC vmid", a.cp_vmid)?;
-    a.cp_ip = ask("Control-plane LXC IP (CIDR)", a.cp_ip)?;
-    a.relay_gw = ask("LXC gateway", a.relay_gw)?;
+    // vmids + ips are auto-picked/assigned (stored in the config after boot).
     a.rootfs_gb = ask("LXC rootfs size (GB)", a.rootfs_gb)?;
     a.memory_mb = ask("LXC memory (MB)", a.memory_mb)?;
 
@@ -199,11 +195,13 @@ fn summary(a: &Answers, serve_pid: &str, cfg_path: &Path) {
     println!();
     println!(
         "  relay:          https://{} (LXC {})",
-        a.domain, a.relay_vmid
+        a.domain,
+        a.relay_vmid.map(|v| v.to_string()).unwrap_or_default()
     );
     println!(
         "  control plane:  https://cp-{} (LXC {})",
-        a.domain, a.cp_vmid
+        a.domain,
+        a.cp_vmid.map(|v| v.to_string()).unwrap_or_default()
     );
     println!(
         "  runner:         serving on {} (pid {})",
@@ -247,14 +245,8 @@ fn main() -> Result<()> {
     println!("  host:            {}", answers.host);
     println!("  runner:          {} @ {}", answers.runner, answers.serve);
     println!("  domain:          {}", answers.domain);
-    println!(
-        "  relay LXC:       {} ({})",
-        answers.relay_vmid, answers.relay_ip
-    );
-    println!(
-        "  control-plane:   LXC {} ({})",
-        answers.cp_vmid, answers.cp_ip
-    );
+    println!("  relay LXC:       auto vmid (dhcp ip)",);
+    println!("  control-plane:   auto vmid (dhcp ip)",);
     println!("  operator pk:     {}", answers.operator_pk);
     println!("  ──────────────────────────────────────────────");
     if !confirm("Proceed?", true)? {
@@ -277,10 +269,10 @@ fn main() -> Result<()> {
     })?;
     verify_loop(&answers)?;
     run_stage("booting the relay LXC…", || {
-        stage_bootstrap(&answers, "relay", answers.relay_vmid, &answers.relay_ip)
+        stage_bootstrap(&answers, "relay", answers.relay_vmid)
     })?;
     run_stage("booting the cp LXC…", || {
-        stage_bootstrap(&answers, "cp", answers.cp_vmid, &answers.cp_ip)
+        stage_bootstrap(&answers, "cp", answers.cp_vmid)
     })?;
     run_stage("deploying the Buzz relay…", || {
         stage_deploy_relay(&answers)

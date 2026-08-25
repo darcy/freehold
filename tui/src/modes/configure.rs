@@ -131,12 +131,12 @@ impl ConfigureState {
         self.job = Some(i);
         self.runner.spawn(move || match i {
             0 => {
-                stage_bootstrap(&a, "relay", a.relay_vmid, &a.relay_ip)?;
-                Ok(format!("relay LXC {} ready", a.relay_vmid))
+                stage_bootstrap(&a, "relay", a.relay_vmid)?;
+                Ok("relay LXC ready".to_string())
             }
             1 => {
-                stage_bootstrap(&a, "cp", a.cp_vmid, &a.cp_ip)?;
-                Ok(format!("cp LXC {} ready", a.cp_vmid))
+                stage_bootstrap(&a, "cp", a.cp_vmid)?;
+                Ok("cp LXC ready".to_string())
             }
             2 => {
                 stage_deploy_relay(&a)?;
@@ -168,9 +168,33 @@ impl ConfigureState {
                     }
                 }
                 CStatus::Run | CStatus::Failed | CStatus::Pending | CStatus::Ok => {
+                    let tail = out.clone();
                     if ok {
                         self.stages[i].status = CStatus::Ok;
-                        self.stages[i].tail = out;
+                        self.stages[i].tail = tail.clone();
+                        // record the ACTUAL post-boot coordinates (auto vmid +
+                        // dhcp ip) in the config — the user asked for this the
+                        // moment the LXC exists.
+                        if i == 0 || i == 1 {
+                            let role = if i == 0 { "relay" } else { "cp" };
+                            match freehold_installer::write_back_lxc(
+                                &self.answers,
+                                &mut self.cfg,
+                                role,
+                            ) {
+                                Ok(()) => {
+                                    self.stages[i].tail = format!(
+                                        "{tail} — recorded in config (vmid {:?}, ip {:?})",
+                                        guest_vmid(&self.cfg, role),
+                                        guest_ip(&self.cfg, role)
+                                    );
+                                    if let Err(e) = self.cfg.save(&self.cfg_path) {
+                                        self.notice = format!("config save failed: {e}");
+                                    }
+                                }
+                                Err(e) => self.notice = format!("write-back failed: {e}"),
+                            }
+                        }
                     } else {
                         self.stages[i].status = CStatus::Failed;
                         self.stages[i].tail = out;
@@ -194,5 +218,21 @@ impl ConfigureState {
             }
         }
         self.transitioning
+    }
+}
+
+fn guest_vmid(cfg: &Config, role: &str) -> Option<u32> {
+    if role == "relay" {
+        cfg.lxc.relay.vmid
+    } else {
+        cfg.lxc.cp.vmid
+    }
+}
+
+fn guest_ip(cfg: &Config, role: &str) -> Option<String> {
+    if role == "relay" {
+        cfg.lxc.relay.ip.clone()
+    } else {
+        cfg.lxc.cp.ip.clone()
     }
 }
