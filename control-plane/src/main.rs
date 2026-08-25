@@ -301,10 +301,27 @@ async fn main() -> Result<()> {
             let runner_dir = args
                 .runner_dir
                 .unwrap_or_else(|| PathBuf::from(format!("./.freehold/runner/{}", args.name)));
-            let secret = read_secret_stdin(&format!(
-                "paste credential for {} ({} @ {}): ",
-                args.name, args.kind, args.address
-            ))?;
+            // SSH runners: freehold GENERATES the runner's keypair and the
+            // operator installs the PUBLIC half on the target's
+            // authorized_keys — nobody pastes an existing key. Other kinds:
+            // the operator pastes the API credential once.
+            let (secret, generated_pubkey): (zeroize::Zeroizing<String>, Option<String>) =
+                if args.kind == "ssh" {
+                    let (privk, pubk) = freehold_core::identity::generate_ssh_keypair(&args.name)
+                        .map_err(|e| anyhow::anyhow!("ssh keygen: {e}"))?;
+                    (
+                        zeroize::Zeroizing::new(String::from_utf8_lossy(&privk).into_owned()),
+                        Some(pubk),
+                    )
+                } else {
+                    (
+                        read_secret_stdin(&format!(
+                            "paste credential for {} ({} @ {}): ",
+                            args.name, args.kind, args.address
+                        ))?,
+                        None,
+                    )
+                };
             let res = provisioner::provision_runner(
                 &store,
                 &ProvisionRequest {
@@ -330,6 +347,16 @@ async fn main() -> Result<()> {
             println!(
                 "  (credential sealed to the runner's key — the CP holds no plaintext, no private keys)"
             );
+            if let Some(pubk) = &generated_pubkey {
+                println!(
+                    "  PUBLIC KEY — add this line to {}'s ~/.ssh/authorized_keys:",
+                    args.address
+                );
+                println!("  {pubk}");
+                println!(
+                    "  (the private half is the sealed credential — it never leaves this box)"
+                );
+            }
             if let Some(relay) = &args.relay_url {
                 provisioner::sync_runner_channel(&store, relay, &args.name, &args.state_dir)?;
                 println!("synced runner channel on the relay ({relay})");
