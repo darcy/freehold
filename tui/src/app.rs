@@ -115,7 +115,14 @@ pub fn run(terminal: &mut DefaultTerminal, cfg_path: PathBuf) -> Result<()> {
             && let Event::Key(k) = event::read()?
             && k.kind == KeyEventKind::Press
         {
-            app.on_key(k.code);
+            if k.modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+                && k.code == KeyCode::Char('c')
+            {
+                app.quit = true; // Ctrl-C quits from ANY screen (raw mode)
+            } else {
+                app.on_key(k.code);
+            }
         }
         app.tick();
         if app.quit {
@@ -302,8 +309,14 @@ fn draw_bootstrap<'a>(area: Rect, f: &mut Frame<'a>, bs: &mut Bootstrap) {
                 ("runner", a.runner.clone()),
                 ("serve", a.serve.clone()),
                 ("domain", a.domain.clone()),
-                ("relay LXC", format!("{} ({})", a.relay_vmid, a.relay_ip)),
-                ("cp LXC", format!("{} ({})", a.cp_vmid, a.cp_ip)),
+                (
+                    "relay LXC",
+                    "auto (vmid + dhcp ip recorded after boot)".to_string(),
+                ),
+                (
+                    "cp LXC",
+                    "auto (vmid + dhcp ip recorded after boot)".to_string(),
+                ),
                 ("operator pk", a.operator_pk.clone()),
             ];
             let lines: Vec<Line> = rows

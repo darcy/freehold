@@ -39,13 +39,13 @@ pub fn plan(config_path: &std::path::Path) -> Result<Option<Plan>> {
         .managed
         .iter()
         .filter(|m| m.as_str() == "relay" || m.as_str() == "cp")
-        .map(|m| {
+        .filter_map(|m| {
             let vmid = if m == "relay" {
                 cfg.lxc.relay.vmid
             } else {
                 cfg.lxc.cp.vmid
             };
-            (m.clone(), vmid)
+            vmid.map(|v| (m.clone(), v))
         })
         .collect();
     Ok(Some(Plan {
@@ -87,14 +87,13 @@ pub fn run(config_path: &std::path::Path, confirm: bool) -> Result<String> {
     // 2. destroy the managed LXCs (each checked present → stopped → destroyed).
     for (role, vmid) in [("relay", cfg.lxc.relay.vmid), ("cp", cfg.lxc.cp.vmid)] {
         if !cfg.managed.iter().any(|m| m == role) {
-            log.push(format!("skipped {role} LXC {vmid} (not managed)"));
+            let label = vmid.map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+            log.push(format!("skipped {role} LXC {label} (not managed)"));
             continue;
         }
-        // presence via `pct list | grep -c` — exits 0 either way, so a GONE
-        // vmid can't be mistaken for an exec failure.
-        let lxc_exists = |a: &Answers, vmid: u32| -> Result<bool> {
-            let out = exec_pct(a, &format!("pct list | grep -c '^\\s*{vmid} ' || true"))?;
-            Ok(out.trim() != "0")
+        let Some(vmid) = vmid else {
+            log.push(format!("{role} LXC: never created (no vmid recorded)"));
+            continue;
         };
         if !lxc_exists(&a, vmid)? {
             log.push(format!("{role} LXC {vmid}: already gone"));
@@ -149,6 +148,13 @@ pub fn run(config_path: &std::path::Path, confirm: bool) -> Result<String> {
     }
 
     Ok(format!("teardown complete:\n  {}", log.join("\n  ")))
+}
+
+/// Does the LXC exist? via `pct list | grep -c` (exits 0 either way so a
+/// GONE vmid is never mistaken for an exec failure).
+fn lxc_exists(a: &Answers, vmid: u32) -> Result<bool> {
+    let out = exec_pct(a, &format!("pct list | grep -c '^\\s*{vmid} ' || true"))?;
+    Ok(out.trim() != "0")
 }
 
 fn exec_pct(a: &Answers, cmd: &str) -> Result<String> {
