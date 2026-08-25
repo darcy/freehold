@@ -84,8 +84,12 @@ struct AgentArgs {
 struct GrantArgs {
     /// Runner to grant
     name: String,
-    /// Agent pubkey (Nostr x-only hex) allowed to call the runner
-    pubkey: String,
+    /// Agent pubkey (npub or 64-hex) allowed to call the runner; omitted =
+    /// the state dir's own ops-agent identity ({state_dir}/agent-ops) — the
+    /// identity the orchestrator drives with, so the common first-run grant
+    /// needs no argument
+    #[arg(long)]
+    pubkey: Option<String>,
     /// Relay to publish the new grant list to (Phase D; kind 30180)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
@@ -154,8 +158,10 @@ struct RotateArgs {
 struct RevokeGrantArgs {
     /// Runner to revoke the grant from
     name: String,
-    /// Agent pubkey (Nostr x-only hex) to drop
-    pubkey: String,
+    /// Agent pubkey (npub or 64-hex) to drop; omitted = the state dir's own
+    /// ops-agent identity (the orchestrator's signing identity)
+    #[arg(long)]
+    pubkey: Option<String>,
     /// Relay to publish the shrunk list to (Phase D)
     #[arg(long, env = "FREEHOLD_RELAY_URL")]
     relay_url: Option<String>,
@@ -248,7 +254,8 @@ async fn main() -> Result<()> {
         Cmd::Grant(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
-            let grants = provisioner::grant_agent(&store, &args.name, &args.pubkey)?;
+            let pubkey = resolve_grant_pubkey(args.pubkey.as_deref(), &args.state_dir)?;
+            let grants = provisioner::grant_agent(&store, &args.name, &pubkey)?;
             if let Some(relay) = &args.relay_url {
                 // Chunk 2.6.1: grants are channel MEMBERSHIP — the next
                 // roster read by the runner (per call) includes the agent.
@@ -256,7 +263,7 @@ async fn main() -> Result<()> {
                     &store,
                     relay,
                     &args.name,
-                    &args.pubkey,
+                    &pubkey,
                     &args.state_dir,
                 )?;
                 println!(
@@ -381,13 +388,14 @@ async fn main() -> Result<()> {
         Cmd::RevokeGrant(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
-            let grants = provisioner::revoke_grant(&store, &args.name, &args.pubkey)?;
+            let pubkey = resolve_grant_pubkey(args.pubkey.as_deref(), &args.state_dir)?;
+            let grants = provisioner::revoke_grant(&store, &args.name, &pubkey)?;
             if let Some(relay) = &args.relay_url {
                 provisioner::remove_user_membership(
                     &store,
                     relay,
                     &args.name,
-                    &args.pubkey,
+                    &pubkey,
                     &args.state_dir,
                 )?;
                 println!(
@@ -595,6 +603,27 @@ async fn main() -> Result<()> {
 /// PEM, API keys are single lines), zeroized on drop. Never echoed, never
 /// logged, never persisted as plaintext. Every copy (read buffer, trimmed
 /// value) is under `Zeroizing` — a core dump or heap spray reads nothing.
+fn resolve_grant_pubkey(
+    explicit: Option<&str>,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    if let Some(pk) = explicit {
+        return freehold_core::identity::parse_pubkey_input(pk).map_err(|e| anyhow::anyhow!("{e}"));
+    }
+    // default: the state dir's own ops-agent identity (the orchestrator's
+    // signing identity) — the common first-run grant needs no argument
+    let agent_dir = state_dir.join("agent-ops");
+    let id = freehold_core::identity::Identity::load(&agent_dir)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "no agent identity at {} — mint one: `runner keys init --state-dir {}`, or pass --pubkey",
+                agent_dir.display(),
+                agent_dir.display()
+            )
+        })?;
+    Ok(id.nostr_pubkey_hex())
+}
+
 fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
     eprintln!("{prompt}");
     // with_capacity: reads can still realloc and orphan a partial copy; a
