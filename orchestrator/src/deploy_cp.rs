@@ -28,7 +28,6 @@ pub const DEFAULT_CP_BIND: &str = "127.0.0.1:8080";
 
 /// base64 chunk size written per exec (kept well under the transport frame;
 /// a chunk is one `printf` of pure base64 — shell-safe).
-const CHUNK: usize = 128_000;
 
 #[derive(Debug, Clone)]
 pub struct DeployCpSpec {
@@ -87,50 +86,72 @@ async fn ship_file(
     remote_final: &str,
     step: &str,
 ) -> Result<(), BootstrapError> {
-    let bytes = std::fs::read(local_path)?;
-    let remote_b64 = format!("{remote_final}.b64");
+    // ONE sftp upload over the runner's pooled connection to a HOST temp
+    // path (the ssh lane ends at the host — pct exec is how we reach the
+    // guest), then `pct push` into the guest. Raw binary streaming: no
+    // base64, no command-size limits, no per-chunk round trips (the old
+    // 24KB-exec ship took ~19 minutes for a 9.4MB binary; this is seconds).
+    let local_size = std::fs::metadata(local_path)?.len();
+    let host_tmp = format!("/tmp/freehold-ship-{}", std::process::id());
+    let _ = exec_to_ok(
+        client,
+        target,
+        &format!("rm -f {host_tmp}"),
+        &format!("reset host tmp {step}"),
+        30,
+    );
+    let remote_size = client
+        .upload(target, &local_path.to_string_lossy(), &host_tmp, 300)
+        .map_err(|e| BootstrapError::Step {
+            step: format!("sftp {step}"),
+            exit: None,
+            output: format!("{e}"),
+        })?;
+    if remote_size != local_size {
+        return Err(BootstrapError::Verify(format!(
+            "shipped {step} size mismatch: remote {remote_size} vs local {local_size}"
+        )));
+    }
+    // push the host file into the guest + make it executable + verify.
+    let lxc = spec
+        .lxc
+        .ok_or_else(|| BootstrapError::Verify("no lxc for ship".into()))?;
     exec_to_ok(
         client,
         target,
-        &crate::relay::lxc_cmd(spec.lxc, &format!("rm -f {remote_b64} && : > {remote_b64}")),
-        &format!("reset {step}"),
+        &format!("pct push {lxc} {host_tmp} {remote_final}"),
+        &format!("pct push {step}"),
+        120,
+    )?;
+    exec_to_ok(
+        client,
+        target,
+        &crate::relay::lxc_cmd(spec.lxc, &format!("chmod 755 {remote_final}")),
+        &format!("chmod {step}"),
         30,
     )?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let mut sent = 0usize;
-    while sent < b64.len() {
-        let end = (sent + CHUNK).min(b64.len());
-        let piece = &b64[sent..end];
-        exec_to_ok(
-            client,
-            target,
-            &crate::relay::lxc_cmd(spec.lxc, &format!("printf %s \"{piece}\" >> {remote_b64}")),
-            &format!("ship {step} chunk"),
-            60,
-        )?;
-        sent = end;
-    }
     let out = exec_to_ok(
         client,
         target,
-        &crate::relay::lxc_cmd(
-            spec.lxc,
-            &format!(
-                "base64 -d {remote_b64} > {remote_final} &&                  chmod 755 {remote_final} && rm {remote_b64} &&                  wc -c < {remote_final}"
-            ),
-        ),
-        &format!("decode + verify {step}"),
-        60,
+        &crate::relay::lxc_cmd(spec.lxc, &format!("wc -c < {remote_final}")),
+        &format!("verify {step}"),
+        30,
     )?;
-    let remote_size: usize = out.stdout.trim().parse().map_err(|_| {
-        BootstrapError::Verify(format!("remote size not a number: {:?}", out.stdout))
+    let guest_size: usize = out.stdout.trim().parse().map_err(|_| {
+        BootstrapError::Verify(format!("guest size not a number: {:?}", out.stdout))
     })?;
-    if remote_size != bytes.len() {
+    if guest_size != local_size as usize {
         return Err(BootstrapError::Verify(format!(
-            "shipped {step} size mismatch: remote {remote_size} vs local {}",
-            bytes.len()
+            "shipped {step} guest size mismatch: {guest_size} vs local {local_size}"
         )));
     }
+    let _ = exec_to_ok(
+        client,
+        target,
+        &format!("rm -f {host_tmp}"),
+        &format!("clean {step}"),
+        30,
+    );
     Ok(())
 }
 

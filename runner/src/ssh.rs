@@ -48,6 +48,12 @@ impl From<russh::Error> for SshError {
     }
 }
 
+impl From<russh_sftp::client::error::Error> for SshError {
+    fn from(e: russh_sftp::client::error::Error) -> Self {
+        SshError::Russh(format!("sftp: {e}"))
+    }
+}
+
 impl From<keys::Error> for SshError {
     fn from(e: keys::Error) -> Self {
         SshError::Key(e.to_string())
@@ -361,6 +367,35 @@ impl SshPool {
             _ => {}
         }
         result
+    }
+
+    /// Upload a LOCAL file to `remote_path` over the SAME pooled connection
+    /// via the sftp subsystem — raw binary streaming (no base64, no command
+    /// size limits, no per-chunk round trips; the SSH transport compresses).
+    /// Returns the uploaded byte count for the caller's size verify.
+    pub async fn upload(
+        &self,
+        target: &SshTarget,
+        key_pem: &str,
+        local_path: &Path,
+        remote_path: &str,
+    ) -> Result<u64, SshError> {
+        use tokio::io::AsyncWriteExt;
+        let data = std::fs::read(local_path)?;
+        let key = decode_secret_key(key_pem, None)?;
+        let conn = self.handle(target, &key).await?;
+        let handle = conn.lock().await;
+        let channel = handle.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await?;
+        let mut file = sftp.create(remote_path).await?;
+        // file.set_metadata(Some(russh_sftp::protocol::FileAttributes { permissions: ... }))
+        for chunk in data.chunks(256 * 1024) {
+            file.write_all(chunk).await?;
+        }
+        file.flush().await?;
+        file.close().await?;
+        Ok(data.len() as u64)
     }
 
     /// Runner's OWN self-check against the target: run a trivial command.

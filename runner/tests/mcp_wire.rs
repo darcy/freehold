@@ -209,7 +209,10 @@ async fn mcp_wire_shape() {
         .iter()
         .map(|t| t["name"].as_str().expect("tool name").to_string())
         .collect();
-    assert_eq!(names, vec!["list", "exec", "config", "status", "snapshot"]);
+    assert_eq!(
+        names,
+        vec!["list", "exec", "upload", "config", "status", "snapshot"]
+    );
 
     // 5. tools/call list — real, returns the (empty) registry
     let list = body_json(
