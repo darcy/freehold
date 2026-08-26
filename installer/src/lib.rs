@@ -308,6 +308,10 @@ pub fn stage_serve(a: &Answers) -> Result<String> {
     // in memory — reusing it makes every signed call fail with
     // "signature does not verify".
     kill_serve_on(&a.serve);
+    // the serve log's dir is part of the world — a wiped home lacks it, and
+    // the spawn's `> log` redirect FAILS (sh exits before nohup) leaving the
+    // port never opened — that was the recurring "serve failed" ghost.
+    std::fs::create_dir_all(serve_log().parent().unwrap())?;
     let pkg = runner_pkgs().join(&a.runner);
     if !pkg.join("identity.json").exists() {
         bail!(
