@@ -20,7 +20,7 @@ fn usage() {
          TUI (no args):\n    freehold [--config <path>]\n\n\
          Modes (auto-detected):\n    bootstrap   no config at ~/.config/freehold/config.toml\n    configure   config present, world not converged\n    running     config present, everything reachable\n\
          Keys: q / Esc / Ctrl-C quit · ↑/↓ navigate · Enter confirm\n\n\
-         CLI (subcommand as the first arg):\n    freehold exec <target> \"<cmd>\"\n    freehold bootstrap --kind proxmox-lxc --role relay --domain …\n    freehold deploy-relay / deploy-cp / relay-member …\n    … (see `freehold <subcommand> --help`)\n"
+         CLI (subcommand as the first arg):\n    freehold exec <target> \"<cmd>\"\n    freehold bootstrap --kind proxmox-lxc --role relay --domain …\n    freehold deploy-relay / deploy-cp / relay-member / console-login …\n    freehold teardown            destroy the managed world (confirm first)\n    … (see `freehold <subcommand> --help`)\n"
     );
 }
 
