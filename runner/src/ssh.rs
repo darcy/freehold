@@ -184,9 +184,20 @@ impl client::Handler for HostKeyHandler {
 /// lifetime; a second exec on the same target reuses the open session.
 type Conn = Arc<tokio::sync::Mutex<client::Handle<HostKeyHandler>>>;
 
+/// Connection-lane health — surfaced by the runner's `status` tool so the
+/// CP/TUI can ALERT when the lane keeps dropping or can't reconnect.
+#[derive(Debug, Clone, Default)]
+pub struct PoolHealth {
+    pub drops: u64,
+    pub reconnects: u64,
+    pub last_drop: Option<String>,
+    pub last_error: Option<String>,
+}
+
 pub struct SshPool {
     known_hosts: Arc<HostKeyStore>,
     conns: Mutex<HashMap<String, Conn>>,
+    health: Mutex<PoolHealth>,
 }
 
 impl SshPool {
@@ -194,7 +205,13 @@ impl SshPool {
         Self {
             known_hosts: Arc::new(HostKeyStore::load(state_dir)),
             conns: Mutex::new(HashMap::new()),
+            health: Mutex::new(PoolHealth::default()),
         }
+    }
+
+    /// The lane's health snapshot (for the `status` tool / alerting).
+    pub fn health(&self) -> PoolHealth {
+        self.health.lock().clone()
     }
 
     async fn connect(
@@ -202,7 +219,14 @@ impl SshPool {
         target: &SshTarget,
         key: &keys::PrivateKey,
     ) -> Result<client::Handle<HostKeyHandler>, SshError> {
-        let config = Arc::new(client::Config::default());
+        // Liveness at the transport level: ping the server when idle and
+        // close on unanswered keepalives — a silently-dead link is detected
+        // in ~30s instead of hanging the lane forever.
+        let config = Arc::new(client::Config {
+            keepalive_interval: Some(Duration::from_secs(10)),
+            keepalive_max: 3,
+            ..Default::default()
+        });
         let handler = HostKeyHandler {
             store: self.known_hosts.clone(),
             key: target.known_hosts_key(),
@@ -229,15 +253,32 @@ impl SshPool {
         Ok(handle)
     }
 
-    /// Borrow-or-connect the pooled connection for `target`.
+    /// Borrow-or-connect the pooled connection for `target`. Connect
+    /// failures RETRY with backoff (1s/2s/4s) — a transient drop must
+    /// self-heal, not surface as an immediate exec failure.
     async fn handle(&self, target: &SshTarget, key: &keys::PrivateKey) -> Result<Conn, SshError> {
         if let Some(c) = self.conns.lock().get(&target.name) {
             return Ok(c.clone());
         }
-        let h = self.connect(target, key).await?;
-        let c: Conn = Arc::new(tokio::sync::Mutex::new(h));
-        self.conns.lock().insert(target.name.clone(), c.clone());
-        Ok(c)
+        let mut last_err = SshError::Russh("no connection".into());
+        for attempt in 0..3usize {
+            match self.connect(target, key).await {
+                Ok(h) => {
+                    let c: Conn = Arc::new(tokio::sync::Mutex::new(h));
+                    self.conns.lock().insert(target.name.clone(), c.clone());
+                    let mut h = self.health.lock();
+                    h.reconnects += 1;
+                    h.last_error = None;
+                    return Ok(c);
+                }
+                Err(e) => {
+                    last_err = e;
+                    self.health.lock().last_error = Some(last_err.to_string());
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+            }
+        }
+        Err(last_err)
     }
 
     /// Execute `cmd` verbatim over the target's connection. Parses key PEM
@@ -300,10 +341,24 @@ impl SshPool {
             },
             None => run.await,
         };
-        // On any failure the connection is suspect — drop it, reconnect next
-        // time. On success it stays pooled for the next command.
-        if result.is_err() {
-            self.conns.lock().remove(&target.name);
+        // On ANY suspect outcome the connection is dropped (reconnect next
+        // time): an ERROR *and* a TIMEOUT. The timeout case is the wedge —
+        // a hung lane that returned Ok(timed_out) used to STAY pooled and
+        // stall every later exec on the target.
+        match &result {
+            Err(e) => {
+                self.conns.lock().remove(&target.name);
+                let mut h = self.health.lock();
+                h.drops += 1;
+                h.last_drop = Some(format!("exec error: {e}"));
+            }
+            Ok(r) if r.timed_out => {
+                self.conns.lock().remove(&target.name);
+                let mut h = self.health.lock();
+                h.drops += 1;
+                h.last_drop = Some("exec timed out — lane dropped".into());
+            }
+            _ => {}
         }
         result
     }

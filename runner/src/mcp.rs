@@ -560,6 +560,18 @@ async fn handle_status(
     };
 
     let mut report: serde_json::Map<String, Value> = serde_json::Map::new();
+    // the connection LANE's health — lets the CP/TUI ALERT when the lane
+    // keeps dropping or can't reconnect (core liveness feature).
+    let h = state.ssh.health();
+    report.insert(
+        "runner_lane".into(),
+        json!({
+            "drops": h.drops,
+            "reconnects": h.reconnects,
+            "last_drop": h.last_drop,
+            "last_error": h.last_error,
+        }),
+    );
     for entry in requested {
         let state_str = if entry == "local" {
             local_status(state).await?
