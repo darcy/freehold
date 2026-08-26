@@ -167,7 +167,7 @@ pub fn cp_live(cfg: &Config) -> bool {
     };
     let a = crate::Answers::from_config(cfg);
     let cmd = format!(
-        r#"pct exec {vmid} -- sh -c 'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET /healthz HTTP/1.0\r\n\r\n" >&3; grep -m1 "^HTTP" <&3 || true'"#
+        r#"pct exec {vmid} -- bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET /healthz HTTP/1.0\r\n\r\n" >&3; grep -m1 "^HTTP" <&3 || true'"#
     );
     match crate::run(
         &crate::bin("freehold-orchestrator"),
