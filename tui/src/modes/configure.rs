@@ -4,7 +4,7 @@
 //! and can be retried (r).
 
 use super::StageRunner;
-use freehold_installer::config::{Config, url_reachable};
+use freehold_installer::config::{Config, cp_live, relay_live};
 use freehold_installer::{
     Answers, probe_lxc, stage_bootstrap, stage_deploy_cp, stage_deploy_relay,
 };
@@ -114,11 +114,13 @@ impl ConfigureState {
         self.stages[i].status = CStatus::Check;
         self.job = Some(i);
         self.runner.spawn(move || {
+            // the SAME real probes the running mode uses — a reachable proxy
+            // must not let the pipeline SKIP a deploy that never happened.
             let present = match i {
                 0 => probe_lxc(&a, cfg.lxc.relay.vmid)?,
                 1 => probe_lxc(&a, cfg.lxc.cp.vmid)?,
-                2 => url_reachable(&cfg.relay_url),
-                3 => url_reachable(&cfg.cp_url),
+                2 => relay_live(&cfg),
+                3 => cp_live(&cfg),
                 _ => false,
             };
             Ok(if present { "1".into() } else { "0".into() })
