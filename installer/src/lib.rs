@@ -29,6 +29,16 @@ pub fn state_dir() -> std::path::PathBuf {
 pub fn ops_dir() -> std::path::PathBuf {
     freehold_home().join("control-plane").join("agent-ops")
 }
+
+/// clap default_value needs a &'static str — points at the home ops dir when
+/// it exists, else the legacy cwd-relative path.
+pub fn default_agent_dir_str() -> &'static str {
+    if ops_dir().join("identity.json").exists() {
+        Box::leak(ops_dir().to_string_lossy().into_owned().into_boxed_str())
+    } else {
+        "./.freehold/control-plane/agent-ops"
+    }
+}
 pub fn runner_pkgs() -> std::path::PathBuf {
     freehold_home().join("runner")
 }
@@ -335,14 +345,18 @@ pub fn stage_serve(a: &Answers) -> Result<String> {
 }
 
 /// Kill any runner serve bound to this MCP address (kills stale-world
-/// serves; a fresh one is spawned by stage_serve right after).
+/// serves; a fresh one is spawned by stage_serve right after) and WAIT for
+/// the port to actually close — spawning while the old listener still holds
+/// the address makes the fresh runner die with "Address already in use".
 pub fn kill_serve_on(addr: &str) {
     let pat = format!("runner serve.*--addr {}", regex_escape(addr));
     let _ = std::process::Command::new("pkill")
         .args(["-f", &pat])
         .output();
-    // give the port a moment to release
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while port_open(addr) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn regex_escape(s: &str) -> String {
@@ -491,7 +505,17 @@ pub fn verify_door_once(a: &Answers) -> Result<DoorProbe> {
 
 /// Run a configured stage of the `freehold-orchestrator` CLI.
 pub fn stage_any(name: &str, args: &[&str], ok_msg: &str) -> Result<String> {
-    let (ok, out) = run(&bin("freehold-orchestrator"), args)?;
+    // --addr/--agent-dir are per-SUBCOMMAND (the orchestrator's flattened
+    // CommonArgs) — THEY GO AFTER the subcommand name, not before.
+    let agent_dir = ops_dir().to_str().unwrap().to_string();
+    let mut full: Vec<String> = vec![args[0].to_string()];
+    full.push("--addr".into());
+    full.push("127.0.0.1:8787".into());
+    full.push("--agent-dir".into());
+    full.push(agent_dir);
+    full.extend(args[1..].iter().map(|a| a.to_string()));
+    let refs: Vec<&str> = full.iter().map(String::as_str).collect();
+    let (ok, out) = run(&bin("freehold-orchestrator"), &refs)?;
     if ok {
         Ok(ok_msg.to_string())
     } else {
@@ -609,4 +633,21 @@ pub fn relay_pubkey_nip11(domain: &str) -> Option<String> {
     let pk: serde_json::Value = serde_json::from_str(&text).ok()?;
     let pk = pk.get("pubkey")?.as_str()?.to_string();
     (pk.len() == 64).then_some(pk)
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Live-world: boots/verifies the relay stage through the real runner +
+    /// host. Idempotent (the driver reuses an existing LXC). Run explicitly.
+    #[test]
+    #[ignore]
+    fn relay_boot_stage_runs_against_live_world() {
+        let cfg = config::Config::load(&config::Config::default_path())
+            .unwrap()
+            .expect("config present");
+        let a = Answers::from_config(&cfg);
+        stage_bootstrap(&a, "relay", cfg.lxc.relay.vmid).expect("relay boot stage works");
+    }
 }

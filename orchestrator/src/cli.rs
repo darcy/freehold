@@ -407,8 +407,9 @@ struct CommonArgs {
     /// Running runner MCP address (host:port or full URL)
     #[arg(long, default_value = "127.0.0.1:8787")]
     addr: String,
-    /// Agent identity dir (minted on demand if missing)
-    #[arg(long, default_value = "./.freehold/control-plane/agent-ops")]
+    /// Agent identity dir (minted on demand if missing). Defaults to the
+    /// freehold home's ops identity (legacy cwd-relative fallback).
+    #[arg(long, default_value = freehold_installer::default_agent_dir_str())]
     agent_dir: PathBuf,
     /// The RUNNER's Nostr pubkey — RESOLVED from ./.freehold/runner/<target>
     /// when omitted (you can't know it before provisioning; freehold reads it)
