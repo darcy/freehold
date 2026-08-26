@@ -149,7 +149,7 @@ pub fn probes_ok(cfg: &Config) -> bool {
 }
 
 /// The relay's own health endpoint (the buzz `/_liveness`).
-fn relay_live(cfg: &Config) -> bool {
+pub fn relay_live(cfg: &Config) -> bool {
     http_ok(&format!(
         "{}/_liveness",
         cfg.relay_url.trim_end_matches('/')
@@ -161,7 +161,7 @@ fn relay_live(cfg: &Config) -> bool {
 /// The CP console's `/healthz`, pinged THROUGH the provisioning runner (the
 /// console binds loopback inside its LXC — there is no public route): the
 /// endpoint must answer 200.
-fn cp_live(cfg: &Config) -> bool {
+pub fn cp_live(cfg: &Config) -> bool {
     let Some(vmid) = cfg.lxc.cp.vmid else {
         return false;
     };

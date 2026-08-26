@@ -2,7 +2,7 @@
 //! shows liveness of the relay, the CP, and the provisioning runner; the CP
 //! API (phase 2) feeds the full console-parity views.
 
-use freehold_installer::config::{Config, url_reachable};
+use freehold_installer::config::{Config, cp_live, relay_live};
 use freehold_installer::port_open;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -38,9 +38,12 @@ impl Running {
     }
 
     fn probe(&mut self, cfg: &Config) {
+        // the SAME real checks the mode probe uses — a reachable proxy is
+        // not a running relay (this stale-TCP bug kept the running screen
+        // "Good to go!" over an empty world).
         self.probes = vec![
-            ("relay".into(), url_reachable(&cfg.relay_url)),
-            ("control plane".into(), url_reachable(&cfg.cp_url)),
+            ("relay (/_liveness)".into(), relay_live(cfg)),
+            ("control plane (/healthz)".into(), cp_live(cfg)),
             ("provisioning runner".into(), port_open(&cfg.runner.addr)),
         ];
         self.last = Instant::now();
