@@ -592,9 +592,12 @@ pub fn stage_bootstrap(a: &Answers, role: &str, vmid: Option<u32>) -> Result<()>
 }
 
 pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
-    let relay_vmid = a
-        .relay_vmid
-        .ok_or_else(|| anyhow::anyhow!("relay LXC not booted yet — no vmid to deploy into"))?;
+    // the config may predate the boot's write-back — resolve the vmid from
+    // the host when it's missing (the check already proved the LXC exists).
+    let relay_vmid = match a.relay_vmid {
+        Some(v) => v,
+        None => find_lxc_vmid(a, "relay")?,
+    };
     stage_any(
         "deploy-relay",
         &[
@@ -618,9 +621,10 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
 }
 
 pub fn stage_deploy_cp(a: &Answers) -> Result<()> {
-    let cp_vmid = a
-        .cp_vmid
-        .ok_or_else(|| anyhow::anyhow!("cp LXC not booted yet — no vmid to deploy into"))?;
+    let cp_vmid = match a.cp_vmid {
+        Some(v) => v,
+        None => find_lxc_vmid(a, "cp")?,
+    };
     stage_any(
         "deploy-cp",
         &[
