@@ -161,6 +161,20 @@ impl ConfigureState {
                     if ok && out == "1" {
                         self.stages[i].status = CStatus::Ok;
                         self.stages[i].tail = "already present".into();
+                        // a REUSED LXC may predate the write-back — record
+                        // its coords now so the deploy stages can run.
+                        if i == 0 || i == 1 {
+                            let role = if i == 0 { "relay" } else { "cp" };
+                            if freehold_installer::write_back_lxc(
+                                &self.answers,
+                                &mut self.cfg,
+                                role,
+                            )
+                            .is_ok()
+                            {
+                                let _ = self.cfg.save(&self.cfg_path);
+                            }
+                        }
                     } else if ok {
                         self.spawn_run(i);
                     } else {
