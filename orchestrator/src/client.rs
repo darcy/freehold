@@ -161,6 +161,50 @@ impl McpClient {
     /// deadline is set above it (exec_agent), so a slow command is reported
     /// by the RUNNER as `timed_out: true` — never as a client-side error with
     /// the command still running.
+    /// Upload a LOCAL file to the target via the runner's sftp `upload` tool —
+    /// raw binary streaming (no base64/command-size limits). Returns the
+    /// remote byte count for the caller's size verify.
+    pub fn upload(
+        &self,
+        target: &str,
+        local_path: &str,
+        remote_path: &str,
+        timeout_s: u64,
+    ) -> Result<u64, ClientError> {
+        let arguments = json!({
+            "target": target,
+            "local_path": local_path,
+            "remote_path": remote_path,
+        });
+        let agent = Self::exec_agent(timeout_s);
+        let resp = self.raw_with(
+            &agent,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "upload", "arguments": arguments }
+            }),
+        )?;
+        if let Some(err) = resp.get("error") {
+            let code = err.get("code").and_then(Value::as_i64).unwrap_or(-1);
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("(no message)");
+            return Err(ClientError::Rpc(format!("{code}: {msg}")));
+        }
+        let result = &resp["result"];
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            let text = result["content"][0]["text"].as_str().unwrap_or("(no text)");
+            return Err(ClientError::ToolError(text.to_string()));
+        }
+        let text = result["content"][0]["text"].as_str().unwrap_or("{}");
+        let v: Value = serde_json::from_str(text)
+            .map_err(|e| ClientError::ToolError(format!("upload json: {e}")))?;
+        Ok(v["uploaded"].as_u64().unwrap_or(0))
+    }
+
     pub fn exec(
         &self,
         target: &str,

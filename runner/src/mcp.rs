@@ -269,6 +269,10 @@ async fn mcp_endpoint(
                     Ok(s) => (false, s),
                     Err(e) => (true, e.to_string()),
                 },
+                Some("upload") => match handle_upload(&state, &arguments, &caller).await {
+                    Ok(s) => (false, s),
+                    Err(e) => (true, e.to_string()),
+                },
                 Some("status") => match handle_status(&state, &arguments, &caller).await {
                     Ok(s) => (false, s),
                     Err(e) => (true, e.to_string()),
@@ -510,6 +514,68 @@ async fn api_status(
         Ok(r) => Ok(format!("yellow(probe {})", r.stdout.trim())),
         Err(e) => Ok(format!("red({e})")),
     }
+}
+
+async fn handle_upload(
+    state: &RunnerState,
+    arguments: &Value,
+    caller: &str,
+) -> Result<String, exec::ExecError> {
+    let target = arguments
+        .get("target")
+        .and_then(Value::as_str)
+        .ok_or(exec::ExecError::MissingField("target"))?
+        .to_string();
+    let local_path = arguments
+        .get("local_path")
+        .and_then(Value::as_str)
+        .ok_or(exec::ExecError::MissingField("local_path"))?;
+    let remote_path = arguments
+        .get("remote_path")
+        .and_then(Value::as_str)
+        .ok_or(exec::ExecError::MissingField("remote_path"))?;
+    if !std::path::Path::new(local_path).exists() {
+        return Err(exec::ExecError::MissingField("local_path"));
+    }
+    if target == "local" {
+        // loopback: a direct local file copy (no ssh lane).
+        let n = std::fs::copy(local_path, remote_path)?;
+        return Ok(format!("{{\"uploaded\": {n}}}"));
+    }
+    let Some(meta) = state.ctx.package.targets.get(&target) else {
+        return Err(exec::ExecError::UnknownTarget(target));
+    };
+    if meta.kind != "ssh" {
+        return Err(exec::ExecError::Ssh(format!(
+            "upload only supported on ssh targets ({} is {})",
+            target, meta.kind
+        )));
+    }
+    let value = exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
+    let endpoint = SshTarget::parse(&target, &meta.address)
+        .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+    let started = exec::now_secs();
+    let n = state
+        .ssh
+        .upload(
+            &endpoint,
+            value.as_str(),
+            std::path::Path::new(local_path),
+            remote_path,
+        )
+        .await
+        .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
+    let result = exec::ExecResult {
+        stdout: format!("uploaded {n} bytes to {remote_path}"),
+        stderr: String::new(),
+        exit_code: Some(0),
+        timed_out: false,
+    };
+    let cmd = format!("upload {remote_path} (from {local_path})");
+    state
+        .exec
+        .audit_cmd(&cmd, &target, &result, started, Some(caller));
+    Ok(format!("{{\"uploaded\": {n}}}"))
 }
 
 async fn handle_local_exec(
@@ -761,6 +827,15 @@ fn tools() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "upload",
+            "description": "Upload a LOCAL file (on the runner's machine) to `remote_path`                             on the target via sftp over the pooled connection — raw binary                             streaming. Returns the uploaded byte count.",
+            "inputSchema": { "type": "object", "properties": {
+                "target": { "type": "string" },
+                "local_path": { "type": "string" },
+                "remote_path": { "type": "string" }
+            }, "required": ["target", "local_path", "remote_path"] }
+        }),
+        json!({
             "name": "config",
             "description": "Non-secret runner configuration.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -800,7 +875,7 @@ mod tests {
 
     #[test]
     fn contract_tools_present() {
-        let expected = ["list", "exec", "config", "status", "snapshot"];
+        let expected = ["list", "exec", "upload", "config", "status", "snapshot"];
         let tools = tools();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, expected);
