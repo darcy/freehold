@@ -28,7 +28,7 @@ pub const DEFAULT_CP_BIND: &str = "127.0.0.1:8080";
 
 /// base64 chunk size written per exec (kept well under the transport frame;
 /// a chunk is one `printf` of pure base64 — shell-safe).
-const CHUNK: usize = 24_000;
+const CHUNK: usize = 128_000;
 
 #[derive(Debug, Clone)]
 pub struct DeployCpSpec {
