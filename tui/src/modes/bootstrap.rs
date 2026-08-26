@@ -44,6 +44,18 @@ impl Form {
                     value: d.domain,
                 },
                 Field {
+                    label: "Relay LXC IP (empty = DHCP)",
+                    value: d.relay_ip.unwrap_or_default(),
+                },
+                Field {
+                    label: "Control-plane LXC IP (empty = DHCP)",
+                    value: d.cp_ip.unwrap_or_default(),
+                },
+                Field {
+                    label: "LXC gateway (static only)",
+                    value: d.relay_gw,
+                },
+                Field {
                     label: "LXC rootfs size (GB)",
                     value: d.rootfs_gb.to_string(),
                 },
@@ -71,14 +83,15 @@ impl Form {
             runner: v(1),
             serve: v(2),
             domain: v(3),
-            // vmids + ips are auto-picked/assigned; the config records them
-            // after the boot (write-back).
+            // vmids auto-picked (recorded after boot); a SPECIFIED ip is
+            // STATIC (proxy/DNS must target it), empty = DHCP.
             relay_vmid: None,
-            relay_ip: None,
+            relay_ip: opt_ip(&self.fields[4].value),
             cp_vmid: None,
-            cp_ip: None,
-            rootfs_gb: num(4)?,
-            memory_mb: num(5)?,
+            cp_ip: opt_ip(&self.fields[5].value),
+            relay_gw: v(6),
+            rootfs_gb: num(7)?,
+            memory_mb: num(8)?,
             operator_pk: String::new(),
             operator_generated: false,
             operator_dir: PathBuf::new(),
@@ -488,6 +501,19 @@ impl Bootstrap {
             self.advance(); // no-op; signals transition
         }
     }
+}
+
+/// empty = DHCP; a bare "192.168.30.8" is normalized to a /24 CIDR.
+fn opt_ip(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    Some(if t.contains('/') {
+        t.to_string()
+    } else {
+        format!("{t}/24")
+    })
 }
 
 #[cfg(test)]

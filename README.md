@@ -123,14 +123,19 @@ freehold --help               # both surfaces
 
 **TUI modes** (auto-detected from `~/.config/freehold/config.toml`):
 
-- **bootstrap** — no config: a form collects host/runner/domain/LXC parameters,
+- **bootstrap** — no config: a form collects host/runner/domain/rootfs/memory,
+  OPTIONAL static LXC IPs (filled = STATIC + gateway; empty = DHCP with a bold
+  on-screen warning that your DNS/proxy must point at whatever DHCP assigns —
+  the real addresses are recorded in the config right after each boot), and
   your operator key (paste npub or mint one), then runs the bring-up stages
   (provision → install the SSH door → grant → serve → verify the door with a
   real exec) and writes the config.
 - **configure** — config present, world not converged: an idempotent
   check-then-run pipeline (relay/cp LXCs, deploy relay + cp). Failed stages
   show their tail; `r` retries.
-- **running** — everything reachable: "Good to go!" + live liveness dots.
+- **running** — everything VERIFIED: relay `/_liveness` over HTTPS, the CP
+  console's `/healthz` pinged through the runner (200), the runner's port —
+  "Good to go!" + live liveness dots.
 
 The same session flows bootstrap → configure → running as the world converges.
 

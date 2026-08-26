@@ -77,6 +77,8 @@ pub struct Answers {
     /// Auto-picked by the driver when None (stored in the config after boot).
     pub relay_vmid: Option<u32>,
     pub relay_ip: Option<String>,
+    /// Gateway for STATIC ips (empty/unused with DHCP).
+    pub relay_gw: String,
     pub cp_vmid: Option<u32>,
     pub cp_ip: Option<String>,
     pub rootfs_gb: u32,
@@ -99,6 +101,7 @@ impl Answers {
             domain: cfg.domain.clone(),
             relay_vmid: cfg.lxc.relay.vmid,
             relay_ip: cfg.lxc.relay.ip.clone(),
+            relay_gw: "192.168.30.1".into(), // bootstrap-time only, not config
             cp_vmid: cfg.lxc.cp.vmid,
             cp_ip: cfg.lxc.cp.ip.clone(),
             rootfs_gb: 16, // bootstrap-time only
@@ -118,6 +121,7 @@ impl Answers {
             domain: "freehold-test.darcydev.net".into(),
             relay_vmid: None,
             relay_ip: None,
+            relay_gw: "192.168.30.1".into(),
             cp_vmid: None,
             cp_ip: None,
             rootfs_gb: 16,
@@ -549,13 +553,34 @@ pub fn stage_bootstrap(a: &Answers, role: &str, vmid: Option<u32>) -> Result<()>
         "--operator-pubkey".into(),
         a.operator_pk.clone(),
     ];
+    // a SPECIFIED IP is STATIC (the user owns addressing + the proxy/DNS
+    // target); an empty one = DHCP + whatever the bridge assigns (recorded
+    // in the config after boot — the UI says this loudly).
+    let ip = if role == "relay" {
+        a.relay_ip.clone()
+    } else {
+        a.cp_ip.clone()
+    };
+    let ip = ip.filter(|i| !i.trim().is_empty());
+    if let Some(ip) = &ip {
+        args.push("--lxc-ip".into());
+        args.push(ip.clone());
+        args.push("--lxc-gw".into());
+        args.push(a.relay_gw.clone());
+    }
     let label = match vmid {
         Some(v) => {
             args.push("--vmid".into());
             args.push(v.to_string());
-            format!("(vmid {v})")
+            match &ip {
+                Some(ip) => format!("(vmid {v}, static ip {ip})"),
+                None => format!("(vmid {v}, dhcp)"),
+            }
         }
-        None => "(auto vmid, dhcp ip)".into(),
+        None => match &ip {
+            Some(ip) => format!("(auto vmid, static ip {ip})"),
+            None => "(auto vmid, dhcp ip)".into(),
+        },
     };
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     stage_any(

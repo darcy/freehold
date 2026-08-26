@@ -158,11 +158,17 @@ fn relay_live(cfg: &Config) -> bool {
 
 /// The CP guest's systemd unit, asked THROUGH the provisioning runner (the
 /// CP console binds loopback inside its LXC — there is no public route).
+/// The CP console's `/healthz`, pinged THROUGH the provisioning runner (the
+/// console binds loopback inside its LXC — there is no public route): the
+/// endpoint must answer 200.
 fn cp_live(cfg: &Config) -> bool {
     let Some(vmid) = cfg.lxc.cp.vmid else {
         return false;
     };
     let a = crate::Answers::from_config(cfg);
+    let cmd = format!(
+        r#"pct exec {vmid} -- sh -c 'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET /healthz HTTP/1.0\r\n\r\n" >&3; grep -m1 "^HTTP" <&3 || true'"#
+    );
     match crate::run(
         &crate::bin("freehold-orchestrator"),
         &[
@@ -172,10 +178,10 @@ fn cp_live(cfg: &Config) -> bool {
             "--agent-dir",
             crate::ops_dir().to_str().unwrap(),
             &a.runner,
-            &format!("pct exec {vmid} -- systemctl is-active freehold-cp"),
+            &cmd,
         ],
     ) {
-        Ok((true, out)) => out.contains("active"),
+        Ok((true, out)) => out.contains(" 200 ") || out.contains("200 OK"),
         _ => false,
     }
 }
