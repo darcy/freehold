@@ -311,15 +311,21 @@ fn draw_bootstrap<'a>(area: Rect, f: &mut Frame<'a>, bs: &mut Bootstrap) {
                 ("domain", a.domain.clone()),
                 (
                     "relay LXC",
-                    "auto (vmid + dhcp ip recorded after boot)".to_string(),
+                    match &a.relay_ip {
+                        Some(ip) => format!("static {ip}"),
+                        None => "dhcp".to_string(),
+                    },
                 ),
                 (
                     "cp LXC",
-                    "auto (vmid + dhcp ip recorded after boot)".to_string(),
+                    match &a.cp_ip {
+                        Some(ip) => format!("static {ip}"),
+                        None => "dhcp".to_string(),
+                    },
                 ),
                 ("operator pk", a.operator_pk.clone()),
             ];
-            let lines: Vec<Line> = rows
+            let mut lines: Vec<Line> = rows
                 .iter()
                 .map(|(k, v)| {
                     Line::from(vec![
@@ -328,6 +334,17 @@ fn draw_bootstrap<'a>(area: Rect, f: &mut Frame<'a>, bs: &mut Bootstrap) {
                     ])
                 })
                 .collect();
+            if a.relay_ip.is_none() || a.cp_ip.is_none() {
+                lines.push(Line::from(Span::raw("")));
+                lines.push(Line::from(Span::styled(
+                    " ⚠  DHCP ASSIGNED IPs — point your DNS/proxy at whatever DHCP gives",
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "     (the real addresses are recorded in the config right after each boot)",
+                    Style::new().fg(Color::Yellow),
+                )));
+            }
             f.render_widget(Paragraph::new(lines), inner);
         }
         Step::Stages | Step::Door | Step::Verify | Step::Written => {
