@@ -437,19 +437,45 @@ fn resolve_door(common: &CommonArgs, target: &str) -> anyhow::Result<(PathBuf, S
             // stays as a legacy fallback for hand-rolled setups.
             let home_pkg = freehold_installer::runner_pkgs().join(target);
             let legacy_pkg = PathBuf::from(format!("./.freehold/runner/{target}"));
-            let pkg = if home_pkg.join("identity.json").exists() {
-                home_pkg
+            let home_exists = home_pkg.join("identity.json").exists();
+            let pkg = if home_exists {
+                Some(home_pkg.clone())
+            } else if legacy_pkg.join("identity.json").exists() {
+                Some(legacy_pkg)
             } else {
-                legacy_pkg
+                None
             };
-            freehold_core::identity::Identity::load(&pkg)
-                .map(|id| id.nostr_pubkey_hex())
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "runner '{target}' not found at {} — provision it first:\n  freehold provision {target} --kind ssh --address root@<host>\n(the provision prints the PUBLIC key to add to <host>'s authorized_keys),\nthen serve it:  freehold-runner serve --state-dir {}",
-                        pkg.display(), pkg.display()
+            match pkg {
+                Some(pkg) => freehold_core::identity::Identity::load(&pkg)
+                    .map(|id| id.nostr_pubkey_hex())
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "runner '{target}' found at {} but its identity failed to load: {e}",
+                            pkg.display()
+                        )
+                    })?,
+                // package gone (a wipe without teardown) but the CONFIG knows
+                // the runner's pubkey and the serve may still be up — that's
+                // enough to verify + tear down.
+                None => {
+                    let cfg = freehold_installer::config::Config::load(
+                        &freehold_installer::config::Config::default_path(),
                     )
-                })?
+                    .ok()
+                    .flatten();
+                    match cfg {
+                        Some(c) if c.runner.target == target && !c.runner.pubkey.is_empty() => {
+                            c.runner.pubkey
+                        }
+                        _ => anyhow::bail!(
+                            "runner '{target}' not found at {} and no config-recorded pubkey — \
+                             provision it first:\n  freehold provision {target} --kind ssh --address root@<host>\n\
+                             (a wiped world: destroy the LXCs + door key from the PVE console if needed)",
+                            home_pkg.clone().display()
+                        ),
+                    }
+                }
+            }
         }
     };
     Ok((common.agent_dir.clone(), runner_pubkey))
