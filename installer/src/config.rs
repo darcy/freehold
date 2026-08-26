@@ -138,11 +138,66 @@ pub fn probe_mode(path: &Path) -> Result<Mode> {
     }
 }
 
-/// Running = relay + cp + the provisioning runner all reachable.
+/// Running = the world is VERIFIED, not just reachable:
+///   - the relay answers its own `/_liveness` over HTTPS
+///   - the CP guest reports its systemd unit `active` (through the runner)
+///   - the provisioning runner's MCP port is open
+///
+/// A TCP-reachable proxy is NOT the relay; an empty host is NOT running.
 pub fn probes_ok(cfg: &Config) -> bool {
-    url_reachable(&cfg.relay_url)
-        && url_reachable(&cfg.cp_url)
-        && crate::port_open(&cfg.runner.addr)
+    relay_live(cfg) && cp_live(cfg) && crate::port_open(&cfg.runner.addr)
+}
+
+/// The relay's own health endpoint (the buzz `/_liveness`).
+fn relay_live(cfg: &Config) -> bool {
+    http_ok(&format!(
+        "{}/_liveness",
+        cfg.relay_url.trim_end_matches('/')
+    ))
+}
+
+/// The CP guest's systemd unit, asked THROUGH the provisioning runner (the
+/// CP console binds loopback inside its LXC — there is no public route).
+fn cp_live(cfg: &Config) -> bool {
+    let Some(vmid) = cfg.lxc.cp.vmid else {
+        return false;
+    };
+    let a = crate::Answers::from_config(cfg);
+    match crate::run(
+        &crate::bin("freehold-orchestrator"),
+        &[
+            "exec",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            crate::ops_dir().to_str().unwrap(),
+            &a.runner,
+            &format!("pct exec {vmid} -- systemctl is-active freehold-cp"),
+        ],
+    ) {
+        Ok((true, out)) => out.contains("active"),
+        _ => false,
+    }
+}
+
+/// HTTPS GET accepting the local-CA / operator-proxy TLS posture (the check
+/// is liveness, not CA pinning), 6s timeout, 2xx-3xx = alive.
+fn http_ok(url: &str) -> bool {
+    use std::time::Duration;
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(6))
+        .build()
+    else {
+        return false;
+    };
+    match client.get(url).send() {
+        Ok(resp) => {
+            let s = resp.status().as_u16();
+            (200..400).contains(&s)
+        }
+        Err(_) => false,
+    }
 }
 
 /// https://host[:port] / http://host[:port] → TCP connect.
