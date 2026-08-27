@@ -6,6 +6,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
+use crate::planebase::MountSpec;
 use crate::{bootstrap, deploy_cp, flows, relay, relay_member};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -171,6 +172,15 @@ struct TeardownArgs {
     /// Skip the confirmation prompt (scripting/CI only)
     #[arg(long)]
     yes: bool,
+    /// Per-tenant scoped teardown: only this tenant's LXC (and, with
+    /// --data, its dataset) is destroyed. relay | cp | k3s-volumes.
+    /// Omitted = whole-world teardown (compute + config + local home).
+    #[arg(long)]
+    tenant: Option<String>,
+    /// With --tenant: ALSO destroy the tenant's dataset (data+compute).
+    /// Without --tenant: whole-world teardown also destroys all datasets.
+    #[arg(long)]
+    data: bool,
 }
 
 #[derive(Args)]
@@ -445,6 +455,10 @@ struct BootstrapArgs {
     lxc_ip: Option<String>,
     #[arg(long)]
     lxc_gw: Option<String>,
+    /// Durable-plane dataset mount baked into `pct create` (repeatable),
+    /// shape `<dataset>:<guest-path>` — the "born on the plane" reference.
+    #[arg(long, value_parser = parse_mount)]
+    mount: Vec<MountSpec>,
     /// Vultr region (vultr-vps)
     #[arg(long, default_value = "atl")]
     region: String,
@@ -700,6 +714,20 @@ fn parse_tenant(s: &str) -> Result<crate::planebase::Tenant> {
         "k3s-volumes" | "k3s" => Ok(crate::planebase::Tenant::K3sVolumes),
         other => anyhow::bail!("unknown tenant {other:?} (relay | cp | k3s-volumes)"),
     }
+}
+
+/// Parse a `<dataset>:<guest-path>` mount spec (the `--mount` value).
+fn parse_mount(s: &str) -> Result<crate::planebase::MountSpec> {
+    let (src, dst) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("--mount must be <dataset>:<guest-path> (got {s:?})"))?;
+    if src.is_empty() || dst.is_empty() {
+        anyhow::bail!("--mount must be <dataset>:<guest-path> (got {s:?})");
+    }
+    Ok(crate::planebase::MountSpec {
+        source: src.to_string(),
+        guest_path: dst.to_string(),
+    })
 }
 
 /// Parse argv and run — the CLI surface shared by the `freehold` bin (with
@@ -1200,7 +1228,23 @@ async fn cli_body() -> Result<()> {
             for (role, vmid) in &plan.lxcs {
                 println!("    destroy:     {role} LXC {vmid}");
             }
-            println!("    world:       {}", plan.world_home.display());
+            if let Some(tenant) = &args.tenant {
+                println!(
+                    "    scope:       per-tenant {tenant}{}",
+                    if args.data {
+                        " (data+compute)"
+                    } else {
+                        " (compute-only)"
+                    }
+                );
+                println!("    config:      KEPT (coords + dataset mapping for reattach)");
+            } else {
+                println!(
+                    "    scope:       whole-world{}",
+                    if args.data { " (datasets too)" } else { "" }
+                );
+                println!("    world:       {}", plan.world_home.display());
+            }
             println!("    config:      {}", plan.config_path.display());
             println!(
                 "    door:        the {} runner's key → removed from the host LAST",
@@ -1212,7 +1256,7 @@ async fn cli_body() -> Result<()> {
                 // operator-signature check once teardown is proven.
                 let mut line = String::new();
                 use std::io::{BufRead, Write};
-                print!("Type 'yes' to destroy the managed world: ");
+                print!("Type 'yes' to destroy: ");
                 std::io::stdout().flush()?;
                 std::io::stdin().lock().read_line(&mut line)?;
                 let ok = line.trim() == "yes";
@@ -1221,7 +1265,15 @@ async fn cli_body() -> Result<()> {
                     return Ok(());
                 }
             }
-            println!("{}", freehold_installer::teardown::run(&cfg_path, true)?);
+            println!(
+                "{}",
+                freehold_installer::teardown::run_scoped(
+                    &cfg_path,
+                    args.tenant.as_deref(),
+                    args.data,
+                    true,
+                )?
+            );
             Ok(())
         }
         Cmd::RelayProfile(args) => {
@@ -1359,7 +1411,7 @@ async fn cli_body() -> Result<()> {
                         bridge: args.bridge.clone(),
                         net_ip: args.lxc_ip.clone(),
                         net_gw: args.lxc_gw.clone(),
-                        mounts: vec![],
+                        mounts: args.mount.clone(),
                     };
                     bootstrap::bootstrap_proxmox_lxc(&client, &args.target, &spec).await?
                 }

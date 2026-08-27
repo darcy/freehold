@@ -21,10 +21,30 @@ pub struct Config {
     pub operator_identity: Option<PathBuf>,
     pub runner: RunnerRef,
     pub lxc: LxcSpec,
+    /// Phase 0.12 durable-volume-plane mapping — the tenant→dataset (or
+    /// volume) resolution. Survives compute teardown by design (the
+    /// two-place rule): teardown reads it BEFORE it deletes the config, and
+    /// it is independently re-derivable from the host/provider's volume
+    /// listing via the naming convention.
+    #[serde(default)]
+    pub plane: PlaneSpec,
     /// The pieces of the world WE operate (relay/cp today; k3s, litellm
     /// later). A relay we were INVITED to would appear in `relay_url` but
     /// not here — we don't manage it.
     pub managed: Vec<String>,
+}
+
+/// The durable volume plane (Phase 0.12). Presence = the plane was resolved;
+/// absence = pre-plane legacy / VPS-downgraded world.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PlaneSpec {
+    /// The backend in use (ZFS zpool name / LVM VG name / VPS volume label).
+    /// The common parent of the per-tenant datasets.
+    pub backend: Option<String>,
+    /// The tenant→dataset mapping, keyed by tenant (relay/cp/k3s-volumes).
+    /// Derived by the naming convention; stored for the two-place rule.
+    #[serde(default)]
+    pub datasets: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -115,6 +135,7 @@ impl Config {
                     ip: a.cp_ip.clone(),
                 },
             },
+            plane: PlaneSpec::default(),
             managed: vec!["relay".into(), "cp".into()],
         }
     }

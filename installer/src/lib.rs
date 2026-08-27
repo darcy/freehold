@@ -639,6 +639,28 @@ pub fn stage_bootstrap(a: &Answers, role: &str, vmid: Option<u32>) -> Result<()>
             None => "(auto vmid, dhcp ip)".into(),
         },
     };
+    // Durable-plane mounts (born-at-create): if the plane is resolved, this
+    // guest's dataset (recorded in the config) is baked into `pct create` as
+    // `--mount <dataset>:<guest-path>`. The guest path is fixed per role —
+    // the same one the storage stage ensures (relay: docker data-root +
+    // compose dir; cp: state dir; k3s: volume carve-out).
+    {
+        let cfg_path = config::Config::default_path();
+        if let Ok(Some(cfg)) = config::Config::load(&cfg_path)
+            && let Some(dataset) = cfg.plane.datasets.get(role)
+        {
+            let guest_paths: &[&str] = match role {
+                "relay" => &["/var/lib/docker", "/srv/buzz-relay"],
+                "cp" => &["/srv/freehold"],
+                "k3s" => &["/srv/data/k8s-volumes"],
+                _ => &[],
+            };
+            for gp in guest_paths {
+                args.push("--mount".into());
+                args.push(format!("{dataset}:{gp}"));
+            }
+        }
+    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     stage_any(
         &format!("booting the {role} LXC {label}"),
@@ -751,6 +773,70 @@ mkdir -p /srv/data/k8s-volumes
     let cfg_path = config::Config::default_path();
     if let Ok(Some(mut cfg)) = config::Config::load(&cfg_path) {
         write_back_lxc(a, &mut cfg, "k3s").ok();
+        let _ = cfg.save(&cfg_path);
+    }
+    Ok(())
+}
+
+/// Phase 0.12 — the durable-plane stage. Resolve the storage backend
+/// (consent-gated create), ensure each tenant's dataset, and record the
+/// tenant→dataset mapping into the config (the two-place rule). Idempotent:
+/// re-resolve against an already-resolved target confirms + creates nothing.
+///
+/// `consent` is the operator's answer to creating a NEW backend (the
+/// `--confirm-storage` gate) — the pipeline itself is non-interactive; the
+/// front-ends translate the operator's prompt into this bool.
+pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
+    let (ok, out) = run(
+        &bin("freehold-orchestrator"),
+        &[
+            "storage",
+            "resolve",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            ops_dir().to_str().unwrap(),
+            "--target",
+            &a.runner,
+            if consent { "--confirm-storage" } else { "" },
+        ],
+    )?;
+    if !ok {
+        bail!("storage resolution failed:\n{out}");
+    }
+    let pool = "rpool";
+    for tenant in ["relay", "cp", "k3s-volumes"] {
+        let (ok, out) = run(
+            &bin("freehold-orchestrator"),
+            &[
+                "storage",
+                "ensure",
+                "--addr",
+                &a.serve,
+                "--agent-dir",
+                ops_dir().to_str().unwrap(),
+                "--target",
+                &a.runner,
+                "--tenant",
+                tenant,
+                "--domain",
+                &a.domain,
+                "--pool",
+                pool,
+            ],
+        )?;
+        if !ok {
+            bail!("storage ensure {tenant} failed:\n{out}");
+        }
+    }
+    // record the tenant→dataset mapping (survives compute teardown).
+    let cfg_path = config::Config::default_path();
+    if let Ok(Some(mut cfg)) = config::Config::load(&cfg_path) {
+        cfg.plane.backend = Some(pool.into());
+        for tenant in ["relay", "cp", "k3s-volumes"] {
+            let ds = format!("{pool}/freehold/{}/{tenant}", a.domain.replace('.', "-"));
+            cfg.plane.datasets.insert(tenant.into(), ds);
+        }
         let _ = cfg.save(&cfg_path);
     }
     Ok(())

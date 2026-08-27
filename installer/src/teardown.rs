@@ -1,16 +1,24 @@
 //! `freehold teardown` — destroy the managed world.
 //!
+//! THREE scopes (Phase 0.12):
+//!   - **Whole-world** (default): destroy every managed LXC + remove the
+//!     runner's door + local cleanup (world home + config). Optional `--data`
+//!     ALSO destroys every tenant's dataset subtree.
+//!   - **Per-tenant compute-only**: destroy ONE tenant's LXC; the dataset is
+//!     untouched and the CONFIG SURVIVES (it holds the coords + the
+//!     tenant→dataset mapping for reattach).
+//!   - **Per-tenant data+compute**: compute-only PLUS that tenant's dataset
+//!     subtree is destroyed (full intended loss, scoped to exactly the named
+//!     tenant by the per-tenant model).
+//!
 //! ORDER MATTERS (each step verified before the next):
 //!   1. the door must prove itself (an exec through the runner) — NOTHING
 //!      remote happens without it;
-//!   2. destroy the managed LXCs (relay + cp; the compose deployments live
-//!      inside them, so destroying the guest removes the deployment + data);
-//!   3. REMOVE THE RUNNER'S KEY from the host's authorized_keys — the LAST
-//!      mutation of the host, after every other remote action succeeded
-//!      (the runner IS the SSH client, so this must precede stopping it) —
-//!      then VERIFY the line is gone;
-//!   4. local cleanup: stop the runner serve, remove `~/.freehold`, remove
-//!      the config file.
+//!   2. destroy the targeted LXC(s) (compose deployments live inside them);
+//!   3. (whole-world only) REMOVE THE RUNNER'S KEY from the host's
+//!      authorized_keys — the LAST host mutation — then verify it's gone;
+//!   4. (whole-world only) local cleanup: stop the serve, remove `~/.freehold`
+//!      + the config. Per-tenant scopes KEEP the config + local home.
 //!
 //! Scoped to `cfg.managed`: a relay we were INVITED to is not ours to
 //! destroy. Operator-key authorization is DEFERRED (per plan) — the prompt
@@ -59,9 +67,42 @@ pub fn plan(config_path: &std::path::Path) -> Result<Option<Plan>> {
     }))
 }
 
+/// The three teardown scopes (Phase 0.12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Scope {
+    /// Every managed LXC + the config + local home. Optional data: also
+    /// destroy every tenant dataset subtree.
+    WholeWorld { data: bool },
+    /// ONE tenant's LXC (compute-only): the dataset is untouched, the
+    /// config SURVIVES (coords + mapping for reattach).
+    TenantCompute { tenant: String },
+    /// ONE tenant's LXC + its dataset subtree (data+compute): full intended
+    /// loss, scoped by construction.
+    TenantData { tenant: String },
+}
+
 /// Execute the teardown. `confirm` is the CLI's authorization gate (typed
 /// "yes" today; the operator-signature check slots in there later).
 pub fn run(config_path: &std::path::Path, confirm: bool) -> Result<String> {
+    run_scoped(config_path, None, false, confirm)
+}
+
+/// Execute the teardown at an optionally tenant-scoped + data granularity.
+pub fn run_scoped(
+    config_path: &std::path::Path,
+    tenant: Option<&str>,
+    data: bool,
+    confirm: bool,
+) -> Result<String> {
+    let scope = match tenant {
+        Some(t) if data => Scope::TenantData { tenant: t.into() },
+        Some(t) => Scope::TenantCompute { tenant: t.into() },
+        None => Scope::WholeWorld { data },
+    };
+    run_scope(config_path, scope, confirm)
+}
+
+fn run_scope(config_path: &std::path::Path, scope: Scope, confirm: bool) -> Result<String> {
     let Some(cfg) = Config::load(config_path)? else {
         return Ok("nothing to tear down — no config".to_string());
     };
@@ -85,75 +126,161 @@ pub fn run(config_path: &std::path::Path, confirm: bool) -> Result<String> {
     }
     log.push(format!("door verified ({})", cfg.runner.target));
 
-    // 2. destroy the managed LXCs (each checked present → stopped → destroyed).
-    let guests = [
-        ("relay", cfg.lxc.relay.vmid),
-        ("cp", cfg.lxc.cp.vmid),
-        ("k3s", cfg.lxc.k3s.vmid),
-    ];
-    for (role, vmid) in guests {
-        if !cfg.managed.iter().any(|m| m == role) {
-            let label = vmid.map(|v| v.to_string()).unwrap_or_else(|| "?".into());
-            log.push(format!("skipped {role} LXC {label} (not managed)"));
-            continue;
+    // 2. destroy the targeted LXC(s).
+    match &scope {
+        Scope::WholeWorld { .. } => {
+            let guests = [
+                ("relay", cfg.lxc.relay.vmid),
+                ("cp", cfg.lxc.cp.vmid),
+                ("k3s", cfg.lxc.k3s.vmid),
+            ];
+            for (role, vmid) in guests {
+                if !cfg.managed.iter().any(|m| m == role) {
+                    let label = vmid.map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+                    log.push(format!("skipped {role} LXC {label} (not managed)"));
+                    continue;
+                }
+                log.extend(destroy_one_lxc(&a, role, vmid)?);
+            }
         }
-        let Some(vmid) = vmid else {
-            log.push(format!("{role} LXC: never created (no vmid recorded)"));
-            continue;
-        };
-        if !lxc_exists(&a, vmid)? {
-            log.push(format!("{role} LXC {vmid}: already gone"));
-            continue;
+        Scope::TenantCompute { tenant } | Scope::TenantData { tenant } => {
+            let role = tenant_lxc_role(tenant);
+            let vmid = match role {
+                "relay" => cfg.lxc.relay.vmid,
+                "cp" => cfg.lxc.cp.vmid,
+                "k3s" => cfg.lxc.k3s.vmid,
+                _ => bail!("unknown tenant {tenant:?} (relay | cp | k3s-volumes)"),
+            };
+            log.extend(destroy_one_lxc(&a, role, vmid)?);
         }
-        let status = exec_pct(&a, &format!("pct status {vmid}"))?;
-        if status.contains("status: running") {
-            exec_pct(&a, &format!("pct stop {vmid} --skiplock"))?;
-        }
-        exec_pct(&a, &format!("pct destroy {vmid}"))?;
-        // verified destroyed
-        if lxc_exists(&a, vmid)? {
-            bail!("{role} LXC {vmid} still exists after destroy");
-        }
-        log.push(format!("destroyed {role} LXC {vmid}"));
     }
 
-    // 3. THE DOOR: remove the runner's key from the host — the last host
-    //    mutation — then verify it's gone (read-only).
-    let key_removal = format!(
-        "sed -i '/ssh-ed25519 [A-Za-z0-9+/=]* {}$/d' /root/.ssh/authorized_keys",
-        a.runner
-    );
-    exec_pct(&a, &key_removal)?;
-    let check = exec_pct(
-        &a,
-        &format!(
-            "grep -c 'ssh-ed25519 .* {}' /root/.ssh/authorized_keys || true",
+    // 3. optionally destroy the tenant dataset subtree (data+compute), or
+    //    all of them on whole-world --data.
+    match &scope {
+        Scope::WholeWorld { data: true } | Scope::TenantData { .. } => {
+            let tenants: Vec<String> = match &scope {
+                Scope::TenantData { tenant } => vec![tenant.clone()],
+                _ => vec!["relay".into(), "cp".into(), "k3s-volumes".into()],
+            };
+            for tenant in tenants {
+                if let Some(dataset) = cfg.plane.datasets.get(&tenant) {
+                    log.push(destroy_dataset(&a, &cfg, &tenant, dataset)?);
+                } else {
+                    log.push(format!(
+                        "no dataset recorded for {tenant} — nothing to destroy"
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // 4. whole-world: THE DOOR + local cleanup. Per-tenant scopes KEEP the
+    //    local home + config (coords + mapping for reattach).
+    if matches!(scope, Scope::WholeWorld { .. }) {
+        let key_removal = format!(
+            "sed -i '/ssh-ed25519 [A-Za-z0-9+/=]* {}$/d' /root/.ssh/authorized_keys",
             a.runner
-        ),
-    )?;
-    let still = check.trim().parse::<u32>().unwrap_or(1);
-    if still != 0 {
-        bail!("the runner's key is STILL in authorized_keys ({still} line(s)) — ");
-    }
-    log.push(format!(
-        "door removed from {} ({} — verified)",
-        a.runner, cfg.runner.target
-    ));
+        );
+        exec_pct(&a, &key_removal)?;
+        let check = exec_pct(
+            &a,
+            &format!(
+                "grep -c 'ssh-ed25519 .* {}' /root/.ssh/authorized_keys || true",
+                a.runner
+            ),
+        )?;
+        let still = check.trim().parse::<u32>().unwrap_or(1);
+        if still != 0 {
+            bail!("the runner's key is STILL in authorized_keys ({still} line(s)) — ");
+        }
+        log.push(format!(
+            "door removed from {} ({} — verified)",
+            a.runner, cfg.runner.target
+        ));
 
-    // 4. local cleanup.
-    stop_local_serve(&a)?;
-    let home = crate::freehold_home();
-    if home.exists() {
-        std::fs::remove_dir_all(&home).with_context(|| format!("removing {}", home.display()))?;
-        log.push(format!("removed world {}", home.display()));
-    }
-    if config_path.exists() {
-        std::fs::remove_file(config_path)
-            .with_context(|| format!("removing {}", config_path.display()))?;
-        log.push(format!("removed config {}", config_path.display()));
+        stop_local_serve(&a)?;
+        let home = crate::freehold_home();
+        if home.exists() {
+            std::fs::remove_dir_all(&home)
+                .with_context(|| format!("removing {}", home.display()))?;
+            log.push(format!("removed world {}", home.display()));
+        }
+        if config_path.exists() {
+            std::fs::remove_file(config_path)
+                .with_context(|| format!("removing {}", config_path.display()))?;
+            log.push(format!("removed config {}", config_path.display()));
+        }
+    } else {
+        log.push(
+            "config KEPT (per-tenant teardown — coords + dataset mapping for reattach)".to_string(),
+        );
     }
 
     Ok(format!("teardown complete:\n  {}", log.join("\n  ")))
+}
+
+/// Map a tenant name to the LXC role it rides (k3s-volumes rides the k3s
+/// guest). Empty for unknown tenants.
+fn tenant_lxc_role(tenant: &str) -> &'static str {
+    match tenant {
+        "k3s-volumes" | "k3s" => "k3s",
+        "relay" => "relay",
+        "cp" => "cp",
+        _ => "",
+    }
+}
+
+/// Destroy one LXC (checked present → stopped → destroyed → verified gone).
+fn destroy_one_lxc(a: &Answers, role: &str, vmid: Option<u32>) -> Result<Vec<String>> {
+    let mut log = Vec::new();
+    let Some(vmid) = vmid else {
+        log.push(format!("{role} LXC: never created (no vmid recorded)"));
+        return Ok(log);
+    };
+    if !lxc_exists(a, vmid)? {
+        log.push(format!("{role} LXC {vmid}: already gone"));
+        return Ok(log);
+    }
+    let status = exec_pct(a, &format!("pct status {vmid}"))?;
+    if status.contains("status: running") {
+        exec_pct(a, &format!("pct stop {vmid} --skiplock"))?;
+    }
+    exec_pct(a, &format!("pct destroy {vmid}"))?;
+    if lxc_exists(a, vmid)? {
+        bail!("{role} LXC {vmid} still exists after destroy");
+    }
+    log.push(format!("destroyed {role} LXC {vmid}"));
+    Ok(log)
+}
+
+/// Destroy a tenant's dataset subtree through the runner (data+compute).
+fn destroy_dataset(a: &Answers, cfg: &Config, tenant: &str, dataset: &str) -> Result<String> {
+    let pool = cfg.plane.backend.clone().unwrap_or_else(|| "rpool".into());
+    let (ok, out) = crate::run(
+        &bin("freehold-orchestrator"),
+        &[
+            "storage",
+            "destroy",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            crate::ops_dir().to_str().unwrap(),
+            "--target",
+            &a.runner,
+            "--tenant",
+            tenant,
+            "--domain",
+            &cfg.domain,
+            "--pool",
+            &pool,
+        ],
+    )?;
+    if !ok {
+        bail!("dataset destroy for {tenant} failed:\n{out}");
+    }
+    Ok(format!("destroyed {tenant} dataset subtree ({dataset})"))
 }
 
 /// Does the LXC exist? via `pct list | grep -c` (exits 0 either way so a
