@@ -21,6 +21,7 @@ use freehold_orchestrator::bootstrap::{
 };
 use freehold_orchestrator::client::McpClient;
 use freehold_orchestrator::flows;
+use freehold_orchestrator::planebase::MountSpec;
 use freehold_orchestrator::{deploy_cp, relay_member};
 use freehold_runner::mcp::{self, RunnerContext};
 use freehold_testkit::mock::{self, VultrState};
@@ -244,6 +245,7 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -297,6 +299,66 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_bakes_durable_plane_mounts_into_create() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
+            ("pveam", "exit 127\n"),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    // The locked "born on the plane" shape: the relay's two child datasets
+    // mount as /var/lib/docker (the daemon data root — named volumes land
+    // there) and /srv/buzz-relay (the compose deploy dir + .env).
+    let mounts = vec![
+        MountSpec {
+            source: "rpool/freehold/t-d/relay/docker-root".into(),
+            guest_path: "/var/lib/docker".into(),
+        },
+        MountSpec {
+            source: "rpool/freehold/t-d/relay/deploy".into(),
+            guest_path: "/srv/buzz-relay".into(),
+        },
+    ];
+    let res = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "testhost-101".into(),
+            vmid: Some(101),
+            template: None,
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
+            mounts,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        res.kind,
+        freehold_orchestrator::bootstrap::TargetKind::ProxmoxLxc
+    );
+    let cmds = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        cmds.contains("--mp0=rpool/freehold/t-d/relay/docker-root,mp=/var/lib/docker"),
+        "docker data-root child baked into create: {cmds}"
+    );
+    assert!(
+        cmds.contains("--mp1=rpool/freehold/t-d/relay/deploy,mp=/srv/buzz-relay"),
+        "compose deploy-dir child baked into create: {cmds}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn proxmox_lxc_create_failure_is_reported_with_output() {
     let base = tempfile::tempdir().unwrap();
     let (bin, _ba) = plant_bin(
@@ -328,6 +390,7 @@ exit 0
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -396,6 +459,7 @@ esac
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -453,6 +517,7 @@ exit 0
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -497,6 +562,7 @@ async fn proxmox_lxc_downloads_template_when_missing() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -556,6 +622,7 @@ async fn proxmox_lxc_picks_free_vmid_when_omitted() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -621,6 +688,7 @@ esac
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -668,6 +736,7 @@ async fn proxmox_lxc_docker_daemon_failure_is_reported() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -713,6 +782,7 @@ async fn proxmox_lxc_vmid_below_100_is_rejected() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -1439,6 +1509,7 @@ async fn proxmox_lxc_static_net_for_cloud_pve() {
             bridge: "vmbr1".into(),
             net_ip: Some("10.10.0.6/24".into()),
             net_gw: Some("10.10.0.1".into()),
+            mounts: vec![],
         },
     )
     .await

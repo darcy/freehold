@@ -1359,6 +1359,7 @@ async fn cli_body() -> Result<()> {
                         bridge: args.bridge.clone(),
                         net_ip: args.lxc_ip.clone(),
                         net_gw: args.lxc_gw.clone(),
+                        mounts: vec![],
                     };
                     bootstrap::bootstrap_proxmox_lxc(&client, &args.target, &spec).await?
                 }
