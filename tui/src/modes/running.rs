@@ -56,7 +56,9 @@ impl Running {
             last: Instant::now() - Duration::from_secs(5),
             last_agents: Instant::now() - Duration::from_secs(60),
             services_at: Instant::now(),
-            agents_at: Instant::now(),
+            // "never fetched yet" — ages honestly until the first real
+            // agents snapshot lands (the old just-now lied over empty data).
+            agents_at: Instant::now() - Duration::from_secs(60),
             runners_at: Instant::now(),
             request_configure: false,
         };
@@ -175,12 +177,11 @@ impl Running {
         self.probes = snap.probes;
         self.services = snap.services;
         self.services_at = snap.services_at;
-        self.agents = snap.agents;
-        self.agents_at = snap.agents_at;
-        if snap.session_dead {
-            self.cp.client = None;
-            self.cp.auth = AuthState::Failed;
-            self.cp.auth_reason = "session expired — press l to log in again".into();
+        // agents are a DELTA — only a real fetch replaces the list; the
+        // stamp travels with it.
+        if let Some(agents) = snap.agents {
+            self.agents = agents;
+            self.agents_at = snap.agents_at;
         }
         // a worker-minted fresh session gets installed; reusing the UI's
         // cookie carries None (keep the existing client).
@@ -190,6 +191,13 @@ impl Running {
             }
             self.cp.auth = auth;
             self.cp.auth_reason = reason;
+        }
+        // session_dead MUST land AFTER the session (the cookie-reuse branch
+        // carries auth=Live) — expiry wins: client dropped + Failed.
+        if snap.session_dead {
+            self.cp.client = None;
+            self.cp.auth = AuthState::Failed;
+            self.cp.auth_reason = "session expired — press l to log in again".into();
         }
         if snap.view_local {
             self.cp.local = snap.local;
@@ -442,7 +450,10 @@ impl Running {
 struct Snapshot {
     probes: Vec<(String, bool)>,
     services: Vec<ServiceRow>,
-    agents: Vec<AgentRow>,
+    /// DELTA: None when the worker wasn't agents-due (or the console is
+    /// unreachable) — the UI keeps the last good list rather than showing
+    /// a false "no agents standing yet".
+    agents: Option<Vec<AgentRow>>,
     local: Vec<LocalRunner>,
     overview: Option<freehold_console_client::Overview>,
     /// a fresh session for the UI to install (None keeps the existing one).
@@ -482,7 +493,7 @@ fn refresh_worker(
     let mut snap = Snapshot {
         probes: Vec::new(),
         services: Vec::new(),
-        agents: Vec::new(),
+        agents: None,
         local: Vec::new(),
         overview: None,
         session: None,
@@ -542,16 +553,17 @@ fn refresh_worker(
                 Ok(list) => {
                     snap.agents_at = Instant::now();
                     let now = freehold_core::auth::now_secs();
-                    snap.agents = list
-                        .into_iter()
-                        .map(|a| AgentRow {
-                            name: a.name,
-                            pubkey: a.pubkey,
-                            created: humanize((now as u64).saturating_sub(a.created_at)),
-                            available: a.available,
-                            note: a.note,
-                        })
-                        .collect();
+                    snap.agents = Some(
+                        list.into_iter()
+                            .map(|a| AgentRow {
+                                name: a.name,
+                                pubkey: a.pubkey,
+                                created: humanize((now as u64).saturating_sub(a.created_at)),
+                                available: a.available,
+                                note: a.note,
+                            })
+                            .collect(),
+                    );
                 }
                 Err(e) => snap.notice = Some(format!("agents: {e}")),
             }
