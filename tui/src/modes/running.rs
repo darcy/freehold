@@ -28,6 +28,10 @@ pub struct Running {
     pub agents: Vec<AgentRow>,
     /// Console API parity (the runner lists).
     pub cp: ConsolePanel,
+    /// Background refresh: every network call lives on a worker thread —
+    /// the UI event loop never blocks on a probe/fetch/login, so keys
+    /// (Tab / r / anything) stay instant even when a guest is slow.
+    ref_: Refresher,
     last_agents: Instant,
     /// per-view "last refreshed" stamps (each view refreshes on its own
     /// cadence; the timestamp tells the truth about the data shown).
@@ -48,158 +52,163 @@ impl Running {
             services: Vec::new(),
             agents: Vec::new(),
             cp: ConsolePanel::default(),
+            ref_: Refresher::default(),
             last: Instant::now() - Duration::from_secs(5),
             last_agents: Instant::now() - Duration::from_secs(60),
             services_at: Instant::now(),
-            agents_at: Instant::now(),
+            // "never fetched yet" — ages honestly until the first real
+            // agents snapshot lands (the old just-now lied over empty data).
+            agents_at: Instant::now() - Duration::from_secs(60),
             runners_at: Instant::now(),
             request_configure: false,
         };
-        if let Some(c) = &cfg {
-            r.probe(c);
-            r.services = build_services(c, &r.probes);
-        }
-        r.attach_console();
+        // NO probing on the UI thread — the first frame renders instantly
+        // and the worker fills the world on the first drain.
+        r.spawn_refresh();
         r
     }
 
     pub fn with_cfg(cfg_path: PathBuf, cfg: Config) -> Self {
         let mut r = Self::new(cfg_path);
         r.cfg = Some(cfg.clone());
-        r.probe(&cfg);
-        r.services = build_services(&cfg, &r.probes);
-        // new() already attached (and stamped the throttle) — re-attaching
-        // here would be a second immediate login on entry.
         r
     }
 
-    /// The registered AI agents, with availability the console probed
-    /// against the relay (kind-9 presence). Refresh is throttled — each
-    /// request makes the console probe every agent.
-    fn refresh_agents(&mut self) {
-        if self.last_agents.elapsed() < Duration::from_secs(15) {
-            return;
+    /// Spawn the background refresh (probes + services + console data all
+    /// run off the UI thread; results land in the next drain).
+    fn spawn_refresh(&mut self) {
+        let cfg = self.cfg.clone();
+        let view_local = self.cp.view == PanelView::Local;
+        let ui_cookie = self
+            .cp
+            .client
+            .as_ref()
+            .and_then(|c| c.cookie().map(str::to_string));
+        let needs_login = self.cp.client.is_none();
+        let can_login = self
+            .cfg
+            .as_ref()
+            .is_some_and(|c| c.operator_identity.is_some())
+            || std::env::var("FREEHOLD_CONSOLE_COOKIE")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+        let agents_due = self.last_agents.elapsed() >= Duration::from_secs(15);
+        if agents_due {
+            self.last_agents = Instant::now();
         }
-        self.last_agents = Instant::now();
-        let Some(client) = self.cp.client.as_ref() else {
-            return;
-        };
-        match client.agents() {
-            Ok(list) => {
-                self.agents_at = Instant::now();
-                let now = freehold_core::auth::now_secs();
-                self.agents = list
-                    .into_iter()
-                    .map(|a| AgentRow {
-                        name: a.name,
-                        pubkey: a.pubkey,
-                        created: humanize((now as u64).saturating_sub(a.created_at)),
-                        available: a.available,
-                        note: a.note,
-                    })
-                    .collect();
-            }
-            Err(e) => self.cp.notice = format!("agents: {e}"),
-        }
-    }
-
-    fn probe(&mut self, cfg: &Config) {
-        // the SAME real checks the mode probe used — a reachable proxy is
-        // not a running relay (this stale-TCP bug kept the old running
-        // screen "Good to go!" over an empty world).
-        self.probes = vec![
-            ("relay".into(), relay_live(cfg)),
-            ("control plane".into(), cp_live(cfg)),
-            ("k3s".into(), k3s_live(cfg)),
-            ("provisioning runner".into(), port_open(&cfg.runner.addr)),
-        ];
         self.last = Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.ref_.rx = Some(rx);
+        self.ref_.handle = Some(std::thread::spawn(move || {
+            refresh_worker(
+                cfg,
+                view_local,
+                ui_cookie,
+                needs_login,
+                can_login,
+                agents_due,
+                tx,
+            )
+        }));
     }
 
-    /// Attach a console session: an explicit `FREEHOLD_CONSOLE_COOKIE`
-    /// (login elsewhere with `console-login`, paste the session here) wins;
-    /// otherwise log in with the operator identity the config records
-    /// (`operator_identity` dir, minted at bootstrap). The key never leaves
-    /// this machine — only the session cookie travels.
-    fn attach_console(&mut self) {
-        self.cp.last_login_attempt = Instant::now();
-        let Some(cfg) = &self.cfg else {
-            self.cp.auth = AuthState::Missing;
-            return;
-        };
+    /// A fresh session for a worker that needs one (the operator identity /
+    /// cookie path — the SAME logic attach_console used, minus the
+    /// UI-thread mutation).
+    fn build_session(cfg: &Config) -> (Option<Client>, AuthState, String) {
         if let Ok(cookie) = std::env::var("FREEHOLD_CONSOLE_COOKIE")
             && !cookie.trim().is_empty()
         {
-            self.cp.client = Some(Client::with_cookie(&cfg.cp_url, &cookie));
-            self.cp.auth = AuthState::Live;
-            self.cp.auth_reason = "FREEHOLD_CONSOLE_COOKIE session".into();
-            return;
+            return (
+                Some(Client::with_cookie(&cfg.cp_url, &cookie)),
+                AuthState::Live,
+                "FREEHOLD_CONSOLE_COOKIE session".into(),
+            );
         }
         let Some(dir) = &cfg.operator_identity else {
-            self.cp.auth = AuthState::Missing;
-            self.cp.auth_reason =
+            return (
+                None,
+                AuthState::Missing,
                 "no operator identity in config and no FREEHOLD_CONSOLE_COOKIE — l retries; \
                  see README console-login"
-                    .into();
-            return;
+                    .into(),
+            );
         };
         match Identity::load(dir) {
             Ok(id) => {
                 let seed = id.secret_seed();
                 let url = cfg.cp_url.clone();
                 match Client::login_with_timeout(&url, &seed, Duration::from_secs(6)) {
-                    Ok(c) => {
-                        self.cp.client = Some(c);
-                        self.cp.auth = AuthState::Live;
-                        self.cp.auth_reason = format!("operator @ {}", dir.display());
-                    }
-                    Err(e) => {
-                        self.cp.auth = AuthState::Failed;
-                        self.cp.auth_reason = format!("login: {e}");
-                    }
+                    Ok(c) => (
+                        Some(c),
+                        AuthState::Live,
+                        format!("operator @ {}", dir.display()),
+                    ),
+                    Err(e) => (None, AuthState::Failed, format!("login: {e}")),
                 }
             }
-            Err(e) => {
-                self.cp.auth = AuthState::Failed;
-                self.cp.auth_reason = format!("identity {}: {e}", dir.display());
-            }
+            Err(e) => (
+                None,
+                AuthState::Failed,
+                format!("identity {}: {e}", dir.display()),
+            ),
         }
     }
 
-    fn refresh(&mut self) {
-        // the AGENTS list is view-independent — refresh it even when the
-        // Runners panel is toggled to the local loopback (r / the 15s tick
-        // must still land).
-        self.refresh_agents();
-        if self.cp.view == PanelView::Local {
-            self.cp.local = read_local(&self.cfg);
-            // the stamp reflects the REAL read, not the throttle's tick.
-            self.runners_at = Instant::now();
+    /// Apply whatever the worker finished (all state writes land here, on
+    /// the UI thread, between frames).
+    fn drain_refresh(&mut self) {
+        let done = self.ref_.handle.as_ref().is_some_and(|h| h.is_finished());
+        if !done {
             return;
         }
-        if self.cp.last_fetch.elapsed() < Duration::from_secs(2) {
-            return;
+        if let Some(h) = self.ref_.handle.take()
+            && h.join().is_ok()
+            && let Some(rx) = self.ref_.rx.take()
+            && let Ok(snap) = rx.try_recv()
+        {
+            self.apply_snapshot(snap);
         }
-        // guard BEFORE the blocking call — a dead console must not make the
-        // tick loop busy-fetch.
-        self.cp.last_fetch = Instant::now();
-        let Some(client) = self.cp.client.as_ref() else {
-            return;
-        };
-        match client.overview() {
-            Ok(ov) => {
-                self.cp.overview = Some(ov);
-                // stamp only when data actually landed.
-                self.runners_at = Instant::now();
+        self.ref_.handle = None;
+        self.ref_.rx = None;
+    }
+
+    fn apply_snapshot(&mut self, snap: Snapshot) {
+        self.probes = snap.probes;
+        self.services = snap.services;
+        self.services_at = snap.services_at;
+        // agents are a DELTA — only a real fetch replaces the list; the
+        // stamp travels with it.
+        if let Some(agents) = snap.agents {
+            self.agents = agents;
+            self.agents_at = snap.agents_at;
+        }
+        // a worker-minted fresh session gets installed; reusing the UI's
+        // cookie carries None (keep the existing client).
+        if let Some((client, auth, reason)) = snap.session {
+            if client.is_some() {
+                self.cp.client = client;
             }
-            Err(freehold_console_client::Error::Api { status: 401, .. }) => {
-                // the session died — stop retrying until the operator logs
-                // in again.
-                self.cp.client = None;
-                self.cp.auth = AuthState::Failed;
-                self.cp.auth_reason = "session expired — press l to log in again".into();
-            }
-            Err(e) => self.cp.notice = format!("overview: {e}"),
+            self.cp.auth = auth;
+            self.cp.auth_reason = reason;
+        }
+        // session_dead MUST land AFTER the session (the cookie-reuse branch
+        // carries auth=Live) — expiry wins: client dropped + Failed.
+        if snap.session_dead {
+            self.cp.client = None;
+            self.cp.auth = AuthState::Failed;
+            self.cp.auth_reason = "session expired — press l to log in again".into();
+        }
+        if snap.view_local {
+            self.cp.local = snap.local;
+            self.runners_at = snap.runners_at;
+        }
+        if let Some(ov) = snap.overview {
+            self.cp.overview = Some(ov);
+            self.runners_at = snap.runners_at;
+        }
+        if let Some(n) = snap.notice {
+            self.cp.notice = n;
         }
     }
 
@@ -270,9 +279,10 @@ impl Running {
                 self.cp.client = None;
                 self.cp.auth = AuthState::Missing;
                 self.cp.auth_reason.clear();
-                self.cp.last_login_attempt = Instant::now();
-                self.attach_console();
-                self.refresh();
+                self.cp.last_login_attempt = Instant::now() - Duration::from_secs(9);
+                if !self.ref_.busy() {
+                    self.spawn_refresh();
+                }
             }
             (DashboardView::Runners, crossterm::event::KeyCode::Char('t')) => {
                 self.cp.view = match self.cp.view {
@@ -285,7 +295,7 @@ impl Running {
                         "runners: local loopback (view-only — manage via remote)".into()
                     }
                 };
-                self.refresh();
+                self.refresh_now();
             }
             (DashboardView::Runners, crossterm::event::KeyCode::Char('w')) => {
                 self.launch_web();
@@ -322,15 +332,13 @@ impl Running {
     }
 
     fn refresh_now(&mut self) {
-        if let Some(cfg) = self.cfg.clone() {
-            self.probe(&cfg);
-            self.services = build_services(&cfg, &self.probes);
-            self.services_at = Instant::now();
+        if self.ref_.busy() {
+            return;
         }
         self.last_agents = Instant::now() - Duration::from_secs(16);
-        self.cp.last_fetch = Instant::now() - Duration::from_secs(3);
-        self.refresh();
-        self.cp.notice = "refreshed".into();
+        self.last = Instant::now() - Duration::from_secs(3);
+        self.cp.last_login_attempt = Instant::now() - Duration::from_secs(9);
+        self.spawn_refresh();
     }
 
     fn launch_web(&mut self) {
@@ -414,40 +422,154 @@ impl Running {
         match res {
             Ok(v) => {
                 self.cp.notice = format!("{} ok: {}", name(), clip(&v.to_string(), 96));
-                self.refresh();
+                self.refresh_now();
             }
             Err(e) => self.cp.notice = format!("{} failed: {e}", name()),
         }
     }
 
     pub fn tick(&mut self) {
-        if self.last.elapsed() >= Duration::from_secs(2)
-            && let Some(cfg) = self.cfg.clone()
-        {
-            self.probe(&cfg);
-            self.services = build_services(&cfg, &self.probes);
-            self.services_at = Instant::now();
-            self.refresh();
-        }
-        // Auto-login retry: the console can still be warming — keep
-        // attempting until a session is live (no l press needed).
-        let can_login = self
-            .cfg
-            .as_ref()
-            .is_some_and(|c| c.operator_identity.is_some())
-            || std::env::var("FREEHOLD_CONSOLE_COOKIE")
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
-        if can_login
+        // land whatever the worker finished FIRST (fresh data renders the
+        // next frame), then decide whether to spin another.
+        self.drain_refresh();
+        let due = self.last.elapsed() >= Duration::from_secs(2);
+        let needs_login = self.cp.client.is_none()
             && self.cp.auth != AuthState::Live
-            && self.cp.client.is_none()
-            && self.cp.last_login_attempt.elapsed() >= Duration::from_secs(8)
-        {
-            self.cp.last_login_attempt = Instant::now();
-            self.attach_console();
-            self.refresh();
+            && self.cp.last_login_attempt.elapsed() >= Duration::from_secs(8);
+        if (due || needs_login) && !self.ref_.busy() {
+            if needs_login {
+                self.cp.last_login_attempt = Instant::now();
+            }
+            self.spawn_refresh();
         }
     }
+}
+
+/// Everything a refresh worker computes OFF the UI thread. The UI owns the
+/// final state; the worker only produces facts.
+struct Snapshot {
+    probes: Vec<(String, bool)>,
+    services: Vec<ServiceRow>,
+    /// DELTA: None when the worker wasn't agents-due (or the console is
+    /// unreachable) — the UI keeps the last good list rather than showing
+    /// a false "no agents standing yet".
+    agents: Option<Vec<AgentRow>>,
+    local: Vec<LocalRunner>,
+    overview: Option<freehold_console_client::Overview>,
+    /// a fresh session for the UI to install (None keeps the existing one).
+    session: Option<(Option<Client>, AuthState, String)>,
+    session_dead: bool,
+    view_local: bool,
+    notice: Option<String>,
+    services_at: Instant,
+    agents_at: Instant,
+    runners_at: Instant,
+}
+
+#[derive(Default)]
+struct Refresher {
+    rx: Option<std::sync::mpsc::Receiver<Snapshot>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Refresher {
+    fn busy(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+}
+
+/// The background refresh body: probes, services, the console overview +
+/// agents (or the local loopback list), and a fresh session when needed.
+/// Runs to completion on a worker thread; the event loop only drains.
+fn refresh_worker(
+    cfg: Option<Config>,
+    view_local: bool,
+    ui_cookie: Option<String>,
+    needs_login: bool,
+    can_login: bool,
+    agents_due: bool,
+    tx: std::sync::mpsc::Sender<Snapshot>,
+) {
+    let mut snap = Snapshot {
+        probes: Vec::new(),
+        services: Vec::new(),
+        agents: None,
+        local: Vec::new(),
+        overview: None,
+        session: None,
+        session_dead: false,
+        view_local,
+        notice: None,
+        services_at: Instant::now(),
+        agents_at: Instant::now(),
+        runners_at: Instant::now(),
+    };
+    let Some(cfg) = cfg else {
+        let _ = tx.send(snap);
+        return;
+    };
+    // a session: reuse the UI's cookie (same session, no re-login) or mint
+    // a fresh one (the operator key) when the UI has none.
+    let (fetch_client, install, auth, reason) = if let Some(cookie) = ui_cookie {
+        (
+            Some(Client::with_cookie(&cfg.cp_url, &cookie)),
+            None,
+            AuthState::Live,
+            "session cookie".into(),
+        )
+    } else if needs_login && can_login {
+        let (client, auth, reason) = Running::build_session(&cfg);
+        (client.clone(), client, auth, reason)
+    } else {
+        (None, None, AuthState::Missing, String::new())
+    };
+    snap.session = Some((install, auth, reason));
+    // probes + services (the world strip):
+    snap.probes = vec![
+        ("relay".into(), relay_live(&cfg)),
+        ("control plane".into(), cp_live(&cfg)),
+        ("k3s".into(), k3s_live(&cfg)),
+        ("provisioning runner".into(), port_open(&cfg.runner.addr)),
+    ];
+    snap.services = build_services(&cfg, &snap.probes);
+    snap.services_at = Instant::now();
+    // data: the local list or the console (overview + agents).
+    if view_local {
+        snap.local = read_local(&Some(cfg));
+        snap.runners_at = Instant::now();
+    } else if let Some(client) = &fetch_client {
+        match client.overview() {
+            Ok(ov) => {
+                snap.overview = Some(ov);
+                snap.runners_at = Instant::now();
+            }
+            Err(freehold_console_client::Error::Api { status: 401, .. }) => {
+                snap.session_dead = true;
+            }
+            Err(e) => snap.notice = Some(format!("overview: {e}")),
+        }
+        if agents_due {
+            match client.agents() {
+                Ok(list) => {
+                    snap.agents_at = Instant::now();
+                    let now = freehold_core::auth::now_secs();
+                    snap.agents = Some(
+                        list.into_iter()
+                            .map(|a| AgentRow {
+                                name: a.name,
+                                pubkey: a.pubkey,
+                                created: humanize((now as u64).saturating_sub(a.created_at)),
+                                available: a.available,
+                                note: a.note,
+                            })
+                            .collect(),
+                    );
+                }
+                Err(e) => snap.notice = Some(format!("agents: {e}")),
+            }
+        }
+    }
+    let _ = tx.send(snap);
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +731,6 @@ pub struct ConsolePanel {
     pub auth_reason: String,
     /// transient feedback from the last action/refresh.
     pub notice: String,
-    last_fetch: Instant,
     /// the last auto-login attempt — the login RETRIES while the console is
     /// still warming so the running screen really is logged in.
     last_login_attempt: Instant,
@@ -629,7 +750,6 @@ impl Default for ConsolePanel {
             auth: AuthState::Missing,
             auth_reason: String::new(),
             notice: String::new(),
-            last_fetch: Instant::now() - Duration::from_secs(60),
             last_login_attempt: Instant::now() - Duration::from_secs(60),
             prompt: None,
             channel: None,
