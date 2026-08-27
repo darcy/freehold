@@ -503,7 +503,7 @@ pub fn read_lxc_ip(a: &Answers, vmid: u32) -> Result<String> {
 
 /// Persist the real post-boot coordinates into the config.
 pub fn write_back_lxc(a: &Answers, cfg: &mut config::Config, role: &str) -> Result<()> {
-    let vmid = find_lxc_vmid(a, role)?;
+    let vmid = find_lxc_vmid_exact(a, role)?;
     let ip = read_lxc_ip(a, vmid)?;
     let guest = if role == "relay" {
         &mut cfg.lxc.relay
@@ -657,14 +657,14 @@ pub fn stage_k3s(a: &Answers) -> Result<()> {
     // died before the write-back) — find by NAME first, then probe.
     let existing = match a.k3s_vmid {
         Some(v) => probe_lxc(a, Some(v))?.then_some(v),
-        None => find_lxc_vmid(a, "k3s")
+        None => find_lxc_vmid_exact(a, "k3s")
             .ok()
             .filter(|v| matches!(probe_lxc(a, Some(*v)), Ok(true))),
     };
     if existing.is_none() {
         stage_bootstrap(a, "k3s", a.k3s_vmid)?;
     }
-    let vmid = find_lxc_vmid(a, "k3s")?;
+    let vmid = find_lxc_vmid_exact(a, "k3s")?;
     // install k3s in the guest when absent. The script is single-quote-free
     // (it travels inside a single-quoted bash -c through the runner); the
     // unit heredoc is unquoted-safe (no $ in its content).
@@ -761,7 +761,7 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
     // the host when it's missing (the check already proved the LXC exists).
     let relay_vmid = match a.relay_vmid {
         Some(v) => v,
-        None => find_lxc_vmid(a, "relay")?,
+        None => find_lxc_vmid_exact(a, "relay")?,
     };
     stage_any(
         "deploy-relay",
@@ -788,7 +788,7 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
 pub fn stage_deploy_cp(a: &Answers) -> Result<()> {
     let cp_vmid = match a.cp_vmid {
         Some(v) => v,
-        None => find_lxc_vmid(a, "cp")?,
+        None => find_lxc_vmid_exact(a, "cp")?,
     };
     stage_any(
         "deploy-cp",

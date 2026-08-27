@@ -282,6 +282,7 @@ impl SshPool {
             let k = key.clone();
             async move { tokio::time::timeout(Duration::from_secs(15), self.connect(&t, &k)).await }
         };
+        let mut at_cap = false;
         for attempt in 0..3usize {
             if let Some(c) = self.try_reuse(&target.name) {
                 return Ok(c);
@@ -318,22 +319,29 @@ impl SshPool {
                     }
                 }
             } else {
+                at_cap = true;
                 // at the cap and all busy: wait briefly, re-check for a free
                 // one.
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
         }
-        // beyond the cap, SHARE: hold for a free lane (bounded — the caller's
-        // exec timeout is the outer bound; a busy lane frees in a moment).
-        for _ in 0..15usize {
-            if let Some(c) = self.try_reuse(&target.name) {
-                return Ok(c);
+        // ONLY when the lane was BUSY (never after pure connect failures —
+        // a fast-refusing host must still error in ~3s, not +15s) SHARE:
+        // hold for a free lane (bounded — the caller's exec timeout is the
+        // outer bound; a busy lane frees in a moment).
+        if at_cap {
+            for _ in 0..15usize {
+                if let Some(c) = self.try_reuse(&target.name) {
+                    return Ok(c);
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err(SshError::Russh(
+                "all connections to this target are busy".into(),
+            ))
+        } else {
+            Err(SshError::Russh("connect failed after 3 attempts".into()))
         }
-        Err(SshError::Russh(
-            "all connections to this target are busy".into(),
-        ))
     }
 
     /// Reuse an idle pooled connection if one exists (sync only).

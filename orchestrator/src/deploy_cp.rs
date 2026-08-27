@@ -29,6 +29,21 @@ pub const DEFAULT_CP_BIND: &str = "127.0.0.1:8080";
 /// The console bind to ship: an EXPLICIT operator value always wins; the
 /// DEFAULT becomes the LAN bind exactly when NIP-98 authn is on (the
 /// operator's proxy path); no authn keeps the loopback posture.
+
+pub fn resolve_cp_bind(explicit: Option<&str>, authn: bool) -> String {
+    match explicit {
+        Some(b) => b.to_string(),
+        None if authn => format!(
+            "0.0.0.0:{}",
+            DEFAULT_CP_BIND
+                .rsplit_once(':')
+                .map(|(_, p)| p)
+                .unwrap_or("8080")
+        ),
+        None => DEFAULT_CP_BIND.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod bind_resolve_tests {
     use super::resolve_cp_bind;
@@ -53,20 +68,6 @@ mod bind_resolve_tests {
     fn default_flips_only_under_authn() {
         assert_eq!(resolve_cp_bind(None, true), "0.0.0.0:8080");
         assert_eq!(resolve_cp_bind(None, false), "127.0.0.1:8080");
-    }
-}
-
-pub fn resolve_cp_bind(explicit: Option<&str>, authn: bool) -> String {
-    match explicit {
-        Some(b) => b.to_string(),
-        None if authn => format!(
-            "0.0.0.0:{}",
-            DEFAULT_CP_BIND
-                .rsplit_once(':')
-                .map(|(_, p)| p)
-                .unwrap_or("8080")
-        ),
-        None => DEFAULT_CP_BIND.to_string(),
     }
 }
 
@@ -546,6 +547,7 @@ pub async fn deploy_cp(
     // (loopback incl. ::1 / [::1]) and derive the authn claim from the
     // actual admin whitelist — never infer either.
     let is_loopback = freehold_control_plane::validate_loopback_bind(&spec.bind_addr).is_ok();
+    let authn_on = !spec.admin_pubkeys.is_empty();
     let bind_hint = if is_loopback {
         format!(
             "console loopback {ba} (reach it via `ssh -L 8080:127.0.0.1:8080 root@<box>`)",
@@ -553,7 +555,8 @@ pub async fn deploy_cp(
         )
     } else {
         format!(
-            "console on {ba} (LAN — the operator's proxy/path can reach it; NIP-98 auth is on)",
+            "console on {ba} (LAN — the operator's proxy/path can reach it; NIP-98 auth {}on)",
+            if authn_on { "" } else { "NOT " },
             ba = spec.bind_addr
         )
     };

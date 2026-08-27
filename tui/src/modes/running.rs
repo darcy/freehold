@@ -311,9 +311,8 @@ impl Running {
             (DashboardView::Runners, crossterm::event::KeyCode::Char('v')) => {
                 self.start(Flow::Channel);
             }
-            (DashboardView::Runners, crossterm::event::KeyCode::Esc) => {
-                self.cp.channel = None;
-            }
+            // (Running-mode Esc is handled in App::on_key — it closes the
+            // channel overlay / cancels without quitting.)
             _ => {}
         }
     }
