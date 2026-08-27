@@ -441,17 +441,28 @@ pub async fn deploy_cp(
         )?;
     }
 
+    let bind_hint = if spec.bind_addr.starts_with("127.") || spec.bind_addr.starts_with("localhost")
+    {
+        format!(
+            "console loopback {ba} (reach it via `ssh -L 8080:127.0.0.1:8080 root@<box>`)",
+            ba = spec.bind_addr
+        )
+    } else {
+        format!(
+            "console on {ba} (LAN — the operator's proxy/path can reach it; NIP-98 auth is on)",
+            ba = spec.bind_addr
+        )
+    };
     Ok(DeployCpResult {
         state_dir: spec.state_dir.clone(),
         bind_addr: spec.bind_addr.clone(),
         detail: format!(
-            "control plane deployed in OPERATE mode: state {sd}, console loopback {ba} \
-             (reach it via `ssh -L 8080:127.0.0.1:8080 root@<box>`); relay scope {relay} \
+            "control plane deployed in OPERATE mode: state {sd}, {bh}; relay scope {relay} \
              (C4: relay authoritative post-port, local state = offline cache mirror); \
              the box's console identity ({pk:?}) GENERATED ON THE BOX — add it as a relay \
              member with `freehold relay-member --pubkey {pk}`",
             sd = spec.state_dir,
-            ba = spec.bind_addr,
+            bh = bind_hint,
             relay = spec.relay_url,
             pk = &pubkey,
         ),
