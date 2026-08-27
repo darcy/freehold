@@ -403,6 +403,50 @@ pub enum DoorProbe {
 /// Find the vmid of the role's container on the host (`pct list` name match
 /// on the `-<role>` suffix) — used to write the ACTUAL vmid back into the
 /// config after an auto-picked boot.
+/// Match the guest by its FULL `<domain-with-dashes>-<role>` name — the
+/// suffix-only match can hit ANOTHER world's container on a multi-world host
+/// (bootstrap names guests from the domain precisely so a host can carry
+/// several: `find_lxc_vmid`'s `ends_with` is wrong there).
+pub fn lxc_name(a: &Answers, role: &str) -> Result<String, anyhow::Error> {
+    let normalized: String = a.domain.replace('.', "-");
+    Ok(format!("{normalized}-{role}"))
+}
+
+pub fn find_lxc_vmid_exact(a: &Answers, role: &str) -> Result<u32> {
+    let name = lxc_name(a, role)?;
+    let vmid = find_lxc_vmid_find(a, &name)?;
+    Ok(vmid)
+}
+
+fn find_lxc_vmid_find(a: &Answers, exact: &str) -> Result<u32> {
+    let (ok, out) = run(
+        &bin("freehold-orchestrator"),
+        &[
+            "exec",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            ops_dir().to_str().unwrap(),
+            &a.runner,
+            "pct list",
+        ],
+    )?;
+    if !ok {
+        bail!("pct list unreadable through the runner:\n{out}");
+    }
+    for line in out.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if let (Some(name), Some(vmid)) = (cols.last(), cols.first())
+            && *name == exact
+        {
+            return vmid
+                .parse()
+                .map_err(|_| anyhow::anyhow!("unparseable vmid {vmid:?} in {line:?}"));
+        }
+    }
+    bail!("no container named {exact} found on the host:\n{out}")
+}
+
 pub fn find_lxc_vmid(a: &Answers, role: &str) -> Result<u32> {
     let (ok, out) = run(
         &bin("freehold-orchestrator"),
@@ -459,7 +503,7 @@ pub fn read_lxc_ip(a: &Answers, vmid: u32) -> Result<String> {
 
 /// Persist the real post-boot coordinates into the config.
 pub fn write_back_lxc(a: &Answers, cfg: &mut config::Config, role: &str) -> Result<()> {
-    let vmid = find_lxc_vmid(a, role)?;
+    let vmid = find_lxc_vmid_exact(a, role)?;
     let ip = read_lxc_ip(a, vmid)?;
     let guest = if role == "relay" {
         &mut cfg.lxc.relay
@@ -613,14 +657,14 @@ pub fn stage_k3s(a: &Answers) -> Result<()> {
     // died before the write-back) — find by NAME first, then probe.
     let existing = match a.k3s_vmid {
         Some(v) => probe_lxc(a, Some(v))?.then_some(v),
-        None => find_lxc_vmid(a, "k3s")
+        None => find_lxc_vmid_exact(a, "k3s")
             .ok()
             .filter(|v| matches!(probe_lxc(a, Some(*v)), Ok(true))),
     };
     if existing.is_none() {
         stage_bootstrap(a, "k3s", a.k3s_vmid)?;
     }
-    let vmid = find_lxc_vmid(a, "k3s")?;
+    let vmid = find_lxc_vmid_exact(a, "k3s")?;
     // install k3s in the guest when absent. The script is single-quote-free
     // (it travels inside a single-quoted bash -c through the runner); the
     // unit heredoc is unquoted-safe (no $ in its content).
@@ -717,7 +761,7 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
     // the host when it's missing (the check already proved the LXC exists).
     let relay_vmid = match a.relay_vmid {
         Some(v) => v,
-        None => find_lxc_vmid(a, "relay")?,
+        None => find_lxc_vmid_exact(a, "relay")?,
     };
     stage_any(
         "deploy-relay",
@@ -744,7 +788,7 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
 pub fn stage_deploy_cp(a: &Answers) -> Result<()> {
     let cp_vmid = match a.cp_vmid {
         Some(v) => v,
-        None => find_lxc_vmid(a, "cp")?,
+        None => find_lxc_vmid_exact(a, "cp")?,
     };
     stage_any(
         "deploy-cp",

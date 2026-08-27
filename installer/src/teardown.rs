@@ -38,12 +38,13 @@ pub fn plan(config_path: &std::path::Path) -> Result<Option<Plan>> {
     let lxcs = cfg
         .managed
         .iter()
-        .filter(|m| m.as_str() == "relay" || m.as_str() == "cp")
+        .filter(|m| m.as_str() == "relay" || m.as_str() == "cp" || m.as_str() == "k3s")
         .filter_map(|m| {
-            let vmid = if m == "relay" {
-                cfg.lxc.relay.vmid
-            } else {
-                cfg.lxc.cp.vmid
+            let vmid = match m.as_str() {
+                "relay" => cfg.lxc.relay.vmid,
+                "cp" => cfg.lxc.cp.vmid,
+                "k3s" => cfg.lxc.k3s.vmid,
+                _ => None,
             };
             vmid.map(|v| (m.clone(), v))
         })
@@ -85,7 +86,12 @@ pub fn run(config_path: &std::path::Path, confirm: bool) -> Result<String> {
     log.push(format!("door verified ({})", cfg.runner.target));
 
     // 2. destroy the managed LXCs (each checked present → stopped → destroyed).
-    for (role, vmid) in [("relay", cfg.lxc.relay.vmid), ("cp", cfg.lxc.cp.vmid)] {
+    let guests = [
+        ("relay", cfg.lxc.relay.vmid),
+        ("cp", cfg.lxc.cp.vmid),
+        ("k3s", cfg.lxc.k3s.vmid),
+    ];
+    for (role, vmid) in guests {
         if !cfg.managed.iter().any(|m| m == role) {
             let label = vmid.map(|v| v.to_string()).unwrap_or_else(|| "?".into());
             log.push(format!("skipped {role} LXC {label} (not managed)"));

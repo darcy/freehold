@@ -4,7 +4,7 @@
 //! and can be retried (r).
 
 use super::StageRunner;
-use freehold_installer::config::{Config, cp_live, relay_live};
+use freehold_installer::config::{Config, cp_live, k3s_live, relay_live};
 use freehold_installer::{
     Answers, probe_lxc, stage_bootstrap, stage_deploy_cp, stage_deploy_relay,
 };
@@ -165,7 +165,14 @@ impl ConfigureState {
             let present = match i {
                 0 => probe_lxc(&a, cfg.lxc.relay.vmid)?,
                 1 => probe_lxc(&a, cfg.lxc.cp.vmid)?,
-                2 => probe_lxc(&a, cfg.lxc.k3s.vmid)?,
+                // a STOPPED or broken k3s guest must NOT report "already
+                // present" — the API itself has to answer (the same rule as
+                // stages 3/4's live checks; there is no later stage to
+                // catch a dead cluster).
+                2 => match cfg.lxc.k3s.ip {
+                    Some(_) => k3s_live(&cfg),
+                    None => false,
+                },
                 3 => relay_live(&cfg),
                 4 => cp_live(&cfg),
                 _ => false,
@@ -233,6 +240,10 @@ impl ConfigureState {
                             .is_ok()
                             {
                                 let _ = self.cfg.save(&self.cfg_path);
+                                // spawn_run clones self.answers — a stale
+                                // pre-write-back copy would re-boot from
+                                // scratch on a retry.
+                                self.answers = Answers::from_config(&self.cfg);
                             }
                         }
                     } else if ok {
@@ -275,6 +286,8 @@ impl ConfigureState {
                                     );
                                     if let Err(e) = self.cfg.save(&self.cfg_path) {
                                         self.notice = format!("config save failed: {e}");
+                                    } else {
+                                        self.answers = Answers::from_config(&self.cfg);
                                     }
                                 }
                                 Err(e) => self.notice = format!("write-back failed: {e}"),
@@ -310,17 +323,17 @@ impl ConfigureState {
 }
 
 fn guest_vmid(cfg: &Config, role: &str) -> Option<u32> {
-    if role == "relay" {
-        cfg.lxc.relay.vmid
-    } else {
-        cfg.lxc.cp.vmid
+    match role {
+        "relay" => cfg.lxc.relay.vmid,
+        "k3s" => cfg.lxc.k3s.vmid,
+        _ => cfg.lxc.cp.vmid,
     }
 }
 
 fn guest_ip(cfg: &Config, role: &str) -> Option<String> {
-    if role == "relay" {
-        cfg.lxc.relay.ip.clone()
-    } else {
-        cfg.lxc.cp.ip.clone()
+    match role {
+        "relay" => cfg.lxc.relay.ip.clone(),
+        "k3s" => cfg.lxc.k3s.ip.clone(),
+        _ => cfg.lxc.cp.ip.clone(),
     }
 }

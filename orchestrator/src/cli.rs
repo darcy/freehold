@@ -123,8 +123,11 @@ struct DeployCpArgs {
     #[arg(long, default_value = deploy_cp::DEFAULT_CP_BIN_DIR)]
     bin_dir: String,
     /// Loopback bind for the console (C3: non-loopback is refused)
-    #[arg(long, default_value = deploy_cp::DEFAULT_CP_BIND)]
-    bind: String,
+    /// Loopback bind for the console. DEFAULT_CP_BIND is the default; an
+    /// EXPLICIT value is always honored. (Option so the default flip under
+    /// --operator-pubkey can't swallow a deliberate --bind 127.0.0.1:8080.)
+    #[arg(long)]
+    bind: Option<String>,
     /// LOCAL path of the built control-plane binary
     #[arg(long)]
     binary: PathBuf,
@@ -673,12 +676,8 @@ async fn cli_body() -> Result<()> {
             // bind the LAN — and that's what the operator's proxy needs — so
             // the DEFAULT loopback bind becomes 0.0.0.0 only in that case
             // (no authn → loopback stays, the security posture).
-            let bind_addr = if operator_pubkey.is_none() || args.bind != deploy_cp::DEFAULT_CP_BIND
-            {
-                args.bind.clone()
-            } else {
-                "0.0.0.0:8080".to_string()
-            };
+            let bind_addr =
+                deploy_cp::resolve_cp_bind(args.bind.as_deref(), operator_pubkey.is_some());
             let res = deploy_cp::deploy_cp(
                 &client,
                 &args.target,

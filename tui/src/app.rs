@@ -84,6 +84,16 @@ impl App {
             // 'q' quits only on RENDERED screens — never while typing text
             // (a pubkey/npub can legitimately contain 'q').
             KeyCode::Char('q') if !matches!(self.mode, Mode::Bootstrap) => self.quit = true,
+            // Esc NEVER quits from the running mode — it closes whatever is
+            // open (a prompt / the channel overlay).
+            KeyCode::Esc if matches!(self.mode, Mode::Running) => {
+                if !self.rn.is_typing() {
+                    self.rn.cp.channel = None;
+                } else {
+                    self.rn.on_key(code);
+                }
+            }
+            KeyCode::Esc if matches!(self.mode, Mode::Bootstrap) => self.bs.on_key(code),
             KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if matches!(self.mode, Mode::Running) => {
                 self.rn.request_configure = true;
@@ -241,10 +251,10 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
             // the hint mirrors the ACTIVE view's keys (scoped input).
             match app.rn.view {
                 crate::modes::running::DashboardView::Agents => {
-                    "Tab/Shift-Tab views · r refresh · agents are view-only for now · q quit"
+                    "Tab/Shift-Tab views · r refresh · agents are view-only for now · c reconfigure · q quit"
                 }
                 crate::modes::running::DashboardView::Services => {
-                    "Tab/Shift-Tab views · r refresh · services are view-only for now · q quit"
+                    "Tab/Shift-Tab views · r refresh · services are view-only for now · c reconfigure · q quit"
                 }
                 crate::modes::running::DashboardView::Runners => {
                     "Tab/Shift-Tab views · r refresh · l login · t local/remote · p provision · R rotate · x revoke · g/G grant · a addr · v channel · w web · c reconfigure · q quit"
@@ -336,7 +346,12 @@ fn draw_bootstrap<'a>(area: Rect, f: &mut Frame<'a>, bs: &mut Bootstrap) {
                         }),
                     ),
                     Span::styled(
-                        bs.op_input.clone(),
+                        if bs.op_field == 0 {
+                            bs.op_input.clone()
+                        } else {
+                            // never echo the nsec buffer in the pubkey row
+                            "".into()
+                        },
                         Style::new().fg(if bs.op_field == 0 {
                             Color::LightCyan
                         } else {
@@ -745,8 +760,9 @@ fn readiness_text(rd: &Option<serde_json::Value>) -> String {
     }
 }
 
-fn grants_text(g: &Option<Vec<String>>) -> String {
+fn grants_text(status: &str, g: &Option<Vec<String>>) -> String {
     match g {
+        None if status == "revoked" => "revoked — pkg removed (B3)".into(),
         None => "pkg unreadable".into(),
         Some(v) if v.is_empty() => "nobody (fail closed)".into(),
         Some(v) => format!(
@@ -849,7 +865,7 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
                     Span::raw(col(r.risk.as_deref().unwrap_or("?"), 6)),
                     Span::raw(col(&secret, 30)),
                     Span::raw(col(reach, 34)),
-                    Span::raw(col(&grants_text(&r.grants), 22)),
+                    Span::raw(col(&grants_text(&r.status, &r.grants), 22)),
                 ]));
             }
         }
@@ -935,7 +951,7 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
                             Span::raw(col(r.risk.as_deref().unwrap_or("?"), 6)),
                             Span::raw(col(&secret, 30)),
                             Span::raw(col(&readiness_text(&r.readiness), 34)),
-                            Span::raw(col(&grants_text(&r.grants), 22)),
+                            Span::raw(col(&grants_text(&r.status, &r.grants), 22)),
                         ]));
                     }
                 }

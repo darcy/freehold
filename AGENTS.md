@@ -225,8 +225,10 @@ VPS (dev/smoke) → PVE host (test/staging, SSH target only) → home
   redacts the injected `<SECRET>_URL` env (the base URL) from output too —
   non-secret, cosmetic; the fix is a redaction list separate from the child
   env list.
-- **SSH connector (C1) accepted gaps**: one command at a time per pooled connection (a
-  concurrent exec waits unboundedly — per-command channels are the real fix); a wedged
+- **SSH connector (C1) accepted gaps**: up to 2 pooled connections per target (the
+  parallel-boots consumer was rolled back in #109; the cap's rationale is now stale —
+  serial execs reuse one connection and over-cap execs wait, then error); per-command
+  channels are the real fix; a wedged
   connection stays pooled after a timeout; ssh timeouts return empty output where local
   returns partial; no IPv6 in `SshTarget::parse`; pooled connections aren't
   re-authenticated after a rotate; half-open connections surface as an error rather than a
