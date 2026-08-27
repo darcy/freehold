@@ -19,7 +19,11 @@ fn usage() {
         "freehold — the freehold appliance (one binary, two surfaces)\n\n\
          TUI (no args):\n    freehold [--config <path>]\n\n\
          Modes (auto-detected):\n    bootstrap   no config at ~/.config/freehold/config.toml\n    configure   config present, world not converged\n    running     config present, everything reachable\n\
-         Keys: q / Esc / Ctrl-C quit · ↑/↓ navigate · Enter confirm\n\n\
+         Running views (Tab / Shift-Tab): Services · Agents · Runners\n\
+         Keys are scoped to the active view — the footer shows them:\n\
+           globals  Tab/Shift-Tab views · c reconfigure · q/Esc/Ctrl-C quit\n\
+           runners  l login · t local/remote · p provision · R rotate · x revoke\n\
+                    g/G grant · a addr · v channel · w web (auto-authenticated)\n\n\
          CLI (subcommand as the first arg):\n    freehold exec <target> \"<cmd>\"\n    freehold bootstrap --kind proxmox-lxc --role relay --domain …\n    freehold deploy-relay / deploy-cp / relay-member / console-login …\n    freehold teardown            destroy the managed world (confirm first)\n    … (see `freehold <subcommand> --help`)\n"
     );
 }
