@@ -58,6 +58,8 @@ pub enum Error {
     Login { status: u16, body: String },
     #[error("login response carried no session cookie")]
     NoCookie,
+    #[error("portal response missing token: {0}")]
+    PortalShape(String),
     #[error("{method} {path} — {source}")]
     Transport {
         method: String,
@@ -357,6 +359,18 @@ impl Client {
 
     pub fn channel(&self, name: &str) -> Result<serde_json::Value, Error> {
         self.get_json(&format!("/api/runner/{name}/channel"))
+    }
+
+    /// Mint a single-use portal token and return the URL to OPEN IN A
+    /// BROWSER: the browser GETs it, receives a fresh session cookie for the
+    /// SAME operator, and lands on the console logged in. The NIP-98 key
+    /// never leaves this process and the token dies on first use.
+    pub fn portal_url(&self) -> Result<String, Error> {
+        let v = self.post_json("/api/auth/portal", &serde_json::json!({}))?;
+        let token = v["token"]
+            .as_str()
+            .ok_or_else(|| Error::PortalShape(v.to_string()))?;
+        Ok(format!("{}/api/auth/portal/{token}", self.base))
     }
 
     // -- internals ----------------------------------------------------------

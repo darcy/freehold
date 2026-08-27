@@ -1542,6 +1542,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "freehold-console-client",
+ "freehold-control-plane",
  "freehold-core",
  "freehold-installer",
  "freehold-orchestrator",
