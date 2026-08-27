@@ -539,8 +539,21 @@ async fn handle_upload(
         return Err(exec::ExecError::MissingField("local_path"));
     }
     if target == "local" {
-        // loopback: a direct local file copy (no ssh lane).
+        // loopback: a direct local file copy (no ssh lane) — STILL audited
+        // (the ssh branch's write happens under `ssh.upload`; here the copy
+        // IS the op, so the 48001/spool row must be signed like any exec).
+        let started = exec::now_secs();
         let n = std::fs::copy(local_path, remote_path)?;
+        let result = exec::ExecResult {
+            stdout: format!("uploaded {n} bytes to {remote_path}"),
+            stderr: String::new(),
+            exit_code: Some(0),
+            timed_out: false,
+        };
+        let cmd = format!("upload {remote_path} (from {local_path})");
+        state
+            .exec
+            .audit_cmd(&cmd, &target, &result, started, Some(caller));
         return Ok(format!("{{\"uploaded\": {n}}}"));
     }
     let Some(meta) = state.ctx.package.targets.get(&target) else {

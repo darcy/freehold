@@ -38,7 +38,7 @@ pub fn plan(config_path: &std::path::Path) -> Result<Option<Plan>> {
     let lxcs = cfg
         .managed
         .iter()
-        .filter(|m| m.as_str() == "relay" || m.as_str() == "cp")
+        .filter(|m| m.as_str() == "relay" || m.as_str() == "cp" || m.as_str() == "k3s")
         .filter_map(|m| {
             let vmid = if m == "relay" {
                 cfg.lxc.relay.vmid

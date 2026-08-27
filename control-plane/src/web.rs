@@ -988,17 +988,18 @@ async fn agents_list(
         for a in &mut agents {
             let url = url.clone();
             let console = console.clone();
+            let name = a["name"].as_str().unwrap_or_default().to_string();
             let pk = a["pubkey"].as_str().unwrap_or_default().to_string();
             let channel = a["channel"].as_str().map(String::from);
             let host = state.store.relay_host().unwrap_or_default();
             probes.spawn(async move {
-                let probe = probe_agent_presence(&console, &url, channel, host).await;
-                (pk, probe)
+                let probe = probe_agent_presence(&console, &url, channel, host, pk).await;
+                (name, probe)
             });
         }
         while let Some(res) = probes.join_next().await {
-            if let Ok((pk, probe)) = res
-                && let Some(a) = agents.iter_mut().find(|a| a["pubkey"] == pk)
+            if let Ok((name, probe)) = res
+                && let Some(a) = agents.iter_mut().find(|a| a["name"] == name)
                 && let Some(probe) = probe
             {
                 match probe {
@@ -1022,6 +1023,7 @@ async fn probe_agent_presence(
     relay: &str,
     channel: Option<String>,
     host: String,
+    agent_pubkey: String,
 ) -> Option<Result<bool, String>> {
     let Some(channel) = channel else {
         return Some(Err("no channel registered for this agent".into()));
@@ -1029,10 +1031,13 @@ async fn probe_agent_presence(
     let secret = console_seed(console);
     let since = now_secs() - 150;
     // kind-9 reads are channel-scoped (#h) on the relay — an author-only
-    // query comes back empty even when the agent is alive.
+    // query comes back empty even when the agent is alive — and MUST also
+    // constrain the AUTHOR: any kind-9 in the channel (a delegated task to
+    // the peer) would otherwise read as the agent being alive.
     // NIP-01 query = a filter ARRAY (a bare map is rejected).
     let filter = json!([{
         "kinds": [9],
+        "authors": [agent_pubkey],
         "#h": [channel],
         "since": since,
     }]);

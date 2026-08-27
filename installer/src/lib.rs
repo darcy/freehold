@@ -403,6 +403,50 @@ pub enum DoorProbe {
 /// Find the vmid of the role's container on the host (`pct list` name match
 /// on the `-<role>` suffix) — used to write the ACTUAL vmid back into the
 /// config after an auto-picked boot.
+/// Match the guest by its FULL `<domain-with-dashes>-<role>` name — the
+/// suffix-only match can hit ANOTHER world's container on a multi-world host
+/// (bootstrap names guests from the domain precisely so a host can carry
+/// several: `find_lxc_vmid`'s `ends_with` is wrong there).
+pub fn lxc_name(a: &Answers, role: &str) -> Result<String, anyhow::Error> {
+    let normalized: String = a.domain.replace('.', "-");
+    Ok(format!("{normalized}-{role}"))
+}
+
+pub fn find_lxc_vmid_exact(a: &Answers, role: &str) -> Result<u32> {
+    let name = lxc_name(a, role)?;
+    let vmid = find_lxc_vmid_find(a, &name)?;
+    Ok(vmid)
+}
+
+fn find_lxc_vmid_find(a: &Answers, exact: &str) -> Result<u32> {
+    let (ok, out) = run(
+        &bin("freehold-orchestrator"),
+        &[
+            "exec",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            ops_dir().to_str().unwrap(),
+            &a.runner,
+            "pct list",
+        ],
+    )?;
+    if !ok {
+        bail!("pct list unreadable through the runner:\n{out}");
+    }
+    for line in out.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if let (Some(name), Some(vmid)) = (cols.last(), cols.first())
+            && *name == exact
+        {
+            return vmid
+                .parse()
+                .map_err(|_| anyhow::anyhow!("unparseable vmid {vmid:?} in {line:?}"));
+        }
+    }
+    bail!("no container named {exact} found on the host:\n{out}")
+}
+
 pub fn find_lxc_vmid(a: &Answers, role: &str) -> Result<u32> {
     let (ok, out) = run(
         &bin("freehold-orchestrator"),

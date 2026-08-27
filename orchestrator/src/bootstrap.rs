@@ -543,8 +543,11 @@ async fn ensure_guest_docker(
             }
             Err(e) => install_err = Some(e),
         }
+        // escalating: fast retry, then a longer wait — a slow DHCP lease
+        // needs the grace, a transient apt hiccup doesn't want a long sit.
         if attempt < 2 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let wait = if attempt == 0 { 2 } else { 6 };
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         }
     }
     if let Some(e) = install_err {
@@ -783,7 +786,10 @@ pub fn wait_for_domain_resolution(
 ) -> Result<(), BootstrapError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let hint = format!("map '{domain} {want_ip}' in your LAN DNS (or /etc/hosts for the POC)");
+    let mut hint_printed = false;
+    let mut poll_count: u64 = 0;
     loop {
+        poll_count += 1;
         match resolve(domain) {
             Some(ip) if ip.to_string() == want_ip => {
                 println!("DOMAIN-GATE: {domain} resolves to {want_ip} — continuing");
@@ -801,7 +807,17 @@ pub fn wait_for_domain_resolution(
                 );
                 return Ok(());
             }
-            None => println!("DOMAIN-GATE: {domain} does not resolve yet — {hint}"),
+            None => {
+                // the hint is the actionable part — print it ONCE, then only
+                // every 20th poll (the print previously ran per-iteration,
+                // up to 300 identical lines at the 1s cadence).
+                if !hint_printed {
+                    println!("DOMAIN-GATE: {domain} does not resolve yet — {hint}");
+                    hint_printed = true;
+                } else if poll_count.is_multiple_of(20) {
+                    println!("DOMAIN-GATE: {domain} still does not resolve — {hint}");
+                }
+            }
         }
         if std::time::Instant::now() >= deadline {
             return Err(BootstrapError::Verify(format!(

@@ -26,6 +26,50 @@ pub const DEFAULT_CP_STATE_DIR: &str = "/srv/freehold/control-plane";
 pub const DEFAULT_CP_BIN_DIR: &str = "/srv/freehold/bin";
 pub const DEFAULT_CP_BIND: &str = "127.0.0.1:8080";
 
+/// The console bind to ship: an EXPLICIT operator value always wins; the
+/// DEFAULT becomes the LAN bind exactly when NIP-98 authn is on (the
+/// operator's proxy path); no authn keeps the loopback posture.
+#[cfg(test)]
+mod bind_resolve_tests {
+    use super::resolve_cp_bind;
+
+    #[test]
+    fn explicit_bind_always_wins() {
+        // a DELIBERATE loopback bind is honored even under authn (the
+        // SSH-tunnel operator) — the Option shape makes this expressible.
+        assert_eq!(
+            resolve_cp_bind(Some("127.0.0.1:8080"), true),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            resolve_cp_bind(Some("127.0.0.1:9000"), true),
+            "127.0.0.1:9000"
+        );
+        assert_eq!(resolve_cp_bind(Some("0.0.0.0:8080"), false), "0.0.0.0:8080");
+        assert_eq!(resolve_cp_bind(Some("[::1]:8080"), true), "[::1]:8080");
+    }
+
+    #[test]
+    fn default_flips_only_under_authn() {
+        assert_eq!(resolve_cp_bind(None, true), "0.0.0.0:8080");
+        assert_eq!(resolve_cp_bind(None, false), "127.0.0.1:8080");
+    }
+}
+
+pub fn resolve_cp_bind(explicit: Option<&str>, authn: bool) -> String {
+    match explicit {
+        Some(b) => b.to_string(),
+        None if authn => format!(
+            "0.0.0.0:{}",
+            DEFAULT_CP_BIND
+                .rsplit_once(':')
+                .map(|(_, p)| p)
+                .unwrap_or("8080")
+        ),
+        None => DEFAULT_CP_BIND.to_string(),
+    }
+}
+
 /// base64 chunk size written per exec (kept well under the transport frame;
 /// a chunk is one `printf` of pure base64 — shell-safe).
 
@@ -116,17 +160,13 @@ async fn ship_file(
             "shipped {step} size mismatch: remote {remote_size} vs local {local_size}"
         )));
     }
-    // push the host file into the guest + make it executable + verify.
-    let lxc = spec
-        .lxc
-        .ok_or_else(|| BootstrapError::Verify("no lxc for ship".into()))?;
-    exec_to_ok(
-        client,
-        target,
-        &format!("pct push {lxc} {host_tmp} {remote_final}"),
-        &format!("pct push {step}"),
-        120,
-    )?;
+    // move the host file into place: inside an LXC via pct push, on a bare
+    // host (VPS / non-LXC CP) the upload already landed on the host — a mv.
+    let place = match spec.lxc {
+        Some(lxc) => format!("pct push {lxc} {host_tmp} {remote_final}"),
+        None => format!("mv {host_tmp} {remote_final}"),
+    };
+    exec_to_ok(client, target, &place, &format!("place {step}"), 120)?;
     exec_to_ok(
         client,
         target,
@@ -300,20 +340,24 @@ pub async fn deploy_cp(
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .trim_end_matches('/')
+            .split(':')
+            .next()
+            .unwrap_or_default()
             .to_string();
         let hosts_cmd = format!(
-            "grep -q '{host}' {sd}/etc-hosts 2>/dev/null || echo '{ip} {host}' >> {sd}/etc-hosts",
+            "grep -q '{host}' /etc/hosts 2>/dev/null || echo '{ip} {host}' >> /etc/hosts",
             host = host,
             ip = ip,
-            sd = "/etc",
         );
-        let _ = exec_to_ok(
+        // the console's relay reads DEPEND on this pin — a failure must
+        // surface, not vanish into `let _ =`.
+        exec_to_ok(
             client,
             target,
             &crate::relay::lxc_cmd(spec.lxc, &hosts_cmd),
             "pin relay host",
             30,
-        );
+        )?;
     }
     let start = format!(
         "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba}{admin_flag}{origin_flag}{relay_flag} \
@@ -498,8 +542,11 @@ pub async fn deploy_cp(
         )?;
     }
 
-    let bind_hint = if spec.bind_addr.starts_with("127.") || spec.bind_addr.starts_with("localhost")
-    {
+    // the message must agree with the BIND GUARD that allowed the bind
+    // (loopback incl. ::1 / [::1]) and derive the authn claim from the
+    // actual admin whitelist — never infer either.
+    let is_loopback = freehold_control_plane::validate_loopback_bind(&spec.bind_addr).is_ok();
+    let bind_hint = if is_loopback {
         format!(
             "console loopback {ba} (reach it via `ssh -L 8080:127.0.0.1:8080 root@<box>`)",
             ba = spec.bind_addr

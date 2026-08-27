@@ -274,19 +274,27 @@ impl SshPool {
         // pooled); open a fresh one only when every existing conn is busy
         // (the two LXC boots get their own lane). Each helper locks in a
         // single sync statement — no lock is ever held across an await.
+        // A connect can hang on a blackholed host (SYN dropped) — bound it
+        // so a dead target costs ~15s, not the kernel's ~127s, and counts
+        // as a transient (retried) rather than stalling forever.
+        let connect_timeout = || {
+            let t = target.clone();
+            let k = key.clone();
+            async move { tokio::time::timeout(Duration::from_secs(15), self.connect(&t, &k)).await }
+        };
         for attempt in 0..3usize {
             if let Some(c) = self.try_reuse(&target.name) {
                 return Ok(c);
             }
             if self.can_open(&target.name) {
-                match self.connect(target, key).await {
-                    Ok(h) => {
+                match connect_timeout().await {
+                    Ok(Ok(h)) => {
                         let c: Conn = Arc::new(tokio::sync::Mutex::new(h));
                         self.push_conn(&target.name, &c);
                         self.health.lock().reconnects += 1;
                         return Ok(c);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         self.health.lock().last_error = Some(e.to_string());
                         // auth / changed-host-key failures are PERMANENT — no
                         // point retrying (wrong key, MITM); only transient
@@ -294,14 +302,38 @@ impl SshPool {
                         if matches!(e, SshError::Auth(_) | SshError::HostKeyChanged(_)) {
                             return Err(e);
                         }
-                        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                        // sleep BETWEEN attempts only — never after the final
+                        // one (a fast-refusing host must cost ~3s, not 7s,
+                        // or the CP's 4s readiness probe reads the whole
+                        // runner as unreachable).
+                        if attempt < 2 {
+                            tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                        }
+                    }
+                    Err(_) => {
+                        self.health.lock().last_error = Some("connect timeout (15s)".into());
+                        if attempt < 2 {
+                            tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                        }
                     }
                 }
+            } else {
+                // at the cap and all busy: wait briefly, re-check for a free
+                // one.
+                tokio::time::sleep(Duration::from_millis(150)).await;
             }
-            // at the cap and all busy: wait briefly, re-check for a free one.
-            tokio::time::sleep(Duration::from_millis(150)).await;
         }
-        Err(SshError::Russh("no free connection".into()))
+        // beyond the cap, SHARE: hold for a free lane (bounded — the caller's
+        // exec timeout is the outer bound; a busy lane frees in a moment).
+        for _ in 0..15usize {
+            if let Some(c) = self.try_reuse(&target.name) {
+                return Ok(c);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(SshError::Russh(
+            "all connections to this target are busy".into(),
+        ))
     }
 
     /// Reuse an idle pooled connection if one exists (sync only).

@@ -162,7 +162,11 @@ pub fn k3s_live(cfg: &Config) -> bool {
     let Some(ip) = &cfg.lxc.k3s.ip else {
         return false;
     };
-    http_any(&format!("https://{ip}:6443/healthz"))
+    // the recorded ip is a CIDR (192.168.30.212/24) — strip the prefix or
+    // the URL parses as host:443 with "/24:6443/healthz" as the path and
+    // Traefik/other 443 listeners answer for the probe.
+    let host = ip.split('/').next().unwrap_or(ip);
+    http_any(&format!("https://{host}:6443/healthz"))
 }
 
 /// The relay's own health endpoint (the buzz `/_liveness`).

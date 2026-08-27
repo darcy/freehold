@@ -68,7 +68,8 @@ impl Running {
         r.cfg = Some(cfg.clone());
         r.probe(&cfg);
         r.services = build_services(&cfg, &r.probes);
-        r.attach_console();
+        // new() already attached (and stamped the throttle) — re-attaching
+        // here would be a second immediate login on entry.
         r
     }
 
@@ -121,6 +122,7 @@ impl Running {
     /// (`operator_identity` dir, minted at bootstrap). The key never leaves
     /// this machine — only the session cookie travels.
     fn attach_console(&mut self) {
+        self.cp.last_login_attempt = Instant::now();
         let Some(cfg) = &self.cfg else {
             self.cp.auth = AuthState::Missing;
             return;
@@ -165,8 +167,14 @@ impl Running {
     }
 
     fn refresh(&mut self) {
+        // the AGENTS list is view-independent — refresh it even when the
+        // Runners panel is toggled to the local loopback (r / the 15s tick
+        // must still land).
+        self.refresh_agents();
         if self.cp.view == PanelView::Local {
             self.cp.local = read_local(&self.cfg);
+            // the stamp reflects the REAL read, not the throttle's tick.
+            self.runners_at = Instant::now();
             return;
         }
         if self.cp.last_fetch.elapsed() < Duration::from_secs(2) {
@@ -175,13 +183,14 @@ impl Running {
         // guard BEFORE the blocking call — a dead console must not make the
         // tick loop busy-fetch.
         self.cp.last_fetch = Instant::now();
-        self.refresh_agents();
         let Some(client) = self.cp.client.as_ref() else {
             return;
         };
         match client.overview() {
             Ok(ov) => {
                 self.cp.overview = Some(ov);
+                // stamp only when data actually landed.
+                self.runners_at = Instant::now();
             }
             Err(freehold_console_client::Error::Api { status: 401, .. }) => {
                 // the session died — stop retrying until the operator logs
@@ -322,7 +331,6 @@ impl Running {
         self.last_agents = Instant::now() - Duration::from_secs(16);
         self.cp.last_fetch = Instant::now() - Duration::from_secs(3);
         self.refresh();
-        self.runners_at = Instant::now();
         self.cp.notice = "refreshed".into();
     }
 
@@ -333,15 +341,21 @@ impl Running {
         };
         match client.portal_url() {
             Ok(url) => {
-                self.cp.notice = format!("web opened: {url}");
-                // detached + silent — the browser outlives the TUI and must
-                // not scribble into the TUI's screen.
-                let _ = std::process::Command::new("xdg-open")
+                // only claim "opened" when the browser actually launched —
+                // no xdg-open on this box => the URL stays as the manual
+                // fallback (single-use token, 60s).
+                let spawned = std::process::Command::new("xdg-open")
                     .arg(&url)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .map_err(|e| format!("xdg-open: {e}"));
+                    .spawn();
+                match spawned {
+                    Ok(_) => self.cp.notice = format!("web opened: {url}"),
+                    Err(e) => {
+                        self.cp.notice =
+                            format!("no browser launcher (xdg-open: {e}) — open manually: {url}");
+                    }
+                }
             }
             Err(e) => self.cp.notice = format!("web launch failed: {e}"),
         }
@@ -415,7 +429,6 @@ impl Running {
             self.services = build_services(&cfg, &self.probes);
             self.services_at = Instant::now();
             self.refresh();
-            self.runners_at = Instant::now();
         }
         // Auto-login retry: the console can still be warming — keep
         // attempting until a session is live (no l press needed).
