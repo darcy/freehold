@@ -198,8 +198,18 @@ impl ConfigureState {
         self.job = Some(i);
         self.runner.spawn(move || match i {
             0 => {
-                freehold_installer::stage_storage(&a, true)?;
-                Ok("durable volume plane ready".to_string())
+                // The pipeline NEVER auto-creates a backend: consent is the
+                // operator's, and this spawned stage has no prompt path. We
+                // pass false (reuse an existing backend, bail with an
+                // actionable message if one must be created) — a greenfield
+                // host creates via `freehold storage resolve
+                // --confirm-storage` run by the operator, gated like
+                // teardown-grade destruction.
+                //
+                // The stage is still idempotent: reuse-or-bail never
+                // mutates an existing backend.
+                freehold_installer::stage_storage(&a, false)?;
+                Ok("durable volume plane ready (reused existing backend)".to_string())
             }
             1 => {
                 stage_bootstrap(&a, "relay", a.relay_vmid)?;

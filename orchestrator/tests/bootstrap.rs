@@ -1552,13 +1552,14 @@ async fn storage_resolve_reuses_existing_zpool() {
     );
     let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
-    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false)
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false, None)
         .await
         .unwrap();
     assert_eq!(
         action,
         freehold_orchestrator::planebase::ResolveAction::Reuse(
-            freehold_orchestrator::planebase::ExistingBackend::Zfs
+            freehold_orchestrator::planebase::ExistingBackend::Zfs,
+            "rpool".into(),
         )
     );
     server.abort();
@@ -1573,13 +1574,14 @@ async fn storage_resolve_reuses_existing_lvm_when_no_zpool() {
     );
     let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
-    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false)
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false, None)
         .await
         .unwrap();
     assert_eq!(
         action,
         freehold_orchestrator::planebase::ResolveAction::Reuse(
-            freehold_orchestrator::planebase::ExistingBackend::LvmThin
+            freehold_orchestrator::planebase::ExistingBackend::LvmThin,
+            "vg".into(),
         )
     );
     server.abort();
@@ -1594,7 +1596,7 @@ async fn storage_resolve_bails_without_consent_when_no_backend() {
     );
     let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
 
-    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false)
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false, None)
         .await
         .unwrap();
     match action {
@@ -1619,15 +1621,17 @@ async fn storage_resolve_with_consent_creates_when_no_backend() {
         &[("zpool", NO_STORAGE_ZPOOL), ("vgs", NO_STORAGE_VGS)],
     );
     let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
-    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", true)
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", true, None)
         .await
         .unwrap();
     assert_eq!(
         action,
         freehold_orchestrator::planebase::ResolveAction::Create(
-            freehold_orchestrator::planebase::Backend::Zfs
+            freehold_orchestrator::planebase::Backend::LvmThin,
+            "freehold".into(),
         ),
-        "consent + no backend -> create (prefer ZFS), never a silent tier"
+        "consent + no backend + no device -> create LVM-thin (the locked \
+         ZFS->LVM-thin->bail order's fallback), never a silent tier"
     );
     server.abort();
 }
@@ -1636,14 +1640,22 @@ async fn storage_resolve_with_consent_creates_when_no_backend() {
 async fn ensure_dataset_is_idempotent_and_chown_runs() {
     use freehold_orchestrator::drive::{chown_guest_uid, ensure_dataset};
     let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("zfs.log");
+    // Fake `zfs`: `list <ds>` ALWAYS answers present (exit 0, no output
+    // needed for the presence probe). Any `create` would be logged.
     let (bin, _ba) = plant_bin(
-        &base.path().join("zfs.log"),
+        &logp,
         &[
             (
                 "zfs",
-                "echo 'rpool/freehold/t-d/relay'; exit 0\n", // list => present
+                "echo 'rpool/freehold/t-d/relay'; exit 0
+",
             ),
-            ("chown", "echo done; exit 0\n"),
+            (
+                "chown",
+                "echo done; exit 0
+",
+            ),
         ],
     );
     let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
@@ -1651,6 +1663,11 @@ async fn ensure_dataset_is_idempotent_and_chown_runs() {
     // idempotent: the fake reports present, so NO `zfs create` runs.
     ensure_dataset(&client, "proxmox-box", ds).await.unwrap();
     ensure_dataset(&client, "proxmox-box", ds).await.unwrap();
+    let cmds = std::fs::read_to_string(&logp).unwrap_or_default();
+    assert!(
+        !cmds.contains("create"),
+        "existing dataset must be REUSED, no zfs create: {cmds}"
+    );
     // chown passes a shifted uid through the runner.
     chown_guest_uid(&client, "proxmox-box", "/srv/data/k8s-volumes", 100000)
         .await
@@ -1663,17 +1680,15 @@ async fn destroy_tenant_dataset_destroys_relay_parent_recursively() {
     use freehold_orchestrator::drive::destroy_tenant_dataset;
     let base = tempfile::tempdir().unwrap();
     let logp = base.path().join("zfs.log");
+    // The fake `zfs` logs its full argv to $ZFS_LOG on destroy.
     let (bin, _ba) = plant_bin(
         &logp,
         &[(
             "zfs",
-            r#"
-if [ "$1" = "destroy" ]; then
-  echo "$*" >> "$ZFS_LOG"
-  exit 0
-fi
-exit 0
-"#,
+            // plant_bin already logs every invocation ("$0 $*") to the test
+            // log, so this body just needs to ANSWER: act as a dataset that
+            // exists (list exits 0) and allow destroy (any op exits 0).
+            "exit 0",
         )],
     );
     let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
@@ -1688,8 +1703,11 @@ exit 0
     .unwrap();
     // The destroy hits the RELAY PARENT (rpool/freehold/.../relay) with -r,
     // so both child datasets (docker-root + deploy) go with it — the locked
-    // single-parent-destroy unit. (The fake logs the command; we assert the
-    // parent path carries -r.)
-    let _cmds = std::fs::read_to_string(&logp).unwrap_or_default();
+    // single-parent-destroy unit.
+    let cmds = std::fs::read_to_string(&logp).expect("zfs destroy was invoked");
+    assert!(
+        cmds.contains("destroy -r rpool/freehold/freehold-test-darcydev-net/relay"),
+        "recursive parent-subtree destroy: {cmds}"
+    );
     server.abort();
 }

@@ -94,12 +94,18 @@ pub fn run_scoped(
     data: bool,
     confirm: bool,
 ) -> Result<String> {
-    let scope = match tenant {
+    run_scope(config_path, scope_for(tenant, data), confirm)
+}
+
+/// The single source of truth for the three-scope derivation (used by both
+/// `run_scoped` and the tests — a regression in the real mapping must fail
+/// the tests, not be mirrored by a copy).
+fn scope_for(tenant: Option<&str>, data: bool) -> Scope {
+    match tenant {
         Some(t) if data => Scope::TenantData { tenant: t.into() },
         Some(t) => Scope::TenantCompute { tenant: t.into() },
         None => Scope::WholeWorld { data },
-    };
-    run_scope(config_path, scope, confirm)
+    }
 }
 
 fn run_scope(config_path: &std::path::Path, scope: Scope, confirm: bool) -> Result<String> {
@@ -164,13 +170,12 @@ fn run_scope(config_path: &std::path::Path, scope: Scope, confirm: bool) -> Resu
                 _ => vec!["relay".into(), "cp".into(), "k3s-volumes".into()],
             };
             for tenant in tenants {
-                if let Some(dataset) = cfg.plane.datasets.get(&tenant) {
-                    log.push(destroy_dataset(&a, &cfg, &tenant, dataset)?);
-                } else {
-                    log.push(format!(
-                        "no dataset recorded for {tenant} — nothing to destroy"
-                    ));
-                }
+                // The two-place rule's second place (independent): re-derive
+                // `<pool>/freehold/<domain-dashes>/<tenant>` from the backend
+                // + naming convention, so a tampered/missing recorded mapping
+                // can't silently skip a data+compute destroy.
+                let dataset = dataset_path_for(&cfg, &tenant, &cfg.domain);
+                log.push(destroy_dataset(&a, &cfg, &tenant, &dataset)?);
             }
         }
         _ => {}
@@ -283,6 +288,15 @@ fn destroy_dataset(a: &Answers, cfg: &Config, tenant: &str, dataset: &str) -> Re
     Ok(format!("destroyed {tenant} dataset subtree ({dataset})"))
 }
 
+/// Re-derive a tenant's dataset from the two-place rule (independent of the
+/// recorded mapping): `<pool>/freehold/<domain-with-dashes>/<tenant>`.
+/// This is what makes the mapping recoverable from the volume listing alone.
+fn dataset_path_for(cfg: &Config, tenant: &str, domain: &str) -> String {
+    let pool = cfg.plane.backend.clone().unwrap_or_else(|| "rpool".into());
+    let dom = domain.replace('.', "-");
+    format!("{pool}/freehold/{dom}/{tenant}")
+}
+
 /// Does the LXC exist? via `pct list | grep -c` (exits 0 either way so a
 /// GONE vmid is never mistaken for an exec failure).
 fn lxc_exists(a: &Answers, vmid: u32) -> Result<bool> {
@@ -340,24 +354,16 @@ fn stop_local_serve(a: &Answers) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn derive(tenant: Option<&str>, data: bool) -> Scope {
-        match tenant {
-            Some(t) if data => Scope::TenantData { tenant: t.into() },
-            Some(t) => Scope::TenantCompute { tenant: t.into() },
-            None => Scope::WholeWorld { data },
-        }
-    }
-
     #[test]
     fn default_is_whole_world() {
-        assert_eq!(derive(None, false), Scope::WholeWorld { data: false });
-        assert_eq!(derive(None, true), Scope::WholeWorld { data: true });
+        assert_eq!(scope_for(None, false), Scope::WholeWorld { data: false });
+        assert_eq!(scope_for(None, true), Scope::WholeWorld { data: true });
     }
 
     #[test]
     fn tenant_scoped_stays_compute_only_without_data() {
         assert_eq!(
-            derive(Some("relay"), false),
+            scope_for(Some("relay"), false),
             Scope::TenantCompute {
                 tenant: "relay".into()
             }
@@ -367,7 +373,7 @@ mod tests {
     #[test]
     fn tenant_data_adds_dataset_destroy() {
         assert_eq!(
-            derive(Some("cp"), true),
+            scope_for(Some("cp"), true),
             Scope::TenantData {
                 tenant: "cp".into()
             }

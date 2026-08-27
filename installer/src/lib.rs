@@ -639,25 +639,19 @@ pub fn stage_bootstrap(a: &Answers, role: &str, vmid: Option<u32>) -> Result<()>
             None => "(auto vmid, dhcp ip)".into(),
         },
     };
-    // Durable-plane mounts (born-at-create): if the plane is resolved, this
-    // guest's dataset (recorded in the config) is baked into `pct create` as
-    // `--mount <dataset>:<guest-path>`. The guest path is fixed per role —
-    // the same one the storage stage ensures (relay: docker data-root +
-    // compose dir; cp: state dir; k3s: volume carve-out).
+    // Durable-plane mounts (born-at-create): if the plane is resolved for
+    // THIS role, the HOST-resolved mounts recorded by the storage stage are
+    // baked into `pct create` as `--mount <host-source>:<guest-path>`. The
+    // sources are real host mountpoints (PVE rejects a bare dataset name),
+    // and the k3s role reads its own "k3s" key (the tenant is k3s-volumes).
     {
         let cfg_path = config::Config::default_path();
         if let Ok(Some(cfg)) = config::Config::load(&cfg_path)
-            && let Some(dataset) = cfg.plane.datasets.get(role)
+            && let Some(mounts) = cfg.plane.mounts.get(role)
         {
-            let guest_paths: &[&str] = match role {
-                "relay" => &["/var/lib/docker", "/srv/buzz-relay"],
-                "cp" => &["/srv/freehold"],
-                "k3s" => &["/srv/data/k8s-volumes"],
-                _ => &[],
-            };
-            for gp in guest_paths {
+            for m in mounts {
                 args.push("--mount".into());
-                args.push(format!("{dataset}:{gp}"));
+                args.push(format!("{}:{}", m.source, m.guest_path));
             }
         }
     }
@@ -787,25 +781,50 @@ mkdir -p /srv/data/k8s-volumes
 /// `--confirm-storage` gate) — the pipeline itself is non-interactive; the
 /// front-ends translate the operator's prompt into this bool.
 pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
-    let (ok, out) = run(
-        &bin("freehold-orchestrator"),
-        &[
-            "storage",
-            "resolve",
-            "--addr",
-            &a.serve,
-            "--agent-dir",
-            ops_dir().to_str().unwrap(),
-            "--target",
-            &a.runner,
-            if consent { "--confirm-storage" } else { "" },
-        ],
-    )?;
+    // Resolve the backend (consent-gated create). The `--confirm-storage`
+    // flag is appended ONLY when consent is given — never an empty-string
+    // argv element (clap rejects "" on a positional-less subcommand).
+    let mut resolve_args = vec![
+        "storage".to_string(),
+        "resolve".to_string(),
+        "--addr".to_string(),
+        a.serve.clone(),
+        "--agent-dir".to_string(),
+        ops_dir().to_str().unwrap().to_string(),
+        "--target".to_string(),
+        a.runner.clone(),
+    ];
+    if consent {
+        resolve_args.push("--confirm-storage".to_string());
+    }
+    let args: Vec<&str> = resolve_args.iter().map(String::as_str).collect();
+    let (ok, out) = run(&bin("freehold-orchestrator"), &args)?;
     if !ok {
         bail!("storage resolution failed:\n{out}");
     }
-    let pool = "rpool";
-    for tenant in ["relay", "cp", "k3s-volumes"] {
+    // Resolve is REPEATABLE (idempotent re-run confirms): the backend the
+    // ensure stage drives is DETECTED anew per call by `storage ensure`'s
+    // own resolve, so no pool name needs to round-trip between stages. The
+    // config records whatever each ensure returns.
+    //
+    // Ensure + record each durable tenant's HOST-resolved mounts. The LXC
+    // ROLE that rides a tenant differs from the tenant's config key:
+    //   tenant        role      guest mount(s)
+    //   relay  ->     relay     /var/lib/docker + /srv/buzz-relay
+    //   cp     ->     cp        /srv/freehold
+    //   k3s-volumes -> k3s      /srv/data/k8s-volumes
+    let role_for: &[(&str, &str)] = &[("relay", "relay"), ("cp", "cp"), ("k3s-volumes", "k3s")];
+    let cfg_path = config::Config::default_path();
+    let Some(mut cfg) = config::Config::load(&cfg_path)? else {
+        // The storage stage runs IN the configure pipeline — a config to
+        // record the mapping into is mandatory, not optional.
+        bail!(
+            "no config at {} — cannot record the durable-plane mapping",
+            cfg_path.display()
+        );
+    };
+    let mut resolved_any = false;
+    for (tenant, role) in role_for {
         let (ok, out) = run(
             &bin("freehold-orchestrator"),
             &[
@@ -822,22 +841,41 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
                 "--domain",
                 &a.domain,
                 "--pool",
-                pool,
+                "rpool", // ensure drives its own detection; the pool arg is
+                         // the naming-convention parent, not a create target
             ],
         )?;
         if !ok {
             bail!("storage ensure {tenant} failed:\n{out}");
         }
-    }
-    // record the tenant→dataset mapping (survives compute teardown).
-    let cfg_path = config::Config::default_path();
-    if let Ok(Some(mut cfg)) = config::Config::load(&cfg_path) {
-        cfg.plane.backend = Some(pool.into());
-        for tenant in ["relay", "cp", "k3s-volumes"] {
-            let ds = format!("{pool}/freehold/{}/{tenant}", a.domain.replace('.', "-"));
-            cfg.plane.datasets.insert(tenant.into(), ds);
+        // Capture the HOST-resolved mounts the ensure printed.
+        let mut mounts = Vec::new();
+        for line in out.lines() {
+            if let Some(rest) = line.strip_prefix("STORAGE-MOUNT ")
+                && let Some((src, guest)) = rest.split_once(':')
+            {
+                mounts.push(config::PlaneMount {
+                    source: src.to_string(),
+                    guest_path: guest.to_string(),
+                });
+            }
         }
+        if !mounts.is_empty() {
+            cfg.plane.backend.get_or_insert_with(|| "rpool".into());
+            cfg.plane.mounts.insert(role.to_string(), mounts);
+            resolved_any = true;
+        }
+    }
+    if resolved_any {
         let _ = cfg.save(&cfg_path);
+    } else {
+        // A host with no backend and consent withheld bails inside resolve
+        // ABOVE; reaching here with no mounts is a real error, not a no-op.
+        if consent {
+            bail!(
+                "storage resolve/ensure recorded no mounts — resolve said create but ensure produced none"
+            );
+        }
     }
     Ok(())
 }

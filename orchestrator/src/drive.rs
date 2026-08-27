@@ -100,15 +100,18 @@ pub async fn resolve_proxmox(
     client: &McpClient,
     target: &str,
     consent: bool,
+    device: Option<&str>,
 ) -> Result<ResolveAction, BootstrapError> {
-    // 1. existing zpool? reuse quietly.
-    if !zpool_list(client, target)?.is_empty() {
-        return Ok(ResolveAction::Reuse(ExistingBackend::Zfs));
+    // 1. existing zpool? reuse quietly, carrying its name so the ensure/
+    //    destroy steps drive the REAL backend (never a hardcoded 'rpool').
+    let pools = zpool_list(client, target)?;
+    if let Some(pool) = pools.first() {
+        return Ok(ResolveAction::Reuse(ExistingBackend::Zfs, pool.clone()));
     }
     // 2. existing LVM VG (with/without thin pool)? reuse quietly.
     let vgs = vg_list(client, target)?;
-    if !vgs.is_empty() {
-        return Ok(ResolveAction::Reuse(ExistingBackend::LvmThin));
+    if let Some(vg) = vgs.first() {
+        return Ok(ResolveAction::Reuse(ExistingBackend::LvmThin, vg.clone()));
     }
     // 3. none + no consent → bail (actionable), never a silent tier.
     if !consent {
@@ -118,8 +121,18 @@ pub async fn resolve_proxmox(
                 .to_string(),
         ));
     }
-    // 4. consent given: prefer ZFS, fall back to LVM-thin.
-    Ok(ResolveAction::Create(Backend::Zfs))
+    // 4. consent given: prefer ZFS, fall back to LVM-thin (the locked order).
+    //    A zpool needs a PHYSICAL device to carve — if none is supplied there
+    //    is no ZFS to create, so we fall to LVM-thin (a thin LV + filesystem
+    //    on existing storage needs no new device). LVM-thin creates into a
+    //    NEW VG named freehold on ensure when none exists.
+    // A device present means a zpool can be carved -> prefer ZFS; absent,
+    // fall to LVM-thin (a thin LV + filesystem needs no new device).
+    if device.is_some() {
+        Ok(ResolveAction::Create(Backend::Zfs, "rpool".into()))
+    } else {
+        Ok(ResolveAction::Create(Backend::LvmThin, "freehold".into()))
+    }
 }
 
 // --------------------------------------------------------------- creation
@@ -277,97 +290,6 @@ pub fn lxc_mp_args(specs: &[MountSpec]) -> Vec<String> {
         .collect()
 }
 
-/// The mount specs for a relay guest: the two child datasets (docker
-/// data-root + compose deploy dir), baked into the LXC create.
-pub fn relay_mount_specs(pool: &str, domain: &str) -> Result<Vec<MountSpec>, BootstrapError> {
-    Ok(vec![
-        MountSpec {
-            source: relay_child_dataset(pool, domain, RelayChild::DockerRoot)
-                .map_err(|e| BootstrapError::Verify(e.to_string()))?,
-            guest_path: "/var/lib/docker".into(),
-        },
-        MountSpec {
-            source: relay_child_dataset(pool, domain, RelayChild::DeployDir)
-                .map_err(|e| BootstrapError::Verify(e.to_string()))?,
-            guest_path: "/srv/buzz-relay".into(),
-        },
-    ])
-}
-
-/// The mount spec for the CP guest: its whole state DIR on the plane.
-pub fn cp_mount_spec(pool: &str, domain: &str) -> Result<MountSpec, BootstrapError> {
-    Ok(MountSpec {
-        source: dataset_path(pool, domain, Tenant::Cp)
-            .map_err(|e| BootstrapError::Verify(e.to_string()))?,
-        guest_path: "/srv/freehold".into(),
-    })
-}
-
-/// The mount spec for the k3s guest: the k3s-volumes tenant dataset becomes
-/// the `/srv/data/k8s-volumes` carve-out (the local-path provisioner root).
-pub fn k3s_mount_spec(pool: &str, domain: &str) -> Result<MountSpec, BootstrapError> {
-    Ok(MountSpec {
-        source: dataset_path(pool, domain, Tenant::K3sVolumes)
-            .map_err(|e| BootstrapError::Verify(e.to_string()))?,
-        guest_path: "/srv/data/k8s-volumes".into(),
-    })
-}
-
-/// chown the relay's two child datasets to the guest's shifted uid so the
-/// guest can write them ("verify guest-writable, never assumed"). The
-/// mountpoints are resolved from the datasets (the guest paths are the
-/// mount targets `mp=...`), then chowned to the pool's unprivileged shifted
-/// uid root (default map[0 100000]).
-pub async fn relay_chown(
-    client: &McpClient,
-    target: &str,
-    pool: &str,
-    domain: &str,
-) -> Result<(), BootstrapError> {
-    for child in [RelayChild::DockerRoot, RelayChild::DeployDir] {
-        let ds = relay_child_dataset(pool, domain, child)
-            .map_err(|e| BootstrapError::Verify(e.to_string()))?;
-        let out = crate::bootstrap::exec(
-            client,
-            target,
-            &format!("zfs get -H -o value mountpoint {ds}"),
-            60,
-        )?;
-        let mp = out.stdout.trim().to_string();
-        if !mp.is_empty() && mp != "none" && mp != "legacy" {
-            chown_guest_uid(client, target, &mp, 100000).await?;
-        }
-    }
-    Ok(())
-}
-
-/// Ensure the CP's dataset is created + chowned before the CP LXC boots.
-pub async fn ensure_cp_dataset(
-    client: &McpClient,
-    target: &str,
-    pool: &str,
-    domain: &str,
-) -> Result<(), BootstrapError> {
-    let ds = dataset_path(pool, domain, Tenant::Cp)
-        .map_err(|e| BootstrapError::Verify(e.to_string()))?;
-    ensure_dataset(client, target, &ds).await?;
-    Ok(())
-}
-
-/// Ensure the k3s-volumes dataset is created + chowned before the k3s LXC
-/// boots (its `/srv/data/k8s-volumes` becomes a mount of this dataset).
-pub async fn ensure_k3s_dataset(
-    client: &McpClient,
-    target: &str,
-    pool: &str,
-    domain: &str,
-) -> Result<(), BootstrapError> {
-    let ds = dataset_path(pool, domain, Tenant::K3sVolumes)
-        .map_err(|e| BootstrapError::Verify(e.to_string()))?;
-    ensure_dataset(client, target, &ds).await?;
-    Ok(())
-}
-
 /// Destroy one tenant's dataset subtree (data+compute teardown). For relay
 /// this is the PARENT (both children), per the locked single-parent-destroy
 /// unit. `zfs destroy -r` removes children recursively.
@@ -387,11 +309,94 @@ pub async fn destroy_tenant_dataset(
         "destroy tenant dataset",
         120,
     )
-    .map_err(|_| {
+    .map_err(|e| {
         BootstrapError::Verify(format!(
-            "dataset {ds} could not be destroyed (or did not exist) — \
+            "dataset {ds} could not be destroyed (or did not exist): {e} — \
              confirm the tenant name is correct (re-typing the target name was already the gate)"
         ))
     })
     .map(|_| ())
+}
+
+/// A host-root mountable path for a dataset: the `zfs get mountpoint` value.
+/// PVE's `mpN` rejects a bare dataset name — it needs an absolute host path.
+pub fn mountpoint_of(
+    client: &McpClient,
+    target: &str,
+    dataset: &str,
+) -> Result<String, BootstrapError> {
+    let out = crate::bootstrap::exec(
+        client,
+        target,
+        &format!("zfs get -H -o value mountpoint {dataset}"),
+        60,
+    )?;
+    let mp = out.stdout.trim().to_string();
+    if mp.is_empty() || mp == "none" || mp == "legacy" || !mp.starts_with('/') {
+        return Err(BootstrapError::Verify(format!(
+            "dataset {dataset} has no usable host mountpoint ({mp:?}) — \
+             ensure the dataset is created and mounted"
+        )));
+    }
+    Ok(mp)
+}
+
+/// Resolve a tenant's born-at-create MOUNTS to HOST-root mountable
+/// `<host-source>:<guest-path>` specs: ensure the dataset(s) exist
+/// (idempotent), chown them to the guest's shifted uid, and resolve each to
+/// its real host mountpoint (PVE's `mpN` rejects a bare dataset name).
+///
+/// Returns the guest's expected mount specs keyed to the LXC ROLE that rides
+/// them (relay/cp/k3s) — the same keys the config's `plane.mounts` map uses,
+/// so `stage_bootstrap` can emit `--mount` from the recorded resolution.
+pub async fn resolve_tenant_mounts(
+    client: &McpClient,
+    target: &str,
+    pool: &str,
+    domain: &str,
+    tenant: Tenant,
+) -> Result<Vec<MountSpec>, BootstrapError> {
+    match tenant {
+        Tenant::Relay => {
+            let mut out = Vec::new();
+            for child in [RelayChild::DockerRoot, RelayChild::DeployDir] {
+                let ds = relay_child_dataset(pool, domain, child)
+                    .map_err(|e| BootstrapError::Verify(e.to_string()))?;
+                ensure_dataset(client, target, &ds).await?;
+                let host = mountpoint_of(client, target, &ds)?;
+                let guest = match child {
+                    RelayChild::DockerRoot => "/var/lib/docker",
+                    RelayChild::DeployDir => "/srv/buzz-relay",
+                };
+                chown_guest_uid(client, target, &host, 100000).await?;
+                out.push(MountSpec {
+                    source: host,
+                    guest_path: guest.into(),
+                });
+            }
+            Ok(out)
+        }
+        Tenant::Cp => {
+            let ds = dataset_path(pool, domain, Tenant::Cp)
+                .map_err(|e| BootstrapError::Verify(e.to_string()))?;
+            ensure_dataset(client, target, &ds).await?;
+            let host = mountpoint_of(client, target, &ds)?;
+            chown_guest_uid(client, target, &host, 100000).await?;
+            Ok(vec![MountSpec {
+                source: host,
+                guest_path: "/srv/freehold".into(),
+            }])
+        }
+        Tenant::K3sVolumes => {
+            let ds = dataset_path(pool, domain, Tenant::K3sVolumes)
+                .map_err(|e| BootstrapError::Verify(e.to_string()))?;
+            ensure_dataset(client, target, &ds).await?;
+            let host = mountpoint_of(client, target, &ds)?;
+            chown_guest_uid(client, target, &host, 100000).await?;
+            Ok(vec![MountSpec {
+                source: host,
+                guest_path: "/srv/data/k8s-volumes".into(),
+            }])
+        }
+    }
 }

@@ -38,13 +38,25 @@ pub struct Config {
 /// absence = pre-plane legacy / VPS-downgraded world.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PlaneSpec {
-    /// The backend in use (ZFS zpool name / LVM VG name / VPS volume label).
-    /// The common parent of the per-tenant datasets.
+    /// The backend in use (ZFS zpool name / LVM VG name) — the common parent
+    /// of the per-tenant datasets. The naming convention + the host/provider
+    /// volume listing are the two-place rule's SECOND place (independent
+    /// derivation); this field is the first.
     pub backend: Option<String>,
-    /// The tenant→dataset mapping, keyed by tenant (relay/cp/k3s-volumes).
-    /// Derived by the naming convention; stored for the two-place rule.
+    /// LXC role -> resolved reference mounts (HOST source + guest path), the
+    /// born-at-create specs. Keyed by LXC role (relay/cp/k3s). relay has two
+    /// children (docker data-root + compose deploy dir).
     #[serde(default)]
-    pub datasets: std::collections::BTreeMap<String, String>,
+    pub mounts: std::collections::BTreeMap<String, Vec<PlaneMount>>,
+}
+
+/// One resolved durable-plane mount. `source` is the HOST-root mountable
+/// path that `pct mpN` accepts (a real mountpoint, not a bare dataset name —
+/// PVE rejects `rpool/freehold/…` as an mp source).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaneMount {
+    pub source: String,
+    pub guest_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

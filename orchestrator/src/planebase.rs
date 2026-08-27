@@ -101,9 +101,13 @@ pub enum ExistingBackend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveAction {
     /// Use an existing backend, create nothing. Idempotent rerun outcome.
-    Reuse(ExistingBackend),
-    /// Create a backend. Only reachable with consent == true.
-    Create(Backend),
+    /// The `String` is the DETECTED backend identity (the zpool name, or the
+    /// LVM VG name) — not a hardcoded default, so a stock PVE `pve` VG or any
+    /// zpool name flows through to the ensure/destroy steps correctly.
+    Reuse(ExistingBackend, String),
+    /// Create a backend. Only reachable with consent == true. The `String`
+    /// is the pool/VG name to create under.
+    Create(Backend, String),
     /// No viable backend and no consent to create one: fail-closed with an
     /// actionable message. Overriding consent is NOT a tier — the ordering
     /// is unchanged; it only decides the Create vs Bail arm.

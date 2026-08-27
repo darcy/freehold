@@ -628,20 +628,26 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
         StorageCmd::Resolve(a) => {
             let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
             let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
-            match crate::drive::resolve_proxmox(&client, &a.target, a.confirm_storage).await? {
-                crate::planebase::ResolveAction::Reuse(backend) => {
+            match crate::drive::resolve_proxmox(
+                &client,
+                &a.target,
+                a.confirm_storage,
+                a.device.as_deref(),
+            )
+            .await?
+            {
+                crate::planebase::ResolveAction::Reuse(backend, pool) => {
+                    let label = match backend {
+                        crate::planebase::ExistingBackend::Zfs => "ZFS zpool",
+                        crate::planebase::ExistingBackend::LvmThin => "LVM VG/thin-pool",
+                    };
                     println!(
-                        "STORAGE: reusing existing backend ({}) — nothing created",
-                        match backend {
-                            crate::planebase::ExistingBackend::Zfs => "ZFS zpool",
-                            crate::planebase::ExistingBackend::LvmThin => "LVM VG/thin-pool",
-                        }
+                        "STORAGE: reusing existing backend ({label} {pool}) — nothing created"
                     );
                 }
-                crate::planebase::ResolveAction::Create(backend) => {
-                    let pool = "rpool";
+                crate::planebase::ResolveAction::Create(backend, pool) => {
                     println!(
-                        "STORAGE: creating new backend ({}) with consent…",
+                        "STORAGE: creating new backend ({}, pool {pool}) with consent…",
                         match backend {
                             crate::planebase::Backend::Zfs => "ZFS zpool",
                             crate::planebase::Backend::LvmThin => "LVM-thin pool",
@@ -652,22 +658,22 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
                             crate::drive::ensure_zpool(
                                 &client,
                                 &a.target,
-                                pool,
+                                &pool,
                                 a.device.as_deref(),
                             )
                             .await?;
                         }
                         crate::planebase::Backend::LvmThin => {
-                            let vg = a.device.clone().unwrap_or_else(|| "freehold".to_string());
+                            // consent + no zpool + no VG: drive's per-tenant
+                            // ensure creates the thin pool in a NEW VG when
+                            // needed; there is no VG to name here yet.
                             println!(
-                                "STORAGE: LVM VG {vg} — run `storage ensure --tenant <t>` per tenant"
+                                "STORAGE: LVM-thin — per-tenant ensure will create the pool+LV"
                             );
                         }
                     }
                 }
-                crate::planebase::ResolveAction::Bail(m) => {
-                    anyhow::bail!("{m}");
-                }
+                crate::planebase::ResolveAction::Bail(m) => anyhow::bail!("{m}"),
             }
             Ok(())
         }
@@ -675,24 +681,16 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
             let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
             let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
             let tenant = parse_tenant(&a.tenant)?;
-            match tenant {
-                crate::planebase::Tenant::Relay => {
-                    for spec in crate::drive::relay_mount_specs(&a.pool, &a.domain)? {
-                        crate::drive::ensure_dataset(&client, &a.target, &spec.source).await?;
-                    }
-                    crate::drive::relay_chown(&client, &a.target, &a.pool, &a.domain).await?;
-                    println!("STORAGE: relay datasets ensured + guest-writable");
-                }
-                crate::planebase::Tenant::Cp => {
-                    crate::drive::ensure_cp_dataset(&client, &a.target, &a.pool, &a.domain).await?;
-                    println!("STORAGE: cp dataset ensured");
-                }
-                crate::planebase::Tenant::K3sVolumes => {
-                    crate::drive::ensure_k3s_dataset(&client, &a.target, &a.pool, &a.domain)
-                        .await?;
-                    println!("STORAGE: k3s-volumes dataset ensured");
-                }
+            // Ensure + chown the tenant's dataset(s), then print the
+            // HOST-resolved born-at-create specs — one `<source>:<guest>`
+            // per line — for the pipeline to record into `plane.mounts`.
+            let mounts =
+                crate::drive::resolve_tenant_mounts(&client, &a.target, &a.pool, &a.domain, tenant)
+                    .await?;
+            for m in &mounts {
+                println!("STORAGE-MOUNT {}:{}", m.source, m.guest_path);
             }
+            println!("STORAGE: {} datasets ensured + guest-writable", tenant);
             Ok(())
         }
         StorageCmd::Destroy(a) => {
@@ -1238,18 +1236,19 @@ async fn cli_body() -> Result<()> {
                     }
                 );
                 println!("    config:      KEPT (coords + dataset mapping for reattach)");
+                println!("    door:        LEFT IN PLACE (per-tenant teardown keeps the world)");
             } else {
                 println!(
                     "    scope:       whole-world{}",
                     if args.data { " (datasets too)" } else { "" }
                 );
                 println!("    world:       {}", plan.world_home.display());
+                println!("    config:      {}", plan.config_path.display());
+                println!(
+                    "    door:        the {} runner's key → removed from the host LAST",
+                    plan.door_target
+                );
             }
-            println!("    config:      {}", plan.config_path.display());
-            println!(
-                "    door:        the {} runner's key → removed from the host LAST",
-                plan.door_target
-            );
             println!();
             if !args.yes {
                 // Auth seam (deferred per plan): this typed "yes" becomes the
