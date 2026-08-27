@@ -707,66 +707,19 @@ async fn cli_body() -> Result<()> {
                     "console-login needs YOUR key: pass --identity <DIR> or --nsec <64-hex>"
                 ),
             };
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .timeout_global(Some(std::time::Duration::from_secs(15)))
-                .build()
-                .into();
-            let base = args.url.trim_end_matches('/').to_string();
-            let ch_resp = agent
-                .get(&format!("{base}/api/auth/challenge"))
-                .call()
-                .with_context(|| format!("GET {base}/api/auth/challenge — console reachable?"))?;
-            if ch_resp.status() != 200 {
-                anyhow::bail!(
-                    "challenge failed (HTTP {}): {}",
-                    ch_resp.status(),
-                    ch_resp.into_body().read_to_string().unwrap_or_default()
-                );
-            }
-            let ch: serde_json::Value =
-                serde_json::from_str(&ch_resp.into_body().read_to_string().unwrap_or_default())
-                    .with_context(|| "parsing challenge response")?;
-            let nonce = ch["nonce"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("challenge response missing nonce: {ch}"))?
-                .to_string();
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-            let tags = vec![
-                vec!["u".into(), base.clone()],
-                vec!["method".into(), "login".into()],
-            ];
-            let (pubkey, _, sig) =
-                freehold_core::nip98::sign_event(&secret, 27235, ts, tags.clone(), &nonce)
-                    .map_err(anyhow::Error::msg)?;
-            let body = serde_json::json!({
-                "nonce": nonce,
-                "pubkey": pubkey,
-                "created_at": ts,
-                "tags": tags,
-                "sig": sig,
-            });
-            let resp = agent
-                .post(&format!("{base}/api/auth/login"))
-                .header("Content-Type", "application/json")
-                .send(body.to_string())
-                .with_context(|| "POST /api/auth/login")?;
-            let status = resp.status();
-            let cookie = resp
-                .headers()
-                .get("set-cookie")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
-            if status != 200 {
-                let text = resp.into_body().read_to_string().unwrap_or_default();
-                anyhow::bail!("login failed (HTTP {status}): {text}");
-            }
-            let cookie = cookie
+            // The console API contract lives in freehold-console-client
+            // (shared with the TUI): challenge -> NIP-98 sign (kind 27235,
+            // tags u=<base> + method=login) -> session cookie. The key
+            // never leaves this machine.
+            let client = freehold_console_client::Client::login(&args.url, &secret)?;
+            let base = client.base().to_string();
+            let cookie = client
+                .cookie()
                 .ok_or_else(|| anyhow::anyhow!("login response carried no session cookie"))?;
-            println!("console session for {pubkey} @ {base}");
+            println!(
+                "console session for {} @ {base}",
+                client.pubkey().unwrap_or("?")
+            );
             println!("{cookie}");
             println!("use it with: curl -H 'Cookie: {cookie}' {base}/api/overview");
             Ok(())

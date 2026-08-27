@@ -1391,12 +1391,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "freehold-console-client"
+version = "0.1.0"
+dependencies = [
+ "freehold-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "ureq",
+]
+
+[[package]]
 name = "freehold-control-plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "freehold-console-client",
  "freehold-core",
  "freehold-runner",
  "freehold-testkit",
@@ -1462,6 +1474,7 @@ dependencies = [
  "base64 0.22.1",
  "bech32",
  "clap",
+ "freehold-console-client",
  "freehold-control-plane",
  "freehold-core",
  "freehold-installer",
@@ -1527,11 +1540,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "freehold-console-client",
  "freehold-core",
  "freehold-installer",
  "freehold-orchestrator",
  "ratatui",
  "serde",
+ "serde_json",
  "toml",
 ]
 

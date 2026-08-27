@@ -12,6 +12,7 @@ base64 = "0.22"
 bech32 = "0.11"
 clap = { version = "4", features = ["derive", "env"] }
 freehold-control-plane = { path = "../control-plane" }
+freehold-console-client = { path = "../console-client" }
 freehold-core = { path = "../core" }
 hex = "0.4"
 freehold-runner = { path = "../runner" }

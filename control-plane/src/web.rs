@@ -1120,6 +1120,22 @@ mod auth_tests {
         (sk, pk)
     }
 
+    /// Like `serve_with`, but the state dir is KEPT alive and returned —
+    /// the round-trip test provisions runner packages (disk writes) and
+    /// asserts on the shipped files.
+    async fn serve_with_kept(auth: Option<Arc<Auth>>) -> (String, std::path::PathBuf) {
+        let dir = tempdir().unwrap().keep();
+        let store = StateStore::open(&dir).unwrap();
+        let console = crate::console::Console::load_or_create(&dir).unwrap();
+        let app = router(Arc::new(store), console, auth, None);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (format!("http://{addr}"), dir)
+    }
+
     async fn serve_with(auth: Option<Arc<Auth>>) -> String {
         let dir = tempdir().unwrap();
         let store = StateStore::open(dir.path()).unwrap();
@@ -1182,6 +1198,104 @@ mod auth_tests {
             .send()
             .await
             .unwrap()
+    }
+
+    /// The FULL client contract against the REAL router — the same flow the
+    /// TUI's console panel and the web page rely on. Any shape change in
+    /// `freehold-console-client` must keep this green (and vice versa).
+    /// Multi-thread: the client is a SYNC ureq executor (like the TUI), so
+    /// the axum task needs its own worker while the test thread blocks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn console_client_round_trip() {
+        let (sk, pk) = test_admin();
+        let (base, dir) = serve_with_kept(Some(Arc::new(Auth::new(vec![pk.clone()])))).await;
+        let pkg_dir = dir.join("runner").join("testbox");
+
+        let client = freehold_console_client::Client::login(&base, &sk).unwrap();
+        assert_eq!(client.pubkey(), Some(pk.as_str()));
+
+        let ov = client.overview().unwrap();
+        assert!(ov.runners.is_empty());
+        assert_eq!(ov.console_pubkey.len(), 64);
+
+        // provision grants the CONSOLE itself — the UI can only ask what the
+        // operator can ask.
+        let res = client
+            .provision(&freehold_console_client::ProvisionReq {
+                name: "testbox".into(),
+                kind: "local".into(),
+                address: "127.0.0.1:9999".into(),
+                secret: String::new(),
+                runner_dir: Some(pkg_dir.display().to_string()),
+                risk: Some("dev".into()),
+            })
+            .unwrap();
+        assert_eq!(res["ok"].as_bool(), Some(true));
+
+        let ov = client.overview().unwrap();
+        let r = ov.runners.iter().find(|r| r.name == "testbox").unwrap();
+        assert_eq!(r.status, "active");
+        assert_eq!(r.risk.as_deref(), Some("dev"));
+        assert_eq!(r.grants, Some(vec![ov.console_pubkey.clone()]));
+        assert_eq!(r.secret.as_ref().map(|s| s.kind.as_str()), Some("local"));
+
+        // grant lands (2.6.1: channel membership — the roster re-read picks
+        // it up per call).
+        let pk2 = "ab".repeat(32);
+        assert_eq!(
+            client.grant("testbox", &pk2).unwrap()["ok"].as_bool(),
+            Some(true)
+        );
+        let ov = client.overview().unwrap();
+        let r = ov.runners.iter().find(|r| r.name == "testbox").unwrap();
+        assert_eq!(r.grants.as_deref().unwrap().len(), 2);
+        assert!(r.grants.as_deref().unwrap().contains(&pk2));
+
+        assert_eq!(
+            client
+                .rotate(&freehold_console_client::SecretReq {
+                    name: "testbox".into(),
+                    secret: "new-secret".into(),
+                })
+                .unwrap()["ok"]
+                .as_bool(),
+            Some(true)
+        );
+
+        assert_eq!(
+            client.runner_addr("testbox", "127.0.0.1:9998").unwrap()["ok"].as_bool(),
+            Some(true)
+        );
+        let ov = client.overview().unwrap();
+        let r = ov.runners.iter().find(|r| r.name == "testbox").unwrap();
+        assert_eq!(r.mcp_addr.as_deref(), Some("127.0.0.1:9998"));
+
+        // un-grant + revoke; the revoked package is gone (grants = None =
+        // unreadable, distinct from an honest empty list).
+        assert_eq!(
+            client.revoke_grant("testbox", &pk2).unwrap()["ok"].as_bool(),
+            Some(true)
+        );
+        let ov = client.overview().unwrap();
+        let r = ov.runners.iter().find(|r| r.name == "testbox").unwrap();
+        assert_eq!(r.grants, Some(vec![ov.console_pubkey.clone()]));
+
+        assert_eq!(
+            client.revoke("testbox").unwrap()["ok"].as_bool(),
+            Some(true)
+        );
+        let ov = client.overview().unwrap();
+        let r = ov.runners.iter().find(|r| r.name == "testbox").unwrap();
+        assert_eq!(r.status, "revoked");
+        assert_eq!(r.grants, None);
+
+        // a BROKEN session is refused (fail closed), not silently accepted.
+        let bad = freehold_console_client::Client::with_cookie(&base, "fh_session=rot");
+        let err = bad.overview().unwrap_err();
+        assert!(
+            matches!(err, freehold_console_client::Error::Api { status: 401, .. }),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
