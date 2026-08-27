@@ -3,7 +3,7 @@
 use crate::modes::{
     bootstrap::{Bootstrap, Status},
     configure::{CStatus, ConfigureState},
-    running::Running,
+    running::{AuthState, Running, clip},
 };
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -74,6 +74,12 @@ impl App {
     }
 
     pub fn on_key(&mut self, code: KeyCode) {
+        // while a console prompt is open, ALL keys belong to it (Esc cancels,
+        // Enter submits) — never quit/reconfigure mid-typing.
+        if matches!(self.mode, Mode::Running) && self.rn.is_typing() {
+            self.rn.on_key(code);
+            return;
+        }
         match code {
             // 'q' quits only on RENDERED screens — never while typing text
             // (a pubkey/npub can legitimately contain 'q').
@@ -215,7 +221,12 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
     match app.mode {
         Mode::Bootstrap => draw_bootstrap(chunks[1], f, &mut app.bs),
         Mode::Configure => draw_configure(chunks[1], f, &mut app.cf, app.first_auth),
-        Mode::Running => draw_running(chunks[1], f, &mut app.rn, app.install_time),
+        Mode::Running => {
+            let rsplit =
+                Layout::vertical([Constraint::Length(13), Constraint::Min(0)]).split(chunks[1]);
+            draw_running(rsplit[0], f, &mut app.rn, app.install_time);
+            draw_console(rsplit[1], f, &mut app.rn);
+        }
     }
 
     let hint = match app.mode {
@@ -231,7 +242,9 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
             crate::modes::bootstrap::Step::Written => "…",
         },
         Mode::Configure => "r retry failed stages · q quit",
-        Mode::Running => "c reconfigure · q quit",
+        Mode::Running => {
+            "l login · p provision · R rotate · x revoke · g grant · G ungrant · a addr · v channel · c reconfigure · q quit"
+        }
     };
     footer(chunks[2], f, hint);
 }
@@ -609,4 +622,193 @@ fn draw_running<'a>(
         )));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+// ---------------------------------------------------------------------------
+// The console panel: services-at-a-glance, driven by the console API through
+// the shared client. This is the TUI half of the web UI's parity — the same
+// overview the page renders, keyboard-driven.
+// ---------------------------------------------------------------------------
+
+fn val_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The runner's readiness probe: an object of check-label -> state (the
+/// runner's OWN self-check, with its traffic lights). An error/note key
+/// carries console-side diagnosis.
+fn readiness_text(rd: &Option<serde_json::Value>) -> String {
+    match rd {
+        Some(serde_json::Value::Object(m)) if !m.is_empty() => m
+            .iter()
+            .map(|(k, v)| format!("{k}: {}", val_text(v)))
+            .collect::<Vec<_>>()
+            .join(" · "),
+        _ => "—".into(),
+    }
+}
+
+fn grants_text(g: &Option<Vec<String>>) -> String {
+    match g {
+        None => "pkg unreadable".into(),
+        Some(v) if v.is_empty() => "nobody (fail closed)".into(),
+        Some(v) => format!(
+            "{} · {}…",
+            v.len(),
+            v[0].chars().take(8).collect::<String>()
+        ),
+    }
+}
+
+/// Fixed-width column: pad to `w` chars, or clip with an ellipsis.
+fn col(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        format!("{s:<w$}")
+    } else {
+        let head: String = s.chars().take(w.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
+    let border = match rn.cp.auth {
+        AuthState::Live => Color::Cyan,
+        AuthState::Failed => Color::Red,
+        AuthState::Missing => Color::DarkGray,
+    };
+    let block = panel("console — services at a glance", border);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(ch) = &rn.cp.channel {
+        for l in ch.lines().take(inner.height.saturating_sub(1) as usize) {
+            lines.push(Line::from(Span::styled(
+                "  ".to_string() + l,
+                Style::new().fg(Color::Gray),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "  (Esc closes)",
+            Style::new().fg(Color::DarkGray),
+        )));
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+    match rn.cp.auth {
+        AuthState::Missing => {
+            lines.push(Line::from(Span::styled(
+                " not logged in — l login (operator identity dir or FREEHOLD_CONSOLE_COOKIE)",
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        AuthState::Failed => {
+            lines.push(Line::from(Span::styled(
+                format!(" login unavailable: {}", clip(&rn.cp.auth_reason, 80)),
+                Style::new().fg(Color::Red),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  (l retries with the config identity; FREEHOLD_CONSOLE_COOKIE overrides)",
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        AuthState::Live => {
+            if let Some(c) = &rn.cp.client {
+                let pk = c
+                    .pubkey()
+                    .map(|p| format!("{}…", clip(p, 16)))
+                    .unwrap_or_else(|| "session".into());
+                lines.push(Line::from(Span::styled(
+                    format!(" session: {pk} @ {}", c.base()),
+                    Style::new().fg(Color::DarkGray),
+                )));
+            }
+            match &rn.cp.overview {
+                None => lines.push(Line::from(Span::styled(
+                    " loading overview…",
+                    Style::new().fg(Color::DarkGray),
+                ))),
+                Some(ov) if ov.runners.is_empty() => lines.push(Line::from(Span::styled(
+                    " no runners yet — provision one (p)",
+                    Style::new().fg(Color::DarkGray),
+                ))),
+                Some(ov) => {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            " {}{}{}{}{}{}",
+                            col("runner", 16),
+                            col("status", 7),
+                            col("risk", 6),
+                            col("secret", 30),
+                            col("readiness", 34),
+                            col("grants", 22),
+                        ),
+                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )));
+                    for r in &ov.runners {
+                        let status = if r.status == "revoked" {
+                            "revoked"
+                        } else {
+                            "active"
+                        };
+                        let secret = r
+                            .secret
+                            .as_ref()
+                            .map(|s| format!("{} · {} · {}", s.name, s.kind, s.address))
+                            .unwrap_or_else(|| "—".into());
+                        lines.push(Line::from(vec![
+                            Span::styled(col(&r.name, 16), Style::new().fg(Color::White)),
+                            Span::styled(
+                                col(status, 7),
+                                Style::new().fg(if r.status == "revoked" {
+                                    Color::Red
+                                } else {
+                                    Color::Green
+                                }),
+                            ),
+                            Span::raw(col(r.risk.as_deref().unwrap_or("?"), 6)),
+                            Span::raw(col(&secret, 30)),
+                            Span::raw(col(&readiness_text(&r.readiness), 34)),
+                            Span::raw(col(&grants_text(&r.grants), 22)),
+                        ]));
+                    }
+                }
+            }
+        }
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+
+    // the prompt / notice line sits on the panel's last row.
+    if let Some(p) = &rn.cp.prompt {
+        let line = format!(" {}: {} ▌", p.label(), p.buf);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                line,
+                Style::new().fg(Color::Yellow),
+            ))),
+            Rect::new(
+                inner.x,
+                inner.y + inner.height.saturating_sub(1),
+                inner.width,
+                1,
+            ),
+        );
+    } else if !rn.cp.notice.is_empty() {
+        let n = rn.cp.notice.clone();
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}", clip(&n, inner.width.saturating_sub(1) as usize)),
+                Style::new().fg(Color::Yellow),
+            ))),
+            Rect::new(
+                inner.x,
+                inner.y + inner.height.saturating_sub(1),
+                inner.width,
+                1,
+            ),
+        );
+    }
 }
