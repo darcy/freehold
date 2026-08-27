@@ -93,6 +93,13 @@ C0: the plane is C0's precondition, not parallel work.
   shared dataset is cross-readable across tenants while both run, independent of teardown.
 * **Snapshot-capable ≠ snapshot-consistent** — named (WAL-aware / quiesce-before-snapshot
   for any tenant running a database), implementation deferred.
+* **ARCHITECTURE's "durable PVCs never on the daemon root" applies to the k3s/rancher root,
+  not the docker data-root.** Mounting the tenant dataset AS `/var/lib/docker` puts durable
+  data under a daemon root by construction — the opposite of that rule's wording. The
+  accepted trade for DOCKER specifically: the images there are disposable-
+  because-durable (harmless), and the mount is the only no-patch way to reach the named
+  volumes. Recorded as the docker-root exception; the k3s rule stands unchanged
+  (`/srv/data/k8s-volumes`).
 * **Attachment is by reference, not by copy** — bind-mount (LXC), provider volume mount
   (VPS), or the k3s `local-path` root pointed at the tenant dataset (kube). **And the
   compute is BORN with the reference mount** — the mount is baked into the LXC
@@ -103,22 +110,35 @@ C0: the plane is C0's precondition, not parallel work.
   must say so.** The compose bundle ships named volumes (`buzz-postgres-data` etc.), which
   physically live under `/var/lib/docker/volumes` INSIDE the guest — an `mp` at
   `/srv/data/relay` never reaches them. The no-patch route (the buzz bundle is NOT patched —
-  locked decision) is: tenant dataset mounted over the docker data-root (daemon.json
-  `data-root` on the mount, or the mount point IS the data root — images become
-  disposable-because-durable, harmless) + the SAME dataset bind-mounted at the compose
-  deploy dir (which covers the `.env`). Two mount points, one dataset; the compose file
-  stays as-shipped.
+  locked decision) commits to ONE variant: the tenant dataset IS the docker data root — the
+  guest's `/var/lib/docker` is the dataset's mount point, never a `daemon.json` `data-root`
+  key (the bootstrap's fuse fallback TRUNCATES `/etc/docker/daemon.json` to
+  `{"storage-driver":"fuse-overlayfs"}` at `bootstrap.rs:576-585` — a later converge would
+  silently revert any data-root there to the ephemeral rootfs and the relay would boot
+  healthy on an empty Postgres; the mount-point variant is immune by construction). Images
+  become disposable-because-durable, harmless; the compose file stays as-shipped.
+* **Two CHILD datasets for relay, not one at two mount points.** The `.env` holds
+  `BUZZ_RELAY_PRIVATE_KEY` + every DB/S3 credential — it must NOT live inside the docker
+  data-root (the routine fix for a wedged docker-in-LXC is wiping that root). Under the
+  relay tenant parent: one child = the daemon data root, one child = the compose deploy dir
+  (where the `.env` lands). Separate blast radii; the root wipe can never take the identity
+  with it.
 * **Unprivileged ownership is a landmine, stated as a requirement.** Guests write as
   host-uid 100000: the dataset root must be chowned to the shifted uid (or an idmap applied)
   BEFORE the guest can write the mount — verified at first mount, not assumed. The LVM-thin
   backend additionally needs mkfs + the same ownership handling. (Not "zoned" — that is a
   ZFS block-device property, unrelated to container mounts; the mechanism is idmap +
   dataset-root ownership.)
-* **Creating a zpool is a silent destructive host mutation — gated like destruction.** A
-  data+compute teardown requires typed confirmation, but auto-creating a zpool (carving/
-  relabeling unallocated space) is the same irreversibility class running silently on every
-  converge. Resolution may DETECT (list pools/volumes) freely; CREATING a zpool requires
-  the operator's explicit consent (a confirm prompt or a `--confirm-storage` flag), never a
+* **Creating ANY storage backend is a silent destructive host mutation — gated like
+  destruction.** A data+compute teardown requires typed confirmation, but creating a zpool
+  OR an LVM-thin pool (carving/relabeling unallocated space) is the same irreversibility
+  class running silently on every converge. Resolution may DETECT (list pools/volumes)
+  freely; CREATING a backend (zpool or thin pool alike — gating only zpool-create would
+  walk a declined prompt straight into an ungated LVM-thin create) requires the operator's
+  explicit consent (a confirm prompt or a `--confirm-storage` flag). Withheld consent is
+  specified, not implicit: an existing viable backend → use it quietly; none + consent
+  withheld → fall through to the EXPLICITLY-DOWNGRADED plain-directory fallback (same
+  labeling rule as the VPS branch) or bail — the operator sees which happened. Never a
   silent auto-create.
 * **Tenant→dataset mapping lives outside compute, two-place recoverable:** the workstation
   config (survives compute teardown by design) plus independently derivable from the
@@ -179,14 +199,15 @@ C0: the plane is C0's precondition, not parallel work.
    a MOUNT of the k3s-volumes tenant dataset (the `local-path` provisioner root points at
    it), satisfying the universal rule + C0/0.09's assumption at once.
 3. Fresh relay stood up with the Postgres/Redis/MinIO/git volumes AND the generated
-   `deploy/compose/.env` BORN on relay's tenant dataset at creation: the dataset mounts over
-   the docker data-root + is bind-mounted at the compose deploy dir (TWO mount points, one
-   dataset — the named volumes land on it, the `.env` is covered, the buzz bundle is NOT
-   patched). The mount is baked into the LXC create; neither the volumes nor the `.env` are
-   migrated from the running instance. A compute-only teardown then reattaches BOTH, so the
-   reattached relay opens its state and keeps its signing identity (rosters stay valid).
-   The dataset root is chowned to the guest's shifted uid at first mount (guest-writable
-   verified, not assumed).
+   `deploy/compose/.env` BORN on relay's tenant datasets at creation: one child dataset IS
+   the guest's `/var/lib/docker` (the named volumes land on it — NO `daemon.json` touch, so
+   the bootstrap's truncating write can never revert it), a second child = the compose
+   deploy dir (the `.env` lives there, outside the wipeable docker root). The mounts are
+   baked into the LXC create; neither the volumes nor the `.env` are migrated from the
+   running instance. A compute-only teardown then reattaches BOTH, so the reattached relay
+   opens its state and keeps its signing identity (rosters stay valid). The dataset roots
+   are chowned to the guest's shifted uid at first mount (guest-writable verified, not
+   assumed).
 4. Fresh CP stood up with the whole STATE DIR (state.json + console identity + runner
    packages) born on CP's tenant dataset at creation; atomic-write discipline verified
    across the mount boundary (and the rename's parent-dir fsync fixed there — futil's
@@ -195,13 +216,22 @@ C0: the plane is C0's precondition, not parallel work.
    survive compute-only teardown.
 5. Tenant→dataset mapping in the workstation config, independently re-derivable from the
    host/provider's volume listing — under a NAMING CONVENTION so the derivation is
-   checkable: `<pool>/freehold/<domain>/<tenant>` (the same pattern the guests already
-   follow with `<domain>-<role>`). A raw `zfs list` is only machine-derivable if the name
-   carries world + tenant.
+   checkable, PER BRANCH (provider volume labels are flat with a restricted charset; a ZFS
+   dataset path is not):
+   - **Proxmox (ZFS/LVM-thin):** `<pool>/freehold/<domain>/<tenant>` — the same
+     world+tenant pattern the guests already follow with `<domain>-<role>`.
+   - **VPS (block volume):** the FLATTENED label `fh-<domain-with-dashes>-<tenant>` (the
+     `.` → `-` normalization the guest names already use); no slashes, derivable from the
+     provider's volume list alone. Whole-world teardown on VPS REMOVES the tenant block
+     volumes (or confirms leaving them) — otherwise the config dies and the volumes survive
+     as orphaned billed resources with no mapping back (the two-place rule has only one
+     place on VPS).
 6. Teardown tooling updated with the THREE scopes (whole-world / per-tenant compute-only
    / per-tenant data+compute); per-tenant scopes KEEP the config (coords + mapping) —
-   whole-world alone deletes it; data+compute carries a clear warning + typed confirmation.
-   VPS connector surface: block-volume create/attach/format/mount (new code).
+   whole-world alone deletes it, and on VPS whole-world removes the tenant block volumes
+   (or confirms leaving them) so they are never orphaned-and-billed with no mapping;
+   data+compute carries a clear warning + typed confirmation. VPS connector surface:
+   block-volume create/attach/format/mount (new code).
 
 ### Acceptance
 
@@ -212,8 +242,11 @@ C0: the plane is C0's precondition, not parallel work.
   other's dataset + mapping alone) — all against a fake `pct`/mock provider, mirroring the
   fake-relay/mock-Vultr pattern.
 * Converge against a Proxmox-lxc target with no existing backend → resolution detects
-  absence and, WITH operator consent (the confirm gate), creates a zpool or falls back to
-  LVM-thin; against a target that can support neither → bails with an actionable message.
+  absence and, WITH operator consent (the confirm gate — covering zpool AND LVM-thin-pool
+  creation alike), creates a zpool or falls back to LVM-thin; WITH CONSENT WITHHELD → falls
+  through to the explicitly-downgraded plain-directory fallback (labeled like the VPS
+  branch) or bails, and the acceptance asserts which happened; against a target that can
+  support neither → bails with an actionable message.
 * Converge against a VPS target → resolution attaches a provider block volume if available,
   or falls back to the explicitly-downgraded local directory, stating the durability
   difference; bails only if both are unavailable.
