@@ -167,7 +167,10 @@ async fn demo_steps_run_and_report_failures() {
             break;
         }
         if attempt == 11 {
-            panic!("first demo step never succeeded after warm-up: {:?}", probe[0]);
+            panic!(
+                "first demo step never succeeded after warm-up: {:?}",
+                probe[0]
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
