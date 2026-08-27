@@ -6,6 +6,37 @@ Consolidates v3 (with its Phase-0 resolutions) + v5's changes: two structural su
 review. Everything below marked v3-unchanged stands as locked-in-v3; supersessions are
 recorded explicitly, not silently.
 
+## Pre-C0 progress (2026-08-27) — what landed before C0, after the world rebuild
+
+The 2026-08-27 teardown/rebuild destroyed the pre-C0 live instances (the landing-strip LXC
+harness and the LXC-105 LiteLLM reference; see the stale-claim amends below); the code and
+harness for both paths survive (flavors #72/#73, terraform plans #76/#78). What landed in
+the rebuild era and directly advances C0/C1:
+
+- **k3s is now a deterministic CONFIGURE STAGE (#120)** — `freehold configure` boots the
+  k3s LXC (auto vmid, coords recorded to `lxc.k3s` + `managed += k3s`) and installs k3s
+  inside with the spike-verified unprivileged posture (KubeletInUserNamespace after the
+  subcommand, unit override, node-ready wait, `/srv/data/k8s-volumes` carve-out). This is
+  the C0 substrate's bring-up, landing as a runner-exec stage (C7's "runner-exec only"
+  discipline honored; the Terraform wrapper for `--kind k3s` remains the C7 consolidation,
+  not a prerequisite for C0).
+- **The Services view is ready for litellm (#115/#120)** — the running dashboard lists
+  `managed` pieces (relay/cp/k3s today); litellm appears automatically the moment its
+  coords land in the config (the same machinery k3s used).
+- **Agents registry + live availability (#118)** — the CP records named AI agents
+  (delegate-peer registers itself at start) and reports ●/○ availability from relay kind-9
+  presence; the buzz-acp agents register through the same path.
+- **The console now has a WORKING relay scope** (deploy-cp wires `--relay-url`/
+  `--relay-pubkey`/`--relay-host`/`--relay-host-ip`; a co-located console talks to the
+  relay LXC over LAN with the community `Host` header + NIP-98 signed at the public URL +
+  relay community membership) — a precondition for the litellm-kube reads and the agent
+  channel views.
+- **Teardown destroys the k3s LXC (#121)** — the box-lifecycle discipline now covers the
+  substrate the rebuilds kept stranding.
+
+C0 itself (litellm-kube apply + Postgres + master-key re-mint + the Services row) has NOT
+started; see Phase C below.
+
 ## Locked decisions — SUPERSEDED or NEW this revision
 
 * **v3's "one dedicated agent-harness LXC" placement is RETIRED in the target
@@ -15,7 +46,9 @@ recorded explicitly, not silently.
   `envFrom` Secret, config pulled fresh per pod-start (ARCHITECTURE's already-specified
   model). **Landing-strip exception (execution, not architecture):** the FIRST expert
   (`@pihole` / `@tailscale`) runs on the already-staged LXC harness (goose 1.47.0 +
-  buzz-acp + a minted LiteLLM key — all live on-box as of 2026-08-24) while C0 stands up the
+  buzz-acp + a minted LiteLLM key — live on-box as of 2026-08-24; that instance was
+  destroyed by the downstream teardown/rebuild (2026-08-27), so the landing strip now
+  re-stages from the flavors + harness, not a live box) while C0 stands up the
   substrate in parallel. Pod migration is a separate, C5-gated cutover — NOT a precondition
   for G1/G2.
 * **Onboarding order INVERTED (supersedes ARCHITECTURE's + POC.md's "CPA provisions target →
@@ -38,10 +71,11 @@ recorded explicitly, not silently.
   forever** — a box-hosted agent cannot report or recover from its own box's unreachability.
   Peers are exempt from disposability/rebuild treatment but still get a C5-style
   postcondition check on their service.
-* **LiteLLM target flips from LXC to kube** (deterministic, C0). The existing live LXC
-  deployment (LXC 105, model registered, key minting proven) is the REFERENCE implementation
-  C0 re-targets, kept serving until the kube deployment passes its own C5 postcondition, then
-  torn down after its soak window — per the blue/green narrowing rule, never before.
+* **LiteLLM target flips from LXC to kube** (deterministic, C0). The LXC deployment
+  (LXC 105, model registered, key minting proven) was the REFERENCE implementation C0 was to
+  re-target — it died with the 2026-08-27 rebuild, so C0 now deploys GREENFIELD to the
+  already-staged k3s and its own C5 postcondition stands alone (no live-reference soak, no
+  blue/green twin).
 * **Terraform is the expert's write-down artifact, not an infra gate (C6, softened).** The
   goal: the expert captures what it learned so it doesn't re-derive it — location
   `/srv/data/agents/<expert>/` unchanged, "skills may ship a starter" unchanged. For Chunk
@@ -171,11 +205,12 @@ NOT widened by the onboarding inversion.
 
 ## Phase C — Skill framework v1
 
-* [ ] C0. **k3s → LiteLLM, deterministic, operator/CPA-driven.** Sequenced AFTER Phase 0.08's
-      re-verification; NOT blocking Phase E's first expert (landing strip). Proves the
-      substrate carries a real workload + stands up Postgres for real (ahead of pod-config
-      need). The live LXC LiteLLM stays serving until the kube deploy passes C5, torn down
-      after its soak window — never before.
+* [ ] C0. **k3s → LiteLLM, deterministic, operator/CPA-driven.** The k3s substrate is
+      ALREADY staged (the configure stage, see Pre-C0 progress); C0 = the litellm-kube
+      apply (the #76/#78 plan) + Postgres (`/srv/data/k8s-volumes` pinned) + the master-key
+      re-mint via the litellm runner + surfacing the Services row. Sequenced AFTER Phase
+      0.08's re-verification; NOT blocking Phase E's first expert (landing strip). No live
+      LXC reference remains — C0's own C5 postcondition is the gate.
 * [ ] C1. Skill schema: `target: lxc | pod | either` documented as a default HINT the expert
       may override (the inversion, recorded in schema docs).
 * [ ] C2. Disposability per compute type: LXC installs `/srv/nobackup` + `/srv/data/<service>`
