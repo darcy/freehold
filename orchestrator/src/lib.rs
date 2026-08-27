@@ -10,6 +10,8 @@ pub mod bootstrap;
 pub mod cli;
 pub mod client;
 pub mod deploy_cp;
+pub mod drive;
 pub mod flows;
+pub mod planebase;
 pub mod relay;
 pub mod relay_member;

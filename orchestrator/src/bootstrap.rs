@@ -98,7 +98,7 @@ pub struct BootstrapResult {
     pub detail: String,
 }
 
-fn exec(
+pub(crate) fn exec(
     client: &McpClient,
     target: &str,
     cmd: &str,

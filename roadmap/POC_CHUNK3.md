@@ -129,19 +129,14 @@ C0: the plane is C0's precondition, not parallel work.
   backend additionally needs mkfs + the same ownership handling. (Not "zoned" — that is a
   ZFS block-device property, unrelated to container mounts; the mechanism is idmap +
   dataset-root ownership.)
-* **Creating ANY storage backend is a silent destructive host mutation — gated like
-  destruction.** A data+compute teardown requires typed confirmation, but creating a zpool
-  OR an LVM-thin pool (carving/relabeling unallocated space) is the same irreversibility
-  class running silently on every converge. Resolution may DETECT (list pools/volumes)
-  freely; CREATING a backend (zpool or thin pool alike — gating only zpool-create would
-  walk a declined prompt straight into an ungated LVM-thin create) requires the operator's
-  explicit consent (a confirm prompt or a `--confirm-storage` flag). Withheld consent is
-  specified, not implicit — and NOT a new resolution tier: the locked order stays
-  `ZFS → LVM-thin → bail` on both the per-branch lists and deliverable 1. An existing
-  viable backend → use it quietly; none + consent withheld → **bail** (Proxmox branch;
-  the VPS branch's explicitly-downgraded local-directory tier is already a first-class
-  rung of ITS order, not a consent consequence). Never a silent auto-create, and never a
-  fallback tier that only an acceptance test knows about.
+  **Consent is a FRONT-END concern — the converge pipeline itself is non-interactive**
+  (the locked `lib.rs` discipline: "prompts and waiting belong to the front-ends"). The
+  NORMATIVE expression of consent in the pipeline is the `--confirm-storage` flag — a
+  headless converge must be able to grant or withhold consent and BAIL (not stall on a
+  prompt) when a backend must be created and the flag is absent. The interactive confirm
+  prompt exists only in the front-ends (`freehold-install`, the TUI), which translate the
+  operator's answer into the flag for the stage. A configure-stage that would prompt
+  directly is a contract violation.
 * **Tenant→dataset mapping lives outside compute, two-place recoverable:** the workstation
   config (survives compute teardown by design) plus independently derivable from the
   host/provider's own volume listing. **Teardown reads the mapping from the config BEFORE it
@@ -182,10 +177,13 @@ C0: the plane is C0's precondition, not parallel work.
   - **Per-tenant compute-only:** destroys exactly ONE tenant's LXC/pod; the config SURVIVES
     (it holds the coords + mapping for reattach — at most the tenant's coords are refreshed);
     the dataset is untouched; next compute reattaches by reference.
-  - **Per-tenant data+compute:** same as compute-only PLUS that tenant's dataset is
-    destroyed — full intended loss, scoped to exactly the named tenant by construction of
-    the per-tenant model. Clear warning + typed confirmation (re-typing the target name),
-    given the size of what's being destroyed, regardless of intent.
+  **The destroy unit of data+compute is the tenant PARENT subtree, never a single child.**
+  Relay is TWO child datasets (docker data-root + compose deploy dir) under its tenant
+  parent; destroying "the relay's dataset" destroys BOTH children with the parent — a
+  data+compute relay teardown must not leave the deploy-dir `.env` (or the data-root)
+  orphaned behind while pretending a full intended loss. Same for CP/k3s (single dataset
+  under their parent, for now). The acceptance covers the two-child relay destroy path,
+  not just CP's single dataset.
 * **Interplay with D4's blue/green (recorded, no decision forced):** the shared tenant
   dataset means both colors mount the SAME volume by reference — DB-style tenants handle
   shared storage natively; single-writer services need the flip at the mount/service
@@ -262,8 +260,14 @@ C0: the plane is C0's precondition, not parallel work.
 * **Downgraded VPS fallback:** rebuild-fresh semantics, stated plainly — the instance disk
   dies with compute-only teardown, so this branch's teardown = fresh install (the durability
   downgrade in action, never a silent surprise).
-* Invoke data+compute teardown on CP's tenant only → confirm relay's dataset provably
-  untouched → typed confirmation required and, once given, destroys CP's data as intended.
+* Invoke data+compute teardown on the RELAY tenant (two children: docker data-root + the
+  compose deploy dir) → both child datasets destroyed with the parent subtree (no `.env`
+  or data-root orphaned behind), and CP's + k3s-volumes' datasets provably untouched.
+* Destroy the k3s LXC (compute-only) → fresh k3s LXC → reattach by reference →
+  `/srv/data/k8s-volumes` contents intact (the k3s-volumes tenant survives, so C0/0.09's
+  Postgres/LiteLLM durable assumption holds across a substrate teardown).
+* Tenant→dataset mapping recoverable from the host/provider's volume listing alone, via
+  the `<pool>/freehold/<domain>/<tenant>` naming convention.
 * Tenant→dataset mapping recoverable from the host/provider's volume listing alone, via
   the `<pool>/freehold/<domain>/<tenant>` naming convention.
 

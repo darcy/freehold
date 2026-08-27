@@ -61,6 +61,8 @@ enum Cmd {
     /// Relay surface: the bootstrap step — ensures the #freehold channel
     /// exists (open, deterministic id) and joins every listed agent to it
     RelaySetup(RelaySetupArgs),
+    /// Phase 0.12: resolve/ensure/destroy the durable volume plane
+    Storage(StorageArgs),
 }
 
 #[derive(Args)]
@@ -326,6 +328,79 @@ struct RelaySetupArgs {
     agents: String,
 }
 
+/// Phase 0.12 — durable volume plane.
+#[derive(Args)]
+struct StorageArgs {
+    #[command(subcommand)]
+    cmd: StorageCmd,
+}
+
+/// Storage subcommands — the operator surface for the durable plane.
+#[derive(Subcommand)]
+enum StorageCmd {
+    /// Resolve the durable backend (ZFS → LVM-thin → bail for the Proxmox
+    /// branch); with consent, create the backend. Runs as part of the
+    /// configure pipeline's storage stage; this is the operator-facing form.
+    Resolve(StorageResolveArgs),
+    /// Ensure a tenant's dataset/volume exists (idempotent) + is guest-writable.
+    Ensure(StorageEnsureArgs),
+    /// Destroy a tenant's dataset subtree (data+compute teardown half).
+    Destroy(StorageDestroyArgs),
+}
+
+#[derive(Args)]
+struct StorageResolveArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to drive storage through (the runner holding the host ssh key)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Physical device for a NEW zpool (e.g. /dev/sdb) — required only on
+    /// the consent-gated create path, when no existing backend is detected.
+    #[arg(long)]
+    device: Option<String>,
+    /// Operator consent to CREATE a backend (zpool OR LVM-thin) when none
+    /// is detected. Absent + no backend = actionable bail.
+    #[arg(long)]
+    confirm_storage: bool,
+}
+
+#[derive(Args)]
+struct StorageEnsureArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to drive storage through (the runner holding the host ssh key)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Tenant: relay | cp | k3s-volumes
+    #[arg(long)]
+    tenant: String,
+    /// The relay's identity domain (for the dataset naming)
+    #[arg(long)]
+    domain: String,
+    /// Storage pool (zpool name / VG name)
+    #[arg(long)]
+    pool: String,
+}
+
+#[derive(Args)]
+struct StorageDestroyArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to drive storage through (the runner holding the host ssh key)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Tenant: relay | cp | k3s-volumes
+    #[arg(long)]
+    tenant: String,
+    /// The relay's identity domain (for the dataset naming)
+    #[arg(long)]
+    domain: String,
+    /// Storage pool (zpool name / VG name)
+    #[arg(long)]
+    pool: String,
+}
+
 #[derive(Args)]
 struct BootstrapArgs {
     #[command(flatten)]
@@ -531,6 +606,100 @@ struct DemoArgs {
     /// JSON steps file: [{target, cmd, secrets?}]
     #[arg(long)]
     steps: PathBuf,
+}
+
+/// Phase 0.12 storage subcommand dispatch.
+async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
+    match &args.cmd {
+        StorageCmd::Resolve(a) => {
+            let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
+            let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
+            match crate::drive::resolve_proxmox(&client, &a.target, a.confirm_storage).await? {
+                crate::planebase::ResolveAction::Reuse(backend) => {
+                    println!(
+                        "STORAGE: reusing existing backend ({}) — nothing created",
+                        match backend {
+                            crate::planebase::ExistingBackend::Zfs => "ZFS zpool",
+                            crate::planebase::ExistingBackend::LvmThin => "LVM VG/thin-pool",
+                        }
+                    );
+                }
+                crate::planebase::ResolveAction::Create(backend) => {
+                    let pool = "rpool";
+                    println!(
+                        "STORAGE: creating new backend ({}) with consent…",
+                        match backend {
+                            crate::planebase::Backend::Zfs => "ZFS zpool",
+                            crate::planebase::Backend::LvmThin => "LVM-thin pool",
+                        }
+                    );
+                    match backend {
+                        crate::planebase::Backend::Zfs => {
+                            crate::drive::ensure_zpool(
+                                &client,
+                                &a.target,
+                                pool,
+                                a.device.as_deref(),
+                            )
+                            .await?;
+                        }
+                        crate::planebase::Backend::LvmThin => {
+                            let vg = a.device.clone().unwrap_or_else(|| "freehold".to_string());
+                            println!(
+                                "STORAGE: LVM VG {vg} — run `storage ensure --tenant <t>` per tenant"
+                            );
+                        }
+                    }
+                }
+                crate::planebase::ResolveAction::Bail(m) => {
+                    anyhow::bail!("{m}");
+                }
+            }
+            Ok(())
+        }
+        StorageCmd::Ensure(a) => {
+            let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
+            let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
+            let tenant = parse_tenant(&a.tenant)?;
+            match tenant {
+                crate::planebase::Tenant::Relay => {
+                    for spec in crate::drive::relay_mount_specs(&a.pool, &a.domain)? {
+                        crate::drive::ensure_dataset(&client, &a.target, &spec.source).await?;
+                    }
+                    crate::drive::relay_chown(&client, &a.target, &a.pool, &a.domain).await?;
+                    println!("STORAGE: relay datasets ensured + guest-writable");
+                }
+                crate::planebase::Tenant::Cp => {
+                    crate::drive::ensure_cp_dataset(&client, &a.target, &a.pool, &a.domain).await?;
+                    println!("STORAGE: cp dataset ensured");
+                }
+                crate::planebase::Tenant::K3sVolumes => {
+                    crate::drive::ensure_k3s_dataset(&client, &a.target, &a.pool, &a.domain)
+                        .await?;
+                    println!("STORAGE: k3s-volumes dataset ensured");
+                }
+            }
+            Ok(())
+        }
+        StorageCmd::Destroy(a) => {
+            let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
+            let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
+            let tenant = parse_tenant(&a.tenant)?;
+            crate::drive::destroy_tenant_dataset(&client, &a.target, &a.pool, &a.domain, tenant)
+                .await?;
+            println!("STORAGE: destroyed {} tenant dataset subtree", tenant);
+            Ok(())
+        }
+    }
+}
+
+fn parse_tenant(s: &str) -> Result<crate::planebase::Tenant> {
+    match s {
+        "relay" => Ok(crate::planebase::Tenant::Relay),
+        "cp" => Ok(crate::planebase::Tenant::Cp),
+        "k3s-volumes" | "k3s" => Ok(crate::planebase::Tenant::K3sVolumes),
+        other => anyhow::bail!("unknown tenant {other:?} (relay | cp | k3s-volumes)"),
+    }
 }
 
 /// Parse argv and run — the CLI surface shared by the `freehold` bin (with
@@ -1159,6 +1328,7 @@ async fn cli_body() -> Result<()> {
             println!("SETUP: #freehold ready — agents joined + greeted");
             Ok(())
         }
+        Cmd::Storage(args) => storage_dispatch(&args).await,
         Cmd::Readiness(args) => {
             let (agent_dir, runner_pubkey) = resolve_door(&args, "proxmox-box")?;
             let client = flows::connect(&args.addr, &agent_dir, &runner_pubkey)?;
