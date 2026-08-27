@@ -136,10 +136,12 @@ C0: the plane is C0's precondition, not parallel work.
   freely; CREATING a backend (zpool or thin pool alike — gating only zpool-create would
   walk a declined prompt straight into an ungated LVM-thin create) requires the operator's
   explicit consent (a confirm prompt or a `--confirm-storage` flag). Withheld consent is
-  specified, not implicit: an existing viable backend → use it quietly; none + consent
-  withheld → fall through to the EXPLICITLY-DOWNGRADED plain-directory fallback (same
-  labeling rule as the VPS branch) or bail — the operator sees which happened. Never a
-  silent auto-create.
+  specified, not implicit — and NOT a new resolution tier: the locked order stays
+  `ZFS → LVM-thin → bail` on both the per-branch lists and deliverable 1. An existing
+  viable backend → use it quietly; none + consent withheld → **bail** (Proxmox branch;
+  the VPS branch's explicitly-downgraded local-directory tier is already a first-class
+  rung of ITS order, not a consent consequence). Never a silent auto-create, and never a
+  fallback tier that only an acceptance test knows about.
 * **Tenant→dataset mapping lives outside compute, two-place recoverable:** the workstation
   config (survives compute teardown by design) plus independently derivable from the
   host/provider's own volume listing. **Teardown reads the mapping from the config BEFORE it
@@ -243,10 +245,10 @@ C0: the plane is C0's precondition, not parallel work.
   fake-relay/mock-Vultr pattern.
 * Converge against a Proxmox-lxc target with no existing backend → resolution detects
   absence and, WITH operator consent (the confirm gate — covering zpool AND LVM-thin-pool
-  creation alike), creates a zpool or falls back to LVM-thin; WITH CONSENT WITHHELD → falls
-  through to the explicitly-downgraded plain-directory fallback (labeled like the VPS
-  branch) or bails, and the acceptance asserts which happened; against a target that can
-  support neither → bails with an actionable message.
+  creation alike), creates a zpool or falls back to LVM-thin; WITH CONSENT WITHHELD and no
+  existing viable backend → bails with the actionable message (the resolution order is
+  `ZFS → LVM-thin → bail`, unchanged — the acceptance asserts the bail, not a fourth
+  tier); against a target that can support neither → bails with an actionable message.
 * Converge against a VPS target → resolution attaches a provider block volume if available,
   or falls back to the explicitly-downgraded local directory, stating the durability
   difference; bails only if both are unavailable.
