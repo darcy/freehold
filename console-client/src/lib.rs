@@ -386,6 +386,11 @@ impl Client {
         serde_json::from_value(v["agents"].clone()).map_err(Error::Json)
     }
 
+    /// Drop an agent's registry row (it was torn down).
+    pub fn unregister_agent(&self, name: &str) -> Result<serde_json::Value, Error> {
+        self.delete_json(&format!("/api/agents/{name}"))
+    }
+
     /// Register a named agent the CPA stood up (delegate-peer at start).
     /// `channel` = the agent's kind-9 presence channel (the relay scopes
     /// reads by #h) — required for an availability probe.
@@ -438,6 +443,29 @@ impl Client {
         if status >= 400 {
             return Err(Error::Api {
                 method: "GET".into(),
+                path: path.into(),
+                status,
+                message: error_message(&text),
+            });
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    fn delete_json(&self, path: &str) -> Result<serde_json::Value, Error> {
+        let mut req = self.agent.delete(&format!("{}{}", self.base, path));
+        if let Some(c) = &self.cookie {
+            req = req.header("cookie", c);
+        }
+        let resp = req.call().map_err(|source| Error::Transport {
+            method: "DELETE".into(),
+            path: path.into(),
+            source,
+        })?;
+        let status = resp.status().as_u16();
+        let text = body_text(resp.into_body())?;
+        if status >= 400 {
+            return Err(Error::Api {
+                method: "DELETE".into(),
                 path: path.into(),
                 status,
                 message: error_message(&text),
