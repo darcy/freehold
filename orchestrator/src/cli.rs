@@ -644,6 +644,9 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
                     println!(
                         "STORAGE: reusing existing backend ({label} {pool}) — nothing created"
                     );
+                    // Machine-parseable for the pipeline to thread the REAL
+                    // backend identity into the ensure + config steps.
+                    println!("STORAGE-POOL: {pool}");
                 }
                 crate::planebase::ResolveAction::Create(backend, pool) => {
                     println!(
@@ -653,6 +656,7 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
                             crate::planebase::Backend::LvmThin => "LVM-thin pool",
                         }
                     );
+                    println!("STORAGE-POOL: {pool}");
                     match backend {
                         crate::planebase::Backend::Zfs => {
                             crate::drive::ensure_zpool(

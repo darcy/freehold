@@ -802,10 +802,16 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
     if !ok {
         bail!("storage resolution failed:\n{out}");
     }
-    // Resolve is REPEATABLE (idempotent re-run confirms): the backend the
-    // ensure stage drives is DETECTED anew per call by `storage ensure`'s
-    // own resolve, so no pool name needs to round-trip between stages. The
-    // config records whatever each ensure returns.
+    // Thread the DETECTED backend identity from resolve into the ensure
+    // steps + the config: a zpool named anything but rpool, or a stock PVE
+    // LVM host (VG pve), must NOT be driven as 'rpool'. resolve prints
+    // `STORAGE-POOL: <name>` (machine-parseable); we use it verbatim.
+    let pool = out
+        .lines()
+        .find_map(|l| l.strip_prefix("STORAGE-POOL: "))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or("rpool");
     //
     // Ensure + record each durable tenant's HOST-resolved mounts. The LXC
     // ROLE that rides a tenant differs from the tenant's config key:
@@ -841,8 +847,7 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
                 "--domain",
                 &a.domain,
                 "--pool",
-                "rpool", // ensure drives its own detection; the pool arg is
-                         // the naming-convention parent, not a create target
+                pool, // the REAL backend identity from resolve
             ],
         )?;
         if !ok {
@@ -861,7 +866,7 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
             }
         }
         if !mounts.is_empty() {
-            cfg.plane.backend.get_or_insert_with(|| "rpool".into());
+            cfg.plane.backend = Some(pool.to_string());
             cfg.plane.mounts.insert(role.to_string(), mounts);
             resolved_any = true;
         }

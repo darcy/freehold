@@ -174,8 +174,18 @@ fn run_scope(config_path: &std::path::Path, scope: Scope, confirm: bool) -> Resu
                 // `<pool>/freehold/<domain-dashes>/<tenant>` from the backend
                 // + naming convention, so a tampered/missing recorded mapping
                 // can't silently skip a data+compute destroy.
+                //
+                // Dataset destroy is BEST-EFFORT — it must never abort the
+                // teardown after the LXCs are gone but before the door is
+                // removed. A missing dataset (pre-plane config, the VPS
+                // downgraded branch, an unprovisioned k3s) is a WARN that
+                // continues; a real `zfs destroy` failure surfaces the error
+                // in the log without stranding the door.
                 let dataset = dataset_path_for(&cfg, &tenant, &cfg.domain);
-                log.push(destroy_dataset(&a, &cfg, &tenant, &dataset)?);
+                match destroy_dataset(&a, &cfg, &tenant, &dataset) {
+                    Ok(line) => log.push(line),
+                    Err(e) => log.push(format!("WARN: dataset destroy for {tenant} failed: {e}")),
+                }
             }
         }
         _ => {}
