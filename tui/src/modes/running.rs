@@ -181,6 +181,7 @@ impl Running {
                 self.cp.client = None;
                 self.cp.auth = AuthState::Missing;
                 self.cp.auth_reason.clear();
+                self.cp.last_login_attempt = Instant::now();
                 self.attach_console();
                 self.refresh();
             }
@@ -264,6 +265,25 @@ impl Running {
             self.probe(&cfg);
             self.refresh();
         }
+        // Auto-login retry: the console can still be warming the moment the
+        // running screen shows — keep attempting until a session is live so
+        // Good to go is logged in without pressing l.
+        let can_login = self
+            .cfg
+            .as_ref()
+            .is_some_and(|c| c.operator_identity.is_some())
+            || std::env::var("FREEHOLD_CONSOLE_COOKIE")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+        if can_login
+            && self.cp.auth != AuthState::Live
+            && self.cp.client.is_none()
+            && self.cp.last_login_attempt.elapsed() >= Duration::from_secs(8)
+        {
+            self.cp.last_login_attempt = Instant::now();
+            self.attach_console();
+            self.refresh();
+        }
     }
 
     pub fn all_ok(&self) -> bool {
@@ -293,6 +313,9 @@ pub struct ConsolePanel {
     /// transient feedback from the last action/refresh.
     pub notice: String,
     last_fetch: Instant,
+    /// the last auto-login attempt — the login RETRIES while the console is
+    /// still warming so "Good to go" really is logged in.
+    last_login_attempt: Instant,
     /// a text-input prompt in progress (Esc cancels / Enter submits).
     pub prompt: Option<Prompt>,
     /// an open channel view (pretty JSON) — replaces the table.
@@ -308,6 +331,7 @@ impl Default for ConsolePanel {
             auth_reason: String::new(),
             notice: String::new(),
             last_fetch: Instant::now() - Duration::from_secs(60),
+            last_login_attempt: Instant::now() - Duration::from_secs(60),
             prompt: None,
             channel: None,
         }
