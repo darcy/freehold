@@ -3,7 +3,7 @@
 use crate::modes::{
     bootstrap::{Bootstrap, Status},
     configure::{CStatus, ConfigureState},
-    running::{AuthState, Running, clip},
+    running::{AuthState, PanelView, Running, clip},
 };
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -243,7 +243,7 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
         },
         Mode::Configure => "r retry failed stages · q quit",
         Mode::Running => {
-            "l login · p provision · R rotate · x revoke · g grant · G ungrant · a addr · v channel · c reconfigure · q quit"
+            "l login · p provision · R rotate · x revoke · g grant · G ungrant · a addr · v channel · Tab local/remote · w web · c reconfigure · q quit"
         }
     };
     footer(chunks[2], f, hint);
@@ -719,7 +719,11 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
         AuthState::Failed => Color::Red,
         AuthState::Missing => Color::DarkGray,
     };
-    let block = panel("console — services at a glance", border);
+    let title = match rn.cp.view {
+        PanelView::Remote => "console — services at a glance · remote",
+        PanelView::Local => "console — services at a glance · local loopback",
+    };
+    let block = panel(title, border);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -736,6 +740,66 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
             Style::new().fg(Color::DarkGray),
         )));
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+    if rn.cp.view == PanelView::Local {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " local loopback · {}",
+                freehold_installer::freehold_home()
+                    .join("control-plane")
+                    .display()
+            ),
+            Style::new().fg(Color::DarkGray),
+        )));
+        if rn.cp.local.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " no local runners — nothing provisioned on this machine yet",
+                Style::new().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " {}{}{}{}{}{}",
+                    col("runner", 16),
+                    col("status", 7),
+                    col("risk", 6),
+                    col("secret", 30),
+                    col("readiness", 34),
+                    col("grants", 22),
+                ),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            for r in &rn.cp.local {
+                let secret = r
+                    .secret
+                    .as_ref()
+                    .map(|(n, k, a)| format!("{n} · {k} · {a}"))
+                    .unwrap_or_else(|| "—".into());
+                let reach = if r.reachable {
+                    "reachable"
+                } else {
+                    "unreachable"
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(col(&r.name, 16), Style::new().fg(Color::White)),
+                    Span::styled(
+                        col(&r.status, 7),
+                        Style::new().fg(if r.status == "revoked" {
+                            Color::Red
+                        } else {
+                            Color::Green
+                        }),
+                    ),
+                    Span::raw(col(r.risk.as_deref().unwrap_or("?"), 6)),
+                    Span::raw(col(&secret, 30)),
+                    Span::raw(col(reach, 34)),
+                    Span::raw(col(&grants_text(&r.grants), 22)),
+                ]));
+            }
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        render_prompt_notice(inner, f, &mut rn.cp);
         return;
     }
     match rn.cp.auth {
@@ -821,8 +885,16 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 
-    // the prompt / notice line sits on the panel's last row.
-    if let Some(p) = &rn.cp.prompt {
+    render_prompt_notice(inner, f, &mut rn.cp);
+}
+
+/// The prompt / notice line sits on the panel's last row.
+fn render_prompt_notice<'a>(
+    inner: Rect,
+    f: &mut Frame<'a>,
+    cp: &mut crate::modes::running::ConsolePanel,
+) {
+    if let Some(p) = &cp.prompt {
         let line = format!(" {}: {} ▌", p.label(), p.buf);
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -836,8 +908,8 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
                 1,
             ),
         );
-    } else if !rn.cp.notice.is_empty() {
-        let n = rn.cp.notice.clone();
+    } else if !cp.notice.is_empty() {
+        let n = cp.notice.clone();
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" {}", clip(&n, inner.width.saturating_sub(1) as usize)),

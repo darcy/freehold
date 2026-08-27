@@ -80,11 +80,27 @@ pub struct Auth {
     admins: HashSet<String>,
     sessions: Mutex<HashMap<String, Session>>,
     challenges: Mutex<HashMap<String, i64>>,
+    /// Single-use browser-launch tokens (the TUI mints one with its own
+    /// session and xdg-opens the URL — the browser lands logged in without
+    /// the operator ever touching console-login).
+    portals: Mutex<HashMap<String, Portal>>,
 }
 
 struct Session {
     expires: i64,
+    /// The operator pubkey the session was issued to — needed to hand a
+    /// portal token to the SAME identity.
+    pubkey: String,
 }
+
+struct Portal {
+    expires: i64,
+    pubkey: String,
+}
+
+/// A portal token is one shot within a short window — a leaked URL dies on
+/// first use and expires anyway.
+const PORTAL_TTL_SECS: i64 = 60;
 
 /// Session cookie name.
 const SESSION_COOKIE: &str = "fh_session";
@@ -108,6 +124,7 @@ impl Auth {
             admins: admins.into_iter().collect(),
             sessions: Mutex::new(HashMap::new()),
             challenges: Mutex::new(HashMap::new()),
+            portals: Mutex::new(HashMap::new()),
         }
     }
 
@@ -137,31 +154,85 @@ impl Auth {
         }
     }
 
-    fn issue_session(&self) -> String {
+    fn issue_session(&self, pubkey: &str) -> String {
         let token = freehold_core::nip98::random_hex(32);
         self.sessions.lock().expect("session lock").insert(
             token.clone(),
             Session {
                 expires: now_secs() + SESSION_TTL_SECS,
+                pubkey: pubkey.to_string(),
             },
         );
         token
     }
 
-    /// Valid + sliding refresh. False for unknown/expired tokens.
-    fn check_session(&self, token: &str) -> bool {
+    /// Valid + sliding refresh; returns the operator pubkey. None for
+    /// unknown/expired tokens.
+    fn session_identity(&self, token: &str) -> Option<String> {
         let mut s = self.sessions.lock().expect("session lock");
         if let Some(ses) = s.get_mut(token) {
             if ses.expires > now_secs() {
                 ses.expires = now_secs() + SESSION_TTL_SECS;
-                true
+                Some(ses.pubkey.clone())
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         }
     }
+
+    /// Valid + sliding refresh. False for unknown/expired tokens.
+    fn check_session(&self, token: &str) -> bool {
+        self.session_identity(token).is_some()
+    }
+
+    /// Mint a single-use portal token bound to `pubkey`.
+    fn issue_portal(&self, pubkey: &str) -> String {
+        let token = freehold_core::nip98::random_hex(16);
+        self.portals.lock().expect("portal lock").insert(
+            token.clone(),
+            Portal {
+                expires: now_secs() + PORTAL_TTL_SECS,
+                pubkey: pubkey.to_string(),
+            },
+        );
+        token
+    }
+
+    /// Consume a portal token (single-use, fresh) — the operator pubkey on
+    /// success, None for unknown/expired/used tokens.
+    fn consume_portal(&self, token: &str) -> Option<String> {
+        let mut p = self.portals.lock().expect("portal lock");
+        match p.remove(token) {
+            Some(portal) if portal.expires >= now_secs() => Some(portal.pubkey),
+            _ => None,
+        }
+    }
+}
+
+/// The calling session's OPERATOR pubkey (validates + slides the expiry).
+/// Unlike `require_session`, this 404s when auth is NOT configured — the
+/// portal only exists when there is something to portal into.
+fn require_session_pubkey(state: &WebState, headers: &HeaderMap) -> Result<String, Box<Response>> {
+    let Some(auth) = &state.auth else {
+        return Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "console auth is not configured"})),
+            )
+                .into_response(),
+        ));
+    };
+    session_token(headers)
+        .and_then(|t| auth.session_identity(&t))
+        .ok_or_else(|| {
+            Box::new((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthenticated — log in via NIP-98: GET /api/auth/challenge, POST /api/auth/login"})),
+            )
+                .into_response())
+        })
 }
 
 fn session_token(headers: &HeaderMap) -> Option<String> {
@@ -265,9 +336,55 @@ async fn login(State(state): State<WebState>, Json(req): Json<LoginRequest>) -> 
         )
             .into_response();
     }
-    let token = auth.issue_session();
+    let token = auth.issue_session(&req.pubkey);
     let mut resp = Json(json!({ "ok": true, "pubkey": req.pubkey })).into_response();
     let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(SET_COOKIE, v);
+    }
+    resp
+}
+
+/// POST /api/auth/portal — mint a single-use portal token bound to the
+/// CALLING session's operator. The TUI xdg-opens `…/portal/{token}`; the
+/// browser lands on the console with a fresh session cookie — the operator
+/// never touches console-login, and the NIP-98 key never leaves the machine.
+async fn portal_token(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    let pk = match require_session_pubkey(&state, &headers) {
+        Ok(pk) => pk,
+        Err(b) => return *b,
+    };
+    let token = state
+        .auth
+        .as_ref()
+        .expect("require_session_pubkey ensured auth")
+        .issue_portal(&pk);
+    Json(json!({ "token": token })).into_response()
+}
+
+/// GET /api/auth/portal/{token} — consume the token, issue a FRESH session
+/// for the SAME operator, land the browser on the console logged in.
+async fn portal_land(
+    State(state): State<WebState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "console auth is not configured"})),
+        )
+            .into_response();
+    };
+    let Some(pk) = auth.consume_portal(&token) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "unknown, expired, or already-used portal token"})),
+        )
+            .into_response();
+    };
+    let session = auth.issue_session(&pk);
+    let cookie = format!("{SESSION_COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict");
+    let mut resp = (StatusCode::FOUND, [(axum::http::header::LOCATION, "/")], "").into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(SET_COOKIE, v);
     }
@@ -285,6 +402,8 @@ pub fn router(
         .route("/healthz", get(healthz))
         .route("/api/auth/challenge", get(challenge))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/portal", post(portal_token))
+        .route("/api/auth/portal/{token}", get(portal_land))
         .route("/api/overview", get(overview))
         .route("/api/provision", post(provision))
         .route("/api/rotate", post(rotate))
@@ -1288,6 +1407,54 @@ mod auth_tests {
         let r = ov.runners.iter().find(|r| r.name == "testbox").unwrap();
         assert_eq!(r.status, "revoked");
         assert_eq!(r.grants, None);
+
+        // the TUI's web-launch path: mint the portal URL with the session,
+        // GET it WITHOUT any cookie (the browser) -> a FRESH session for the
+        // same operator + a redirect to the console.
+        let url = client.portal_url().unwrap();
+        assert!(
+            url.starts_with(&format!("{base}/api/auth/portal/")),
+            "{url}"
+        );
+        let land = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(land.status(), 302, "portal lands with a redirect");
+        let portal_cookie = land
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let portal_client = freehold_console_client::Client::with_cookie(&base, &portal_cookie);
+        let ov = portal_client.overview().unwrap();
+        assert!(
+            ov.runners.iter().any(|r| r.name == "testbox"),
+            "the portal session sees the same world"
+        );
+        // single-use: the same token is dead on the second GET.
+        let again = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(again.status(), 404, "a used portal token is refused");
+        // no session -> no mint.
+        let anon = reqwest::Client::new()
+            .post(format!("{base}/api/auth/portal"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(anon.status(), 401, "portal minting requires a session");
 
         // a BROKEN session is refused (fail closed), not silently accepted.
         let bad = freehold_console_client::Client::with_cookie(&base, "fh_session=rot");

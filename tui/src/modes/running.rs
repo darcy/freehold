@@ -5,6 +5,7 @@
 
 use freehold_console_client::{Client, ProvisionReq, SecretReq};
 use freehold_core::identity::Identity;
+use freehold_core::secrets::SecretPackage;
 use freehold_installer::config::{Config, cp_live, relay_live};
 use freehold_installer::port_open;
 use std::path::PathBuf;
@@ -107,6 +108,10 @@ impl Running {
     }
 
     fn refresh(&mut self) {
+        if self.cp.view == PanelView::Local {
+            self.cp.local = read_local();
+            return;
+        }
         let Some(client) = self.cp.client.as_ref() else {
             return;
         };
@@ -193,6 +198,45 @@ impl Running {
             crossterm::event::KeyCode::Char('G') => self.start(Flow::Ungrant),
             crossterm::event::KeyCode::Char('a') => self.start(Flow::Addr),
             crossterm::event::KeyCode::Char('v') => self.start(Flow::Channel),
+            crossterm::event::KeyCode::Tab => {
+                self.cp.view = match self.cp.view {
+                    PanelView::Remote => PanelView::Local,
+                    PanelView::Local => PanelView::Remote,
+                };
+                self.cp.notice = match self.cp.view {
+                    PanelView::Remote => "remote console list".into(),
+                    PanelView::Local => {
+                        "local loopback list (view-only — manage via remote)".into()
+                    }
+                };
+                self.refresh();
+            }
+            crossterm::event::KeyCode::Char('w') => {
+                if self.cp.view == PanelView::Local {
+                    self.cp.notice =
+                        "local has no web UI (loopback posture) — Tab to the remote list".into();
+                    return;
+                }
+                let Some(client) = self.cp.client.as_ref() else {
+                    self.cp.notice =
+                        "not logged in — press l first (the web needs a session)".into();
+                    return;
+                };
+                match client.portal_url() {
+                    Ok(url) => {
+                        self.cp.notice = format!("web opened: {url}");
+                        // detached + silent — the browser outlives the TUI
+                        // and must not scribble into the TUI's screen.
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(&url)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .map_err(|e| format!("xdg-open: {e}"));
+                    }
+                    Err(e) => self.cp.notice = format!("web launch failed: {e}"),
+                }
+            }
             crossterm::event::KeyCode::Esc => self.cp.channel = None,
             _ => {}
         }
@@ -203,6 +247,11 @@ impl Running {
     }
 
     fn start(&mut self, flow: Flow) {
+        if self.cp.view == PanelView::Local {
+            self.cp.notice =
+                "local is a view-only list — Tab to the remote console to manage".into();
+            return;
+        }
         if self.cp.client.is_none() {
             self.cp.notice = "not logged in — press l first".into();
             return;
@@ -305,9 +354,24 @@ pub enum AuthState {
     Failed,
 }
 
+/// Which runner list the console panel is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelView {
+    /// the DEPLOYED console, via its API (the same data the web UI renders).
+    #[default]
+    Remote,
+    /// the LOCAL loopback world: ~/.freehold/control-plane state + the
+    /// shipped packages' grants, read directly (view-only — manage via the
+    /// remote tab).
+    Local,
+}
+
 pub struct ConsolePanel {
     pub client: Option<Client>,
     pub overview: Option<freehold_console_client::Overview>,
+    pub view: PanelView,
+    /// the local loopback runner list (built when `view == Local`).
+    pub local: Vec<LocalRunner>,
     pub auth: AuthState,
     pub auth_reason: String,
     /// transient feedback from the last action/refresh.
@@ -327,6 +391,8 @@ impl Default for ConsolePanel {
         Self {
             client: None,
             overview: None,
+            view: PanelView::Remote,
+            local: Vec::new(),
             auth: AuthState::Missing,
             auth_reason: String::new(),
             notice: String::new(),
@@ -336,6 +402,59 @@ impl Default for ConsolePanel {
             channel: None,
         }
     }
+}
+
+/// One runner in the LOCAL loopback view — the same columns as the remote
+/// overview, read straight off the local CP state + the shipped package
+/// (no server, no session: the loopback IS the authn here).
+pub struct LocalRunner {
+    pub name: String,
+    pub status: String,
+    pub risk: Option<String>,
+    pub secret: Option<(String, String, String)>, // name · kind · address
+    pub grants: Option<Vec<String>>,
+    pub reachable: bool,
+}
+
+/// The local world: ~/.freehold/control-plane/state.json + the runner
+/// packages it points at. Missing state => empty (the panel says so).
+fn read_local() -> Vec<LocalRunner> {
+    use freehold_control_plane::state::{RunnerStatus, StateStore};
+    let dir = freehold_installer::freehold_home().join("control-plane");
+    if !dir.join("state.json").exists() {
+        return Vec::new();
+    }
+    let Ok(store) = StateStore::open(&dir) else {
+        return Vec::new();
+    };
+    let snap = store.snapshot();
+    snap.runners
+        .iter()
+        .map(|(name, rec)| {
+            let secret = snap
+                .secrets
+                .get(name)
+                .map(|s| (s.runner.clone(), s.kind.clone(), s.address.clone()));
+            let grants = SecretPackage::load(&rec.package_dir).ok().map(|p| p.grants);
+            let status = match rec.status {
+                RunnerStatus::Active => "active",
+                RunnerStatus::Revoked => "revoked",
+            };
+            let reachable = rec
+                .mcp_addr
+                .as_deref()
+                .map(freehold_installer::port_open)
+                .unwrap_or(false);
+            LocalRunner {
+                name: name.clone(),
+                status: status.into(),
+                risk: rec.risk_level.clone(),
+                secret,
+                grants,
+                reachable,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
