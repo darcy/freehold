@@ -67,8 +67,9 @@ impl Running {
             self.cp.auth = AuthState::Missing;
             return;
         };
-        if let Ok(cookie) = std::env::var("FREEHOLD_CONSOLE_COOKIE") {
-            if !cookie.trim().is_empty() {
+        if let Ok(cookie) = std::env::var("FREEHOLD_CONSOLE_COOKIE")
+            && !cookie.trim().is_empty()
+        {
                 self.cp.client = Some(Client::with_cookie(&cfg.cp_url, &cookie));
                 self.cp.auth = AuthState::Live;
                 self.cp.auth_reason = "FREEHOLD_CONSOLE_COOKIE session".into();
