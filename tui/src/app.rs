@@ -238,7 +238,18 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
         },
         Mode::Configure => "r retry failed stages · q quit",
         Mode::Running => {
-            "Tab/Shift-Tab views · t local/remote · l login · p provision · R rotate · x revoke · g/G grant · a addr · v channel · w web · c reconfigure · q quit"
+            // the hint mirrors the ACTIVE view's keys (scoped input).
+            match app.rn.view {
+                crate::modes::running::DashboardView::Agents => {
+                    "Tab/Shift-Tab views · agents are view-only for now · q quit"
+                }
+                crate::modes::running::DashboardView::Services => {
+                    "Tab/Shift-Tab views · services are view-only for now · q quit"
+                }
+                crate::modes::running::DashboardView::Runners => {
+                    "Tab/Shift-Tab views · l login · t local/remote · p provision · R rotate · x revoke · g/G grant · a addr · v channel · w web · c reconfigure · q quit"
+                }
+            }
         }
     };
     footer(chunks[2], f, hint);

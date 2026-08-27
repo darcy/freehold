@@ -196,20 +196,31 @@ impl Running {
             }
             return;
         }
-        match code {
-            crossterm::event::KeyCode::Char('c') => self.request_configure = true,
-            // cycle the top-level views.
-            crossterm::event::KeyCode::Tab => {
+        // Keys are scoped to the ACTIVE view: navigation (Tab/BackTab) and
+        // mode switches (c) work everywhere; everything else belongs to the
+        // view shown — the footer hint changes per view, so a key does
+        // exactly what the active view's hint says.
+        match (self.view, code) {
+            // global: cycle views + reconfigure.
+            (_, crossterm::event::KeyCode::Tab) => {
                 self.view = self.view.next();
                 self.cp.notice.clear();
             }
-            crossterm::event::KeyCode::BackTab => {
+            (_, crossterm::event::KeyCode::BackTab) => {
                 self.view = self.view.prev();
                 self.cp.notice.clear();
             }
-            // runners source toggle: local loopback <-> remote console.
-            crossterm::event::KeyCode::Char('t') => {
-                self.view = DashboardView::Runners;
+            (_, crossterm::event::KeyCode::Char('c')) => self.request_configure = true,
+            // runners: login, source toggle, actions, channel, web.
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('l')) => {
+                self.cp.client = None;
+                self.cp.auth = AuthState::Missing;
+                self.cp.auth_reason.clear();
+                self.cp.last_login_attempt = Instant::now();
+                self.attach_console();
+                self.refresh();
+            }
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('t')) => {
                 self.cp.view = match self.cp.view {
                     PanelView::Remote => PanelView::Local,
                     PanelView::Local => PanelView::Remote,
@@ -222,45 +233,33 @@ impl Running {
                 };
                 self.refresh();
             }
-            crossterm::event::KeyCode::Char('l') => {
-                self.cp.client = None;
-                self.cp.auth = AuthState::Missing;
-                self.cp.auth_reason.clear();
-                self.cp.last_login_attempt = Instant::now();
-                self.attach_console();
-                self.refresh();
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('w')) => {
+                self.launch_web();
             }
-            crossterm::event::KeyCode::Char('w') => self.launch_web(),
-            // runner management actions — from any view, land on Runners.
-            crossterm::event::KeyCode::Char('p') => {
-                self.view = DashboardView::Runners;
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('p')) => {
                 self.start(Flow::Provision);
             }
-            crossterm::event::KeyCode::Char('R') => {
-                self.view = DashboardView::Runners;
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('R')) => {
                 self.start(Flow::Rotate);
             }
-            crossterm::event::KeyCode::Char('x') => {
-                self.view = DashboardView::Runners;
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('x')) => {
                 self.start(Flow::Revoke);
             }
-            crossterm::event::KeyCode::Char('g') => {
-                self.view = DashboardView::Runners;
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('g')) => {
                 self.start(Flow::Grant);
             }
-            crossterm::event::KeyCode::Char('G') => {
-                self.view = DashboardView::Runners;
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('G')) => {
                 self.start(Flow::Ungrant);
             }
-            crossterm::event::KeyCode::Char('a') => {
-                self.view = DashboardView::Runners;
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('a')) => {
                 self.start(Flow::Addr);
             }
-            crossterm::event::KeyCode::Char('v') => {
-                self.view = DashboardView::Runners;
+            (DashboardView::Runners, crossterm::event::KeyCode::Char('v')) => {
                 self.start(Flow::Channel);
             }
-            crossterm::event::KeyCode::Esc => self.cp.channel = None,
+            (DashboardView::Runners, crossterm::event::KeyCode::Esc) => {
+                self.cp.channel = None;
+            }
             _ => {}
         }
     }
