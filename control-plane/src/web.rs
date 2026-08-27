@@ -413,6 +413,7 @@ pub fn router(
         .route("/api/runner-addr", post(runner_addr))
         .route("/api/runner/{name}/channel", get(runner_channel))
         .route("/api/agents", get(agents_list).post(agents_register))
+        .route("/api/agents/{name}", axum::routing::delete(agents_remove))
         .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state(WebState {
             store,
@@ -1157,6 +1158,28 @@ struct AgentReq {
     channel: Option<String>,
 }
 
+/// DELETE /api/agents/{name} — an agent was torn down; drop its registry row.
+async fn agents_remove(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    if !state.store.snapshot().agents.contains_key(&name) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("no such agent: {name}")})),
+        )
+            .into_response());
+    }
+    state.store.remove_agent(&name);
+    if let Err(e) = state.store.save() {
+        return Err(state_error(e).into_response());
+    }
+    Ok(Json(json!({ "ok": true, "name": name })))
+}
+
 fn bad_request(msg: &str) -> axum::response::Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
 }
@@ -1694,6 +1717,22 @@ mod auth_tests {
         let a = agents.iter().find(|a| a.name == "peer-1").unwrap();
         assert_eq!(a.created_at, before);
         assert_eq!(a.pubkey, "cd".repeat(32));
+
+        // teardown: unregister removes the row; a second delete 404s.
+        assert_eq!(
+            client.unregister_agent("peer-1").unwrap()["ok"].as_bool(),
+            Some(true)
+        );
+        let agents = client.agents().unwrap();
+        assert!(
+            agents.iter().all(|a| a.name != "peer-1"),
+            "unregistered agent is gone"
+        );
+        let err = client.unregister_agent("peer-1").unwrap_err();
+        assert!(
+            matches!(err, freehold_console_client::Error::Api { status: 404, .. }),
+            "missing agent delete 404s: {err:?}"
+        );
 
         // a BROKEN session is refused (fail closed), not silently accepted.
         let bad = freehold_console_client::Client::with_cookie(&base, "fh_session=rot");

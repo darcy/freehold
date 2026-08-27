@@ -3,7 +3,7 @@
 use crate::modes::{
     bootstrap::{Bootstrap, Status},
     configure::{CStatus, ConfigureState},
-    running::{AuthState, DashboardView, PanelView, Running, clip},
+    running::{AuthState, DashboardView, PanelView, Running, clip, secs_ago},
 };
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -241,13 +241,13 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
             // the hint mirrors the ACTIVE view's keys (scoped input).
             match app.rn.view {
                 crate::modes::running::DashboardView::Agents => {
-                    "Tab/Shift-Tab views · agents are view-only for now · q quit"
+                    "Tab/Shift-Tab views · r refresh · agents are view-only for now · q quit"
                 }
                 crate::modes::running::DashboardView::Services => {
-                    "Tab/Shift-Tab views · services are view-only for now · q quit"
+                    "Tab/Shift-Tab views · r refresh · services are view-only for now · q quit"
                 }
                 crate::modes::running::DashboardView::Runners => {
-                    "Tab/Shift-Tab views · l login · t local/remote · p provision · R rotate · x revoke · g/G grant · a addr · v channel · w web · c reconfigure · q quit"
+                    "Tab/Shift-Tab views · r refresh · l login · t local/remote · p provision · R rotate · x revoke · g/G grant · a addr · v channel · w web · c reconfigure · q quit"
                 }
             }
         }
@@ -637,16 +637,22 @@ fn draw_services<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
     let block = panel("services", Color::Cyan);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        format!(
-            " {}{}{}{}",
-            col("service", 18),
-            col("where", 24),
-            col("status", 8),
-            col("url", 40),
-        ),
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    ))];
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!(" services · last refreshed {}", secs_ago(&rn.services_at)),
+            Style::new().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            format!(
+                " {}{}{}{}",
+                col("service", 18),
+                col("where", 24),
+                col("status", 8),
+                col("url", 40),
+            ),
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+    ];
     for svc in &rn.services {
         let (status_ch, color) = match svc.status {
             Some(true) => ("●", Color::Green),
@@ -675,7 +681,10 @@ fn draw_agents<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            " AI agents registered with the console · availability = relay presence (120s)",
+            format!(
+                " AI agents · availability = relay presence (120s) · last refreshed {}",
+                secs_ago(&rn.agents_at)
+            ),
             Style::new().fg(Color::DarkGray),
         )));
         lines.push(Line::from(Span::styled(
@@ -790,10 +799,11 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
     if rn.cp.view == PanelView::Local {
         lines.push(Line::from(Span::styled(
             format!(
-                " local loopback · {}",
+                " local loopback · {} · last refreshed {}",
                 freehold_installer::freehold_home()
                     .join("control-plane")
-                    .display()
+                    .display(),
+                secs_ago(&rn.runners_at)
             ),
             Style::new().fg(Color::DarkGray),
         )));
@@ -871,7 +881,11 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
                     .map(|p| format!("{}…", clip(p, 16)))
                     .unwrap_or_else(|| "session".into());
                 lines.push(Line::from(Span::styled(
-                    format!(" session: {pk} @ {}", c.base()),
+                    format!(
+                        " session: {pk} @ {} · last refreshed {}",
+                        c.base(),
+                        secs_ago(&rn.runners_at)
+                    ),
                     Style::new().fg(Color::DarkGray),
                 )));
             }

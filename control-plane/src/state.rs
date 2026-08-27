@@ -193,6 +193,10 @@ impl StateStore {
 
     /// Persist the relay scope for this console (Chunk 2.6.1). The web UI
     /// syncs runner channels against it; a restart keeps it.
+    pub fn remove_agent(&self, name: &str) {
+        self.inner.write().agents.remove(name);
+    }
+
     pub fn insert_agent(&self, name: &str, rec: AgentRecord) {
         self.inner.write().agents.insert(name.to_string(), rec);
     }

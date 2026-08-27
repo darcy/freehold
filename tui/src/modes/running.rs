@@ -29,6 +29,11 @@ pub struct Running {
     /// Console API parity (the runner lists).
     pub cp: ConsolePanel,
     last_agents: Instant,
+    /// per-view "last refreshed" stamps (each view refreshes on its own
+    /// cadence; the timestamp tells the truth about the data shown).
+    pub services_at: Instant,
+    pub agents_at: Instant,
+    pub runners_at: Instant,
     pub last: Instant,
     pub request_configure: bool,
 }
@@ -45,6 +50,9 @@ impl Running {
             cp: ConsolePanel::default(),
             last: Instant::now() - Duration::from_secs(5),
             last_agents: Instant::now() - Duration::from_secs(60),
+            services_at: Instant::now(),
+            agents_at: Instant::now(),
+            runners_at: Instant::now(),
             request_configure: false,
         };
         if let Some(c) = &cfg {
@@ -77,6 +85,7 @@ impl Running {
         };
         match client.agents() {
             Ok(list) => {
+                self.agents_at = Instant::now();
                 let now = freehold_core::auth::now_secs();
                 self.agents = list
                     .into_iter()
@@ -243,6 +252,9 @@ impl Running {
                 self.cp.notice.clear();
             }
             (_, crossterm::event::KeyCode::Char('c')) => self.request_configure = true,
+            // refresh NOW on any view: reset every throttle and re-pull the
+            // active view's data + the world strip.
+            (_, crossterm::event::KeyCode::Char('r')) => self.refresh_now(),
             // runners: login, source toggle, actions, channel, web.
             (DashboardView::Runners, crossterm::event::KeyCode::Char('l')) => {
                 self.cp.client = None;
@@ -298,6 +310,19 @@ impl Running {
 
     pub fn is_typing(&self) -> bool {
         self.cp.prompt.is_some()
+    }
+
+    fn refresh_now(&mut self) {
+        if let Some(cfg) = self.cfg.clone() {
+            self.probe(&cfg);
+            self.services = build_services(&cfg, &self.probes);
+            self.services_at = Instant::now();
+        }
+        self.last_agents = Instant::now() - Duration::from_secs(16);
+        self.cp.last_fetch = Instant::now() - Duration::from_secs(3);
+        self.refresh();
+        self.runners_at = Instant::now();
+        self.cp.notice = "refreshed".into();
     }
 
     fn launch_web(&mut self) {
@@ -387,7 +412,9 @@ impl Running {
         {
             self.probe(&cfg);
             self.services = build_services(&cfg, &self.probes);
+            self.services_at = Instant::now();
             self.refresh();
+            self.runners_at = Instant::now();
         }
         // Auto-login retry: the console can still be warming — keep
         // attempting until a session is live (no l press needed).
@@ -496,6 +523,16 @@ pub struct AgentRow {
     pub available: Option<bool>,
     /// the console's probe failure, when available is None.
     pub note: Option<String>,
+}
+
+/// "just now" / "2s ago" / "14s ago" — the per-view last-refreshed stamps.
+pub fn secs_ago(at: &Instant) -> String {
+    let s = at.elapsed().as_secs();
+    if s < 2 {
+        "just now".into()
+    } else {
+        format!("{s}s ago")
+    }
 }
 
 /// "just now" / "3m ago" / "2h ago" / "5d ago" — enough for the agents view.
