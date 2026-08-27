@@ -7,7 +7,7 @@ description = "Freehold runner: privileged MCP tool server (generic exec + owned
 
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["macros"] }
 clap = { version = "4", features = ["derive", "env"] }
 freehold-core = { path = "../core" }
 hex = "0.4"
