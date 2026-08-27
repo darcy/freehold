@@ -29,7 +29,6 @@ pub const DEFAULT_CP_BIND: &str = "127.0.0.1:8080";
 /// The console bind to ship: an EXPLICIT operator value always wins; the
 /// DEFAULT becomes the LAN bind exactly when NIP-98 authn is on (the
 /// operator's proxy path); no authn keeps the loopback posture.
-
 pub fn resolve_cp_bind(explicit: Option<&str>, authn: bool) -> String {
     match explicit {
         Some(b) => b.to_string(),
