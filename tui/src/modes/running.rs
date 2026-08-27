@@ -70,11 +70,10 @@ impl Running {
         if let Ok(cookie) = std::env::var("FREEHOLD_CONSOLE_COOKIE")
             && !cookie.trim().is_empty()
         {
-                self.cp.client = Some(Client::with_cookie(&cfg.cp_url, &cookie));
-                self.cp.auth = AuthState::Live;
-                self.cp.auth_reason = "FREEHOLD_CONSOLE_COOKIE session".into();
-                return;
-            }
+            self.cp.client = Some(Client::with_cookie(&cfg.cp_url, &cookie));
+            self.cp.auth = AuthState::Live;
+            self.cp.auth_reason = "FREEHOLD_CONSOLE_COOKIE session".into();
+            return;
         }
         let Some(dir) = &cfg.operator_identity else {
             self.cp.auth = AuthState::Missing;
