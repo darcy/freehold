@@ -26,6 +26,8 @@ pub struct App {
     /// set at the first VALID ssh auth (door verify on bootstrap; the first
     /// successful lane exec during configure) — the install timer's origin.
     pub first_auth: Option<std::time::Instant>,
+    /// the install total, FROZEN the moment the running screen appears.
+    pub install_time: Option<std::time::Duration>,
 }
 
 impl App {
@@ -39,6 +41,7 @@ impl App {
             mode,
             quit: false,
             first_auth: None,
+            install_time: None,
         })
     }
 
@@ -54,6 +57,11 @@ impl App {
                 );
             }
             Mode::Running => {
+                // the clock STOPS here — the total is what it was the moment
+                // the running screen showed.
+                if self.install_time.is_none() {
+                    self.install_time = self.first_auth.map(|t0| t0.elapsed());
+                }
                 let cfg = Config::load(&self.cfg_path).ok().flatten();
                 if let Some(c) = cfg {
                     self.rn = Running::with_cfg(self.cfg_path.clone(), c);
@@ -207,7 +215,7 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
     match app.mode {
         Mode::Bootstrap => draw_bootstrap(chunks[1], f, &mut app.bs),
         Mode::Configure => draw_configure(chunks[1], f, &mut app.cf, app.first_auth),
-        Mode::Running => draw_running(chunks[1], f, &mut app.rn, app.first_auth),
+        Mode::Running => draw_running(chunks[1], f, &mut app.rn, app.install_time),
     }
 
     let hint = match app.mode {
@@ -540,7 +548,7 @@ fn draw_running<'a>(
     area: Rect,
     f: &mut Frame<'a>,
     rn: &mut Running,
-    first_auth: Option<std::time::Instant>,
+    install_time: Option<std::time::Duration>,
 ) {
     let color = if rn.all_ok() {
         Color::Green
@@ -578,10 +586,10 @@ fn draw_running<'a>(
             Span::styled(label.to_string(), Style::new().fg(Color::White)),
         ]));
     }
-    if let Some(t0) = first_auth {
+    if let Some(t) = install_time {
         lines.push(Line::from(Span::raw("")));
         lines.push(Line::from(Span::styled(
-            format!("  door → good to go: {:.1}s", t0.elapsed().as_secs_f32()),
+            format!("  door → good to go: {:.1}s", t.as_secs_f32()),
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )));
     }

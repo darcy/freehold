@@ -25,6 +25,8 @@ pub struct CStage {
     pub tail: String,
     /// when the stage's check/run started — live ticking while it runs.
     pub started_at: Option<std::time::Instant>,
+    /// frozen elapsed at completion (Ok/Failed) — the timer STOPS once done.
+    pub finished_at: Option<std::time::Duration>,
 }
 
 impl CStage {
@@ -32,7 +34,17 @@ impl CStage {
         self.started_at.map(|t| t.elapsed())
     }
     pub fn elapsed_secs(&self) -> f32 {
-        self.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0)
+        self.finished_at
+            .or_else(|| self.elapsed())
+            .map(|d| d.as_secs_f32())
+            .unwrap_or(0.0)
+    }
+
+    /// stop the stage's clock at the Ok/Failed transition.
+    fn freeze(&mut self) {
+        if self.finished_at.is_none() {
+            self.finished_at = self.started_at.map(|t| t.elapsed());
+        }
     }
 }
 
@@ -71,24 +83,28 @@ impl ConfigureState {
                 status: CStatus::Pending,
                 tail: String::new(),
                 started_at: None,
+                finished_at: None,
             },
             CStage {
                 name: "control-plane LXC (boot if missing)",
                 status: CStatus::Pending,
                 tail: String::new(),
                 started_at: None,
+                finished_at: None,
             },
             CStage {
                 name: "deploy the Buzz relay",
                 status: CStatus::Pending,
                 tail: String::new(),
                 started_at: None,
+                finished_at: None,
             },
             CStage {
                 name: "deploy the control plane",
                 status: CStatus::Pending,
                 tail: String::new(),
                 started_at: None,
+                finished_at: None,
             },
         ];
         Self {
@@ -114,6 +130,8 @@ impl ConfigureState {
         for s in &mut self.stages {
             s.status = CStatus::Pending;
             s.tail.clear();
+            s.started_at = None;
+            s.finished_at = None;
         }
         self.cur = 0;
         self.transitioning = false;
@@ -184,6 +202,7 @@ impl ConfigureState {
                         self.auth_detected = true; // a successful probe exec = valid auth
                         self.stages[i].status = CStatus::Ok;
                         self.stages[i].tail = "already present".into();
+                        self.stages[i].freeze();
                         // a REUSED LXC may predate the write-back — record
                         // its coords now so the deploy stages can run.
                         if i == 0 || i == 1 {
@@ -203,6 +222,7 @@ impl ConfigureState {
                     } else {
                         self.stages[i].status = CStatus::Failed;
                         self.stages[i].tail = out;
+                        self.stages[i].freeze();
                         self.notice = "check failed — r to retry".into();
                     }
                 }
@@ -212,6 +232,7 @@ impl ConfigureState {
                     if ok {
                         self.stages[i].status = CStatus::Ok;
                         self.stages[i].tail = tail.clone();
+                        self.stages[i].freeze();
                         // record the ACTUAL post-boot coordinates (auto vmid +
                         // dhcp ip) in the config — the user asked for this the
                         // moment the LXC exists.
@@ -238,6 +259,7 @@ impl ConfigureState {
                     } else {
                         self.stages[i].status = CStatus::Failed;
                         self.stages[i].tail = out;
+                        self.stages[i].freeze();
                         self.notice = "stage failed — r to retry".into();
                     }
                 }
