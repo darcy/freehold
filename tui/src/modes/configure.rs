@@ -23,6 +23,17 @@ pub struct CStage {
     pub name: &'static str,
     pub status: CStatus,
     pub tail: String,
+    /// when the stage's check/run started — live ticking while it runs.
+    pub started_at: Option<std::time::Instant>,
+}
+
+impl CStage {
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        self.started_at.map(|t| t.elapsed())
+    }
+    pub fn elapsed_secs(&self) -> f32 {
+        self.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0)
+    }
 }
 
 pub struct ConfigureState {
@@ -33,6 +44,10 @@ pub struct ConfigureState {
     pub cur: usize,
     pub notice: String,
     pub transitioning: bool,
+    /// set the moment a successful exec through the runner proves valid ssh
+    /// auth — the global "install" timer starts here (first run: door
+    /// verify; reruns: the first check probe).
+    pub auth_detected: bool,
     runner: StageRunner,
     job: Option<usize>,
 }
@@ -55,21 +70,25 @@ impl ConfigureState {
                 name: "relay LXC (boot if missing)",
                 status: CStatus::Pending,
                 tail: String::new(),
+                started_at: None,
             },
             CStage {
                 name: "control-plane LXC (boot if missing)",
                 status: CStatus::Pending,
                 tail: String::new(),
+                started_at: None,
             },
             CStage {
                 name: "deploy the Buzz relay",
                 status: CStatus::Pending,
                 tail: String::new(),
+                started_at: None,
             },
             CStage {
                 name: "deploy the control plane",
                 status: CStatus::Pending,
                 tail: String::new(),
+                started_at: None,
             },
         ];
         Self {
@@ -80,6 +99,7 @@ impl ConfigureState {
             cur: 0,
             notice: String::new(),
             transitioning: false,
+            auth_detected: false,
             runner: StageRunner::new(),
             job: None,
         }
@@ -112,6 +132,7 @@ impl ConfigureState {
         let a = self.answers.clone();
         let cfg = self.cfg.clone();
         self.stages[i].status = CStatus::Check;
+        self.stages[i].started_at = Some(std::time::Instant::now());
         self.job = Some(i);
         self.runner.spawn(move || {
             // the SAME real probes the running mode uses — a reachable proxy
@@ -130,6 +151,7 @@ impl ConfigureState {
     fn spawn_run(&mut self, i: usize) {
         let a = self.answers.clone();
         self.stages[i].status = CStatus::Run;
+        self.stages[i].started_at = Some(std::time::Instant::now());
         self.job = Some(i);
         self.runner.spawn(move || match i {
             0 => {
@@ -159,6 +181,7 @@ impl ConfigureState {
             match self.stages[i].status {
                 CStatus::Check => {
                     if ok && out == "1" {
+                        self.auth_detected = true; // a successful probe exec = valid auth
                         self.stages[i].status = CStatus::Ok;
                         self.stages[i].tail = "already present".into();
                         // a REUSED LXC may predate the write-back — record
@@ -185,6 +208,7 @@ impl ConfigureState {
                 }
                 CStatus::Run | CStatus::Failed | CStatus::Pending | CStatus::Ok => {
                     let tail = out.clone();
+                    self.auth_detected = true; // a run-ok means the lane is live
                     if ok {
                         self.stages[i].status = CStatus::Ok;
                         self.stages[i].tail = tail.clone();

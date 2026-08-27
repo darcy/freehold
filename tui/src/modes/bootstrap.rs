@@ -186,6 +186,9 @@ pub struct Bootstrap {
     pub notice: String,
     pub transitioning: bool,
     pub quit_requested: bool,
+    /// valid ssh auth proven (a real exec through the runner returned ok) —
+    /// the install timer starts here on a fresh bootstrap.
+    pub auth_ok: bool,
     runner: StageRunner,
     job: Job,
     fns: StageFns,
@@ -238,6 +241,7 @@ impl Bootstrap {
             notice: String::new(),
             transitioning: false,
             quit_requested: false,
+            auth_ok: false,
             runner: StageRunner::new(),
             job: Job::None,
             fns,
@@ -433,6 +437,7 @@ impl Bootstrap {
                     Job::Probe => {
                         self.door_tries += 1;
                         if out == "ok" {
+                            self.auth_ok = true;
                             self.stages[3].status = Status::Ok;
                             self.job = Job::None;
                             self.cur = 4;

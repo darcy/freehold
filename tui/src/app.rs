@@ -23,6 +23,9 @@ pub struct App {
     pub cf: ConfigureState,
     pub rn: Running,
     pub quit: bool,
+    /// set at the first VALID ssh auth (door verify on bootstrap; the first
+    /// successful lane exec during configure) — the install timer's origin.
+    pub first_auth: Option<std::time::Instant>,
 }
 
 impl App {
@@ -35,6 +38,7 @@ impl App {
             rn: Running::new(cfg_path.clone()),
             mode,
             quit: false,
+            first_auth: None,
         })
     }
 
@@ -82,6 +86,9 @@ impl App {
         match self.mode {
             Mode::Bootstrap => {
                 self.bs.tick();
+                if self.first_auth.is_none() && self.bs.auth_ok {
+                    self.first_auth = Some(std::time::Instant::now());
+                }
                 if self.bs.quit_requested {
                     self.quit = true;
                 }
@@ -91,6 +98,9 @@ impl App {
                 }
             }
             Mode::Configure => {
+                if self.first_auth.is_none() && self.cf.auth_detected {
+                    self.first_auth = Some(std::time::Instant::now());
+                }
                 if self.cf.tick() {
                     self.cf.transitioning = false;
                     self.to(Mode::Running);
@@ -196,8 +206,8 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
 
     match app.mode {
         Mode::Bootstrap => draw_bootstrap(chunks[1], f, &mut app.bs),
-        Mode::Configure => draw_configure(chunks[1], f, &mut app.cf),
-        Mode::Running => draw_running(chunks[1], f, &mut app.rn),
+        Mode::Configure => draw_configure(chunks[1], f, &mut app.cf, app.first_auth),
+        Mode::Running => draw_running(chunks[1], f, &mut app.rn, app.first_auth),
     }
 
     let hint = match app.mode {
@@ -447,7 +457,12 @@ fn cstatus_span(status: &crate::modes::configure::CStatus) -> Span<'static> {
     }
 }
 
-fn draw_configure<'a>(area: Rect, f: &mut Frame<'a>, cf: &mut ConfigureState) {
+fn draw_configure<'a>(
+    area: Rect,
+    f: &mut Frame<'a>,
+    cf: &mut ConfigureState,
+    first_auth: Option<std::time::Instant>,
+) {
     let block = panel("Converging the world to the config", Color::Yellow);
     let inner = block.inner(area);
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(inner);
@@ -457,9 +472,15 @@ fn draw_configure<'a>(area: Rect, f: &mut Frame<'a>, cf: &mut ConfigureState) {
         .stages
         .iter()
         .map(|s| {
+            let timing = match &s.status {
+                CStatus::Check | CStatus::Run => format!("  — {:.1}s…", s.elapsed_secs()),
+                CStatus::Ok | CStatus::Failed => format!("  ({:.1}s)", s.elapsed_secs()),
+                _ => String::new(),
+            };
             Line::from(vec![
                 cstatus_span(&s.status),
                 Span::styled(s.name.to_string(), Style::new().fg(Color::White)),
+                Span::styled(timing, Style::new().fg(Color::DarkGray)),
             ])
         })
         .collect();
@@ -477,7 +498,7 @@ fn draw_configure<'a>(area: Rect, f: &mut Frame<'a>, cf: &mut ConfigureState) {
     }
     f.render_widget(Paragraph::new(lines), chunks[0]);
 
-    let meta = vec![
+    let mut meta = vec![
         Line::from(Span::styled(
             format!(" doing: {}", cf.stages[cf.cur.min(3)].name),
             Style::new().fg(Color::DarkGray),
@@ -490,6 +511,15 @@ fn draw_configure<'a>(area: Rect, f: &mut Frame<'a>, cf: &mut ConfigureState) {
             Style::new().fg(Color::DarkGray),
         )),
     ];
+    if let Some(t0) = first_auth {
+        meta.push(Line::from(Span::styled(
+            format!(
+                " since first valid auth: {:.1}s",
+                t0.elapsed().as_secs_f32()
+            ),
+            Style::new().fg(Color::Cyan),
+        )));
+    }
     f.render_widget(Paragraph::new(meta), chunks[1]);
 
     if !cf.notice.is_empty() {
@@ -506,7 +536,12 @@ fn draw_configure<'a>(area: Rect, f: &mut Frame<'a>, cf: &mut ConfigureState) {
     }
 }
 
-fn draw_running<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
+fn draw_running<'a>(
+    area: Rect,
+    f: &mut Frame<'a>,
+    rn: &mut Running,
+    first_auth: Option<std::time::Instant>,
+) {
     let color = if rn.all_ok() {
         Color::Green
     } else {
@@ -542,6 +577,13 @@ fn draw_running<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
             ),
             Span::styled(label.to_string(), Style::new().fg(Color::White)),
         ]));
+    }
+    if let Some(t0) = first_auth {
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            format!("  door → good to go: {:.1}s", t0.elapsed().as_secs_f32()),
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
     }
     if let Some(cfg) = &rn.cfg {
         lines.push(Line::from(Span::raw("")));
