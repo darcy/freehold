@@ -646,6 +646,16 @@ async fn cli_body() -> Result<()> {
                 .map(freehold_core::identity::parse_pubkey_input)
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // With operator authn configured (admin whitelist) the console may
+            // bind the LAN — and that's what the operator's proxy needs — so
+            // the DEFAULT loopback bind becomes 0.0.0.0 only in that case
+            // (no authn → loopback stays, the security posture).
+            let bind_addr = if operator_pubkey.is_none() || args.bind != deploy_cp::DEFAULT_CP_BIND
+            {
+                args.bind.clone()
+            } else {
+                "0.0.0.0:8080".to_string()
+            };
             let res = deploy_cp::deploy_cp(
                 &client,
                 &args.target,
@@ -653,7 +663,7 @@ async fn cli_body() -> Result<()> {
                     lxc: args.lxc,
                     state_dir: args.state_dir.clone(),
                     bin_dir: args.bin_dir.clone(),
-                    bind_addr: args.bind.clone(),
+                    bind_addr,
                     binary_path: args.binary.clone(),
                     relay_url: args.relay_url.clone(),
                     admin_pubkeys: operator_pubkey.map(|pk| vec![pk]).unwrap_or_default(),
