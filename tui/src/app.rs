@@ -3,7 +3,7 @@
 use crate::modes::{
     bootstrap::{Bootstrap, Status},
     configure::{CStatus, ConfigureState},
-    running::{AuthState, PanelView, Running, clip},
+    running::{AuthState, DashboardView, PanelView, Running, clip},
 };
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -221,12 +221,7 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
     match app.mode {
         Mode::Bootstrap => draw_bootstrap(chunks[1], f, &mut app.bs),
         Mode::Configure => draw_configure(chunks[1], f, &mut app.cf, app.first_auth),
-        Mode::Running => {
-            let rsplit =
-                Layout::vertical([Constraint::Length(13), Constraint::Min(0)]).split(chunks[1]);
-            draw_running(rsplit[0], f, &mut app.rn, app.install_time);
-            draw_console(rsplit[1], f, &mut app.rn);
-        }
+        Mode::Running => draw_running(chunks[1], f, &mut app.rn),
     }
 
     let hint = match app.mode {
@@ -243,7 +238,7 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
         },
         Mode::Configure => "r retry failed stages · q quit",
         Mode::Running => {
-            "l login · p provision · R rotate · x revoke · g grant · G ungrant · a addr · v channel · Tab local/remote · w web · c reconfigure · q quit"
+            "Tab/Shift-Tab views · t local/remote · l login · p provision · R rotate · x revoke · g/G grant · a addr · v channel · w web · c reconfigure · q quit"
         }
     };
     footer(chunks[2], f, hint);
@@ -597,71 +592,102 @@ fn draw_configure<'a>(
     }
 }
 
-fn draw_running<'a>(
-    area: Rect,
-    f: &mut Frame<'a>,
-    rn: &mut Running,
-    install_time: Option<std::time::Duration>,
-) {
-    let color = if rn.all_ok() {
-        Color::Green
-    } else {
-        Color::Yellow
-    };
-    let block = panel(
-        if rn.all_ok() {
-            "Good to go!"
-        } else {
-            "still bringing things up…"
-        },
-        color,
+fn draw_running<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
+    // one-line world strip (the liveness glance; the Good-to-go box is gone).
+    let strip = format!(
+        " {}",
+        rn.probes
+            .iter()
+            .map(|(label, ok)| format!("{label} {}", if *ok { "●" } else { "○" }))
+            .collect::<Vec<_>>()
+            .join("  ·  ")
     );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            strip,
+            Style::new().fg(Color::DarkGray),
+        ))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let panel_area = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    match rn.view {
+        DashboardView::Agents => draw_agents(panel_area, f, rn),
+        DashboardView::Services => draw_services(panel_area, f, rn),
+        DashboardView::Runners => draw_console(panel_area, f, rn),
+    }
+}
+
+fn draw_services<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
+    let block = panel("services", Color::Cyan);
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("        ", Style::new().fg(color)),
-            Span::styled(
-                "Everything is running",
-                Style::new().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  — freehold is up."),
-        ]),
-        Line::from(Span::raw("")),
-    ];
-    for (label, ok) in &rn.probes {
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!(
+            " {}{}{}{}",
+            col("service", 18),
+            col("where", 24),
+            col("status", 8),
+            col("url", 40),
+        ),
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ))];
+    for svc in &rn.services {
+        let (status_ch, color) = match svc.status {
+            Some(true) => ("●", Color::Green),
+            Some(false) => ("○", Color::Red),
+            None => ("—", Color::DarkGray),
+        };
         lines.push(Line::from(vec![
-            Span::styled(
-                if *ok { "● " } else { "○ " },
-                Style::new().fg(if *ok { Color::Green } else { Color::Red }),
-            ),
-            Span::styled(label.to_string(), Style::new().fg(Color::White)),
+            Span::styled(col(&svc.name, 18), Style::new().fg(Color::White)),
+            Span::styled(col(&svc.location, 24), Style::new().fg(Color::Gray)),
+            Span::styled(col(status_ch, 8), Style::new().fg(color)),
+            Span::styled(col(&svc.url, 40), Style::new().fg(Color::LightBlue)),
         ]));
     }
-    if let Some(t) = install_time {
-        lines.push(Line::from(Span::raw("")));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn draw_agents<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
+    let block = panel("agents", Color::Cyan);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!(
+            " local agent identities · {}",
+            freehold_installer::freehold_home()
+                .join("control-plane")
+                .display()
+        ),
+        Style::new().fg(Color::DarkGray),
+    ))];
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {}{}{}",
+            col("agent", 18),
+            col("pubkey", 22),
+            col("created", 12),
+        ),
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    if rn.agents.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("  door → good to go: {:.1}s", t.as_secs_f32()),
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            " no agents stood up yet — the CPA records them here as it creates them",
+            Style::new().fg(Color::DarkGray),
         )));
     }
-    if let Some(cfg) = &rn.cfg {
-        lines.push(Line::from(Span::raw("")));
-        lines.push(Line::from(Span::styled(
-            format!("  relay:   {}", cfg.relay_url),
-            Style::new().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("  console: {}", cfg.cp_url),
-            Style::new().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("  runner:  {} (proxmox-box)", cfg.runner.addr),
-            Style::new().fg(Color::DarkGray),
-        )));
+    for a in &rn.agents {
+        lines.push(Line::from(vec![
+            Span::styled(col(&a.name, 18), Style::new().fg(Color::White)),
+            Span::styled(col(&clip(&a.pubkey, 20), 22), Style::new().fg(Color::Gray)),
+            Span::styled(col(&a.created, 12), Style::new().fg(Color::Gray)),
+        ]));
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -720,8 +746,8 @@ fn draw_console<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
         AuthState::Missing => Color::DarkGray,
     };
     let title = match rn.cp.view {
-        PanelView::Remote => "console — services at a glance · remote",
-        PanelView::Local => "console — services at a glance · local loopback",
+        PanelView::Remote => "runners · remote console API",
+        PanelView::Local => "runners · local loopback",
     };
     let block = panel(title, border);
     let inner = block.inner(area);

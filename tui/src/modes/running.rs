@@ -1,7 +1,15 @@
-//! Running mode — the "Good to go!" dashboard PLUS full console parity:
-//! services-at-a-glance and the same manage actions as the web UI, all
-//! driven by the console API through the shared `freehold-console-client`.
-//! The web page and this TUI are two clients of ONE contract.
+//! Running mode — the post-bring-up dashboard. THREE views, cycled with
+//! Tab / Shift-Tab:
+//!   - **Agents** — named agents stood up so far (the local agent
+//!     identities; the CP-side registry the CPA writes is the follow-up).
+//!   - **Services** — everything running, by name / where / status / URL:
+//!     relay + control plane today, k3s/litellm/etc. as their coordinates
+//!     land in the config (`managed`).
+//!   - **Runners** — the console API parity (remote console list, same data
+//!     as the web UI) + the local loopback list (`t` toggles the source).
+//!
+//! The world strip (one line) keeps the liveness glance; the Good-to-go box
+//! is gone.
 
 use freehold_console_client::{Client, ProvisionReq, SecretReq};
 use freehold_core::identity::Identity;
@@ -13,12 +21,15 @@ use std::time::{Duration, Instant};
 
 pub struct Running {
     pub cfg: Option<Config>,
-    /// (label, reachable) — the bring-up probes.
+    /// (label, reachable) — the world strip + the services status.
     pub probes: Vec<(String, bool)>,
+    pub view: DashboardView,
+    pub services: Vec<ServiceRow>,
+    pub agents: Vec<AgentRow>,
+    /// Console API parity (the runner lists).
+    pub cp: ConsolePanel,
     pub last: Instant,
     pub request_configure: bool,
-    /// Console API parity (the web UI's data through the same client).
-    pub cp: ConsolePanel,
 }
 
 impl Running {
@@ -27,12 +38,16 @@ impl Running {
         let mut r = Self {
             cfg: cfg.clone(),
             probes: Vec::new(),
+            view: DashboardView::default(),
+            services: Vec::new(),
+            agents: build_agents(),
+            cp: ConsolePanel::default(),
             last: Instant::now() - Duration::from_secs(5),
             request_configure: false,
-            cp: ConsolePanel::default(),
         };
         if let Some(c) = &cfg {
             r.probe(c);
+            r.services = build_services(c, &r.probes);
         }
         r.attach_console();
         r
@@ -42,17 +57,18 @@ impl Running {
         let mut r = Self::new(cfg_path);
         r.cfg = Some(cfg.clone());
         r.probe(&cfg);
+        r.services = build_services(&cfg, &r.probes);
         r.attach_console();
         r
     }
 
     fn probe(&mut self, cfg: &Config) {
-        // the SAME real checks the mode probe uses — a reachable proxy is
-        // not a running relay (this stale-TCP bug kept the running screen
-        // "Good to go!" over an empty world).
+        // the SAME real checks the mode probe used — a reachable proxy is
+        // not a running relay (this stale-TCP bug kept the old running
+        // screen "Good to go!" over an empty world).
         self.probes = vec![
-            ("relay (/_liveness)".into(), relay_live(cfg)),
-            ("control plane (/healthz)".into(), cp_live(cfg)),
+            ("relay".into(), relay_live(cfg)),
+            ("control plane".into(), cp_live(cfg)),
             ("provisioning runner".into(), port_open(&cfg.runner.addr)),
         ];
         self.last = Instant::now();
@@ -109,7 +125,7 @@ impl Running {
 
     fn refresh(&mut self) {
         if self.cp.view == PanelView::Local {
-            self.cp.local = read_local();
+            self.cp.local = read_local(&self.cfg);
             return;
         }
         let Some(client) = self.cp.client.as_ref() else {
@@ -182,6 +198,30 @@ impl Running {
         }
         match code {
             crossterm::event::KeyCode::Char('c') => self.request_configure = true,
+            // cycle the top-level views.
+            crossterm::event::KeyCode::Tab => {
+                self.view = self.view.next();
+                self.cp.notice.clear();
+            }
+            crossterm::event::KeyCode::BackTab => {
+                self.view = self.view.prev();
+                self.cp.notice.clear();
+            }
+            // runners source toggle: local loopback <-> remote console.
+            crossterm::event::KeyCode::Char('t') => {
+                self.view = DashboardView::Runners;
+                self.cp.view = match self.cp.view {
+                    PanelView::Remote => PanelView::Local,
+                    PanelView::Local => PanelView::Remote,
+                };
+                self.cp.notice = match self.cp.view {
+                    PanelView::Remote => "runners: remote console".into(),
+                    PanelView::Local => {
+                        "runners: local loopback (view-only — manage via remote)".into()
+                    }
+                };
+                self.refresh();
+            }
             crossterm::event::KeyCode::Char('l') => {
                 self.cp.client = None;
                 self.cp.auth = AuthState::Missing;
@@ -190,52 +230,35 @@ impl Running {
                 self.attach_console();
                 self.refresh();
             }
-            crossterm::event::KeyCode::Char('r') => self.refresh(),
-            crossterm::event::KeyCode::Char('p') => self.start(Flow::Provision),
-            crossterm::event::KeyCode::Char('R') => self.start(Flow::Rotate),
-            crossterm::event::KeyCode::Char('x') => self.start(Flow::Revoke),
-            crossterm::event::KeyCode::Char('g') => self.start(Flow::Grant),
-            crossterm::event::KeyCode::Char('G') => self.start(Flow::Ungrant),
-            crossterm::event::KeyCode::Char('a') => self.start(Flow::Addr),
-            crossterm::event::KeyCode::Char('v') => self.start(Flow::Channel),
-            crossterm::event::KeyCode::Tab => {
-                self.cp.view = match self.cp.view {
-                    PanelView::Remote => PanelView::Local,
-                    PanelView::Local => PanelView::Remote,
-                };
-                self.cp.notice = match self.cp.view {
-                    PanelView::Remote => "remote console list".into(),
-                    PanelView::Local => {
-                        "local loopback list (view-only — manage via remote)".into()
-                    }
-                };
-                self.refresh();
+            crossterm::event::KeyCode::Char('w') => self.launch_web(),
+            // runner management actions — from any view, land on Runners.
+            crossterm::event::KeyCode::Char('p') => {
+                self.view = DashboardView::Runners;
+                self.start(Flow::Provision);
             }
-            crossterm::event::KeyCode::Char('w') => {
-                if self.cp.view == PanelView::Local {
-                    self.cp.notice =
-                        "local has no web UI (loopback posture) — Tab to the remote list".into();
-                    return;
-                }
-                let Some(client) = self.cp.client.as_ref() else {
-                    self.cp.notice =
-                        "not logged in — press l first (the web needs a session)".into();
-                    return;
-                };
-                match client.portal_url() {
-                    Ok(url) => {
-                        self.cp.notice = format!("web opened: {url}");
-                        // detached + silent — the browser outlives the TUI
-                        // and must not scribble into the TUI's screen.
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg(&url)
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn()
-                            .map_err(|e| format!("xdg-open: {e}"));
-                    }
-                    Err(e) => self.cp.notice = format!("web launch failed: {e}"),
-                }
+            crossterm::event::KeyCode::Char('R') => {
+                self.view = DashboardView::Runners;
+                self.start(Flow::Rotate);
+            }
+            crossterm::event::KeyCode::Char('x') => {
+                self.view = DashboardView::Runners;
+                self.start(Flow::Revoke);
+            }
+            crossterm::event::KeyCode::Char('g') => {
+                self.view = DashboardView::Runners;
+                self.start(Flow::Grant);
+            }
+            crossterm::event::KeyCode::Char('G') => {
+                self.view = DashboardView::Runners;
+                self.start(Flow::Ungrant);
+            }
+            crossterm::event::KeyCode::Char('a') => {
+                self.view = DashboardView::Runners;
+                self.start(Flow::Addr);
+            }
+            crossterm::event::KeyCode::Char('v') => {
+                self.view = DashboardView::Runners;
+                self.start(Flow::Channel);
             }
             crossterm::event::KeyCode::Esc => self.cp.channel = None,
             _ => {}
@@ -246,10 +269,30 @@ impl Running {
         self.cp.prompt.is_some()
     }
 
+    fn launch_web(&mut self) {
+        let Some(client) = self.cp.client.as_ref() else {
+            self.cp.notice = "not logged in — press l first (the web needs a session)".into();
+            return;
+        };
+        match client.portal_url() {
+            Ok(url) => {
+                self.cp.notice = format!("web opened: {url}");
+                // detached + silent — the browser outlives the TUI and must
+                // not scribble into the TUI's screen.
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&url)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("xdg-open: {e}"));
+            }
+            Err(e) => self.cp.notice = format!("web launch failed: {e}"),
+        }
+    }
+
     fn start(&mut self, flow: Flow) {
         if self.cp.view == PanelView::Local {
-            self.cp.notice =
-                "local is a view-only list — Tab to the remote console to manage".into();
+            self.cp.notice = "local is a view-only list — t to the remote console to manage".into();
             return;
         }
         if self.cp.client.is_none() {
@@ -312,11 +355,11 @@ impl Running {
             && let Some(cfg) = self.cfg.clone()
         {
             self.probe(&cfg);
+            self.services = build_services(&cfg, &self.probes);
             self.refresh();
         }
-        // Auto-login retry: the console can still be warming the moment the
-        // running screen shows — keep attempting until a session is live so
-        // Good to go is logged in without pressing l.
+        // Auto-login retry: the console can still be warming — keep
+        // attempting until a session is live (no l press needed).
         let can_login = self
             .cfg
             .as_ref()
@@ -334,9 +377,136 @@ impl Running {
             self.refresh();
         }
     }
+}
 
-    pub fn all_ok(&self) -> bool {
-        !self.probes.is_empty() && self.probes.iter().all(|(_, ok)| *ok)
+// ---------------------------------------------------------------------------
+// The dashboard views.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DashboardView {
+    /// named agents stood up so far.
+    Agents,
+    /// everything running: name / where / status / url.
+    #[default]
+    Services,
+    /// the runner lists (remote console API <-> local loopback).
+    Runners,
+}
+
+impl DashboardView {
+    pub fn next(self) -> Self {
+        match self {
+            DashboardView::Agents => DashboardView::Services,
+            DashboardView::Services => DashboardView::Runners,
+            DashboardView::Runners => DashboardView::Agents,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            DashboardView::Agents => DashboardView::Runners,
+            DashboardView::Services => DashboardView::Agents,
+            DashboardView::Runners => DashboardView::Services,
+        }
+    }
+}
+
+/// One service row: what's provisioned + running, from the config's
+/// `managed` pieces. relay/cp carry their LXC coords; future pieces
+/// (k3s, litellm, …) appear as soon as their coordinates land in the config.
+pub struct ServiceRow {
+    pub name: String,
+    pub location: String,
+    /// None = not provisioned (yet).
+    pub status: Option<bool>,
+    pub url: String,
+}
+
+fn build_services(cfg: &Config, probes: &[(String, bool)]) -> Vec<ServiceRow> {
+    let status_of = |key: &str| probes.iter().find(|(l, _)| l == key).map(|(_, ok)| *ok);
+    let location = |vmid: &Option<u32>, ip: &Option<String>| match (vmid, ip) {
+        (Some(v), Some(i)) => format!("LXC {v} · {i}"),
+        (Some(v), None) => format!("LXC {v}"),
+        (None, Some(i)) => i.clone(),
+        (None, None) => "—".into(),
+    };
+    cfg.managed
+        .iter()
+        .map(|piece| match piece.as_str() {
+            "relay" => ServiceRow {
+                name: "relay".into(),
+                location: location(&cfg.lxc.relay.vmid, &cfg.lxc.relay.ip),
+                status: status_of("relay"),
+                url: cfg.relay_url.clone(),
+            },
+            "cp" => ServiceRow {
+                name: "control plane".into(),
+                location: location(&cfg.lxc.cp.vmid, &cfg.lxc.cp.ip),
+                status: status_of("control plane"),
+                url: cfg.cp_url.clone(),
+            },
+            other => ServiceRow {
+                name: other.into(),
+                location: "—".into(),
+                status: None,
+                url: "—".into(),
+            },
+        })
+        .collect()
+}
+
+/// Named agents stood up so far = the agent identity dirs under the freehold
+/// home (agent-ops, agent-peer, …). The CP-side registry (the CPA records
+/// agents when it stands them up) is the follow-up — this is the local
+/// truth today.
+pub struct AgentRow {
+    pub name: String,
+    pub pubkey: String,
+    pub created: String,
+}
+
+fn build_agents() -> Vec<AgentRow> {
+    let base = freehold_installer::freehold_home().join("control-plane");
+    let Ok(rd) = std::fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("agent") || !path.join("identity.json").exists() {
+            continue;
+        }
+        if let Ok(id) = Identity::load(&path) {
+            let created = path
+                .join("identity.json")
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| humanize(t.elapsed().unwrap_or_default().as_secs()))
+                .unwrap_or_else(|| "—".into());
+            rows.push(AgentRow {
+                name,
+                pubkey: id.nostr_pubkey_hex(),
+                created,
+            });
+        }
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows
+}
+
+/// "just now" / "3m ago" / "2h ago" / "5d ago" — enough for the agents view.
+fn humanize(secs: u64) -> String {
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 
@@ -354,7 +524,7 @@ pub enum AuthState {
     Failed,
 }
 
-/// Which runner list the console panel is showing.
+/// Which runner list the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelView {
     /// the DEPLOYED console, via its API (the same data the web UI renders).
@@ -370,7 +540,7 @@ pub struct ConsolePanel {
     pub client: Option<Client>,
     pub overview: Option<freehold_console_client::Overview>,
     pub view: PanelView,
-    /// the local loopback runner list (built when `view == Local`).
+    /// the local loopback runner list (built when `view == PanelView::Local`).
     pub local: Vec<LocalRunner>,
     pub auth: AuthState,
     pub auth_reason: String,
@@ -378,7 +548,7 @@ pub struct ConsolePanel {
     pub notice: String,
     last_fetch: Instant,
     /// the last auto-login attempt — the login RETRIES while the console is
-    /// still warming so "Good to go" really is logged in.
+    /// still warming so the running screen really is logged in.
     last_login_attempt: Instant,
     /// a text-input prompt in progress (Esc cancels / Enter submits).
     pub prompt: Option<Prompt>,
@@ -417,9 +587,15 @@ pub struct LocalRunner {
 }
 
 /// The local world: ~/.freehold/control-plane/state.json + the runner
-/// packages it points at. Missing state => empty (the panel says so).
-fn read_local() -> Vec<LocalRunner> {
+/// packages it points at. Missing state => empty (the panel says so). A
+/// runner whose record never captured an address falls back to the
+/// CONFIGURED provisioning runner address (the same runner in practice).
+fn read_local(cfg: &Option<Config>) -> Vec<LocalRunner> {
     use freehold_control_plane::state::{RunnerStatus, StateStore};
+    let fallback_addr = cfg
+        .as_ref()
+        .map(|c| c.runner.addr.clone())
+        .unwrap_or_default();
     let dir = freehold_installer::freehold_home().join("control-plane");
     if !dir.join("state.json").exists() {
         return Vec::new();
@@ -440,11 +616,11 @@ fn read_local() -> Vec<LocalRunner> {
                 RunnerStatus::Active => "active",
                 RunnerStatus::Revoked => "revoked",
             };
-            let reachable = rec
+            let addr = rec
                 .mcp_addr
-                .as_deref()
-                .map(freehold_installer::port_open)
-                .unwrap_or(false);
+                .clone()
+                .or_else(|| fallback_addr.clone().into());
+            let reachable = addr.map(|a| port_open(&a)).unwrap_or(false);
             LocalRunner {
                 name: name.clone(),
                 status: status.into(),
