@@ -93,6 +93,13 @@ impl ConfigureState {
                 finished_at: None,
             },
             CStage {
+                name: "k3s cluster LXC (boot if missing)",
+                status: CStatus::Pending,
+                tail: String::new(),
+                started_at: None,
+                finished_at: None,
+            },
+            CStage {
                 name: "deploy the Buzz relay",
                 status: CStatus::Pending,
                 tail: String::new(),
@@ -158,8 +165,9 @@ impl ConfigureState {
             let present = match i {
                 0 => probe_lxc(&a, cfg.lxc.relay.vmid)?,
                 1 => probe_lxc(&a, cfg.lxc.cp.vmid)?,
-                2 => relay_live(&cfg),
-                3 => cp_live(&cfg),
+                2 => probe_lxc(&a, cfg.lxc.k3s.vmid)?,
+                3 => relay_live(&cfg),
+                4 => cp_live(&cfg),
                 _ => false,
             };
             Ok(if present { "1".into() } else { "0".into() })
@@ -181,10 +189,14 @@ impl ConfigureState {
                 Ok("cp LXC ready".to_string())
             }
             2 => {
+                freehold_installer::stage_k3s(&a)?;
+                Ok("k3s cluster ready".to_string())
+            }
+            3 => {
                 stage_deploy_relay(&a)?;
                 Ok(format!("relay live at https://{}", a.domain))
             }
-            3 => {
+            4 => {
                 stage_deploy_cp(&a)?;
                 Ok(format!("control plane live at https://cp-{}", a.domain))
             }
@@ -205,8 +217,14 @@ impl ConfigureState {
                         self.stages[i].freeze();
                         // a REUSED LXC may predate the write-back — record
                         // its coords now so the deploy stages can run.
-                        if i == 0 || i == 1 {
-                            let role = if i == 0 { "relay" } else { "cp" };
+                        if i == 0 || i == 1 || i == 2 {
+                            let role = if i == 0 {
+                                "relay"
+                            } else if i == 1 {
+                                "cp"
+                            } else {
+                                "k3s"
+                            };
                             if freehold_installer::write_back_lxc(
                                 &self.answers,
                                 &mut self.cfg,
@@ -236,8 +254,14 @@ impl ConfigureState {
                         // record the ACTUAL post-boot coordinates (auto vmid +
                         // dhcp ip) in the config — the user asked for this the
                         // moment the LXC exists.
-                        if i == 0 || i == 1 {
-                            let role = if i == 0 { "relay" } else { "cp" };
+                        if i == 0 || i == 1 || i == 2 {
+                            let role = if i == 0 {
+                                "relay"
+                            } else if i == 1 {
+                                "cp"
+                            } else {
+                                "k3s"
+                            };
                             match freehold_installer::write_back_lxc(
                                 &self.answers,
                                 &mut self.cfg,

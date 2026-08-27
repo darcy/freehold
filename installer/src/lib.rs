@@ -81,6 +81,8 @@ pub struct Answers {
     pub relay_gw: String,
     pub cp_vmid: Option<u32>,
     pub cp_ip: Option<String>,
+    pub k3s_vmid: Option<u32>,
+    pub k3s_ip: Option<String>,
     pub rootfs_gb: u32,
     pub memory_mb: u32,
     /// Operator Nostr pubkey (64-hex)
@@ -104,6 +106,8 @@ impl Answers {
             relay_gw: "192.168.30.1".into(), // bootstrap-time only, not config
             cp_vmid: cfg.lxc.cp.vmid,
             cp_ip: cfg.lxc.cp.ip.clone(),
+            k3s_vmid: cfg.lxc.k3s.vmid,
+            k3s_ip: cfg.lxc.k3s.ip.clone(),
             rootfs_gb: 16, // bootstrap-time only
             memory_mb: 2048,
             operator_pk: cfg.operator_pubkey.clone(),
@@ -124,6 +128,8 @@ impl Answers {
             relay_gw: "192.168.30.1".into(),
             cp_vmid: None,
             cp_ip: None,
+            k3s_vmid: None,
+            k3s_ip: None,
             rootfs_gb: 16,
             memory_mb: 2048,
             operator_pk: String::new(),
@@ -457,11 +463,18 @@ pub fn write_back_lxc(a: &Answers, cfg: &mut config::Config, role: &str) -> Resu
     let ip = read_lxc_ip(a, vmid)?;
     let guest = if role == "relay" {
         &mut cfg.lxc.relay
+    } else if role == "k3s" {
+        &mut cfg.lxc.k3s
     } else {
         &mut cfg.lxc.cp
     };
     guest.vmid = Some(vmid);
     guest.ip = Some(ip);
+    // a k3s guest means the world OWNS a kube substrate — record the piece
+    // here so every write-back (stage + TUI) carries it.
+    if role == "k3s" && !cfg.managed.iter().any(|m| m == "k3s") {
+        cfg.managed.push("k3s".into());
+    }
     Ok(())
 }
 
@@ -556,10 +569,10 @@ pub fn stage_bootstrap(a: &Answers, role: &str, vmid: Option<u32>) -> Result<()>
     // a SPECIFIED IP is STATIC (the user owns addressing + the proxy/DNS
     // target); an empty one = DHCP + whatever the bridge assigns (recorded
     // in the config after boot — the UI says this loudly).
-    let ip = if role == "relay" {
-        a.relay_ip.clone()
-    } else {
-        a.cp_ip.clone()
+    let ip = match role {
+        "relay" => a.relay_ip.clone(),
+        "cp" => a.cp_ip.clone(),
+        _ => a.k3s_ip.clone(),
     };
     let ip = ip.filter(|i| !i.trim().is_empty());
     if let Some(ip) = &ip {
@@ -588,6 +601,114 @@ pub fn stage_bootstrap(a: &Answers, role: &str, vmid: Option<u32>) -> Result<()>
         &arg_refs,
         &format!("{role} LXC booted"),
     )?;
+    Ok(())
+}
+
+/// The k3s substrate stage (configure): boot the k3s LXC if missing, install
+/// k3s inside it (unprivileged-LXC spike posture: the KubeletInUserNamespace
+/// feature gate must ride AFTER the subcommand), wait for the API, then
+/// record the guest coords + the managed piece.
+pub fn stage_k3s(a: &Answers) -> Result<()> {
+    // boot if missing: the config may not know the vmid yet (a prior run
+    // died before the write-back) — find by NAME first, then probe.
+    let existing = match a.k3s_vmid {
+        Some(v) => probe_lxc(a, Some(v))?.then_some(v),
+        None => find_lxc_vmid(a, "k3s")
+            .ok()
+            .filter(|v| matches!(probe_lxc(a, Some(*v)), Ok(true))),
+    };
+    if existing.is_none() {
+        stage_bootstrap(a, "k3s", a.k3s_vmid)?;
+    }
+    let vmid = find_lxc_vmid(a, "k3s")?;
+    // install k3s in the guest when absent. The script is single-quote-free
+    // (it travels inside a single-quoted bash -c through the runner); the
+    // unit heredoc is unquoted-safe (no $ in its content).
+    let (installed, out) = run(
+        &bin("freehold-orchestrator"),
+        &[
+            "exec",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            ops_dir().to_str().unwrap(),
+            &a.runner,
+            &format!("pct exec {vmid} -- command -v k3s"),
+        ],
+    )?;
+    if (!installed || out.trim().is_empty()) && !out.contains("/usr/local/bin/k3s") {
+        let script = r#"set -euo pipefail
+export PATH=/usr/local/bin:/root/.cargo/bin:$PATH
+DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq
+if ! command -v kubectl >/dev/null 2>&1; then
+  curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh
+  INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
+fi
+if ! grep -q KubeletInUserNamespace /etc/systemd/system/k3s.service 2>/dev/null; then
+cat > /etc/systemd/system/k3s.service <<UNIT
+[Unit]
+Description=Lightweight Kubernetes
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+[Install]
+WantedBy=multi-user.target
+[Service]
+Type=notify
+EnvironmentFile=-/etc/default/%N
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/k3s server --kubelet-arg feature-gates=KubeletInUserNamespace=true
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+UNIT
+  systemctl daemon-reload
+  systemctl restart k3s
+fi
+KUBECTL=$(command -v kubectl)
+K="$KUBECTL --kubeconfig /etc/rancher/k3s/k3s.yaml"
+for i in $(seq 1 30); do
+  $K get nodes >/dev/null 2>&1 && break
+  sleep 10
+done
+$K get nodes 2>&1 | tail -2 | head -1
+mkdir -p /srv/data/k8s-volumes
+"#;
+        let (ok, out) = run(
+            &bin("freehold-orchestrator"),
+            &[
+                "exec",
+                "--addr",
+                &a.serve,
+                "--agent-dir",
+                ops_dir().to_str().unwrap(),
+                "--timeout",
+                "900",
+                &a.runner,
+                &format!("pct exec {vmid} -- bash -c '{}'", script.trim()),
+            ],
+        )?;
+        if !ok {
+            bail!(
+                "k3s install failed:
+{out}"
+            );
+        }
+    }
+    // record the guest coords + the managed piece.
+    let cfg_path = config::Config::default_path();
+    if let Ok(Some(mut cfg)) = config::Config::load(&cfg_path) {
+        write_back_lxc(a, &mut cfg, "k3s").ok();
+        let _ = cfg.save(&cfg_path);
+    }
     Ok(())
 }
 

@@ -14,7 +14,7 @@
 use freehold_console_client::{Client, ProvisionReq, SecretReq};
 use freehold_core::identity::Identity;
 use freehold_core::secrets::SecretPackage;
-use freehold_installer::config::{Config, cp_live, relay_live};
+use freehold_installer::config::{Config, cp_live, k3s_live, relay_live};
 use freehold_installer::port_open;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -109,6 +109,7 @@ impl Running {
         self.probes = vec![
             ("relay".into(), relay_live(cfg)),
             ("control plane".into(), cp_live(cfg)),
+            ("k3s".into(), k3s_live(cfg)),
             ("provisioning runner".into(), port_open(&cfg.runner.addr)),
         ];
         self.last = Instant::now();
@@ -503,6 +504,18 @@ fn build_services(cfg: &Config, probes: &[(String, bool)]) -> Vec<ServiceRow> {
                 location: location(&cfg.lxc.cp.vmid, &cfg.lxc.cp.ip),
                 status: status_of("control plane"),
                 url: cfg.cp_url.clone(),
+            },
+            "k3s" => ServiceRow {
+                name: "k3s (kube)".into(),
+                location: location(&cfg.lxc.k3s.vmid, &cfg.lxc.k3s.ip),
+                status: status_of("k3s"),
+                url: cfg
+                    .lxc
+                    .k3s
+                    .ip
+                    .as_ref()
+                    .map(|ip| format!("https://{}:6443", ip.split('/').next().unwrap_or(ip)))
+                    .unwrap_or_else(|| "—".into()),
             },
             other => ServiceRow {
                 name: other.into(),
