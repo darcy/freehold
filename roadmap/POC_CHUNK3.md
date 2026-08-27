@@ -19,7 +19,8 @@ the rebuild era and directly advances C0/C1:
   subcommand, unit override, node-ready wait, `/srv/data/k8s-volumes` carve-out). This is
   the C0 substrate's bring-up, landing as a runner-exec stage (C7's "runner-exec only"
   discipline honored; the Terraform wrapper for `--kind k3s` remains the C7 consolidation,
-  not a prerequisite for C0).
+  not a prerequisite for C0). It applies Phase 0.08's install half LIVE on librem; the
+  other half (nginx-through-NodePort from the PVE host) is still open — see 0.08.
 - **The Services view is ready for litellm (#115/#120)** — the running dashboard lists
   `managed` pieces (relay/cp/k3s today); litellm appears automatically the moment its
   coords land in the config (the same machinery k3s used).
@@ -177,11 +178,13 @@ audit 48001+spool, prompt-injection record. New this revision:
       carries every needed harness: buzz-acp BUILDS (workstation, 52s, release binary
       verified 2026-08-24), goose 1.47.0 runs (harness LXC verified). Confirm no
       codex-only need exists (codex excluded) → lock the single image.
-* [ ] 08. **k3s-on-librem re-verification.** Repeat the Chunk-2.5 spike shape on the CURRENT
-      test world (librem): unprivileged LXC, `INSTALL_K3S_EXEC="server --kubelet-arg
-      feature-gates=KubeletInUserNamespace=true"`, nginx pod through NodePort from the PVE
-      host. The 2.5 spike proved it on the cloud hosts (10.10.0.7) — librem has NOT run it.
-      PREREQUISITE for C0.
+* [ ] 08. **k3s-on-librem re-verification.** HALF-DONE by the Pre-C0 configure stage
+      (#120, live 2026-08-27): the unprivileged k3s LXC (102) with exactly this posture —
+      `INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true"` —
+      now boots + installs deterministically through `freehold configure`. REMAINING: the
+      nginx pod through NodePort reachable from the PVE host (the 2.5 spike proved that
+      half on the cloud hosts, 10.10.0.7; librem's NodePort path is unproven).
+      PREREQUISITE for C0's apply.
 * [ ] 09. **Postgres placement — LOCKED** (new locked decision above): single instance,
       multiple logical DBs, kube Deployment, durable volume pinned to `/srv/data/k8s-volumes`
       (never the default local-path root), CP-owned migrations.
@@ -206,7 +209,8 @@ NOT widened by the onboarding inversion.
 ## Phase C — Skill framework v1
 
 * [ ] C0. **k3s → LiteLLM, deterministic, operator/CPA-driven.** The k3s substrate is
-      ALREADY staged (the configure stage, see Pre-C0 progress); C0 = the litellm-kube
+      staged (configure stage, #120 — install done live; 0.08's NodePort reachability
+      proof is the remaining pre-apply gate); C0 = the litellm-kube
       apply (the #76/#78 plan) + Postgres (`/srv/data/k8s-volumes` pinned) + the master-key
       re-mint via the litellm runner + surfacing the Services row. Sequenced AFTER Phase
       0.08's re-verification; NOT blocking Phase E's first expert (landing strip). No live
