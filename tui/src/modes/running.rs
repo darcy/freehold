@@ -28,6 +28,7 @@ pub struct Running {
     pub agents: Vec<AgentRow>,
     /// Console API parity (the runner lists).
     pub cp: ConsolePanel,
+    last_agents: Instant,
     pub last: Instant,
     pub request_configure: bool,
 }
@@ -40,9 +41,10 @@ impl Running {
             probes: Vec::new(),
             view: DashboardView::default(),
             services: Vec::new(),
-            agents: build_agents(),
+            agents: Vec::new(),
             cp: ConsolePanel::default(),
             last: Instant::now() - Duration::from_secs(5),
+            last_agents: Instant::now() - Duration::from_secs(60),
             request_configure: false,
         };
         if let Some(c) = &cfg {
@@ -60,6 +62,35 @@ impl Running {
         r.services = build_services(&cfg, &r.probes);
         r.attach_console();
         r
+    }
+
+    /// The registered AI agents, with availability the console probed
+    /// against the relay (kind-9 presence). Refresh is throttled — each
+    /// request makes the console probe every agent.
+    fn refresh_agents(&mut self) {
+        if self.last_agents.elapsed() < Duration::from_secs(15) {
+            return;
+        }
+        self.last_agents = Instant::now();
+        let Some(client) = self.cp.client.as_ref() else {
+            return;
+        };
+        match client.agents() {
+            Ok(list) => {
+                let now = freehold_core::auth::now_secs();
+                self.agents = list
+                    .into_iter()
+                    .map(|a| AgentRow {
+                        name: a.name,
+                        pubkey: a.pubkey,
+                        created: humanize((now as u64).saturating_sub(a.created_at)),
+                        available: a.available,
+                        note: a.note,
+                    })
+                    .collect();
+            }
+            Err(e) => self.cp.notice = format!("agents: {e}"),
+        }
     }
 
     fn probe(&mut self, cfg: &Config) {
@@ -128,15 +159,16 @@ impl Running {
             self.cp.local = read_local(&self.cfg);
             return;
         }
-        let Some(client) = self.cp.client.as_ref() else {
-            return;
-        };
         if self.cp.last_fetch.elapsed() < Duration::from_secs(2) {
             return;
         }
         // guard BEFORE the blocking call — a dead console must not make the
         // tick loop busy-fetch.
         self.cp.last_fetch = Instant::now();
+        self.refresh_agents();
+        let Some(client) = self.cp.client.as_ref() else {
+            return;
+        };
         match client.overview() {
             Ok(ov) => {
                 self.cp.overview = Some(ov);
@@ -455,45 +487,15 @@ fn build_services(cfg: &Config, probes: &[(String, bool)]) -> Vec<ServiceRow> {
         .collect()
 }
 
-/// Named agents stood up so far = the agent identity dirs under the freehold
-/// home (agent-ops, agent-peer, …). The CP-side registry (the CPA records
-/// agents when it stands them up) is the follow-up — this is the local
-/// truth today.
+/// A named AI agent registered with the console: the relay-addressable
+/// pubkey, when it was stood up, and its LIVE availability (relay presence).
 pub struct AgentRow {
     pub name: String,
     pub pubkey: String,
     pub created: String,
-}
-
-fn build_agents() -> Vec<AgentRow> {
-    let base = freehold_installer::freehold_home().join("control-plane");
-    let Ok(rd) = std::fs::read_dir(&base) else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    for e in rd.flatten() {
-        let path = e.path();
-        let name = e.file_name().to_string_lossy().to_string();
-        if !name.starts_with("agent") || !path.join("identity.json").exists() {
-            continue;
-        }
-        if let Ok(id) = Identity::load(&path) {
-            let created = path
-                .join("identity.json")
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| humanize(t.elapsed().unwrap_or_default().as_secs()))
-                .unwrap_or_else(|| "—".into());
-            rows.push(AgentRow {
-                name,
-                pubkey: id.nostr_pubkey_hex(),
-                created,
-            });
-        }
-    }
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
-    rows
+    pub available: Option<bool>,
+    /// the console's probe failure, when available is None.
+    pub note: Option<String>,
 }
 
 /// "just now" / "3m ago" / "2h ago" / "5d ago" — enough for the agents view.

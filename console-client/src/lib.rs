@@ -128,6 +128,20 @@ pub struct Runner {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AgentInfo {
+    pub name: String,
+    pub pubkey: String,
+    pub created_at: u64,
+    /// Live relay presence: Some(true) = kind-9 seen recently,
+    /// Some(false) = registered but silent, None = relay not probable.
+    #[serde(default)]
+    pub available: Option<bool>,
+    /// Why the probe failed, when `available` is None.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SecretInfo {
     pub name: String,
     pub kind: String,
@@ -365,6 +379,32 @@ impl Client {
     /// BROWSER: the browser GETs it, receives a fresh session cookie for the
     /// SAME operator, and lands on the console logged in. The NIP-98 key
     /// never leaves this process and the token dies on first use.
+    /// The registered AI agents (the CPA records them when stood up) with
+    /// live availability probed by the console against the relay.
+    pub fn agents(&self) -> Result<Vec<AgentInfo>, Error> {
+        let v: serde_json::Value = self.get_json("/api/agents")?;
+        serde_json::from_value(v["agents"].clone()).map_err(Error::Json)
+    }
+
+    /// Register a named agent the CPA stood up (delegate-peer at start).
+    /// `channel` = the agent's kind-9 presence channel (the relay scopes
+    /// reads by #h) — required for an availability probe.
+    pub fn register_agent(
+        &self,
+        name: &str,
+        pubkey: &str,
+        channel: &str,
+    ) -> Result<serde_json::Value, Error> {
+        self.post_json(
+            "/api/agents",
+            &serde_json::json!({
+                "name": name,
+                "pubkey": pubkey,
+                "channel": channel,
+            }),
+        )
+    }
+
     pub fn portal_url(&self) -> Result<String, Error> {
         let v = self.post_json("/api/auth/portal", &serde_json::json!({}))?;
         let token = v["token"]

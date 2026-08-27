@@ -412,6 +412,7 @@ pub fn router(
         .route("/api/revoke-grant", post(revoke_grant))
         .route("/api/runner-addr", post(runner_addr))
         .route("/api/runner/{name}/channel", get(runner_channel))
+        .route("/api/agents", get(agents_list).post(agents_register))
         .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state(WebState {
             store,
@@ -953,6 +954,209 @@ async fn runner_channel(
     })))
 }
 
+/// GET /api/agents — the registered AI agents, each with a LIVE availability
+/// probe: any kind-9 presence from the agent's pubkey on the relay in the
+/// last window = available. No relay configured / unreachable => `available`
+/// stays null (the registry remains — status is just unknown).
+async fn agents_list(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    let relay = relay_url(&state);
+    let console = state.console.clone();
+
+    let snap = state.store.snapshot();
+    let mut agents: Vec<Value> = snap
+        .agents
+        .iter()
+        .map(|(name, rec)| {
+            json!({
+                "name": name,
+                "pubkey": rec.pubkey,
+                "created_at": rec.created_at,
+                "channel": rec.channel,
+                "available": serde_json::Value::Null,
+                "note": serde_json::Value::Null,
+            })
+        })
+        .collect();
+    if let Some(url) = relay {
+        let mut probes = tokio::task::JoinSet::new();
+        for a in &mut agents {
+            let url = url.clone();
+            let console = console.clone();
+            let pk = a["pubkey"].as_str().unwrap_or_default().to_string();
+            let channel = a["channel"].as_str().map(String::from);
+            let host = state.store.relay_host().unwrap_or_default();
+            probes.spawn(async move {
+                let probe = probe_agent_presence(&console, &url, channel, host).await;
+                (pk, probe)
+            });
+        }
+        while let Some(res) = probes.join_next().await {
+            if let Ok((pk, probe)) = res
+                && let Some(a) = agents.iter_mut().find(|a| a["pubkey"] == pk)
+                && let Some(probe) = probe
+            {
+                match probe {
+                    Ok(ok) => a["available"] = serde_json::Value::Bool(ok),
+                    Err(msg) => {
+                        a["note"] = serde_json::Value::String(msg);
+                    }
+                }
+            }
+        }
+    }
+    Ok(Json(json!({ "agents": agents })))
+}
+
+/// kind-9 presence from an agent's pubkey on the relay within the window.
+/// kind-9 presence from an agent's pubkey on the relay within the window.
+/// The error string travels to the operator (`available` = null + `note`)
+/// so a probe failure is diagnosable, not a silent "?".
+async fn probe_agent_presence(
+    console: &Console,
+    relay: &str,
+    channel: Option<String>,
+    host: String,
+) -> Option<Result<bool, String>> {
+    let Some(channel) = channel else {
+        return Some(Err("no channel registered for this agent".into()));
+    };
+    let secret = console_seed(console);
+    let since = now_secs() - 150;
+    // kind-9 reads are channel-scoped (#h) on the relay — an author-only
+    // query comes back empty even when the agent is alive.
+    // NIP-01 query = a filter ARRAY (a bare map is rejected).
+    let filter = json!([{
+        "kinds": [9],
+        "#h": [channel],
+        "since": since,
+    }]);
+    let relay = relay.to_string();
+    tokio::task::spawn_blocking(move || {
+        query_events_host(&relay, &host, &secret, filter).map(|events| !events.is_empty())
+    })
+    .await
+    .ok()
+}
+
+/// NIP-98-authed NIP-01 query with an explicit `Host` header — the
+/// co-located console talks to the relay LXC over the LAN (scope URL) but
+/// the relay serves communities by host, so the community domain is sent
+/// explicitly.
+fn query_events_host(
+    relay: &str,
+    host: &str,
+    secret: &[u8; 32],
+    filters: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    let url = format!("{relay}/query");
+    // The relay verifies the NIP-98 URL against the COMMUNITY host (from
+    // the Host header) at the PUBLIC scheme — the signature covers that
+    // URL while the transport goes to the co-located LAN address.
+    let sign_url = if host.is_empty() {
+        url.clone()
+    } else {
+        format!("https://{host}/query")
+    };
+    let headers = freehold_core::nip98::nip98_auth(secret, "POST", &sign_url, now_secs())
+        .map_err(|e| e.to_string())?;
+    let mut agent_cfg = ureq::config::Config::builder();
+    agent_cfg = agent_cfg
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(8)));
+    let agent: ureq::Agent = agent_cfg.build().into();
+    let mut req = agent
+        .post(&url)
+        .header("Authorization", &headers)
+        .header("Content-Type", "application/json");
+    if !host.is_empty() {
+        req = req.header("Host", host);
+    }
+    let resp = req
+        .send(filters.to_string())
+        .map_err(|e| format!("query request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("query read: {e}"))?;
+    if status >= 400 {
+        return Err(format!("query returned HTTP {status}: {body}"));
+    }
+    serde_json::from_str(&body).map_err(|e| format!("query parse: {e}: {body}"))
+}
+
+/// The console agent's signing secret, zeroized as soon as the call returns.
+fn console_seed(console: &Console) -> zeroize::Zeroizing<[u8; 32]> {
+    let secret_hex = Zeroizing::new(console.identity.nostr_secret_hex());
+    let decoded =
+        Zeroizing::new(hex::decode(&*secret_hex).expect("console identity secret is valid hex"));
+    let mut secret = Zeroizing::new([0u8; 32]);
+    secret.copy_from_slice(&decoded);
+    let _ = &decoded;
+    secret
+}
+
+/// POST /api/agents {name, pubkey} — the CPA registers an agent it stood up
+/// (e.g. the delegate-peer at start). Upsert: an existing name keeps its
+/// created_at (re-registration is not a recreation).
+async fn agents_register(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(req): Json<AgentReq>,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    if req.name.trim().is_empty() {
+        return Err(bad_request("name is required"));
+    }
+    if !crate::is_hex64(&req.pubkey) {
+        return Err(bad_request("pubkey must be 64-hex"));
+    }
+    let snap = state.store.snapshot();
+    let created_at = snap
+        .agents
+        .get(&req.name)
+        .map(|r| r.created_at)
+        .unwrap_or_else(now_secs_u64);
+    state.store.insert_agent(
+        &req.name,
+        crate::state::AgentRecord {
+            pubkey: req.pubkey.clone(),
+            created_at,
+            channel: req.channel.clone(),
+        },
+    );
+    if let Err(e) = state.store.save() {
+        return Err(state_error(e).into_response());
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "name": req.name,
+        "pubkey": req.pubkey,
+    })))
+}
+
+fn now_secs_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Deserialize)]
+struct AgentReq {
+    name: String,
+    pubkey: String,
+    /// The agent's kind-9 presence channel (required for availability).
+    #[serde(default)]
+    channel: Option<String>,
+}
+
 fn bad_request(msg: &str) -> axum::response::Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
 }
@@ -1455,6 +1659,41 @@ mod auth_tests {
             .await
             .unwrap();
         assert_eq!(anon.status(), 401, "portal minting requires a session");
+
+        // the agent registry: register + list (the test storage has no relay
+        // scope, so availability stays null = unknown, not false).
+        assert_eq!(
+            client
+                .register_agent(
+                    "peer-1",
+                    &"ab".repeat(32),
+                    "aaaa-0000-4000-8000-00000000f0ee"
+                )
+                .unwrap()["ok"]
+                .as_bool(),
+            Some(true)
+        );
+        let agents = client.agents().unwrap();
+        let a = agents.iter().find(|a| a.name == "peer-1").unwrap();
+        assert_eq!(a.pubkey, "ab".repeat(32));
+        assert_eq!(a.available, None, "no relay scope => availability unknown");
+        // upsert: re-registration keeps created_at but takes the new pubkey.
+        let before = a.created_at;
+        assert_eq!(
+            client
+                .register_agent(
+                    "peer-1",
+                    &"cd".repeat(32),
+                    "aaaa-0000-4000-8000-00000000f0ee"
+                )
+                .unwrap()["ok"]
+                .as_bool(),
+            Some(true)
+        );
+        let agents = client.agents().unwrap();
+        let a = agents.iter().find(|a| a.name == "peer-1").unwrap();
+        assert_eq!(a.created_at, before);
+        assert_eq!(a.pubkey, "cd".repeat(32));
 
         // a BROKEN session is refused (fail closed), not silently accepted.
         let bad = freehold_console_client::Client::with_cookie(&base, "fh_session=rot");
