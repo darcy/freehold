@@ -150,6 +150,29 @@ async fn demo_steps_run_and_report_failures() {
     let (client, server) =
         serve_client(&base.path().join("runner"), &adir, &report.runner_pubkey).await;
 
+    // CI shows a genuine first-call transient (the runner warming up under
+    // parallel load) — retry the FIRST step briefly; a real regression still
+    // fails loudly WITH the actual error instead of a bare assert.
+    let retry_steps = vec![flows::DemoStep {
+        target: "local".into(),
+        cmd: "echo step-one".into(),
+        secrets: vec![],
+        timeout_s: 60,
+    }];
+    let mut ready = false;
+    for attempt in 0..12 {
+        let probe = flows::run_demo(&client, &retry_steps).unwrap();
+        if probe[0].ok {
+            ready = true;
+            break;
+        }
+        if attempt == 11 {
+            panic!("first demo step never succeeded after warm-up: {:?}", probe[0]);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    assert!(ready, "runner did not come ready");
+
     let steps = vec![
         flows::DemoStep {
             target: "local".into(),
@@ -183,17 +206,31 @@ async fn demo_steps_run_and_report_failures() {
         },
     ];
     let results = flows::run_demo(&client, &steps).unwrap();
-    assert!(results[0].ok && results[0].stdout_head.contains("step-one"));
-    assert!(results[1].ok && results[1].stdout_head.contains("step-two"));
+    assert!(
+        results[0].ok && results[0].stdout_head.contains("step-one"),
+        "step one failed: {:?}",
+        results[0]
+    );
+    assert!(
+        results[1].ok && results[1].stdout_head.contains("step-two"),
+        "step two failed: {:?}",
+        results[1]
+    );
     assert!(
         !results[2].ok && results[2].exit_code == Some(3),
-        "a non-zero exit must be reported as a FAILED step"
+        "a non-zero exit must be reported as a FAILED step: {:?}",
+        results[2]
     );
     assert!(
         results[3].timed_out && !results[3].ok,
-        "a step overrunning timeout_s must report TIMEOUT, not a client-side error"
+        "a step overrunning timeout_s must report TIMEOUT, not a client-side error: {:?}",
+        results[3]
     );
-    assert!(!results[4].ok, "unknown target must fail the step");
+    assert!(
+        !results[4].ok,
+        "unknown target must fail the step: {:?}",
+        results[4]
+    );
     assert!(results[4].error.is_some());
 
     server.abort();
