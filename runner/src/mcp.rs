@@ -129,6 +129,7 @@ pub async fn serve(
     Ok((bound, handle))
 }
 
+#[axum::debug_handler]
 async fn mcp_endpoint(
     State(state): State<Arc<RunnerState>>,
     headers: HeaderMap,

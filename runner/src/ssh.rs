@@ -202,9 +202,16 @@ pub struct PoolHealth {
 
 pub struct SshPool {
     known_hosts: Arc<HostKeyStore>,
-    conns: Mutex<HashMap<String, Conn>>,
+    /// per target: a small conn VEC — concurrent execs each get their OWN
+    /// connection (the parallel LXC boots really parallelize instead of
+    /// queueing on one channel); beyond the cap they share.
+    conns: Mutex<HashMap<String, Vec<Conn>>>,
     health: Mutex<PoolHealth>,
 }
+
+/// How many concurrent connections we'll hold per target. Two covers the
+/// parallel LXC boots; everything else runs one exec at a time.
+const MAX_CONNS_PER_TARGET: usize = 2;
 
 impl SshPool {
     pub fn new(state_dir: &Path) -> Self {
@@ -263,28 +270,58 @@ impl SshPool {
     /// failures RETRY with backoff (1s/2s/4s) — a transient drop must
     /// self-heal, not surface as an immediate exec failure.
     async fn handle(&self, target: &SshTarget, key: &keys::PrivateKey) -> Result<Conn, SshError> {
-        if let Some(c) = self.conns.lock().get(&target.name) {
-            return Ok(c.clone());
-        }
-        let mut last_err = SshError::Russh("no connection".into());
+        // Parallel-safe pool: reuse an IDLE connection (serial execs stay
+        // pooled); open a fresh one only when every existing conn is busy
+        // (the two LXC boots get their own lane). Each helper locks in a
+        // single sync statement — no lock is ever held across an await.
         for attempt in 0..3usize {
-            match self.connect(target, key).await {
-                Ok(h) => {
-                    let c: Conn = Arc::new(tokio::sync::Mutex::new(h));
-                    self.conns.lock().insert(target.name.clone(), c.clone());
-                    let mut h = self.health.lock();
-                    h.reconnects += 1;
-                    h.last_error = None;
-                    return Ok(c);
-                }
-                Err(e) => {
-                    last_err = e;
-                    self.health.lock().last_error = Some(last_err.to_string());
-                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+            if let Some(c) = self.try_reuse(&target.name) {
+                return Ok(c);
+            }
+            if self.can_open(&target.name) {
+                match self.connect(target, key).await {
+                    Ok(h) => {
+                        let c: Conn = Arc::new(tokio::sync::Mutex::new(h));
+                        self.push_conn(&target.name, &c);
+                        self.health.lock().reconnects += 1;
+                        return Ok(c);
+                    }
+                    Err(e) => {
+                        self.health.lock().last_error = Some(e.to_string());
+                        // auth / changed-host-key failures are PERMANENT — no
+                        // point retrying (wrong key, MITM); only transient
+                        // connection errors get backoff.
+                        if matches!(e, SshError::Auth(_) | SshError::HostKeyChanged(_)) {
+                            return Err(e);
+                        }
+                        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                    }
                 }
             }
+            // at the cap and all busy: wait briefly, re-check for a free one.
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
-        Err(last_err)
+        Err(SshError::Russh("no free connection".into()))
+    }
+
+    /// Reuse an idle pooled connection if one exists (sync only).
+    fn try_reuse(&self, target: &str) -> Option<Conn> {
+        let conns = self.conns.lock();
+        let vec = conns.get(target)?;
+        vec.iter().find(|c| c.try_lock().is_ok()).cloned()
+    }
+
+    fn can_open(&self, target: &str) -> bool {
+        let mut conns = self.conns.lock();
+        conns.entry(target.to_string()).or_default().len() < MAX_CONNS_PER_TARGET
+    }
+
+    fn push_conn(&self, target: &str, c: &Conn) {
+        self.conns
+            .lock()
+            .entry(target.to_string())
+            .or_default()
+            .push(c.clone());
     }
 
     /// Execute `cmd` verbatim over the target's connection. Parses key PEM
