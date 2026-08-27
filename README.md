@@ -36,7 +36,8 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 ## Repository layout (what things do in the code)
 
 ```
-Cargo.toml            workspace: core, runner, control-plane, orchestrator, testkit, acceptance, installer, tui
+Cargo.toml            workspace: core, runner, console-client, control-plane, orchestrator, testkit,
+                      acceptance, installer, tui
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -77,8 +78,14 @@ control-plane/        freehold-control-plane — the engine room
                       list / adopt / rebuild / identity / agent-create / serve (web console)
 orchestrator/         freehold-orchestrator — the `freehold` CLI: a signed MCP client +
                       the world-bring-up drivers (bootstrap proxmox-lxc / vultr-vps /
-                      hetzner-vps, deploy-relay, deploy-cp, relay-member, console-login)
-                      and the agent surface (onboard/exec/demo, memory, delegate)
+                      hetzner-vps, deploy-relay, deploy-cp, relay-member, console-login,
+                      teardown) and the agent surface (onboard/exec/demo/readiness,
+                      memory, delegate/delegate-peer, relay-profile/relay-join/relay-setup)
+console-client/       freehold-console-client — ONE console API contract, two clients:
+                      the web page (control-plane/src/web.rs) and the TUI's Runners view;
+                      NIP-98 login + overview/actions + the single-use web-launch portal
+tui/                  freehold-tui — the `freehold` binary: bootstrap/configure forms +
+                      the running dashboard (Agents · Services · Runners views)
 testkit/              freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
                       an in-process russh sshd (shared by the connector tests)
 acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G): 9 checks,
@@ -105,9 +112,9 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 122 tests across core / runner / control-plane / orchestrator / acceptance
+cargo test --workspace        # 177 tests across core / runner / console-client / control-plane / orchestrator / acceptance
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
-cargo fmt --all --check       # CI gate
+cargo fmt --check             # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
 ```
 
@@ -127,15 +134,23 @@ freehold --help               # both surfaces
   OPTIONAL static LXC IPs (filled = STATIC + gateway; empty = DHCP with a bold
   on-screen warning that your DNS/proxy must point at whatever DHCP assigns —
   the real addresses are recorded in the config right after each boot), and
-  your operator key (paste npub or mint one), then runs the bring-up stages
+  your operator key (paste npub, mint one, or paste YOUR nsec — it is
+  validated against the pubkey and persisted 0600 so every launch
+  auto-logs in), then runs the bring-up stages
   (provision → install the SSH door → grant → serve → verify the door with a
   real exec) and writes the config.
 - **configure** — config present, world not converged: an idempotent
   check-then-run pipeline (relay/cp LXCs, deploy relay + cp). Failed stages
   show their tail; `r` retries.
-- **running** — everything VERIFIED: relay `/_liveness` over HTTPS, the CP
-  console's `/healthz` pinged through the runner (200), the runner's port —
-  "Good to go!" + live liveness dots.
+- **running** — the post-bring-up dashboard, three views cycled with
+  `Tab` / `Shift-Tab`: **Services** (everything provisioned — name / where /
+  status / url: relay + control plane today, k3s / litellm as their
+  coordinates land in the config), **Agents** (named agents stood up so far),
+  **Runners** (the console API parity — same data as the web UI — toggled to
+  the local loopback list with `t`). A one-line world strip keeps the
+  liveness glance; `w` opens the web console in your browser already
+  authenticated (single-use portal token — no `console-login`); keys are
+  scoped to the active view.
 
 The same session flows bootstrap → configure → running as the world converges.
 
@@ -154,7 +169,10 @@ it is configured. The config is the CONNECTION/DESIRE profile:
 domain = "freehold-test.darcydev.net"
 relay_url = "https://freehold-test.darcydev.net"
 cp_url = "https://cp-freehold-test.darcydev.net"
-operator_pubkey = "1dc07610…"
+operator_pubkey = "1dc07610…"           # console admin + relay owner
+operator_identity = "/home/you/.freehold/control-plane/operator"   # YOUR key, 0600 —
+                                        # the TUI auto-logs in with it; optional when
+                                        # you pasted an npub (console-login --nsec then)
 managed = ["relay", "cp"]      # what WE operate — an invited relay wouldn't be here
 
 [runner]                       # the provisioning door (the exec path into the host)
@@ -164,11 +182,11 @@ target = "proxmox-box"
 
 [lxc.relay]                    # connect/status coords only; sizing is bootstrap-time
 vmid = 100
-ip = "192.168.30.238/24"
+ip = "192.168.30.8/24"
 
 [lxc.cp]
-vmid = 102
-ip = "192.168.30.254/24"
+vmid = 101
+ip = "192.168.30.9/24"
 ```
 
 ### Runner: identity + MCP server
@@ -277,7 +295,8 @@ cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --role cp \
 #   deploy-cp: ship the control-plane binary (base64 chunks) + a co-located
 #   runner package into the cp LXC, start serve (console identity is MINTED
 #   ON THE BOX — a keypair is never shipped), adopt + self-grant the runner.
-#   --admin whitelist (NIP-98) relaxes the loopback-only bind guard.
+#   --operator-pubkey seeds the console's NIP-98 admin whitelist and
+#   relaxes the loopback-only bind guard (operator authn => LAN bind).
 cargo run -p freehold-orchestrator -- deploy-cp --target proxmox-box --lxc 102 \
   --binary target/release/control-plane --runner-binary target/release/runner \
   --runner-package ./.freehold/runner/proxmox-box-ish --bind 0.0.0.0:8080 \
@@ -305,6 +324,8 @@ cargo run -p freehold-orchestrator -- relay-member --target proxmox-box --lxc 10
 
 #   console-login: the operator logs in with THEIR OWN nsec (NIP-98) — the
 #   key never leaves their machine. Works over the proxy (cp-<relay-domain>).
+#   (In the TUI, just press w on the Runners view — it opens the web console
+#   already authenticated via a single-use portal token, no console-login.)
 cargo run -p freehold-orchestrator -- console-login \
   --url https://cp-<relay-domain> --nsec nsec1...
 
@@ -392,7 +413,7 @@ sequenceDiagram
     CP->>CP: seal credential to the runner's<br/>encryption pubkey — ciphertext only
     CP->>RUN: write the package onto the runner's box<br/>(identity.json + secrets.json — ciphertext, targets)
     CP->>CP: record pubkeys + ciphertext in state.json<br/>(no plaintext, no private keys)
-    CP->>REL: create the runner's private channel (9007)<br/>h = sha256(runner pk) — owner = the console
+    CP->>REL: create the runner's private channel (9007)<br/>h = sha256(runner pk)[0:16] (uuid form) — owner = the console
     CP->>REL: member the runner itself (9000 put-user)<br/>— the channel layer
     CP->>BR: relay-member add — the runner's pubkey<br/>(community layer)
     BR->>REL: buzz-admin add-member (kind 13534) —<br/>without it, roster reads 403
