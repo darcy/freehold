@@ -544,7 +544,7 @@ async fn ensure_guest_docker(
             Err(e) => install_err = Some(e),
         }
         if attempt < 2 {
-            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
     if let Some(e) = install_err {
@@ -808,7 +808,7 @@ pub fn wait_for_domain_resolution(
                 "domain gate: {domain} still does not resolve within {wait_secs}s — {hint}"
             )));
         }
-        sleep(std::time::Duration::from_secs(5));
+        sleep(std::time::Duration::from_secs(1));
     }
 }
 
