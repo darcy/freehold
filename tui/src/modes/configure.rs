@@ -50,9 +50,6 @@ pub struct ConfigureState {
     pub auth_detected: bool,
     runner: StageRunner,
     job: Option<usize>,
-    /// the two boot stages run CONCURRENTLY (each its own lane/runner) —
-    /// the docker installs in the guests parallelize instead of serializing.
-    boot: [Option<std::sync::mpsc::Receiver<super::RawMsg>>; 2],
 }
 
 impl ConfigureState {
@@ -105,7 +102,6 @@ impl ConfigureState {
             auth_detected: false,
             runner: StageRunner::new(),
             job: None,
-            boot: [None, None],
         }
     }
 
@@ -131,44 +127,6 @@ impl ConfigureState {
     }
 
     // ------------------------------------------------------------ flow
-
-    /// Spawn a boot stage on its own runner: check first (an exec through
-    /// the runner proves auth), then the boot if the LXC is missing — all on
-    /// a SEPARATE channel so the other boot proceeds concurrently.
-    fn spawn_boot(&mut self, i: usize) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.boot[i] = Some(rx);
-        let a = self.answers.clone();
-        let cfg = self.cfg.clone();
-        self.stages[i].status = CStatus::Check;
-        self.stages[i].started_at = Some(std::time::Instant::now());
-        std::thread::spawn(move || {
-            // plain branches: check (proves auth via the lane), then boot.
-            let out = (|| -> anyhow::Result<String> {
-                if i == 0 {
-                    if probe_lxc(&a, cfg.lxc.relay.vmid)? {
-                        return Ok("already present".into());
-                    }
-                    stage_bootstrap(&a, "relay", a.relay_vmid)?;
-                    Ok("relay LXC ready".into())
-                } else {
-                    if probe_lxc(&a, cfg.lxc.cp.vmid)? {
-                        return Ok("already present".into());
-                    }
-                    stage_bootstrap(&a, "cp", a.cp_vmid)?;
-                    Ok("cp LXC ready".into())
-                }
-            })();
-            let msg = match out {
-                Ok(t) => super::RawMsg::Done { ok: true, out: t },
-                Err(e) => super::RawMsg::Done {
-                    ok: false,
-                    out: format!("{e:#}"),
-                },
-            };
-            let _ = tx.send(msg);
-        });
-    }
 
     fn spawn_check(&mut self, i: usize) {
         let a = self.answers.clone();
@@ -218,30 +176,6 @@ impl ConfigureState {
 
     /// Returns true when everything converged (app transitions to running).
     pub fn tick(&mut self) -> bool {
-        // drain the parallel boot lanes first (relay + cp, own channels).
-        // `take()` moves the receiver out so the Done may clear the lane.
-        for i in 0..2 {
-            if let Some(rx) = self.boot[i].take() {
-                // one result per boot — plain if-let
-                if let Ok(super::RawMsg::Done { ok, out }) = rx.try_recv() {
-                    {
-                        let st = &mut self.stages[i];
-                        st.status = if ok { CStatus::Ok } else { CStatus::Failed };
-                        st.tail = if ok { out } else { format!("failed: {out}") };
-                    }
-                    if ok {
-                        let role = if i == 0 { "relay" } else { "cp" };
-                        let _ =
-                            freehold_installer::write_back_lxc(&self.answers, &mut self.cfg, role);
-                        let _ = self.cfg.save(&self.cfg_path);
-                        self.auth_detected = true;
-                    }
-                } else {
-                    // still running — put the lane back
-                    self.boot[i] = Some(rx);
-                }
-            }
-        }
         while let Ok(super::RawMsg::Done { ok, out }) = self.runner.rx.try_recv() {
             let Some(i) = self.job.take() else { continue };
             match self.stages[i].status {
@@ -309,19 +243,12 @@ impl ConfigureState {
                 }
             }
         }
-        // advance — the two BOOT stages (0/1) run CONCURRENTLY once started.
+        // advance — SEQUENTIAL: PVE's `pct` takes a global config lock, so
+        // concurrent `pct create`s collide ("trying to acquire lock...") —
+        // the boots stay serial (the parallel experiment was rolled back).
         if self.cur < self.stages.len() {
             match self.stages[self.cur].status {
-                CStatus::Pending => {
-                    let start = self.cur == 0 || self.cur == 1;
-                    if start {
-                        // kick BOTH boots at once (parallel guest installs)
-                        self.spawn_boot(0);
-                        self.spawn_boot(1);
-                    } else {
-                        self.spawn_check(self.cur);
-                    }
-                }
+                CStatus::Pending => self.spawn_check(self.cur),
                 CStatus::Ok => {
                     self.cur += 1;
                     if self.cur >= self.stages.len() {
