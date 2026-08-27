@@ -79,11 +79,13 @@ services need, and makes acquiring that plane a **first-class precondition** on 
 * **The universal rule, unchanged:** all compute is disposable; all data durable and
   separately addressable, no exception for relay or CP; `~/.freehold` explicitly out.
 * **Per-tenant datasets, not one shared dataset — for correctness, not accident
-  prevention.** Each durable tenant (relay, CP, later k3s-volumes) gets its own dataset
-  under a common parent: (1) teardown granularity — data+compute teardown of one tenant
-  must leave others untouched, by construction; (2) unprivileged LXC guests share a host uid
-  range, so a shared dataset is cross-readable across tenants while both run, independent of
-  teardown.
+  prevention.** Each durable tenant (relay, CP, and k3s-volumes FROM THE START — C0 and
+  locked 0.09 pin Postgres/LiteLLM to `/srv/data/k8s-volumes`, which today is carved INSIDE
+  the disposable k3s LXC (`k3s-bringup.sh:64`) and dies with it — a live exception to the
+  universal rule until it is a tenant) gets its own dataset under a common parent:
+  (1) teardown granularity — data+compute teardown of one tenant must leave others
+  untouched, by construction; (2) unprivileged LXC guests share a host uid range, so a
+  shared dataset is cross-readable across tenants while both run, independent of teardown.
 * **Snapshot-capable ≠ snapshot-consistent** — named (WAL-aware / quiesce-before-snapshot
   for any tenant running a database), implementation deferred.
 * **Attachment is by reference, not by copy** — bind-mount (LXC), provider volume mount
@@ -102,9 +104,21 @@ services need, and makes acquiring that plane a **first-class precondition** on 
   plane" = tear down the existing relay/CP, resolve the backend, stand up FRESH instances
   with state born directly on the resolved tenant dataset. No copy-verification or
   stack-bounce deliverable under this resolution — if something worth keeping appears first,
-  the decision is revisited explicitly, never silently reinterpreted as a live cutover. The
-  first cutover's CP comes up as a FRESH console identity — re-relay-member + re-adopt is
-  normal bootstrap work, not silent.
+  the decision is revisited explicitly, never silently reinterpreted as a live cutover.
+* **A tenant's durable set is the WHOLE compute-born state that must outlive it, not just
+  the obvious volumes — recorded per tenant:**
+  - **Relay:** the Postgres/Redis/MinIO + git data volumes AND `deploy/compose/.env` — the
+    compose bundle GENERATES the relay signing key + `POSTGRES_PASSWORD`/`REDIS_PASSWORD`/
+    S3 keys onto the rootfs at deploy (`relay.rs:163-230`). Reattach the volumes but not the
+    `.env` and: Postgres ignores `POSTGRES_PASSWORD` on a non-empty PGDATA (the state
+    doesn't open), and a regenerated relay signing key invalidates every 39002 roster the
+    fail-closed runners verify against their pinned `--relay-pubkey`. The `.env` is state.
+  - **CP:** the whole state DIR (`/srv/freehold/control-plane`: `state.json` + the console
+    identity + the shipped runner packages), not `state.json` alone — a compute-only
+    teardown otherwise recreates a fresh console identity + loses the packages on EVERY
+    cycle, not just the first. With the dir durable, the identity + packages survive and
+    there is NO recurring re-member/re-adopt — the "fresh console identity" note above
+    applies only to the one-time pre-plane cutover (where nothing was worth keeping).
 * **`rebuild`'s role changes** once CP's state is plane-backed: volume-loss DR fallback,
   not the ordinary post-teardown recovery path.
 * **CP's distributed/replicated form** — named, not built, gated on CP's state moving to
@@ -127,13 +141,18 @@ services need, and makes acquiring that plane a **first-class precondition** on 
 1. Converge pipeline gains a storage-backend resolution stage (Proxmox-lxc: ZFS →
    LVM-thin → bail; VPS: provider block volume → explicitly-downgraded local directory →
    bail), idempotent on re-runs, inserting before the relay/CP boots.
-2. Per-tenant dataset/volume for relay and CP under a common parent, each independently
-   destroyable.
-3. Fresh relay stood up with Postgres/Redis/MinIO/git volume BORN on relay's tenant dataset
-   at creation (the mount baked into the LXC create; not migrated from the running
-   instance).
-4. Fresh CP stood up with `state.json` BORN on CP's tenant dataset at creation;
-   atomic-write discipline verified across the mount boundary.
+2. Per-tenant dataset/volume for relay, CP, AND k3s-volumes under a common parent, each
+   independently destroyable — the k3s bringup's `/srv/data/k8s-volumes` carve-out becomes
+   a MOUNT of the k3s-volumes tenant dataset (the `local-path` provisioner root points at
+   it), satisfying the universal rule + C0/0.09's assumption at once.
+3. Fresh relay stood up with the Postgres/Redis/MinIO/git volumes AND the generated
+   `deploy/compose/.env` BORN on relay's tenant dataset at creation (the mount baked into
+   the LXC create; neither migrated from the running instance) — a compute-only teardown
+   then reattaches BOTH, so the reattached relay opens its state and keeps its signing
+   identity (rosters stay valid).
+4. Fresh CP stood up with the whole STATE DIR (state.json + console identity + runner
+   packages) born on CP's tenant dataset at creation; atomic-write discipline verified
+   across the mount boundary; the identity + packages survive compute-only teardown.
 5. Tenant→dataset mapping in the workstation config, independently re-derivable from the
    host/provider's volume listing.
 6. Teardown tooling updated with the two explicit modes, each scoped to a single tenant's
@@ -151,8 +170,10 @@ services need, and makes acquiring that plane a **first-class precondition** on 
 * Re-run resolution against an already-resolved target → confirms the existing backend,
   creates nothing new.
 * **Durable backends (Proxmox / block-volume):** destroy the relay LXC (compute-only) →
-  fresh relay LXC → reattach by reference → full prior state intact, no rebuild needed.
-  Same for CP with runners/grants/secrets ciphertext intact.
+  fresh relay LXC → reattach by reference → full prior state + the compose `.env` (same
+  signing identity, same DB/Redis/MinIO secrets) intact, no rebuild needed. Same for CP
+  with the full state dir (runners/grants/secrets ciphertext + the console identity +
+  packages) intact and the existing relay memberships/rosters still valid.
 * **Downgraded VPS fallback:** rebuild-fresh semantics, stated plainly — the instance disk
   dies with compute-only teardown, so this branch's teardown = fresh install (the durability
   downgrade in action, never a silent surprise).
