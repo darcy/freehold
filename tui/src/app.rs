@@ -320,9 +320,45 @@ fn draw_bootstrap<'a>(area: Rect, f: &mut Frame<'a>, bs: &mut Bootstrap) {
             ];
             if bs.op_sel == 0 {
                 lines.push(Line::from(Span::raw("")));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        " pubkey: ",
+                        Style::new().fg(if bs.op_field == 0 {
+                            Color::Cyan
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                    Span::styled(
+                        bs.op_input.clone(),
+                        Style::new().fg(if bs.op_field == 0 {
+                            Color::LightCyan
+                        } else {
+                            Color::Gray
+                        }),
+                    ),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        " nsec:   ",
+                        Style::new().fg(if bs.op_field == 1 {
+                            Color::Cyan
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                    Span::styled(
+                        "•".repeat(bs.op_input.chars().count()),
+                        Style::new().fg(if bs.op_field == 1 {
+                            Color::Yellow
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                ]));
                 lines.push(Line::from(Span::styled(
-                    format!(" pubkey: {}", bs.op_input),
-                    Style::new().fg(Color::LightCyan),
+                    "         (optional — persist YOUR key locally (0600) so every launch logs in; must match the pubkey)",
+                    Style::new().fg(Color::DarkGray),
                 )));
             }
             if let Some(e) = &bs.op_err {
@@ -356,6 +392,10 @@ fn draw_bootstrap<'a>(area: Rect, f: &mut Frame<'a>, bs: &mut Bootstrap) {
                 ),
                 ("operator pk", a.operator_pk.clone()),
             ];
+            let mut rows = rows.to_vec();
+            if a.operator_generated {
+                rows.push(("identity", a.operator_dir.display().to_string()));
+            }
             let mut lines: Vec<Line> = rows
                 .iter()
                 .map(|(k, v)| {

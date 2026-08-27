@@ -69,17 +69,20 @@ fn bech32_polymod_step(mut acc: u32, v: u32) -> u32 {
     acc
 }
 
-fn decode_bech32_pubkey(s: &str) -> Result<String, String> {
+/// BIP-173 bech32 decode: verifies the checksum (over the EXPANDED hrp) and
+/// returns the (hrp, payload-bytes, checksum-verification) — shared by the
+/// npub and nsec decoders so both accept exactly what users hold.
+fn bech32_decode(s: &str) -> Result<(String, Vec<u8>), String> {
     let s = s.to_ascii_lowercase();
     let pos = s
         .rfind('1')
-        .ok_or_else(|| "npub must contain a '1' separator".to_string())?;
+        .ok_or_else(|| "bech32 string must contain a '1' separator".to_string())?;
     let (hrp, data) = (&s[..pos], &s[pos + 1..]);
-    if hrp != "npub" {
-        return Err(format!("expected npub1... prefix, got {hrp}1..."));
+    if hrp.is_empty() {
+        return Err("bech32 string has an empty hrp".to_string());
     }
     if data.len() < 6 {
-        return Err("npub too short".to_string());
+        return Err("bech32 string too short".to_string());
     }
     // BIP-173 checksum runs over the EXPANDED hrp (high bits, 0, low bits).
     let mut vals: Vec<u32> = Vec::with_capacity(hrp.len() * 2 + 1 + data.len());
@@ -123,10 +126,40 @@ fn decode_bech32_pubkey(s: &str) -> Result<String, String> {
             out.push(((accv >> bits) & 0xff) as u8);
         }
     }
+    Ok((hrp.to_string(), out))
+}
+
+fn decode_bech32_pubkey(s: &str) -> Result<String, String> {
+    let (hrp, out) = bech32_decode(s)?;
+    if hrp != "npub" {
+        return Err(format!("expected npub1... prefix, got {hrp}1..."));
+    }
     if out.len() != 32 {
         return Err(format!("npub payload is {} bytes, expected 32", out.len()));
     }
     Ok(hex::encode(out))
+}
+
+/// Decode an operator's `nsec1...` to its 32-byte secret. The intermediate
+/// buffer is wiped before return (the whole point: a typo'd or pasted nsec
+/// must not linger in the heap).
+pub fn nsec_to_secret(nsec: &str) -> Result<[u8; SECRET_LEN], String> {
+    use zeroize::Zeroize;
+    let (hrp, mut out) = bech32_decode(nsec)?;
+    if hrp != "nsec" {
+        return Err(format!("expected nsec1... prefix, got {hrp}1..."));
+    }
+    if out.len() != SECRET_LEN {
+        let got = out.len();
+        out.zeroize();
+        return Err(format!(
+            "nsec payload is {got} bytes, expected {SECRET_LEN}"
+        ));
+    }
+    let mut arr = [0u8; SECRET_LEN];
+    arr.copy_from_slice(&out);
+    out.zeroize();
+    Ok(arr)
 }
 
 /// Generate an ed25519 SSH keypair FOR A RUNNER, IN PROCESS — no ssh-keygen
@@ -223,6 +256,16 @@ impl Identity {
             nostr_secret,
             enc_secret,
         })
+    }
+
+    /// Build an identity from an EXISTING nostr secret (an operator's own
+    /// nsec) with a FRESH random encryption keypair — the canonical shape
+    /// for persisting the operator's key at install time so every local
+    /// launch logs into the console automatically (the key never leaves
+    /// this machine; the 0700 identity dir is the same storage the
+    /// generated-identity path uses).
+    pub fn from_nostr_secret(nostr_secret: [u8; SECRET_LEN]) -> Result<Self, IdentityError> {
+        Self::from_secrets(nostr_secret, random_bytes())
     }
 
     /// Load identity: env vars win, else the state-dir file.
@@ -721,6 +764,58 @@ mod tests {
         assert!(
             matches!(err, IdentityError::InvalidNostrSecret),
             "got {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod nsec_tests {
+    use super::*;
+
+    #[test]
+    fn nsec_decodes_to_secret() {
+        let secret =
+            nsec_to_secret("nsec1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqgs898n")
+                .unwrap();
+        let mut expect = [0u8; SECRET_LEN];
+        expect[0] = 1;
+        assert_eq!(secret, expect);
+    }
+
+    #[test]
+    fn nsec_round_trips_through_from_nostr_secret_and_disk() {
+        // the persisted-operator form: an EXISTING nsec + a fresh enc pair,
+        // written 0600 and loadable with the same key.
+        let mut seed = [0u8; SECRET_LEN];
+        seed[0] = 7;
+        let id = Identity::from_nostr_secret(seed).unwrap();
+        assert_eq!(id.secret_seed(), seed);
+        assert_eq!(id.nostr_pubkey_hex().len(), 64);
+
+        let dir = tempfile::tempdir().unwrap();
+        id.write_to_dir(dir.path()).unwrap();
+        let back = Identity::load(dir.path()).unwrap();
+        assert_eq!(back.secret_seed(), seed);
+        assert_eq!(back.nostr_pubkey_hex(), id.nostr_pubkey_hex());
+        assert_eq!(back.enc_pubkey_hex(), id.enc_pubkey_hex());
+    }
+
+    #[test]
+    fn nsec_rejects_garbage() {
+        // wrong hrp
+        assert!(
+            nsec_to_secret(
+                "npub1rrrrqws4zqyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqyxvypx"
+            )
+            .is_err()
+        );
+        // empty payload
+        assert!(nsec_to_secret("nsec1qqqqqq").is_err());
+        // valid except a flipped checksum char
+        assert!(
+            nsec_to_secret("nsec1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqgs898x")
+                .is_err()
         );
     }
 }

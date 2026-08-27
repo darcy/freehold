@@ -176,6 +176,9 @@ pub struct Bootstrap {
     pub form: Form,
     /// Operator identity: 0 = have a key, 1 = generate.
     pub op_sel: usize,
+    /// Which input the operator is editing when op_sel == 0: 0 = pubkey,
+    /// 1 = nsec (optional, persisted so every launch logs in).
+    pub op_field: usize,
     pub op_input: String,
     pub op_err: Option<String>,
     pub answers: Answers,
@@ -205,6 +208,7 @@ impl Bootstrap {
             step: Step::Form,
             form: Form::new(),
             op_sel: 0,
+            op_field: 0,
             op_input: String::new(),
             op_err: None,
             answers: Answers::defaults(),
@@ -314,14 +318,26 @@ impl Bootstrap {
 
     fn op_key(&mut self, code: crossterm::event::KeyCode) {
         self.op_err = None;
+        use zeroize::Zeroize;
         match code {
             crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down => {
-                if self.op_input.is_empty() {
+                // selection toggles only from the untouched pubkey field
+                // (never while typing a pubkey or nsec).
+                if self.op_sel == 0 && self.op_field == 0 && self.op_input.is_empty() {
                     self.op_sel = 1 - self.op_sel;
                 }
             }
+            crossterm::event::KeyCode::Esc => {
+                // back out of the nsec field to the pubkey field (stay on
+                // the step — Esc never abandons the form or quits).
+                if self.op_sel == 0 && self.op_field == 1 {
+                    self.op_input.zeroize();
+                    self.op_input.clear();
+                    self.op_field = 0;
+                }
+            }
             crossterm::event::KeyCode::Enter => {
-                if self.op_sel == 0 {
+                if self.op_sel == 0 && self.op_field == 0 {
                     if self.op_input.trim().is_empty() {
                         self.op_err = Some("paste your npub1… or 64-hex pubkey".into());
                         return;
@@ -329,20 +345,70 @@ impl Bootstrap {
                     match freehold_core::identity::parse_pubkey_input(&self.op_input) {
                         Ok(pk) => {
                             self.answers.operator_pk = pk;
-                            self.step = Step::Confirm;
+                            self.op_input.zeroize();
+                            self.op_input.clear();
+                            self.op_field = 1;
                         }
                         Err(e) => self.op_err = Some(format!("invalid pubkey: {e}")),
                     }
-                } else {
-                    self.answers.operator_generated = true;
-                    self.answers.operator_dir = freehold_installer::operator_dir();
-                    self.job = Job::Mint;
-                    let dir = self.answers.operator_dir.clone();
-                    self.runner.spawn(move || {
-                        let id = mint_identity(&dir)?;
-                        Ok(format!("{}|{}", id.nostr_pubkey_hex(), dir.display()))
-                    });
+                    return;
                 }
+                if self.op_sel == 0 {
+                    // nsec (optional): empty = skip (console-login route
+                    // stays available); present = must match the pasted
+                    // pubkey, then persist 0600 for auto-login.
+                    if self.op_input.trim().is_empty() {
+                        self.step = Step::Confirm;
+                        return;
+                    }
+                    let secret = match freehold_core::identity::nsec_to_secret(&self.op_input) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.op_err = Some(format!("invalid nsec: {e}"));
+                            return;
+                        }
+                    };
+                    self.op_input.zeroize();
+                    self.op_input.clear();
+                    match freehold_core::identity::Identity::from_nostr_secret(secret) {
+                        Ok(id) => {
+                            if id.nostr_pubkey_hex() != self.answers.operator_pk {
+                                self.op_err = Some(
+                                    "the nsec's pubkey does not match the pubkey above".into(),
+                                );
+                                return;
+                            }
+                            let dir = freehold_installer::operator_dir();
+                            if dir.join(freehold_core::identity::IDENTITY_FILE).exists() {
+                                self.op_err = Some(format!(
+                                    "an operator identity already exists at {} — remove it or reuse that key",
+                                    dir.display()
+                                ));
+                                return;
+                            }
+                            match id.write_to_dir(&dir) {
+                                Ok(_) => {
+                                    self.answers.operator_generated = true;
+                                    self.answers.operator_dir = dir;
+                                    self.step = Step::Confirm;
+                                }
+                                Err(e) => {
+                                    self.op_err = Some(format!("persisting your key failed: {e}"))
+                                }
+                            }
+                        }
+                        Err(e) => self.op_err = Some(format!("invalid nsec: {e}")),
+                    }
+                    return;
+                }
+                self.answers.operator_generated = true;
+                self.answers.operator_dir = freehold_installer::operator_dir();
+                self.job = Job::Mint;
+                let dir = self.answers.operator_dir.clone();
+                self.runner.spawn(move || {
+                    let id = mint_identity(&dir)?;
+                    Ok(format!("{}|{}", id.nostr_pubkey_hex(), dir.display()))
+                });
             }
             crossterm::event::KeyCode::Backspace => {
                 self.op_input.pop();
