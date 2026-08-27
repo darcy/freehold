@@ -38,6 +38,139 @@ the rebuild era and directly advances C0/C1:
 C0 itself (litellm-kube apply + Postgres + master-key re-mint + the Services row) has NOT
 started; see Phase C below.
 
+## Pre2-C0 — Durable Volume Plane
+
+Status: DRAFT — for review (v4 with doc-review tweaks: VPS branch added; migration
+resolved as destroy-and-recreate-fresh; placement re-keyed to the converge pipeline;
+mount-at-create made explicit; acceptance scoped to the durable backends). NOT yet locked.
+Sequenced after the Pre-C0 progress block above (k3s configure stage, Services view, agents
+registry, working console relay scope, k3s teardown discipline) and before C0.
+
+### Why this exists
+
+The 2026-08-27 teardown destroyed the LXC harness and the LXC-105 LiteLLM reference because
+their state lived only on the compute being torn down — acceptable for throwaway staging,
+not once relay and CP are load-bearing. This phase builds the durable plane those two
+services need, and makes acquiring that plane a **first-class precondition** on any target
+(Proxmox-lxc AND VPS — Host-FLEXIBLE requires both), not a librem-specific fix.
+
+### Locked decisions
+
+* **Storage-backend resolution is host-agnostic and runs as a STAGE IN THE CONVERGE
+  PIPELINE** (where the k3s stage and the relay/CP deploys already run — not a separate
+  "bootstrap sequence" naming that no longer matches the actual pipeline), inserted BEFORE
+  the relay/CP boots. Both branches:
+  - **Proxmox-lxc:** prefer ZFS (existing zpool, or create one if the target has
+    unallocated space) → fall back to LVM-thin → bail if neither is viable.
+  - **VPS:** prefer a provider block-storage volume (Vultr Block Storage / Hetzner Volumes),
+    created through the runner's existing vultr/hetzner connectors (consistent with the C7
+    runner-exec-only discipline) and mounted as the tenant-volume root → if no block-storage
+    API/budget is configured, a plain data directory on the instance disk with durability
+    EXPLICITLY downgraded and stated as such ("survives compute-only teardown only if the
+    instance disk itself survives it" — no snapshot capability, never presented as parity)
+    → bail.
+  - **Bail, either branch, is actionable:** names the fix (free space / attach a disk /
+    attach a block volume / a NAS manually). This is a first pass, not full VPS storage
+    hardening (deferred) — the downgraded fallback is honestly labeled rather than
+    pretending parity.
+  - **Idempotent on re-runs:** create a zpool/volume only if absent; never re-carve or
+    resize an existing pool/volume on a re-converge; a re-run against an already-resolved
+    target confirms the existing backend, creates nothing new.
+* **The universal rule, unchanged:** all compute is disposable; all data durable and
+  separately addressable, no exception for relay or CP; `~/.freehold` explicitly out.
+* **Per-tenant datasets, not one shared dataset — for correctness, not accident
+  prevention.** Each durable tenant (relay, CP, later k3s-volumes) gets its own dataset
+  under a common parent: (1) teardown granularity — data+compute teardown of one tenant
+  must leave others untouched, by construction; (2) unprivileged LXC guests share a host uid
+  range, so a shared dataset is cross-readable across tenants while both run, independent of
+  teardown.
+* **Snapshot-capable ≠ snapshot-consistent** — named (WAL-aware / quiesce-before-snapshot
+  for any tenant running a database), implementation deferred.
+* **Attachment is by reference, not by copy** — bind-mount (LXC), provider volume mount
+  (VPS), or the k3s `local-path` root pointed at the tenant dataset (kube). **And the
+  compute is BORN with the reference mount** — the mount is baked into the LXC
+  create / VM provision / pod volume at first creation, never attached post-hoc. "Born on
+  the plane from creation" is the deliverable; a post-hoc `pct set` is a different, weaker
+  claim.
+* **Tenant→dataset mapping lives outside compute, two-place recoverable:** the workstation
+  config (survives compute teardown by design) plus independently derivable from the
+  host/provider's own volume listing. **Teardown reads the mapping from the config BEFORE it
+  deletes the config** (today's teardown removes it) — the two-place rule is the recovery
+  net, not the read order.
+* **First tenants: relay and CP — migration means destroy-and-recreate-fresh, not a live
+  cutover.** Neither running instance holds data worth preserving, so "migrate onto the
+  plane" = tear down the existing relay/CP, resolve the backend, stand up FRESH instances
+  with state born directly on the resolved tenant dataset. No copy-verification or
+  stack-bounce deliverable under this resolution — if something worth keeping appears first,
+  the decision is revisited explicitly, never silently reinterpreted as a live cutover. The
+  first cutover's CP comes up as a FRESH console identity — re-relay-member + re-adopt is
+  normal bootstrap work, not silent.
+* **`rebuild`'s role changes** once CP's state is plane-backed: volume-loss DR fallback,
+  not the ordinary post-teardown recovery path.
+* **CP's distributed/replicated form** — named, not built, gated on CP's state moving to
+  the `control_plane` Postgres database first.
+* **Relay-as-kube** — named direction, not built here.
+* **Teardown gains two explicit modes, both intentional:**
+  - **Compute-only (default):** destroy the LXC/pod; the tenant's dataset/volume untouched;
+    next compute reattaches by reference.
+  - **Data + compute (explicit):** also destroys that tenant's dataset — full intended loss,
+    scoped to exactly the named tenant by construction of the per-tenant model. Clear
+    warning + typed confirmation (re-typing the target name), given the size of what's being
+    destroyed, regardless of intent.
+* **Interplay with D4's blue/green (recorded, no decision forced):** the shared tenant
+  dataset means both colors mount the SAME volume by reference — DB-style tenants handle
+  shared storage natively; single-writer services need the flip at the mount/service
+  selector, not in-place on one volume.
+
+### Deliverables
+
+1. Converge pipeline gains a storage-backend resolution stage (Proxmox-lxc: ZFS →
+   LVM-thin → bail; VPS: provider block volume → explicitly-downgraded local directory →
+   bail), idempotent on re-runs, inserting before the relay/CP boots.
+2. Per-tenant dataset/volume for relay and CP under a common parent, each independently
+   destroyable.
+3. Fresh relay stood up with Postgres/Redis/MinIO/git volume BORN on relay's tenant dataset
+   at creation (the mount baked into the LXC create; not migrated from the running
+   instance).
+4. Fresh CP stood up with `state.json` BORN on CP's tenant dataset at creation;
+   atomic-write discipline verified across the mount boundary.
+5. Tenant→dataset mapping in the workstation config, independently re-derivable from the
+   host/provider's volume listing.
+6. Teardown tooling updated with the two explicit modes, each scoped to a single tenant's
+   dataset/volume; data+compute carries a clear warning + typed confirmation; the mapping
+   is read before the config is destroyed.
+
+### Acceptance
+
+* Converge against a Proxmox-lxc target with no existing backend → resolution creates a
+  zpool or falls back to LVM-thin; against a target that can support neither → bails with
+  an actionable message.
+* Converge against a VPS target → resolution attaches a provider block volume if available,
+  or falls back to the explicitly-downgraded local directory, stating the durability
+  difference; bails only if both are unavailable.
+* Re-run resolution against an already-resolved target → confirms the existing backend,
+  creates nothing new.
+* **Durable backends (Proxmox / block-volume):** destroy the relay LXC (compute-only) →
+  fresh relay LXC → reattach by reference → full prior state intact, no rebuild needed.
+  Same for CP with runners/grants/secrets ciphertext intact.
+* **Downgraded VPS fallback:** rebuild-fresh semantics, stated plainly — the instance disk
+  dies with compute-only teardown, so this branch's teardown = fresh install (the durability
+  downgrade in action, never a silent surprise).
+* Invoke data+compute teardown on CP's tenant only → confirm relay's dataset provably
+  untouched → typed confirmation required and, once given, destroys CP's data as intended.
+* Tenant→dataset mapping recoverable from the host/provider's volume listing alone.
+
+### Explicitly deferred
+
+* Automated snapshot scheduling and retention policy.
+* Snapshot consistency mechanics — named as a requirement, implementation deferred.
+* Backblaze off-site backup.
+* NFS/iSCSI-off-a-NAS substitution for the local Proxmox-lxc backend.
+* Full VPS storage hardening beyond the first-pass block-volume/downgraded-fallback branch.
+* Relay-as-kube, CP-as-distributed-kube (gated on named preconditions).
+* LiteLLM and Postgres-for-k3s as plane tenants — new builds directly on the plane as part
+  of C0's scope (C0 assumes them born on the plane).
+
 ## Locked decisions — SUPERSEDED or NEW this revision
 
 * **v3's "one dedicated agent-harness LXC" placement is RETIRED in the target
@@ -208,7 +341,9 @@ NOT widened by the onboarding inversion.
 
 ## Phase C — Skill framework v1
 
-* [ ] C0. **k3s → LiteLLM, deterministic, operator/CPA-driven.** The k3s substrate is
+* [ ] C0. **k3s → LiteLLM, deterministic, operator/CPA-driven.** Sequenced AFTER
+      Pre2-C0 (the durable plane — LiteLLM + Postgres are new builds born ON the plane, not
+      migrations). The k3s substrate is
       staged (configure stage, #120 — install done live; 0.08's NodePort reachability
       proof is the remaining pre-apply gate); C0 = the litellm-kube
       apply (the #76/#78 plan) + Postgres (`/srv/data/k8s-volumes` pinned) + the master-key
