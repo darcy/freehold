@@ -1464,6 +1464,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "zeroize",
 ]
 
 [[package]]
@@ -1548,6 +1549,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "zeroize",
 ]
 
 [[package]]

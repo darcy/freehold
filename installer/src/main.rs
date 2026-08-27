@@ -3,7 +3,7 @@
 //! bootstrap mode drives the same stages with its own widgets.
 
 use anyhow::{Result, bail};
-use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use freehold_installer::config;
 use freehold_installer::{
     Answers, DoorProbe, ensure_bins, mint_identity, ops_pubkey, print_tail, relay_pubkey_nip11,
@@ -93,6 +93,47 @@ fn collect() -> Result<Answers> {
             .interact_text()?;
         a.operator_pk = freehold_core::identity::parse_pubkey_input(&npub)
             .map_err(|e| anyhow::anyhow!("invalid pubkey: {e}"))?;
+
+        // Optionally persist THEIR nsec: encoded into the same 0600 identity
+        // file the generated path writes, so every local launch (TUI +
+        // console-login) logs into the console automatically. The key never
+        // leaves this machine.
+        let nsec: String = Password::with_theme(&ColorfulTheme::default())
+            .with_prompt(
+                "Your nsec (nsec1… — optional: persist your login key here so the TUI/console-login work with no pasting; empty = skip)",
+            )
+            .allow_empty_password(true)
+            .interact()?;
+        if !nsec.trim().is_empty() {
+            let secret = freehold_core::identity::nsec_to_secret(&nsec)
+                .map_err(|e| anyhow::anyhow!("invalid nsec: {e}"))?;
+            let id = freehold_core::identity::Identity::from_nostr_secret(secret)
+                .map_err(|e| anyhow::anyhow!("invalid nsec: {e}"))?;
+            // wipe the dialoguer buffer — a pasted nsec must not linger.
+            let mut wiped = nsec;
+            zeroize::Zeroize::zeroize(&mut wiped);
+            if id.nostr_pubkey_hex() != a.operator_pk {
+                bail!(
+                    "the nsec's pubkey {} does not match the pubkey you pasted ({}) — fix one",
+                    id.nostr_pubkey_hex(),
+                    a.operator_pk
+                );
+            }
+            let dir = freehold_installer::operator_dir();
+            if dir.join(freehold_core::identity::IDENTITY_FILE).exists() {
+                bail!(
+                    "an operator identity already exists at {} — remove it or reuse that key",
+                    dir.display()
+                );
+            }
+            id.write_to_dir(&dir)?;
+            a.operator_generated = true;
+            a.operator_dir = dir;
+            println!();
+            println!("  Persisted your key (0600 — it stays on this machine):");
+            println!("    {}", a.operator_dir.display());
+            println!("  Every local launch (TUI or console-login) now logs in automatically.");
+        }
     } else {
         let dir = freehold_installer::operator_dir();
         let id = mint_identity(&dir)?;
