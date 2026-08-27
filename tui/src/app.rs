@@ -567,7 +567,7 @@ fn draw_configure<'a>(
 
     let mut meta = vec![
         Line::from(Span::styled(
-            format!(" doing: {}", cf.stages[cf.cur.min(3)].name),
+            format!(" doing: {}", cf.stages[cf.cur.min(4)].name),
             Style::new().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(

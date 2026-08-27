@@ -41,13 +41,16 @@ pub struct RunnerRef {
 pub struct LxcSpec {
     pub relay: LxcGuest,
     pub cp: LxcGuest,
+    /// k3s substrate coords — absent in pre-k3s configs (serde default).
+    #[serde(default)]
+    pub k3s: LxcGuest,
 }
 
 /// A managed LXC's CONNECT/status coordinates. Filled in by the configure
 /// pipeline right after the boot (the vmid is auto-picked; the IP is what
 /// DHCP assigned); unknown (None) before creation. Sizing (rootfs/memory)
 /// is bootstrap-time only.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct LxcGuest {
     pub vmid: Option<u32>,
     pub ip: Option<String>,
@@ -99,6 +102,10 @@ impl Config {
                 target: a.runner.clone(),
             },
             lxc: LxcSpec {
+                k3s: LxcGuest {
+                    vmid: a.k3s_vmid,
+                    ip: a.k3s_ip.clone(),
+                },
                 relay: LxcGuest {
                     vmid: a.relay_vmid,
                     ip: a.relay_ip.clone(),
@@ -148,6 +155,16 @@ pub fn probes_ok(cfg: &Config) -> bool {
     relay_live(cfg) && cp_live(cfg) && crate::port_open(&cfg.runner.addr)
 }
 
+/// The k3s cluster's API liveness: ANY HTTP answer from the kube-apiserver
+/// (the health endpoints are auth-gated by default — a 401 means the API is
+/// up and answering; only a connection failure means down).
+pub fn k3s_live(cfg: &Config) -> bool {
+    let Some(ip) = &cfg.lxc.k3s.ip else {
+        return false;
+    };
+    http_any(&format!("https://{ip}:6443/healthz"))
+}
+
 /// The relay's own health endpoint (the buzz `/_liveness`).
 pub fn relay_live(cfg: &Config) -> bool {
     http_ok(&format!(
@@ -188,6 +205,20 @@ pub fn cp_live(cfg: &Config) -> bool {
 
 /// HTTPS GET accepting the local-CA / operator-proxy TLS posture (the check
 /// is liveness, not CA pinning), 6s timeout, 2xx-3xx = alive.
+/// Any HTTP response (including the k3s API's auth-gated 401) proves the
+/// endpoint answers; only a transport failure is "down".
+fn http_any(url: &str) -> bool {
+    use std::time::Duration;
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(6))
+        .build()
+    else {
+        return false;
+    };
+    client.get(url).send().is_ok()
+}
+
 fn http_ok(url: &str) -> bool {
     use std::time::Duration;
     let Ok(client) = reqwest::blocking::Client::builder()

@@ -89,6 +89,8 @@ impl Form {
             relay_ip: opt_ip(&self.fields[4].value),
             cp_vmid: None,
             cp_ip: opt_ip(&self.fields[5].value),
+            k3s_vmid: None,
+            k3s_ip: None,
             relay_gw: v(6),
             rootfs_gb: num(7)?,
             memory_mb: num(8)?,
