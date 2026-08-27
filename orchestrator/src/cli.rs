@@ -131,6 +131,16 @@ struct DeployCpArgs {
     /// The relay this CP helps serve (the ONE scope; C4 posture record)
     #[arg(long)]
     relay_url: String,
+    /// The RELAY's signing pubkey (the 39002 roster trust anchor). When
+    /// omitted, the deploy tries NIP-11 discovery (best-effort — Buzz often
+    /// advertises none; pass it when known).
+    #[arg(long)]
+    relay_pubkey: Option<String>,
+    /// The relay LXC's LAN IP — pinned into the CP guest's /etc/hosts so
+    /// the console can RESOLVE the relay domain (the operator's DNS may
+    /// not reach inside the guests: tailnet etc.).
+    #[arg(long)]
+    relay_host_ip: Option<String>,
     /// Deploy INTO this LXC on the target — the CP lives in its OWN guest,
     /// a different LXC than the relay's by default (omitted = the target host).
     #[arg(long)]
@@ -259,6 +269,19 @@ struct DelegatePeerArgs {
     /// Poll interval seconds
     #[arg(long, default_value_t = 3)]
     interval: u64,
+    /// The console base URL where this agent REGISTERS at start (default:
+    /// the config's cp_url). The registry is observability — registering is
+    /// best-effort; the agent runs regardless.
+    #[arg(long)]
+    console_url: Option<String>,
+    /// Operator identity DIR for the registry login (default: the config's
+    /// operator_identity; FREEHOLD_CONSOLE_COOKIE also works). The operator
+    /// standing the agent up logs it in — the agent key is never an admin.
+    #[arg(long)]
+    console_identity: Option<PathBuf>,
+    /// The agent's registry name (default: the agent dir name).
+    #[arg(long)]
+    name: Option<String>,
 }
 
 #[derive(Args)]
@@ -666,6 +689,8 @@ async fn cli_body() -> Result<()> {
                     bind_addr,
                     binary_path: args.binary.clone(),
                     relay_url: args.relay_url.clone(),
+                    relay_pubkey: args.relay_pubkey.clone(),
+                    relay_host_ip: args.relay_host_ip.clone(),
                     admin_pubkeys: operator_pubkey.map(|pk| vec![pk]).unwrap_or_default(),
                     runner_binary: args.runner_binary.clone(),
                     runner_package: args.runner_package.clone(),
@@ -863,6 +888,22 @@ async fn cli_body() -> Result<()> {
                 "freehold-auto-ops",
             )
             .map_err(anyhow::Error::msg)?;
+            // The agent REGISTERS with the console registry (best-effort —
+            // observability, never a gate). Sessions come from the OPERATOR
+            // standing this agent up; the agent's own key is never an admin.
+            let name = args.name.clone().unwrap_or_else(|| {
+                args.agent_dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "agent".to_string())
+            });
+            register_agent_best_effort(
+                &args.console_url,
+                &args.console_identity,
+                &name,
+                &me,
+                &args.channel,
+            );
             println!(
                 "DELEGATE-PEER {} watching {}s on channel {}",
                 me, args.watch, args.channel
@@ -876,7 +917,23 @@ async fn cli_body() -> Result<()> {
             let mut last_ts = since;
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let client = flows::connect(&args.runner_addr, &args.agent_dir, &args.runner_pubkey)?;
+            let mut last_beat = std::time::Instant::now();
             loop {
+                // PRESENCE heartbeat: a kind-9 on the channel every 30s —
+                // the console's availability probe sees recent kind-9 from
+                // this pubkey and reports the agent available.
+                if last_beat.elapsed() >= std::time::Duration::from_secs(30) {
+                    if let Err(e) = delegate::post_message(
+                        &args.relay_url,
+                        &id.secret_seed(),
+                        &args.channel,
+                        &me,
+                        "fh-presence",
+                    ) {
+                        println!("DELEGATE-PEER: presence publish failed: {e}");
+                    }
+                    last_beat = std::time::Instant::now();
+                }
                 let polled = delegate::poll_stream_p(
                     &args.relay_url,
                     &id.secret_seed(),
@@ -1272,6 +1329,88 @@ fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
         anyhow::bail!("empty secret");
     }
     Ok(value)
+}
+
+fn register_agent_best_effort(
+    console_url: &Option<String>,
+    console_identity: &Option<PathBuf>,
+    name: &str,
+    agent_pubkey: &str,
+    channel: &str,
+) {
+    use freehold_core::identity::Identity;
+    let Some(url) = console_url.clone().or_else(cfg_cp_url) else {
+        println!("DELEGATE-PEER: registry skipped — no console URL (--console-url / config)");
+        return;
+    };
+    let result = match console_identity {
+        Some(dir) => Identity::load(dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|id| {
+                freehold_console_client::Client::login_with_timeout(
+                    &url,
+                    &id.secret_seed(),
+                    std::time::Duration::from_secs(8),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .and_then(|c| {
+                c.register_agent(name, agent_pubkey, channel)
+                    .map_err(anyhow::Error::from)
+            }),
+        None => {
+            let cookie = std::env::var("FREEHOLD_CONSOLE_COOKIE")
+                .ok()
+                .filter(|c| !c.trim().is_empty());
+            match cookie {
+                Some(c) => freehold_console_client::Client::with_cookie(&url, &c)
+                    .register_agent(name, agent_pubkey, channel)
+                    .map_err(anyhow::Error::from),
+                None => match freehold_installer::config::Config::load(
+                    &freehold_installer::config::Config::default_path(),
+                )
+                .ok()
+                .flatten()
+                .and_then(|cfg| cfg.operator_identity)
+                {
+                    Some(dir) => Identity::load(&dir)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|id| {
+                            freehold_console_client::Client::login_with_timeout(
+                                &url,
+                                &id.secret_seed(),
+                                std::time::Duration::from_secs(8),
+                            )
+                            .map_err(anyhow::Error::from)
+                        })
+                        .and_then(|c| {
+                            c.register_agent(name, agent_pubkey, channel)
+                                .map_err(anyhow::Error::from)
+                        }),
+                    None => {
+                        println!(
+                            "DELEGATE-PEER: registry skipped — no identity (--console-identity / config operator_identity / FREEHOLD_CONSOLE_COOKIE)"
+                        );
+                        return;
+                    }
+                },
+            }
+        }
+    };
+    match result {
+        Ok(_) => println!(
+            "DELEGATE-PEER: registered as agent '{name}' with the console registry ({url})"
+        ),
+        Err(e) => println!("DELEGATE-PEER: registry registration skipped: {e}"),
+    }
+}
+
+/// The config's console URL, if readable — the default registry endpoint.
+fn cfg_cp_url() -> Option<String> {
+    freehold_installer::config::Config::load(&freehold_installer::config::Config::default_path())
+        .ok()
+        .flatten()
+        .map(|c| c.cp_url)
 }
 
 #[cfg(test)]

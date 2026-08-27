@@ -42,6 +42,10 @@ pub struct DeployCpSpec {
     pub binary_path: PathBuf,
     /// The relay this CP helps serve — the ONE scope (C4 posture).
     pub relay_url: String,
+    /// The relay's signing pubkey (the 39002 roster trust anchor).
+    pub relay_pubkey: Option<String>,
+    /// The relay LXC's LAN IP, pinned into the guest's /etc/hosts.
+    pub relay_host_ip: Option<String>,
     /// Operator/admin Nostr pubkeys (64-hex) seeding the console's NIP-98
     /// auth whitelist (C3.5). Non-empty => the console may bind non-loopback
     /// and the deploy's own loopback guard is relaxed.
@@ -259,14 +263,67 @@ pub async fn deploy_cp(
         .as_ref()
         .map(|o| format!(" --public-origin {o}"))
         .unwrap_or_default();
+    // The console's relay SCOPE: 2.6.1 features (grant sync, runner channel
+    // views, the AGENTS availability probe) read `state.relay_url` — the
+    // serve must be told the scope or it runs loopback-posture with none.
+    // The relay signing pubkey is auto-discovered via NIP-11 (best-effort:
+    // no pubkey => no scope flags => the console stays scope-less rather
+    // than passing a half scope that `serve` rejects).
+    let domain = spec
+        .relay_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    // Explicit --relay-pubkey wins; NIP-11 discovery is the fallback (Buzz
+    // often advertises none — the operator reads the key from the relay box).
+    let relay_pk = spec
+        .relay_pubkey
+        .clone()
+        .or_else(|| freehold_installer::relay_pubkey_nip11(&domain));
+    // A co-located console (in an LXC on the relay's host) cannot terminate
+    // the operator's public TLS nor resolve the tailnet DNS — its relay
+    // scope points straight at the relay LXC's HTTP listener.
+    let scope_url = match &spec.relay_host_ip {
+        Some(ip) => format!("http://{ip}:3000"),
+        None => spec.relay_url.clone(),
+    };
+    let relay_flag = match relay_pk {
+        Some(pk) => format!(" --relay-url {scope_url} --relay-pubkey {pk} --relay-host {domain}"),
+        None => String::new(),
+    };
+    // The console (co-located in an LXC) must RESOLVE the relay domain to
+    // query it — the operator's DNS may not reach inside the guests.
+    if let Some(ip) = &spec.relay_host_ip {
+        let host = spec
+            .relay_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        let hosts_cmd = format!(
+            "grep -q '{host}' {sd}/etc-hosts 2>/dev/null || echo '{ip} {host}' >> {sd}/etc-hosts",
+            host = host,
+            ip = ip,
+            sd = "/etc",
+        );
+        let _ = exec_to_ok(
+            client,
+            target,
+            &crate::relay::lxc_cmd(spec.lxc, &hosts_cmd),
+            "pin relay host",
+            30,
+        );
+    }
     let start = format!(
-        "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba}{admin_flag}{origin_flag} \
+        "setsid nohup {bd}/control-plane serve --state-dir {sd} --addr {ba}{admin_flag}{origin_flag}{relay_flag} \
          >> {sd}/serve.log 2>&1 < /dev/null & echo $! | tee {sd}/serve.pid",
         bd = spec.bin_dir,
         sd = spec.state_dir,
         ba = spec.bind_addr,
         admin_flag = admin_flag,
         origin_flag = origin_flag,
+        relay_flag = relay_flag,
     );
     let out = exec_to_ok(
         client,

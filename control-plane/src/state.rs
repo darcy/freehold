@@ -48,6 +48,19 @@ pub struct RunnerRecord {
     pub risk_level: Option<String>,
 }
 
+/// A named AI agent: the relay-addressable pubkey + when it was stood up.
+/// The registry is observability — the agent's availability comes from its
+/// recent presence on the relay, never from this row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRecord {
+    pub pubkey: String,
+    pub created_at: u64,
+    /// The agent's kind-9 presence CHANNEL (the relay scopes kind-9 reads
+    /// by #h) — required for an availability probe.
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRecord {
     /// Runner (service) this secret belongs to — one per runner in Chunk 1.
@@ -64,6 +77,16 @@ pub struct SecretRecord {
 pub struct ControlPlaneState {
     pub runners: BTreeMap<String, RunnerRecord>,
     pub secrets: BTreeMap<String, SecretRecord>,
+    /// Named AI agents stood up (the CPA records them when it creates one —
+    /// e.g. the delegate-peer registers at start). Availability is probed
+    /// LIVE against the relay; this table is the registry, not the status.
+    #[serde(default)]
+    pub agents: BTreeMap<String, AgentRecord>,
+    /// The COMMUNITY host the relay serves kind-9/#h under — the relay
+    /// serves per-community by `Host`, so the co-located console (LAN URL)
+    /// must send it explicitly.
+    #[serde(default)]
+    pub relay_host: Option<String>,
     /// Console operator/admin whitelist (64-hex Nostr pubkeys). Non-empty
     /// => NIP-98 console auth is ON and the bind guard relaxes (C3.5).
     #[serde(default)]
@@ -170,6 +193,19 @@ impl StateStore {
 
     /// Persist the relay scope for this console (Chunk 2.6.1). The web UI
     /// syncs runner channels against it; a restart keeps it.
+    pub fn insert_agent(&self, name: &str, rec: AgentRecord) {
+        self.inner.write().agents.insert(name.to_string(), rec);
+    }
+
+    pub fn relay_host(&self) -> Option<String> {
+        self.inner.read().relay_host.clone()
+    }
+
+    pub fn set_relay_host(&self, relay_host: Option<String>) -> Result<(), StateError> {
+        self.inner.write().relay_host = relay_host;
+        self.save()
+    }
+
     pub fn set_relay_url(&self, relay_url: Option<String>) -> Result<(), StateError> {
         self.inner.write().relay_url = relay_url;
         self.save()

@@ -203,6 +203,11 @@ struct ServeArgs {
     /// in state.json.
     #[arg(long, env = "FREEHOLD_RELAY_PUBKEY")]
     relay_pubkey: Option<String>,
+    /// The relay's COMMUNITY host (the domain) — sent as the `Host` header
+    /// on relay reads when the scope URL is a LAN address the relay's
+    /// strict host map would otherwise refuse.
+    #[arg(long)]
+    relay_host: Option<String>,
     /// Comma-separated operator/admin Nostr pubkeys (64-hex). Non-empty =>
     /// NIP-98 console auth is ON and a non-loopback bind is allowed (C3.5);
     /// empty => the loopback-only posture (C3) holds.
@@ -555,6 +560,10 @@ async fn main() -> Result<()> {
             if let Some(url) = &args.relay_url {
                 store.set_relay_url(Some(url.clone()))?;
                 tracing::info!(relay = %url, "console relay scope set");
+            }
+            if let Some(host) = &args.relay_host {
+                store.set_relay_host(Some(host.clone()))?;
+                tracing::info!(host = %host, "console relay community host set");
             }
             if let Some(pk) = &args.relay_pubkey {
                 if !freehold_control_plane::is_hex64(pk) {

@@ -667,45 +667,53 @@ fn draw_agents<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
     let block = panel("agents", Color::Cyan);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        format!(
-            " local agent identities · {}",
-            freehold_installer::freehold_home()
-                .join("control-plane")
-                .display()
-        ),
-        Style::new().fg(Color::DarkGray),
-    ))];
-    lines.push(Line::from(Span::styled(
-        format!(
-            " {}{}{}",
-            col("agent", 18),
-            col("pubkey", 22),
-            col("created", 12),
-        ),
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )));
-    if rn.agents.is_empty() {
+    let mut lines: Vec<Line> = vec![];
+    if rn.cp.client.is_none() {
         lines.push(Line::from(Span::styled(
-            " no agents stood up yet — the CPA records them here as it creates them",
+            " the agent registry lives on the console — log in on Runners (l), then Tab back",
             Style::new().fg(Color::DarkGray),
         )));
-    }
-    for a in &rn.agents {
-        lines.push(Line::from(vec![
-            Span::styled(col(&a.name, 18), Style::new().fg(Color::White)),
-            Span::styled(col(&clip(&a.pubkey, 20), 22), Style::new().fg(Color::Gray)),
-            Span::styled(col(&a.created, 12), Style::new().fg(Color::Gray)),
-        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " AI agents registered with the console · availability = relay presence (120s)",
+            Style::new().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {}{}{}{}",
+                col("agent", 18),
+                col("pubkey", 22),
+                col("status", 12),
+                col("created", 12),
+            ),
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        if rn.agents.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " no agents standing yet — a stood-up agent (delegate-peer / CPA) registers here",
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        for a in &rn.agents {
+            let (label, color) = match a.available {
+                Some(true) => ("● available", Color::Green),
+                Some(false) => ("○ unavailable", Color::Red),
+                None => ("? unknown", Color::DarkGray),
+            };
+            let ident = match (&a.available, &a.note) {
+                (None, Some(n)) => clip(&format!("? {n}"), 60),
+                _ => clip(&a.pubkey, 20),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(col(&a.name, 18), Style::new().fg(Color::White)),
+                Span::styled(col(&ident, 22), Style::new().fg(Color::Gray)),
+                Span::styled(col(label, 12), Style::new().fg(color)),
+                Span::styled(col(&a.created, 12), Style::new().fg(Color::Gray)),
+            ]));
+        }
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
-
-// ---------------------------------------------------------------------------
-// The console panel: services-at-a-glance, driven by the console API through
-// the shared client. This is the TUI half of the web UI's parity — the same
-// overview the page renders, keyboard-driven.
-// ---------------------------------------------------------------------------
 
 fn val_text(v: &serde_json::Value) -> String {
     match v {
