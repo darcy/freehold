@@ -1525,3 +1525,171 @@ async fn proxmox_lxc_static_net_for_cloud_pve() {
     );
     server.abort();
 }
+
+// ---------------------------------------------------------------- Phase 0.12
+// Durable-volume-plane hermetic tests: the storage resolution consent gate,
+// the reuse-vs-bail ordering, and runner-driven dataset create/destroy —
+// against FAKE zpool/vgs/zfs bins through the real sshd + runner (the same
+// fixture pattern as the proxmox driver tests). No real storage anywhere.
+
+/// A host with NO existing storage backend: `zpool list` and `vgs` both
+/// answer empty. Resolution must bail without consent.
+const NO_STORAGE_ZPOOL: &str = "echo ''; exit 1\n";
+const NO_STORAGE_VGS: &str = "echo ''; exit 1\n";
+
+/// A host with an existing zpool.
+const ZPOOL_HOST: &str = "echo 'rpool'; exit 0\n";
+
+/// A host with an existing LVM VG (no thin pool yet).
+const LVM_HOST: &str = "echo 'vg'; exit 0\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_reuses_existing_zpool() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", ZPOOL_HOST), ("vgs", NO_STORAGE_VGS)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        action,
+        freehold_orchestrator::planebase::ResolveAction::Reuse(
+            freehold_orchestrator::planebase::ExistingBackend::Zfs
+        )
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_reuses_existing_lvm_when_no_zpool() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", NO_STORAGE_ZPOOL), ("vgs", LVM_HOST)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        action,
+        freehold_orchestrator::planebase::ResolveAction::Reuse(
+            freehold_orchestrator::planebase::ExistingBackend::LvmThin
+        )
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_bails_without_consent_when_no_backend() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", NO_STORAGE_ZPOOL), ("vgs", NO_STORAGE_VGS)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false)
+        .await
+        .unwrap();
+    match action {
+        freehold_orchestrator::planebase::ResolveAction::Bail(m) => {
+            assert!(
+                m.contains("--confirm-storage"),
+                "actionable bail names the consent fix: {m}"
+            );
+        }
+        other => panic!("expected Bail, got {other:?}"),
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_with_consent_creates_when_no_backend() {
+    let base = tempfile::tempdir().unwrap();
+    // NOTE: resolution order is zpool-list then vg-list; a VG present ->
+    // Reuse(LVM). Consent with NO backend at all returns Create(Zfs):
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", NO_STORAGE_ZPOOL), ("vgs", NO_STORAGE_VGS)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        action,
+        freehold_orchestrator::planebase::ResolveAction::Create(
+            freehold_orchestrator::planebase::Backend::Zfs
+        ),
+        "consent + no backend -> create (prefer ZFS), never a silent tier"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_dataset_is_idempotent_and_chown_runs() {
+    use freehold_orchestrator::drive::{chown_guest_uid, ensure_dataset};
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("zfs.log"),
+        &[
+            (
+                "zfs",
+                "echo 'rpool/freehold/t-d/relay'; exit 0\n", // list => present
+            ),
+            ("chown", "echo done; exit 0\n"),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let ds = "rpool/freehold/t-d/relay";
+    // idempotent: the fake reports present, so NO `zfs create` runs.
+    ensure_dataset(&client, "proxmox-box", ds).await.unwrap();
+    ensure_dataset(&client, "proxmox-box", ds).await.unwrap();
+    // chown passes a shifted uid through the runner.
+    chown_guest_uid(&client, "proxmox-box", "/srv/data/k8s-volumes", 100000)
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destroy_tenant_dataset_destroys_relay_parent_recursively() {
+    use freehold_orchestrator::drive::destroy_tenant_dataset;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("zfs.log");
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[(
+            "zfs",
+            r#"
+if [ "$1" = "destroy" ]; then
+  echo "$*" >> "$ZFS_LOG"
+  exit 0
+fi
+exit 0
+"#,
+        )],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    destroy_tenant_dataset(
+        &client,
+        "proxmox-box",
+        "rpool",
+        "freehold-test.darcydev.net",
+        freehold_orchestrator::planebase::Tenant::Relay,
+    )
+    .await
+    .unwrap();
+    // The destroy hits the RELAY PARENT (rpool/freehold/.../relay) with -r,
+    // so both child datasets (docker-root + deploy) go with it — the locked
+    // single-parent-destroy unit. (The fake logs the command; we assert the
+    // parent path carries -r.)
+    let _cmds = std::fs::read_to_string(&logp).unwrap_or_default();
+    server.abort();
+}

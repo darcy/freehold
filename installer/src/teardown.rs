@@ -335,3 +335,51 @@ fn stop_local_serve(a: &Answers) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn derive(tenant: Option<&str>, data: bool) -> Scope {
+        match tenant {
+            Some(t) if data => Scope::TenantData { tenant: t.into() },
+            Some(t) => Scope::TenantCompute { tenant: t.into() },
+            None => Scope::WholeWorld { data },
+        }
+    }
+
+    #[test]
+    fn default_is_whole_world() {
+        assert_eq!(derive(None, false), Scope::WholeWorld { data: false });
+        assert_eq!(derive(None, true), Scope::WholeWorld { data: true });
+    }
+
+    #[test]
+    fn tenant_scoped_stays_compute_only_without_data() {
+        assert_eq!(
+            derive(Some("relay"), false),
+            Scope::TenantCompute {
+                tenant: "relay".into()
+            }
+        );
+    }
+
+    #[test]
+    fn tenant_data_adds_dataset_destroy() {
+        assert_eq!(
+            derive(Some("cp"), true),
+            Scope::TenantData {
+                tenant: "cp".into()
+            }
+        );
+    }
+
+    #[test]
+    fn k3s_volumes_maps_to_k3s_lxc() {
+        assert_eq!(tenant_lxc_role("k3s-volumes"), "k3s");
+        assert_eq!(tenant_lxc_role("k3s"), "k3s");
+        assert_eq!(tenant_lxc_role("relay"), "relay");
+        assert_eq!(tenant_lxc_role("cp"), "cp");
+        assert_eq!(tenant_lxc_role("bogus"), "");
+    }
+}

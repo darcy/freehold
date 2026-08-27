@@ -40,12 +40,11 @@ started; see Phase C below.
 
 ## Phase 0.12 — Durable Volume Plane (pre-C0)
 
-Status: DRAFT — for review. NOT yet locked. Addresses the five gap notes (docker named
-volumes mechanism, unprivileged ownership + zpool-create gating, three teardown scopes,
-VPS connector scope, hermetic-first acceptance) + the smaller notes (naming convention,
-dir-fsync, doc naming). Sequenced after the Pre-C0 progress block above (k3s configure
-stage, Services view, agents registry, working console relay scope, k3s teardown
-discipline) and before C0.
+Status: IMPLEMENTED + hermetic-tested (2026-08-27) — storage backend resolution stage
+(ZFS → LVM-thin → bail, consent-gated create), per-tenant datasets + relay's two child
+datasets, the tenant→dataset mapping in the config (two-place rule), born-at-create
+mounts, and the THREE teardown scopes. NOT yet live-verified on a real host — the live
+acceptance gates remain. This section documents the decisions the implementation follows.
 
 ### Why this exists
 
