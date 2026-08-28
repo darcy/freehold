@@ -256,14 +256,14 @@ impl ConfigureState {
                             } else {
                                 "k3s"
                             };
-                            if freehold_installer::write_back_lxc(
-                                &self.answers,
-                                &mut self.cfg,
-                                role,
-                            )
-                            .is_ok()
+                            // record_lxc loads the config FRESH (the stages
+                            // wrote facts — the plane — after self.cfg was
+                            // loaded) and returns the merged result; saving a
+                            // stale copy here wiped exactly those facts.
+                            if let Ok(cfg) =
+                                freehold_installer::record_lxc(&self.answers, &self.cfg_path, role)
                             {
-                                let _ = self.cfg.save(&self.cfg_path);
+                                self.cfg = cfg;
                                 // spawn_run clones self.answers — a stale
                                 // pre-write-back copy would re-boot from
                                 // scratch on a retry.
@@ -297,22 +297,20 @@ impl ConfigureState {
                             } else {
                                 "k3s"
                             };
-                            match freehold_installer::write_back_lxc(
+                            // same fresh-load discipline as the check path.
+                            match freehold_installer::record_lxc(
                                 &self.answers,
-                                &mut self.cfg,
+                                &self.cfg_path,
                                 role,
                             ) {
-                                Ok(()) => {
+                                Ok(cfg) => {
                                     self.stages[i].tail = format!(
                                         "{tail} — recorded in config (vmid {:?}, ip {:?})",
-                                        guest_vmid(&self.cfg, role),
-                                        guest_ip(&self.cfg, role)
+                                        guest_vmid(&cfg, role),
+                                        guest_ip(&cfg, role)
                                     );
-                                    if let Err(e) = self.cfg.save(&self.cfg_path) {
-                                        self.notice = format!("config save failed: {e}");
-                                    } else {
-                                        self.answers = Answers::from_config(&self.cfg);
-                                    }
+                                    self.cfg = cfg;
+                                    self.answers = Answers::from_config(&self.cfg);
                                 }
                                 Err(e) => self.notice = format!("write-back failed: {e}"),
                             }

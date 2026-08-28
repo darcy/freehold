@@ -501,10 +501,42 @@ pub fn read_lxc_ip(a: &Answers, vmid: u32) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no ipv4 on LXC {vmid} eth0:\n{out}"))
 }
 
-/// Persist the real post-boot coordinates into the config.
-pub fn write_back_lxc(a: &Answers, cfg: &mut config::Config, role: &str) -> Result<()> {
-    let vmid = find_lxc_vmid_exact(a, role)?;
-    let ip = read_lxc_ip(a, vmid)?;
+/// Persist the real post-boot coordinates into the config ON DISK: load the
+/// config FRESH, mutate, save, return the merged result. Front-ends must
+/// never save their own pre-pipeline copy instead — the stages write facts
+/// mid-pipeline (the durable plane, earlier write-backs) that a stale copy
+/// would wipe (exactly how cp/k3s were born without their plane mounts).
+pub fn record_lxc(a: &Answers, cfg_path: &Path, role: &str) -> Result<config::Config> {
+    record_lxc_with(a, cfg_path, role, |a, role| {
+        let vmid = find_lxc_vmid_exact(a, role)?;
+        let ip = read_lxc_ip(a, vmid)?;
+        Ok((vmid, ip))
+    })
+}
+
+/// `record_lxc` with the coordinate resolution injected — the seam that lets
+/// the load→mutate→save discipline be tested hermetically (no runner).
+pub fn record_lxc_with(
+    a: &Answers,
+    cfg_path: &Path,
+    role: &str,
+    resolve: impl FnOnce(&Answers, &str) -> Result<(u32, String)>,
+) -> Result<config::Config> {
+    let Some(mut cfg) = config::Config::load(cfg_path)? else {
+        bail!(
+            "no config at {} — cannot record the {role} LXC's coordinates",
+            cfg_path.display()
+        );
+    };
+    let (vmid, ip) = resolve(a, role)?;
+    apply_lxc_coords(&mut cfg, role, vmid, ip);
+    cfg.save(cfg_path)?;
+    Ok(cfg)
+}
+
+/// The mutation half of a write-back (no runner probes): record one guest's
+/// coordinates + the managed piece it implies.
+pub fn apply_lxc_coords(cfg: &mut config::Config, role: &str, vmid: u32, ip: String) {
     let guest = if role == "relay" {
         &mut cfg.lxc.relay
     } else if role == "k3s" {
@@ -519,7 +551,6 @@ pub fn write_back_lxc(a: &Answers, cfg: &mut config::Config, role: &str) -> Resu
     if role == "k3s" && !cfg.managed.iter().any(|m| m == "k3s") {
         cfg.managed.push("k3s".into());
     }
-    Ok(())
 }
 
 /// Is the LXC with this vmid present on the target host (via the runner)?
@@ -763,12 +794,10 @@ mkdir -p /srv/data/k8s-volumes
             );
         }
     }
-    // record the guest coords + the managed piece.
-    let cfg_path = config::Config::default_path();
-    if let Ok(Some(mut cfg)) = config::Config::load(&cfg_path) {
-        write_back_lxc(a, &mut cfg, "k3s").ok();
-        let _ = cfg.save(&cfg_path);
-    }
+    // record the guest coords + the managed piece (best-effort — the
+    // install itself already succeeded; a missing/failed write-back must
+    // not sink the stage).
+    let _ = record_lxc(a, &config::Config::default_path(), "k3s");
     Ok(())
 }
 
@@ -993,5 +1022,104 @@ mod live_tests {
             .expect("config present");
         let a = Answers::from_config(&cfg);
         stage_bootstrap(&a, "relay", cfg.lxc.relay.vmid).expect("relay boot stage works");
+    }
+}
+
+#[cfg(test)]
+mod writeback_tests {
+    use super::*;
+
+    fn answers() -> Answers {
+        let mut a = Answers::defaults();
+        a.operator_pk = "ab".repeat(32);
+        a
+    }
+
+    /// THE clobber regression: a write-back loads the config FRESH from
+    /// disk, mutates ONE role's coords, and saves — facts the front-end's
+    /// stale in-memory copy can't see (the durable plane, recorded by a
+    /// mid-pipeline stage) must survive. This is how cp/k3s got born
+    /// without their plane mounts: the TUI saved its pre-plane copy.
+    #[test]
+    fn record_lxc_preserves_facts_written_mid_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = config::Config::from_answers(&answers());
+        // stage_storage's record lands BEFORE the boots write back:
+        cfg.plane.backend = Some("pve".into());
+        cfg.plane.backend_kind = Some("lvmth".into());
+        cfg.plane.mounts.insert(
+            "cp".into(),
+            vec![config::PlaneMount {
+                source: "/freehold/world/cp".into(),
+                guest_path: "/srv/freehold".into(),
+            }],
+        );
+        cfg.save(&path).unwrap();
+
+        // The TUI's STALE in-memory copy (loaded before the plane stage):
+        let stale = config::Config::from_answers(&answers());
+        assert!(stale.plane.mounts.is_empty());
+
+        // write-back for cp through the fresh-load path:
+        let merged = record_lxc_with(&answers(), &path, "cp", |_, _| {
+            Ok((101, "10.0.0.9/24".into()))
+        })
+        .unwrap();
+
+        // the returned config carries BOTH the fresh coords and the disk facts:
+        assert_eq!(merged.lxc.cp.vmid, Some(101));
+        assert_eq!(merged.lxc.cp.ip.as_deref(), Some("10.0.0.9/24"));
+        assert_eq!(merged.plane.backend.as_deref(), Some("pve"));
+        // ...and the disk now has them (this is what the next stage reads):
+        let back = config::Config::load(&path).unwrap().unwrap();
+        assert_eq!(back.plane, merged.plane);
+        assert_eq!(back.lxc.cp.vmid, Some(101));
+    }
+
+    #[test]
+    fn record_lxc_k3s_appends_managed_piece() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config::Config::from_answers(&answers())
+            .save(&path)
+            .unwrap();
+        let merged = record_lxc_with(&answers(), &path, "k3s", |_, _| {
+            Ok((102, "10.0.0.10/24".into()))
+        })
+        .unwrap();
+        assert_eq!(merged.managed, vec!["relay", "cp", "k3s"]);
+        // idempotent: a second write-back does not duplicate the piece
+        let merged = record_lxc_with(&answers(), &path, "k3s", |_, _| {
+            Ok((102, "10.0.0.10/24".into()))
+        })
+        .unwrap();
+        assert_eq!(merged.managed, vec!["relay", "cp", "k3s"]);
+    }
+
+    #[test]
+    fn record_lxc_without_config_bails() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = record_lxc_with(&answers(), &dir.path().join("nope.toml"), "cp", |_, _| {
+            Ok((101, "10.0.0.9/24".into()))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("no config"));
+    }
+
+    #[test]
+    fn record_lxc_propagates_resolve_failure_without_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config::Config::from_answers(&answers())
+            .save(&path)
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let err = record_lxc_with(&answers(), &path, "cp", |_, _| {
+            bail!("no container named world-cp found on the host")
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("no container"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 }

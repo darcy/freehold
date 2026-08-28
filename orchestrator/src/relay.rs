@@ -69,6 +69,24 @@ pub(crate) fn lxc_cmd(lxc: Option<u32>, cmd: &str) -> String {
     }
 }
 
+/// The relay runs as `buzz:buzz` (uid 1000), but the `buzz-git-data` named
+/// volume arrives ROOT-owned: docker initializes a fresh named volume from
+/// the image's dir, and the image's `/data/git` is EMPTY (its Dockerfile
+/// `chown` never transfers onto an empty dir), while a re-provisioned
+/// docker-root retains old-world root-owned leftovers. The relay then
+/// panics at git pack-cache creation ("Permission denied (os error 13) at
+/// path /data/git/.pack-cache/...") and crash-loops — fix ownership BEFORE
+/// the first start. `docker compose run` mounts the service's OWN volumes
+/// (the volume name stays compose-derived, never hardcoded); `--user 0` +
+/// `--entrypoint chown` root the one-shot regardless of the image's USER;
+/// `-R` reaches retained old-world files. Single-quote-free: the payload
+/// travels inside a single-quoted `pct exec ... sh -c`.
+fn git_data_chown_cmd() -> String {
+    "docker compose --env-file .env -f compose.yml run --rm --user 0 \
+     --entrypoint chown relay -R buzz:buzz /data/git"
+        .to_string()
+}
+
 #[derive(Debug)]
 pub struct RelayDeployResult {
     pub relay_url: String,
@@ -227,8 +245,10 @@ pub async fn deploy_relay(
          fi; done && \
          (grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in \
          {dir}/deploy/compose/.env\" >&2 && exit 1 || true) && \
+         {chown} && \
          ./run.sh start",
         dir = spec.deploy_dir,
+        chown = git_data_chown_cmd(),
         port = spec.http_port,
         owner = spec.owner_pubkey,
         rhost = spec.domain.clone().unwrap_or_else(|| {
@@ -398,4 +418,33 @@ pub async fn deploy_relay(
             ref = spec.buzz_ref,
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The crash-loop regression (live-reproduced): the relay image runs as
+    /// uid 1000 (buzz:buzz) but the buzz-git-data named volume initializes
+    /// root-owned — the relay panics creating /data/git/.pack-cache and
+    /// restarts forever. The install must fix ownership BEFORE `run.sh
+    /// start`, recursively (a re-provisioned docker-root retains old-world
+    /// root-owned files), rootless of the image's USER, and through the
+    /// service's OWN volume mount (never a hardcoded volume name).
+    #[test]
+    fn git_data_chown_shape() {
+        let cmd = git_data_chown_cmd();
+        // single-quote-free: travels inside pct exec ... sh -c '<cmd>'
+        assert!(!cmd.contains('\''));
+        // compose-derived volumes, not a hardcoded volume name
+        assert!(cmd.contains("docker compose --env-file .env -f compose.yml run"));
+        assert!(cmd.contains("--user 0"));
+        assert!(cmd.contains("--entrypoint chown"));
+        assert!(cmd.contains("relay -R buzz:buzz /data/git"));
+        assert!(cmd.contains("--rm"));
+        // the chown must LAND before the first start, inside the install
+        // command's own single-quote-safe wrapping
+        let wrapped = lxc_cmd(Some(100), &cmd);
+        assert!(wrapped.starts_with("pct exec 100 -- sh -c '"));
+    }
 }
