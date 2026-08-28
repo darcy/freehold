@@ -870,6 +870,17 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
             cfg.plane.mounts.insert(role.to_string(), mounts);
             resolved_any = true;
         }
+        // Record the discoverable backend KIND printed by ensure ("zfs" or
+        // "lvmth") so teardown/dispatch pick the right driver.
+        for line in out.lines() {
+            if let Some(rest) = line.strip_prefix("STORAGE-BACKEND: ") {
+                let kind = rest.split_whitespace().next().unwrap_or("").to_string();
+                if !kind.is_empty() {
+                    cfg.plane.backend_kind = Some(kind);
+                }
+                break;
+            }
+        }
     }
     if resolved_any {
         let _ = cfg.save(&cfg_path);

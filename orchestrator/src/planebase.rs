@@ -95,6 +95,16 @@ pub enum ExistingBackend {
     LvmThin,
 }
 
+/// Which durable-storage DRIVER a tenant's plane uses. Recorded in the
+/// config's `plane.backend_kind` so dispatch (ensure vs destroy) and teardown
+/// pick the right verbs (zfs vs lvm-thin) instead of inferring from a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    Zfs,
+    LvmThin,
+}
+
 /// What the resolution stage decides to DO, given the detected host state
 /// and the operator's consent. A pure function of the inputs — the driver
 /// maps each arm to the exact remote commands.
@@ -158,6 +168,29 @@ pub fn relay_child_dataset(pool: &str, domain: &str, child: RelayChild) -> Resul
     ))
 }
 
+/// The LVM thin-LV NAME for a tenant under a VG. Flat with a restricted
+/// charset (LV names allow no `/`), and TWO-PLACE derivable: the name encodes
+/// the world (domain) + tenant, so it is recoverable from `lvs` alone.
+/// `freehold-<domain-with-dashes>-<tenant>` (e.g. `freehold-freehold-test-darcydev-net-relay`).
+pub fn lvm_lv_name(domain: &str, tenant: Tenant) -> Result<String> {
+    Ok(format!(
+        "freehold-{}-{}",
+        normalize_domain(domain)?,
+        tenant.as_str()
+    ))
+}
+
+/// The LVM thin-LV name for one of the relay's two child datasets. Relay
+/// keeps the two-child blast-radius separation (docker data-root + compose
+/// deploy dir) on LVM too — two thin LVs, each independently destroyable.
+pub fn lvm_relay_child_lv_name(domain: &str, child: RelayChild) -> Result<String> {
+    Ok(format!(
+        "freehold-{}-relay-{}",
+        normalize_domain(domain)?,
+        child.as_str()
+    ))
+}
+
 fn normalize_domain(domain: &str) -> Result<String> {
     let normalized = domain.replace('.', "-");
     if normalized.is_empty() || normalized.len() > 48 {
@@ -216,6 +249,24 @@ mod tests {
                 .contains('.'),
             "flattened label has no dots"
         );
+    }
+
+    #[test]
+    fn lvm_lv_name_is_flat_and_derivable() {
+        assert_eq!(
+            lvm_lv_name("freehold-test.darcydev.net", Tenant::Relay).unwrap(),
+            "freehold-freehold-test-darcydev-net-relay"
+        );
+        assert_eq!(
+            lvm_relay_child_lv_name("t.d", RelayChild::DockerRoot).unwrap(),
+            "freehold-t-d-relay-docker-root"
+        );
+        assert_eq!(
+            lvm_relay_child_lv_name("t.d", RelayChild::DeployDir).unwrap(),
+            "freehold-t-d-relay-deploy"
+        );
+        assert!(!lvm_lv_name("a.b", Tenant::Cp).unwrap().contains('.'));
+        assert!(!lvm_lv_name("a.b", Tenant::Cp).unwrap().contains('/'));
     }
 
     #[test]

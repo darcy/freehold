@@ -43,6 +43,11 @@ pub struct PlaneSpec {
     /// volume listing are the two-place rule's SECOND place (independent
     /// derivation); this field is the first.
     pub backend: Option<String>,
+    /// Which durable-storage DRIVER this plane uses (zfs vs lvm-thin), so
+    /// dispatch (ensure vs destroy) and teardown pick the right verbs. Serde
+    /// default keeps pre-plane configs parseable.
+    #[serde(default)]
+    pub backend_kind: Option<String>,
     /// LXC role -> resolved reference mounts (HOST source + guest path), the
     /// born-at-create specs. Keyed by LXC role (relay/cp/k3s). relay has two
     /// children (docker data-root + compose deploy dir).
