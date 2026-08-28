@@ -112,7 +112,7 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 177 tests across core / runner / console-client / control-plane / orchestrator / acceptance
+cargo test --workspace        # 210 tests across core / runner / console-client / control-plane / orchestrator / acceptance
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --check             # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)

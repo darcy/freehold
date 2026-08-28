@@ -81,6 +81,12 @@ pub(crate) fn lxc_cmd(lxc: Option<u32>, cmd: &str) -> String {
 /// `--entrypoint chown` root the one-shot regardless of the image's USER;
 /// `-R` reaches retained old-world files. Single-quote-free: the payload
 /// travels inside a single-quoted `pct exec ... sh -c`.
+/// The one-shot must resolve the SAME compose project as `run.sh start`,
+/// else it chowns a different volume and silently no-ops: both run with
+/// `--env-file .env -f compose.yml` from the same cwd, and compose derives
+/// the project name from the FIRST compose file — verified live: run.sh's
+/// `COMPOSE_FILES` always starts with `-f compose.yml` (TLS/dev overlays
+/// append, never replace it).
 fn git_data_chown_cmd() -> String {
     "docker compose --env-file .env -f compose.yml run --rm --user 0 \
      --entrypoint chown relay -R buzz:buzz /data/git"
@@ -208,77 +214,11 @@ pub async fn deploy_relay(
     )?;
 
     // Install per the upstream bundle contract: .env ONCE (preserve the
-    // signing identity), then the port + the owner + per-key secrets, then
-    // run.sh. The cold first pull of Postgres/Redis/MinIO/relay/Caddy gets a
-    // real timeout (600s), not the default.
-    // Single-quote-free on purpose: the whole command is single-quoted when
-    // wrapped for `pct exec ... sh -c`.
-    // Entropy: each secret comes from /dev/urandom (od -N32 -> 64 hex), NOT a
-    // timestamp — `sha256(date +%s%N)` is guessable within a bound run (the
-    // relay's first signed event leaks the boot time) and BUZZ_RELAY_PRIVATE_KEY
-    // is the relay's signing key (forging kind 13534 = self-admission).
-    let install = format!(
-        "set -e; cd {dir}/deploy/compose && (test -f .env || cp .env.example .env) && \
-         (grep -q \"^BUZZ_HTTP_PORT=\" .env && \
-          sed -i \"s/^BUZZ_HTTP_PORT=.*/BUZZ_HTTP_PORT={port}/\" .env || \
-          echo \"BUZZ_HTTP_PORT={port}\" >> .env) && \
-         (grep -q \"^RELAY_OWNER_PUBKEY=\" .env && \
-          sed -i \"s/^RELAY_OWNER_PUBKEY=.*/RELAY_OWNER_PUBKEY={owner}/\" .env || \
-          echo \"RELAY_OWNER_PUBKEY={owner}\" >> .env) && \
-         (grep -q \"^BUZZ_DOMAIN=\" .env && \
-          sed -i \"s|^BUZZ_DOMAIN=.*|BUZZ_DOMAIN={rhost}|\" .env || \
-          echo \"BUZZ_DOMAIN={rhost}\" >> .env) && \
-         (grep -q \"^RELAY_URL=\" .env && \
-          sed -i \"s|^RELAY_URL=.*|RELAY_URL={rws}|\" .env || \
-          echo \"RELAY_URL={rws}\" >> .env) && \
-         (grep -q \"^BUZZ_MEDIA_BASE_URL=\" .env && \
-          sed -i \"s|^BUZZ_MEDIA_BASE_URL=.*|BUZZ_MEDIA_BASE_URL={rhttp}/media|\" .env || \
-          echo \"BUZZ_MEDIA_BASE_URL={rhttp}/media\" >> .env) && \
-         (grep -q \"^BUZZ_MEDIA_SERVER_DOMAIN=\" .env && \
-          sed -i \"s|^BUZZ_MEDIA_SERVER_DOMAIN=.*|BUZZ_MEDIA_SERVER_DOMAIN={rhost}|\" .env || \
-          echo \"BUZZ_MEDIA_SERVER_DOMAIN={rhost}\" >> .env) && \
-         for k in BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET POSTGRES_PASSWORD \
-         REDIS_PASSWORD BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY; do \
-         if grep -q \"^$k=CHANGE_ME\" .env; then \
-         v=$(od -An -N32 -tx1 /dev/urandom | tr -d \"\\n \"); \
-         sed -i \"s/^$k=CHANGE_ME.*/$k=$v/\" .env; \
-         fi; done && \
-         (grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in \
-         {dir}/deploy/compose/.env\" >&2 && exit 1 || true) && \
-         {chown} && \
-         ./run.sh start",
-        dir = spec.deploy_dir,
-        chown = git_data_chown_cmd(),
-        port = spec.http_port,
-        owner = spec.owner_pubkey,
-        rhost = spec.domain.clone().unwrap_or_else(|| {
-            spec.relay_url
-                .trim_start_matches("http://")
-                .trim_start_matches("https://")
-                .trim_end_matches('/')
-                .to_string()
-        }),
-        rws = format!(
-            "{}://{}",
-            if spec.domain.is_some() || spec.relay_url.trim_start().starts_with("https://") {
-                "wss"
-            } else {
-                "ws"
-            },
-            spec.domain.clone().unwrap_or_else(|| {
-                spec.relay_url
-                    .trim_start_matches("http://")
-                    .trim_start_matches("https://")
-                    .trim_end_matches('/')
-                    .to_string()
-            })
-        ),
-        rhttp = spec
-            .domain
-            .as_ref()
-            .map(|d| format!("https://{d}"))
-            .unwrap_or_else(|| { spec.relay_url.trim_end_matches('/').to_string() }),
-    );
+    // signing identity), then the port + the owner + per-key secrets, the
+    // git-volume ownership fix, then run.sh. The cold first pull of
+    // Postgres/Redis/MinIO/relay/Caddy gets a real timeout (600s), not the
+    // default.
+    let install = install_cmd(spec);
     crate::bootstrap::exec_to_ok(
         client,
         target,
@@ -419,18 +359,102 @@ pub async fn deploy_relay(
         ),
     })
 }
+/// The upstream bundle install command: .env ONCE (preserves the signing
+/// identity on a re-run), the port/owner/domain keys per key, the per-key
+/// secrets from /dev/urandom (NOT a timestamp — the relay's first signed
+/// event leaks the boot time and CHANGE_ME must never survive to start),
+/// the relay's git-volume ownership fix BEFORE the first start, then
+/// run.sh. Single-quote-free on purpose: the whole command is single-quoted
+/// when wrapped for `pct exec ... sh -c`.
+fn install_cmd(spec: &RelayDeploySpec) -> String {
+    format!(
+        "set -e; cd {dir}/deploy/compose && (test -f .env || cp .env.example .env) && \
+         (grep -q \"^BUZZ_HTTP_PORT=\" .env && \
+          sed -i \"s/^BUZZ_HTTP_PORT=.*/BUZZ_HTTP_PORT={port}/\" .env || \
+          echo \"BUZZ_HTTP_PORT={port}\" >> .env) && \
+         (grep -q \"^RELAY_OWNER_PUBKEY=\" .env && \
+          sed -i \"s/^RELAY_OWNER_PUBKEY=.*/RELAY_OWNER_PUBKEY={owner}/\" .env || \
+          echo \"RELAY_OWNER_PUBKEY={owner}\" >> .env) && \
+         (grep -q \"^BUZZ_DOMAIN=\" .env && \
+          sed -i \"s|^BUZZ_DOMAIN=.*|BUZZ_DOMAIN={rhost}|\" .env || \
+          echo \"BUZZ_DOMAIN={rhost}\" >> .env) && \
+         (grep -q \"^RELAY_URL=\" .env && \
+          sed -i \"s|^RELAY_URL=.*|RELAY_URL={rws}|\" .env || \
+          echo \"RELAY_URL={rws}\" >> .env) && \
+         (grep -q \"^BUZZ_MEDIA_BASE_URL=\" .env && \
+          sed -i \"s|^BUZZ_MEDIA_BASE_URL=.*|BUZZ_MEDIA_BASE_URL={rhttp}/media|\" .env || \
+          echo \"BUZZ_MEDIA_BASE_URL={rhttp}/media\" >> .env) && \
+         (grep -q \"^BUZZ_MEDIA_SERVER_DOMAIN=\" .env && \
+          sed -i \"s|^BUZZ_MEDIA_SERVER_DOMAIN=.*|BUZZ_MEDIA_SERVER_DOMAIN={rhost}|\" .env || \
+          echo \"BUZZ_MEDIA_SERVER_DOMAIN={rhost}\" >> .env) && \
+         for k in BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET POSTGRES_PASSWORD \
+         REDIS_PASSWORD BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY; do \
+         if grep -q \"^$k=CHANGE_ME\" .env; then \
+         v=$(od -An -N32 -tx1 /dev/urandom | tr -d \"\\n \"); \
+         sed -i \"s/^$k=CHANGE_ME.*/$k=$v/\" .env; \
+         fi; done && \
+         (grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in \
+         {dir}/deploy/compose/.env\" >&2 && exit 1 || true) && \
+         {chown} && \
+         ./run.sh start",
+        dir = spec.deploy_dir,
+        chown = git_data_chown_cmd(),
+        port = spec.http_port,
+        owner = spec.owner_pubkey,
+        rhost = spec.domain.clone().unwrap_or_else(|| {
+            spec.relay_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+                .to_string()
+        }),
+        rws = format!(
+            "{}://{}",
+            if spec.domain.is_some() || spec.relay_url.trim_start().starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            },
+            spec.domain.clone().unwrap_or_else(|| {
+                spec.relay_url
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://")
+                    .trim_end_matches('/')
+                    .to_string()
+            })
+        ),
+        rhttp = spec
+            .domain
+            .as_ref()
+            .map(|d| format!("https://{d}"))
+            .unwrap_or_else(|| { spec.relay_url.trim_end_matches('/').to_string() }),
+    )
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn spec() -> RelayDeploySpec {
+        RelayDeploySpec {
+            relay_name: "relay-box".into(),
+            deploy_dir: "/srv/buzz-relay".into(),
+            http_port: 3000,
+            buzz_ref: "main".into(),
+            lxc: Some(100),
+            owner_pubkey: "ab".repeat(32),
+            relay_url: "http://192.168.30.248:3000".into(),
+            operator_pubkey: "cd".repeat(32),
+            domain: Some("freehold-test.darcydev.net".into()),
+        }
+    }
+
     /// The crash-loop regression (live-reproduced): the relay image runs as
     /// uid 1000 (buzz:buzz) but the buzz-git-data named volume initializes
     /// root-owned — the relay panics creating /data/git/.pack-cache and
-    /// restarts forever. The install must fix ownership BEFORE `run.sh
-    /// start`, recursively (a re-provisioned docker-root retains old-world
-    /// root-owned files), rootless of the image's USER, and through the
-    /// service's OWN volume mount (never a hardcoded volume name).
+    /// restarts forever. The ownership fix must be RECURSIVE, rooted, and
+    /// through the service's OWN volume mount (never a hardcoded volume
+    /// name).
     #[test]
     fn git_data_chown_shape() {
         let cmd = git_data_chown_cmd();
@@ -442,9 +466,32 @@ mod tests {
         assert!(cmd.contains("--entrypoint chown"));
         assert!(cmd.contains("relay -R buzz:buzz /data/git"));
         assert!(cmd.contains("--rm"));
-        // the chown must LAND before the first start, inside the install
-        // command's own single-quote-safe wrapping
-        let wrapped = lxc_cmd(Some(100), &cmd);
+    }
+
+    /// The chown must LAND INSIDE the actual install command, and BEFORE the
+    /// first `run.sh start` — under `set -e`, so a chown failure aborts the
+    /// deploy rather than letting the relay crash-loop. Deleting the splice
+    /// from `install_cmd` must fail this (the helper shape alone is not the
+    /// contract).
+    #[test]
+    fn install_cmd_chown_lands_before_first_start() {
+        let install = install_cmd(&spec());
+        let chown = git_data_chown_cmd();
+        let chown_at = install.find(&chown).expect("chown spliced into install");
+        let start_at = install
+            .find("./run.sh start")
+            .expect("run.sh start present");
+        assert!(
+            chown_at < start_at,
+            "ownership fix must run BEFORE the first run.sh start"
+        );
+        // fail-fast: the chown is a hard step, not a `|| true` best-effort
+        assert!(install.starts_with("set -e"));
+        // the splice is an `&&` step of the chain
+        assert!(install.contains(&format!("{chown} &&")));
+        // single-quote-free end-to-end: wrapped for pct exec ... sh -c
+        assert!(!install.contains('\''));
+        let wrapped = lxc_cmd(Some(100), &install);
         assert!(wrapped.starts_with("pct exec 100 -- sh -c '"));
     }
 }

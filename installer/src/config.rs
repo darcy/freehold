@@ -170,6 +170,14 @@ impl Config {
         if cfg.relay_pubkey.is_none() {
             cfg.relay_pubkey = prev.relay_pubkey;
         }
+        // the operator identity path is RECORDED on the generated-key path
+        // (from_answers only sets it then); a re-run where the operator
+        // pastes an npub and skips the nsec (re-persisting is refused) must
+        // NOT wipe the recorded dir — the TUI's auto-login panel and
+        // delegate-peer read it back.
+        if cfg.operator_identity.is_none() {
+            cfg.operator_identity = prev.operator_identity;
+        }
         // answers win (they carry a FRESH boot's coords); prev fills the
         // Nones — a CLI collect() never knows vmids/ips, only write-backs do.
         for (cur, old) in [
@@ -395,6 +403,7 @@ mod tests {
         );
         prev.managed.push("k3s".into());
         prev.relay_pubkey = Some("cd".repeat(32));
+        prev.operator_identity = Some("/home/op/.freehold/control-plane/operator".into());
         prev.lxc.relay.vmid = Some(100);
         prev.lxc.relay.ip = Some("10.0.0.5/24".into());
         prev.lxc.cp.vmid = Some(101);
@@ -409,6 +418,15 @@ mod tests {
         assert_eq!(merged.lxc.relay.vmid, Some(100));
         assert_eq!(merged.lxc.relay.ip.as_deref(), Some("10.0.0.5/24"));
         assert_eq!(merged.lxc.cp.vmid, Some(101));
+        // a re-run that pastes an npub + skips the nsec has
+        // operator_generated = false -> from_answers leaves the identity
+        // None -> the merge must fill it from prev (never wipe the recorded
+        // dir; the TUI auto-login panel + delegate-peer read it back).
+        assert!(!a.operator_generated);
+        assert_eq!(
+            merged.operator_identity.as_deref(),
+            Some(Path::new("/home/op/.freehold/control-plane/operator"))
+        );
     }
 
     /// Answers carry the FRESHER truth — a boot's write-back into the
