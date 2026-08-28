@@ -156,6 +156,49 @@ impl Config {
             managed: vec!["relay".into(), "cp".into()],
         }
     }
+
+    /// Rebuild from answers WITHOUT wiping the world facts a prior run
+    /// recorded into the config: the durable plane, the relay pubkey, the
+    /// boot-time write-back coords, and any managed piece beyond the
+    /// baseline (k3s). `from_answers` alone only describes a GREENFIELD
+    /// world — saving it over a converged config wiped exactly the records
+    /// the later stages read (plane mounts born-at-create, `managed`).
+    pub fn merge_from_answers(a: &crate::Answers, prev: Option<Config>) -> Config {
+        let mut cfg = Config::from_answers(a);
+        let Some(prev) = prev else { return cfg };
+        cfg.plane = prev.plane;
+        if cfg.relay_pubkey.is_none() {
+            cfg.relay_pubkey = prev.relay_pubkey;
+        }
+        // the operator identity path is RECORDED on the generated-key path
+        // (from_answers only sets it then); a re-run where the operator
+        // pastes an npub and skips the nsec (re-persisting is refused) must
+        // NOT wipe the recorded dir — the TUI's auto-login panel and
+        // delegate-peer read it back.
+        if cfg.operator_identity.is_none() {
+            cfg.operator_identity = prev.operator_identity;
+        }
+        // answers win (they carry a FRESH boot's coords); prev fills the
+        // Nones — a CLI collect() never knows vmids/ips, only write-backs do.
+        for (cur, old) in [
+            (&mut cfg.lxc.relay, &prev.lxc.relay),
+            (&mut cfg.lxc.cp, &prev.lxc.cp),
+            (&mut cfg.lxc.k3s, &prev.lxc.k3s),
+        ] {
+            if cur.vmid.is_none() {
+                cur.vmid = old.vmid;
+            }
+            if cur.ip.is_none() {
+                cur.ip = old.ip.clone();
+            }
+        }
+        for m in prev.managed {
+            if !cfg.managed.contains(&m) {
+                cfg.managed.push(m);
+            }
+        }
+        cfg
+    }
 }
 
 /// Minimal host:port probing — no TLS handshake, just reachability. Good
@@ -338,5 +381,76 @@ mod tests {
         );
         assert_eq!(split_url("http://x:3000/"), Some(("x".into(), 3000)));
         assert_eq!(split_url("cp-rs.example/path"), None);
+    }
+
+    /// The clobber regression: a config carrying a resolved durable plane
+    /// (backend + mounts) and a k3s managed piece must SURVIVE the
+    /// end-of-pipeline re-save, which rebuilds from answers — the CLI's
+    /// collect() knows nothing about either.
+    #[test]
+    fn merge_keeps_plane_managed_and_pubkey() {
+        let mut a = crate::Answers::defaults();
+        a.operator_pk = "ab".repeat(32);
+        let mut prev = Config::from_answers(&a);
+        prev.plane.backend = Some("pve".into());
+        prev.plane.backend_kind = Some("lvmth".into());
+        prev.plane.mounts.insert(
+            "cp".into(),
+            vec![PlaneMount {
+                source: "/freehold/world/cp".into(),
+                guest_path: "/srv/freehold".into(),
+            }],
+        );
+        prev.managed.push("k3s".into());
+        prev.relay_pubkey = Some("cd".repeat(32));
+        prev.operator_identity = Some("/home/op/.freehold/control-plane/operator".into());
+        prev.lxc.relay.vmid = Some(100);
+        prev.lxc.relay.ip = Some("10.0.0.5/24".into());
+        prev.lxc.cp.vmid = Some(101);
+
+        let merged = Config::merge_from_answers(&a, Some(prev));
+        assert_eq!(merged.plane.backend.as_deref(), Some("pve"));
+        assert_eq!(merged.plane.backend_kind.as_deref(), Some("lvmth"));
+        assert_eq!(merged.plane.mounts.get("cp").unwrap().len(), 1);
+        assert_eq!(merged.managed, vec!["relay", "cp", "k3s"]);
+        let pk = "cd".repeat(32);
+        assert_eq!(merged.relay_pubkey.as_deref(), Some(pk.as_str()));
+        assert_eq!(merged.lxc.relay.vmid, Some(100));
+        assert_eq!(merged.lxc.relay.ip.as_deref(), Some("10.0.0.5/24"));
+        assert_eq!(merged.lxc.cp.vmid, Some(101));
+        // a re-run that pastes an npub + skips the nsec has
+        // operator_generated = false -> from_answers leaves the identity
+        // None -> the merge must fill it from prev (never wipe the recorded
+        // dir; the TUI auto-login panel + delegate-peer read it back).
+        assert!(!a.operator_generated);
+        assert_eq!(
+            merged.operator_identity.as_deref(),
+            Some(Path::new("/home/op/.freehold/control-plane/operator"))
+        );
+    }
+
+    /// Answers carry the FRESHER truth — a boot's write-back into the
+    /// in-memory answers must NOT be clobbered by stale disk coords.
+    #[test]
+    fn merge_prefers_answer_coords_over_prev() {
+        let mut a = crate::Answers::defaults();
+        a.cp_vmid = Some(111);
+        a.cp_ip = Some("10.0.0.9/24".into());
+        let mut prev = Config::from_answers(&crate::Answers::defaults());
+        prev.lxc.cp.vmid = Some(101);
+        prev.lxc.cp.ip = Some("10.0.0.7/24".into());
+
+        let merged = Config::merge_from_answers(&a, Some(prev));
+        assert_eq!(merged.lxc.cp.vmid, Some(111));
+        assert_eq!(merged.lxc.cp.ip.as_deref(), Some("10.0.0.9/24"));
+    }
+
+    /// No prior config = greenfield: merge == from_answers.
+    #[test]
+    fn merge_without_prev_is_from_answers() {
+        let mut a = crate::Answers::defaults();
+        a.operator_pk = "ab".repeat(32);
+        let merged = Config::merge_from_answers(&a, None);
+        assert_eq!(merged, Config::from_answers(&a));
     }
 }

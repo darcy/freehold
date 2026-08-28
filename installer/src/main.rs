@@ -347,7 +347,11 @@ fn main() -> Result<()> {
     }
 
     let cfg_path = config::Config::default_path();
-    let cfg = config::Config::from_answers(&answers);
+    // MERGE, never rebuild-from-answers alone: the mid-pipeline stages (the
+    // storage stage's plane record, the boots' write-backs, any relay pubkey)
+    // live on disk; a from_answers save would wipe them.
+    let prev = config::Config::load(&cfg_path)?;
+    let cfg = config::Config::merge_from_answers(&answers, prev);
     cfg.save(&cfg_path)?;
     println!("  ✓ wrote config {}", cfg_path.display());
 
