@@ -831,25 +831,31 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
     };
     let mut resolved_any = false;
     for (tenant, role) in role_for {
-        let (ok, out) = run(
-            &bin("freehold-orchestrator"),
-            &[
-                "storage",
-                "ensure",
-                "--addr",
-                &a.serve,
-                "--agent-dir",
-                ops_dir().to_str().unwrap(),
-                "--target",
-                &a.runner,
-                "--tenant",
-                tenant,
-                "--domain",
-                &a.domain,
-                "--pool",
-                pool, // the REAL backend identity from resolve
-            ],
-        )?;
+        let mut ensure_args = vec![
+            "storage".to_string(),
+            "ensure".to_string(),
+            "--addr".to_string(),
+            a.serve.clone(),
+            "--agent-dir".to_string(),
+            ops_dir().to_str().unwrap().to_string(),
+            "--target".to_string(),
+            a.runner.clone(),
+            "--tenant".to_string(),
+            tenant.to_string(),
+            "--domain".to_string(),
+            a.domain.clone(),
+            "--pool".to_string(),
+            pool.to_string(), // the REAL backend identity from resolve
+        ];
+        // Honor the RECORDED backend kind (once the first tenant has ensured
+        // it): on a host with BOTH a zpool and a VG, re-detection would
+        // always pick ZFS and drive an LVM-backed tenant the wrong way.
+        if let Some(kind) = cfg.plane.backend_kind.as_deref() {
+            ensure_args.push("--kind".to_string());
+            ensure_args.push(kind.to_string());
+        }
+        let ensure_refs: Vec<&str> = ensure_args.iter().map(String::as_str).collect();
+        let (ok, out) = run(&bin("freehold-orchestrator"), &ensure_refs)?;
         if !ok {
             bail!("storage ensure {tenant} failed:\n{out}");
         }

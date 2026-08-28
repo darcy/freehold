@@ -286,25 +286,32 @@ fn destroy_dataset(a: &Answers, cfg: &Config, tenant: &str, _dataset: &str) -> R
     // Ok(true) = destroyed, Ok(false) = absent (no-op). A real destroy
     // failure surfaces as an Err with the underlying output.
     let pool = cfg.plane.backend.clone().unwrap_or_else(|| "rpool".into());
-    let (ok, out) = crate::run(
-        &bin("freehold-orchestrator"),
-        &[
-            "storage",
-            "destroy",
-            "--addr",
-            &a.serve,
-            "--agent-dir",
-            crate::ops_dir().to_str().unwrap(),
-            "--target",
-            &a.runner,
-            "--tenant",
-            tenant,
-            "--domain",
-            &cfg.domain,
-            "--pool",
-            &pool,
-        ],
-    )?;
+    let mut args = vec![
+        "storage".to_string(),
+        "destroy".to_string(),
+        "--addr".to_string(),
+        a.serve.clone(),
+        "--agent-dir".to_string(),
+        crate::ops_dir().to_str().unwrap().to_string(),
+        "--target".to_string(),
+        a.runner.clone(),
+        "--tenant".to_string(),
+        tenant.to_string(),
+        "--domain".to_string(),
+        cfg.domain.clone(),
+        "--pool".to_string(),
+        pool,
+    ];
+    // Honor the RECORDED backend kind: on a host with BOTH a zpool and a VG,
+    // re-detection would always pick ZFS and drive an LVM-backed tenant the
+    // wrong way (probes a dataset that is absent, logs "nothing destroyed",
+    // and the LVs + their data survive the whole-world teardown).
+    if let Some(kind) = cfg.plane.backend_kind.as_deref() {
+        args.push("--kind".to_string());
+        args.push(kind.to_string());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (ok, out) = crate::run(&bin("freehold-orchestrator"), &refs)?;
     if !ok {
         bail!("dataset destroy for {tenant} failed:\n{out}");
     }

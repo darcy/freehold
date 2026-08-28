@@ -243,6 +243,7 @@ pub async fn ensure_lvm_lv(
     lv_name: &str,
     host_path: &str,
 ) -> Result<String, BootstrapError> {
+    let dev = format!("/dev/{vg}/{lv_name}");
     if !thin_lv_exists(client, target, vg, lv_name)? {
         // REUSE the VG's existing thin pool (stock PVE: `pve/data`); only
         // carve a fresh `freehold-thin` when the VG truly has none.
@@ -259,7 +260,6 @@ pub async fn ensure_lvm_lv(
                 "freehold-thin".to_string()
             }
         };
-        let dev = format!("/dev/{vg}/{lv_name}");
         crate::bootstrap::exec_to_ok(
             client,
             target,
@@ -267,6 +267,19 @@ pub async fn ensure_lvm_lv(
             "lvcreate thin LV",
             120,
         )?;
+    }
+    // mkfs GATED on blkid: runs on first create, and recovers a partial
+    // failure (a prior run that died between lvcreate and mkfs leaves the LV
+    // without a filesystem — re-running must mkfs it, not skip).
+    let has_fs = crate::bootstrap::exec(
+        client,
+        target,
+        &format!("blkid -s TYPE -o value {dev} 2>/dev/null"),
+        30,
+    )?
+    .exit_code
+        == Some(0);
+    if !has_fs {
         crate::bootstrap::exec_to_ok(
             client,
             target,
@@ -292,7 +305,6 @@ pub async fn ensure_lvm_lv(
     .exit_code
         == Some(0);
     if !mounted {
-        let dev = format!("/dev/{vg}/{lv_name}");
         crate::bootstrap::exec_to_ok(
             client,
             target,
@@ -301,6 +313,20 @@ pub async fn ensure_lvm_lv(
             60,
         )?;
     }
+    // Record the mount in /etc/fstab (idempotent) so a HOST REBOOT restores
+    // the plane — unlike ZFS (remounted by zfs-mount.service), a bare
+    // `mount` of an ext4 LV does not survive reboot; without this the guest
+    // would bind-mount an empty dir and write into the host root fs.
+    let fstab_line = format!("{dev} {host_path} ext4 defaults 0 2");
+    crate::bootstrap::exec_to_ok(
+        client,
+        target,
+        &format!(
+            "grep -qxF '{fstab_line}' /etc/fstab || echo '{fstab_line}' | tee -a /etc/fstab >/dev/null"
+        ),
+        "record mount in /etc/fstab",
+        60,
+    )?;
     Ok(host_path.to_string())
 }
 
@@ -464,6 +490,19 @@ pub async fn destroy_lvm_tenant(
         if !lv_exists(client, target, vg, lv)? {
             continue;
         }
+        let dev = format!("/dev/{vg}/{lv}");
+        // Unmount + strip the fstab line FIRST — `lvremove -f` skips the
+        // prompt, NOT the open-count check, so an LV still mounted at
+        // /freehold/<domain>/... would be refused and the teardown would
+        // bail with the LXCs already gone. umount failing is tolerated here
+        // (the LV may never have been mounted); if it is genuinely busy the
+        // lvremove below fails and surfaces it honestly.
+        let _ = crate::bootstrap::exec(
+            client,
+            target,
+            &format!("umount {dev} 2>/dev/null; sed -i '\\|^{dev} |d' /etc/fstab; true"),
+            60,
+        );
         crate::bootstrap::exec_to_ok(
             client,
             target,
