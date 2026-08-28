@@ -92,8 +92,9 @@ Wire layout (versioned):
 
 - `/events` (POST signed event JSON) and `/query` (POST filters ARRAY), both
   NIP-98-authed.
-- Runner channel id = `sha256(runnerNostrPubkey)[0..16]` as **32 lowercase
-  hex** (NOT 64 — buzz parses `h` as a UUID; 64-hex → None → 9000 rejected).
+- Runner channel id = `sha256(runnerNostrPubkey)[0..16]`, formatted as a
+  dashed UUID `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (NOT bare 32 hex and NOT
+  64 — buzz parses `h` and `d` as `uuid::Uuid`; 64-hex → None → 9000 rejected).
 
 ## NIP-29 kinds (`core/src/nip98.rs` + `delegate.rs`)
 
@@ -105,3 +106,6 @@ Wire layout (versioned):
 - Runner profile metadata: kind 39000 (replaceable per (author, h)) carries
   identity pubkeys, connector kind/address, status, secret NAME — never
   material.
+- Memory engram d-tag = `sha256(agent_pk ‖ "#" ‖ key)` (64 lowercase hex —
+  buzz requires 64-hex engram addresses; verified live). Written as the `d`
+  tag; a `p` tag carries the agent's pubkey.
