@@ -353,3 +353,37 @@ func TestSecretPackageWriteLoad(t *testing.T) {
 		t.Fatalf("write/load roundtrip mismatch:\n  %s\n  %s", orig, back)
 	}
 }
+
+// TestSignEventParityProbe cross-verifies signatures for several seeds so the
+// harness exercises BOTH pubkey parities (roughly half of random scalars give
+// an odd-Y pubkey, which exercises the BIP-340 parity-negation path in the
+// aux mask). The oracle is the byte-exact truth for whatever seed we pick, so
+// a parity bug in the Go signer fails this even though the crypto tests work
+// for seedS1 alone (IMPORTANT-4).
+func TestSignEventParityProbe(t *testing.T) {
+	seeds := []string{
+		seedS1,
+		seedS2,
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		"3333333333333333333333333333333333333333333333333333333333333333",
+		"0000000000000000000000000000000000000000000000000000000000000042",
+		"8080808080808080808080808080808080808080808080808080808080808080",
+		"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+	}
+	for _, seed := range seeds {
+		if _, err := crypto.PubkeyFromSecret(h2b(t, seed)); err != nil {
+			t.Fatalf("invalid seed %s: %v", seed, err)
+		}
+		pkGo, idGo, sigGo, err := wire.SignEvent(h2b(t, seed), 9007, nowTS, [][]string{{"h", "x"}}, "")
+		if err != nil {
+			t.Fatalf("seed %s: %v", seed, err)
+		}
+		resp := oracle(t, map[string]interface{}{
+			"op": "sign_event", "secret": seed, "created_at": nowTS, "kind": 9007,
+			"tags": [][]string{{"h", "x"}}, "content": "",
+		})
+		if pkGo != resp["pubkey"].(string) || idGo != resp["id"].(string) || sigGo != resp["sig"].(string) {
+			t.Fatalf("seed %s: signature/event mismatch with oracle — parity path broken", seed)
+		}
+	}
+}

@@ -135,8 +135,7 @@ var relayMemberCmd = &cobra.Command{
 	Use:   "relay-member",
 	Short: "C2: add a relay member through the relay-admin runner (buzz-admin)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		pubkey, _ := cmd.Flags().GetString("pubkey")
 		role, _ := cmd.Flags().GetString("role")
@@ -184,6 +183,7 @@ var relayMemberCmd = &cobra.Command{
 }
 
 func init() {
+	addCommonFlags(relayMemberCmd, nil)
 	relayMemberCmd.Flags().String("target", "proxmox-box", "Target runner (the box holding the relay host)")
 	relayMemberCmd.Flags().String("pubkey", "", "Nostr pubkey (64-hex) to add as a relay member")
 	relayMemberCmd.Flags().String("role", "", "Role: member (default) or admin (owner comes from RELAY_OWNER_PUBKEY)")

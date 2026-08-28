@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -279,26 +280,24 @@ func filepathBase(p string) string {
 // firstTargetKA extracts the first target's kind + address from a secrets.json
 // (for co-located runner adoption).
 func firstTargetKA(raw string) (string, string) {
-	kind, address := "ssh", ""
-	// best-effort JSON scan
-	rest := raw
-	if i := strings.Index(rest, `"kind"`); i >= 0 {
-		tail := rest[i+len(`"kind"`):]
-		if j := strings.Index(tail, `"`); j >= 0 {
-			t2 := tail[j+1:]
-			if k := strings.Index(t2, `"`); k >= 0 {
-				kind = t2[:k]
-			}
-		}
+	// Parse secrets.json properly (DEFER-firstTargetKA): read the first
+	// target's kind + address via the wire SecretPackage shape instead of
+	// hand-scanning the JSON text (fragile to field order).
+	var pkg struct {
+		Targets map[string]struct {
+			Kind    string `json:"kind"`
+			Address string `json:"address"`
+		} `json:"targets"`
 	}
-	if i := strings.Index(rest, `"address"`); i >= 0 {
-		tail := rest[i+len(`"address"`):]
-		if j := strings.Index(tail, `"`); j >= 0 {
-			t2 := tail[j+1:]
-			if k := strings.Index(t2, `"`); k >= 0 {
-				address = t2[:k]
-			}
-		}
+	if err := json.Unmarshal([]byte(raw), &pkg); err != nil {
+		return "ssh", ""
 	}
-	return kind, address
+	for _, t := range pkg.Targets {
+		kind := t.Kind
+		if kind == "" {
+			kind = "ssh"
+		}
+		return kind, t.Address
+	}
+	return "ssh", ""
 }

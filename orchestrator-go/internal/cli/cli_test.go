@@ -35,15 +35,10 @@ func TestConnectURLExplicitMcpNotDuplicated(t *testing.T) {
 
 // nsec_tests parity (the orchestrator's nsec_to_secret).
 func TestNsecBech32Roundtrip(t *testing.T) {
-	// A known nsec for secret 0x01 (x-only pubkey derivation must match).
-	secret, err := crypto.NsecToSecret("nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqr2wxk7")
-	if err == nil {
-		// The above string may not be a valid checksummed nsec; validate only
-		// that a valid nsec parses. Build one from raw bytes instead.
-		_ = secret
-	}
-	// Encode a real 32-byte secret as bech32 nsec and round-trip it.
-	var raw = make([]byte, 32)
+	// Encode a real 32-byte secret as bech32 nsec and round-trip it, asserting
+	// the decoded bytes EXACTLY match the input (IMPORTANT-6 — the previous
+	// assertion was unreachable/vacuous).
+	raw := make([]byte, 32)
 	for i := range raw {
 		raw[i] = byte(i + 1)
 	}
@@ -52,8 +47,10 @@ func TestNsecBech32Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nsec decode failed: %v", err)
 	}
-	if strings.TrimRight(string(out[:]), "\x00") == "" {
-		t.Log("ok")
+	for i := range out {
+		if out[i] != raw[i] {
+			t.Fatalf("decoded byte %d = %02x, want %02x (round-trip lost data)", i, out[i], raw[i])
+		}
 	}
 }
 

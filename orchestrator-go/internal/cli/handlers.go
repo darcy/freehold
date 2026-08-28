@@ -16,10 +16,21 @@ import (
 
 // --- exec family shared flags ---
 
-func addCommonFlags(cmd *cobra.Command, c *CommonArgs) {
-	cmd.Flags().StringVar(&c.Addr, "addr", "127.0.0.1:8787", "Running runner MCP address (host:port or full URL)")
-	cmd.Flags().StringVar(&c.AgentDir, "agent-dir", defaultAgentDir(), "Agent identity dir (minted on demand if missing). Defaults to the freehold home's ops identity (legacy cwd-relative fallback)")
-	cmd.Flags().StringVar(&c.RunnerPubkey, "runner-pubkey", "", "The RUNNER's Nostr pubkey — RESOLVED from ./.freehold/runner/<target> when omitted (you can't know it before provisioning; freehold reads it)")
+func addCommonFlags(cmd *cobra.Command, _ *CommonArgs) {
+	// Register the shared runner flags so they exist at parse time (rejected
+	// as unknown if added inside RunE — BLOCKING-3).
+	cmd.Flags().String("addr", "127.0.0.1:8787", "Running runner MCP address (host:port or full URL)")
+	cmd.Flags().String("agent-dir", defaultAgentDir(), "Agent identity dir (minted on demand if missing). Defaults to the freehold home's ops identity (legacy cwd-relative fallback)")
+	cmd.Flags().String("runner-pubkey", "", "The RUNNER's Nostr pubkey — RESOLVED from ./.freehold/runner/<target> when omitted (you can't know it before provisioning; freehold reads it)")
+}
+
+// readCommonFlags reads the shared runner flags into a fresh CommonArgs (RunE).
+func readCommonFlags(cmd *cobra.Command) *CommonArgs {
+	c := &CommonArgs{}
+	c.Addr, _ = cmd.Flags().GetString("addr")
+	c.AgentDir, _ = cmd.Flags().GetString("agent-dir")
+	c.RunnerPubkey, _ = cmd.Flags().GetString("runner-pubkey")
+	return c
 }
 
 // --- onboard ---
@@ -76,8 +87,7 @@ var execCmd = &cobra.Command{
 			return fmt.Errorf("exec needs <TARGET> <CMD>")
 		}
 		target, cmds := args[0], args[1]
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		secrets, _ := cmd.Flags().GetStringSlice("secret")
 		timeoutS, _ := cmd.Flags().GetUint64("timeout")
 		c, err := connect(common, target)
@@ -110,6 +120,7 @@ var execCmd = &cobra.Command{
 }
 
 func init() {
+	addCommonFlags(execCmd, nil)
 	execCmd.Flags().StringSliceP("secret", "s", nil, "Secret names to request (must be the target's own credential; defaults to the target name — the provision convention)")
 	execCmd.Flags().Uint64("timeout", 60, "Runner-side watchdog in seconds (client deadline sits above it)")
 }
@@ -120,8 +131,7 @@ var readinessCmd = &cobra.Command{
 	Use:   "readiness",
 	Short: "Readiness table from a running runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		if target == "" {
 			target = resolveDefaultTarget()
@@ -142,6 +152,7 @@ var readinessCmd = &cobra.Command{
 }
 
 func init() {
+	addCommonFlags(readinessCmd, nil)
 	readinessCmd.Flags().String("target", "", "Target runner name (resolves its pubkey)")
 }
 
@@ -159,8 +170,7 @@ var demoCmd = &cobra.Command{
 		if stepsPath == "" {
 			return fmt.Errorf("demo needs --steps")
 		}
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		if target == "" {
 			target = resolveDefaultTarget()
@@ -199,6 +209,7 @@ var demoCmd = &cobra.Command{
 }
 
 func init() {
+	addCommonFlags(demoCmd, nil)
 	demoCmd.Flags().String("target", "", "Target runner name")
 	demoCmd.Flags().String("steps", "", "JSON steps file: [{target, cmd, secrets?}]")
 }

@@ -74,12 +74,19 @@ func SignBIP340NoAuxRand(secret []byte, msgDigest []byte) ([]byte, error) {
 		d = dNeg
 	}
 
-	// masked_key = key XOR TaggedHash("BIP0340/aux", 0x00^32). For no_aux_rand
-	// the aux is all zeros.
+	// masked_key = bytes(d') XOR TaggedHash("BIP0340/aux", 0x00^32), where d'
+	// is the even-Y-ordered private scalar. BIP-340 and libsecp256k1 mask the
+	// parity-ADJUSTED key (d is already negated above if P.y is odd) — NOT the
+	// raw secret; for odd-Y keys they differ, so using the raw secret yields a
+	// valid but NOT byte-identical signature (IMPORTANT-4).
+	dBytes := d.Bytes()
+	if len(dBytes) < 32 {
+		dBytes = append(make([]byte, 32-len(dBytes)), dBytes...)
+	}
 	auxMask := taggedHash("BIP0340/aux", make([]byte, 32))
 	masked := make([]byte, 32)
 	for i := 0; i < 32; i++ {
-		masked[i] = secret[i] ^ auxMask[i]
+		masked[i] = dBytes[i] ^ auxMask[i]
 	}
 
 	// x32 (x-only pubkey bytes).

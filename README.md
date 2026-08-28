@@ -37,7 +37,10 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 
 ```
 Cargo.toml            workspace: core, runner, console-client, control-plane, orchestrator, testkit,
-                      acceptance, installer, tui
+                      acceptance, installer, tui, orchestrator-go/harness/oracle
+orchestrator-go/     freehold-orchestrator (Go port, in progress): the same CLI contract,
+                      with byte-exact crypto/wire cross-verified against the Rust core by
+                      the oracle-harness gate (`go test ./orchestrator-go/harness/...`)
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -112,7 +115,8 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 220 tests across core / runner / console-client / control-plane / orchestrator / acceptance
+cargo test --workspace        # tests across core / runner / console-client / control-plane / orchestrator / acceptance
+cd orchestrator-go && go test ./...   # the Go port's byte-exact harness + hermetic unit tests
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --check             # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)

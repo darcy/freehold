@@ -80,7 +80,10 @@ func SealMemory(secret []byte, value string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	payload := encryptToBytes(ck, []byte(value))
+	payload, err := encryptToBytes(ck, []byte(value))
+	if err != nil {
+		return "", err
+	}
 	return base64.StdEncoding.EncodeToString(payload), nil
 }
 
@@ -112,12 +115,26 @@ func getMessageKeys(ck *ConversationKey, nonce []byte) ([]byte, error) {
 	return expanded, nil
 }
 
-func encryptToBytes(ck *ConversationKey, plaintext []byte) []byte {
+// nip44MaxPlaintext is the largest plaintext NIP-44 v2 can represent: the
+// 2-byte length prefix caps at 65535, and the spec caps at 65536-128. A larger
+// value would be silently truncated by the u16 prefix and produce a payload no
+// reader can ever decrypt — error at WRITE instead (IMPORTANT-5).
+const nip44MaxPlaintext = 65536 - 128
+
+func encryptToBytes(ck *ConversationKey, plaintext []byte) ([]byte, error) {
+	if len(plaintext) < 1 {
+		return nil, fmt.Errorf("%w: message empty", errNip44)
+	}
+	if len(plaintext) > nip44MaxPlaintext {
+		return nil, fmt.Errorf("%w: message too long (%d bytes, max %d)", errNip44, len(plaintext), nip44MaxPlaintext)
+	}
 	// Random 32-byte nonce.
 	nonce := make([]byte, nip44NonceSize)
-	// (entropy via crypto/rand in caller)
 	randRead(nonce)
-	keys, _ := getMessageKeys(ck, nonce)
+	keys, err := getMessageKeys(ck, nonce)
+	if err != nil {
+		return nil, err
+	}
 
 	// Pad.
 	buffer := pad(plaintext)
@@ -138,7 +155,7 @@ func encryptToBytes(ck *ConversationKey, plaintext []byte) []byte {
 	payload = append(payload, nonce...)
 	payload = append(payload, buffer...)
 	payload = append(payload, hmacBytes...)
-	return payload
+	return payload, nil
 }
 
 func decryptToBytes(ck *ConversationKey, payload []byte) ([]byte, error) {

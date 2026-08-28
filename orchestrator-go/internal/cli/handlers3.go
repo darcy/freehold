@@ -21,8 +21,7 @@ var deployRelayCmd = &cobra.Command{
 	Use:   "deploy-relay",
 	Short: "C2/B: deploy the Buzz relay onto the target through a provisioning runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		name, _ := cmd.Flags().GetString("name")
 		deployDir, _ := cmd.Flags().GetString("deploy-dir")
@@ -68,6 +67,7 @@ var deployRelayCmd = &cobra.Command{
 }
 
 func init() {
+	addCommonFlags(deployRelayCmd, nil)
 	deployRelayCmd.Flags().String("target", "proxmox-box", "Target to deploy through (the runner holding the SSH credential to the PVE host / relay LXC)")
 	deployRelayCmd.Flags().String("name", "", "Relay hostname (reported; defaults to <normalized-domain>-relay when --domain is given)")
 	deployRelayCmd.Flags().String("deploy-dir", "/srv/data/relay", "Where the official compose bundle lands on the target")
@@ -86,8 +86,7 @@ var deployCpCmd = &cobra.Command{
 	Use:   "deploy-cp",
 	Short: "C1: deploy the control plane onto the target box (OPERATE mode)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		stateDir, _ := cmd.Flags().GetString("state-dir")
 		binDir, _ := cmd.Flags().GetString("bin-dir")
@@ -156,6 +155,7 @@ func optOf(s string) *string {
 }
 
 func init() {
+	addCommonFlags(deployCpCmd, nil)
 	deployCpCmd.Flags().String("target", "proxmox-box", "Target runner (the box where the relay lives)")
 	deployCpCmd.Flags().String("state-dir", deploy.DefaultCPStateDir(), "Remote state dir on the box (also holds the seeded console identity)")
 	deployCpCmd.Flags().String("bin-dir", deploy.DefaultCPBinDir(), "Remote dir for the shipped binary")
@@ -177,8 +177,7 @@ var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
 	Short: "C2/A2: bootstrap-provision a target through a provisioning runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		kind, _ := cmd.Flags().GetString("kind")
 		target, _ := cmd.Flags().GetString("target")
 		operatorPub, _ := cmd.Flags().GetString("operator-pubkey")
@@ -187,13 +186,13 @@ var bootstrapCmd = &cobra.Command{
 			return fmt.Errorf("bootstrap needs --kind --operator-pubkey --domain")
 		}
 		_ = common
-		_ = kind
 		_ = target
 		return fmt.Errorf("bootstrap: the full proxmox/vultr/hetzner driver is not yet ported — use the Rust binary on main (bootstrap resolution/ensure live under `storage`)")
 	},
 }
 
 func init() {
+	addCommonFlags(bootstrapCmd, nil)
 	bootstrapCmd.Flags().String("target", "proxmox-box", "Target to drive provisioning through (a runner targeting the PVE host for proxmox-lxc, the vultr runner for vultr-vps)")
 	bootstrapCmd.Flags().String("role", "relay", "Role of this target: 'relay' or 'cp' — the LXC name is derived from the domain: <normalized-domain>-relay / -cp (--name is gone)")
 	bootstrapCmd.Flags().Uint32("vmid", 0, "LXC vmid (proxmox-lxc; must be >= 100 when given; omitted = the driver picks the lowest free id via `pct list`)")
@@ -229,8 +228,7 @@ var storageResolveCmd = &cobra.Command{
 	Use:   "resolve",
 	Short: "Resolve the durable backend (ZFS → LVM-thin → bail for the Proxmox branch); with consent, create the backend",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		device, _ := cmd.Flags().GetString("device")
 		confirm, _ := cmd.Flags().GetBool("confirm-storage")
@@ -258,8 +256,7 @@ var storageEnsureCmd = &cobra.Command{
 	Use:   "ensure",
 	Short: "Ensure a tenant's dataset/volume exists (idempotent) + is guest-writable",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		domain, _ := cmd.Flags().GetString("domain")
@@ -291,8 +288,7 @@ var storageDestroyCmd = &cobra.Command{
 	Use:   "destroy",
 	Short: "Destroy a tenant's dataset subtree (data+compute teardown half)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		domain, _ := cmd.Flags().GetString("domain")
@@ -328,8 +324,7 @@ var storageInfoCmd = &cobra.Command{
 	Use:   "info",
 	Short: "Report the live durable-plane snapshot: host capacity + per-mount size/used + guest bind-mount liveness (read-only, DATA-tab source)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		common := &CommonArgs{}
-		addCommonFlags(cmd, common)
+		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		pool, _ := cmd.Flags().GetString("pool")
 		if pool == "" {
@@ -362,9 +357,15 @@ func tenantFor(tenant string) (planebase.Tenant, error) {
 
 func destroyDatasetVia(c *client.McpClient, target, pool, dataset string) (bool, error) {
 	// zfs destroy is destructive; report absent vs destroyed.
-	exists, err := bootstrap.ExecToOK(c, target, "zfs list -H -o name "+dataset+" >/dev/null 2>&1", "exists", 30)
+	// A nonzero `zfs list` exit means the dataset is ABSENT (safe no-op); a
+	// transport/signing error (wedged runner) is NOT absent — surface it so the
+	// operator isn't told "nothing destroyed" when the truth is "couldn't ask"
+	// (DEFER-destroyDatasetVia).
+	out, err := bootstrap.Exec(c, target, "zfs list -H -o name "+dataset+" >/dev/null 2>&1", 30)
 	if err != nil {
-		_ = exists
+		return false, err
+	}
+	if out.ExitCode == nil || *out.ExitCode != 0 {
 		return false, nil // absent -> not destroyed
 	}
 	if _, err := bootstrap.ExecToOK(c, target, "zfs destroy -r "+dataset, "zfs destroy", 120); err != nil {
@@ -384,8 +385,7 @@ var teardownCmd = &cobra.Command{
 		tenant, _ := cmd.Flags().GetString("tenant")
 		data, _ := cmd.Flags().GetBool("data")
 		if !yes {
-			fmt.Fprintln(os.Stderr, "teardown aborted (not confirmed); pass --yes")
-			return fmt.Errorf("teardown aborted (not confirmed)")
+			return fmt.Errorf("teardown aborted (not confirmed); pass --yes")
 		}
 		scope := teardown.ScopeFor(optOf(tenant), data)
 		_ = configPath
@@ -395,6 +395,7 @@ var teardownCmd = &cobra.Command{
 }
 
 func init() {
+	addCommonFlags(teardownCmd, nil)
 	teardownCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	teardownCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
 	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown (compute + config + local home)")
@@ -411,6 +412,10 @@ func defaultConfigPath() string {
 
 func init() {
 	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd, storageInfoCmd, storageDestroyCmd)
+	addCommonFlags(storageResolveCmd, nil)
+	addCommonFlags(storageEnsureCmd, nil)
+	addCommonFlags(storageInfoCmd, nil)
+	addCommonFlags(storageDestroyCmd, nil)
 	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd, storageInfoCmd, storageDestroyCmd} {
 		sc.Flags().String("target", "proxmox-box", "Target to drive storage through (the runner holding the host ssh key)")
 	}
