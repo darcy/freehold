@@ -1745,3 +1745,247 @@ async fn destroy_tenant_dataset_absent_is_a_noop_not_an_error() {
     );
     server.abort();
 }
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_lvm_mounts_creates_thin_lvs_for_stock_pve_host() {
+    use freehold_orchestrator::drive::resolve_lvm_mounts;
+    use freehold_orchestrator::planebase::Tenant;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("lvm.log");
+    // A VG with NO thin pool yet: `lvs -a` answers nothing, so a fresh
+    // `freehold-thin` carve-out is issued; `lvcreate`/`mkfs`/`mount` succeed
+    // and log their argv.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[
+            ("zpool", "echo ''; exit 1\n"),
+            ("vgs", "echo 'pve'; exit 0\n"),
+            ("lvs", "echo ''; exit 0\n"),
+            ("lvcreate", "echo lvcreated; exit 0\n"),
+            ("mkfs.ext4", "echo mkfs; exit 0\n"),
+            ("mkdir", "exit 0\n"),
+            ("mountpoint", "exit 1\n"),
+            ("mount", "echo mounted; exit 0\n"),
+            ("chown", "exit 0\n"),
+            ("blkid", "exit 1\n"),
+            ("grep", "exit 1\n"),
+            ("tee", "exit 0\n"),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    // The CP tenant on the stock-PVE LVM backend: one thin LV + mount.
+    let mounts = resolve_lvm_mounts(
+        &client,
+        "proxmox-box",
+        "pve",
+        "freehold-test.darcydev.net",
+        Tenant::Cp,
+    )
+    .await
+    .unwrap();
+    assert_eq!(mounts.len(), 1, "cp gets one mount: {mounts:?}");
+    assert!(
+        mounts[0].source.starts_with("/freehold/"),
+        "host mount source: {:?}",
+        mounts[0]
+    );
+    assert_eq!(mounts[0].guest_path, "/srv/freehold");
+    let cmds = std::fs::read_to_string(&logp).unwrap();
+    assert!(
+        cmds.contains("lvcreate -L 40G -T pve/freehold-thin"),
+        "thin pool created once in the pve VG: {cmds}"
+    );
+    assert!(
+        cmds.contains(
+            "lvcreate -V 20G -T pve/freehold-thin -n freehold-freehold-test-darcydev-net-cp"
+        ),
+        "tenant thin LV created: {cmds}"
+    );
+    assert!(
+        cmds.contains("chown -R 100000:100000 /freehold/freehold-test-darcydev-net/cp"),
+        "mount chowned to the guest shifted uid: {cmds}"
+    );
+    assert!(
+        cmds.contains("tee -a /etc/fstab"),
+        "mount recorded in /etc/fstab so a host reboot restores the plane: {cmds}"
+    );
+    server.abort();
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_lvm_mounts_reuses_the_stock_pve_thin_pool() {
+    use freehold_orchestrator::drive::resolve_lvm_mounts;
+    use freehold_orchestrator::planebase::Tenant;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("lvm.log");
+    // The REAL stock-PVE layout: VG `pve` holds root/swap plus the
+    // `pve/data` thin pool (local-lvm). `lvs -a` shows the internal
+    // `[data_tdata]`/`[data_tmeta]` segments. The tenant LV must be carved
+    // INTO `pve/data` — NEVER a fresh 40G pool on a near-full VG (that is
+    // the exact `lvcreate -L 40G -T` failure seen on the live host).
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[
+            ("zpool", "echo ''; exit 1\n"),
+            ("vgs", "echo 'pve'; exit 0\n"),
+            (
+                "lvs",
+                "echo '  [data_tdata]'\necho '  [data_tmeta]'\necho '  root'\necho '  swap'\nexit 0\n",
+            ),
+            ("lvcreate", "echo lvcreated; exit 0\n"),
+            ("mkfs.ext4", "echo mkfs; exit 0\n"),
+            ("mkdir", "exit 0\n"),
+            ("mountpoint", "exit 1\n"),
+            ("mount", "echo mounted; exit 0\n"),
+            ("chown", "exit 0\n"),
+            ("blkid", "exit 1\n"),
+            ("grep", "exit 1\n"),
+            ("tee", "exit 0\n"),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let mounts = resolve_lvm_mounts(
+        &client,
+        "proxmox-box",
+        "pve",
+        "freehold-test.darcydev.net",
+        Tenant::Cp,
+    )
+    .await
+    .unwrap();
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].guest_path, "/srv/freehold");
+    let cmds = std::fs::read_to_string(&logp).unwrap();
+    assert!(
+        cmds.contains("lvcreate -V 20G -T pve/data -n freehold-freehold-test-darcydev-net-cp"),
+        "tenant LV carved into the EXISTING pve/data thin pool: {cmds}"
+    );
+    assert!(
+        !cmds.contains("lvcreate -L 40G"),
+        "no fresh thin-pool carve-out when one already exists: {cmds}"
+    );
+    server.abort();
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_lvm_mounts_is_idempotent_when_lv_exists() {
+    use freehold_orchestrator::drive::resolve_lvm_mounts;
+    use freehold_orchestrator::planebase::Tenant;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("lvm.log");
+    // LV already exists + already mounted: no lvcreate, no mount.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[
+            ("zpool", "echo ''; exit 1\n"),
+            ("vgs", "echo 'pve'; exit 0\n"),
+            (
+                "lvs",
+                "echo 'freehold-freehold-test-darcydev-net-cp'; exit 0\n",
+            ),
+            ("lvcreate", "echo lvcreated; exit 0\n"),
+            ("mkfs.ext4", "echo mkfs; exit 0\n"),
+            ("mkdir", "exit 0\n"),
+            ("mountpoint", "exit 0\n"),
+            ("mount", "echo mounted; exit 0\n"),
+            ("chown", "exit 0\n"),
+            ("blkid", "exit 0\n"),
+            ("grep", "exit 0\n"),
+            ("tee", "exit 0\n"),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let mounts = resolve_lvm_mounts(
+        &client,
+        "proxmox-box",
+        "pve",
+        "freehold-test.darcydev.net",
+        Tenant::Cp,
+    )
+    .await
+    .unwrap();
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].guest_path, "/srv/freehold");
+    let cmds = std::fs::read_to_string(&logp).unwrap();
+    assert!(
+        !cmds.contains("lvcreate"),
+        "LV already exists: no lvcreate is issued: {cmds}"
+    );
+    assert!(!cmds.contains("mkfs"), "no mkfs: {cmds}");
+    assert!(
+        !cmds.lines().any(|l| l.starts_with("mount ")),
+        "already mounted: no mount: {cmds}"
+    );
+    assert!(
+        !cmds.contains("tee"),
+        "fstab entry already present: no fstab re-add: {cmds}"
+    );
+    server.abort();
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn destroy_lvm_tenant_unmounts_strips_fstab_then_removes_lvs() {
+    use freehold_orchestrator::drive::destroy_lvm_tenant;
+    use freehold_orchestrator::planebase::Tenant;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("lvm.log");
+    // Relay: both child LVs exist. Destroy must umount + strip the fstab
+    // line BEFORE each lvremove — `lvremove -f` skips the prompt, not the
+    // open-count check, so a still-mounted LV would be refused and the
+    // teardown would bail with the LXCs already gone.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[
+            (
+                "lvs",
+                "echo 'freehold-t-d-relay-docker-root'\necho 'freehold-t-d-relay-deploy'\nexit 0\n",
+            ),
+            ("umount", "echo unmounted; exit 0\n"),
+            ("sed", "exit 0\n"),
+            ("lvremove", "echo removed; exit 0\n"),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let destroyed = destroy_lvm_tenant(&client, "proxmox-box", "pve", "t.d", Tenant::Relay)
+        .await
+        .unwrap();
+    assert!(destroyed, "both child LVs existed => destroyed");
+    let cmds = std::fs::read_to_string(&logp).unwrap();
+    // Order: umount BEFORE lvremove for each child (both children removed).
+    let umount_pos = cmds.find("umount /dev/pve/freehold-t-d-relay-docker-root");
+    let lvremove_pos = cmds.find("lvremove -f pve/freehold-t-d-relay-docker-root");
+    assert!(
+        umount_pos.is_some() && lvremove_pos.is_some() && umount_pos < lvremove_pos,
+        "umount must precede lvremove: {cmds}"
+    );
+    assert!(
+        cmds.contains("lvremove -f pve/freehold-t-d-relay-deploy"),
+        "second child removed: {cmds}"
+    );
+    assert!(
+        cmds.contains("sed -i"),
+        "fstab line stripped before removal: {cmds}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destroy_lvm_tenant_absent_is_a_noop() {
+    use freehold_orchestrator::drive::destroy_lvm_tenant;
+    use freehold_orchestrator::planebase::Tenant;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("lvm.log");
+    // No matching LVs: absent => Ok(false), no lvremove.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[
+            ("lvs", "echo 'root'; exit 0\n"),
+            ("lvremove", "echo removed; exit 0\n"),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let destroyed = destroy_lvm_tenant(&client, "proxmox-box", "pve", "t.d", Tenant::Cp)
+        .await
+        .unwrap();
+    assert!(!destroyed, "absent LV is a no-op, not an error");
+    let cmds = std::fs::read_to_string(&logp).unwrap();
+    assert!(!cmds.contains("lvremove"), "absent: no lvremove: {cmds}");
+    server.abort();
+}

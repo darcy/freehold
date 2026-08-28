@@ -13,8 +13,8 @@ use anyhow::Result;
 use crate::bootstrap::BootstrapError;
 use crate::client::McpClient;
 use crate::planebase::{
-    Backend, ExistingBackend, MountSpec, RelayChild, ResolveAction, Tenant, dataset_path,
-    relay_child_dataset,
+    Backend, BackendKind, ExistingBackend, MountSpec, RelayChild, ResolveAction, Tenant,
+    dataset_path, lvm_lv_name, lvm_relay_child_lv_name, relay_child_dataset,
 };
 
 // ---------------------------------------------------------------- detection
@@ -55,20 +55,26 @@ pub fn vg_list(client: &McpClient, target: &str) -> Result<Vec<String>, Bootstra
     Ok(out.stdout.split_whitespace().map(str::to_string).collect())
 }
 
-/// Does an LVM thin pool exist in this VG? (`lvs`, looking for the
-/// `pool_tmeta`/`pool_tdata` companion pair that marks a thin pool.)
-pub fn vg_has_thin_pool(
+/// The thin pool REUSED for freehold's tenant LVs, if this VG already has
+/// one (`lvs -a`, looking for the `pool_tmeta`/`pool_tdata` companion pair
+/// that marks a thin pool). A stock PVE install has `pve/data` (local-lvm) —
+/// it must be REUSED, never shadowed by a fresh carve-out on a near-full VG.
+pub fn thin_pool_name(
     client: &McpClient,
     target: &str,
     vg: &str,
-) -> Result<bool, BootstrapError> {
+) -> Result<Option<String>, BootstrapError> {
     let names = lvs_names(client, target, vg)?;
-    Ok(names.iter().any(|n| {
-        n.ends_with("_tmeta")
-            && names
-                .iter()
-                .any(|m| m == &format!("{}_tdata", n.trim_end_matches("_tmeta")))
-    }))
+    Ok(names
+        .iter()
+        .filter(|n| {
+            n.ends_with("_tmeta")
+                && names
+                    .iter()
+                    .any(|m| m == &format!("{}_tdata", n.trim_end_matches("_tmeta")))
+        })
+        .map(|n| n.trim_end_matches("_tmeta").to_string())
+        .next())
 }
 
 /// Does a thin volume (LV) already exist for this tenant under this VG?
@@ -82,13 +88,22 @@ pub fn thin_lv_exists(
 }
 
 fn lvs_names(client: &McpClient, target: &str, vg: &str) -> Result<Vec<String>, BootstrapError> {
+    // `-a` so the INTERNAL thin-pool segments are visible — a plain `lvs`
+    // hides them, which made a stock PVE host's existing `pve/data` thin pool
+    // undetectable (and a doomed fresh-pool lvcreate followed). The hidden
+    // segments print bracketed (`[data_tdata]`); strip the brackets.
     let out = crate::bootstrap::exec(
         client,
         target,
-        &format!("lvs --noheadings -o lv_name {vg} 2>/dev/null || true"),
+        &format!("lvs -a --noheadings -o lv_name {vg} 2>/dev/null || true"),
         60,
     )?;
-    Ok(out.stdout.split_whitespace().map(str::to_string).collect())
+    Ok(out
+        .stdout
+        .split_whitespace()
+        .map(|n| n.trim_matches(['[', ']']))
+        .map(str::to_string)
+        .collect())
 }
 
 // ------------------------------------------------------------- resolution
@@ -212,57 +227,79 @@ pub async fn chown_guest_uid(
     Ok(())
 }
 
-/// Ensure the LVM-thin filesystem backend exists for a tenant: a thin pool
-/// in the VG (created on demand, consent-gated by the caller) + a thin LV +
-/// ext4 + mounted at the tenant data path. Idempotent on reruns.
-pub async fn ensure_lvm_thin_tenant(
+/// Ensure ONE LVM thin LV exists + is mounted at a HOST path (idempotent):
+/// the VG's EXISTING thin pool is reused (stock PVE: `pve/data`); only a VG
+/// with no thin pool gets a fresh `freehold-thin` carve-out. Then the LV,
+/// ext4, and a mount at `host_path`. Returns the host mount path (the `mpN`
+/// source).
+///
+/// The fresh-pool SIZE is a first-pass fixed value; the LV is named by the
+/// caller (the two-place-derivable `freehold-<domain>-<tenant>` names from
+/// planebase).
+pub async fn ensure_lvm_lv(
     client: &McpClient,
     target: &str,
     vg: &str,
-    tenant: Tenant,
-    guest_mount: &str,
-) -> Result<(), BootstrapError> {
-    if thin_lv_exists(client, target, vg, tenant.as_str())? {
-        return Ok(());
-    }
-    // thin pool once per VG
-    if !vg_has_thin_pool(client, target, vg)? {
+    lv_name: &str,
+    host_path: &str,
+) -> Result<String, BootstrapError> {
+    let dev = format!("/dev/{vg}/{lv_name}");
+    if !thin_lv_exists(client, target, vg, lv_name)? {
+        // REUSE the VG's existing thin pool (stock PVE: `pve/data`); only
+        // carve a fresh `freehold-thin` when the VG truly has none.
+        let pool = match thin_pool_name(client, target, vg)? {
+            Some(existing) => existing,
+            None => {
+                crate::bootstrap::exec_to_ok(
+                    client,
+                    target,
+                    &format!("lvcreate -L 40G -T {vg}/freehold-thin"),
+                    "lvcreate thin pool",
+                    300,
+                )?;
+                "freehold-thin".to_string()
+            }
+        };
         crate::bootstrap::exec_to_ok(
             client,
             target,
-            &format!("lvcreate -L 40G -T {vg}/freehold-thin"),
-            "lvcreate thin pool",
-            300,
+            &format!("lvcreate -V 20G -T {vg}/{pool} -n {lv_name}"),
+            "lvcreate thin LV",
+            120,
         )?;
     }
-    // tenant thin LV
+    // mkfs GATED on blkid: runs on first create, and recovers a partial
+    // failure (a prior run that died between lvcreate and mkfs leaves the LV
+    // without a filesystem — re-running must mkfs it, not skip).
+    let has_fs = crate::bootstrap::exec(
+        client,
+        target,
+        &format!("blkid -s TYPE -o value {dev} 2>/dev/null"),
+        30,
+    )?
+    .exit_code
+        == Some(0);
+    if !has_fs {
+        crate::bootstrap::exec_to_ok(
+            client,
+            target,
+            &format!("mkfs.ext4 -q {dev}"),
+            "mkfs LV",
+            120,
+        )?;
+    }
+    // mkdir + mount at the host path (idempotent).
     crate::bootstrap::exec_to_ok(
         client,
         target,
-        &format!("lvcreate -V 20G -T {vg}/freehold-thin -n {tenant}"),
-        "lvcreate tenant thin LV",
-        120,
-    )?;
-    // filesystem + mount at the guest data path on the HOST fs tree
-    let dev = format!("/dev/{vg}/{tenant}");
-    crate::bootstrap::exec_to_ok(
-        client,
-        target,
-        &format!("mkfs.ext4 -q {dev}"),
-        "mkfs tenant LV",
-        120,
-    )?;
-    crate::bootstrap::exec_to_ok(
-        client,
-        target,
-        &format!("mkdir -p {guest_mount}"),
+        &format!("mkdir -p {host_path}"),
         "mkdir mount",
         60,
     )?;
     let mounted = crate::bootstrap::exec(
         client,
         target,
-        &format!("mountpoint -q {guest_mount} 2>/dev/null"),
+        &format!("mountpoint -q {host_path} 2>/dev/null"),
         30,
     )?
     .exit_code
@@ -271,12 +308,96 @@ pub async fn ensure_lvm_thin_tenant(
         crate::bootstrap::exec_to_ok(
             client,
             target,
-            &format!("mount {dev} {guest_mount}"),
-            "mount tenant LV",
+            &format!("mount {dev} {host_path}"),
+            "mount LV",
             60,
         )?;
     }
-    Ok(())
+    // Record the mount in /etc/fstab (idempotent) so a HOST REBOOT restores
+    // the plane — unlike ZFS (remounted by zfs-mount.service), a bare
+    // `mount` of an ext4 LV does not survive reboot; without this the guest
+    // would bind-mount an empty dir and write into the host root fs.
+    let fstab_line = format!("{dev} {host_path} ext4 defaults 0 2");
+    crate::bootstrap::exec_to_ok(
+        client,
+        target,
+        &format!(
+            "grep -qxF '{fstab_line}' /etc/fstab || echo '{fstab_line}' | tee -a /etc/fstab >/dev/null"
+        ),
+        "record mount in /etc/fstab",
+        60,
+    )?;
+    Ok(host_path.to_string())
+}
+
+/// Resolve a tenant's born-at-create MOUNTS on an **LVM-thin** backend: one
+/// thin LV per tenant (relay keeps TWO — the docker data-root + compose
+/// deploy dir — preserving the two-child blast radius on LVM too), each
+/// created + mounted and returned as a `<host-source>:<guest-path>` spec.
+pub async fn resolve_lvm_mounts(
+    client: &McpClient,
+    target: &str,
+    vg: &str,
+    domain: &str,
+    tenant: Tenant,
+) -> Result<Vec<MountSpec>, BootstrapError> {
+    // Host parent dir under which each tenant LV is mounted. Two-place: the
+    // VG + LV names alone re-identify the world+tenant from `lvs`.
+    let base = format!("/freehold/{}", domain.replace('.', "-"));
+    match tenant {
+        Tenant::Relay => {
+            let mut out = Vec::new();
+            for (child, guest) in [
+                (RelayChild::DockerRoot, "/var/lib/docker"),
+                (RelayChild::DeployDir, "/srv/buzz-relay"),
+            ] {
+                let lv = lvm_relay_child_lv_name(domain, child)
+                    .map_err(|e| BootstrapError::Verify(e.to_string()))?;
+                let host = format!("{base}/{}", child.as_str());
+                let source = ensure_lvm_lv(client, target, vg, &lv, &host).await?;
+                // Fresh ext4 is root-owned: chown to the guest's shifted uid,
+                // same as the ZFS path (locked: guest-writable, never assumed).
+                chown_guest_uid(client, target, &source, 100000).await?;
+                out.push(MountSpec {
+                    source,
+                    guest_path: guest.into(),
+                });
+            }
+            Ok(out)
+        }
+        Tenant::Cp => {
+            let lv = lvm_lv_name(domain, Tenant::Cp)
+                .map_err(|e| BootstrapError::Verify(e.to_string()))?;
+            let host = format!("{base}/cp");
+            let source = ensure_lvm_lv(client, target, vg, &lv, &host).await?;
+            chown_guest_uid(client, target, &source, 100000).await?;
+            Ok(vec![MountSpec {
+                source,
+                guest_path: "/srv/freehold".into(),
+            }])
+        }
+        Tenant::K3sVolumes => {
+            let lv = lvm_lv_name(domain, Tenant::K3sVolumes)
+                .map_err(|e| BootstrapError::Verify(e.to_string()))?;
+            let host = format!("{base}/k3s-volumes");
+            let source = ensure_lvm_lv(client, target, vg, &lv, &host).await?;
+            chown_guest_uid(client, target, &source, 100000).await?;
+            Ok(vec![MountSpec {
+                source,
+                guest_path: "/srv/data/k8s-volumes".into(),
+            }])
+        }
+    }
+}
+
+/// Does an LV exist under this VG? (idempotency probe).
+pub fn lv_exists(
+    client: &McpClient,
+    target: &str,
+    vg: &str,
+    lv_name: &str,
+) -> Result<bool, BootstrapError> {
+    Ok(lvs_names(client, target, vg)?.iter().any(|n| n == lv_name))
 }
 
 // ----------------------------------------------------------- mountpoints
@@ -337,6 +458,84 @@ pub async fn destroy_tenant_dataset(
         ))
     })
     .map(|_| true)
+}
+
+/// Destroy a tenant's LVM-thin volumes for a data+compute teardown. Relay
+/// destroys BOTH child LVs (docker-root + deploy), the parent-destroy unit.
+/// Returns `Ok(false)` when every target LV is ABSENT (a no-op), `Ok(true)`
+/// when at least one was removed; a real `lvremove` failure is an `Err`.
+pub async fn destroy_lvm_tenant(
+    client: &McpClient,
+    target: &str,
+    vg: &str,
+    domain: &str,
+    tenant: Tenant,
+) -> Result<bool, BootstrapError> {
+    // The LVs to remove (two for relay, one otherwise). Absent ones are
+    // skipped; if NONE exist this is a no-op (Ok(false)).
+    let lvs: Vec<String> = match tenant {
+        Tenant::Relay => [RelayChild::DockerRoot, RelayChild::DeployDir]
+            .iter()
+            .map(|c| {
+                lvm_relay_child_lv_name(domain, *c)
+                    .map_err(|e| BootstrapError::Verify(e.to_string()))
+            })
+            .collect::<Result<_, _>>()?,
+        other => {
+            vec![lvm_lv_name(domain, other).map_err(|e| BootstrapError::Verify(e.to_string()))?]
+        }
+    };
+    let mut destroyed_any = false;
+    for lv in &lvs {
+        if !lv_exists(client, target, vg, lv)? {
+            continue;
+        }
+        let dev = format!("/dev/{vg}/{lv}");
+        // Unmount + strip the fstab line FIRST — `lvremove -f` skips the
+        // prompt, NOT the open-count check, so an LV still mounted at
+        // /freehold/<domain>/... would be refused and the teardown would
+        // bail with the LXCs already gone. umount failing is tolerated here
+        // (the LV may never have been mounted); if it is genuinely busy the
+        // lvremove below fails and surfaces it honestly.
+        let _ = crate::bootstrap::exec(
+            client,
+            target,
+            &format!("umount {dev} 2>/dev/null; sed -i '\\|^{dev} |d' /etc/fstab; true"),
+            60,
+        );
+        crate::bootstrap::exec_to_ok(
+            client,
+            target,
+            &format!("lvremove -f {vg}/{lv}"),
+            "lvremove tenant thin LV",
+            120,
+        )
+        .map_err(|e| {
+            BootstrapError::Verify(format!(
+                "LV {vg}/{lv} EXISTS but could not be removed: {e} — \
+                 the tenant's data is INTACT; fix the cause or re-run"
+            ))
+        })?;
+        destroyed_any = true;
+    }
+    Ok(destroyed_any)
+}
+
+/// Destroy a tenant for a data+compute teardown, dispatching on the backend
+/// kind (ZFS `zfs destroy -r` vs LVM `lvremove`). `backend` is the pool/VG
+/// name. Returns `Ok(false)` when absent (a no-op), `Ok(true)` when destroyed.
+pub async fn destroy_tenant_backend(
+    client: &McpClient,
+    target: &str,
+    backend_kind: BackendKind,
+    backend: &str,
+    domain: &str,
+    tenant: Tenant,
+) -> Result<bool, BootstrapError> {
+    match backend_kind {
+        BackendKind::Zfs => destroy_tenant_dataset(client, target, backend, domain, tenant).await,
+        BackendKind::LvmThin => destroy_lvm_tenant(client, target, backend, domain, tenant).await,
+    }
 }
 
 /// A host-root mountable path for a dataset: the `zfs get mountpoint` value.

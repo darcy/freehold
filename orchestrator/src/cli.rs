@@ -391,6 +391,11 @@ struct StorageEnsureArgs {
     /// Storage pool (zpool name / VG name)
     #[arg(long)]
     pool: String,
+    /// Backend kind recorded by the plane (`zfs` | `lvmth`). Honored when
+    /// present; absent => detect. A host with BOTH a zpool and a VG must be
+    /// driven by the recorded kind, not by whichever one resolve finds first.
+    #[arg(long)]
+    kind: Option<String>,
 }
 
 #[derive(Args)]
@@ -409,6 +414,10 @@ struct StorageDestroyArgs {
     /// Storage pool (zpool name / VG name)
     #[arg(long)]
     pool: String,
+    /// Backend kind recorded by the plane (`zfs` | `lvmth`). Honored when
+    /// present; absent => detect.
+    #[arg(long)]
+    kind: Option<String>,
 }
 
 #[derive(Args)]
@@ -685,12 +694,52 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
             let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
             let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
             let tenant = parse_tenant(&a.tenant)?;
-            // Ensure + chown the tenant's dataset(s), then print the
-            // HOST-resolved born-at-create specs — one `<source>:<guest>`
-            // per line — for the pipeline to record into `plane.mounts`.
-            let mounts =
-                crate::drive::resolve_tenant_mounts(&client, &a.target, &a.pool, &a.domain, tenant)
-                    .await?;
+            // DETECT the backend: a host with a zpool drives ZFS; a host with
+            // only an LVM VG (stock PVE: VG `pve`, no zpool) drives LVM-thin.
+            // Consent=false here — ensure never CREATES a backend, it only
+            // mounts tenants onto one that exists.
+            let kind = match parse_kind(a.kind.as_deref())? {
+                Some(k) => k,
+                None => match crate::drive::resolve_proxmox(&client, &a.target, false, None).await?
+                {
+                    crate::planebase::ResolveAction::Reuse(backend, _) => match backend {
+                        crate::planebase::ExistingBackend::Zfs => {
+                            crate::planebase::BackendKind::Zfs
+                        }
+                        crate::planebase::ExistingBackend::LvmThin => {
+                            crate::planebase::BackendKind::LvmThin
+                        }
+                    },
+                    crate::planebase::ResolveAction::Create(_, _) => {
+                        anyhow::bail!(
+                            "storage ensure cannot run on a backend that needs creating — run `storage resolve --confirm-storage` first"
+                        );
+                    }
+                    crate::planebase::ResolveAction::Bail(m) => anyhow::bail!(
+                        "no storage backend to ensure onto: {m} — run `storage resolve` first"
+                    ),
+                },
+            };
+            // Resolve + chown the tenant's born-at-create mounts, then print
+            // one `<source>:<guest>` line per mount for the pipeline to record.
+            let pool = &a.pool;
+            let mounts = match kind {
+                crate::planebase::BackendKind::Zfs => {
+                    crate::drive::resolve_tenant_mounts(&client, &a.target, pool, &a.domain, tenant)
+                        .await?
+                }
+                crate::planebase::BackendKind::LvmThin => {
+                    crate::drive::resolve_lvm_mounts(&client, &a.target, pool, &a.domain, tenant)
+                        .await?
+                }
+            };
+            // Always emit the discoverable backend kind so the pipeline
+            // records it (dispatch of later destroy/re-resolve steps).
+            let kind_str = match kind {
+                crate::planebase::BackendKind::Zfs => "zfs",
+                crate::planebase::BackendKind::LvmThin => "lvmth",
+            };
+            println!("STORAGE-BACKEND: {kind_str} {pool}");
             for m in &mounts {
                 println!("STORAGE-MOUNT {}:{}", m.source, m.guest_path);
             }
@@ -701,12 +750,32 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
             let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
             let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
             let tenant = parse_tenant(&a.tenant)?;
+            let kind = match parse_kind(a.kind.as_deref())? {
+                Some(k) => k,
+                None => match crate::drive::resolve_proxmox(&client, &a.target, false, None).await?
+                {
+                    crate::planebase::ResolveAction::Reuse(backend, _) => match backend {
+                        crate::planebase::ExistingBackend::Zfs => {
+                            crate::planebase::BackendKind::Zfs
+                        }
+                        crate::planebase::ExistingBackend::LvmThin => {
+                            crate::planebase::BackendKind::LvmThin
+                        }
+                    },
+                    // No backend to destroy on => NOTHING was ever created:
+                    // a tolerated no-op (the pre-plane / VPS-downgraded /
+                    // unprovisioned teardown case), not a hard error after
+                    // the LXCs are already gone.
+                    _ => {
+                        println!("STORAGE-DESTROYED: false");
+                        return Ok(());
+                    }
+                },
+            };
             // The bool distinguishes ABSENT (nothing to destroy — a no-op for
-            // the caller) from DESTROYED (the dataset subtree went away). The
-            // pipeline's teardown needs the distinction: absent is tolerated,
-            // a real destroy failure is not.
-            let destroyed = crate::drive::destroy_tenant_dataset(
-                &client, &a.target, &a.pool, &a.domain, tenant,
+            // the caller) from DESTROYED (the dataset subtree went away).
+            let destroyed = crate::drive::destroy_tenant_backend(
+                &client, &a.target, kind, &a.pool, &a.domain, tenant,
             )
             .await?;
             println!("STORAGE-DESTROYED: {destroyed}");
@@ -721,6 +790,19 @@ fn parse_tenant(s: &str) -> Result<crate::planebase::Tenant> {
         "cp" => Ok(crate::planebase::Tenant::Cp),
         "k3s-volumes" | "k3s" => Ok(crate::planebase::Tenant::K3sVolumes),
         other => anyhow::bail!("unknown tenant {other:?} (relay | cp | k3s-volumes)"),
+    }
+}
+
+/// The backend KIND to drive with. The plane records it (`plane.backend_kind`)
+/// and the pipeline passes it as `--kind`; honoring the recorded kind beats
+/// re-detecting, because a host with BOTH a zpool and a VG would otherwise
+/// always resolve to ZFS and drive an LVM-backed tenant the wrong way.
+fn parse_kind(kind: Option<&str>) -> Result<Option<crate::planebase::BackendKind>> {
+    match kind {
+        None => Ok(None),
+        Some("zfs") => Ok(Some(crate::planebase::BackendKind::Zfs)),
+        Some("lvmth") => Ok(Some(crate::planebase::BackendKind::LvmThin)),
+        Some(other) => anyhow::bail!("unknown storage backend kind: {other} (expected zfs|lvmth)"),
     }
 }
 
