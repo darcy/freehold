@@ -100,7 +100,6 @@ func signBody(secret []byte, runnerPubkey string, ts int64, raw string) (sigHex 
 
 // rawWith signs and POSTs body to the MCP endpoint with the given HTTP client.
 func (c *McpClient) rawWith(hc *http.Client, body []byte) (json.RawMessage, error) {
-	defer c.Auth.Zero()
 	raw := string(body)
 	ts := time.Now().Unix()
 	sig, err := signBody(c.Auth.Secret[:], c.RunnerPubkey, ts, raw)

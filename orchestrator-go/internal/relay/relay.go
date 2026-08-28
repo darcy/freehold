@@ -223,28 +223,18 @@ func parseTags(ev map[string]interface{}) ([][]string, string) {
 			var row []string
 			if arr, ok := t.([]interface{}); ok {
 				for _, a := range arr {
-					if s, ok := a.(string); ok && s != "" {
+					if s, ok := a.(string); ok {
 						row = append(row, s)
 					}
 				}
 			} else if ss, ok := t.([]string); ok {
-				for _, s := range ss {
-					if s != "" {
-						row = append(row, s)
-					}
-				}
+				row = append(row, ss...)
 			}
 			tags = append(tags, row)
 		}
 	case [][]string:
 		for _, t := range raw {
-			var row []string
-			for _, s := range t {
-				if s != "" {
-					row = append(row, s)
-				}
-			}
-			tags = append(tags, row)
+			tags = append(tags, append([]string(nil), t...))
 		}
 	}
 	for _, t := range tags {

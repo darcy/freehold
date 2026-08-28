@@ -139,9 +139,11 @@ func TestMetaNewestWinsPerChannelAndRogueAuthorIgnored(t *testing.T) {
 // --- merge_roster (relay-signed only; rogue ignored) ---
 
 func rosterEvent(t *testing.T, who []byte, ts int64, channel string, members []string) map[string]interface{} {
+	// The live buzz 39002 shape: ["p", pk, "", role] — the EMPTY element is part
+	// of the signed bytes and must survive the round-trip (BLOCKING-1).
 	tags := [][]string{{"d", channel}}
 	for _, m := range members {
-		tags = append(tags, []string{"p", m})
+		tags = append(tags, []string{"p", m, "", "member"})
 	}
 	return sign(t, who, wire.GroupMembers, ts, tags, "")
 }
