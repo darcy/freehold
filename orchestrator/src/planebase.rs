@@ -22,6 +22,41 @@ pub struct MountSpec {
     pub guest_path: String,
 }
 
+/// Guest paths are the ARCHITECTURE convention ("Filesystem layout
+/// convention — `/srv/data` vs `/srv/nobackup`"): durable data under
+/// `/srv/data/<tenant>`, reproducible stores out of it. The single source
+/// of truth every mount builder + deploy default reads — a guest-path
+/// change lands HERE once, never per-call-site.
+///
+/// The relay's docker data root is the locked EXCEPTION (POC_CHUNK3, and
+/// live-verified on the box): the buzz bundle's Postgres/Redis/MinIO/git
+/// data are docker NAMED VOLUMES (physically under `/var/lib/docker/
+/// volumes/<name>/_data`), so with no buzz patch the ONLY way to land them
+/// on a tenant dataset is for the dataset to BE the guest's
+/// `/var/lib/docker` — never a `daemon.json` `data-root` key (the
+/// bootstrap's fuse fallback truncates `daemon.json` on a retry). It stays
+/// a durable LV mounted at `/var/lib/docker`; the reproducible image/layers
+/// that share it are the documented cost of the no-patch route.
+pub const GUEST_PATH_DOCKER_ROOT: &str = "/var/lib/docker";
+pub const GUEST_PATH_RELAY_DEPLOY: &str = "/srv/data/relay";
+pub const GUEST_PATH_CP: &str = "/srv/data/cp";
+pub const GUEST_PATH_K8S_VOLUMES: &str = "/srv/data/k8s-volumes";
+
+/// The backup rule IS the split (ARCHITECTURE): a mount under `/srv/data`
+/// is the backup set (`backup=1` on the `mpN` entry — vzdump EXCLUDES mount
+/// points by default, so the flag must be set to be IN the job); everything
+/// else (container stores, caches, scratch) is excluded (`backup=0`).
+///
+/// ONE documented carve-out: the relay docker data root (`/var/lib/docker`)
+/// rides `backup=1` despite being a container store, because the relay's
+/// actual durable databases (the named volumes) live INSIDE it — backing it
+/// up at `0` would silently exclude them (the exact gap the `/srv/data`
+/// convention exists to close). The reproducible images are the cost.
+pub fn backup_flag(guest_path: &str) -> u8 {
+    let in_data = guest_path == "/srv/data" || guest_path.starts_with("/srv/data/");
+    u8::from(in_data || guest_path == GUEST_PATH_DOCKER_ROOT)
+}
+
 /// Tenant kinds that get their own durable dataset under a common parent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tenant {

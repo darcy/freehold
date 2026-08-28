@@ -174,6 +174,17 @@ were re-anchored to match (implemented | live-verified).
   as Proxmox from day one — no Proxmox-only shortcuts.
 - **K8s fixed; hosting substrate pluggable.** Two orthogonal axes: SKILLS (what to install) ×
   HOST (where the appliance lives). Anything × anything composes.
+- **Durable-plane guest paths = the `/srv/data` convention** (ARCHITECTURE.md §"Filesystem
+  layout convention"). Every `--mpN` is born at `pct create` with an explicit `backup=`
+  flag (vzdump excludes mount points by default): relay docker-root → `/var/lib/docker`,
+  `backup=1` (the buzz no-patch carve-out — its Postgres/Redis/MinIO/git live as named
+  volumes UNDER the daemon root; relocating it would silently exclude the relay DBs);
+  relay deploy → `/srv/data/relay`, CP → `/srv/data/cp`, k3s volumes →
+  `/srv/data/k8s-volumes` — all `backup=1`; a future `/srv/nobackup` mount gets
+  `backup=0`. Guest paths are the `planebase::GUEST_PATH_*` constants; the CLI literal
+  defaults are pinned against them by `deploy_paths_track_guest_paths`. The TUI's DATA
+  tab shows this plane live (host capacity + per-mount size/used/liveness) through the
+  signed runner channel — read-only, never a new console endpoint.
 
 ## Chunk 1 (current work)
 

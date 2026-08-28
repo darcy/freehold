@@ -22,8 +22,11 @@ use base64::Engine as _;
 use crate::bootstrap::{BootstrapError, exec_to_ok, plain_path};
 use crate::client::McpClient;
 
-pub const DEFAULT_CP_STATE_DIR: &str = "/srv/freehold/control-plane";
-pub const DEFAULT_CP_BIN_DIR: &str = "/srv/freehold/bin";
+/// Derived from `planebase::GUEST_PATH_CP` (the mount guest path) — pinned
+/// by `cp_dirs_track_guest_path` so they can't silently drift from the
+/// plane. clap `default_value` needs a literal, so these can't `concat!`.
+pub const DEFAULT_CP_STATE_DIR: &str = "/srv/data/cp/control-plane";
+pub const DEFAULT_CP_BIN_DIR: &str = "/srv/data/cp/bin";
 pub const DEFAULT_CP_BIND: &str = "127.0.0.1:8080";
 
 /// The console bind to ship: an EXPLICIT operator value always wins; the

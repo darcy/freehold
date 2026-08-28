@@ -13,7 +13,8 @@ use anyhow::Result;
 use crate::bootstrap::BootstrapError;
 use crate::client::McpClient;
 use crate::planebase::{
-    Backend, BackendKind, ExistingBackend, MountSpec, RelayChild, ResolveAction, Tenant,
+    Backend, BackendKind, ExistingBackend, GUEST_PATH_CP, GUEST_PATH_DOCKER_ROOT,
+    GUEST_PATH_K8S_VOLUMES, GUEST_PATH_RELAY_DEPLOY, MountSpec, RelayChild, ResolveAction, Tenant,
     dataset_path, lvm_lv_name, lvm_relay_child_lv_name, relay_child_dataset,
 };
 
@@ -348,8 +349,8 @@ pub async fn resolve_lvm_mounts(
         Tenant::Relay => {
             let mut out = Vec::new();
             for (child, guest) in [
-                (RelayChild::DockerRoot, "/var/lib/docker"),
-                (RelayChild::DeployDir, "/srv/buzz-relay"),
+                (RelayChild::DockerRoot, GUEST_PATH_DOCKER_ROOT),
+                (RelayChild::DeployDir, GUEST_PATH_RELAY_DEPLOY),
             ] {
                 let lv = lvm_relay_child_lv_name(domain, child)
                     .map_err(|e| BootstrapError::Verify(e.to_string()))?;
@@ -373,7 +374,7 @@ pub async fn resolve_lvm_mounts(
             chown_guest_uid(client, target, &source, 100000).await?;
             Ok(vec![MountSpec {
                 source,
-                guest_path: "/srv/freehold".into(),
+                guest_path: GUEST_PATH_CP.into(),
             }])
         }
         Tenant::K3sVolumes => {
@@ -384,7 +385,7 @@ pub async fn resolve_lvm_mounts(
             chown_guest_uid(client, target, &source, 100000).await?;
             Ok(vec![MountSpec {
                 source,
-                guest_path: "/srv/data/k8s-volumes".into(),
+                guest_path: GUEST_PATH_K8S_VOLUMES.into(),
             }])
         }
     }
@@ -402,12 +403,23 @@ pub fn lv_exists(
 
 // ----------------------------------------------------------- mountpoints
 
-/// Build the LXC `--mpN` args: each MountSpec becomes `<source>,mp=<guest>`.
+/// Build the LXC `--mpN` args: each MountSpec becomes
+/// `<source>,mp=<guest>,backup=<n>`. The `backup` flag is the ARCHITECTURE
+/// split made load-bearing: vzdump EXCLUDES mount points by default, so
+/// `/srv/data` mounts need `backup=1` to be IN the job and reproducible
+/// mounts `backup=0` to stay out — `planebase::backup_flag` is the rule.
 pub fn lxc_mp_args(specs: &[MountSpec]) -> Vec<String> {
     specs
         .iter()
         .enumerate()
-        .map(|(i, m)| format!("--mp{i}={},mp={}", m.source, m.guest_path))
+        .map(|(i, m)| {
+            format!(
+                "--mp{i}={},mp={},backup={}",
+                m.source,
+                m.guest_path,
+                crate::planebase::backup_flag(&m.guest_path)
+            )
+        })
         .collect()
 }
 
@@ -585,8 +597,8 @@ pub async fn resolve_tenant_mounts(
                 ensure_dataset(client, target, &ds).await?;
                 let host = mountpoint_of(client, target, &ds)?;
                 let guest = match child {
-                    RelayChild::DockerRoot => "/var/lib/docker",
-                    RelayChild::DeployDir => "/srv/buzz-relay",
+                    RelayChild::DockerRoot => GUEST_PATH_DOCKER_ROOT,
+                    RelayChild::DeployDir => GUEST_PATH_RELAY_DEPLOY,
                 };
                 chown_guest_uid(client, target, &host, 100000).await?;
                 out.push(MountSpec {
@@ -604,7 +616,7 @@ pub async fn resolve_tenant_mounts(
             chown_guest_uid(client, target, &host, 100000).await?;
             Ok(vec![MountSpec {
                 source: host,
-                guest_path: "/srv/freehold".into(),
+                guest_path: GUEST_PATH_CP.into(),
             }])
         }
         Tenant::K3sVolumes => {
@@ -615,8 +627,318 @@ pub async fn resolve_tenant_mounts(
             chown_guest_uid(client, target, &host, 100000).await?;
             Ok(vec![MountSpec {
                 source: host,
-                guest_path: "/srv/data/k8s-volumes".into(),
+                guest_path: GUEST_PATH_K8S_VOLUMES.into(),
             }])
         }
+    }
+}
+
+// ----------------------------------------------------------- storage info
+
+/// One mount's live usage: capacity + consumed, host-side (the source) and
+/// whether the guest's bind mount is actually live (a `pct exec df` probe —
+/// the bind-mount proof, distinct from the host numbers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountUsage {
+    /// The LXC role riding it (relay/cp/k3s) — the plane.mounts key.
+    pub role: String,
+    /// The HOST-side source (ZFS dataset or host mount path).
+    pub source: String,
+    /// The guest mount point (the /srv/data convention path).
+    pub guest: String,
+    pub size: Option<u64>,
+    pub used: Option<u64>,
+    /// None = no vmid recorded / probe unreachable; Some(false) = the guest
+    /// is down or the mount is missing inside it.
+    pub guest_mounted: Option<bool>,
+}
+
+/// A read-only snapshot of the durable plane: host capacity + one
+/// [`MountUsage`] per recorded plane mount. The DATA tab (TUI) and the
+/// `storage info` subcommand read this same shape. EVERY probe degrades —
+/// a stopped guest or unreachable command yields None fields, never an
+/// error; only transport failure (runner down) surfaces as Err.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageInfo {
+    /// Human host-capacity summary (zpool or VG + thin pool).
+    pub capacity: String,
+    pub mounts: Vec<MountUsage>,
+}
+
+/// Short capacity string ("1.2T" / "814.7M" / "40K" / "512B") for the tab.
+pub fn human_bytes(b: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let v = b as f64;
+    if v >= KIB.powi(4) {
+        format!("{:.1}T", v / KIB.powi(4))
+    } else if v >= KIB.powi(3) {
+        format!("{:.1}G", v / KIB.powi(3))
+    } else if v >= KIB.powi(2) {
+        format!("{:.0}M", v / KIB.powi(2))
+    } else if v >= KIB {
+        format!("{:.0}K", v / KIB)
+    } else {
+        format!("{b}B")
+    }
+}
+
+/// Host-level capacity summary: ZFS = the pool's alloc/size/free; LVM =
+/// VG size/free + the thin pool's data% (the real constraint). Degrades to
+/// a "—" string on probe failure — capacity is advisory, not load-bearing.
+pub fn host_capacity(client: &McpClient, target: &str, kind: BackendKind, pool: &str) -> String {
+    match kind {
+        BackendKind::Zfs => {
+            let out = crate::bootstrap::exec(
+                client,
+                target,
+                &format!("zpool list -H -p -o size,alloc,free {pool} 2>/dev/null || true"),
+                60,
+            );
+            match out {
+                Ok(o) if o.exit_code == Some(0) => {
+                    let nums: Vec<u64> = o
+                        .stdout
+                        .split_ascii_whitespace()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    if nums.len() >= 3 {
+                        return format!(
+                            "zpool {pool} · {} alloc of {} · {} free",
+                            human_bytes(nums[1]),
+                            human_bytes(nums[0]),
+                            human_bytes(nums[2])
+                        );
+                    }
+                    "zpool capacity unreadable".into()
+                }
+                _ => "zpool capacity unreadable".into(),
+            }
+        }
+        BackendKind::LvmThin => {
+            let vgs = crate::bootstrap::exec(
+                client,
+                target,
+                &format!(
+                    "vgs --noheadings --units b -o vg_size,vg_free {pool} 2>/dev/null || true"
+                ),
+                60,
+            );
+            let (size, free) = match vgs {
+                Ok(o) if o.exit_code == Some(0) => {
+                    let nums: Vec<u64> = o
+                        .stdout
+                        .split_ascii_whitespace()
+                        .filter_map(|s| s.trim_end_matches(['B', 'b']).parse().ok())
+                        .collect();
+                    if nums.len() >= 2 {
+                        (Some(nums[0]), Some(nums[1]))
+                    } else {
+                        (None, None)
+                    }
+                }
+                _ => (None, None),
+            };
+            // The thin pool's data% is the constraint that actually bites.
+            let pct = thin_pool_data_pct(client, target, pool);
+            let mut s = String::new();
+            if let (Some(sz), Some(fr)) = (size, free) {
+                s.push_str(&format!(
+                    "vg {pool} · {} of {} · {} free",
+                    human_bytes(sz.saturating_sub(fr)),
+                    human_bytes(sz),
+                    human_bytes(fr)
+                ));
+            } else {
+                s.push_str(&format!("vg {pool} · size unreadable"));
+            }
+            if let Some(p) = pct {
+                s.push_str(&format!(" · thin pool data {p:.1}%"));
+            }
+            s
+        }
+    }
+}
+
+/// The VG's thin-pool `data_percent` (lvs scan for the `[xxx_tmeta]`
+/// companion), or None — advisory only.
+fn thin_pool_data_pct(client: &McpClient, target: &str, vg: &str) -> Option<f64> {
+    let out = crate::bootstrap::exec(
+        client,
+        target,
+        &format!("lvs -a --noheadings -o lv_name,data_percent {vg} 2>/dev/null || true"),
+        60,
+    )
+    .ok()?;
+    out.stdout.lines().find_map(|line| {
+        let mut parts = line.split_ascii_whitespace();
+        let name = parts.next()?;
+        let pct = parts.next()?;
+        // hidden segments print bracketed: [data_tmeta] / [data_tdata]
+        let stripped = name.trim_matches(['[', ']']);
+        if stripped.ends_with("_tmeta") || stripped.ends_with("_tdata") {
+            pct.parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// Parse one `H <source> <size> <used>` probe line (— for missing).
+fn parse_h_line(line: &str) -> Option<(&str, Option<u64>, Option<u64>)> {
+    let rest = line.strip_prefix("H ")?;
+    let mut parts = rest.split_ascii_whitespace();
+    let src = parts.next()?;
+    let size = parts
+        .next()
+        .and_then(|s| if s == "-" { None } else { s.parse().ok() });
+    let used = parts
+        .next()
+        .and_then(|s| if s == "-" { None } else { s.parse().ok() });
+    Some((src, size, used))
+}
+
+/// Parse one `G <vmid> <guest> ok|absent|down` probe line.
+fn parse_g_line(line: &str) -> Option<(u32, &str, bool)> {
+    let rest = line.strip_prefix("G ")?;
+    let mut parts = rest.split_ascii_whitespace();
+    let vmid: u32 = parts.next()?.parse().ok()?;
+    let mp = parts.next()?;
+    let ok = parts.next()? == "ok";
+    Some((vmid, mp, ok))
+}
+
+/// The live, read-only plane snapshot. `mounts` = (role, source, guest,
+/// vmid) — the recorded `plane.mounts` + the LXC coords; vmid None skips
+/// the guest probe. Three host execs total (sources, guests, capacity).
+pub fn storage_info(
+    client: &McpClient,
+    target: &str,
+    kind: BackendKind,
+    pool: &str,
+    mounts: &[(String, String, String, Option<u32>)],
+) -> Result<StorageInfo, BootstrapError> {
+    // 1. host-side size/used per source. ZFS dataset sources answer via
+    //    `zfs list` (used+avail = effective size); LVM host paths via df
+    //    on the mount. Either missing => "H <src> - -".
+    let srcs = mounts
+        .iter()
+        .map(|(_, src, _, _)| src.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let h_out = crate::bootstrap::exec(
+        client,
+        target,
+        &format!(
+            "for p in {srcs}; do \
+             if zfs list -H \"$p\" >/dev/null 2>&1; then \
+             echo \"H $p $(zfs list -H -p -o used,avail \"$p\" | awk '{{print $1+$2\" \"$1}}')\"; \
+             elif mountpoint -q \"$p\" 2>/dev/null; then \
+             echo \"H $p $(df -B1 \"$p\" | tail -1 | awk '{{print $2\" \"$3}}')\"; \
+             else echo \"H $p - -\"; fi; done"
+        ),
+        120,
+    )?;
+    let mut host: std::collections::BTreeMap<&str, (Option<u64>, Option<u64>)> =
+        std::collections::BTreeMap::new();
+    for line in h_out.stdout.lines() {
+        if let Some((src, size, used)) = parse_h_line(line) {
+            host.insert(src, (size, used));
+        }
+    }
+    // 2. guest-side bind-mount liveness: one loop over vmid:path pairs.
+    let pairs: Vec<(u32, &str)> = mounts
+        .iter()
+        .filter_map(|(_, _, guest, vmid)| vmid.map(|v| (v, guest.as_str())))
+        .collect();
+    let mut guests: std::collections::BTreeMap<(u32, String), bool> =
+        std::collections::BTreeMap::new();
+    if !pairs.is_empty() {
+        let spec = pairs
+            .iter()
+            .map(|(v, mp)| format!("{v}:{mp}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let g_out = crate::bootstrap::exec(
+            client,
+            target,
+            &format!(
+                "for s in {spec}; do vmid=${{s%%:*}}; mp=${{s#*:}}; \
+                 if pct status \"$vmid\" 2>/dev/null | grep -q running; then \
+                 if pct exec \"$vmid\" -- df -B1 \"$mp\" >/dev/null 2>&1; then \
+                 echo \"G $vmid $mp ok\"; else echo \"G $vmid $mp down\"; fi; \
+                 else echo \"G $vmid $mp down\"; fi; done"
+            ),
+            120,
+        )?;
+        for line in g_out.stdout.lines() {
+            if let Some((vmid, mp, ok)) = parse_g_line(line) {
+                guests.insert((vmid, mp.to_string()), ok);
+            }
+        }
+    }
+    // 3. host capacity + assemble.
+    let capacity = host_capacity(client, target, kind, pool);
+    let rows = mounts
+        .iter()
+        .map(|(role, src, guest, vmid)| {
+            let (size, used) = host.get(src.as_str()).copied().unwrap_or((None, None));
+            let guest_mounted = vmid.and_then(|v| guests.get(&(v, guest.clone())).copied());
+            MountUsage {
+                role: role.clone(),
+                source: src.clone(),
+                guest: guest.clone(),
+                size,
+                used,
+                guest_mounted,
+            }
+        })
+        .collect();
+    Ok(StorageInfo {
+        capacity,
+        mounts: rows,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_bytes_formats_scales() {
+        assert_eq!(human_bytes(0), "0B");
+        assert_eq!(human_bytes(512), "512B");
+        assert_eq!(human_bytes(40 * 1024), "40K");
+        assert_eq!(human_bytes(20 * 1024 * 1024), "20M");
+        assert_eq!(human_bytes(40 * 1024 * 1024 * 1024), "40.0G");
+        assert_eq!(human_bytes(2 * 1024 * 1024 * 1024 * 1024), "2.0T");
+    }
+
+    #[test]
+    fn parse_h_line_reads_size_and_used() {
+        assert_eq!(
+            parse_h_line("H /freehold/x/cp 4096 1024"),
+            Some(("/freehold/x/cp", Some(4096), Some(1024)))
+        );
+        // missing source => both dashes, still a row (degrade, not error)
+        assert_eq!(
+            parse_h_line("H /freehold/x/cp - -"),
+            Some(("/freehold/x/cp", None, None))
+        );
+        assert_eq!(parse_h_line("garbage"), None);
+        assert_eq!(parse_h_line(""), None);
+    }
+
+    #[test]
+    fn parse_g_line_reads_vmid_mount_and_liveness() {
+        assert_eq!(
+            parse_g_line("G 100 /var/lib/docker ok"),
+            Some((100, "/var/lib/docker", true))
+        );
+        assert_eq!(
+            parse_g_line("G 102 /srv/data/cp down"),
+            Some((102, "/srv/data/cp", false))
+        );
+        assert_eq!(parse_g_line("G 102 /srv/data/cp"), None);
+        assert_eq!(parse_g_line("not-g 100 /x ok"), None);
     }
 }

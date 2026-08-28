@@ -313,7 +313,7 @@ async fn proxmox_lxc_bakes_durable_plane_mounts_into_create() {
     let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
     // The locked "born on the plane" shape: the relay's two child datasets
     // mount as /var/lib/docker (the daemon data root — named volumes land
-    // there) and /srv/buzz-relay (the compose deploy dir + .env).
+    // there) and /srv/data/relay (the compose deploy dir + .env).
     let mounts = vec![
         MountSpec {
             source: "rpool/freehold/t-d/relay/docker-root".into(),
@@ -321,7 +321,7 @@ async fn proxmox_lxc_bakes_durable_plane_mounts_into_create() {
         },
         MountSpec {
             source: "rpool/freehold/t-d/relay/deploy".into(),
-            guest_path: "/srv/buzz-relay".into(),
+            guest_path: "/srv/data/relay".into(),
         },
     ];
     let res = bootstrap_proxmox_lxc(
@@ -348,12 +348,12 @@ async fn proxmox_lxc_bakes_durable_plane_mounts_into_create() {
     );
     let cmds = std::fs::read_to_string(&log).unwrap();
     assert!(
-        cmds.contains("--mp0=rpool/freehold/t-d/relay/docker-root,mp=/var/lib/docker"),
-        "docker data-root child baked into create: {cmds}"
+        cmds.contains("--mp0=rpool/freehold/t-d/relay/docker-root,mp=/var/lib/docker,backup=1"),
+        "docker data-root child baked into create with backup flag: {cmds}"
     );
     assert!(
-        cmds.contains("--mp1=rpool/freehold/t-d/relay/deploy,mp=/srv/buzz-relay"),
-        "compose deploy-dir child baked into create: {cmds}"
+        cmds.contains("--mp1=rpool/freehold/t-d/relay/deploy,mp=/srv/data/relay,backup=1"),
+        "compose deploy-dir child baked into create with backup flag: {cmds}"
     );
     server.abort();
 }
@@ -1789,7 +1789,7 @@ async fn resolve_lvm_mounts_creates_thin_lvs_for_stock_pve_host() {
         "host mount source: {:?}",
         mounts[0]
     );
-    assert_eq!(mounts[0].guest_path, "/srv/freehold");
+    assert_eq!(mounts[0].guest_path, "/srv/data/cp");
     let cmds = std::fs::read_to_string(&logp).unwrap();
     assert!(
         cmds.contains("lvcreate -L 40G -T pve/freehold-thin"),
@@ -1853,7 +1853,7 @@ async fn resolve_lvm_mounts_reuses_the_stock_pve_thin_pool() {
     .await
     .unwrap();
     assert_eq!(mounts.len(), 1);
-    assert_eq!(mounts[0].guest_path, "/srv/freehold");
+    assert_eq!(mounts[0].guest_path, "/srv/data/cp");
     let cmds = std::fs::read_to_string(&logp).unwrap();
     assert!(
         cmds.contains("lvcreate -V 20G -T pve/data -n freehold-freehold-test-darcydev-net-cp"),
@@ -1903,7 +1903,7 @@ async fn resolve_lvm_mounts_is_idempotent_when_lv_exists() {
     .await
     .unwrap();
     assert_eq!(mounts.len(), 1);
-    assert_eq!(mounts[0].guest_path, "/srv/freehold");
+    assert_eq!(mounts[0].guest_path, "/srv/data/cp");
     let cmds = std::fs::read_to_string(&logp).unwrap();
     assert!(
         !cmds.contains("lvcreate"),
@@ -1987,5 +1987,131 @@ async fn destroy_lvm_tenant_absent_is_a_noop() {
     assert!(!destroyed, "absent LV is a no-op, not an error");
     let cmds = std::fs::read_to_string(&logp).unwrap();
     assert!(!cmds.contains("lvremove"), "absent: no lvremove: {cmds}");
+    server.abort();
+}
+
+// ------------------------------------------------------- convention pins
+
+/// The deploy/binary defaults are DERIVED FROM the plane's guest mount paths
+/// (ARCHITECTURE: service data lives at `/srv/data/<service>` INSIDE the
+/// guest's mount). clap `default_value` needs literals, so the derivation
+/// can't be a compile-time `concat!` — this test pins it so a guest-path
+/// move in `planebase` can't silently strand these defaults on the old path.
+#[test]
+fn deploy_paths_track_guest_paths() {
+    assert!(
+        freehold_orchestrator::deploy_cp::DEFAULT_CP_STATE_DIR
+            .starts_with(freehold_orchestrator::planebase::GUEST_PATH_CP),
+        "cp state dir must live under the cp guest path"
+    );
+    assert!(
+        freehold_orchestrator::deploy_cp::DEFAULT_CP_BIN_DIR
+            .starts_with(freehold_orchestrator::planebase::GUEST_PATH_CP),
+        "cp bin dir must live under the cp guest path"
+    );
+    assert!(
+        freehold_orchestrator::relay_member::DEFAULT_BUZZ_COMPOSE_DIR
+            .starts_with(freehold_orchestrator::planebase::GUEST_PATH_RELAY_DEPLOY),
+        "relay compose dir must live under the relay deploy guest path"
+    );
+}
+
+/// The backup flag IS the `/srv/data` split, with ONE documented carve-out
+/// (the relay docker root: the named volumes inside it are the relay's real
+/// databases, so it rides backup=1 despite being a container store).
+#[test]
+fn backup_flag_tracks_srv_data_split() {
+    use freehold_orchestrator::planebase::*;
+    assert_eq!(backup_flag("/srv/data"), 1);
+    assert_eq!(backup_flag("/srv/data/cp"), 1);
+    assert_eq!(backup_flag("/srv/data/relay"), 1);
+    assert_eq!(backup_flag("/srv/data/k8s-volumes"), 1);
+    assert_eq!(backup_flag("/srv/nobackup"), 0);
+    assert_eq!(backup_flag("/srv/scratch"), 0);
+    // the carve-out: docker root is backed up (named volumes = the DBs)
+    assert_eq!(backup_flag(GUEST_PATH_DOCKER_ROOT), 1);
+}
+
+/// `--mpN` args MUST carry the backup flag: vzdump excludes mount points by
+/// default, so omission means silent exclusion from backups.
+#[test]
+fn lxc_mp_args_carry_backup_flags() {
+    use freehold_orchestrator::planebase::MountSpec;
+    let args = freehold_orchestrator::drive::lxc_mp_args(&[
+        MountSpec {
+            source: "rpool/fh-x/relay/docker-root".into(),
+            guest_path: "/var/lib/docker".into(),
+        },
+        MountSpec {
+            source: "rpool/fh-x/cp".into(),
+            guest_path: "/srv/data/cp".into(),
+        },
+    ]);
+    assert_eq!(
+        args,
+        vec![
+            "--mp0=rpool/fh-x/relay/docker-root,mp=/var/lib/docker,backup=1".to_string(),
+            "--mp1=rpool/fh-x/cp,mp=/srv/data/cp,backup=1".to_string(),
+        ]
+    );
+}
+
+/// storage_info is READ-ONLY + fully degradable: host size/used come from a
+/// zfs probe, guest bind-mount liveness from a `pct exec df` probe, and a
+/// missing guest/mount degrades to None (never an error). The DATA tab
+/// (TUI) and `storage info` read exactly this shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_info_reads_live_mount_usage_and_guest_liveness() {
+    let base = tempfile::tempdir().unwrap();
+    // zfs answers used/avail; pct answers running + a successful guest df.
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[
+            ("zfs", "echo \"500000 1000000\"\nexit 0\n"),
+            (
+                "zpool",
+                "echo \"1099511627776 549755813888 549755813888\"\nexit 0\n",
+            ),
+            (
+                "pct",
+                "if [ \"$1\" = status ]; then echo \"status: running\"; exit 0; fi\nexit 0\n",
+            ),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let info = freehold_orchestrator::drive::storage_info(
+        &client,
+        "proxmox-box",
+        freehold_orchestrator::planebase::BackendKind::Zfs,
+        "rpool",
+        &[
+            (
+                "relay".to_string(),
+                "rpool/freehold/t-d/relay/docker-root".to_string(),
+                "/var/lib/docker".to_string(),
+                Some(100),
+            ),
+            (
+                "cp".to_string(),
+                "rpool/freehold/t-d/cp".to_string(),
+                "/srv/data/cp".to_string(),
+                None,
+            ),
+        ],
+    )
+    .unwrap();
+    // host-side usage from the zfs probe for both rows
+    let relay = info.mounts.iter().find(|m| m.role == "relay").unwrap();
+    assert_eq!(relay.size, Some(1_500_000));
+    assert_eq!(relay.used, Some(500_000));
+    // vmid present + running + guest df ok => mounted live
+    assert_eq!(relay.guest_mounted, Some(true));
+    let cp = info.mounts.iter().find(|m| m.role == "cp").unwrap();
+    assert_eq!(cp.size, Some(1_500_000));
+    // no vmid recorded => guest probe skipped, None (not an error)
+    assert_eq!(cp.guest_mounted, None);
+    // host capacity from the zpool probe
+    assert!(info.capacity.contains("rpool"));
+    assert!(info.capacity.contains("alloc"));
     server.abort();
 }

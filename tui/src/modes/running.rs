@@ -26,6 +26,8 @@ pub struct Running {
     pub view: DashboardView,
     pub services: Vec<ServiceRow>,
     pub agents: Vec<AgentRow>,
+    /// the durable-plane snapshot (DATA view) — host capacity + per-mount.
+    pub data: Option<freehold_orchestrator::drive::StorageInfo>,
     /// Console API parity (the runner lists).
     pub cp: ConsolePanel,
     /// Background refresh: every network call lives on a worker thread —
@@ -33,11 +35,13 @@ pub struct Running {
     /// (Tab / r / anything) stay instant even when a guest is slow.
     ref_: Refresher,
     last_agents: Instant,
+    last_data: Instant,
     /// per-view "last refreshed" stamps (each view refreshes on its own
     /// cadence; the timestamp tells the truth about the data shown).
     pub services_at: Instant,
     pub agents_at: Instant,
     pub runners_at: Instant,
+    pub data_at: Instant,
     pub last: Instant,
     pub request_configure: bool,
 }
@@ -51,15 +55,18 @@ impl Running {
             view: DashboardView::default(),
             services: Vec::new(),
             agents: Vec::new(),
+            data: None,
             cp: ConsolePanel::default(),
             ref_: Refresher::default(),
-            last: Instant::now() - Duration::from_secs(5),
             last_agents: Instant::now() - Duration::from_secs(60),
+            last_data: Instant::now() - Duration::from_secs(60),
+            last: Instant::now() - Duration::from_secs(5),
             services_at: Instant::now(),
             // "never fetched yet" — ages honestly until the first real
             // agents snapshot lands (the old just-now lied over empty data).
             agents_at: Instant::now() - Duration::from_secs(60),
             runners_at: Instant::now(),
+            data_at: Instant::now() - Duration::from_secs(60),
             request_configure: false,
         };
         // NO probing on the UI thread — the first frame renders instantly
@@ -96,6 +103,10 @@ impl Running {
         if agents_due {
             self.last_agents = Instant::now();
         }
+        let data_due = self.last_data.elapsed() >= Duration::from_secs(15);
+        if data_due {
+            self.last_data = Instant::now();
+        }
         self.last = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
         self.ref_.rx = Some(rx);
@@ -107,6 +118,7 @@ impl Running {
                 needs_login,
                 can_login,
                 agents_due,
+                data_due,
                 tx,
             )
         }));
@@ -182,6 +194,13 @@ impl Running {
         if let Some(agents) = snap.agents {
             self.agents = agents;
             self.agents_at = snap.agents_at;
+        }
+        // the durable plane is a DELTA too — a failed probe (no plane,
+        // runner down) carries None and the UI keeps the last good
+        // snapshot, its stamp ageing honestly (secs_ago does the rest).
+        if let Some(info) = snap.data {
+            self.data = Some(info);
+            self.data_at = snap.data_at;
         }
         // a worker-minted fresh session gets installed; reusing the UI's
         // cookie carries None (keep the existing client).
@@ -336,6 +355,7 @@ impl Running {
             return;
         }
         self.last_agents = Instant::now() - Duration::from_secs(16);
+        self.last_data = Instant::now() - Duration::from_secs(16);
         self.last = Instant::now() - Duration::from_secs(3);
         self.cp.last_login_attempt = Instant::now() - Duration::from_secs(9);
         self.spawn_refresh();
@@ -455,6 +475,9 @@ struct Snapshot {
     /// a false "no agents standing yet".
     agents: Option<Vec<AgentRow>>,
     local: Vec<LocalRunner>,
+    /// DELTA: the live durable-plane snapshot (DATA view). None when the
+    /// runner/world can't answer — the UI keeps the last good snapshot.
+    data: Option<freehold_orchestrator::drive::StorageInfo>,
     overview: Option<freehold_console_client::Overview>,
     /// a fresh session for the UI to install (None keeps the existing one).
     session: Option<(Option<Client>, AuthState, String)>,
@@ -464,6 +487,7 @@ struct Snapshot {
     services_at: Instant,
     agents_at: Instant,
     runners_at: Instant,
+    data_at: Instant,
 }
 
 #[derive(Default)]
@@ -481,6 +505,7 @@ impl Refresher {
 /// The background refresh body: probes, services, the console overview +
 /// agents (or the local loopback list), and a fresh session when needed.
 /// Runs to completion on a worker thread; the event loop only drains.
+#[allow(clippy::too_many_arguments)] // every arg is a request-context flag.
 fn refresh_worker(
     cfg: Option<Config>,
     view_local: bool,
@@ -488,6 +513,8 @@ fn refresh_worker(
     needs_login: bool,
     can_login: bool,
     agents_due: bool,
+    // the DATA view's plane probe is due (15s cadence, r forces).
+    data_due: bool,
     tx: std::sync::mpsc::Sender<Snapshot>,
 ) {
     let mut snap = Snapshot {
@@ -503,6 +530,8 @@ fn refresh_worker(
         services_at: Instant::now(),
         agents_at: Instant::now(),
         runners_at: Instant::now(),
+        data: None,
+        data_at: Instant::now(),
     };
     let Some(cfg) = cfg else {
         let _ = tx.send(snap);
@@ -533,6 +562,16 @@ fn refresh_worker(
     ];
     snap.services = build_services(&cfg, &snap.probes);
     snap.services_at = Instant::now();
+    // DATA view: the live durable-plane snapshot through the SAME signed
+    // runner channel the orchestrator uses (ops agent identity — granted at
+    // bootstrap). Read-only probes; a missing plane/runner leaves `data`
+    // None and the UI keeps the last good snapshot.
+    if data_due && cfg.plane.backend_kind.is_some() && cfg.plane.backend.is_some() {
+        snap.data = plane_info(&cfg);
+        if snap.data.is_some() {
+            snap.data_at = Instant::now();
+        }
+    }
     // data: the local list or the console (overview + agents).
     if view_local {
         snap.local = read_local(&Some(cfg));
@@ -583,6 +622,8 @@ pub enum DashboardView {
     /// everything running: name / where / status / url.
     #[default]
     Services,
+    /// the durable plane: host capacity + each mount's size/used/liveness.
+    Data,
     /// the runner lists (remote console API <-> local loopback).
     Runners,
 }
@@ -591,7 +632,8 @@ impl DashboardView {
     pub fn next(self) -> Self {
         match self {
             DashboardView::Agents => DashboardView::Services,
-            DashboardView::Services => DashboardView::Runners,
+            DashboardView::Services => DashboardView::Data,
+            DashboardView::Data => DashboardView::Runners,
             DashboardView::Runners => DashboardView::Agents,
         }
     }
@@ -600,7 +642,8 @@ impl DashboardView {
         match self {
             DashboardView::Agents => DashboardView::Runners,
             DashboardView::Services => DashboardView::Agents,
-            DashboardView::Runners => DashboardView::Services,
+            DashboardView::Data => DashboardView::Services,
+            DashboardView::Runners => DashboardView::Data,
         }
     }
 }
@@ -611,9 +654,25 @@ impl DashboardView {
 pub struct ServiceRow {
     pub name: String,
     pub location: String,
+    /// the durable guest paths the service's data rides, from
+    /// `cfg.plane.mounts` (the `/srv/data` convention). "—" = none recorded.
+    pub data: String,
     /// None = not provisioned (yet).
     pub status: Option<bool>,
     pub url: String,
+}
+
+/// The guest-path list a managed piece rides: the plane.mounts role key.
+fn data_paths(cfg: &Config, role: &str) -> String {
+    let mounts = cfg.plane.mounts.get(role);
+    match mounts {
+        Some(ms) if !ms.is_empty() => ms
+            .iter()
+            .map(|m| m.guest_path.as_str())
+            .collect::<Vec<_>>()
+            .join(" · "),
+        _ => "—".into(),
+    }
 }
 
 fn build_services(cfg: &Config, probes: &[(String, bool)]) -> Vec<ServiceRow> {
@@ -630,18 +689,21 @@ fn build_services(cfg: &Config, probes: &[(String, bool)]) -> Vec<ServiceRow> {
             "relay" => ServiceRow {
                 name: "relay".into(),
                 location: location(&cfg.lxc.relay.vmid, &cfg.lxc.relay.ip),
+                data: data_paths(cfg, "relay"),
                 status: status_of("relay"),
                 url: cfg.relay_url.clone(),
             },
             "cp" => ServiceRow {
                 name: "control plane".into(),
                 location: location(&cfg.lxc.cp.vmid, &cfg.lxc.cp.ip),
+                data: data_paths(cfg, "cp"),
                 status: status_of("control plane"),
                 url: cfg.cp_url.clone(),
             },
             "k3s" => ServiceRow {
                 name: "k3s (kube)".into(),
                 location: location(&cfg.lxc.k3s.vmid, &cfg.lxc.k3s.ip),
+                data: data_paths(cfg, "k3s"),
                 status: status_of("k3s"),
                 url: cfg
                     .lxc
@@ -654,6 +716,7 @@ fn build_services(cfg: &Config, probes: &[(String, bool)]) -> Vec<ServiceRow> {
             other => ServiceRow {
                 name: other.into(),
                 location: "—".into(),
+                data: "—".into(),
                 status: None,
                 url: "—".into(),
             },
@@ -814,6 +877,48 @@ fn read_local(cfg: &Option<Config>) -> Vec<LocalRunner> {
             }
         })
         .collect()
+}
+
+/// The live durable-plane snapshot, driven through the SAME signed runner
+/// channel the orchestrator uses: the ops agent identity (granted at
+/// bootstrap) signs tools/call against the provisioning runner, which execs
+/// read-only `zfs`/`lvs`/`df`/`pct` probes on the host. Every failure
+/// (no plane, runner down, identity missing) degrades to None — the DATA
+/// view then keeps the last good snapshot and shows its age honestly.
+fn plane_info(cfg: &Config) -> Option<freehold_orchestrator::drive::StorageInfo> {
+    let kind = match cfg.plane.backend_kind.as_deref() {
+        Some("zfs") => freehold_orchestrator::planebase::BackendKind::Zfs,
+        Some("lvmth") => freehold_orchestrator::planebase::BackendKind::LvmThin,
+        _ => return None,
+    };
+    let pool = cfg.plane.backend.as_deref()?;
+    // the plane records mounts per LXC ROLE; the vmid per role gives the
+    // guest-liveness probe its target (no vmid => probe skipped).
+    let mounts: Vec<(String, String, String, Option<u32>)> = cfg
+        .plane
+        .mounts
+        .iter()
+        .flat_map(|(role, specs)| {
+            let vmid = match role.as_str() {
+                "relay" => cfg.lxc.relay.vmid,
+                "cp" => cfg.lxc.cp.vmid,
+                "k3s" => cfg.lxc.k3s.vmid,
+                _ => None,
+            };
+            specs
+                .iter()
+                .map(move |m| (role.clone(), m.source.clone(), m.guest_path.clone(), vmid))
+        })
+        .collect();
+    if mounts.is_empty() {
+        return None;
+    }
+    let agent_dir = freehold_installer::ops_dir();
+    let client =
+        freehold_orchestrator::flows::connect(&cfg.runner.addr, &agent_dir, &cfg.runner.pubkey)
+            .ok()?;
+    freehold_orchestrator::drive::storage_info(&client, &cfg.runner.target, kind, pool, &mounts)
+        .ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -845,8 +845,8 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
     // Ensure + record each durable tenant's HOST-resolved mounts. The LXC
     // ROLE that rides a tenant differs from the tenant's config key:
     //   tenant        role      guest mount(s)
-    //   relay  ->     relay     /var/lib/docker + /srv/buzz-relay
-    //   cp     ->     cp        /srv/freehold
+    //   relay  ->     relay     /var/lib/docker + /srv/data/relay
+    //   cp     ->     cp        /srv/data/cp
     //   k3s-volumes -> k3s      /srv/data/k8s-volumes
     let role_for: &[(&str, &str)] = &[("relay", "relay"), ("cp", "cp"), ("k3s-volumes", "k3s")];
     let cfg_path = config::Config::default_path();
@@ -1052,7 +1052,7 @@ mod writeback_tests {
             "cp".into(),
             vec![config::PlaneMount {
                 source: "/freehold/world/cp".into(),
-                guest_path: "/srv/freehold".into(),
+                guest_path: "/srv/data/cp".into(),
             }],
         );
         cfg.save(&path).unwrap();

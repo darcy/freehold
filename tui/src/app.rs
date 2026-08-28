@@ -256,6 +256,9 @@ pub fn draw<'a>(f: &mut Frame<'a>, app: &mut App) {
                 crate::modes::running::DashboardView::Services => {
                     "Tab/Shift-Tab views · r refresh · services are view-only for now · c reconfigure · q quit"
                 }
+                crate::modes::running::DashboardView::Data => {
+                    "Tab/Shift-Tab views · r refresh · durable plane (capacity + mounts) · c reconfigure · q quit"
+                }
                 crate::modes::running::DashboardView::Runners => {
                     "Tab/Shift-Tab views · r refresh · l login · t local/remote · p provision · R rotate · x revoke · g/G grant · a addr · v channel · w web · c reconfigure · q quit"
                 }
@@ -644,6 +647,7 @@ fn draw_running<'a>(area: Rect, f: &mut Frame<'a>, rn: &mut Running) {
     match rn.view {
         DashboardView::Agents => draw_agents(panel_area, f, rn),
         DashboardView::Services => draw_services(panel_area, f, rn),
+        DashboardView::Data => draw_data(panel_area, f, rn),
         DashboardView::Runners => draw_console(panel_area, f, rn),
     }
 }
@@ -659,10 +663,11 @@ fn draw_services<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
         )),
         Line::from(Span::styled(
             format!(
-                " {}{}{}{}",
+                " {}{}{}{}{}",
                 col("service", 18),
                 col("where", 24),
                 col("status", 8),
+                col("data", 26),
                 col("url", 40),
             ),
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -678,10 +683,83 @@ fn draw_services<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
             Span::styled(col(&svc.name, 18), Style::new().fg(Color::White)),
             Span::styled(col(&svc.location, 24), Style::new().fg(Color::Gray)),
             Span::styled(col(status_ch, 8), Style::new().fg(color)),
+            Span::styled(col(&svc.data, 26), Style::new().fg(Color::DarkGray)),
             Span::styled(col(&svc.url, 40), Style::new().fg(Color::LightBlue)),
         ]));
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn draw_data<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
+    let block = panel("data", Color::Cyan);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!(" durable plane · last refreshed {}", secs_ago(&rn.data_at)),
+        Style::new().fg(Color::DarkGray),
+    ))];
+    let Some(info) = &rn.data else {
+        lines.push(Line::from(Span::styled(
+            " no durable plane on record — converge first, then r refreshes here",
+            Style::new().fg(Color::DarkGray),
+        )));
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" {}", info.capacity),
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {}{}{}{}{}{}",
+            col("service", 10),
+            col("mount point", 22),
+            col("size", 9),
+            col("used", 9),
+            col("fill", 7),
+            col("source (host)", 40),
+        ),
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    for m in &info.mounts {
+        let size = m
+            .size
+            .map_or("—".to_string(), freehold_orchestrator::drive::human_bytes);
+        let used = m
+            .used
+            .map_or("—".to_string(), freehold_orchestrator::drive::human_bytes);
+        let fill = match (m.used, m.size) {
+            (Some(u), Some(s)) if s > 0 => format!("{}%", (u * 100).div_ceil(s)),
+            _ => "—".into(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(col(&m.role, 10), Style::new().fg(Color::White)),
+            Span::styled(col(&m.guest, 22), Style::new().fg(Color::LightBlue)),
+            Span::styled(col(&size, 9), Style::new().fg(Color::Gray)),
+            Span::styled(col(&used, 9), Style::new().fg(Color::Gray)),
+            Span::styled(col(&fill, 7), Style::new().fg(fill_color(m))),
+            Span::styled(col(&m.source, 40), Style::new().fg(Color::DarkGray)),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Fill-ratio traffic light: green < 70%, yellow < 90%, red at/above.
+fn fill_color(m: &freehold_orchestrator::drive::MountUsage) -> Color {
+    match (m.used, m.size) {
+        (Some(u), Some(s)) if s > 0 => {
+            let pct = (u * 100) / s;
+            if pct >= 90 {
+                Color::Red
+            } else if pct >= 70 {
+                Color::Yellow
+            } else {
+                Color::Green
+            }
+        }
+        _ => Color::DarkGray,
+    }
 }
 
 fn draw_agents<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {

@@ -79,7 +79,7 @@ struct DeployRelayArgs {
     #[arg(long)]
     name: Option<String>,
     /// Where the official compose bundle lands on the target
-    #[arg(long, default_value = "/srv/buzz-relay")]
+    #[arg(long, default_value = "/srv/data/relay")]
     deploy_dir: String,
     /// Relay HTTP port (WRITTEN into the compose .env BUZZ_HTTP_PORT)
     #[arg(long, default_value_t = 3000)]
@@ -354,6 +354,9 @@ enum StorageCmd {
     Resolve(StorageResolveArgs),
     /// Ensure a tenant's dataset/volume exists (idempotent) + is guest-writable.
     Ensure(StorageEnsureArgs),
+    /// Report the live durable-plane snapshot: host capacity + per-mount
+    /// size/used + guest bind-mount liveness (read-only, DATA-tab source).
+    Info(StorageInfoArgs),
     /// Destroy a tenant's dataset subtree (data+compute teardown half).
     Destroy(StorageDestroyArgs),
 }
@@ -396,6 +399,25 @@ struct StorageEnsureArgs {
     /// driven by the recorded kind, not by whichever one resolve finds first.
     #[arg(long)]
     kind: Option<String>,
+}
+
+#[derive(Args)]
+struct StorageInfoArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to drive storage through (the runner holding the host ssh key)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Storage pool (zpool name / VG name)
+    #[arg(long)]
+    pool: String,
+    /// Backend kind recorded by the plane (`zfs` | `lvmth`). Honored when
+    /// present; absent => detect.
+    #[arg(long)]
+    kind: Option<String>,
+    /// Mount to report, repeatable: `<role>:<source>:<guest>:<vmid|->`.
+    #[arg(long)]
+    mount: Vec<String>,
 }
 
 #[derive(Args)]
@@ -746,6 +768,51 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
             println!("STORAGE: {} datasets ensured + guest-writable", tenant);
             Ok(())
         }
+        StorageCmd::Info(a) => {
+            let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
+            let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
+            let kind = match parse_kind(a.kind.as_deref())? {
+                Some(k) => k,
+                None => match crate::drive::resolve_proxmox(&client, &a.target, false, None).await?
+                {
+                    crate::planebase::ResolveAction::Reuse(backend, _) => match backend {
+                        crate::planebase::ExistingBackend::Zfs => {
+                            crate::planebase::BackendKind::Zfs
+                        }
+                        crate::planebase::ExistingBackend::LvmThin => {
+                            crate::planebase::BackendKind::LvmThin
+                        }
+                    },
+                    _ => {
+                        println!("STORAGE-CAPACITY: -");
+                        return Ok(());
+                    }
+                },
+            };
+            let mut mounts = Vec::new();
+            for m in &a.mount {
+                mounts.push(parse_info_mount(m)?);
+            }
+            let info = crate::drive::storage_info(&client, &a.target, kind, &a.pool, &mounts)?;
+            println!("STORAGE-CAPACITY: {}", info.capacity);
+            for m in &info.mounts {
+                let mounted = match m.guest_mounted {
+                    Some(true) => "mounted",
+                    Some(false) => "absent",
+                    None => "-",
+                };
+                println!(
+                    "STORAGE-INFO {}:{}:{}:{}:{}:{}",
+                    m.role,
+                    m.source,
+                    m.guest,
+                    m.size.map_or("-".to_string(), |s| s.to_string()),
+                    m.used.map_or("-".to_string(), |u| u.to_string()),
+                    mounted,
+                );
+            }
+            Ok(())
+        }
         StorageCmd::Destroy(a) => {
             let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
             let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
@@ -804,6 +871,31 @@ fn parse_kind(kind: Option<&str>) -> Result<Option<crate::planebase::BackendKind
         Some("lvmth") => Ok(Some(crate::planebase::BackendKind::LvmThin)),
         Some(other) => anyhow::bail!("unknown storage backend kind: {other} (expected zfs|lvmth)"),
     }
+}
+
+/// Parse a `storage info --mount` spec: `<role>:<source>:<guest>:<vmid|->`.
+/// Neither a host path/dataset nor a guest path carries `:`, so a plain
+/// 4-field split is unambiguous.
+fn parse_info_mount(s: &str) -> Result<(String, String, String, Option<u32>)> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 4 || parts.iter().any(|p| p.is_empty()) {
+        anyhow::bail!("--mount must be <role>:<source>:<guest>:<vmid|-> (got {s:?})");
+    }
+    let vmid = if parts[3] == "-" {
+        None
+    } else {
+        Some(
+            parts[3]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("vmid must be a number or '-' (got {s:?}"))?,
+        )
+    };
+    Ok((
+        parts[0].to_string(),
+        parts[1].to_string(),
+        parts[2].to_string(),
+        vmid,
+    ))
 }
 
 /// Parse a `<dataset>:<guest-path>` mount spec (the `--mount` value).
