@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,4 +54,16 @@ func write0600Atomic(path string, data []byte) error {
 		return fmt.Errorf("rename temp: %w", err)
 	}
 	return nil
+}
+
+// EnsurePrivateDir creates dir 0700 (exported for cross-package use).
+func EnsurePrivateDir(dir string) error { return ensurePrivateDir(dir) }
+
+// WriteJSON0600 writes doc as pretty JSON to path atomically with 0600.
+func WriteJSON0600(path string, doc map[string]string) error {
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return write0600Atomic(path, data)
 }
