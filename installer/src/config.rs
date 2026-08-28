@@ -398,7 +398,7 @@ mod tests {
             "cp".into(),
             vec![PlaneMount {
                 source: "/freehold/world/cp".into(),
-                guest_path: "/srv/freehold".into(),
+                guest_path: "/srv/data/cp".into(),
             }],
         );
         prev.managed.push("k3s".into());

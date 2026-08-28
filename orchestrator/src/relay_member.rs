@@ -10,7 +10,10 @@
 use crate::bootstrap::{BootstrapError, plain_path};
 use crate::client::McpClient;
 
-pub const DEFAULT_BUZZ_COMPOSE_DIR: &str = "/srv/buzz-relay/deploy/compose";
+/// Derived from `planebase::GUEST_PATH_RELAY_DEPLOY` (the mount guest
+/// path) — pinned by `compose_dir_tracks_guest_path` so it can't silently
+/// drift from the plane. clap `default_value` needs a literal.
+pub const DEFAULT_BUZZ_COMPOSE_DIR: &str = "/srv/data/relay/deploy/compose";
 
 /// Build the `buzz-admin add-member` command (all single-quote-free:
 /// relay::lxc_cmd wraps the payload in single quotes when deploying into

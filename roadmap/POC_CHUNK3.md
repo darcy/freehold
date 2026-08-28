@@ -166,7 +166,7 @@ C0: the plane is C0's precondition, not parallel work.
     `.env` and: Postgres ignores `POSTGRES_PASSWORD` on a non-empty PGDATA (the state
     doesn't open), and a regenerated relay signing key invalidates every 39002 roster the
     fail-closed runners verify against their pinned `--relay-pubkey`. The `.env` is state.
-  - **CP:** the whole state DIR (`/srv/freehold/control-plane`: `state.json` + the console
+  - **CP:** the whole state DIR (`/srv/data/cp/control-plane`: `state.json` + the console
     identity + the shipped runner packages), not `state.json` alone — a compute-only
     teardown otherwise recreates a fresh console identity + loses the packages on EVERY
     cycle, not just the first. With the dir durable, the identity + packages survive and

@@ -845,8 +845,8 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
     // Ensure + record each durable tenant's HOST-resolved mounts. The LXC
     // ROLE that rides a tenant differs from the tenant's config key:
     //   tenant        role      guest mount(s)
-    //   relay  ->     relay     /var/lib/docker + /srv/buzz-relay
-    //   cp     ->     cp        /srv/freehold
+    //   relay  ->     relay     /var/lib/docker + /srv/data/relay
+    //   cp     ->     cp        /srv/data/cp
     //   k3s-volumes -> k3s      /srv/data/k8s-volumes
     let role_for: &[(&str, &str)] = &[("relay", "relay"), ("cp", "cp"), ("k3s-volumes", "k3s")];
     let cfg_path = config::Config::default_path();
@@ -931,6 +931,54 @@ pub fn stage_storage(a: &Answers, consent: bool) -> Result<()> {
     Ok(())
 }
 
+/// The guest mount points of an LXC — the `mp=` values of its `pct config`
+/// `mpN:` lines, in order. This is ground truth for where PVE binds the
+/// tenant's durable dataset into the guest. Deploy stages must follow it:
+/// a pre-`/srv/data` world mounts at `/srv/buzz-relay` / `/srv/freehold`,
+/// and hardcoding the new convention default would land the bundle on the
+/// rootfs (re-minting a `.env` against the SURVIVING PGDATA in the still-
+/// mounted docker volume — the state never opens). Returns empty when the
+/// guest has no mpN mounts (a rootfs-only box), in which case the stage
+/// falls back to the orchestrator's own default.
+fn guest_mounts(a: &Answers, vmid: u32) -> Result<Vec<String>> {
+    let (ok, out) = run(
+        &bin("freehold-orchestrator"),
+        &[
+            "exec",
+            "--addr",
+            &a.serve,
+            "--agent-dir",
+            ops_dir().to_str().unwrap(),
+            &a.runner,
+            &format!("pct config {vmid}"),
+        ],
+    )?;
+    if !ok {
+        bail!("pct config unreadable on LXC {vmid}:\n{out}");
+    }
+    Ok(parse_pct_mounts(&out))
+}
+
+/// The `mp=` guest paths of a `pct config` dump, in order. Lines are
+/// `mp<N>: <source>,mp=<guest>[,backup=n]`; only `mp<digits>:` lines count
+/// (a loose `mp` prefix would catch unrelated keys). Empty = rootfs-only
+/// guest (deploy falls back to the orchestrator's own default).
+fn parse_pct_mounts(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("mp")?;
+            let (idx, rest) = rest.split_once(':')?;
+            // mp<digits>: — reject non-numeric keys caught by the prefix.
+            if !idx.chars().all(|c| c.is_ascii_digit()) || idx.is_empty() {
+                return None;
+            }
+            rest.split(',')
+                .find_map(|kv| kv.trim().strip_prefix("mp="))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
     // the config may predate the boot's write-back — resolve the vmid from
     // the host when it's missing (the check already proved the LXC exists).
@@ -938,23 +986,35 @@ pub fn stage_deploy_relay(a: &Answers) -> Result<()> {
         Some(v) => v,
         None => find_lxc_vmid_exact(a, "relay")?,
     };
+    // Deploy dir = where the guest's durable mount actually IS. Relay keeps
+    // TWO mounts (docker data-root + compose deploy dir); the deploy child
+    // is whichever is NOT the docker root. Ground truth, not a default.
+    let deploy_dir = guest_mounts(a, relay_vmid)?
+        .into_iter()
+        .find(|g| g != "/var/lib/docker");
+    let mut args: Vec<String> = vec![
+        "deploy-relay".into(),
+        "--target".into(),
+        a.runner.clone(),
+        "--lxc".into(),
+        relay_vmid.to_string(),
+        "--domain".into(),
+        a.domain.clone(),
+        "--relay-url".into(),
+        format!("https://{}", a.domain),
+        "--owner-pubkey".into(),
+        a.operator_pk.clone(),
+        "--operator-pubkey".into(),
+        a.operator_pk.clone(),
+    ];
+    if let Some(d) = deploy_dir {
+        args.push("--deploy-dir".into());
+        args.push(d);
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     stage_any(
         "deploy-relay",
-        &[
-            "deploy-relay",
-            "--target",
-            &a.runner,
-            "--lxc",
-            &relay_vmid.to_string(),
-            "--domain",
-            &a.domain,
-            "--relay-url",
-            &format!("https://{}", a.domain),
-            "--owner-pubkey",
-            &a.operator_pk,
-            "--operator-pubkey",
-            &a.operator_pk,
-        ],
+        &refs,
         &format!("relay live at https://{}", a.domain),
     )?;
     Ok(())
@@ -965,23 +1025,36 @@ pub fn stage_deploy_cp(a: &Answers) -> Result<()> {
         Some(v) => v,
         None => find_lxc_vmid_exact(a, "cp")?,
     };
+    // State/bin dirs = the guest's cp mount root + the convention subdirs.
+    // Same ground-truth rule as the relay: a pre-`/srv/data` world mounts
+    // the CP at `/srv/freehold`, and the new default would ship to the
+    // rootfs, minting a fresh console identity + losing the packages.
+    let cp_root = guest_mounts(a, cp_vmid)?.into_iter().next_back();
+    let mut args: Vec<String> = vec![
+        "deploy-cp".into(),
+        "--target".into(),
+        a.runner.clone(),
+        "--lxc".into(),
+        cp_vmid.to_string(),
+        "--relay-url".into(),
+        format!("https://{}", a.domain),
+        "--binary".into(),
+        rel_bin("control-plane").display().to_string(),
+        "--runner-binary".into(),
+        rel_bin("runner").display().to_string(),
+        "--operator-pubkey".into(),
+        a.operator_pk.clone(),
+    ];
+    if let Some(root) = cp_root {
+        args.push("--state-dir".into());
+        args.push(format!("{root}/control-plane"));
+        args.push("--bin-dir".into());
+        args.push(format!("{root}/bin"));
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     stage_any(
         "deploy-cp",
-        &[
-            "deploy-cp",
-            "--target",
-            &a.runner,
-            "--lxc",
-            &cp_vmid.to_string(),
-            "--relay-url",
-            &format!("https://{}", a.domain),
-            "--binary",
-            &rel_bin("control-plane").display().to_string(),
-            "--runner-binary",
-            &rel_bin("runner").display().to_string(),
-            "--operator-pubkey",
-            &a.operator_pk,
-        ],
+        &refs,
         &format!("control plane live at https://cp-{}", a.domain),
     )?;
     Ok(())
@@ -1052,7 +1125,7 @@ mod writeback_tests {
             "cp".into(),
             vec![config::PlaneMount {
                 source: "/freehold/world/cp".into(),
-                guest_path: "/srv/freehold".into(),
+                guest_path: "/srv/data/cp".into(),
             }],
         );
         cfg.save(&path).unwrap();
@@ -1121,5 +1194,31 @@ mod writeback_tests {
         .unwrap_err();
         assert!(err.to_string().contains("no container"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod pct_mount_tests {
+    use super::*;
+
+    #[test]
+    fn parse_pct_mounts_reads_guest_paths_in_order() {
+        // The exact live shape: a pre-/srv/data relay guest carries TWO
+        // mounts (docker data-root + the OLD compose dir). Order = mpN.
+        let out = "mp0: /freehold/x/docker-root,mp=/var/lib/docker\n\
+                   mp1: /freehold/x/deploy,mp=/srv/buzz-relay\n\
+                   hostname: relay\n";
+        assert_eq!(
+            parse_pct_mounts(out),
+            vec!["/var/lib/docker".to_string(), "/srv/buzz-relay".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_pct_mounts_ignores_non_mp_keys() {
+        // A loose `mp` prefix would swallow keys like `mpfoo:`; only
+        // `mp<digits>:` counts.
+        let out = "mpfoo: something,mp=/bad\nrootfs: local:100/root\n";
+        assert!(parse_pct_mounts(out).is_empty());
     }
 }

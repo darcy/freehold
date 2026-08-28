@@ -438,7 +438,7 @@ mod tests {
     fn spec() -> RelayDeploySpec {
         RelayDeploySpec {
             relay_name: "relay-box".into(),
-            deploy_dir: "/srv/buzz-relay".into(),
+            deploy_dir: "/srv/data/relay".into(),
             http_port: 3000,
             buzz_ref: "main".into(),
             lxc: Some(100),

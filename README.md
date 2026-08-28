@@ -112,7 +112,7 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # 210 tests across core / runner / console-client / control-plane / orchestrator / acceptance
+cargo test --workspace        # 220 tests across core / runner / console-client / control-plane / orchestrator / acceptance
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --check             # CI gate
 cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
@@ -124,7 +124,7 @@ cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopba
 freehold                      # no args → the TUI (ratatui)
 freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
 freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
-freehold deploy-relay …       #   memory, console-login, grant …)
+freehold deploy-relay …       #   memory, console-login, grant, storage …)
 freehold --help               # both surfaces
 ```
 
@@ -142,11 +142,13 @@ freehold --help               # both surfaces
 - **configure** — config present, world not converged: an idempotent
   check-then-run pipeline (relay/cp LXCs, deploy relay + cp). Failed stages
   show their tail; `r` retries.
-- **running** — the post-bring-up dashboard, three views cycled with
+- **running** — the post-bring-up dashboard, four views cycled with
   `Tab` / `Shift-Tab`: **Services** (everything provisioned — name / where /
-  status / url: relay + control plane today, k3s / litellm as their
+  status / data / url: relay + control plane today, k3s / litellm as their
   coordinates land in the config), **Agents** (named agents stood up so far),
-  **Runners** (the console API parity — same data as the web UI — toggled to
+  **Data** (the live durable plane — host capacity + each mount's size /
+  used / guest bind-mount liveness, read-only through the signed runner
+  channel), **Runners** (the console API parity — same data as the web UI — toggled to
   the local loopback list with `t`). A one-line world strip keeps the
   liveness glance; `w` opens the web console in your browser already
   authenticated (single-use portal token — no `console-login`); keys are
