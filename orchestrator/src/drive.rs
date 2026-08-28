@@ -55,20 +55,26 @@ pub fn vg_list(client: &McpClient, target: &str) -> Result<Vec<String>, Bootstra
     Ok(out.stdout.split_whitespace().map(str::to_string).collect())
 }
 
-/// Does an LVM thin pool exist in this VG? (`lvs`, looking for the
-/// `pool_tmeta`/`pool_tdata` companion pair that marks a thin pool.)
-pub fn vg_has_thin_pool(
+/// The thin pool REUSED for freehold's tenant LVs, if this VG already has
+/// one (`lvs -a`, looking for the `pool_tmeta`/`pool_tdata` companion pair
+/// that marks a thin pool). A stock PVE install has `pve/data` (local-lvm) —
+/// it must be REUSED, never shadowed by a fresh carve-out on a near-full VG.
+pub fn thin_pool_name(
     client: &McpClient,
     target: &str,
     vg: &str,
-) -> Result<bool, BootstrapError> {
+) -> Result<Option<String>, BootstrapError> {
     let names = lvs_names(client, target, vg)?;
-    Ok(names.iter().any(|n| {
-        n.ends_with("_tmeta")
-            && names
-                .iter()
-                .any(|m| m == &format!("{}_tdata", n.trim_end_matches("_tmeta")))
-    }))
+    Ok(names
+        .iter()
+        .filter(|n| {
+            n.ends_with("_tmeta")
+                && names
+                    .iter()
+                    .any(|m| m == &format!("{}_tdata", n.trim_end_matches("_tmeta")))
+        })
+        .map(|n| n.trim_end_matches("_tmeta").to_string())
+        .next())
 }
 
 /// Does a thin volume (LV) already exist for this tenant under this VG?
@@ -82,13 +88,22 @@ pub fn thin_lv_exists(
 }
 
 fn lvs_names(client: &McpClient, target: &str, vg: &str) -> Result<Vec<String>, BootstrapError> {
+    // `-a` so the INTERNAL thin-pool segments are visible — a plain `lvs`
+    // hides them, which made a stock PVE host's existing `pve/data` thin pool
+    // undetectable (and a doomed fresh-pool lvcreate followed). The hidden
+    // segments print bracketed (`[data_tdata]`); strip the brackets.
     let out = crate::bootstrap::exec(
         client,
         target,
-        &format!("lvs --noheadings -o lv_name {vg} 2>/dev/null || true"),
+        &format!("lvs -a --noheadings -o lv_name {vg} 2>/dev/null || true"),
         60,
     )?;
-    Ok(out.stdout.split_whitespace().map(str::to_string).collect())
+    Ok(out
+        .stdout
+        .split_whitespace()
+        .map(|n| n.trim_matches(['[', ']']))
+        .map(str::to_string)
+        .collect())
 }
 
 // ------------------------------------------------------------- resolution
@@ -213,11 +228,14 @@ pub async fn chown_guest_uid(
 }
 
 /// Ensure ONE LVM thin LV exists + is mounted at a HOST path (idempotent):
-/// the thin pool is created in the VG once on demand, then the LV, ext4, and
-/// a mount at `host_path`. Returns the host mount path (the `mpN` source).
+/// the VG's EXISTING thin pool is reused (stock PVE: `pve/data`); only a VG
+/// with no thin pool gets a fresh `freehold-thin` carve-out. Then the LV,
+/// ext4, and a mount at `host_path`. Returns the host mount path (the `mpN`
+/// source).
 ///
-/// The pool SIZE is a first-pass fixed value; the LV is named by the caller
-/// (the two-place-derivable `freehold-<domain>-<tenant>` names from planebase).
+/// The fresh-pool SIZE is a first-pass fixed value; the LV is named by the
+/// caller (the two-place-derivable `freehold-<domain>-<tenant>` names from
+/// planebase).
 pub async fn ensure_lvm_lv(
     client: &McpClient,
     target: &str,
@@ -226,21 +244,26 @@ pub async fn ensure_lvm_lv(
     host_path: &str,
 ) -> Result<String, BootstrapError> {
     if !thin_lv_exists(client, target, vg, lv_name)? {
-        // thin pool once per VG
-        if !vg_has_thin_pool(client, target, vg)? {
-            crate::bootstrap::exec_to_ok(
-                client,
-                target,
-                &format!("lvcreate -L 40G -T {vg}/freehold-thin"),
-                "lvcreate thin pool",
-                300,
-            )?;
-        }
+        // REUSE the VG's existing thin pool (stock PVE: `pve/data`); only
+        // carve a fresh `freehold-thin` when the VG truly has none.
+        let pool = match thin_pool_name(client, target, vg)? {
+            Some(existing) => existing,
+            None => {
+                crate::bootstrap::exec_to_ok(
+                    client,
+                    target,
+                    &format!("lvcreate -L 40G -T {vg}/freehold-thin"),
+                    "lvcreate thin pool",
+                    300,
+                )?;
+                "freehold-thin".to_string()
+            }
+        };
         let dev = format!("/dev/{vg}/{lv_name}");
         crate::bootstrap::exec_to_ok(
             client,
             target,
-            &format!("lvcreate -V 20G -T {vg}/freehold-thin -n {lv_name}"),
+            &format!("lvcreate -V 20G -T {vg}/{pool} -n {lv_name}"),
             "lvcreate thin LV",
             120,
         )?;

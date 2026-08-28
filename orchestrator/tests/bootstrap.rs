@@ -1751,9 +1751,9 @@ async fn resolve_lvm_mounts_creates_thin_lvs_for_stock_pve_host() {
     use freehold_orchestrator::planebase::Tenant;
     let base = tempfile::tempdir().unwrap();
     let logp = base.path().join("lvm.log");
-    // A stock PVE host: VG `pve` present, no zpool, thin pool NOT yet created.
-    // The fake `lvs` answers nothing (so thin_lv_exists/vg_has_thin_pool are
-    // false); `lvcreate` + `mkfs` + `mount` succeed and log their argv.
+    // A VG with NO thin pool yet: `lvs -a` answers nothing, so a fresh
+    // `freehold-thin` carve-out is issued; `lvcreate`/`mkfs`/`mount` succeed
+    // and log their argv.
     let (bin, _ba) = plant_bin(
         &logp,
         &[
@@ -1801,6 +1801,57 @@ async fn resolve_lvm_mounts_creates_thin_lvs_for_stock_pve_host() {
     assert!(
         cmds.contains("chown -R 100000:100000 /freehold/freehold-test-darcydev-net/cp"),
         "mount chowned to the guest shifted uid: {cmds}"
+    );
+    server.abort();
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_lvm_mounts_reuses_the_stock_pve_thin_pool() {
+    use freehold_orchestrator::drive::resolve_lvm_mounts;
+    use freehold_orchestrator::planebase::Tenant;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("lvm.log");
+    // The REAL stock-PVE layout: VG `pve` holds root/swap plus the
+    // `pve/data` thin pool (local-lvm). `lvs -a` shows the internal
+    // `[data_tdata]`/`[data_tmeta]` segments. The tenant LV must be carved
+    // INTO `pve/data` — NEVER a fresh 40G pool on a near-full VG (that is
+    // the exact `lvcreate -L 40G -T` failure seen on the live host).
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[
+            ("zpool", "echo ''; exit 1\n"),
+            ("vgs", "echo 'pve'; exit 0\n"),
+            (
+                "lvs",
+                "echo '  [data_tdata]'\necho '  [data_tmeta]'\necho '  root'\necho '  swap'\nexit 0\n",
+            ),
+            ("lvcreate", "echo lvcreated; exit 0\n"),
+            ("mkfs.ext4", "echo mkfs; exit 0\n"),
+            ("mkdir", "exit 0\n"),
+            ("mountpoint", "exit 1\n"),
+            ("mount", "echo mounted; exit 0\n"),
+            ("chown", "exit 0\n"),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let mounts = resolve_lvm_mounts(
+        &client,
+        "proxmox-box",
+        "pve",
+        "freehold-test.darcydev.net",
+        Tenant::Cp,
+    )
+    .await
+    .unwrap();
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].guest_path, "/srv/freehold");
+    let cmds = std::fs::read_to_string(&logp).unwrap();
+    assert!(
+        cmds.contains("lvcreate -V 20G -T pve/data -n freehold-freehold-test-darcydev-net-cp"),
+        "tenant LV carved into the EXISTING pve/data thin pool: {cmds}"
+    );
+    assert!(
+        !cmds.contains("lvcreate -L 40G"),
+        "no fresh thin-pool carve-out when one already exists: {cmds}"
     );
     server.abort();
 }
