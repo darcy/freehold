@@ -636,8 +636,8 @@ pub async fn resolve_tenant_mounts(
 // ----------------------------------------------------------- storage info
 
 /// One mount's live usage: capacity + consumed, host-side (the source) and
-/// whether the guest's bind mount is actually live (a `pct exec df` probe —
-/// the bind-mount proof, distinct from the host numbers).
+/// whether the guest's bind mount is actually live (a `pct exec mountpoint`
+/// probe — the bind-mount proof, distinct from the host numbers).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountUsage {
     /// The LXC role riding it (relay/cp/k3s) — the plane.mounts key.
