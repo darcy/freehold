@@ -759,8 +759,11 @@ pub fn host_capacity(client: &McpClient, target: &str, kind: BackendKind, pool: 
     }
 }
 
-/// The VG's thin-pool `data_percent` (lvs scan for the `[xxx_tmeta]`
-/// companion), or None — advisory only.
+/// The VG's thin-pool `data_percent`, or None — advisory only. The pool is
+/// named by its `[xxx_tmeta]`/`xxx_tdata` companion pair (same rule as
+/// `thin_pool_name`), but `data_percent` lives on the POOL row itself —
+/// `lvs` prints the bracketed segment rows with an EMPTY percent column, so
+/// reading them (the old bug) always returned None.
 fn thin_pool_data_pct(client: &McpClient, target: &str, vg: &str) -> Option<f64> {
     let out = crate::bootstrap::exec(
         client,
@@ -769,18 +772,29 @@ fn thin_pool_data_pct(client: &McpClient, target: &str, vg: &str) -> Option<f64>
         60,
     )
     .ok()?;
-    out.stdout.lines().find_map(|line| {
-        let mut parts = line.split_ascii_whitespace();
-        let name = parts.next()?;
-        let pct = parts.next()?;
-        // hidden segments print bracketed: [data_tmeta] / [data_tdata]
-        let stripped = name.trim_matches(['[', ']']);
-        if stripped.ends_with("_tmeta") || stripped.ends_with("_tdata") {
-            pct.parse().ok()
-        } else {
-            None
-        }
-    })
+    parse_lvs_data_pct(&out.stdout)
+}
+
+/// Parse `lvs -a -o lv_name,data_percent` output for the VG's thin pool
+/// fill. The pool is named by its `_tmeta`/`_tdata` companion pair (the
+/// same rule as `thin_pool_name`), but the percent lives on the POOL row
+/// itself — the bracketed segment rows print an EMPTY percent column.
+fn parse_lvs_data_pct(stdout: &str) -> Option<f64> {
+    let rows: Vec<(String, Option<f64>)> = stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_ascii_whitespace();
+            let name = parts.next()?.trim_matches(['[', ']']).to_string();
+            let pct = parts.next().and_then(|s| s.parse().ok());
+            Some((name, pct))
+        })
+        .collect();
+    let pool = rows
+        .iter()
+        .find(|(n, _)| n.ends_with("_tmeta"))
+        .map(|(n, _)| n.trim_end_matches("_tmeta").to_string())
+        .filter(|pool| rows.iter().any(|(n, _)| n == &format!("{pool}_tdata")))?;
+    rows.iter().find(|(n, _)| n == &pool).and_then(|(_, p)| *p)
 }
 
 /// Parse one `H <source> <size> <used>` probe line (— for missing).
@@ -864,7 +878,7 @@ pub fn storage_info(
             &format!(
                 "for s in {spec}; do vmid=${{s%%:*}}; mp=${{s#*:}}; \
                  if pct status \"$vmid\" 2>/dev/null | grep -q running; then \
-                 if pct exec \"$vmid\" -- df -B1 \"$mp\" >/dev/null 2>&1; then \
+                 if pct exec \"$vmid\" -- mountpoint -q \"$mp\" 2>/dev/null; then \
                  echo \"G $vmid $mp ok\"; else echo \"G $vmid $mp down\"; fi; \
                  else echo \"G $vmid $mp down\"; fi; done"
             ),
@@ -940,5 +954,23 @@ mod tests {
         );
         assert_eq!(parse_g_line("G 102 /srv/data/cp"), None);
         assert_eq!(parse_g_line("not-g 100 /x ok"), None);
+    }
+
+    #[test]
+    fn parse_lvs_data_pct_reads_pool_row_not_segments() {
+        // The exact shape `lvs -a -o lv_name,data_percent` prints on a real
+        // PVE host: the thin POOL is named `data` (data% 2.80 on its own
+        // row); the bracketed `[data_tdata]` / `[data_tmeta]` segment rows
+        // print an EMPTY percent column. The old bug read the segments and
+        // always returned None.
+        let out = "  data                                                 2.80 \n\
+                   [data_tdata]                                                \n\
+                   [data_tmeta]                                                \n\
+                   root                                                        \n";
+        assert_eq!(parse_lvs_data_pct(out), Some(2.80));
+        // no thin pool at all => None, not an error
+        assert_eq!(parse_lvs_data_pct("  root\n  swap\n"), None);
+        // a _tmeta without its _tdata is not a pool
+        assert_eq!(parse_lvs_data_pct("  foo_tmeta 1.0\n"), None);
     }
 }
