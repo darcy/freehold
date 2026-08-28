@@ -1711,3 +1711,37 @@ async fn destroy_tenant_dataset_destroys_relay_parent_recursively() {
     );
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destroy_tenant_dataset_absent_is_a_noop_not_an_error() {
+    use freehold_orchestrator::drive::destroy_tenant_dataset;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("zfs.log");
+    // Fake `zfs`: a dataset that does NOT exist (list exits 1). The destroy
+    // must NOT call `zfs destroy` (absent is a no-op, not an error) and must
+    // return Ok(false) so the caller can distinguish it from a real destroy.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[("zfs", "if [ \"$1\" = \"list\" ]; then exit 1; fi; exit 0\n")],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let destroyed = destroy_tenant_dataset(
+        &client,
+        "proxmox-box",
+        "rpool",
+        "freehold-test.darcydev.net",
+        freehold_orchestrator::planebase::Tenant::Cp,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !destroyed,
+        "absent dataset is a no-op (Ok(false)), not an error"
+    );
+    let cmds = std::fs::read_to_string(&logp).unwrap_or_default();
+    assert!(
+        !cmds.contains("destroy"),
+        "absent dataset: no zfs destroy is issued: {cmds}"
+    );
+    server.abort();
+}

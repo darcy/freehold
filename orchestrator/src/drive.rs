@@ -293,15 +293,35 @@ pub fn lxc_mp_args(specs: &[MountSpec]) -> Vec<String> {
 /// Destroy one tenant's dataset subtree (data+compute teardown). For relay
 /// this is the PARENT (both children), per the locked single-parent-destroy
 /// unit. `zfs destroy -r` removes children recursively.
+///
+/// Returns `Ok(false)` when the dataset is ABSENT (nothing to destroy — a
+/// no-op to the caller), `Ok(true)` when it was destroyed. A real `zfs
+/// destroy` failure is an `Err` — the caller must NOT treat a no-op and a
+/// failed destroy as the same outcome.
 pub async fn destroy_tenant_dataset(
     client: &McpClient,
     target: &str,
     pool: &str,
     domain: &str,
     tenant: Tenant,
-) -> Result<(), BootstrapError> {
+) -> Result<bool, BootstrapError> {
     let ds =
         dataset_path(pool, domain, tenant).map_err(|e| BootstrapError::Verify(e.to_string()))?;
+    // Existence probe FIRST — an absent dataset is a no-op, not an error
+    // (the same probe ensure_dataset uses). This is what lets teardown
+    // tolerate a missing dataset (pre-plane config, VPS branch, unprovisioned
+    // k3s) while still surfacing a genuine destroy failure.
+    let exists = crate::bootstrap::exec(
+        client,
+        target,
+        &format!("zfs list -H -o name {ds} >/dev/null 2>&1"),
+        60,
+    )?
+    .exit_code
+        == Some(0);
+    if !exists {
+        return Ok(false);
+    }
     crate::bootstrap::exec_to_ok(
         client,
         target,
@@ -311,11 +331,12 @@ pub async fn destroy_tenant_dataset(
     )
     .map_err(|e| {
         BootstrapError::Verify(format!(
-            "dataset {ds} could not be destroyed (or did not exist): {e} — \
-             confirm the tenant name is correct (re-typing the target name was already the gate)"
+            "dataset {ds} EXISTS but could not be destroyed: {e} — \
+             the tenant's data is INTACT; fix the cause (busy/ref'ed) or re-run. \
+             The teardown must not delete the config mapping for data that survived."
         ))
     })
-    .map(|_| ())
+    .map(|_| true)
 }
 
 /// A host-root mountable path for a dataset: the `zfs get mountpoint` value.

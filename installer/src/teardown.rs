@@ -183,8 +183,19 @@ fn run_scope(config_path: &std::path::Path, scope: Scope, confirm: bool) -> Resu
                 // in the log without stranding the door.
                 let dataset = dataset_path_for(&cfg, &tenant, &cfg.domain);
                 match destroy_dataset(&a, &cfg, &tenant, &dataset) {
-                    Ok(line) => log.push(line),
-                    Err(e) => log.push(format!("WARN: dataset destroy for {tenant} failed: {e}")),
+                    // Absent (dataset never existed): a logged no-op, tolerating
+                    // pre-plane configs / the VPS downgraded branch.
+                    Ok(false) => log.push(format!(
+                        "no dataset to destroy for {tenant} (absent) — nothing destroyed"
+                    )),
+                    Ok(true) => log.push(format!("destroyed {tenant} dataset subtree ({dataset})")),
+                    // A GENUINE destroy failure must not report "complete": the
+                    // data is intact, so bailing BEFORE the config is deleted
+                    // preserves the mapping for it.
+                    Err(e) => bail!(
+                        "data+compute teardown for {tenant} FAILED: {e} — the dataset was \
+                         NOT destroyed; the config mapping is preserved"
+                    ),
                 }
             }
         }
@@ -271,7 +282,9 @@ fn destroy_one_lxc(a: &Answers, role: &str, vmid: Option<u32>) -> Result<Vec<Str
 }
 
 /// Destroy a tenant's dataset subtree through the runner (data+compute).
-fn destroy_dataset(a: &Answers, cfg: &Config, tenant: &str, dataset: &str) -> Result<String> {
+fn destroy_dataset(a: &Answers, cfg: &Config, tenant: &str, _dataset: &str) -> Result<bool> {
+    // Ok(true) = destroyed, Ok(false) = absent (no-op). A real destroy
+    // failure surfaces as an Err with the underlying output.
     let pool = cfg.plane.backend.clone().unwrap_or_else(|| "rpool".into());
     let (ok, out) = crate::run(
         &bin("freehold-orchestrator"),
@@ -295,7 +308,19 @@ fn destroy_dataset(a: &Answers, cfg: &Config, tenant: &str, dataset: &str) -> Re
     if !ok {
         bail!("dataset destroy for {tenant} failed:\n{out}");
     }
-    Ok(format!("destroyed {tenant} dataset subtree ({dataset})"))
+    // Parse the drive's absent-vs-destroyed signal; a malformed response is
+    // an ERROR (the CLI is ours — it must have printed the bool).
+    out.lines()
+        .find_map(|l| l.strip_prefix("STORAGE-DESTROYED: "))
+        .map(str::trim)
+        .ok_or_else(|| {
+            anyhow::anyhow!("storage destroy for {tenant} printed no STORAGE-DESTROYED line")
+        })
+        .and_then(|v| {
+            v.parse::<bool>().map_err(|_| {
+                anyhow::anyhow!("storage destroy STORAGE-DESTROYED = {v:?} not a bool")
+            })
+        })
 }
 
 /// Re-derive a tenant's dataset from the two-place rule (independent of the

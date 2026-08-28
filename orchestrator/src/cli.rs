@@ -701,9 +701,15 @@ async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
             let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
             let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
             let tenant = parse_tenant(&a.tenant)?;
-            crate::drive::destroy_tenant_dataset(&client, &a.target, &a.pool, &a.domain, tenant)
-                .await?;
-            println!("STORAGE: destroyed {} tenant dataset subtree", tenant);
+            // The bool distinguishes ABSENT (nothing to destroy — a no-op for
+            // the caller) from DESTROYED (the dataset subtree went away). The
+            // pipeline's teardown needs the distinction: absent is tolerated,
+            // a real destroy failure is not.
+            let destroyed = crate::drive::destroy_tenant_dataset(
+                &client, &a.target, &a.pool, &a.domain, tenant,
+            )
+            .await?;
+            println!("STORAGE-DESTROYED: {destroyed}");
             Ok(())
         }
     }
