@@ -40,11 +40,13 @@ started; see Phase C below.
 
 ## Phase 0.12 — Durable Volume Plane (pre-C0)
 
-Status: IMPLEMENTED + hermetic-tested (2026-08-27) — storage backend resolution stage
-(ZFS → LVM-thin → bail, consent-gated create), per-tenant datasets + relay's two child
-datasets, the tenant→dataset mapping in the config (two-place rule), born-at-create
-mounts, and the THREE teardown scopes. NOT yet live-verified on a real host — the live
-acceptance gates remain. This section documents the decisions the implementation follows.
+Named follow-ups (not yet live): the LVM-thin rung is DETECTION-ONLY today —
+`resolve` finds and reports an existing LVM VG, but `ensure_lvm_thin_tenant` has no
+caller, so the shipped ZFS path is what actually creates datasets; a stock PVE LVM host
+(VG `pve`, no ZFS) resolves as `Reuse(LvmThin)` and the ZFS-based ensure does NOT build
+its thin-LV datasets yet (the advertised `ZFS → LVM-thin → bail` is `ZFS → bail` in
+practice until that rung is wired). Both the LVM rung and the live acceptances remain
+pre-C0 work.
 
 ### Why this exists
 
