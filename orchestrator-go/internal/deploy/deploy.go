@@ -144,3 +144,9 @@ func checkDocker(clientConn *client.McpClient, target string, lxc *uint32) error
 	_, err := bootstrap.ExecToOK(clientConn, target, cmd, "docker gate", 60)
 	return err
 }
+
+// DefaultCPStateDir is the remote CP state dir default (deploy_cp.rs).
+func DefaultCPStateDir() string { return "/srv/data/cp/control-plane" }
+
+// DefaultCPBinDir is the remote CP bin dir default (deploy_cp.rs).
+func DefaultCPBinDir() string { return "/srv/data/cp/bin" }

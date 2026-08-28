@@ -228,10 +228,10 @@ func DeployRelay(clientConn *client.McpClient, target string, spec *RelayDeployS
 // addMemberCmd reproduces relay_member::add_member_cmd (buzz-admin through
 // the runner at the compose dir).
 func addMemberCmd(composeDir, pubkey string, role *string) string {
-	r := "member"
+	roleSuffix := ""
 	if role != nil && *role != "" {
-		r = *role
+		roleSuffix = " --role " + *role
 	}
-	return fmt.Sprintf("cd %s && docker compose run --rm --entrypoint ./target/release/buzz-admin relay people add %s --role %s",
-		composeDir, pubkey, r)
+	return fmt.Sprintf("cd %s && docker compose exec -T relay buzz-admin add-member --pubkey %s%s",
+		composeDir, pubkey, roleSuffix)
 }

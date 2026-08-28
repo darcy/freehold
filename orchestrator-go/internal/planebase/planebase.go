@@ -185,3 +185,19 @@ func LvmRelayChildLVName(domain string, child RelayChild) (string, error) {
 	}
 	return fmt.Sprintf("freehold-%s-relay-%s", dom, child.String()), nil
 }
+
+// String names an ExistingBackend (for reports).
+func (b ExistingBackend) String() string {
+	if b == ExistingZfs {
+		return "zfs"
+	}
+	return "lvm-thin"
+}
+
+// String names a Backend (for reports).
+func (b Backend) String() string {
+	if b == BackendZfs {
+		return "zfs"
+	}
+	return "lvm-thin"
+}

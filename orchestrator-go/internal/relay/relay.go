@@ -217,7 +217,8 @@ func QueryRunnerMetas(relayURL string, expectedAuthor string, authSecret []byte)
 func parseTags(ev map[string]interface{}) ([][]string, string) {
 	var tags [][]string
 	h := ""
-	if raw, ok := ev["tags"].([]interface{}); ok {
+	switch raw := ev["tags"].(type) {
+	case []interface{}:
 		for _, t := range raw {
 			var row []string
 			if arr, ok := t.([]interface{}); ok {
@@ -225,6 +226,22 @@ func parseTags(ev map[string]interface{}) ([][]string, string) {
 					if s, ok := a.(string); ok && s != "" {
 						row = append(row, s)
 					}
+				}
+			} else if ss, ok := t.([]string); ok {
+				for _, s := range ss {
+					if s != "" {
+						row = append(row, s)
+					}
+				}
+			}
+			tags = append(tags, row)
+		}
+	case [][]string:
+		for _, t := range raw {
+			var row []string
+			for _, s := range t {
+				if s != "" {
+					row = append(row, s)
 				}
 			}
 			tags = append(tags, row)
@@ -250,7 +267,7 @@ func mergeRunnerMetas(events []map[string]interface{}, expectedAuthor string) ([
 		if author != expectedAuthor {
 			continue
 		}
-		createdAt := int64(readFloat(ev["created_at"]))
+		createdAt := intOr(ev["created_at"])
 		tags, h := parseTags(ev)
 		if h == "" {
 			continue // missing h tag — skip
@@ -309,7 +326,7 @@ func mergeRoster(events []map[string]interface{}, relayPubkey, channelID string)
 		if author != relayPubkey {
 			continue
 		}
-		createdAt := int64(readFloat(ev["created_at"]))
+		createdAt := intOr(ev["created_at"])
 		tags, _ := parseTags(ev)
 		// The roster's channel attribution is its d tag.
 		if tagValue(tags, "d") != channelID {
@@ -366,6 +383,22 @@ func readFloat(v interface{}) float64 {
 	case json.Number:
 		f, _ := n.Float64()
 		return f
+	}
+	return 0
+}
+
+// intOr coerces created_at from a json float64, a Go int64/int, or json.Number.
+func intOr(v interface{}) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
 	}
 	return 0
 }
@@ -444,7 +477,7 @@ func ReadMemory(relayURL string, agentNostrSecret []byte, key string) (string, b
 		if author != pk {
 			continue
 		}
-		createdAt := int64(readFloat(ev["created_at"]))
+		createdAt := intOr(ev["created_at"])
 		tags, _ := parseTags(ev)
 		content, _ := ev["content"].(string)
 		sig, _ := ev["sig"].(string)
