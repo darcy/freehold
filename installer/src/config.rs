@@ -21,10 +21,42 @@ pub struct Config {
     pub operator_identity: Option<PathBuf>,
     pub runner: RunnerRef,
     pub lxc: LxcSpec,
+    /// Phase 0.12 durable-volume-plane mapping — the tenant→dataset (or
+    /// volume) resolution. Survives compute teardown by design (the
+    /// two-place rule): teardown reads it BEFORE it deletes the config, and
+    /// it is independently re-derivable from the host/provider's volume
+    /// listing via the naming convention.
+    #[serde(default)]
+    pub plane: PlaneSpec,
     /// The pieces of the world WE operate (relay/cp today; k3s, litellm
     /// later). A relay we were INVITED to would appear in `relay_url` but
     /// not here — we don't manage it.
     pub managed: Vec<String>,
+}
+
+/// The durable volume plane (Phase 0.12). Presence = the plane was resolved;
+/// absence = pre-plane legacy / VPS-downgraded world.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PlaneSpec {
+    /// The backend in use (ZFS zpool name / LVM VG name) — the common parent
+    /// of the per-tenant datasets. The naming convention + the host/provider
+    /// volume listing are the two-place rule's SECOND place (independent
+    /// derivation); this field is the first.
+    pub backend: Option<String>,
+    /// LXC role -> resolved reference mounts (HOST source + guest path), the
+    /// born-at-create specs. Keyed by LXC role (relay/cp/k3s). relay has two
+    /// children (docker data-root + compose deploy dir).
+    #[serde(default)]
+    pub mounts: std::collections::BTreeMap<String, Vec<PlaneMount>>,
+}
+
+/// One resolved durable-plane mount. `source` is the HOST-root mountable
+/// path that `pct mpN` accepts (a real mountpoint, not a bare dataset name —
+/// PVE rejects `rpool/freehold/…` as an mp source).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaneMount {
+    pub source: String,
+    pub guest_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -115,6 +147,7 @@ impl Config {
                     ip: a.cp_ip.clone(),
                 },
             },
+            plane: PlaneSpec::default(),
             managed: vec!["relay".into(), "cp".into()],
         }
     }

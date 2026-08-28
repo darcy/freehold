@@ -21,6 +21,7 @@ use freehold_orchestrator::bootstrap::{
 };
 use freehold_orchestrator::client::McpClient;
 use freehold_orchestrator::flows;
+use freehold_orchestrator::planebase::MountSpec;
 use freehold_orchestrator::{deploy_cp, relay_member};
 use freehold_runner::mcp::{self, RunnerContext};
 use freehold_testkit::mock::{self, VultrState};
@@ -244,6 +245,7 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -297,6 +299,66 @@ async fn proxmox_lxc_reuses_present_template_docker_ready() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn proxmox_lxc_bakes_durable_plane_mounts_into_create() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("pct.log"),
+        &[
+            ("pvesm", HAPPY_PVESM),
+            ("pct", HAPPY_PCT),
+            ("uname", "echo x86_64\n"),
+            ("pveam", "exit 127\n"),
+        ],
+    );
+    let (log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    // The locked "born on the plane" shape: the relay's two child datasets
+    // mount as /var/lib/docker (the daemon data root — named volumes land
+    // there) and /srv/buzz-relay (the compose deploy dir + .env).
+    let mounts = vec![
+        MountSpec {
+            source: "rpool/freehold/t-d/relay/docker-root".into(),
+            guest_path: "/var/lib/docker".into(),
+        },
+        MountSpec {
+            source: "rpool/freehold/t-d/relay/deploy".into(),
+            guest_path: "/srv/buzz-relay".into(),
+        },
+    ];
+    let res = bootstrap_proxmox_lxc(
+        &client,
+        "proxmox-box",
+        &ProxmoxLxcSpec {
+            hostname: "testhost-101".into(),
+            vmid: Some(101),
+            template: None,
+            storage: "local-lvm".into(),
+            rootfs_gb: 16,
+            memory_mb: 2048,
+            bridge: "vmbr0".into(),
+            net_ip: None,
+            net_gw: None,
+            mounts,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        res.kind,
+        freehold_orchestrator::bootstrap::TargetKind::ProxmoxLxc
+    );
+    let cmds = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        cmds.contains("--mp0=rpool/freehold/t-d/relay/docker-root,mp=/var/lib/docker"),
+        "docker data-root child baked into create: {cmds}"
+    );
+    assert!(
+        cmds.contains("--mp1=rpool/freehold/t-d/relay/deploy,mp=/srv/buzz-relay"),
+        "compose deploy-dir child baked into create: {cmds}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn proxmox_lxc_create_failure_is_reported_with_output() {
     let base = tempfile::tempdir().unwrap();
     let (bin, _ba) = plant_bin(
@@ -328,6 +390,7 @@ exit 0
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -396,6 +459,7 @@ esac
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -453,6 +517,7 @@ exit 0
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -497,6 +562,7 @@ async fn proxmox_lxc_downloads_template_when_missing() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -556,6 +622,7 @@ async fn proxmox_lxc_picks_free_vmid_when_omitted() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -621,6 +688,7 @@ esac
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -668,6 +736,7 @@ async fn proxmox_lxc_docker_daemon_failure_is_reported() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -713,6 +782,7 @@ async fn proxmox_lxc_vmid_below_100_is_rejected() {
             bridge: "vmbr0".into(),
             net_ip: None,
             net_gw: None,
+            mounts: vec![],
         },
     )
     .await
@@ -1439,6 +1509,7 @@ async fn proxmox_lxc_static_net_for_cloud_pve() {
             bridge: "vmbr1".into(),
             net_ip: Some("10.10.0.6/24".into()),
             net_gw: Some("10.10.0.1".into()),
+            mounts: vec![],
         },
     )
     .await
@@ -1451,6 +1522,226 @@ async fn proxmox_lxc_static_net_for_cloud_pve() {
     assert!(
         !cmds.contains("bridge=vmbr1,ip=dhcp"),
         "no dhcp on the private bridge: {cmds}"
+    );
+    server.abort();
+}
+
+// ---------------------------------------------------------------- Phase 0.12
+// Durable-volume-plane hermetic tests: the storage resolution consent gate,
+// the reuse-vs-bail ordering, and runner-driven dataset create/destroy —
+// against FAKE zpool/vgs/zfs bins through the real sshd + runner (the same
+// fixture pattern as the proxmox driver tests). No real storage anywhere.
+
+/// A host with NO existing storage backend: `zpool list` and `vgs` both
+/// answer empty. Resolution must bail without consent.
+const NO_STORAGE_ZPOOL: &str = "echo ''; exit 1\n";
+const NO_STORAGE_VGS: &str = "echo ''; exit 1\n";
+
+/// A host with an existing zpool.
+const ZPOOL_HOST: &str = "echo 'rpool'; exit 0\n";
+
+/// A host with an existing LVM VG (no thin pool yet).
+const LVM_HOST: &str = "echo 'vg'; exit 0\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_reuses_existing_zpool() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", ZPOOL_HOST), ("vgs", NO_STORAGE_VGS)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        action,
+        freehold_orchestrator::planebase::ResolveAction::Reuse(
+            freehold_orchestrator::planebase::ExistingBackend::Zfs,
+            "rpool".into(),
+        )
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_reuses_existing_lvm_when_no_zpool() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", NO_STORAGE_ZPOOL), ("vgs", LVM_HOST)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        action,
+        freehold_orchestrator::planebase::ResolveAction::Reuse(
+            freehold_orchestrator::planebase::ExistingBackend::LvmThin,
+            "vg".into(),
+        )
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_bails_without_consent_when_no_backend() {
+    let base = tempfile::tempdir().unwrap();
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", NO_STORAGE_ZPOOL), ("vgs", NO_STORAGE_VGS)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", false, None)
+        .await
+        .unwrap();
+    match action {
+        freehold_orchestrator::planebase::ResolveAction::Bail(m) => {
+            assert!(
+                m.contains("--confirm-storage"),
+                "actionable bail names the consent fix: {m}"
+            );
+        }
+        other => panic!("expected Bail, got {other:?}"),
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn storage_resolve_with_consent_creates_when_no_backend() {
+    let base = tempfile::tempdir().unwrap();
+    // NOTE: resolution order is zpool-list then vg-list; a VG present ->
+    // Reuse(LVM). Consent with NO backend at all returns Create(Zfs):
+    let (bin, _ba) = plant_bin(
+        &base.path().join("storage.log"),
+        &[("zpool", NO_STORAGE_ZPOOL), ("vgs", NO_STORAGE_VGS)],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let action = freehold_orchestrator::drive::resolve_proxmox(&client, "proxmox-box", true, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        action,
+        freehold_orchestrator::planebase::ResolveAction::Create(
+            freehold_orchestrator::planebase::Backend::LvmThin,
+            "freehold".into(),
+        ),
+        "consent + no backend + no device -> create LVM-thin (the locked \
+         ZFS->LVM-thin->bail order's fallback), never a silent tier"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_dataset_is_idempotent_and_chown_runs() {
+    use freehold_orchestrator::drive::{chown_guest_uid, ensure_dataset};
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("zfs.log");
+    // Fake `zfs`: `list <ds>` ALWAYS answers present (exit 0, no output
+    // needed for the presence probe). Any `create` would be logged.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[
+            (
+                "zfs",
+                "echo 'rpool/freehold/t-d/relay'; exit 0
+",
+            ),
+            (
+                "chown",
+                "echo done; exit 0
+",
+            ),
+        ],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let ds = "rpool/freehold/t-d/relay";
+    // idempotent: the fake reports present, so NO `zfs create` runs.
+    ensure_dataset(&client, "proxmox-box", ds).await.unwrap();
+    ensure_dataset(&client, "proxmox-box", ds).await.unwrap();
+    let cmds = std::fs::read_to_string(&logp).unwrap_or_default();
+    assert!(
+        !cmds.contains("create"),
+        "existing dataset must be REUSED, no zfs create: {cmds}"
+    );
+    // chown passes a shifted uid through the runner.
+    chown_guest_uid(&client, "proxmox-box", "/srv/data/k8s-volumes", 100000)
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destroy_tenant_dataset_destroys_relay_parent_recursively() {
+    use freehold_orchestrator::drive::destroy_tenant_dataset;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("zfs.log");
+    // The fake `zfs` logs its full argv to $ZFS_LOG on destroy.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[(
+            "zfs",
+            // plant_bin already logs every invocation ("$0 $*") to the test
+            // log, so this body just needs to ANSWER: act as a dataset that
+            // exists (list exits 0) and allow destroy (any op exits 0).
+            "exit 0",
+        )],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    destroy_tenant_dataset(
+        &client,
+        "proxmox-box",
+        "rpool",
+        "freehold-test.darcydev.net",
+        freehold_orchestrator::planebase::Tenant::Relay,
+    )
+    .await
+    .unwrap();
+    // The destroy hits the RELAY PARENT (rpool/freehold/.../relay) with -r,
+    // so both child datasets (docker-root + deploy) go with it — the locked
+    // single-parent-destroy unit.
+    let cmds = std::fs::read_to_string(&logp).expect("zfs destroy was invoked");
+    assert!(
+        cmds.contains("destroy -r rpool/freehold/freehold-test-darcydev-net/relay"),
+        "recursive parent-subtree destroy: {cmds}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destroy_tenant_dataset_absent_is_a_noop_not_an_error() {
+    use freehold_orchestrator::drive::destroy_tenant_dataset;
+    let base = tempfile::tempdir().unwrap();
+    let logp = base.path().join("zfs.log");
+    // Fake `zfs`: a dataset that does NOT exist (list exits 1). The destroy
+    // must NOT call `zfs destroy` (absent is a no-op, not an error) and must
+    // return Ok(false) so the caller can distinguish it from a real destroy.
+    let (bin, _ba) = plant_bin(
+        &logp,
+        &[("zfs", "if [ \"$1\" = \"list\" ]; then exit 1; fi; exit 0\n")],
+    );
+    let (_log, _rd, client, server) = proxmox_fixture(base.path(), &bin).await;
+    let destroyed = destroy_tenant_dataset(
+        &client,
+        "proxmox-box",
+        "rpool",
+        "freehold-test.darcydev.net",
+        freehold_orchestrator::planebase::Tenant::Cp,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !destroyed,
+        "absent dataset is a no-op (Ok(false)), not an error"
+    );
+    let cmds = std::fs::read_to_string(&logp).unwrap_or_default();
+    assert!(
+        !cmds.contains("destroy"),
+        "absent dataset: no zfs destroy is issued: {cmds}"
     );
     server.abort();
 }

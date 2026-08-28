@@ -18,6 +18,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::client::{ClientError, ExecOutcome, McpClient};
+use crate::planebase::MountSpec;
 
 #[derive(Debug, Error)]
 pub enum BootstrapError {
@@ -66,6 +67,11 @@ pub struct ProxmoxLxcSpec {
     /// host NAT/DNAT. None = dhcp (the LAN/home default).
     pub net_ip: Option<String>,
     pub net_gw: Option<String>,
+    /// Durable-plane reference MOUNTS baked into `pct create` (`--mpN`):
+    /// each dataset is bound to its guest path at FIRST creation — the
+    /// locked "born on the plane, never `pct set` post-hoc" rule. Empty =
+    /// no mounts (the pre-plane legacy / VPS paths).
+    pub mounts: Vec<MountSpec>,
 }
 
 pub struct VultrVpsSpec {
@@ -98,7 +104,7 @@ pub struct BootstrapResult {
     pub detail: String,
 }
 
-fn exec(
+pub(crate) fn exec(
     client: &McpClient,
     target: &str,
     cmd: &str,
@@ -348,12 +354,20 @@ pub async fn bootstrap_proxmox_lxc(
     // unprivileged container — without it docker-in-LXC fails at the mount
     // namespace boundary. keyctl=1 is required alongside for docker itself
     // (kernel keyring access inside the guest). fuse=1 exposes /dev/fuse, the
-    // fuse-overlayfs storage-driver device (observed live: docker in the
-    // guest failed with `fuse: device not found` until it was set).
+    // The durable-plane reference mounts (`--mpN`) are baked into FIRST
+    // creation only — never applied post-hoc to a reused guest (the locked
+    // born-at-create rule; a re-converge against an existing LXC keeps its
+    // original mounts, and the migrate-to-plane path adds them explicitly).
+    let mp_args: Vec<String> = crate::drive::lxc_mp_args(&spec.mounts);
+    let mp = if mp_args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", mp_args.join(" "))
+    };
     let create = format!(
         "pct create {vmid} local:vztmpl/{tpl} --rootfs {storage}:{rootfs_gb} \
          --memory {memory_mb} --hostname {host} --unprivileged 1 \
-         --features fuse=1,keyctl=1,nesting=1 --net0 {net0}",
+         --features fuse=1,keyctl=1,nesting=1 --net0 {net0}{mp}",
         vmid = vmid,
         tpl = tpl,
         storage = spec.storage,
@@ -367,6 +381,7 @@ pub async fn bootstrap_proxmox_lxc(
             ),
             _ => format!("name=eth0,bridge={},ip=dhcp,type=veth", spec.bridge),
         },
+        mp = mp,
     );
     if !reuse {
         let out = exec(client, target, &create, 120)?;

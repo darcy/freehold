@@ -309,6 +309,22 @@ fn main() -> Result<()> {
         stage_serve(&answers)
     })?;
     verify_loop(&answers)?;
+    // Phase 0.12 durable plane: resolve/ensure the storage backend FIRST so
+    // the relay/CP/k3s guests are BORN with their dataset mounts. The
+    // interactive front-end asks consent (creating a backend is a
+    // destructive host mutation — gated like teardown); the non-interactive
+    // pipeline passes the front-end's answer as the bool.
+    run_stage("resolving the durable volume plane…", || {
+        let consent = dialoguer::Confirm::new()
+            .with_prompt(
+                "No existing storage backend — create one (ZFS/LVM-thin)? \
+                 this carves/relabels host storage",
+            )
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        freehold_installer::stage_storage(&answers, consent)
+    })?;
     run_stage("booting the relay LXC…", || {
         stage_bootstrap(&answers, "relay", answers.relay_vmid)
     })?;

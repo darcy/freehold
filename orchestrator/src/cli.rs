@@ -6,6 +6,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
+use crate::planebase::MountSpec;
 use crate::{bootstrap, deploy_cp, flows, relay, relay_member};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -61,6 +62,8 @@ enum Cmd {
     /// Relay surface: the bootstrap step — ensures the #freehold channel
     /// exists (open, deterministic id) and joins every listed agent to it
     RelaySetup(RelaySetupArgs),
+    /// Phase 0.12: resolve/ensure/destroy the durable volume plane
+    Storage(StorageArgs),
 }
 
 #[derive(Args)]
@@ -169,6 +172,15 @@ struct TeardownArgs {
     /// Skip the confirmation prompt (scripting/CI only)
     #[arg(long)]
     yes: bool,
+    /// Per-tenant scoped teardown: only this tenant's LXC (and, with
+    /// --data, its dataset) is destroyed. relay | cp | k3s-volumes.
+    /// Omitted = whole-world teardown (compute + config + local home).
+    #[arg(long)]
+    tenant: Option<String>,
+    /// With --tenant: ALSO destroy the tenant's dataset (data+compute).
+    /// Without --tenant: whole-world teardown also destroys all datasets.
+    #[arg(long)]
+    data: bool,
 }
 
 #[derive(Args)]
@@ -326,6 +338,79 @@ struct RelaySetupArgs {
     agents: String,
 }
 
+/// Phase 0.12 — durable volume plane.
+#[derive(Args)]
+struct StorageArgs {
+    #[command(subcommand)]
+    cmd: StorageCmd,
+}
+
+/// Storage subcommands — the operator surface for the durable plane.
+#[derive(Subcommand)]
+enum StorageCmd {
+    /// Resolve the durable backend (ZFS → LVM-thin → bail for the Proxmox
+    /// branch); with consent, create the backend. Runs as part of the
+    /// configure pipeline's storage stage; this is the operator-facing form.
+    Resolve(StorageResolveArgs),
+    /// Ensure a tenant's dataset/volume exists (idempotent) + is guest-writable.
+    Ensure(StorageEnsureArgs),
+    /// Destroy a tenant's dataset subtree (data+compute teardown half).
+    Destroy(StorageDestroyArgs),
+}
+
+#[derive(Args)]
+struct StorageResolveArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to drive storage through (the runner holding the host ssh key)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Physical device for a NEW zpool (e.g. /dev/sdb) — required only on
+    /// the consent-gated create path, when no existing backend is detected.
+    #[arg(long)]
+    device: Option<String>,
+    /// Operator consent to CREATE a backend (zpool OR LVM-thin) when none
+    /// is detected. Absent + no backend = actionable bail.
+    #[arg(long)]
+    confirm_storage: bool,
+}
+
+#[derive(Args)]
+struct StorageEnsureArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to drive storage through (the runner holding the host ssh key)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Tenant: relay | cp | k3s-volumes
+    #[arg(long)]
+    tenant: String,
+    /// The relay's identity domain (for the dataset naming)
+    #[arg(long)]
+    domain: String,
+    /// Storage pool (zpool name / VG name)
+    #[arg(long)]
+    pool: String,
+}
+
+#[derive(Args)]
+struct StorageDestroyArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Target to drive storage through (the runner holding the host ssh key)
+    #[arg(long, default_value = "proxmox-box")]
+    target: String,
+    /// Tenant: relay | cp | k3s-volumes
+    #[arg(long)]
+    tenant: String,
+    /// The relay's identity domain (for the dataset naming)
+    #[arg(long)]
+    domain: String,
+    /// Storage pool (zpool name / VG name)
+    #[arg(long)]
+    pool: String,
+}
+
 #[derive(Args)]
 struct BootstrapArgs {
     #[command(flatten)]
@@ -370,6 +455,10 @@ struct BootstrapArgs {
     lxc_ip: Option<String>,
     #[arg(long)]
     lxc_gw: Option<String>,
+    /// Durable-plane dataset mount baked into `pct create` (repeatable),
+    /// shape `<dataset>:<guest-path>` — the "born on the plane" reference.
+    #[arg(long, value_parser = parse_mount)]
+    mount: Vec<MountSpec>,
     /// Vultr region (vultr-vps)
     #[arg(long, default_value = "atl")]
     region: String,
@@ -531,6 +620,122 @@ struct DemoArgs {
     /// JSON steps file: [{target, cmd, secrets?}]
     #[arg(long)]
     steps: PathBuf,
+}
+
+/// Phase 0.12 storage subcommand dispatch.
+async fn storage_dispatch(args: &StorageArgs) -> Result<()> {
+    match &args.cmd {
+        StorageCmd::Resolve(a) => {
+            let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
+            let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
+            match crate::drive::resolve_proxmox(
+                &client,
+                &a.target,
+                a.confirm_storage,
+                a.device.as_deref(),
+            )
+            .await?
+            {
+                crate::planebase::ResolveAction::Reuse(backend, pool) => {
+                    let label = match backend {
+                        crate::planebase::ExistingBackend::Zfs => "ZFS zpool",
+                        crate::planebase::ExistingBackend::LvmThin => "LVM VG/thin-pool",
+                    };
+                    println!(
+                        "STORAGE: reusing existing backend ({label} {pool}) — nothing created"
+                    );
+                    // Machine-parseable for the pipeline to thread the REAL
+                    // backend identity into the ensure + config steps.
+                    println!("STORAGE-POOL: {pool}");
+                }
+                crate::planebase::ResolveAction::Create(backend, pool) => {
+                    println!(
+                        "STORAGE: creating new backend ({}, pool {pool}) with consent…",
+                        match backend {
+                            crate::planebase::Backend::Zfs => "ZFS zpool",
+                            crate::planebase::Backend::LvmThin => "LVM-thin pool",
+                        }
+                    );
+                    println!("STORAGE-POOL: {pool}");
+                    match backend {
+                        crate::planebase::Backend::Zfs => {
+                            crate::drive::ensure_zpool(
+                                &client,
+                                &a.target,
+                                &pool,
+                                a.device.as_deref(),
+                            )
+                            .await?;
+                        }
+                        crate::planebase::Backend::LvmThin => {
+                            // consent + no zpool + no VG: drive's per-tenant
+                            // ensure creates the thin pool in a NEW VG when
+                            // needed; there is no VG to name here yet.
+                            println!(
+                                "STORAGE: LVM-thin — per-tenant ensure will create the pool+LV"
+                            );
+                        }
+                    }
+                }
+                crate::planebase::ResolveAction::Bail(m) => anyhow::bail!("{m}"),
+            }
+            Ok(())
+        }
+        StorageCmd::Ensure(a) => {
+            let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
+            let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
+            let tenant = parse_tenant(&a.tenant)?;
+            // Ensure + chown the tenant's dataset(s), then print the
+            // HOST-resolved born-at-create specs — one `<source>:<guest>`
+            // per line — for the pipeline to record into `plane.mounts`.
+            let mounts =
+                crate::drive::resolve_tenant_mounts(&client, &a.target, &a.pool, &a.domain, tenant)
+                    .await?;
+            for m in &mounts {
+                println!("STORAGE-MOUNT {}:{}", m.source, m.guest_path);
+            }
+            println!("STORAGE: {} datasets ensured + guest-writable", tenant);
+            Ok(())
+        }
+        StorageCmd::Destroy(a) => {
+            let (agent_dir, runner_pubkey) = resolve_door(&a.common, &a.target)?;
+            let client = flows::connect(&a.common.addr, &agent_dir, &runner_pubkey)?;
+            let tenant = parse_tenant(&a.tenant)?;
+            // The bool distinguishes ABSENT (nothing to destroy — a no-op for
+            // the caller) from DESTROYED (the dataset subtree went away). The
+            // pipeline's teardown needs the distinction: absent is tolerated,
+            // a real destroy failure is not.
+            let destroyed = crate::drive::destroy_tenant_dataset(
+                &client, &a.target, &a.pool, &a.domain, tenant,
+            )
+            .await?;
+            println!("STORAGE-DESTROYED: {destroyed}");
+            Ok(())
+        }
+    }
+}
+
+fn parse_tenant(s: &str) -> Result<crate::planebase::Tenant> {
+    match s {
+        "relay" => Ok(crate::planebase::Tenant::Relay),
+        "cp" => Ok(crate::planebase::Tenant::Cp),
+        "k3s-volumes" | "k3s" => Ok(crate::planebase::Tenant::K3sVolumes),
+        other => anyhow::bail!("unknown tenant {other:?} (relay | cp | k3s-volumes)"),
+    }
+}
+
+/// Parse a `<dataset>:<guest-path>` mount spec (the `--mount` value).
+fn parse_mount(s: &str) -> Result<crate::planebase::MountSpec> {
+    let (src, dst) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("--mount must be <dataset>:<guest-path> (got {s:?})"))?;
+    if src.is_empty() || dst.is_empty() {
+        anyhow::bail!("--mount must be <dataset>:<guest-path> (got {s:?})");
+    }
+    Ok(crate::planebase::MountSpec {
+        source: src.to_string(),
+        guest_path: dst.to_string(),
+    })
 }
 
 /// Parse argv and run — the CLI surface shared by the `freehold` bin (with
@@ -1031,19 +1236,36 @@ async fn cli_body() -> Result<()> {
             for (role, vmid) in &plan.lxcs {
                 println!("    destroy:     {role} LXC {vmid}");
             }
-            println!("    world:       {}", plan.world_home.display());
-            println!("    config:      {}", plan.config_path.display());
-            println!(
-                "    door:        the {} runner's key → removed from the host LAST",
-                plan.door_target
-            );
+            if let Some(tenant) = &args.tenant {
+                println!(
+                    "    scope:       per-tenant {tenant}{}",
+                    if args.data {
+                        " (data+compute)"
+                    } else {
+                        " (compute-only)"
+                    }
+                );
+                println!("    config:      KEPT (coords + dataset mapping for reattach)");
+                println!("    door:        LEFT IN PLACE (per-tenant teardown keeps the world)");
+            } else {
+                println!(
+                    "    scope:       whole-world{}",
+                    if args.data { " (datasets too)" } else { "" }
+                );
+                println!("    world:       {}", plan.world_home.display());
+                println!("    config:      {}", plan.config_path.display());
+                println!(
+                    "    door:        the {} runner's key → removed from the host LAST",
+                    plan.door_target
+                );
+            }
             println!();
             if !args.yes {
                 // Auth seam (deferred per plan): this typed "yes" becomes the
                 // operator-signature check once teardown is proven.
                 let mut line = String::new();
                 use std::io::{BufRead, Write};
-                print!("Type 'yes' to destroy the managed world: ");
+                print!("Type 'yes' to destroy: ");
                 std::io::stdout().flush()?;
                 std::io::stdin().lock().read_line(&mut line)?;
                 let ok = line.trim() == "yes";
@@ -1052,7 +1274,15 @@ async fn cli_body() -> Result<()> {
                     return Ok(());
                 }
             }
-            println!("{}", freehold_installer::teardown::run(&cfg_path, true)?);
+            println!(
+                "{}",
+                freehold_installer::teardown::run_scoped(
+                    &cfg_path,
+                    args.tenant.as_deref(),
+                    args.data,
+                    true,
+                )?
+            );
             Ok(())
         }
         Cmd::RelayProfile(args) => {
@@ -1159,6 +1389,7 @@ async fn cli_body() -> Result<()> {
             println!("SETUP: #freehold ready — agents joined + greeted");
             Ok(())
         }
+        Cmd::Storage(args) => storage_dispatch(&args).await,
         Cmd::Readiness(args) => {
             let (agent_dir, runner_pubkey) = resolve_door(&args, "proxmox-box")?;
             let client = flows::connect(&args.addr, &agent_dir, &runner_pubkey)?;
@@ -1189,6 +1420,7 @@ async fn cli_body() -> Result<()> {
                         bridge: args.bridge.clone(),
                         net_ip: args.lxc_ip.clone(),
                         net_gw: args.lxc_gw.clone(),
+                        mounts: args.mount.clone(),
                     };
                     bootstrap::bootstrap_proxmox_lxc(&client, &args.target, &spec).await?
                 }

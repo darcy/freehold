@@ -79,6 +79,13 @@ impl ConfigureState {
         let answers = Answers::from_config(&cfg);
         let stages = vec![
             CStage {
+                name: "durable volume plane (resolve + ensure datasets)",
+                status: CStatus::Pending,
+                tail: String::new(),
+                started_at: None,
+                finished_at: None,
+            },
+            CStage {
                 name: "relay LXC (boot if missing)",
                 status: CStatus::Pending,
                 tail: String::new(),
@@ -163,18 +170,21 @@ impl ConfigureState {
             // the SAME real probes the running mode uses — a reachable proxy
             // must not let the pipeline SKIP a deploy that never happened.
             let present = match i {
-                0 => probe_lxc(&a, cfg.lxc.relay.vmid)?,
-                1 => probe_lxc(&a, cfg.lxc.cp.vmid)?,
+                // storage: already present iff the plane is resolved in config
+                // (idempotent re-converge confirms + creates nothing).
+                0 => cfg.plane.backend.is_some(),
+                1 => probe_lxc(&a, cfg.lxc.relay.vmid)?,
+                2 => probe_lxc(&a, cfg.lxc.cp.vmid)?,
                 // a STOPPED or broken k3s guest must NOT report "already
                 // present" — the API itself has to answer (the same rule as
-                // stages 3/4's live checks; there is no later stage to
+                // stages 4/5's live checks; there is no later stage to
                 // catch a dead cluster).
-                2 => match cfg.lxc.k3s.ip {
+                3 => match cfg.lxc.k3s.ip {
                     Some(_) => k3s_live(&cfg),
                     None => false,
                 },
-                3 => relay_live(&cfg),
-                4 => cp_live(&cfg),
+                4 => relay_live(&cfg),
+                5 => cp_live(&cfg),
                 _ => false,
             };
             Ok(if present { "1".into() } else { "0".into() })
@@ -188,22 +198,36 @@ impl ConfigureState {
         self.job = Some(i);
         self.runner.spawn(move || match i {
             0 => {
+                // The pipeline NEVER auto-creates a backend: consent is the
+                // operator's, and this spawned stage has no prompt path. We
+                // pass false (reuse an existing backend, bail with an
+                // actionable message if one must be created) — a greenfield
+                // host creates via `freehold storage resolve
+                // --confirm-storage` run by the operator, gated like
+                // teardown-grade destruction.
+                //
+                // The stage is still idempotent: reuse-or-bail never
+                // mutates an existing backend.
+                freehold_installer::stage_storage(&a, false)?;
+                Ok("durable volume plane ready (reused existing backend)".to_string())
+            }
+            1 => {
                 stage_bootstrap(&a, "relay", a.relay_vmid)?;
                 Ok("relay LXC ready".to_string())
             }
-            1 => {
+            2 => {
                 stage_bootstrap(&a, "cp", a.cp_vmid)?;
                 Ok("cp LXC ready".to_string())
             }
-            2 => {
+            3 => {
                 freehold_installer::stage_k3s(&a)?;
                 Ok("k3s cluster ready".to_string())
             }
-            3 => {
+            4 => {
                 stage_deploy_relay(&a)?;
                 Ok(format!("relay live at https://{}", a.domain))
             }
-            4 => {
+            5 => {
                 stage_deploy_cp(&a)?;
                 Ok(format!("control plane live at https://cp-{}", a.domain))
             }
@@ -224,10 +248,10 @@ impl ConfigureState {
                         self.stages[i].freeze();
                         // a REUSED LXC may predate the write-back — record
                         // its coords now so the deploy stages can run.
-                        if i == 0 || i == 1 || i == 2 {
-                            let role = if i == 0 {
+                        if i == 1 || i == 2 || i == 3 {
+                            let role = if i == 1 {
                                 "relay"
-                            } else if i == 1 {
+                            } else if i == 2 {
                                 "cp"
                             } else {
                                 "k3s"
@@ -265,10 +289,10 @@ impl ConfigureState {
                         // record the ACTUAL post-boot coordinates (auto vmid +
                         // dhcp ip) in the config — the user asked for this the
                         // moment the LXC exists.
-                        if i == 0 || i == 1 || i == 2 {
-                            let role = if i == 0 {
+                        if i == 1 || i == 2 || i == 3 {
+                            let role = if i == 1 {
                                 "relay"
-                            } else if i == 1 {
+                            } else if i == 2 {
                                 "cp"
                             } else {
                                 "k3s"
