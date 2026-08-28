@@ -170,9 +170,15 @@ impl ConfigureState {
             // the SAME real probes the running mode uses — a reachable proxy
             // must not let the pipeline SKIP a deploy that never happened.
             let present = match i {
-                // storage: already present iff the plane is resolved in config
-                // (idempotent re-converge confirms + creates nothing).
-                0 => cfg.plane.backend.is_some(),
+                // storage: NEVER skip. `backend.is_some()` in config is not
+                // proof the plane is live — per-tenant data+compute teardown
+                // KEEPS the config (reattach) but destroys the datasets, and
+                // a skipped ensure then leaves the boot baking STALE recorded
+                // mounts (`/srv/buzz-relay`, no backup flag) + a rootfs-backed
+                // /var/lib/docker (dockerd dies on EPERM, not fuse). ensure is
+                // idempotent (confirm + create nothing), so running it every
+                // converge is exactly the documented behavior.
+                0 => false,
                 1 => probe_lxc(&a, cfg.lxc.relay.vmid)?,
                 2 => probe_lxc(&a, cfg.lxc.cp.vmid)?,
                 // a STOPPED or broken k3s guest must NOT report "already

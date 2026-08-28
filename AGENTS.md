@@ -184,7 +184,12 @@ were re-anchored to match (implemented | live-verified).
   `backup=0`. Guest paths are the `planebase::GUEST_PATH_*` constants; the CLI literal
   defaults are pinned against them by `deploy_paths_track_guest_paths`. The TUI's DATA
   tab shows this plane live (host capacity + per-mount size/used/liveness) through the
-  signed runner channel — read-only, never a new console endpoint.
+  signed runner channel — read-only, never a new console endpoint. **The converge
+  pipeline's plane stage is NEVER skipped** (`backend.is_some()` in the config is not
+  proof the plane is live — per-tenant data+compute teardown KEEPS the config for
+  reattach but destroys the datasets, and a skipped ensure then boots with stale
+  recorded mounts + a rootfs-backed `/var/lib/docker`; ensure is idempotent, so it
+  runs every converge).
 
 ## Chunk 1 (current work)
 
