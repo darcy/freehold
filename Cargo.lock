@@ -1452,6 +1452,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "freehold-harness-oracle"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "freehold-core",
+ "hex",
+ "serde_json",
+]
+
+[[package]]
 name = "freehold-installer"
 version = "0.1.0"
 dependencies = [
