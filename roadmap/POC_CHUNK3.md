@@ -42,14 +42,20 @@ started; see Phase C below.
 
 Named follow-ups (not yet live): the LVM-thin rung is IMPLEMENTED +
 hermetic-tested — a stock PVE LVM host (VG `pve`, no ZFS) resolves
-`Reuse(LvmThin)` and `ensure` builds thin-LV mounts (thin pool once per VG,
-one thin LV per tenant — relay keeps TWO, docker-root + deploy; mkfs + mount
-at `/freehold/<domain-dash>/<tenant|child>` + chown to the shifted guest uid;
-the backend KIND is recorded in `plane.backend_kind` so teardown's destroy
-dispatches `zfs destroy -r` vs `lvremove`). The advertised
-`ZFS → LVM-thin → bail` order is real on both rungs now. What remains
-pre-C0 is the LIVE acceptance: running the LVM ensure/destroy + relay
-two-child + k3s-reattach gates against the actual PVE host.
+`Reuse(LvmThin)` and `ensure` builds thin-LV mounts: the VG's EXISTING thin
+pool is REUSED (stock PVE `pve/data`; a fresh `freehold-thin` carve-out only
+when the VG truly has none), one thin LV per tenant (relay keeps TWO,
+docker-root + deploy), mkfs gated on blkid (a partial failure recovers on
+rerun), mount at `/freehold/<domain-dash>/<tenant|child>` + chown to the
+shifted guest uid + an idempotent /etc/fstab entry (a host reboot restores
+the plane — a bare mount would not). The backend KIND is recorded in
+`plane.backend_kind` and threaded back into every `storage ensure|destroy`
+as `--kind`, so a host with BOTH a zpool and a VG never drives an
+LVM-backed tenant through the ZFS arm; destroy unmounts + strips the fstab
+line before `lvremove` (which refuses a mounted LV even with `-f`). The
+advertised `ZFS → LVM-thin → bail` order is real on both rungs now. What
+remains pre-C0 is the LIVE acceptance: running the LVM ensure/destroy +
+relay two-child + k3s-reattach gates against the actual PVE host.
 
 ### Why this exists
 
