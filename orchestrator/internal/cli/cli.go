@@ -22,13 +22,32 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 }
 
-// Execute runs the root command tree and returns the exit-relevant error.
+// Execute runs the CLI with the process args (the freehold-orchestrator
+// binary entry point) and returns any error.
 func Execute() error {
+	return runErr(rootCmd.Execute())
+}
+
+// runErr optionally prints the error (SilenceErrors is on).
+func runErr(err error) error {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	return err
+}
+
+// Run executes the CLI with the given subcommand args (the freehold binary
+// forwards them here) and returns the process exit code.
+func Run(args []string) int {
+	oldArgs := os.Args
+	os.Args = append([]string{"freehold"}, args...)
+	defer func() { os.Args = oldArgs }()
+	rootCmd.SetArgs(args)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return err
+		return 1
 	}
-	return nil
+	return 0
 }
 
 func init() {
