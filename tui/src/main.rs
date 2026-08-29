@@ -43,7 +43,7 @@ fn main() -> Result<()> {
                 .context("--config needs a path")?;
             run_tui(path)
         }
-        Some(_) => freehold_orchestrator::cli::dispatch(),
+        Some(_) => freehold_orchestrator_lib::cli::dispatch(),
     }
 }
 

@@ -27,7 +27,7 @@ pub struct Running {
     pub services: Vec<ServiceRow>,
     pub agents: Vec<AgentRow>,
     /// the durable-plane snapshot (DATA view) — host capacity + per-mount.
-    pub data: Option<freehold_orchestrator::drive::StorageInfo>,
+    pub data: Option<freehold_orchestrator_lib::drive::StorageInfo>,
     /// Console API parity (the runner lists).
     pub cp: ConsolePanel,
     /// Background refresh: every network call lives on a worker thread —
@@ -477,7 +477,7 @@ struct Snapshot {
     local: Vec<LocalRunner>,
     /// DELTA: the live durable-plane snapshot (DATA view). None when the
     /// runner/world can't answer — the UI keeps the last good snapshot.
-    data: Option<freehold_orchestrator::drive::StorageInfo>,
+    data: Option<freehold_orchestrator_lib::drive::StorageInfo>,
     overview: Option<freehold_console_client::Overview>,
     /// a fresh session for the UI to install (None keeps the existing one).
     session: Option<(Option<Client>, AuthState, String)>,
@@ -885,10 +885,10 @@ fn read_local(cfg: &Option<Config>) -> Vec<LocalRunner> {
 /// read-only `zfs`/`lvs`/`df`/`pct` probes on the host. Every failure
 /// (no plane, runner down, identity missing) degrades to None — the DATA
 /// view then keeps the last good snapshot and shows its age honestly.
-fn plane_info(cfg: &Config) -> Option<freehold_orchestrator::drive::StorageInfo> {
+fn plane_info(cfg: &Config) -> Option<freehold_orchestrator_lib::drive::StorageInfo> {
     let kind = match cfg.plane.backend_kind.as_deref() {
-        Some("zfs") => freehold_orchestrator::planebase::BackendKind::Zfs,
-        Some("lvmth") => freehold_orchestrator::planebase::BackendKind::LvmThin,
+        Some("zfs") => freehold_orchestrator_lib::planebase::BackendKind::Zfs,
+        Some("lvmth") => freehold_orchestrator_lib::planebase::BackendKind::LvmThin,
         _ => return None,
     };
     let pool = cfg.plane.backend.as_deref()?;
@@ -915,9 +915,9 @@ fn plane_info(cfg: &Config) -> Option<freehold_orchestrator::drive::StorageInfo>
     }
     let agent_dir = freehold_installer::ops_dir();
     let client =
-        freehold_orchestrator::flows::connect(&cfg.runner.addr, &agent_dir, &cfg.runner.pubkey)
+        freehold_orchestrator_lib::flows::connect(&cfg.runner.addr, &agent_dir, &cfg.runner.pubkey)
             .ok()?;
-    freehold_orchestrator::drive::storage_info(&client, &cfg.runner.target, kind, pool, &mounts)
+    freehold_orchestrator_lib::drive::storage_info(&client, &cfg.runner.target, kind, pool, &mounts)
         .ok()
 }
 

@@ -725,10 +725,10 @@ fn draw_data<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
     for m in &info.mounts {
         let size = m
             .size
-            .map_or("—".to_string(), freehold_orchestrator::drive::human_bytes);
+            .map_or("—".to_string(), freehold_orchestrator_lib::drive::human_bytes);
         let used = m
             .used
-            .map_or("—".to_string(), freehold_orchestrator::drive::human_bytes);
+            .map_or("—".to_string(), freehold_orchestrator_lib::drive::human_bytes);
         let fill = match (m.used, m.size) {
             (Some(u), Some(s)) if s > 0 => format!("{}%", (u * 100).div_ceil(s)),
             _ => "—".into(),
@@ -746,7 +746,7 @@ fn draw_data<'a>(area: Rect, f: &mut Frame<'a>, rn: &Running) {
 }
 
 /// Fill-ratio traffic light: green < 70%, yellow < 90%, red at/above.
-fn fill_color(m: &freehold_orchestrator::drive::MountUsage) -> Color {
+fn fill_color(m: &freehold_orchestrator_lib::drive::MountUsage) -> Color {
     match (m.used, m.size) {
         (Some(u), Some(s)) if s > 0 => {
             let pct = (u * 100) / s;

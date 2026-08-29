@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 freehold-installer = { path = "../installer" }
 freehold-core = { path = "../core" }
-freehold-orchestrator = { path = "../orchestrator" }
+freehold-orchestrator-lib = { path = "../orchestrator-rust" }
 freehold-console-client = { path = "../console-client" }
 freehold-control-plane = { path = "../control-plane" }
 anyhow = "1"

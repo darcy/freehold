@@ -1478,7 +1478,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "freehold-orchestrator"
+name = "freehold-orchestrator-lib"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1555,7 +1555,7 @@ dependencies = [
  "freehold-control-plane",
  "freehold-core",
  "freehold-installer",
- "freehold-orchestrator",
+ "freehold-orchestrator-lib",
  "ratatui",
  "serde",
  "serde_json",
