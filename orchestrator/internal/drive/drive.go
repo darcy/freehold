@@ -43,73 +43,6 @@ func HumanBytes(b uint64) string {
 	case v >= KIB:
 		return fmt.Sprintf("%.0fK", v/KIB)
 	default:
-		return fmt.Sprintf("%d", b) + "B"
-	}
-}
-
-// HostCapacity: ZFS = zpool size/alloc/free; LVM = VG size/free + thin-pool
-// data%. Advisory — degrades to "—" on probe failure.
-func HostCapacity(c client.Connecter, target string, kind planebase.BackendKind, pool string) string {
-	_ = c
-	_ = target
-	_ = kind
-	_ = pool
-	return "—"
-}
-</parameter>
-</invoke>
-</invoke>
-
-Let me write the drive package. First fix the client.Connecter issue — my McpClient is a concrete type, not an interface. Let me use `*client.McpClient` directly.
-
-Given the persistent corruption, let me write drive.go in full via a clean single write, using `*client.McpClient` (the concrete client from the ported package).Let me write the drive package using the concrete `*client.McpClient` (avoiding the interface mismatch) in one clean write.
-
-<parameter name="write">
-<parameter name="content">// Package drive reproduces the orchestrator's durable-plane storage driver
-// (orchestrator/src/drive.rs): the read-only storage-info snapshot for the
-// TUI's DATA view, driven through the runner's ONE exec primitive.
-package drive
-
-import (
-	"fmt"
-	"strconv"
-	"strings"
-
-	"freehold/orchestrator/internal/bootstrap"
-	"freehold/orchestrator/internal/client"
-	"freehold/orchestrator/internal/planebase"
-)
-
-// MountUsage is one durable-plane mount's host size/used + guest liveness.
-type MountUsage struct {
-	Role         string
-	Source       string
-	Guest        string
-	Size         *uint64
-	Used         *uint64
-	GuestMounted *bool
-}
-
-// StorageInfo is the live, read-only plane snapshot.
-type StorageInfo struct {
-	Capacity string
-	Mounts   []MountUsage
-}
-
-// HumanBytes renders a short capacity string ("1.2T" / "814.7M" / "40K").
-func HumanBytes(b uint64) string {
-	const KIB = 1024.0
-	v := float64(b)
-	switch {
-	case v >= KIB*KIB*KIB*KIB:
-		return fmt.Sprintf("%.1fT", v/(KIB*KIB*KIB*KIB))
-	case v >= KIB*KIB*KIB:
-		return fmt.Sprintf("%.1fG", v/(KIB*KIB*KIB))
-	case v >= KIB*KIB:
-		return fmt.Sprintf("%.0fM", v/(KIB*KIB))
-	case v >= KIB:
-		return fmt.Sprintf("%.0fK", v/KIB)
-	default:
 		return fmt.Sprintf("%dB", b)
 	}
 }
@@ -172,10 +105,11 @@ func thinPoolDataPct(c *client.McpClient, target, vg string) *float64 {
 }
 
 func parseLvsDataPct(stdout string) *float64 {
-	var rows []struct {
+	type row struct {
 		name string
 		pct  *float64
 	}
+	var rows []row
 	for _, line := range strings.Split(stdout, "\n") {
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
@@ -184,12 +118,10 @@ func parseLvsDataPct(stdout string) *float64 {
 		name := strings.Trim(parts[0], "[]")
 		var p *float64
 		if f, err := strconv.ParseFloat(parts[1], 64); err == nil {
-			p = &f
+			p2 := f
+			p = &p2
 		}
-		rows = append(rows, struct {
-			name string
-			pct  *float64
-		}{name, p})
+		rows = append(rows, row{name, p})
 	}
 	var pool string
 	for _, r := range rows {
@@ -200,13 +132,13 @@ func parseLvsDataPct(stdout string) *float64 {
 	if pool == "" {
 		return nil
 	}
-	hasTdata := false
+	hasData := false
 	for _, r := range rows {
 		if r.name == pool+"_tdata" {
-			hasTdata = true
+			hasData = true
 		}
 	}
-	if !hasTdata {
+	if !hasData {
 		return nil
 	}
 	for _, r := range rows {
@@ -217,7 +149,7 @@ func parseLvsDataPct(stdout string) *float64 {
 	return nil
 }
 
-// ParseHLine parses one `H <source> <size> <used>` probe line ("-" = absent).
+// ParseHLine parses one "H <source> <size> <used>" probe line ("-" = absent).
 func ParseHLine(line string) (src string, size, used *uint64) {
 	rest, ok := strings.CutPrefix(line, "H ")
 	if !ok {
@@ -240,10 +172,10 @@ func ParseHLine(line string) (src string, size, used *uint64) {
 	return parts[0], size, used
 }
 
-// ParseGLine parses one `G <vmid> <guest> ok|down` probe line.
+// ParseGLine parses one "G <vmid> <guest> ok|down" probe line.
 func ParseGLine(line string) (vmid uint32, mp string, ok bool, valid bool) {
-	rest, okp := strings.CutPrefix(line, "G ")
-	if !okp {
+	rest, validp := strings.CutPrefix(line, "G ")
+	if !validp {
 		return
 	}
 	parts := strings.Fields(rest)
@@ -257,10 +189,18 @@ func ParseGLine(line string) (vmid uint32, mp string, ok bool, valid bool) {
 	return uint32(n), parts[1], parts[2] == "ok", true
 }
 
+// MountArg is one mount reference for StorageInfo.
+type MountArg struct {
+	Role   string
+	Source string
+	Guest  string
+	VMID   *uint32
+}
+
 // StorageInfo probes the live plane: host size/used per mount source plus
-// guest bind-mount liveness, and the host capacity summary. mounts =
+// guest bind-mount liveness, and the host capacity summary. mounts reference
 // (role, source, guest, vmid); vmid nil skips the guest probe.
-func StorageInfo(c *client.McpClient, target string, kind planebase.BackendKind, pool string, mounts []MountArg) (*StorageInfo, error) {
+func ProbeStorage(c *client.McpClient, target string, kind planebase.BackendKind, pool string, mounts []MountArg) (*StorageInfo, error) {
 	var srcs []string
 	for _, m := range mounts {
 		srcs = append(srcs, m.Source)
@@ -275,7 +215,6 @@ func StorageInfo(c *client.McpClient, target string, kind planebase.BackendKind,
 			host[src] = [2]*uint64{size, used}
 		}
 	}
-	// guest liveness: only mounts with a vmid.
 	guests := map[[2]interface{}]bool{}
 	var pairs []string
 	for _, m := range mounts {
@@ -308,23 +247,9 @@ func StorageInfo(c *client.McpClient, target string, kind planebase.BackendKind,
 	return &StorageInfo{Capacity: capacity, Mounts: rows}, nil
 }
 
-// MountArg is one mount reference for StorageInfo.
-type MountArg struct {
-	Role   string
-	Source string
-	Guest  string
-	VMID   *uint32
-}
-
 // ExecHost runs the host source probe (zfs used/avail or df).
 func ExecHost(c *client.McpClient, target, srcList string) (string, error) {
-	cmd := fmt.Sprintf(
-		"for p in %s; do \
-		 if zfs list -H \"$p\" >/dev/null 2>&1; then \
-		 echo \"H $p $(zfs list -H -p -o used,avail \"$p\" | awk '{print $1+$2\" \"$1}')\"; \
-		 elif mountpoint -q \"$p\" 2>/dev/null; then \
-		 echo \"H $p $(df -B1 \"$p\" | tail -1 | awk '{print $2\" \"$3}')\"; \
-		 else echo \"H $p - -\"; fi; done", srcList)
+	cmd := `for p in ` + srcList + `; do if zfs list -H "$p" >/dev/null 2>&1; then echo "H $p $(zfs list -H -p -o used,avail "$p" | awk '{print $1+$2 " " $1}')"; elif mountpoint -q "$p" 2>/dev/null; then echo "H $p $(df -B1 "$p" | tail -1 | awk '{print $2 " " $3}')"; else echo "H $p - -"; fi; done`
 	out, err := bootstrap.Exec(c, target, cmd, 120)
 	if err != nil {
 		return "", err
@@ -334,18 +259,10 @@ func ExecHost(c *client.McpClient, target, srcList string) (string, error) {
 
 // ExecGuests runs the guest bind-mount liveness probe.
 func ExecGuests(c *client.McpClient, target, spec string) (string, error) {
-	cmd := fmt.Sprintf(
-		"for s in %s; do vmid=${s%%:*}; mp=${s#*:}; \
-		 if pct status \"$vmid\" 2>/dev/null | grep -q running; then \
-		 if pct exec \"$vmid\" -- mountpoint -q \"$mp\" 2>/dev/null; then \
-		 echo \"G $vmid $mp ok\"; else echo \"G $vmid $mp down\"; fi; \
-		 else echo \"G $vmid $mp down\"; fi; done", spec)
+	cmd := `for s in ` + spec + `; do vmid=${s%%:*}; mp=${s#*:}; if pct status "$vmid" 2>/dev/null | grep -q running; then if pct exec "$vmid" -- mountpoint -q "$mp" 2>/dev/null; then echo "G $vmid $mp ok"; else echo "G $vmid $mp down"; fi; else echo "G $vmid $mp down"; fi; done`
 	out, err := bootstrap.Exec(c, target, cmd, 120)
 	if err != nil {
 		return "", err
 	}
 	return out.Stdout, nil
 }
-</parameter>
-<parameter name="path">/home/darcy/Work/freehold/orchestrator/internal/drive/drive.go</parameter>
-<parameter name="i">Write drive package

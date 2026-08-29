@@ -83,6 +83,8 @@ type Model struct {
 	Storage     []DataRow
 	Err         string
 	Msg         string
+	Flow        *tuiFlow
+	console     *consoleClient
 }
 
 // ServiceRow is one managed piece of the world.

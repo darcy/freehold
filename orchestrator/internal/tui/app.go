@@ -144,8 +144,11 @@ func (m *Model) buildAgents(cfg *config.Config) {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.KeyMsg:
+		if m.Flow != nil {
+			return m.handleFlow(v)
+		}
 		switch v.String() {
-		case "q", "esc", "ctrl+c":
+		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab":
 			m.nextView()
@@ -155,6 +158,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Mode == ModeRunning {
 				m.Msg = "data refresh requested"
 			}
+		case "l":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowLogin)
+			}
+		case "p":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowProvision)
+			}
+		case "x":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowRevoke)
+			}
+		case "g":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowGrant)
+			}
+		}
+	case flowMsg:
+		m.Flow = nil
+		m.refreshLocal()
+		if v.err != nil {
+			m.Err = v.err.Error()
+		} else {
+			m.Msg = v.ok
 		}
 	case tickMsg:
 		m.LastRef = time.Now()
@@ -196,6 +223,9 @@ func (m *Model) View() string {
 	} else {
 		b.WriteString(renderProbes(m) + "\n")
 		b.WriteString(renderViews(m))
+	}
+	if m.Flow != nil {
+		b.WriteString("\n  " + styleYellow.Render(promptLabel(m.Flow.Kind, m.Flow.Step)) + ": " + fieldValue(m.Flow) + "\n")
 	}
 	b.WriteString("\n" + m.footer())
 	return lipgloss.NewStyle().Render(b.String())
