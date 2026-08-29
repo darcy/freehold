@@ -36,15 +36,13 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 ## Repository layout (what things do in the code)
 
 ```
-Cargo.toml            workspace: core, runner, console-client, control-plane, orchestrator-rust, testkit,
-                      acceptance, installer, tui, orchestrator/harness/oracle
-orchestrator/        freehold-orchestrator (Go, the live CLI): the full 16-subcommand
-                      contract, byte-exact crypto/wire cross-verified against the Rust core
-                      by the oracle-harness gate (`go test ./orchestrator/harness/...`);
-                      bootstrap + teardown drivers are the remaining in-progress pieces
-orchestrator-rust/   freehold-orchestrator-lib (Rust): the `drive::` storage types + `cli::`
-                      surfaces the TUI still links; the standalone `freehold-orchestrator`
-                      binary is DEPRECATED (Go owns the binary name now)
+Cargo.toml            workspace: core, runner, console-client, control-plane, testkit,
+                      acceptance, installer, orchestrator/harness/oracle
+orchestrator/        freehold (Go): the full CLI + interactive TUI — the live toolchain.
+                      Subcommands mirror the 16-command contract; the crypto/wire layer is
+                      byte-exact cross-verified against the Rust core by the oracle-harness
+                      gate (`go test ./orchestrator/harness/...`). The Rust tui and a
+                      freehold-orchestrator-lib are REMOVED (superseded by the Go binary).
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -119,7 +117,7 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
 
 ```sh
-cargo test --workspace        # tests across core / runner / console-client / control-plane / orchestrator-rust / acceptance
+cargo test --workspace        # tests across core / runner / console-client / control-plane / installer / acceptance
 cd orchestrator && go test ./...      # the Go CLI's byte-exact harness + hermetic unit tests
 (cd orchestrator && go build -o ~/bin/freehold-orchestrator ./cmd/freehold-orchestrator)  # build the Go CLI
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
@@ -130,7 +128,7 @@ cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopba
 ### The appliance (`freehold` — one binary, two surfaces)
 
 ```sh
-freehold                      # no args → the TUI (ratatui)
+freehold                      # no args → the interactive TUI (bubbletea); a subcommand → the CLI
 freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
 freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
 freehold deploy-relay …       #   memory, console-login, grant, storage …)
