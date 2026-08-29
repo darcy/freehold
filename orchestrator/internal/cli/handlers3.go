@@ -635,7 +635,9 @@ var teardownCmd = &cobra.Command{
 		}
 
 		// The door must work before anything remote: a signed exec probe.
-		out, err := flows.Exec(cfg.Runner.Addr, agentDir, cfg.Runner.Pubkey, cfg.Runner.Target, "echo freehold-door-ok", nil, 30)
+		// The ssh target requires its own secret in `secrets` (same rule the
+		// exec CLI applies when no --secret refs are given).
+		out, err := flows.Exec(cfg.Runner.Addr, agentDir, cfg.Runner.Pubkey, cfg.Runner.Target, "echo freehold-door-ok", []string{cfg.Runner.Target}, 30)
 		if err != nil {
 			return fmt.Errorf("teardown won't touch the host: the door can't be verified — fix/start the runner first: %w", err)
 		}

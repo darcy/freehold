@@ -234,6 +234,11 @@ func (c *McpClient) Readiness() (map[string]interface{}, error) {
 
 // Exec runs a command on target with a runner-side watchdog of timeoutS.
 func (c *McpClient) Exec(target, cmd string, secrets []string, timeoutS uint64) (*ExecOutcome, error) {
+	// The runner is Rust: serde wants a SEQUENCE for `secrets` — a Go nil
+	// slice marshals as `null` and is rejected. Always send an array.
+	if secrets == nil {
+		secrets = []string{}
+	}
 	arguments := map[string]interface{}{
 		"cmd":       cmd,
 		"target":    target,
