@@ -13,6 +13,7 @@ import (
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/deploy"
+	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/planebase"
 	"freehold/orchestrator/internal/teardown"
@@ -337,14 +338,67 @@ var storageResolveCmd = &cobra.Command{
 		}
 		switch action.Kind {
 		case "Reuse":
-			fmt.Printf("reuse existing backend (%s, pool %s)\n", action.Detected.String(), action.Pool)
+			label := "ZFS zpool"
+			if *action.Detected == planebase.ExistingLvmThin {
+				label = "LVM VG/thin-pool"
+			}
+			fmt.Printf("STORAGE: reusing existing backend (%s %s) — nothing created\n", label, action.Pool)
+			// Machine-parseable for the pipeline to thread the REAL backend
+			// identity into the ensure + config steps.
+			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
 		case "Create":
-			fmt.Printf("create backend (%s, pool %s)\n", action.Backend.String(), action.Pool)
+			label := "ZFS zpool"
+			if *action.Backend == planebase.BackendLvmThin {
+				label = "LVM-thin pool"
+			}
+			fmt.Printf("STORAGE: creating new backend (%s, pool %s) with consent…\n", label, action.Pool)
+			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
+			if *action.Backend == planebase.BackendZfs {
+				if err := bootstrap.EnsureZpool(c, target, action.Pool, optOf(device)); err != nil {
+					return err
+				}
+			} else {
+				// consent + no zpool + no VG: drive's per-tenant ensure
+				// creates the thin pool in a NEW VG when needed; there is no
+				// VG to name here yet.
+				fmt.Println("STORAGE: LVM-thin — per-tenant ensure will create the pool+LV")
+			}
 		case "Bail":
 			return fmt.Errorf("%s", action.Message)
 		}
 		return nil
 	},
+}
+
+// parseKind resolves the backend KIND to drive with. The plane records it
+// (`plane.backend_kind`) and the pipeline passes it as `--kind`; honoring the
+// recorded kind beats re-detecting, because a host with BOTH a zpool and a VG
+// would otherwise always resolve to ZFS and drive an LVM-backed tenant the
+// wrong way. Absent flag => detect via resolve_proxmox(consent=false): a host
+// with a zpool drives ZFS; a host with only an LVM VG (stock PVE: VG `pve`,
+// no zpool) drives LVM-thin. A non-nil action in the return means "no
+// existing backend" — the caller decides its tolerated-no-op shape.
+func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendKind, *bootstrap.ResolveAction, error) {
+	switch kindFlag {
+	case "":
+	case "zfs":
+		return planebase.KindZfs, nil, nil
+	case "lvmth":
+		return planebase.KindLvmThin, nil, nil
+	default:
+		return "", nil, fmt.Errorf("unknown storage backend kind: %s (expected zfs|lvmth)", kindFlag)
+	}
+	action, err := bootstrap.ResolveProxmox(c, target, false, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	if action.Kind == "Reuse" {
+		if *action.Detected == planebase.ExistingZfs {
+			return planebase.KindZfs, action, nil
+		}
+		return planebase.KindLvmThin, action, nil
+	}
+	return "", action, nil
 }
 
 var storageEnsureCmd = &cobra.Command{
@@ -356,6 +410,9 @@ var storageEnsureCmd = &cobra.Command{
 		tenant, _ := cmd.Flags().GetString("tenant")
 		domain, _ := cmd.Flags().GetString("domain")
 		pool, _ := cmd.Flags().GetString("pool")
+		kindStr, _ := cmd.Flags().GetString("kind")
+		sizeGB, _ := cmd.Flags().GetUint64("size-gb")
+		poolSizeGB, _ := cmd.Flags().GetUint64("pool-size-gb")
 		if tenant == "" || domain == "" || pool == "" {
 			return fmt.Errorf("storage ensure needs --tenant --domain --pool")
 		}
@@ -367,14 +424,42 @@ var storageEnsureCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		dataset, err := planebase.DatasetPath(pool, domain, t)
+		// DETECT the backend when --kind is absent; consent=false here —
+		// ensure never CREATES a backend, it only mounts tenants onto one
+		// that exists.
+		kind, action, err := parseKind(c, target, kindStr)
 		if err != nil {
 			return err
 		}
-		if err := bootstrap.EnsureDataset(c, target, dataset); err != nil {
+		if action != nil {
+			if action.Kind == "Create" {
+				return fmt.Errorf("storage ensure cannot run on a backend that needs creating — run `storage resolve --confirm-storage` first")
+			}
+			return fmt.Errorf("no storage backend to ensure onto: %s — run `storage resolve` first", action.Message)
+		}
+		// Resolve + chown the tenant's born-at-create mounts, then print one
+		// `<source>:<guest>` line per mount for the pipeline to record.
+		var mounts []planebase.MountSpec
+		switch kind {
+		case planebase.KindZfs:
+			mounts, err = drive.ResolveTenantMounts(c, target, pool, domain, t)
+		case planebase.KindLvmThin:
+			mounts, err = drive.ResolveLvmMounts(c, target, pool, domain, t, sizeGB, poolSizeGB)
+		}
+		if err != nil {
 			return err
 		}
-		fmt.Printf("ensured dataset %s\n", dataset)
+		// Always emit the discoverable backend kind so the pipeline records
+		// it (dispatch of later destroy/re-resolve steps).
+		kindOut := "zfs"
+		if kind == planebase.KindLvmThin {
+			kindOut = "lvmth"
+		}
+		fmt.Printf("STORAGE-BACKEND: %s %s\n", kindOut, pool)
+		for _, m := range mounts {
+			fmt.Printf("STORAGE-MOUNT %s:%s\n", m.Source, m.GuestPath)
+		}
+		fmt.Printf("STORAGE: %s datasets ensured + guest-writable\n", tenant)
 		return nil
 	},
 }
@@ -388,6 +473,7 @@ var storageDestroyCmd = &cobra.Command{
 		tenant, _ := cmd.Flags().GetString("tenant")
 		domain, _ := cmd.Flags().GetString("domain")
 		pool, _ := cmd.Flags().GetString("pool")
+		kindStr, _ := cmd.Flags().GetString("kind")
 		if tenant == "" || domain == "" || pool == "" {
 			return fmt.Errorf("storage destroy needs --tenant --domain --pool")
 		}
@@ -399,18 +485,25 @@ var storageDestroyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		dataset, err := planebase.DatasetPath(pool, domain, t)
+		kind, action, err := parseKind(c, target, kindStr)
 		if err != nil {
 			return err
 		}
-		destroyed, err := destroyDatasetVia(c, target, pool, dataset)
+		if action != nil {
+			// No backend to destroy on => NOTHING was ever created: a
+			// tolerated no-op (the pre-plane / VPS-downgraded / unprovisioned
+			// teardown case), not a hard error after the LXCs are already
+			// gone.
+			fmt.Println("STORAGE-DESTROYED: false")
+			return nil
+		}
+		// The bool distinguishes ABSENT (nothing to destroy — a no-op for the
+		// caller) from DESTROYED (the dataset subtree went away).
+		destroyed, err := drive.DestroyTenantBackend(c, target, kind, pool, domain, t)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("STORAGE-DESTROYED: %v\n", destroyed)
-		if !destroyed {
-			fmt.Println("no dataset to destroy (absent) — nothing destroyed")
-		}
 		return nil
 	},
 }
@@ -422,6 +515,8 @@ var storageInfoCmd = &cobra.Command{
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		pool, _ := cmd.Flags().GetString("pool")
+		kindStr, _ := cmd.Flags().GetString("kind")
+		mountSpecs, _ := cmd.Flags().GetStringArray("mount")
 		if pool == "" {
 			return fmt.Errorf("storage info needs --pool")
 		}
@@ -429,11 +524,45 @@ var storageInfoCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		out, err := bootstrap.ExecToOK(c, target, "zfs list -H -o name,used,avail "+pool+" 2>/dev/null || true", "info", 60)
+		kind, action, err := parseKind(c, target, kindStr)
 		if err != nil {
 			return err
 		}
-		fmt.Print(out.Stdout)
+		if action != nil {
+			fmt.Println("STORAGE-CAPACITY: -")
+			return nil
+		}
+		var mounts []drive.MountArg
+		for _, m := range mountSpecs {
+			ma, err := parseInfoMount(m)
+			if err != nil {
+				return err
+			}
+			mounts = append(mounts, ma)
+		}
+		info, err := drive.ProbeStorage(c, target, kind, pool, mounts)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("STORAGE-CAPACITY: %s\n", info.Capacity)
+		for _, m := range info.Mounts {
+			mounted := "-"
+			if m.GuestMounted != nil {
+				if *m.GuestMounted {
+					mounted = "mounted"
+				} else {
+					mounted = "absent"
+				}
+			}
+			size, used := "-", "-"
+			if m.Size != nil {
+				size = strconv.FormatUint(*m.Size, 10)
+			}
+			if m.Used != nil {
+				used = strconv.FormatUint(*m.Used, 10)
+			}
+			fmt.Printf("STORAGE-INFO %s:%s:%s:%s:%s:%s\n", m.Role, m.Source, m.Guest, size, used, mounted)
+		}
 		return nil
 	},
 }
@@ -450,23 +579,24 @@ func tenantFor(tenant string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q (relay | cp | k3s-volumes)", tenant)
 }
 
-func destroyDatasetVia(c *client.McpClient, target, pool, dataset string) (bool, error) {
-	// zfs destroy is destructive; report absent vs destroyed.
-	// A nonzero `zfs list` exit means the dataset is ABSENT (safe no-op); a
-	// transport/signing error (wedged runner) is NOT absent — surface it so the
-	// operator isn't told "nothing destroyed" when the truth is "couldn't ask"
-	// (DEFER-destroyDatasetVia).
-	out, err := bootstrap.Exec(c, target, "zfs list -H -o name "+dataset+" >/dev/null 2>&1", 30)
-	if err != nil {
-		return false, err
+// parseInfoMount parses a `storage info --mount` spec:
+// `<role>:<source>:<guest>:<vmid|->`. Neither a host path/dataset nor a guest
+// path carries `:`, so a plain 4-field split is unambiguous.
+func parseInfoMount(s string) (drive.MountArg, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 4 || parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
+		return drive.MountArg{}, fmt.Errorf("--mount must be <role>:<source>:<guest>:<vmid|-> (got %q)", s)
 	}
-	if out.ExitCode == nil || *out.ExitCode != 0 {
-		return false, nil // absent -> not destroyed
+	var vmid *uint32
+	if parts[3] != "-" {
+		n, err := strconv.ParseUint(parts[3], 10, 32)
+		if err != nil {
+			return drive.MountArg{}, fmt.Errorf("vmid must be a number or '-' (got %q)", s)
+		}
+		v := uint32(n)
+		vmid = &v
 	}
-	if _, err := bootstrap.ExecToOK(c, target, "zfs destroy -r "+dataset, "zfs destroy", 120); err != nil {
-		return false, err
-	}
-	return true, nil
+	return drive.MountArg{Role: parts[0], Source: parts[1], Guest: parts[2], VMID: vmid}, nil
 }
 
 // --- teardown ---
@@ -597,12 +727,15 @@ func init() {
 	storageEnsureCmd.Flags().String("domain", "", "The relay's identity domain (for the dataset naming)")
 	storageEnsureCmd.Flags().String("pool", "", "Storage pool (zpool name / VG name)")
 	storageEnsureCmd.Flags().String("kind", "", "Backend kind recorded by the plane (`zfs` | `lvmth`). Honored when present; absent => detect")
+	storageEnsureCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend; operator-prompted at rebuild)")
+	storageEnsureCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved (only when the VG has none)")
 	storageDestroyCmd.Flags().String("tenant", "", "Tenant: relay | cp | k3s-volumes")
 	storageDestroyCmd.Flags().String("domain", "", "The relay's identity domain (for the dataset naming)")
 	storageDestroyCmd.Flags().String("pool", "", "Storage pool (zpool name / VG name)")
 	storageDestroyCmd.Flags().String("kind", "", "Backend kind recorded by the plane (`zfs` | `lvmth`). Honored when present; absent => detect")
 	storageInfoCmd.Flags().String("pool", "", "Storage pool (zpool name / VG name)")
 	storageInfoCmd.Flags().String("kind", "", "Backend kind recorded by the plane (`zfs` | `lvmth`). Honored when present; absent => detect")
+	storageInfoCmd.Flags().StringArray("mount", nil, "Mount ref <role>:<source>:<guest>:<vmid|-> (repeatable; vmid '-' skips the guest probe)")
 	storageResolveCmd.Flags().String("device", "", "Physical device for a NEW zpool (e.g. /dev/sdb) — required only on the consent-gated create path, when no existing backend is detected")
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a backend (zpool OR LVM-thin) when none is detected. Absent + no backend = actionable bail")
 }

@@ -73,12 +73,15 @@ type Model struct {
 	Mode        Mode
 	Domain      string
 	HasConfig   bool
-	RelayReach  bool
-	CPReach     bool
+	RelayLive   bool
+	CPLive      bool
+	K3sLive     bool
 	RunnerReach bool
 	Converged   bool
 	ActiveView  View
 	LastRef     time.Time
+	DataCap     string
+	DataAt      time.Time
 	Services    []ServiceRow
 	Agents      []AgentRow
 	Runners     []RunnerRow
@@ -118,11 +121,13 @@ type RunnerRow struct {
 
 // DataRow is one durable-plane mount line (DATA view).
 type DataRow struct {
-	Role     string
-	Source   string
-	Capacity string
-	Used     string
-	Live     string
+	Role   string
+	Mount  string
+	Size   string
+	Used   string
+	Fill   string
+	Source string
+	Live   string
 }
 
 // New builds the model from the config path (mirrors app.rs::run).

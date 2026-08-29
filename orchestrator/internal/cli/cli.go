@@ -69,6 +69,7 @@ func init() {
 		relayJoinCmd,
 		relaySetupCmd,
 		storageCmd,
+		rebuildCmd,
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.Version = "0.1.0"

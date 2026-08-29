@@ -81,9 +81,9 @@ type HetznerVpsSpec struct {
 
 // BootstrapResult is the driver's report.
 type BootstrapResult struct {
-	Kind   TargetKind
-	ID     string
-	Name   string
+	Kind TargetKind
+	ID   string
+	Name string
 	// The target's first global IPv4, when the driver can learn it (the
 	// A4 domain gate requires it so the DOMAIN — never the IP — is verified).
 	IP     string // "" when unknown
@@ -252,7 +252,7 @@ func EnsureDebianTemplate(c *client.McpClient, target string, specTemplate *stri
 }
 
 func firstField(line string) string {
-	return strings.TrimSpace(strings.Fields(line+" ")[0])
+	return strings.TrimSpace(strings.Fields(line + " ")[0])
 }
 
 // verCmp compares two numeric template versions component-wise.

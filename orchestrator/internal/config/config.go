@@ -5,6 +5,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"os"
@@ -159,11 +160,21 @@ func URLReachable(url string) bool {
 	return true
 }
 
+// probeClient builds the liveness HTTP client: TLS validation OFF, mirroring
+// the Rust http_any/http_ok (danger_accept_invalid_certs) — these probes
+// check LIVENESS, not CA pinning, and must accept the local-CA / self-signed
+// posture. 6s timeout.
+func probeClient() *http.Client {
+	return &http.Client{
+		Timeout:   6 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+}
+
 // HTTPAny GETs the URL accepting ANY HTTP response (including the k3s 401 —
-// only a transport failure means down). 6s timeout.
+// only a transport failure means down).
 func HTTPAny(url string) bool {
-	cli := &http.Client{Timeout: 6 * time.Second}
-	resp, err := cli.Get(url)
+	resp, err := probeClient().Get(url)
 	if err != nil {
 		return false
 	}
@@ -173,8 +184,7 @@ func HTTPAny(url string) bool {
 
 // HTTPOK GETs the URL requiring a 2xx/3xx response.
 func HTTPOK(url string) bool {
-	cli := &http.Client{Timeout: 6 * time.Second}
-	resp, err := cli.Get(url)
+	resp, err := probeClient().Get(url)
 	if err != nil {
 		return false
 	}
@@ -182,14 +192,28 @@ func HTTPOK(url string) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
-// RelayLive polls the relay's own /_liveness.
+// RelayLive polls the relay's own /_liveness — the relay's OWN answer (2xx),
+// not "some proxy on that host answers". Mirrors Rust relay_live (http_ok).
 func RelayLive(cfg *Config) bool {
-	return HTTPAny(strings.TrimSuffix(cfg.RelayURL, "/") + "/_liveness")
+	return HTTPOK(strings.TrimSuffix(cfg.RelayURL, "/") + "/_liveness")
 }
 
-// K3sLive: any HTTP answer from the kube-apiserver (auth-gated 401 counts).
+// StripCIDR drops the /prefix from a recorded CIDR ip ("1.2.3.4/24" ->
+// "1.2.3.4"); the config records ips in CIDR form.
+func StripCIDR(ip string) string {
+	if i := strings.Index(ip, "/"); i >= 0 {
+		return ip[:i]
+	}
+	return ip
+}
+
+// K3sLive: any HTTP answer from the kube-apiserver on the RECORDED k3s ip
+// (auth-gated 401 counts). Mirrors Rust k3s_live: the recorded ip is CIDR —
+// stripping the prefix keeps the URL from parsing as host:443 with the
+// "/24:6443/healthz" tail as a path.
 func K3sLive(cfg *Config) bool {
-	// derived from relay_url's host realm; a placeholder when k3s absent
-	host, _ := SplitURL(cfg.RelayURL)
-	return HTTPAny("https://" + host + ":6443/healthz")
+	if cfg.Lxc.K3s.Ip == nil {
+		return false
+	}
+	return HTTPAny("https://" + StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443/healthz")
 }

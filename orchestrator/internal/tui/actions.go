@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/flows"
@@ -40,6 +40,8 @@ const (
 	flowBootstrap
 	flowDeployRelay
 	flowDeployCp
+	flowTeardown
+	flowRebuild
 )
 
 type tuiFlow struct {
@@ -70,6 +72,10 @@ func ncols(k flowKind) int {
 		return 3
 	case flowBootstrap:
 		return 4
+	case flowTeardown:
+		return 1
+	case flowRebuild:
+		return 5
 	default:
 		return 1
 	}
@@ -124,6 +130,21 @@ func promptLabel(k flowKind, step int) string {
 			return "relay URL (blank = https://<domain>)"
 		default:
 			return "operator pubkey (64-hex)"
+		}
+	case flowTeardown:
+		return "destroy tenant data too? (yes | no)"
+	case flowRebuild:
+		switch step {
+		case 0:
+			return "operator pubkey (64-hex)"
+		case 1:
+			return "domain (the relay's identity)"
+		case 2:
+			return "tenant LV size GB (blank = 10)"
+		case 3:
+			return "fresh thin-pool size GB (blank = 40)"
+		default:
+			return "boot k3s too? (y/n, blank = y)"
 		}
 	default:
 		return "value"
@@ -266,8 +287,43 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				return flowMsg{err: fmt.Errorf("deploy-cp failed: %w (%s)", err, tail(out))}
 			}
 			return flowMsg{ok: "CP deployed — " + tail(out), reload: true}
+		case flowTeardown:
+			// The whole-world teardown destroys LXCs (+ datasets with yes),
+			// removes the door key LAST, then wipes local home + config —
+			// reload after so the dashboard re-detects bootstrap mode.
+			args := []string{"teardown", "--yes"}
+			if strings.EqualFold(f.Inputs[0], "yes") {
+				args = append(args, "--data")
+			}
+			out, err := runSelf(args...)
+			if err != nil {
+				return flowMsg{err: fmt.Errorf("teardown failed: %w (%s)", err, tail(out))}
+			}
+			return flowMsg{ok: "teardown ok — " + tail(out), reload: true}
+		case flowRebuild:
+			op, domain := f.Inputs[0], f.Inputs[1]
+			if op == "" || domain == "" {
+				return flowMsg{err: fmt.Errorf("rebuild needs operator pubkey and domain")}
+			}
+			args := []string{"rebuild", "--yes",
+				"--operator-pubkey", op,
+				"--domain", domain,
+			}
+			if f.Inputs[2] != "" {
+				args = append(args, "--size-gb", f.Inputs[2])
+			}
+			if f.Inputs[3] != "" {
+				args = append(args, "--pool-size-gb", f.Inputs[3])
+			}
+			if strings.EqualFold(strings.TrimSpace(f.Inputs[4]), "n") {
+				args = append(args, "--with-k3s=false")
+			}
+			out, err := runSelf(args...)
+			if err != nil {
+				return flowMsg{err: fmt.Errorf("rebuild failed: %w (%s)", err, tail(out))}
+			}
+			return flowMsg{ok: "rebuild ok — " + tail(out), reload: true}
 		}
-
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
 		}

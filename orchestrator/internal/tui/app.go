@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,6 +12,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/drive"
+	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/planebase"
 	"freehold/orchestrator/internal/state"
 )
 
@@ -51,11 +56,16 @@ func (m *Model) load(cfgPath string) error {
 	m.HasConfig = true
 	m.Domain = cfg.Domain
 
-	// Liveness probes (installer probes_ok split: relay + CP + runner).
-	m.RelayReach = config.RelayLive(cfg)
+	// Liveness probes — the world must be ALIVE, not merely reachable behind
+	// the operator's proxy (Rust probes_ok): the relay's OWN /_liveness 2xx,
+	// the CP's /healthz answered 200 from INSIDE its LXC (through the
+	// provisioning runner), and the runner MCP port open. The k3s API is NOT
+	// part of the convergence gate (Rust parity) — it shows in the strip.
+	m.RelayLive = config.RelayLive(cfg)
 	m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
-	m.CPReach = config.URLReachable(cfg.CPURL)
-	m.Converged = m.RelayReach && m.CPReach && m.RunnerReach
+	m.CPLive = cpLive(cfg)
+	m.K3sLive = config.K3sLive(cfg)
+	m.Converged = m.RelayLive && m.CPLive && m.RunnerReach
 	if !m.Converged {
 		m.Mode = ModeConfigure
 	} else {
@@ -65,23 +75,58 @@ func (m *Model) load(cfgPath string) error {
 	m.buildServices(cfg)
 	m.readLocalRunners(cfg)
 	m.buildAgents(cfg)
+	if m.Mode == ModeRunning {
+		m.refreshData(cfg)
+	}
 	return nil
 }
 
-// buildServices fills the Services view from the config's managed pieces.
+// cpLive pings the CP console's /healthz from INSIDE its LXC, through the
+// provisioning runner (the console binds loopback and the public URL fronts
+// the operator's proxy — so URL reachability is not the probe; the guest's
+// OWN service must answer 200). Mirrors Rust cp_live; failure = down.
+func cpLive(cfg *config.Config) bool {
+	if cfg.Lxc.Cp.Vmid == nil || cfg.Runner.Addr == "" {
+		return false
+	}
+	inner := "exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3; grep -m1 \"^HTTP\" <&3 || true"
+	out, err := runSelf("exec", "--addr", cfg.Runner.Addr,
+		"--agent-dir", freeholdStateDir()+"/agent-ops",
+		"--runner-pubkey", cfg.Runner.Pubkey,
+		"--timeout", "10",
+		cfg.Runner.Target,
+		fmt.Sprintf("pct exec %d -- bash -c '%s'", *cfg.Lxc.Cp.Vmid, inner))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out, " 200 ") || strings.Contains(out, "200 OK")
+}
+
+// buildServices fills the Services view from the config's managed pieces
+// (mirrors Rust build_services, incl. the k3s row).
 func (m *Model) buildServices(cfg *config.Config) {
 	m.Services = nil
 	for _, piece := range cfg.Managed {
 		row := ServiceRow{Name: piece}
 		switch piece {
 		case "relay":
-			row.Where = "LXC relay"
+			row.Where = guestLocation(cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip)
 			row.URL = cfg.RelayURL
-			row.Status = boolStatus(m.RelayReach, "reachable", "down")
+			row.Status = boolStatus(m.RelayLive, "live", "down")
 		case "cp":
-			row.Where = "LXC cp"
+			row.Name = "control plane"
+			row.Where = guestLocation(cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip)
 			row.URL = cfg.CPURL
-			row.Status = boolStatus(m.CPReach, "up", "down")
+			row.Status = boolStatus(m.CPLive, "live", "down")
+		case "k3s":
+			row.Name = "k3s (kube)"
+			row.Where = guestLocation(cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip)
+			if cfg.Lxc.K3s.Ip != nil {
+				row.URL = "https://" + config.StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443"
+			} else {
+				row.URL = "—"
+			}
+			row.Status = boolStatus(m.K3sLive, "live", "down")
 		default:
 			row.Where = "managed"
 			row.Status = "—"
@@ -91,6 +136,143 @@ func (m *Model) buildServices(cfg *config.Config) {
 	if len(m.Services) == 0 {
 		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
 	}
+}
+
+// guestLocation mirrors the Rust location column: "LXC 100 · 1.2.3.4".
+func guestLocation(vmid *uint32, ip *string) string {
+	switch {
+	case vmid != nil && ip != nil:
+		return fmt.Sprintf("LXC %d · %s", *vmid, config.StripCIDR(*ip))
+	case vmid != nil:
+		return fmt.Sprintf("LXC %d", *vmid)
+	case ip != nil:
+		return config.StripCIDR(*ip)
+	default:
+		return "—"
+	}
+}
+
+// refreshData rebuilds the DATA view: the live durable-plane snapshot read
+// through the SAME signed runner channel the orchestrator uses (ops agent
+// identity — granted at bootstrap). Mirrors Rust plane_info: a missing
+// plane/runner keeps the last good snapshot; a probe failure degrades to
+// the notice in m.Msg.
+func (m *Model) refreshData(cfg *config.Config) {
+	if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil {
+		return
+	}
+	var kind planebase.BackendKind
+	switch *cfg.Plane.BackendKind {
+	case string(planebase.KindZfs):
+		kind = planebase.KindZfs
+	case string(planebase.KindLvmThin):
+		kind = planebase.KindLvmThin
+	default:
+		return
+	}
+	var mounts []drive.MountArg
+	for role, specs := range cfg.Plane.Mounts {
+		vmid := vmidForRole(cfg, role)
+		for _, s := range specs {
+			mounts = append(mounts, drive.MountArg{Role: role, Source: s.Source, Guest: s.GuestPath, VMID: vmid})
+		}
+	}
+	if len(mounts) == 0 {
+		return
+	}
+	sort.Slice(mounts, func(i, j int) bool {
+		if mounts[i].Role != mounts[j].Role {
+			return mounts[i].Role < mounts[j].Role
+		}
+		return mounts[i].Guest < mounts[j].Guest
+	})
+	c, err := flows.Connect(cfg.Runner.Addr, freeholdStateDir()+"/agent-ops", cfg.Runner.Pubkey)
+	if err != nil {
+		m.Msg = "data: runner connect failed — " + err.Error()
+		return
+	}
+	info, err := drive.ProbeStorage(c, cfg.Runner.Target, kind, *cfg.Plane.Backend, mounts)
+	if err != nil {
+		m.Msg = "data: plane probe failed — " + err.Error()
+		return
+	}
+	m.DataCap = info.Capacity
+	m.DataAt = time.Now()
+	m.Storage = nil
+	for _, mu := range info.Mounts {
+		size, used, fill := "—", "—", "—"
+		if mu.Size != nil {
+			size = drive.HumanBytes(*mu.Size)
+		}
+		if mu.Used != nil {
+			used = drive.HumanBytes(*mu.Used)
+		}
+		if mu.Used != nil && mu.Size != nil && *mu.Size > 0 {
+			pct := (*mu.Used*100 + *mu.Size - 1) / (*mu.Size) // div_ceil
+			fill = fillStyle(pct).Render(fmt.Sprintf("%d%%", pct))
+		}
+		live := styleDim.Render("—")
+		if mu.GuestMounted != nil {
+			live = boolStatus(*mu.GuestMounted, "mounted", "down")
+		}
+		m.Storage = append(m.Storage, DataRow{
+			Role: mu.Role, Mount: mu.Guest, Size: size, Used: used,
+			Fill: fill, Source: mu.Source, Live: live,
+		})
+	}
+	if len(m.Storage) == 0 {
+		m.Storage = []DataRow{{Role: "(no mounts)"}}
+	}
+	m.Msg = fmt.Sprintf("data refreshed %s", time.Now().Format("15:04:05"))
+}
+
+// vmidForRole maps a plane mount role to its LXC vmid (mirror of Rust
+// plane_info's role match).
+func vmidForRole(cfg *config.Config, role string) *uint32 {
+	switch role {
+	case "relay":
+		return cfg.Lxc.Relay.Vmid
+	case "cp":
+		return cfg.Lxc.Cp.Vmid
+	case "k3s":
+		return cfg.Lxc.K3s.Vmid
+	default:
+		return nil
+	}
+}
+
+// fillStyle is the DATA fill-ratio traffic light (Rust fill_color):
+// green < 70%, yellow < 90%, red at/above.
+func fillStyle(pct uint64) lipgloss.Style {
+	switch {
+	case pct >= 90:
+		return styleRed
+	case pct >= 70:
+		return styleYellow
+	default:
+		return styleGreen
+	}
+}
+
+// launchWeb opens the console's portal URL in the browser (mirrors Rust
+// launch_web): needs a session (l); xdg-open absence degrades to the
+// manual-URL notice (single-use token, 60s).
+func (m *Model) launchWeb() {
+	if m.console == nil || m.console.client == nil {
+		m.Msg = "not logged in — press l first (the web needs a session)"
+		return
+	}
+	url, err := m.console.client.PortalURL()
+	if err != nil {
+		m.Msg = "web launch failed: " + err.Error()
+		return
+	}
+	cmd := exec.Command("xdg-open", url)
+	if err := cmd.Start(); err != nil {
+		m.Msg = "no browser launcher (xdg-open: " + err.Error() + ") — open manually: " + url
+		return
+	}
+	m.Msg = "web opened: " + url
 }
 
 // readLocalRunners fills the Runners view from the local CP state.json (the
@@ -156,7 +338,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prevView()
 		case "r":
 			if m.Mode == ModeRunning {
-				m.Msg = "data refresh requested"
+				_ = m.load(m.CfgPath)
+			}
+		case "w":
+			if m.Mode == ModeRunning {
+				m.launchWeb()
 			}
 		case "l":
 			if m.Mode == ModeRunning {
@@ -185,6 +371,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			if m.Mode == ModeConfigure {
 				m.beginPrompt(flowDeployCp)
+			}
+		case "t":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowTeardown)
+			}
+		case "B":
+			if m.Mode == ModeBootstrap || m.Mode == ModeConfigure {
+				m.beginPrompt(flowRebuild)
 			}
 		}
 	case flowMsg:
@@ -231,10 +425,12 @@ func (m *Model) View() string {
 	if m.Mode == ModeBootstrap {
 		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")
 		b.WriteString("press " + styleYellow.Render("b") + " to bootstrap a target (kind · domain · operator pubkey)\n")
+		b.WriteString("press " + styleYellow.Render("B") + " to rebuild the whole world (door · plane · LXCs · deploys)\n")
 	} else if m.Mode == ModeConfigure {
 		b.WriteString(styleYellow.Render("config present, world NOT converged") + "\n")
 		b.WriteString(renderProbes(m) + "\n\n")
 		b.WriteString("press " + styleYellow.Render("d") + " to deploy the relay, " + styleYellow.Render("c") + " to deploy the control plane\n")
+		b.WriteString("press " + styleYellow.Render("B") + " to rebuild the whole world (tear + re-create everything)\n")
 	} else {
 		b.WriteString(renderProbes(m) + "\n")
 		b.WriteString(renderViews(m))
@@ -247,9 +443,10 @@ func (m *Model) View() string {
 }
 
 func renderProbes(m *Model) string {
-	return fmt.Sprintf("  relay %s  cp %s  runner %s",
-		boolStatus(m.RelayReach, "green", "red"),
-		boolStatus(m.CPReach, "green", "red"),
+	return fmt.Sprintf("  relay %s  cp %s  k3s %s  runner %s",
+		boolStatus(m.RelayLive, "green", "red"),
+		boolStatus(m.CPLive, "green", "red"),
+		boolStatus(m.K3sLive, "green", "red"),
 		boolStatus(m.RunnerReach, "green", "red"),
 	)
 }
@@ -259,13 +456,13 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second))) +
-			"   " + styleDim.Render("l login · p provision · x revoke · g grant · w web")
+			"   " + styleDim.Render("l login · p provision · x revoke · g grant · w web · t teardown")
 	}
 	switch m.Mode {
 	case ModeBootstrap:
-		return styleFooter.Render("q quit · b bootstrap")
+		return styleFooter.Render("q quit · b bootstrap · B rebuild")
 	case ModeConfigure:
-		return styleFooter.Render("q quit · d deploy-relay · c deploy-cp")
+		return styleFooter.Render("q quit · d deploy-relay · c deploy-cp · B rebuild")
 	default:
 		return styleFooter.Render("q quit")
 	}
@@ -284,6 +481,7 @@ func renderViews(m *Model) string {
 	if m.Msg != "" {
 		b.WriteString(styleGreen.Render("  "+m.Msg) + "\n")
 	}
+	title := m.ActiveView.String()
 	var headers []string
 	var rows [][]string
 	switch m.ActiveView {
@@ -303,12 +501,20 @@ func renderViews(m *Model) string {
 			rows = append(rows, []string{r.Name, r.Status, clip(r.Pubkey, 16), r.Addr, r.Grants})
 		}
 	case ViewData:
-		headers = []string{"role", "source", "capacity", "used", "live"}
+		if !m.DataAt.IsZero() {
+			title = fmt.Sprintf("DATA · %s · refreshed %s", m.DataCap, humanize(time.Since(m.DataAt)))
+		} else {
+			title = "DATA · no plane snapshot yet"
+		}
+		headers = []string{"service", "mount point", "size", "used", "fill", "source (host)", "live"}
+		if len(m.Storage) == 0 {
+			rows = append(rows, []string{styleDim.Render("(no durable plane on record — converge first, then r refreshes)")})
+		}
 		for _, d := range m.Storage {
-			rows = append(rows, []string{d.Role, d.Source, d.Capacity, d.Used, d.Live})
+			rows = append(rows, []string{d.Role, d.Mount, d.Size, d.Used, d.Fill, d.Source, d.Live})
 		}
 	}
-	return b.String() + renderTable(m.ActiveView.String(), headers, rows)
+	return b.String() + renderTable(title, headers, rows)
 }
 
 func renderTable(title string, headers []string, rows [][]string) string {

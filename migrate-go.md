@@ -93,6 +93,50 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   `freehold-door-ok`, rc=0; `readiness` → green; `storage resolve` → reuse lvm-thin.
   TUI launch verified under a PTY (running + bootstrap modes render; b-form prompt works).
 
+### Phase 7 — World lifecycle (teardown/rebuild from the TUI): DONE
+- **LVM lifecycle port** (`internal/drive/lvm.go`, 12 hermetic tests): full
+  LVM-thin plane support. Defaults are the HALVED sizes proven live on the
+  test PVE box: `TenantLVSizeGB = 10`, `FreshPoolSizeGB = 40` (the old Rust
+  hardcoded 20/40). The live world's four tenant LVs
+  (`relay-docker-root`, `relay-deploy`, `cp`, `k3s-volumes`) were resized
+  20G→10G and all services revived (thin-provisioned — no physical VG space
+  freed, just headroom).
+- **Storage CLI rewired to the Rust contracts**: `storage ensure` gained
+  `--size-gb` / `--pool-size-gb`; `storage resolve` gained `--confirm-storage`.
+  All four storage subcommands + the bootstrap/teardown/storage drivers are
+  hermetic-tested and live-verified.
+- **`freehold rebuild` CLI** (`internal/cli/rebuild.go`): the whole-world
+  bring-up pipeline — the Rust installer's stage set ported to Go, shelling
+  the REAL sibling binaries (`control-plane` + `runner` stay Rust; self via
+  `os.Executable()`), resolved relative to the running binary
+  (`target/debug/*` + `../release/{control-plane,runner}` with the exact
+  build one-liner when missing). Stage order: ensure_bins → provision (ssh
+  keypair; reuse tolerated only with a real package) → door gate (fresh key:
+  interactive ENTER/r/q, `--yes` bails actionably with the key + install
+  line) → grant → serve (pkill the stale listener, wait for the port to
+  close, spawn detached, poll 20s) → verify door (self-subprocess exec) →
+  **write initial config** (merge preserves surviving facts; placed AFTER
+  verify, BEFORE storage so the plane mapping has somewhere to record) →
+  storage resolve + ensure×3 (relay/cp/k3s-volumes; honors the RECORDED
+  `plane.backend_kind` over re-detection) → bootstrap relay → record_lxc
+  relay (fresh load → resolve vmid+ip through the runner → mutate → save) →
+  bootstrap cp → record_lxc cp → k3s stage (boot-if-missing + the 900s
+  in-guest install script, verbatim) → deploy-relay (deploy dir from the
+  guest's actual mounts, never hardcoded) → deploy-cp (from the release
+  binaries; state/bin dirs from the guest's last mount) → NIP-11 relay
+  pubkey (best-effort) → final merge save. Every parsing helper
+  (STORAGE-POOL/MOUNT/BACKEND lines, `pct list` exact-name vmid, eth0 ip,
+  `pct config` mounts, NIP-11 pubkey) is a pure function with a hermetic
+  test; the fresh-load/mutate/save record discipline is regression-tested
+  against clobbering (the Rust lib.rs test ported).
+- **TUI teardown + rebuild flows**: running mode `t` = 1-field teardown form
+  ("destroy tenant data too? yes/no") → `teardown --yes [--data]`, reload
+  re-detects bootstrap mode; bootstrap + configure modes `B` = 5-field
+  rebuild form (operator pubkey · domain · tenant LV size GB · fresh
+  thin-pool size GB · boot k3s y/n) → `rebuild --yes …`, reload after.
+  Both exec the freehold binary (self) like the existing forms. Footer +
+  view hints wired and PTY-verified in both modes.
+
 ## Commits on `refactor-go` (working tree clean)
 
 | commit | content |
@@ -116,9 +160,12 @@ The plan is COMPLETE on `refactor-go`. Only operator-driven live exercises remai
 1. Full `bootstrap` end-to-end on a scratch target (proxmox-lxc pct create through
    the real runner) — the drivers are ported and CLI-wired; the exec probe,
    readiness, and storage paths are already live-verified.
-2. `teardown --yes` on a scratch world — engine ported + CLI-wired; door probe
-   live-verified; a full run is destructive, so it's operator-paced.
-3. The operator's rebuild-from-branch end-user test (the `refactor-go` hold gate).
+2. `teardown` from the TUI (`t` in running mode) — engine ported + CLI-wired;
+   door probe live-verified; a full run is destructive, so it's operator-paced.
+3. The operator's whole-world teardown → `rebuild` end-user test from the TUI
+   (`t` then `B`) — the hold gate. The pipeline is hermetic-tested and every
+   stage is the Rust installer's contract ported verbatim; a live run is
+   what's left.
 
 ## Constraints & decisions (carry-forward)
 
