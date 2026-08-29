@@ -26,6 +26,20 @@ const (
 	ScopeTenantData
 )
 
+// String renders the scope for operator-facing output.
+func (s Scope) String() string {
+	switch s {
+	case ScopeWholeWorld:
+		return "whole-world"
+	case ScopeTenantCompute:
+		return "tenant-compute"
+	case ScopeTenantData:
+		return "tenant-data"
+	default:
+		return "?"
+	}
+}
+
 // ScopeFor is the single source of truth for the three-scope derivation.
 func ScopeFor(tenant *string, data bool) Scope {
 	if tenant != nil {
@@ -277,10 +291,16 @@ type Cfg struct {
 	BackendKind   string
 	TenantRole    string // for tenant-scoped teardown
 	Data          bool   // whole-world --data
+	Vmid          map[string]*uint32
 }
 
-// LxcVMID returns the recorded vmid for a role (from managed config).
-func (c *Cfg) LxcVMID(role string) *uint32 { return nil } // populated by the CLI from config
+// LxcVMID returns the recorded vmid for a role (from the managed config).
+func (c *Cfg) LxcVMID(role string) *uint32 {
+	if c == nil || c.Vmid == nil {
+		return nil
+	}
+	return c.Vmid[role]
+}
 
 // TenantRoleDatasetName returns the tenant ROLE for the scoped tenant name.
 func (c *Cfg) TenantRoleDatasetName() string {

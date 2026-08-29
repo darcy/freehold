@@ -6,10 +6,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"freehold/orchestrator/internal/bootstrap"
 	"freehold/orchestrator/internal/client"
+	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/deploy"
+	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/planebase"
 	"freehold/orchestrator/internal/teardown"
 	"github.com/spf13/cobra"
@@ -182,12 +186,83 @@ var bootstrapCmd = &cobra.Command{
 		target, _ := cmd.Flags().GetString("target")
 		operatorPub, _ := cmd.Flags().GetString("operator-pubkey")
 		domain, _ := cmd.Flags().GetString("domain")
+		role, _ := cmd.Flags().GetString("role")
 		if kind == "" || operatorPub == "" || domain == "" {
 			return fmt.Errorf("bootstrap needs --kind --operator-pubkey --domain")
 		}
-		_ = common
-		_ = target
-		return fmt.Errorf("bootstrap: the full proxmox/vultr/hetzner driver is not yet ported — use the Rust binary on main (bootstrap resolution/ensure live under `storage`)")
+		c, err := connect(common, target)
+		if err != nil {
+			return err
+		}
+		// fail-closed gate: --operator-pubkey must be a real pubkey (npub or
+		// hex); the value itself is consumed by deploy-relay.
+		if _, err := crypto.ParsePubkeyInput(operatorPub); err != nil {
+			return err
+		}
+		hostname, err := bootstrap.DomainLXCName(domain, role)
+		if err != nil {
+			return err
+		}
+		var res *bootstrap.BootstrapResult
+		switch kind {
+		case "proxmox-lxc":
+			spec := &bootstrap.ProxmoxLxcSpec{
+				Hostname: hostname,
+				Storage:  mustStr(cmd, "storage"),
+				RootfsGB: mustU32(cmd, "rootfs-gb"),
+				MemoryMB: mustU32(cmd, "memory-mb"),
+				Bridge:   mustStr(cmd, "bridge"),
+			}
+			if v, _ := cmd.Flags().GetUint32("vmid"); v != 0 {
+				spec.VMID = &v
+			}
+			if t, _ := cmd.Flags().GetString("template"); t != "" {
+				spec.Template = &t
+			}
+			if ip, _ := cmd.Flags().GetString("lxc-ip"); ip != "" {
+				gw, _ := cmd.Flags().GetString("lxc-gw")
+				spec.NetIP, spec.NetGW = &ip, &gw
+			}
+			for _, m := range mustArr(cmd, "mount") {
+				ms, err := bootstrap.ParseMount(m)
+				if err != nil {
+					return err
+				}
+				spec.Mounts = append(spec.Mounts, ms)
+			}
+			res, err = bootstrap.BootstrapProxmoxLxc(c, target, spec)
+		case "vultr-vps":
+			res, err = bootstrap.BootstrapVultrVps(c, target, &bootstrap.VultrVpsSpec{
+				Label:        hostname,
+				Region:       mustStr(cmd, "region"),
+				Plan:         mustStr(cmd, "plan"),
+				OsID:         mustU32(cmd, "os-id"),
+				DestroyAfter: mustBool(cmd, "destroy"),
+			})
+		case "hetzner-vps":
+			res, err = bootstrap.BootstrapHetznerVps(c, target, &bootstrap.HetznerVpsSpec{
+				Label:        hostname,
+				Location:     mustStr(cmd, "location"),
+				ServerType:   mustStr(cmd, "server-type"),
+				Image:        mustStr(cmd, "image"),
+				DestroyAfter: mustBool(cmd, "destroy"),
+			})
+		default:
+			return fmt.Errorf("unknown --kind %q (proxmox-lxc | vultr-vps | hetzner-vps)", kind)
+		}
+		if err != nil {
+			return err
+		}
+		if res.IP == "" {
+			return fmt.Errorf("the %s driver did not report a target IP — the domain gate (A4) cannot proceed", kind)
+		}
+		fmt.Printf("DOMAIN-GATE: target is up at %s; require '%s' to resolve there (map it in your LAN DNS, or /etc/hosts for the POC)\n", res.IP, domain)
+		waitSecs, _ := cmd.Flags().GetUint64("domain-wait-secs")
+		if err := bootstrap.WaitForDomainResolution(domain, res.IP, waitSecs, bootstrap.ResolveIP, time.Sleep); err != nil {
+			return err
+		}
+		fmt.Printf("BOOTSTRAPPED %s (%s): %s\n", res.Name, res.Kind, res.Detail)
+		return nil
 	},
 }
 
@@ -210,11 +285,31 @@ func init() {
 	bootstrapCmd.Flags().String("location", "fsn1", "Hetzner location (hetzner-vps)")
 	bootstrapCmd.Flags().String("server-type", "cx22", "Hetzner server type (hetzner-vps)")
 	bootstrapCmd.Flags().String("image", "ubuntu-22.04", "Hetzner OS image (hetzner-vps)")
-	bootstrapCmd.Flags().Bool("destroy", false, "Destroy the VPS after verifying (vultr-vps; for tests/cleanup)")
+	bootstrapCmd.Flags().Bool("destroy", false, "Destroy the VPS after verifying (vultr-vps/hetzner-vps; for tests/cleanup)")
 	bootstrapCmd.Flags().String("operator-pubkey", "", "The OPERATOR's Nostr pubkey (64-hex) — relay invite (create-new) / attach auth (attach-existing) + console admin seed (fail-closed: required at bootstrap)")
 	bootstrapCmd.Flags().String("domain", "", "The relay's identity DOMAIN (never an IP): the install BLOCKS (A4) until it resolves to the provisioned target's IP")
 	bootstrapCmd.Flags().Uint64("domain-wait-secs", 300, "Seconds to wait for the domain to resolve to the target IP (A4)")
 	bootstrapCmd.Flags().String("kind", "", "Target kind: proxmox-lxc | vultr-vps | hetzner-vps")
+}
+
+func mustStr(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	return v
+}
+
+func mustU32(cmd *cobra.Command, name string) uint32 {
+	v, _ := cmd.Flags().GetUint32(name)
+	return v
+}
+
+func mustBool(cmd *cobra.Command, name string) bool {
+	v, _ := cmd.Flags().GetBool(name)
+	return v
+}
+
+func mustArr(cmd *cobra.Command, name string) []string {
+	v, _ := cmd.Flags().GetStringArray(name)
+	return v
 }
 
 // --- storage ---
@@ -384,13 +479,80 @@ var teardownCmd = &cobra.Command{
 		yes, _ := cmd.Flags().GetBool("yes")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		data, _ := cmd.Flags().GetBool("data")
-		if !yes {
-			return fmt.Errorf("teardown aborted (not confirmed); pass --yes")
-		}
 		scope := teardown.ScopeFor(optOf(tenant), data)
-		_ = configPath
-		_ = scope
-		return fmt.Errorf("teardown: the installer-config-driven driver is not yet ported — use the Rust binary on main")
+
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			return err
+		}
+		if cfg == nil {
+			fmt.Println("nothing to tear down — no config")
+			return nil
+		}
+
+		// The teardown engine shells `freehold-orchestrator exec` — resolve the
+		// orchestrator binary as OURSELF (we are it).
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		agentDir := filepath.Join(freeholdHome(), "control-plane", "agent-ops")
+		runner := &teardown.ExecRunner{
+			OrchestratorBin: self,
+			Addr:            cfg.Runner.Addr,
+			AgentDir:        agentDir,
+			Runner:          cfg.Runner.Target,
+		}
+
+		// The door must work before anything remote: a signed exec probe.
+		out, err := flows.Exec(cfg.Runner.Addr, agentDir, cfg.Runner.Pubkey, cfg.Runner.Target, "echo freehold-door-ok", nil, 30)
+		if err != nil {
+			return fmt.Errorf("teardown won't touch the host: the door can't be verified — fix/start the runner first: %w", err)
+		}
+		if !strings.Contains(out.Stdout, "freehold-door-ok") {
+			return fmt.Errorf("teardown won't touch the host: the door probe did not answer (got %q)", strings.TrimSpace(out.Stdout))
+		}
+
+		pool := "rpool"
+		if cfg.Plane.Backend != nil && *cfg.Plane.Backend != "" {
+			pool = *cfg.Plane.Backend
+		}
+		kind := ""
+		if cfg.Plane.BackendKind != nil {
+			kind = *cfg.Plane.BackendKind
+		}
+		tcfg := &teardown.Cfg{
+			Domain:        cfg.Domain,
+			RunNTarget:    cfg.Runner.Target,
+			RunnerComment: cfg.Runner.Pubkey,
+			Managed:       cfg.Managed,
+			WorldHome:     freeholdHome(),
+			ConfigPath:    configPath,
+			Pool:          pool,
+			BackendKind:   kind,
+			TenantRole:    teardown.TenantLxcRole(tenant),
+			Data:          data,
+			Vmid: map[string]*uint32{
+				"relay": cfg.Lxc.Relay.Vmid,
+				"cp":    cfg.Lxc.Cp.Vmid,
+				"k3s":   cfg.Lxc.K3s.Vmid,
+			},
+		}
+
+		// Confirmation gate: --yes skips the prompt (scripting/CI).
+		if !yes {
+			fmt.Printf("teardown scope: %s (config %s)\nproceed? [type yes] ", scope, configPath)
+			var answer string
+			if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
+				return fmt.Errorf("teardown aborted (not confirmed)")
+			}
+		}
+		report, err := teardown.Run(runner, tcfg, scope, true)
+		if err != nil {
+			return err
+		}
+		fmt.Println(report)
+		return nil
 	},
 }
 
@@ -408,6 +570,18 @@ func defaultConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".config", "freehold", "config.toml")
+}
+
+// freeholdHome mirrors installer::freehold_home (FREEHOLD_HOME override).
+func freeholdHome() string {
+	if h := os.Getenv("FREEHOLD_HOME"); h != "" {
+		return h
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/root"
+	}
+	return filepath.Join(home, ".freehold")
 }
 
 func init() {
