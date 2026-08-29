@@ -63,26 +63,35 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   `internal/deploy` (relay + CP, OPERATE mode), `internal/teardown` (three scopes),
   `internal/delegate` (job-request/job-result envelopes).
 
-### Phase 5 — Surface: DONE except the bootstrap/configure interactive forms
+### Phase 5 — Surface: DONE
 - CLI contract: 18 subcommands registered (the plan's 16 + destroy/ensure/info/resolve):
   bootstrap, console-login, delegate, delegate-peer, demo, deploy-cp, deploy-relay, destroy,
   ensure, info, readiness, relay-join, relay-member, relay-profile, relay-setup, resolve,
   storage, teardown. `installer`'s `bin("freehold-orchestrator")` resolve path =
-  `target/debug/freehold-orchestrator` (the Go binary; cargo build does NOT regenerate it).
+  `target/debug/freehold-orchestrator` — the Go binary is built there (`go build -C
+  orchestrator -o ../target/debug/freehold-orchestrator ./cmd/freehold-orchestrator`);
+  cargo build does NOT regenerate it.
+- bootstrap + teardown subcommands are FULLY wired to drivers (commit cfd7a4c —
+  the last two CLI stubs): bootstrap dispatches proxmox-lxc/vultr/hetzner drivers
+  with the operator-pubkey gate + A4 domain gate; teardown loads the installer
+  config, verifies the door via a signed exec probe, and runs the three scopes.
 - TUI (bubbletea): mode auto-detection (bootstrap/configure/running), running dashboard
   (Services/Agents/Runners/DATA views, Tab cycling, 2s timer), interactive console action
   flows (l login NIP-98 / p provision / x revoke / g grant via textinput prompts), drive
   storage-info for the DATA view.
-- **OPEN**: the `bootstrap` and `configure` TUI modes still render CLI hints
-  ("run the CLI to bootstrap: freehold bootstrap …") instead of collecting answers via the
-  prompt machinery (textinput/tuiFlow already exist and work in running-mode flows).
+- Interactive bootstrap/configure forms (commit f8a13ae): bootstrap mode `b` = 4-field
+  bootstrap form; configure mode `d` = deploy-relay (owner/relay-url/operator-pubkey),
+  `c` = deploy-cp (binary/relay-url/operator-pubkey). Forms exec the freehold binary
+  (self) to reuse the wired CLI drivers; flowMsg reload re-detects the mode.
 
-### Phase 6 — Fling: DONE except the live installer door-probe
-- `cargo build --workspace` clean; `cargo test --workspace` green (26 test binaries, 0 fail);
+### Phase 6 — Fling: DONE
+- `cargo build --workspace` clean; `cargo test --workspace` green (0 fail);
   `go vet ./...` clean; `go test ./...` green (harness byte-exact gate + all packages).
-- **OPEN**: run the installer's `ensure_bins` / `verify_door_once` (`echo freehold-door-ok`)
-  path against the Go binary at `target/debug/freehold-orchestrator` to confirm byte-compatible
-  exec output + exit behavior.
+- Installer subprocess contract verified LIVE against the real runner
+  (127.0.0.1:8787 / proxmox-box, commit f8a13ae):
+  `target/debug/freehold-orchestrator exec ... "echo freehold-door-ok"` → exact output
+  `freehold-door-ok`, rc=0; `readiness` → green; `storage resolve` → reuse lvm-thin.
+  TUI launch verified under a PTY (running + bootstrap modes render; b-form prompt works).
 
 ## Commits on `refactor-go` (working tree clean)
 
@@ -93,24 +102,23 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `0c027bc` | drive: durable-plane storage-info port for the DATA view |
 | `9786cbf` | Interactive console action flows (login/provision/revoke/grant) + drive fixes |
 | `c5a3750` | Remove Rust `tui` + `freehold-orchestrator-lib`: Go freehold is the sole UI/CLI |
+| `36c6876` | migrate-go.md: this status document |
+| `cfd7a4c` | Wire bootstrap + teardown CLI to real drivers (last two stubs) |
+| `f8a13ae` | Interactive bootstrap/configure TUI forms + live installer-contract verification |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
-## Remaining work (next steps)
+## Remaining work
 
-1. **Interactive `configure`/`bootstrap` TUI forms** — reuse `beginPrompt`/`tuiFlow`/
-   `textinput` machinery already in `actions.go`; collect the bootstrap answers
-   (kind/target/domain/operator-pubkey) and configure answers, then dispatch to the ported
-   drivers (internal/bootstrap, internal/deploy). This is the only incomplete TUI piece.
-2. **Verify the freehold no-args TUI launches interactively** — needs a real TTY
-   (`tea.NewProgram`); test via a pty or render `Model.View()` for each mode with a crafted
-   config.
-3. **Smoke the Go `bootstrap` subcommand's driver path** through a real runner
-   (`pct`/`pvesh`/docker), and `teardown`'s config-coupled driver — confirm end-to-end.
-4. **Installer subprocess contract**: build the Go binary to
-   `target/debug/freehold-orchestrator`, run the installer's `ensure_bins` + door-probe path;
-   confirm `exec` output + exit is byte-compatible with what `installer` parses.
-5. Commit cleanly; keep the working tree green (cargo + go build/vet/test).
+The plan is COMPLETE on `refactor-go`. Only operator-driven live exercises remain
+(these are the end-user testing the branch is held back from `main` for):
+
+1. Full `bootstrap` end-to-end on a scratch target (proxmox-lxc pct create through
+   the real runner) — the drivers are ported and CLI-wired; the exec probe,
+   readiness, and storage paths are already live-verified.
+2. `teardown --yes` on a scratch world — engine ported + CLI-wired; door probe
+   live-verified; a full run is destructive, so it's operator-paced.
+3. The operator's rebuild-from-branch end-user test (the `refactor-go` hold gate).
 
 ## Constraints & decisions (carry-forward)
 
