@@ -8,6 +8,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -85,6 +87,7 @@ type Model struct {
 	Msg         string
 	Flow        *tuiFlow
 	console     *consoleClient
+	CfgPath     string
 }
 
 // ServiceRow is one managed piece of the world.
@@ -124,9 +127,24 @@ type DataRow struct {
 
 // New builds the model from the config path (mirrors app.rs::run).
 func New(cfgPath string) (*Model, error) {
-	m := &Model{Mode: ModeBootstrap, LastRef: time.Now()}
-	if err := m.load(cfgPath); err != nil {
+	m := &Model{Mode: ModeBootstrap, LastRef: time.Now(), CfgPath: cfgPath}
+	if m.CfgPath == "" {
+		m.CfgPath = defaultTuiConfigPath()
+	}
+	if err := m.load(m.CfgPath); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// defaultTuiConfigPath mirrors config.DefaultPath (~/.config/freehold/config.toml).
+func defaultTuiConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "freehold", "config.toml")
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/root"
+	}
+	return filepath.Join(home, ".config", "freehold", "config.toml")
 }

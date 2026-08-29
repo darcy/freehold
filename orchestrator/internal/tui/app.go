@@ -174,10 +174,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Mode == ModeRunning {
 				m.beginPrompt(flowGrant)
 			}
+		case "b":
+			if m.Mode == ModeBootstrap {
+				m.beginPrompt(flowBootstrap)
+			}
+		case "d":
+			if m.Mode == ModeConfigure {
+				m.beginPrompt(flowDeployRelay)
+			}
+		case "c":
+			if m.Mode == ModeConfigure {
+				m.beginPrompt(flowDeployCp)
+			}
 		}
 	case flowMsg:
 		m.Flow = nil
 		m.refreshLocal()
+		if v.reload {
+			_ = m.load(m.CfgPath)
+		}
 		if v.err != nil {
 			m.Err = v.err.Error()
 		} else {
@@ -214,12 +229,12 @@ func (m *Model) View() string {
 		b.WriteString(styleRed.Render("! "+m.Err) + "\n\n")
 	}
 	if m.Mode == ModeBootstrap {
-		b.WriteString(styleYellow.Render("no config at ~/.config/freehold/config.toml — world not bootstrapped") + "\n\n")
-		b.WriteString("run the CLI to bootstrap:  freehold bootstrap --kind proxmox-lxc --role relay --domain <domain>\n")
+		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")
+		b.WriteString("press " + styleYellow.Render("b") + " to bootstrap a target (kind · domain · operator pubkey)\n")
 	} else if m.Mode == ModeConfigure {
 		b.WriteString(styleYellow.Render("config present, world NOT converged") + "\n")
 		b.WriteString(renderProbes(m) + "\n\n")
-		b.WriteString("run `freehold bootstrap` / `freehold deploy-relay` / `freehold deploy-cp` to converge, or check the runner door.\n")
+		b.WriteString("press " + styleYellow.Render("d") + " to deploy the relay, " + styleYellow.Render("c") + " to deploy the control plane\n")
 	} else {
 		b.WriteString(renderProbes(m) + "\n")
 		b.WriteString(renderViews(m))
@@ -246,7 +261,14 @@ func (m *Model) footer() string {
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second))) +
 			"   " + styleDim.Render("l login · p provision · x revoke · g grant · w web")
 	}
-	return styleFooter.Render("q quit")
+	switch m.Mode {
+	case ModeBootstrap:
+		return styleFooter.Render("q quit · b bootstrap")
+	case ModeConfigure:
+		return styleFooter.Render("q quit · d deploy-relay · c deploy-cp")
+	default:
+		return styleFooter.Render("q quit")
+	}
 }
 
 func renderViews(m *Model) string {

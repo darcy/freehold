@@ -1,7 +1,19 @@
+// Console + world-mutation action flows for the TUI.
+//
+// The running-mode flows (login/provision/rotate/revoke/grant) talk to the
+// console client in-process. The bootstrap/configure-mode forms reuse the
+// FULLY WIRED CLI drivers by exec'ing the freehold binary (this binary) as
+// a subprocess — the same pattern the teardown engine uses, which avoids a
+// cli<->tui import cycle and cobra re-entrancy while keeping a single
+// source of truth for the drivers.
 package tui
 
 import (
+	"bytes"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,18 +37,22 @@ const (
 	flowRotate
 	flowRevoke
 	flowGrant
+	flowBootstrap
+	flowDeployRelay
+	flowDeployCp
 )
 
 type tuiFlow struct {
 	Kind   flowKind
 	Step   int
-	Inputs [2]string
+	Inputs [6]string
 	Field  *textinput.Model
 }
 
 type flowMsg struct {
-	ok  string
-	err error
+	ok     string
+	err    error
+	reload bool
 }
 
 func textInputNew(placeholder string) *textinput.Model {
@@ -50,6 +66,10 @@ func ncols(k flowKind) int {
 	switch k {
 	case flowProvision, flowRotate, flowGrant:
 		return 2
+	case flowDeployRelay, flowDeployCp:
+		return 3
+	case flowBootstrap:
+		return 4
 	default:
 		return 1
 	}
@@ -76,6 +96,35 @@ func promptLabel(k flowKind, step int) string {
 			return "runner name"
 		}
 		return "agent pubkey (64-hex)"
+	case flowBootstrap:
+		switch step {
+		case 0:
+			return "runner address (blank = 127.0.0.1:8787)"
+		case 1:
+			return "kind: proxmox-lxc | vultr-vps | hetzner-vps"
+		case 2:
+			return "domain (the relay's identity)"
+		default:
+			return "operator pubkey (64-hex)"
+		}
+	case flowDeployRelay:
+		switch step {
+		case 0:
+			return "owner pubkey (64-hex)"
+		case 1:
+			return "relay URL (blank = https://<domain>)"
+		default:
+			return "operator pubkey (64-hex)"
+		}
+	case flowDeployCp:
+		switch step {
+		case 0:
+			return "local path of the control-plane binary"
+		case 1:
+			return "relay URL (blank = https://<domain>)"
+		default:
+			return "operator pubkey (64-hex)"
+		}
 	default:
 		return "value"
 	}
@@ -117,6 +166,27 @@ func (m *Model) handleFlow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// selfBin resolves the running freehold binary (the forms exec it as a
+// subprocess to reuse the wired CLI drivers).
+func selfBin() (string, error) {
+	return os.Executable()
+}
+
+// runSelf runs the freehold binary with the given subcommand args and
+// returns combined stdout/stderr.
+func runSelf(args ...string) (string, error) {
+	bin, err := selfBin()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(bin, args...)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err = cmd.Run()
+	return buf.String(), err
+}
+
 func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 	return func() tea.Msg {
 		if f.Kind == flowLogin {
@@ -133,6 +203,71 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			m.console = &consoleClient{client: c}
 			return flowMsg{ok: "console login ok — cookie " + c.Cookie()[:10] + "..."}
 		}
+
+		// The three world-mutation forms reuse the wired CLI drivers.
+		switch f.Kind {
+		case flowBootstrap:
+			addr := f.Inputs[0]
+			if addr == "" {
+				addr = "127.0.0.1:8787"
+			}
+			kind, domain, op := f.Inputs[1], f.Inputs[2], f.Inputs[3]
+			if kind == "" || domain == "" || op == "" {
+				return flowMsg{err: fmt.Errorf("bootstrap needs kind, domain and operator pubkey")}
+			}
+			out, err := runSelf("bootstrap",
+				"--addr", addr,
+				"--kind", kind,
+				"--domain", domain,
+				"--operator-pubkey", op,
+			)
+			if err != nil {
+				return flowMsg{err: fmt.Errorf("bootstrap failed: %w (%s)", err, tail(out))}
+			}
+			return flowMsg{ok: "bootstrap ok — " + tail(out), reload: true}
+		case flowDeployRelay:
+			owner, url, op := f.Inputs[0], f.Inputs[1], f.Inputs[2]
+			if owner == "" || op == "" {
+				return flowMsg{err: fmt.Errorf("deploy-relay needs owner pubkey and operator pubkey")}
+			}
+			if url == "" {
+				if m.Domain == "" {
+					return flowMsg{err: fmt.Errorf("no domain known — give an explicit relay URL")}
+				}
+				url = "https://" + m.Domain
+			}
+			args := []string{"deploy-relay",
+				"--owner-pubkey", owner,
+				"--relay-url", url,
+				"--operator-pubkey", op,
+			}
+			if m.Domain != "" {
+				args = append(args, "--domain", m.Domain)
+			}
+			out, err := runSelf(args...)
+			if err != nil {
+				return flowMsg{err: fmt.Errorf("deploy-relay failed: %w (%s)", err, tail(out))}
+			}
+			return flowMsg{ok: "relay deployed — " + tail(out), reload: true}
+		case flowDeployCp:
+			binary, url, op := f.Inputs[0], f.Inputs[1], f.Inputs[2]
+			if binary == "" || url == "" {
+				return flowMsg{err: fmt.Errorf("deploy-cp needs the CP binary path and relay URL")}
+			}
+			args := []string{"deploy-cp",
+				"--binary", binary,
+				"--relay-url", url,
+			}
+			if op != "" {
+				args = append(args, "--operator-pubkey", op)
+			}
+			out, err := runSelf(args...)
+			if err != nil {
+				return flowMsg{err: fmt.Errorf("deploy-cp failed: %w (%s)", err, tail(out))}
+			}
+			return flowMsg{ok: "CP deployed — " + tail(out), reload: true}
+		}
+
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
 		}
@@ -166,6 +301,25 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			return flowMsg{err: fmt.Errorf("unhandled flow")}
 		}
 	}
+}
+
+// tail returns the last non-empty line of a command's output (the CLI's
+// success/error detail line).
+func tail(s string) string {
+	var last string
+	for _, line := range splitLines(s) {
+		if line != "" {
+			last = line
+		}
+	}
+	if len(last) > 200 {
+		return last[:200] + "…"
+	}
+	return last
+}
+
+func splitLines(s string) []string {
+	return strings.Split(s, "\n")
 }
 
 func (m *Model) refreshLocal() {
