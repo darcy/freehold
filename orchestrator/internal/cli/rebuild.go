@@ -832,7 +832,7 @@ func (e *rebuildEngine) stagePlacement() (*placement, error) {
 		return nil, fmt.Errorf("storage resolution failed:\n%s", out)
 	}
 	pool := parseStoragePool(out)
-	detected, isLvm := parseStorageThinPool(out)
+	detected, isLvm := parseStorageThinPools(out)
 
 	// The STORAGE-THINPOOL line exists only on the LVM-thin backend; its
 	// absence is ZFS, where the placement gate does not apply (datasets
@@ -843,21 +843,33 @@ func (e *rebuildEngine) stagePlacement() (*placement, error) {
 		}
 		return &placement{pool: pool}, nil
 	}
+	has := func(name string) bool {
+		for _, d := range detected {
+			if d == name {
+				return true
+			}
+		}
+		return false
+	}
 
-	// The operator named the pool up front: reuse (adopt) or carve at
-	// --pool-size-gb. An empty detected name with no flag means the VG has
-	// no thin pool yet — carve the default.
-	if e.f.thinPool != "" || detected == "" {
+	// The operator named the pool up front: adopt if it ALREADY EXISTS
+	// (membership in the VG's pool set — the honest probe), carve at
+	// --pool-size-gb when it doesn't. No flag + no pool yet: carve the
+	// default. Deriving `created` from a NAME-vs-FIRST-POOL comparison is
+	// wrong in a multi-pool VG (a named existing second pool would be
+	// misreported created=true and recorded for teardown --data).
+	if e.f.thinPool != "" || len(detected) == 0 {
 		name := e.f.thinPool
 		if name == "" {
 			name = drive.FreshThinPool
 		}
-		return &placement{pool: pool, thinPool: name, created: name != detected}, nil
+		return &placement{pool: pool, thinPool: name, created: !has(name)}, nil
 	}
 	if e.f.yes {
-		return &placement{pool: pool, thinPool: detected, created: false}, nil
+		return &placement{pool: pool, thinPool: detected[0], created: false}, nil
 	}
 
+	first := detected[0]
 	fmt.Fprintf(e.out, `
   ─ plane placement ───────────────────────────────────────
   VG %s currently holds the thin pool %q.
@@ -865,14 +877,19 @@ func (e *rebuildEngine) stagePlacement() (*placement, error) {
     r      reuse it
     <name> carve a NEW dedicated pool of that name (%d GB)
   ─────────────────────────────────────────────────────────
-`, pool, detected, e.f.poolSizeGB)
+`, pool, first, e.f.poolSizeGB)
 	answer, err := e.prompt("pool choice [r = reuse / type a new pool name]")
 	if err != nil {
 		return nil, err
 	}
 	answer = strings.TrimSpace(answer)
-	if answer == "" || answer == "r" || answer == "R" || answer == detected {
-		return &placement{pool: pool, thinPool: detected, created: false}, nil
+	if answer == "" || answer == "r" || answer == "R" || answer == first {
+		return &placement{pool: pool, thinPool: first, created: false}, nil
+	}
+	// A name the operator types is an ADOPT if it already exists in the VG
+	// (membership probe), a CARVE otherwise — same rule as the flag path.
+	if has(answer) {
+		return &placement{pool: pool, thinPool: answer, created: false}, nil
 	}
 	sizeAnswer, err := e.prompt(fmt.Sprintf("new pool %q size GB (blank = %d)", answer, e.f.poolSizeGB))
 	if err != nil {
@@ -883,7 +900,7 @@ func (e *rebuildEngine) stagePlacement() (*placement, error) {
 		return nil, err
 	}
 	e.f.poolSizeGB = size
-	return &placement{pool: pool, thinPool: answer, created: answer != detected}, nil
+	return &placement{pool: pool, thinPool: answer, created: true}, nil
 }
 
 // stageStorage ensures each tenant's dataset onto the placement gate's
@@ -962,38 +979,19 @@ func (e *rebuildEngine) stageStorage(placement *placement) error {
 // pool freehold just carved. `pct create --rootfs local-lvm:…` (both LXC
 // boots) resolves through storage.cfg — after the operator wiped the VG's
 // only thin pool the carve leaves local-lvm dangling unless we re-point
-// it here. Idempotent: the probe skips an already-correct pointer.
-//
-// The re-point is a SCOPED in-place edit of /etc/pve/storage.cfg, NOT
-// `pvesm set local-lvm --thinpool`: the thinpool property is not mutable
-// through pvesm's API on PVE ("Unknown option: thinpool" — live-verified),
-// and storage.cfg editing is PVE's sanctioned manual repair. The block
-// format is WHITESPACE (`\tthinpool data`, `vgname pve`) — no colons.
+// it here. The probe/edit/readback discipline lives ONCE in
+// drive.RepointLocalLvm (shared with teardown's RemoveThinPool); this
+// method only supplies the subprocess transport. Idempotent: the probe
+// skips an already-correct pointer.
 func (e *rebuildEngine) stageLocalLvmRepoint(placement *placement) error {
-	probe := "grep -A2 '^lvmthin: local-lvm$' /etc/pve/storage.cfg | awk '/^[[:space:]]*thinpool[[:space:]]/{print $2; exit}'"
-	ok, out := e.runBin(e.bins.Self, e.execArgs(probe, 30))
-	if !ok {
-		return fmt.Errorf("local-lvm probe failed on %s:\n%s", e.f.host, out)
+	run := func(script string, timeoutS uint64) (string, error) {
+		ok, out := e.runBin(e.bins.Self, e.execArgs(script, int(timeoutS)))
+		if !ok {
+			return out, fmt.Errorf("local-lvm storage.cfg step failed on %s:\n%s", e.f.host, out)
+		}
+		return out, nil
 	}
-	current := strings.TrimSpace(out)
-	if current == "" {
-		return fmt.Errorf("no `lvmthin: local-lvm` storage block in /etc/pve/storage.cfg on %s — cannot re-point it at %s", e.f.host, placement.thinPool)
-	}
-	if current == placement.thinPool {
-		return nil // already pointing at the carved pool
-	}
-	// Rewrite ONLY the thinpool line inside the local-lvm block
-	// (awk scoped: in-block flag set on the header, cleared on blank).
-	edit := fmt.Sprintf(`awk -v tp=%s '/^lvmthin: local-lvm$/{inb=1; print; next} /^[[:space:]]*$/{inb=0} inb && /^[[:space:]]*thinpool[[:space:]]/{print "\tthinpool " tp; next} {print}' /etc/pve/storage.cfg > /tmp/fh-storage.cfg && cat /tmp/fh-storage.cfg > /etc/pve/storage.cfg && rm -f /tmp/fh-storage.cfg`, placement.thinPool)
-	ok, out = e.runBin(e.bins.Self, e.execArgs(edit, 60))
-	if !ok {
-		return fmt.Errorf("re-pointing PVE local-lvm to %s failed:\n%s", placement.thinPool, out)
-	}
-	ok, out = e.runBin(e.bins.Self, e.execArgs(probe, 30))
-	if !ok || strings.TrimSpace(out) != placement.thinPool {
-		return fmt.Errorf("local-lvm still points at %q after the edit (want %q):\n%s", strings.TrimSpace(out), placement.thinPool, out)
-	}
-	return nil
+	return drive.RepointLocalLvm(run, placement.thinPool)
 }
 
 // placement is the plane-placement gate's resolved answer.
@@ -1015,21 +1013,26 @@ func parseStoragePool(out string) string {
 	return "rpool"
 }
 
-// parseStorageThinPool reads `STORAGE-THINPOOL: <name>`, emitted by the
-// LVM-thin backend only ("-" = the VG has no thin pool yet). lvm is true
-// only when the line is present — its ABSENCE means the backend is not
-// LVM-thin (ZFS), and the placement gate does not apply.
-func parseStorageThinPool(out string) (pool string, lvm bool) {
+// parseStorageThinPools reads `STORAGE-THINPOOL: <name>[,<name>…]`, emitted
+// by the LVM-thin backend only ("-" = the VG has no thin pool yet). The
+// FULL list is the placement gate's adopt-or-carve probe: a named pool that
+// matches ANY member is adopted (created=false); a name matching NONE is
+// carved. Comparing against only the first pool misreports an existing
+// second pool as created — and teardown --data would then destroy an
+// operator-owned pool. lvm is true only when the line is present — its
+// ABSENCE means the backend is not LVM-thin (ZFS), and the gate does not
+// apply.
+func parseStorageThinPools(out string) (pools []string, lvm bool) {
 	for _, l := range strings.Split(out, "\n") {
 		if rest, ok := strings.CutPrefix(l, "STORAGE-THINPOOL: "); ok {
 			p := strings.TrimSpace(rest)
-			if p == "-" {
-				p = ""
+			if p != "-" && p != "" {
+				pools = strings.Split(p, ",")
 			}
-			return p, true
+			return pools, true
 		}
 	}
-	return "", false
+	return nil, false
 }
 
 // parseStorageMounts reads the `STORAGE-MOUNT <src>:<guest>` lines.

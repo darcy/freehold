@@ -347,14 +347,19 @@ var storageResolveCmd = &cobra.Command{
 			// identity into the ensure + config steps.
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
 			if *action.Detected == planebase.ExistingLvmThin {
-				// The placement gate's probe: which thin pool the VG holds
-				// RIGHT NOW (named) vs none ("-") — reuse vs carve decision.
-				thin, found, err := bootstrap.ThinPoolName(c, target, action.Pool)
+				// The placement gate's probe: ALL thin pools the VG holds
+				// RIGHT NOW. The membership list — not just the first pool
+				// — is what lets the gate decide adopt-vs-carve honestly for
+				// a NAMED pool (--thin-pool): a two-pool VG where the named
+				// pool is the SECOND one must adopt it (created=false), and
+				// a name that matches none must carve (created=true).
+				pools, err := bootstrap.ThinPools(c, target, action.Pool)
 				if err != nil {
 					return err
 				}
-				if !found {
-					thin = "-"
+				thin := "-"
+				if len(pools) > 0 {
+					thin = strings.Join(pools, ",")
 				}
 				fmt.Printf("STORAGE-THINPOOL: %s\n", thin)
 			}

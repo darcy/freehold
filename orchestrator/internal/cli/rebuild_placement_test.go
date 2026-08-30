@@ -8,17 +8,21 @@ import (
 
 // ---- storage-thinpool contract-line parsing ----------------------------------
 
-func TestParseStorageThinPool(t *testing.T) {
-	if pool, lvm := parseStorageThinPool("noise\nSTORAGE-THINPOOL: data\nmore\n"); !lvm || pool != "data" {
-		t.Errorf("named pool = %q,%v, want data,true", pool, lvm)
+func TestParseStorageThinPools(t *testing.T) {
+	if pools, lvm := parseStorageThinPools("noise\nSTORAGE-THINPOOL: data\nmore\n"); !lvm || len(pools) != 1 || pools[0] != "data" {
+		t.Errorf("single pool = %v,%v, want [data],true", pools, lvm)
+	}
+	// The membership list is the adopt-or-carve probe: multi-pool VGs.
+	if pools, lvm := parseStorageThinPools("STORAGE-THINPOOL: data,other\n"); !lvm || len(pools) != 2 || pools[0] != "data" || pools[1] != "other" {
+		t.Errorf("two pools = %v,%v, want [data other],true", pools, lvm)
 	}
 	// "-" is resolve's way of saying the VG has no thin pool yet.
-	if pool, lvm := parseStorageThinPool("STORAGE-THINPOOL: -\n"); !lvm || pool != "" {
-		t.Errorf("dash must mean no pool: %q,%v, want ,true", pool, lvm)
+	if pools, lvm := parseStorageThinPools("STORAGE-THINPOOL: -\n"); !lvm || len(pools) != 0 {
+		t.Errorf("dash must mean no pool: %v,%v, want [],true", pools, lvm)
 	}
 	// absent line = not an LVM-thin backend (ZFS): the gate is skipped.
-	if pool, lvm := parseStorageThinPool("STORAGE-POOL: rpool\n"); lvm || pool != "" {
-		t.Errorf("absent thinpool line = %q,%v, want ,false", pool, lvm)
+	if pools, lvm := parseStorageThinPools("STORAGE-POOL: rpool\n"); lvm || len(pools) != 0 {
+		t.Errorf("absent thinpool line = %v,%v, want [],false", pools, lvm)
 	}
 }
 
@@ -174,6 +178,63 @@ func TestStagePlacementInteractiveTypeDetectedNameAdopts(t *testing.T) {
 	}
 	if got.thinPool != "data" || got.created {
 		t.Errorf("typing the detected name => adopt, got %+v", got)
+	}
+}
+
+// ---- the two-pool VG regression (round-4 IMPORTANT #3) ---------------------
+//
+// `created` must come from a MEMBERSHIP probe (is the named pool already in
+// the VG?), never from a name-vs-FIRST-pool comparison: in a two-pool VG the
+// flag can name the SECOND pool, which a first-pool compare misreports as
+// created=true — recording an operator-owned pool that teardown --data would
+// then destroy.
+const resolveLvmTwoPools = "STORAGE-POOL: pve\nSTORAGE-THINPOOL: data,other\n"
+
+func TestStagePlacementFlagAdoptsSecondPoolInTwoPoolVG(t *testing.T) {
+	e := placementEngine(resolveLvmTwoPools, "", rebuildFlags{thinPool: "other"})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "other" || got.created {
+		t.Errorf("a named EXISTING second pool must be adopted, never claimed created: %+v", got)
+	}
+}
+
+func TestStagePlacementFlagCarvesUnknownNameInTwoPoolVG(t *testing.T) {
+	e := placementEngine(resolveLvmTwoPools, "", rebuildFlags{thinPool: "fh-new", poolSizeGB: 30})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "fh-new" || !got.created {
+		t.Errorf("a name matching NO existing pool must carve: %+v", got)
+	}
+}
+
+func TestStagePlacementYesStillReusesFirstPool(t *testing.T) {
+	// The --yes default path is untouched by the membership change: it
+	// reuses the FIRST detected pool and never claims it created.
+	e := placementEngine(resolveLvmTwoPools, "", rebuildFlags{yes: true})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "data" || got.created {
+		t.Errorf("--yes => reuse the first pool, got %+v", got)
+	}
+}
+
+func TestStagePlacementInteractiveTypeSecondPoolNameAdopts(t *testing.T) {
+	// Typing an EXISTING pool's name (even the non-first one) must adopt,
+	// not ask for a carve size.
+	e := placementEngine(resolveLvmTwoPools, "other\n", rebuildFlags{})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "other" || got.created {
+		t.Errorf("typing an existing pool's name => adopt, got %+v", got)
 	}
 }
 

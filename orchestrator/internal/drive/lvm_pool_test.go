@@ -81,7 +81,7 @@ func TestRemoveThinPoolRemovesEmptyPool(t *testing.T) {
 	if f.lvs["fh"] || f.lvs["fh_tdata"] || f.lvs["fh_tmeta"] {
 		t.Errorf("pool trio must be gone: %v", f.lvs)
 	}
-	if i := indexOfContaining(f.cmds, "pvesm set"); i >= 0 {
+	if i := indexOfContaining(f.cmds, "awk -v tp="); i >= 0 {
 		t.Errorf("no storage.cfg pointer => no re-point: %v", f.cmds)
 	}
 }
@@ -104,12 +104,16 @@ func TestRemoveThinPoolRefusesWhileLVRides(t *testing.T) {
 
 func TestRemoveThinPoolSurvivorNotARider(t *testing.T) {
 	// The rider count must be per-POOL (the pool_lv column), not a global
-	// LV count: a SURVIVING pool's own LVs must not block removing the
-	// doomed one, or the re-point branch below would be unreachable.
+	// LV count: a SURVIVING pool's own LVs — including a real thin volume
+	// riding it — must not block removing the doomed one, or the re-point
+	// branch below would be unreachable. (With the bare-pool lvs form this
+	// is a real distinction: `other  other-guest-lv` rides `other`, not
+	// the doomed `fh`.)
 	f := newFakeRunner()
 	seedPool(f, "pve", "fh")
 	seedPool(f, "pve", "other")
-	f.lvs["other-guest-lv"] = true // plain PVE guest volume on the survivor
+	f.lvs["other-guest-lv"] = true
+	f.thinOf["other-guest-lv"] = "other"
 	c := f.serve(t)
 	if err := RemoveThinPool(c, "box", "pve", "fh"); err != nil {
 		t.Fatalf("survivor's LVs must not count as riders: %v", err)
@@ -134,23 +138,30 @@ func TestRemoveThinPoolRepointsLocalLvmToSurvivor(t *testing.T) {
 	f := newFakeRunner()
 	seedPool(f, "pve", "fh")
 	seedPool(f, "pve", "other")
-	f.storageCfgThinpool = "pve/fh"
+	// storage.cfg's local-lvm pointer is the BARE pool name (whitespace
+	// block, no vg prefix), pointing at the doomed pool.
+	f.storageCfgThinpool = "fh"
 	c := f.serve(t)
 	if err := RemoveThinPool(c, "box", "pve", "fh"); err != nil {
 		t.Fatalf("RemoveThinPool: %v", err)
 	}
-	// The re-point must land on the SURVIVOR, before the removal, and never
-	// on the doomed pool.
-	if i := indexOfContaining(f.cmds, "pvesm set local-lvm --thinpool pve/other"); i < 0 {
-		t.Errorf("must re-point local-lvm to the surviving pool: %v", f.cmds)
+	// The re-point goes through the shared whitespace storage.cfg awk
+	// script (never `pvesm set local-lvm --thinpool` — PVE rejects it).
+	// It must land on the SURVIVOR, before the removal, and never on the
+	// doomed pool.
+	if i := indexOfContaining(f.cmds, "awk -v tp=other"); i < 0 {
+		t.Errorf("must re-point local-lvm to the surviving pool via the storage.cfg edit: %v", f.cmds)
 	}
-	if i := indexOfContaining(f.cmds, "pvesm set local-lvm --thinpool pve/fh"); i >= 0 {
+	if i := indexOfContaining(f.cmds, "awk -v tp=fh"); i >= 0 {
 		t.Errorf("must never re-point local-lvm onto the doomed pool: %v", f.cmds)
 	}
-	if rep, rem := indexOfContaining(f.cmds, "pvesm set"), indexOfContaining(f.cmds, "lvremove -f pve/fh"); rem >= 0 && rep > rem {
+	if i := indexOfContaining(f.cmds, "pvesm set"); i >= 0 {
+		t.Errorf("must never use pvesm set for the thinpool re-point: %v", f.cmds)
+	}
+	if rep, rem := indexOfContaining(f.cmds, "awk -v tp=other"), indexOfContaining(f.cmds, "lvremove -f pve/fh"); rem >= 0 && rep > rem {
 		t.Errorf("re-point must precede the removal: %v", f.cmds)
 	}
-	if f.storageCfgThinpool != "pve/other" {
+	if f.storageCfgThinpool != "other" {
 		t.Errorf("storage.cfg must end on the survivor, got %q", f.storageCfgThinpool)
 	}
 }
@@ -161,12 +172,12 @@ func TestRemoveThinPoolNoSurvivorLeavesLocalLvm(t *testing.T) {
 	// rebuild re-points it once the new pool is carved.
 	f := newFakeRunner()
 	seedPool(f, "pve", "fh")
-	f.storageCfgThinpool = "pve/fh"
+	f.storageCfgThinpool = "fh"
 	c := f.serve(t)
 	if err := RemoveThinPool(c, "box", "pve", "fh"); err != nil {
 		t.Fatalf("RemoveThinPool: %v", err)
 	}
-	if i := indexOfContaining(f.cmds, "pvesm set"); i >= 0 {
+	if i := indexOfContaining(f.cmds, "awk -v tp="); i >= 0 {
 		t.Errorf("no survivor => no re-point (rebuild re-points on next carve): %v", f.cmds)
 	}
 	if i := indexOfContaining(f.cmds, "lvremove -f pve/fh"); i < 0 {

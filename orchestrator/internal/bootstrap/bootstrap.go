@@ -157,28 +157,43 @@ func VGList(clientConn *client.McpClient, target string) ([]string, error) {
 	return strings.Fields(out.Stdout), nil
 }
 
-// ThinPoolName is the thin pool REUSED for freehold tenant LVs in a VG, if it
-// already has one (marked by the _tmeta/_tdata companion pair).
-func ThinPoolName(clientConn *client.McpClient, target, vg string) (string, bool, error) {
+// ThinPools lists ALL thin pools in the VG (each marked by its _tmeta/_tdata
+// companion pair), in lvs order. The placement gate needs the full set:
+// "reuse the detected first pool" and "is the NAMED pool already carved"
+// are different questions the first-pool answer alone cannot distinguish —
+// a two-pool VG with `--thin-pool <the other one>` must adopt, not claim.
+func ThinPools(clientConn *client.McpClient, target, vg string) ([]string, error) {
 	names, err := lvsNames(clientConn, target, vg)
+	if err != nil {
+		return nil, err
+	}
+	set := map[string]bool{}
+	for _, n := range names {
+		set[n] = true
+	}
+	var pools []string
+	for _, n := range names {
+		if !strings.HasSuffix(n, "_tmeta") {
+			continue
+		}
+		if pool := strings.TrimSuffix(n, "_tmeta"); set[pool+"_tdata"] {
+			pools = append(pools, pool)
+		}
+	}
+	return pools, nil
+}
+
+// ThinPoolName is the FIRST thin pool REUSED for freehold tenant LVs in a
+// VG, if it already has one (marked by the _tmeta/_tdata companion pair).
+func ThinPoolName(clientConn *client.McpClient, target, vg string) (string, bool, error) {
+	pools, err := ThinPools(clientConn, target, vg)
 	if err != nil {
 		return "", false, err
 	}
-	for _, n := range names {
-		if strings.HasSuffix(n, "_tmeta") {
-			pool := strings.TrimSuffix(n, "_tmeta")
-			hasTdata := false
-			for _, m := range names {
-				if m == pool+"_tdata" {
-					hasTdata = true
-				}
-			}
-			if hasTdata {
-				return pool, true, nil
-			}
-		}
+	if len(pools) == 0 {
+		return "", false, nil
 	}
-	return "", false, nil
+	return pools[0], true, nil
 }
 
 // ThinLVExists reports whether a thin LV already exists for a tenant.
@@ -199,46 +214,29 @@ func ThinLVExists(clientConn *client.McpClient, target, vg, tenant string) (bool
 // (marked by its _tmeta/_tdata companion pair). ThinPoolName finds ANY pool;
 // this one names it — the plane-placement gate's adopt-or-carve probe.
 func ThinPoolExists(clientConn *client.McpClient, target, vg, pool string) (bool, error) {
-	names, err := lvsNames(clientConn, target, vg)
+	pools, err := ThinPools(clientConn, target, vg)
 	if err != nil {
 		return false, err
 	}
-	meta, data := false, false
-	for _, n := range names {
-		switch n {
-		case pool + "_tmeta":
-			meta = true
-		case pool + "_tdata":
-			data = true
+	for _, p := range pools {
+		if p == pool {
+			return true, nil
 		}
 	}
-	return meta && data, nil
+	return false, nil
 }
 
 // ThinPoolNameOther returns the first thin pool in the VG EXCEPT `except` —
 // the full teardown's local-lvm re-point wants a SURVIVING pool; the doomed
 // one must never be picked as its own successor.
 func ThinPoolNameOther(clientConn *client.McpClient, target, vg, except string) (string, bool, error) {
-	names, err := lvsNames(clientConn, target, vg)
+	pools, err := ThinPools(clientConn, target, vg)
 	if err != nil {
 		return "", false, err
 	}
-	for _, n := range names {
-		if !strings.HasSuffix(n, "_tmeta") {
-			continue
-		}
-		pool := strings.TrimSuffix(n, "_tmeta")
-		if pool == except {
-			continue
-		}
-		hasTdata := false
-		for _, m := range names {
-			if m == pool+"_tdata" {
-				hasTdata = true
-			}
-		}
-		if hasTdata {
-			return pool, true, nil
+	for _, p := range pools {
+		if p != except {
+			return p, true, nil
 		}
 	}
 	return "", false, nil

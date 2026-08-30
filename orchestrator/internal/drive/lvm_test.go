@@ -30,7 +30,8 @@ type fakeRunner struct {
 	// a pool's own row has a blank parent and is not a rider).
 	thinOf map[string]string
 	// storageCfgThinpool models /etc/pve/storage.cfg's local-lvm thinpool
-	// pointer ("<vg>/<pool>"); "" = no pointer line.
+	// pointer — the BARE pool name (the real block is whitespace-formatted,
+	// `\tthinpool data`, no vg prefix and no colon); "" = no pointer line.
 	storageCfgThinpool string
 }
 
@@ -59,18 +60,14 @@ func (f *fakeRunner) run(cmd string) (int, string) {
 
 	switch {
 	case strings.HasPrefix(cmd, "lvs --noheadings -o pool_lv,lv_name"):
-		// pool_lv is blank for pools/plain LVs; riders name their parent
-		// pool as `vg/pool` (the real lvs form). The VG comes from the
-		// command's trailing argument: lvs --noheadings -o pool_lv,lv_name <vg> ...
-		fields := strings.Fields(cmd)
-		vg := ""
-		if len(fields) >= 5 {
-			vg = fields[4]
-		}
+		// Real lvs form (live-verified): riders name their parent pool
+		// BARE in the pool_lv column (`data`, never `pve/data`); pools and
+		// plain LVs get a blank first field. The VG comes from the
+		// command's trailing argument.
 		var lines []string
 		for lv := range f.lvs {
-			if parent := f.thinOf[lv]; parent != "" && vg != "" {
-				lines = append(lines, vg+"/"+parent+"  "+lv)
+			if parent := f.thinOf[lv]; parent != "" {
+				lines = append(lines, parent+"  "+lv)
 			} else {
 				lines = append(lines, "  "+lv)
 			}
@@ -171,14 +168,18 @@ func (f *fakeRunner) run(cmd string) (int, string) {
 	case strings.HasPrefix(cmd, "chown ") && !strings.HasPrefix(cmd, "chown -"):
 		return 0, ""
 
-	case strings.HasPrefix(cmd, "grep -oE 'thinpool:"):
+	case strings.Contains(cmd, "grep -A2 '^lvmthin: local-lvm$'"):
+		// The LocalLvmProbeScript: bare pool name from the local-lvm block.
 		if f.storageCfgThinpool != "" {
-			return 0, "thinpool: " + f.storageCfgThinpool + "\n"
+			return 0, f.storageCfgThinpool + "\n"
 		}
 		return 0, ""
 
-	case strings.HasPrefix(cmd, "pvesm set local-lvm --thinpool"):
-		f.storageCfgThinpool = strings.Fields(cmd)[4]
+	case strings.Contains(cmd, "awk -v tp=") && strings.Contains(cmd, "/etc/pve/storage.cfg"):
+		// The LocalLvmRepointScript: parse `-v tp=<pool>` and set the pointer.
+		idx := strings.Index(cmd, "-v tp=")
+		rest := strings.Fields(cmd[idx+len("-v tp="):])[0]
+		f.storageCfgThinpool = rest
 		return 0, ""
 
 	case strings.HasPrefix(cmd, "zfs list -H -o name"):
