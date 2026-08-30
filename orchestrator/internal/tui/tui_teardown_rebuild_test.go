@@ -203,8 +203,8 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 }
 
 // TestRebuildFormNoSeedWithoutConfig: no config = the old fresh-world
-// behavior (nothing prefilled), and a config WITHOUT k3s leaves the k3s
-// answer blank (not "y").
+// behavior (nothing prefilled), and a config WITHOUT k3s seeds "n" — that
+// prompt's blank default is y, so blank would boot k3s on a k3s-off world.
 func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: "/nonexistent/config.toml"}
 	keyPress(m, "B")
@@ -221,8 +221,35 @@ func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
 	if m2.Flow == nil {
 		t.Fatal("B did not start the rebuild flow")
 	}
-	if got := flowDefaults(m2, flowRebuild)[5]; got != "" {
-		t.Errorf("config without k3s must not seed the k3s answer, got %q", got)
+	if got := flowDefaults(m2, flowRebuild)[5]; got != "n" {
+		t.Errorf("config without k3s must seed the k3s answer as %q, got %q", "n", got)
+	}
+}
+
+// TestRebuildFormK3sOffWorldStaysOff: six bare enters on a k3s-off world
+// must dispatch --with-k3s=false — the seeded "n" has to round-trip into
+// the args (a blank would have booted k3s: the prompt default is y).
+func TestRebuildFormK3sOffWorldStaysOff(t *testing.T) {
+	cfgPath := writeRebuildCfg(t,
+		"domain = \"world.test\"\n"+
+			"operator_pubkey = \""+strings.Repeat("b", 64)+"\"\n"+
+			"managed = [\"relay\", \"cp\"]\n")
+	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	keyPress(m, "B")
+	var msg tea.Cmd
+	for i := 0; i < 6; i++ {
+		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if msg == nil {
+		t.Fatal("no activity message was dispatched")
+	}
+	start, ok := msg().(activityStartMsg)
+	if !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
+	}
+	joined := strings.Join(start.args, " ")
+	if !strings.Contains(joined, "--with-k3s=false") {
+		t.Errorf("k3s-off world must dispatch --with-k3s=false, got %q", joined)
 	}
 }
 

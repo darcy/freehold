@@ -270,3 +270,121 @@ func TestNoDestroyingLineWithoutVmid(t *testing.T) {
 		t.Errorf("report must say the cp LXC was never created:\n%s", report)
 	}
 }
+
+// pctList models real `pct list` output (VMID STATUS LOCK NAME): each row
+// starts at column 0 or with whitespace, the name is the LAST column — the
+// shape lxcOccupant's `awk $NF` parses.
+type pctHost struct {
+	execs []string
+	names map[uint32]string // vmid -> guest name
+}
+
+func (p *pctHost) execFn(cmd string) (bool, string) {
+	p.execs = append(p.execs, cmd)
+	switch {
+	case strings.Contains(cmd, "pct list") && strings.Contains(cmd, "awk"):
+		// occupant lookup: "pct list | grep -E '^\s*N ' | awk ..."
+		for vmid, name := range p.names {
+			if strings.Contains(cmd, fmt.Sprintf("\\s*%d ", vmid)) {
+				return true, name + "\n"
+			}
+		}
+		return true, "\n"
+	case strings.Contains(cmd, "pct list") && strings.Contains(cmd, "grep -c"):
+		for vmid := range p.names {
+			if strings.Contains(cmd, fmt.Sprintf("\\s*%d ", vmid)) {
+				return true, "1\n"
+			}
+		}
+		return true, "0\n"
+	case strings.HasPrefix(cmd, "pct destroy "):
+		var v uint32
+		_, _ = fmt.Sscanf(strings.TrimPrefix(cmd, "pct destroy "), "%d", &v)
+		delete(p.names, v)
+		return true, ""
+	case strings.HasPrefix(cmd, "pct status "):
+		return true, "status: stopped\n"
+	}
+	return true, ""
+}
+
+// TestExecRunnerRefusesForeignGuestAtRecordedVmid is the vmid-reuse guard:
+// the config kept vmid 100 after a compute teardown, PVE handed the freed
+// id to the operator's next guest, and a second teardown must REFUSE — no
+// pct stop, no pct destroy.
+func TestExecRunnerRefusesForeignGuestAtRecordedVmid(t *testing.T) {
+	host := &pctHost{names: map[uint32]string{100: "operators-new-ct"}}
+	r := &ExecRunner{Domain: "world.test", execFn: host.execFn}
+	_, err := r.DestroyOneLxc("relay", ptr32(100))
+	if err == nil {
+		t.Fatal("destroy must refuse when the recorded vmid holds a foreign guest")
+	}
+	for _, c := range []string{"operators-new-ct", "world-test-relay"} {
+		if !strings.Contains(err.Error(), c) {
+			t.Errorf("refusal must name both the occupant %q and the expected %q, got: %v", "operators-new-ct", "world-test-relay", err)
+		}
+	}
+	for _, cmd := range host.execs {
+		if strings.HasPrefix(cmd, "pct destroy") || strings.HasPrefix(cmd, "pct stop") {
+			t.Errorf("no destroy/stop may run on a foreign occupant, got: %q", cmd)
+		}
+	}
+}
+
+// TestExecRunnerDestroysMatchingGuest: the occupant at the recorded vmid IS
+// the freehold guest (same name rebuild creates) — the full destroy path
+// runs and reports it.
+func TestExecRunnerDestroysMatchingGuest(t *testing.T) {
+	host := &pctHost{names: map[uint32]string{100: "world-test-relay"}}
+	r := &ExecRunner{Domain: "world.test", execFn: host.execFn}
+	log, err := r.DestroyOneLxc("relay", ptr32(100))
+	if err != nil {
+		t.Fatalf("matching occupant must destroy, got: %v", err)
+	}
+	if len(log) != 1 || !strings.Contains(log[0], "destroyed relay LXC 100") {
+		t.Errorf("log = %v", log)
+	}
+	var destroyed bool
+	for _, cmd := range host.execs {
+		if cmd == "pct destroy 100" {
+			destroyed = true
+		}
+	}
+	if !destroyed {
+		t.Errorf("pct destroy 100 never ran: %v", host.execs)
+	}
+}
+
+// TestExecRunnerAbsentVmidIsNoop: a free vmid = "already gone", and nothing
+// destructive runs.
+func TestExecRunnerAbsentVmidIsNoop(t *testing.T) {
+	host := &pctHost{names: map[uint32]string{}}
+	r := &ExecRunner{Domain: "world.test", execFn: host.execFn}
+	log, err := r.DestroyOneLxc("cp", ptr32(101))
+	if err != nil {
+		t.Fatalf("absent vmid is a no-op, got: %v", err)
+	}
+	if len(log) != 1 || !strings.Contains(log[0], "already gone") {
+		t.Errorf("log = %v", log)
+	}
+	for _, cmd := range host.execs {
+		if strings.HasPrefix(cmd, "pct destroy") || strings.HasPrefix(cmd, "pct stop") {
+			t.Errorf("nothing destructive may run on an absent vmid, got: %q", cmd)
+		}
+	}
+}
+
+// TestExecRunnerRefusesWithoutDomain: no domain recorded = no expected name
+// to verify against = fail closed (never destroy by vmid alone).
+func TestExecRunnerRefusesWithoutDomain(t *testing.T) {
+	host := &pctHost{names: map[uint32]string{100: "world-test-relay"}}
+	r := &ExecRunner{execFn: host.execFn}
+	if _, err := r.DestroyOneLxc("relay", ptr32(100)); err == nil {
+		t.Fatal("no domain must refuse — the occupant cannot be verified")
+	}
+	for _, cmd := range host.execs {
+		if strings.HasPrefix(cmd, "pct destroy") {
+			t.Errorf("no destroy may run without a domain guard, got: %q", cmd)
+		}
+	}
+}

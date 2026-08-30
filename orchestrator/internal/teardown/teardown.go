@@ -15,7 +15,7 @@
 // ORDER MATTERS: 1) the door must prove itself, 2) destroy the targeted
 // LXC(s), 3) (--data) destroy the tenant datasets + freehold-created thin
 // pool, 4) local half: --data = full wipe (door key, world home, config
-// LAST); default = config KEPT with the regenerated facts pruned.
+// LAST); default = config KEPT INTACT (recorded LXC coordinates included).
 // Remote steps run through the `freehold-orchestrator exec` subprocess —
 // the same signed exec contract the CLI uses.
 package teardown
@@ -97,6 +97,11 @@ type ExecRunner struct {
 	Addr            string // runner MCP addr
 	AgentDir        string // ops identity dir
 	Runner          string // runner target name
+	Domain          string // the world's domain — the destroy-side name guard derives the expected guest name from it
+
+	// execFn overrides the subprocess shell-out for hermetic tests
+	// (nil = the real `freehold-orchestrator exec`).
+	execFn func(cmd string) (bool, string)
 }
 
 // Runner is the remote-side surface Run drives. ExecRunner is the real
@@ -110,6 +115,9 @@ type Runner interface {
 
 // Exec runs one command through the runner and returns (ok, output).
 func (r *ExecRunner) Exec(cmd string) (bool, string) {
+	if r.execFn != nil {
+		return r.execFn(cmd)
+	}
 	args := []string{"exec", "--addr", r.Addr, "--agent-dir", r.AgentDir, r.Runner, cmd}
 	out, err := exec.Command(r.OrchestratorBin, args...).CombinedOutput()
 	if err != nil {
@@ -124,21 +132,33 @@ func TenantDataset(pool, domain, tenant string) string {
 	return fmt.Sprintf("%s/freehold/%s/%s", pool, dom, tenant)
 }
 
-// DestroyOneLxc destroys one LXC: checked present -> stopped -> destroyed ->
-// verified gone. Returns log lines.
+// DestroyOneLxc destroys one LXC: name-verified present -> stopped ->
+// destroyed -> verified gone. The name check is the HARD guard: the config
+// keeps the recorded vmid across a compute teardown, and PVE hands a freed
+// id to the operator's next guest (pvesh get /cluster/nextid returns the
+// LOWEST free id — the one just freed), so a second teardown must not
+// `pct destroy` a foreign container by vmid alone. Mirrors the create-side
+// guard (bootstrap/drivers.go: "already exists as container %q (expected
+// %q)"). Returns log lines.
 func (r *ExecRunner) DestroyOneLxc(role string, vmid *uint32) ([]string, error) {
 	var log []string
 	if vmid == nil {
 		log = append(log, fmt.Sprintf("%s LXC: never created (no vmid recorded)", role))
 		return log, nil
 	}
-	exists, err := r.lxcExists(*vmid)
+	occupant, err := r.lxcOccupant(*vmid)
 	if err != nil {
 		return nil, err
 	}
-	if !exists {
+	if occupant == "" {
 		log = append(log, fmt.Sprintf("%s LXC %d: already gone", role, *vmid))
 		return log, nil
+	}
+	if r.Domain == "" {
+		return nil, fmt.Errorf("cannot verify the occupant of vmid %d (%q): no domain recorded to derive the expected %s guest name from", *vmid, occupant, role)
+	}
+	if want := guestName(r.Domain, role); occupant != want {
+		return nil, fmt.Errorf("refusing to destroy: vmid %d holds %q, not the %s guest (expected %q) — PVE likely re-allocated the freed id to another guest; destroy it by hand or fix the recorded vmid", *vmid, occupant, role, want)
 	}
 	ok, status := r.Exec(fmt.Sprintf("pct status %d", *vmid))
 	if !ok {
@@ -161,6 +181,24 @@ func (r *ExecRunner) DestroyOneLxc(role string, vmid *uint32) ([]string, error) 
 	}
 	log = append(log, fmt.Sprintf("destroyed %s LXC %d", role, *vmid))
 	return log, nil
+}
+
+// lxcOccupant returns the NAME of the guest at vmid from `pct list` (the
+// last column of the row; `awk $NF` after the vmid-anchored grep) — "" when
+// there is no row (the vmid is free).
+func (r *ExecRunner) lxcOccupant(vmid uint32) (string, error) {
+	ok, out := r.Exec(fmt.Sprintf("pct list | grep -E '^\\s*%d ' | awk '{print $NF; exit}' || true", vmid))
+	if !ok {
+		return "", fmt.Errorf("pct list failed on %s: %s", r.Runner, out)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// guestName is the guest's FULL name: <domain-with-dashes>-<role> — the
+// SAME derivation rebuild's lxcName and bootstrap's create-time hostname
+// use; the name the destroy-side guard verifies against.
+func guestName(domain, role string) string {
+	return strings.ReplaceAll(domain, ".", "-") + "-" + role
 }
 
 func (r *ExecRunner) lxcExists(vmid uint32) (bool, error) {
@@ -259,7 +297,7 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 
 	// 4. the local half. --data = the FULL teardown: the host door key, the
 	//    world home, then the config LAST. Default whole-world = the compute
-	//    teardown: KEEP the config file (regenerated LXC coords pruned), the
+	//    teardown: KEEP the config file INTACT (recorded LXC coordinates included),
 	//    world home, and the door key — a rebuild reuses the package + door
 	//    and skips the door gate. Per-tenant KEEPS everything too.
 	switch {

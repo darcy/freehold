@@ -658,7 +658,7 @@ func parseInfoMount(s string) (drive.MountArg, error) {
 
 var teardownCmd = &cobra.Command{
 	Use:   "teardown",
-	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (regenerated coords pruned), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then wipes door key + world home + config",
+	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config INTACT (recorded LXC coordinates included — rebuild re-boots the same vmids + IPs), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then wipes door key + world home + config",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		configPath, _ := cmd.Flags().GetString("config")
 		yes, _ := cmd.Flags().GetBool("yes")
@@ -687,6 +687,7 @@ var teardownCmd = &cobra.Command{
 			Addr:            cfg.Runner.Addr,
 			AgentDir:        agentDir,
 			Runner:          cfg.Runner.Target,
+			Domain:          cfg.Domain,
 		}
 
 		// The door must work before anything remote: a signed exec probe.

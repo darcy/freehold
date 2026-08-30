@@ -94,9 +94,11 @@ func fieldFor(k flowKind, step int, def string) *textinput.Model {
 // have a recorded value. The rebuild form's four config-backed answers:
 // operator pubkey, domain, the carved thin-pool (a reused stock pool is
 // deliberately NOT recorded — Plane.ThinPool says freehold owns it), and
-// the k3s membership. The two size prompts have no config record; blank
-// keeps their "(blank = N)" semantics. Absent/unreadable config = no
-// defaults (fresh-world behavior, unchanged).
+// the k3s membership: "y" when k3s is managed, else "n" — that prompt's
+// blank default is y, so a k3s-off world MUST seed an explicit n (a blank
+// would boot k3s). The two size prompts have no config record; blank keeps
+// their "(blank = N)" semantics. Absent/unreadable config = no defaults
+// (fresh-world behavior, unchanged).
 func flowDefaults(m *Model, k flowKind) [6]string {
 	var d [6]string
 	if k != flowRebuild || m.CfgPath == "" {
@@ -111,6 +113,7 @@ func flowDefaults(m *Model, k flowKind) [6]string {
 	if cfg.Plane.ThinPool != nil {
 		d[3] = *cfg.Plane.ThinPool
 	}
+	d[5] = "n"
 	for _, role := range cfg.Managed {
 		if role == "k3s" {
 			d[5] = "y"
