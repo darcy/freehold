@@ -32,9 +32,14 @@ type Config struct {
 
 // PlaneSpec is the durable volume plane (Phase 0.12).
 type PlaneSpec struct {
-	Backend     *string                 `toml:"backend,omitempty"`
-	BackendKind *string                 `toml:"backend_kind,omitempty"`
-	Mounts      map[string][]PlaneMount `toml:"mounts,omitempty"`
+	Backend     *string `toml:"backend,omitempty"`
+	BackendKind *string `toml:"backend_kind,omitempty"`
+	// ThinPool names a thin pool FREEHOLD CREATED (LVM-thin backend). Set
+	// only by the carve branch of the rebuild placement gate; a REUSED
+	// stock pool (pve/data) is never recorded here. Teardown --data removes
+	// exactly this pool and nothing else.
+	ThinPool *string                 `toml:"thin_pool,omitempty"`
+	Mounts   map[string][]PlaneMount `toml:"mounts,omitempty"`
 }
 
 // PlaneMount is one resolved durable-plane mount (HOST source + guest path).

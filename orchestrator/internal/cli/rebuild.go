@@ -34,7 +34,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/drive"
+	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/wire"
 )
 
 var rebuildCmd = &cobra.Command{
@@ -50,13 +53,24 @@ var rebuildCmd = &cobra.Command{
 		f.operatorIdentity, _ = cmd.Flags().GetString("operator-identity")
 		f.sizeGB, _ = cmd.Flags().GetUint64("size-gb")
 		f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
+		f.thinPool, _ = cmd.Flags().GetString("thin-pool")
 		f.withK3s, _ = cmd.Flags().GetBool("with-k3s")
 		f.rootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
 		f.memoryMB, _ = cmd.Flags().GetUint32("memory-mb")
 		f.relayGw, _ = cmd.Flags().GetString("relay-gw")
+		f.relayIP, _ = cmd.Flags().GetString("relay-ip")
+		f.cpIP, _ = cmd.Flags().GetString("cp-ip")
+		f.k3sIP, _ = cmd.Flags().GetString("k3s-ip")
 		f.configPath, _ = cmd.Flags().GetString("config")
 		f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 		f.yes, _ = cmd.Flags().GetBool("yes")
+		// STATIC IPs must be CIDR — pct create's net0=ip= wants host/prefix,
+		// and failing that at stage 7 is a long-run failure; say it up front.
+		for _, ip := range []string{f.relayIP, f.cpIP, f.k3sIP} {
+			if ip != "" && !strings.Contains(ip, "/") {
+				return fmt.Errorf("STATIC guest IPs are CIDR (host/prefix) — got %q", ip)
+			}
+		}
 
 		eng, err := newRebuildEngine(f)
 		if err != nil {
@@ -75,10 +89,14 @@ func init() {
 	rebuildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
 	rebuildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	rebuildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
+	rebuildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
 	rebuildCmd.Flags().Bool("with-k3s", true, "Boot + install the k3s substrate LXC as part of the world")
 	rebuildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	rebuildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
 	rebuildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for STATIC guest IPs (unused with DHCP)")
+	rebuildCmd.Flags().String("relay-ip", "", "STATIC relay LXC IP (CIDR, e.g. 192.168.30.8/24) — absent => DHCP (Rust: the recorded config ip is re-booted static)")
+	rebuildCmd.Flags().String("cp-ip", "", "STATIC control-plane LXC IP (CIDR) — absent => DHCP")
+	rebuildCmd.Flags().String("k3s-ip", "", "STATIC k3s LXC IP (CIDR) — absent => DHCP")
 	rebuildCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	rebuildCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	rebuildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
@@ -94,10 +112,14 @@ type rebuildFlags struct {
 	operatorIdentity string
 	sizeGB           uint64
 	poolSizeGB       uint64
+	thinPool         string
 	withK3s          bool
 	rootfsGB         uint32
 	memoryMB         uint32
 	relayGw          string
+	relayIP          string
+	cpIP             string
+	k3sIP            string
 	configPath       string
 	confirmStorage   bool
 	yes              bool
@@ -159,6 +181,11 @@ type rebuildEngine struct {
 
 	out io.Writer
 	in  io.Reader
+	// stdin is the ONE buffered reader over in. prompt() must not build a
+	// fresh bufio.Reader per call: a fresh one reads ahead past the first
+	// newline into its own buffer, so a back-to-back prompt (the carve
+	// size after the pool name) would see an already-drained in and EOF.
+	stdin *bufio.Reader
 
 	// seams
 	runBin   func(bin string, args []string) (bool, string)
@@ -172,8 +199,16 @@ func newRebuildEngine(f rebuildFlags) (*rebuildEngine, error) {
 		return nil, fmt.Errorf("rebuild needs --domain (the relay's identity)")
 	}
 	if f.operatorPubkey == "" {
-		return nil, fmt.Errorf("rebuild needs --operator-pubkey (64-hex)")
+		return nil, fmt.Errorf("rebuild needs --operator-pubkey (64-hex or npub1…)")
 	}
+	// Normalize to 64-hex up front (Rust installer::main.rs runs
+	// parse_pubkey_input before the pipeline): deploy-relay/deploy-cp
+	// reject anything that isn't 64-hex, and the config records hex.
+	pk, err := crypto.ParsePubkeyInput(f.operatorPubkey)
+	if err != nil {
+		return nil, err
+	}
+	f.operatorPubkey = pk
 	bins, err := resolveRebuildBins()
 	if err != nil {
 		return nil, err
@@ -282,8 +317,16 @@ func (e *rebuildEngine) run() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
-	// 7. the durable volume plane: resolve + ensure each tenant, record.
-	if err := e.stageStorage(); err != nil {
+	// 7a. plane placement: where do the tenant LVs live — reuse the VG's
+	// detected thin pool, or carve a dedicated new one?
+	placement, err := e.stagePlacement()
+	if err != nil {
+		return err
+	}
+
+	// 7b. the durable volume plane: ensure each tenant onto the chosen
+	// pool, record, and keep PVE's local-lvm storage pointed at it.
+	if err := e.stageStorage(placement); err != nil {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ durable volume plane ready")
@@ -403,11 +446,26 @@ func (e *rebuildEngine) doorGate(key string) error {
 	instr := fmt.Sprintf("echo '%s' >> /root/.ssh/authorized_keys", key)
 	if e.f.yes {
 		return fmt.Errorf(
-			"the door needs a NEW ssh key before rebuild can continue — install it on %s and re-run:\n\n    %s\n\n  (on the host: mkdir -p /root/.ssh && %s)",
+			"the door needs a NEW ssh key before rebuild can continue — install it on %s, then re-run rebuild:\n\n    %s\n\n  (on the host: mkdir -p /root/.ssh && %s)",
 			e.f.host, key, instr)
 	}
 	for {
-		fmt.Fprintf(e.out, `
+		e.printDoorKey(key)
+		answer, err := e.prompt("Press ENTER when it's in place, or 'r' to show it again, 'q' to quit")
+		if err != nil {
+			return fmt.Errorf("aborted by the operator (door not installed)")
+		}
+		if strings.TrimSpace(answer) == "" {
+			return nil
+		}
+	}
+}
+
+// printDoorKey is the install block shared by doorGate (fresh key) and the
+// verify stage's re-surface (recovered key).
+func (e *rebuildEngine) printDoorKey(key string) {
+	instr := fmt.Sprintf("echo '%s' >> /root/.ssh/authorized_keys", key)
+	fmt.Fprintf(e.out, `
   ─────────────────────────────────────────────────────────
   Finish the door: add this line to %s's ~/.ssh/authorized_keys:
 
@@ -416,21 +474,116 @@ func (e *rebuildEngine) doorGate(key string) error {
   (on the host: mkdir -p /root/.ssh && %s)
   ─────────────────────────────────────────────────────────
 `, e.f.host, key, instr)
-		answer := e.prompt("Press ENTER when it's in place, or 'r' to show it again, 'q' to quit")
-		switch strings.TrimSpace(answer) {
-		case "":
-			return nil
-		case "q", "Q":
-			return fmt.Errorf("aborted by the operator (door not installed)")
-		}
-	}
 }
 
-func (e *rebuildEngine) prompt(label string) string {
+// doorKeyNotInstalled is the REUSE path's door gate: provision skipped the
+// gate (the package already exists), but the ssh AUTH failure proves the key
+// was never installed. Recover the public line from the package and bail
+// actionably exactly like doorGate's --yes — the operator must see the key
+// again or they are stuck.
+func (e *rebuildEngine) doorKeyNotInstalled() error {
+	key := e.recoverDoorKey()
+	if key == "" {
+		return fmt.Errorf(
+			"the door check failed: ssh authentication was refused and the door key could\nnot be recovered from the runner package at %s — wipe the world and start clean:\n  rm -rf ~/.freehold   (then re-run rebuild)",
+			filepath.Join(rbRunnerPkgs(), e.f.target))
+	}
+	instr := fmt.Sprintf("echo '%s' >> /root/.ssh/authorized_keys", key)
+	return fmt.Errorf(
+		"the door needs its ssh key before rebuild can continue — install it on %s, then re-run rebuild:\n\n    %s\n\n  (on the host: mkdir -p /root/.ssh && %s)",
+		e.f.host, key, instr)
+}
+
+// recoverDoorKey re-derives the door ssh PUBLIC line from the existing
+// runner package — the same material the runner decrypts at boot. "" when
+// the package is missing or unusable (the caller falls back to the
+// fresh-start message).
+func (e *rebuildEngine) recoverDoorKey() string {
+	key, err := doorKeyFromPackage(filepath.Join(rbRunnerPkgs(), e.f.target), e.f.target)
+	if err != nil {
+		return ""
+	}
+	return key
+}
+
+// doorKeyFromPackage opens the sealed door credential with the runner's OWN
+// enc key (identity.json opens secrets.json — the runner's boot path) and
+// re-derives only the PUBLIC authorized_keys line. The private half is
+// parsed past and never returned, written, or shipped — nothing new leaves
+// the machine. Prefer the target's own entry (provision seals under the
+// runner name); fall back to any ssh target in the package.
+func doorKeyFromPackage(runnerDir, target string) (string, error) {
+	id, err := flows.LoadIdentity(runnerDir)
+	if err != nil {
+		return "", fmt.Errorf("read identity: %w", err)
+	}
+	encSecret, err := hexDecode(id.EncSecretHex)
+	if err != nil {
+		return "", fmt.Errorf("bad enc secret: %w", err)
+	}
+	pkg, err := wire.Load(runnerDir)
+	if err != nil {
+		return "", fmt.Errorf("read package: %w", err)
+	}
+	names := []string{target}
+	for name := range pkg.Targets {
+		if name != target {
+			names = append(names, name)
+		}
+	}
+	for _, name := range names {
+		meta, ok := pkg.Targets[name]
+		if !ok || meta.Kind != "ssh" {
+			continue
+		}
+		ctHex, ok := pkg.Secrets[meta.Secret]
+		if !ok {
+			continue
+		}
+		sealed, err := hexDecode(ctHex)
+		if err != nil {
+			continue
+		}
+		// aad = the secret NAME the CP sealed with (provisioner: req.Name).
+		pem, err := crypto.Open(encSecret, []byte(meta.Secret), sealed)
+		if err != nil {
+			continue
+		}
+		line, err := crypto.ExtractED25519PublicKeyLine(pem)
+		if err != nil {
+			continue
+		}
+		return line, nil
+	}
+	return "", fmt.Errorf("no usable ssh credential in %s", runnerDir)
+}
+
+func (e *rebuildEngine) prompt(label string) (string, error) {
 	fmt.Fprintf(e.out, "%s: ", label)
-	r := bufio.NewReader(e.in)
-	line, _ := r.ReadString('\n')
-	return line
+	if e.stdin == nil {
+		e.stdin = bufio.NewReader(e.in)
+	}
+	line, err := e.stdin.ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("no input (EOF)")
+	}
+	if strings.TrimSpace(line) == "q" {
+		return "", fmt.Errorf("aborted by the operator")
+	}
+	return line, nil
+}
+
+// parseGB parses a positive size-in-GB answer; blank takes the default.
+func parseGB(s string, def uint64, what string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be a number >= 1 (got %q; blank = %d)", what, s, def)
+	}
+	return n, nil
 }
 
 func (e *rebuildEngine) stageGrant() error {
@@ -504,9 +657,23 @@ func (e *rebuildEngine) stageVerify() error {
 		}
 		failures++
 		if e.f.yes {
+			// An ssh AUTH refusal after a provision reuse is the classic
+			// "pressed B again before installing the key" trap: the gate
+			// was skipped, so the operator never saw the key. Recover it
+			// from the package and bail actionably — the SAME waiting
+			// state the fresh-key gate produces.
+			if isSshAuthFailure(out) {
+				return e.doorKeyNotInstalled()
+			}
 			return fmt.Errorf("the door check failed (non-interactive):\n%s", printTail(out, 6))
 		}
 		fmt.Fprintf(e.out, "  ✗ the exec failed (auth or otherwise)\n%s\n", printTail(out, 6))
+		if isSshAuthFailure(out) {
+			if key := e.recoverDoorKey(); key != "" {
+				fmt.Fprintf(e.out, "  (ssh authentication was refused — the door key is probably not installed yet)\n")
+				e.printDoorKey(key)
+			}
+		}
 		if failures >= 3 {
 			fmt.Fprintf(e.out, `
   Still failing after %d tries. If this runner predates the ssh-key
@@ -515,11 +682,17 @@ func (e *rebuildEngine) stageVerify() error {
   Fresh start:  rm -rf ~/.freehold && freehold rebuild ...
 `, failures)
 		}
-		answer := e.prompt("Fix authorized_keys on the host, then press ENTER to retry ('q' to quit)")
-		if strings.EqualFold(strings.TrimSpace(answer), "q") {
+		if _, err := e.prompt("Fix authorized_keys on the host, then press ENTER to retry ('q' to quit)"); err != nil {
 			return fmt.Errorf("aborted at the door check")
 		}
+
 	}
+}
+
+// isSshAuthFailure detects the runner's ssh auth refusal in exec output
+// (runner/src/ssh.rs SshError::Auth: "authentication failed").
+func isSshAuthFailure(out string) bool {
+	return strings.Contains(out, "authentication failed")
 }
 
 // execArgs builds `exec --addr --agent-dir [--timeout] <target> <cmd>`.
@@ -642,10 +815,13 @@ func (e *rebuildEngine) finalSave() error {
 
 // ---- the storage stage -----------------------------------------------------
 
-// stageStorage resolves the backend (consent-gated create), ensures each
-// tenant's dataset, and records the mapping into the config (Rust
-// stage_storage — loads the config FRESH, bails when absent).
-func (e *rebuildEngine) stageStorage() error {
+// stagePlacement runs `storage resolve` and applies the plane-placement
+// gate: the tenant LVs must land in a named thin pool — reuse the VG's
+// detected one, or carve a dedicated new pool (then at --pool-size-gb and
+// recorded as freehold-created). The --thin-pool flag answers it headless;
+// without it the interactive pipeline prompts, and --yes takes the
+// reuse-detected / carve-default path.
+func (e *rebuildEngine) stagePlacement() (*placement, error) {
 	resolveArgs := []string{"storage", "resolve",
 		"--addr", e.f.addr, "--agent-dir", rbOpsDir(), "--target", e.f.target}
 	if e.f.confirmStorage {
@@ -653,9 +829,68 @@ func (e *rebuildEngine) stageStorage() error {
 	}
 	ok, out := e.runBin(e.bins.Self, resolveArgs)
 	if !ok {
-		return fmt.Errorf("storage resolution failed:\n%s", out)
+		return nil, fmt.Errorf("storage resolution failed:\n%s", out)
 	}
 	pool := parseStoragePool(out)
+	detected, isLvm := parseStorageThinPool(out)
+
+	// The STORAGE-THINPOOL line exists only on the LVM-thin backend; its
+	// absence is ZFS, where the placement gate does not apply (datasets
+	// carve themselves). A named --thin-pool on ZFS is an operator error.
+	if !isLvm {
+		if e.f.thinPool != "" {
+			return nil, fmt.Errorf("--thin-pool applies only to the LVM-thin backend; this host resolved %q (ZFS)", pool)
+		}
+		return &placement{pool: pool}, nil
+	}
+
+	// The operator named the pool up front: reuse (adopt) or carve at
+	// --pool-size-gb. An empty detected name with no flag means the VG has
+	// no thin pool yet — carve the default.
+	if e.f.thinPool != "" || detected == "" {
+		name := e.f.thinPool
+		if name == "" {
+			name = drive.FreshThinPool
+		}
+		return &placement{pool: pool, thinPool: name, created: name != detected}, nil
+	}
+	if e.f.yes {
+		return &placement{pool: pool, thinPool: detected, created: false}, nil
+	}
+
+	fmt.Fprintf(e.out, `
+  ─ plane placement ───────────────────────────────────────
+  VG %s currently holds the thin pool %q.
+  The tenant LVs need a thin pool to live in:
+    r      reuse it
+    <name> carve a NEW dedicated pool of that name (%d GB)
+  ─────────────────────────────────────────────────────────
+`, pool, detected, e.f.poolSizeGB)
+	answer, err := e.prompt("pool choice [r = reuse / type a new pool name]")
+	if err != nil {
+		return nil, err
+	}
+	answer = strings.TrimSpace(answer)
+	if answer == "" || answer == "r" || answer == "R" || answer == detected {
+		return &placement{pool: pool, thinPool: detected, created: false}, nil
+	}
+	sizeAnswer, err := e.prompt(fmt.Sprintf("new pool %q size GB (blank = %d)", answer, e.f.poolSizeGB))
+	if err != nil {
+		return nil, err
+	}
+	size, err := parseGB(sizeAnswer, e.f.poolSizeGB, "new thin-pool size GB")
+	if err != nil {
+		return nil, err
+	}
+	e.f.poolSizeGB = size
+	return &placement{pool: pool, thinPool: answer, created: answer != detected}, nil
+}
+
+// stageStorage ensures each tenant's dataset onto the placement gate's
+// pool and records the mapping into the config (Rust stage_storage —
+// loads the config FRESH, bails when absent).
+func (e *rebuildEngine) stageStorage(placement *placement) error {
+	pool := placement.pool
 
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil {
@@ -685,6 +920,9 @@ func (e *rebuildEngine) stageStorage() error {
 		if cfg.Plane.BackendKind != nil && *cfg.Plane.BackendKind != "" {
 			ensureArgs = append(ensureArgs, "--kind", *cfg.Plane.BackendKind)
 		}
+		if placement.thinPool != "" {
+			ensureArgs = append(ensureArgs, "--thin-pool", placement.thinPool)
+		}
 		ok, out := e.runBin(e.bins.Self, ensureArgs)
 		if !ok {
 			return fmt.Errorf("storage ensure %s failed:\n%s", tenant, out)
@@ -703,12 +941,66 @@ func (e *rebuildEngine) stageStorage() error {
 			cfg.Plane.BackendKind = &k
 		}
 	}
+	if placement.created {
+		tp := placement.thinPool
+		cfg.Plane.ThinPool = &tp
+	}
 	if resolvedAny {
 		_ = cfg.Save(e.f.configPath)
 	} else if e.f.confirmStorage {
 		return fmt.Errorf("storage resolve/ensure recorded no mounts — resolve said create but ensure produced none")
 	}
+	if placement.created {
+		if err := e.stageLocalLvmRepoint(placement); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// stageLocalLvmRepoint keeps PVE's stock local-lvm storage pointed at the
+// pool freehold just carved. `pct create --rootfs local-lvm:…` (both LXC
+// boots) resolves through storage.cfg — after the operator wiped the VG's
+// only thin pool the carve leaves local-lvm dangling unless we re-point
+// it here. Idempotent: the probe skips an already-correct pointer.
+//
+// The re-point is a SCOPED in-place edit of /etc/pve/storage.cfg, NOT
+// `pvesm set local-lvm --thinpool`: the thinpool property is not mutable
+// through pvesm's API on PVE ("Unknown option: thinpool" — live-verified),
+// and storage.cfg editing is PVE's sanctioned manual repair. The block
+// format is WHITESPACE (`\tthinpool data`, `vgname pve`) — no colons.
+func (e *rebuildEngine) stageLocalLvmRepoint(placement *placement) error {
+	probe := "grep -A2 '^lvmthin: local-lvm$' /etc/pve/storage.cfg | awk '/^[[:space:]]*thinpool[[:space:]]/{print $2; exit}'"
+	ok, out := e.runBin(e.bins.Self, e.execArgs(probe, 30))
+	if !ok {
+		return fmt.Errorf("local-lvm probe failed on %s:\n%s", e.f.host, out)
+	}
+	current := strings.TrimSpace(out)
+	if current == "" {
+		return fmt.Errorf("no `lvmthin: local-lvm` storage block in /etc/pve/storage.cfg on %s — cannot re-point it at %s", e.f.host, placement.thinPool)
+	}
+	if current == placement.thinPool {
+		return nil // already pointing at the carved pool
+	}
+	// Rewrite ONLY the thinpool line inside the local-lvm block
+	// (awk scoped: in-block flag set on the header, cleared on blank).
+	edit := fmt.Sprintf(`awk -v tp=%s '/^lvmthin: local-lvm$/{inb=1; print; next} /^[[:space:]]*$/{inb=0} inb && /^[[:space:]]*thinpool[[:space:]]/{print "\tthinpool " tp; next} {print}' /etc/pve/storage.cfg > /tmp/fh-storage.cfg && cat /tmp/fh-storage.cfg > /etc/pve/storage.cfg && rm -f /tmp/fh-storage.cfg`, placement.thinPool)
+	ok, out = e.runBin(e.bins.Self, e.execArgs(edit, 60))
+	if !ok {
+		return fmt.Errorf("re-pointing PVE local-lvm to %s failed:\n%s", placement.thinPool, out)
+	}
+	ok, out = e.runBin(e.bins.Self, e.execArgs(probe, 30))
+	if !ok || strings.TrimSpace(out) != placement.thinPool {
+		return fmt.Errorf("local-lvm still points at %q after the edit (want %q):\n%s", strings.TrimSpace(out), placement.thinPool, out)
+	}
+	return nil
+}
+
+// placement is the plane-placement gate's resolved answer.
+type placement struct {
+	pool     string // the backend name (LVM: the VG)
+	thinPool string // the thin pool the tenant LVs land in ("" on ZFS)
+	created  bool   // true => freehold carves it (recorded for teardown --data)
 }
 
 // parseStoragePool reads `STORAGE-POOL: <name>` (default rpool).
@@ -721,6 +1013,23 @@ func parseStoragePool(out string) string {
 		}
 	}
 	return "rpool"
+}
+
+// parseStorageThinPool reads `STORAGE-THINPOOL: <name>`, emitted by the
+// LVM-thin backend only ("-" = the VG has no thin pool yet). lvm is true
+// only when the line is present — its ABSENCE means the backend is not
+// LVM-thin (ZFS), and the placement gate does not apply.
+func parseStorageThinPool(out string) (pool string, lvm bool) {
+	for _, l := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(l, "STORAGE-THINPOOL: "); ok {
+			p := strings.TrimSpace(rest)
+			if p == "-" {
+				p = ""
+			}
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // parseStorageMounts reads the `STORAGE-MOUNT <src>:<guest>` lines.
@@ -749,11 +1058,12 @@ func parseStorageBackend(out string) string {
 	return ""
 }
 
-// ---- the boot + record stages ----------------------------------------------
-
 // stageBootstrap boots the role's LXC via THIS binary's bootstrap driver;
 // durable-plane mounts are baked from the config FRESH-loaded (born at
-// create — the reuse path skips re-baking).
+// create — the reuse path skips re-baking). A per-role --lxc-ip rides the
+// bootstrap --lxc-ip/--lxc-gw pair (Rust: a SPECIFIED ip is STATIC — the
+// operator owns the addressing + the proxy target); absent => DHCP and the
+// real coordinate is read back + recorded after boot.
 func (e *rebuildEngine) stageBootstrap(role string) error {
 	args := []string{"bootstrap",
 		"--kind", "proxmox-lxc",
@@ -764,13 +1074,38 @@ func (e *rebuildEngine) stageBootstrap(role string) error {
 		"--memory-mb", strconv.FormatUint(uint64(e.f.memoryMB), 10),
 		"--operator-pubkey", e.f.operatorPubkey,
 	}
-	if cfg, err := config.Load(e.f.configPath); err == nil && cfg != nil {
+	cfg, _ := config.Load(e.f.configPath)
+	if ip := bootstrapStaticIP(role, e.f, cfg); ip != "" {
+		args = append(args, "--lxc-ip", ip, "--lxc-gw", e.f.relayGw)
+	}
+	if cfg != nil {
+		// A RECORDED vmid rides on resume: the driver's reuse path then finds
+		// the existing guest (hostname match) instead of picking a new id and
+		// refusing the collision — Rust rebuild re-booted the SAME vmid.
+		g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s}[role]
+		if g.Vmid != nil {
+			args = append(args, "--vmid", strconv.FormatUint(uint64(*g.Vmid), 10))
+		}
 		for _, m := range cfg.Plane.Mounts[role] {
 			args = append(args, "--mount", m.Source+":"+m.GuestPath)
 		}
 	}
 	_, err := e.selfStage("booting the "+role+" LXC", args)
 	return err
+}
+
+// bootstrapStaticIP is the role's STATIC guest IP: an explicit --lxc-ip flag
+// wins; else the RECORDED config ip rides again (Rust Answers::from_config —
+// the operator owns the addressing + the proxy target); else "" = DHCP.
+func bootstrapStaticIP(role string, f rebuildFlags, cfg *config.Config) string {
+	ip := map[string]string{"relay": f.relayIP, "cp": f.cpIP, "k3s": f.k3sIP}[role]
+	if ip == "" && cfg != nil {
+		g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s}[role]
+		if g.Ip != nil && *g.Ip != "" {
+			ip = *g.Ip
+		}
+	}
+	return ip
 }
 
 // stageRecordLxc persists the real post-boot coordinates into the config ON

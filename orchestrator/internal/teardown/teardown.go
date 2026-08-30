@@ -1,11 +1,19 @@
 // Package teardown reproduces installer/src/teardown.rs — destroying the
 // managed world with THREE scopes:
-//   - WholeWorld (default, optional --data destroys every tenant dataset)
+//   - WholeWorld (default): the COMPUTE teardown — destroys the LXCs and
+//     keeps the world's identity: the config file (regenerated LXC coords
+//     stripped), the world home (~/.freehold: runner package + keys), and
+//     the host door key. The plane's locations stay recorded for remap.
+//     --data turns it into the FULL teardown: tenant datasets + the
+//     freehold-created thin pool go, then the door key, the world home,
+//     and the config.
 //   - TenantCompute (one LXC, config survives for reattach)
 //   - TenantData (one LXC + its dataset subtree)
 //
-// ORDER MATTERS: 1) the door must prove itself, 2) destroy the targeted LXC(s),
-// 3) (whole-world) remove the runner's key LAST + verify, 4) local cleanup.
+// ORDER MATTERS: 1) the door must prove itself, 2) destroy the targeted
+// LXC(s), 3) (--data) destroy the tenant datasets + freehold-created thin
+// pool, 4) local half: --data = full wipe (door key, world home, config
+// LAST); default = config KEPT with the regenerated facts pruned.
 // Remote steps run through the `freehold-orchestrator exec` subprocess, the
 // same contract the Rust installer uses.
 package teardown
@@ -89,6 +97,15 @@ type ExecRunner struct {
 	Runner          string // runner target name
 }
 
+// Runner is the remote-side surface Run drives. ExecRunner is the real
+// subprocess driver; the hermetic tests fake it.
+type Runner interface {
+	Exec(cmd string) (bool, string)
+	DestroyOneLxc(role string, vmid *uint32) ([]string, error)
+	DestroyDataset(tenant, domain, pool, kind, dataset string) (bool, error)
+	DestroyPool(vg, pool string) error
+}
+
 // Exec runs one command through the runner and returns (ok, output).
 func (r *ExecRunner) Exec(cmd string) (bool, string) {
 	args := []string{"exec", "--addr", r.Addr, "--agent-dir", r.AgentDir, r.Runner, cmd}
@@ -153,16 +170,14 @@ func (r *ExecRunner) lxcExists(vmid uint32) (bool, error) {
 }
 
 // Run executes the teardown. cfg holds the managed state.
-func Run(r *ExecRunner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
+func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 	if !confirm {
 		return "", fmt.Errorf("teardown aborted (not confirmed)")
 	}
 	var log []string
 
-	// 1. drain a door probe (the caller already verified it; a refused probe
-	//    aborts nothing remote).
-	_ = r
-
+	// 1. the door probe already passed at the CLI layer (it is the gate
+	//    before Run is ever called).
 	log = append(log, fmt.Sprintf("door verified (%s)", cfg.RunNTarget))
 
 	// 2. destroy the targeted LXC(s).
@@ -211,14 +226,29 @@ func Run(r *ExecRunner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 				log = append(log, fmt.Sprintf("no dataset to destroy for %s (absent) — nothing destroyed", tenant))
 			}
 		}
+		// The freehold-CREATED thin pool (config plane.thin_pool) goes with
+		// the data. A reused stock pool (pve/data) was never recorded here —
+		// that is the guard that keeps --data off host-owned pools. Refuses
+		// while LVs still ride it (the tenant destroy above just cleared
+		// them); absent = no-op.
+		if scope == ScopeWholeWorld && cfg.ThinPool != "" {
+			if err := r.DestroyPool(cfg.Pool, cfg.ThinPool); err != nil {
+				return "", fmt.Errorf("thin-pool teardown FAILED: %v — the pool is NOT removed", err)
+			}
+			log = append(log, fmt.Sprintf("removed freehold-created thin pool %s/%s", cfg.Pool, cfg.ThinPool))
+		}
 	}
 
-	// 4. whole-world: the door + local cleanup. Per-tenant KEEPS local home +
-	//    config.
-	if scope == ScopeWholeWorld {
+	// 4. the local half. --data = the FULL teardown: the host door key, the
+	//    world home, then the config LAST. Default whole-world = the compute
+	//    teardown: KEEP the config file (regenerated LXC coords pruned), the
+	//    world home, and the door key — a rebuild reuses the package + door
+	//    and skips the door gate. Per-tenant KEEPS everything too.
+	switch {
+	case scope == ScopeWholeWorld && cfg.Data:
 		keyRemoval := fmt.Sprintf("sed -i '/ssh-ed25519 [A-Za-z0-9+/=]* %s$/d' /root/.ssh/authorized_keys", cfg.RunnerComment)
 		if ok, _ := r.Exec(keyRemoval); !ok {
-			return "", fmt.Errorf("door removal command failed on %s", r.Runner)
+			return "", fmt.Errorf("door removal command failed on %s", cfg.RunNTarget)
 		}
 		_, check := r.Exec(fmt.Sprintf("grep -c 'ssh-ed25519 .* %s' /root/.ssh/authorized_keys || true", cfg.RunnerComment))
 		still := 0
@@ -244,7 +274,21 @@ func Run(r *ExecRunner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 				log = append(log, "removed config "+cfg.ConfigPath)
 			}
 		}
-	} else {
+	case scope == ScopeWholeWorld:
+		// The config SURVIVES: domain, runner identity, and the plane's
+		// locations stay for remap. Only the REGENERATED facts go — the
+		// destroyed LXCs' vmid/ip (next boot mints fresh ones; a leftover
+		// record would make the next teardown chase a ghost).
+		if cfg.PruneLxcCoords != nil {
+			if err := cfg.PruneLxcCoords(); err != nil {
+				return "", fmt.Errorf("config prune failed: %w", err)
+			}
+			log = append(log, "config KEPT — regenerated LXC coords pruned (domain + plane mapping intact for remap)")
+		} else {
+			log = append(log, "config KEPT (door + world home + plane mapping intact)")
+		}
+		log = append(log, fmt.Sprintf("door key KEPT on %s (rebuild reuses it — no door gate)", cfg.RunNTarget))
+	default:
 		log = append(log, "config KEPT (per-tenant teardown — coords + dataset mapping for reattach)")
 	}
 
@@ -279,6 +323,25 @@ func (r *ExecRunner) DestroyDataset(tenant, domain, pool, kind, dataset string) 
 	return false, fmt.Errorf("storage destroy for %s printed no STORAGE-DESTROYED line", tenant)
 }
 
+// DestroyPool removes a freehold-created thin pool through the orchestrator
+// CLI (`storage destroy-pool`); drive.RemoveThinPool refuses while tenant
+// LVs still ride it, so the caller runs this AFTER the tenant destroys.
+func (r *ExecRunner) DestroyPool(vg, pool string) error {
+	args := []string{
+		"storage", "destroy-pool",
+		"--addr", r.Addr,
+		"--agent-dir", r.AgentDir,
+		"--target", r.Runner,
+		"--pool", vg,
+		"--thin-pool", pool,
+	}
+	out, err := exec.Command(r.OrchestratorBin, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("thin-pool removal for %s/%s failed:\n%s", vg, pool, out)
+	}
+	return nil
+}
+
 // Cfg is the teardown-input config surface.
 type Cfg struct {
 	Domain        string
@@ -292,6 +355,11 @@ type Cfg struct {
 	TenantRole    string // for tenant-scoped teardown
 	Data          bool   // whole-world --data
 	Vmid          map[string]*uint32
+	ThinPool      string // freehold-CREATED thin pool (config plane.thin_pool); "" = none
+	// PruneLxcCoords strips the regenerated facts (LXC vmid/ip) from the
+	// config on disk — the keep-config half of the default whole-world
+	// teardown. nil = no config to prune.
+	PruneLxcCoords func() error
 }
 
 // LxcVMID returns the recorded vmid for a role (from the managed config).

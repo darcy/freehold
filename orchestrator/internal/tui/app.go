@@ -326,6 +326,30 @@ func (m *Model) buildAgents(cfg *config.Config) {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.KeyMsg:
+		// The Rust door flow: a rebuild paused at the door gate keeps the
+		// operator INSIDE the gate — install the key, press ENTER, the
+		// SAME rebuild re-runs in place (stages are idempotent: provision
+		// reuses the key, verify re-probes the door and the pipeline
+		// continues). Never back to the form.
+		if m.rebuildArgs != nil {
+			switch v.Type {
+			case tea.KeyEnter:
+				args := m.rebuildArgs
+				m.Wait, m.Err, m.Msg = "", "", "re-testing the door and resuming rebuild…"
+				m.rebuildArgs = nil
+				m.Flow = nil
+				return m, func() tea.Msg { return rebuildRun(args) }
+			case tea.KeyEsc:
+				m.rebuildArgs, m.Wait, m.Msg = nil, "", "rebuild cancelled at the door — the key is still printed above"
+				return m, nil
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			}
+			if v.String() == "q" {
+				return m, tea.Quit
+			}
+			return m, nil // the gate swallows everything else until ENTER/esc
+		}
 		if m.Flow != nil {
 			return m.handleFlow(v)
 		}
@@ -388,9 +412,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.load(m.CfgPath)
 		}
 		if v.err != nil {
-			m.Err = v.err.Error()
+			m.Err, m.Wait = v.err.Error(), ""
+			m.rebuildArgs = nil
+		} else if v.wait != "" {
+			m.Wait = v.wait
+			// the paused rebuild keeps its args → ENTER re-runs it in place.
+			m.rebuildArgs = v.rebuildArgs
 		} else {
-			m.Msg = v.ok
+			m.Msg, m.Wait = v.ok, ""
+			m.rebuildArgs = nil
 		}
 	case tickMsg:
 		m.LastRef = time.Now()
@@ -421,6 +451,13 @@ func (m *Model) View() string {
 	b.WriteString(styleTitle.Render(" freehold ") + styleDim.Render(m.Domain+" · "+m.Mode.String()) + "\n\n")
 	if m.Err != "" {
 		b.WriteString(styleRed.Render("! "+m.Err) + "\n\n")
+	}
+	if m.Wait != "" {
+		b.WriteString(styleYellow.Render("waiting for the operator:\n"+m.Wait) + "\n")
+		if m.rebuildArgs != nil {
+			b.WriteString(styleYellow.Render("install the key, then press ENTER to re-test the door and resume — esc to cancel") + "\n")
+		}
+		b.WriteString("\n")
 	}
 	if m.Mode == ModeBootstrap {
 		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")

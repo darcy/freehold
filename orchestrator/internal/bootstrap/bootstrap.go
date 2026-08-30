@@ -195,6 +195,55 @@ func ThinLVExists(clientConn *client.McpClient, target, vg, tenant string) (bool
 	return false, nil
 }
 
+// ThinPoolExists reports whether a SPECIFIC thin pool exists in the VG
+// (marked by its _tmeta/_tdata companion pair). ThinPoolName finds ANY pool;
+// this one names it — the plane-placement gate's adopt-or-carve probe.
+func ThinPoolExists(clientConn *client.McpClient, target, vg, pool string) (bool, error) {
+	names, err := lvsNames(clientConn, target, vg)
+	if err != nil {
+		return false, err
+	}
+	meta, data := false, false
+	for _, n := range names {
+		switch n {
+		case pool + "_tmeta":
+			meta = true
+		case pool + "_tdata":
+			data = true
+		}
+	}
+	return meta && data, nil
+}
+
+// ThinPoolNameOther returns the first thin pool in the VG EXCEPT `except` —
+// the full teardown's local-lvm re-point wants a SURVIVING pool; the doomed
+// one must never be picked as its own successor.
+func ThinPoolNameOther(clientConn *client.McpClient, target, vg, except string) (string, bool, error) {
+	names, err := lvsNames(clientConn, target, vg)
+	if err != nil {
+		return "", false, err
+	}
+	for _, n := range names {
+		if !strings.HasSuffix(n, "_tmeta") {
+			continue
+		}
+		pool := strings.TrimSuffix(n, "_tmeta")
+		if pool == except {
+			continue
+		}
+		hasTdata := false
+		for _, m := range names {
+			if m == pool+"_tdata" {
+				hasTdata = true
+			}
+		}
+		if hasTdata {
+			return pool, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 func lvsNames(clientConn *client.McpClient, target, vg string) ([]string, error) {
 	out, err := Exec(clientConn, target, fmt.Sprintf("lvs -a --noheadings -o lv_name %s 2>/dev/null || true", vg), 60)
 	if err != nil {

@@ -137,6 +137,167 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   Both exec the freehold binary (self) like the existing forms. Footer +
   view hints wired and PTY-verified in both modes.
 
+### Phase 8 — Plane-placement gate + teardown semantics (working tree, uncommitted)
+- **Plane-placement gate** (`rebuild`): the tenant LVs must land in a NAMED
+  thin pool. `storage resolve` now also emits `STORAGE-THINPOOL: <name|->`
+  (LVM-thin backend only; the line's ABSENCE = ZFS, where the gate skips).
+  `stagePlacement` (rebuild.go, stage 7a) resolves it: `--thin-pool` flag
+  headless (adopt-if-present / carve-at-`--pool-size-gb`), no flag + no
+  detected pool → carve `freehold-thin`, `--yes` + detected → reuse; the
+  interactive prompt offers `r`/blank = reuse, a name = carve, with a
+  SECOND prompt for the carve size. Typing the detected pool's name verbatim
+  adopts (no size prompt). ZFS + `--thin-pool` = actionable error.
+- **`EnsureLvmLv` / `ResolveLvmMounts`** thread a `thinPool` arg: `""` reuses
+  the VG's pool; a name is adopt-or-carve that exact name (Rust-parity
+  command strings preserved byte-for-byte). Config records
+  `plane.thin_pool` ONLY when rebuild CARVES — the guard that keeps `--data`
+  teardown off reused stock pools.
+- **`storage destroy-pool`** CLI + `drive.RemoveThinPool`: absent = no-op;
+  refuses while LVs RIDE the pool (rider detection via `lvs -o pool_lv,lv_name`
+  — per-pool, NOT a global LV count; a surviving pool's own LVs don't block);
+  re-points PVE `local-lvm` to a surviving pool before removal, or leaves it
+  (next rebuild re-points once the new pool is carved).
+- **`stageLocalLvmRepoint`** (rebuild, carve path only): keeps PVE's
+  `local-lvm` storage pointed at the carved pool so `pct create --rootfs
+  local-lvm:…` resolves. Idempotent (probe skips already-correct).
+- **Teardown semantics fixed** (`internal/teardown/teardown.go`): default
+  whole-world = COMPUTE teardown — destroys LXCs, KEEPS config (LXC vmid+ip
+  pruned via `Cfg.PruneLxcCoords`), world home `~/.freehold`, and the door
+  key (rebuild reuses all three → no door gate, cheap rebuild). `--data` =
+  FULL teardown: tenant datasets + the freehold-created thin pool, then door
+  key + world home + config LAST. New `Runner` interface (Exec / DestroyOneLxc
+  / DestroyDataset / DestroyPool) makes `Run` hermetically testable.
+- **`prompt()` fixed**: one persistent `bufio.Reader` over stdin — a fresh
+  reader per call read ahead past the first newline, breaking back-to-back
+  prompts (the carve size after the pool name).
+- **TUI rebuild form** is now 6 steps (operator pk · domain · tenant LV size
+  GB · thin-pool name · new thin-pool size GB · boot k3s), PTY-verified.
+- Hermetic tests added: `drive/lvm_pool_test.go` (placement adopt/carve +
+  RemoveThinPool rider/survivor/re-point semantics, 8 tests),
+  `cli/rebuild_placement_test.go` (parseStorageThinPool 3-way, parseGB,
+  stagePlacement ×11), `teardown/teardown_test.go` (compute-keeps /
+  data-removes / pool-guard / tenant-scopes / confirm, 6 tests).
+  `go build ./... && go vet ./internal/... && gofmt -l . && go test ./...`
+  GREEN; both Go binaries rebuilt.
+- **TUI door-gate waiting state** (post-first-run fix): the TUI's `B` form
+  runs `rebuild --yes` as a subprocess; a fresh provision mints a NEW door
+  key and `--yes` bails actionably (a subprocess can't prompt the operator).
+  That pause is EXPECTED, not a failure — the TUI now detects it
+  (`doorKeyWaiting` on "needs a NEW ssh key"), renders it yellow as
+  "waiting for the operator" with the full install line (the OLD behavior
+  painted it red and showed only the truncated tail), and clears it on the
+  next flow/error. Both CLI bail texts now read "re-run rebuild" (the
+  parenthetical TUI hint is gone — the TUI owns the retry mechanic, below).
+- **Door-key recovery on reuse + auth failure** (the "pressed B twice before
+  installing the key" trap): a second `rebuild` sees the existing package →
+  provision reuses → the door gate is SKIPPED (no fresh key) → `stageVerify`
+  fails with `ssh error: authentication failed`, and the key printed on the
+  first run was gone. Fix: the door ssh PUBLIC line is re-derivable from the
+  runner package itself — `identity.json` holds the runner's own X25519
+  enc key, `secrets.json` holds the door PEM sealed TO it (aad = secret
+  name), exactly the runner's boot path — so `recoverDoorKey()` unseals it,
+  parses the openssh-key-v1 container, and emits ONLY the public line
+  (`crypto.ExtractED25519PublicKeyLine`: private half parsed past, never
+  returned/written — nothing new leaves the machine). `stageVerify` on an
+  auth refusal now bails with the same shape as the fresh-key gate
+  ("the door needs its ssh key..."); the TUI's `doorKeyWaiting` marker is
+  the shared "the door needs" prefix so BOTH pauses render yellow.
+  Unrecoverable package → the actionable
+  `rm -rf ~/.freehold` fresh-start message. Tests: PEM round-trip,
+  sealed-package recovery, stageVerify re-surface + non-auth passthrough,
+  unrecoverable bail.
+- **In-place door retry — the Rust loop in the TUI** (supersedes "press B
+  again"): a rebuild paused at the door gate keeps the operator INSIDE the
+  gate. The pause carries the EXACT rebuild args (`flowMsg.rebuildArgs` →
+  `Model.rebuildArgs`); the TUI renders the key + "install the key, then
+  press ENTER to re-test the door and resume — esc to cancel"; ENTER re-runs
+  the SAME `rebuild --yes` in place (stages are idempotent: provision REUSES
+  the package → no new key, grant/serve re-run, `stageVerify` re-probes the
+  door and, on success, the pipeline CONTINUES through config/storage/deploys)
+  — never back to the 6-field form. ESC cancels the pause (no error); q /
+  ctrl+c still quit; every other key is swallowed at the gate. A second
+  pause (key still not installed) re-arms the gate with the same args.
+  Shared classifier `rebuildRun(args) flowMsg` used by both the form
+  dispatch and the ENTER handler. Tests: `TestDoorGateEnterRetry` (ENTER
+  dispatches + never reopens the form, re-pause re-arms, ESC cancels clean),
+  `TestDoorGateSwallowsKeys` (B at the gate opens no form),
+  `TestDoorKeyWaitingRenderedNotError` extended (args kept on wait, cleared
+  on error/beginPrompt, ENTER hint rendered).
+- **First LIVE whole-world rebuild (2026-08-29)**: the pipeline ran end to
+  end on the real box (door pre-installed → no gate pause; VG `pve` had no
+  thin pool → carved `freehold-thin` at 120 GB; relay 100 / cp 101 / k3s 102
+  booted + recorded; relay stack healthy; CP serving with the operator admin
+  seed; k3s active with kubeconfig). The live run exposed + fixed 4 bugs,
+  each with a regression test or live proof:
+  1. `parseKind` returned a NON-NIL action on `Reuse`, but every caller
+     treats non-nil as "NO existing backend" — the very first `storage
+     ensure` (nothing recorded yet, no `--kind`) always failed with
+     "no storage backend to ensure onto" on a host that HAS a VG. Now
+     Reuse returns `nil` action (the caller drives the detected kind).
+  2. The operator pubkey was stored raw — the Rust installer runs
+     `parse_pubkey_input` BEFORE the pipeline; `deploy-relay`/`deploy-cp`
+     reject non-hex at stages 13-14. `newRebuildEngine` now normalizes
+     npub→64-hex up front (parity with installer::main.rs).
+  3. `stageLocalLvmRepoint` used `pvesm set local-lvm --thinpool` —
+     REJECTED live ("Unknown option: thinpool"; thinpool is not mutable
+     via pvesm's API), and its probe greped a colon form that PVE's
+     whitespace `storage.cfg` never matches. Now: scoped in-place
+     `storage.cfg` edit (PVE's sanctioned manual repair), whitespace
+     probe + post-edit readback. Tests: carve / already-correct skip /
+     missing-block error.
+  4. `firstField` panicked on the blank trailing line of `pvesm list
+     local` (`Fields("")+" "` = empty slice → `[0]`). Now returns "".
+     Test: `TestFirstFieldBlankLine`.
+- Live world coords after the run: relay LXC 100 @ 192.168.30.225 (docker
+  stack healthy, `/_liveness` ok, NIP-11 self `dee88751…` recorded as
+  `relay_pubkey`), CP LXC 101 @ 192.168.30.205 (:8080, admin = operator
+  1dc07610…), k3s LXC 102 @ 192.168.30.253 (k3s active, kubeconfig
+  present). Open tail: the operator's truenas proxy still forwards the
+  domain hostnames to the PREVIOUS world's guest IPs (.238/.254) — guests
+  are live direct on the LAN; the proxy repoint is operator-side.
+- **Static-IP wiring** (`cli/rebuild.go`): `--relay-ip`, `--cp-ip`, `--k3s-ip`
+  (CIDR) + `--relay-gw` (default `192.168.30.1`). `bootstrapStaticIP(role,
+  flags, cfg)`: explicit flag wins → else the RECORDED `lxc.<role>.ip` rides
+  again (Rust `Answers::from_config` parity) → else `""` = DHCP. `stageBootstrap`
+  passes `--lxc-ip/--lxc-gw` when static AND reuses the recorded `vmid` on
+  resume (reuse path finds the existing guest by hostname instead of picking
+  a new id and refusing the collision; Rust parity re-booted the same vmid).
+  CIDR validated fail-fast (host + prefix) in `RunE` BEFORE `newRebuildEngine`
+  — a bare host would only die deep at stage-7 `pct create`. Tests:
+  flag-wins / recorded-fallback / none-is-DHCP.
+- **Persistent-plane recursive-chown bug — root-caused + fixed (the
+  deploy-relay EACCES cascade).** Stage-3 mount resolution ran `chown -R
+  100000:100000 <mount>` UNCONDITIONALLY (the comment claimed "Fresh ext4 is
+  root-owned" but nothing gated on freshness). On a rebuild over the
+  SURVIVING plane (compute-only teardown keeps the LVs) that recursive sweep
+  re-rooted every container-owned subtree — docker volumes with per-service
+  uids (redis 999, postgres 70/100070 on host, buzz 1000) → guest root —
+  and every non-root service EACCESed: redis MISCONF/BGSAVE, postgres
+  `pg_filenode.map`, relay `git pack cache ... Permission denied` panic.
+  Redis's docker-entrypoint self-heals on restart (proven live: re-root
+  `/data`, restart, entrypoint chowns back); postgres/buzz don't. ctime
+  forensics (all four volumes, one sweep, nanosecond-identical, exactly at
+  the stage-3 moment) pinned it; PVE itself only chowns newly ALLOCATED
+  volumes, non-recursive, root-of-volume (`LXC.pm::create_disks`) — bind-mp
+  dirs are untouched by PVE, so the sweep was ours. FIX: `ChownGuestUid` is
+  now NON-RECURSIVE (top dir only, matching PVE's own invariant: the guest
+  needs the mount ROOT writable; the subtree belongs to the container
+  stack). Live repair applied in-place: git volume `chown buzz:buzz` via the
+  deploy's own `gitDataChownCmd`, postgres dir to uid 70, redis self-healed;
+  no LXC/volume destroyed. Regression test
+  `TestResolveLvmMountsSurvivingPlaneNeverRecursiveChowns` (surviving
+  relay plane: non-recursive root chown, zero `chown -R` / lvcreate / mkfs /
+  re-mount churn) + the relay/zfs assertions rewritten to the top-dir form.
+- **Second LIVE rebuild — green end to end with STATIC IPs (2026-08-29).**
+  `rebuild --yes --relay-ip 192.168.30.8/24 --cp-ip 192.168.30.9/24` passed
+  all 10 stages + record on the SURVIVING plane (stages 0–7 idempotent;
+  deploy-relay + deploy-cp green after the ownership fix). Live coords:
+  relay LXC 100 @ **192.168.30.8** (4/4 containers healthy, `/_liveness`
+  ok), CP LXC 101 @ **192.168.30.9** (:8080, NIP-98 gate), k3s LXC 102 @
+  **192.168.30.213** (k3s active), all recorded in config. Operator action:
+  repoint the truenas proxy upstreams to `.8:3000` (relay) and `.9:8080`
+  (CP) — the domain hosts still 502 until then.
+
 ## Commits on `refactor-go` (working tree clean)
 
 | commit | content |
@@ -162,10 +323,11 @@ The plan is COMPLETE on `refactor-go`. Only operator-driven live exercises remai
    readiness, and storage paths are already live-verified.
 2. `teardown` from the TUI (`t` in running mode) — engine ported + CLI-wired;
    door probe live-verified; a full run is destructive, so it's operator-paced.
-3. The operator's whole-world teardown → `rebuild` end-user test from the TUI
-   (`t` then `B`) — the hold gate. The pipeline is hermetic-tested and every
-   stage is the Rust installer's contract ported verbatim; a live run is
-   what's left.
+3. ~~The operator's whole-world teardown → `rebuild` end-user test from the
+   TUI (`t` then `B`) — the hold gate.~~ **DONE (2026-08-29)** — the live
+   rebuild above; the pipeline's four live bugs are fixed + regression-tested.
+4. Operator-side: re-point the truenas proxy at the new guest IPs (relay
+   .225, CP .205) — the ONLY remaining step before the domain URLs work.
 
 ## Constraints & decisions (carry-forward)
 

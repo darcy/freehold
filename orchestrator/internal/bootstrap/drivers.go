@@ -252,7 +252,11 @@ func EnsureDebianTemplate(c *client.McpClient, target string, specTemplate *stri
 }
 
 func firstField(line string) string {
-	return strings.TrimSpace(strings.Fields(line + " ")[0])
+	f := strings.Fields(line)
+	if len(f) == 0 {
+		return "" // blank/whitespace-only line (the output's trailing newline)
+	}
+	return strings.TrimSpace(f[0])
 }
 
 // verCmp compares two numeric template versions component-wise.

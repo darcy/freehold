@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // OpenSSH wire encoding helpers — reproduce ssh-key crate output exactly.
@@ -89,4 +90,123 @@ func encodeED25519OpenSSH(seed []byte, comment string) (privatePEM []byte, pubLi
 	}
 
 	return pem.Bytes(), pubLine, nil
+}
+
+// ExtractED25519PublicKeyLine derives the authorized_keys public line from
+// an openssh-key-v1 private-key PEM (ed25519 only — the only kind the
+// provisioner generates). This is the door-key RECOVERY path: a reused
+// runner package holds the private key as a sealed credential; when the
+// door gate was skipped and ssh auth fails, rebuild re-derives the PUBLIC
+// half to show the operator. The private half is parsed past, never
+// returned. Mirrors ssh-key's openssh-key-v1 container layout.
+func ExtractED25519PublicKeyLine(pemBytes []byte) (string, error) {
+	body, err := pemUnwrap(pemBytes, "OPENSSH PRIVATE KEY")
+	if err != nil {
+		return "", err
+	}
+	const magic = "openssh-key-v1\x00"
+	if !bytes.HasPrefix(body, []byte(magic)) {
+		return "", fmt.Errorf("not an openssh-key-v1 container")
+	}
+	rest := body[len(magic):]
+	var cipher, kdf, kdfOpts []byte
+	if cipher, rest, err = readSshWireString(rest); err != nil {
+		return "", fmt.Errorf("ciphername: %w", err)
+	}
+	if kdf, rest, err = readSshWireString(rest); err != nil {
+		return "", fmt.Errorf("kdfname: %w", err)
+	}
+	if kdfOpts, rest, err = readSshWireString(rest); err != nil {
+		return "", fmt.Errorf("kdfoptions: %w", err)
+	}
+	if string(cipher) != "none" || string(kdf) != "none" || len(kdfOpts) != 0 {
+		return "", fmt.Errorf("encrypted private keys are not supported (cipher=%q kdf=%q)", cipher, kdf)
+	}
+	if len(rest) < 4 {
+		return "", fmt.Errorf("truncated container: no key count")
+	}
+	nkeys := binary.BigEndian.Uint32(rest[:4])
+	rest = rest[4:]
+	if nkeys != 1 {
+		return "", fmt.Errorf("expected 1 key, got %d", nkeys)
+	}
+	var pubBlob []byte
+	if pubBlob, rest, err = readSshWireString(rest); err != nil {
+		return "", fmt.Errorf("public key blob: %w", err)
+	}
+	// Public blob: string "ssh-ed25519" + string pubkey(32).
+	kind, inner, err := readSshWireString(pubBlob)
+	if err != nil || string(kind) != "ssh-ed25519" {
+		return "", fmt.Errorf("expected an ssh-ed25519 key, got %q", kind)
+	}
+	pub, _, err := readSshWireString(inner)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return "", fmt.Errorf("bad ed25519 public key in blob")
+	}
+	// The private blob carries the comment: checkint(4)+checkint(4) +
+	// string kind + string pub + string priv(64) + string comment (+pad).
+	comment := ""
+	if len(rest) >= 4 {
+		var privBlob []byte
+		if privBlob, _, err = readSshWireString(rest); err == nil && len(privBlob) >= 8 {
+			p := privBlob[8:]
+			for _, skip := range []string{"kind", "pub", "priv"} {
+				var v []byte
+				if v, p, err = readSshWireString(p); err != nil {
+					break
+				}
+				_ = v
+				_ = skip
+			}
+			if err == nil {
+				var c []byte
+				if c, _, err = readSshWireString(p); err == nil {
+					comment = string(c)
+				}
+			}
+		}
+	}
+	line := "ssh-ed25519 " + base64.StdEncoding.EncodeToString(pubBlob)
+	if comment != "" {
+		line += " " + comment
+	}
+	return line, nil
+}
+
+// readSshWireString consumes one uint32-length-prefixed OpenSSH wire string.
+func readSshWireString(b []byte) (val, rest []byte, err error) {
+	if len(b) < 4 {
+		return nil, nil, fmt.Errorf("truncated wire string")
+	}
+	n := binary.BigEndian.Uint32(b[:4])
+	if uint32(len(b)-4) < n {
+		return nil, nil, fmt.Errorf("wire string overflows buffer")
+	}
+	return b[4 : 4+n], b[4+n:], nil
+}
+
+// pemUnwrap decodes the base64 body between the armor lines (any wrap
+// width, LF or CRLF).
+func pemUnwrap(pemBytes []byte, label string) ([]byte, error) {
+	var body []byte
+	in := false
+	for _, l := range strings.Split(string(pemBytes), "\n") {
+		l = strings.TrimSpace(l)
+		switch {
+		case l == "-----BEGIN "+label+"-----":
+			in = true
+		case l == "-----END "+label+"-----":
+			in = false
+		case in:
+			body = append(body, l...)
+		}
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("no %q PEM body found", label)
+	}
+	out, err := base64.StdEncoding.DecodeString(string(body))
+	if err != nil {
+		return nil, fmt.Errorf("bad PEM base64: %w", err)
+	}
+	return out, nil
 }

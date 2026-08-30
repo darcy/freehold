@@ -26,6 +26,12 @@ type fakeRunner struct {
 	failCmd map[string]int    // cmd substring -> exit code to force
 	zfsDS   map[string]bool   // zfs datasets present
 	zfsMP   map[string]string // dataset -> mountpoint
+	// thinOf: thin volume name -> parent pool name (the pool_lv column;
+	// a pool's own row has a blank parent and is not a rider).
+	thinOf map[string]string
+	// storageCfgThinpool models /etc/pve/storage.cfg's local-lvm thinpool
+	// pointer ("<vg>/<pool>"); "" = no pointer line.
+	storageCfgThinpool string
 }
 
 func newFakeRunner() *fakeRunner {
@@ -36,6 +42,7 @@ func newFakeRunner() *fakeRunner {
 		failCmd: map[string]int{},
 		zfsDS:   map[string]bool{},
 		zfsMP:   map[string]string{},
+		thinOf:  map[string]string{},
 	}
 }
 
@@ -51,7 +58,27 @@ func (f *fakeRunner) run(cmd string) (int, string) {
 	}
 
 	switch {
+	case strings.HasPrefix(cmd, "lvs --noheadings -o pool_lv,lv_name"):
+		// pool_lv is blank for pools/plain LVs; riders name their parent
+		// pool as `vg/pool` (the real lvs form). The VG comes from the
+		// command's trailing argument: lvs --noheadings -o pool_lv,lv_name <vg> ...
+		fields := strings.Fields(cmd)
+		vg := ""
+		if len(fields) >= 5 {
+			vg = fields[4]
+		}
+		var lines []string
+		for lv := range f.lvs {
+			if parent := f.thinOf[lv]; parent != "" && vg != "" {
+				lines = append(lines, vg+"/"+parent+"  "+lv)
+			} else {
+				lines = append(lines, "  "+lv)
+			}
+		}
+		return 0, strings.Join(lines, "\n")
 	case strings.HasPrefix(cmd, "lvs -a --noheadings -o lv_name"):
+		// Mirrors the real `-o lv_name` output: one name per line, no
+		// attrs column (lvsNames/lvsAll parse with strings.Fields).
 		var names []string
 		for lv := range f.lvs {
 			names = append(names, lv)
@@ -59,21 +86,25 @@ func (f *fakeRunner) run(cmd string) (int, string) {
 		return 0, strings.Join(names, "\n")
 
 	case strings.HasPrefix(cmd, "lvcreate -L"):
-		// lvcreate -L 40G -T <vg>/<pool>: carve the fresh thin pool.
+		// lvcreate -L 40G -T <vg>/<pool>: carve the fresh thin pool. `lvs -a`
+		// shows the pool as its OWN LV (type t) plus the _tdata/_tmeta pair.
 		fields := strings.Fields(cmd)
 		if len(fields) >= 4 {
 			pool := fields[3] // <vg>/<pool>
 			name := pool[strings.Index(pool, "/")+1:]
+			f.lvs[name] = true
 			f.lvs[name+"_tdata"] = true
 			f.lvs[name+"_tmeta"] = true
 		}
 		return 0, ""
 
 	case strings.HasPrefix(cmd, "lvcreate -V"):
-		// lvcreate -V 10G -T <vg>/<pool> -n <lv>
+		// lvcreate -V 10G -T <vg>/<pool> -n <lv>: a thin volume riding the pool.
 		fields := strings.Fields(cmd)
 		if len(fields) >= 7 && fields[5] == "-n" {
 			f.lvs[fields[6]] = true
+			parent := fields[3] // <vg>/<pool>
+			f.thinOf[fields[6]] = parent[strings.Index(parent, "/")+1:]
 		}
 		return 0, ""
 
@@ -132,9 +163,22 @@ func (f *fakeRunner) run(cmd string) (int, string) {
 			return 5, "Failed to find logical volume"
 		}
 		delete(f.lvs, name)
+		// removing a thin POOL takes its _tdata/_tmeta pair with it.
+		delete(f.lvs, name+"_tdata")
+		delete(f.lvs, name+"_tmeta")
 		return 0, ""
 
-	case strings.HasPrefix(cmd, "chown -R"):
+	case strings.HasPrefix(cmd, "chown ") && !strings.HasPrefix(cmd, "chown -"):
+		return 0, ""
+
+	case strings.HasPrefix(cmd, "grep -oE 'thinpool:"):
+		if f.storageCfgThinpool != "" {
+			return 0, "thinpool: " + f.storageCfgThinpool + "\n"
+		}
+		return 0, ""
+
+	case strings.HasPrefix(cmd, "pvesm set local-lvm --thinpool"):
+		f.storageCfgThinpool = strings.Fields(cmd)[4]
 		return 0, ""
 
 	case strings.HasPrefix(cmd, "zfs list -H -o name"):
@@ -243,7 +287,7 @@ func (f *fakeRunner) serve(t *testing.T) *client.McpClient {
 func TestEnsureLvmLvFreshVGCarvesPoolThenLV(t *testing.T) {
 	f := newFakeRunner()
 	c := f.serve(t)
-	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40)
+	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "")
 	if err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
@@ -270,7 +314,7 @@ func TestEnsureLvmLvReusesExistingThinPool(t *testing.T) {
 	f.lvs["data_tdata"] = true
 	f.lvs["data_tmeta"] = true
 	c := f.serve(t)
-	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40)
+	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "")
 	if err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
@@ -285,7 +329,7 @@ func TestEnsureLvmLvReusesExistingThinPool(t *testing.T) {
 func TestEnsureLvmLvHonorsOperatorSizes(t *testing.T) {
 	f := newFakeRunner()
 	c := f.serve(t)
-	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 12, 30); err != nil {
+	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 12, 30, ""); err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
 	if i := indexOfContaining(f.cmds, "lvcreate -L 30G -T pve/freehold-thin"); i < 0 {
@@ -299,11 +343,11 @@ func TestEnsureLvmLvHonorsOperatorSizes(t *testing.T) {
 func TestEnsureLvmLvIdempotentSecondRun(t *testing.T) {
 	f := newFakeRunner()
 	c := f.serve(t)
-	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40); err != nil {
+	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, ""); err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
 	before := len(f.cmds)
-	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40); err != nil {
+	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, ""); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
 	second := f.cmds[before:]
@@ -327,7 +371,7 @@ func TestEnsureLvmLvIdempotentSecondRun(t *testing.T) {
 func TestResolveLvmMountsRelayTwoChildren(t *testing.T) {
 	f := newFakeRunner()
 	c := f.serve(t)
-	mounts, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantRelay, 10, 40)
+	mounts, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantRelay, 10, 40, "")
 	if err != nil {
 		t.Fatalf("ResolveLvmMounts: %v", err)
 	}
@@ -340,13 +384,20 @@ func TestResolveLvmMountsRelayTwoChildren(t *testing.T) {
 	if mounts[1].Source != "/freehold/t-d/deploy" || mounts[1].GuestPath != "/srv/data/relay" {
 		t.Errorf("deploy mount wrong: %+v", mounts[1])
 	}
-	// BOTH LVs chowned to the guest's shifted uid.
+	// BOTH LV mount ROOTS chowned to the guest's shifted uid — top dir ONLY
+	// (never -R: a surviving plane's container-owned subtrees must not be
+	// re-rooted; see ChownGuestUid).
 	for _, want := range []string{
-		"chown -R 100000:100000 /freehold/t-d/docker-root",
-		"chown -R 100000:100000 /freehold/t-d/deploy",
+		"chown 100000:100000 /freehold/t-d/docker-root",
+		"chown 100000:100000 /freehold/t-d/deploy",
 	} {
 		if indexOfContaining(f.cmds, want) < 0 {
 			t.Errorf("missing chown %q: %v", want, f.cmds)
+		}
+	}
+	for _, banned := range []string{"chown -R "} {
+		if i := indexOfContaining(f.cmds, banned); i >= 0 {
+			t.Errorf("recursive chown on a plane mount root: %v", f.cmds[i])
 		}
 	}
 }
@@ -354,7 +405,7 @@ func TestResolveLvmMountsRelayTwoChildren(t *testing.T) {
 func TestResolveLvmMountsCpSingleMount(t *testing.T) {
 	f := newFakeRunner()
 	c := f.serve(t)
-	mounts, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantCp, 10, 40)
+	mounts, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantCp, 10, 40, "")
 	if err != nil {
 		t.Fatalf("ResolveLvmMounts: %v", err)
 	}
@@ -363,6 +414,48 @@ func TestResolveLvmMountsCpSingleMount(t *testing.T) {
 	}
 	if mounts[0].Source != "/freehold/t-d/cp" || mounts[0].GuestPath != "/srv/data/cp" {
 		t.Errorf("cp mount wrong: %+v", mounts[0])
+	}
+}
+
+// TestResolveLvmMountsSurvivingPlaneNeverRecursiveChowns is the live-incident
+// regression: a rebuild after compute-only teardown re-resolves a SURVIVING
+// plane. The old unconditional `chown -R 100000:100000 <mount>` re-rooted
+// every container-owned subtree (redis 999, postgres 70, buzz 1000 -> guest
+// root) and every non-root service EACCESed. Surviving LV + fs + mounted
+// must yield a NON-recursive top-dir chown and nothing else.
+func TestResolveLvmMountsSurvivingPlaneNeverRecursiveChowns(t *testing.T) {
+	f := newFakeRunner()
+	// BOTH relay children survive the compute-only teardown: LV + fs + mounted.
+	for _, pair := range []struct {
+		child planebase.RelayChild
+		host  string
+	}{
+		{planebase.RelayChildDockerRoot, "/freehold/t-d/docker-root"},
+		{planebase.RelayChildDeployDir, "/freehold/t-d/deploy"},
+	} {
+		lv, _ := planebase.LvmRelayChildLVName("t.d", pair.child)
+		f.lvs[lv] = true
+		f.thinOf[lv] = "freehold-thin"
+		f.fs["/dev/pve/"+lv] = true
+		f.mounted[pair.host] = true
+	}
+	c := f.serve(t)
+	if _, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantRelay, 10, 40, ""); err != nil {
+		t.Fatalf("ResolveLvmMounts on surviving plane: %v", err)
+	}
+	if indexOfContaining(f.cmds, "chown 100000:100000 /freehold/t-d/docker-root") < 0 {
+		t.Errorf("surviving mount root must still be chowned (top dir): %v", f.cmds)
+	}
+	for i, cmd := range f.cmds {
+		if strings.HasPrefix(cmd, "chown -R") {
+			t.Errorf("recursive chown on surviving plane: cmds[%d]=%q", i, cmd)
+		}
+	}
+	// Pure re-resolution: no lvcreate / mkfs / mount churn on a live LV.
+	for _, banned := range []string{"lvcreate", "mkfs.ext4", "mount /dev"} {
+		if i := indexOfContaining(f.cmds, banned); i >= 0 {
+			t.Errorf("surviving plane must not re-create/re-mount: cmds[%d]=%q", i, f.cmds[i])
+		}
 	}
 }
 
@@ -492,8 +585,8 @@ func TestResolveTenantMountsZfsEnsuresAndChowns(t *testing.T) {
 	if !f.zfsDS["rpool/freehold/t-d/cp"] {
 		t.Error("dataset not ensured")
 	}
-	if indexOfContaining(f.cmds, "chown -R 100000:100000 /rpool/freehold/t-d/cp") < 0 {
-		t.Errorf("zfs mountpoint must be chowned: %v", f.cmds)
+	if indexOfContaining(f.cmds, "chown 100000:100000 /rpool/freehold/t-d/cp") < 0 {
+		t.Errorf("zfs mountpoint root must be chowned (non-recursive): %v", f.cmds)
 	}
 }
 

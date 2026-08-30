@@ -54,7 +54,13 @@ type tuiFlow struct {
 type flowMsg struct {
 	ok     string
 	err    error
+	wait   string // expected operator-paused state (rendered yellow, not an error)
 	reload bool
+	// rebuildArgs: the door-gate pause keeps the EXACT rebuild args so
+	// ENTER re-runs it in place (the Rust door flow: install the key,
+	// press ENTER, the door is re-tested and the pipeline continues) —
+	// the operator never refills the form.
+	rebuildArgs []string
 }
 
 func textInputNew(placeholder string) *textinput.Model {
@@ -75,7 +81,7 @@ func ncols(k flowKind) int {
 	case flowTeardown:
 		return 1
 	case flowRebuild:
-		return 5
+		return 6
 	default:
 		return 1
 	}
@@ -142,7 +148,9 @@ func promptLabel(k flowKind, step int) string {
 		case 2:
 			return "tenant LV size GB (blank = 10)"
 		case 3:
-			return "fresh thin-pool size GB (blank = 40)"
+			return "thin-pool name (blank = reuse detected / carve default)"
+		case 4:
+			return "new thin-pool size GB (blank = 40, used when carving)"
 		default:
 			return "boot k3s too? (y/n, blank = y)"
 		}
@@ -157,8 +165,9 @@ func fieldValue(f *tuiFlow) string {
 	}
 	return ""
 }
-
 func (m *Model) beginPrompt(k flowKind) {
+	m.Wait = "" // a new flow supersedes any pending operator-wait state
+	m.rebuildArgs = nil
 	m.Flow = &tuiFlow{Kind: k, Field: textInputNew(promptLabel(k, 0))}
 }
 
@@ -313,16 +322,15 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				args = append(args, "--size-gb", f.Inputs[2])
 			}
 			if f.Inputs[3] != "" {
-				args = append(args, "--pool-size-gb", f.Inputs[3])
+				args = append(args, "--thin-pool", f.Inputs[3])
 			}
-			if strings.EqualFold(strings.TrimSpace(f.Inputs[4]), "n") {
+			if f.Inputs[4] != "" {
+				args = append(args, "--pool-size-gb", f.Inputs[4])
+			}
+			if strings.EqualFold(strings.TrimSpace(f.Inputs[5]), "n") {
 				args = append(args, "--with-k3s=false")
 			}
-			out, err := runSelf(args...)
-			if err != nil {
-				return flowMsg{err: fmt.Errorf("rebuild failed: %w (%s)", err, tail(out))}
-			}
-			return flowMsg{ok: "rebuild ok — " + tail(out), reload: true}
+			return rebuildRun(args)
 		}
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
@@ -378,6 +386,23 @@ func splitLines(s string) []string {
 	return strings.Split(s, "\n")
 }
 
+// doorKeyWaiting extracts rebuild's EXPECTED door-gate pause from the
+// subprocess output and returns the install instruction ("" = not the
+// pause) so the TUI renders it as a waiting state, not an error.
+// Two --yes bails produce it:
+//   - fresh provision:  "the door needs a NEW ssh key before rebuild..."
+//   - reuse + auth fail: "the door needs its ssh key before rebuild..."
+//
+// The shared "the door needs" prefix anchors both.
+func doorKeyWaiting(out string) string {
+	const marker = "the door needs"
+	i := strings.Index(out, marker)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(out[i:])
+}
+
 func (m *Model) refreshLocal() {
 	st, err := state.Open(freeholdStateDir())
 	if err != nil {
@@ -394,4 +419,20 @@ func (m *Model) refreshLocal() {
 	if len(m.Runners) == 0 {
 		m.Runners = []RunnerRow{{Name: "(no runners)"}}
 	}
+}
+
+// rebuildRun executes one rebuild attempt and classifies the outcome:
+// a door-gate pause (fresh key / auth fail) becomes a wait that keeps the
+// exact args for an in-place ENTER retry; any other failure is an error;
+// success reloads the world. Shared by the form dispatch and the door
+// gate's ENTER handler so both paths classify identically.
+func rebuildRun(args []string) flowMsg {
+	out, err := runSelf(args...)
+	if err != nil {
+		if wait := doorKeyWaiting(out); wait != "" {
+			return flowMsg{wait: wait, rebuildArgs: args}
+		}
+		return flowMsg{err: fmt.Errorf("rebuild failed: %w (%s)", err, tail(out))}
+	}
+	return flowMsg{ok: "rebuild ok — " + tail(out), reload: true}
 }

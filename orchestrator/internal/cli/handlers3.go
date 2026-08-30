@@ -346,6 +346,18 @@ var storageResolveCmd = &cobra.Command{
 			// Machine-parseable for the pipeline to thread the REAL backend
 			// identity into the ensure + config steps.
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
+			if *action.Detected == planebase.ExistingLvmThin {
+				// The placement gate's probe: which thin pool the VG holds
+				// RIGHT NOW (named) vs none ("-") — reuse vs carve decision.
+				thin, found, err := bootstrap.ThinPoolName(c, target, action.Pool)
+				if err != nil {
+					return err
+				}
+				if !found {
+					thin = "-"
+				}
+				fmt.Printf("STORAGE-THINPOOL: %s\n", thin)
+			}
 		case "Create":
 			label := "ZFS zpool"
 			if *action.Backend == planebase.BackendLvmThin {
@@ -393,10 +405,12 @@ func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendK
 		return "", nil, err
 	}
 	if action.Kind == "Reuse" {
+		// a USABLE backend exists → the caller drives it; the non-nil
+		// return is reserved for "no existing backend" (Create/Bail).
 		if *action.Detected == planebase.ExistingZfs {
-			return planebase.KindZfs, action, nil
+			return planebase.KindZfs, nil, nil
 		}
-		return planebase.KindLvmThin, action, nil
+		return planebase.KindLvmThin, nil, nil
 	}
 	return "", action, nil
 }
@@ -413,6 +427,7 @@ var storageEnsureCmd = &cobra.Command{
 		kindStr, _ := cmd.Flags().GetString("kind")
 		sizeGB, _ := cmd.Flags().GetUint64("size-gb")
 		poolSizeGB, _ := cmd.Flags().GetUint64("pool-size-gb")
+		thinPool, _ := cmd.Flags().GetString("thin-pool")
 		if tenant == "" || domain == "" || pool == "" {
 			return fmt.Errorf("storage ensure needs --tenant --domain --pool")
 		}
@@ -444,7 +459,7 @@ var storageEnsureCmd = &cobra.Command{
 		case planebase.KindZfs:
 			mounts, err = drive.ResolveTenantMounts(c, target, pool, domain, t)
 		case planebase.KindLvmThin:
-			mounts, err = drive.ResolveLvmMounts(c, target, pool, domain, t, sizeGB, poolSizeGB)
+			mounts, err = drive.ResolveLvmMounts(c, target, pool, domain, t, sizeGB, poolSizeGB, thinPool)
 		}
 		if err != nil {
 			return err
@@ -504,6 +519,32 @@ var storageDestroyCmd = &cobra.Command{
 			return err
 		}
 		fmt.Printf("STORAGE-DESTROYED: %v\n", destroyed)
+		return nil
+	},
+}
+
+var storageDestroyPoolCmd = &cobra.Command{
+	Use:   "destroy-pool",
+	Short: "Remove a freehold-CREATED thin pool from its VG (full teardown --data half)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		common := readCommonFlags(cmd)
+		target, _ := cmd.Flags().GetString("target")
+		pool, _ := cmd.Flags().GetString("pool")
+		thinPool, _ := cmd.Flags().GetString("thin-pool")
+		if pool == "" || thinPool == "" {
+			return fmt.Errorf("storage destroy-pool needs --pool (the VG) and --thin-pool")
+		}
+		c, err := connect(common, target)
+		if err != nil {
+			return err
+		}
+		// The CLI is the ONLY caller; the pool passed here comes from the
+		// config's plane.thin_pool, recorded only when freehold carved it.
+		// drive.RemoveThinPool refuses while tenant LVs still ride it.
+		if err := drive.RemoveThinPool(c, target, pool, thinPool); err != nil {
+			return err
+		}
+		fmt.Println("STORAGE-POOL-DESTROYED: true")
 		return nil
 	},
 }
@@ -579,6 +620,15 @@ func tenantFor(tenant string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q (relay | cp | k3s-volumes)", tenant)
 }
 
+// thinPoolOf returns the freehold-CREATED thin pool recorded in the config
+// ("" when the plane reused a stock pool — nothing recorded).
+func thinPoolOf(cfg *config.Config) string {
+	if cfg.Plane.ThinPool != nil {
+		return *cfg.Plane.ThinPool
+	}
+	return ""
+}
+
 // parseInfoMount parses a `storage info --mount` spec:
 // `<role>:<source>:<guest>:<vmid|->`. Neither a host path/dataset nor a guest
 // path carries `:`, so a plain 4-field split is unambiguous.
@@ -603,7 +653,7 @@ func parseInfoMount(s string) (drive.MountArg, error) {
 
 var teardownCmd = &cobra.Command{
 	Use:   "teardown",
-	Short: "Tear the managed world down: destroy the LXCs, remove the runner's key from the host LAST (after verification), then local cleanup",
+	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (regenerated coords pruned), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then wipes door key + world home + config",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		configPath, _ := cmd.Flags().GetString("config")
 		yes, _ := cmd.Flags().GetBool("yes")
@@ -669,11 +719,26 @@ var teardownCmd = &cobra.Command{
 				"cp":    cfg.Lxc.Cp.Vmid,
 				"k3s":   cfg.Lxc.K3s.Vmid,
 			},
+			ThinPool: thinPoolOf(cfg),
+			// The keep-config half of the default whole-world teardown: strip
+			// the regenerated facts (the destroyed LXCs' vmid/ip) so the next
+			// run mints fresh coords instead of chasing ghosts. Domain, runner
+			// identity, and the plane's locations all stay for remap.
+			PruneLxcCoords: func() error {
+				cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
+				cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
+				cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
+				return cfg.Save(configPath)
+			},
 		}
 
 		// Confirmation gate: --yes skips the prompt (scripting/CI).
 		if !yes {
-			fmt.Printf("teardown scope: %s (config %s)\nproceed? [type yes] ", scope, configPath)
+			fmt.Printf("teardown scope: %s (config %s)\n", scope, configPath)
+			if scope == teardown.ScopeWholeWorld && !data {
+				fmt.Println("keeps: config (regenerated LXC coords pruned) · world home · door key · plane locations")
+			}
+			fmt.Printf("proceed? [type yes] ")
 			var answer string
 			if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
 				return fmt.Errorf("teardown aborted (not confirmed)")
@@ -692,8 +757,8 @@ func init() {
 	addCommonFlags(teardownCmd, nil)
 	teardownCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	teardownCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
-	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown (compute + config + local home)")
-	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: whole-world teardown also destroys all datasets")
+	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown")
+	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: the FULL teardown — all datasets + the freehold-created thin pool, then door key + world home + config. Without it the config, world home, and door key are KEPT for a cheap rebuild")
 }
 
 func defaultConfigPath() string {
@@ -717,12 +782,12 @@ func freeholdHome() string {
 }
 
 func init() {
-	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd, storageInfoCmd, storageDestroyCmd)
+	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd, storageInfoCmd, storageDestroyCmd, storageDestroyPoolCmd)
 	addCommonFlags(storageResolveCmd, nil)
 	addCommonFlags(storageEnsureCmd, nil)
 	addCommonFlags(storageInfoCmd, nil)
 	addCommonFlags(storageDestroyCmd, nil)
-	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd, storageInfoCmd, storageDestroyCmd} {
+	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd, storageInfoCmd, storageDestroyCmd, storageDestroyPoolCmd} {
 		sc.Flags().String("target", "proxmox-box", "Target to drive storage through (the runner holding the host ssh key)")
 	}
 	storageEnsureCmd.Flags().String("tenant", "", "Tenant: relay | cp | k3s-volumes")
@@ -731,6 +796,9 @@ func init() {
 	storageEnsureCmd.Flags().String("kind", "", "Backend kind recorded by the plane (`zfs` | `lvmth`). Honored when present; absent => detect")
 	storageEnsureCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend; operator-prompted at rebuild)")
 	storageEnsureCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved (only when the VG has none)")
+	storageEnsureCmd.Flags().String("thin-pool", "", "Thin pool the tenant LVs land in (placement gate's choice): named = adopt-or-carve that pool; empty = reuse the VG's pool / carve the default when none")
+	storageDestroyPoolCmd.Flags().String("pool", "", "The VG the thin pool lives in")
+	storageDestroyPoolCmd.Flags().String("thin-pool", "", "The thin pool to remove (recorded plane.thin_pool — freehold-created only)")
 	storageDestroyCmd.Flags().String("tenant", "", "Tenant: relay | cp | k3s-volumes")
 	storageDestroyCmd.Flags().String("domain", "", "The relay's identity domain (for the dataset naming)")
 	storageDestroyCmd.Flags().String("pool", "", "Storage pool (zpool name / VG name)")

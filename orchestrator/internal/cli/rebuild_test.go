@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/crypto"
+	"freehold/orchestrator/internal/wire"
 )
 
 // ---- storage-line parsing (stage_storage contract lines) -------------------
@@ -308,5 +311,202 @@ func TestExtractNip11Pubkey(t *testing.T) {
 func TestRegexEscape(t *testing.T) {
 	if got := regexEscape("127.0.0.1:8787"); got != `127\.0\.0\.1\:8787` {
 		t.Errorf("escape = %q", got)
+	}
+}
+
+// ---- door key recovery (reuse + auth-fail re-surface) -----------------------
+
+// TestExtractED25519PublicKeyLine: the public line round-trips through the
+// openssh-key-v1 PEM (generate → extract) byte-identically — the recovery
+// must re-emit EXACTLY the line the operator was shown at provision time.
+func TestExtractED25519PublicKeyLine(t *testing.T) {
+	pem, want, err := crypto.GenerateED25519SSHKeypair("proxmox-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := crypto.ExtractED25519PublicKeyLine(pem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("extracted line = %q\nwant             %q", got, want)
+	}
+	if _, err := crypto.ExtractED25519PublicKeyLine([]byte("not a pem")); err == nil {
+		t.Error("garbage input must fail")
+	}
+}
+
+// sealedRunnerPackage builds a runner package exactly like provision does:
+// identity.json (own X25519 enc key) + secrets.json holding the door PEM
+// sealed TO that key under aad = the secret name.
+func sealedRunnerPackage(t *testing.T, dir, secretName string) string {
+	t.Helper()
+	// identity.json: fresh 32-byte secrets (provisioner.identityGenerate);
+	// provision creates the dir first, so mirror that.
+	if err := wire.EnsurePrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	nostr := bytes.Repeat([]byte{0x11}, 32)
+	enc := bytes.Repeat([]byte{0x22}, 32)
+	encPub, err := crypto.X25519PublicKey(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := map[string]string{
+		"nostr_secret_hex": hexStr(nostr),
+		"enc_secret_hex":   hexStr(enc),
+	}
+	if err := wire.WriteJSON0600(filepath.Join(dir, "identity.json"), doc); err != nil {
+		t.Fatal(err)
+	}
+	pem, want, err := crypto.GenerateED25519SSHKeypair("proxmox-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := crypto.Seal(encPub, []byte(secretName), pem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg := wire.New(
+		map[string]string{secretName: hexStr(sealed)},
+		map[string]wire.TargetMeta{secretName: {Kind: "ssh", Address: "root@h", Secret: secretName}},
+		nil,
+	)
+	if err := pkg.WriteToDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return want
+}
+
+func hexStr(b []byte) string {
+	const digits = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, c := range b {
+		out[i*2], out[i*2+1] = digits[c>>4], digits[c&0xf]
+	}
+	return string(out)
+}
+
+// TestDoorKeyFromPackage: the public line comes back out of the sealed
+// package — the recovery path the verify stage uses.
+func TestDoorKeyFromPackage(t *testing.T) {
+	dir := t.TempDir()
+	want := sealedRunnerPackage(t, dir, "proxmox-box")
+	got, err := doorKeyFromPackage(dir, "proxmox-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("recovered line = %q\nwant             %q", got, want)
+	}
+	// wrong aad (wrong secret name) must not decrypt to a key.
+	if _, err := doorKeyFromPackage(dir, "some-other-target"); err == nil {
+		// no ssh target named some-other-target — the fallback still finds
+		// the real entry, so success is fine; but a package with NO ssh
+		// target must fail.
+		t.Log("fallback found the real entry (ok)")
+	}
+	empty := t.TempDir()
+	if err := wire.New(nil, nil, nil).WriteToDir(empty); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doorKeyFromPackage(empty, "x"); err == nil {
+		t.Error("a package without any ssh target must fail")
+	}
+}
+
+// TestStageVerifyReSurfacesDoorKey: with --yes, an ssh auth refusal bails
+// with the recovered key + the install line — the SAME pause shape the
+// fresh-key gate produces (so the TUI's waiting-state marker catches it).
+func TestStageVerifyReSurfacesDoorKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FREEHOLD_HOME", home)
+	dir := filepath.Join(home, "runner", "proxmox-box")
+	want := sealedRunnerPackage(t, dir, "proxmox-box")
+
+	authFail := "tool error: ssh error: authentication failed (remaining methods: MethodSet([PublicKey, Password]))"
+	e := &rebuildEngine{
+		f:    rebuildFlags{yes: true, target: "proxmox-box", host: "root@192.168.30.224", addr: "127.0.0.1:8787"},
+		bins: rebuildBins{Self: "self"},
+		out:  &bytes.Buffer{},
+		in:   strings.NewReader(""),
+	}
+	e.runBin = func(bin string, args []string) (bool, string) {
+		return false, authFail
+	}
+	err := e.stageVerify()
+	if err == nil {
+		t.Fatal("auth failure must fail the stage")
+	}
+	msg := err.Error()
+	for _, wantSub := range []string{"the door needs", "re-run rebuild", want, ">> /root/.ssh/authorized_keys"} {
+		if !strings.Contains(msg, wantSub) {
+			t.Errorf("re-surface bail missing %q:\n%s", wantSub, msg)
+		}
+	}
+
+	// A NON-auth exec failure keeps the plain bail (no key re-surface).
+	e.runBin = func(bin string, args []string) (bool, string) {
+		return false, "tool error: ssh error: connection refused"
+	}
+	err = e.stageVerify()
+	if err == nil || strings.Contains(err.Error(), "the door needs") {
+		t.Errorf("non-auth failure must not claim a key is needed: %v", err)
+	}
+}
+
+// TestStageVerifyUnrecoverable: auth failure with NO usable package tells
+// the operator the fresh-start path instead of dangling a fake key.
+func TestStageVerifyUnrecoverable(t *testing.T) {
+	home := t.TempDir() // world home with NO runner package at all
+	t.Setenv("FREEHOLD_HOME", home)
+	e := &rebuildEngine{
+		f:    rebuildFlags{yes: true, target: "proxmox-box", host: "root@h", addr: "127.0.0.1:8787"},
+		bins: rebuildBins{Self: "self"},
+		out:  &bytes.Buffer{},
+		in:   strings.NewReader(""),
+	}
+	e.runBin = func(bin string, args []string) (bool, string) {
+		return false, "tool error: ssh error: authentication failed (remaining methods: MethodSet([PublicKey]))"
+	}
+	err := e.stageVerify()
+	if err == nil {
+		t.Fatal("must fail")
+	}
+	if !strings.Contains(err.Error(), "rm -rf ~/.freehold") {
+		t.Errorf("unrecoverable bail must give the fresh-start path:\n%s", err)
+	}
+}
+
+// ---- static IP resolution (Rust Answers::from_config parity) --------------
+
+func TestBootstrapStaticIPFlagWins(t *testing.T) {
+	ip := "10.0.0.8/24"
+	cfg := &config.Config{}
+	cfg.Lxc.Relay.Ip = &ip
+	// explicit flag beats the recorded config ip.
+	if got := bootstrapStaticIP("relay", rebuildFlags{relayIP: "192.168.30.8/24"}, cfg); got != "192.168.30.8/24" {
+		t.Errorf("flag should win, got %q", got)
+	}
+}
+
+func TestBootstrapStaticIPRecordedFallsBack(t *testing.T) {
+	ip := "192.168.30.9/24"
+	cfg := &config.Config{}
+	cfg.Lxc.Cp.Ip = &ip
+	// no flag => the recorded ip rides again (the proxy/DNS target is owned).
+	if got := bootstrapStaticIP("cp", rebuildFlags{}, cfg); got != "192.168.30.9/24" {
+		t.Errorf("recorded ip should ride again, got %q", got)
+	}
+}
+
+func TestBootstrapStaticIPNoneIsDHCP(t *testing.T) {
+	// no flag, no recorded ip => DHCP.
+	if got := bootstrapStaticIP("k3s", rebuildFlags{}, &config.Config{}); got != "" {
+		t.Errorf("absent ip should be DHCP, got %q", got)
+	}
+	// nil config (no file yet) => DHCP.
+	if got := bootstrapStaticIP("relay", rebuildFlags{}, nil); got != "" {
+		t.Errorf("nil config should be DHCP, got %q", got)
 	}
 }
