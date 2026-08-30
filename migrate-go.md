@@ -137,7 +137,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   Both exec the freehold binary (self) like the existing forms. Footer +
   view hints wired and PTY-verified in both modes.
 
-### Phase 8 — Plane-placement gate + teardown semantics (working tree, uncommitted)
+### Phase 8 — Plane-placement gate + teardown semantics (committed; round-4 fixes in 85732a7)
 - **Plane-placement gate** (`rebuild`): the tenant LVs must land in a NAMED
   thin pool. `storage resolve` now also emits `STORAGE-THINPOOL: <name|->`
   (LVM-thin backend only; the line's ABSENCE = ZFS, where the gate skips).
@@ -294,9 +294,21 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   deploy-relay + deploy-cp green after the ownership fix). Live coords:
   relay LXC 100 @ **192.168.30.8** (4/4 containers healthy, `/_liveness`
   ok), CP LXC 101 @ **192.168.30.9** (:8080, NIP-98 gate), k3s LXC 102 @
-  **192.168.30.213** (k3s active), all recorded in config. Operator action:
+  **192.168.30.7** (k3s active), all recorded in config. Operator action:
   repoint the truenas proxy upstreams to `.8:3000` (relay) and `.9:8080`
   (CP) — the domain hosts still 502 until then.
+
+  k3s addressing note (2026-08-30): the `.213` in earlier rebuilds was
+  DHCP-learned at boot and only recorded after the fact; it was NOT pinned
+  as static (config had no k3s ip, so the recorded-ip reuse didn't apply
+  yet). k3s is reachable only inside the operator's network — no proxy
+  upstream points at it — so it does not REQUIRE a static IP for the
+  world to function. But a static-out-of-DHCP IP keeps the rebuild
+  deterministic (a known API endpoint, no DHCP-range collision if the
+  relay/CP rebuild ever re-records a learned address), so it was set to
+  **192.168.30.7/24** per operator. `.7` was verified free (no arp,
+  ping-free) before assignment, and the relay/CP proxy upstreams are
+  unaffected (they stay at `.8`/`.9`).
 
 ## Commits on `refactor-go` (working tree clean)
 
@@ -310,6 +322,8 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `36c6876` | migrate-go.md: this status document |
 | `cfd7a4c` | Wire bootstrap + teardown CLI to real drivers (last two stubs) |
 | `f8a13ae` | Interactive bootstrap/configure TUI forms + live installer-contract verification |
+| `6d7719a` | Phase 8: placement gate + RemoveThinPool + teardown semantics + door-key recovery |
+| `85732a7` | Review round 4 fixes: rider guard, storage.cfg re-point, placement created probe |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
@@ -326,8 +340,9 @@ The plan is COMPLETE on `refactor-go`. Only operator-driven live exercises remai
 3. ~~The operator's whole-world teardown → `rebuild` end-user test from the
    TUI (`t` then `B`) — the hold gate.~~ **DONE (2026-08-29)** — the live
    rebuild above; the pipeline's four live bugs are fixed + regression-tested.
-4. Operator-side: re-point the truenas proxy at the new guest IPs (relay
-   .225, CP .205) — the ONLY remaining step before the domain URLs work.
+4. Operator-side: re-point the truenas proxy upstreams at the current
+   guest IPs (relay `.8:3000`, CP `.9:8080`) — the ONLY remaining step
+   before the domain URLs work.
 
 ## Constraints & decisions (carry-forward)
 
