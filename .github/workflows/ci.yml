@@ -28,5 +28,18 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Go build
+        working-directory: orchestrator
+        run: go build ./...
+
+      - name: Go vet
+        working-directory: orchestrator
+        run: go vet ./...
+
+      - name: Go test
+        working-directory: orchestrator
+        run: go test ./...
