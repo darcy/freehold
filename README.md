@@ -37,12 +37,17 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 
 ```
 Cargo.toml            workspace: core, runner, console-client, control-plane, testkit,
-                      acceptance, installer, orchestrator/harness/oracle
-orchestrator/        freehold (Go): the full CLI + interactive TUI — the live toolchain.
-                      Subcommands mirror the 16-command contract; the crypto/wire layer is
-                      byte-exact cross-verified against the Rust core by the oracle-harness
-                      gate (`go test ./orchestrator/harness/...`). The Rust tui and a
-                      freehold-orchestrator-lib are REMOVED (superseded by the Go binary).
+                      acceptance, orchestrator/harness/oracle
+orchestrator/         freehold (Go): the full CLI + interactive TUI — the live toolchain.
+                      Subcommands mirror the 16-command contract, plus the world-bring-up
+                      drivers (bootstrap proxmox-lxc / vultr-vps / hetzner-vps,
+                      deploy-relay, deploy-cp, relay-member, console-login, teardown,
+                      rebuild, install) and the agent surface (onboard/exec/demo/
+                      readiness, memory, delegate/delegate-peer, relay-profile/relay-join/
+                      relay-setup); the crypto/wire layer is byte-exact cross-verified
+                      against the Rust core by the oracle-harness gate (`go test
+                      ./orchestrator/harness/...`). The Rust tui, freehold-orchestrator,
+                      and installer crates are REMOVED (superseded by the Go binary).
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -81,16 +86,9 @@ control-plane/        freehold-control-plane — the engine room
                       management. Not chat (Buzz owns conversation).
   src/main.rs         CLI: provision / rotate-secret / revoke / grant / revoke-grant /
                       list / adopt / rebuild / identity / agent-create / serve (web console)
-orchestrator/         freehold-orchestrator — the `freehold` CLI: a signed MCP client +
-                      the world-bring-up drivers (bootstrap proxmox-lxc / vultr-vps /
-                      hetzner-vps, deploy-relay, deploy-cp, relay-member, console-login,
-                      teardown) and the agent surface (onboard/exec/demo/readiness,
-                      memory, delegate/delegate-peer, relay-profile/relay-join/relay-setup)
 console-client/       freehold-console-client — ONE console API contract, two clients:
                       the web page (control-plane/src/web.rs) and the TUI's Runners view;
                       NIP-98 login + overview/actions + the single-use web-launch portal
-tui/                  freehold-tui — the `freehold` binary: bootstrap/configure forms +
-                      the running dashboard (Agents · Services · Runners views)
 testkit/              freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
                       an in-process russh sshd (shared by the connector tests)
 acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G): 9 checks,
@@ -114,15 +112,13 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 
 ## Getting started (current Chunk-1 state)
 
-Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`).
+Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.23+
+(the `orchestrator/` module).
 
 ```sh
-cargo test --workspace        # tests across core / runner / console-client / control-plane / installer / acceptance
-cd orchestrator && go test ./...      # the Go CLI's byte-exact harness + hermetic unit tests
-(cd orchestrator && go build -o ~/bin/freehold-orchestrator ./cmd/freehold-orchestrator)  # build the Go CLI
-cargo clippy --workspace --all-targets -- -D warnings   # must be clean
-cargo fmt --check             # CI gate
-cargo run -p freehold-acceptance   # the whole Chunk-1 story, hermetic on loopback (9 checks, exit 0)
+cargo build --workspace && cargo test --workspace   # the Rust crates: core / runner / console-client / control-plane / testkit / acceptance
+cd orchestrator && go build ./... && go vet ./... && go test ./...   # the Go CLI/TUI + the byte-exact harness gate
+cargo fmt --all --check          # CI gate
 ```
 
 ### The appliance (`freehold` — one binary, two surfaces)
@@ -163,11 +159,11 @@ freehold --help               # both surfaces
 
 The same session flows bootstrap → configure → running as the world converges.
 
-The TUI drives the SAME stage library (`freehold_installer::*`) and world
-binaries as the `freehold-install` script (dialoguer front-end, still there);
-no duplicated logic. Re-runs are safe: an existing runner package is reused,
-the door is re-verified, and a matching LXC is reused (a foreign container on
-the vmid is refused).
+The TUI's bring-up flows and the `freehold install` command drive the SAME
+rebuild engine (`orchestrator/internal/cli/rebuild.go`) — one pipeline, no
+duplicated logic (the old Rust installer crate is gone). Re-runs are safe: an
+existing runner package is reused, the door is re-verified, and a matching LXC
+is reused (a foreign container on the vmid is refused).
 
 #### The config (`~/.config/freehold/config.toml`)
 
@@ -261,26 +257,28 @@ package, errors instead of destroying a runner's key.
 
 ### freehold: the CLI (the scripted CPA stand-in)
 
-The binary is `freehold`; the cargo package is `freehold-orchestrator`. Build with the
-workspace (`cargo build`, binary at `target/debug/freehold`) or install it into PATH once:
+The CLI binary is `freehold`, built from the Go module under `orchestrator/`
+(the `freehold-orchestrator` binary keeps the old name so teardown and the TUI
+can resolve it as a sibling):
 
 ```sh
-cargo install --path orchestrator   # -> ~/.cargo/bin/freehold
+go build -C orchestrator -o ../target/debug/freehold ./cmd/freehold
+go build -C orchestrator -o ../target/debug/freehold-orchestrator ./cmd/freehold-orchestrator
 freehold --help
 ```
 
 ```sh
 # onboard an existing service: provision -> ship -> self-check (hard-fails unless green) -> grant -> report
-echo -n 'vultr-api-key-9876' | cargo run -p freehold-orchestrator -- onboard blog \
+echo -n 'vultr-api-key-9876' | freehold onboard blog \
   --kind vultr --address api.vultr.com --agent-dir ./.freehold/control-plane/agent-my-agent \
   --cp-state-dir ./.freehold/control-plane
 
 # drive a RUNNING runner with signed calls:
-cargo run -p freehold-orchestrator -- exec --addr 127.0.0.1:8787 \
-  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
-  --target blog --cmd 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"'
+freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"' \
+  --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
+  --runner-pubkey <runner-nostr>
 
-cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
+freehold demo --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
   --steps steps.json   # [{target, cmd, secrets?, timeout_s?}]
 
@@ -291,12 +289,12 @@ cargo run -p freehold-orchestrator -- demo --addr 127.0.0.1:8787 \
 #   (the domain must resolve to the target IP or the operator's proxy).
 #   --role relay|cp derives the LXC name from --domain; pass --lxc-ip/--lxc-gw
 #   for a STATIC guest address (cloud DHCP won't lease to LXC veths).
-cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --role relay \
+freehold bootstrap --kind proxmox-lxc --role relay \
   --vmid 100 --lxc-ip <lan-ip>/24 --lxc-gw <lan-gw> --domain <relay-domain> \
   --operator-pubkey <your-64-hex> --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
 
-cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --role cp \
+freehold bootstrap --kind proxmox-lxc --role cp \
   --vmid 102 --lxc-ip <lan-ip>/24 --lxc-gw <lan-gw> --domain <relay-domain> \
   --operator-pubkey <your-64-hex> --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
@@ -306,7 +304,7 @@ cargo run -p freehold-orchestrator -- bootstrap --kind proxmox-lxc --role cp \
 #   ON THE BOX — a keypair is never shipped), adopt + self-grant the runner.
 #   --operator-pubkey seeds the console's NIP-98 admin whitelist and
 #   relaxes the loopback-only bind guard (operator authn => LAN bind).
-cargo run -p freehold-orchestrator -- deploy-cp --target proxmox-box --lxc 102 \
+freehold deploy-cp --target proxmox-box --lxc 102 \
   --binary target/release/control-plane --runner-binary target/release/runner \
   --runner-package ./.freehold/runner/proxmox-box-ish --bind 0.0.0.0:8080 \
   --relay-url https://<relay-domain> --operator-pubkey <your-64-hex> \
@@ -317,7 +315,7 @@ cargo run -p freehold-orchestrator -- deploy-cp --target proxmox-box --lxc 102 \
 #   .env (BUZZ_DOMAIN/RELAY_URL = the domain, RELAY_OWNER_PUBKEY = the CP
 #   console, operator invite, local-CA TLS) -> compose up -> /_liveness.
 #   Run AFTER deploy-cp: --owner-pubkey is the freshly minted console pubkey.
-cargo run -p freehold-orchestrator -- deploy-relay --target proxmox-box --lxc 100 \
+freehold deploy-relay --target proxmox-box --lxc 100 \
   --owner-pubkey <fresh-console-pubkey> --operator-pubkey <your-64-hex> \
   --domain <relay-domain> --relay-url https://<relay-domain> \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
@@ -327,7 +325,7 @@ cargo run -p freehold-orchestrator -- deploy-relay --target proxmox-box --lxc 10
 #   membership via 9000/9001 is not enough for relay queries). Add the fresh
 #   console pubkey / operator keys / runners / agents via buzz-admin in the
 #   relay LXC — the CP never holds the relay signing key.
-cargo run -p freehold-orchestrator -- relay-member --target proxmox-box --lxc 100 \
+freehold relay-member --target proxmox-box --lxc 100 \
   --pubkey <pubkey-or-operator-key> --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
 
@@ -335,7 +333,7 @@ cargo run -p freehold-orchestrator -- relay-member --target proxmox-box --lxc 10
 #   key never leaves their machine. Works over the proxy (cp-<relay-domain>).
 #   (In the TUI, just press w on the Runners view — it opens the web console
 #   already authenticated via a single-use portal token, no console-login.)
-cargo run -p freehold-orchestrator -- console-login \
+freehold console-login \
   --url https://cp-<relay-domain> --nsec nsec1...
 
 #   grants (Chunk 2.6.1): grants ARE channel membership. With FREEHOLD_RELAY_URL

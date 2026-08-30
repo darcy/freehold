@@ -2,7 +2,7 @@
 resolver = "2"
 members = ["core", "runner", "console-client",
     "testkit", "control-plane",
-    "acceptance", "installer", "orchestrator/harness/oracle"]
+    "acceptance", "orchestrator/harness/oracle"]
 
 [workspace.package]
 version = "0.1.0"

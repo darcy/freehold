@@ -144,7 +144,7 @@ C0: the plane is C0's precondition, not parallel work.
   NORMATIVE expression of consent in the pipeline is the `--confirm-storage` flag — a
   headless converge must be able to grant or withhold consent and BAIL (not stall on a
   prompt) when a backend must be created and the flag is absent. The interactive confirm
-  prompt exists only in the front-ends (`freehold-install`, the TUI), which translate the
+  prompt exists only in the front-ends (`freehold install`, the TUI), which translate the
   operator's answer into the flag for the stage. A configure-stage that would prompt
   directly is a contract violation.
 * **Tenant→dataset mapping lives outside compute, two-place recoverable:** the workstation

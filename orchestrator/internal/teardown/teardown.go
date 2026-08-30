@@ -16,8 +16,8 @@
 // LXC(s), 3) (--data) destroy the tenant datasets + freehold-created thin
 // pool, 4) local half: --data = full wipe (door key, world home, config
 // LAST); default = config KEPT with the regenerated facts pruned.
-// Remote steps run through the `freehold-orchestrator exec` subprocess, the
-// same contract the Rust installer uses.
+// Remote steps run through the `freehold-orchestrator exec` subprocess —
+// the same signed exec contract the CLI uses.
 package teardown
 
 import (

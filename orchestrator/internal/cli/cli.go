@@ -1,9 +1,9 @@
 // Package cli holds the cobra command tree for freehold-orchestrator.
 //
 // The CLI contract (flag names, existence, defaults, help text) mirrors the
-// Rust `clap` surface in orchestrator/src/cli.rs so installer, teardown, and
-// the TUI can invoke this binary by name + args unchanged. Behavior is wired
-// to the internal/* packages.
+// old Rust `clap` surface so teardown, the TUI, and `freehold install` can
+// invoke this binary by name + args unchanged. Behavior is wired to the
+// internal/* packages.
 package cli
 
 import (
@@ -70,6 +70,7 @@ func init() {
 		relaySetupCmd,
 		storageCmd,
 		rebuildCmd,
+		installCmd,
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.Version = "0.1.0"
