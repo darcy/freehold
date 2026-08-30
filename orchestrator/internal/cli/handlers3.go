@@ -725,23 +725,16 @@ var teardownCmd = &cobra.Command{
 				"k3s":   cfg.Lxc.K3s.Vmid,
 			},
 			ThinPool: thinPoolOf(cfg),
-			// The keep-config half of the default whole-world teardown: strip
-			// the regenerated facts (the destroyed LXCs' vmid/ip) so the next
-			// run mints fresh coords instead of chasing ghosts. Domain, runner
-			// identity, and the plane's locations all stay for remap.
-			PruneLxcCoords: func() error {
-				cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
-				cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
-				cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
-				return cfg.Save(configPath)
-			},
+			// No prune: the recorded LXC coordinates (vmid + ip) are
+			// operator-owned facts — rebuild reuses them for a deterministic
+			// re-boot of the SAME world.
 		}
 
 		// Confirmation gate: --yes skips the prompt (scripting/CI).
 		if !yes {
 			fmt.Printf("teardown scope: %s (config %s)\n", scope, configPath)
 			if scope == teardown.ScopeWholeWorld && !data {
-				fmt.Println("keeps: config (regenerated LXC coords pruned) · world home · door key · plane locations")
+				fmt.Println("keeps: config (LXC coordinates intact) · world home · door key · plane locations")
 			}
 			fmt.Printf("proceed? [type yes] ")
 			var answer string
@@ -749,6 +742,9 @@ var teardownCmd = &cobra.Command{
 				return fmt.Errorf("teardown aborted (not confirmed)")
 			}
 		}
+		// Stream every line as it lands (--yes runs have no operator to
+		// page through; the TUI subprocess stream shows the same bytes).
+		tcfg.Live = func(line string) { fmt.Println("  " + line) }
 		report, err := teardown.Run(runner, tcfg, scope, true)
 		if err != nil {
 			return err

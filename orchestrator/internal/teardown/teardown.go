@@ -1,9 +1,11 @@
 // Package teardown reproduces installer/src/teardown.rs — destroying the
 // managed world with THREE scopes:
 //   - WholeWorld (default): the COMPUTE teardown — destroys the LXCs and
-//     keeps the world's identity: the config file (regenerated LXC coords
-//     stripped), the world home (~/.freehold: runner package + keys), and
-//     the host door key. The plane's locations stay recorded for remap.
+//     keeps EVERYTHING else intact: the config file WITH the recorded LXC
+//     coordinates (vmid + ip are operator-owned facts — proxy targets and
+//     static assignments; rebuild reuses them for a deterministic re-boot),
+//     the world home (~/.freehold: runner package + keys), the host door
+//     key, and the plane's locations.
 //     --data turns it into the FULL teardown: tenant datasets + the
 //     freehold-created thin pool go, then the door key, the world home,
 //     and the config.
@@ -175,10 +177,20 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 		return "", fmt.Errorf("teardown aborted (not confirmed)")
 	}
 	var log []string
+	// say appends to the final report AND streams the line live (the CLI's
+	// Live hook — the TUI's subprocess stream shows it the moment it lands).
+	say := func(lines ...string) {
+		for _, l := range lines {
+			log = append(log, l)
+			if cfg.Live != nil {
+				cfg.Live(l)
+			}
+		}
+	}
 
 	// 1. the door probe already passed at the CLI layer (it is the gate
 	//    before Run is ever called).
-	log = append(log, fmt.Sprintf("door verified (%s)", cfg.RunNTarget))
+	say(fmt.Sprintf("door verified (%s)", cfg.RunNTarget))
 
 	// 2. destroy the targeted LXC(s).
 	switch scope {
@@ -186,7 +198,7 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 		for _, m := range []string{"relay", "cp", "k3s"} {
 			managed := contains(cfg.Managed, m)
 			if !managed {
-				log = append(log, fmt.Sprintf("skipped %s LXC (not managed)", m))
+				say(fmt.Sprintf("skipped %s LXC (not managed)", m))
 				continue
 			}
 			vmid := cfg.LxcVMID(m)
@@ -194,7 +206,7 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			log = append(log, lines...)
+			say(lines...)
 		}
 	case ScopeTenantCompute, ScopeTenantData:
 		role := cfg.TenantRole
@@ -203,7 +215,7 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		log = append(log, lines...)
+		say(lines...)
 	}
 
 	// 3. optionally destroy the tenant dataset subtree (data+compute).
@@ -221,9 +233,9 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 				return "", fmt.Errorf("data+compute teardown for %s FAILED: %v — the dataset was NOT destroyed; the config mapping is preserved", tenant, err)
 			}
 			if destroyed {
-				log = append(log, fmt.Sprintf("destroyed %s dataset subtree (%s)", tenant, dataset))
+				say(fmt.Sprintf("destroyed %s dataset subtree (%s)", tenant, dataset))
 			} else {
-				log = append(log, fmt.Sprintf("no dataset to destroy for %s (absent) — nothing destroyed", tenant))
+				say(fmt.Sprintf("no dataset to destroy for %s (absent) — nothing destroyed", tenant))
 			}
 		}
 		// The freehold-CREATED thin pool (config plane.thin_pool) goes with
@@ -235,7 +247,7 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 			if err := r.DestroyPool(cfg.Pool, cfg.ThinPool); err != nil {
 				return "", fmt.Errorf("thin-pool teardown FAILED: %v — the pool is NOT removed", err)
 			}
-			log = append(log, fmt.Sprintf("removed freehold-created thin pool %s/%s", cfg.Pool, cfg.ThinPool))
+			say(fmt.Sprintf("removed freehold-created thin pool %s/%s", cfg.Pool, cfg.ThinPool))
 		}
 	}
 
@@ -256,14 +268,14 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 		if still != 0 {
 			return "", fmt.Errorf("the runner's key is STILL in authorized_keys (%d line(s))", still)
 		}
-		log = append(log, fmt.Sprintf("door removed from %s (%s — verified)", cfg.RunnerComment, cfg.RunNTarget))
+		say(fmt.Sprintf("door removed from %s (%s — verified)", cfg.RunnerComment, cfg.RunNTarget))
 
 		if cfg.WorldHome != "" {
 			if _, err := os.Stat(cfg.WorldHome); err == nil {
 				if err := os.RemoveAll(cfg.WorldHome); err != nil {
 					return "", err
 				}
-				log = append(log, "removed world "+cfg.WorldHome)
+				say("removed world " + cfg.WorldHome)
 			}
 		}
 		if cfg.ConfigPath != "" {
@@ -271,25 +283,21 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 				if err := os.Remove(cfg.ConfigPath); err != nil {
 					return "", err
 				}
-				log = append(log, "removed config "+cfg.ConfigPath)
+				say("removed config " + cfg.ConfigPath)
 			}
 		}
 	case scope == ScopeWholeWorld:
-		// The config SURVIVES: domain, runner identity, and the plane's
-		// locations stay for remap. Only the REGENERATED facts go — the
-		// destroyed LXCs' vmid/ip (next boot mints fresh ones; a leftover
-		// record would make the next teardown chase a ghost).
-		if cfg.PruneLxcCoords != nil {
-			if err := cfg.PruneLxcCoords(); err != nil {
-				return "", fmt.Errorf("config prune failed: %w", err)
-			}
-			log = append(log, "config KEPT — regenerated LXC coords pruned (domain + plane mapping intact for remap)")
-		} else {
-			log = append(log, "config KEPT (door + world home + plane mapping intact)")
-		}
-		log = append(log, fmt.Sprintf("door key KEPT on %s (rebuild reuses it — no door gate)", cfg.RunNTarget))
+		// The config SURVIVES INTACT: domain, runner identity, the plane's
+		// locations, AND the recorded LXC coordinates (vmid + ip). The IPs
+		// are operator-owned facts (proxy targets, static assignments out
+		// of the DHCP range) — pruning them turned a cheap rebuild into a
+		// re-addressing surprise. Rebuild reuses the recorded vmid+ip and
+		// re-boots the SAME world; teardown never chases ghosts anyway
+		// (DestroyOneLxc treats "already gone" as a no-op).
+		say("config KEPT INTACT (LXC coordinates preserved — rebuild reuses the same vmids + IPs)")
+		say(fmt.Sprintf("door key KEPT on %s (rebuild reuses it — no door gate)", cfg.RunNTarget))
 	default:
-		log = append(log, "config KEPT (per-tenant teardown — coords + dataset mapping for reattach)")
+		say("config KEPT (per-tenant teardown — coords + dataset mapping for reattach)")
 	}
 
 	return "teardown complete:\n  " + strings.Join(log, "\n  "), nil
@@ -355,11 +363,8 @@ type Cfg struct {
 	TenantRole    string // for tenant-scoped teardown
 	Data          bool   // whole-world --data
 	Vmid          map[string]*uint32
-	ThinPool      string // freehold-CREATED thin pool (config plane.thin_pool); "" = none
-	// PruneLxcCoords strips the regenerated facts (LXC vmid/ip) from the
-	// config on disk — the keep-config half of the default whole-world
-	// teardown. nil = no config to prune.
-	PruneLxcCoords func() error
+	ThinPool      string            // freehold-CREATED thin pool (config plane.thin_pool); "" = none
+	Live          func(line string) // optional: stream each line as it lands (TUI)
 }
 
 // LxcVMID returns the recorded vmid for a role (from the managed config).

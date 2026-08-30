@@ -161,12 +161,16 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   `local-lvm` storage pointed at the carved pool so `pct create --rootfs
   local-lvm:…` resolves. Idempotent (probe skips already-correct).
 - **Teardown semantics fixed** (`internal/teardown/teardown.go`): default
-  whole-world = COMPUTE teardown — destroys LXCs, KEEPS config (LXC vmid+ip
-  pruned via `Cfg.PruneLxcCoords`), world home `~/.freehold`, and the door
-  key (rebuild reuses all three → no door gate, cheap rebuild). `--data` =
-  FULL teardown: tenant datasets + the freehold-created thin pool, then door
-  key + world home + config LAST. New `Runner` interface (Exec / DestroyOneLxc
-  / DestroyDataset / DestroyPool) makes `Run` hermetically testable.
+  whole-world = COMPUTE teardown — destroys LXCs, KEEPS config **INTACT**
+  (LXC vmid+ip coordinates preserved — the `PruneLxcCoords` knob is GONE:
+  recorded coords are operator-owned facts — proxy targets + static IPs out
+  of the DHCP range — so rebuild re-boots the SAME world deterministically),
+  world home `~/.freehold`, and the door key (rebuild reuses all three → no
+  door gate, cheap rebuild). `--data` = FULL teardown: tenant datasets + the
+  freehold-created thin pool, then door key + world home + config LAST. New
+  `Runner` interface (Exec / DestroyOneLxc / DestroyDataset / DestroyPool)
+  makes `Run` hermetically testable. Intentional divergence from the Rust
+  oracle (`installer/src/teardown.rs` removes config) — do NOT "fix" it back.
 - **`prompt()` fixed**: one persistent `bufio.Reader` over stdin — a fresh
   reader per call read ahead past the first newline, breaking back-to-back
   prompts (the carve size after the pool name).
@@ -309,6 +313,49 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   **192.168.30.7/24** per operator. `.7` was verified free (no arp,
   ping-free) before assignment, and the relay/CP proxy upstreams are
   unaffected (they stay at `.8`/`.9`).
+
+- **Full-screen activity view — the TUI never stares at a blank dashboard
+  while the world changes (2026-08-30).** New `internal/tui/activity.go`
+  (~440 lines). ONE activity surface for ALL long ops — boot check,
+  teardown, rebuild (incl. the door gate), bootstrap, both deploys.
+  Modeled on bubbletea's `send-msg` / `tui-daemon-combo` examples (the
+  user's pick after the package-manager sketch). While active it REPLACES
+  the entire UI: spinner + live label on the top line, ✓/✗ result rows
+  (boot probes) or a streaming last-12-lines window (subprocess runs),
+  `ctrl+c aborts` at the bottom — no dashboard, no shortcut footer.
+  Subprocess runs stream line-by-line: the freehold binary re-execs itself
+  (`os.Executable()`; `activityExec` var is injectable for tests), child
+  stdout+stderr piped through `io.Pipe` → `bufio.Scanner`, and a
+  re-arming `pumpActLine` Cmd reads one line per dispatch (each Cmd on its
+  own goroutine, so a blocked read never stalls the loop). Owner-tagged
+  msgs (`actLineMsg{a}` / `actDoneMsg{a}`) drop stale pumps from
+  superseded activities; `a.done` is the dedupe guard.
+- **Door gate lives INSIDE the activity view.** A rebuild bailing at the
+  door (`--yes` can't prompt) exits non-zero with "the door needs …" on
+  stdout → classified as an EXPECTED pause (`a.wait`), rendered yellow
+  ("waiting for the operator") with the install line; ENTER re-runs the
+  SAME args in place (fresh subprocess activity — never back to the
+  6-field form), esc cancels. The old dashboard-level `Model.Wait` /
+  `Model.rebuildArgs` / `flowMsg.reload` machinery is DELETED. `flowMsg`
+  is now just `{ok, err}` (login flows only). Tests: door-pause rendered
+  not error, ENTER in-place retry + re-arm + esc, gate swallows stray
+  keys, activity replaces dashboard chrome, streamed lines land in order.
+- **Boot check is the activity view too.** `load()` is now FAST (config
+  file only, no network; `Mode=ModeRunning` placeholder), `Init()` chains
+  `startBootActivity` — sequential probes (config → runner → relay → cp →
+  k3s → world state, bounded 6s each) streamed as ✓/✗ rows, then the mode
+  settles (converged = running, else configure/bootstrap). `r` re-runs it;
+  the post-run re-check rides on activity completion.
+- **Third LIVE rebuild — through the ACTIVITY VIEW (2026-08-30).** The
+  destroyed world (LXCs gone, config kept INTACT per above) was re-booted
+  from the TUI: `B` form (operator pk + domain, coords blanks ride the
+  recorded config) → `activityStartMsg` → full-screen streaming rebuild
+  (door pre-installed → no gate pause) → "✓ rebuilding — done" → done-key
+  → boot re-check. All three LXCs came back on the RESTORED coordinates:
+  relay 100 @ `.8` (4/4 containers healthy, `/_liveness` ok through the
+  domain), CP 101 @ `.9` (healthz 200), k3s 102 @ `.7` (k3s active);
+  config re-recorded vmid 100/101/102 + `.8/.9/.7` + the SAME
+  `relay_pubkey` — the same world, re-booted.
 
 ## Commits on `refactor-go` (working tree clean)
 

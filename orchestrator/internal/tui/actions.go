@@ -52,15 +52,18 @@ type tuiFlow struct {
 }
 
 type flowMsg struct {
-	ok     string
-	err    error
-	wait   string // expected operator-paused state (rendered yellow, not an error)
-	reload bool
-	// rebuildArgs: the door-gate pause keeps the EXACT rebuild args so
-	// ENTER re-runs it in place (the Rust door flow: install the key,
-	// press ENTER, the door is re-tested and the pipeline continues) —
-	// the operator never refills the form.
-	rebuildArgs []string
+	ok  string
+	err error
+}
+
+// activityStartMsg tells Update to swap the whole screen into a streaming
+// subprocess activity (teardown / rebuild / bootstrap / deploys). The form
+// dispatch returns it INSTEAD of flowMsg for the world-mutation flows: the
+// operator never stares at a blank dashboard while the world changes.
+type activityStartMsg struct {
+	kind  string
+	title string
+	args  []string
 }
 
 func textInputNew(placeholder string) *textinput.Model {
@@ -166,8 +169,6 @@ func fieldValue(f *tuiFlow) string {
 	return ""
 }
 func (m *Model) beginPrompt(k flowKind) {
-	m.Wait = "" // a new flow supersedes any pending operator-wait state
-	m.rebuildArgs = nil
 	m.Flow = &tuiFlow{Kind: k, Field: textInputNew(promptLabel(k, 0))}
 }
 
@@ -234,7 +235,10 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			return flowMsg{ok: "console login ok — cookie " + c.Cookie()[:10] + "..."}
 		}
 
-		// The three world-mutation forms reuse the wired CLI drivers.
+		// The five world-mutation forms all become FULL-SCREEN streaming
+		// activities: the freehold binary re-execs itself and its stdout
+		// lands in the activity view line by line (send-msg pattern) —
+		// the operator never watches a frozen dashboard mid-mutation.
 		switch f.Kind {
 		case flowBootstrap:
 			addr := f.Inputs[0]
@@ -245,16 +249,13 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			if kind == "" || domain == "" || op == "" {
 				return flowMsg{err: fmt.Errorf("bootstrap needs kind, domain and operator pubkey")}
 			}
-			out, err := runSelf("bootstrap",
+			return activityStartMsg{kind: "bootstrap", title: "bootstrapping " + domain, args: []string{
+				"bootstrap",
 				"--addr", addr,
 				"--kind", kind,
 				"--domain", domain,
 				"--operator-pubkey", op,
-			)
-			if err != nil {
-				return flowMsg{err: fmt.Errorf("bootstrap failed: %w (%s)", err, tail(out))}
-			}
-			return flowMsg{ok: "bootstrap ok — " + tail(out), reload: true}
+			}}
 		case flowDeployRelay:
 			owner, url, op := f.Inputs[0], f.Inputs[1], f.Inputs[2]
 			if owner == "" || op == "" {
@@ -274,11 +275,7 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			if m.Domain != "" {
 				args = append(args, "--domain", m.Domain)
 			}
-			out, err := runSelf(args...)
-			if err != nil {
-				return flowMsg{err: fmt.Errorf("deploy-relay failed: %w (%s)", err, tail(out))}
-			}
-			return flowMsg{ok: "relay deployed — " + tail(out), reload: true}
+			return activityStartMsg{kind: "deploy", title: "deploying the relay", args: args}
 		case flowDeployCp:
 			binary, url, op := f.Inputs[0], f.Inputs[1], f.Inputs[2]
 			if binary == "" || url == "" {
@@ -291,24 +288,16 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			if op != "" {
 				args = append(args, "--operator-pubkey", op)
 			}
-			out, err := runSelf(args...)
-			if err != nil {
-				return flowMsg{err: fmt.Errorf("deploy-cp failed: %w (%s)", err, tail(out))}
-			}
-			return flowMsg{ok: "CP deployed — " + tail(out), reload: true}
+			return activityStartMsg{kind: "deploy", title: "deploying the control plane", args: args}
 		case flowTeardown:
-			// The whole-world teardown destroys LXCs (+ datasets with yes),
-			// removes the door key LAST, then wipes local home + config —
-			// reload after so the dashboard re-detects bootstrap mode.
+			// The whole-world teardown destroys LXCs (+ datasets with yes);
+			// with --data it wipes door key + local home + config. Either way
+			// the post-run boot check re-detects the honest mode.
 			args := []string{"teardown", "--yes"}
 			if strings.EqualFold(f.Inputs[0], "yes") {
 				args = append(args, "--data")
 			}
-			out, err := runSelf(args...)
-			if err != nil {
-				return flowMsg{err: fmt.Errorf("teardown failed: %w (%s)", err, tail(out))}
-			}
-			return flowMsg{ok: "teardown ok — " + tail(out), reload: true}
+			return activityStartMsg{kind: "teardown", title: "tearing down the world", args: args}
 		case flowRebuild:
 			op, domain := f.Inputs[0], f.Inputs[1]
 			if op == "" || domain == "" {
@@ -330,7 +319,7 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			if strings.EqualFold(strings.TrimSpace(f.Inputs[5]), "n") {
 				args = append(args, "--with-k3s=false")
 			}
-			return rebuildRun(args)
+			return activityStartMsg{kind: "rebuild", title: "rebuilding " + domain, args: args}
 		}
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
@@ -419,20 +408,4 @@ func (m *Model) refreshLocal() {
 	if len(m.Runners) == 0 {
 		m.Runners = []RunnerRow{{Name: "(no runners)"}}
 	}
-}
-
-// rebuildRun executes one rebuild attempt and classifies the outcome:
-// a door-gate pause (fresh key / auth fail) becomes a wait that keeps the
-// exact args for an in-place ENTER retry; any other failure is an error;
-// success reloads the world. Shared by the form dispatch and the door
-// gate's ENTER handler so both paths classify identically.
-func rebuildRun(args []string) flowMsg {
-	out, err := runSelf(args...)
-	if err != nil {
-		if wait := doorKeyWaiting(out); wait != "" {
-			return flowMsg{wait: wait, rebuildArgs: args}
-		}
-		return flowMsg{err: fmt.Errorf("rebuild failed: %w (%s)", err, tail(out))}
-	}
-	return flowMsg{ok: "rebuild ok — " + tail(out), reload: true}
 }

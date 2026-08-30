@@ -87,15 +87,14 @@ type Model struct {
 	Runners     []RunnerRow
 	Storage     []DataRow
 	Err         string
-	Wait        string // expected operator-paused state (e.g. door key install)
 	Msg         string
 	Flow        *tuiFlow
 	console     *consoleClient
-	// rebuildArgs: a rebuild paused at the door gate keeps its EXACT args
-	// so ENTER re-runs it in place (the Rust door flow) instead of making
-	// the operator refill the form.
-	rebuildArgs []string
-	CfgPath     string
+	// activity: while non-nil, the FULL-SCREEN activity view replaces the
+	// dashboard entirely (boot check, teardown, rebuild, bootstrap, deploys).
+	// The door-gate pause lives inside it too (its args ride a.args).
+	activity *activity
+	CfgPath  string
 }
 
 // ServiceRow is one managed piece of the world.

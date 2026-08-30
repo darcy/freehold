@@ -21,7 +21,14 @@ import (
 // ---- bubbletea lifecycle -------------------------------------------------
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+	cmds := []tea.Cmd{tea.Tick(2*time.Second, func(time.Time) tea.Msg { return tickMsg{} })}
+	if m.HasConfig && m.activity == nil {
+		// the world check streams in the activity view instead of blocking
+		// the first frame (the old synchronous load hung for every probe
+		// timeout before anything rendered).
+		cmds = append(cmds, m.startBootActivity("checking the world"))
+	}
+	return tea.Batch(cmds...)
 }
 
 type tickMsg struct{}
@@ -41,8 +48,10 @@ func freeholdStateDir() string {
 	return envOr("HOME", "/root") + "/.freehold/control-plane"
 }
 
-// load detects the mode from the config's presence + liveness and populates
-// the dashboard views (mirrors app.rs::run + installer probe_mode).
+// load is the FAST half of startup: it reads the config (local file only —
+// no network) so the first frame renders instantly. The liveness probes
+// (relay, runner, CP, k3s) run AFTERWARD, streamed through the activity
+// view by Init — the dashboard never hangs on a probe timeout.
 func (m *Model) load(cfgPath string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -55,29 +64,14 @@ func (m *Model) load(cfgPath string) error {
 	}
 	m.HasConfig = true
 	m.Domain = cfg.Domain
-
-	// Liveness probes — the world must be ALIVE, not merely reachable behind
-	// the operator's proxy (Rust probes_ok): the relay's OWN /_liveness 2xx,
-	// the CP's /healthz answered 200 from INSIDE its LXC (through the
-	// provisioning runner), and the runner MCP port open. The k3s API is NOT
-	// part of the convergence gate (Rust parity) — it shows in the strip.
-	m.RelayLive = config.RelayLive(cfg)
-	m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
-	m.CPLive = cpLive(cfg)
-	m.K3sLive = config.K3sLive(cfg)
-	m.Converged = m.RelayLive && m.CPLive && m.RunnerReach
-	if !m.Converged {
-		m.Mode = ModeConfigure
-	} else {
-		m.Mode = ModeRunning
-	}
-
+	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.RunnerReach = false, false, false, false, false
+	// ModeRunning until the boot check proves otherwise — the activity view
+	// covers the screen while the probes run, and the check settles the
+	// real mode (its k3s/world-state steps populate the dashboard rows).
+	m.Mode = ModeRunning
 	m.buildServices(cfg)
 	m.readLocalRunners(cfg)
 	m.buildAgents(cfg)
-	if m.Mode == ModeRunning {
-		m.refreshData(cfg)
-	}
 	return nil
 }
 
@@ -326,29 +320,10 @@ func (m *Model) buildAgents(cfg *config.Config) {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.KeyMsg:
-		// The Rust door flow: a rebuild paused at the door gate keeps the
-		// operator INSIDE the gate — install the key, press ENTER, the
-		// SAME rebuild re-runs in place (stages are idempotent: provision
-		// reuses the key, verify re-probes the door and the pipeline
-		// continues). Never back to the form.
-		if m.rebuildArgs != nil {
-			switch v.Type {
-			case tea.KeyEnter:
-				args := m.rebuildArgs
-				m.Wait, m.Err, m.Msg = "", "", "re-testing the door and resuming rebuild…"
-				m.rebuildArgs = nil
-				m.Flow = nil
-				return m, func() tea.Msg { return rebuildRun(args) }
-			case tea.KeyEsc:
-				m.rebuildArgs, m.Wait, m.Msg = nil, "", "rebuild cancelled at the door — the key is still printed above"
-				return m, nil
-			case tea.KeyCtrlC:
-				return m, tea.Quit
-			}
-			if v.String() == "q" {
-				return m, tea.Quit
-			}
-			return m, nil // the gate swallows everything else until ENTER/esc
+		// Full-screen activity mode owns every key while it runs (boot
+		// check, teardown, rebuild incl. the door gate, bootstrap, deploys).
+		if m.activity != nil {
+			return m.handleActivityKey(v)
 		}
 		if m.Flow != nil {
 			return m.handleFlow(v)
@@ -362,7 +337,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prevView()
 		case "r":
 			if m.Mode == ModeRunning {
-				_ = m.load(m.CfgPath)
+				return m, m.startBootActivity("checking the world")
 			}
 		case "w":
 			if m.Mode == ModeRunning {
@@ -408,27 +383,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case flowMsg:
 		m.Flow = nil
 		m.refreshLocal()
-		if v.reload {
-			_ = m.load(m.CfgPath)
-		}
 		if v.err != nil {
-			m.Err, m.Wait = v.err.Error(), ""
-			m.rebuildArgs = nil
-		} else if v.wait != "" {
-			m.Wait = v.wait
-			// the paused rebuild keeps its args → ENTER re-runs it in place.
-			m.rebuildArgs = v.rebuildArgs
+			m.Err = v.err.Error()
 		} else {
-			m.Msg, m.Wait = v.ok, ""
-			m.rebuildArgs = nil
+			m.Msg = v.ok
 		}
 	case tickMsg:
-		m.LastRef = time.Now()
+		if m.activity == nil {
+			m.LastRef = time.Now()
+		}
 		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+	case activityStartMsg:
+		// the world-mutation forms all land here: full-screen streaming.
+		m.Flow = nil
+		return m.startSubprocessActivity(v.kind, v.title, v.args)
+	default:
+		if handled, mm, cmd := m.handleActivityMsg(msg); handled {
+			return mm, cmd
+		}
 	}
 	return m, nil
 }
-
 func (m *Model) nextView() {
 	if m.Mode != ModeRunning {
 		m.ActiveView = ViewServices
@@ -447,17 +422,13 @@ func (m *Model) prevView() {
 // ---- View ----------------------------------------------------------------
 
 func (m *Model) View() string {
+	if m.activity != nil {
+		return m.activityView()
+	}
 	var b strings.Builder
 	b.WriteString(styleTitle.Render(" freehold ") + styleDim.Render(m.Domain+" · "+m.Mode.String()) + "\n\n")
 	if m.Err != "" {
 		b.WriteString(styleRed.Render("! "+m.Err) + "\n\n")
-	}
-	if m.Wait != "" {
-		b.WriteString(styleYellow.Render("waiting for the operator:\n"+m.Wait) + "\n")
-		if m.rebuildArgs != nil {
-			b.WriteString(styleYellow.Render("install the key, then press ENTER to re-test the door and resume — esc to cancel") + "\n")
-		}
-		b.WriteString("\n")
 	}
 	if m.Mode == ModeBootstrap {
 		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")

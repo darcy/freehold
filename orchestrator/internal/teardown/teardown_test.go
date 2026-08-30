@@ -60,22 +60,24 @@ func testCfg(t *testing.T, data bool) (*Cfg, *fakeRunner) {
 			"relay": ptr32(100),
 			"cp":    ptr32(101),
 		},
-		ThinPool:       "fh-thin",
-		Data:           data,
-		PruneLxcCoords: func() error { return nil },
+		ThinPool: "fh-thin",
+		Data:     data,
 	}, &fakeRunner{}
 }
 
 func ptr32(v uint32) *uint32 { return &v }
 
 // The default whole-world teardown is the COMPUTE teardown: it destroys the
-// LXCs but keeps the config (LXC coords pruned), the world home, and the
-// door key — so rebuild can reuse all three and re-carve only the plane.
+// LXCs but keeps the config INTACT — including the recorded LXC coordinates
+// (vmid + ip are operator-owned facts: proxy targets + static assignments),
+// the world home, and the door key — so rebuild re-boots the SAME world.
 func TestWholeWorldKeepsConfigAndDoor(t *testing.T) {
 	cfg, r := testCfg(t, false)
-	pruned := false
-	cfg.PruneLxcCoords = func() error { pruned = true; return nil }
 
+	before, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	report, err := Run(r, cfg, ScopeWholeWorld, true)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -83,8 +85,14 @@ func TestWholeWorldKeepsConfigAndDoor(t *testing.T) {
 	if len(r.pools) != 0 {
 		t.Errorf("no --data => no pool removal, got %v", r.pools)
 	}
-	if !pruned {
-		t.Error("must prune the LXC coords from the kept config")
+	// Regression (operator report 2026-08-30): compute teardown must NOT
+	// strip the LXC coordinates — the config file comes back byte-identical.
+	after, err := os.ReadFile(cfg.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("compute teardown must leave the config byte-identical:\nbefore: %s\nafter: %s", before, after)
 	}
 	for _, cmd := range r.execs {
 		if strings.Contains(cmd, "authorized_keys") {
@@ -97,7 +105,7 @@ func TestWholeWorldKeepsConfigAndDoor(t *testing.T) {
 	if _, err := os.Stat(cfg.ConfigPath); err != nil {
 		t.Error("default teardown must keep the config file")
 	}
-	if !strings.Contains(report, "config KEPT") || !strings.Contains(report, "door key KEPT") {
+	if !strings.Contains(report, "config KEPT INTACT") || !strings.Contains(report, "door key KEPT") {
 		t.Errorf("report must say what was kept:\n%s", report)
 	}
 	if len(r.lxcRoles) != 2 {
