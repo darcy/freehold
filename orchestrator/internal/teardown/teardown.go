@@ -202,6 +202,9 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 				continue
 			}
 			vmid := cfg.LxcVMID(m)
+			if vmid != nil {
+				say(fmt.Sprintf("destroying %s LXC %d", m, *vmid))
+			}
 			lines, err := r.DestroyOneLxc(m, vmid)
 			if err != nil {
 				return "", err
@@ -211,6 +214,9 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 	case ScopeTenantCompute, ScopeTenantData:
 		role := cfg.TenantRole
 		vmid := cfg.LxcVMID(role)
+		if vmid != nil {
+			say(fmt.Sprintf("destroying %s LXC %d", role, *vmid))
+		}
 		lines, err := r.DestroyOneLxc(role, vmid)
 		if err != nil {
 			return "", err

@@ -1,6 +1,7 @@
 package teardown
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,10 @@ func (f *fakeRunner) Exec(cmd string) (bool, string) {
 
 func (f *fakeRunner) DestroyOneLxc(role string, vmid *uint32) ([]string, error) {
 	f.lxcRoles = append(f.lxcRoles, role)
-	return nil, nil
+	if vmid == nil {
+		return []string{fmt.Sprintf("%s LXC: never created (no vmid recorded)", role)}, nil
+	}
+	return []string{fmt.Sprintf("destroyed %s LXC %d", role, *vmid)}, nil
 }
 
 func (f *fakeRunner) DestroyDataset(tenant, domain, pool, kind, dataset string) (bool, error) {
@@ -205,5 +209,64 @@ func TestWholeWorldDataToleratesAbsentFiles(t *testing.T) {
 
 	if _, err := Run(r, cfg, ScopeWholeWorld, true); err != nil {
 		t.Fatalf("missing home/config must not fail the full teardown: %v", err)
+	}
+}
+
+// TestDestroyingAnnouncedLive pins the teardown's streaming contract (the
+// TUI's checkbox feed): EVERY destroy is announced the moment it STARTS
+// ("destroying relay LXC 100") — the operator never stares at a silent
+// screen for the ~30s a pct destroy takes — and the finished line
+// ("destroyed relay LXC 100") lands after it, both in the Live stream AND
+// the final report.
+func TestDestroyingAnnouncedLive(t *testing.T) {
+	cfg, r := testCfg(t, false)
+	var live []string
+	cfg.Live = func(line string) { live = append(live, line) }
+	three := uint32(102)
+	cfg.Managed = append(cfg.Managed, "k3s")
+	cfg.Vmid["k3s"] = &three
+
+	report, err := Run(r, cfg, ScopeWholeWorld, true)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, role := range []string{"relay", "cp", "k3s"} {
+		if !strings.Contains(report, fmt.Sprintf("destroying %s LXC", role)) {
+			t.Errorf("report must announce %s BEFORE the destroy:\n%s", role, report)
+		}
+		if !strings.Contains(report, fmt.Sprintf("destroyed %s LXC", role)) {
+			t.Errorf("report must record the finished %s destroy:\n%s", role, report)
+		}
+	}
+	// the Live stream must see the start line BEFORE the finish line (that
+	// ordering is the whole point — the TUI flips pending→running→✓ on it).
+	idx := func(needle string) int {
+		for i, l := range live {
+			if strings.Contains(l, needle) {
+				return i
+			}
+		}
+		return -1
+	}
+	if idx("destroying relay") < 0 || idx("destroyed relay") < 0 || idx("destroying relay") > idx("destroyed relay") {
+		t.Errorf("Live must stream 'destroying relay' before 'destroyed relay': %v", live)
+	}
+}
+
+// A managed LXC with NO recorded vmid was never created: no "destroying"
+// announcement (there is nothing to destroy), the noop line still lands.
+func TestNoDestroyingLineWithoutVmid(t *testing.T) {
+	cfg, r := testCfg(t, false)
+	delete(cfg.Vmid, "cp")
+
+	report, err := Run(r, cfg, ScopeWholeWorld, true)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(report, "destroying cp") {
+		t.Errorf("no vmid => never announce a cp destroy:\n%s", report)
+	}
+	if !strings.Contains(report, "never created") {
+		t.Errorf("report must say the cp LXC was never created:\n%s", report)
 	}
 }

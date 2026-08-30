@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -216,6 +217,9 @@ func (m *Model) startSubprocessActivity(kind, title string, args []string) (tea.
 		return m, nil
 	}
 	a := &activity{kind: kind, title: title, args: args, spin: newSpinner()}
+	if kind == "teardown" {
+		m.seedTeardownSteps(a)
+	}
 	pr, pw := io.Pipe()
 	a.scanner = bufio.NewScanner(pr)
 	a.scanner.Buffer(make([]byte, 64*1024), 512*1024)
@@ -232,6 +236,26 @@ func (m *Model) startSubprocessActivity(kind, title string, args []string) (tea.
 		_ = pw.Close()
 	}()
 	return m, tea.Batch(m.pumpActLine(a), a.spin.Tick)
+}
+
+// seedTeardownSteps pre-populates the teardown activity's checkbox slots
+// from the recorded managed LXCs (same config facts teardown reads). Each
+// slot fills live as the subprocess stream announces the LXC:
+// "destroying relay LXC 100" flips it to running, "destroyed relay LXC
+// 100" (or "already gone" / "never created") flips it to ✓.
+func (m *Model) seedTeardownSteps(a *activity) {
+	cfg, err := config.Load(m.CfgPath)
+	if err != nil || cfg == nil {
+		return // the stream window shows everything anyway
+	}
+	vmidOf := map[string]*uint32{"relay": cfg.Lxc.Relay.Vmid, "cp": cfg.Lxc.Cp.Vmid, "k3s": cfg.Lxc.K3s.Vmid}
+	for _, role := range cfg.Managed {
+		label := role + " LXC"
+		if v := vmidOf[role]; v != nil {
+			label += fmt.Sprintf(" %d", *v)
+		}
+		a.steps = append(a.steps, actStep{label: label, state: stepPending})
+	}
 }
 
 // pumpActLine reads ONE line from the child (blocking) and re-arms itself
@@ -284,6 +308,7 @@ func (m *Model) handleActivityMsg(msg tea.Msg) (bool, tea.Model, tea.Cmd) {
 			return true, m, nil // stale pump from a superseded activity
 		}
 		if line := strings.TrimRight(v.line, " \t"); line != "" {
+			a.feedTeardownLine(line)
 			a.lines = append(a.lines, line)
 		}
 		return true, m, m.pumpActLine(a)
@@ -408,6 +433,12 @@ func (m *Model) activityView() string {
 		case stepPending:
 			// send-msg's empty result slots: placeholder dots.
 			b.WriteString("  " + styleDots.Render(strings.Repeat(".", 30)) + "\n")
+		case stepRunning:
+			line := a.spin.View() + " " + styleCurrent.Render(s.label+"…")
+			if s.detail != "" {
+				line += " " + styleDots.Render(s.detail)
+			}
+			b.WriteString("  " + line + "\n")
 		}
 	}
 	for _, l := range lastLines(a.lines, 12) {
@@ -418,13 +449,63 @@ func (m *Model) activityView() string {
 	return lipgloss.NewStyle().Render(b.String())
 }
 
+// teardownLineRe matches the per-LXC progress lines the teardown CLI
+// streams: `destroying relay LXC 100` at the start of each destroy and
+// `destroyed relay LXC 100` (or `already gone` / `never created`) when it
+// finishes. The TUI turns them into checkbox state; everything else stays
+// in the stream window.
+var teardownLineRe = regexp.MustCompile(`^(destroying|destroyed) (\S+) LXC (\d+)`)
+var teardownNoopRe = regexp.MustCompile(`^(\S+) LXC(?: \d+)?: (already gone|never created)`)
+
+// feedTeardownLine drives the teardown checkbox slots from the streamed
+// subprocess lines (steps-only for teardown activities).
+func (a *activity) feedTeardownLine(line string) {
+	if a.kind != "teardown" {
+		return
+	}
+	// the CLI's Live hook indents every streamed line ("  " + line), so the
+	// subprocess bytes arrive with a leading indent — match the bare text.
+	line = strings.TrimSpace(line)
+	if m := teardownLineRe.FindStringSubmatch(line); m != nil {
+		if i := a.stepIndex(m[2]); i >= 0 {
+			if m[1] == "destroying" {
+				a.steps[i].state = stepRunning
+			} else {
+				a.steps[i].state = stepOK
+			}
+			// the label already carries the vmid (seeded from the config);
+			// no detail — "relay LXC 100" would render "relay LXC 100 LXC 100".
+		}
+		return
+	}
+	if m := teardownNoopRe.FindStringSubmatch(line); m != nil {
+		if i := a.stepIndex(m[1]); i >= 0 {
+			a.steps[i].state = stepOK
+			a.steps[i].detail = m[2]
+		}
+	}
+}
+
+func (a *activity) stepIndex(role string) int {
+	for i, s := range a.steps {
+		if s.label == role+" LXC" || strings.HasPrefix(s.label, role+" LXC ") {
+			return i
+		}
+	}
+	return -1
+}
+
 // liveLabel is the spinner's current-action text.
 func (a *activity) liveLabel() string {
-	if a.kind == "boot" {
-		for _, s := range a.steps {
-			if s.state == stepRunning {
-				return "checking " + s.label + "…"
-			}
+	for _, s := range a.steps {
+		if s.state != stepRunning {
+			continue
+		}
+		if a.kind == "boot" {
+			return "checking " + s.label + "…"
+		}
+		if a.kind == "teardown" {
+			return "destroying " + s.label + "…"
 		}
 	}
 	return a.title + "…"

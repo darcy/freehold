@@ -372,6 +372,30 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   IDLE in `epoll_wait` (alive, not deadlocked); a fresh session took keys
   fine. NEVER read the TUI's PTY slave fd while it runs; observe via the
   hub's `logs` only.
+- **Teardown is now ACTIVE with checkboxes (2026-08-30).** The operator
+  reported teardown "just logs when done ('destroyed 102')" — silent during
+  each destroy. Two changes. (1) `teardown.Run` announces each LXC BEFORE it
+  destroys it (both WholeWorld + tenant loops, vmid-guarded): `destroying
+  relay LXC 100` streams via the same `say()`/Live hook before
+  `DestroyOneLxc` runs; the CLI gets the raw bytes too. The
+  DestroyOneLxc output contract stays byte-exact (`destroyed` / `already
+  gone` / `never created` — the `destroying` line lives in `Run`, not
+  `DestroyOneLxc`). (2) The TUI renders teardown as checkboxes:
+  `startSubprocessActivity` seeds one slot per MANAGED LXC from the config
+  (`relay LXC 100` …), `feedTeardownLine` parses the streamed lines
+  (`destroying` → running spinner row, `destroyed` / `already gone` /
+  `never created` → ✓ with the reason), and everything else still streams
+  in the lines window below; `liveLabel` names the in-flight LXC. Caught a
+  REAL bug while proving it: the CLI's Live hook INDENTS every streamed
+  line (two leading spaces), so the anchored `^destroying` regex never
+  matched and the checkboxes stayed placeholder dots — fixed with
+  `strings.TrimSpace` before matching (the indented case is pinned in
+  `TestTeardownLinesFlipCheckboxes`). LIVE-VERIFIED end-to-end through the
+  PTY: a TUI teardown on the UP world streamed `destroying relay LXC 100…`
+  per LXC, flipped each to ✓ as it went, then `✓ tearing down the world —
+  done`; the dashboard re-detected configure / world NOT converged
+  honestly. World restored by a fifth fast-reuse rebuild (~4 min, same
+  vmids + IPs + relay pubkey).
 
 ## Commits on `refactor-go` (working tree clean)
 

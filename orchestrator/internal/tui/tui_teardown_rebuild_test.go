@@ -2,7 +2,9 @@ package tui
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -325,5 +327,159 @@ func TestActivityStreamsLines(t *testing.T) {
 	}
 	if strings.Join(m.activity.lines, ",") != "one,two,three" {
 		t.Errorf("every line must stream in order, got %v", m.activity.lines)
+	}
+}
+
+// TestTeardownStepsFromConfig: starting a teardown activity seeds one
+// checkbox slot per MANAGED LXC from the recorded config (label = role +
+// vmid) — the "checkboxes" the operator sees, same shape as the boot view.
+func TestTeardownStepsFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	tomlBody := "domain = \"world.test\"\nmanaged = [\"relay\", \"cp\", \"k3s\"]\n" +
+		"[lxc.relay]\nvmid = 100\n[lxc.cp]\nvmid = 101\n[lxc.k3s]\nvmid = 102\n"
+	if err := os.WriteFile(cfgPath, []byte(tomlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Model{Mode: ModeRunning, Domain: "world.test", CfgPath: cfgPath}
+	a := &activity{kind: "teardown", title: "tearing down the world", spin: newSpinner()}
+	m.seedTeardownSteps(a)
+
+	if len(a.steps) != 3 {
+		t.Fatalf("one slot per managed LXC, got %v", a.steps)
+	}
+	for i, want := range []string{"relay LXC 100", "cp LXC 101", "k3s LXC 102"} {
+		if a.steps[i].label != want || a.steps[i].state != stepPending {
+			t.Errorf("step %d: want pending %q, got %+v", i, want, a.steps[i])
+		}
+	}
+}
+
+// TestTeardownLinesFlipCheckboxes: the streamed subprocess lines drive the
+// slots — "destroying relay LXC 100" flips it to RUNNING, "destroyed relay
+// LXC 100" (or already-gone / never-created) flips it to ✓; non-LXC lines
+// leave every slot untouched.
+func TestTeardownLinesFlipCheckboxes(t *testing.T) {
+	a := &activity{kind: "teardown", spin: newSpinner()}
+	a.steps = []actStep{
+		{label: "relay LXC 100", state: stepPending},
+		{label: "cp LXC 101", state: stepPending},
+		{label: "k3s LXC 102", state: stepPending},
+	}
+
+	a.feedTeardownLine("door verified (proxmox-box)")
+	if a.steps[0].state != stepPending {
+		t.Errorf("a non-LXC line must not touch any slot: %+v", a.steps[0])
+	}
+
+	a.feedTeardownLine("destroying relay LXC 100")
+	if a.steps[0].state != stepRunning {
+		t.Errorf("'destroying' must flip the slot to running: %+v", a.steps[0])
+	}
+	if a.steps[1].state != stepPending || a.steps[2].state != stepPending {
+		t.Errorf("only the relay slot may move: %+v", a.steps)
+	}
+
+	a.feedTeardownLine("destroyed relay LXC 100")
+	if a.steps[0].state != stepOK {
+		t.Errorf("'destroyed' must flip the slot to ✓: %+v", a.steps[0])
+	}
+
+	a.feedTeardownLine("cp LXC 101: already gone")
+	a.feedTeardownLine("k3s LXC: never created (no vmid recorded)")
+	if a.steps[1].state != stepOK || a.steps[1].detail != "already gone" {
+		t.Errorf("'already gone' must ✓ the cp slot with its reason: %+v", a.steps[1])
+	}
+	if a.steps[2].state != stepOK || a.steps[2].detail != "never created" {
+		t.Errorf("'never created' must ✓ the k3s slot with its reason: %+v", a.steps[2])
+	}
+
+	// the CLI's Live hook indents every streamed line ("  " + line) — the
+	// parser must match the bare text or the checkboxes never flip.
+	a.steps[0].state = stepPending
+	a.feedTeardownLine("  destroying relay LXC 100")
+	if a.steps[0].state != stepRunning {
+		t.Errorf("indented 'destroying' must still flip to running: %+v", a.steps[0])
+	}
+	a.feedTeardownLine("  destroyed relay LXC 100")
+	if a.steps[0].state != stepOK {
+		t.Errorf("indented 'destroyed' must still flip to ✓: %+v", a.steps[0])
+	}
+}
+
+// TestTeardownViewRendersCheckboxRows: the activity view shows the ✓ rows
+// and the in-flight slot while teardown runs — the active-checkbox UX.
+func TestTeardownViewRendersCheckboxRows(t *testing.T) {
+	m := &Model{Mode: ModeRunning, Domain: "world.test"}
+	a := &activity{kind: "teardown", title: "tearing down the world", spin: newSpinner()}
+	a.steps = []actStep{
+		{label: "relay LXC 100", state: stepOK},
+		{label: "cp LXC 101", state: stepRunning},
+		{label: "k3s LXC 102", state: stepPending},
+	}
+	m.activity = a
+	out := m.View()
+
+	if !strings.Contains(out, "✓ relay LXC 100") {
+		t.Errorf("finished slot must render a ✓ row:\n%s", out)
+	}
+	if !strings.Contains(out, "cp LXC 101…") {
+		t.Errorf("in-flight slot must render its label:\n%s", out)
+	}
+	if !strings.Contains(out, strings.Repeat(".", 30)) {
+		t.Errorf("queued slot must render placeholder dots:\n%s", out)
+	}
+	if !strings.Contains(out, "destroying cp LXC 101…") {
+		t.Errorf("the spinner line must name the LXC being destroyed:\n%s", out)
+	}
+}
+
+// TestTeardownStreamDrivesSteps end-to-end: a teardown activity seeded from
+// the config flips its slots as the subprocess stream lands — the full
+// pump → Update loop, no fakes.
+func TestTeardownStreamDrivesSteps(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	tomlBody := "domain = \"world.test\"\nmanaged = [\"relay\", \"cp\"]\n" +
+		"[lxc.relay]\nvmid = 100\n[lxc.cp]\nvmid = 101\n"
+	if err := os.WriteFile(cfgPath, []byte(tomlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldExec := activityExec
+	activityExec = func(bin string, args ...string) *exec.Cmd {
+		return exec.Command("printf",
+			"door verified (proxmox-box)\\ndestroying relay LXC 100\\ndestroyed relay LXC 100\\ndestroying cp LXC 101\\ndestroyed cp LXC 101\\nconfig KEPT INTACT\\n")
+	}
+	defer func() { activityExec = oldExec }()
+
+	m := &Model{Mode: ModeRunning, Domain: "world.test", CfgPath: cfgPath}
+	_, _ = m.startSubprocessActivity("teardown", "tearing down the world", []string{"anything"})
+	if m.activity == nil || len(m.activity.steps) != 2 {
+		t.Fatalf("teardown must seed its checkbox slots, got %+v", m.activity)
+	}
+
+	cmd := m.pumpActLine(m.activity)
+	for i := 0; i < 12; i++ {
+		msg := cmd()
+		_, next := m.Update(msg)
+		if _, isDone := msg.(actDoneMsg); isDone {
+			break
+		}
+		cmd = next
+		if cmd == nil {
+			break
+		}
+	}
+
+	a := m.activity
+	if a == nil || !a.done || !a.ok {
+		t.Fatalf("clean teardown must finish ok (a=%v)", a)
+	}
+	for i, s := range a.steps {
+		if s.state != stepOK {
+			t.Errorf("step %d must end ✓, got %+v", i, s)
+		}
 	}
 }
