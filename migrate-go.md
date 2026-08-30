@@ -466,6 +466,18 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   `ParsePubkeyInput` before any stage); only the label claimed "(64-hex)".
   Label now reads `npub1… or 64-hex`; a new crypto test pins the
   acceptance contract on the shared primitive (Rust-core fixture).
+- **PR #131 review debt closed (2026-08-30, af26e44).** The three open
+  items from review rounds 7–13, all on the destructive path:
+  (1) BLOCKING — `DestroyOneLxc` destroyed by vmid alone; it now reads
+  the occupant's name and REFUSES when the recorded vmid holds a foreign
+  guest (PVE hands a freed id to the next guest), mirroring the
+  create-side guard; no domain = fail closed; 4 tests drive the real
+  `ExecRunner` via an injected `execFn`. (2) `teardown --help` said
+  "regenerated coords pruned" — the opposite of the keep-intact
+  semantics; Short + two package comments corrected. (3) the k3s seed
+  was blank-when-absent, but blank = YES for that prompt, so a k3s-off
+  world would have booted k3s on accepted defaults; seeds "n" instead,
+  with a dispatch test pinning `--with-k3s=false`.
 
 ## Commits on `refactor-go` (working tree clean)
 
@@ -490,6 +502,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `ad5c2bf` | Phase 9: `freehold install` port (dialoguer → Go collect) + delete the Rust installer crate |
 | `4acb02f` | TUI rebuild (`B`) prefills the form from the recorded config |
 | `22e34dc` | rebuild pubkey label admits npub1…; crypto test pins the npub/hex contract |
+| `af26e44` | review debt closed: teardown name guard, honest --help, k3s seed n |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
