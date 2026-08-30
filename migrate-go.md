@@ -31,7 +31,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 - `orchestrator/harness/` — Go↔Rust byte-exact cross-verification harness (`harness_test.go`)
   + Rust oracle crate `freehold-harness-oracle` (workspace member).
 - Rust workspace now: `core, runner, console-client, testkit, control-plane, acceptance,
-  installer, orchestrator/harness/oracle`. `orchestrator-rust/` and `tui/` DELETED.
+  orchestrator/harness/oracle`. `orchestrator-rust/`, `tui/`, and `installer/` DELETED.
 
 ## Where we are — by phase
 
@@ -67,13 +67,14 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 - CLI contract: 18 subcommands registered (the plan's 16 + destroy/ensure/info/resolve):
   bootstrap, console-login, delegate, delegate-peer, demo, deploy-cp, deploy-relay, destroy,
   ensure, info, readiness, relay-join, relay-member, relay-profile, relay-setup, resolve,
-  storage, teardown. `installer`'s `bin("freehold-orchestrator")` resolve path =
-  `target/debug/freehold-orchestrator` — the Go binary is built there (`go build -C
-  orchestrator -o ../target/debug/freehold-orchestrator ./cmd/freehold-orchestrator`);
-  cargo build does NOT regenerate it.
+  storage, teardown. Sibling-binary resolution (the old `installer`'s
+  `bin("freehold-orchestrator")` path) now lives in Go: `resolveRebuildBins()`
+  resolves `control-plane`/`runner` (Rust) + ITSELF relative to the running
+  executable — the Go bins ship in `target/debug/` (`go build -C orchestrator
+  -o ../target/debug/...`); cargo build does NOT regenerate them.
 - bootstrap + teardown subcommands are FULLY wired to drivers (commit cfd7a4c —
   the last two CLI stubs): bootstrap dispatches proxmox-lxc/vultr/hetzner drivers
-  with the operator-pubkey gate + A4 domain gate; teardown loads the installer
+  with the operator-pubkey gate + A4 domain gate; teardown loads the world
   config, verifies the door via a signed exec probe, and runs the three scopes.
 - TUI (bubbletea): mode auto-detection (bootstrap/configure/running), running dashboard
   (Services/Agents/Runners/DATA views, Tab cycling, 2s timer), interactive console action
@@ -424,6 +425,33 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   the caller's scrollback cleanly (no bleed). Live-verified under a PTY:
   boot-check streams, `running` mode, clean exit 0.
 
+### Phase 9 — install port + installer deletion (committed: ad5c2bf)
+- **`freehold install`** (`orchestrator/internal/cli/install.go`): Go port of
+  the Rust `freehold-install` binary (dialoguer `collect()` + handoff into the
+  rebuild pipeline). It is a THIN front-end: `collectAnswers` gathers
+  domain/host/relay-gw/sizing/k3s + the operator identity into a `rebuildFlags`
+  and hands the SAME `newRebuildEngine(f).run()` the `rebuildCmd` uses — no
+  parallel pipeline. The ONE buffered stdin reader built during collect is
+  handed to the engine (`eng.stdin = ui.in`) so the mid-pipeline prompts
+  (thin-pool placement, door gate) never lose bytes to a second buffer.
+- **Operator identity (port of `main.rs collect()`)**: have-key persists the
+  operator's nsec as `identity.json` (their OWN nostr secret + a FRESH random
+  enc keypair — `Identity::from_nostr_secret` semantics; derived-pubkey check
+  bails on mismatch; refuses when identity.json already exists); generate
+  REUSES an existing identity.json (Rust `mint_identity` loads on existence),
+  else mints. Storage consent is asked up front in collect (same bool, same
+  gate, flows as `f.confirmStorage`).
+- **Rust `installer` crate DELETED**: zero external dependents
+  (scout-verified); `rm -rf installer/` + workspace-member removal. The Go
+  rebuild engine already reproduced the stage library byte-for-behavior; the
+  crate held only the front-end. `Cargo.lock` regenerated in the same commit.
+- **Tests** (`install_test.go`, 10, all green): nsec persist + skip +
+  mismatch-bail, existing-identity refusal, pubkey re-prompt, generate mint +
+  reuse (byte-identical file), defaults carry-through, abort-before-engine
+  (mint runs before the proceed gate; engine never constructed), and exact
+  flag handoff to the engine. go.mod: `charmbracelet/x/term` promoted
+  indirect→direct for the no-echo nsec read.
+
 ## Commits on `refactor-go` (working tree clean)
 
 | commit | content |
@@ -444,6 +472,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `10bf4b8` | TUI teardown is active with checkboxes: destroying announced per LXC, ✓ as each finishes |
 | `e989414` | storage destroy-pool registers the runner flags; failure banner keeps the embedded cause |
 | `21059e6` | TUI is fullscreen: runTUI passes tea.WithAltScreen() |
+| `ad5c2bf` | Phase 9: `freehold install` port (dialoguer → Go collect) + delete the Rust installer crate |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
@@ -471,6 +500,9 @@ Done since this list was written:
 3. ~~Operator-side: re-point the truenas proxy upstreams~~ **DONE** — both
    domain URLs now resolve to the rebuilt guests (relay `/_liveness` ok, CP
    healthz 200 via the domain).
+4. ~~Port the `freehold-install` Rust binary to Go~~ **DONE (2026-08-30)** —
+   `freehold install` (Phase 9); the Rust installer crate deleted in the same
+   change.
 
 ## Constraints & decisions (carry-forward)
 
@@ -484,8 +516,12 @@ Done since this list was written:
 - Zeroize: explicit `Zero()` via `defer` on `[32]byte` secrets (no third-party zeroize crate).
 - NIP-44 v2 implemented against the formal spec (HKDF + ChaCha20-Poly1305), harness-verified
   byte-for-byte against rust-nostr.
-- `installer` stays Rust; it spawns `freehold-orchestrator` by name (15 refs), so the Go
-  binary must keep that name and the subprocess contract.
+- The Rust `installer` crate is DELETED (2026-08-30) — superseded by Go
+  `freehold install`. What survives is the SUBPROCESS contract: the rebuild
+  engine shells `control-plane` + `runner` (still Rust) and ITSELF
+  (`os.Executable()`, teardown's pattern) for the orchestrator stages, and
+  teardown resolves the orchestrator binary as itself — so the Go binary
+  keeps the `freehold-orchestrator` name and the signed-exec subprocess shape.
 - Session tooling note: file edits/commits land reliably only through `eval` (Python,
   absolute paths) — the write/edit/bash tools have been observed to splice corruption into
   files. Verify builds via `eval` running `go build ./...` / `cargo build --workspace` from
