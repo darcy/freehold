@@ -356,6 +356,22 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   domain), CP 101 @ `.9` (healthz 200), k3s 102 @ `.7` (k3s active);
   config re-recorded vmid 100/101/102 + `.8/.9/.7` + the SAME
   `relay_pubkey` — the same world, re-booted.
+- **Fourth LIVE rebuild — the fast REUSE path, 4 min 15 s vs ~70 min fresh
+  (2026-08-30).** A repeat teardown (config kept INTACT, plane LVs intact)
+  then `rebuild --yes` skipped every expensive re-provision: door REUSED
+  (no gate pause — the key stayed installed), plane adopted, and the three
+  LXCs re-booted on the recorded vmids + static IPs (100/.8, 101/.9,
+  102/.7) — relay 4/4 healthy + `/_liveness` ok through the domain, CP
+  healthz 200, k3s active. This is the design payoff of "teardown keeps
+  config INTACT + plane-reuse": a destroyed-but-recorded world re-boots in
+  minutes, same coordinates, same relay pubkey.
+- **PTY lesson (operator-tooling, not a TUI bug):** while a session was
+  driving the live TUI rebuild, a stray `tail -c /proc/<tui-pid>/fd/1`
+  opened the PTY SLAVE and raced bubbletea for stdin bytes — the TUI went
+  input-deaf (looked frozen). The goroutine dump showed the event loop
+  IDLE in `epoll_wait` (alive, not deadlocked); a fresh session took keys
+  fine. NEVER read the TUI's PTY slave fd while it runs; observe via the
+  hub's `logs` only.
 
 ## Commits on `refactor-go` (working tree clean)
 
