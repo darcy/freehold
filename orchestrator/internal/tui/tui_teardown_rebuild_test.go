@@ -100,7 +100,7 @@ func TestNewFlowLabels(t *testing.T) {
 	if got := promptLabel(flowTeardown, 0); got != "destroy tenant data too? (yes | no)" {
 		t.Errorf("teardown label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 0); got != "operator pubkey (64-hex)" {
+	if got := promptLabel(flowRebuild, 0); got != "operator pubkey (npub1… or 64-hex)" {
 		t.Errorf("rebuild step0 label = %q", got)
 	}
 	if got := promptLabel(flowRebuild, 2); got != "tenant LV size GB (blank = 10)" {

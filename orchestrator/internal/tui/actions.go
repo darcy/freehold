@@ -192,7 +192,7 @@ func promptLabel(k flowKind, step int) string {
 	case flowRebuild:
 		switch step {
 		case 0:
-			return "operator pubkey (64-hex)"
+			return "operator pubkey (npub1… or 64-hex)"
 		case 1:
 			return "domain (the relay's identity)"
 		case 2:
