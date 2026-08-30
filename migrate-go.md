@@ -396,6 +396,28 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   done`; the dashboard re-detected configure / world NOT converged
   honestly. World restored by a fifth fast-reuse rebuild (~4 min, same
   vmids + IPs + relay pubkey).
+- **`storage destroy-pool` registered the runner flags (operator report
+  2026-08-30 — `! teardown failed:  — the pool is NOT removed`).** Two
+  bugs, one complaint. (1) `storageDestroyPoolCmd` was the ONLY storage
+  subcommand missing `addCommonFlags` — teardown's `DestroyPool` drives
+  this binary with `--addr`/`--agent-dir`, and the child died
+  `unknown flag: --addr` mid-way through a `--data` teardown (after LXCs
+  + datasets, before the pool). Fixed at the registration site
+  (handlers3.go), the same pattern every sibling already uses; regression
+  test asserts all five storage subcommands register
+  `addr`/`agent-dir`/`runner-pubkey`/`target`. LIVE-PROVEN: the exact
+  command that died now exits 0 (`STORAGE-POOL-DESTROYED: true`,
+  `lvs pve` shows zero freehold LVs). (2) The TUI's failure banner was
+  BLANK-looking because `tail()` kept only the last line — and teardown
+  embeds the child's stderr INSIDE its error, so the actionable cause
+  (`unknown flag: --addr`) sat one line ABOVE the trailing clause that
+  got surfaced alone. `tail()` now keeps the last 3 non-empty lines,
+  trimmed, joined ` · `, capped at 200 chars; regression test pins the
+  operator's exact error shape. Recovery: the `--data` teardown's LOCAL
+  half (door key/config/world home) runs LAST, so the door stayed
+  installed and the config survived — a safe, recoverable state; the
+  world was restored by rebuild with `--confirm-storage` (the pool was
+  gone, so the carve path re-ran).
 
 ## Commits on `refactor-go` (working tree clean)
 

@@ -356,15 +356,21 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 	}
 }
 
-// tail returns the last non-empty line of a command's output (the CLI's
-// success/error detail line).
+// tail returns the last NON-EMPTY lines of a command's output joined with
+// " · " (up to 3, capped at 200 chars). One line is not enough when the
+// CLI embeds a subprocess's stderr mid-message — the actionable cause
+// ("unknown flag: --addr") must not be swallowed by a trailing clause.
 func tail(s string) string {
-	var last string
+	var kept []string
 	for _, line := range splitLines(s) {
-		if line != "" {
-			last = line
+		if line = strings.TrimSpace(line); line != "" {
+			kept = append(kept, line)
 		}
 	}
+	if len(kept) > 3 {
+		kept = kept[len(kept)-3:]
+	}
+	last := strings.Join(kept, " · ")
 	if len(last) > 200 {
 		return last[:200] + "…"
 	}

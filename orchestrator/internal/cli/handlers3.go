@@ -788,6 +788,7 @@ func init() {
 	addCommonFlags(storageEnsureCmd, nil)
 	addCommonFlags(storageInfoCmd, nil)
 	addCommonFlags(storageDestroyCmd, nil)
+	addCommonFlags(storageDestroyPoolCmd, nil)
 	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd, storageInfoCmd, storageDestroyCmd, storageDestroyPoolCmd} {
 		sc.Flags().String("target", "proxmox-box", "Target to drive storage through (the runner holding the host ssh key)")
 	}

@@ -483,3 +483,22 @@ func TestTeardownStreamDrivesSteps(t *testing.T) {
 		}
 	}
 }
+
+// TestFailTailKeepsTheCause pins the failure-detail contract the operator
+// hit (2026-08-30 — "! teardown failed:  — the pool is NOT removed"):
+// teardown's pool step embeds the child's stderr INSIDE its error, so the
+// actionable cause ("unknown flag: --addr") is NOT the last line — a
+// single-line tail returned only the trailing clause and the cause was
+// invisible. tail must keep the last 3 non-empty lines so the cause shows.
+func TestFailTailKeepsTheCause(t *testing.T) {
+	out := "thin-pool teardown FAILED: dataset destroy for relay failed:\n" +
+		"unknown flag: --addr\n" +
+		" — the pool is NOT removed\n"
+	got := tail(out)
+	if !strings.Contains(got, "unknown flag: --addr") {
+		t.Errorf("tail must keep the actionable cause, got %q", got)
+	}
+	if !strings.Contains(got, "the pool is NOT removed") {
+		t.Errorf("tail must keep the trailing clause too, got %q", got)
+	}
+}
