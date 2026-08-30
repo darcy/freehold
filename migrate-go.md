@@ -418,6 +418,11 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   installed and the config survived — a safe, recoverable state; the
   world was restored by rebuild with `--confirm-storage` (the pool was
   gone, so the carve path re-ran).
+- **TUI is fullscreen (alt-screen) now.** `runTUI` passes
+  `tea.WithAltScreen()` — the v1.3.10 fullscreen example's pattern — so the
+  dashboard + activities render in the dedicated alt buffer and `q` restores
+  the caller's scrollback cleanly (no bleed). Live-verified under a PTY:
+  boot-check streams, `running` mode, clean exit 0.
 
 ## Commits on `refactor-go` (working tree clean)
 
@@ -433,25 +438,38 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `f8a13ae` | Interactive bootstrap/configure TUI forms + live installer-contract verification |
 | `6d7719a` | Phase 8: placement gate + RemoveThinPool + teardown semantics + door-key recovery |
 | `85732a7` | Review round 4 fixes: rider guard, storage.cfg re-point, placement created probe |
+| `def7bdd` | migrate-go.md: record Phase 8 commit + round-4 fixes; k3s static IP .7 |
+| `719a43b` | TUI activity view: full-screen streaming for world ops; teardown keeps config intact |
+| `c8a83e1` | migrate-go.md: record the fast-reuse rebuild (4m15s) + the PTY-slave race lesson |
+| `10bf4b8` | TUI teardown is active with checkboxes: destroying announced per LXC, ✓ as each finishes |
+| `e989414` | storage destroy-pool registers the runner flags; failure banner keeps the embedded cause |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
 ## Remaining work
 
-The plan is COMPLETE on `refactor-go`. Only operator-driven live exercises remain
-(these are the end-user testing the branch is held back from `main` for):
+The plan is COMPLETE on `refactor-go`; the TUI is fully live-verified (activity
+view teardown + rebuild, door gate, boot check, fullscreen alt-screen). What
+remains is operator-paced live exercise + the merge itself:
 
-1. Full `bootstrap` end-to-end on a scratch target (proxmox-lxc pct create through
-   the real runner) — the drivers are ported and CLI-wired; the exec probe,
-   readiness, and storage paths are already live-verified.
-2. `teardown` from the TUI (`t` in running mode) — engine ported + CLI-wired;
-   door probe live-verified; a full run is destructive, so it's operator-paced.
-3. ~~The operator's whole-world teardown → `rebuild` end-user test from the
+1. Full `bootstrap` end-to-end on a scratch target (proxmox-lxc pct create
+   through the real runner) — the drivers are ported and CLI-wired; the exec
+   probe, readiness, and storage paths are already live-verified. (The VPS leg
+   wants a real Vultr token.)
+2. The merge decision itself — the branch is held back from `main` pending the
+   operator's go; `main` stays untouched until then.
+
+Done since this list was written:
+
+1. ~~The operator's whole-world teardown → `rebuild` end-user test from the
    TUI (`t` then `B`) — the hold gate.~~ **DONE (2026-08-29)** — the live
    rebuild above; the pipeline's four live bugs are fixed + regression-tested.
-4. Operator-side: re-point the truenas proxy upstreams at the current
-   guest IPs (relay `.8:3000`, CP `.9:8080`) — the ONLY remaining step
-   before the domain URLs work.
+2. ~~`teardown` from the TUI (`t` in running mode)~~ **DONE (2026-08-30)** —
+   the operator's `--data` teardown surfaced the `destroy-pool` flag bug
+   (fixed + live-proven in `e989414`); the world re-booted via rebuild.
+3. ~~Operator-side: re-point the truenas proxy upstreams~~ **DONE** — both
+   domain URLs now resolve to the rebuilt guests (relay `/_liveness` ok, CP
+   healthz 200 via the domain).
 
 ## Constraints & decisions (carry-forward)
 
