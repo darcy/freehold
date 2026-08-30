@@ -113,6 +113,7 @@ func NsecToSecret(s string) ([32]byte, error) {
 	return out, fmt.Errorf("expected nsec1<bech32> or a 64-character hex secret")
 }
 
+// ParsePubkeyInput accepts a pubkey as npub1<bech32> or 64-hex and returns
 // the 64-hex form — reproducing core/src/identity.rs::parse_pubkey_input,
 // including the TRIM and the hex LOWERCASING (uppercase hex, though valid,
 // would exact-mismatch the CP console's admin whitelist, which the relay
