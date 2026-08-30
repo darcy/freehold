@@ -461,6 +461,11 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   (seed/edit/dispatch/no-seed). LIVE-verified under a PTY: operator pk +
   domain + freehold-thin + k3s `y` all prefilled from the real config; sizes
   blank; ESC cancelled cleanly (world untouched).
+- **npub is accepted where it looks hex-only (2026-08-30).** The
+  B-rebuild operator-pubkey prompt always took `npub1…` (the engine runs
+  `ParsePubkeyInput` before any stage); only the label claimed "(64-hex)".
+  Label now reads `npub1… or 64-hex`; a new crypto test pins the
+  acceptance contract on the shared primitive (Rust-core fixture).
 
 ## Commits on `refactor-go` (working tree clean)
 
@@ -484,6 +489,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `21059e6` | TUI is fullscreen: runTUI passes tea.WithAltScreen() |
 | `ad5c2bf` | Phase 9: `freehold install` port (dialoguer → Go collect) + delete the Rust installer crate |
 | `4acb02f` | TUI rebuild (`B`) prefills the form from the recorded config |
+| `22e34dc` | rebuild pubkey label admits npub1…; crypto test pins the npub/hex contract |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
