@@ -451,6 +451,16 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   (mint runs before the proceed gate; engine never constructed), and exact
   flag handoff to the engine. go.mod: `charmbracelet/x/term` promoted
   indirect→direct for the no-echo nsec read.
+- **TUI rebuild (`B`) prefills from the config (2026-08-30).** `beginPrompt`
+  now seeds each step from `flowDefaults`: when a config exists, the rebuild
+  form opens with the RECORDED operator pubkey, domain, carved thin-pool
+  (`Plane.ThinPool` — a reused stock pool is never recorded), and k3s
+  membership (`y`). The two size prompts stay blank (the config records no
+  size; their "(blank = N)" semantics hold). Seeds are editable (cursor at
+  end) and absent config = unchanged fresh-world behavior. 4 new tests
+  (seed/edit/dispatch/no-seed). LIVE-verified under a PTY: operator pk +
+  domain + freehold-thin + k3s `y` all prefilled from the real config; sizes
+  blank; ESC cancelled cleanly (world untouched).
 
 ## Commits on `refactor-go` (working tree clean)
 
@@ -473,6 +483,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `e989414` | storage destroy-pool registers the runner flags; failure banner keeps the embedded cause |
 | `21059e6` | TUI is fullscreen: runTUI passes tea.WithAltScreen() |
 | `ad5c2bf` | Phase 9: `freehold install` port (dialoguer → Go collect) + delete the Rust installer crate |
+| `4acb02f` | TUI rebuild (`B`) prefills the form from the recorded config |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
