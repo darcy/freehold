@@ -443,6 +443,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `c8a83e1` | migrate-go.md: record the fast-reuse rebuild (4m15s) + the PTY-slave race lesson |
 | `10bf4b8` | TUI teardown is active with checkboxes: destroying announced per LXC, ✓ as each finishes |
 | `e989414` | storage destroy-pool registers the runner flags; failure banner keeps the embedded cause |
+| `21059e6` | TUI is fullscreen: runTUI passes tea.WithAltScreen() |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
