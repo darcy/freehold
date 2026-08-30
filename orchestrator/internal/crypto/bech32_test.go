@@ -17,9 +17,17 @@ func TestParsePubkeyInput(t *testing.T) {
 		t.Errorf("npub decode = %q, %v — want %s", got, err, hex)
 	}
 
-	// 64-hex passes through untouched.
+	// 64-hex is accepted and NORMALIZED to lowercase (Rust's
+	// parse_pubkey_input does to_ascii_lowercase): uppercase hex is valid
+	// input but must not reach the CP's admin whitelist exact-match.
 	if got, err := ParsePubkeyInput(hex); err != nil || got != hex {
-		t.Errorf("hex passthrough = %q, %v", got, err)
+		t.Errorf("lowercase hex passthrough = %q, %v", got, err)
+	}
+	if got, err := ParsePubkeyInput(strings.ToUpper(hex)); err != nil || got != hex {
+		t.Errorf("uppercase hex should normalize to lowercase: got %q, %v — want %s", got, err, hex)
+	}
+	if got, err := ParsePubkeyInput("  " + hex + "\n"); err != nil || got != hex {
+		t.Errorf("hex with surrounding whitespace should trim + pass: got %q, %v", got, err)
 	}
 
 	for _, bad := range []string{"npub1rhqSY85", "not-a-pubkey", "ABC", strings.Repeat("0", 63)} {

@@ -69,6 +69,7 @@ type activity struct {
 	scanner *bufio.Scanner
 	proc    *exec.Cmd
 	procErr error
+	scanErr error // scanner failure (token over cap / read error) — distinct from a clean EOF
 
 	spin spinner.Model
 	done bool
@@ -267,6 +268,9 @@ func (m *Model) pumpActLine(a *activity) tea.Cmd {
 		if a.scanner.Scan() {
 			return actLineMsg{a: a, line: a.scanner.Text()}
 		}
+		// Scan()==false is CLEAN EOF only when Err() is nil — a token over
+		// the cap or a read error must not be classified as a clean done.
+		a.scanErr = a.scanner.Err()
 		return actDoneMsg{a: a}
 	}
 }
@@ -330,6 +334,10 @@ func (m *Model) handleActivityMsg(msg tea.Msg) (bool, tea.Model, tea.Cmd) {
 			a.fail = "rebuild failed: " + tail(out)
 		case a.procErr != nil:
 			a.fail = a.kind + " failed: " + tail(out)
+		case a.scanErr != nil:
+			// scanner broke (token over cap / read error) while the child
+			// kept running: never report a clean done for a partial stream.
+			a.fail = a.kind + " stream broke: " + a.scanErr.Error()
 		default:
 			a.ok = true
 		}
@@ -370,7 +378,7 @@ func (m *Model) handleActivityKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startSubprocessActivity("rebuild", "rebuilding "+m.Domain, args)
 		case tea.KeyEsc:
 			m.activity = nil
-			m.Msg = "rebuild cancelled at the door — the key is still printed above"
+			m.Msg = "rebuild cancelled at the door — note the key was shown only in this full-screen view (no scrollback); re-run rebuild (B) to re-surface it through the same gate"
 			return m, nil
 		}
 		return m, nil

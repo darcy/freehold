@@ -750,7 +750,14 @@ var teardownCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Println(report)
+		// The report re-prints every line already streamed via Live, so on
+		// the streaming path emit only the completion summary — the
+		// duplicated body was pure noise on the CLI and in the TUI stream.
+		if idx := strings.IndexByte(report, '\n'); idx >= 0 {
+			fmt.Println(report[:idx])
+		} else {
+			fmt.Println(report)
+		}
 		return nil
 	},
 }

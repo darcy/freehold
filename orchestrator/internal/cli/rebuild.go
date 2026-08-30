@@ -1052,10 +1052,16 @@ func parseStorageMounts(out string) []config.PlaneMount {
 }
 
 // parseStorageBackend reads the kind from `STORAGE-BACKEND: <kind> <pool>`.
+// A present-but-empty value (malformed resolve/ensure output) is treated as
+// absent rather than panicking on the field index.
 func parseStorageBackend(out string) string {
 	for _, l := range strings.Split(out, "\n") {
 		if rest, ok := strings.CutPrefix(l, "STORAGE-BACKEND: "); ok {
-			return strings.Fields(rest)[0]
+			fields := strings.Fields(rest)
+			if len(fields) == 0 {
+				return ""
+			}
+			return fields[0]
 		}
 	}
 	return ""

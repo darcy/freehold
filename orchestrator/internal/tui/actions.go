@@ -132,7 +132,7 @@ func ncols(k flowKind) int {
 	case flowBootstrap:
 		return 4
 	case flowTeardown:
-		return 1
+		return 2
 	case flowRebuild:
 		return 6
 	default:
@@ -191,7 +191,12 @@ func promptLabel(k flowKind, step int) string {
 			return "operator pubkey (64-hex)"
 		}
 	case flowTeardown:
-		return "destroy tenant data too? (yes | no)"
+		switch step {
+		case 0:
+			return "destroy tenant data too? (yes | no)"
+		default:
+			return "CONFIRM destroying the whole world (all LXCs, door key KEPT)? type yes"
+		}
 	case flowRebuild:
 		switch step {
 		case 0:
@@ -343,8 +348,14 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			return activityStartMsg{kind: "deploy", title: "deploying the control plane", args: args}
 		case flowTeardown:
 			// The whole-world teardown destroys LXCs (+ datasets with yes);
-			// with --data it wipes door key + local home + config. Either way
-			// the post-run boot check re-detects the honest mode.
+			// with --data it wipes door key + local home + config. The
+			// SECOND step is the world-destroy confirm: anything but an
+			// explicit "yes" aborts — t+Enter must not tear down the world
+			// by accident (the CLI's own --yes silent path is not
+			// reachable).
+			if !strings.EqualFold(strings.TrimSpace(f.Inputs[1]), "yes") {
+				return flowMsg{err: fmt.Errorf("teardown cancelled: type yes to confirm destroying the whole world")}
+			}
 			args := []string{"teardown", "--yes"}
 			if strings.EqualFold(f.Inputs[0], "yes") {
 				args = append(args, "--data")

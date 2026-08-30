@@ -12,8 +12,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// TestTeardownFormSteps walks the 1-step teardown form and confirms the
-// answer is captured (it only starts in RUNNING mode).
+// TestTeardownFormSteps walks the 2-step teardown form (data? then the
+// world-destroy CONFIRM) and confirms the answers are captured, the confirm
+// GATES the dispatch, and teardown only starts in RUNNING mode.
 func TestTeardownFormSteps(t *testing.T) {
 	m := &Model{Mode: ModeRunning}
 	if !keyPress(m, "t") {
@@ -22,8 +23,8 @@ func TestTeardownFormSteps(t *testing.T) {
 	if m.Flow == nil || m.Flow.Kind != flowTeardown {
 		t.Fatal("expected a teardown flow after pressing t")
 	}
-	if ncols(flowTeardown) != 1 {
-		t.Fatalf("teardown form should have 1 step, got %d", ncols(flowTeardown))
+	if ncols(flowTeardown) != 2 {
+		t.Fatalf("teardown form should have 2 steps, got %d", ncols(flowTeardown))
 	}
 	typeText(m, "yes")
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -31,11 +32,45 @@ func TestTeardownFormSteps(t *testing.T) {
 		t.Fatalf("teardown input not captured: %+v", m.Flow)
 	}
 
+	// (the form is already at step 1 from the walk above)
+	typeText(m, "no") // confirm = NOT yes -> abort
+	var cmd tea.Cmd
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if cmd == nil {
+		t.Fatal("the confirm step must produce a dispatch outcome")
+	}
+	if start, ok := cmd().(activityStartMsg); ok {
+		t.Fatalf("a non-yes confirm must NOT dispatch teardown, got %+v", start)
+	}
+	msg := cmd() // resolve the flowMsg
+	m.Update(msg)
+	if m.Flow != nil {
+		t.Fatal("the aborted teardown flow should be finished after the flowMsg")
+	}
+
+	// an explicit "yes" on the confirm step dispatches teardown --yes.
+	m2 := &Model{Mode: ModeRunning}
+	_ = keyPress(m2, "t")
+	typeText(m2, "no") // data
+	_, _ = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
+	typeText(m2, "yes") // confirm
+	_, cmd = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if cmd == nil {
+		t.Fatal("a confirmed teardown must dispatch")
+	}
+	start, ok := cmd().(activityStartMsg)
+	if !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
+	}
+	if strings.Join(start.args, " ") != "teardown --yes" {
+		t.Errorf("args = %v, want teardown --yes (no --data)", start.args)
+	}
+
 	// teardown must NOT start outside running mode (config absent = the
 	// teardown CLI would no-op anyway, but the hint isn't offered there).
 	for _, mode := range []Mode{ModeBootstrap, ModeConfigure} {
-		m2 := &Model{Mode: mode}
-		if keyPress(m2, "t") {
+		m3 := &Model{Mode: mode}
+		if keyPress(m3, "t") {
 			t.Errorf("t must not start a teardown flow in %s", mode)
 		}
 	}
@@ -97,8 +132,8 @@ func TestRebuildFormEscCancels(t *testing.T) {
 
 // TestNewFlowLabels sanity-checks the teardown/rebuild prompt labels.
 func TestNewFlowLabels(t *testing.T) {
-	if got := promptLabel(flowTeardown, 0); got != "destroy tenant data too? (yes | no)" {
-		t.Errorf("teardown label = %q", got)
+	if got := promptLabel(flowTeardown, 1); got != "CONFIRM destroying the whole world (all LXCs, door key KEPT)? type yes" {
+		t.Errorf("teardown step1 label = %q", got)
 	}
 	if got := promptLabel(flowRebuild, 0); got != "operator pubkey (npub1… or 64-hex)" {
 		t.Errorf("rebuild step0 label = %q", got)
@@ -476,6 +511,62 @@ func TestActivityStreamsLines(t *testing.T) {
 	}
 	if strings.Join(m.activity.lines, ",") != "one,two,three" {
 		t.Errorf("every line must stream in order, got %v", m.activity.lines)
+	}
+}
+
+// TestActivityScannerErrorNotCleanDone: a line over the scanner's 512 KiB
+// cap makes Scan() return false with ErrTooLong WHILE the child keeps
+// running — that must classify as a FAILURE, never a clean "done" (the
+// stream is partial and the child is still live). The child is this test
+// binary itself (a 600 KiB ARGV would blow ARG_MAX, so it must be stdout).
+func TestActivityScannerErrorNotCleanDone(t *testing.T) {
+	oldExec := activityExec
+	activityExec = func(bin string, args ...string) *exec.Cmd {
+		c := exec.Command(os.Args[0], "-test.run=TestActivityScannerBigLineHelper")
+		c.Env = append(os.Environ(), "FREEHOLD_TEST_BIG_LINE=1")
+		return c
+	}
+	defer func() { activityExec = oldExec }()
+
+	m := &Model{Mode: ModeRunning, Domain: "world.test"}
+	_, _ = m.startSubprocessActivity("teardown", "tearing down the world", []string{"anything"})
+	if m.activity == nil {
+		t.Fatal("startSubprocessActivity must arm the activity")
+	}
+	cmd := m.pumpActLine(m.activity)
+	for i := 0; i < 8; i++ {
+		msg := cmd()
+		_, next := m.Update(msg)
+		if _, isDone := msg.(actDoneMsg); isDone {
+			break
+		}
+		cmd = next
+		if cmd == nil {
+			break
+		}
+	}
+	if m.activity == nil {
+		t.Fatal("the activity must survive until the done key")
+	}
+	if !m.activity.done {
+		t.Fatal("the scanner error must still deliver the done state")
+	}
+	if m.activity.ok {
+		t.Fatal("a scanner error must NOT classify as a clean done")
+	}
+	if !strings.Contains(m.activity.fail, "stream broke") {
+		t.Errorf("failure must surface the scanner error, got %q", m.activity.fail)
+	}
+}
+
+// TestActivityScannerBigLineHelper is the child: emit a single line over the
+// pump scanner's 512 KiB cap (a real argument would blow ARG_MAX).
+func TestActivityScannerBigLineHelper(t *testing.T) {
+	if os.Getenv("FREEHOLD_TEST_BIG_LINE") != "1" {
+		return
+	}
+	if _, err := os.Stdout.WriteString(strings.Repeat("x", 600*1024) + "\n"); err != nil {
+		t.Errorf("write failed: %v", err)
 	}
 }
 

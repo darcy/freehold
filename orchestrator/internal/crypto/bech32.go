@@ -113,11 +113,14 @@ func NsecToSecret(s string) ([32]byte, error) {
 	return out, fmt.Errorf("expected nsec1<bech32> or a 64-character hex secret")
 }
 
-// ParsePubkeyInput accepts a pubkey as npub1<bech32> or 64-hex and returns
-// the 64-hex form — reproducing core/src/identity.rs::parse_pubkey_input.
+// the 64-hex form — reproducing core/src/identity.rs::parse_pubkey_input,
+// including the TRIM and the hex LOWERCASING (uppercase hex, though valid,
+// would exact-mismatch the CP console's admin whitelist, which the relay
+// keys by the lowercase form).
 func ParsePubkeyInput(input string) (string, error) {
-	if strings.HasPrefix(input, "npub1") {
-		hrp, out, err := bech32Decode(input)
+	t := strings.TrimSpace(input)
+	if strings.HasPrefix(t, "npub1") {
+		hrp, out, err := bech32Decode(t)
 		if err != nil {
 			return "", fmt.Errorf("bad npub1 encoding: %w", err)
 		}
@@ -129,9 +132,9 @@ func ParsePubkeyInput(input string) (string, error) {
 		}
 		return hex.EncodeToString(out), nil
 	}
-	if isHex64(input) {
-		hex.DecodeString(input) // validated by isHex64
-		return input, nil
+	if isHex64(t) {
+		hex.DecodeString(t) // validated by isHex64
+		return strings.ToLower(t), nil
 	}
 	return "", fmt.Errorf("expected npub1<bech32> or a 64-character hex pubkey")
 }

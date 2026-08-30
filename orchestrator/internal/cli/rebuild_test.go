@@ -52,6 +52,11 @@ func TestParseStorageBackend(t *testing.T) {
 	if got := parseStorageBackend("no line\n"); got != "" {
 		t.Errorf("absent line = %q, want empty", got)
 	}
+	// a present-but-empty value must not panic (malformed resolve output) —
+	// it reads as absent.
+	if got := parseStorageBackend("STORAGE-BACKEND: \n"); got != "" {
+		t.Errorf("empty value = %q, want empty", got)
+	}
 }
 
 // ---- pct output parsing ------------------------------------------------------
