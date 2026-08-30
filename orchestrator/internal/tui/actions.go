@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/state"
@@ -49,6 +50,10 @@ type tuiFlow struct {
 	Step   int
 	Inputs [6]string
 	Field  *textinput.Model
+	// Defaults are the prefilled answers per step — sourced from the
+	// recorded config when one exists (see flowDefaults). Blank = no
+	// recorded value; the prompt's own "(blank = N)" semantics apply.
+	Defaults [6]string
 }
 
 type flowMsg struct {
@@ -71,6 +76,48 @@ func textInputNew(placeholder string) *textinput.Model {
 	ti.Placeholder = placeholder
 	ti.Focus()
 	return &ti
+}
+
+// fieldFor builds one step's input: the label as placeholder, the recorded
+// default as the prefilled value (cursor at the end so the operator just
+// hits enter — or edits it).
+func fieldFor(k flowKind, step int, def string) *textinput.Model {
+	ti := textInputNew(promptLabel(k, step))
+	if def != "" {
+		ti.SetValue(def)
+		ti.CursorEnd()
+	}
+	return ti
+}
+
+// flowDefaults reads the recorded config and prefills the form steps that
+// have a recorded value. The rebuild form's four config-backed answers:
+// operator pubkey, domain, the carved thin-pool (a reused stock pool is
+// deliberately NOT recorded — Plane.ThinPool says freehold owns it), and
+// the k3s membership. The two size prompts have no config record; blank
+// keeps their "(blank = N)" semantics. Absent/unreadable config = no
+// defaults (fresh-world behavior, unchanged).
+func flowDefaults(m *Model, k flowKind) [6]string {
+	var d [6]string
+	if k != flowRebuild || m.CfgPath == "" {
+		return d
+	}
+	cfg, err := config.Load(m.CfgPath)
+	if err != nil || cfg == nil {
+		return d
+	}
+	d[0] = cfg.OperatorPubkey
+	d[1] = cfg.Domain
+	if cfg.Plane.ThinPool != nil {
+		d[3] = *cfg.Plane.ThinPool
+	}
+	for _, role := range cfg.Managed {
+		if role == "k3s" {
+			d[5] = "y"
+			break
+		}
+	}
+	return d
 }
 
 func ncols(k flowKind) int {
@@ -168,8 +215,10 @@ func fieldValue(f *tuiFlow) string {
 	}
 	return ""
 }
+
 func (m *Model) beginPrompt(k flowKind) {
-	m.Flow = &tuiFlow{Kind: k, Field: textInputNew(promptLabel(k, 0))}
+	m.Flow = &tuiFlow{Kind: k, Defaults: flowDefaults(m, k)}
+	m.Flow.Field = fieldFor(k, 0, m.Flow.Defaults[0])
 }
 
 func (m *Model) handleFlow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -189,7 +238,7 @@ func (m *Model) handleFlow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		next := f.Step + 1
 		if next < ncols(f.Kind) {
 			f.Step = next
-			f.Field = textInputNew(promptLabel(f.Kind, next))
+			f.Field = fieldFor(f.Kind, next, f.Defaults[next])
 			return m, nil
 		}
 		return m, runFlowAction(m, f)

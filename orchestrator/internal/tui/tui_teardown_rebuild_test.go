@@ -114,6 +114,128 @@ func TestNewFlowLabels(t *testing.T) {
 	}
 }
 
+// TestRebuildFormSeededFromConfig: when a config exists, pressing B opens
+// the rebuild form with the RECORDED answers prefilled — operator pubkey,
+// domain, the carved thin-pool (a reused stock pool is never recorded),
+// and k3s membership. The two size prompts stay blank: the config records
+// nothing about them, so their "(blank = N)" semantics hold.
+func TestRebuildFormSeededFromConfig(t *testing.T) {
+	op := strings.Repeat("b", 64)
+	cfgPath := writeRebuildCfg(t,
+		"domain = \"world.test\"\n"+
+			"operator_pubkey = \""+op+"\"\n"+
+			"managed = [\"relay\", \"cp\", \"k3s\"]\n"+
+			"[plane]\nthin_pool = \"freehold-thin\"\n")
+
+	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	if !keyPress(m, "B") {
+		t.Fatal("B did not start the rebuild flow")
+	}
+
+	want := [6]string{op, "world.test", "", "freehold-thin", "", "y"}
+	for i := 0; i < 6; i++ {
+		if m.Flow == nil {
+			t.Fatalf("flow vanished at step %d", i)
+		}
+		if got := m.Flow.Field.Value(); got != want[i] {
+			t.Errorf("step %d prefilled %q, want %q", i, got, want[i])
+		}
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if m.Flow == nil {
+		t.Fatal("flow vanished before inputs were captured")
+	}
+	for i := 0; i < 6; i++ {
+		if m.Flow.Inputs[i] != want[i] {
+			t.Errorf("inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want[i])
+		}
+	}
+}
+
+// TestRebuildFormSeedCanBeEdited: the prefills are EDITABLE, not locked —
+// appended typing changes the answer (cursor sits at the end of the seed).
+func TestRebuildFormSeedCanBeEdited(t *testing.T) {
+	cfgPath := writeRebuildCfg(t, "domain = \"world.test\"\noperator_pubkey = \""+strings.Repeat("b", 64)+"\"\n")
+	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	keyPress(m, "B")
+	if m.Flow == nil {
+		t.Fatal("B did not start the rebuild flow")
+	}
+	typeText(m, "-new")
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.Flow.Inputs[0]; !strings.HasSuffix(got, "-new") {
+		t.Errorf("edited seed should keep the prefix + the appended text, got %q", got)
+	}
+}
+
+// TestRebuildFormAcceptsSeededDefaults: six bare enters on a seeded form
+// must launch the rebuild with the RECORDED world — same args the operator
+// would have typed by hand.
+func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
+	op := strings.Repeat("b", 64)
+	cfgPath := writeRebuildCfg(t,
+		"domain = \"world.test\"\n"+
+			"operator_pubkey = \""+op+"\"\n"+
+			"managed = [\"relay\", \"cp\", \"k3s\"]\n"+
+			"[plane]\nthin_pool = \"freehold-thin\"\n")
+	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	keyPress(m, "B")
+	var msg tea.Cmd
+	for i := 0; i < 6; i++ {
+		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if msg == nil {
+		t.Fatal("no activity message was dispatched")
+	}
+	start, ok := msg().(activityStartMsg)
+	if !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
+	}
+	joined := strings.Join(start.args, " ")
+	for _, want := range []string{"--operator-pubkey " + op, "--domain world.test", "--thin-pool freehold-thin"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rebuild args %q missing %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "--with-k3s=false") {
+		t.Errorf("k3s is managed in the config — the args must not disable it: %q", joined)
+	}
+}
+
+// TestRebuildFormNoSeedWithoutConfig: no config = the old fresh-world
+// behavior (nothing prefilled), and a config WITHOUT k3s leaves the k3s
+// answer blank (not "y").
+func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
+	m := &Model{Mode: ModeBootstrap, CfgPath: "/nonexistent/config.toml"}
+	keyPress(m, "B")
+	if m.Flow == nil {
+		t.Fatal("B did not start the rebuild flow")
+	}
+	if got := m.Flow.Field.Value(); got != "" {
+		t.Errorf("no config = nothing prefilled, got %q", got)
+	}
+
+	cfgPath := writeRebuildCfg(t, "domain = \"world.test\"\noperator_pubkey = \""+strings.Repeat("b", 64)+"\"\n")
+	m2 := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	keyPress(m2, "B")
+	if m2.Flow == nil {
+		t.Fatal("B did not start the rebuild flow")
+	}
+	if got := flowDefaults(m2, flowRebuild)[5]; got != "" {
+		t.Errorf("config without k3s must not seed the k3s answer, got %q", got)
+	}
+}
+
+// writeRebuildCfg writes a scratch config.toml and returns its path.
+func writeRebuildCfg(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // TestTeardownRebuildHints confirms the footers + views offer the new keys.
 func TestTeardownRebuildHints(t *testing.T) {
 	run := (&Model{Mode: ModeRunning}).footer()
