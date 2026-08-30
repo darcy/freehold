@@ -478,6 +478,16 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
   was blank-when-absent, but blank = YES for that prompt, so a k3s-off
   world would have booted k3s on accepted defaults; seeds "n" instead,
   with a dispatch test pinning `--with-k3s=false`.
+- **DEFER tier closed (2026-08-30, e727a7b).** All six PR-body follow-ups:
+  (1) `ParsePubkeyInput` now trims + lowercases hex (Rust oracle parity —
+  an uppercase paste silently missed the CP admin whitelist); (2) the
+  door-gate ESC message no longer claims "printed above" (no alt-screen
+  scrollback); (3) `parseStorageBackend` empty-value panic guarded;
+  (4) teardown CLI no longer prints every line twice on the streaming
+  path; (5) the activity pump classifies scanner errors (over-cap token)
+  as failure, never a clean done; (6) the TUI `t` teardown is gated by an
+  explicit world-destroy CONFIRM step (non-yes aborts without
+  dispatching).
 
 ## Commits on `refactor-go` (working tree clean)
 
@@ -503,6 +513,7 @@ CLI. Both binaries (`freehold`, `freehold-orchestrator`) are Go.
 | `4acb02f` | TUI rebuild (`B`) prefills the form from the recorded config |
 | `22e34dc` | rebuild pubkey label admits npub1…; crypto test pins the npub/hex contract |
 | `af26e44` | review debt closed: teardown name guard, honest --help, k3s seed n |
+| `e727a7b` | DEFER tier closed: pubkey lowercase, honest door message, panic guard, dedup, scanner err, t-confirm |
 
 (earlier: phase 2–4 port commits 9f23609, f59373e, 80609a7, e92d574, 5c2377d)
 
