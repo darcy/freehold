@@ -355,6 +355,7 @@ func (e *rebuildEngine) run() error {
 	fmt.Fprintln(e.out, "  ✓ durable volume plane ready")
 
 	// 8-9. boot the relay LXC, record its coordinates.
+	fmt.Fprintln(e.out, "  · booting the relay LXC (create → docker → compose; can take minutes)…")
 	if err := e.stageBootstrap("relay"); err != nil {
 		return err
 	}
@@ -364,6 +365,7 @@ func (e *rebuildEngine) run() error {
 	fmt.Fprintln(e.out, "  ✓ relay LXC booted + recorded")
 
 	// 10-11. boot the cp LXC, record.
+	fmt.Fprintln(e.out, "  · booting the cp LXC (create → docker → compose; can take minutes)…")
 	if err := e.stageBootstrap("cp"); err != nil {
 		return err
 	}
@@ -374,6 +376,7 @@ func (e *rebuildEngine) run() error {
 
 	// 12. the k3s substrate (boot-if-missing + in-guest install + record).
 	if e.f.withK3s {
+		fmt.Fprintln(e.out, "  · installing the k3s substrate (download + in-guest install; several minutes)…")
 		if err := e.stageK3s(); err != nil {
 			return err
 		}
@@ -381,10 +384,12 @@ func (e *rebuildEngine) run() error {
 	}
 
 	// 13-14. deploy the relay + the control plane.
+	fmt.Fprintln(e.out, "  · deploying the relay stack (compose pull + start)…")
 	if err := e.stageDeployRelay(); err != nil {
 		return err
 	}
 	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.domain)
+	fmt.Fprintln(e.out, "  · deploying the control plane (release binaries into the cp LXC)…")
 	if err := e.stageDeployCp(); err != nil {
 		return err
 	}
@@ -394,6 +399,7 @@ func (e *rebuildEngine) run() error {
 	// provider + postgres secrets sealed to it), apply the kube workloads,
 	// register the model, and record the coords for the Services row.
 	if e.f.withLitellm {
+		fmt.Fprintln(e.out, "  · applying the litellm kube workloads (postgres + gateway; rollout up to 5m)…")
 		if err := e.stageLitellm(); err != nil {
 			return err
 		}
@@ -402,9 +408,11 @@ func (e *rebuildEngine) run() error {
 
 	// 14.7. C0: register the CP resolver's explicit records (relay/cp/k3s +
 	// litellm) INSIDE the deployed CP, then point every guest at it.
+	fmt.Fprintln(e.out, "  · writing the resolver records (relay/cp/k3s/litellm)…")
 	if err := e.stageDnsRegister(); err != nil {
 		return err
 	}
+	fmt.Fprintln(e.out, "  · pointing every guest at the resolver + verifying it answers…")
 	if err := e.stageDnsPoint(); err != nil {
 		return err
 	}
@@ -828,6 +836,12 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	cfg := *ans
 	cfg.Plane = prev.Plane
+	// The mid-pipeline recorders (recordLitellm, stageDnsRegister) persist
+	// their sections to disk BEFORE finalSave rebuilds from answers from
+	// scratch — dropping them here would silently erase the gateway coords
+	// and the resolver mirror on every run. Keep them, like Plane.
+	cfg.Dns = prev.Dns
+	cfg.Litellm = prev.Litellm
 	if cfg.RelayPubkey == nil {
 		cfg.RelayPubkey = prev.RelayPubkey
 	}
@@ -853,6 +867,34 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 		}
 	}
 	return &cfg
+}
+
+// managedForFlags is the rebuild's world manifest: relay + cp always,
+// k3s/litellm exactly when their flags were given. The pipeline's mid-stage
+// recorders append as they go; finalSave replaces the list wholesale so a
+// withheld flag drops its survivor.
+func managedForFlags(withK3s, withLitellm bool) []string {
+	m := []string{"relay", "cp"}
+	if withK3s {
+		m = append(m, "k3s")
+	}
+	if withLitellm {
+		m = append(m, "litellm")
+	}
+	return m
+}
+
+// worldManaged is managedForFlags plus the k3s-guard: a k3s LXC that a prior
+// run recorded (vmid present) stays in the manifest even when this run
+// skipped k3s, so teardown still owns it. litellm needs no such carve-out —
+// it is a kube workload with no guest of its own; its pods ride the k3s
+// guest's teardown.
+func worldManaged(withK3s, withLitellm bool, k3sVmid *uint32) []string {
+	m := managedForFlags(withK3s, withLitellm)
+	if !withK3s && k3sVmid != nil && !containsStr(m, "k3s") {
+		m = append(m, "k3s")
+	}
+	return m
 }
 
 func containsStr(list []string, s string) bool {
@@ -882,6 +924,17 @@ func (e *rebuildEngine) finalSave() error {
 		return err
 	}
 	cfg := mergeFromAnswers(e.fromAnswers(), prev)
+	// The rebuild OWNS the world manifest: managed = the pieces THIS run
+	// deployed. A surviving config entry (e.g. litellm after a rebuild run
+	// WITHOUT --with-litellm) must not keep claiming a service the pipeline
+	// did not stand up — that is how the Services view showed a phantom
+	// "litellm (gateway) … down" for a world that never got one.
+	// The rebuild OWNS the world manifest: managed = the pieces THIS run
+	// deployed. A k3s LXC recorded by a PRIOR run is still ours to tear
+	// down even when this run skipped it (`--with-k3s=false`) — dropping it
+	// would make teardown say "skipped k3s LXC (not managed)" and leak the
+	// guest + its thin LV forever.
+	cfg.Managed = worldManaged(e.f.withK3s, e.f.withLitellm, cfg.Lxc.K3s.Vmid)
 	if rpk, ok := e.relayPubkeyNip11(); ok {
 		cfg.RelayPubkey = &rpk
 	}
@@ -1642,26 +1695,86 @@ func (e *rebuildEngine) guestSearchBase() string {
 	return base
 }
 
-// guestNameserver reads the CP LXC's current first PVE-managed nameserver
-// (the router) — kept as the CP's own secondary so dnsmasq has an upstream
-// for external names once pct set makes the resolver primary.
+// guestNameserver returns the CP LXC's dnsmasq UPSTREAM (the router), tried
+// in order so BOTH static and DHCP worlds keep external resolution:
+//
+//  1. the PVE-owned `net0` `gw=` line (`pct config`) — STATIC guests only;
+//     the default world (no --cp-ip, DHCP) has no gw= key at all.
+//  2. the guest's default route — works on every network shape.
+//  3. the CP resolv.conf's first nameserver that is NOT the resolver's own
+//     IP (its first entry is commonly the resolver from a prior world; a
+//     duplicated `nameserver .9 .9` made dnsmasq ignore its only entry and
+//     fed "no upstream" back to every guest pointed at the resolver).
 func (e *rebuildEngine) guestNameserver() string {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
 		return ""
 	}
+	if gw := e.cpGuestGateway(); gw != "" {
+		return gw
+	}
+	// 2. default route via `cut` — awk '{print $3}' would be expanded by the
+	// outer runner shell (same trap that corrupted the earlier probe).
 	cmd := fmt.Sprintf(
-		"pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | head -1 | cut -d' ' -f2\"",
+		"pct exec %d -- sh -c \"ip route show default | head -1 | cut -d' ' -f3\"",
 		*cfg.Lxc.Cp.Vmid)
-	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30)); ok {
+		if ns := strings.TrimSpace(out); ns != "" && strings.ContainsAny(ns, "0123456789") {
+			return ns
+		}
+	}
+	// 3. resolv.conf last resort, skipping the resolver's own address.
+	own := ""
+	if cfg.Lxc.Cp.Ip != nil {
+		own = config.StripCIDR(*cfg.Lxc.Cp.Ip)
+	}
+	cmd = fmt.Sprintf(
+		"pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | cut -d' ' -f2\"",
+		*cfg.Lxc.Cp.Vmid)
+	if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30)); ok {
+		for _, l := range strings.Split(out, "\n") {
+			ns := strings.TrimSpace(l)
+			if ns != "" && ns != own && strings.ContainsAny(ns, "0123456789") {
+				return ns
+			}
+		}
+	}
+	return ""
+}
+
+// cpGuestGateway reads the CP LXC's PVE-owned `net0` `gw=` value (`pct
+// config`). Pure for tests: parsePctGateway covers the line format.
+func (e *rebuildEngine) cpGuestGateway() string {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return ""
+	}
+	ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct config %d", *cfg.Lxc.Cp.Vmid), 30))
 	if !ok {
 		return ""
 	}
-	ns := strings.TrimSpace(out)
-	if ns == "" || !strings.ContainsAny(ns, "0123456789") {
-		return ""
+	return parsePctGateway(out)
+}
+
+// parsePctGateway extracts the `net0` `gw=` value from a `pct config` dump.
+// Static guests carry `gw=<router>`; DHCP guests (`ip=dhcp`) have NO gw= —
+// an empty result routes the caller to the default-route fallback.
+func parsePctGateway(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(l, "net0:") {
+			continue
+		}
+		for _, kv := range strings.Split(l, ",") {
+			v, found := strings.CutPrefix(kv, "gw=")
+			if found {
+				v = strings.TrimSpace(v)
+				if v != "" && strings.ContainsAny(v, "0123456789") {
+					return v
+				}
+			}
+		}
 	}
-	return ns
+	return ""
 }
 
 // stageDnsPoint points every managed guest at the CP resolver: write

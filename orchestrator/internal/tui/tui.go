@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"freehold/orchestrator/internal/config"
 )
 
 var (
@@ -44,6 +46,13 @@ func (m Mode) String() string {
 		return "running"
 	}
 }
+
+// Runner sources for the Runners view: the console API (CP — the default)
+// or the local loopback state.json. Toggle with `s`.
+const (
+	RunnerSourceCP    = "cp"
+	RunnerSourceLocal = "local"
+)
 
 // View is the running dashboard's active view.
 type View int
@@ -95,6 +104,10 @@ type Model struct {
 	Msg         string
 	Flow        *tuiFlow
 	console     *consoleClient
+	// Runners view source: RunnerSourceCP (default) | RunnerSourceLocal.
+	RunnerSource string
+	// last-loaded config — the `s` toggle and post-flow refreshes need it.
+	cfg *config.Config
 	// activity: while non-nil, the FULL-SCREEN activity view replaces the
 	// dashboard entirely (boot check, teardown, rebuild, bootstrap, deploys).
 	// The door-gate pause lives inside it too (its args ride a.args).

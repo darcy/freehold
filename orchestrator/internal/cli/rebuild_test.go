@@ -1,5 +1,7 @@
 package cli
 
+import "reflect"
+
 import (
 	"bytes"
 	"encoding/hex"
@@ -167,6 +169,83 @@ func TestApplyLxcCoords(t *testing.T) {
 // record_lxc must load the config FRESH from disk, mutate only the target
 // role, and save — never clobbering facts another stage recorded (the
 // plane mounts here stand in for any mid-pipeline write).
+// TestMergeKeepsDnsAndLitellm covers the finalSave contract: the mid-
+// pipeline recorders persist [dns] + [litellm] to disk, and the terminal
+// merge must KEEP them (the old merge rebuilt from answers and dropped
+// both, so a finished rebuild showed no gateway coords and an empty DNS
+// mirror even though the resolver held records).
+func TestMergeKeepsDnsAndLitellm(t *testing.T) {
+	prev := &config.Config{
+		Dns:     config.DnsSpec{Records: map[string]string{"relay": "192.168.30.8", "litellm": "192.168.30.7"}},
+		Litellm: config.LitellmSpec{URL: "http://192.168.30.7:31400", Host: "192.168.30.7"},
+		Plane:   config.PlaneSpec{Backend: ptr("pve")},
+		Managed: []string{"relay", "cp", "litellm"},
+	}
+	ans := &config.Config{Managed: []string{"relay", "cp"}}
+	got := mergeFromAnswers(ans, prev)
+	if len(got.Dns.Records) != 2 {
+		t.Errorf("dns records dropped by merge: %+v", got.Dns)
+	}
+	if got.Litellm.Host != "192.168.30.7" || got.Litellm.URL != "http://192.168.30.7:31400" {
+		t.Errorf("litellm dropped by merge: %+v", got.Litellm)
+	}
+	if got.Plane.Backend == nil || *got.Plane.Backend != "pve" {
+		t.Errorf("plane must still merge: %+v", got.Plane)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// TestParsePctGateway covers the gw= parser: static guests carry the
+// router, DHCP guests (`ip=dhcp`) have NO gw= and must yield "" so the
+// caller falls back to the default route (the review-flagged regression:
+// gw-only reading silently lost dnsmasq's upstream on the default world).
+func TestParsePctGateway(t *testing.T) {
+	static := `arch: amd64
+cores: 2
+net0: name=eth0,bridge=vmbr0,gw=192.168.30.1,hwaddr=BC:24:11:71:48:B5,ip=192.168.30.9/24,type=veth
+ostype: debian
+`
+	if got := parsePctGateway(static); got != "192.168.30.1" {
+		t.Errorf("static gw = %q, want 192.168.30.1", got)
+	}
+	dhcp := `arch: amd64
+cores: 2
+net0: name=eth0,bridge=vmbr0,ip=dhcp,type=veth
+ostype: debian
+`
+	if got := parsePctGateway(dhcp); got != "" {
+		t.Errorf("dhcp gw = %q, want empty (no gw= key)", got)
+	}
+}
+
+// TestWorldManaged keeps a recorded k3s guest in the manifest when a re-run
+// skips k3s, so teardown still destroys it instead of leaking the LXC + LV.
+func TestWorldManaged(t *testing.T) {
+	got := worldManaged(false, false, ptr(uint32(102)))
+	if !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+		t.Errorf("skipped k3s with recorded vmid = %v, want relay/cp/k3s", got)
+	}
+	if got := worldManaged(false, false, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("skipped k3s with no vmid = %v, want relay/cp", got)
+	}
+	if got := worldManaged(true, true, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full world = %v", got)
+	}
+}
+
+func TestManagedForFlags(t *testing.T) {
+	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("base = %v", got)
+	}
+	if got := managedForFlags(true, false); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+		t.Errorf("with k3s = %v", got)
+	}
+	if got := managedForFlags(true, true); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full = %v", got)
+	}
+}
+
 func TestRecordLxcFreshLoadClobber(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
