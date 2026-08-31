@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"encoding/hex"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -514,4 +516,107 @@ func TestBootstrapStaticIPNoneIsDHCP(t *testing.T) {
 	if got := bootstrapStaticIP("relay", rebuildFlags{}, nil); got != "" {
 		t.Errorf("nil config should be DHCP, got %q", got)
 	}
+
+}
+
+// TestGenSecretHex: the re-minted master key + postgres password are 32-byte
+// random hex — valid input for every consumer (and never committed).
+func TestGenSecretHex(t *testing.T) {
+	a, b := genSecretHex(), genSecretHex()
+	if len(a) != 64 || len(b) != 64 {
+		t.Fatalf("secret must be 32 bytes hex, got %q / %q", a, b)
+	}
+	if a == b {
+		t.Fatal("two mints must differ")
+	}
+	if _, err := hex.DecodeString(a); err != nil {
+		t.Errorf("not hex: %v", err)
+	}
+}
+
+// TestLitellmManifestScript: the apply script creates the Secrets FROM ENV
+// (never a literal), embeds both workloads, and pins the durable PVC + the
+// fireworks egress — the C0 kube surface.
+func TestLitellmManifestScript(t *testing.T) {
+	out := litellmManifestScript(102)
+	for _, want := range []string{
+		"pct exec 102 -- sh -c",
+		"master-key=\\\"$FREEHOLD_LITELLM_MASTER\\\"",
+		"postgres-pw=\\\"$FREEHOLD_LITELLM_PG\\\"",
+		"provider-key=\\\"$FREEHOLD_LITELLM_PROVIDER\\\"",
+		"storageClassName: local-path",
+		"nodePort: 31400",
+		"35.207.52.96",                  // fireworks egress pin
+		"LITELLM_MASTER_KEY",            // pod reads the k8s Secret
+		"rollout status deploy/litellm", // readiness gate
+		"LEG1_OK",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("manifest script missing %q", want)
+		}
+	}
+	// The script must NEVER carry a literal secret value.
+	for _, forbidden := range []string{"fw_", "masterKey", "postgresPw", "$LITELLM"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("script leaked a literal: %q", forbidden)
+		}
+	}
+	if strings.Contains(out, "FREEHOLD_LITELLM_MASTER=") {
+		t.Error("script must not embed the secret value")
+	}
+}
+
+// TestLitellmRegisterScript: the registration leg asks the runner for the
+// two secrets BY NAME and uses them in env, never literal.
+func TestLitellmRegisterScript(t *testing.T) {
+	out := litellmRegisterScript()
+	for _, want := range []string{"$LITELLM", "$PROVIDER_KEY", "/model/new", "deepseek-v4-flash", "LEG2_OK"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("register script missing %q", want)
+		}
+	}
+	if strings.Contains(out, "fw_") {
+		t.Error("register script leaked the provider key")
+	}
+}
+
+// TestRecordLitellm: coords land in config + managed (Services row + DNS + a
+// teardown sees the gateway).
+func TestRecordLitellm(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	base := "domain = \"world.test\"\noperator_pubkey = \"" + strings.Repeat("a", 64) + "\"\nmanaged = [\"relay\", \"cp\", \"k3s\"]\n"
+	if err := os.WriteFile(cfgPath, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := &rebuildEngine{f: rebuildFlags{configPath: cfgPath}}
+	if err := e.recordLitellm("http://192.168.30.7:31400", "192.168.30.7"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Litellm.URL != "http://192.168.30.7:31400" || cfg.Litellm.Host != "192.168.30.7" {
+		t.Errorf("litellm coords = %+v", cfg.Litellm)
+	}
+	if !containsStr(cfg.Managed, "litellm") {
+		t.Errorf("managed must include litellm, got %v", cfg.Managed)
+	}
+	// idempotent: a second record doesn't duplicate the managed entry.
+	if err := e.recordLitellm("http://192.168.30.7:31400", "192.168.30.7"); err != nil {
+		t.Fatal(err)
+	}
+	if n := countStr(cfg.Managed, "litellm"); n != 1 {
+		t.Errorf("managed duplicated litellm %d times", n)
+	}
+}
+
+func countStr(list []string, s string) int {
+	n := 0
+	for _, v := range list {
+		if v == s {
+			n++
+		}
+	}
+	return n
 }

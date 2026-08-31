@@ -298,6 +298,46 @@ func (c *Client) PortalURL() (string, error) {
 	return c.base + "/api/auth/portal/" + v.Token, nil
 }
 
+// DnsRecord mirrors the console's DNS record row (C0 resolver).
+type DnsRecord struct {
+	Name      string `json:"name"`
+	IP        string `json:"ip"`
+	Source    string `json:"source"`
+	CreatedAt uint64 `json:"created_at"`
+}
+
+// DnsView is the console's DNS surface: records + the rendered addn-hosts.
+type DnsView struct {
+	DNS       []DnsRecord `json:"dns"`
+	AddnHosts string      `json:"addn_hosts"`
+}
+
+// ListDNS reads the CP resolver's explicit records (read-only panel).
+func (c *Client) ListDNS() (*DnsView, error) {
+	raw, err := c.request(http.MethodGet, "/api/dns", nil)
+	if err != nil {
+		return nil, err
+	}
+	var v DnsView
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// UpsertDNS registers/updates one explicit record on the CP resolver
+// (registration-owned: rebuild calls this after record_lxc; the litellm
+// apply registers the gateway name).
+func (c *Client) UpsertDNS(name, ip, source string) (json.RawMessage, error) {
+	req := map[string]string{"name": name, "ip": ip, "source": source}
+	return c.request(http.MethodPost, "/api/dns", req)
+}
+
+// RemoveDNS drops a record (missing = ok).
+func (c *Client) RemoveDNS(name string) (json.RawMessage, error) {
+	return c.request(http.MethodDelete, "/api/dns", map[string]string{"name": name})
+}
+
 func errorMessage(text string) string {
 	var v struct {
 		Error string `json:"error"`
