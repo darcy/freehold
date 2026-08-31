@@ -1754,14 +1754,17 @@ $EX "$K create ns litellm 2>/dev/null || true"
 # the operator's provider key is deliberately absent here (runner-only).
 $EX "$K create secret generic litellm-keys -n litellm --from-literal=master-key=__MASTER_ESC__ --dry-run=client -o yaml | $K apply -f -"
 $EX "$K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=__PG_ESC__ --dry-run=client -o yaml | $K apply -f -"
+# Manifests: written HOST-side (this exec runs on the PVE host where pct
+# lives), pushed INTO the guest, then applied with the full kubectl path.
+mkdir -p /tmp/litellm-manifests
 cat >/tmp/litellm-manifests/postgres.yaml <<'YAML'
 __POSTGRES__
 YAML
 cat >/tmp/litellm-manifests/litellm.yaml <<'YAML'
 __LITELLM__
 YAML
-cat /tmp/litellm-manifests/postgres.yaml | pct push __VMID__ - /tmp/litellm-manifests/postgres.yaml
-cat /tmp/litellm-manifests/litellm.yaml | pct push __VMID__ - /tmp/litellm-manifests/litellm.yaml
+pct push __VMID__ /tmp/litellm-manifests/postgres.yaml /tmp/litellm-manifests/postgres.yaml
+pct push __VMID__ /tmp/litellm-manifests/litellm.yaml /tmp/litellm-manifests/litellm.yaml
 $EX "$K apply -f /tmp/litellm-manifests/postgres.yaml"
 $EX "$K apply -f /tmp/litellm-manifests/litellm.yaml"
 $EX "$K rollout status deploy/litellm -n litellm --timeout=300s"
