@@ -417,7 +417,8 @@ async fn handle_exec(
             if !state.ctx.package.secrets.contains_key(name) {
                 return Err(exec::ExecError::UnknownSecret(format!(
                     "requested secret {name:?} is not in this runner's package — \
-                     {target} knows {}", meta.secret
+                     {target} knows {}",
+                    meta.secret
                 )));
             }
         }
@@ -1103,7 +1104,10 @@ mod tests {
         let pkg = SecretPackage {
             secrets: BTreeMap::from([
                 ("litellm".to_string(), seal_hex("litellm", b"MASTER-SECRET")),
-                ("provider-key".to_string(), seal_hex("provider-key", b"fw_PROVIDER")),
+                (
+                    "provider-key".to_string(),
+                    seal_hex("provider-key", b"fw_PROVIDER"),
+                ),
                 ("postgres-pw".to_string(), seal_hex("postgres-pw", b"PG-PW")),
             ]),
             targets: BTreeMap::from([(
@@ -1154,7 +1158,9 @@ mod tests {
         }
         let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
         assert!(
-            !text.contains("MASTER-SECRET") && !text.contains("fw_PROVIDER") && !text.contains("PG-PW"),
+            !text.contains("MASTER-SECRET")
+                && !text.contains("fw_PROVIDER")
+                && !text.contains("PG-PW"),
             "injected values must be redacted from output: {text}"
         );
         // The env reached the child: every requested secret is present under
