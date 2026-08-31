@@ -1550,6 +1550,12 @@ func (e *rebuildEngine) stageCpExec(cpBinArgs ...string) (string, error) {
 	return out, nil
 }
 
+// escapeSingle makes a value safe inside a single-quoted shell fragment
+// (the standard '\'\'' idiom) — used for the multi-line corefile.
+func escapeSingle(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
 // shellQuote single-quotes a string for sh (no embedded single quotes in the
 // values we pass — names/IPs are validated before reaching here).
 func shellQuote(s string) string {
@@ -1621,8 +1627,8 @@ func (e *rebuildEngine) stageDnsPoint() error {
 		}
 		ns := fmt.Sprintf("nameserver %s", resolver)
 		cmd := fmt.Sprintf(
-			"pct exec %d -- sh -c 'grep -q %s /etc/resolv.conf 2>/dev/null || echo %s >> /etc/resolv.conf'",
-			*g.Vmid, shellQuote(ns), shellQuote(ns))
+			"pct exec %d -- sh -c \"grep -qF '%s' /etc/resolv.conf 2>/dev/null || echo '%s' >> /etc/resolv.conf\"",
+			*g.Vmid, resolver, ns)
 		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
 			return fmt.Errorf("pointing %s at the resolver failed:\n%s", role, out)
 		}
@@ -1651,8 +1657,8 @@ func (e *rebuildEngine) stageDnsPoint() error {
     loadbalance
 }`, resolver)
 		cmd := fmt.Sprintf(
-			"pct exec %d -- bash -c 'printf %%s > /tmp/coredns.conf %s && /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml create cm coredns -n kube-system --from-file=Corefile=/tmp/coredns.conf --dry-run=client -o yaml | /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f - && /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml rollout restart deploy/coredns -n kube-system'",
-			*cfg.Lxc.K3s.Vmid, shellQuote(corefile))
+			"pct exec %d -- bash -c \"printf %%s > /tmp/coredns.conf '%s' && /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml create cm coredns -n kube-system --from-file=Corefile=/tmp/coredns.conf --dry-run=client -o yaml | /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f - && /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml rollout restart deploy/coredns -n kube-system\"",
+			*cfg.Lxc.K3s.Vmid, escapeSingle(corefile))
 		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 90)); !ok {
 			return fmt.Errorf("pointing k3s coredns at the resolver failed:\n%s", out)
 		}
