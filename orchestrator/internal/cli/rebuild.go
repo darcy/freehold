@@ -1551,7 +1551,7 @@ func (e *rebuildEngine) stageCpExec(cpBinArgs ...string) (string, error) {
 }
 
 // escapeSingle makes a value safe inside a single-quoted shell fragment
-// (the standard '\'\'' idiom) — used for the multi-line corefile.
+// (close-quote, quoted quote, reopen) — used for the multi-line corefile.
 func escapeSingle(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
 }
