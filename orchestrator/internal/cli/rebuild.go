@@ -1536,8 +1536,10 @@ func (e *rebuildEngine) stageCpExec(cpBinArgs ...string) (string, error) {
 	for i, a := range cpBinArgs {
 		quoted[i] = shellQuote(a)
 	}
-	inner := fmt.Sprintf("'%s/control-plane' %s --state-dir '%s'",
-		binDir, strings.Join(quoted, " "), stateDir)
+	// --state-dir lives on the `dns` PARENT (before the subcommand), so
+	// insert it there rather than at the tail.
+	inner := fmt.Sprintf("'%s/control-plane' dns --state-dir '%s' %s",
+		binDir, stateDir, strings.Join(quoted, " "))
 	cmd := fmt.Sprintf("pct exec %d -- sh -c %s", vmid, shellQuote(inner))
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 120))
 	if !ok {
