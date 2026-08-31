@@ -170,6 +170,17 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			}
 			return "no API answer at " + config.StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443", false
 		}},
+		{"litellm", func() (string, bool) {
+			if cfg.Litellm.URL == "" {
+				m.LitellmLive = false
+				return "not deployed (no gateway coords)", true
+			}
+			m.LitellmLive = config.LitellmLive(cfg)
+			if m.LitellmLive {
+				return "gateway healthy at " + cfg.Litellm.URL, true
+			}
+			return "no answer at " + cfg.Litellm.URL, false
+		}},
 		{"world state", func() (string, bool) {
 			m.buildServices(cfg)
 			m.readLocalRunners(cfg)

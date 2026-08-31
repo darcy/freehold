@@ -13,6 +13,7 @@
 //! the source of record and every route reads it directly.
 
 pub mod console;
+pub mod dns;
 pub mod provisioner;
 pub mod state;
 pub mod web;

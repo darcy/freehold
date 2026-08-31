@@ -411,6 +411,10 @@ pub fn router(
         .route("/api/grant", post(grant))
         .route("/api/revoke-grant", post(revoke_grant))
         .route("/api/runner-addr", post(runner_addr))
+        .route(
+            "/api/dns",
+            get(dns_list).post(dns_upsert).delete(dns_remove),
+        )
         .route("/api/runner/{name}/channel", get(runner_channel))
         .route("/api/agents", get(agents_list).post(agents_register))
         .route("/api/agents/{name}", axum::routing::delete(agents_remove))
@@ -488,6 +492,19 @@ fn action_error(e: ProvisionError) -> (StatusCode, Json<Value>) {
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
     };
     (code, Json(json!({"error": msg})))
+}
+
+fn dns_error(e: crate::dns::DnsError) -> (StatusCode, Json<Value>) {
+    match e {
+        crate::dns::DnsError::InvalidName { .. } | crate::dns::DnsError::InvalidIp { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 fn state_error(e: crate::state::StateError) -> (StatusCode, Json<Value>) {
@@ -850,6 +867,113 @@ async fn revoke_grant(
 /// The console's configured relay scope (state.json), if any.
 fn relay_url(state: &WebState) -> Option<String> {
     state.store.snapshot().relay_url
+}
+
+#[derive(Deserialize)]
+struct DnsReq {
+    name: String,
+    ip: String,
+    #[serde(default)]
+    source: String,
+}
+
+/// C0: read-only list of the resolver's explicit records + the rendered
+/// addn-hosts (the TUI's DNS panel + the operator's read-only mirror).
+async fn dns_list(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    let snap = state.store.snapshot();
+    let mut records = Vec::with_capacity(snap.dns.len());
+    for (name, rec) in &snap.dns {
+        records.push(
+            json!({"name": name, "ip": rec.ip, "source": rec.source, "created_at": rec.created_at}),
+        );
+    }
+    Ok(Json(json!({
+        "dns": records,
+        "addn_hosts": crate::dns::render_addn_hosts(&snap.dns, snap.resolver_domain.as_deref()),
+    })))
+}
+
+/// C0: upsert one explicit record (registration-owned — rebuild calls this
+/// after record_lxc; the litellm apply calls it for the gateway name).
+async fn dns_upsert(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(req): Json<DnsReq>,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    // The CP LXC IS the resolver host: upsert + re-sync happen in one op.
+    let rec = crate::dns::upsert(
+        &state.store,
+        &req.name,
+        &req.ip,
+        if req.source.is_empty() {
+            "api"
+        } else {
+            &req.source
+        },
+    )
+    .map_err(|e| dns_error(e).into_response())?;
+    let dns_err = {
+        let snap = state.store.snapshot();
+        crate::dns::sync_resolver(
+            state.store.dir(),
+            &snap.dns,
+            snap.resolver_domain.as_deref(),
+            &dns_write,
+            &dns_reload,
+        )
+    };
+    match dns_err {
+        Ok(()) => Ok(Json(json!({"ok": true, "name": req.name, "ip": rec.ip}))),
+        Err(e) => Err(dns_error(e).into_response()),
+    }
+}
+
+/// C0: remove a record (missing = ok).
+async fn dns_remove(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(req): Json<DnsReq>,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    crate::dns::remove(&state.store, &req.name).map_err(|e| dns_error(e).into_response())?;
+    let snap = state.store.snapshot();
+    crate::dns::sync_resolver(
+        state.store.dir(),
+        &snap.dns,
+        snap.resolver_domain.as_deref(),
+        &dns_write,
+        &dns_reload,
+    )
+    .map_err(|e| dns_error(e).into_response())?;
+    Ok(Json(json!({"ok": true, "name": req.name})))
+}
+
+/// Write the addn-hosts file under the CP state dir (durable plane).
+fn dns_write(path: &std::path::Path, body: &str) -> Result<(), String> {
+    std::fs::write(path, body).map_err(|e| e.to_string())
+}
+
+/// Ensure dnsmasq is installed, pointed at the addn-hosts file, and reloaded.
+fn dns_reload() -> Result<(), String> {
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v dnsmasq >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsmasq >/dev/null 2>&1); mkdir -p /etc/dnsmasq.d")
+        .output()
+        .map_err(|e| e.to_string())?;
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true")
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Chunk 2.6.1 — the operator's runner-channel view: the CP queries the

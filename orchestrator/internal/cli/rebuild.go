@@ -21,6 +21,8 @@ package cli
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -55,6 +57,11 @@ var rebuildCmd = &cobra.Command{
 		f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 		f.thinPool, _ = cmd.Flags().GetString("thin-pool")
 		f.withK3s, _ = cmd.Flags().GetBool("with-k3s")
+		f.withLitellm, _ = cmd.Flags().GetBool("with-litellm")
+		f.litellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
+		if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
+			f.litellmProviderKey = v
+		}
 		f.rootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
 		f.memoryMB, _ = cmd.Flags().GetUint32("memory-mb")
 		f.relayGw, _ = cmd.Flags().GetString("relay-gw")
@@ -94,6 +101,8 @@ func init() {
 	rebuildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	rebuildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
 	rebuildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for STATIC guest IPs (unused with DHCP)")
+	rebuildCmd.Flags().Bool("with-litellm", false, "C0: deploy the litellm gateway (kube workloads + runner + model registration) during the rebuild")
+	rebuildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (C0 — supplied at bootstrap, never committed; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	rebuildCmd.Flags().String("relay-ip", "", "STATIC relay LXC IP (CIDR, e.g. 192.168.30.8/24) — absent => DHCP (Rust: the recorded config ip is re-booted static)")
 	rebuildCmd.Flags().String("cp-ip", "", "STATIC control-plane LXC IP (CIDR) — absent => DHCP")
 	rebuildCmd.Flags().String("k3s-ip", "", "STATIC k3s LXC IP (CIDR) — absent => DHCP")
@@ -104,25 +113,27 @@ func init() {
 
 // rebuildFlags is the command's collected answers.
 type rebuildFlags struct {
-	addr             string
-	target           string
-	host             string
-	domain           string
-	operatorPubkey   string
-	operatorIdentity string
-	sizeGB           uint64
-	poolSizeGB       uint64
-	thinPool         string
-	withK3s          bool
-	rootfsGB         uint32
-	memoryMB         uint32
-	relayGw          string
-	relayIP          string
-	cpIP             string
-	k3sIP            string
-	configPath       string
-	confirmStorage   bool
-	yes              bool
+	addr               string
+	target             string
+	host               string
+	domain             string
+	operatorPubkey     string
+	operatorIdentity   string
+	sizeGB             uint64
+	poolSizeGB         uint64
+	thinPool           string
+	withK3s            bool
+	withLitellm        bool
+	litellmProviderKey string
+	rootfsGB           uint32
+	memoryMB           uint32
+	relayGw            string
+	relayIP            string
+	cpIP               string
+	k3sIP              string
+	configPath         string
+	confirmStorage     bool
+	yes                bool
 }
 
 // rebuildBins are the resolved sibling binary paths. Go has no
@@ -189,6 +200,7 @@ type rebuildEngine struct {
 
 	// seams
 	runBin   func(bin string, args []string) (bool, string)
+	runEnv   func(bin string, env []string, args []string) (bool, string)
 	runSh    func(script string) (string, error)
 	portOpen func(addr string) bool
 	curlGet  func(url string) (string, bool)
@@ -219,6 +231,7 @@ func newRebuildEngine(f rebuildFlags) (*rebuildEngine, error) {
 		out:      os.Stdout,
 		in:       os.Stdin,
 		runBin:   runBinDefault,
+		runEnv:   runEnvDefault,
 		runSh:    runShDefault,
 		portOpen: portOpenDefault,
 		curlGet:  curlGetDefault,
@@ -229,6 +242,16 @@ func newRebuildEngine(f rebuildFlags) (*rebuildEngine, error) {
 // runBinDefault runs a sibling binary capturing stdout+stderr (Rust run()).
 func runBinDefault(bin string, args []string) (bool, string) {
 	out, err := exec.Command(bin, args...).CombinedOutput()
+	return err == nil, string(out)
+}
+
+// runEnvDefault runs a sibling binary with an EXTRA env var prefix (the
+// headless secret supply: values ride env, never argv — provision/add-secret
+// read them via --secret-env).
+func runEnvDefault(bin string, env []string, args []string) (bool, string) {
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(env, os.Environ()...)
+	out, err := cmd.CombinedOutput()
 	return err == nil, string(out)
 }
 
@@ -366,6 +389,26 @@ func (e *rebuildEngine) run() error {
 		return err
 	}
 	fmt.Fprintf(e.out, "  ✓ control plane live at https://cp-%s\n", e.f.domain)
+
+	// 14.5. C0: the litellm gateway — provision the litellm runner (master +
+	// provider + postgres secrets sealed to it), apply the kube workloads,
+	// register the model, and record the coords for the Services row.
+	if e.f.withLitellm {
+		if err := e.stageLitellm(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.out, "  ✓ litellm gateway live")
+	}
+
+	// 14.7. C0: register the CP resolver's explicit records (relay/cp/k3s +
+	// litellm) INSIDE the deployed CP, then point every guest at it.
+	if err := e.stageDnsRegister(); err != nil {
+		return err
+	}
+	if err := e.stageDnsPoint(); err != nil {
+		return err
+	}
+	fmt.Fprintln(e.out, "  ✓ internal DNS resolver live (CP-owned)")
 
 	// 15. the relay's signing key via NIP-11 (best-effort trust anchor).
 	if rpk, ok := e.relayPubkeyNip11(); ok {
@@ -716,6 +759,38 @@ func (e *rebuildEngine) selfStage(name string, args []string) (string, error) {
 		return "", fmt.Errorf("%s failed:\n%s", name, out)
 	}
 	return out, nil
+}
+
+// stageServeRunner serves an ADDITIONAL runner package on a dedicated
+// loopback addr (C0: the litellm runner at 127.0.0.1:8788 — its exec reaches
+// the gateway NodePort and carrries the 3-secret package). Returns the pid.
+func (e *rebuildEngine) stageServeRunner(name, pkg string) (string, error) {
+	addr := "127.0.0.1:8788"
+	e.killServeOn(addr)
+	logPath := filepath.Join(freeholdHome(), "installer", name+".serve.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return "", err
+	}
+	script := fmt.Sprintf("nohup '%s' serve --state-dir %s --addr %s > %s 2>&1 & echo $!",
+		e.bins.Runner, pkg, addr, logPath)
+	out, _ := e.runSh(script)
+	pid := strings.TrimSpace(out)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if e.portOpen(addr) {
+			return pid, nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return "", fmt.Errorf("the %s runner didn't come up on %s within 20s — see %s", name, addr, logPath)
+}
+
+// stopRunner kills a runner pid (best-effort; the serve was detached).
+func (e *rebuildEngine) stopRunner(pid string) {
+	if pid == "" {
+		return
+	}
+	_, _ = e.runSh(fmt.Sprintf("kill '%s' >/dev/null 2>&1 || true", pid))
 }
 
 // ---- config writes ---------------------------------------------------------
@@ -1427,6 +1502,549 @@ func parsePctMounts(out string) []string {
 		}
 	}
 	return mounts
+}
+
+// cpBinDir resolves the DEPLOYED control-plane binary + state dir inside the
+// cp LXC (the same mounts stageDeployCp uses): the last plane mount is the CP
+// root, bin/ + control-plane/ live under it.
+func (e *rebuildEngine) cpGuestDirs() (binDir, stateDir string, err error) {
+	vmid, err := e.findLxcVmidExact("cp")
+	if err != nil {
+		return "", "", err
+	}
+	mounts := e.guestMounts(vmid)
+	if len(mounts) == 0 {
+		return "", "", fmt.Errorf("cp LXC has no plane mount — cannot find the deployed CP")
+	}
+	root := mounts[len(mounts)-1]
+	return root + "/bin", root + "/control-plane", nil
+}
+
+// stageCpExec runs a command via the DEPLOYED CP binary inside its LXC
+// (through the runner's pct exec): `pct exec <cp> -- <bin>/control-plane ARGS
+// --state-dir <state>`. The pattern deploy-cp already uses for adopt/grant.
+func (e *rebuildEngine) stageCpExec(cpBinArgs ...string) (string, error) {
+	binDir, stateDir, err := e.cpGuestDirs()
+	if err != nil {
+		return "", err
+	}
+	vmid, err := e.findLxcVmidExact("cp")
+	if err != nil {
+		return "", err
+	}
+	// cpBinArgs[0] is the PARENT subcommand (e.g. dns) and --state-dir lives
+	// on IT, before its sub-subcommand. The caller passes the full chain
+	// ("dns", "add", ...), so quote each and insert --state-dir after the
+	// parent without duplicating it.
+	quoted := make([]string, len(cpBinArgs))
+	for i, a := range cpBinArgs {
+		quoted[i] = shellQuote(a)
+	}
+	inner := fmt.Sprintf("'%s/control-plane' %s --state-dir '%s' %s",
+		binDir, quoted[0], stateDir, strings.Join(quoted[1:], " "))
+	cmd := fmt.Sprintf("pct exec %d -- sh -c %s", vmid, shellQuote(inner))
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 120))
+	if !ok {
+		return "", fmt.Errorf("in-LXC cp command failed:\n%s", out)
+	}
+	return out, nil
+}
+
+// escapeSingle makes a value safe inside a single-quoted shell fragment
+// (close-quote, quoted quote, reopen) — used for the multi-line corefile.
+func escapeSingle(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// shellQuote single-quotes a string for sh (no embedded single quotes in the
+// values we pass — names/IPs are validated before reaching here).
+func shellQuote(s string) string {
+	return "'" + s + "'"
+}
+
+// stageDnsRegister records the resolver's EXPLICIT names inside the deployed
+// CP: relay/cp/k3s (their live coords) + litellm (the k3s node) — the same
+// trigger points that write the LXC coords. Idempotent (upsert).
+func (e *rebuildEngine) stageDnsRegister() error {
+	type rec struct{ name, ip, source string }
+	var recs []rec
+	cfg, _ := config.Load(e.f.configPath)
+	if cfg != nil {
+		for _, role := range []string{"relay", "cp", "k3s"} {
+			g := map[string]config.LxcGuest{
+				"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s,
+			}[role]
+			if g.Ip != nil {
+				recs = append(recs, rec{name: role, ip: config.StripCIDR(*g.Ip), source: "record_lxc " + role})
+			}
+		}
+		if cfg.Litellm.Host != "" {
+			recs = append(recs, rec{name: "litellm", ip: cfg.Litellm.Host, source: "litellm-apply"})
+		}
+	}
+	// Configure the mirror BEFORE the remote sync: if the CP is unreachable
+	// the config still records the intent (the panel + teardown see it; a
+	// re-run re-syncs the resolver).
+	if cfg != nil {
+		if cfg.Dns.Records == nil {
+			cfg.Dns.Records = map[string]string{}
+		}
+		for _, r := range recs {
+			cfg.Dns.Records[r.name] = r.ip
+		}
+		if err := cfg.Save(e.f.configPath); err != nil {
+			return err
+		}
+	}
+	if len(recs) == 0 {
+		return nil
+	}
+	// The guests' resolv.conf carries PVE's `search` line; register it as the
+	// resolver's world domain so addn-hosts serves <name>.<search> FIRST (the
+	// glibc search-first lookup gets the split-horizon answer, not the
+	// public/tailscale record through upstream).
+	searchBase := e.guestSearchBase()
+	for _, r := range recs {
+		args := []string{"dns", "add", r.name, r.ip, r.source}
+		if searchBase != "" {
+			args = append(args, "--domain", searchBase)
+		}
+		if _, err := e.stageCpExec(args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// guestSearchBase reads the `search` line from the CP LXC's resolv.conf (PVE
+// writes the same search domain to every guest it manages). Empty when the
+// line is absent — the resolver then stays bare-name only.
+func (e *rebuildEngine) guestSearchBase() string {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return ""
+	}
+	cmd := fmt.Sprintf(
+		"pct exec %d -- sh -c \"grep '^search' /etc/resolv.conf | head -1 | cut -d' ' -f2-\"",
+		*cfg.Lxc.Cp.Vmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return ""
+	}
+	base := strings.TrimSpace(out)
+	if base == "" || strings.ContainsAny(base, " \"'`$;(){}") {
+		return ""
+	}
+	// a single label is not a useful search base
+	if !strings.Contains(base, ".") {
+		return ""
+	}
+	return base
+}
+
+// guestNameserver reads the CP LXC's current first PVE-managed nameserver
+// (the router) — kept as the CP's own secondary so dnsmasq has an upstream
+// for external names once pct set makes the resolver primary.
+func (e *rebuildEngine) guestNameserver() string {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return ""
+	}
+	cmd := fmt.Sprintf(
+		"pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | head -1 | cut -d' ' -f2\"",
+		*cfg.Lxc.Cp.Vmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return ""
+	}
+	ns := strings.TrimSpace(out)
+	if ns == "" || !strings.ContainsAny(ns, "0123456789") {
+		return ""
+	}
+	return ns
+}
+
+// stageDnsPoint points every managed guest at the CP resolver: write
+// nameserver into each LXC's resolv.conf (idempotent) and set k3s coredns's
+// `forward .` to the resolver so pods resolve *.freehold.internal.
+func (e *rebuildEngine) stageDnsPoint() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Ip == nil {
+		return fmt.Errorf("no control-plane IP recorded — cannot point guests at the resolver")
+	}
+	resolver := config.StripCIDR(*cfg.Lxc.Cp.Ip)
+
+	// LXCs: the CP resolver becomes each guest's PRIMARY nameserver via
+	// `pct set --nameserver` — PVE-managed, durable across guest reboots (a
+	// hand-appended line dies on boot). glibc is search-first (ndots=1), and
+	// the resolver now serves <name>.<search> records, so e.g. "litellm"
+	// resolves to the internal k3s IP, never the public/tailscale record via
+	// the router. The CP itself KEEPS the router as a secondary so its
+	// dnsmasq still has an upstream for external names.
+	searchBase := e.guestSearchBase()
+	router := e.guestNameserver()
+	for _, role := range []string{"relay", "cp", "k3s"} {
+		g := map[string]config.LxcGuest{
+			"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s,
+		}[role]
+		if g.Vmid == nil {
+			continue
+		}
+		nsList := resolver
+		if role == "cp" && router != "" {
+			nsList += " " + router
+		}
+		parts := []string{"set", strconv.FormatUint(uint64(*g.Vmid), 10), "--nameserver", nsList}
+		if searchBase != "" {
+			parts = append(parts, "--searchdomain", searchBase)
+		}
+		quoted := make([]string, len(parts))
+		for i, a := range parts {
+			quoted[i] = shellQuote(a)
+		}
+		cmd := "pct " + strings.Join(quoted, " ")
+		fmt.Fprintf(e.out, "  · pct: %s\n", cmd)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
+			return fmt.Errorf("pointing %s at the resolver failed:\n%s", role, out)
+		}
+		// pct only regenerates resolv.conf at the NEXT boot — write it now.
+		// Values are validated IPs / charset-checked search base: single-quote
+		// at the innermost level only (no nested-quote hang).
+		body := "nameserver " + resolver + "\n"
+		if role == "cp" && router != "" {
+			body += "nameserver " + router + "\n"
+		}
+		if searchBase != "" {
+			body = "search " + searchBase + "\n" + body
+		}
+		rcmd := fmt.Sprintf(
+			"pct exec %d -- sh -c \"printf '%s' > /etc/resolv.conf\"",
+			*g.Vmid, body)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(rcmd, 60)); !ok {
+			return fmt.Errorf("writing %s resolv.conf failed:\n%s", role, out)
+		}
+	}
+
+	// Honest gate: the resolver must ANSWER a record from the CP's own
+	// loopback, not merely have tcp/53 open. dnsmasq serves addn-hosts only
+	// if it could READ the file at start — a 0700 state dir makes it fail
+	// silently ("Permission denied") while the port still probes green. The
+	// deployed CP's dns sync repairs perms; asking for a real answer proves
+	// the whole chain (render -> write -> dnsmasq load) landed.
+	relayIP := ""
+	if cfg.Lxc.Relay.Ip != nil {
+		relayIP = config.StripCIDR(*cfg.Lxc.Relay.Ip)
+	}
+	litellmIP := cfg.Litellm.Host
+	var cpVmid *uint32
+	cpVmid = cfg.Lxc.Cp.Vmid
+	for _, q := range []struct{ name, want string }{
+		{"relay", relayIP},
+		{"litellm", litellmIP},
+	} {
+		if q.want == "" || cpVmid == nil {
+			continue
+		}
+		cmd := fmt.Sprintf(
+			"pct exec %d -- sh -c \"dig +short +time=2 +tries=1 %s @127.0.0.1 2>/dev/null | grep -qx '%s'\"",
+			*cpVmid, q.name, q.want)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30)); !ok {
+			return fmt.Errorf("resolver did not answer %s -> %s (dnsmasq addn-hosts load failed?):\n%s",
+				q.name, q.want, out)
+		}
+	}
+	return nil
+}
+
+// stageLitellm deploys the litellm gateway in two legs:
+//
+//	Leg 1 (kube workloads, no agent secrets): the orchestrator writes the
+//	k8s Secrets (master key + postgres pw are ITS generated material; the
+//	provider key is the operator's bootstrap supply) and applies the
+//	postgres + litellm manifests inside the k3s LXC via the proxmox runner.
+//	Leg 2 (admin call, runner-decrypted): the litellm runner SERVES on
+//	loopback with the three-secret package; the model registration curl runs
+//	THROUGH it with the secrets requested BY NAME — the runner decrypts,
+//	injects env, redacts output (the locked agent-vs-secret shape).
+func (e *rebuildEngine) stageLitellm() error {
+	if e.f.litellmProviderKey == "" {
+		return fmt.Errorf("litellm needs the provider key at bootstrap: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY")
+	}
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.K3s.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("no k3s coords recorded — cannot place the litellm gateway")
+	}
+	k3sIP := config.StripCIDR(*cfg.Lxc.K3s.Ip)
+	k3sVmid := *cfg.Lxc.K3s.Vmid
+	gwURL := "http://" + k3sIP + ":31400"
+
+	masterKey := genSecretHex()  // litellm's admin key (re-mint)
+	postgresPw := genSecretHex() // postgres password
+	providerKey := e.f.litellmProviderKey
+
+	// ---- Leg 1: kube workloads. The k8s Secrets (master + postgres pw) are
+	// CP-GENERATED installer material (like deploy flags) — they cross the
+	// ssh runner as shell-quoted literals in the script. The OPERATOR's
+	// provider key is NOT here: it rides ONLY the runner package (leg 2).
+	leg1 := litellmManifestScript(k3sVmid, masterKey, postgresPw, providerKey)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(leg1, 420))
+	if !ok {
+		return fmt.Errorf("litellm kube apply failed:\n%s", out)
+	}
+
+	// ---- Leg 2: model registration through the litellm runner. -----------
+	runnerDir := filepath.Join(rbRunnerPkgs(), "litellm")
+	agentPK := e.opsAgentPubkey()
+	env := append(
+		[]string{"FREEHOLD_LITELLM_MASTER=" + masterKey},
+		os.Environ()...,
+	)
+	ok, out = e.runEnv(e.bins.ControlPlane, env, []string{
+		"provision", "litellm",
+		"--kind", "litellm",
+		"--address", gwURL,
+		"--state-dir", rbStateDir(),
+		"--runner-dir", runnerDir,
+		"--grant", agentPK,
+		"--secret-env", "FREEHOLD_LITELLM_MASTER",
+	})
+	if !ok && !isProvisionReuse(out) {
+		return fmt.Errorf("provision litellm runner failed:\n%s", out)
+	}
+	for _, extra := range []struct{ name, env string }{
+		{"provider-key", "FREEHOLD_LITELLM_PROVIDER"},
+		{"postgres-pw", "FREEHOLD_LITELLM_PG"},
+	} {
+		extraEnv := append(
+			[]string{extra.env + "=" + map[string]string{"provider-key": providerKey, "postgres-pw": postgresPw}[extra.name]},
+			os.Environ()...,
+		)
+		if ok, out := e.runEnv(e.bins.ControlPlane, extraEnv, []string{
+			"add-secret", "litellm", extra.name,
+			"--state-dir", rbStateDir(),
+			"--secret-env", extra.env,
+		}); !ok {
+			return fmt.Errorf("add-secret %s failed:\n%s", extra.name, out)
+		}
+	}
+
+	// Serve the litellm runner on loopback, exec the registration through it.
+	pid, err := e.stageServeRunner("litellm", runnerDir)
+	if err != nil {
+		return err
+	}
+	defer e.stopRunner(pid)
+
+	regScript := litellmRegisterScript()
+	ok, out = e.runEnv(e.bins.Self, os.Environ(), e.execArgs(
+		fmt.Sprintf("exec --target litellm --secrets litellm,provider-key %s", regScript), 120))
+	if !ok {
+		return fmt.Errorf("litellm model registration failed:\n%s", out)
+	}
+
+	return e.recordLitellm(gwURL, k3sIP)
+}
+
+// litellmManifestScript applies the postgres + litellm kube resources inside
+// the k3s LXC: namespace, Secrets (values from exec env), PVC (local-path ->
+// the durable plane), deployments, NodePort service. No secrets in argv.
+func litellmManifestScript(k3sVmid uint32, masterKey, postgresPw, providerKey string) string {
+	sb := strings.ReplaceAll(`set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+EX="pct exec __VMID__ -- sh -c"
+$EX "mkdir -p /tmp/litellm-manifests"
+$EX "$K create ns litellm 2>/dev/null || true"
+# Secrets: CP-generated values are shell-quoted literals (deploy-flag shape);
+# the operator's provider key is deliberately absent here (runner-only).
+# Secrets are created ONLY when absent: the first run's values are the
+# authoritative ones (postgres initializes PGDATA against them, and the
+# reused runner package keeps them) — a re-run must never re-roll them.
+$EX "$K get secret litellm-keys -n litellm >/dev/null 2>&1 || $K create secret generic litellm-keys -n litellm --from-literal=master-key=__MASTER_ESC__ --from-literal=provider-key=__PROVIDER_ESC__"
+$EX "$K get secret litellm-pg -n litellm >/dev/null 2>&1 || $K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=__PG_ESC__"
+# Manifests: written HOST-side (this exec runs on the PVE host where pct
+# lives), pushed INTO the guest, then applied with the full kubectl path.
+mkdir -p /tmp/litellm-manifests
+cat >/tmp/litellm-manifests/postgres.yaml <<'YAML'
+__POSTGRES__
+YAML
+cat >/tmp/litellm-manifests/litellm.yaml <<'YAML'
+__LITELLM__
+YAML
+pct push __VMID__ /tmp/litellm-manifests/postgres.yaml /tmp/litellm-manifests/postgres.yaml
+pct push __VMID__ /tmp/litellm-manifests/litellm.yaml /tmp/litellm-manifests/litellm.yaml
+$EX "$K apply -f /tmp/litellm-manifests/postgres.yaml"
+$EX "$K apply -f /tmp/litellm-manifests/litellm.yaml"
+$EX "$K rollout status deploy/litellm -n litellm --timeout=300s"
+echo LEG1_OK`,
+		"__VMID__", strconv.FormatUint(uint64(k3sVmid), 10),
+	)
+	sb = strings.ReplaceAll(sb, "__POSTGRES__", litellmPostgresManifest)
+	sb = strings.ReplaceAll(sb, "__LITELLM__", litellmGatewayManifest)
+	sb = strings.ReplaceAll(sb, "__MASTER_ESC__", shQuoteLiteral(masterKey))
+	sb = strings.ReplaceAll(sb, "__PG_ESC__", shQuoteLiteral(postgresPw))
+	sb = strings.ReplaceAll(sb, "__PROVIDER_ESC__", shQuoteLiteral(providerKey))
+	return sb
+}
+
+// shQuoteLiteral single-quotes a value for a shell command embedded in the
+// exec script (CP-generated secrets only; the operator's keys never come
+// here — they ride the runner package).
+func shQuoteLiteral(v string) string {
+	return "'" + v + "'"
+}
+
+// litellmPostgresManifest is the postgres Deployment on the durable plane
+// (local-path -> /srv/data/k8s-volumes), password from the k8s Secret.
+const litellmPostgresManifest = `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-pg-data
+  namespace: litellm
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16
+        env:
+        - {name: POSTGRES_DB, value: litellm}
+        - {name: POSTGRES_USER, value: llmproxy}
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: litellm-pg, key: postgres-pw}
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/postgresql/data}
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: litellm-pg-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: litellm
+spec:
+  selector: {app: postgres}
+  ports:
+  - {port: 5432}`
+
+// litellmGatewayManifest is the litellm proxy (master key from the k8s
+// Secret, fireworks egress pinned, NodePort 31400 for the LAN/agents).
+const litellmGatewayManifest = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: litellm}
+  template:
+    metadata:
+      labels: {app: litellm}
+    spec:
+      containers:
+      - name: litellm
+        image: docker.litellm.ai/berriai/litellm:main-stable
+        ports:
+        - {containerPort: 4000}
+        env:
+        # The postgres password is the CP-GENERATED value from the litellm-pg
+        # Secret — the URL must reference it, never a hardcoded literal.
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: litellm-pg, key: postgres-pw}
+        - {name: DATABASE_URL, value: "postgresql://llmproxy:$(POSTGRES_PASSWORD)@postgres.litellm:5432/litellm"}
+        - {name: STORE_MODEL_IN_DB, value: "True"}
+        - name: LITELLM_MASTER_KEY
+          valueFrom:
+            secretKeyRef: {name: litellm-keys, key: master-key}
+        readinessProbe:
+          httpGet:
+            path: /health/liveliness
+            port: 4000
+          periodSeconds: 10
+          failureThreshold: 6
+      hostAliases:
+      - ip: "35.207.52.96"
+        hostnames: ["api.fireworks.ai"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: litellm
+spec:
+  type: NodePort
+  selector: {app: litellm}
+  ports:
+  - {port: 4000, targetPort: 4000, nodePort: 31400}`
+
+// litellmRegisterScript registers the model through the litellm runner: the
+// runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name.
+func litellmRegisterScript() string {
+	return `set -euo pipefail
+BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
+curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://127.0.0.1:31400/model/new" | head -c 300
+echo
+echo LEG2_OK
+`
+}
+
+// opsAgentPubkey returns the ops-agent's pubkey (the rebuild's signing
+// identity — same as deploy-cp grants).
+func (e *rebuildEngine) opsAgentPubkey() string {
+	id, err := flows.LoadIdentity(rbOpsDir())
+	if err != nil {
+		return ""
+	}
+	pk, _ := id.NostrPubkeyHex()
+	return pk
+}
+
+// genSecretHex mints a 32-byte random hex secret (master key / postgres pw).
+func genSecretHex() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "" // caller validates
+	}
+	return hex.EncodeToString(b)
+}
+
+// recordLitellm writes the gateway coords into the config (litellm section +
+// managed), so the Services row + teardown see it.
+func (e *rebuildEngine) recordLitellm(url, host string) error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	cfg.Litellm = config.LitellmSpec{URL: url, Host: host}
+	if !containsStr(cfg.Managed, "litellm") {
+		cfg.Managed = append(cfg.Managed, "litellm")
+	}
+	return cfg.Save(e.f.configPath)
 }
 
 // relayPubkeyNip11 reads the relay's signing pubkey via NIP-11 (best-effort

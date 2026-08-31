@@ -18,16 +18,18 @@ import (
 
 // Config is the connection profile / desired world state.
 type Config struct {
-	Domain           string    `toml:"domain"`
-	RelayURL         string    `toml:"relay_url"`
-	RelayPubkey      *string   `toml:"relay_pubkey,omitempty"`
-	CPURL            string    `toml:"cp_url"`
-	OperatorPubkey   string    `toml:"operator_pubkey"`
-	OperatorIdentity *string   `toml:"operator_identity,omitempty"`
-	Runner           RunnerRef `toml:"runner"`
-	Lxc              LxcSpec   `toml:"lxc"`
-	Plane            PlaneSpec `toml:"plane,omitempty"`
-	Managed          []string  `toml:"managed"`
+	Domain           string      `toml:"domain"`
+	RelayURL         string      `toml:"relay_url"`
+	RelayPubkey      *string     `toml:"relay_pubkey,omitempty"`
+	CPURL            string      `toml:"cp_url"`
+	OperatorPubkey   string      `toml:"operator_pubkey"`
+	OperatorIdentity *string     `toml:"operator_identity,omitempty"`
+	Runner           RunnerRef   `toml:"runner"`
+	Lxc              LxcSpec     `toml:"lxc"`
+	Plane            PlaneSpec   `toml:"plane,omitempty"`
+	Dns              DnsSpec     `toml:"dns,omitempty"`
+	Litellm          LitellmSpec `toml:"litellm,omitempty"`
+	Managed          []string    `toml:"managed"`
 }
 
 // PlaneSpec is the durable volume plane (Phase 0.12).
@@ -60,6 +62,20 @@ type LxcSpec struct {
 	Relay LxcGuest `toml:"relay"`
 	Cp    LxcGuest `toml:"cp"`
 	K3s   LxcGuest `toml:"k3s,omitempty"`
+}
+
+// DnsSpec is the CP-owned resolver's explicit records (name -> IP), the
+// same table the CP state holds — mirrored here for the TUI's read-only
+// panel + the services-at-a-glance render (the CP is authoritative).
+type DnsSpec struct {
+	Records map[string]string `toml:"records,omitempty"`
+}
+
+// LitellmSpec is the C0 gateway's coords: the kube NodePort URL the agents
+// call + which kube node hosts it (for teardown/readiness).
+type LitellmSpec struct {
+	URL  string `toml:"url,omitempty"`
+	Host string `toml:"host,omitempty"` // the k3s guest name
 }
 
 // LxcGuest is a managed LXC's connect/status coordinates.
@@ -201,6 +217,15 @@ func HTTPOK(url string) bool {
 // not "some proxy on that host answers". Mirrors Rust relay_live (http_ok).
 func RelayLive(cfg *Config) bool {
 	return HTTPOK(strings.TrimSuffix(cfg.RelayURL, "/") + "/_liveness")
+}
+
+// LitellmLive: any HTTP answer from the recorded litellm gateway URL (the
+// kube NodePort — /health/liveliness 200s when litellm is up).
+func LitellmLive(cfg *Config) bool {
+	if cfg.Litellm.URL == "" {
+		return false
+	}
+	return HTTPAny(strings.TrimSuffix(cfg.Litellm.URL, "/") + "/health/liveliness")
 }
 
 // StripCIDR drops the /prefix from a recorded CIDR ip ("1.2.3.4/24" ->

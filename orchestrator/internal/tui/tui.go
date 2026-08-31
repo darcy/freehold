@@ -53,6 +53,7 @@ const (
 	ViewAgents
 	ViewRunners
 	ViewData
+	ViewDNS
 )
 
 func (v View) String() string {
@@ -63,6 +64,8 @@ func (v View) String() string {
 		return "Runners"
 	case ViewData:
 		return "DATA"
+	case ViewDNS:
+		return "DNS"
 	default:
 		return "Services"
 	}
@@ -76,6 +79,7 @@ type Model struct {
 	RelayLive   bool
 	CPLive      bool
 	K3sLive     bool
+	LitellmLive bool
 	RunnerReach bool
 	Converged   bool
 	ActiveView  View
@@ -83,6 +87,7 @@ type Model struct {
 	DataCap     string
 	DataAt      time.Time
 	Services    []ServiceRow
+	DNS         []DnsRow
 	Agents      []AgentRow
 	Runners     []RunnerRow
 	Storage     []DataRow
@@ -98,6 +103,13 @@ type Model struct {
 }
 
 // ServiceRow is one managed piece of the world.
+// DnsRow is one explicit resolver record (C0 DNS panel).
+type DnsRow struct {
+	Name   string
+	IP     string
+	Source string
+}
+
 type ServiceRow struct {
 	Name   string
 	Where  string

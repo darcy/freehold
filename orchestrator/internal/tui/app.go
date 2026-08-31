@@ -64,7 +64,7 @@ func (m *Model) load(cfgPath string) error {
 	}
 	m.HasConfig = true
 	m.Domain = cfg.Domain
-	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.RunnerReach = false, false, false, false, false
+	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.LitellmLive, m.RunnerReach = false, false, false, false, false, false
 	// ModeRunning until the boot check proves otherwise — the activity view
 	// covers the screen while the probes run, and the check settles the
 	// real mode (its k3s/world-state steps populate the dashboard rows).
@@ -121,6 +121,11 @@ func (m *Model) buildServices(cfg *config.Config) {
 				row.URL = "—"
 			}
 			row.Status = boolStatus(m.K3sLive, "live", "down")
+		case "litellm":
+			row.Name = "litellm (gateway)"
+			row.Where = "kube · " + cfg.Litellm.Host
+			row.URL = cfg.Litellm.URL
+			row.Status = boolStatus(m.LitellmLive, "live", "down")
 		default:
 			row.Where = "managed"
 			row.Status = "—"
@@ -129,6 +134,12 @@ func (m *Model) buildServices(cfg *config.Config) {
 	}
 	if len(m.Services) == 0 {
 		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
+	}
+	// The CP resolver's explicit records (C0 DNS panel) — from config where
+	// the rebuild mirrored them (the CP is authoritative; this is the panel).
+	m.DNS = nil
+	for name, ip := range cfg.Dns.Records {
+		m.DNS = append(m.DNS, DnsRow{Name: name, IP: ip, Source: "config mirror"})
 	}
 }
 
@@ -409,14 +420,14 @@ func (m *Model) nextView() {
 		m.ActiveView = ViewServices
 		return
 	}
-	m.ActiveView = View((int(m.ActiveView) + 1) % 4)
+	m.ActiveView = View((int(m.ActiveView) + 1) % 5)
 }
 func (m *Model) prevView() {
 	if m.Mode != ModeRunning {
 		m.ActiveView = ViewServices
 		return
 	}
-	m.ActiveView = View((int(m.ActiveView) + 3) % 4)
+	m.ActiveView = View((int(m.ActiveView) + 4) % 5)
 }
 
 // ---- View ----------------------------------------------------------------
@@ -451,10 +462,11 @@ func (m *Model) View() string {
 }
 
 func renderProbes(m *Model) string {
-	return fmt.Sprintf("  relay %s  cp %s  k3s %s  runner %s",
+	return fmt.Sprintf("  relay %s  cp %s  k3s %s  litellm %s  runner %s",
 		boolStatus(m.RelayLive, "green", "red"),
 		boolStatus(m.CPLive, "green", "red"),
 		boolStatus(m.K3sLive, "green", "red"),
+		boolStatus(m.LitellmLive, "green", "red"),
 		boolStatus(m.RunnerReach, "green", "red"),
 	)
 }
@@ -497,6 +509,15 @@ func renderViews(m *Model) string {
 		headers = []string{"name", "where", "status", "url"}
 		for _, s := range m.Services {
 			rows = append(rows, []string{s.Name, s.Where, s.Status, s.URL})
+		}
+	case ViewDNS:
+		title = "DNS · the CP resolver's explicit records"
+		headers = []string{"name", "ip", "source"}
+		if len(m.DNS) == 0 {
+			rows = append(rows, []string{styleDim.Render("(no records — the resolver forwards everything upstream)")})
+		}
+		for _, d := range m.DNS {
+			rows = append(rows, []string{d.Name, d.IP, d.Source})
 		}
 	case ViewAgents:
 		headers = []string{"name", "pubkey", "available", "created"}

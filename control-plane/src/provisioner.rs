@@ -614,6 +614,61 @@ fn runner_meta(
     })
 }
 
+/// Add an EXTRA named secret to an existing runner's package (C0: the
+/// litellm runner carries the target credential — the master key — PLUS the
+/// provider key and the postgres password as additional `secrets` entries).
+/// The new value is sealed to the runner's OWN enc key under aad = its NAME
+/// (the same discipline the target credential uses), the package is re-shipped
+/// with ALL entries preserved, and a SecretRecord is recorded so rotate/list
+/// see it. The Chunk-1 "one secret per runner" phrasing loosens here: the
+/// TARGET stays single (its own credential), extras are named companions.
+pub fn add_secret(
+    store: &StateStore,
+    runner: &str,
+    secret_name: &str,
+    value: &[u8],
+) -> Result<SecretRecord, ProvisionError> {
+    if secret_name.is_empty() || secret_name.contains('/') || secret_name.starts_with('.') {
+        return Err(ProvisionError::InvalidName(secret_name.to_string()));
+    }
+    let runner_rec = store
+        .get_runner(runner)
+        .ok_or_else(|| StateError::RunnerNotFound(runner.to_string()))?;
+    if runner_rec.status == RunnerStatus::Revoked {
+        return Err(ProvisionError::RunnerRevoked(runner.to_string()));
+    }
+    let enc_pub = hex_to_arr(&runner_rec.enc_pubkey)?;
+    let sealed = crypto::seal(&enc_pub, secret_name.as_bytes(), value)?;
+    let ciphertext_hex = hex::encode(&sealed);
+
+    // Re-ship the package with the new entry appended to the existing map.
+    let mut pkg = SecretPackage::load(&runner_rec.package_dir)?;
+    pkg.secrets
+        .insert(secret_name.to_string(), ciphertext_hex.clone());
+    pkg.write_to_dir(&runner_rec.package_dir)?;
+
+    let now = now_secs();
+    let rec = SecretRecord {
+        runner: runner.to_string(),
+        kind: "extra".to_string(),
+        address: String::new(),
+        ciphertext_hex,
+        created_at: now,
+        rotated_at: None,
+    };
+    store.insert_secret(secret_name, rec.clone());
+    if let Err(e) = store.save() {
+        // Roll back the in-memory record AND the package entry — the runner
+        // must not end up with a secret the CP never recorded.
+        store.remove_secret(secret_name);
+        let mut pkg = SecretPackage::load(&runner_rec.package_dir).unwrap_or_default();
+        pkg.secrets.remove(secret_name);
+        let _ = pkg.write_to_dir(&runner_rec.package_dir);
+        return Err(e.into());
+    }
+    Ok(rec)
+}
+
 fn relay_err(op: &str, e: String) -> ProvisionError {
     ProvisionError::Io(std::io::Error::other(format!("relay {op}: {e}")))
 }
@@ -635,4 +690,109 @@ fn hex_to_arr(s: &str) -> Result<[u8; 32], ProvisionError> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Ok(arr)
+}
+
+#[cfg(test)]
+mod add_secret_tests {
+    use super::*;
+
+    fn provision(name: &str) -> (StateStore, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = StateStore::open(tmp.path()).unwrap();
+        let runner_dir = tmp.path().join("runner");
+        provision_runner(
+            &store,
+            &ProvisionRequest {
+                name,
+                kind: "litellm",
+                address: "http://192.168.30.7:31400",
+                secret: b"master-key-value",
+                runner_dir: &runner_dir,
+                grants: &[
+                    "a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0".to_string(),
+                ],
+                risk_level: Some("safe"),
+            },
+        )
+        .unwrap();
+        (store, tmp)
+    }
+
+    // The litellm package carries THREE named secrets: the target credential
+    // (master key) + provider key + postgres pw, all sealed to the runner's
+    // OWN enc key — the exact C0 shape. Each decrypts under aad = its name.
+    #[test]
+    fn litellm_package_holds_three_named_secrets() {
+        let (store, tmp) = provision("litellm");
+        add_secret(&store, "litellm", "provider-key", b"fw_provider_value").unwrap();
+        add_secret(&store, "litellm", "postgres-pw", b"pg-secret").unwrap();
+
+        let pkg = SecretPackage::load(&tmp.path().join("runner")).unwrap();
+        assert_eq!(pkg.secrets.len(), 3, "package secrets: {:?}", pkg.secrets);
+        for name in ["litellm", "provider-key", "postgres-pw"] {
+            assert!(pkg.secrets.contains_key(name), "missing {name}");
+        }
+
+        // A record per secret, all pointing at the runner; rotate/list see all.
+        let snap = store.snapshot();
+        assert_eq!(snap.secrets.len(), 3);
+        for name in ["litellm", "provider-key", "postgres-pw"] {
+            assert_eq!(snap.secrets[&name.to_string()].runner, "litellm");
+        }
+
+        // Decrypt each with the runner's OWN enc key — aad = the name.
+        let id = identity::Identity::load(&tmp.path().join("runner")).unwrap();
+        let enc = hex::decode(&id.enc_secret_hex()).unwrap();
+        let mut enc_arr = [0u8; 32];
+        enc_arr.copy_from_slice(&enc);
+        let master = crypto::open(
+            &enc_arr,
+            b"litellm",
+            &hex::decode(&pkg.secrets["litellm"]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(master, b"master-key-value");
+        let provider = crypto::open(
+            &enc_arr,
+            b"provider-key",
+            &hex::decode(&pkg.secrets["provider-key"]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(provider, b"fw_provider_value");
+        let pg = crypto::open(
+            &enc_arr,
+            b"postgres-pw",
+            &hex::decode(&pkg.secrets["postgres-pw"]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pg, b"pg-secret");
+    }
+
+    #[test]
+    fn add_secret_preserves_target_and_grants() {
+        let (store, tmp) = provision("litellm");
+        add_secret(&store, "litellm", "provider-key", b"v").unwrap();
+        let pkg = SecretPackage::load(&tmp.path().join("runner")).unwrap();
+        assert_eq!(pkg.targets["litellm"].address, "http://192.168.30.7:31400");
+        assert_eq!(pkg.targets["litellm"].secret, "litellm");
+        assert_eq!(
+            pkg.grants,
+            vec!["a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0"]
+        );
+    }
+
+    #[test]
+    fn add_secret_unknown_runner_fails() {
+        let (store, _) = provision("litellm");
+        let err = add_secret(&store, "nope", "provider-key", b"v").unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn add_secret_invalid_name_fails() {
+        let (store, _) = provision("litellm");
+        assert!(add_secret(&store, "litellm", "a/b", b"v").is_err());
+        assert!(add_secret(&store, "litellm", ".hidden", b"v").is_err());
+        assert!(add_secret(&store, "litellm", "", b"v").is_err());
+    }
 }
