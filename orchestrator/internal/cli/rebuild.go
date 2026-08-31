@@ -1532,14 +1532,16 @@ func (e *rebuildEngine) stageCpExec(cpBinArgs ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// cpBinArgs[0] is the PARENT subcommand (e.g. dns) and --state-dir lives
+	// on IT, before its sub-subcommand. The caller passes the full chain
+	// ("dns", "add", ...), so quote each and insert --state-dir after the
+	// parent without duplicating it.
 	quoted := make([]string, len(cpBinArgs))
 	for i, a := range cpBinArgs {
 		quoted[i] = shellQuote(a)
 	}
-	// --state-dir lives on the `dns` PARENT (before the subcommand), so
-	// insert it there rather than at the tail.
-	inner := fmt.Sprintf("'%s/control-plane' dns --state-dir '%s' %s",
-		binDir, stateDir, strings.Join(quoted, " "))
+	inner := fmt.Sprintf("'%s/control-plane' %s --state-dir '%s' %s",
+		binDir, quoted[0], stateDir, strings.Join(quoted[1:], " "))
 	cmd := fmt.Sprintf("pct exec %d -- sh -c %s", vmid, shellQuote(inner))
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 120))
 	if !ok {
