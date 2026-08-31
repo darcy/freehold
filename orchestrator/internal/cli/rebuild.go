@@ -1746,7 +1746,7 @@ func (e *rebuildEngine) stageLitellm() error {
 // the durable plane), deployments, NodePort service. No secrets in argv.
 func litellmManifestScript(k3sVmid uint32, masterKey, postgresPw string) string {
 	sb := strings.ReplaceAll(`set -euo pipefail
-K="kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec __VMID__ -- sh -c"
 $EX "mkdir -p /tmp/litellm-manifests"
 $EX "$K create ns litellm 2>/dev/null || true"
