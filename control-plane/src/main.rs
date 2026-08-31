@@ -530,7 +530,12 @@ async fn main() -> Result<()> {
                             add.domain.as_deref(),
                         )?;
                     }
-                    let rec = freehold_control_plane::dns::upsert(&store, &add.name, &add.ip, &add.source)?;
+                    let rec = freehold_control_plane::dns::upsert(
+                        &store,
+                        &add.name,
+                        &add.ip,
+                        &add.source,
+                    )?;
                     sync()?;
                     println!(
                         "dns record {} -> {} (source: {})",
@@ -829,4 +834,3 @@ fn dns_sync_resolver(
     let _ = path; // path is used inside the closures above
     Ok(())
 }
-

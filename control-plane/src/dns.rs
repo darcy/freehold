@@ -15,11 +15,13 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::state::{DnsRecord, StateStore, StateError};
+use crate::state::{DnsRecord, StateError, StateStore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DnsError {
-    #[error("invalid record name {name:?}: must match [a-z0-9-]+, 1-63 chars, no leading/trailing dash")]
+    #[error(
+        "invalid record name {name:?}: must match [a-z0-9-]+, 1-63 chars, no leading/trailing dash"
+    )]
     InvalidName { name: String },
     #[error("invalid record IP {ip:?}: expected an IPv4 literal")]
     InvalidIp { ip: String },
@@ -118,8 +120,6 @@ pub fn addn_hosts_path(state_dir: &Path) -> PathBuf {
     state_dir.join("dnsmasq.addn-hosts")
 }
 
-
-
 /// Writes the addn-hosts file (the resolver auto-reloads hosts changes via
 /// hostsdir semantics; a SIGHUP forces the reload). Pure — takes a write
 /// closure so the CLI/TUI can inject the target's local exec.
@@ -135,7 +135,6 @@ pub fn sync_resolver(
     ensure_resolver_readable(&path).map_err(|e| DnsError::Resolver(e.to_string()))?;
     reload().map_err(DnsError::Resolver)?;
     Ok(())
-
 }
 
 /// dnsmasq runs as its own uid and must be able to TRAVERSE every ancestor
@@ -183,7 +182,16 @@ mod dns_tests {
         for ok in ["relay", "litellm", "cp-2", "a1"] {
             validate_name(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
-        for bad in ["", ".start", "end.", "UPPER", "has space", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "a/b", "dash-"] {
+        for bad in [
+            "",
+            ".start",
+            "end.",
+            "UPPER",
+            "has space",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "a/b",
+            "dash-",
+        ] {
             assert!(validate_name(bad).is_err(), "{bad:?} must be rejected");
         }
     }

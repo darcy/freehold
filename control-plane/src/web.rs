@@ -411,7 +411,10 @@ pub fn router(
         .route("/api/grant", post(grant))
         .route("/api/revoke-grant", post(revoke_grant))
         .route("/api/runner-addr", post(runner_addr))
-        .route("/api/dns", get(dns_list).post(dns_upsert).delete(dns_remove))
+        .route(
+            "/api/dns",
+            get(dns_list).post(dns_upsert).delete(dns_remove),
+        )
         .route("/api/runner/{name}/channel", get(runner_channel))
         .route("/api/agents", get(agents_list).post(agents_register))
         .route("/api/agents/{name}", axum::routing::delete(agents_remove))
@@ -493,9 +496,10 @@ fn action_error(e: ProvisionError) -> (StatusCode, Json<Value>) {
 
 fn dns_error(e: crate::dns::DnsError) -> (StatusCode, Json<Value>) {
     match e {
-        crate::dns::DnsError::InvalidName { .. } | crate::dns::DnsError::InvalidIp { .. } => {
-            (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()})))
-        }
+        crate::dns::DnsError::InvalidName { .. } | crate::dns::DnsError::InvalidIp { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        ),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -865,7 +869,6 @@ fn relay_url(state: &WebState) -> Option<String> {
     state.store.snapshot().relay_url
 }
 
-
 #[derive(Deserialize)]
 struct DnsReq {
     name: String,
@@ -885,7 +888,9 @@ async fn dns_list(
     let snap = state.store.snapshot();
     let mut records = Vec::with_capacity(snap.dns.len());
     for (name, rec) in &snap.dns {
-        records.push(json!({"name": name, "ip": rec.ip, "source": rec.source, "created_at": rec.created_at}));
+        records.push(
+            json!({"name": name, "ip": rec.ip, "source": rec.source, "created_at": rec.created_at}),
+        );
     }
     Ok(Json(json!({
         "dns": records,
@@ -903,8 +908,17 @@ async fn dns_upsert(
     require_session(&state, &headers).map_err(|b| *b)?;
     check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     // The CP LXC IS the resolver host: upsert + re-sync happen in one op.
-    let rec = crate::dns::upsert(&state.store, &req.name, &req.ip, if req.source.is_empty() { "api" } else { &req.source })
-        .map_err(|e| dns_error(e).into_response())?;
+    let rec = crate::dns::upsert(
+        &state.store,
+        &req.name,
+        &req.ip,
+        if req.source.is_empty() {
+            "api"
+        } else {
+            &req.source
+        },
+    )
+    .map_err(|e| dns_error(e).into_response())?;
     let dns_err = {
         let snap = state.store.snapshot();
         crate::dns::sync_resolver(
@@ -938,7 +952,7 @@ async fn dns_remove(
         &dns_write,
         &dns_reload,
     )
-        .map_err(|e| dns_error(e).into_response())?;
+    .map_err(|e| dns_error(e).into_response())?;
     Ok(Json(json!({"ok": true, "name": req.name})))
 }
 

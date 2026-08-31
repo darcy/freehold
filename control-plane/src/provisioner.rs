@@ -643,7 +643,8 @@ pub fn add_secret(
 
     // Re-ship the package with the new entry appended to the existing map.
     let mut pkg = SecretPackage::load(&runner_rec.package_dir)?;
-    pkg.secrets.insert(secret_name.to_string(), ciphertext_hex.clone());
+    pkg.secrets
+        .insert(secret_name.to_string(), ciphertext_hex.clone());
     pkg.write_to_dir(&runner_rec.package_dir)?;
 
     let now = now_secs();
@@ -707,7 +708,9 @@ mod add_secret_tests {
                 address: "http://192.168.30.7:31400",
                 secret: b"master-key-value",
                 runner_dir: &runner_dir,
-                grants: &["a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0".to_string()],
+                grants: &[
+                    "a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0".to_string(),
+                ],
                 risk_level: Some("safe"),
             },
         )
@@ -742,11 +745,26 @@ mod add_secret_tests {
         let enc = hex::decode(&id.enc_secret_hex()).unwrap();
         let mut enc_arr = [0u8; 32];
         enc_arr.copy_from_slice(&enc);
-        let master = crypto::open(&enc_arr, b"litellm", &hex::decode(&pkg.secrets["litellm"]).unwrap()).unwrap();
+        let master = crypto::open(
+            &enc_arr,
+            b"litellm",
+            &hex::decode(&pkg.secrets["litellm"]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(master, b"master-key-value");
-        let provider = crypto::open(&enc_arr, b"provider-key", &hex::decode(&pkg.secrets["provider-key"]).unwrap()).unwrap();
+        let provider = crypto::open(
+            &enc_arr,
+            b"provider-key",
+            &hex::decode(&pkg.secrets["provider-key"]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(provider, b"fw_provider_value");
-        let pg = crypto::open(&enc_arr, b"postgres-pw", &hex::decode(&pkg.secrets["postgres-pw"]).unwrap()).unwrap();
+        let pg = crypto::open(
+            &enc_arr,
+            b"postgres-pw",
+            &hex::decode(&pkg.secrets["postgres-pw"]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(pg, b"pg-secret");
     }
 
@@ -755,12 +773,12 @@ mod add_secret_tests {
         let (store, tmp) = provision("litellm");
         add_secret(&store, "litellm", "provider-key", b"v").unwrap();
         let pkg = SecretPackage::load(&tmp.path().join("runner")).unwrap();
-        assert_eq!(
-            pkg.targets["litellm"].address,
-            "http://192.168.30.7:31400"
-        );
+        assert_eq!(pkg.targets["litellm"].address, "http://192.168.30.7:31400");
         assert_eq!(pkg.targets["litellm"].secret, "litellm");
-        assert_eq!(pkg.grants, vec!["a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0"]);
+        assert_eq!(
+            pkg.grants,
+            vec!["a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0"]
+        );
     }
 
     #[test]
