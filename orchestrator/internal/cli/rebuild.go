@@ -1634,33 +1634,32 @@ func (e *rebuildEngine) stageDnsPoint() error {
 		}
 	}
 
-	// k3s coredns: rewrite the Corefile's `forward .` to the resolver
-	// (chain-forwards everything upstream). Generated file -> push -> apply.
-	if cfg.Lxc.K3s.Vmid != nil {
-		corefile := fmt.Sprintf(`.:53 {
-    errors
-    health
-    ready
-    kubernetes cluster.local in-addr.arpa ip6.arpa {
-      pods insecure
-      fallthrough in-addr.arpa ip6.arpa
-    }
-    hosts /etc/coredns/NodeHosts {
-      ttl 60
-      reload 15s
-      fallthrough
-    }
-    forward . %s
-    cache 30
-    loop
-    reload
-    loadbalance
-}`, resolver)
+	// Honest gate: the resolver must ANSWER a record from the CP's own
+	// loopback, not merely have tcp/53 open. dnsmasq serves addn-hosts only
+	// if it could READ the file at start — a 0700 state dir makes it fail
+	// silently ("Permission denied") while the port still probes green. The
+	// deployed CP's dns sync repairs perms; asking for a real answer proves
+	// the whole chain (render -> write -> dnsmasq load) landed.
+	relayIP := ""
+	if cfg.Lxc.Relay.Ip != nil {
+		relayIP = config.StripCIDR(*cfg.Lxc.Relay.Ip)
+	}
+	litellmIP := cfg.Litellm.Host
+	var cpVmid *uint32
+	cpVmid = cfg.Lxc.Cp.Vmid
+	for _, q := range []struct{ name, want string }{
+		{"relay", relayIP},
+		{"litellm", litellmIP},
+	} {
+		if q.want == "" || cpVmid == nil {
+			continue
+		}
 		cmd := fmt.Sprintf(
-			"pct exec %d -- bash -c \"printf %%s > /tmp/coredns.conf '%s' && /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml create cm coredns -n kube-system --from-file=Corefile=/tmp/coredns.conf --dry-run=client -o yaml | /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f - && /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml rollout restart deploy/coredns -n kube-system\"",
-			*cfg.Lxc.K3s.Vmid, escapeSingle(corefile))
-		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 90)); !ok {
-			return fmt.Errorf("pointing k3s coredns at the resolver failed:\n%s", out)
+			"pct exec %d -- sh -c \"dig +short +time=2 +tries=1 %s @127.0.0.1 2>/dev/null | grep -qx '%s'\"",
+			*cpVmid, q.name, q.want)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30)); !ok {
+			return fmt.Errorf("resolver did not answer %s -> %s (dnsmasq addn-hosts load failed?):\n%s",
+				q.name, q.want, out)
 		}
 	}
 	return nil

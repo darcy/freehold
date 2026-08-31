@@ -103,6 +103,8 @@ pub fn addn_hosts_path(state_dir: &Path) -> PathBuf {
     state_dir.join("dnsmasq.addn-hosts")
 }
 
+
+
 /// Writes the addn-hosts file (the resolver auto-reloads hosts changes via
 /// hostsdir semantics; a SIGHUP forces the reload). Pure — takes a write
 /// closure so the CLI/TUI can inject the target's local exec.
@@ -114,9 +116,40 @@ pub fn sync_resolver(
 ) -> Result<(), DnsError> {
     let path = addn_hosts_path(state_dir);
     write(&path, &render_addn_hosts(records)).map_err(DnsError::Resolver)?;
+    ensure_resolver_readable(&path).map_err(|e| DnsError::Resolver(e.to_string()))?;
     reload().map_err(DnsError::Resolver)?;
     Ok(())
 
+}
+
+/// dnsmasq runs as its own uid and must be able to TRAVERSE every ancestor
+/// of the addn-hosts file and READ the file itself. Deploy-created dirs can
+/// arrive 0700 — dnsmasq then fails the addn-hosts load with "Permission
+/// denied" and serves nothing while the resolver still answers the READY
+/// probe (tcp/53), so the failure is silent. After writing, grant o+x on any
+/// ancestor directory missing it (never strip bits) and ensure the file is
+/// world-readable.
+fn ensure_resolver_readable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        let md = std::fs::metadata(d)?;
+        if md.is_dir() {
+            let mode = md.permissions().mode();
+            if mode & 0o011 == 0 {
+                std::fs::set_permissions(d, std::fs::Permissions::from_mode(mode | 0o011))?;
+            }
+        }
+        dir = d.parent();
+    }
+    if path.exists() {
+        let md = std::fs::metadata(&path)?;
+        let mode = md.permissions().mode();
+        if mode & 0o444 != 0o444 {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o444))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -199,5 +232,41 @@ mod dns_tests {
         .unwrap();
         assert!(wrote.borrow().contains("192.168.30.8 relay"));
         assert!(*reloaded.borrow());
+    }
+    #[test]
+    fn resolver_readable_opens_0700_deploy_dirs() {
+        // The deploy lands the state dir 0700-root; dnsmasq (uid dnsmasq)
+        // silently fails its addn-hosts load without o+x on the ancestor
+        // chain and o+r on the file. ensure_resolver_readable must repair
+        // exactly that, stripping nothing.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("srv").join("data").join("cp");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let file = dir.join("dnsmasq.addn-hosts");
+        std::fs::write(&file, "192.168.30.8 relay\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        ensure_resolver_readable(&file).unwrap();
+
+        // every ancestor from the file up to the tmp root gained o+x (the
+        // file gained o+r); no bit was stripped: 0o700 | 0o011 == 0o711.
+        let mut d = file.parent().unwrap();
+        loop {
+            let mode = std::fs::metadata(d).unwrap().permissions().mode();
+            assert_eq!(mode & 0o011, 0o011, "{d:?} should be traversable");
+            if d == tmp.path() {
+                break;
+            }
+            d = d.parent().unwrap();
+        }
+        let fmode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(fmode & 0o444, 0o444);
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o711
+        );
     }
 }
