@@ -196,6 +196,44 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// TestParsePctGateway covers the gw= parser: static guests carry the
+// router, DHCP guests (`ip=dhcp`) have NO gw= and must yield "" so the
+// caller falls back to the default route (the review-flagged regression:
+// gw-only reading silently lost dnsmasq's upstream on the default world).
+func TestParsePctGateway(t *testing.T) {
+	static := `arch: amd64
+cores: 2
+net0: name=eth0,bridge=vmbr0,gw=192.168.30.1,hwaddr=BC:24:11:71:48:B5,ip=192.168.30.9/24,type=veth
+ostype: debian
+`
+	if got := parsePctGateway(static); got != "192.168.30.1" {
+		t.Errorf("static gw = %q, want 192.168.30.1", got)
+	}
+	dhcp := `arch: amd64
+cores: 2
+net0: name=eth0,bridge=vmbr0,ip=dhcp,type=veth
+ostype: debian
+`
+	if got := parsePctGateway(dhcp); got != "" {
+		t.Errorf("dhcp gw = %q, want empty (no gw= key)", got)
+	}
+}
+
+// TestWorldManaged keeps a recorded k3s guest in the manifest when a re-run
+// skips k3s, so teardown still destroys it instead of leaking the LXC + LV.
+func TestWorldManaged(t *testing.T) {
+	got := worldManaged(false, false, ptr(uint32(102)))
+	if !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+		t.Errorf("skipped k3s with recorded vmid = %v, want relay/cp/k3s", got)
+	}
+	if got := worldManaged(false, false, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("skipped k3s with no vmid = %v, want relay/cp", got)
+	}
+	if got := worldManaged(true, true, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full world = %v", got)
+	}
+}
+
 func TestManagedForFlags(t *testing.T) {
 	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
 		t.Errorf("base = %v", got)
