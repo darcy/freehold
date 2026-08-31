@@ -61,6 +61,22 @@ pub struct AgentRecord {
     pub channel: Option<String>,
 }
 
+/// One explicit DNS record the CP resolver serves (C0: the core-service
+/// resolver). `name` is a bare hostname WITHOUT the domain suffix — the
+/// resolver config joins the world domain (`litellm.freehold.internal`).
+/// Explicit records only; absent = the resolver forwards upstream (never a
+/// stale/typo name silently resolving).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsRecord {
+    /// Target IP (A record). v4 for now; the record shape leaves room for
+    /// AAAA if the substrate ever needs it.
+    pub ip: String,
+    /// Which registration wrote this (e.g. "record_lxc relay", "litellm
+    /// apply") — for the read-only UI and teardown bookkeeping.
+    pub source: String,
+    pub created_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRecord {
     /// Runner (service) this secret belongs to — one per runner in Chunk 1.
@@ -77,6 +93,10 @@ pub struct SecretRecord {
 pub struct ControlPlaneState {
     pub runners: BTreeMap<String, RunnerRecord>,
     pub secrets: BTreeMap<String, SecretRecord>,
+    /// Explicit DNS records the resolver serves (name -> record). Empty =
+    /// the CP resolver still runs, but only forwards upstream.
+    #[serde(default)]
+    pub dns: BTreeMap<String, DnsRecord>,
     /// Named AI agents stood up (the CPA records them when it creates one —
     /// e.g. the delegate-peer registers at start). Availability is probed
     /// LIVE against the relay; this table is the registry, not the status.
@@ -218,6 +238,18 @@ impl StateStore {
     pub fn set_relay_pubkey(&self, relay_pubkey: Option<String>) -> Result<(), StateError> {
         self.inner.write().relay_pubkey = relay_pubkey;
         self.save()
+    }
+
+    pub fn get_dns(&self, name: &str) -> Option<DnsRecord> {
+        self.inner.read().dns.get(name).cloned()
+    }
+
+    pub fn insert_dns(&self, name: &str, rec: DnsRecord) {
+        self.inner.write().dns.insert(name.to_string(), rec);
+    }
+
+    pub fn remove_dns(&self, name: &str) {
+        self.inner.write().dns.remove(name);
     }
 
     /// The state dir itself (the console identity + packages live beside it).

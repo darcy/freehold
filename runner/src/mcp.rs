@@ -358,7 +358,7 @@ async fn handle_exec(
 
     // Shipped target (package metadata): dispatch by connector kind.
     if let Some(meta) = state.ctx.package.targets.get(&target) {
-        require_target_credential(&args.secrets, &target, meta)?;
+        require_target_credential(state, &args.secrets, &target, meta)?;
 
         // SSH: verbatim command over the pooled connection; credential = the
         // target's private key PEM.
@@ -396,9 +396,13 @@ async fn handle_exec(
         return handle_api_exec(state, &args, cmd, &target, meta, caller).await;
     }
 
-    /// The target's credential must be the ONLY requested secret — anything else
-    /// would silently run unset on every connector flavor.
+    /// The target's own credential must be requested, and EVERY requested name
+    /// must exist in the package — a runner may carry extra named secrets
+    /// (e.g. litellm's provider key and the postgres password alongside the
+    /// target credential); each is injected + redacted by handle_api_exec.
+    /// Unknown names fail closed: no silently-unset env vars.
     fn require_target_credential(
+        state: &RunnerState,
         requested: &[String],
         target: &str,
         meta: &freehold_core::secrets::TargetMeta,
@@ -409,12 +413,13 @@ async fn handle_exec(
                 meta.secret
             )));
         }
-        if let Some(extra) = requested.iter().find(|n| *n != &meta.secret) {
-            return Err(exec::ExecError::UnknownSecret(format!(
-                "target {target} accepts only its own credential {} — {extra:?} was also \
-             requested; no env injection beyond the target credential",
-                meta.secret
-            )));
+        for name in requested {
+            if !state.ctx.package.secrets.contains_key(name) {
+                return Err(exec::ExecError::UnknownSecret(format!(
+                    "requested secret {name:?} is not in this runner's package — \
+                     {target} knows {}", meta.secret
+                )));
+            }
         }
         Ok(())
     }
@@ -423,8 +428,11 @@ async fn handle_exec(
 }
 
 /// Run a command on the runner host with the target credential and base URL
-/// in env: `<SECRET>_URL` carries `meta.address`; the credential is the
-/// injected value. `run` (and streaming) sign the audit.
+/// in env: `<SECRET>_URL` carries `meta.address`; the target's credential is
+/// injected under its env name, and EVERY extra requested secret the package
+/// carries (e.g. litellm's provider key, the postgres password) is injected
+/// under its own env name and redacted from output. `run` (and streaming)
+/// sign the audit.
 async fn handle_api_exec(
     state: &RunnerState,
     args: &ExecArgs,
@@ -433,13 +441,12 @@ async fn handle_api_exec(
     meta: &freehold_core::secrets::TargetMeta,
     caller: &str,
 ) -> Result<String, exec::ExecError> {
-    let value = exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
-    let cred_env = exec::env_name(&meta.secret);
-    let url_env = format!("{cred_env}_URL");
-    let envs = vec![
-        (cred_env.clone(), value.clone()),
-        (url_env, zeroize::Zeroizing::new(meta.address.clone())),
-    ];
+    // Resolve EVERY requested name (the target credential + any extras the
+    // agent asked for by name) — each becomes an env var; all get redacted.
+    let secrets = exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
+    let url_env = format!("{}_URL", exec::env_name(&meta.secret));
+    let mut envs: Vec<(String, zeroize::Zeroizing<String>)> = secrets.clone();
+    envs.push((url_env, zeroize::Zeroizing::new(meta.address.clone())));
 
     if args.stream {
         let sid =
@@ -450,14 +457,13 @@ async fn handle_api_exec(
         return Ok(serde_json::to_string_pretty(&snap)?);
     }
 
-    // run() signs the audit; the credential value is redacted from output.
+    // run() signs the audit; EVERY injected value is redacted from output.
     let mut result = state
         .exec
         .run(&cmd, target, envs, args.timeout_s, Some(caller))
         .await?;
-    let redaction = [(cred_env, value)];
-    exec::redact(&mut result.stdout, &redaction);
-    exec::redact(&mut result.stderr, &redaction);
+    exec::redact(&mut result.stdout, &secrets);
+    exec::redact(&mut result.stderr, &secrets);
     Ok(serde_json::to_string_pretty(&result)?)
 }
 
@@ -886,6 +892,7 @@ fn rpc_error(id: Option<Value>, code: i64, message: String) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn contract_tools_present() {
@@ -1040,6 +1047,123 @@ mod tests {
             err.contains("unauthorized"),
             "relay outage must deny (fail closed): {err}"
         );
+        server.abort();
+    }
+
+    // C0: a litellm runner carries THREE named secrets (target credential =
+    // the master key, plus provider-key and postgres-pw). An exec may
+    // request them by name; require_target_credential must accept the
+    // extras (they EXIST in the package) and handle_api_exec must inject
+    // each under its env name and redact every value from output.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exec_injects_and_redacts_extra_named_secrets() {
+        let rid = Identity::generate();
+        let runner_pk = rid.nostr_pubkey_hex();
+        let a = Identity::generate();
+        let grant_pk = a.nostr_pubkey_hex();
+        let dir = tempfile::tempdir().unwrap();
+
+        // The fake API target: echoes env values so the test can assert
+        // exactly what was injected. It prints the PROXY value so redaction
+        // is observable in the runner's response.
+        // Pick a free port: bind, note the address, then serve on it.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let api_url = format!("http://{addr}");
+        let echo = tokio::task::spawn(async move {
+            let (mut sock, _) = l.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Respond with the env values that were visible to the child.
+            let body = format!(
+                "seen master={} provider={} pg={}",
+                std::env::var("LITELLM").unwrap_or_default(),
+                std::env::var("PROVIDER_KEY").unwrap_or_default(),
+                std::env::var("POSTGRES_PW").unwrap_or_default(),
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = req;
+        });
+
+        // Build the package: the target credential + two extras, sealed to
+        // the RUNNER's own identity (the one serve() loads).
+        let enc_pub = hex::decode(rid.enc_pubkey_hex()).unwrap();
+        let mut enc_arr = [0u8; 32];
+        enc_arr.copy_from_slice(&enc_pub);
+        let seal_hex = |name: &str, val: &[u8]| -> String {
+            hex::encode(freehold_core::crypto::seal(&enc_arr, name.as_bytes(), val).unwrap())
+        };
+        let pkg = SecretPackage {
+            secrets: BTreeMap::from([
+                ("litellm".to_string(), seal_hex("litellm", b"MASTER-SECRET")),
+                ("provider-key".to_string(), seal_hex("provider-key", b"fw_PROVIDER")),
+                ("postgres-pw".to_string(), seal_hex("postgres-pw", b"PG-PW")),
+            ]),
+            targets: BTreeMap::from([(
+                "litellm".to_string(),
+                freehold_core::secrets::TargetMeta {
+                    kind: "litellm".into(),
+                    address: api_url.clone(),
+                    secret: "litellm".into(),
+                },
+            )]),
+            grants: vec![grant_pk.clone()],
+        };
+        pkg.write_to_dir(dir.path()).unwrap();
+
+        let ctx = RunnerContext {
+            identity: rid,
+            package: pkg,
+            state_dir: dir.path().to_path_buf(),
+            relay_url: None,
+            relay_pubkey: None,
+        };
+        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let url = format!("http://{addr}/mcp");
+
+        // Sign + exec: request ALL THREE names. litellm_flavor uses curl, so
+        // the command itself prints the env values the runner injected.
+        let body = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "exec", "arguments": {
+                "cmd": "echo MASTER=$LITELLM PROVIDER=$PROVIDER_KEY PG=$POSTGRES_PW",
+                "target": "litellm",
+                "secrets": ["litellm", "provider-key", "postgres-pw"]
+            } }
+        });
+        let raw = body.to_string();
+        let ts = freehold_core::auth::now_secs();
+        let ev = freehold_core::auth::sign_body(&a.secret_seed(), &runner_pk, ts, &raw);
+        let mut resp = ureq::post(&url)
+            .header("Content-Type", "application/json")
+            .header(auth::PUBKEY_HEADER, &grant_pk)
+            .header(auth::SIG_HEADER, ev.sig)
+            .header(auth::TS_HEADER, ts)
+            .send(raw.clone())
+            .unwrap();
+        let v: Value = resp.body_mut().read_json().unwrap();
+        if let Some(err) = v.get("error") {
+            panic!("exec failed: {}", err["message"]);
+        }
+        let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !text.contains("MASTER-SECRET") && !text.contains("fw_PROVIDER") && !text.contains("PG-PW"),
+            "injected values must be redacted from output: {text}"
+        );
+        // The env reached the child: every requested secret is present under
+        // its env name, and every value is masked by redaction.
+        assert!(
+            text.contains("MASTER=***") && text.contains("PROVIDER=***") && text.contains("PG=***"),
+            "each requested secret must be injected by name + redacted: {text}"
+        );
+        drop(echo);
         server.abort();
     }
 

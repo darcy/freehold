@@ -43,8 +43,15 @@ enum Cmd {
     Provision(ProvisionArgs),
     /// Rotate a secret: re-seal the NEW credential (stdin) to the runner key
     RotateSecret(RotateArgs),
+    /// Add an EXTRA named secret (stdin) to an existing runner's package —
+    /// sealed to the runner's key under aad = the name (C0: litellm carries
+    /// master + provider + postgres together).
+    AddSecret(AddSecretArgs),
     /// Revoke a runner's membership (cut-off): blocks provision/rotate
     Revoke(RevokeArgs),
+    /// C0 DNS records: add/rm/list — the CP resolver's explicit surface.
+    /// `add` writes state + re-syncs dnsmasq addn-hosts (core service).
+    Dns(DnsArgs),
     /// List runners + secrets at a glance
     List(CommonArgs),
     /// Chunk 2.6.1: REBUILD the CP view from the relay's runner-profile
@@ -152,6 +159,46 @@ struct RotateArgs {
     relay_url: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct AddSecretArgs {
+    /// Runner to add the extra secret to
+    runner: String,
+    /// Extra secret name (e.g. provider-key) — the agent requests this name
+    /// in an exec's `secrets`, and the runner injects + redacts its value.
+    name: String,
+    #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
+    state_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct DnsArgs {
+    #[command(subcommand)]
+    cmd: DnsSub,
+    #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
+    state_dir: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum DnsSub {
+    /// Add/upsert a record: NAME IP [source] — e.g. `dns add relay 192.168.30.8 record_lxc`
+    Add(DnsAddArgs),
+    /// Remove a record (missing = ok)
+    Rm { name: String },
+    /// List the records table + the rendered addn-hosts
+    List,
+    /// (Re)write the addn-hosts file + reload dnsmasq without changing state
+    Sync,
+}
+
+#[derive(Args)]
+struct DnsAddArgs {
+    name: String,
+    ip: String,
+    /// Registration source (record_lxc <role>, litellm-apply, manual)
+    #[arg(default_value = "manual")]
+    source: String,
 }
 
 #[derive(Args)]
@@ -375,6 +422,20 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::AddSecret(args) => {
+            let store = StateStore::open(&args.state_dir)
+                .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
+            let value = read_secret_stdin(&format!(
+                "paste extra secret {0} for runner {1}: ",
+                args.name, args.runner
+            ))?;
+            provisioner::add_secret(&store, &args.runner, &args.name, value.as_bytes())?;
+            println!(
+                "added extra secret {0} to runner {1} (sealed to the runner's key)",
+                args.name, args.runner
+            );
+            Ok(())
+        }
         Cmd::RotateSecret(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
@@ -428,6 +489,46 @@ async fn main() -> Result<()> {
             println!("revoked runner {} (was {})", args.name, rec.nostr_pubkey);
             println!("note: the shipped secrets.json was removed, but the credential itself may");
             println!("      still be valid at the service — rotate it upstream if it was exposed");
+            Ok(())
+        }
+        Cmd::Dns(args) => {
+            let store = StateStore::open(&args.state_dir)
+                .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
+            let sync = || {
+                dns_sync_resolver(&store, &args.state_dir)
+                    .map_err(|e| anyhow::anyhow!("resolver sync failed: {e}"))
+            };
+            match args.cmd {
+                DnsSub::Add(add) => {
+                    let rec = freehold_control_plane::dns::upsert(&store, &add.name, &add.ip, &add.source)?;
+                    sync()?;
+                    println!(
+                        "dns record {} -> {} (source: {})",
+                        add.name, rec.ip, rec.source
+                    );
+                }
+                DnsSub::Rm { name } => {
+                    freehold_control_plane::dns::remove(&store, &name)?;
+                    sync()?;
+                    println!("dns record {name} removed");
+                }
+                DnsSub::List => {
+                    let snap = store.snapshot();
+                    if snap.dns.is_empty() {
+                        println!("(no dns records — the resolver forwards everything upstream)");
+                    }
+                    for (name, rec) in &snap.dns {
+                        println!("{name:<32} {}", rec.ip);
+                        println!("  source: {} · created: {}", rec.source, rec.created_at);
+                    }
+                    println!("--- addn-hosts ---");
+                    print!("{}", freehold_control_plane::dns::render_addn_hosts(&snap.dns));
+                }
+                DnsSub::Sync => {
+                    sync()?;
+                    println!("dnsmasq addn-hosts synced + reloaded");
+                }
+            }
             Ok(())
         }
         Cmd::Rebuild(args) => {
@@ -645,3 +746,51 @@ fn read_secret_stdin(prompt: &str) -> Result<Zeroizing<String>> {
     }
     Ok(value)
 }
+/// Write the addn-hosts file + reload dnsmasq — the resolver runs IN this
+/// box (the CP LXC), so "local" exec IS the CP's own host. dnsmasq's
+/// addn-hosts is watched; a SIGHUP forces an immediate reload. The file path
+/// lives under the state dir (durable plane) so a compute teardown of the CP
+/// LXC keeps the records rendering on the first boot before any re-sync.
+fn dns_sync_resolver(
+    store: &StateStore,
+    state_dir: &std::path::Path,
+) -> Result<(), freehold_control_plane::dns::DnsError> {
+    let snap = store.snapshot();
+    let path = freehold_control_plane::dns::addn_hosts_path(state_dir);
+    let rendered = freehold_control_plane::dns::render_addn_hosts(&snap.dns);
+    freehold_control_plane::dns::sync_resolver(
+        state_dir,
+        &snap.dns,
+        &|p: &std::path::Path, body: &str| -> Result<(), String> {
+            std::fs::write(p, body).map_err(|e| e.to_string())
+        },
+        &|| -> Result<(), String> {
+            // dnsmasq may not be installed yet (first boot): ensure it, then
+            // point it at the file + reload. Install + restarts are
+            // idempotent (apt returns ok on present; /etc/dnsmasq.d re-point
+            // is a no-op once set).
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("command -v dnsmasq >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsmasq >/dev/null 2>&1); mkdir -p /etc/dnsmasq.d")
+                .output()
+                .map_err(|e| e.to_string())?;
+            let conf = "/etc/dnsmasq.d/freehold-names.conf";
+            let conf_body = format!(
+                "addn-hosts={}\nno-negcache\n",
+                freehold_control_plane::dns::addn_hosts_path(state_dir).display()
+            );
+            std::fs::write(conf, conf_body).map_err(|e| e.to_string())?;
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true"
+                ))
+                .output()
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        },
+    )?;
+    let _ = path; // path is used inside the closures above
+    Ok(())
+}
+
