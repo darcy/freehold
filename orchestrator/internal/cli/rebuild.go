@@ -1642,6 +1642,28 @@ func (e *rebuildEngine) guestSearchBase() string {
 	return base
 }
 
+// guestNameserver reads the CP LXC's current first PVE-managed nameserver
+// (the router) — kept as the CP's own secondary so dnsmasq has an upstream
+// for external names once pct set makes the resolver primary.
+func (e *rebuildEngine) guestNameserver() string {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return ""
+	}
+	cmd := fmt.Sprintf(
+		"pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | head -1 | awk '{print $2}'\"",
+		*cfg.Lxc.Cp.Vmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return ""
+	}
+	ns := strings.TrimSpace(out)
+	if ns == "" || !strings.ContainsAny(ns, "0123456789") {
+		return ""
+	}
+	return ns
+}
+
 // stageDnsPoint points every managed guest at the CP resolver: write
 // nameserver into each LXC's resolv.conf (idempotent) and set k3s coredns's
 // `forward .` to the resolver so pods resolve *.freehold.internal.
@@ -1652,7 +1674,15 @@ func (e *rebuildEngine) stageDnsPoint() error {
 	}
 	resolver := config.StripCIDR(*cfg.Lxc.Cp.Ip)
 
-	// LXCs: resolv.conf gains the resolver as the first nameserver.
+	// LXCs: the CP resolver becomes each guest's PRIMARY nameserver via
+	// `pct set --nameserver` — PVE-managed, durable across guest reboots (a
+	// hand-appended line dies on boot). glibc is search-first (ndots=1), and
+	// the resolver now serves <name>.<search> records, so e.g. "litellm"
+	// resolves to the internal k3s IP, never the public/tailscale record via
+	// the router. The CP itself KEEPS the router as a secondary so its
+	// dnsmasq still has an upstream for external names.
+	searchBase := e.guestSearchBase()
+	router := e.guestNameserver()
 	for _, role := range []string{"relay", "cp", "k3s"} {
 		g := map[string]config.LxcGuest{
 			"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s,
@@ -1660,10 +1690,14 @@ func (e *rebuildEngine) stageDnsPoint() error {
 		if g.Vmid == nil {
 			continue
 		}
-		ns := fmt.Sprintf("nameserver %s", resolver)
-		cmd := fmt.Sprintf(
-			"pct exec %d -- sh -c \"grep -qF '%s' /etc/resolv.conf 2>/dev/null || echo '%s' >> /etc/resolv.conf\"",
-			*g.Vmid, resolver, ns)
+		nsList := resolver
+		if role == "cp" && router != "" {
+			nsList += ";" + router
+		}
+		if searchBase != "" {
+			nsList += ";search=" + searchBase
+		}
+		cmd := fmt.Sprintf("pct set %d --nameserver %s", *g.Vmid, shellQuote(nsList))
 		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
 			return fmt.Errorf("pointing %s at the resolver failed:\n%s", role, out)
 		}
