@@ -776,7 +776,6 @@ fn dns_sync_resolver(
 ) -> Result<(), freehold_control_plane::dns::DnsError> {
     let snap = store.snapshot();
     let path = freehold_control_plane::dns::addn_hosts_path(state_dir);
-    let rendered = freehold_control_plane::dns::render_addn_hosts(&snap.dns);
     freehold_control_plane::dns::sync_resolver(
         state_dir,
         &snap.dns,
