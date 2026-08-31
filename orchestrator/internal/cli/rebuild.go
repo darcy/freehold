@@ -1651,7 +1651,7 @@ func (e *rebuildEngine) guestNameserver() string {
 		return ""
 	}
 	cmd := fmt.Sprintf(
-		"pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | head -1 | awk '{print $2}'\"",
+		"pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | head -1 | cut -d' ' -f2\"",
 		*cfg.Lxc.Cp.Vmid)
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
 	if !ok {
@@ -1703,6 +1703,7 @@ func (e *rebuildEngine) stageDnsPoint() error {
 			quoted[i] = shellQuote(a)
 		}
 		cmd := "pct " + strings.Join(quoted, " ")
+		fmt.Fprintf(e.out, "  · pct: %s\n", cmd)
 		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
 			return fmt.Errorf("pointing %s at the resolver failed:\n%s", role, out)
 		}
