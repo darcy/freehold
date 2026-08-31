@@ -1692,7 +1692,7 @@ func (e *rebuildEngine) stageDnsPoint() error {
 		}
 		nsList := resolver
 		if role == "cp" && router != "" {
-			nsList += ";" + router
+			nsList += " " + router
 		}
 		parts := []string{"set", strconv.FormatUint(uint64(*g.Vmid), 10), "--nameserver", nsList}
 		if searchBase != "" {
@@ -1705,6 +1705,22 @@ func (e *rebuildEngine) stageDnsPoint() error {
 		cmd := "pct " + strings.Join(quoted, " ")
 		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
 			return fmt.Errorf("pointing %s at the resolver failed:\n%s", role, out)
+		}
+		// pct only regenerates resolv.conf at the NEXT boot — write it now.
+		// Values are validated IPs / charset-checked search base: single-quote
+		// at the innermost level only (no nested-quote hang).
+		body := "nameserver " + resolver + "\n"
+		if role == "cp" && router != "" {
+			body += "nameserver " + router + "\n"
+		}
+		if searchBase != "" {
+			body = "search " + searchBase + "\n" + body
+		}
+		rcmd := fmt.Sprintf(
+			"pct exec %d -- sh -c \"printf '%s' > /etc/resolv.conf\"",
+			*g.Vmid, body)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(rcmd, 60)); !ok {
+			return fmt.Errorf("writing %s resolv.conf failed:\n%s", role, out)
 		}
 	}
 
