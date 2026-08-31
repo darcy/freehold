@@ -1694,10 +1694,15 @@ func (e *rebuildEngine) stageDnsPoint() error {
 		if role == "cp" && router != "" {
 			nsList += ";" + router
 		}
+		parts := []string{"set", strconv.FormatUint(uint64(*g.Vmid), 10), "--nameserver", nsList}
 		if searchBase != "" {
-			nsList += ";search=" + searchBase
+			parts = append(parts, "--searchdomain", searchBase)
 		}
-		cmd := fmt.Sprintf("pct set %d --nameserver %s", *g.Vmid, shellQuote(nsList))
+		quoted := make([]string, len(parts))
+		for i, a := range parts {
+			quoted[i] = shellQuote(a)
+		}
+		cmd := "pct " + strings.Join(quoted, " ")
 		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
 			return fmt.Errorf("pointing %s at the resolver failed:\n%s", role, out)
 		}
