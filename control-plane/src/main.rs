@@ -204,6 +204,11 @@ enum DnsSub {
 struct DnsAddArgs {
     name: String,
     ip: String,
+    /// World domain suffix (the guests' resolv.conf search base) — when set,
+    /// addn-hosts renders bare AND `<name>.<domain>` so search-first lookups
+    /// hit the split-horizon answer instead of leaking upstream.
+    #[arg(long)]
+    domain: Option<String>,
     /// Registration source (record_lxc <role>, litellm-apply, manual)
     #[arg(default_value = "manual")]
     source: String,
@@ -519,6 +524,12 @@ async fn main() -> Result<()> {
             };
             match args.cmd {
                 DnsSub::Add(add) => {
+                    if add.domain.is_some() {
+                        freehold_control_plane::dns::set_resolver_domain(
+                            &store,
+                            add.domain.as_deref(),
+                        )?;
+                    }
                     let rec = freehold_control_plane::dns::upsert(&store, &add.name, &add.ip, &add.source)?;
                     sync()?;
                     println!(
@@ -541,7 +552,13 @@ async fn main() -> Result<()> {
                         println!("  source: {} · created: {}", rec.source, rec.created_at);
                     }
                     println!("--- addn-hosts ---");
-                    print!("{}", freehold_control_plane::dns::render_addn_hosts(&snap.dns));
+                    print!(
+                        "{}",
+                        freehold_control_plane::dns::render_addn_hosts(
+                            &snap.dns,
+                            snap.resolver_domain.as_deref()
+                        )
+                    );
                 }
                 DnsSub::Sync => {
                     sync()?;
@@ -779,6 +796,7 @@ fn dns_sync_resolver(
     freehold_control_plane::dns::sync_resolver(
         state_dir,
         &snap.dns,
+        snap.resolver_domain.as_deref(),
         &|p: &std::path::Path, body: &str| -> Result<(), String> {
             std::fs::write(p, body).map_err(|e| e.to_string())
         },

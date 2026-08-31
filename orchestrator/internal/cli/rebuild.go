@@ -1599,12 +1599,47 @@ func (e *rebuildEngine) stageDnsRegister() error {
 	if len(recs) == 0 {
 		return nil
 	}
+	// The guests' resolv.conf carries PVE's `search` line; register it as the
+	// resolver's world domain so addn-hosts serves <name>.<search> FIRST (the
+	// glibc search-first lookup gets the split-horizon answer, not the
+	// public/tailscale record through upstream).
+	searchBase := e.guestSearchBase()
 	for _, r := range recs {
-		if _, err := e.stageCpExec("dns", "add", r.name, r.ip, r.source); err != nil {
+		args := []string{"dns", "add", r.name, r.ip, r.source}
+		if searchBase != "" {
+			args = append(args, "--domain", searchBase)
+		}
+		if _, err := e.stageCpExec(args...); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// guestSearchBase reads the `search` line from the CP LXC's resolv.conf (PVE
+// writes the same search domain to every guest it manages). Empty when the
+// line is absent — the resolver then stays bare-name only.
+func (e *rebuildEngine) guestSearchBase() string {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return ""
+	}
+	cmd := fmt.Sprintf(
+		"pct exec %d -- sh -c \"grep '^search' /etc/resolv.conf | head -1 | cut -d' ' -f2-\"",
+		*cfg.Lxc.Cp.Vmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return ""
+	}
+	base := strings.TrimSpace(out)
+	if base == "" || strings.ContainsAny(base, " \"'`$;(){}") {
+		return ""
+	}
+	// a single label is not a useful search base
+	if !strings.Contains(base, ".") {
+		return ""
+	}
+	return base
 }
 
 // stageDnsPoint points every managed guest at the CP resolver: write

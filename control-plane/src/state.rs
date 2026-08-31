@@ -97,6 +97,12 @@ pub struct ControlPlaneState {
     /// the CP resolver still runs, but only forwards upstream.
     #[serde(default)]
     pub dns: BTreeMap<String, DnsRecord>,
+    /// The world domain suffix the resolver joins to bare records when set
+    /// (e.g. "darcydev.net") — addn-hosts then renders BOTH `<name>` and
+    /// `<name>.<domain>`, so guests' search-first (ndots=1) lookups hit the
+    /// split-horizon answer instead of leaking upstream. Absent = bare only.
+    #[serde(default)]
+    pub resolver_domain: Option<String>,
     /// Named AI agents stood up (the CPA records them when it creates one —
     /// e.g. the delegate-peer registers at start). Availability is probed
     /// LIVE against the relay; this table is the registry, not the status.
@@ -227,6 +233,11 @@ impl StateStore {
 
     pub fn set_relay_host(&self, relay_host: Option<String>) -> Result<(), StateError> {
         self.inner.write().relay_host = relay_host;
+        self.save()
+    }
+
+    pub fn set_resolver_domain(&self, resolver_domain: Option<String>) -> Result<(), StateError> {
+        self.inner.write().resolver_domain = resolver_domain;
         self.save()
     }
 

@@ -59,10 +59,16 @@ pub fn validate_ip(ip: &str) -> Result<(), DnsError> {
 /// addn-hosts lines for the CURRENT records: `<ip> <name>` per line, one per
 /// record — the shape `/etc/hosts` and dnsmasq's `addn-hosts=` accept. Never
 /// renders a wildcard; records are the entire explicit surface.
-pub fn render_addn_hosts(records: &std::collections::BTreeMap<String, DnsRecord>) -> String {
+pub fn render_addn_hosts(
+    records: &std::collections::BTreeMap<String, DnsRecord>,
+    domain: Option<&str>,
+) -> String {
     let mut out = String::new();
     for (name, rec) in records {
         out.push_str(&format!("{} {}\n", rec.ip, name));
+        if let Some(d) = domain {
+            out.push_str(&format!("{} {}.{}\n", rec.ip, name, d));
+        }
     }
     out
 }
@@ -91,6 +97,15 @@ pub fn upsert(
     Ok(rec)
 }
 
+/// Sets the world domain suffix the resolver joins to bare records (the
+/// guests' resolv.conf search base). Last add wins; None clears.
+pub fn set_resolver_domain(store: &StateStore, domain: Option<&str>) -> Result<(), DnsError> {
+    store
+        .set_resolver_domain(domain.map(|d| d.to_string()))
+        .map_err(DnsError::State)?;
+    Ok(())
+}
+
 /// Removes a record + re-syncs the resolver. Missing = Ok (idempotent).
 pub fn remove(store: &StateStore, name: &str) -> Result<(), DnsError> {
     store.remove_dns(name);
@@ -111,11 +126,12 @@ pub fn addn_hosts_path(state_dir: &Path) -> PathBuf {
 pub fn sync_resolver(
     state_dir: &Path,
     records: &std::collections::BTreeMap<String, DnsRecord>,
+    domain: Option<&str>,
     write: &dyn Fn(&Path, &str) -> Result<(), String>,
     reload: &dyn Fn() -> Result<(), String>,
 ) -> Result<(), DnsError> {
     let path = addn_hosts_path(state_dir);
-    write(&path, &render_addn_hosts(records)).map_err(DnsError::Resolver)?;
+    write(&path, &render_addn_hosts(records, domain)).map_err(DnsError::Resolver)?;
     ensure_resolver_readable(&path).map_err(|e| DnsError::Resolver(e.to_string()))?;
     reload().map_err(DnsError::Resolver)?;
     Ok(())
@@ -194,8 +210,13 @@ mod dns_tests {
         upsert(&store, "litellm", "192.168.30.7", "litellm-apply").unwrap();
         let snap = store.snapshot();
         assert_eq!(snap.dns.len(), 2);
-        let rendered = render_addn_hosts(&snap.dns);
+        let rendered = render_addn_hosts(&snap.dns, None);
         assert!(rendered.contains("192.168.30.9 relay"));
+        // With a world domain the resolver serves BOTH bare + FQDN — the
+        // guests' search-first (ndots=1) lookup hits the split horizon.
+        let fqd = render_addn_hosts(&snap.dns, Some("darcydev.net"));
+        assert!(fqd.contains("192.168.30.9 relay.darcydev.net"));
+        assert!(fqd.contains("192.168.30.7 litellm.darcydev.net"));
         assert!(rendered.contains("192.168.30.7 litellm"));
         // Explicit records only: never a wildcard line.
         assert!(!rendered.contains("*"));
@@ -219,6 +240,7 @@ mod dns_tests {
         sync_resolver(
             tmp.path(),
             &store.snapshot().dns,
+            None,
             &|p: &Path, body: &str| {
                 assert_eq!(p, &addn_hosts_path(tmp.path()));
                 *wrote.borrow_mut() = body.to_string();

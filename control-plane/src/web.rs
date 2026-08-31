@@ -889,7 +889,7 @@ async fn dns_list(
     }
     Ok(Json(json!({
         "dns": records,
-        "addn_hosts": crate::dns::render_addn_hosts(&snap.dns),
+        "addn_hosts": crate::dns::render_addn_hosts(&snap.dns, snap.resolver_domain.as_deref()),
     })))
 }
 
@@ -910,6 +910,7 @@ async fn dns_upsert(
         crate::dns::sync_resolver(
             state.store.dir(),
             &snap.dns,
+            snap.resolver_domain.as_deref(),
             &dns_write,
             &dns_reload,
         )
@@ -930,7 +931,13 @@ async fn dns_remove(
     check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     crate::dns::remove(&state.store, &req.name).map_err(|e| dns_error(e).into_response())?;
     let snap = state.store.snapshot();
-    crate::dns::sync_resolver(state.store.dir(), &snap.dns, &dns_write, &dns_reload)
+    crate::dns::sync_resolver(
+        state.store.dir(),
+        &snap.dns,
+        snap.resolver_domain.as_deref(),
+        &dns_write,
+        &dns_reload,
+    )
         .map_err(|e| dns_error(e).into_response())?;
     Ok(Json(json!({"ok": true, "name": req.name})))
 }
