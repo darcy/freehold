@@ -70,7 +70,11 @@ func (m *Model) load(cfgPath string) error {
 	// real mode (its k3s/world-state steps populate the dashboard rows).
 	m.Mode = ModeRunning
 	m.buildServices(cfg)
-	m.readLocalRunners(cfg)
+	m.cfg = cfg
+	if m.RunnerSource == "" {
+		m.RunnerSource = RunnerSourceCP
+	}
+	m.refreshRunners(cfg)
 	m.buildAgents(cfg)
 	return nil
 }
@@ -354,6 +358,66 @@ func (m *Model) readLocalRunners(cfg *config.Config) {
 	}
 }
 
+// refreshRunners fills the Runners view from the ACTIVE source: the console
+// API (CP — default) or the local loopback state.json.
+func (m *Model) refreshRunners(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if m.RunnerSource == RunnerSourceLocal {
+		m.readLocalRunners(cfg)
+		return
+	}
+	m.readCpRunners(cfg)
+}
+
+// readCpRunners fills the Runners view from the CONSOLE /api/overview (the
+// CP's authoritative runner list — NIP-98 session). Not logged in = a hint
+// row, not an empty table.
+func (m *Model) readCpRunners(cfg *config.Config) {
+	if m.console == nil || m.console.client == nil {
+		m.Runners = []RunnerRow{{
+			Name:   "(not logged into a console)",
+			Status: styleDim.Render("press l to log in — s switches to the local list"),
+			Addr:   cfg.Runner.Addr,
+		}}
+		return
+	}
+	ov, err := m.console.client.Overview()
+	if err != nil {
+		m.Runners = []RunnerRow{{
+			Name:   "(console overview failed)",
+			Status: styleRed.Render(clip(err.Error(), 48)),
+			Addr:   cfg.Runner.Addr,
+		}}
+		return
+	}
+	m.Runners = nil
+	for _, r := range ov.Runners {
+		addr := "—"
+		if r.McpAddr != nil {
+			addr = *r.McpAddr
+		} else if cfg != nil {
+			addr = cfg.Runner.Addr
+		}
+		grants := "—"
+		if len(r.Grants) > 0 {
+			grants = fmt.Sprintf("%d grants", len(r.Grants))
+		}
+		readiness := "—"
+		if r.Readiness != nil {
+			readiness = fmt.Sprintf("%v", r.Readiness)
+		}
+		m.Runners = append(m.Runners, RunnerRow{
+			Name: r.Name, Status: r.Status, Pubkey: r.NostrPubkey,
+			Addr: addr, Grants: grants, Readiness: readiness,
+		})
+	}
+	if len(m.Runners) == 0 {
+		m.Runners = []RunnerRow{{Name: "(no runners on the console)", Status: styleDim.Render("provision one with p")}}
+	}
+}
+
 // buildAgents fills the Agents view from the local state registry.
 func (m *Model) buildAgents(cfg *config.Config) {
 	st, err := state.Open(freeholdStateDir())
@@ -397,6 +461,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			if m.Mode == ModeRunning {
 				return m, m.startBootActivity("checking the world")
+			}
+		case "s":
+			if m.Mode == ModeRunning {
+				if m.RunnerSource == RunnerSourceLocal {
+					m.RunnerSource = RunnerSourceCP
+				} else {
+					m.RunnerSource = RunnerSourceLocal
+				}
+				m.refreshRunners(m.cfg)
+				m.Msg = "runners: " + m.runnerSourceLabel()
 			}
 		case "w":
 			if m.Mode == ModeRunning {
@@ -509,6 +583,14 @@ func (m *Model) View() string {
 	return lipgloss.NewStyle().Render(b.String())
 }
 
+// runnerSourceLabel names the active Runners view source.
+func (m *Model) runnerSourceLabel() string {
+	if m.RunnerSource == RunnerSourceLocal {
+		return "local (loopback state.json)"
+	}
+	return "CP (console /api/overview)"
+}
+
 func renderProbes(m *Model) string {
 	return fmt.Sprintf("  relay %s  cp %s  k3s %s  litellm %s  runner %s",
 		boolStatus(m.RelayLive, "green", "red"),
@@ -524,7 +606,7 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second))) +
-			"   " + styleDim.Render("l login · p provision · x revoke · g grant · w web · t teardown")
+			"   " + styleDim.Render("l login · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · t teardown")
 	}
 	switch m.Mode {
 	case ModeBootstrap:
@@ -573,9 +655,10 @@ func renderViews(m *Model) string {
 			rows = append(rows, []string{a.Name, clip(a.Pubkey, 16), a.Available, a.Created})
 		}
 	case ViewRunners:
-		headers = []string{"name", "status", "pubkey", "addr", "grants"}
+		title = "Runners · " + m.runnerSourceLabel() + " · s toggles"
+		headers = []string{"name", "status", "pubkey", "addr", "grants", "readiness"}
 		for _, r := range m.Runners {
-			rows = append(rows, []string{r.Name, r.Status, clip(r.Pubkey, 16), r.Addr, r.Grants})
+			rows = append(rows, []string{r.Name, r.Status, clip(r.Pubkey, 16), r.Addr, r.Grants, r.Readiness})
 		}
 	case ViewData:
 		if !m.DataAt.IsZero() {

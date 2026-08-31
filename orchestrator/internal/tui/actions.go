@@ -22,7 +22,6 @@ import (
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/flows"
-	"freehold/orchestrator/internal/state"
 )
 
 type consoleClient struct {
@@ -462,19 +461,5 @@ func doorKeyWaiting(out string) string {
 }
 
 func (m *Model) refreshLocal() {
-	st, err := state.Open(freeholdStateDir())
-	if err != nil {
-		return
-	}
-	m.Runners = nil
-	for name, rec := range st.Snapshot().Runners {
-		addr := "—"
-		if rec.McpAddr != nil {
-			addr = *rec.McpAddr
-		}
-		m.Runners = append(m.Runners, RunnerRow{Name: name, Status: string(rec.Status), Pubkey: rec.NostrPubkey, Addr: addr})
-	}
-	if len(m.Runners) == 0 {
-		m.Runners = []RunnerRow{{Name: "(no runners)"}}
-	}
+	m.refreshRunners(m.cfg)
 }
