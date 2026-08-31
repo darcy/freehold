@@ -1,5 +1,7 @@
 package cli
 
+import "reflect"
+
 import (
 	"bytes"
 	"encoding/hex"
@@ -167,6 +169,18 @@ func TestApplyLxcCoords(t *testing.T) {
 // record_lxc must load the config FRESH from disk, mutate only the target
 // role, and save — never clobbering facts another stage recorded (the
 // plane mounts here stand in for any mid-pipeline write).
+func TestManagedForFlags(t *testing.T) {
+	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("base = %v", got)
+	}
+	if got := managedForFlags(true, false); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+		t.Errorf("with k3s = %v", got)
+	}
+	if got := managedForFlags(true, true); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full = %v", got)
+	}
+}
+
 func TestRecordLxcFreshLoadClobber(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

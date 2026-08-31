@@ -174,6 +174,35 @@ func TestGuestLocation(t *testing.T) {
 	}
 }
 
+// TestParseDnsList extracts records from `dns list` output (marker + metadata
+// lines ignored) — the live DNS panel's pure parser.
+func TestParseDnsList(t *testing.T) {
+	out := `cp 192.168.30.9
+  source: record_lxc cp · created: 123
+relay 192.168.30.8
+  source: record_lxc relay · created: 124
+--- addn-hosts ---
+192.168.30.9 cp
+192.168.30.9 cp.darcydev.net
+192.168.30.8 relay
+192.168.30.8 relay.darcydev.net
+`
+	rows := parseDnsList(out)
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(rows), rows)
+	}
+	if rows[0].Name != "cp" || rows[0].IP != "192.168.30.9" || rows[0].Source != "resolver (live)" {
+		t.Errorf("row0 = %+v", rows[0])
+	}
+	if rows[1].Name != "relay" || rows[1].IP != "192.168.30.8" {
+		t.Errorf("row1 = %+v", rows[1])
+	}
+	// empty output -> no rows (caller falls back to the mirror)
+	if got := parseDnsList("(no dns records — the resolver forwards everything upstream)\n"); len(got) != 0 {
+		t.Errorf("empty list should parse to 0 rows, got %+v", got)
+	}
+}
+
 // TestVmidForRole covers the plane mount role -> vmid map.
 func TestVmidForRole(t *testing.T) {
 	cfg := testCfg()

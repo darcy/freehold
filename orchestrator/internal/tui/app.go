@@ -123,7 +123,11 @@ func (m *Model) buildServices(cfg *config.Config) {
 			row.Status = boolStatus(m.K3sLive, "live", "down")
 		case "litellm":
 			row.Name = "litellm (gateway)"
-			row.Where = "kube · " + cfg.Litellm.Host
+			if cfg.Litellm.Host != "" {
+				row.Where = "kube · " + cfg.Litellm.Host
+			} else {
+				row.Where = "kube · (no coords — not deployed this run)"
+			}
 			row.URL = cfg.Litellm.URL
 			row.Status = boolStatus(m.LitellmLive, "live", "down")
 		default:
@@ -135,12 +139,56 @@ func (m *Model) buildServices(cfg *config.Config) {
 	if len(m.Services) == 0 {
 		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
 	}
-	// The CP resolver's explicit records (C0 DNS panel) — from config where
-	// the rebuild mirrored them (the CP is authoritative; this is the panel).
-	m.DNS = nil
-	for name, ip := range cfg.Dns.Records {
-		m.DNS = append(m.DNS, DnsRow{Name: name, IP: ip, Source: "config mirror"})
+	// The CP resolver's explicit records (C0 DNS panel). The live probe
+	// (dns activity step) sets m.DNS — the CP is authoritative. This render
+	// stays PURE (no exec): it falls back to the config mirror ONLY when the
+	// live probe has never produced a snapshot.
+	if len(m.DNS) == 0 {
+		for name, ip := range cfg.Dns.Records {
+			m.DNS = append(m.DNS, DnsRow{Name: name, IP: ip, Source: "config mirror"})
+		}
 	}
+}
+
+// dnsRowsLive execs `control-plane dns list` inside the cp LXC through the
+// signed runner channel (same pattern as cpLive) and parses the records.
+// Failure or empty output = (nil) — the caller falls back to the mirror.
+func dnsRowsLive(cfg *config.Config) []DnsRow {
+	if cfg.Lxc.Cp.Vmid == nil || cfg.Runner.Addr == "" {
+		return nil
+	}
+	inner := "'/srv/data/cp/bin/control-plane' dns --state-dir '/srv/data/cp/control-plane' list"
+	out, err := runSelf("exec", "--addr", cfg.Runner.Addr,
+		"--agent-dir", freeholdStateDir()+"/agent-ops",
+		"--runner-pubkey", cfg.Runner.Pubkey,
+		"--timeout", "15",
+		cfg.Runner.Target,
+		fmt.Sprintf("pct exec %d -- sh -c %s", *cfg.Lxc.Cp.Vmid, "'"+inner+"'"))
+	if err != nil {
+		return nil
+	}
+	return parseDnsList(out)
+}
+
+// parseDnsList extracts `name ip` pairs from the RECORDS TABLE of
+// `control-plane dns list` output: the indented metadata lines and the
+// "--- addn-hosts ---" section (ip-first lines) are both skipped. Pure.
+func parseDnsList(out string) []DnsRow {
+	var rows []DnsRow
+	for _, l := range strings.Split(out, "\n") {
+		if l == "" || l[0] == ' ' || l[0] == '\t' || strings.HasPrefix(l, "---") ||
+			strings.HasPrefix(l, "(no dns") {
+			continue
+		}
+		f := strings.Fields(l)
+		if len(f) > 0 && f[0][0] == '-' {
+			continue
+		}
+		if len(f) >= 2 && !strings.Contains(f[0], ".") {
+			rows = append(rows, DnsRow{Name: f[0], IP: f[1], Source: "resolver (live)"})
+		}
+	}
+	return rows
 }
 
 // guestLocation mirrors the Rust location column: "LXC 100 · 1.2.3.4".

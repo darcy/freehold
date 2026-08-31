@@ -181,6 +181,16 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			}
 			return "no answer at " + cfg.Litellm.URL, false
 		}},
+		{"dns", func() (string, bool) {
+			// The CP resolver is authoritative: pull the live records once
+			// per refresh, keep the old snapshot on failure (fallback to the
+			// config mirror stays in buildServices when there is no snapshot).
+			if live := dnsRowsLive(cfg); len(live) > 0 {
+				m.DNS = live
+				return fmt.Sprintf("%d resolver records", len(live)), true
+			}
+			return "resolver unreachable (mirror fallback)", len(m.DNS) > 0
+		}},
 		{"world state", func() (string, bool) {
 			m.buildServices(cfg)
 			m.readLocalRunners(cfg)

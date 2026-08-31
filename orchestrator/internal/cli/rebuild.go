@@ -355,6 +355,7 @@ func (e *rebuildEngine) run() error {
 	fmt.Fprintln(e.out, "  ✓ durable volume plane ready")
 
 	// 8-9. boot the relay LXC, record its coordinates.
+	fmt.Fprintln(e.out, "  · booting the relay LXC (create → docker → compose; can take minutes)…")
 	if err := e.stageBootstrap("relay"); err != nil {
 		return err
 	}
@@ -364,6 +365,7 @@ func (e *rebuildEngine) run() error {
 	fmt.Fprintln(e.out, "  ✓ relay LXC booted + recorded")
 
 	// 10-11. boot the cp LXC, record.
+	fmt.Fprintln(e.out, "  · booting the cp LXC (create → docker → compose; can take minutes)…")
 	if err := e.stageBootstrap("cp"); err != nil {
 		return err
 	}
@@ -374,6 +376,7 @@ func (e *rebuildEngine) run() error {
 
 	// 12. the k3s substrate (boot-if-missing + in-guest install + record).
 	if e.f.withK3s {
+		fmt.Fprintln(e.out, "  · installing the k3s substrate (download + in-guest install; several minutes)…")
 		if err := e.stageK3s(); err != nil {
 			return err
 		}
@@ -381,10 +384,12 @@ func (e *rebuildEngine) run() error {
 	}
 
 	// 13-14. deploy the relay + the control plane.
+	fmt.Fprintln(e.out, "  · deploying the relay stack (compose pull + start)…")
 	if err := e.stageDeployRelay(); err != nil {
 		return err
 	}
 	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.domain)
+	fmt.Fprintln(e.out, "  · deploying the control plane (release binaries into the cp LXC)…")
 	if err := e.stageDeployCp(); err != nil {
 		return err
 	}
@@ -394,6 +399,7 @@ func (e *rebuildEngine) run() error {
 	// provider + postgres secrets sealed to it), apply the kube workloads,
 	// register the model, and record the coords for the Services row.
 	if e.f.withLitellm {
+		fmt.Fprintln(e.out, "  · applying the litellm kube workloads (postgres + gateway; rollout up to 5m)…")
 		if err := e.stageLitellm(); err != nil {
 			return err
 		}
@@ -402,9 +408,11 @@ func (e *rebuildEngine) run() error {
 
 	// 14.7. C0: register the CP resolver's explicit records (relay/cp/k3s +
 	// litellm) INSIDE the deployed CP, then point every guest at it.
+	fmt.Fprintln(e.out, "  · writing the resolver records (relay/cp/k3s/litellm)…")
 	if err := e.stageDnsRegister(); err != nil {
 		return err
 	}
+	fmt.Fprintln(e.out, "  · pointing every guest at the resolver + verifying it answers…")
 	if err := e.stageDnsPoint(); err != nil {
 		return err
 	}
@@ -855,6 +863,21 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	return &cfg
 }
 
+// managedForFlags is the rebuild's world manifest: relay + cp always,
+// k3s/litellm exactly when their flags were given. The pipeline's mid-stage
+// recorders append as they go; finalSave replaces the list wholesale so a
+// withheld flag drops its survivor.
+func managedForFlags(withK3s, withLitellm bool) []string {
+	m := []string{"relay", "cp"}
+	if withK3s {
+		m = append(m, "k3s")
+	}
+	if withLitellm {
+		m = append(m, "litellm")
+	}
+	return m
+}
+
 func containsStr(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {
@@ -882,6 +905,12 @@ func (e *rebuildEngine) finalSave() error {
 		return err
 	}
 	cfg := mergeFromAnswers(e.fromAnswers(), prev)
+	// The rebuild OWNS the world manifest: managed = the pieces THIS run
+	// deployed. A surviving config entry (e.g. litellm after a rebuild run
+	// WITHOUT --with-litellm) must not keep claiming a service the pipeline
+	// did not stand up — that is how the Services view showed a phantom
+	// "litellm (gateway) … down" for a world that never got one.
+	cfg.Managed = managedForFlags(e.f.withK3s, e.f.withLitellm)
 	if rpk, ok := e.relayPubkeyNip11(); ok {
 		cfg.RelayPubkey = &rpk
 	}
