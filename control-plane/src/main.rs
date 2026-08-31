@@ -127,8 +127,13 @@ struct AdoptArgs {
 
 #[derive(Args)]
 struct ProvisionArgs {
-    /// Service/runner name (one secret per runner in Chunk 1)
+    /// Service/runner name (one target credential per runner; extras via
+    /// add-secret for C0's litellm master/provider/postgres set)
     name: String,
+    /// Read the credential from this ENV VAR instead of stdin (headless
+    /// pipelines: the value arrives as an env-injected secret, never argv).
+    #[arg(long)]
+    secret_env: Option<String>,
     #[arg(long)]
     kind: String,
     #[arg(long)]
@@ -168,6 +173,9 @@ struct AddSecretArgs {
     /// Extra secret name (e.g. provider-key) — the agent requests this name
     /// in an exec's `secrets`, and the runner injects + redacts its value.
     name: String,
+    /// Read the value from this ENV VAR instead of stdin (never argv).
+    #[arg(long)]
+    secret_env: Option<String>,
     #[arg(long, env = STATE_DIR_ENV, default_value = "./.freehold/control-plane")]
     state_dir: PathBuf,
 }
@@ -365,7 +373,12 @@ async fn main() -> Result<()> {
             // authorized_keys — nobody pastes an existing key. Other kinds:
             // the operator pastes the API credential once.
             let (secret, generated_pubkey): (zeroize::Zeroizing<String>, Option<String>) =
-                if args.kind == "ssh" {
+                if let Some(env) = &args.secret_env {
+                    let v = std::env::var(env).map_err(|_| {
+                        anyhow::anyhow!("--secret-env {env} is not set in this environment")
+                    })?;
+                    (zeroize::Zeroizing::new(v), None)
+                } else if args.kind == "ssh" {
                     let (privk, pubk) = freehold_core::identity::generate_ssh_keypair(&args.name)
                         .map_err(|e| anyhow::anyhow!("ssh keygen: {e}"))?;
                     (
@@ -425,10 +438,16 @@ async fn main() -> Result<()> {
         Cmd::AddSecret(args) => {
             let store = StateStore::open(&args.state_dir)
                 .with_context(|| format!("opening CP state in {}", args.state_dir.display()))?;
-            let value = read_secret_stdin(&format!(
-                "paste extra secret {0} for runner {1}: ",
-                args.name, args.runner
-            ))?;
+            let value: zeroize::Zeroizing<String> = if let Some(env) = &args.secret_env {
+                zeroize::Zeroizing::new(std::env::var(env).map_err(|_| {
+                    anyhow::anyhow!("--secret-env {env} is not set in this environment")
+                })?)
+            } else {
+                read_secret_stdin(&format!(
+                    "paste extra secret {0} for runner {1}: ",
+                    args.name, args.runner
+                ))?
+            };
             provisioner::add_secret(&store, &args.runner, &args.name, value.as_bytes())?;
             println!(
                 "added extra secret {0} to runner {1} (sealed to the runner's key)",
