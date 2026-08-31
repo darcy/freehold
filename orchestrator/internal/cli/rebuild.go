@@ -1678,17 +1678,12 @@ func (e *rebuildEngine) stageLitellm() error {
 	postgresPw := genSecretHex() // postgres password
 	providerKey := e.f.litellmProviderKey
 
-	// ---- Leg 1: kube workloads (values ride exec env, never argv). -------
-	leg1 := litellmManifestScript(k3sVmid)
-	leg1Env := append(
-		[]string{
-			"FREEHOLD_LITELLM_MASTER=" + masterKey,
-			"FREEHOLD_LITELLM_PROVIDER=" + providerKey,
-			"FREEHOLD_LITELLM_PG=" + postgresPw,
-		},
-		os.Environ()...,
-	)
-	ok, out := e.runEnv(e.bins.Self, leg1Env, e.execArgs(leg1, 420))
+	// ---- Leg 1: kube workloads. The k8s Secrets (master + postgres pw) are
+	// CP-GENERATED installer material (like deploy flags) — they cross the
+	// ssh runner as shell-quoted literals in the script. The OPERATOR's
+	// provider key is NOT here: it rides ONLY the runner package (leg 2).
+	leg1 := litellmManifestScript(k3sVmid, masterKey, postgresPw)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(leg1, 420))
 	if !ok {
 		return fmt.Errorf("litellm kube apply failed:\n%s", out)
 	}
@@ -1749,15 +1744,16 @@ func (e *rebuildEngine) stageLitellm() error {
 // litellmManifestScript applies the postgres + litellm kube resources inside
 // the k3s LXC: namespace, Secrets (values from exec env), PVC (local-path ->
 // the durable plane), deployments, NodePort service. No secrets in argv.
-func litellmManifestScript(k3sVmid uint32) string {
+func litellmManifestScript(k3sVmid uint32, masterKey, postgresPw string) string {
 	sb := strings.ReplaceAll(`set -euo pipefail
 K="kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec __VMID__ -- sh -c"
 $EX "mkdir -p /tmp/litellm-manifests"
 $EX "$K create ns litellm 2>/dev/null || true"
-# Secrets: values ride env (FREEHOLD_LITELLM_*), never argv.
-$EX "$K create secret generic litellm-keys -n litellm --from-literal=master-key=\"$FREEHOLD_LITELLM_MASTER\" --from-literal=provider-key=\"$FREEHOLD_LITELLM_PROVIDER\" --dry-run=client -o yaml | $K apply -f -"
-$EX "$K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=\"$FREEHOLD_LITELLM_PG\" --dry-run=client -o yaml | $K apply -f -"
+# Secrets: CP-generated values are shell-quoted literals (deploy-flag shape);
+# the operator's provider key is deliberately absent here (runner-only).
+$EX "$K create secret generic litellm-keys -n litellm --from-literal=master-key=__MASTER_ESC__ --dry-run=client -o yaml | $K apply -f -"
+$EX "$K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=__PG_ESC__ --dry-run=client -o yaml | $K apply -f -"
 cat >/tmp/litellm-manifests/postgres.yaml <<'YAML'
 __POSTGRES__
 YAML
@@ -1774,7 +1770,16 @@ echo LEG1_OK`,
 	)
 	sb = strings.ReplaceAll(sb, "__POSTGRES__", litellmPostgresManifest)
 	sb = strings.ReplaceAll(sb, "__LITELLM__", litellmGatewayManifest)
+	sb = strings.ReplaceAll(sb, "__MASTER_ESC__", shQuoteLiteral(masterKey))
+	sb = strings.ReplaceAll(sb, "__PG_ESC__", shQuoteLiteral(postgresPw))
 	return sb
+}
+
+// shQuoteLiteral single-quotes a value for a shell command embedded in the
+// exec script (CP-generated secrets only; the operator's keys never come
+// here — they ride the runner package).
+func shQuoteLiteral(v string) string {
+	return "'" + v + "'"
 }
 
 // litellmPostgresManifest is the postgres Deployment on the durable plane

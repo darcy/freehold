@@ -538,12 +538,11 @@ func TestGenSecretHex(t *testing.T) {
 // (never a literal), embeds both workloads, and pins the durable PVC + the
 // fireworks egress — the C0 kube surface.
 func TestLitellmManifestScript(t *testing.T) {
-	out := litellmManifestScript(102)
+	out := litellmManifestScript(102, "masterkey", "pgpw")
 	for _, want := range []string{
 		"pct exec 102 -- sh -c",
-		"master-key=\\\"$FREEHOLD_LITELLM_MASTER\\\"",
-		"postgres-pw=\\\"$FREEHOLD_LITELLM_PG\\\"",
-		"provider-key=\\\"$FREEHOLD_LITELLM_PROVIDER\\\"",
+		"master-key='masterkey'",
+		"postgres-pw='pgpw'",
 		"storageClassName: local-path",
 		"nodePort: 31400",
 		"35.207.52.96",                  // fireworks egress pin
