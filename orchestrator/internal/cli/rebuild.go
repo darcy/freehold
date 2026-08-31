@@ -1682,7 +1682,7 @@ func (e *rebuildEngine) stageLitellm() error {
 	// CP-GENERATED installer material (like deploy flags) — they cross the
 	// ssh runner as shell-quoted literals in the script. The OPERATOR's
 	// provider key is NOT here: it rides ONLY the runner package (leg 2).
-	leg1 := litellmManifestScript(k3sVmid, masterKey, postgresPw)
+	leg1 := litellmManifestScript(k3sVmid, masterKey, postgresPw, providerKey)
 	ok, out := e.runBin(e.bins.Self, e.execArgs(leg1, 420))
 	if !ok {
 		return fmt.Errorf("litellm kube apply failed:\n%s", out)
@@ -1744,7 +1744,7 @@ func (e *rebuildEngine) stageLitellm() error {
 // litellmManifestScript applies the postgres + litellm kube resources inside
 // the k3s LXC: namespace, Secrets (values from exec env), PVC (local-path ->
 // the durable plane), deployments, NodePort service. No secrets in argv.
-func litellmManifestScript(k3sVmid uint32, masterKey, postgresPw string) string {
+func litellmManifestScript(k3sVmid uint32, masterKey, postgresPw, providerKey string) string {
 	sb := strings.ReplaceAll(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec __VMID__ -- sh -c"
@@ -1752,8 +1752,11 @@ $EX "mkdir -p /tmp/litellm-manifests"
 $EX "$K create ns litellm 2>/dev/null || true"
 # Secrets: CP-generated values are shell-quoted literals (deploy-flag shape);
 # the operator's provider key is deliberately absent here (runner-only).
-$EX "$K create secret generic litellm-keys -n litellm --from-literal=master-key=__MASTER_ESC__ --dry-run=client -o yaml | $K apply -f -"
-$EX "$K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=__PG_ESC__ --dry-run=client -o yaml | $K apply -f -"
+# Secrets are created ONLY when absent: the first run's values are the
+# authoritative ones (postgres initializes PGDATA against them, and the
+# reused runner package keeps them) — a re-run must never re-roll them.
+$EX "$K get secret litellm-keys -n litellm >/dev/null 2>&1 || $K create secret generic litellm-keys -n litellm --from-literal=master-key=__MASTER_ESC__ --from-literal=provider-key=__PROVIDER_ESC__"
+$EX "$K get secret litellm-pg -n litellm >/dev/null 2>&1 || $K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=__PG_ESC__"
 # Manifests: written HOST-side (this exec runs on the PVE host where pct
 # lives), pushed INTO the guest, then applied with the full kubectl path.
 mkdir -p /tmp/litellm-manifests
@@ -1775,6 +1778,7 @@ echo LEG1_OK`,
 	sb = strings.ReplaceAll(sb, "__LITELLM__", litellmGatewayManifest)
 	sb = strings.ReplaceAll(sb, "__MASTER_ESC__", shQuoteLiteral(masterKey))
 	sb = strings.ReplaceAll(sb, "__PG_ESC__", shQuoteLiteral(postgresPw))
+	sb = strings.ReplaceAll(sb, "__PROVIDER_ESC__", shQuoteLiteral(providerKey))
 	return sb
 }
 
@@ -1860,7 +1864,12 @@ spec:
         ports:
         - {containerPort: 4000}
         env:
-        - {name: DATABASE_URL, value: "postgresql://llmproxy:llmproxy-db-pass@postgres.litellm:5432/litellm"}
+        # The postgres password is the CP-GENERATED value from the litellm-pg
+        # Secret — the URL must reference it, never a hardcoded literal.
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: litellm-pg, key: postgres-pw}
+        - {name: DATABASE_URL, value: "postgresql://llmproxy:$(POSTGRES_PASSWORD)@postgres.litellm:5432/litellm"}
         - {name: STORE_MODEL_IN_DB, value: "True"}
         - name: LITELLM_MASTER_KEY
           valueFrom:
