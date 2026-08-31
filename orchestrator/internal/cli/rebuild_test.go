@@ -169,6 +169,33 @@ func TestApplyLxcCoords(t *testing.T) {
 // record_lxc must load the config FRESH from disk, mutate only the target
 // role, and save — never clobbering facts another stage recorded (the
 // plane mounts here stand in for any mid-pipeline write).
+// TestMergeKeepsDnsAndLitellm covers the finalSave contract: the mid-
+// pipeline recorders persist [dns] + [litellm] to disk, and the terminal
+// merge must KEEP them (the old merge rebuilt from answers and dropped
+// both, so a finished rebuild showed no gateway coords and an empty DNS
+// mirror even though the resolver held records).
+func TestMergeKeepsDnsAndLitellm(t *testing.T) {
+	prev := &config.Config{
+		Dns:     config.DnsSpec{Records: map[string]string{"relay": "192.168.30.8", "litellm": "192.168.30.7"}},
+		Litellm: config.LitellmSpec{URL: "http://192.168.30.7:31400", Host: "192.168.30.7"},
+		Plane:   config.PlaneSpec{Backend: ptr("pve")},
+		Managed: []string{"relay", "cp", "litellm"},
+	}
+	ans := &config.Config{Managed: []string{"relay", "cp"}}
+	got := mergeFromAnswers(ans, prev)
+	if len(got.Dns.Records) != 2 {
+		t.Errorf("dns records dropped by merge: %+v", got.Dns)
+	}
+	if got.Litellm.Host != "192.168.30.7" || got.Litellm.URL != "http://192.168.30.7:31400" {
+		t.Errorf("litellm dropped by merge: %+v", got.Litellm)
+	}
+	if got.Plane.Backend == nil || *got.Plane.Backend != "pve" {
+		t.Errorf("plane must still merge: %+v", got.Plane)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
 func TestManagedForFlags(t *testing.T) {
 	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
 		t.Errorf("base = %v", got)

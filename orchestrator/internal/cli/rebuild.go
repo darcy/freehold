@@ -836,6 +836,12 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	cfg := *ans
 	cfg.Plane = prev.Plane
+	// The mid-pipeline recorders (recordLitellm, stageDnsRegister) persist
+	// their sections to disk BEFORE finalSave rebuilds from answers from
+	// scratch — dropping them here would silently erase the gateway coords
+	// and the resolver mirror on every run. Keep them, like Plane.
+	cfg.Dns = prev.Dns
+	cfg.Litellm = prev.Litellm
 	if cfg.RelayPubkey == nil {
 		cfg.RelayPubkey = prev.RelayPubkey
 	}
@@ -1671,26 +1677,37 @@ func (e *rebuildEngine) guestSearchBase() string {
 	return base
 }
 
-// guestNameserver reads the CP LXC's current first PVE-managed nameserver
-// (the router) — kept as the CP's own secondary so dnsmasq has an upstream
-// for external names once pct set makes the resolver primary.
+// guestNameserver returns the CP LXC's dnsmasq UPSTREAM: the router from
+// the guest's PVE-owned `net0` gateway line. Reading resolv.conf is WRONG
+// here — its first nameserver is already the resolver itself (set by a
+// prior world), which would produce a duplicated `nameserver .9 .9` and
+// strip dnsmasq's upstream. `pct config` is authoritative and never
+// polluted by resolv.conf history.
 func (e *rebuildEngine) guestNameserver() string {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
 		return ""
 	}
-	cmd := fmt.Sprintf(
-		"pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | head -1 | cut -d' ' -f2\"",
-		*cfg.Lxc.Cp.Vmid)
+	cmd := fmt.Sprintf("pct config %d", *cfg.Lxc.Cp.Vmid)
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
 	if !ok {
 		return ""
 	}
-	ns := strings.TrimSpace(out)
-	if ns == "" || !strings.ContainsAny(ns, "0123456789") {
-		return ""
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(l, "net0:") {
+			continue
+		}
+		for _, kv := range strings.Split(l, ",") {
+			v, found := strings.CutPrefix(kv, "gw=")
+			if found {
+				v = strings.TrimSpace(v)
+				if v != "" && strings.ContainsAny(v, "0123456789") {
+					return v
+				}
+			}
+		}
 	}
-	return ns
+	return ""
 }
 
 // stageDnsPoint points every managed guest at the CP resolver: write
