@@ -4,13 +4,21 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-**Status:** Chunk 2 complete + Chunk 2.6 runner-lifecycle slice IMPLEMENTED
+**Status:** Chunk 3 Phase 0.12 is implemented and live-verified on the real PVE
+host (VG `pve`, LVM-thin `freehold-thin`); `storage resolve|ensure|destroy` run
+against that host (Go `orchestrator/internal/cli/handlers3.go` — NOT Rust).
+Chunk 2 complete + Chunk 2.6 runner-lifecycle slice IMPLEMENTED
 and SUPERSEDED by Chunk 2.6.1 — runners-as-NIP-29-channels, IMPLEMENTED + LIVE-VERIFIED
 on a REBUILT world (relay/CPs torn down + recreated same-IPs; proxy untouched):
 9007 create + 9000/9001 membership + kind-9 fh-profile envelope ACCEPTED by stock buzz
 uuid channel ids (client-suggested) + #d roster filter + 39002 relay-signed roster =
 whitelist, read LIVE per call; community membership (relay-member) is a two-layer
 prerequisite; rebuild folds from real buzz; G-1 resolved = native-kinds-only.
+`TestManagedForFlags` / `TestWorldManaged` / `TestParsePctGateway` live in
+`rebuild_test.go`; `TestParseDnsList` lives in `tui_running_test.go` — there is no
+`TestPlaneStageNeverSkipped` (the plane stage is never skipped: `backend.is_some()`
+in the config is not proof the plane is live — ensure is idempotent, so it runs
+every converge).
 Legacy: (RUNNER_PROFILE kind 30181 published at every lifecycle mutation;
 `control-plane rebuild` = the disposable-CP fold, deterministic+idempotent;
 G-2 resolved query-per-call fail-closed; G-1 fork-vs-contribution deferred).
@@ -91,8 +99,9 @@ RE-PROVISIONED fresh under `<relay-domain>` (relay LXC 100 @
 192.168.30.254:8080; console admin = the operator's new key b2ab89...; memory +
 delegation re-proven live under the domain; the old PVE-host CP stopped).
 Chunk 3 plan in draft v5 (roadmap/POC_CHUNK3.md, unapproved): agents-as-pods on a
-k8s substrate pulled forward from MVP (supersedes ROADMAP's NO-Kubernetes-in-POC for
-Chunk 3; landed strip = first expert on the staged LXC harness), onboarding inversion
+k8s substrate pulled forward from MVP (supersedes ROADMAP's "NO Kubernetes in the
+POC" for Chunks 1–2; landed strip = first expert on the staged LXC harness), onboarding
+inversion
 (expert first, reasons about its target, asks CPA; CPA resolves the named hardware peer +
 cost gate), LiteLLM re-targets kube (LXC deploy = reference, torn down only after the kube
 deploy passes C5 + soak). Phase-0 items 01-06 resolved (POC_CHUNK3_SURFACE.md); github/
@@ -102,7 +111,9 @@ each bootstrap --kind = one TF plan, executed through the provisioning runner's 
 runner-injected TF_VAR secrets only (never tfvars), TF-generated secrets acknowledged in
 state (state = sensitive, /srv/data 0600 or encrypted backend), host-sysadmin steps as
 remote-exec in the plans, and a post-apply guard that state contains no operator-supplied
-variable values. G6's teardown/rebuild = terraform destroy/apply + the verify harness.
+variable values. C7's teardown/rebuild = `terraform destroy` / `terraform apply`
+plus the verify harness. G6's teardown/rebuild is the same
+(`terraform destroy`/`apply` + the verify harness).
 Post-Chunk-2 scope decisions (2026-08-20): Phase G (Buzz as the interaction surface —
 opening a room/DM with @freehold in the Buzz UI) MOVED to Chunk 3 (needs a real
 relay-addressable agent, not CLI-driven); Phase F (emergency-repair drill) moved OUT of
@@ -165,9 +176,10 @@ were re-anchored to match (implemented | live-verified).
 - **Grants are coarse**: agent ↔ runner (whitelist of Nostr pubkeys). Dedicated runner per
   service = default; sharing via grants allowed. Readiness = the runner's OWN self-check:
   🟢 green / 🟡 yellow / 🔴 red.
-- **POC is pre-MVP**: NO Kubernetes, NO real reasoning agent (Chunk 1 = scripted orchestrator,
-  CPA stand-in), Buzz required only from Chunk 2. Deterministic k8s pods + LiteLLM = public
-  release.
+- **NO Kubernetes in Chunks 1–2** (Kubernetes is pulled forward for Chunk 3 —
+  see `roadmap/POC_CHUNK3.md`), NO real reasoning agent (Chunk 1 = scripted orchestrator,
+  CPA stand-in), Buzz required only from Chunk 2. Deterministic k8s pods + LiteLLM
+  run on the Chunk 3 k8s substrate and carry into the public release.
 - **Host-FLEXIBLE — not locked to Proxmox.** Proxmox is the lead/default, but VPS/cloud are
   first-class supported options (the business path). K8s layer and everything above the host
   driver run identically regardless of substrate. Installer/runner must target a VPS as easily
@@ -194,8 +206,9 @@ were re-anchored to match (implemented | live-verified).
 ## Chunk 1 (current work)
 
 Prove the engine room standalone: local control plane (web UI) + runners as MCP tool servers +
-secret provisioner + coarse grants + readiness. Connectors: SSH, Vultr, Backblaze B2. No Buzz,
-no k8s.
+secret provisioner + coarse grants + readiness. Connectors: SSH, Vultr, Backblaze B2.
+No Buzz, and NO Kubernetes in Chunks 1–2 (Chunk 3 pulls k8s forward —
+`roadmap/POC_CHUNK3.md`).
 
 - Rust workspace: `core` (identity, auth — the shared signed-call protocol, sealed-box
   crypto, secret packaging, atomic-0600 fs), `runner` (+ ssh connector via russh,

@@ -3,7 +3,7 @@
 Status: EXECUTED — the engine room is merged and acceptance-green (hermetic + on the PVE
 host as a real SSH target). Remaining open legs tracked at C2/C3 (B2 live-account) and H2
 (home dogfood, deferred to Chunk 3). Checkboxes: left = implemented, right = live-verified.  
-Scope: POC, pre-Buzz, NO k8s, NO real reasoning agent.
+Scope: POC, pre-Buzz, NO Kubernetes in Chunks 1–2, NO real reasoning agent.
 
 ## Locked decisions
 

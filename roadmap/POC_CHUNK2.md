@@ -5,8 +5,10 @@ Status: IMPLEMENTED + live-verified against real Buzz (see the Chunk 2.6.1
 convention (reconciled 2026-08-20): left = implemented/built; right =
 live-verified (real relay / real account / spike / real-world operation —
 NOT hermetic-only). Every flipped row below points at its live evidence.  
-Scope: POC, brings in Buzz relay + real control plane deployment. NO Kubernetes. NO general
-provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent (deferred/unnecessary — see below).
+Scope: POC, brings in Buzz relay + real control plane deployment. NO Kubernetes in  
+Chunks 1–2 (Kubernetes is pulled forward for Chunk 3 — see `roadmap/POC_CHUNK3.md`).  
+NO general provisioner-picker (that's Chunk 6). NO `@buzz-relay` agent  
+(deferred/unnecessary — see below).
 
 ## Locked decisions
 
