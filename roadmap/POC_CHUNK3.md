@@ -1,30 +1,29 @@
-# Chunk 3 — Shipped Scope
+# Chunk 3 — Current Plan
 
-Status: COMPLETE. Everything Chunk 3 planned that did not ship moved to
-`roadmap/POC_CHUNK4.md` (archival copy there; this file is current-state only).
+Status: IN PROGRESS. The Rust→Go refactor below is done; the pre-C0 and
+Chunk-4 planning items remain.
 
 ## The Rust→Go refactor (orchestrator, installer, control-plane)
 
-*   **The whole orchestrator/installer surface is Go.** `orchestrator/` is the Go
-    module `freehold/orchestrator` (go 1.25), NOT `orchestrator-go` (renamed
-    during the reorg, commit `b75f7c5`); the Rust `tui` and `installer` crates
-    are gone, and both binaries — `freehold` (no args = the bubbletea TUI;
-    `freehold <subcmd>` = the CLI) and `freehold-orchestrator` — are Go.
-    `internal/` carries 19 packages: bootstrap, cli, client, config, console,
-    crypto, delegate, deploy, drive, flows, harness, planebase, provisioner,
-    relay, state, teardown, tui, wire.
+*   **The whole orchestrator/installer surface is Go.** `orchestrator/` is the
+    Go module `freehold/orchestrator` (go 1.25), and both binaries —
+    `freehold` (no args = the bubbletea TUI; `freehold <subcmd>` = the CLI)
+    and `freehold-orchestrator` — are Go. `internal/` carries 18 packages:
+    bootstrap, cli, client, config, console, crypto, delegate, deploy, drive,
+    flows, harness, planebase, provisioner, relay, state, teardown, tui,
+    wire.
 
 *   **The Rust `core` (crypto/identity/wire) and `runner` stay Rust** as the
-    byte-exact reference oracle. `orchestrator/harness/` (`harness_test.go` +
-    the Rust oracle crate `freehold-harness-oracle`) is the release gate:
-    `go test ./harness/` drives `target/debug/freehold-harness-oracle`, and
-    `orchestrator/`'s crypto reproduces the Rust `core` surface byte-exactly —
-    BIP-340 Schnorr via btcec/v2 (parity-negated scalar aux mask, the
-    parity-probe test gating it), X25519+HKDF+ChaCha20-Poly1305 sealed box,
-    bech32 nsec, ed25519, `SecretPackage` as sorted-map JSON matching serde's
-    `BTreeMap` output, NIP-98 canonical events, kind-48001 audit, NIP-44 v2
-    engrams. `onboard` executes the shipped Rust `runner serve` as a
-    subprocess (never in-process); `mcp::serve` is not reimplemented in Go.
+    byte-exact reference oracle. `orchestrator/harness/` (`harness_test.go`
+    drives `target/debug/freehold-harness-oracle`, the Rust oracle crate) is
+    the release gate: the Go crypto reproduces the Rust `core` surface
+    byte-exactly — BIP-340 Schnorr via btcec/v2 (parity-negated scalar aux
+    mask, gated by a parity-probe test), X25519+HKDF+ChaCha20-Poly1305
+    sealed box, bech32 nsec, ed25519, `SecretPackage` as sorted-map JSON
+    matching serde's `BTreeMap` output, NIP-98 canonical events, kind-48001
+    audit, NIP-44 v2 engrams. `onboard` executes `runner serve` as a
+    subprocess (never in-process); the MCP serve layer is not reimplemented
+    in Go.
 
 *   **The TUI is fully Go (bubbletea, full-screen alt-screen).** One activity
     surface for ALL long ops (`internal/tui/activity.go`, ~440 lines, from the
@@ -40,25 +39,31 @@ Status: COMPLETE. Everything Chunk 3 planned that did not ship moved to
     `actLineMsg{a}`/`actDoneMsg{a}` dropping stale pumps).
 
 *   **The rebuild engine runs the whole world.** `freehold rebuild`
-    (`internal/cli/rebuild.go`) threads the Rust installer's stage set
-    verbatim into Go: ensure_bins → provision (ssh keypair; reuse tolerated
-    only with a real package) → door gate (interactive ENTER/r/q, `--yes`
-    bails actionably with the key + install line) → grant → serve (`pkill` the
-    stale listener, wait for the port to close, spawn detached, poll 20s) →
+    (`internal/cli/rebuild.go`) threads the stage set verbatim into Go:
+    ensure_bins → provision (ssh keypair; reuse tolerated only with a real
+    package) → door gate (interactive ENTER/r/q, `--yes` bails actionably
+    with the key + install line) → grant → serve (`pkill` the stale
+    listener, wait for the port to close, spawn detached, poll 20s) →
     verify door (self-subprocess exec) → **write initial config** (merge
     preserves surviving facts; AFTER verify, BEFORE storage, so the plane
     mapping has somewhere to record) → storage resolve + ensure×3
-    (relay/cp/k3s-volumes; honors the RECORDED `plane.backend_kind` over
-    re-detection) → bootstrap relay → record LXC relay (fresh load → resolve
-    vmid+ip through the runner → mutate → save) → bootstrap cp → record LXC cp
-    → k3s stage (boot-if-missing + the 900s in-guest install script,
+    (relay/cp/k3s-volumes; honors the recorded `plane.backend_kind` over
+    re-detection — `TestManagedForFlags`, `TestWorldManaged` and
+    `TestParsePctGateway` in `internal/cli/rebuild_test.go` anchor this
+    region) → bootstrap relay → record LXC relay (fresh load → resolve
+    vmid+ip through the runner → mutate → save) → bootstrap cp → record LXC
+    cp → k3s stage (boot-if-missing + the 900s in-guest install script,
     verbatim) → deploy-relay (deploy dir from the guest's ACTUAL mounts) →
-    deploy-cp (from the release binaries; state/bin dirs from the guest's last
-    mount) → NIP-11 relay pubkey (best-effort) → final merge save. Every
-    parsing helper (STORAGE-POOL/MOUNT/BACKEND lines, `pct list` exact-name
-    vmid, eth0 ip, `pct config` mounts, NIP-11 pubkey) is a pure function
-    with a hermetic test; the fresh-load/mutate/save record discipline is
-    regression-tested against clobbering (the Rust `lib.rs` test ported).
+    deploy-cp (from the release binaries; state/bin dirs from the guest's
+    last mount) → NIP-11 relay pubkey (best-effort) → final merge save.
+    Every parsing helper (STORAGE-POOL/MOUNT/BACKEND lines, `pct list`
+    exact-name vmid, eth0 ip, `pct config` mounts, NIP-11 pubkey) is a pure
+    function with a hermetic test; the fresh-load/mutate/save record
+    discipline is regression-tested against clobbering. `TestParseDnsList`
+    lives in `internal/tui/tui_running_test.go` — there is no
+    `TestPlaneStageNeverSkipped`: the plane stage is never skipped, because
+    `ensure` is idempotent and runs every converge (`backend.is_some()` in
+    the config is not proof the plane is live).
 
 *   **The door gate lives INSIDE the activity view.** A rebuild bailing at the
     door (`--yes` can't prompt) exits non-zero with "the door needs …" on
@@ -73,18 +78,18 @@ Status: COMPLETE. Everything Chunk 3 planned that did not ship moved to
 
 *   **Teardown keeps the config INTACT.** `internal/teardown/teardown.go`
     runs whole-world as COMPUTE teardown — destroys LXCs, KEEPS the recorded
-    coords (operator-owned facts; `PruneLxcCoords` removed) so a rebuild
+    coords (operator-owned facts; no `PruneLxcCoords`), so a rebuild
     re-boots the SAME world — and `--data` adds the tenant datasets +
-    `freehold-thin` before the door key/world home/config go LAST (intentional
-    divergence from `installer/src/teardown.rs`, which removes config; `New
-    Runner` interface makes `Run` hermetically testable). `stageLocalLvm`
-    honors the plane: `ChownGuestUid` is NON-recursive (top dir only —
-    PVE's own invariant; a recursive sweep re-rooted every container-owned
-    subtree and EACCESed redis/postgres/buzz; the ctime forensics pinned
-    `stagePlacement`'s `--confirm-storage`-gated creation as the moment).
+    `freehold-thin` before the door key/world home/config go LAST
+    (`installer/src/teardown.rs` removes config; that behavior is gone).
+    `stageLocalLvm` honors the plane: `ChownGuestUid` is NON-recursive (top
+    dir only — PVE's own invariant; a recursive sweep re-roots every
+    container-owned subtree and EACCESes redis/postgres/buzz).
     `--thin-pool` headless does adopt-if-present / carve at
-    `--pool-size-gb`; a name typed verbatim adopts; `--confirm-storage`
+    `--pool-size-gb`; a name typed verbatim adopts; `--confirm-storage` is
     required before a carve; ZFS + `--thin-pool` is an actionable error.
+    `stagePlacement` (rebuild stage 7a) keys the plane placement off the
+    `STORAGE-THINPOOL:` line the resolve stage emits.
 
 *   **`freehold install` is a thin front-end to the same engine**
     (`internal/cli/install.go`): `collectAnswers` gathers
@@ -101,41 +106,40 @@ Status: COMPLETE. Everything Chunk 3 planned that did not ship moved to
 *   **Teardown is ACTIVE with checkboxes; the CLI streams.** `teardown.Run`
     announces each LXC BEFORE it destroys it (`destroying relay LXC 100`
     streams via `say()`/Live before `DestroyOneLxc`; the
-    `destroyed / already gone / never created` contract is unchanged), and the
+    `destroyed / already gone / never created` contract holds), and the
     TUI seeds one slot per MANAGED LXC (`relay LXC 100` …) that flips to ✓
     as lines arrive; `tail()` keeps the last 3 non-empty lines so the
     embedded cause is never lost.
 
 *   **Storage + CLI contracts.** `storage ensure` takes `--size-gb` /
     `--pool-size-gb`; `storage resolve` takes `--confirm-storage` and emits
-    `STORAGE-THINPOOL: <name|->` (absence = ZFS; the plane-placement gate
-    `stagePlacement` at rebuild stage 7a keys off it); all five storage
-    subcommands register `addr`/`agent-dir`/`runner-pubkey`/`target`
-    (`storage destroy-pool` had been the outlier); `prompt()` reads through
+    `STORAGE-THINPOOL: <name|->` (absence = ZFS); the storage subcommands
+    (`resolve`, `ensure`, `ensure --confirm-storage` path, `destroy`,
+    `destroy-pool`) all register
+    `addr`/`agent-dir`/`runner-pubkey`/`target`; `prompt()` reads through
     one persistent `bufio.Reader` over stdin.
 
 *   **Go↔Rust gates stay green.** `cargo build --workspace` clean, `cargo
     test --workspace` 0 fail, `go vet ./...` clean, `go test ./...` green
-    (harness byte-exact gate + all packages); both Go binaries rebuild from
+    (harness byte-exact gate + all packages); both Go binaries build from
     `target/debug/` (`go build -C orchestrator -o ../target/debug/…`), and
-    `go test ./harness/` stays the release gate for every primitive.
+    `go test ./harness/` is the release gate for every primitive.
 
-## What Chunk 3 delivered pre-C0
+## Pre-C0 and Chunk 4 planning
 
-*   **k3s is a deterministic CONFIGURE STAGE (#120)** — `freehold configure`
-    boots the k3s LXC (auto vmid, coords recorded to `lxc.k3s` +
-    `managed += k3s`) and installs k3s inside with the spike-verified
-    unprivileged posture (`INSTALL_K3S_EXEC="server --kubelet-arg
-    feature-gates=KubeletInUserNamespace=true"` — without it the kubelet dies
-    for lack of `/dev/kmsg`; even a device-cgroup allow does NOT materialize
-    it under userns); an nginx pod serves 200 on pod / ClusterIP / NodePort,
-    and 31500 from the PVE host. The dashboard lists `managed` pieces (relay/
-    cp/k3s today); litellm appears the moment its coords land in the config
-    (#115/#120), and the agents registry records named AI agents
-    (delegate-peer registers itself at start) with ●/○ availability from relay
-    kind-9 presence (#118).
+*   **k3s is a deterministic CONFIGURE STAGE** (`freehold configure`,
+    `internal/cli/rebuild.go`) — boots the k3s LXC (auto vmid, coords
+    recorded to `lxc.k3s` + `managed += k3s`) and installs k3s inside with
+    the spike-verified unprivileged posture (`INSTALL_K3S_EXEC="server
+    --kubelet-arg feature-gates=KubeletInUserNamespace=true"` — without it
+    the kubelet dies for lack of `/dev/kmsg`; even a device-cgroup allow
+    does NOT materialize it under userns); an nginx pod serves 200 on pod /
+    ClusterIP / NodePort, and 31500 from the PVE host. The dashboard lists
+    the `managed` pieces (relay/cp/k3s today), and the agents registry
+    records named AI agents (delegate-peer registers itself at start) with
+    ●/○ availability from relay kind-9 presence.
 
-## Still open → Chunk 4
+## What remains
 
 C0 (litellm-kube apply + Postgres + master-key re-mint + the Services row),
 C1–C7, D1–D4, E1–E6, F1–F3, G1–G7, and the carried Chunk 1–2.6.1 items —
