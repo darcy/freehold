@@ -48,11 +48,11 @@ backbone for agents.
     no mgmt channel by design, idle auto-reap, emptyDir, no PVC v1) — target from Chunk 3  
     (k8s pulled forward: `roadmap/POC_CHUNK3.md`), carried into the public release.
     
-*   **Agent placement:** POC (Chunks 1–2) = scripted agents joining the relay via
-    their own NIP-42 client (the `buzz-acp` harness targets LLM agents and is the
-    Chunk-3+ path — see `roadmap/BUZZ_SURFACE.md`); Chunk 3 onward = k8s pods
-    (Kubernetes pulled forward out of MVP — see `roadmap/POC_CHUNK3.md`). Runners
-    are separate — see the Runners section below.
+*   **Agent placement:** POC = scripted agents joining the relay via their own NIP-42 client
+    (the `buzz-acp` harness targets LLM agents and is the Chunk-3+ path — see
+    `roadmap/BUZZ_SURFACE.md`); Chunk 3 onward = k8s pods (k8s pulled forward out of MVP —  
+    see `roadmap/POC_CHUNK3.md`). Runners are separate — see the
+    Runners section below.
     
 *   **We do NOT build a chat UI / agent-management surface** — Buzz provides it.
     
@@ -61,14 +61,32 @@ backbone for agents.
 
 Single fabric, memory anchored to the relay, agents scoped to the relay:
 
-*   **Master / control agent (CPA)** — appliance-level: setup, orchestration, fixing Buzz,  
-    coordinating experts, and **onboarding** (creating runners, granting agents, validating).  
-    Lives in the management relay; also drives the control plane (same memory via relay).  
-    Emergency tool to fix Buzz + primary setup tool.
+*   **Master / control agent (CPA)** is a real, LLM-backed reasoning agent — the system's
+    **main user touchpoint**, the thing a person actually opens Buzz and talks to. It runs
+    on the same buzz-acp/goose-class harness as expert agents, with its own system prompt
+    (a versioned Markdown file in the repo — see `roadmap/POC.md`'s Chunk 3) and a dedicated
+    create/grant/manage-agent toolset instead of a service-specific one. The structural,
+    safety-relevant operations underneath it — provisioning, granting, teardown/rebuild,
+    secret handling — stay in the deterministic runner/CP layer; reasoning decides *what*
+    to do, the deterministic layer does it auditably. Channel membership is still the
+    injection-surface gate: CPA is reachable only by the operator + its own channels.
+    *   Appliance-level responsibilities: setup, orchestration, fixing Buzz, coordinating
+        experts, and **onboarding** (creating runners, granting agents, validating).
+    *   **Delegates to the agents it creates** — CPA is not meant to do expert-level work
+        itself; it spawns a per-service expert and hands off, the same way a person would
+        delegate to a colleague, and stays the durable point of contact if that expert is
+        unreachable, stale, or needs to be replaced.
+    *   Lives in the management relay; also drives the control plane (same memory via
+        relay). Emergency tool to fix Buzz + primary setup tool.
+    *   Durable and rebuildable by construction (Phase 0.12's per-tenant dataset +
+        reattach-by-reference model): CPA's identity, memory, and roster survive a
+        compute-only teardown/rebuild of its own compute, the same guarantee every other
+        tenant gets. Its Buzz handle is chosen by the operator during bootstrap, not fixed.
     
 *   **Per-service expert agents** (`@litellm`, `@algolia`, `@pihole`, `@vultr`, `@b2`…) — each  
-    expert in one service, spawned on onboarding, scoped to the relay. Master delegates; users  
-    talk to them directly in Buzz.
+    expert in one service, spawned on onboarding by CPA, scoped to the relay. CPA delegates;  
+    users can talk to CPA (which routes to the right expert) or to an expert directly in Buzz —  
+    both are first-class; CPA is the front door, not a mandatory relay.
     
 *   **Onboarding pattern (happy path):**
     1.  User tells CPA to set up a service (e.g. "set up LiteLLM on an LXC" or "manage my  
@@ -272,35 +290,9 @@ The tiers above encode onto every LXC/VM as a single top-level split, so the bac
     └── scratch/
 ```
 
-*   **The backup rule is the split, implemented as MOUNT POINTS with explicit flags.**
-    `/srv/data` (and its tenants) and `/srv/nobackup` are `mpN:` volume mounts, never
-    plain rootfs directories — and the flag must be set on EVERY entry, because
-    vzdump's default excludes volume mount points. freehold lands each tenant dataset
-    as its own mount (`mp0: …,mp=/var/lib/docker,backup=1`,
-    `mp1: …,mp=/srv/data/relay,backup=1`, `mp2: …,mp=/srv/data/cp,backup=1`, …),
-    which is the same rule applied per tenant rather than as one shared `/srv/data`
-    mount; a future reproducible half gets `mpN: …,mp=/srv/nobackup,backup=0` (never
-    in the PBS job). On a box that can't add a second mount point,
-    `vzdump --exclude-path /srv/nobackup` is the rootfs fallback. Nothing under
-    `/srv/nobackup` is ever in a PBS job.
-*   **Container stores relocate under `/srv/nobackup`** (`docker`/`containerd`/`rancher`
-    daemon roots), mirroring the existing "exclude `/var/lib/docker`" Docker-host LXC
-    pattern — but by layout, not by config list. **Carve-out — the buzz relay keeps
-    its daemon root at `/var/lib/docker`, backed up (`backup=1`):** the relay's
-    Postgres/Redis/MinIO/git data are docker *named volumes* living under
-    `/var/lib/docker/volumes/`, and freehold ships no buzz patch, so landing them on
-    a tenant dataset means that dataset IS the guest's `/var/lib/docker`. Relocating
-    it would silently exclude the relay DBs from backup. The documented cost is
-    reproducible images/layers riding in the backup set; a future buzz change that
-    moves the named volumes out of the daemon root removes that cost.
-*   **Durable PVCs are pinned under `/srv/data` — never the daemon root.** k3s's
-    default `local-path` provisioner stores PVCs *under the rancher root*
-    (`/var/lib/rancher/k3s/storage/…`); relocating that whole root would drag the
-    control_plane Postgres PVC — the thing every "reconstructible from" claim
-    depends on — into the excluded half, silently. Configure provisioner roots
-    explicitly: disposable volumes on a `nobackup`-rooted storage class, durable
-    ones pinned to `/srv/data/k8s-volumes`. These lands live on the Chunk 3
-    Kubernetes substrate — see the Build plan.
+*   **The backup rule is the split, implemented as MOUNT POINTS with explicit flags.** `/srv/data` (and its tenants) and `/srv/nobackup` are `mpN:` volume mounts, never plain rootfs directories — and the flag must be set on EVERY entry, because vzdump's default excludes volume mount points. freehold lands each tenant dataset as its own mount (`mp0: …,mp=/var/lib/docker,backup=1`, `mp1: …,mp=/srv/data/relay,backup=1`, `mp2: …,mp=/srv/data/cp,backup=1`, …), which is the same rule applied per tenant rather than as one shared `/srv/data` mount; a future reproducible half gets `mpN: …,mp=/srv/nobackup,backup=0` (never in the PBS job). On a box that can't add a second mount point, `vzdump --exclude-path /srv/nobackup` is the rootfs fallback. Nothing under `/srv/nobackup` is individually "important" — if it needs a carve-out, it was filed in the wrong half.
+*   **Container stores relocate under `/srv/nobackup`** (`docker`/`containerd`/`rancher` daemon roots), mirroring the existing "exclude `/var/lib/docker`" Docker-host LXC pattern — but by layout, not by config list. **Carve-out — the buzz relay keeps its daemon root at `/var/lib/docker`, backed up (`backup=1`):** the relay's Postgres/Redis/MinIO/git data are docker *named volumes* living under `/var/lib/docker/volumes/`, and freehold ships no buzz patch, so landing them on a tenant dataset means that dataset IS the guest's `/var/lib/docker`. Relocating it would silently exclude the relay DBs from backup. The documented cost is reproducible images/layers riding in the backup set; a future buzz change that moves the named volumes out of the daemon root removes the carve-out.
+*   **Durable PVCs are pinned under `/srv/data` — never the daemon root.** k3s's default `local-path` provisioner stores PVCs *under the rancher root* (`/var/lib/rancher/k3s/storage/…`); relocating that whole root would drag the control_plane Postgres PVC — the thing every "reconstructible from" claim depends on — into the excluded half, silently. Configure provisioner roots explicitly: disposable volumes on a `nobackup`-rooted storage class, durable ones pinned to `/srv/data/k8s-volumes`.
 *   **Data-heavy services mount TrueNAS under `/srv/data/<service>`** — backed by TrueNAS snapshots + Backblaze off-site, not by PBS rootfs copies.
 *   **Skills map onto it:** `needs: {volume: …}` → `/srv/data/<service>`; a scratch-only service (nothing durable) → `/srv/nobackup/<service>` or a pod `emptyDir`. `needs.volume` is the declaration that something is durable — absence means disposable by default.
 
@@ -425,10 +417,9 @@ Anything × anything composes. K8s layer runs identically regardless of host.
     
 *   Unified control plane app; bootstrap is a MODE, not a script.
     
-*   Co-locate the control plane + its runner with the CP's OWN target LXC/box for MVP —
-    the relay is an ATTACH (own LXC, different infra, or unmanaged), never a
-    co-location requirement. "Local CP + remote k8s" = not MVP (Kubernetes arrives
-    with Chunk 3; see `roadmap/POC_CHUNK3.md`).
+*   Co-locate the control plane + its runner with the CP's OWN target LXC/box for MVP — the
+    relay is an ATTACH (own LXC, different infra, or unmanaged), never a co-location requirement.
+    "Local CP + remote k8s" = not MVP.
     
 *   Pre-installed box = phase 2/3. Future: local CP can provision another Proxmox box (software).
     
@@ -448,18 +439,14 @@ Anything × anything composes. K8s layer runs identically regardless of host.
     
 *   **Config volume-mounted / ConfigMaps**; images stay thin.
     
-*   **Deterministic agent pods** (from Chunk 3 — Kubernetes is pulled forward,
-    `roadmap/POC_CHUNK3.md`); connections as env vars; secrets via
+*   **Deterministic agent pods** (public release); connections as env vars; secrets via  
     provisioner model (runner holds ciphertext + injected key; agent uses, never reads).
     
-*   **Agent placement:** Chunks 1–2 = scripted agents joining the relay via their
-    own NIP-42 client (the `buzz-acp` harness is the Chunk-3+ path); Chunk 3
-    onward = k8s pods (Kubernetes pulled forward — `roadmap/POC_CHUNK3.md`).
+*   **Agent placement:** POC = Buzz agents via buzz-acp; public release = k8s pods.
     
 *   **Buzz required; management relay created by install; one relay per control plane.**
     
-*   **LiteLLM** as a k8s Deployment (replicas), config mounted, state in Postgres —
-    on the Chunk 3 Kubernetes substrate (`roadmap/POC_CHUNK3.md`).
+*   **LiteLLM** as a k8s Deployment (replicas), config mounted, state in Postgres.
     
 *   **Storage**: ZFS now → Ceph on 2nd box. Layered reliability.
     
@@ -467,8 +454,7 @@ Anything × anything composes. K8s layer runs identically regardless of host.
     
 *   **K8s fixed; hosting substrate pluggable** (proxmox lead, vps/cloud, incus).
     
-*   **K8s is pulled forward into the POC at Chunk 3** (`roadmap/POC_CHUNK3.md`);
-    Chunks 1–2 stay Kubernetes-free and prove the connector world.
+*   **K8s is part of the public release (MVP), not the POC.** POC proves the connector world.
     
 *   **Generic exec runner** (agent writes commands, runner owns connection + streams + audits).
     
@@ -487,11 +473,11 @@ Anything × anything composes. K8s layer runs identically regardless of host.
 
 ## Host provider interface (each substrate = setup skill + management skill)
 
-A host driver implements the runner contract: provision host, run k8s (Chunk 3's
-Terraform-deployed substrate), storage (`storage resolve|ensure|destroy` — live
-against the real PVE host: VG `pve`, LVM-thin `freehold-thin`), network,
-snapshots/backups. Keep interface MINIMAL; do not flatten away substrate
-superpowers.
+A host driver implements the runner contract: provision host, run k8s, storage, network,  
+snapshots/backups. Keep interface MINIMAL; do not flatten away substrate superpowers.
+
+## Host feasibility (honest)
+
 *   **Proxmox** — lead/default. Best for the homelab box. MVP happy path.
     
 *   **VPS / cloud** — cleanest; single VPS simpler than Proxmox, managed k8s = zero control-plane  
@@ -524,7 +510,7 @@ BUZZ — self-hosted Nostr relay + agent management   ← INTERACTION SURFACE (B
   │    ├─ master agent (CPA) + service agents (@litellm, @algolia, @pihole, @vultr, @b2…)
   │    └─ memory + audit events (relay-persisted)
   ├─ user's EXISTING relays — onboarded as services (relay runner connector), NOT nested scopes
-  ├─ deterministic k8s pods (Chunk 3 onward — k8s pulled forward) | local buzz-acp (Chunks 1–2) | LXC
+  ├─ deterministic k8s pods (public release) | local buzz-acp (POC) | LXC
   │ agents call tools ↓
 RUNNERS — privileged generic MCP tool servers (the bridge, separate from Buzz)   ← OUR BUILD (engine)
   ├─ Nostr identity (auth/membership) + separate encryption keypair (env-injected)
@@ -590,8 +576,7 @@ health → report to user.
 
 ## Build plan (chunked)
 
-**POC (pre-MVP, Kubernetes pulled forward for Chunk 3 — see `roadmap/POC_CHUNK3.md`;
-Chunks 1–2 ship without it):**
+**POC (pre-MVP, Kubernetes pulled forward for Chunk 3 — see `roadmap/POC_CHUNK3.md`):**
 
 1.  **Chunk 1 — Local control plane + runners + secrets + connectors:** local web UI  
     (admin/ops console — NOT chat; Buzz owns conversation); runner as MCP tool server with  
@@ -614,8 +599,8 @@ locally, connects to remote services. TEST against the PVE host.
     POC done = master agent manages LXCs + external services (SSH/Vultr/Backblaze) via runner +  
     installs via skills, with readiness view; management relay as the scope.
     
-**MVP (public release — Kubernetes already stands up from Chunk 3; this chunk
-carries it into the release along with the full host-driver abstraction):**  
+
+**MVP (public release — ADDS k8s):**  
 4. **Chunk 4 — Kubernetes substrate:** deterministic agent pods, LiteLLM as deployment, Postgres  
 cluster, control plane as deployment, host driver abstraction (Proxmox + VPS).  
 5. **Chunk 5 — Full console:** service readiness dashboard, unified resource/activity view,  

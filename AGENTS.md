@@ -4,289 +4,132 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-**Status:** Chunk 3 Phase 0.12 is implemented and live-verified on the real PVE
-host (VG `pve`, LVM-thin `freehold-thin`); `storage resolve|ensure|destroy` run
-against that host (Go `orchestrator/internal/cli/handlers3.go` — NOT Rust).
-Chunk 2 complete + Chunk 2.6 runner-lifecycle slice IMPLEMENTED
-and SUPERSEDED by Chunk 2.6.1 — runners-as-NIP-29-channels, IMPLEMENTED + LIVE-VERIFIED
-on a REBUILT world (relay/CPs torn down + recreated same-IPs; proxy untouched):
-9007 create + 9000/9001 membership + kind-9 fh-profile envelope ACCEPTED by stock buzz
-uuid channel ids (client-suggested) + #d roster filter + 39002 relay-signed roster =
-whitelist, read LIVE per call; community membership (relay-member) is a two-layer
-prerequisite; rebuild folds from real buzz; G-1 resolved = native-kinds-only.
-`TestManagedForFlags` / `TestWorldManaged` / `TestParsePctGateway` live in
-`rebuild_test.go`; `TestParseDnsList` lives in `tui_running_test.go` — there is no
-`TestPlaneStageNeverSkipped` (the plane stage is never skipped: `backend.is_some()`
-in the config is not proof the plane is live — ensure is idempotent, so it runs
-every converge).
-Legacy: (RUNNER_PROFILE kind 30181 published at every lifecycle mutation;
-`control-plane rebuild` = the disposable-CP fold, deterministic+idempotent;
-G-2 resolved query-per-call fail-closed; G-1 fork-vs-contribution deferred).
-Docs + locked Chunk 1 plan; Phases A (identity, MCP skeleton, exec/readiness/
-audit), B (provisioner), C (SSH + vultr + b2 connectors), D (coarse grants), E
-(orchestrator: the scripted CPA stand-in — onboard/readiness/exec/demo), F (local
-admin/ops web UI: services-at-a-glance with LIVE readiness via a console agent, and
-runner/secret/grant management), and G (the acceptance script: `cargo run -p
-freehold-acceptance` reproduces every Chunk-1 acceptance criterion hermetic on
-H1 (the PVE host as a real SSH target)
-is DONE — the PVE host is onboarded as a runner and execs green.
-Phase 0 (Buzz surface research — `roadmap/BUZZ_SURFACE.md`) and Phase A (bootstrap
-provisioning: `freehold bootstrap` with proxmox-lxc + vultr-vps + hetzner-vps drivers,
-hermetic-tested, dry-run verified against the PVE host) are DONE;
-the domain gate (A4) requires `--domain` and blocks until it RESOLVES
-(directly, or at an operator-managed proxy that forwards to the target)
-is in `roadmap/POC_CHUNK2.md`. Phase B (deploy-relay driver: docker gate,
-curl+tar bundle fetch, compose start, /_liveness verify, scope claim) is
-implemented and hermetic-tested. The proxmox-lxc bootstrap is idempotent
-(template ensure by host arch + docker+compose in the guest); the CLI is
-`freehold`. Phase B and the LIVE relay deploy are DONE: LXC 100 `relay-box`
-(deb-13 amd64, unprivileged, 16G) runs the Buzz compose stack; Phase C is
-DONE: the control
-is deployed in OPERATE mode in ITS OWN LXC (`cp-box` 102, `/srv/freehold`,
-binary shipped as base64 through the runner's exec-only primitive — every
-remote command routes through `pct exec`, per the CP-off-the-host decision);
-the console has NIP-98 operator auth (admin whitelist seeded by
-`--operator-pubkey`, bind guard authn-conditional, UI login panel,
-`--public-origin cp-<relay-domain>` behind the operator's proxy), and the
-operator logs in with their OWN nsec (`console-login --nsec nsec1...`) —
-the key never leaves their machine. Phase D (identity
-port) slice 1 is DONE: the grant-list kind (30180, addressable, d-tag =
-runner pubkey, replaceable) is defined + implemented end-to-end — CP
-publishes via NIP-98 POST /events, the runner reads the CURRENT list live
-per call via NIP-98 GET /query (fail-closed on relay outage; revoke lands
-WITHOUT a runner restart — hermetic proof included; NIP-98 signatures
-cross-verified byte-for-byte with rust-nostr, the crate the relay uses).
-The relay's ingest restrict-list refuses custom kinds (BUZZ_SURFACE §9.5).
-DECISION (post-Phase-D review): freehold does NOT patch buzz — relay-grants
-(kind-30180) stays a DORMANT, hermetic-tested optional mode; the OPERATIONAL
-grant flow remains the shipped-package one (web console UI +
-`control-plane grant` / `revoke-grant` / `revoke`, re-shipped and re-read by
-the runner per call — revoke lands without a restart). D2 (membership records on the relay) is partially
-live under the DOMAIN community (`<relay-domain>`, operator
-nginx on the tailnet forwards the hostname to the relay LXC — the relay's
-strict host map makes the domain the only door; deploy-relay writes
-BUZZ_DOMAIN/RELAY_URL from --relay-url / --domain; TLS rides the proxy, or
-the local-CA posture when --domain is used without it). The IP-anchored
-first live relay was KILLED and the full stack re-provisioned fresh under
-the domain (A4 gate verified both the direct-DNS and proxy cases). D5 (audit publishing) is DONE. D3 (encrypted memory) is DONE:
-D3 (encrypted memory) is DONE: the CPA's memory lives on the relay as
-kind-30174 engrams, NIP-44 v2 SELF-encrypted (only the agent's own key can
-decrypt; the relay stores ciphertext only), d-tag = sha256(agentpk#key),
-live-verified set/get through the real relay (the ONE D item with no ingest
-patch gate — the engram wire rules are recorded in BUZZ_SURFACE §9.6).
-`freehold memory set|get`. E (delegation) is DONE: the CPA delegates a
-task over the relay to a peer agent that execs it runner-direct —
-CPA -> relay (kind-9 channel in a created OPEN channel) -> peer -> runner ->
-relay -> CPA — proven LIVE; requests/results correlate by id (BUZZ_SURFACE
-§9.7; the peer's exec uses the target's own credential, the CPA polls
-unfiltered because a #p-filtered kind-9 query hung for its identity). D5 (audit publishing) is DONE: the runner's audit row is now a kind-48001
-NIP-01 event (id + BIP-340 over the id) — the SAME bytes spooled locally
-(0600, fail-closed read, never silent) AND published to the relay when
---relay-url is set (detached so a wedged relay never delays the agent's
-exec; publish failure degrades to spool-only and is surfaced). D3 (encrypted memory) and E (delegation) landed after this — both live.
-NO buzz ingest patch is planned: the relay-grants mode stays dormant/
-hermetic, and grants operate via the shipped-package flow (web UI + CP
-CLI). A real Vultr token is still needed for the VPS leg.
-Work ships via branches, pending a GitHub outage before the PR/review cycle.
-Post-review corrections (locked): the CP deploys to its OWN LXC and ATTACHES to the
-relay (Buzz = substrate, co-location never assumed; naming: the PVE host vs the local
-workstation). Bootstrap REQUIRES a domain (identity) with a blocking resolution gate
-(A4); TLS = local CA on the domain by default, LE DNS-01 with a provider key; console
-auth = NIP-98 operator login, admin seeded by --operator-pubkey; the bind guard becomes
-authn-conditional. The live IP-anchored relay community WAS killed and the full stack
-RE-PROVISIONED fresh under `<relay-domain>` (relay LXC 100 @
-192.168.30.238:3000 behind the operator's tailnet nginx; CP in its own LXC 102 @
-192.168.30.254:8080; console admin = the operator's new key b2ab89...; memory +
-delegation re-proven live under the domain; the old PVE-host CP stopped).
-Chunk 3 plan in draft v5 (roadmap/POC_CHUNK3.md, unapproved): agents-as-pods on a
-k8s substrate pulled forward from MVP (supersedes ROADMAP's "NO Kubernetes in the
-POC" for Chunks 1–2; landed strip = first expert on the staged LXC harness), onboarding
-inversion
-(expert first, reasons about its target, asks CPA; CPA resolves the named hardware peer +
-cost gate), LiteLLM re-targets kube (LXC deploy = reference, torn down only after the kube
-deploy passes C5 + soak). Phase-0 items 01-06 resolved (POC_CHUNK3_SURFACE.md); github/
-websearch/litellm runner flavors + risk_level merged (#72/#73).
-Terraform is adopted as the BOOTSTRAP substrate driver (POC_CHUNK3 v5 supersession):
-each bootstrap --kind = one TF plan, executed through the provisioning runner's exec;
-runner-injected TF_VAR secrets only (never tfvars), TF-generated secrets acknowledged in
-state (state = sensitive, /srv/data 0600 or encrypted backend), host-sysadmin steps as
-remote-exec in the plans, and a post-apply guard that state contains no operator-supplied
-variable values. C7's teardown/rebuild = `terraform destroy` / `terraform apply`
-plus the verify harness. G6's teardown/rebuild is the same
-(`terraform destroy`/`apply` + the verify harness).
-Post-Chunk-2 scope decisions (2026-08-20): Phase G (Buzz as the interaction surface —
-opening a room/DM with @freehold in the Buzz UI) MOVED to Chunk 3 (needs a real
-relay-addressable agent, not CLI-driven); Phase F (emergency-repair drill) moved OUT of
-the POC (the repair path is the same idempotent local-expert flow exercised on every
-rebuild/re-deploy; a dedicated relay-down drill is later pre-MVP work). Connector/D2
-truth-check (2026-08-20): SSH + Vultr + B2 are all real connector code, hermetic-tested;
-the Vultr leg is LIVE via the Chunk 2.5 spike (real account, 45.76.255.185); the B2 leg
-is hermetic-only pending real Backblaze credentials; CHECKBOXES in POC_CHUNK1/POC_CHUNK2
-were re-anchored to match (implemented | live-verified).
+**Current version: 0.3.0.** Chunk 1 (engine room) and Chunk 2 (relay scope), including the
+durable volume plane (Phase 0.12), are implemented and live-verified against real
+infrastructure (a real PVE host, a real relay/CP pair under a real domain). Chunk 3 (a real,
+reasoning CPA that lives in Buzz) is the current focus — see `roadmap/POC.md`. For how we got
+here, see `CHANGELOG.md`; this file describes the current state and the rules for working in
+this repo, not the history.
 
+## Documentation hygiene (locked) — a primary job of this file
 
-## Next (implemented)
-- **Chunk 2.6.1 — Runners-as-Channels, Grants-as-Membership** (roadmap
-  §Chunk 2.6.1): IMPLEMENTED hermetic — supersedes 2.6's custom-kind wire
-  format (30181 + 30180 surfaces DELETED; the relay's hardcoded INGEST
-  allowlist in `ingest.rs::scopes()` refused them — NOT the ALL_KINDS
-  registry). G-1 resolved = **native-kinds-only** (fork + upstream
-  rejected; zero Buzz changes). Mapping: runner = private NIP-29 channel
-  (9007), grant/revoke = 9000 put-user / 9001 remove-user (owner-gated),
-  the runner's whitelist = its own relay-SIGNED 39002 roster read per call
-  (fail-closed; trust anchor = `--relay-pubkey`, the relay's key — not the
-  console's), profile/status/rotation = 39000 group metadata, `rebuild`
-  folds 39000 (same guarantees). CP cannot self-author membership writes
-  (§3.2 — it COMMANDS, the relay mints). Web UI: console relay scope
-  persisted (`serve --relay-url/--relay-pubkey`), lifecycle actions sync
-  channels, `GET /api/runner/<name>/channel` shows profile + verified
-  roster + messages without operator membership. OPEN live gates (need
-  relay access, not code): G-A headless drive path, G-C 39000/39002 ingest
-  allowlist read, audit-receipts-as-channel-messages (D5 48001 stays
-  operational; G-B redaction is its release gate). Testkit fake relay now
-  models the NIP-29 contract incl. 403 membership gating.
+**Docs describe current-world state only.** `ROADMAP.md`, `POC.md`, `ARCHITECTURE.md`,
+`BUZZ_SURFACE.md`, `README.md`, and this file say what's true *now* — never "formerly X,"
+"SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
+
+1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
+2.  Add an entry to `CHANGELOG.md` explaining what changed and why, under the project's
+    Semantic Versioning scheme (`0.x.y` ≈ through Chunk N pre-MVP; `1.0.0` = public release —
+    see `CHANGELOG.md` for the full convention).
 
 ## Navigation
 
 - `VISION.md` — narrative, single source of truth for the "why".
-- `ARCHITECTURE.md` — system design, locked decisions, build plan (including host feasibility and
-  the two axes: skills × host).
-- `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–3, MVP chunks 4–6.
-- `roadmap/POC.md` — POC scope, goal, acceptance, test/promote flow.
-- `roadmap/POC_CHUNK1.md` — detailed Chunk 1 build plan. **Locked, ready to execute.**
-- `roadmap/POC_CHUNK2.md` — detailed Chunk 2 build plan (relay/CP deployment + identity port).
-- `roadmap/BUZZ_SURFACE.md` — Phase 0 deliverable: the Buzz relay's actual surfaces and the
-  per-capability port decision (native kinds vs our own custom kinds).
+- `ARCHITECTURE.md` — system design, locked decisions, build plan.
+- `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
+- `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–6+, MVP definition, North Star.
+- `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
+- `roadmap/POC_CHUNK<n>.md` — detailed build plans for Chunks
+- `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
+  decisions (native kinds vs. custom kinds).
 
 ## Locked model — do not change without an explicit user decision
 
-- **One control plane = exactly ONE relay scope** (relay-as-scope). The CP lives on its OWN target
-  (a dedicated LXC/box) and ATTACHES to the relay — co-location with the relay is convenience,
-  never assumed; the CP does not depend on managing the relay. A user's existing relay is
-  onboarded as a service, not a nested scope. No "control plane of control planes".
-- **Agent = brain; runner = dumb privileged hands.** ONE generic primitive: `exec(cmd, target,
-  stream?)`. NO semantic tools (`tail_log`, `create_server`, … don't exist). Streaming is a
-  property of exec. Runner executes the agent's command verbatim on the connection it owns.
+- **One control plane = exactly ONE relay scope** (relay-as-scope). The CP lives on its own
+  target (a dedicated LXC/box) and attaches to the relay — co-location is convenience, never
+  assumed. A user's existing relay is onboarded as a service, not a nested scope. No
+  "control plane of control planes."
+- **Agent = brain; runner = dumb privileged hands.** One generic primitive:
+  `exec(cmd, target, stream?)`. No semantic tools. Streaming is a property of `exec`. The
+  runner executes the agent's command verbatim on the connection it owns.
 - **Runner identity** = Nostr keypair (membership/signing) + a separate encryption keypair
   (env-injected / mounted secret, never committed).
 - **CP = secret PROVISIONER, not a vault.** Encrypt-to-runner-key → ship ciphertext → inject
-  runner private key → rotate. **NO master key.** Runner holds only ciphertext + its own key;
+  runner private key → rotate. No master key. Runner holds only ciphertext + its own key;
   decrypts locally, uses in memory, forgets. Plaintext never on disk, never in agent context;
-  agents reference secrets BY NAME only.
+  agents reference secrets by name only.
 - **Grants are coarse**: agent ↔ runner (whitelist of Nostr pubkeys). Dedicated runner per
-  service = default; sharing via grants allowed. Readiness = the runner's OWN self-check:
+  service by default; sharing via grants allowed. Readiness = the runner's own self-check:
   🟢 green / 🟡 yellow / 🔴 red.
-- **NO Kubernetes in Chunks 1–2** (Kubernetes is pulled forward for Chunk 3 —
-  see `roadmap/POC_CHUNK3.md`), NO real reasoning agent (Chunk 1 = scripted orchestrator,
-  CPA stand-in), Buzz required only from Chunk 2. Deterministic k8s pods + LiteLLM
-  run on the Chunk 3 k8s substrate and carry into the public release.
-- **Host-FLEXIBLE — not locked to Proxmox.** Proxmox is the lead/default, but VPS/cloud are
-  first-class supported options (the business path). K8s layer and everything above the host
-  driver run identically regardless of substrate. Installer/runner must target a VPS as easily
-  as Proxmox from day one — no Proxmox-only shortcuts.
-- **K8s fixed; hosting substrate pluggable.** Two orthogonal axes: SKILLS (what to install) ×
-  HOST (where the appliance lives). Anything × anything composes.
-- **Durable-plane guest paths = the `/srv/data` convention** (ARCHITECTURE.md §"Filesystem
-  layout convention"). Every `--mpN` is born at `pct create` with an explicit `backup=`
-  flag (vzdump excludes mount points by default): relay docker-root → `/var/lib/docker`,
-  `backup=1` (the buzz no-patch carve-out — its Postgres/Redis/MinIO/git live as named
-  volumes UNDER the daemon root; relocating it would silently exclude the relay DBs);
-  relay deploy → `/srv/data/relay`, CP → `/srv/data/cp`, k3s volumes →
-  `/srv/data/k8s-volumes` — all `backup=1`; a future `/srv/nobackup` mount gets
-  `backup=0`. Guest paths are the `planebase::GUEST_PATH_*` constants; the CLI literal
-  defaults are pinned against them by `deploy_paths_track_guest_paths`. The TUI's DATA
-  tab shows this plane live (host capacity + per-mount size/used/liveness) through the
-  signed runner channel — read-only, never a new console endpoint. **The converge
-  pipeline's plane stage is NEVER skipped** (`backend.is_some()` in the config is not
-  proof the plane is live — per-tenant data+compute teardown KEEPS the config for
-  reattach but destroys the datasets, and a skipped ensure then boots with stale
-  recorded mounts + a rootfs-backed `/var/lib/docker`; ensure is idempotent, so it
-  runs every converge).
+- **The runner lifecycle rides native Nostr kinds, not custom ones.** A runner is a private
+  NIP-29 channel; grant/revoke is channel membership (9000/9001); the runner's live
+  whitelist is the relay's own signed roster (39002), read fresh per call, fail-closed on
+  relay outage. No relay fork or patch.
+- **The CPA is a real, LLM-backed reasoning agent — the system's main user touchpoint.**
+  It runs on the same buzz-acp/goose-class harness as the expert agents it creates, gets its
+  purpose from `CPA_SYSTEM_PROMPT.md`, and delegates to the agents it spawns rather than
+  doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
+  secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
+  still does it auditably.
+- **Host-flexible — not locked to Proxmox.** Proxmox is the lead/default; VPS/cloud are
+  first-class (the business path). The k8s layer and everything above the host driver run
+  identically regardless of substrate. Installer/runner must target a VPS as easily as
+  Proxmox — no Proxmox-only shortcuts.
+- **Durable-plane guest paths follow the `/srv/data` convention** (see ARCHITECTURE.md's
+  "Filesystem layout convention"). Every `--mpN` is born at `pct create` with an explicit
+  `backup=` flag: the relay's docker-root stays at `/var/lib/docker` with `backup=1` (its
+  Postgres/Redis/MinIO/git live as named volumes under the daemon root — relocating it would
+  silently exclude the relay DBs from backup); relay deploy data lands at `/srv/data/relay`,
+  CP at `/srv/data/cp`, k3s volumes at `/srv/data/k8s-volumes`, all `backup=1`; a
+  `/srv/nobackup` mount gets `backup=0`. The converge pipeline's plane stage is never
+  skipped — `ensure` is idempotent and runs every converge, because a skipped ensure after a
+  compute-only teardown/rebuild would boot against stale recorded mounts.
 
-## Chunk 1 (current work)
+## Known gaps (current, maintained here — not in CHANGELOG)
 
-Prove the engine room standalone: local control plane (web UI) + runners as MCP tool servers +
-secret provisioner + coarse grants + readiness. Connectors: SSH, Vultr, Backblaze B2.
-No Buzz, and NO Kubernetes in Chunks 1–2 (Chunk 3 pulls k8s forward —
-`roadmap/POC_CHUNK3.md`).
-
-- Rust workspace: `core` (identity, auth — the shared signed-call protocol, sealed-box
-  crypto, secret packaging, atomic-0600 fs), `runner` (+ ssh connector via russh,
-  in-memory keys), `control-plane` (provisioner + local admin/ops web console), and
-  `orchestrator` (scripted CPA stand-in: signed MCP client + onboarding/demo flows),
-  `testkit` (hermetic fixtures: mock Vultr/B2 APIs + in-process sshd), and `acceptance`
-  (the Chunk 1 acceptance script) crates.
-- MCP over HTTP for agent↔runner even though co-located — proves the real shape.
-VPS (dev/smoke) → PVE host (test/staging, SSH target only) → home
-  dogfood. Chunk 1 touches Proxmox only as an SSH target; a VPS or any SSH-able box stands in.
-
-## Chunk 1 known gaps (honest scope)
+These are open limitations in the shipped code today, not history. Update this list as gaps
+close or new ones surface; it's current-state, so it belongs here rather than in the
+changelog.
 
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
-  issuing (revoke blocks provision/rotate), erase its own copies (rotate re-seals, revoke
-  deletes the shipped `secrets.json`), and blobs are pinned to recipient + secret name — but
-  a blob someone else kept still opens, and re-keying (a leaked runner private key) is out
-  of scope. Epoch/staleness rejection is a named follow-up (tracked post-A4; wire-format
-  addition, nothing deployed yet). "Rotation = erase" refers to YOUR copies, not copies
-  others held.
-- **Loopback exposure narrowed, not gone (D done):** every tools/call now requires a
-  signature from a GRANTED agent pubkey (fail closed) — a random local process can no
-  longer exec. Remaining: session state isn't tied to the grant (a signed request is
-  verified fresh each call), and relay membership (Chunk 2) is the real cut.
-- **Backups outlive "rotation = erase your copies"** (review-surfaced): `/srv/data` is part
-  of the PBS + TrueNAS + Backblaze set and can hold runner secrets ciphertext, so a revoke
-  that deletes the shipped `secrets.json` still leaves the old blob in every off-site
-  snapshot — same class as "a blob someone else kept still opens"; backup retention is a
-  named copy-holder follow-up.
-- **Rotate/re-grant do not reach a RUNNING runner** (G-surfaced): the runner holds its
-  package in memory from boot (only GRANTS are re-read from disk per call). A rotate
-  re-ships new ciphertext that a RESTARTED runner decrypts, but the live runner keeps
-  serving the old in-memory credential until restart — same class as the revocation
-  gap; the acceptance script proves rotation by restarting the runner.
+  issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
+  someone else already holds still opens; re-keying after a leaked runner private key is out
+  of scope. Epoch/staleness rejection is a named follow-up.
+- **Backups can outlive "rotation = erase your copies."** `/srv/data` sits in the PBS +
+  TrueNAS + Backblaze backup set, so a revoke that deletes the shipped `secrets.json` can
+  still leave the old ciphertext in an off-site snapshot; backup retention is a named
+  follow-up.
+- **Rotate/re-grant don't reach an already-running runner.** A runner holds its package in
+  memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
+  a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
+  credential until restart.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
-  map for the process lifetime. A TTL reaper is Phase C-sized.
-- **`timeout_s` kills the shell, not its descendants** (no setsid/killpg yet) — a timed-out
+  map for the process lifetime; a TTL reaper is sized but not built.
+- **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
-- **Grants (D) accepted gap**: a signed call can be replayed against the SAME
-  runner within the 60s window (audience + runner binding closes cross-runner
-  replay; a per-runner replay cache is a Chunk-2/security item).
-- **API connectors (C2/C3) accepted gaps**: streamed exec on an api target
-  redacts the injected `<SECRET>_URL` env (the base URL) from output too —
-  non-secret, cosmetic; the fix is a redaction list separate from the child
-  env list.
-- **SSH connector (C1) accepted gaps**: up to 2 pooled connections per target (the
-  parallel-boots consumer was rolled back in #109; the cap's rationale is now stale —
-  serial execs reuse one connection and over-cap execs wait, then error); per-command
-  channels are the real fix; a wedged
-  connection stays pooled after a timeout; ssh timeouts return empty output where local
-  returns partial; no IPv6 in `SshTarget::parse`; pooled connections aren't
-  re-authenticated after a rotate; half-open connections surface as an error rather than a
-  transparent reconnect; ssh injects NO secret env over the channel (extra requested
-  secrets are rejected explicitly — the honest contract while that's unimplemented).
-- **State store is single-process** (`StateStore` open→mutate→save is not cross-process
-  atomic; TODO for the Postgres swap at MVP).
-- **Orchestrator (E) accepted gaps**: `onboard` has no rollback — a hard-fail at the
-  readiness gate leaves CP state + the shipped package on disk and a re-run hits
-  `RunnerExists`/`PackageDirInUse` (operator cleans up by hand); the in-process runner
-  task is only aborted on the success path (harmless in the CLI, matters if `onboard`
-  is ever called twice in one process).
-- **Web console (F) accepted gaps**: a secret posted to `/api/provision` or
-  `/api/rotate` exists unzeroized as axum body bytes + a serde `String` before
-  `Zeroizing` takes ownership (loopback, TLS-free — same exposure as the CLI's stdin
-  path); the console's signing key is re-derived (hex-decode) on every readiness probe
-  rather than held once (bounded, but a zeroize-fast path would re-derive it once).
+- **Replay window:** a signed call can be replayed against the *same* runner within its 60s
+  validity window; audience + runner binding closes cross-runner replay, but a per-runner
+  replay cache is still open.
+- **SSH connector:** capped at 2 pooled connections per target (the rationale predates a
+  rollback and is now stale); a wedged connection stays pooled past a timeout; ssh timeouts
+  return empty output where local execs return partial; no IPv6 in target parsing; pooled
+  connections aren't re-authenticated after a rotate; no secret env injection over the ssh
+  channel yet (extra requested secrets are rejected explicitly rather than silently ignored).
+- **API connectors:** streamed exec on an API target redacts the injected secret value but
+  not the (non-secret) base-URL env var — cosmetic, fix is a separate redaction list.
+- **State store is single-process** — not cross-process atomic; planned Postgres swap at MVP
+  addresses this.
+- **Orchestrator `onboard` has no rollback** — a hard-fail at the readiness gate leaves CP
+  state + the shipped package on disk; a re-run hits `RunnerExists`/`PackageDirInUse` and
+  needs manual cleanup.
+- **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
+  unzeroized body bytes before a `Zeroizing` wrapper takes ownership (loopback, TLS-free —
+  same exposure class as the CLI's stdin path); the console's signing key is re-derived on
+  every readiness probe rather than cached once.
 
 ## Build / test
 
-- Workspace: `cargo build`, `cargo test` (once scaffolded in Phase A).
-- No formatter/linter config yet — rustfmt + clippy defaults.
-- Each phase in `roadmap/POC_CHUNK1.md` has acceptance checkboxes; tick them as work lands.
+- Workspace: `cargo build`, `cargo test`.
+- No formatter/linter config beyond rustfmt + clippy defaults.
+- Each phase in `roadmap/POC_CHUNK1.md` / `POC_CHUNK2.md` has acceptance checkboxes; tick
+  them as work lands. `freehold-acceptance` reproduces Chunk 1's acceptance criteria
+  hermetically on loopback.
 
 ## Code style
 
 - Rust: follow rustfmt; small crates; keep the runner↔CP contract at the crate boundary and
   language-agnostic (MCP over HTTP).
-- **Never** put secrets in code, config, tests, logs, or committed files. Private keys arrive via
-  env var / mounted secret. No secret dumps in output or agent context.
+- **Never** put secrets in code, config, tests, logs, or committed files. Private keys arrive
+  via env var / mounted secret. No secret dumps in output or agent context.
 - Keep `exec` generic — do not add semantic tools to work around a connector's API.
 - No UI/chat surface rebuilds: Buzz provides the chat; the CP console is admin/ops only.

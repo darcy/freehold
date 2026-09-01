@@ -1,5 +1,8 @@
 # Roadmap — The AI-operated Appliance
 
+Current version: **0.0.2**. See `CHANGELOG.md` for how this plan arrived here; this
+document describes the current plan only.
+
 Product: open-source appliance — Proxmox VE + k8s, Buzz Relay control plane, and an  
 agent that installs/configures self-hosted OSS via a **skill framework**. One app, three  
 modes (bootstrap / operate / connected). Vision: "reclaim the future we were promised."  
@@ -16,11 +19,19 @@ runners, and memory are scoped to a single relay.
     a relay runner (same as algolia). Not a nested scope.
     
 *   **Bootstrap is self-scoping:** install creates the Buzz relay → creates the CP → creates  
-    a runner that reaches/manages both → CP adds itself as a member.
+    a runner that reaches/manages both → CP adds itself as a member. The operator names the  
+    CPA during this step; the name becomes its Buzz handle.
     
 *   **Agent = brain, runner = dumb privileged hands.** Runner provides connection + executes  
     the command the agent writes verbatim. NO semantic tools — one generic `exec(cmd, target)`.  
     Runner streams output for long-running/live commands and signs a Nostr audit event per command.
+    
+*   **The master/control agent (CPA) is a real, LLM-backed reasoning agent — the system's**
+    **main user touchpoint.** It runs on a real-agent harness (buzz-acp/goose-class), gets
+    its purpose from a versioned system-prompt file in the repo, and delegates to the
+    per-service expert agents it creates rather than doing expert-level work itself. The
+    deterministic runner/CP layer underneath (provisioning, grants, secrets, teardown/
+    rebuild) stays as-is — reasoning decides what to do, the same auditable machinery does it.
     
 *   **Runner identity = Nostr membership + separate encryption keypair (env-injected).**  
     CP is a **secret PROVISIONER** (encrypt-to-runner-key + ship + rotate + membership), not a  
@@ -58,16 +69,19 @@ behalf via privileged runners, with a management relay as the scope.
     control plane's scope (agents + secrets scoped to it). User's existing relay is onboarded  
     as a service (relay runner), not a nested scope.
     
-*   **Agent placement:** POC = Buzz agents via buzz-acp (local); k8s pods later (public release).
+*   **Agent placement:** Chunks 1–2 run agents via Buzz's buzz-acp harness on LXCs;
+    Chunk 5 introduces k8s pods as the agent-compute substrate.
     
-*   **NO Kubernetes** in POC — SUPERSEDED FOR CHUNK 3 FORWARD (2026-08-24, see
-    roadmap/POC_CHUNK3.md v5: agents deploy as deterministic pods on a pulled-forward
-    k3s substrate; still true for Chunks 1–2).
+*   No Kubernetes in Chunks 1–2.
     
 *   Environments: VPS dev/smoke + PVE host test + home dogfood.
     
 *   POC acceptance: master agent manages SSH machine / Vultr / Backblaze via runner + installs  
     skills (tailscale, pihole) with readiness view; management relay is the scope.
+    
+*   **Chunk-by-chunk plan (Chunk 3 onward): see `roadmap/POC.md`** — a real, durable,
+    agent-creating CPA (Chunk 3) → agent workspaces + git/GitHub (Chunk 4) → kube deploys
+    (Chunk 5) → remaining connectors exercised + the North Star below (Chunk 6).
     
 
 ## MVP — public release (definition)
@@ -140,6 +154,32 @@ The public release builds on the POC and adds the Kubernetes substrate. Core pro
 *   LiteLLM routes agent models; Postgres holds control-plane + service state.
     
 *   Runs safely on PVE host test box AND home box (dogfooded daily).
+    
+
+## North Star — portable backup & hardware migration
+
+**Target: as soon as Chunk 6** (see `roadmap/POC.md`) — the earliest point a real workflow
+exists worth migrating.
+
+Run freehold locally, back it up reliably, and stand up a fresh freehold on **different
+hardware or a different provider** (e.g. a home Proxmox box → Vultr) restored from that
+backup — same identity, memory, grants, and running services. This is hardware-loss
+disaster recovery, distinct from same-host compute-only teardown/rebuild: it requires
+off-site backup, cross-storage-backend restore, and a bootstrap path that restores state
+from backup rather than assuming the original dataset is still reachable.
+
+*   **Why it's the North Star:** it's the single test that proves the whole model — durable
+    plane, relay-as-scope, deterministic rebuild — holds under the failure mode that
+    actually matters (losing the hardware, not just the compute).
+    
+*   **Why it's worth dogfooding, not just a checkbox:** once it works, it's a standing
+    workflow — clone a running production freehold onto disposable hardware, test a risky
+    change against the clone, discard it, without ever touching the real system.
+    
+*   **What it needs that doesn't exist yet:** off-site backup shipping (Backblaze), a
+    portable snapshot/restore format independent of the source storage backend (ZFS ↔
+    LVM-thin ↔ VPS block volume), and a restore-from-backup bootstrap path distinct from
+    live reattach.
     
 
 ## Future items (prioritize later)

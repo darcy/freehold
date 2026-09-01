@@ -5,21 +5,16 @@ AI-agent-operated — that lands a Proxmox VE / VPS + Kubernetes stack with Buzz
 control plane and a skill framework that installs and configures self-hosted OSS. The agent
 is the wall-breaker: you don't manage servers, you *ask*.
 
-**Status: Chunk 1 (engine room) merged; Chunk 2 live — the runner lifecycle is
-runners-as-NIP-29-channels (Chunk 2.6.1), implemented and LIVE-VERIFIED against a stock
-buzz relay (no custom kinds, no buzz patch; G-1 resolved = native-kinds-only).**
-Chunk 1 proved the engine room standalone: identity + MCP skeleton (A), secret provisioner
-— seal/ship/rotate/revoke, no master key (B), SSH + Vultr + B2 connectors (C), coarse
-grants — signed calls only (D), the scripted orchestrator CPA stand-in (E), the local
-admin/ops web console (F), and the acceptance script that proves it all hermetic on
-loopback (G). Chunk 2 added the relay scope end-to-end: bootstrap-provisioned LXCs under a
-domain identity, NIP-98 console auth (operator logs in with their own nsec), encrypted
-memory (30174), delegation, and a runner lifecycle proven live against a real buzz relay. POC scope boundary
-(2026-08-20): the emergency-repair drill (Phase F) and the Buzz-UI interaction surface
-(meeting `@freehold` in a room/DM — Phase G) are scoped OUT of the POC — repair reuses
-the same idempotent local-expert flow exercised on every re-deploy, and the Buzz-UI leg
-needs a real relay-addressable agent (Chunk 3). The B2 connector leg is
-hermetic-verified; a live Backblaze account test stays open.
+**Version: 0.3.0.** See `CHANGELOG.md` for the history of how this plan got here.
+
+**Status:** the engine room (identity, secret provisioner, MCP runner primitive, SSH/Vultr/
+B2 connectors, coarse grants, local admin/ops console) is live and hermetic-tested. The
+management relay is live: bootstrap-provisioned LXCs under a domain identity, NIP-98 console
+auth, encrypted relay-persisted agent memory, delegation, and the runner lifecycle
+(runners-as-NIP-29-channels) all verified against a real Buzz relay with no custom kinds or
+relay patch. The CPA is not yet a live, talkable Buzz agent — that's the current focus (see
+`roadmap/POC.md`, Chunk 3). The Backblaze B2 connector is hermetic-verified; a live account
+test is still open.
 
 ## Design in one paragraph
 

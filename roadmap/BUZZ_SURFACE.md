@@ -96,11 +96,9 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
   inbound grant.
 - **buzz-cli**: JSON-in/JSON-out CLI (send_message, get_messages, create_channel, …) for
   scripted/agent use.
-- **Corrects one plan assumption:** buzz-acp exists to run REAL (LLM) agents. The POC's
-  scripted `@freehold` CPA should join the relay with ITS OWN NIP-42 client (it IS our code)
-  rather than running under buzz-acp — preserving "no real reasoning agent in POC". buzz-acp +
-  the harness is the Chunk-3+ path for real expert agents. (E1 wording in POC_CHUNK2.md
-  amended accordingly.)
+- **buzz-acp runs every real (LLM) agent in the fabric, including the CPA.** see ARCHITECTURE.md's 
+  "Agent fabric" section for its current design (real reasoning agent, own system prompt, 
+  create/grant/manage-agent toolset).
 
 ## 7. Memory
 
