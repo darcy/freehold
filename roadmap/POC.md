@@ -1,7 +1,9 @@
 # POC Steps — The AI-operated Appliance
 
-Scope: proof of concept (pre-MVP). NO Kubernetes in the POC. Agents run via Buzz  
-buzz-acp (local) in the POC; deterministic k8s pods are the public-release target.
+Scope: proof of concept (pre-MVP). Kubernetes pulled forward for Chunk 3  
+(see `roadmap/POC_CHUNK3.md` v5); still NO Kubernetes in Chunks 1–2. Agents run via  
+Buzz buzz-acp (local) in Chunks 1–2; deterministic k8s pods arrive with Chunk 3 and  
+are the public-release target.
 
 ## Core model (locked)
 

@@ -24,6 +24,12 @@ The agent is the key that breaks down the wall. Most people can't configure a ro
 provision a server — but they can _ask_. An agent can do both, and more. It doesn't just  
 run software for you; it **gives you back the agency** that complexity and lock-in took away.
 
+**Status:** Chunk 3 Phase 0.12 is implemented and live-verified on the real PVE host  
+(VG `pve`, LVM-thin `freehold-thin`); `storage resolve|ensure|destroy` work against that  
+host. C0 (bootstrap) has not yet started; the first expert (pihole / tailscale) lands on  
+the already-staged LXC harness (goose + buzz-acp + LiteLLM key) while C0 stands up  
+Kubernetes in parallel.
+
 ## The "break down the wall" feeling
 
 This is personal and family first. It's about:
