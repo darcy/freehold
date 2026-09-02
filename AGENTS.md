@@ -27,12 +27,13 @@ describes the current state and the rules for working in this repo, not the hist
 - Every chunk/phase lands as a branch → PR → `main`. Create the PR as soon as the
   branch has commits; the `claude.yml` workflow posts its review on the PR, so the
   PR body is where review findings get worked.
-- **A PR is not done until the review verdict is `MERGE-READY`.** After pushing,
-  wait for both checks (`CI` and `review`) to settle: `gh pr checks <n>` and
-  `gh pr view <n> --json comments`. Read every `BLOCKING`/`IMPORTANT` inline
-  comment, verify each claim against the tree, fix what's real, and re-push;
-  repeat until no `BLOCKING`/`IMPORTANT` items remain. `DEFER` items belong in the
-  PR body or the `Known gaps` section below, not in re-review rounds.
+- **Wait for the review to settle BEFORE working its comments.** After pushing,
+  poll until both checks finish — `gh pr checks <n>` (CI `check` and the
+  `claude.yml` `review` workflow) — and only then open the findings:
+  `gh pr view <n> --json comments` (or `gh api repos/<owner>/<repo>/pulls/<n>/comments`)
+  with a timestamp cursor, and fix what's real. Addressing comments mid-review wastes
+  a round and risks editing files the review hasn't seen yet; `DEFER` items belong
+  in the PR body or the `Known gaps` section below, not in re-review rounds.
 - **Commit and push; never merge.** Merging is the operator's call — do it only
   when the operator explicitly says "merge when complete" (or equivalent). Until
   then the PR sits in review, even at `MERGE-READY`.
