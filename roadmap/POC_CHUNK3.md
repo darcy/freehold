@@ -1,8 +1,10 @@
 # Chunk 3 — Shipped Scope
 
-Status: COMPLETE. What remains — C0 (litellm-kube apply + Postgres + master-key
-re-mint + the Services row), C1–C7, D1–D4, E1–E6, F1–F3, G1–G7, and the
-carried Chunk 1–2.6.1 items — waits in `roadmap/POC.md`'s chunk sections.
+Status: COMPLETE. The pre-C0 items (k3s as a deterministic configure stage,
+the ready-for-litellm Services view, the agents registry, the working relay
+scope, per-tenant teardown, the durable volume plane) and the Chunk-4 work
+live in `roadmap/POC.md`; the rest of the carried backlog
+(C1–C7, D1–D4, E1–E6, F1–F3, G1–G7) was never written down anywhere else.
 
 ## The Rust→Go refactor (orchestrator, installer, control-plane)
 
@@ -142,6 +144,7 @@ carried Chunk 1–2.6.1 items — waits in `roadmap/POC.md`'s chunk sections.
 
 ## What remains
 
-C0 (litellm-kube apply + Postgres + master-key re-mint + the Services row),
-C1–C7, D1–D4, E1–E6, F1–F3, G1–G7, and the carried Chunk 1–2.6.1 items —
-waits in `roadmap/POC.md`'s chunk sections.
+The pre-C0 items above are the only backlog the plan actually specifies.
+Earlier drafts forwarded a wider `C0`/`C1–C7`/`D1–D4`/`E1–E6`/`F1–F3`/
+`G1–G7` list that lives in no plan file; treat those labels as shorthand
+for the deliverables written down in `roadmap/POC.md`.
