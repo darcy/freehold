@@ -34,13 +34,19 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     assumed. A user's existing relay is onboarded as a service (via a relay
     runner), not a nested scope. No "control plane of control planes."
 
-*   Deterministic k8s agent pods (bare Pods, digest-pinned sprig,
-    per-attempt envFrom Secret, no mgmt channel by design, idle auto-reap,
-    emptyDir, no PVC v1) — **arrive with Chunks 6–7** (see `roadmap/POC.md`).
+*   **Agent pods are bare v1 Pods in the k3s LXC's `agents` namespace** — the
+    CPA (Chunk 4) and every agent it creates. Each agent owns distinct objects
+    named from its sanitized display name (`<pod>`, `<pod>-identity`,
+    `app: <pod>`), so a second agent never applies over the first. The harness
+    is the `ghcr.io/block/buzz-sprig` image (moving `:main` tag today; a
+    build-time digest pin is a named follow-up); identity rides a
+    first-run-wins `<pod>-identity` Secret via `secretKeyRef` (the nsec never
+    rides the manifest); `restartPolicy: Never` keeps an intentional exit
+    terminal (I5); no mgmt channel by design; no PVC — agent memory is
+    relay-persisted (kind 30174).
 
-*   **Agent placement:** POC (Chunks 1–3) = scripted agents joining the relay
-    via their own NIP-42 client (the `buzz-acp` harness targets LLM agents
-    and is the Chunk-4 path — see `roadmap/POC.md`); Chunks 6–7 = k8s pods.
+*   **Agent placement:** every agent (CPA and created alike) runs on Buzz's
+    `buzz-acp` remote-agent harness as a k3s pod (see `roadmap/POC.md`).
     Runners are separate — see the Runners section below.
 
 *   **Runner identity** = Nostr keypair (membership/signing) + a *separate*
@@ -558,8 +564,8 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     secrets via the provisioner model (a runner holds ciphertext + an
     injected key; an agent uses, never reads).
 
-*   **Agent placement:** POC = Buzz agents via buzz-acp; Chunks 6–7 = k8s
-    pods.
+*   **Agent placement:** every agent (CPA and created alike) runs on the
+    `buzz-acp` harness as a bare k3s pod.
 
 *   **Buzz required; the management relay is created by the install; one
     relay per control plane.**

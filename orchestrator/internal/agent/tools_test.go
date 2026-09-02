@@ -32,11 +32,17 @@ func TestAgentPodPrepare(t *testing.T) {
 	if len(pub1) != 64 {
 		t.Errorf("minted pubkey not 64 hex: %q", pub1)
 	}
-	if !strings.Contains(idScr, "create secret generic cpa-identity -n agents") {
+	// The object names are derived from the agent's own name, never a
+	// shared/fixed CPA name — a second agent must never apply over the CPA's
+	// objects.
+	if !strings.Contains(idScr, "create secret generic helper-identity -n agents") {
 		t.Errorf("identity script missing secret creation: %q", idScr)
 	}
-	if !strings.Contains(manScr, "name: cpa") {
-		t.Errorf("manifest script missing the cpa pod: %q", manScr)
+	if !strings.Contains(manScr, "name: helper") {
+		t.Errorf("manifest script missing the helper pod: %q", manScr)
+	}
+	if strings.Contains(idScr, "cpa-identity") || strings.Contains(manScr, "cpa-identity") {
+		t.Errorf("agent scripts must reference helper-identity, not cpa-identity: %q / %q", idScr, manScr)
 	}
 	// Reusing the same dir must return the SAME identity (durability).
 	pub2, _, _, err := pod.Prepare()

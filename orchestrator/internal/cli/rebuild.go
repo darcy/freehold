@@ -2230,8 +2230,8 @@ func (e *rebuildEngine) stageCpa() error {
 	if err != nil {
 		return fmt.Errorf("cpa identity unreadable after mint: %w", err)
 	}
-	ok, out := e.runBin(e.bins.Self, e.execArgs(agent.CPAIdentityScript(
-		k3sVmid, id.NostrSecretHex, e.f.operatorPubkey), 120))
+	ok, out := e.runBin(e.bins.Self, e.execArgs(agent.AgentIdentityScript(
+		k3sVmid, id.NostrSecretHex, e.f.operatorPubkey, cpaName), 120))
 	if !ok {
 		return fmt.Errorf("cpa identity secret failed:\n%s", out)
 	}

@@ -51,19 +51,25 @@ to run, idle and active.
 
 #### Phase A — Bootstrap naming step & CPA on a real-agent harness
 
-- [ ] A1. Add an interactive step to `freehold bootstrap`: ask the operator
+- [x] A1. Add an interactive step to `freehold bootstrap`: ask the operator
       what to call their agent, with a default offered (e.g. `freehold`) 
       and store the value.
-- [ ] A2. Stand up the CPA's identity on a buzz-acp/goose-class harness — the
+- [x] A2. Stand up the CPA's identity on a buzz-acp/goose-class harness — the
       same class of harness expert agents use — rather than a scripted NIP-42
       client.
-- [ ] A3. Use stored name as the CPA's Buzz handle / profile
+- [x] A3. Use stored name as the CPA's Buzz handle / profile
       display name — not a fixed brand name baked into the product.
-- [ ] A4. Give it a dedicated toolset (create-agent, grant, manage) in place
+- [x] A4. Give it a dedicated toolset (create-agent, grant, manage) in place
       of a service-specific one. No skill-execution tools yet.
-- [ ] A5. Wire it into the existing agent registry (already live: named agents
+- [x] A5. Wire it into the existing agent registry (already live: named agents
       register and report ●/○ availability from relay presence) so CPA shows
       up the same way any agent does.
+
+> **Phase A deferral (named, not lost):** A4's toolset is built and
+> unit-tested, but nothing yet registers it as an MCP surface the buzz-acp
+> harness process can actually call — that wiring (system prompt + tool
+> config) lands with Phase B. A4 is ticked for the toolset itself; the
+> live Buzz proof (CPA *using* it to create an agent) lands in Phases D/E.
 
 #### Phase B — CPA system prompt
 

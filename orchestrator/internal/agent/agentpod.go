@@ -47,8 +47,8 @@ func (p *AgentPod) Prepare() (pubkey string, identityScript, manifestScript stri
 		return "", "", "", err
 	}
 	return pubkey,
-		CPAIdentityScript(p.K3sVmid, id.NostrSecretHex, p.OwnerPub),
-		CPAManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, p.Name),
+		AgentIdentityScript(p.K3sVmid, id.NostrSecretHex, p.OwnerPub, p.Name),
+		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, p.Name),
 		nil
 }
 
