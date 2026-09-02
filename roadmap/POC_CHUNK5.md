@@ -17,10 +17,15 @@ Status: placeholder
     reliably) — the fuller skill-schema/readiness/verify-harness design is
     pulled in only as later chunks need it.
 
+*   The first named skills are tailscale + pihole — deliberately *not*
+    LiteLLM, which rides the k8s path (the `terraform/` plans land in
+    Chunk 6).
+
 *   The workspace/git credential surface (credential-helper vs. generic
     `exec()`) is decided explicitly here, not assumed.
 
-*   Proof point: an agent deploys a service to an LXC using what it committed.
+*   Proof point: an agent deploys a service to an LXC using what it
+    committed.
 
 ### Chunk 5 acceptance
 
@@ -29,6 +34,5 @@ Status: placeholder
     pushed to a real GitHub repo.
 
 *   The workspace/git-runner credential surface is either adopted (with a
-    written carve-out from the generic `exec()` model) or explicitly rejected
-    in favor of it.
-
+    written carve-out from the generic `exec()` model) or explicitly
+    rejected in favor of it.
