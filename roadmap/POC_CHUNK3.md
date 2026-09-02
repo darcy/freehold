@@ -1,7 +1,8 @@
-# Chunk 3 — Current Plan
+# Chunk 3 — Shipped Scope
 
-Status: IN PROGRESS. The Rust→Go refactor below is done; the pre-C0 and
-Chunk-4 planning items remain.
+Status: COMPLETE. What remains — C0 (litellm-kube apply + Postgres + master-key
+re-mint + the Services row), C1–C7, D1–D4, E1–E6, F1–F3, G1–G7, and the
+carried Chunk 1–2.6.1 items — waits in `roadmap/POC.md`'s chunk sections.
 
 ## The Rust→Go refactor (orchestrator, installer, control-plane)
 
@@ -26,7 +27,7 @@ Chunk-4 planning items remain.
     in Go.
 
 *   **The TUI is fully Go (bubbletea, full-screen alt-screen).** One activity
-    surface for ALL long ops (`internal/tui/activity.go`, ~440 lines, from the
+    surface for ALL long ops (`internal/tui/activity.go`, 548 lines, from the
     `send-msg`/`tui-daemon-combo` pattern): spinner + live label on the top
     line, ✓/✗ result rows (boot probes — config → runner → relay → cp → k3s →
     world state, 6s each) or a streaming last-12-lines window (subprocess
@@ -143,4 +144,4 @@ Chunk-4 planning items remain.
 
 C0 (litellm-kube apply + Postgres + master-key re-mint + the Services row),
 C1–C7, D1–D4, E1–E6, F1–F3, G1–G7, and the carried Chunk 1–2.6.1 items —
-see `roadmap/POC_CHUNK4.md`.
+waits in `roadmap/POC.md`'s chunk sections.
