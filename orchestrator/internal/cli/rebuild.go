@@ -53,6 +53,7 @@ var rebuildCmd = &cobra.Command{
 		f.domain, _ = cmd.Flags().GetString("domain")
 		f.operatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
 		f.operatorIdentity, _ = cmd.Flags().GetString("operator-identity")
+		f.agentName, _ = cmd.Flags().GetString("agent-name")
 		f.sizeGB, _ = cmd.Flags().GetUint64("size-gb")
 		f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 		f.thinPool, _ = cmd.Flags().GetString("thin-pool")
@@ -94,6 +95,7 @@ func init() {
 	rebuildCmd.Flags().String("domain", "", "Relay identity domain (must resolve to the host — the A4 gate; REQUIRED)")
 	rebuildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
 	rebuildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
+	rebuildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
 	rebuildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	rebuildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	rebuildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
@@ -119,6 +121,7 @@ type rebuildFlags struct {
 	domain             string
 	operatorPubkey     string
 	operatorIdentity   string
+	agentName          string
 	sizeGB             uint64
 	poolSizeGB         uint64
 	thinPool           string
@@ -818,6 +821,7 @@ func (e *rebuildEngine) fromAnswers() *config.Config {
 			Target: e.f.target,
 		},
 		Managed: []string{"relay", "cp"},
+		CPAName: e.f.agentName,
 	}
 	if e.f.operatorIdentity != "" {
 		v := e.f.operatorIdentity

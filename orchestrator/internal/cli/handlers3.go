@@ -268,7 +268,6 @@ var bootstrapCmd = &cobra.Command{
 }
 
 func init() {
-	bootstrapCmd.Flags().String("agent-name", "freehold", "The agent's display name in Buzz (default: 'freehold')")
 	addCommonFlags(bootstrapCmd, nil)
 	bootstrapCmd.Flags().String("target", "proxmox-box", "Target to drive provisioning through (a runner targeting the PVE host for proxmox-lxc, the vultr runner for vultr-vps)")
 	bootstrapCmd.Flags().String("role", "relay", "Role of this target: 'relay' or 'cp' — the LXC name is derived from the domain: <normalized-domain>-relay / -cp (--name is gone)")

@@ -76,9 +76,9 @@ func TestTeardownFormSteps(t *testing.T) {
 	}
 }
 
-// TestRebuildFormSteps walks the 6-step rebuild form to completion and
+// TestRebuildFormSteps walks the 7-step rebuild form to completion and
 // confirms the inputs land in order (operator pk, domain, LV size,
-// thin-pool name, pool size, k3s).
+// thin-pool name, pool size, k3s, CPA agent name).
 func TestRebuildFormSteps(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap}
 	if !keyPress(m, "B") {
@@ -87,10 +87,10 @@ func TestRebuildFormSteps(t *testing.T) {
 	if m.Flow == nil || m.Flow.Kind != flowRebuild {
 		t.Fatal("expected a rebuild flow after pressing B")
 	}
-	if ncols(flowRebuild) != 6 {
-		t.Fatalf("rebuild form should have 6 steps, got %d", ncols(flowRebuild))
+	if ncols(flowRebuild) != 7 {
+		t.Fatalf("rebuild form should have 7 steps, got %d", ncols(flowRebuild))
 	}
-	answers := []string{strings.Repeat("a", 64), "world.test", "10", "freehold-thin", "40", "y"}
+	answers := []string{strings.Repeat("a", 64), "world.test", "10", "freehold-thin", "40", "y", "my-cpa"}
 	for i := range answers {
 		typeText(m, answers[i])
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -147,6 +147,9 @@ func TestNewFlowLabels(t *testing.T) {
 	if got := promptLabel(flowRebuild, 5); got != "boot k3s too? (y/n, blank = y)" {
 		t.Errorf("rebuild step5 label = %q", got)
 	}
+	if got := promptLabel(flowRebuild, 6); got != "CPA agent name (blank = freehold)" {
+		t.Errorf("rebuild step6 label = %q", got)
+	}
 }
 
 // TestRebuildFormSeededFromConfig: when a config exists, pressing B opens
@@ -167,8 +170,8 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 		t.Fatal("B did not start the rebuild flow")
 	}
 
-	want := [6]string{op, "world.test", "", "freehold-thin", "", "y"}
-	for i := 0; i < 6; i++ {
+	want := [7]string{op, "world.test", "", "freehold-thin", "", "y", ""}
+	for i := 0; i < 7; i++ {
 		if m.Flow == nil {
 			t.Fatalf("flow vanished at step %d", i)
 		}
@@ -180,7 +183,7 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 	if m.Flow == nil {
 		t.Fatal("flow vanished before inputs were captured")
 	}
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 7; i++ {
 		if m.Flow.Inputs[i] != want[i] {
 			t.Errorf("inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want[i])
 		}
@@ -216,7 +219,7 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 7; i++ {
 		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if msg == nil {
@@ -234,6 +237,41 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 	}
 	if strings.Contains(joined, "--with-k3s=false") {
 		t.Errorf("k3s is managed in the config — the args must not disable it: %q", joined)
+	}
+}
+
+// TestRebuildFormAgentNameRoundTrip: a config with cpa_name seeds the
+// agent-name step, and seven bare enters dispatch --agent-name with that
+// recorded value — the name the operator chose at install round-trips into
+// the rebuild args (A1: persist the CPA name).
+func TestRebuildFormAgentNameRoundTrip(t *testing.T) {
+	op := strings.Repeat("b", 64)
+	cfgPath := writeRebuildCfg(t,
+		"domain = \"world.test\"\n"+
+			"operator_pubkey = \""+op+"\"\n"+
+			"cpa_name = \"waldo\"\n"+
+			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
+	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	keyPress(m, "B")
+	if m.Flow == nil {
+		t.Fatal("B did not start the rebuild flow")
+	}
+	if got := m.Flow.Defaults[6]; got != "waldo" {
+		t.Fatalf("agent-name step seeded %q, want %q", got, "waldo")
+	}
+	var msg tea.Cmd
+	for i := 0; i < 7; i++ {
+		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if msg == nil {
+		t.Fatal("no activity message was dispatched")
+	}
+	start, ok := msg().(activityStartMsg)
+	if !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
+	}
+	if got := strings.Join(start.args, " "); !strings.Contains(got, "--agent-name waldo") {
+		t.Errorf("rebuild args %q missing --agent-name waldo", got)
 	}
 }
 
@@ -272,7 +310,7 @@ func TestRebuildFormK3sOffWorldStaysOff(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 7; i++ {
 		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if msg == nil {
