@@ -1,6 +1,6 @@
 # Roadmap — The AI-operated Appliance
 
-Current version: **0.0.2**. See `CHANGELOG.md` for how this plan arrived here; this
+Current version: **0.3.0**. See `CHANGELOG.md` for how this plan arrived here; this
 document describes the current plan only.
 
 Product: open-source appliance — Proxmox VE + k8s, Buzz Relay control plane, and an  
@@ -70,7 +70,7 @@ behalf via privileged runners, with a management relay as the scope.
     as a service (relay runner), not a nested scope.
     
 *   **Agent placement:** Chunks 1–2 run agents via Buzz's buzz-acp harness on LXCs;
-    Chunk 5 introduces k8s pods as the agent-compute substrate.
+    Chunk 3 introduces k8s pods as the agent-compute substrate.
     
 *   No Kubernetes in Chunks 1–2.
     
@@ -158,7 +158,7 @@ The public release builds on the POC and adds the Kubernetes substrate. Core pro
 
 ## North Star — portable backup & hardware migration
 
-**Target: as soon as Chunk 6** (see `roadmap/POC.md`) — the earliest point a real workflow
+**Target: as soon as Chunk 5** (see `roadmap/POC.md`) — the earliest point a real workflow
 exists worth migrating.
 
 Run freehold locally, back it up reliably, and stand up a fresh freehold on **different
