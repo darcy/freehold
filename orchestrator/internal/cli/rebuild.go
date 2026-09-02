@@ -23,7 +23,6 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -2193,40 +2192,8 @@ func cpaIdentityDir() string {
 // ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its
 // pubkey. Rebuilds reuse the recorded identity (identity continuity), so the
 // CPA's Buzz profile, presence, and DMs all survive.
-func ensureCPAIdentity() (pubkey string, err error) {
-	dir := cpaIdentityDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	if id, err := flows.LoadIdentity(dir); err == nil {
-		return id.NostrPubkeyHex()
-	}
-	return mintIdentity(dir)
-}
-
-// mintIdentity creates a fresh runner-style identity (nostr + enc secrets) in
-// dir and returns the pubkey. Mirrors `flows` provision-time minting.
-func mintIdentity(dir string) (string, error) {
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return "", fmt.Errorf("mint CPA identity: %w", err)
-	}
-	enc := make([]byte, 32)
-	if _, err := rand.Read(enc); err != nil {
-		return "", fmt.Errorf("mint CPA identity: %w", err)
-	}
-	id := flows.Identity{
-		NostrSecretHex: hex.EncodeToString(secret),
-		EncSecretHex:   hex.EncodeToString(enc),
-	}
-	raw, err := json.MarshalIndent(id, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "identity.json"), raw, 0o600); err != nil {
-		return "", err
-	}
-	return id.NostrPubkeyHex()
+func ensureCPAIdentity() (string, error) {
+	return agent.EnsureIdentity(cpaIdentityDir())
 }
 
 // stageCpa deploys the CPA as a k3s Pod running the buzz-sprig harness (A2),
