@@ -265,14 +265,15 @@ list is current-state and kept there rather than duplicated here.
 
 ### Known limits at this version
 
-*   C0 (litellm-kube apply + Postgres + master-key re-mint + the Services
-    row) never started; everything else Chunk 3 planned — C1–C7, D1–D4,
-    E1–E6, F1–F3, G1–G7 — waits in `roadmap/POC_CHUNK4.md`, with the
-    carried Chunk 1–2.6.1 items (B2's live-account leg, the VPS block-volume
-    surface never built, CP-restart memory persistence, audit-as-channel
-    messages, secondary-relay onboarding) and Phase 0.08's open half (nginx
-    through NodePort from the PVE host — the 2.5 spike proved it on the cloud
-    hosts, 10.10.0.7; librem's path is unproven).
+*   The pre-C0 items (k3s as a deterministic `configure` stage, the
+    ready-for-litellm Services view, the agents registry, the working relay
+    scope, per-tenant teardown, the durable volume plane) are the only
+    backlog the plan specifies; `roadmap/POC.md`'s Chunk 4/5/6/7 sections
+    hold the forward plan. The old draft's `C0`/`C1–C7`/`D1–D4`/`E1–E6`/
+    `F1–F3`/`G1–G7` labels (and the "carried Chunk 1–2.6.1" items — B2's
+    live-account leg, the VPS block-volume surface, CP-restart memory
+    persistence, audit-as-channel messages, secondary-relay onboarding, and
+    nginx-through-NodePort) were never written down anywhere else.
 *   A dedicated relay-down repair drill is later pre-MVP work — the repair
     path IS the local-expert flow, exercised on every
     teardown/rebuild/re-attach; a human opening a room/DM with `@freehold` is
