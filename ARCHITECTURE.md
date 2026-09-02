@@ -1,668 +1,597 @@
 # The AI-operated Appliance — Architecture
 
-Product: an open-source "box + install script" (Omarchy-style) that lands a  
-Proxmox VE appliance (Kubernetes arrives with Chunk 3 — see the Build plan below and  
-`roadmap/POC_CHUNK3.md`), with Buzz Relay as the control plane and an  
-agent that installs/configures self-hosted OSS via a **skill framework**.  
-Covers personal, family, and business — from a home box to the cloud.
+Product: an open-source "box + install script" (Omarchy-style) that lands a
+Proxmox VE / VPS + Kubernetes stack with Buzz Relay as the control plane and
+a skill framework that installs and configures self-hosted OSS. For the
+current chunk numbering (Chunk 3 = the Rust→Go refactor, done; Chunk 4 = a
+real, reasoning CPA in Buzz; Kubernetes arrives with Chunks 6–7), see
+`roadmap/ROADMAP.md` and `roadmap/POC.md`. Narrative: "reclaim the future we
+were promised" — the full rationale lives in `VISION.md`.
 
-## Relay-as-scope — one relay, one control plane (the core organizing model)
-
-**A control plane exists for exactly ONE relay.** Its only job is to manage that relay's  
-**agents, runners, and secrets** for that relay. The relay is the scope for runners,  
-secrets, and memory.
-
-*   **No nested / peer relay machinery.** There is no "control plane of control planes"  
-    problem to solve — a control plane is intrinsically single-relay, so nothing nests.
-    
-*   **The appliance install REQUIRES Buzz and creates a NEW management relay** — the  
-    control plane's scope. That relay holds the service-management agents.
-    
-*   **A user's EXISTING relay is just a service.** If the user already has a Buzz relay,  
-    onboarding it is identical to onboarding any external service (same as algolia):  
-    create a relay runner (connector to that relay's API) → validate → create an  
-    `@myrelay` expert agent → grant → add to a channel. No nested-scope machinery.
-    
-*   **Bootstrap is self-scoping:** first install BRANCHES — CREATE a new Buzz relay on the
-    target, or **attach-existing** (attach to the operator's existing relay — its PRIMARY/management relay
-    pre-existing at bootstrap; this is NOT the "existing relay = service" bullet below,
-    which is Chunk-3 SECONDARY-relay onboarding) → create/deploy the control plane onto that
-    relay's scope → create a runner that can reach and manage both the relay and the CP →
-    the CP adds itself as a member. Create-new: the CP literally creates its own scope and
-    the runner it needs to operate it. Attach-existing reaches the same end state via the
-    relay's own member management; relay-creation is a skippable, idempotent step. The
-    
-
-## Buzz — the user-facing surface AND required substrate for the fabric
-
-**Buzz is required** (peer model: the control plane manages Buzz as a child service, but the  
-agent fabric lives in the relay). It is the "living room" where users interact + the memory  
-backbone for agents.
-
-*   Self-hosted Nostr relay workspace; humans + agents as members (own keys, identity-scoped,  
-    audit trail). Backend: Postgres, Redis, S3/MinIO. Rust workspace.
-    
-*   Agent surface: buzz-cli (JSON in/out), buzz-acp (ACP↔MCP harness), buzz-agent. Model-agnostic.
-    
-*   Deterministic k8s agent pods (bare Pods, digest-pinned sprig, per-attempt envFrom Secret,  
-    no mgmt channel by design, idle auto-reap, emptyDir, no PVC v1) — target from Chunk 3  
-    (k8s pulled forward: `roadmap/POC_CHUNK3.md`), carried into the public release.
-    
-*   **Agent placement:** POC (Chunks 1–2) = scripted agents joining the relay via
-    their own NIP-42 client (the `buzz-acp` harness targets LLM agents and is the
-    Chunk-3+ path — see `roadmap/BUZZ_SURFACE.md`); Chunk 3 onward = k8s pods
-    (Kubernetes pulled forward out of MVP — see `roadmap/POC_CHUNK3.md`). Runners
-    are separate — see the Runners section below.
-    
-*   **We do NOT build a chat UI / agent-management surface** — Buzz provides it.
-    
-
-## Agent fabric — master agent + per-service expert agents
-
-Single fabric, memory anchored to the relay, agents scoped to the relay:
-
-*   **Master / control agent (CPA)** — appliance-level: setup, orchestration, fixing Buzz,  
-    coordinating experts, and **onboarding** (creating runners, granting agents, validating).  
-    Lives in the management relay; also drives the control plane (same memory via relay).  
-    Emergency tool to fix Buzz + primary setup tool.
-    
-*   **Per-service expert agents** (`@litellm`, `@algolia`, `@pihole`, `@vultr`, `@b2`…) — each  
-    expert in one service, spawned on onboarding, scoped to the relay. Master delegates; users  
-    talk to them directly in Buzz.
-    
-*   **Onboarding pattern (happy path):**
-    1.  User tells CPA to set up a service (e.g. "set up LiteLLM on an LXC" or "manage my  
-        existing algolia at ip X with key Y").
-        
-    2.  CPA provisions/points at the target → creates a **runner** holding the credential  
-        (e.g. ssh key to the LiteLLM LXC, or the algolia API key).
-        
-    3.  CPA validates the runner connects → readiness goes 🟢.
-        
-    4.  CPA creates the **buzz agent** (e.g. `@litellm`, `@algolia`), grants it permission to  
-        use that runner, writes an **AGENTS.md** (the agent's job: manage this process, be an  
-        expert in it, how to use the runner).
-        
-    5.  CPA connects it to Buzz, adds it to a channel (`#litellm`), and tells it (via Buzz) to  
-        install / verify and report back.
-        
-*   **Mirroring (conceptual target):** talking to master agent in control plane mirrors as DMs in  
-    the relay; if relay down, sync later. (Resolve later — not a POC blocker.)
-    
-
-## Runners — privileged generic executors (the connector bridge)
-
-**Runners are SEPARATE from Buzz** (the control plane installs them; plumbing works independent  
-of the fabric). Runner = an MCP tool server on the target side, privileged, reaching  
-ssh-machine | vultr | backblaze | proxmox | lxc | external/saas.
-
-### Generic exec — the agent reasons, the runner executes
-
-*   **Agent = the brain.** It figures out intent and composes the actual command.
-    
-*   **Runner = dumb, privileged hands.** It owns the connection (ssh session, key, reach) and  
-    executes the command the agent hands it **verbatim**.
-    
-*   **NO semantic tools.** There is no `tail_log()`, no `list_directory()`, no `create_server()`.  
-    One generic primitive: `exec(cmd, target)` — "run this exact command on that target, return  
-    output." `ls`, `tail`, `docker ps` — the agent writes them.
-    
-*   **Streaming is a property of exec, not a separate tool.** Long-running/live commands  
-    (`tail -f`, installs, builds) return output **over time** via a stream (pull-style chunk  
-    buffer in the runner; push-style SSE possible later). The agent can watch progress.
-    
-*   **Transport:** MCP over HTTP/SSE for discrete calls. The runner keeps persistent ssh  
-    connections (ControlMaster/ControlPersist pool) so repeated commands are cheap — connection  
-    lifetime is a runner-internal concern, never the agent's. WebSocket only if a real  
-    bidirectional-interactive case appears (rare for agents).
-    
-
-### Runner API (minimal contract)
-
-`list` (what targets can I reach), `exec(cmd, target, stream?)`, `config`, `status`, `snapshot`.
-
-*   **Readiness = the runner's OWN self-check**, not the agent's. Green/yellow/red = "runner can  
-    reach its service with its creds." Like every MCP call, the readiness probe is signed and  
-    GRANTED — the runner fails closed (Phase D). The CP's console holds its own agent identity,  
-    auto-granted to runners it provisions; readiness is never an unauthenticated side door.
-    
-
-### Runner identity & secrets (provisioner model)
-
-*   Runner = **a Nostr identity** (auth/membership; can be revoked at the relay) + a **separate**  
-    **encryption keypair** (injected as an env var / mounted secret by the CP at provision time).  
-    The Nostr nsec is for _signing/membership_; a distinct key handles _secrets_ (keeps blast  
-    radius small; nsec stays pure identity).
-    
-*   **CP = secret PROVISIONER, not a vault.** At onboarding the CP generates the runner  
-    identity, encrypts each secret TO the runner's encryption pubkey, ships the ciphertext to  
-    the runner's config, and injects the runner's private key. No decrypt-on-demand, no master  
-    key stored centrally.
-    
-*   **Runner holds only ciphertext + its own private key.** It decrypts locally, uses in memory,  
-    forgets. Plaintext never on disk, never in agent context.
-    
-*   **Per-runner containment, no master key.** A compromised runner leaks only its own secrets  
-    (not the relay's, not other services'). A compromised CP reveals nothing readable — it holds  
-    only ciphertext. This trades the old "runner holds zero secrets at rest" for per-runner  
-    containment; the better trade for personal/family-first on owned hardware.
-    
-*   **On-demand decryption is a FUTURE opt-in**, NOT part of the shipped no-master-key model.  
-    If adopted for runners on external/less-trusted targets (a cloud VPS we don't control), the  
-    store would hold each runner's OWN encryption key — per-runner containment only, never a  
-    master key; the CP still holds nothing but ciphertext. Secret-resolution is entirely  
-    internal to the runner either way, so a runner can be swapped between "decrypt locally" and  
-    "ask the store" without touching the agent or the tool contract. Tracked in Future items  
-    ("Vault for dynamic secrets").
-    
-
-### Revocation & audit
-
-*   **Revocation = two levers:** (1) revoke the runner's Nostr membership at the relay → cuts off  
-    its ability to _act_ (be called as a valid member) — the "cut-off" lever; (2) **rotate** the  
-    secret (re-encrypt to a fresh key / re-issue to remaining runners) → the "erase" lever.  
-    Membership revocation does not un-decrypt ciphertext already on disk; rotation does.
-    
-*   **Audit = the runner's signature job.** Because exec is raw, the runner **signs a Nostr**  
-    **event for every executed command** (agent pubkey, target, command, result) into the relay —  
-    an identity-scoped, queryable audit trail. Fits relay-as-scope + runner-as-Nostr-identity.
-    
-
-## Secrets — provisioner model (root of trust = the user; scoped to relay)
-
-**The user is the root of trust.** Two distinct secret paths:
-
-*   **Agent pod** ← its OWN Nostr identity (nsec; needs it to sign events / be a member)
-    
-*   **Runner** ← SERVICE credentials (agent can trigger use, NEVER read; out of model context)
-    
-
-Flow: CP provisions runner (generate identity, encrypt secret to runner pubkey, ship ciphertext,  
-inject private key) → runner decrypts locally on use → uses in memory → forgets. Plaintext never  
-on disk, never in agent context. Revoke membership (cut off) + rotate (erase). Crypto tool  
-(age/libsodium) is orthogonal; a separate encryption keypair (NOT the user nsec — nsec stays pure  
-identity/auth).
-
-## Deterministic agent pods + injected secrets (mirroring Buzz kubes)
-
-Buzz's deterministic pods are the model for disposable agent fleets (public release). "Use  
-without seeing": agent references a credential BY NAME; runner resolves it. Plaintext never  
-in context window → no exfiltration even if agent compromised/confused.
-
-## Agent placement — two categories, not one
-
-Public release doesn't put every agent in the same kind of pod. Two distinct placement categories:
-
-* **Ephemeral service-expert pods** — for managing external/remote things (Vultr, B2, LiteLLM, Buzz itself). Classic bare-pod model: `emptyDir`, no PVC, idle auto-reap. Stateless by design — nothing on the pod matters if it dies, because everything that matters lives behind a **runner**, not on the pod. Agent restarts freely to pick up a prompt change.
-
-* **Long-lived team/project environment LXCs** — for coding-agent work: dev and QA agents with real repo access, running `git`/`docker compose` directly against checked-out code. These are **not** k8s pods. `buzz-acp` + the harness (Goose/Claude Code/opencode/etc.) run natively on the LXC's own filesystem — this matches Buzz's own supported "Relay Bridge" pattern for headless server-side agents. Multiple agent identities (dev, QA) can be granted onto the same LXC via coarse grants, sharing one filesystem/DB/compose stack intentionally — but different teams/projects get separate LXCs so DB migrations and compute never collide across them.
-
-**Prompt sourcing is the same in both cases and is intentionally NOT volume-paired to the agent.** AGENTS.md / system prompt lives as a row in the `control_plane` Postgres database (see Database model below), authored/updated by CPA. On every pod start or LXC agent restart, the current prompt is pulled fresh from that row — via ConfigMap mount (pods) or direct read at process start (LXC) — and handed to the harness at session creation. This means a prompt tweak is just "CP updates its row, restart the agent process" — no volume to keep in sync, no drift risk, and the source of truth is something already in the storage-reliability plan.
-
-**The runner boundary looks different in each category, and that's intentional:**
-
-* In the ephemeral case, the runner may genuinely be a separate process/target — it's brokering to a remote API the pod has no other way to reach.
-* In the team-environment case, **the runner is colocated on the same LXC as the agent.** It is not a network hop. It's a local daemon (Unix socket) that holds decrypted git-deploy-key / registry-token secrets in memory only, exposed to the agent's own `git`/`docker` invocations via their native credential-helper protocols:
+## System layout
 
 ```
-git config --system credential.helper '/usr/local/bin/team-runner-cred'
-# helper calls out to /run/runner.sock — local only, plaintext never on disk
+Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted LXC/VM or VPS)
+                           │  CPA + expert agents live in Buzz
+                           │  chat / memory (30174) / audit (48001) / jobs (43001–6)
+                           │
+              tools ▼      │   ▲ agents connect with their OWN keypair
+        ┌──────────────────┘   │   (gates: signature, audience, expiry, replay)
+        ▼                      ▼
+   freehold-orchestrator / freehold-runner (Go, independent)
+        │  single `exec` MCP tool (runShell) — dumb privileged hands
+        │  signed, addressable, audited
+        │  NO LLM, NO router, NO key vault in either
+        ▼
+   Target: pct LXC (relay/CP) | qm VM (VPS host) | k8s (MVP only)
+        │
+        └──backups──► PBS (scheduled vzdump of pct/qm) | TrueNAS | Backblaze B2
 ```
 
-This preserves "secrets never in agent context" without forcing coding work through a remote `exec()` hop — the agent runs commands locally like a developer would; only the runner's own outbound call (fetching from the actual git remote / registry) ever leaves the box. Provisioning, rotation, and revocation follow the identical CP-provisioner model as every other runner.
+*   **One control plane = exactly ONE relay scope** (relay-as-scope). The CP
+    lives on its own target (a dedicated LXC/VM, a VPS, or a VM with k8s in
+    v1) and *attaches to* the relay — co-location is convenience, never
+    assumed. A user's existing relay is onboarded as a service (via a relay
+    runner), not a nested scope. No "control plane of control planes."
 
-*Harness working state (session history, tool caches — whatever a given harness accumulates beyond the checked-out repo itself) is NOT assumed durable via the Buzz relay.* Buzz's relay-native memory covers channel history and its own agent memory; it does not absorb the local state of externally-run harnesses. Anything that needs to survive a restart belongs on the LXC's own volume, covered by the storage tiers below — not assumed to be relay-backed.
+*   Deterministic k8s agent pods (bare Pods, digest-pinned sprig,
+    per-attempt envFrom Secret, no mgmt channel by design, idle auto-reap,
+    emptyDir, no PVC v1) — **arrive with Chunks 6–7** (see `roadmap/POC.md`).
 
----
+*   **Agent placement:** POC (Chunks 1–3) = scripted agents joining the relay
+    via their own NIP-42 client (the `buzz-acp` harness targets LLM agents
+    and is the Chunk-4 path — see `roadmap/POC.md`); Chunks 6–7 = k8s pods.
+    Runners are separate — see the Runners section below.
 
-## Storage & backup placement (per-service, driven by the skill's `needs:`)
+*   **Runner identity** = Nostr keypair (membership/signing) + a *separate*
+    encryption keypair (env-injected / mounted secret, never committed).
+    Agents connect with their *own* keypair; secrets are encrypted for the
+    runner's encryption key.
 
-Not every service's data belongs in the same place. Four placement tiers, each mapping onto the existing Proxmox / PBS / TrueNAS / Backblaze layering used for the appliance's own backup strategy:
+*   **CP = secret PROVISIONER, not a vault:** encrypt to runner-key → ship
+    ciphertext → inject the runner private key → rotate. No master key.
+    Runner holds only ciphertext + its own key; decrypts in its own memory,
+    uses in memory, forgets. Plaintext never on disk, never in agent context.
 
-| Tier | What lives here | Backed up via | Notes |
+*   **Grants are coarse:** agent ↔ runner (whitelist of Nostr pubkeys);
+    dedicated runner per service by default. Readiness = the runner's own
+    self-check (🟢 all checked / 🟡 some checks missing / 🔴 none).
+
+*   **The runner lifecycle rides native Nostr kinds, not custom ones:** a
+    runner is a private NIP-29 channel; grant/revoke is channel membership
+    (kinds 9000/9001); the runner's live whitelist is the relay's own signed
+    roster (**kind 39002**), read fresh per call, fail-closed on relay
+    outage. No relay fork, no custom 30073/30078.
+
+*   **CPA + experts live in Buzz:** the CPA is a real reasoning agent (the
+    system's main user touchpoint); experts are deterministic or
+    reasoning-class. The CPA gets its purpose from `CPA_SYSTEM_PROMPT.md`.
+
+*   **Host-flexible:** Proxmox is the lead/default; VPS/cloud are first-class
+    (the business path). The k8s layer (Chunks 6–7) and everything above the
+    host driver run identically regardless of substrate.
+
+*   **Backups are the load-bearing wall — and most teams won't have a PBS
+    server:** the *whole* backup chain (LXC/VZ+T pl8755, KVM+PBS) depends on
+    a PBS host. Where one doesn't exist, the durable half of the
+    `/srv/data` convention must land on TrueNAS and/or Backblaze B2.
+
+*   **The durable half lands FIRST (Chunk 3; see `roadmap/POC.md`):**
+    `/srv/data` — everything that survives rebuild: `/srv/data/relay` (all
+    relay deploy data: config, CA, keypairs), `/srv/data/cp`
+    (`secrets.json` + `providers.json`), `/srv/data/k8s-volumes` (k8s
+    storage, Chunks 6–7). **Nothing in the POC needs a cluster**
+    (`roadmap/ROADMAP.md`), and even in MVP most services aren't k8s
+    workloads: the relay/CP are LXCs, with LiteLLM/Postgres as k8s
+    Deployments only in v1.
+
+*   **The backup rule is the split, implemented as MOUNT POINTS with explicit
+    flags.** `/srv/data` (and its tenants) and `/srv/nobackup` are `mpN:`
+    volume mounts, never plain rootfs directories — and the flag must be set
+    on EVERY entry, because vzdump's default excludes volume mount points.
+    freehold lands each tenant dataset as its own mount (`mp0: …,
+    mp=/var/lib/docker,backup=1`, `mp1: …,mp=/srv/data/relay,backup=1`,
+    `mp2: …,mp=/srv/data/cp,backup=1`, …), which is the same rule applied per
+    tenant rather than as one shared `/srv/data` mount; a future reproducible
+    half gets `mpN: …,mp=/srv/nobackup,backup=0` (never in the PBS job). On
+    a box that can't add a second mount point, `vzdump --exclude-path
+    /srv/nobackup` is the rootfs fallback.
+
+*   **Container stores relocate under `/srv/nobackup`**
+    (`docker`/`containerd`/`rancher` daemon roots), mirroring the existing
+    "exclude `/var/lib/docker`" Docker-host LXC pattern — but by layout, not
+    by config list. **Carve-out — the buzz relay keeps its daemon root at
+    `/var/lib/docker`, backed up (`backup=1`):** the relay's
+    Postgres/Redis/MinIO/git data are docker *named volumes* under
+    `/var/lib/docker/volumes/`, and freehold ships no buzz patch, so
+    relocating it would silently exclude the relay DBs from backup.
+
+*   **Durable PVCs are pinned under `/srv/data` — never the daemon root.**
+    k3s's default `local-path` provisioner stores PVCs *under the rancher
+    root* (`/var/lib/rancher/k3s/storage/…`); relocating that whole root
+    would drag the control_plane Postgres PVC — the thing every
+    "reconstructible from" claim depends on — into the excluded half,
+    silently. Configure provisioner roots explicitly: durable ones
+    (`control_plane`) pin to `/srv/data/k8s-volumes`; disposable ones ride
+    the `nobackup`-rooted storage class.
+
+*   **The CP host itself must be reconstructible, not durable:** booting a
+    fresh target on *different* hardware (and even a different distro) from
+    the recorded config + the durable `/srv/data` mounts is the whole point.
+
+## The pieces
+
+### `freehold-core` (Rust; the contract oracle)
+
+* **Purpose:** the language-agnostic trust, crypto, and wire contract:
+  keypairs, sealed boxes, canonical events, `SecretPackage` JSON, and the
+  `RunnerCall` envelope. The Rust `core` (crypto/identity/wire) and `runner`
+  stay in the tree as the **byte-exact reference oracle** for the Go port;
+  the shipped surface is Go: `freehold/orchestrator` (the `freehold` and
+  `freehold-orchestrator` binaries), `freehold/installer`, and
+  `freehold/control-plane` (all Go 1.25 modules).
+
+* **Contents:** NIP-44 v2 encryption (chacha20poly1305, bech32, hkdf-sha256,
+  sha256, hex) and the signer (`CryptoProvider` over `CryptoDyn` —
+  `secp256k1` + `ring` only; `bip39`, `bs58`, and `keyring` are unused).
+
+* **Rust→Go port status:** the Go `internal/crypto` reproduces the Rust
+  `core` surface **byte-exactly** — verified by
+  `orchestrator/harness/harness_test.go`, which drives the Rust
+  `freehold-harness-oracle` binary and locks every primitive against it
+  (BIP-340 via btcec/v2, X25519+HKDF+ChaCha20-Poly1305, bech32 nsec,
+  ed25519, `SecretPackage` as sorted-map JSON matching serde's `BTreeMap`
+  output, NIP-98 canonical events, kind-48001 audit, NIP-44 v2 engrams).
+
+* **`RunnerCall`:** `{call_id, ts, nonce, issuer, audience, tool, args, sig}`
+  (full schema + per-field notes in `RUNTIME_CONTRACT.md`).
+
+* **`SecretPackage`:** `{secrets:[{name, ciphertext(nonce‖ct), nonce,
+  aad:"<name>", alg:"sealed-ex-nopb-hkdf-sha256-cha20p1305", tags,
+  issuer, audience:[...], active, created}]}`.
+
+* **`identity.json` / `providers.json`:** identity holds `nostr_secret`
+  (nsec) + `enc_secret` (nenc), both encrypted under the *plaintext*
+  `enc_secret` key; `providers.json` (control-plane only) holds opaque
+  `params` per connector.
+
+* **`FreeholdRuntime`:** `run_call` (single funnel), `resolve_target`
+  (pure: parse `TargetId`, load auth, map `pve:vm:<id>` → `{target_id,
+  transport, ssh, env}`), `verify_envelope` (verify-only; replay cache, 60s
+  expiry). `internal/runner` (`freehold-runner`) runs `run_call` over one
+  persistent `*http.Client` + `proxy.Dialer`; `serve.go` calls
+  `RunCallWithDial` and `runShell` holds `cmd.Context()`.
+
+* **`teardown.go` and `prune_lxc_coords` keep the COMPUTE/data split**
+  (`DestroysLxc` keeps config; `DestroysData` erases it).
+
+### `freehold-orchestrator` (Go; the single privileged hand)
+
+*   **The whole orchestrator/installer surface is Go.** `orchestrator/` is
+    the Go module `freehold/orchestrator` (go 1.25), and both binaries —
+    `freehold` and `freehold-orchestrator` — are Go. `internal/` carries 18
+    packages: bootstrap, cli, client, config, console, crypto, delegate,
+    deploy, drive, flows, harness, planebase, provisioner, relay, state,
+    teardown, tui, wire.
+
+*   **`orchestrator` = the dumb privileged hand.** A dumb, privileged MCP
+    tool server (`internal/delegate` + `internal/cli`): `tools/list` returns
+    *exactly one* entry, `"exec"`; `tools/call` runs the command *verbatim*
+    and streams stdout/stderr.
+
+*   **MCP server, not a proxy.** `internal/delegate/mcp.go` serves the
+    `freehold-delegate` MCP server with the single `exec` tool;
+    `cmd/freehold-delegate` (alias `cmd/freehold` → `freehold`) and
+    `cmd/freehold-runner` both wire `delegate`'s `RunCall`.
+
+*   **`run_call(call, rawJSON)` → `{stream:[stdout…, stderr…]}`.** It parses
+    the `RunnerCall`, verifies the signature over canonical bytes, checks
+    nonce/expiry, looks up issuer in the roster (fail-closed), selects the
+    connector, and executes the `exec` command verbatim.
+
+*   **A stream is a property of `exec`.** `tools/call` with `stream=true`
+    yields `content[0].text`, a JSON array of interleaved
+    `["stdout"|"stderr", line]` pairs; `false` yields a single
+    `{stdout, stderr, code}` object.
+
+*   **Gates:** signature validity against the roster, audience binding,
+    `ts + timeout_s` expiry, and nonce replay — each a separate rejection
+    path; `identity.json` → `identity.priv`.
+
+*   **`readFile` is NOT a tool.** Any agent that can `exec` can `cat` a
+    file; the only way to erase a capability is to revoke it from the
+    channel (`RevokeRunner` → 9003).
+
+*   **`FreeholdRuntime` (above) is the contract oracle:** `run_call` is the
+    single funnel, `resolve_target` stays pure, and `verify_envelope` guards
+    replay in memory only.
+
+*   **The Go engine reads the contract verbatim.** `newRebuildEngine` threads
+    the stage set without interpretation (`internal/cli/rebuild.go`);
+    `collectAnswers` → `rebuildFlags` hands `install` the same engine
+    (`eng.stdin = ui.in`); `runReconstruct` does `stateFromRunner` →
+    `resolve` → `ensure` → `bootstrap relay` → `bootstrap CP`.
+
+*   **The CLI's single stdin is load-bearing:** `prompt()` reads through one
+    persistent `bufio.Reader` over `cmd.InOrStdin()`; a new mid-pipeline
+    prompt never opens a second reader.
+
+*   **`internal/tui` (`freehold`) and `cmd/freehold-orchestrator` are the
+    operator's only UI.** `internal/tui/activity.go` (548 lines) provides
+    one activity surface for ALL long ops (the `send-msg`/`tui-daemon-combo`
+    pattern): spinner + live label on the top line, ✓/✗ result rows (boot
+    probes — config → runner → relay → cp → k3s → world state, 6s each) or a
+    streaming last-12-lines window (subprocess runs), `ctrl+c` aborts — no
+    dashboard, no shortcut footer, while active.
+
+*   **A rebuild bailing at the door is an EXPECTED pause** (`a.wait`,
+    rendered "waiting for the operator" and YELLOW): `main.go` maps
+    `!GateOpen` to `ErrWait` → `ActionWait` → `model{wait: m.act, …}`;
+    ENTER re-runs the SAME args in place (never back to the 6-field form),
+    ESC cancels.
+
+*   **`recoverDoorKey()` re-derives the door ssh PUBLIC line** (and only the
+    public line) from `identity.json` + the sealed `secrets.json`
+    (aad = secret name) when a reused package skips the gate but the key
+    was never installed; `crypto.ExtractED25519PublicKeyLine` parses past
+    the private half and never returns/writes it.
+
+*   **`storage.go` honors `plane.backend_kind`; `resolve.go`/`ensure.go`
+    honor it.** The plane stage is NEVER skipped — `ensure` is idempotent
+    and runs EVERY converge (`backend.is_some()` in the config is not proof
+    the plane is live). `TestManagedForFlags`, `TestWorldManaged` and
+    `TestParsePctGateway` in `internal/cli/rebuild_test.go` anchor this
+    region.
+
+*   **Teardown (Chunk 3): whole-world is COMPUTE teardown.**
+    `internal/teardown/teardown.go`'s `Run` destroys LXCs, KEEPS the
+    recorded coords (operator-owned facts; no `PruneLxcCoords`), so a
+    rebuild re-boots the SAME world — and `--data` adds the tenant datasets
+    + `freehold-thin` before the door key/world home/config go LAST
+    (`installer/src/teardown.rs` removes config).
+
+*   `stageLocalLvm` honors the plane: `ChownGuestUid` is NON-recursive (top
+    dir only — PVE's own invariant; a recursive sweep re-roots every
+    container-owned subtree and EACCESes redis/postgres/buzz).
+
+*   **The teardown TUI is ACTIVE with checkboxes.** `Run` announces each LXC
+    *before* it destroys it (`destroying relay LXC 100` streams via
+    `say()`/Live before `DestroyOneLxc`; the `destroyed / already gone /
+    never created` contract holds), and `freehold/teardown`'s `state.go`
+    seeds one slot per MANAGED LXC (`relay LXC 100` …) that flips to ✓ as
+    lines arrive; `tail()` keeps the last 3 non-empty lines so the
+    embedded cause is never lost.
+
+*   **No `vm_snapshot`/`vm_rollback`/`vm_restore`/`vm_exec`/`pct_*` tools**
+    in `run_call` — all of these are `exec`.
+
+*   **`internal/state` is a file store** (`secrets.json`, `providers.json`):
+    `state.go: managedStore{root}` at `/srv/data/cp`, never inside the
+    read-only module (`store.go`'s `managed: true`).
+
+*   **A crash-dump symbolized on the target** (`coredumptl` /
+    `coredumpctl copy` → `internal/tui/coredump.go`) is evidence of a real
+    problem, never a fallback.
+
+### `freehold` TUI (bubbletea; the operator's console)
+
+*   **It is bubbletea, not HTML.** `internal/tui/tui.go` is full-screen
+    alt-screen: `tea.NewProgram(m, WithAltScreen(), WithMouseCellArea(…))`.
+
+*   **Four views** (`<Tab> next view`, `1` Services, `2` Agents, `3`
+    Runners, `4` DATA): `newDashboardModel()` (services),
+    `newAgentModel()` (agents), `newRunnerModel()` (runners),
+    `newDataModel()` (DATA); the dashboard renders ONLY when nothing is
+    active (`state.go` → `actStepMsg{kind: "done"}`) — it never scrolls
+    under an open activity.
+
+*   **The six auth fields** (`domain`, `pve_host`, `pve_user`, `pve_pass`,
+    `relay_gw`, `sizing`) are collected once, in order (`stepAfter` is
+    `func(int) int { return 1 }`; `nextStep` is unreachable — enforced).
+
+*   **Nothing may hardcode `local`** (`source.go: func Default`,
+    `func Resolve`); the store is a `managed` store, so a machine with no
+    recorded `mp*` mounts is *not* an authenticated appliance yet.
+
+*   **`identity.json` and `providers.json`** (with `params`) live in
+    `/srv/data/cp`; they are freehold state, never part of the read-only
+    `go:embed` module.
+
+*   **No secrets ever ride the wire or enter an agent's context**
+    (`mcp.go: func (h *Handler) callTool`); the `exec` stream frames
+    (`//> …` / `<! …`) carry only command text and stdout/stderr lines.
+
+*   **`<Tab>` cycles** `services → agents → runners → data → services`;
+    **`2` (or clicking) goes straight to Agents**; there is no `3`/`4`.
+
+*   **`<Ctrl+C>` aborts** mid-run (the tea ctx ends `RunShell`; the
+    process group is killed with `SIGKILL`, and `Wait` waits for pipes);
+    `[Q]` quits (`cmdQuit` → `tea.Quit`).
+
+*   **`[Enter]` continues** and re-runs the SAME args in place
+    (`runShell`); it never returns to the 6-field auth form.
+
+### `CPA_SYSTEM_PROMPT.md` (the CPA's purpose)
+
+*   **`CPA_SYSTEM_PROMPT.md`** (at `/srv/data/cp` and baked into
+    `freehold-orchestrator`'s `agents/<name>/AGENT.md`) — not a Go file and
+    not a "CPA host / LLM routing" spec. It says:
+
+*   The CPA is a **reasoning agent that lives in Buzz** and is the system's
+    **main user touchpoint**; it runs on the same `goose`/`omp` harnesses as
+    the expert agents it creates.
+
+*   It **delegates** expert work — drives a `target`'s `Runner` via `exec`,
+    or hits an **API directly** — instead of doing expert-level work itself.
+
+*   **It never sees plaintext secrets**, never writes secrets to files, and
+    references credentials by name only.
+
+*   `## Example: "Create a VM with Nextcloud"` — "Create a Nextcloud
+    instance" / "Back it up."
+
+*   **`run_call` returns `{stdout, stderr}`** (or `{error}`).
+
+*   **The `exec` tool** (`{cmd, target, stream?}`) is the ONLY one.
+
+*   **The `exec` stream** is a `tools/call` to `freehold-orchestrator`
+    (`{"stream": true}` → `result.content[0].text` = JSON array of
+    `["stdout"|"stderr", line]` pairs).
+
+*   **Every long-running operation** — a `run_call`, or a subprocess like
+    `install`/`rebuild`/`teardown` — gets **one activity view** that is
+    ALWAYS the top line: `spinner + live label`, then `✓/✗ result rows`
+    (boot probes) or a `streaming last-12-lines window`.
+
+*   **The agent must NEVER:** re-derive a secret from `identity.json`, put a
+    secret in a URL, type `ssh host 'nc …'`, or hand a credential to a
+    container via `--env`.
+
+### `freehold-control-plane` (Go; the provisioning brain)
+
+*   **The `control-plane` module is `freehold/control-plane`, not a Rust
+    crate** — `internal/provisioner` (`provision.go`, `secrets.go`,
+    `providers.go`) and `internal/client` (`litellm.go`, `openrouter.go`,
+    …) live only under `orchestrator/`.
+
+*   **The `control-plane` binary's whole job is the LLM plane.** It
+    *provisions* providers and *seals* credentials into a
+    `SecretPackage`-shaped `secrets.json`; **there is no
+    `cp provision-provider`, no `cp rotate-secret`, no `cp
+    list-secret-names`.**
+
+*   **`providers.json` (at `state/providers.json`)** and **`secrets.json`
+    (at `secrets.json`)** are read-only to the `freehold` TUI/CLI and
+    written ONLY by the `control-plane` CLI.
+
+*   **`provisioner.go: func (f *Flags) Provision`** runs the whole
+    sequence — `resolve` → `writeSecrets` → `recordPackage` → `relaunch` —
+    in ONE pass; `rotate.go`'s `Rotate` *generates* a fresh keypair,
+    *re-seals* `secrets.json` under it, rewrites the `secrets/` and
+    `providers/` dirs, and *relaunches* the LXC.
+
+*   **`internal/provisioner/secrets.go: Destroy` and `provision.go`
+    both call `teardown.Run`;** `storeDir` is `state/`, and a failed
+    sequence rolls the dir back (`store.go: func (*managedStore) …`).
+
+*   **`providers.go` (the only "semantic tools" left):** a provider's
+    `params` are **opaque to the system** and *never* parsed, so there is
+    no `litellm.chat` / `litellm.list_keys` / `openrouter.list_models`.
+
+*   **`internal/deploy` reads `providers.json`/`secrets.json` and builds
+    a k3s `manifests.yaml`** (see `freehold-deploy/` below).
+
+### `freehold-deploy/` (Kubernetes — arrives with Chunks 6–7)
+
+*   **`freehold-deploy/` is `freehold/orchestrator`'s `internal/deploy` +
+    `internal/planebase`** (plus `config` and `deploy.yaml`); it lands with
+    Chunks 6–7 (see `roadmap/POC.md`).
+
+*   **The sole store is `deploy.yaml`** (or `deploy.yml`, `deploy.json`, or
+    `.jsonc`); `loadDeploy` parses it into a
+    `deploy.Deploy{Services: map[ServiceID]Service{…}}`.
+
+*   **Every secret is a `SecretName`;** `Build` passes the *name* into
+    `buildSecret` (with `Labels`), and `buildStatefulSet` mounts
+    `/data`/`/var/lib/postgresql/data` from `PersistentVolumeClaim`s in
+    `/srv/data/k8s-volumes`.
+
+*   **`k3s image` digests are content-verified:** `resolveDigest` checks
+    `sha256:` pins against `oci://<image>@sha256:<digest>`; `apply` runs
+    `k3s kubectl apply` (via `freehold`'s `exec`).
+
+*   **`freehold-acceptance` (a Go package) reproduces Chunk 1's acceptance
+    criteria hermetically on loopback.**
+
+*   **A real LLM (Claude / GPT / Gemini, via LiteLLM or OpenRouter) drives
+    the CPA.** No local-only inference.
+
+### Runners (the bridge between the two)
+
+**A runner is a dumb privileged machine** — it runs commands; it isn't an
+agent; it is *never* the brain (that's the CPA).
+
+| Step | Action |
+
+|---|---|
+
+| 1 | `run_call` validates signature (roster), audience, expiry, nonce;
+selects the connector |
+
+| 2 | `runShell` executes the command **verbatim**, streaming output |
+
+| 3 | Results (`//> …` / `<! …`) return to the calling agent |
+
+**No MCP, no REST, no LLM, no router, no key vault.** A connector MUST NOT
+cache plaintext credentials, hold a "master key," or consult the router —
+credentials are injected per attempt via `envFrom`/`env` and the router
+(`litellm.rs`) is an **API connector** whose `baseUrl` and `apiKey` ride as
+env vars (`LITELLM_HOST`, `LITELLM_API_KEY`).
+
+**A `pct` or `qm` command is simply a command.** The `exec` tool is the
+single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
+`lxc.*`, `vm.*`, `vm_snapshot`, `vm_restore`, `snapshot.*`, and `backup.*`
+(all illustrative; nothing here is a semantic tool).
+
+### Targets (where the work lands)
+
+| Kind | Example target | Connector | State |
+
 |---|---|---|---|
-| **K8s host LXC/VM** | k8s binaries, OS | PBS (machine-level) | Standard rootfs backup, same as any LXC |
-| **control_plane Postgres (PVC on k8s host)** | prompts, grants, service registry, audit | PBS + TrueNAS (scheduled) | Same bucket as any app database — important, not reproducible |
-| **Ephemeral service pods** | agent runtime, scratch | *Not backed up* | `emptyDir`, fully reproducible from AGENTS.md + skill — same logic as excluding `/var/lib/docker` |
-| **Team/project environment LXCs** | rootfs / `/srv/data` (repo, compose, runner secrets ciphertext) / `/srv/nobackup` (relocated container stores, caches, PVCs excluded by root pinning) | rootfs+`/srv/data` → PBS+TrueNAS; `/srv/nobackup` → excluded (as its own mount point, `backup=0` on the `mpN` entry) | Mirrors the Docker-host LXC pattern — the `/srv` split IS the backup config, implemented as two mount points |
-| **Data-heavy services** (Nextcloud, Immich, media) | live user datasets under `/srv/data/<service>` | TrueNAS (mounted directly, not local NVMe) + ZFS snapshots + Backblaze off-site | Proxmox stays fast/small; service LXC mounts TrueNAS via NFS/iSCSI rather than storing data locally |
 
-A skill declares which tier it needs, and CPA/the provisioning flow places it accordingly:
+| `pct` LXC | relay (`relay-…-<nn>`) | `pve` | `lxc.<role>` |
 
-```yaml
-name: install-nextcloud
-target: lxc
-needs: {database: true, volume: 20Gi, mount: truenas-nfs}
----
-name: install-litellm
-target: pod
-needs: {database: true}   # no mount — ephemeral, no PVC
----
-name: provision-team-env
-target: lxc
-needs: {database: true, volume: 40Gi, workspace_runner: true}   # colocated git/registry runner
-```
+| `qm` KVM | VPS host (Vultr, `vps:<id>`) | `ssh` (KeyPath) | `vm.<id>` |
 
-Governing principle, carried over from the appliance's own backup design: **back up what matters, not what's easily recreated.** Anything derivable from a skill install (images, layers, model downloads, build cache) is excluded regardless of tier; anything that represents real work or real state (databases, checked-out repos with uncommitted changes, user data) gets the full PBS-plus-off-site treatment.
+| `pct` LXC | K3s (`k3s-…-<nn>`) | `k8s` | `lxc.k3s` |
 
-### Filesystem layout convention — `/srv/data` vs `/srv/nobackup`
+| `pct` LXC | control plane | `local` | `cp.<role>` |
 
-The tiers above encode onto every LXC/VM as a single top-level split, so the backup config is one rule instead of a per-path carve-out list:
+| `vm` | … | `api` | `provider.<name>` |
 
-```
-/srv/
-├── data/                 # durable application data — THE backup set
-│   ├── nextcloud/        # live user datasets (TrueNAS-backed via NFS/iSCSI)
-│   ├── agents/           # durable agent/harness state that must survive restarts
-│   ├── <service>/        # anything with needs.volume; repos, compose, runner
-│   │                     #   secrets ciphertext
-│   └── ...
-│
-└── nobackup/             # reproducible / disposable — its MOUNT POINT carries
-                          #   backup=0 (the flag lives on the mpN entry, not
-                          #   on a directory — see below)
-    ├── docker/           # container stores: daemon roots RELOCATED here (or
-    ├── containerd/       #   bind-mounted), so the exclude is structural, not
-    ├── rancher/          #   a fragile path list — but ONLY the daemon root:
-    │                     #   k3s/rancher state is reconstructible from
-    │                     #   control_plane Postgres (deterministic pods +
-    │                     #   config-as-data); durable PVCs are pinned under
-    │                     #   /srv/data, never the daemon root
-    ├── caches/
-    └── scratch/
-```
+*   **A `TargetId`** is `pct`, `qm`, `pve`, `k8s`, `local`, `ssh`, `api`, or
+    `proxy` (full grammar in `internal/runner`; `TargetId::parse` lives in
+    `internal/runner`).
 
-*   **The backup rule is the split, implemented as MOUNT POINTS with explicit flags.**
-    `/srv/data` (and its tenants) and `/srv/nobackup` are `mpN:` volume mounts, never
-    plain rootfs directories — and the flag must be set on EVERY entry, because
-    vzdump's default excludes volume mount points. freehold lands each tenant dataset
-    as its own mount (`mp0: …,mp=/var/lib/docker,backup=1`,
-    `mp1: …,mp=/srv/data/relay,backup=1`, `mp2: …,mp=/srv/data/cp,backup=1`, …),
-    which is the same rule applied per tenant rather than as one shared `/srv/data`
-    mount; a future reproducible half gets `mpN: …,mp=/srv/nobackup,backup=0` (never
-    in the PBS job). On a box that can't add a second mount point,
-    `vzdump --exclude-path /srv/nobackup` is the rootfs fallback. Nothing under
-    `/srv/nobackup` is ever in a PBS job.
-*   **Container stores relocate under `/srv/nobackup`** (`docker`/`containerd`/`rancher`
-    daemon roots), mirroring the existing "exclude `/var/lib/docker`" Docker-host LXC
-    pattern — but by layout, not by config list. **Carve-out — the buzz relay keeps
-    its daemon root at `/var/lib/docker`, backed up (`backup=1`):** the relay's
-    Postgres/Redis/MinIO/git data are docker *named volumes* living under
-    `/var/lib/docker/volumes/`, and freehold ships no buzz patch, so landing them on
-    a tenant dataset means that dataset IS the guest's `/var/lib/docker`. Relocating
-    it would silently exclude the relay DBs from backup. The documented cost is
-    reproducible images/layers riding in the backup set; a future buzz change that
-    moves the named volumes out of the daemon root removes that cost.
-*   **Durable PVCs are pinned under `/srv/data` — never the daemon root.** k3s's
-    default `local-path` provisioner stores PVCs *under the rancher root*
-    (`/var/lib/rancher/k3s/storage/…`); relocating that whole root would drag the
-    control_plane Postgres PVC — the thing every "reconstructible from" claim
-    depends on — into the excluded half, silently. Configure provisioner roots
-    explicitly: disposable volumes on a `nobackup`-rooted storage class, durable
-    ones pinned to `/srv/data/k8s-volumes`. These lands live on the Chunk 3
-    Kubernetes substrate — see the Build plan.
-*   **Data-heavy services mount TrueNAS under `/srv/data/<service>`** — backed by TrueNAS snapshots + Backblaze off-site, not by PBS rootfs copies.
-*   **Skills map onto it:** `needs: {volume: …}` → `/srv/data/<service>`; a scratch-only service (nothing durable) → `/srv/nobackup/<service>` or a pod `emptyDir`. `needs.volume` is the declaration that something is durable — absence means disposable by default.
+*   **`pve.<verb>` and `container.<verb>` are gone:** `pct`/`qm` are `exec`
+    on the PVE host or a VPS.
 
----
+*   **`exec` is the one tool**; `local` is a generic exec on the runner
+    itself (used by `provision`/`rotate` for `zfs` and `vzdump`), *not* a
+    proxy, delegate-peer, or "executes in the control plane LXC."
 
-## Fourth connector flavor: workspace/git runner
+*   **`<id>` (VMID),** not an LXC ID.
 
-Alongside SSH / Vultr / Backblaze: a **workspace runner** for team/project environment LXCs — holds git deploy keys and container-registry tokens as ciphertext, decrypts locally, and serves them through native credential-helper protocols (`git credential.helper`, `docker credHelpers`) rather than the generic `exec()` primitive. Same identity, provisioning, rotation, and audit model as every other runner; the difference is purely in how the secret is surfaced to the caller (local credential-helper socket vs. remote exec). Not required for Chunk 1's three connectors, but the same core (Phase A–B) covers it — worth flagging as the connector to add once team environments are in scope. **Status: proposed, not locked.** AGENTS.md's locked model defines ONE generic `exec` primitive; adopting the credential-helper surface needs an explicit locked-model carve-out before team environments enter scope.
+*   **`<nn>`:** `managedStore{root}` at `/srv/data/cp`, **not**
+    `managed: false`.
 
-## Grants — agent ↔ runner (not 1:1)
+### The single control plane (CP)
 
-*   **A runner is scoped to a credential/target**, not an agent. **An agent is granted runners.**  
-    The grant is the real concept (many-to-many via grants).
-    
-*   **Dedicated runner per service = the happy-path default** (buy isolation + surgical  
-    revocation; clean audit: revoke the LiteLLM runner, cut off only LiteLLM).
-        
-*   **Sharing via grants allowed:** master agent needs many runners (create LXCs, create agents);  
-    shared infra (one Proxmox runner) is granted to multiple experts. Following Buzz's approach of  
-    **whitelisting Nostr pubkeys** of who may call a given agent/runner — revisit finer-grained  
-    (target-scoped) permissions later; keep grants COARSE for Chunk 1 (agent ↔ runner, maybe  
-    per-tool).
+*   **One host, many connectors.** The CP is the only instance (no "CP of
+    CPs"); it reads `providers.json`/`secrets.json` from `/srv/data/cp` and
+    never re-derives them.
 
-*   **Grants authority (Phase D):** once a runner serves with `--relay-url`, the relay's
-    **kind-30180 grant list (d-tag = runner pubkey) is AUTHORITATIVE** and is read LIVE per call
-    (a revoke lands without a restart — closes the Chunk-1 running-runner gap); the shipped
-    package becomes the offline mirror. **Trust anchor:** only kind-30180 events authored by
-    the console/owner pubkey (`--grant-author`, NIP-98-signed publish) whose Schnorr signature
-    verifies locally are accepted — never any member's word. Without `--relay-url`, the
-    package list is the source (loopback/local runners).
-    
+*   **A crash dump** (`coredumptl`, `internal/coredump`) proves something
+    broke; it is not a recovery path.
 
-## Control plane — the management layer / engine room (our build)
+*   **No dashboard** while an op is active; **no secret dumps** in output;
+    no secrets in `logs/` or the activity window; **no LLM in the CP**
+    (that's the CPA's job).
 
-A **management layer over agent-manageable services**, for exactly ONE relay. Also the  
-appliance Buzz lives in (setup tool + emergency fix) + shows all services with access at a glance.
+### Skills
 
-*   **Register services** manually OR **auto-discover** on Proxmox; **opt-in** per service.
-    
-*   Applies to LXCs created, EXISTING services, EXTERNAL/SaaS (SSH machines, Vultr, Backblaze,  
-    user's existing relay).
-    
-*   **Web UI (admin/ops view):** services-at-a-glance + readiness + setup + master agent access  
-    (mirrors to relay). NOT the chat surface (that's Buzz).
-    
-*   **The product's job: give the agent connection tools so services aren't in a red state.**
-    
+*   **A skill is a directory** (e.g. `/skills/<id>/SKILL.md`) with YAML
+    frontmatter (`name`, `description`, `metadata.openclaw.*`); the
+    `metadata` key holds **`openclaw`** (or **`omarchy`**), and *all*
+    supported values live under it.
 
-### Service health / readiness states (the console's core signal)
+*   **One skill = one host = one `SKILL.md`.**
 
-*   🟢 **Green** — runner self-check passes; runner has access → service manageable.
-    
-*   🟡 **Yellow** — can connect + manage, but needs updates/remediation to "fix."
-    
-*   🔴 **Red** — can't connect / can't manage (missing creds, no access, unreachable).  
-    Readiness = health of the runner↔service connection (reported by the runner's own self-check).
-    
+*   **`freehold <verb>`** — there is no `freehold skill run`, no `skill run`,
+    and no `freehold skill <verb>` subcommand; and *nothing* that re-proves
+    the crypto with a `python3 scripts/convert_agents_opencode.py`.
 
-## Control plane app — ONE application, three modes
+*   **Never encode `sk-…`, `nsec…`, or `nenc…`.**
 
-The control plane is a single app (web UI + master agent + skill framework + runner client).  
-Installer is NOT a separate script — it is the app's first-run/BOOTSTRAP mode.
+*   **The skill is the doc for one `SKILL.md`.** A long op uses
+    `run_call`/`RunCallWithDial`; there is no `freehold skill` CLI, and a
+    "Managed by freehold" dataset must never be re-`create`d.
 
-```
-Modes:
-  BOOTSTRAP  — local first-run: guide Proxmox ISO, provision VPS, create management relay,
-               install CP onto a target, create self-scoping runner
-  OPERATE    — deployed on the target (LXC / VPS): the always-on control plane (a web UI)
-  CONNECTED  — local app connects to + surfaces a deployed control plane
-```
-
-*   Local = web UI at localhost; deployed = web UI at [https://box](https://box). Same app, different mode.
-    (Chunk 2: deployed keeps loopback + SSH tunnel until console authn/TLS lands — see Future items.)
-    
-*   Only true split = the RUNNER boundary. Everything above the runner can run anywhere.
-    
-*   Mobile is natural later (CP is a web service).
-    
-*   Single-relay by construction — no distributed "control plane of control planes."
-    
-
-## Two orthogonal axes (the core product architecture)
-
-```
-AXIS 1 — SKILLS  :  WHAT to install / how to configure (install-plane, tailscale…)
-AXIS 2 — HOST    :  WHERE the appliance lives (proxmox, vps, cloud, incus…)
-```
-
-Anything × anything composes. K8s layer runs identically regardless of host.
-
-## Environments (dev / test / prod / dogfood)
-
-*   **VPS (dev/smoke):** fast, cheap, disposable. Tests runner abstraction, agent logic, skill  
-    plumbing. Also IS the VPS/cloud product driver dev env (same path).
-    
-*   **PVE host (test/staging):** real Proxmox API + LXC lifecycle BEFORE production.
-    Low-end hardware = proof point for "appliance on modest hardware." Primary Proxmox dev target.
-    
-*   **Home Proxmox (prod):** real daily driver; dogfooded daily. Never the first test.
-    
-*   **Later:** PVE hosts join as cluster nodes for multi-box scaling + Ceph.
-    
-*   **Discipline:** installer/runner must install to a VPS as easily as Proxmox from day one.
-    
-
-## MVP scope (installer / provisioning)
-
-**Happy + supported path = Proxmox route** (assumes Proxmox ALREADY running; install-only).  
-**VPS = advanced option** (provision + install) for business path + substrate isolation.
-
-*   Provisioning ≠ installing. VPS provisions; Proxmox is install-only.
-    
-*   Install creates a new management relay OR attaches to an existing one (Buzz required; relay-creation is a skippable idempotent step).
-*   **"VPS" = Proxmox-on-Cloud-Compute (LXC-only).** Vultr Cloud Compute and
-    Hetzner Cloud instances have no nested hardware virtualization — Proxmox
-    on them manages LXC containers, not KVM VMs. The whole stack is
-    container/pod-shaped, so the VPS host collapses into the Proxmox host
-    driver: provision an amd64 instance, custom-ISO PVE install, then the
-    same LXC flows (relay + cp LXCs + services as more LXCs). A real-VM
-    requirement routes to Bare Metal (Vultr BM / Hetzner dedicated), never
-    the VPS host. (Chunk 2.5.)
-    
-*   Unified control plane app; bootstrap is a MODE, not a script.
-    
-*   Co-locate the control plane + its runner with the CP's OWN target LXC/box for MVP —
-    the relay is an ATTACH (own LXC, different infra, or unmanaged), never a
-    co-location requirement. "Local CP + remote k8s" = not MVP (Kubernetes arrives
-    with Chunk 3; see `roadmap/POC_CHUNK3.md`).
-    
-*   Pre-installed box = phase 2/3. Future: local CP can provision another Proxmox box (software).
-    
-*   Installer state machine (bootstrap): (1) provision VPS + install, (2) install on this  
-    machine, (3) install on existing Proxmox (create LXC + CP), (4) guide Proxmox ISO install,  
-    (5) tear down.
-    
-*   Security: control-plane LXC/pod is privileged by design (holds Proxmox token + SSH keys).
-    
-
-## Design decisions (locked)
-
-*   **No Supabase.** Plain Postgres as single shared system-of-record (control-plane state;  
-    Buzz relay has its own Postgres).
-    
-*   **Flexible deploy target.** Skills _declare_ pod vs LXC; agent falls back to heuristics.
-    
-*   **Config volume-mounted / ConfigMaps**; images stay thin.
-    
-*   **Deterministic agent pods** (from Chunk 3 — Kubernetes is pulled forward,
-    `roadmap/POC_CHUNK3.md`); connections as env vars; secrets via
-    provisioner model (runner holds ciphertext + injected key; agent uses, never reads).
-    
-*   **Agent placement:** Chunks 1–2 = scripted agents joining the relay via their
-    own NIP-42 client (the `buzz-acp` harness is the Chunk-3+ path); Chunk 3
-    onward = k8s pods (Kubernetes pulled forward — `roadmap/POC_CHUNK3.md`).
-    
-*   **Buzz required; management relay created by install; one relay per control plane.**
-    
-*   **LiteLLM** as a k8s Deployment (replicas), config mounted, state in Postgres —
-    on the Chunk 3 Kubernetes substrate (`roadmap/POC_CHUNK3.md`).
-    
-*   **Storage**: ZFS now → Ceph on 2nd box. Layered reliability.
-    
-*   **Buzz Relay headless**; first-party **console** is the admin/ops surface.
-    
-*   **K8s fixed; hosting substrate pluggable** (proxmox lead, vps/cloud, incus).
-    
-*   **K8s is pulled forward into the POC at Chunk 3** (`roadmap/POC_CHUNK3.md`);
-    Chunks 1–2 stay Kubernetes-free and prove the connector world.
-    
-*   **Generic exec runner** (agent writes commands, runner owns connection + streams + audits).
-    
-
-## Base directions (opinionated starter presets)
-
-*   **Personal** — individual power-user: Pihole, Tailscale, Plane, notes, local AI.
-    
-*   **Family** — shared use, safety/guardrails: Pihole, Tailscale, media, shared calendar,  
-    kid-safe defaults (parental controls as a skill).
-    
-*   **Business** — reliability/ops/team: Plane, Jira/Linear optional, SSO/auth, backups-first,  
-    cloud host option, compliance-friendly.  
-    Agent seeded with the direction's conventions; can deviate on request.
-    
-
-## Host provider interface (each substrate = setup skill + management skill)
-
-A host driver implements the runner contract: provision host, run k8s (Chunk 3's
-Terraform-deployed substrate), storage (`storage resolve|ensure|destroy` — live
-against the real PVE host: VG `pve`, LVM-thin `freehold-thin`), network,
-snapshots/backups. Keep interface MINIMAL; do not flatten away substrate
-superpowers.
-*   **Proxmox** — lead/default. Best for the homelab box. MVP happy path.
-    
-*   **VPS / cloud** — cleanest; single VPS simpler than Proxmox, managed k8s = zero control-plane  
-    ops. THE business path. MVP advanced option. Also the dev/smoke env.
-    
-*   **incus** — feasible; system containers, same family as LXC.
-    
-*   **Mac "containers"** — dev-only (Docker Desktop/Colima/OrbStack/Lima). Not production.
-    
-*   **Pre-installed box (shipping)** — phase 2/3. Needs self-boot onboarding.
-    
-
-## Business model (open-core)
-
-*   Homelab/self-hosted (Proxmox) — free, enthusiast path = moat + community.
-    
-*   Cloud (managed k8s) — paid, business path; same OSS core + skills, different host driver;  
-    funds OSS build-out.
-    
-*   Skill ecosystem — community/marketplace, host-agnostic, works everywhere.
-    
-
-## The stack / layers
-
-```
-USER
-  ▼  Buzz clients (desktop/mobile/web)
-BUZZ — self-hosted Nostr relay + agent management   ← INTERACTION SURFACE (Buzz provides)
-  ├─ MANAGEMENT RELAY (created by install) — the control plane's ONE scope
-  │    ├─ master agent (CPA) + service agents (@litellm, @algolia, @pihole, @vultr, @b2…)
-  │    └─ memory + audit events (relay-persisted)
-  ├─ user's EXISTING relays — onboarded as services (relay runner connector), NOT nested scopes
-  ├─ deterministic k8s pods (Chunk 3 onward — k8s pulled forward) | local buzz-acp (Chunks 1–2) | LXC
-  │ agents call tools ↓
-RUNNERS — privileged generic MCP tool servers (the bridge, separate from Buzz)   ← OUR BUILD (engine)
-  ├─ Nostr identity (auth/membership) + separate encryption keypair (env-injected)
-  ├─ generic exec: agent writes commands, runner owns connection + streams + signs audit
-  └─ reach ssh-machine | vultr | backblaze | proxmox | lxc | external/saas | user's relay
-  ▼
-CONTROL PLANE (management layer for ONE relay + appliance Buzz lives in)   ← OUR BUILD
-  ├─ SECRET PROVISIONER (encrypt-to-runner-key + ship + rotate + membership; no master key)
-  ├─ register/discover services, opt-in per service
-  ├─ grants (agent ↔ runner, coarse)
-  ├─ readiness green/yellow/red (from runner self-check)
-  ├─ skill framework (install/configure)
-  └─ web UI = admin/ops view + setup + emergency Buzz fix + master agent access
-  ▼
-SERVICES — ssh-machine | vultr | backblaze | proxmox | lxc | external/saas | user's relay
-```
-
-## Console (control surface, not metrics store)
-
-*   Web UI: services-at-a-glance + readiness (green/yellow/red) + setup + master agent access  
-    (mirrors to relay) + skill/service management.
-    
-*   Reads Proxmox API, k8s API, Prometheus, LiteLLM, AI box (node_exporter+DCGM).
-    
-*   Compose telemetry backbone from existing tools; build aggregating shell. Control shell +  
-    thin backend first, deep views second.
-    
-
-## Database model — one Postgres cluster, many databases (control plane)
-
-```
-control_plane | litellm | plane | per_client_<n>
-```
-
-Logical isolation, single ops surface, single storage volume. (Buzz relay has its own Postgres.)
-
-## Storage reliability (layered onion)
-
-1.  Physical replication — ZFS (1) → Ceph (2+). 2. Postgres WAL + logical backup.
-    
-2.  Off-box pg_dump. (Per-substrate storage implementations.)
-    
-
-## Skill framework
-
-```yaml
-name: install-plane
-target: lxc | pod | either
-runtime: community-scripts | hand-rolled
-inputs: [domain, admin_email]
-needs: {database: true, volume: 20Gi, network: host}
-steps: [fetch script, provision, wire config, register]
-```
-
-Skills DECLARE their target; agent falls back to heuristics when absent.
-
-## Provisioning flow
-
-User → master agent (Buzz or CP) resolves intent → pick skill (or improvise) → fill inputs →  
-skill runner checks needs (db, volume, network) → deploy to pod or LXC → wire config →  
-register → spawn per-service expert agent (@service, in management relay) → agent verifies  
-health → report to user.
+*   **The agent MUST verify every `SKILL.md` command** on loopback (e.g.
+    `127.0.0.1:3000`) against the `go test ./...` suite before it
+    documents that command; **don't guess from prose** — probe first.
 
 ## Build plan (chunked)
 
-**POC (pre-MVP, Kubernetes pulled forward for Chunk 3 — see `roadmap/POC_CHUNK3.md`;
-Chunks 1–2 ship without it):**
+**POC (pre-MVP, Kubernetes arrives with Chunks 6–7 — see `roadmap/POC.md`):**
 
-1.  **Chunk 1 — Local control plane + runners + secrets + connectors:** local web UI  
-    (admin/ops console — NOT chat; Buzz owns conversation); runner as MCP tool server with  
-    generic `exec`; secret PROVISIONER in the control plane (encrypt-to-runner-key + ship +  
-    rotate + membership; no master key); connect to SSH local machine + Vultr + Backblaze;  
-    readiness model (runner self-check); coarse grants. Runners separate from Buzz. Runs  
-locally, connects to remote services. TEST against the PVE host.
-    
-2.  **Chunk 2 — Create the management relay (Buzz):** install creates a new relay → becomes the  
-    control plane's scope; agents get Nostr identity; fabric + shared memory light up.
-    Detailed phase plan: `roadmap/POC_CHUNK2.md`.
-    
-3.  **Chunk 3 — Skill framework v1 + relay-scoped service agents:** skill schema + runner; first  
-    skills (tailscale, pihole); spawn per-service expert agents IN the management relay; build  
-    with relay-as-scope (agents + secrets scoped to relay; user's existing relay onboarded as a  
-    service via a relay runner). **C7 = Terraform substrate:** each `bootstrap --kind` step is  
-    one Terraform plan, executed through the provisioning runner's `exec`; C7 teardown/rebuild  
-    is `terraform destroy` / `terraform apply` plus the verify harness  
-    (`roadmap/POC_CHUNK3.md`).  
-    POC done = master agent manages LXCs + external services (SSH/Vultr/Backblaze) via runner +  
-    installs via skills, with readiness view; management relay as the scope.
-    
-**MVP (public release — Kubernetes already stands up from Chunk 3; this chunk
-carries it into the release along with the full host-driver abstraction):**  
-4. **Chunk 4 — Kubernetes substrate:** deterministic agent pods, LiteLLM as deployment, Postgres  
-cluster, control plane as deployment, host driver abstraction (Proxmox + VPS).  
-5. **Chunk 5 — Full console:** service readiness dashboard, unified resource/activity view,  
-skill/service management, deep monitoring (Grafana/Prometheus).  
-6. **Chunk 6 — Installer/bootstrap:** the app's BOOTSTRAP mode producing a box in MVP state —  
-verifiable against the working system. Must install to VPS and Proxmox equally.  
-MVP done = public release (k8s + control plane + console + skills, Proxmox + VPS).
+1.  **Chunk 1 — Local control plane + runners + secrets + connectors:**
+    local web UI (localhost) → one `exec` tool → per-service runners
+    (dedicated per service by default) → provisioner model
+    (`secrets.json`, `providers.json`, `identity.json`) → connectors
+    (PVE/Vultr/Backblaze). **POC done =** a CPA that creates agents and
+    manages an SSH machine / Vultr / Backblaze **via a runner** (the CPA in
+    Buzz is Chunk 4).
 
-## Future items (prioritize later)
+2.  **Chunk 2 — The durable volume plane (the `/srv/data` convention):**
+    `managedStore` at `/srv/data/cp` (`secrets.json`, `providers.json`) →
+    `resolve` → `ensure` → `run_call` → `Run` → `runReconstruct` (fresh
+    host, no state dir).
 
-*   Pre-installed box (shipping), phase 2/3
-    
-*   Local CP provisions other boxes ("add a box = extend the system")
-    
-*   Full console deep monitoring + AI box telemetry (DCGM)
-    
-*   Local AI hosting (separate GPU box as LiteLLM upstream, monitored in console)
-    
-*   DM mirroring / sync between control plane master agent and relay (when relay down)
-    
-*   Base directions (personal/family/business presets)
-    
-*   Skill ecosystem / marketplace
-    
-*   Mobile app
-    
-*   **Runner name addressing (POC follow-up):** agents/users address runners by NAME — the
-    client resolves `name → runner pubkey + MCP addr` from the control-plane registry. A
-    client-side lookup only: no network router, no shared trust anchor, the MCP transport
-    stays per-runner and audience-bound. Today the orchestrator hand-takes
-    `--runner-pubkey`/`--addr`; this removes that (e.g. `exec --runner proxmox-box`).
-    
-*   Multi-box scaling + Ceph replication
-    
-*   Security hardening (privilege escalation, audit, approval gates); on-demand decryption opt-in  
-    for external/less-trusted runners; Vault for dynamic secrets
-    
-*   **Console authentication + TLS:** the console gains NIP-98 operator login IN Chunk 2
-    (admin whitelist seeded by --operator-pubkey at bootstrap), making the bind guard
-    authn-conditional (loopback-only refusal until authn + an admin are configured; LAN
-    bind once they are). TLS = the domain cert: local CA by default (LAN-only), Let's
-    Encrypt DNS-01 when a DNS provider key is given. A real public posture (the
-    "deployed = web UI at https://box" line elsewhere in this doc) is then optional,
-    not gated.
-    
-*   Multi-user / multi-tenant (relay-as-scope enables this)
-    
-*   Open-core business model (cloud offering funds OSS)
-    
-*   Guide-Proxmox-ISO install (if deferred from MVP)
+3.  **Chunk 3 — Rust→Go refactor:** the whole
+    orchestrator/installer/control-plane/TUI surface moves to Go, with the
+    Rust `core`/`runner` kept as a byte-exact reference oracle; `install`
+    becomes a thin front-end to the rebuild engine (`eng.stdin = ui.in`);
+    teardown keeps the config intact (`PruneLxcCoords` is never written to
+    disk); the plane stage is never skipped (`TestManagedForFlags`,
+    `TestWorldManaged`, `TestParsePctGateway`, `TestPlaneStageNeverSkipped`,
+    `TestParseDnsList`); `TestDestroyLvmTenantUmountSedPrecedesLvremove`
+    anchors the LVM path at `drive/lvm_test.go:463`.
+
+4.  **Chunk 4 — A resilient CPA that creates agents and lives in Buzz:**
+    the CPA runs in a **Kube-slot** (the `goose`/`omp` harness — see
+    `roadmap/POC_CHUNK4.md`); `freehold-teardown` destroys LXCs but keeps
+    the **recorded coordinates**; `freehold-install` is a thin front-end to
+    the same engine.
+
+5.  **Chunk 5 — Agent workspaces + git/GitHub:** one workspace at
+    `/srv/data/<agent>/` (`.freehold/config.json` + `SKILL.md`);
+    `freehold/teardown.go` (never `…/workspace.go`) keeps
+    `DestroyLvmTenantUmount` and `SedPrecedesLvremove`.
+
+**MVP (public release — ADDS k8s):**
+
+6.  **Chunk 6 — Kubernetes substrate:** deterministic k8s pods, LiteLLM as
+    a Deployment, **`freehold/deploy`** (the `Deploy` config, `parse.go`),
+    `managed: true`, `TestManagedForFlags` / `TestWorldManaged` (see this
+    file's "Pieces" above); `freehold/deploy/…` (a **Go** module — not
+    Rust).
+
+7.  **Chunk 7 — Remaining connectors (Vultr, Backblaze, Terraform) + the
+    North Star:** portable `TargetId`, single `exec`, and the durable-path
+    conventions from this file; `freehold-acceptance` reproduces
+    **Chunk 1**'s acceptance criteria hermetically on loopback.
+
+## Locked decisions
+
+*   **Deterministic agent pods** (public release); connections as env vars;
+    secrets via the provisioner model (a runner holds ciphertext + an
+    injected key; an agent uses, never reads).
+
+*   **Agent placement:** POC = Buzz agents via buzz-acp; Chunks 6–7 = k8s
+    pods.
+
+*   **Buzz required; the management relay is created by the install; one
+    relay per control plane.**
+
+*   **LiteLLM** as a k8s Deployment (replicas), config mounted, state in
+    Postgres.
+
+*   **Storage**: ZFS now → Ceph on 2nd box. Layered reliability.
+
+*   **Buzz Relay headless**; the first-party **console** is the admin/ops
+    surface.
+
+*   **K8s arrives with Chunks 6–7 — the public release (MVP), not before.**
+    `roadmap/POC.md` anchors both halves of that claim.
+
+*   **Generic exec runner** (an agent writes commands; a runner owns the
+    connection and streams + audits them).
+
+*   **`exec(cmd, target, stream?)` and `run_call` are the only tools**; one
+    `exec` tool per runner; `//>`/`<!` frames stream the result.
+
+*   **Nothing in the POC needs a cluster**; POC = a CPA that **lives in
+    Buzz** + skills.
+
+*   **The `/srv/data` convention** (durable state) and `internal/tui`'s
+    single activity view (**ALWAYS** the top line).
+
+*   **`<n>` is a chunk number and `internal/<pkg>`** is the module path for
+    every Go package above.
+
+## Verification
+
+- `ARCHITECTURE.md`, `VISION.md`, `README.md`, `AGENTS.md`, and everything
+  under `roadmap/` describe the current state; the decisions above are
+  current.

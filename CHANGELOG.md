@@ -1,0 +1,478 @@
+# Changelog
+
+All notable decisions, reversals, and supersessions live here — the rest of `roadmap/`
+(ROADMAP.md, POC.md, ARCHITECTURE.md, BUZZ_SURFACE.md, README.md) describes the **current**
+plan only and should never carry inline "SUPERSEDED / formerly / previously" narration.
+When something changes, update the docs to state the new reality plainly and add an entry
+here explaining what changed and why. Most recent changes at the top.
+
+## Versioning
+
+This project follows [Semantic Versioning](https://semver.org) once there's a public
+release to version. Before that (pre-1.0), we're using it loosely as a project-progress
+marker:
+
+*   **0.x.y** — pre-MVP chunks (see `roadmap/POC.md`); each patch bump roughly corresponds
+    to "through Chunk N," e.g. 0.2.0 = first Chunk 2 step, 0.2.1 next chunk 2 step, 
+    0.3.0 = first Chunk 3 step. Merging chunk steps (sub tasks, etc) to main will increment 
+    the minor version, same for tweaks and fixes. These numbers aren't tied to chunk 
+    deliverables but to merges to main. Note that this was introduced in version 0.3.0,
+    previous versions have all merges and minor versions collapsed.
+*   **1.0.0** — reserved for the MVP / public release definition in ROADMAP.md.
+
+### Known gaps
+See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
+limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
+list is current-state and kept there rather than duplicated here.
+
+
+## [0.3.0] — Chunk 3: the Rust→Go refactor, the durable plane, and the Kube-slot plan
+
+### Added
+
+*   **The orchestrator, installer, and TUI are Go (Chunk 3's headwork).** The
+    orchestrator — the bootstrap/repair engine, 16 subcommands — moved to the Go
+    module `freehold/orchestrator` (go 1.25) across 19 `internal/` packages
+    (bootstrap, cli, client, config, console, crypto, delegate, deploy, drive,
+    flows, harness, planebase, provisioner, relay, state, teardown, tui, wire);
+    the Rust `tui` crate is removed and `installer/` deleted (zero external
+    dependents; the Go rebuild engine reproduces the stage library
+    byte-for-behavior; `Cargo.lock` regenerated in the same commit), and both
+    binaries (`freehold`, `freehold-orchestrator`) are Go. The Rust `core`
+    (crypto/identity/wire) and `runner` stay the byte-exact reference oracle:
+    `orchestrator/harness/` (plus the Rust oracle crate `freehold-harness-oracle`,
+    a workspace member) gates every primitive — BIP-340 Schnorr via btcec/v2
+    (parity-negated scalar aux mask, parity-probe-gated), X25519+HKDF+
+    ChaCha20-Poly1305 sealed box, bech32 nsec, ed25519, serde-matching
+    sorted-map `SecretPackage`, NIP-98 canonical events, kind-48001 audit,
+    NIP-44 v2 engrams — seal/open and sign/verify byte-exact both directions.
+    `mcp::serve` is NOT reimplemented: `onboard` spawns the Rust `runner serve`
+    as a subprocess, and `freehold install`/`rebuild` shell the
+    `control-plane`/`runner` binaries resolved relative to the running
+    executable (`resolveRebuildBins()`; cargo never regenerates the Go bins).
+*   **The TUI is bubbletea in the alt screen** (`runTUI` passes
+    `tea.WithAltScreen()`), with mode auto-detection (bootstrap / configure /
+    running), the running dashboard (Services/Agents/Runners/DATA, Tab cycling,
+    2s timer), and interactive console flows (l login NIP-98 / p provision /
+    x revoke / g grant via textinput). ONE activity surface (`activity.go`)
+    covers boot check, teardown, rebuild (incl. the door gate), bootstrap, and
+    both deploys: spinner + live label on the top line, ✓/✗ result rows (boot
+    probes — config → runner → relay → cp → k3s → world state, 6s each) or a
+    streaming last-12-lines window (subprocess runs — the `freehold` binary
+    re-execs itself; `activityExec` is injectable for tests), `ctrl+c`
+    aborts — no dashboard, no shortcut footer, while active. The rebuild form
+    is 6 steps (operator pk · domain · tenant LV size · thin-pool name · new
+    pool size · boot k3s), PTY-verified; the `B`/`b`/`d`/`c`/`t` forms all
+    exec the `freehold` binary (self), and `flowMsg` is just `{ok, err}`
+    (login flows only) — the old dashboard `Model.Wait`/`rebuildArgs`/`reload`
+    machinery is gone.
+*   **The rebuild engine runs the whole world.** `freehold rebuild`
+    (`internal/cli/rebuild.go`) threads the Rust installer's stage set verbatim
+    into Go: ensure bins → provision (ssh keypair; reuse tolerated only with a
+    real package) → door gate (interactive ENTER/r/q, `--yes` bails actionably
+    with the key + install line) → grant → serve (`pkill` the stale listener,
+    wait for the port to close, spawn detached, poll 20s) → verify door
+    (self-subprocess exec) → **write initial config** (merge preserves surviving
+    facts; AFTER verify, BEFORE storage, so the plane mapping has somewhere to
+    record) → storage resolve + ensure×3 (relay/cp/k3s-volumes; honors the
+    RECORDED `plane.backend_kind` over re-detection) → bootstrap relay → record
+    LXC relay (fresh load → resolve vmid+ip through the runner → mutate → save)
+    → bootstrap cp → record LXC cp → k3s stage (boot-if-missing + the 900s
+    in-guest install script, verbatim) → deploy-relay (deploy dir from the
+    guest's ACTUAL mounts, never hardcoded) → deploy-cp (from the release
+    binaries; state/bin dirs from the guest's last mount) → NIP-11 relay pubkey
+    (best-effort) → final merge save. Every parsing helper (STORAGE-
+    POOL/MOUNT/BACKEND lines, `pct list` exact-name vmid, eth0 ip,
+    `pct config` mounts, NIP-11 pubkey) is a pure function with a hermetic
+    test; the fresh-load/mutate/save record discipline is regression-tested
+    against clobbering (the Rust `lib.rs` test ported).
+*   **Teardown keeps the config INTACT.** `internal/teardown/teardown.go`
+    runs whole-world as COMPUTE teardown — destroys LXCs, KEEPS the recorded
+    coords (operator-owned facts; `PruneLxcCoords` gone) so a rebuild re-boots
+    the SAME world deterministically — and `--data` adds the tenant datasets
+    and the freehold-created thin pool before the door key / world home /
+    config go LAST (intentional divergence from `installer/src/teardown.rs`,
+    which removes config; the new `Runner` interface (Exec / DestroyOneLxc /
+    DestroyDataset / DestroyPool) makes `Run` hermetically testable).
+    `stageLocalLvm` honors the plane: `ChownGuestUid` is NON-RECURSIVE (top
+    dir only — PVE's own invariant: `LXC.pm::create_disks` chowns only newly
+    ALLOCATED volumes, non-recursive, root-of-volume; bind-mp dirs are
+    untouched by PVE, so the sweep was ours), and the ctime forensics (all four
+    volumes, nanosecond-identical, exactly at the stage-3 moment) pinned it as
+    the cause of the EACCES cascade.
+*   **The plane-placement gate holds.** `storage resolve` emits
+    `STORAGE-THINPOOL: <name|->` (absence = ZFS → `stagePlacement` skips);
+    `--thin-pool` headless does adopt-or-carve (`--pool-size-gb`, default 40),
+    a verbatim name adopts, `--confirm-storage` gates creation, and
+    ZFS + `--thin-pool` bails actionably. `storage destroy-pool` was the ONLY
+    storage subcommand missing `addCommonFlags`, so a `--data` teardown's pool
+    destroy died `unknown flag: --addr` mid-flight (after LXCs + datasets,
+    before the pool) — fixed at the registration site in `handlers3.go`, the
+    same pattern every sibling uses; a regression test pins all five storage
+    subcommands against `addr`/`agent-dir`/`runner-pubkey`/`target`. It
+    re-points PVE's `local-lvm` to a surviving pool before removal, or leaves
+    it (the next rebuild re-points once the new pool is carved).
+    `TenantLVSizeGB = 10` / `FreshPoolSizeGB = 40` are the HALVED sizes proven
+    on the test PVE box (the Rust hardcodes 20/40); the live world's four
+    tenant LVs (`relay-docker-root`, `relay-deploy`, `cp`, `k3s-volumes`) were
+    resized 20G→10G and every service revived (thin-provisioned — headroom
+    only). `prompt()` now reads through ONE persistent `bufio.Reader` over
+    stdin — a fresh reader per call read ahead past the first newline and broke
+    back-to-back prompts (the carve size after the pool name).
+*   **`freehold install` (Go) is a thin front-end to the same engine**
+    (`internal/cli/install.go`, commit `ad5c2bf`): `collectAnswers` gathers
+    domain/host/relay-gw/sizing/k3s into a `rebuildFlags` and hands the SAME
+    `newRebuildEngine(f).run()` the `rebuildCmd` uses — no parallel pipeline.
+    The ONE buffered stdin reader built during collect is handed to the engine
+    (`eng.stdin = ui.in`), so the mid-pipeline prompts (thin-pool placement,
+    door gate) never lose bytes.
+*   **Operator identity (port of Rust `main.rs collect()`)**: have-key
+    persists the operator's nsec as `identity.json` (their OWN nostr secret +
+    a FRESH random enc keypair — `Identity::from_nostr_secret` semantics;
+    derived-pubkey check bails on mismatch; refuses when `identity.json`
+    already exists); generate REUSES an existing `identity.json` (Rust
+    `mint_identity` loads on existence), else mints. Storage consent is asked
+    up front in collect (same bool, same gate, flows as `f.confirmStorage`).
+    `install_test.go` (10 tests, all green): nsec persist + skip +
+    mismatch-bail, existing-identity refusal, pubkey re-prompt, generate mint +
+    reuse (byte-identical file), defaults carry-through, abort-before-engine
+    (the mint runs before the proceed gate; the engine is never constructed),
+    and the exact flag handoff to the engine. `go.mod` promotes
+    `charmbracelet/x/term` indirect→direct for the no-echo nsec read.
+*   **Teardown is ACTIVE with checkboxes.** `teardown.Run` announces each LXC
+    BEFORE it destroys it (`destroying relay LXC 100` streams via the same
+    `say()`/Live hook before `DestroyOneLxc` runs — both WholeWorld and the
+    tenant loops, vmid-guarded — and the CLI gets the raw bytes too), and the
+    TUI renders teardown as checkboxes: `startSubprocessActivity` seeds one
+    slot per MANAGED LXC from the config (`relay LXC 100` …),
+    `feedTeardownLine` parses the streamed lines (`destroying` → running
+    spinner row; `destroyed / already gone / never created` → ✓ with the
+    reason), and `liveLabel` names the in-flight LXC. Caught a REAL bug: the
+    CLI's Live hook INDENTS every line (two spaces), so the anchored
+    `^destroying` regex never matched and the checkboxes stayed placeholder
+    dots — `strings.TrimSpace` before matching fixes it
+    (`TestTeardownLinesFlipCheckboxes`). `tail()` keeps the last 3 non-empty
+    lines, trimmed, joined ` · `, capped at 200 chars — the old last-line-only
+    tail made teardown's embedded-cause failure look blank.
+*   **The first LIVE whole-world rebuild ran end to end on the real box**
+    (2026-08-29; door pre-installed → no gate pause; VG `pve` had no thin
+    pool → carved `freehold-thin` at 120 GB; relay 100 / cp 101 / k3s 102
+    booted + recorded; the relay stack healthy, the CP serving on the operator
+    admin seed, k3s active with kubeconfig). The four bugs it exposed each got
+    a regression test (see `### Fixed / corrected`), and the live coords after
+    the run are `192.168.30.225` (relay, 4/4 containers healthy,
+    `/_liveness` ok), `192.168.30.205` (CP, `:8080`, admin `1dc07610…`) and
+    k3s `10.10.0.7`.
+*   **Static-IP wiring** (`cli/rebuild.go`): `--relay-ip`, `--cp-ip`,
+    `--k3s-ip` (CIDR) + `--relay-gw` (default `192.168.30.1`);
+    `bootstrapStaticIP(role, flags, cfg)` picks explicit flag → RECORDED
+    `lxc.<role>.ip` → DHCP, and `stageBootstrap` reuses the recorded vmid on
+    resume (the reuse path finds the existing guest by hostname instead of
+    taking a new id and refusing the collision). CIDR validates fail-fast in
+    `RunE` BEFORE `newRebuildEngine` — a bare host would only die deep at
+    stage-7 `pct create`. Tests: flag-wins / recorded-fallback / none-is-DHCP.
+*   **The second and third LIVE rebuilds proved the REUSE path** — 4 min 15 s
+    vs ~70 min fresh. `rebuild --yes --relay-ip 192.168.30.8/24 --cp-ip
+    192.168.30.9/24` passed all 10 stages + record on the SURVIVING plane
+    (stages 0–7 idempotent; deploy-relay + deploy-cp green after the ownership
+    fix); a destroyed-but-recorded world re-boots in minutes, same coordinates
+    (100@.8, 101@.9, 102@.7 — `.7` verified free, then pinned static for
+    determinism), same relay pubkey.
+*   **`storage destroy-pool` and the activity view** (PR #131 review debt,
+    `af26e44`; DEFER tier `e727a7b`) close all three open review items and
+    six deferred follow-ups: `DestroyOneLxc` now reads the occupant's name and
+    REFUSES when the recorded vmid holds a foreign guest (PVE hands a freed id
+    to the next guest); no domain = fail closed; 4 tests drive the real
+    `ExecRunner` through an injected `execFn`. `teardown --help` said
+    "regenerated coords pruned" — the OPPOSITE of the keep-intact semantics —
+    and the k3s seed defaulted blank-when-absent while blank = YES, so a
+    k3s-off world would have booted k3s on accepted defaults; seeds `n` with
+    a dispatch test pinning `--with-k3s=false`.
+*   **k3s runs as a deterministic configure stage** (post-2.5, closing the
+    "k3s unproven" flag). The ONE required flag is
+    `INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true"`
+    — the kubelet dies without `/dev/kmsg`, and a device-cgroup allow does NOT
+    materialize it under userns. The dashboard lists `managed` pieces (relay/
+    cp/k3s today); litellm appears the moment its coords land in the config
+    (#115/#120), and the agents registry records named AI agents
+    (delegate-peer registers itself at start) with ●/○ from relay kind-9
+    presence (#118).
+
+### Fixed / corrected
+
+*   **Four live rebuilds corrected the Go port.** (1) `parseKind` returned a
+    NON-NIL action on `Reuse` and every caller reads non-nil as "NO existing
+    backend" — the very first `storage ensure` (nothing recorded, no `--kind`)
+    always failed with "no storage backend to ensure onto" on a host that HAS
+    a VG. `Reuse` returns `nil` action now (the caller drives the detected
+    kind). (2) The operator pubkey was stored raw — Rust `installer` runs
+    `parse_pubkey_input` BEFORE the pipeline, and `deploy-relay`/`deploy-cp`
+    reject non-hex at stages 13–14. `newRebuildEngine` normalizes npub→64-hex
+    up front (parity with `installer::main.rs`); `ParsePubkeyInput` trims +
+    lowercases hex (an uppercase paste silently missed the CP admin whitelist).
+    (3) `stageLocalLvmRepoint` used `pvesm set local-lvm --thinpool` —
+    REJECTED ("Unknown option: thinpool"; thinpool is not mutable via pvesm's
+    API), and its probe greped a colon form that PVE's whitespace
+    `storage.cfg` never matches. Scoped in-place `storage.cfg` edit (PVE's
+    sanctioned manual repair), whitespace probe + post-edit readback. Tests:
+    carve / already-correct-skip / missing-block. (4) `firstField` panicked on
+    `pvesm list local`'s blank trailing line (`Fields("")+" "` = empty slice
+    → `[0]`); returns `""` (`TestFirstFieldBlankLine`).
+*   **The persistent-plane chown bug is closed.** Stage-3 ran `chown -R
+    100000:100000` UNCONDITIONALLY (the comment claimed "Fresh ext4 is
+    root-owned" with nothing gating on freshness) over the SURVIVING plane
+    (compute-only teardown keeps the LVs), re-rooting every container-owned
+    subtree — docker volumes with per-service uids (redis 999,
+    postgres 70/100070 on host, buzz 1000) → guest root — and every non-root
+    service EACCESed: redis MISCONF/BGSAVE, postgres `pg_filenode.map`, relay
+    `git pack cache` EACCES. Redis self-heals on restart; postgres/buzz
+    don't. Live repair applied in-place (git volume via `gitDataChownCmd`,
+    postgres to uid 70, redis self-healed) — no LXC/volume destroyed.
+    `TestResolveLvmMountsSurvivingPlaneNeverRecursiveChowns` pins it; the
+    relay/zfs assertions are rewritten to the top-dir form.
+*   **`freehold-acceptance`** reproduces every Chunk 1 criterion hermetically
+    on loopback.
+*   **Door-key recovery closes the "pressed B twice" trap.** A second
+    `rebuild` sees the existing package → provision REUSES → the door gate is
+    SKIPPED → `stageVerify` fails `ssh error: authentication failed` with the
+    first run's key gone. `recoverDoorKey()` unseals it, parses the
+    `openssh-key-v1` container, and emits ONLY the public line
+    (`crypto.ExtractED25519PublicKeyLine`: private half parsed past, never
+    returned/written — nothing new leaves the machine); `stageVerify` bails with
+    the same shape as the fresh-key gate, and the shared `doorKeyWaiting`
+    marker ("the door needs") renders BOTH pauses. Unrecoverable package → the
+    actionable `rm -rf ~/.freehold` fresh-start message. Tests: PEM round-trip,
+    sealed-package recovery, stageVerify re-surface + non-auth pass-through,
+    unrecoverable bail.
+*   **The door gate stays IN the activity view.** A rebuild bailing at the
+    door (`--yes` can't prompt) exits non-zero with "the door needs …" on
+    stdout → classified as an EXPECTED pause (`a.wait`), rendered YELLOW
+    ("waiting for the operator") with the install line; ENTER re-runs the SAME
+    `rebuild --yes` in place (provision REUSES → no new key, grant/serve
+    re-run, `stageVerify` re-probes and on success the pipeline CONTINUES
+    through config/storage/deploys) — never back to the 6-field form. ESC
+    cancels cleanly; `q`/`ctrl+c` quit; other keys are swallowed. The shared
+    classifier `rebuildRun(args)` feeds both the form dispatch and the ENTER
+    handler; `TestDoorGateEnterRetry` / `TestDoorGateSwallowsKeys` /
+    `TestDoorKeyWaitingRenderedNotError` pin it.
+*   **The `B` prefill and npub acceptance.** `beginPrompt` seeds each step
+    from `flowDefaults` — the recorded operator pubkey, domain, carved
+    thin-pool (`Plane.ThinPool`; a reused stock pool is never recorded), and
+    k3s membership `y` — editable, cursor at end; absent config = unchanged
+    fresh-world behavior. The B-rebuild prompt always took `npub1…` (the
+    engine runs `ParsePubkeyInput` before any stage); only the label claimed
+    "(64-hex)".
+
+### Known limits at this version
+
+*   The pre-C0 items (k3s as a deterministic `configure` stage, the
+    ready-for-litellm Services view, the agents registry, the working relay
+    scope, per-tenant teardown, the durable volume plane) are the only
+    backlog the plan specifies; `roadmap/POC.md`'s Chunk 4/5/6/7 sections
+    hold the forward plan. The old draft's `C0`/`C1–C7`/`D1–D4`/`E1–E6`/
+    `F1–F3`/`G1–G7` labels (and the "carried Chunk 1–2.6.1" items — B2's
+    live-account leg, the VPS block-volume surface, CP-restart memory
+    persistence, audit-as-channel messages, secondary-relay onboarding, and
+    nginx-through-NodePort) were never written down anywhere else.
+*   A dedicated relay-down repair drill is later pre-MVP work — the repair
+    path IS the local-expert flow, exercised on every
+    teardown/rebuild/re-attach; a human opening a room/DM with `@freehold` is
+    Chunk 4's (Chunk 3's POC agents are scripted NIP-42 clients; the
+    mechanics — 30174 memory, kind-9 delegation, NIP-98 auth — are
+    live-proven only via CLI/scripts).
+*   A separate Vultr-API runner identity under a relay roster was never
+    minted; the drivers' create/poll/wait/destroy shapes ran against the real
+    API (45.76.255.185), and a live Backblaze leg stays open pending real
+    credentials.
+
+### Removed
+
+*   The Rust `tui` and `installer` crates — superseded by the Go TUI and
+    `freehold install`; the workspace is `core, runner, console-client, testkit,
+    control-plane, acceptance, orchestrator/harness/oracle`.
+
+### Still open
+
+*   Nothing shipped a Workstation-terraform path: the `terraform/` plans
+    (#76/#78) and flavors (#72/#73) wait in Chunk 4's plan.
+
+## [0.2.0] — Chunk 2: relay scope
+
+### Added
+*   **Phase 0 surface research** (`roadmap/BUZZ_SURFACE.md`): every integration surface the
+    port must consume is named against actual Buzz — workspace/membership, agent identity,
+    event kinds, rooms/DMs, native memory. Most capabilities ride native kinds —
+    membership 13534, agent memory 30174, audit 48001, jobs 43001–43006, DMs 41001;
+    only **grants** needed a freehold custom kind (and that custom-kind path is dormant:
+    the live relay refuses kinds outside `ingest.rs::scopes()`).
+*   **Bootstrap provisioning** (`freehold bootstrap`) with `proxmox-lxc` / `vultr-vps` /
+    `hetzner-vps` drivers, hermetic-tested, dry-run verified against the PVE host. A
+    blocking domain gate requires `--domain` and holds until it resolves (directly, or via
+    an operator-managed proxy) — bootstrap always establishes a real identity before
+    continuing.
+*   **Relay deploy driver:** docker gate, curl+tar bundle fetch, compose start,
+    `/_liveness` verify, scope claim; idempotent (template-ensure by host arch,
+    docker+compose in the guest).
+*   **Create-new vs attach-existing (B0):** no operator relay → create it; operator already
+    runs one → skip creation, verify liveness + membership feasibility, and attach the CP to
+    it. Re-runs resume, never re-create.
+*   **Live relay + CP, each on its own LXC**, attached rather than co-located: relay on
+    `relay-box`, CP on `cp-box`, communicating over the network — co-location with the
+    relay is convenience, never assumed. The CP ships as a base64 binary through the
+    runner's exec-only primitive (every remote command routes through `pct exec`).
+*   **The CP joins the relay it is pointed at (C2)** via the relay's own member management
+    (`buzz-admin add-member`); it cannot self-add. The relay is authoritative for
+    membership; local state stays authoritative for grants (the shipped-package flow); local
+    state mirrors membership, readable offline and write-through.
+*   **Console NIP-98 operator auth** — admin allowlist seeded by `--operator-pubkey`; the
+    operator logs into the console with their own nsec, which never leaves their machine.
+    Server-issued `{nonce, ts}` challenge (60s freshness), signature verified against the
+    admin whitelist, session cookie (httponly, SameSite=Strict, Secure once TLS is up),
+    Origin-check + login rate-limit. The bind guard is authn-conditional: with authn
+    configured the console may bind the LAN; otherwise the loopback-only refusal holds.
+*   **Relay-persisted, encrypted agent memory** (kind 30174, NIP-44 v2 self-encrypted
+    engrams; the relay stores ciphertext only) — live-verified against a real relay.
+*   **Delegation, live-proven:** CPA → relay kind-9 channel → peer agent → runner → relay →
+    CPA, with request/result correlation by id.
+*   **Audit publishing:** every runner audit row is a signed Nostr event, spooled locally
+    (fail-closed, never silent) and published to the relay when configured — detached, so
+    a wedged relay never blocks an exec.
+*   **The whole appliance ran on Proxmox-on-Cloud-Compute (Chunk 2.5).**
+    `bootstrap --kind vultr-vps | hetzner-vps` provisions a PVE host (Debian 13 via the
+    apt route — the custom-ISO variant was dropped during the spike), then the same
+    `proxmox-lxc` + `deploy-relay` + `deploy-cp` flows run verbatim: live on both
+    providers (Vultr 45.76.255.185, Hetzner 178.156.179.204), with the console and
+    relay reachable publicly through host DNAT (`/_liveness` ok). No nested KVM exists
+    on either cloud (`cpuinfo` confirms); the LXC/pod appliance needs none.
+    `orchestrator/src/bootstrap.rs` carries `bootstrap_vultr_vps`/`bootstrap_hetzner_vps`
+    (create/poll/wait/destroy), hermetically tested in `orchestrator/tests/bootstrap.rs`.
+*   **Single-public-NIC cloud networking (V2):** vmbr0 over eth0, a private vmbr1 for
+    LXC-to-LXC, DNAT from the public IP to the relay LXC's Caddy and the CP console.
+    Client reachability is domain → proxy → host public IP → DNAT → LXC — the home
+    own-IP-on-LAN pattern does not apply. Cloud DHCP will NOT lease to LXC veths:
+    guests need static IPs on the private bridge plus host NAT (driver: `--lxc-ip` /
+    `--lxc-gw`). pve-firewall's nftables persist after `systemctl stop` (14 drop
+    rules) — flush them, or every guest loses egress silently.
+    download.proxmox.com serves CN=enterprise.proxmox.com, and the trixie release key
+    exists only there (the docs URL 404s), so apt goes over http. The route needs
+    /etc/hosts pointed at the non-loopback IP (pmxcfs refuses 127.0.1.1) and the pve
+    node's lxc/qemu-server dirs; no vmbr0 by default. Guest DNS needs dnsmasq on vmbr1
+    — the host's resolver won't answer NAT'd guests. Debian 13's compose package is
+    `docker-compose` (not `docker-compose-v2`). Hetzner: NIC = eth0, and
+    `chpasswd: expire: false` avoids the forced root-password change; the
+    private-only + DNAT-off-the-NIC variant avoids the bridge-move lockout entirely
+    (Vultr kept the public bridge move).
+*   **k3s in an unprivileged LXC (post-2.5, closes the "k3s unproven" flag):** 10.10.0.7
+    on a static private IP (v1.36.3+k3s1, containerd). The ONE required flag:
+    `INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true"`
+    — the kubelet otherwise dies without /dev/kmsg (absent in the unprivileged LXC;
+    even a device-cgroup allow does NOT materialize it — userns). Real workload: an
+    nginx pod Running, images pulled through the LXC's NAT egress; pod-ip:200,
+    cluster-ip:200, NodePort:200 — reachable both inside the LXC and from the PVE host
+    (10.10.0.7:31500 → pod). Conclusion: the k8s layer rides the same static-net LXC +
+    NAT/DNAT path the appliance already uses; no nested virt needed.
+*   **Chunk 2.6's runner-profile surface (for the record):** kind 30181
+    (`RUNNER_PROFILE`) — a runner's lifecycle snapshot: identity pubkeys, connector
+    kind/address, status, secret NAME only. Revocation rides the status flip and
+    rotation the `rotated_at` flip: same d-tag (the runner pubkey), REPLACE, never
+    append (revocation never appends). Published at EVERY lifecycle mutation under
+    `--relay-url` (provision/adopt publish "active", rotate flips `rotated_at`,
+    revoke flips `status` + the existing empty-grants cut-off), author-gated to the
+    console and Schnorr-verified locally — same trust anchor as grants, so a rogue
+    member can neither mint nor clobber runner records. `control-plane rebuild
+    --relay-url` queries ALL profiles and reconstructs the store deterministically +
+    idempotently (re-runs converge to the same state); restored records carry NO
+    ciphertext or package path — the relay never holds secret material — and `adopt`
+    per runner re-arms the package (the documented re-trust step: a rebuilt CP's new
+    console pubkey reads nothing until re-admitted).
+*   **Runners as NIP-29 channels (Chunk 2.6.1):** a runner is a private channel;
+    grant/revoke is `buzz-admin add-member`/`remove-member` — the CP is the sole
+    COMMANDER, the relay signs the resulting 39002 roster; the runner's whitelist is
+    its own channel's roster, read fresh per call, fail-closed, and `rebuild` folds
+    the kind-9 `fh-profile` envelope identically (G-C's pinned-message fallback).
+    G-A (headless drive of the write path) resolved LIVE: `provision --relay-url`
+    synced 9007 create + 9000 put + `fh-profile`, and `revoke-grant` drove 9001 —
+    both headless through the relay-admin runner, on the rebuilt world.
+*   **Durable volume plane** (Phase 0.12): per-tenant datasets under a common
+    parent, ZFS → LVM-thin → bail resolution on Proxmox-lxc targets, compute-only
+    teardown + reattach-by-reference for relay/CP/k3s tenants.
+*   **LiteLLM staged on an LXC landing-strip harness** (goose + buzz-acp + a minted
+    LiteLLM key) — the first real-agent-capable harness, ahead of the kube
+    substrate.
+*   Full-workspace `cargo test` green, clippy 0, fmt clean throughout these slices.
+
+### Fixed / corrected
+
+*   **Four real-Buzz behaviors corrected the design (all live).** (1) Channel ids
+    are dashed UUIDs, client-suggested: buzz's `extract_channel_id` parses `h` as a
+    `uuid::Uuid` (64-hex sha256 → `None` → `invalid: channel-scoped events must
+    include an h tag`), and `create_channel_with_id` HONORS the client id
+    (duplicate → idempotent `accept:false`) — the channel row id ==
+    sha256(runner pk)[:16], confirmed live. (2) Rosters carry a `d` tag, not `h`:
+    buzz mints 39002 with `["d", <dashed uuid>]` + one `p`-tag per member (`pk`,
+    "", role), relay-signed (author == the BUZZ_RELAY_PRIVATE_KEY pubkey — the
+    runner's `--relay-pubkey` anchor); NIP-01 tag filters match STRING-EXACTLY, so
+    `query_channel_roster` filters `#d` — `#h` matches nothing. (3) Kind 39000
+    (group metadata) is NOT in buzz's ingest scope (`restricted: unknown event
+    kind`) — the runner profile rides a kind-9 message tagged `t`=`fh-profile`
+    (G-C's pinned-message fallback); `rebuild` folds it identically. (4) TWO
+    membership layers: 9000/9001 execute CHANNEL membership, but every relay QUERY
+    additionally requires COMMUNITY membership (`buzz-admin add-member` /
+    `freehold relay-member`) — a runner/agent not community-membered gets
+    `403 relay_membership_required` and fails closed (correct exposure; never
+    serves stale grants). Provisioning in relay mode therefore needs BOTH:
+    `freehold relay-member` (community) + the channel put-user (via
+    `control-plane … --relay-url`).
+
+### Known limits at this version
+*   The CPA itself was not yet a live, talkable Buzz agent — it was operated via
+    CLI/orchestrator; a human meeting it in a Buzz room/DM was explicitly out of
+    scope (addressed starting 0.3.0 / Chunk 3).
+*   The Buzz-UI interaction surface and a dedicated emergency-repair drill were both
+    moved out of scope: repair reuses the same idempotent local-expert flow already
+    pre-MVP work.
+*   The parameterized `freehold-acceptance` harness itself has never run against the
+    real relay — create-new, attach-existing, non-member
+    (`403 relay_membership_required`) and revoke-without-restart were each proven
+    live ad hoc; B2 stays hermetic-only until real credentials exist, and no
+    separate Vultr-API runner identity under a relay roster was ever minted.
+    `uuid::Uuid` (64-hex sha256 → `None` → `invalid: channel-scoped events must
+    include an h tag`), and `create_channel_with_id` HONORS the client id
+    (duplicate → idempotent `accept:false`) — the channel row id ==
+    sha256(runner pk)[:16], confirmed live. (2) Rosters carry a `d` tag, not `h`:
+    buzz mints 39002 with `["d", <dashed uuid>]` + one `p`-tag per member (`pk`,
+    "", role), relay-signed (author == the BUZZ_RELAY_PRIVATE_KEY pubkey — the
+    runner's `--relay-pubkey` anchor); NIP-01 tag filters match STRING-EXACTLY, so
+    `query_channel_roster` filters `#d` — `#h` matches nothing. (3) Kind 39000
+    (group metadata) is NOT in buzz's ingest scope (`restricted: unknown event
+    kind`) — the runner profile rides a kind-9 message tagged `t`=`fh-profile`
+    (G-C's pinned-message fallback); `rebuild` folds it identically. (4) TWO
+    membership layers: 9000/9001 execute CHANNEL membership, but every relay QUERY
+    additionally requires COMMUNITY membership (`buzz-admin add-member` /
+    `freehold relay-member`) — a runner/agent not community-membered gets
+    `freehold relay-member` (community) + the channel put-user (via
+    `control-plane … --relay-url`).
+
+## [0.1.0] — Chunk 1: engine room
+
+*   Runner core: Nostr identity + separate encryption keypair, MCP tool server
+    (over HTTP, even co-located, to prove the real shape), the generic
+    `exec(cmd, target, stream?)` primitive, self-check readiness
+    (green/yellow/red).
+*   Secret provisioner (CP-side): encrypt-to-runner-key, ship ciphertext,
+    inject runner private key, rotate, revoke — no master key anywhere.
+*   Three connectors: SSH (local/PVE host), Vultr (create/destroy/status),
+    Backblaze B2 (S3-compatible read/write) — all hermetic-tested;
+    live-account verification of Vultr followed in the Chunk 2.5 spike
+    (0.2.0), B2's live-account leg is still open.
+*   Coarse grants: agent ↔ runner, whitelist Nostr pubkeys, signed calls only;
+    dedicated runner per service by default.
+*   Scripted orchestrator (CPA stand-in) driving onboarding/readiness/exec/
+    demo — no real reasoning agent at this stage, by design.
+*   Local admin/ops web UI: services-at-a-glance + live readiness +
+    runner/secret/grant management.
+*   `freehold-acceptance` — hermetic acceptance script reproducing every
+    Chunk 1 criterion on loopback.
+*   `freehold-acceptance` fixtures: mock Vultr/B2 APIs + in-process sshd, and
+    the Chunk 1 acceptance script.
+

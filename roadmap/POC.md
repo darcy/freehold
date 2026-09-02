@@ -1,9 +1,11 @@
 # POC Steps — The AI-operated Appliance
 
-Scope: proof of concept (pre-MVP). Kubernetes pulled forward for Chunk 3  
-(see `roadmap/POC_CHUNK3.md` v5); still NO Kubernetes in Chunks 1–2. Agents run via  
-Buzz buzz-acp (local) in Chunks 1–2; deterministic k8s pods arrive with Chunk 3 and  
-are the public-release target.
+Current version: **0.0.2**. For the history of how this plan changed (superseded decisions,
+reordering, reversed calls) see `CHANGELOG.md` — this document describes the current plan
+only.
+
+Scope: proof of concept (pre-MVP). Chunks 1–2 avoid Kubernetes entirely; Chunk 5 introduces
+it once there's a real agent workflow worth generalizing to it (see Chunk 5 below).
 
 ## Core model (locked)
 
@@ -78,65 +80,280 @@ Goal: prove the engine room works standalone (before Buzz is in the picture).
 
 ## Chunk 2 — Create the management relay (Buzz)
 
-Goal: bring in the interaction surface + memory backbone; establish the scope.
+Goal: bring in the interaction surface + memory backbone; establish the scope. The actual
+job is proving the transition from runner-direct bootstrap to **delegation mode** — the
+control plane deploys onto its OWN target (the `freehold` service), the CP joins a relay
+as a member, and `@freehold` delegates its first real task to a relay-addressable peer
+agent instead of calling a runner itself.
 
-*   Install creates a **new management relay** → becomes the control plane's ONE scope.
-    
-*   Master agent + fabric get Nostr identity; memory is relay-persisted.
-    
-*   The control plane manages Buzz as a child service (peer model).
-    
-*   If the user has an existing Buzz relay, it's onboarded as a service (relay runner), not a  
-    nested scope.
-    
+*   **Phase 0: Buzz surface research first.** Buzz is a real product, not a blank event
+    store — no kind is designed against an assumption. Deliverable:
+    `roadmap/BUZZ_SURFACE.md` (membership 13534, memory 30174, audit 48001, jobs
+    43001–43006, DMs 41001; GRANTS was the only capability needing a custom kind).
+
+*   **Phase A: bootstrap provisioning (pre-relay, runner-direct).** `freehold bootstrap`
+    stands up the target via the existing API runners (`vultr create/destroy`,
+    `hetzner create/destroy`) or the ssh runner driving `pvesh`/`pct` — no new
+    Proxmox connector. A **blocking domain gate** requires `--domain` and holds until it
+    resolves: the domain, not the IP, is the identity from event zero.
+
+*   **Phase B: create-new vs attach-existing.** No operator relay → create it (Postgres,
+    Redis, S3/MinIO per Architecture); one pre-existing at bootstrap → skip creation,
+    verify liveness + membership feasibility, and attach. Idempotent: re-runs resume,
+    never re-create. TLS rides whatever the operator's proxy terminates; the relay serves
+    plain HTTP behind the strict host map.
+
+*   **Phase C: the `freehold` service, not a co-located pair.** The CP deploys onto its
+    OWN dedicated LXC/box (relay on `relay-box`, CP on `cp-box`, attached over the
+    network), and joins the relay via its own member management (`buzz-admin add-member`
+    — the CP cannot self-add). The console starts loopback-only (SSH-tunnel access) and
+    gains **NIP-98 operator login** (`--operator-pubkey` seeds the admin whitelist);
+    with authn configured it may bind the LAN.
+
+*   **Phase D: Chunk 1's identity model ports onto relay membership.** The keys were
+    always real Nostr keypairs; what moves is where membership/grants/memory/audit live.
+    Memory rides native 30174 (self-encrypted — a relay operator is not a reader of agent
+    memory); grants stay in the shipped package (the custom-kind 30180/30181 surface was
+    built, then withdrawn: stock Buzz's hardcoded `ingest.rs::scopes()` refuses
+    out-of-scope kinds — we don't patch Buzz, so 2.6.1 remaps runners onto NIP-29
+    channels and membership commands, with the runner's whitelist as its own
+    relay-signed 39002 roster, read fresh per call). Audit is additive: 48001 spools
+    locally AND publishes to the relay when `--relay-url` is set; publish failure
+    degrades to spool-only, never silently dropped.
+
+*   **Phase E: delegation mode, live.** The provisioning capability is **duplicated** into
+    the relay, not promoted: a NEW runner identity + a NEW relay-addressable peer agent
+    with their own keypair and re-encrypted credentials (key-material separation is the
+    assertion — a same-key rename would be a failure). `@freehold`, connected to the
+    relay, delegates a provisioning-flavored ask over relay events (request event → reply
+    event, correlated by id); the local provisioning expert stays local and dormant.
 
 ### Chunk 2 acceptance
 
-*   Management relay is up; master agent has identity in it; memory persists across runs.
-    
-*   Users can talk to the master agent in Buzz (rooms/DMs).
-    
+*   A fresh run: provision the target → relay up (TLS on the domain, `wss://`, non-domain
+    hosts refused) → CP up on its own LXC → CP is a relay member. Re-runs and
+    attach-existing (point the CP at a pre-existing relay) resume rather than re-create.
 
-## Chunk 3 — Skill framework v1 + relay-scoped service agents
+*   `@freehold` delegates to a relay peer; the result comes back through the relay, not
+    as a direct runner reply — with the peer's keypair and credential provably distinct
+    from the local expert's.
 
-NOTE (2026-08-24): the detailed plan is `roadmap/POC_CHUNK3.md` (draft v5). It SUPERSEDES
-the onboarding order below (expert created first, reasons about its own target, asks CPA —
-CPA resolves the named hardware peer; the old CPA-provisions-target-first order is replaced
-for Chunk 3 forward) and adds k8s-as-pods to Chunk 3 (superseding ROADMAP's NO-Kubernetes-
-in-POC for this chunk). This section stays the short goal/acceptance summary.
+*   Chunk 1's three connectors still work under relay identities (SSH live; Vultr live as
+    a HOST path — the real account sat in the Chunk 2.5 spike; B2 hermetic-only). A
+    non-member pubkey is denied; a member-but-ungranted pubkey is denied; the console is
+    unreachable without an operator session.
 
-Goal: agents can install/configure services, with per-service experts in the relay scope.
+*   Memory persists across a CP restart (30174's store is relay-side; set/get round-trips
+    live; the restart-persistence run is still owed).
 
-*   **Skill schema + runner** — declarative playbooks (target: lxc | pod | either).
-    
-*   **First skills:** tailscale, pihole.
-    
-*   **Spawn per-service expert agents** IN the management relay (`@tailscale`, `@pihole`,  
-    and later `@vultr`, `@b2`) — built with relay-as-scope (agents + secrets + runners scoped  
-    to relay).
-    
-*   **Onboarding pattern (happy path):** user tells CPA to set up a service → CPA provisions/  
-    points at target → creates runner (holds credential) → validates runner connects (readiness  
-    🟢) → creates buzz agent → grants it the runner → writes AGENTS.md → adds to a channel →  
-    tells it (via Buzz) to install/verify and report back.
-    
-*   Agent executes skills instead of free-form shell.
-    
+### Chunk 2.5 + k3s (the same appliance on cloud compute)
+
+*   `bootstrap --kind vultr-vps | hetzner-vps` collapses into "provision a PVE host on
+    <provider>," then the existing LXC flows run verbatim. Live on **both** providers —
+    Vultr 45.76.255.185 and Hetzner 178.156.179.204 (Debian 13, apt-route PVE).
+    Cloud PVE has a single public NIC: vmbr0 over eth0, a private vmbr1 for LXC-to-LXC,
+    DNAT off the public IP; guests need static IPs (cloud DHCP won't lease to veths) and
+    dnsmasq on vmbr1 for DNS; pve-firewall's nftables persist past `systemctl stop`.
+
+*   k3s proven READY inside an **unprivileged** LXC (10.10.0.7) with
+    `INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true"`
+    (the kubelet dies without `/dev/kmsg` otherwise); an nginx pod serves 200 on pod /
+    ClusterIP / NodePort, and 31500 from the PVE host. No nested virt needed — the
+    whole appliance is LXC/pod-shaped. (Recorded here for completeness: k8s itself is
+    Chunk 5's substrate, and the skill schema is Chunk 3's.)
+
+## Chunk 3 — Capability runners, skill framework, and named peers
+
+Goal: real reasoning agents, under capability-brokering and inbound-gating, install and
+operate services end to end — the first expert via the LXC landing strip, the architecture
+via deterministic pods, every side effect brokered through an audited, classed runner or
+contained to disposable compute. The detailed plan (v5) is `roadmap/POC_CHUNK3.md`; the
+deliverables actually shipped are the pre-C0 items:
+*   **k3s is a deterministic configure stage (#120).** `freehold configure` boots the k3s
+    LXC (auto-vmid, coords recorded to `lxc.k3s`, `managed += k3s`) and installs k3s with
+    the spike-verified unprivileged posture
+    (`INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true"`
+    — without it the kubelet dies for lack of `/dev/kmsg`); pods ride it (nginx serving
+    200 on pod / ClusterIP / NodePort, 31500 from the PVE host).
+
+*   **The Services view is ready for litellm (#115/#120)** — the running dashboard lists
+    `managed` pieces (relay/cp/k3s today); litellm appears automatically the moment its
+    coords land in the config (the same machinery k3s used).
+
+*   **Agents registry + live availability (#118)** — the CP records named AI agents
+    (delegate-peer registers itself at start) and reports ●/○ availability from relay
+    kind-9 presence; the buzz-acp agents register through the same path.
+
+*   **The console has a WORKING relay scope** — deploy-cp wires
+    `--relay-url`/`--relay-pubkey`/`--relay-host`/`--relay-host-ip`; a co-located console
+    talks to the relay LXC over LAN with the community `Host` header + NIP-98 signed at
+    the public URL + relay community membership — the precondition for the litellm-kube
+    reads and the agent channel views.
+
+*   **Teardown destroys the k3s LXC (#121)** — the box-lifecycle discipline covers the
+    substrate; a per-tenant teardown keeps the workstation config (coords + tenant→dataset
+    mapping) so reattach-by-reference works.
+
+*   **Nothing lives only on disposable compute.** The durable volume plane (Phase 0.12)
+    runs as a stage in the converge pipeline before relay/CP boot: Proxmox-LXC resolves
+    `ZFS → LVM-thin → bail` and VPS resolves `block volume → downgraded local dir →
+    bail`; per-tenant datasets sit under `<pool>/freehold/<domain>/<tenant>` (VPS labels
+    flatten to `fh-<domain-dashes>-<tenant>`), the relay keeps TWO children (docker-root
+    plus the compose deploy dir holding `BUZZ_RELAY_PRIVATE_KEY`), and compute-only
+    teardown reattaches by reference — a new `pct create` born with its `mp=` mounts.
 
 ### Chunk 3 acceptance
 
-*   Master agent installs + configures tailscale and pihole via skills.
+*   The three connectors still work under relay identities (SSH live; Vultr live as a
+    HOST path — the real accounts sat in the Chunk 2.5 spike; B2 hermetic-only). A
+    non-member pubkey is denied; a member-but-ungranted pubkey is denied; the console is
+    unreachable without an operator session.
+
+*   Memory persists across a CP restart (30174's store is relay-side; set/get
+    round-trips live; the restart-persistence run is still owed).
+
+## Chunk 4 — A resilient CPA that creates agents and lives in Buzz
+
+Goal: `@freehold` is a real, LLM-backed reasoning agent runnning in a Kube-slot — the system's main user
+touchpoint. It is responsive in Buzz, durable and rebuildable with no data loss, gets its
+purpose from a versioned system prompt, and can create a new agent on request.
+
+*   **CPA runs on a real-agent harness in kube** (buzz-acp/goose-class) with a create/grant/
+    manage-agent toolset, not as a scripted command-matcher.
     
-*   Per-service expert agents exist in the management relay and can be talked to directly.
+*   **Bootstrap names the CPA.** Install asks the operator what to call their agent (default
+    offered, e.g. `freehold`); the name becomes its Buzz handle/profile identity. Personal,
+    not a fixed brand name baked into the product.
     
-*   Secrets for services scoped to the management relay.
+*   **Durable and rebuildable, live-proven:** a real Buzz conversation with the CPA survives
+    a restart of its process and a full compute-only teardown/rebuild of its Kube, with
+    identity and relay-persisted memory intact both times.
+    
+*   **Agent-creates-agent, stripped to the relationship, not the capability:** CPA can spin
+    up a second agent from just a name + purpose — no service, no skill, no target — that
+    gets its own durable relay-scoped identity/memory and is directly reachable in Buzz.
+    
+*   **Resource stress-test:** with at least CPA + one created agent running, get a real
+    read on what an ad-hoc agent process actually costs (CPU/RAM/idle footprint), to inform
+    whether/when agents need to sleep when idle and wake on @mention. Sleep/wake mechanics
+    themselves are Chunk 5's deliverable (built against the pod substrate); this chunk
+    collects the numbers.
+    
+*   **CPA system-prompt:** The CPA's purpose, tone, and toolset boundaries live in a single Markdown file in the repo
+    (e.g. `CPA_SYSTEM_PROMPT.md` at the root, alongside `AGENTS.md`) — not generated at runtime,
+    not improvised per spawn. Bootstrap loads it into the harness config at first spawn; every
+    restart reloads the current file, so editing the prompt and redeploying is how CPA's purpose
+    changes — versioned and reviewable like any other repo change, same as a per-expert
+    `AGENTS.md` but for the one agent that isn't spawned by anything else.
+
+### Chunk 4 acceptance
+
+*   A human opens a room/DM with the named CPA in Buzz and gets real, reasoned responses.
+    
+*   Memory survives both a process restart and a full LXC teardown/rebuild, demonstrated
+    live in Buzz.
+    
+*   CPA, asked in Buzz, creates a second agent (name + purpose only) that gets its own
+    durable identity and is directly talkable — also surviving a rebuild.
+    
+*   CPA's purpose is defined by `CPA_SYSTEM_PROMPT.md`; changing the file and redeploying
+    changes CPA's behavior.
+    
+*   Baseline resource numbers recorded for one CPA + one created agent, idle and active.
     
 
-## POC done
+## Chunk 5 — Agents get a workspace and can commit code
 
-Master agent manages SSH machine / Vultr / Backblaze via runner + installs skills  
-(tailscale, pihole), with a readiness view; management relay is the scope; Buzz  
-optional-but-working as a managed child service.
+Goal: an agent can get its own LXC workspace, provisioned by a named hardware peer, and use
+it to make and ship a real change — to Buzz's own git and/or GitHub.
+
+*   A named peer provisions the workspace LXC on request, routed through CPA (CPA resolves
+    which peer, gates cost/irreversibility, delegates; the agent never learns which peer it
+    landed on).
+    
+*   A commit made from the workspace is verified durable in Buzz's relay-hosted git — not
+    just present on the disposable workspace LXC.
+    
+*   An agent pushes a commit to a real GitHub repo via a GitHub grant.
+    
+*   Minimal skills, scoped to only what this needs (clone/edit/commit/push reliably) — the
+    fuller skill-schema/readiness/verify-harness design is pulled in only as later chunks
+    need it.
+    
+*   The workspace/git credential surface (credential-helper vs. generic `exec()`) is decided
+    explicitly here, not assumed.
+    
+*   Proof point: an agent deploys a service to an LXC using what it committed.
+    
+
+### Chunk 5 acceptance
+
+*   CPA-routed request → named peer provisions an LXC workspace → agent commits a real
+    change → change is verified durable in Buzz's git and/or pushed to a real GitHub repo.
+    
+*   The workspace/git-runner credential surface is either adopted (with a written carve-out
+    from the generic `exec()` model) or explicitly rejected in favor of it.
+    
+
+## Chunk 6 — Agents deploy via Kubernetes
+
+Goal: the same agent-does-real-work loop from Chunk 4 generalizes from an LXC target to a
+kube target.
+
+*   Kube-slot fulfillment: a named peer hands out a namespace + ResourceQuota instead of an
+    LXC, same "give me compute" shape.
+    
+*   An agent deploys a service to that slot, verified live.
+    
+*   Sleep/wake for ad-hoc agents is built here (idle auto-reap on pods), using the resource
+    numbers gathered in Chunk 3.
+    
+
+### Chunk 6 acceptance
+
+*   Same proof point as Chunk 4 (agent deploys a service), targeting a kube namespace
+    instead of an LXC, via the same CPA-routed peer-fulfillment pattern.
+    
+
+## Chunk 7 — Remaining connectors exercised + North Star: portable backup & hardware migration
+
+Goal: exercise Vultr and Backblaze for real onboarding work through the now-mature CPA/
+expert/runner loop, and take a first real run at the **North Star**: run freehold locally,
+back it up reliably, and stand up a fresh freehold on different hardware or a different
+provider (e.g. local Proxmox → Vultr), restored from that backup — same identity, memory,
+grants, and services.
+
+*   Onboard a real external service via Vultr and via Backblaze B2 through a real agent
+    conversation.
+    
+*   Off-site backup of the durable plane (Backblaze).
+    
+*   A portable snapshot/restore format independent of the source storage backend (e.g. a
+    ZFS-backed local box's data restoring onto a VPS provider's block volume).
+    
+*   A bootstrap path that restores identity + memory + grants + running services from a
+    backup — disaster recovery, distinct from the live compute-only reattach path.
+    
+*   This is also a standing dogfood tool once built: clone a running production freehold
+    onto disposable hardware to test a risky change, without touching the real system, then
+    discard the clone.
+    
+
+### Chunk 7 acceptance
+
+*   Backblaze and Vultr each carry at least one real onboarded service/workload through the
+    CPA loop.
+    
+*   A freehold instance running locally is backed up off-site, torn down entirely (hardware
+    gone, not just compute), and restored onto different hardware/provider — same identity,
+    memory, grants, and services present and correct.
+    
+
+## Done bar (current)
+
+A real, durable, talkable, agent-creating CPA (Chunk 4) is the baseline "done" this roadmap
+builds from; Chunks 5–6 extend it toward agents that do real work on LXC and kube targets,
+and toward full hardware-portability.
 
 ## Test / promote flow (dogfood)
 
@@ -151,11 +368,7 @@ Promotion: code → VPS smoke → PVE host test → home. Installer/runner must 
 
 ## Out of scope for POC (later)
 
-*   Kubernetes / deterministic pods (public release).
-    
 *   Full console with deep monitoring (Grafana/Prometheus).
-    
-*   LiteLLM as a k8s deployment.
     
 *   DM mirroring/sync between control plane and relay when relay is down.
     
