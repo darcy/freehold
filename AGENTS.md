@@ -6,10 +6,10 @@ configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 **Current version: 0.3.0.** Chunk 1 (engine room) and Chunk 2 (relay scope), including the
 durable volume plane (Phase 0.12), are implemented and live-verified against real
-infrastructure (a real PVE host, a real relay/CP pair under a real domain). Chunk 3 (a real,
-reasoning CPA that lives in Buzz) is the current focus — see `roadmap/POC.md`. For how we got
-here, see `CHANGELOG.md`; this file describes the current state and the rules for working in
-this repo, not the history.
+infrastructure (a real PVE host, a real relay/CP pair under a real domain). Chunk 3 (the
+Rust→Go refactor) is complete; Chunk 4 (a real, reasoning CPA that lives in Buzz) is the
+current focus — see `roadmap/POC.md`. For how we got here, see `CHANGELOG.md`; this file
+describes the current state and the rules for working in this repo, not the history.
 
 ## Documentation hygiene (locked) — a primary job of this file
 
@@ -49,7 +49,8 @@ this repo, not the history.
 - `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
-- `roadmap/POC_CHUNK<n>.md` — detailed build plans for Chunks 3–5 (Chunk 4 is current).
+- `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
+  done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
 - `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
 
