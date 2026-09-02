@@ -52,6 +52,11 @@ describes the current state and the rules for working in this repo, not the hist
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
   done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
+- `.agents/skills/release/SKILL.md` — the `release` skill: cut a `v0.x.y` annotated
+  tag on `main` and publish a short, high-level GitHub Release (distilled from
+  `CHANGELOG.md`, never the full changelog) — one per phase, per the PR rules above.
+  This is the canonical, agent-agnostic location (auto-loaded by opencode and any
+  other agent that reads `~/.agents/skills/`-style external skills).
 - `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
 
