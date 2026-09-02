@@ -69,8 +69,9 @@ behalf via privileged runners, with a management relay as the scope.
     control plane's scope (agents + secrets scoped to it). User's existing relay is onboarded  
     as a service (relay runner), not a nested scope.
     
-*   **Agent placement:** Chunks 1–2 run agents via Buzz's buzz-acp harness on LXCs;
-    Chunk 3 introduces k8s pods as the agent-compute substrate.
+*   **Agent placement:** Chunks 1–3 run agents via Buzz's buzz-acp harness on
+    LXCs; Chunk 4 brings the CPA to that harness. Kubernetes is MVP-only —
+    nothing in the POC needs a cluster.
     
 *   No Kubernetes in Chunks 1–2.
     
@@ -79,9 +80,10 @@ behalf via privileged runners, with a management relay as the scope.
 *   POC acceptance: master agent manages SSH machine / Vultr / Backblaze via runner + installs  
     skills (tailscale, pihole) with readiness view; management relay is the scope.
     
-*   **Chunk-by-chunk plan (Chunk 3 onward): see `roadmap/POC.md`** — a real, durable,
-    agent-creating CPA (Chunk 3) → agent workspaces + git/GitHub (Chunk 4) → kube deploys
-    (Chunk 5) → remaining connectors exercised + the North Star below (Chunk 6).
+*   **Chunk-by-chunk plan (Chunk 4 onward): see `roadmap/POC.md`** — a real,
+    durable, agent-creating CPA (Chunk 4) → agent workspaces + git/GitHub
+    (Chunk 5) → kube deploys (Chunk 6) → remaining connectors exercised + the
+    North Star below (Chunk 7).
     
 
 ## MVP — public release (definition)
@@ -158,8 +160,8 @@ The public release builds on the POC and adds the Kubernetes substrate. Core pro
 
 ## North Star — portable backup & hardware migration
 
-**Target: as soon as Chunk 5** (see `roadmap/POC.md`) — the earliest point a real workflow
-exists worth migrating.
+**Target: as soon as Chunk 7** (see `roadmap/POC.md`) — the earliest point a real
+workflow exists worth migrating.
 
 Run freehold locally, back it up reliably, and stand up a fresh freehold on **different
 hardware or a different provider** (e.g. a home Proxmox box → Vultr) restored from that
