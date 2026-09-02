@@ -297,7 +297,8 @@ it to make and ship a real change — to Buzz's own git and/or GitHub.
 
 ## Chunk 6 — Agents deploy via Kubernetes
 
-Goal: the skill framework matures and the same agent-does-real-work loop from Chunk 4
+Goal: the same agent-does-real-work loop from Chunk 4 generalizes from an LXC target to a
+kube target.
 
 *   **The skill schema and the first skills.** A `provision` skill declares `target: lxc | pod |
     either` — a *hint* the expert may override, not an authorization. The expert reasons
