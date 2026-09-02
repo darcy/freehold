@@ -18,18 +18,38 @@ this repo, not the history.
 "SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
 
 1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
-2.  Add an entry to `CHANGELOG.md` explaining what changed and why, under the project's
-    Semantic Versioning scheme (`0.x.y` ≈ through Chunk N pre-MVP; `1.0.0` = public release —
-    see `CHANGELOG.md` for the full convention).
+2.  Add an entry to `CHANGELOG.md` explaining what changed and why (see "Pull
+    requests": each phase bumps `0.x.y` and adds a changelog entry; a phase merged
+    to `main` is tagged `v0.x.y`).
+
+## Pull requests (locked) — every unit of work ships through a PR
+
+- Every chunk/phase lands as a branch → PR → `main`. Create the PR as soon as the
+  branch has commits; the `claude.yml` workflow posts its review on the PR, so the
+  PR body is where review findings get worked.
+- **A PR is not done until the review verdict is `MERGE-READY`.** After pushing,
+  wait for both checks (`CI` and `review`) to settle: `gh pr checks <n>` and
+  `gh pr view <n> --json comments`. Read every `BLOCKING`/`IMPORTANT` inline
+  comment, verify each claim against the tree, fix what's real, and re-push;
+  repeat until no `BLOCKING`/`IMPORTANT` items remain. `DEFER` items belong in the
+  PR body or the `Known gaps` section below, not in re-review rounds.
+- **Commit and push; never merge.** Merging is the operator's call — do it only
+  when the operator explicitly says "merge when complete" (or equivalent). Until
+  then the PR sits in review, even at `MERGE-READY`.
+- **One `0.x.y` per phase.** Each phase that comes online gets its own
+  `CHANGELOG.md` entry and version bump (`0.4.0`, `0.4.1`, …): the minor moves
+  when a chunk's work lands, the patch when a phase inside it does. When a phase
+  merges to `main`, that release tags the tree at `v0.4.1` etc. — the tag and
+  the changelog entry are both part of landing the phase.
 
 ## Navigation
 
 - `VISION.md` — narrative, single source of truth for the "why".
 - `ARCHITECTURE.md` — system design, locked decisions, build plan.
 - `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
-- `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–6+, MVP definition, North Star.
+- `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
-- `roadmap/POC_CHUNK<n>.md` — detailed build plans for Chunks
+- `roadmap/POC_CHUNK<n>.md` — detailed build plans for Chunks 3–5 (Chunk 4 is current).
 - `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
 
@@ -119,16 +139,21 @@ changelog.
 
 ## Build / test
 
-- Workspace: `cargo build`, `cargo test`.
+- Rust (`core/`, `runner/`, `control-plane/`, `console-client/`, `testkit/`, `acceptance/`):
+  `cargo build --workspace` + `cargo test --workspace`.
+- Go (`orchestrator/` — the `freehold` and `freehold-orchestrator` binaries, the TUI, and the
+  `harness/` release gate): `cd orchestrator && go build ./... && go vet ./... &&
+  go test ./...`; `go test ./harness/` drives `target/debug/freehold-harness-oracle` and
+  gates every crypto primitive against the Rust `core` byte-for-byte.
 - No formatter/linter config beyond rustfmt + clippy defaults.
-- Each phase in `roadmap/POC_CHUNK1.md` / `POC_CHUNK2.md` has acceptance checkboxes; tick
-  them as work lands. `freehold-acceptance` reproduces Chunk 1's acceptance criteria
-  hermetically on loopback.
+- `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
+  `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
+  `freehold-acceptance` reproduces Chunk 1's acceptance criteria hermetically on loopback.
 
 ## Code style
 
 - Rust: follow rustfmt; small crates; keep the runner↔CP contract at the crate boundary and
-  language-agnostic (MCP over HTTP).
+  language-agnostic (MCP over HTTP). Go: `gofmt` + `go vet` clean across `orchestrator/`.
 - **Never** put secrets in code, config, tests, logs, or committed files. Private keys arrive
   via env var / mounted secret. No secret dumps in output or agent context.
 - Keep `exec` generic — do not add semantic tools to work around a connector's API.
