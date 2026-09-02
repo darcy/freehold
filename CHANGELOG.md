@@ -25,6 +25,32 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.0] — Chunk 4 Phase A: the CPA on a real-agent harness
+
+### Added
+
+*   **A1 — the operator names the CPA at install.** `freehold rebuild` gained
+    an interactive "CPA agent name" step (TUI form, seeded from a recorded
+    `cpa_name`, default `freehold`) and the `--agent-name`/`cpa_name` value now
+    persists through the rebuild config path instead of being a dead flag.
+*   **A2 — the CPA runs on Buzz's real-agent mechanism.** The CPA deploys as a
+    k3s Pod running the digest-pinned `ghcr.io/block/buzz-sprig` image whose
+    entrypoint `exec`s `buzz-acp`, joined to the community relay with its own
+    nsec — the remote-agent mechanism from Buzz's `VISION_REMOTE_AGENTS.md`
+    (a body on the k3s substrate, identity sealed in a first-run-wins k8s
+    Secret). A durable CPA identity under the CP's state dir means the same
+    agent returns after a compute-only teardown/rebuild.
+*   **A3 — the stored name is the CPA's Buzz identity.** The CPA's display
+    name rides the pod's `cpa-name` annotation and config `managed`, so the
+    agent the operator named at install is the agent that appears in Buzz.
+*   **A4 — a dedicated create/grant/manage-agent toolset.** The CPA gets
+    `create-agent` (deploy a named sprig pod with its own durable identity),
+    `grant-agent` (agent ↔ runner whitelist), and `manage-agent`
+    (list/remove registry rows) — the dedicated toolset the roadmap calls
+    for, no skill-execution tools yet.
+*   **A5 — the CPA registers like any named agent.** The CPA row lands in the
+    control-plane agent registry at deploy; live ●/○ availability is the CPA's
+    own relay kind:20001 presence, read fresh per view.
 
 ## [0.3.0] — Chunk 3: the Rust→Go refactor, the durable plane, and the Kube-slot plan
 
