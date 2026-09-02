@@ -114,10 +114,10 @@ carried Chunk 1–2.6.1 items — waits in `roadmap/POC.md`'s chunk sections.
 
 *   **Storage + CLI contracts.** `storage ensure` takes `--size-gb` /
     `--pool-size-gb`; `storage resolve` takes `--confirm-storage` and emits
-    `STORAGE-THINPOOL: <name|->` (absence = ZFS); the storage subcommands
-    (`resolve`, `ensure`, `ensure --confirm-storage` path, `destroy`,
-    `destroy-pool`) all register
-    `addr`/`agent-dir`/`runner-pubkey`/`target`; `prompt()` reads through
+    `STORAGE-THINPOOL: <name|->` (absence = ZFS; `stagePlacement` at rebuild
+    stage 7a keys the plane placement off that line); all five storage
+    subcommands register `addr`/`agent-dir`/`runner-pubkey`/`target`
+    (`storage destroy-pool` had been the outlier); `prompt()` reads through
     one persistent `bufio.Reader` over stdin.
 
 *   **Go↔Rust gates stay green.** `cargo build --workspace` clean, `cargo
