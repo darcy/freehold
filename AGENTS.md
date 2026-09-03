@@ -4,12 +4,14 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-**Current version: 0.3.0.** Chunk 1 (engine room) and Chunk 2 (relay scope), including the
-durable volume plane (Phase 0.12), are implemented and live-verified against real
-infrastructure (a real PVE host, a real relay/CP pair under a real domain). Chunk 3 (the
-Rust→Go refactor) is complete; Chunk 4 (a real, reasoning CPA that lives in Buzz) is the
-current focus — see `roadmap/POC.md`. For how we got here, see `CHANGELOG.md`; this file
-describes the current state and the rules for working in this repo, not the history.
+The current version is the top entry in `CHANGELOG.md` — this file deliberately never
+restates a version number, so it can't go stale. Chunk 1 (engine room) and Chunk 2 (relay
+scope), including the durable volume plane (Phase 0.12), are implemented and live-verified
+against real infrastructure (a real PVE host, a real relay/CP pair under a real domain).
+Chunk 3 (the Rust→Go refactor) is complete; Chunk 4 (a real, reasoning CPA that lives in
+Buzz) is the current focus — see `roadmap/POC.md`. For how we got here, see
+`CHANGELOG.md`; this file describes the current state and the rules for working in this
+repo, not the history.
 
 ## Documentation hygiene (locked) — a primary job of this file
 
