@@ -5,20 +5,25 @@ truth for the phase so work survives context compaction. Read `AGENTS.md` / `CHA
 `roadmap/POC_CHUNK4.md` for the surrounding context (Chunk 4 CPA, D1–D4 drills, PR 143).
 
 ## Progress (checkpoint — resume here)
-- **F1 DONE** (`3ded298`, merged to branch + pushed): resolver accepts dotted FQDNs; config
-  derives `relay.<d>` / `cp.<d>`; new `dns wildcard` subcommand + dnsmasq
-  `address=/.<d>/<ip>` apex so `relay.`/`cp.`/`*.base` resolve internally to the k3s node;
-  rebuild `stageDnsWildcard` wires it (`record-caddy`); TUI DNS panel shows the wildcard row.
-- **F2 DONE** (`f5981b6`, pushed): core Caddy hostNetwork kube edge — `deploy/caddy.go`
-  (`RenderCaddyfile` + `CaddyManifest`: durable PVC, Caddyfile ConfigMap, hostNetwork
-  Deployment on 80/443, NodePort svc); `config.CaddySpec`; rebuild `stageCaddy`/
-  `caddyManifestScript`/`recordCaddy` (runs whenever k3s is on); TUI `caddy (TLS edge)` row +
-  probe. Relay vhost fronts relay LXC:3000; cp.<d> deferred until the CP console binds the LAN.
-- **F3 IN PROGRESS (next)**: embedded go-acme/lego DNS-01 — provider dropdown from lego's
-  registry, per-provider env collection, TXT pre-verify, store as runner ciphertext secret,
-  issue `*.domain` -> write certs into the caddy-data PVC at /data/tls, Caddy reload, reuse gate.
+- **F1 DONE** (`3ded298`): resolver dotted FQDNs + `relay.<d>`/`cp.<d>` derivation + dnsmasq
+  `address=/.<d>/<ip>` wildcard apex + `dns wildcard` subcommand + `stageDnsWildcard` + TUI row.
+- **F2 DONE** (`f5981b6`): core Caddy hostNetwork kube edge — `deploy/caddy.go`
+  (`RenderCaddyfile` + `CaddyManifest`: durable PVC, Caddyfile ConfigMap, hostNetwork Deployment
+  on 80/443, NodePort svc); `config.CaddySpec`; `stageCaddy`/`caddyManifestScript`/`recordCaddy`;
+  TUI `caddy (TLS edge)` row + probe.
+- **F3a DONE** (this branch): embedded go-acme/lego + `internal/cert` package —
+  `providers_gen.go` GENERATED from lego's own registry (`go run ./internal/cert/genproviders`):
+  201 provider names + per-provider env-var table (route53→AWS_*, cloudflare→CLOUDFLARE_*,
+  digitalocean→DO_* …); `Providers()`/`ProviderEnvNames()`/`IsProvider()`; `Verify()` (throwaway
+  TXT present+cleanup); `IssueWildcard()` (lego DNS-01 via `SetDNS01Provider`); `WriteTLS()`
+  (atomic, /data/tls); `LoadExpiry()`/`ReuseIfValid()` reuse gate. Tests green.
+- **F3b NEXT**: wire the DNS provider token collection + storage through the ciphertext
+  runner-secret path + the rebuild/TUI cert step (dropdown from cert.Providers(), env collection,
+  pre-verify, save) + a cert stage that IssueWildcard → WriteTLS into the caddy-data PVC →
+  Caddy reload, gated by the ReuseIfValid reuse and --yes hard-error.
 - **F4–F6 PENDING**: Certs TUI tab; CPA pod -> wss://relay.<d> + live D1; tests/docs/PR.
-- Binaries already rebuilt + placed in `~/.cargo/bin/{freehold,control-plane}` for live deploy.
+- Binaries rebuilt + placed in `~/.cargo/bin/{freehold,control-plane}`.
+
 
 
 ## Why this phase exists (the two hard blockers it fixes)
