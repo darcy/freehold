@@ -400,7 +400,7 @@ func (e *rebuildEngine) run() error {
 	if err := e.stageDeployCp(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  ✓ control plane live at https://cp-%s\n", e.f.domain)
+	fmt.Fprintf(e.out, "  ✓ control plane live at https://cp.%s\n", e.f.domain)
 
 	// 14.5. C0: the litellm gateway — provision the litellm runner (master +
 	// provider + postgres secrets sealed to it), apply the kube workloads,
@@ -459,7 +459,7 @@ func (e *rebuildEngine) run() error {
   ╰─────────────────────────────────────────────────────────╯
 
   relay:          https://%s
-  control plane:  https://cp-%s
+  control plane:  https://cp.%s
   runner:         serving on %s
   operator pk:    %s
 `, e.f.domain, e.f.domain, e.f.addr, e.f.operatorPubkey)
@@ -830,9 +830,9 @@ func (e *rebuildEngine) fromAnswers() *config.Config {
 	runnerPK, _ := loadRPubkey(filepath.Join(rbRunnerPkgs(), e.f.target))
 	cfg := &config.Config{
 		Domain:         e.f.domain,
-		RelayURL:       "https://" + e.f.domain,
-		RelayWsURL:     "ws://" + e.f.domain + ":3000",
-		CPURL:          "https://cp-" + e.f.domain,
+		RelayURL:       "https://relay." + e.f.domain,
+		RelayWsURL:     "wss://relay." + e.f.domain,
+		CPURL:          "https://cp." + e.f.domain,
 		OperatorPubkey: e.f.operatorPubkey,
 		Runner: config.RunnerRef{
 			Addr:   e.f.addr,

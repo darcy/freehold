@@ -31,15 +31,21 @@ pub enum DnsError {
     Resolver(String),
 }
 
-/// Validates a bare hostname record name: lowercase letters, digits, dashes.
+/// Validates a record name. A bare hostname uses lowercase letters, digits,
+/// dashes; a dotted FQDN additionally allows `.` (so the resolver can serve
+/// e.g. `relay.<base>` and `cp.<base>` behind a wildcard apex). Max 253 (an
+/// FQDN), no leading/trailing dot or hyphen.
 pub fn validate_name(name: &str) -> Result<(), DnsError> {
     if name.is_empty()
-        || name.len() > 63
+        || name.len() > 253
         || !name
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
         || name.starts_with('-')
+        || name.starts_with('.')
+        || name.ends_with('.')
         || name.ends_with('-')
+        || name.contains("..")
     {
         return Err(DnsError::InvalidName { name: name.into() });
     }
@@ -179,7 +185,7 @@ mod dns_tests {
 
     #[test]
     fn name_validation() {
-        for ok in ["relay", "litellm", "cp-2", "a1"] {
+        for ok in ["relay", "litellm", "cp-2", "a1", "relay.freehold-test", "cp.freehold-test"] {
             validate_name(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
         for bad in [
@@ -188,9 +194,11 @@ mod dns_tests {
             "end.",
             "UPPER",
             "has space",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
             "a/b",
             "dash-",
+            "a..b",
+            "-x",
         ] {
             assert!(validate_name(bad).is_err(), "{bad:?} must be rejected");
         }
