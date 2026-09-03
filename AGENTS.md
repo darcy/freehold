@@ -147,13 +147,18 @@ changelog.
   unzeroized body bytes before a `Zeroizing` wrapper takes ownership (loopback, TLS-free —
   same exposure class as the CLI's stdin path); the console's signing key is re-derived on
   every readiness probe rather than cached once.
-- **The CPA's toolset is wired but its binary isn't built here yet.** The agent pods set
-  `BUZZ_ACP_MCP_COMMAND=/usr/local/bin/freehold-agent-tools` (+ args, in
-  `orchestrator/internal/agent/agent.go`), but no `freehold-agent-tools` binary is built or
-  packaged in this repo — whether it already ships in the upstream
-  `ghcr.io/block/buzz-sprig:main` image is unconfirmed. Until it's provably built from this
-  repo (or confirmed upstream), Phase B's toolset is a live config surface, not yet a live
-  callable one; the binary source + a build/image step are the named follow-up.
+- **The CPA toolset (create-agent / grant-agent / manage-agent) is deferred — not wired as an
+  MCP surface.** The Go methods are built and unit-tested (`orchestrator/internal/agent/tools.go`),
+  but the CPA pod sets no `BUZZ_ACP_MCP_COMMAND` (the `freehold-agent-tools` scaffold was dropped
+  for D1–D3), so the harness has no callable create/grant/manage tools yet. Wiring them as a real
+  MCP server (or an equivalent surfaced toolset) is the named follow-up for Phase E
+  (agent-creates-agent); D1–D3 need conversation only and don't require it.
+- **The CPA talks its reasoning model through the litellm gateway as an OpenAI-compatible
+  endpoint.** The pod routes `BUZZ_AGENT_PROVIDER=openai-compat` to the in-kube
+  `litellm.litellm:4000/v1` service (alias `ControlPlaneAgent` → deepseek). Whether the live
+  harness (buzz-agent in `ghcr.io/block/buzz-sprig:main`) honours exactly these env vars is
+  verified against the packaged binary's config errors, but is not yet confirmed end-to-end on a
+  live pod — the D1 drill is the first proof.
 
 ## Build / test
 

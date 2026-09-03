@@ -66,11 +66,19 @@ to run, idle and active.
       register and report ●/○ availability from relay presence) so CPA shows
       up the same way any agent does.
 
-> **Phase A deferral (named, not lost):** A4's toolset is built and
-> unit-tested, but nothing yet registers it as an MCP surface the buzz-acp
-> harness process can actually call — that wiring (system prompt + tool
-> config) lands with Phase B. A4 is ticked for the toolset itself; the
-> live Buzz proof (CPA *using* it to create an agent) lands in Phases D/E.
+> **Phase B deferral (named, not lost):** A4's toolset is built and
+> unit-tested, but it is **not** wired as an MCP surface for D1–D3 — the
+> `freehold-agent-tools` MCP command was dropped for this pass, so the harness
+> has no callable create/grant/manage tools yet. A4 is ticked for the toolset
+> itself; wiring it as a real MCP server (or an equivalent surfaced toolset) is
+> the named follow-up for Phase E (agent-creates-agent).
+
+> **D1 model wiring:** the CPA's reasoning rides the litellm gateway as an
+> OpenAI-compatible endpoint — the pod sets `BUZZ_AGENT_PROVIDER=openai-compat`,
+> `OPENAI_COMPAT_BASE_URL=http://litellm.litellm:4000/v1`,
+> `OPENAI_COMPAT_MODEL=ControlPlaneAgent` (alias → deepseek), with the API key
+> from the `<pod>-litellm-key` Secret (`secretKeyRef`). D1 is the first live
+> proof the harness honours these env vars end to end.
 
 #### Phase B — CPA system prompt
 

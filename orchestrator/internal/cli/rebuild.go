@@ -1974,6 +1974,22 @@ func (e *rebuildEngine) stageLitellm() error {
 		return fmt.Errorf("litellm model registration failed:\n%s", out)
 	}
 
+	// Mint the CPA's scoped litellm key now, while the litellm runner (which
+	// holds the master, injected by name) is still up. The pod references this
+	// Secret as its OPENAI_COMPAT_API_KEY (D1: the CPA routes deepseek via the
+	// gateway). First-run-wins ties the pod to the same key across rebuilds.
+	cpaName := cfg.CPAName
+	if cpaName == "" {
+		cpaName = agent.DefaultCPAName
+	}
+	keySecret := agent.AgentPodName(cpaName) + "-litellm-key"
+	mintScript := litellmCpaKeyScript(k3sVmid, keySecret)
+	ok, out = e.runEnv(e.bins.Self, os.Environ(), e.execArgs(
+		fmt.Sprintf("exec --target litellm --secrets litellm %s", mintScript), 120))
+	if !ok {
+		return fmt.Errorf("litellm CPA key mint failed:\n%s", out)
+	}
+
 	return e.recordLitellm(gwURL, k3sIP)
 }
 
@@ -2132,14 +2148,35 @@ spec:
   - {port: 4000, targetPort: 4000, nodePort: 31400}`
 
 // litellmRegisterScript registers the model through the litellm runner: the
-// runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name.
+// runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name. The
+// model_name is the ControlPlaneAgent alias the CPA pod talks to (agent.go's
+// CpaLiteLLMModel); litellm maps it to the deepseek route behind the scenes.
 func litellmRegisterScript() string {
-	return `set -euo pipefail
-BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
+	return fmt.Sprintf(`set -euo pipefail
+BODY=$(printf '{"model_name":"%s","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%%s"}}' "$PROVIDER_KEY")
 curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://127.0.0.1:31400/model/new" | head -c 300
 echo
 echo LEG2_OK
-`
+`, agent.CpaLiteLLMModel)
+}
+
+// litellmCpaKeyScript mints a scoped litellm key for the CPA pod and stores it
+// as the agents-namespace Secret the pod's OPENAI_COMPAT_API_KEY references
+// (first-run-wins, like the identity secret). It runs ON the k3s node THROUGH
+// the litellm runner (LITELLM = master injected by name), so the admin key
+// never rides argv; litellm's OpenAI-compat gateway is reached on loopback and
+// kubectl is the local k3s controller's.
+func litellmCpaKeyScript(k3sVmid uint32, secretName string) string {
+	k := `K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`
+	return fmt.Sprintf(`set -euo pipefail
+%s
+KEY=$(curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" \
+  -d '{"models":["%s"],"metadata":{"user":"cpa"}}' \
+  "http://127.0.0.1:31400/key/generate" | grep -oP 'sk-[A-Za-z0-9_-]+' | head -1)
+if [ -z "$KEY" ]; then echo "litellm CPA key mint returned no sk- key"; exit 1; fi
+$K create ns agents 2>/dev/null || true
+$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=$KEY
+echo CPA_LITELLM_KEY_OK`, k, agent.CpaLiteLLMModel, secretName, secretName)
 }
 
 // opsAgentPubkey returns the ops-agent's pubkey (the rebuild's signing
@@ -2211,6 +2248,9 @@ func (e *rebuildEngine) stageCpa() error {
 	if cfg.RelayURL == "" {
 		return fmt.Errorf("no relay URL in config — the CPA must join the community relay")
 	}
+	if cfg.Litellm.URL == "" {
+		return fmt.Errorf("no litellm gateway recorded — the CPA needs a reasoning model (rebuild with --with-litellm)")
+	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	cpaName := cfg.CPAName
 	if cpaName == "" {
@@ -2244,7 +2284,7 @@ func (e *rebuildEngine) stageCpa() error {
 	// same transport stageLitellm's exec uses), then record the agent. The
 	// runner executes this verbatim on the k3s guest; the pod's ConfigMap
 	// carries the prompt, so nothing ships the .md to the CP LXC.
-	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.AgentManifestScript(
+	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.CPAManifestScript(
 		k3sVmid, relayURL, promptText, cpaName), 420))
 	if !ok {
 		return fmt.Errorf("cpa pod apply failed:\n%s", out)

@@ -31,8 +31,14 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		`value: "wss://relay.test"`,
 		"BUZZ_ACP_SYSTEM_PROMPT_FILE",
 		CPASystemPromptPath,
-		"BUZZ_ACP_MCP_COMMAND",
-		CpaMcpCommand,
+		// D1: the CPA reaches its reasoning model through the litellm gateway
+		// as an OpenAI-compatible endpoint (alias ControlPlaneAgent).
+		"BUZZ_AGENT_PROVIDER",
+		`value: "openai-compat"`,
+		"OPENAI_COMPAT_BASE_URL",
+		LiteLLMServiceURL,
+		"OPENAI_COMPAT_MODEL",
+		CpaLiteLLMModel,
 		"BUZZ_ACP_AGENT_COMMAND",
 		`value: "buzz-agent"`,
 		"restartPolicy: Never",
@@ -70,6 +76,17 @@ func TestCPAPodManifestBasics(t *testing.T) {
 	// from the sanitized name — never a shared/fixed name.
 	if !strings.Contains(m, "secretKeyRef: {name: waldo-identity, key: nsec}") {
 		t.Errorf("manifest missing the agent-specific identity Secret ref")
+	}
+	// The litellm key must also ride a per-agent Secret (waldo-litellm-key),
+	// never a literal in the manifest.
+	if !strings.Contains(m, "OPENAI_COMPAT_API_KEY") {
+		t.Errorf("manifest missing OPENAI_COMPAT_API_KEY")
+	}
+	if !strings.Contains(m, "secretKeyRef: {name: waldo-litellm-key, key: key}") {
+		t.Errorf("litellm key must come from the waldo-litellm-key Secret, not a literal")
+	}
+	if strings.Contains(m, "sk-") || strings.Contains(m, "Bearer ") {
+		t.Errorf("manifest embeds a litellm key literal")
 	}
 	// The display name must appear only as the agent-name annotation.
 	if !strings.Contains(m, "freehold.fh/agent-name: waldo") {

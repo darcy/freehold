@@ -40,10 +40,16 @@ list is current-state and kept there rather than duplicated here.
     so `kubectl apply` parses it) and the pod mounts that at
     `/srv/freehold/CPA_SYSTEM_PROMPT.md`, re-reading it fresh on every
     spawn.
-*   **The CPA's toolset is a live MCP surface.** The agent pods now run with
-    `BUZZ_ACP_MCP_COMMAND=/usr/local/bin/freehold-agent-tools` (+ args), so
-    the create/grant/manage-agent toolset Phase A built is what the
-    reasoning agent actually calls (Phase A's named deferral closes).
+*   **The CPA's reasoning model rides the litellm gateway.** The agent pod
+    points the buzz-agent harness at the in-kube OpenAI-compatible endpoint as
+    `BUZZ_AGENT_PROVIDER=openai-compat` +
+    `OPENAI_COMPAT_BASE_URL=http://litellm.litellm:4000/v1` +
+    `OPENAI_COMPAT_MODEL=ControlPlaneAgent` (litellm alias → the registered
+    deepseek route), with the API key from a per-pod `<pod>-litellm-key` Secret
+    (`secretKeyRef` — never a literal). `stageLitellm` now registers the model
+    under the `ControlPlaneAgent` alias and mints a scoped key for the CPA pod.
+    D1 (a live Buzz conversation) is the first end-to-end proof of this wiring
+    against the packaged harness.
 
 ### Deferred (named, not lost)
 
@@ -51,6 +57,11 @@ list is current-state and kept there rather than duplicated here.
     the orchestrator's embedded bytes; serving the prompt from the CP's
     `/srv/data/cp` mount (so an edit survives a rebuild without a
     re-deploy) is a named follow-up — see `roadmap/POC_CHUNK4.md`.
+*   **The CPA toolset (create/grant/manage) is not yet an MCP surface.** The
+    Go methods stay built and unit-tested, but the pod no longer sets
+    `BUZZ_ACP_MCP_COMMAND` (the `freehold-agent-tools` scaffold was dropped for
+    D1–D3); wiring it as a real MCP server is the Phase E follow-up for
+    agent-creates-agent.
 
 ## [0.4.0] — Chunk 4 Phase A: the CPA on a real-agent harness
 

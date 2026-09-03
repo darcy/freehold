@@ -29,6 +29,14 @@ const SprigImage = "ghcr.io/block/buzz-sprig:main"
 // DefaultCPAName is the default CPA display name (A1's fallback).
 const DefaultCPAName = "freehold"
 
+// AgentPodName returns the sanitized k8s object name (pod/service/secret base)
+// for an agent's display name — the prefix every derived object name hangs
+// off (`<pod>-identity`, `<pod>-prompt`, `<pod>-litellm-key`). Exported so the
+// orchestrator can derive the same names the manifest uses.
+func AgentPodName(agentName string) string {
+	return sanitizePodName(agentName)
+}
+
 // sanitizePodName turns an agent display name into a legal k8s object name
 // (DNS-1123: lowercase letters/digits with internal dashes, <=63 chars).
 // "My CPA!" -> "my-cpa". Every object name (pod/service/secret) is derived
@@ -65,13 +73,19 @@ func sanitizePodName(name string) string {
 // and the agent re-reads it on every spawn — never cached.
 const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
 
-// CpaMcpCommand/CpaMcpArgs wire the CPA's dedicated toolset into the harness
-// (B2: the toolset is registered as an MCP surface the pod can actually
-// call, not a dead config knob). No skill-execution tools yet (Chunk 5/6).
-const (
-	CpaMcpCommand = "/usr/local/bin/freehold-agent-tools"
-	CpaMcpArgs    = "serve --addr 127.0.0.1:8787"
-)
+// LiteLLMServiceURL is the in-kube OpenAI-compatible endpoint the agent
+// harness reaches the litellm gateway at (ClusterIP Service litellm.litellm
+// port 4000 — litellm's OpenAI-compat API lives under /v1). The CPA's
+// reasoning model (D1 wiring) routes here.
+const LiteLLMServiceURL = "http://litellm.litellm:4000/v1"
+
+// CpaLiteLLMModel is the litellm model alias the CPA talks to; it maps behind
+// the scenes to the deepseek route registered at deploy time.
+const CpaLiteLLMModel = "ControlPlaneAgent"
+
+// AgentLiteLLMKeySecretKey is the k8s Secret literal that carries the pod's
+// minted litellm key (referenced by secretKeyRef, never in the manifest).
+const AgentLiteLLMKeySecretKey = "key"
 
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
 // agent is ONE pod (at-most-one-live-instance, I4); the harness is the
@@ -88,15 +102,21 @@ const (
 // never cached. Editing the prompt and redeploying is the only way the
 // agent's behavior changes.
 //
-// The nsec NEVER rides the manifest: it comes from the `<pod>-identity` Secret
-// (a `secretKeyRef`), which the deploy step writes ONLY when absent — the
-// same first-run-wins discipline as litellm's keys. The object names are
+// The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
+// points the buzz-agent harness at litellmBaseURL with litellmModel and a
+// per-pod minted key (OPENAI_COMPAT_API_KEY from the `<pod>-litellm-key`
+// Secret by secretKeyRef). The API key NEVER rides the manifest.
+//
+// The nsec also NEVER rides the manifest: it comes from the `<pod>-identity`
+// Secret (a `secretKeyRef`), which the deploy step writes ONLY when absent —
+// the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
-// Service, and Secret.
-func AgentPodManifest(agentName, relayURL, systemPrompt string) string {
+// Service, and Secrets.
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
+	litellmKeySecret := pod + "-litellm-key"
 	return fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -125,10 +145,14 @@ spec:
     env:
     - {name: BUZZ_RELAY_URL, value: %q}
     - {name: BUZZ_ACP_SYSTEM_PROMPT_FILE, value: %q}
-    - {name: BUZZ_ACP_MCP_COMMAND, value: %q}
-    - {name: BUZZ_ACP_MCP_ARGS, value: %q}
     - {name: BUZZ_ACP_AGENT_COMMAND, value: "buzz-agent"}
     - {name: BUZZ_ACP_RESPOND_TO, value: "allowlist"}
+    - {name: BUZZ_AGENT_PROVIDER, value: "openai-compat"}
+    - {name: OPENAI_COMPAT_BASE_URL, value: %q}
+    - {name: OPENAI_COMPAT_MODEL, value: %q}
+    - name: OPENAI_COMPAT_API_KEY
+      valueFrom:
+        secretKeyRef: {name: %s, key: %s}
     - name: BUZZ_PRIVATE_KEY
       valueFrom:
         secretKeyRef: {name: %s, key: nsec}
@@ -153,7 +177,8 @@ spec:
 `,
 		promptCm, indentSystemPrompt(systemPrompt),
 		pod, pod, agentName, pod, SprigImage, relayURL, CPASystemPromptPath,
-		CpaMcpCommand, CpaMcpArgs,
+		litellmBaseURL, litellmModel,
+		litellmKeySecret, AgentLiteLLMKeySecretKey,
 		secret, secret, CPASystemPromptPath, promptCm, pod, pod)
 }
 
@@ -169,16 +194,17 @@ func indentSystemPrompt(prompt string) string {
 }
 
 // CPAPodManifest is the CPA's pod manifest — AgentPodManifest with the CPA's
-// display name (A1's stored value, default freehold).
+// display name (A1's stored value, default freehold) wired to the litellm
+// gateway (LiteLLMServiceURL + CpaLiteLLMModel).
 func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
-	return AgentPodManifest(cpaName, relayURL, systemPrompt)
+	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel)
 }
 
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
 // litellmManifestScript. agentName is the display name (sanitized into the
 // pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here).
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, agentName string) string {
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName string) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
@@ -192,14 +218,14 @@ pct push %d /tmp/agent-manifests/%s.yaml /tmp/agent-manifests/%s.yaml
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt),
+		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel),
 		k3sVmid, pod, pod, pod, pod)
 }
 
 // CPAManifestScript applies the CPA pod (AgentManifestScript with the CPA
 // display name).
 func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName string) string {
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, cpaName)
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, cpaName)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in
