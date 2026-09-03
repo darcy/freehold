@@ -656,11 +656,14 @@ func TestLitellmManifestScript(t *testing.T) {
 // TestLitellmRegisterScript: the registration leg asks the runner for the
 // two secrets BY NAME and uses them in env, never literal.
 func TestLitellmRegisterScript(t *testing.T) {
-	out := litellmRegisterScript()
-	for _, want := range []string{"$LITELLM", "$PROVIDER_KEY", "/model/new", "deepseek-v4-flash", "LEG2_OK"} {
+	out := litellmRegisterScript("http://192.168.30.7:31400")
+	for _, want := range []string{"$LITELLM", "$PROVIDER_KEY", "/model/new", "deepseek-v4-flash", "LEG2_OK", "http://192.168.30.7:31400"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("register script missing %q", want)
 		}
+	}
+	if strings.Contains(out, "127.0.0.1:31400") {
+		t.Error("register script must target the real gateway URL, not loopback")
 	}
 	if strings.Contains(out, "fw_") {
 		t.Error("register script leaked the provider key")
@@ -735,5 +738,33 @@ func TestLitellmHasProviderKey(t *testing.T) {
 	}
 	if litellmHasProviderKey(dir) {
 		t.Error("expected missing package to read as no provider-key")
+	}
+}
+
+// TestLitellmRunArgs: the litellm admin leg must exec the dedicated litellm
+// runner (loopback 8788, target "litellm") with the named secrets — NOT the
+// main proxmox-box runner via a nested "exec --target …" prefix (which bash
+// swallows and never injects the secrets).
+func TestLitellmRunArgs(t *testing.T) {
+	var got [][]string
+	eng := &rebuildEngine{}
+	eng.bins.Self = "/bin/true"
+	eng.runEnv = func(_ string, _ []string, args []string) (bool, string) {
+		got = append(got, args)
+		return true, ""
+	}
+	eng.litellmRun("echo hi", 60, "litellm", "provider-key")
+	if len(got) != 1 {
+		t.Fatalf("litellmRun ran %d execs, want 1", len(got))
+	}
+	args := got[0]
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"exec", "--addr", "127.0.0.1:8788", "--secret", "litellm", "--secret", "provider-key", "litellm"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("litellmRun args %q missing %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "exec --target litellm") {
+		t.Errorf("litellmRun must not use the nested exec --target form: %q", joined)
 	}
 }

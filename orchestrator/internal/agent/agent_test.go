@@ -77,6 +77,14 @@ func TestCPAPodManifestBasics(t *testing.T) {
 	if !strings.Contains(m, "secretKeyRef: {name: waldo-identity, key: nsec}") {
 		t.Errorf("manifest missing the agent-specific identity Secret ref")
 	}
+	// The allowlist gate must carry the owner pubkey (from the identity
+	// Secret's owner), or buzz-acp refuses to boot (allowlist needs pubkeys).
+	if !strings.Contains(m, "BUZZ_ACP_RESPOND_TO_ALLOWLIST") {
+		t.Errorf("manifest missing BUZZ_ACP_RESPOND_TO_ALLOWLIST")
+	}
+	if !strings.Contains(m, "secretKeyRef: {name: waldo-identity, key: owner}") {
+		t.Errorf("allowlist must come from the identity Secret's owner, not a literal")
+	}
 	// The litellm key must also ride a per-agent Secret (waldo-litellm-key),
 	// never a literal in the manifest.
 	if !strings.Contains(m, "OPENAI_COMPAT_API_KEY") {

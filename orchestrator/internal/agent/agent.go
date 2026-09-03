@@ -159,8 +159,11 @@ spec:
     - name: BUZZ_ACP_AGENT_OWNER
       valueFrom:
         secretKeyRef: {name: %s, key: owner}
+    - name: BUZZ_ACP_RESPOND_TO_ALLOWLIST
+      valueFrom:
+        secretKeyRef: {name: %s, key: owner}
     volumeMounts:
-    - {name: prompt, mountPath: %s, readOnly: true}
+    - {name: prompt, mountPath: %s, readOnly: true, subPath: CPA_SYSTEM_PROMPT.md}
   volumes:
   - name: prompt
     configMap: {name: %s}
@@ -179,7 +182,7 @@ spec:
 		pod, pod, agentName, pod, SprigImage, relayURL, CPASystemPromptPath,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
-		secret, secret, CPASystemPromptPath, promptCm, pod, pod)
+		secret, secret, secret, CPASystemPromptPath, promptCm, pod, pod)
 }
 
 // indentSystemPrompt indents every prompt line by four spaces so it embeds as
@@ -210,6 +213,9 @@ func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL,
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec %d -- sh -c"
 $EX "$K create ns agents 2>/dev/null || true"
+# The pct push destination needs /tmp/agent-manifests to EXIST IN THE GUEST;
+# a bare host-side mkdir is not enough (the guest mount is separate).
+$EX "mkdir -p /tmp/agent-manifests"
 mkdir -p /tmp/agent-manifests
 cat >/tmp/agent-manifests/%s.yaml <<'YAML'
 %s
@@ -249,6 +255,22 @@ echo AGENT_IDENTITY_OK`,
 // with the CPA display name).
 func CPAIdentityScript(k3sVmid uint32, nsecSecretHex, ownerPub string) string {
 	return AgentIdentityScript(k3sVmid, nsecSecretHex, ownerPub, "")
+}
+
+// AgentLiteLLMKeyScript seeds the agents-namespace Secret the pod's
+// OPENAI_COMPAT_API_KEY references (first-run-wins, like the identity secret).
+// key is the litellm credential the pod talks to the gateway with. It travels
+// as a shell-quoted literal — the same shape the identity nsec uses.
+func AgentLiteLLMKeyScript(k3sVmid uint32, key, agentName string) string {
+	pod := sanitizePodName(agentName)
+	secret := pod + "-litellm-key"
+	return fmt.Sprintf(`set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+EX="pct exec %d -- sh -c"
+$EX "$K create ns agents 2>/dev/null || true"
+$EX "$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=%s"
+echo AGENT_LITELLM_KEY_OK`,
+		k3sVmid, secret, secret, shQ(key))
 }
 
 // shQ single-quotes a value for a shell-embedded literal (no embedded quotes

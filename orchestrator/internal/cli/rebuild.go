@@ -1931,7 +1931,14 @@ func (e *rebuildEngine) stageLitellm() error {
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	gwURL := "http://" + k3sIP + ":31400"
 
-	masterKey := genSecretHex()           // litellm's admin key (re-mint)
+	// The gateway master key must MATCH the running gateway's LITELLM_MASTER_KEY
+	// (the first-run-wins k8s `litellm-keys` Secret is canonical across
+	// rebuilds). Resolve it back and re-seal the runner to it below; only a
+	// fresh world (no Secret yet) mints a brand-new one.
+	masterKey := e.litellmMasterKey(k3sVmid)
+	if masterKey == "" {
+		masterKey = genSecretHex()
+	}
 	postgresPw := genSecretHex()          // postgres password
 	providerKey := e.f.litellmProviderKey // "" when reusing the sealed key
 
@@ -1987,6 +1994,23 @@ func (e *rebuildEngine) stageLitellm() error {
 		}
 	}
 
+	// Re-seal the runner's `litellm` secret to the gateway's canonical master
+	// every run: `provision` on a reused package is a no-op, so the runner
+	// keeps an OLD (possibly divergent) sealed master — exactly the mismatch
+	// that makes every admin call 401. Driving it with add-secret re-encrypts
+	// the SAME value, keeping $LITELLM in lockstep with the live gateway.
+	masterEnv := append(
+		[]string{"FREEHOLD_LITELLM_MASTER=" + masterKey},
+		os.Environ()...,
+	)
+	if ok, out := e.runEnv(e.bins.ControlPlane, masterEnv, []string{
+		"add-secret", "litellm", "litellm",
+		"--state-dir", rbStateDir(),
+		"--secret-env", "FREEHOLD_LITELLM_MASTER",
+	}); !ok {
+		return fmt.Errorf("add-secret litellm (master) failed:\n%s", out)
+	}
+
 	// Serve the litellm runner on loopback, exec the registration through it.
 	pid, err := e.stageServeRunner("litellm", runnerDir)
 	if err != nil {
@@ -1994,27 +2018,27 @@ func (e *rebuildEngine) stageLitellm() error {
 	}
 	defer e.stopRunner(pid)
 
-	regScript := litellmRegisterScript()
-	ok, out = e.runEnv(e.bins.Self, os.Environ(), e.execArgs(
-		fmt.Sprintf("exec --target litellm --secrets litellm,provider-key %s", regScript), 120))
+	// Register the model THROUGH the litellm runner (its own ciphertext: master
+	// + provider-key), against the gateway's real URL.
+	ok, out = e.litellmRun(litellmRegisterScript(gwURL), 120, "litellm", "provider-key")
 	if !ok {
 		return fmt.Errorf("litellm model registration failed:\n%s", out)
 	}
 
-	// Mint the CPA's scoped litellm key now, while the litellm runner (which
-	// holds the master, injected by name) is still up. The pod references this
-	// Secret as its OPENAI_COMPAT_API_KEY (D1: the CPA routes deepseek via the
-	// gateway). First-run-wins ties the pod to the same key across rebuilds.
+	// The CPA's litellm key is the gateway master itself: litellm /key/generate
+	// now requires a pre-existing virtual key to mint scoped keys (quadrant
+	// blocked until one exists), while the master is accepted for chat AND
+	// admin. The pod reads it as its OPENAI_COMPAT_API_KEY from the
+	// <pod>-litellm-key Secret (seeded first-run-wins via pct). Minting scoped
+	// virtual keys is the named follow-up once a bootstrap virtual key exists.
 	cpaName := cfg.CPAName
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	keySecret := agent.AgentPodName(cpaName) + "-litellm-key"
-	mintScript := litellmCpaKeyScript(k3sVmid, keySecret)
-	ok, out = e.runEnv(e.bins.Self, os.Environ(), e.execArgs(
-		fmt.Sprintf("exec --target litellm --secrets litellm %s", mintScript), 120))
+	ok, out = e.runBin(e.bins.Self, e.execArgs(
+		agent.AgentLiteLLMKeyScript(k3sVmid, masterKey, cpaName), 60))
 	if !ok {
-		return fmt.Errorf("litellm CPA key mint failed:\n%s", out)
+		return fmt.Errorf("seed CPA litellm key secret failed:\n%s", out)
 	}
 
 	return e.recordLitellm(gwURL, k3sIP)
@@ -2178,21 +2202,21 @@ spec:
 // runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name. The
 // model_name is the ControlPlaneAgent alias the CPA pod talks to (agent.go's
 // CpaLiteLLMModel); litellm maps it to the deepseek route behind the scenes.
-func litellmRegisterScript() string {
+// litellmRegisterScript registers the model through the litellm runner: the
+// runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name, and
+// curl's the gateway's REAL URL (gwURL — never 127.0.0.1, which is dead on the
+// runner host; the gateway is reached at its k3s-node NodePort). The model_name
+// is the ControlPlaneAgent alias the CPA pod talks to (agent.go's
+// CpaLiteLLMModel); litellm maps it to the deepseek route behind the scenes.
+func litellmRegisterScript(gwURL string) string {
 	return fmt.Sprintf(`set -euo pipefail
 BODY=$(printf '{"model_name":"%s","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%%s"}}' "$PROVIDER_KEY")
-curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://127.0.0.1:31400/model/new" | head -c 300
+curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "%s/model/new" | head -c 300
 echo
 echo LEG2_OK
-`, agent.CpaLiteLLMModel)
+`, agent.CpaLiteLLMModel, gwURL)
 }
 
-// litellmCpaKeyScript mints a scoped litellm key for the CPA pod and stores it
-// as the agents-namespace Secret the pod's OPENAI_COMPAT_API_KEY references
-// (first-run-wins, like the identity secret). It runs ON the k3s node THROUGH
-// the litellm runner (LITELLM = master injected by name), so the admin key
-// never rides argv; litellm's OpenAI-compat gateway is reached on loopback and
-// kubectl is the local k3s controller's.
 // litellmHasProviderKey reports whether the litellm runner package already
 // carries a sealed provider-key (so a rebuild can reuse it instead of demanding
 // a fresh supply). It inspects only the ciphertext map's secret NAMES — never
@@ -2212,17 +2236,40 @@ func litellmHasProviderKey(runnerDir string) bool {
 	return ok
 }
 
-func litellmCpaKeyScript(k3sVmid uint32, secretName string) string {
-	k := `K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`
-	return fmt.Sprintf(`set -euo pipefail
-%s
-KEY=$(curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" \
-  -d '{"models":["%s"],"metadata":{"user":"cpa"}}' \
-  "http://127.0.0.1:31400/key/generate" | grep -oP 'sk-[A-Za-z0-9_-]+' | head -1)
-if [ -z "$KEY" ]; then echo "litellm CPA key mint returned no sk- key"; exit 1; fi
-$K create ns agents 2>/dev/null || true
-$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=$KEY
-echo CPA_LITELLM_KEY_OK`, k, agent.CpaLiteLLMModel, secretName, secretName)
+// litellmMasterKey resolves the litellm gateway's ACTUAL admin master key: the
+// canonical copy is the first-run-wins k8s `litellm-keys` Secret (it survives
+// rebuilds while provisioning reuses the old sealed runner key), so on a reuse
+// run we read the canonical one back and re-seal the runner to it — a re-minted
+// master would diverge from the running gateway and every admin call would 401.
+// Returns "" only when the Secret doesn't exist yet (a fresh run mints it).
+func (e *rebuildEngine) litellmMasterKey(k3sVmid uint32) string {
+	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
+		k3sVmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return "" // a read failure is treated as "no canonical master yet" — a fresh run mints one
+	}
+	return strings.TrimSpace(out)
+}
+
+// litellmRun executes a script THROUGH the dedicated litellm runner (served on
+// loopback 127.0.0.1:8788, target "litellm"), injecting the named secrets by
+// env. This is where the litellm admin calls run: the runner host is this
+// machine — from which the gateway URL is reachable — and the secrets
+// (litellm = master, provider-key) are the litellm runner package's own
+// ciphertext. (Not the main proxmox-box runner, and not a nested
+// "exec --target …" prefix — that prefix is a shell no-op the old code leaned
+// on and never injected the secrets at all.)
+func (e *rebuildEngine) litellmRun(script string, timeoutS int, secrets ...string) (bool, string) {
+	args := []string{"exec", "--addr", "127.0.0.1:8788", "--agent-dir", rbOpsDir()}
+	if timeoutS > 0 {
+		args = append(args, "--timeout", strconv.Itoa(timeoutS))
+	}
+	for _, s := range secrets {
+		args = append(args, "--secret", s)
+	}
+	args = append(args, "litellm", script)
+	return e.runEnv(e.bins.Self, os.Environ(), args)
 }
 
 // opsAgentPubkey returns the ops-agent's pubkey (the rebuild's signing
