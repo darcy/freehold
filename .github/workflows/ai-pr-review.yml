@@ -45,7 +45,7 @@ jobs:
 
           PROMPT_FILE: "review-prompt.md"
           CONTEXT_FILES: "AGENTS.md,README.md,ARCHITECTURE.md"
-          EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,**/*.md,**/dist/**,**/vendor/**"
+          EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,*.md,**/*.md,**/dist/**,**/vendor/**"
           MAX_DIFF_CHARS: "60000"
           MAX_CONTEXT_FILE_CHARS: "20000"
           FAIL_ON_OVERSIZED_DIFF: "true"
