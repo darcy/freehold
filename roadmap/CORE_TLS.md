@@ -11,18 +11,26 @@ truth for the phase so work survives context compaction. Read `AGENTS.md` / `CHA
   (`RenderCaddyfile` + `CaddyManifest`: durable PVC, Caddyfile ConfigMap, hostNetwork Deployment
   on 80/443, NodePort svc); `config.CaddySpec`; `stageCaddy`/`caddyManifestScript`/`recordCaddy`;
   TUI `caddy (TLS edge)` row + probe.
-- **F3a DONE** (this branch): embedded go-acme/lego + `internal/cert` package —
+- **F3a DONE**: embedded go-acme/lego + `internal/cert` package —
   `providers_gen.go` GENERATED from lego's own registry (`go run ./internal/cert/genproviders`):
-  201 provider names + per-provider env-var table (route53→AWS_*, cloudflare→CLOUDFLARE_*,
-  digitalocean→DO_* …); `Providers()`/`ProviderEnvNames()`/`IsProvider()`; `Verify()` (throwaway
-  TXT present+cleanup); `IssueWildcard()` (lego DNS-01 via `SetDNS01Provider`); `WriteTLS()`
-  (atomic, /data/tls); `LoadExpiry()`/`ReuseIfValid()` reuse gate. Tests green.
-- **F3b NEXT**: wire the DNS provider token collection + storage through the ciphertext
-  runner-secret path + the rebuild/TUI cert step (dropdown from cert.Providers(), env collection,
-  pre-verify, save) + a cert stage that IssueWildcard → WriteTLS into the caddy-data PVC →
-  Caddy reload, gated by the ReuseIfValid reuse and --yes hard-error.
-- **F4–F6 PENDING**: Certs TUI tab; CPA pod -> wss://relay.<d> + live D1; tests/docs/PR.
+  201 provider names + per-provider env-var table; `Providers()`/`ProviderEnvNames()`/`IsProvider()`;
+  `Verify()` (throwaway TXT); `IssueWildcard()` (DNS-01 via `SetDNS01Provider`); `WriteTLS()`;
+  `LoadExpiry()`/`ReuseIfValid()`/`ReuseIfValidBytes()` reuse gate. Tests green.
+- **F3b DONE**: `internal/cert/store.go` seals the DNS token to the ops identity
+  (AAD-bound, regenerable by freehold which runs lego in-process — never plaintext);
+  `stageCert()` right after `stageCaddy`: reuse the durable PVC cert when fresh (>=30d),
+  else resolve the token (sealed copy or interactive provider dropdown + lego-derived
+  env fields + freeform fallback), pre-verify via lego TXT, issue the wildcard, and
+  `installCaddyCert` writes chain/key into the caddy-data PVC via a short-lived helper
+  pod (survives Caddy's first-boot crash-loop) + restarts the edge; records expiry/issuer
+  into `config.Caddy.CertExpiry/CertIssuer`.
+- **F3c PENDING (optional)**: the TUI rebuild form step to collect the DNS provider up
+  front (like the litellm key) — today collection happens inline in stageCert.
+- **F4 IN PROGRESS**: Certs TUI tab (expiry list from config + issue/renew).
+- **F5–F6 PENDING**: CPA pod -> wss://relay.<d> (flip RelayWsURL once the edge truly
+  serves TLS live) + live D1; tests/docs/PR.
 - Binaries rebuilt + placed in `~/.cargo/bin/{freehold,control-plane}`.
+
 
 
 
