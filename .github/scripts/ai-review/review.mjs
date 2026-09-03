@@ -236,9 +236,28 @@ async function upsertTrackingComment(body) {
   }
 }
 
+const PROGRESS_ITEMS = [
+  'Gather context (AGENTS.md, README.md, ARCHITECTURE.md, CI status)',
+  'Read changed files',
+  'Check CI status',
+  'Review for BLOCKING/IMPORTANT issues',
+  'Post inline comments',
+  'Post final summary with verdict',
+];
+
+// The parent comment is the single tracking comment, updated as the review
+// progresses (like claude's parent) — inline comments are posted separately.
+function progressBody(doneCount, extra) {
+  const checklist = PROGRESS_ITEMS.map((p, i) => `${i < doneCount ? '- [x]' : '- [ ]'} ${p}`);
+  const parts = [TRACKING_MARKER, '### DeepSeek AI Review', ...checklist];
+  if (extra) parts.push(extra);
+  return parts.join('\n');
+}
+
 async function main() {
   const pr = github.context.payload.pull_request;
   const headSha = pr.head.sha;
+  const startedAt = Date.now();
 
   const diffResult = await buildDiff();
 
@@ -254,7 +273,7 @@ async function main() {
 
     const body = [
       TRACKING_MARKER,
-      `### AI Review — skipped`,
+      `### DeepSeek AI Review — skipped`,
       `**Reason:** ${isOversizedFile ? 'oversized file(s)' : 'diff too large'} ` +
         `(~${diffResult.totalChars.toLocaleString()} chars across ${diffResult.fileCount} file(s), limit ${MAX_DIFF_CHARS.toLocaleString()} chars).`,
       `${isOversizedFile ? 'Offending file(s)' : 'Largest files'}:\n${diffResult.offenders.map(f => `- ${f}`).join('\n')}`,
@@ -274,10 +293,14 @@ async function main() {
 
   const diff = diffResult.diff;
 
+  // Read the previous round's notes BEFORE overwriting the tracking comment,
+  // then post the in-progress parent so the review shows progress while the
+  // check is still running.
   const [ciStatus, previousRound] = await Promise.all([
     getCiStatus(headSha),
     getPreviousRoundNotes(),
   ]);
+  await upsertTrackingComment(progressBody(3, `**CI:** ${ciStatus}`));
 
   const template = readFileSync(PROMPT_FILE, 'utf8');
   const prompt = template
@@ -291,10 +314,32 @@ async function main() {
   const result = await callLlm(prompt);
   const inline = Array.isArray(result.inline) ? result.inline : [];
 
-  // Don't re-flag a path:line already commented on in an earlier round.
+  // Re-flag only against comments already on THIS commit, so findings still get
+  // a child inline comment on a new push (matching claude's per-commit inline
+  // comments) without duplicating comments within the same commit.
   const existingComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number, per_page: 100 });
-  const seen = new Set(existingComments.map(c => `${c.path}:${c.line}`));
+  const seen = new Set(existingComments.filter(c => c.commit_id === headSha).map(c => `${c.path}:${c.line}`));
   const newInline = inline.filter(c => !seen.has(`${c.path}:${c.line}`));
+
+  // Child inline comments are posted as a review (no body, like claude); the
+  // parent comment is the tracking comment updated above. A single hallucinated
+  // line (a line number not part of the diff) 422s the whole call, so isolate it.
+  if (newInline.length > 0) {
+    try {
+      await octokit.rest.pulls.createReview({
+        owner, repo, pull_number,
+        event: 'COMMENT',
+        comments: newInline.map(c => ({
+          path: c.path,
+          line: c.line,
+          side: 'RIGHT',
+          body: `**[${c.severity}]** ${c.comment}`,
+        })),
+      });
+    } catch (e) {
+      core.warning(`Inline comments failed (${newInline.length}): ${e.message}`);
+    }
+  }
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
   const summaryText = [
@@ -307,28 +352,18 @@ async function main() {
     `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
   ].filter(Boolean).join('\n\n');
 
-  // Always post the review with a body (the parent comment inline comments
-  // roll up under) — even when there are no new inline comments, so every
-  // round leaves a parent review comment. A single hallucinated line (a line
-  // number not part of the diff) makes the whole createReview call 422, so
-  // isolate it so a bad inline comment can't prevent the summary comment.
-  try {
-    await octokit.rest.pulls.createReview({
-      owner, repo, pull_number,
-      event: 'COMMENT',
-      body: summaryText,
-      comments: newInline.map(c => ({
-        path: c.path,
-        line: c.line,
-        side: 'RIGHT',
-        body: `**[${c.severity}]** ${c.comment}`,
-      })),
-    });
-  } catch (e) {
-    core.warning(`Review comment failed: ${e.message}`);
-  }
-
-  await upsertTrackingComment(`${TRACKING_MARKER}\n\n${summaryText}`);
+  const elapsed = Math.round((Date.now() - startedAt) / 1000);
+  const runUrl = `${github.serverUrl}/${owner}/${repo}/actions/runs/${github.context.run_id}`;
+  const finalBody = [
+    TRACKING_MARKER,
+    `**DeepSeek finished @${pr.user.login}'s task in ${elapsed}s** — [View job](${runUrl})`,
+    `---`,
+    `### Review complete`,
+    ...PROGRESS_ITEMS.map(p => `- [x] ${p}`),
+    `---`,
+    summaryText,
+  ].join('\n');
+  await upsertTrackingComment(finalBody);
 
   core.info(`Posted ${newInline.length} inline comment(s). Verdict: ${result.verdict}`);
 }
