@@ -563,8 +563,7 @@ async fn main() -> Result<()> {
                 }
                 DnsSub::List => {
                     let snap = store.snapshot();
-                    if snap.resolver_wildcard.is_some() {
-                        let w = snap.resolver_wildcard.as_ref().unwrap();
+                    if let Some(w) = snap.resolver_wildcard.as_ref() {
                         println!("wildcard  *.{:<15} {}", w.apex, w.ip);
                         println!("  source: {} · created: {}", w.source, w.created_at);
                     } else {
