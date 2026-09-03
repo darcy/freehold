@@ -161,13 +161,31 @@ async function callLlm(prompt) {
   });
   if (!res.ok) throw new Error(`LLM API error ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content?.trim() || '{}';
+  const msg = data.choices?.[0]?.message;
+  if (!msg) throw new Error(`LLM returned no message: ${JSON.stringify(data).slice(0, 200)}`);
+
+  // Reasoning models (DeepSeek R1-style) leave `content` empty and put the
+  // answer in `reasoning_content`; some providers return `content` as an array
+  // of parts. Normalize all three shapes, then log the raw output so a bad
+  // response is diagnosable from the step log.
+  let content = '';
+  if (typeof msg.content === 'string') content = msg.content;
+  else if (Array.isArray(msg.content)) content = msg.content.map(p => p?.text || '').join('');
+  if (!content.trim() && typeof msg.reasoning_content === 'string') content = msg.reasoning_content;
+  core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 240)}`);
+
+  const raw = content.trim() || '{}';
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
+  let parsed;
   try {
-    return JSON.parse(cleaned);
+    parsed = JSON.parse(cleaned);
   } catch (e) {
     throw new Error(`LLM returned non-JSON: ${e.message} (raw starts: ${raw.slice(0, 60)})`);
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.verdict) {
+    throw new Error(`LLM response missing verdict (raw: ${raw.slice(0, 120)}). Check the model/prompt.`);
+  }
+  return parsed;
 }
 
 async function upsertTrackingComment(body) {
