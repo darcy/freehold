@@ -372,6 +372,24 @@ func TestMergeFromAnswersPreservesPrevFacts(t *testing.T) {
 
 func u32(v uint32) *uint32 { return &v }
 
+// TestFromAnswersRelayWsURLInternal is the guard for the review finding that
+// the CPA relay origin must stay on the relay's plain internal ws://<domain>:3000
+// shape until the Caddy edge serves TLS (CORE_TLS.md F5 flips it to
+// wss://relay.<domain>). Asserting it locks in the non-regression so a rebuild
+// from a fresh world never points the CPA at a host with no live 443 terminator.
+func TestFromAnswersRelayWsURLInternal(t *testing.T) {
+	e := &rebuildEngine{f: rebuildFlags{domain: "freehold-test.darcydev.net", agentName: "cpa"}}
+	cfg := e.fromAnswers()
+	if cfg.RelayWsURL != "ws://freehold-test.darcydev.net:3000" {
+		t.Errorf("RelayWsURL = %q, want internal ws://<domain>:3000", cfg.RelayWsURL)
+	}
+	if cfg.RelayURL != "https://relay.freehold-test.darcydev.net" {
+		t.Errorf("RelayURL = %q, want public https://relay.<domain>", cfg.RelayURL)
+	}
+	if cfg.CPURL != "https://cp.freehold-test.darcydev.net" {
+		t.Errorf("CPURL = %q, want https://cp.<domain>", cfg.CPURL)
+	}
+}
 func sptr(v string) *string { return &v }
 
 // ---- door + NIP-11 parsing ----------------------------------------------------

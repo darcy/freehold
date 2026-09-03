@@ -416,7 +416,27 @@ func (e *rebuildEngine) run() error {
 		fmt.Fprintln(e.out, "  ✓ litellm gateway live")
 	}
 
-	// 14.6. C0: the core Caddy TLS fronting proxy — freehold's own edge. It
+	// 14.6. C0: register the CP resolver's explicit records (relay/cp/k3s +
+	// litellm) INSIDE the deployed CP, then point every guest at it. This runs
+	// BEFORE the Caddy edge and the CPA so a cold world's first CPA boot never
+	// races the very DNS wiring it dials: by the time the pod comes up, the
+	// split-horizon <domain> -> relay record exists and the k3s guest's
+	// nameserver is already pointed at the CP resolver (hostNetwork pod).
+	fmt.Fprintln(e.out, "  · writing the resolver records (relay/cp/k3s/litellm)…")
+	if err := e.stageDnsRegister(); err != nil {
+		return err
+	}
+	fmt.Fprintln(e.out, "  · pointing every guest at the resolver + verifying it answers…")
+	if err := e.stageDnsPoint(); err != nil {
+		return err
+	}
+	fmt.Fprintln(e.out, "  ✓ internal DNS resolver live (CP-owned)")
+	fmt.Fprintln(e.out, "  · registering the Caddy wildcard apex (*.<domain> -> k3s node)…")
+	if err := e.stageDnsWildcard(); err != nil {
+		return err
+	}
+
+	// 14.65. C0: the core Caddy TLS fronting proxy — freehold's own edge. It
 	// fronts the relay over the wildcard cert (F3 issues it; F5 points the CPA
 	// at wss://relay.<domain>). Rides the k3s node (hostNetwork), so it needs
 	// the substrate; part of the desired world whenever k3s is on.
@@ -432,28 +452,14 @@ func (e *rebuildEngine) run() error {
 	// k3s Pod running the buzz-sprig harness (Chunk 4 Phase A: A2/A3/A5).
 	// It needs both the k3s substrate and the litellm gateway to reason, so
 	// opting either out skips the CPA too (a brainless pod is a dead pod).
+	// The DNS stages above (14.6) run first so the relay address it dials is
+	// already LAN-resolvable through the node on first boot.
 	if !e.f.noK3s && !e.f.noLitellm {
 		fmt.Fprintln(e.out, "  · deploying the CPA (buzz-sprig pod into k3s; rollout up to 5m)…")
 		if err := e.stageCpa(); err != nil {
 			return err
 		}
 		fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
-	}
-
-	// 14.75. C0: register the CP resolver's explicit records (relay/cp/k3s +
-	// litellm) INSIDE the deployed CP, then point every guest at it.
-	fmt.Fprintln(e.out, "  · writing the resolver records (relay/cp/k3s/litellm)…")
-	if err := e.stageDnsRegister(); err != nil {
-		return err
-	}
-	fmt.Fprintln(e.out, "  · pointing every guest at the resolver + verifying it answers…")
-	if err := e.stageDnsPoint(); err != nil {
-		return err
-	}
-	fmt.Fprintln(e.out, "  ✓ internal DNS resolver live (CP-owned)")
-	fmt.Fprintln(e.out, "  · registering the Caddy wildcard apex (*.<domain> -> k3s node)…")
-	if err := e.stageDnsWildcard(); err != nil {
-		return err
 	}
 
 	// 15. the relay's signing key via NIP-11 (best-effort trust anchor).
@@ -845,10 +851,17 @@ func (e *rebuildEngine) stopRunner(pid string) {
 // config::Config::from_answers). runner pubkey resolved from the package.
 func (e *rebuildEngine) fromAnswers() *config.Config {
 	runnerPK, _ := loadRPubkey(filepath.Join(rbRunnerPkgs(), e.f.target))
+	// RelayWsURL stays on the relay's plain internal ws://<domain>:3000 origin
+	// — the connection verified live in the D1 world — until the Caddy edge
+	// actually serves TLS (F5 of roadmap/CORE_TLS.md flips it to
+	// wss://relay.<domain> once the wildcard cert is live). Pointing it at a
+	// host with no working 443 terminator before then would regress every
+	// rebuild. RelayURL/CPURL (public, operator-facing) already use the
+	// relay./cp. subdomain topology the edge will serve.
 	cfg := &config.Config{
 		Domain:         e.f.domain,
 		RelayURL:       "https://relay." + e.f.domain,
-		RelayWsURL:     "wss://relay." + e.f.domain,
+		RelayWsURL:     "ws://" + e.f.domain + ":3000",
 		CPURL:          "https://cp." + e.f.domain,
 		OperatorPubkey: e.f.operatorPubkey,
 		Runner: config.RunnerRef{
@@ -2509,10 +2522,12 @@ func (e *rebuildEngine) stageCpa() error {
 		return err
 	}
 	// The harness speaks WS to the relay. The pod joins the community relay
-	// over the LAN: resolve the domain internally to the relay LXC and speak
+	// over the LAN: resolve the domain internally to the relay LXC (the CP
+	// resolver's split-horizon record wired before this stage) and speak
 	// plain ws on the relay's HTTP port (:3000 — the deployment's
-	// BUZZ_HTTP_PORT), because there is no TLS terminator on the LAN for the
-	// public wss:443 origin (that only exists on the external/Tailscale face).
+	// BUZZ_HTTP_PORT). The Caddy edge fronts TLS at wss://relay.<domain>, but
+	// the pod keeps the LAN ws origin until F5 flips it (roadmap/CORE_TLS.md)
+	// — a wss:443 host with no live cert yet would be a dead pod.
 	// cfg.RelayWsURL records this internal origin; fall back to deriving wss
 	// from the public URL for worlds that do reach the relay over TLS.
 	relayURL := cfg.RelayWsURL
