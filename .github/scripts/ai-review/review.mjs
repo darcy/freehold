@@ -303,13 +303,16 @@ async function main() {
   await upsertTrackingComment(progressBody(3, `**CI:** ${ciStatus}`));
 
   const template = readFileSync(PROMPT_FILE, 'utf8');
+  // Use function replacements: String.replace interprets $&, $', $$ etc. in the
+  // replacement string, which corrupts the diff (the code contains '$&'), turning
+  // it into '{{DIFF}}'. Functions avoid that substitution.
   const prompt = template
-    .replace('{{REPO}}', `${owner}/${repo}`)
-    .replace('{{PR_NUMBER}}', String(pull_number))
-    .replace('{{CI_STATUS}}', ciStatus)
-    .replace('{{PREVIOUS_ROUND}}', previousRound)
-    .replace('{{CONTEXT_FILES}}', readContextFiles())
-    .replace('{{DIFF}}', diff);
+    .replace('{{REPO}}', () => `${owner}/${repo}`)
+    .replace('{{PR_NUMBER}}', () => String(pull_number))
+    .replace('{{CI_STATUS}}', () => ciStatus)
+    .replace('{{PREVIOUS_ROUND}}', () => previousRound)
+    .replace('{{CONTEXT_FILES}}', () => readContextFiles())
+    .replace('{{DIFF}}', () => diff);
 
   const result = await callLlm(prompt);
   const inline = Array.isArray(result.inline) ? result.inline : [];
@@ -353,7 +356,7 @@ async function main() {
   ].filter(Boolean).join('\n\n');
 
   const elapsed = Math.round((Date.now() - startedAt) / 1000);
-  const runUrl = `${github.serverUrl}/${owner}/${repo}/actions/runs/${github.context.run_id}`;
+  const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
   const finalBody = [
     TRACKING_MARKER,
     `**DeepSeek finished @${pr.user.login}'s task in ${elapsed}s** — [View job](${runUrl})`,
