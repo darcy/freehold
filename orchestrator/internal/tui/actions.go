@@ -385,6 +385,12 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			if strings.EqualFold(strings.TrimSpace(f.Inputs[5]), "n") {
 				args = append(args, "--with-k3s=false")
+			} else {
+				// The CPA needs the litellm gateway to reason (D1): when k3s is
+				// on, wire it so a `t` → `B` cycle actually rebuilds the CPA's
+				// model path. The gateway reuses the already-sealed provider
+				// key when present (see stageLitellm).
+				args = append(args, "--with-litellm")
 			}
 			if name := strings.TrimSpace(f.Inputs[6]); name != "" {
 				args = append(args, "--agent-name", name)

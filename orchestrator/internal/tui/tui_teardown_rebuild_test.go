@@ -103,6 +103,23 @@ func TestRebuildFormSteps(t *testing.T) {
 			t.Errorf("rebuild inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want)
 		}
 	}
+	// Completing the form dispatches the rebuild subprocess. With k3s on, it
+	// must wire the litellm gateway (the CPA needs it to reason) and forward
+	// the named CPA agent — and never disable k3s.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if cmd != nil {
+		if start, ok := cmd().(activityStartMsg); ok {
+			got := strings.Join(start.args, " ")
+			for _, want := range []string{"--with-litellm", "--agent-name", "my-cpa"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("rebuild args %q missing %q", got, want)
+				}
+			}
+			if strings.Contains(got, "--with-k3s=false") {
+				t.Errorf("rebuild args must keep k3s on when not opted out: %q", got)
+			}
+		}
+	}
 
 	// rebuild must also start in configure mode (half-built worlds).
 	m2 := &Model{Mode: ModeConfigure}

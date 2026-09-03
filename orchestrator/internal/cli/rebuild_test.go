@@ -698,3 +698,33 @@ func countStr(list []string, s string) int {
 	}
 	return n
 }
+
+func TestLitellmHasProviderKey(t *testing.T) {
+	dir := t.TempDir()
+	write := func(s string) {
+		if err := os.WriteFile(filepath.Join(dir, "secrets.json"), []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// provider-key present -> reuse.
+	write(`{"secrets":{"litellm":"abc","provider-key":"def"},"targets":["litellm"],"grants":[]}`)
+	if !litellmHasProviderKey(dir) {
+		t.Error("expected provider-key detected as present")
+	}
+	// missing -> require a fresh supply.
+	write(`{"secrets":{"litellm":"abc"},"targets":["litellm"],"grants":[]}`)
+	if litellmHasProviderKey(dir) {
+		t.Error("expected no provider-key")
+	}
+	// corrupted / absent file -> conservative (treat as absent).
+	write(`{not json`)
+	if litellmHasProviderKey(dir) {
+		t.Error("expected corrupt package to read as no provider-key")
+	}
+	if err := os.Remove(filepath.Join(dir, "secrets.json")); err != nil {
+		t.Fatal(err)
+	}
+	if litellmHasProviderKey(dir) {
+		t.Error("expected missing package to read as no provider-key")
+	}
+}

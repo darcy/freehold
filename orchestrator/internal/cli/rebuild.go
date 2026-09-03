@@ -23,6 +23,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -1899,9 +1900,17 @@ func (e *rebuildEngine) stageDnsPoint() error {
 //	THROUGH it with the secrets requested BY NAME — the runner decrypts,
 //	injects env, redacts output (the locked agent-vs-secret shape).
 func (e *rebuildEngine) stageLitellm() error {
-	if e.f.litellmProviderKey == "" {
+	runnerDir := filepath.Join(rbRunnerPkgs(), "litellm")
+
+	// The provider key (operator's fireworks/upstream supply) is needed
+	// ONCE, at first shipment, to seed the litellm runner — after that it is
+	// sealed in the runner package (ciphertext) and reused on rebuilds, so a
+	// `freehold rebuild` does not demand a fresh supply every time.
+	reusingKey := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
+	if e.f.litellmProviderKey == "" && !reusingKey {
 		return fmt.Errorf("litellm needs the provider key at bootstrap: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY")
 	}
+
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil || cfg.Lxc.K3s.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
 		return fmt.Errorf("no k3s coords recorded — cannot place the litellm gateway")
@@ -1910,9 +1919,9 @@ func (e *rebuildEngine) stageLitellm() error {
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	gwURL := "http://" + k3sIP + ":31400"
 
-	masterKey := genSecretHex()  // litellm's admin key (re-mint)
-	postgresPw := genSecretHex() // postgres password
-	providerKey := e.f.litellmProviderKey
+	masterKey := genSecretHex()           // litellm's admin key (re-mint)
+	postgresPw := genSecretHex()          // postgres password
+	providerKey := e.f.litellmProviderKey // "" when reusing the sealed key
 
 	// ---- Leg 1: kube workloads. The k8s Secrets (master + postgres pw) are
 	// CP-GENERATED installer material (like deploy flags) — they cross the
@@ -1925,7 +1934,6 @@ func (e *rebuildEngine) stageLitellm() error {
 	}
 
 	// ---- Leg 2: model registration through the litellm runner. -----------
-	runnerDir := filepath.Join(rbRunnerPkgs(), "litellm")
 	agentPK := e.opsAgentPubkey()
 	env := append(
 		[]string{"FREEHOLD_LITELLM_MASTER=" + masterKey},
@@ -1947,8 +1955,15 @@ func (e *rebuildEngine) stageLitellm() error {
 		{"provider-key", "FREEHOLD_LITELLM_PROVIDER"},
 		{"postgres-pw", "FREEHOLD_LITELLM_PG"},
 	} {
+		val := map[string]string{"provider-key": providerKey, "postgres-pw": postgresPw}[extra.name]
+		if val == "" && extra.name == "provider-key" && reusingKey {
+			// The provider key is already sealed in the runner package —
+			// re-shipping an empty value would clobber nothing but must be
+			// skipped so a rebuild reuses the stored one.
+			continue
+		}
 		extraEnv := append(
-			[]string{extra.env + "=" + map[string]string{"provider-key": providerKey, "postgres-pw": postgresPw}[extra.name]},
+			[]string{extra.env + "=" + val},
 			os.Environ()...,
 		)
 		if ok, out := e.runEnv(e.bins.ControlPlane, extraEnv, []string{
@@ -2166,6 +2181,25 @@ echo LEG2_OK
 // the litellm runner (LITELLM = master injected by name), so the admin key
 // never rides argv; litellm's OpenAI-compat gateway is reached on loopback and
 // kubectl is the local k3s controller's.
+// litellmHasProviderKey reports whether the litellm runner package already
+// carries a sealed provider-key (so a rebuild can reuse it instead of demanding
+// a fresh supply). It inspects only the ciphertext map's secret NAMES — never
+// any value.
+func litellmHasProviderKey(runnerDir string) bool {
+	b, err := os.ReadFile(filepath.Join(runnerDir, "secrets.json"))
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Secrets map[string]string `json:"secrets"`
+	}
+	if err := json.Unmarshal(b, &pkg); err != nil {
+		return false
+	}
+	_, ok := pkg.Secrets["provider-key"]
+	return ok
+}
+
 func litellmCpaKeyScript(k3sVmid uint32, secretName string) string {
 	k := `K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`
 	return fmt.Sprintf(`set -euo pipefail
