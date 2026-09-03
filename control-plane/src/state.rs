@@ -264,10 +264,7 @@ impl StateStore {
         self.inner.read().resolver_wildcard.clone()
     }
 
-    pub fn set_resolver_wildcard(
-        &self,
-        wildcard: Option<DnsWildcard>,
-    ) -> Result<(), StateError> {
+    pub fn set_resolver_wildcard(&self, wildcard: Option<DnsWildcard>) -> Result<(), StateError> {
         self.inner.write().resolver_wildcard = wildcard;
         self.save()
     }

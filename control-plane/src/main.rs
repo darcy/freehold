@@ -590,29 +590,27 @@ async fn main() -> Result<()> {
                     sync()?;
                     println!("dnsmasq addn-hosts + wildcard apex synced + reloaded");
                 }
-                DnsSub::Wildcard(wc) => {
-                    match (wc.apex, wc.ip) {
-                        (Some(apex), Some(ip)) => {
-                            freehold_control_plane::dns::validate_name(&apex)?;
-                            freehold_control_plane::dns::validate_ip(&ip)?;
-                            store.set_resolver_wildcard(Some(
-                                freehold_control_plane::state::DnsWildcard {
-                                    apex: apex.clone(),
-                                    ip: ip.clone(),
-                                    source: wc.source.clone(),
-                                    created_at: freehold_control_plane::state::now_secs(),
-                                },
-                            ))?;
-                            sync()?;
-                            println!("wildcard apex {apex} -> {ip} (source: {})", wc.source);
-                        }
-                        _ => {
-                            store.set_resolver_wildcard(None)?;
-                            sync()?;
-                            println!("wildcard apex cleared");
-                        }
+                DnsSub::Wildcard(wc) => match (wc.apex, wc.ip) {
+                    (Some(apex), Some(ip)) => {
+                        freehold_control_plane::dns::validate_name(&apex)?;
+                        freehold_control_plane::dns::validate_ip(&ip)?;
+                        store.set_resolver_wildcard(Some(
+                            freehold_control_plane::state::DnsWildcard {
+                                apex: apex.clone(),
+                                ip: ip.clone(),
+                                source: wc.source.clone(),
+                                created_at: freehold_control_plane::state::now_secs(),
+                            },
+                        ))?;
+                        sync()?;
+                        println!("wildcard apex {apex} -> {ip} (source: {})", wc.source);
                     }
-                }
+                    _ => {
+                        store.set_resolver_wildcard(None)?;
+                        sync()?;
+                        println!("wildcard apex cleared");
+                    }
+                },
             }
             Ok(())
         }
@@ -861,7 +859,8 @@ fn dns_sync_resolver(
                 .arg("command -v dnsmasq >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsmasq >/dev/null 2>&1); mkdir -p /etc/dnsmasq.d")
                 .output()
                 .map_err(|e| e.to_string())?;
-            std::fs::copy(&conf, "/etc/dnsmasq.d/freehold-names.conf").map_err(|e| e.to_string())?;
+            std::fs::copy(&conf, "/etc/dnsmasq.d/freehold-names.conf")
+                .map_err(|e| e.to_string())?;
             let _ = std::process::Command::new("sh")
                 .arg("-c")
                 .arg("systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true")

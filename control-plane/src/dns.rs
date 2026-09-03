@@ -214,7 +214,14 @@ mod dns_tests {
 
     #[test]
     fn name_validation() {
-        for ok in ["relay", "litellm", "cp-2", "a1", "relay.freehold-test", "cp.freehold-test"] {
+        for ok in [
+            "relay",
+            "litellm",
+            "cp-2",
+            "a1",
+            "relay.freehold-test",
+            "cp.freehold-test",
+        ] {
             validate_name(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
         for bad in [
@@ -305,9 +312,11 @@ mod dns_tests {
         )
         .unwrap();
         assert!(wrote_hosts.borrow().contains("192.168.30.8 relay"));
-        assert!(wrote_conf
-            .borrow()
-            .contains("address=/.freehold-test.darcydev.net/192.168.30.7"));
+        assert!(
+            wrote_conf
+                .borrow()
+                .contains("address=/.freehold-test.darcydev.net/192.168.30.7")
+        );
         assert!(wrote_conf.borrow().starts_with("addn-hosts="));
         assert!(*reloaded.borrow());
     }
@@ -315,7 +324,10 @@ mod dns_tests {
     fn render_conf_wildcard_leading_dot() {
         let (_, tmp) = test_store();
         let base = render_dnsmasq_conf(tmp.path(), None, None);
-        assert!(!base.contains("address="), "no wildcard => no address=: {base}");
+        assert!(
+            !base.contains("address="),
+            "no wildcard => no address=: {base}"
+        );
         let with = render_dnsmasq_conf(
             tmp.path(),
             Some("freehold-test.darcydev.net"),
