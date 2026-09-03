@@ -158,10 +158,10 @@ fn ensure_resolver_readable(path: &Path) -> std::io::Result<()> {
         dir = d.parent();
     }
     if path.exists() {
-        let md = std::fs::metadata(&path)?;
+        let md = std::fs::metadata(path)?;
         let mode = md.permissions().mode();
         if mode & 0o444 != 0o444 {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o444))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o444))?;
         }
     }
     Ok(())

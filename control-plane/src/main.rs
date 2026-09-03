@@ -823,9 +823,7 @@ fn dns_sync_resolver(
             std::fs::write(conf, conf_body).map_err(|e| e.to_string())?;
             let _ = std::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!(
-                    "systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true"
-                ))
+                .arg("systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true")
                 .output()
                 .map_err(|e| e.to_string())?;
             Ok(())
