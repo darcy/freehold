@@ -8,11 +8,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// systemPrompt is the real multi-line prompt, loaded from the repo root's
-// prompts/ dir (what stageCpa passes to AgentManifestScript — the old tests
-// passed a path string, which is why the block-scalar bug compiled).
+// systemPrompt is the real multi-line prompt, loaded from the copy embedded
+// in internal/cli/prompts (what stageCpa passes to AgentManifestScript —
+// the old tests passed a path string, which is why the block-scalar bug
+// compiled).
 func systemPrompt() string {
-	b, err := os.ReadFile("../../../prompts/CPA_SYSTEM_PROMPT.md")
+	b, err := os.ReadFile("../cli/prompts/CPA_SYSTEM_PROMPT.md")
 	if err != nil {
 		panic(err)
 	}

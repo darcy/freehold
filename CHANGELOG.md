@@ -25,16 +25,20 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
-## [0.4.1] — Chunk 4 Phase B: the CPA's purpose on disk
+## [0.4.2] — Chunk 4 Phase B: the embed is real, the prompt rides the manifest
 
-### Added
+### Fixed
 
-*   **`prompts/CPA_SYSTEM_PROMPT.md` (under `orchestrator/`).** The CPA's
-    purpose, tone, and tool/scope boundaries are one reviewable Markdown
-    file, embedded by `freehold-orchestrator` and mounted into the CPA's pod
-    as the `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
-    so the pod re-reads it fresh on every spawn and editing the file +
-    redeploying is the only way CPA's behavior changes.
+*   **`//go:embed prompts/CPA_SYSTEM_PROMPT.md`** in
+    `orchestrator/internal/cli/rebuild.go` embeds the CPA's purpose from a
+    copy that rides inside the `orchestrator/` Go module (a `..` path or an
+    absolute path is invalid in a `//go:embed` directive, so the file can't
+    live at the repo root). `stageCpa` still passes the prompt's full text
+    into `agent.AgentPodManifest`, which embeds it as the
+    `<pod>-prompt` ConfigMap's block scalar (indented four spaces per line,
+    so `kubectl apply` parses it) and the pod mounts that at
+    `/srv/freehold/CPA_SYSTEM_PROMPT.md`, re-reading it fresh on every
+    spawn.
 *   **The CPA's toolset is a live MCP surface.** The agent pods now run with
     `BUZZ_ACP_MCP_COMMAND=/usr/local/bin/freehold-agent-tools` (+ args), so
     the create/grant/manage-agent toolset Phase A built is what the
