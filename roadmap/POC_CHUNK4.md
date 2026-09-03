@@ -74,12 +74,27 @@ to run, idle and active.
 
 #### Phase B — CPA system prompt
 
-- [ ] B1. Write `CPA_SYSTEM_PROMPT.md` at the repo root (sibling to
+- [x] B1. Write `CPA_SYSTEM_PROMPT.md` at the repo root (sibling to
       `AGENTS.md`): purpose, tone, and explicit tool/scope boundaries.
-- [ ] B2. Bootstrap loads this file into the harness config at first spawn.
-- [ ] B3. Every restart re-reads the current file from disk (never cached) —
+- [x] B2. Bootstrap loads this file into the harness config at first spawn
+      (the orchestrator embeds it and the CPA/agent pod mounts it as a
+      `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`; the
+      old `//go:embed not-embedded-here` marker was fiction — the file
+      simply didn't exist until B1).
+- [x] B3. Every restart re-reads the current file from disk (never cached) —
       editing the prompt and redeploying is the only way CPA's purpose
       changes.
+
+> **Phase B deferral (named, not lost):** the pod reads its prompt from a
+> `<pod>-prompt` ConfigMap (mounted read-only at
+> `/srv/freehold/CPA_SYSTEM_PROMPT.md`), seeded at apply time from the
+> orchestrator's embedded `CPA_SYSTEM_PROMPT.md`. A host restart of that pod
+> re-reads the mounted copy, so editing the prompt and redeploying changes
+> CPA's behavior (B3 as planned). A compute-only teardown/rebuild (Phase
+> 0.12) re-seeds the pod from the *embedded* bytes, so a prompt edit made
+> only in the CP's `/srv/data/cp` copy doesn't survive a rebuild until
+> re-deployed — wiring the pod to the CP's durable mount is a named
+> follow-up.
 
 #### Phase D — Live durability proof
 

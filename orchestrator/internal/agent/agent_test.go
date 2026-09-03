@@ -85,10 +85,10 @@ func TestCPAManifestScriptApplies(t *testing.T) {
 // TestSanitizePodName: display names become DNS-1123-safe object names.
 func TestSanitizePodName(t *testing.T) {
 	for in, want := range map[string]string{
-		"freehold":  "freehold",
-		"My CPA!":   "my-cpa",
-		"Über":      "ber", // non-ASCII -> dashes; leading/trailing dashes trimmed (DNS-1123)
-		"---":       "agent", // all dashes -> fallback
+		"freehold": "freehold",
+		"My CPA!":  "my-cpa",
+		"Über":     "ber",   // non-ASCII -> dashes; leading/trailing dashes trimmed (DNS-1123)
+		"---":      "agent", // all dashes -> fallback
 	} {
 		if got := sanitizePodName(in); got != want {
 			t.Errorf("sanitizePodName(%q) = %q, want %q", in, got, want)

@@ -25,6 +25,31 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.1] — Chunk 4 Phase B: the CPA's purpose on disk
+
+### Added
+
+*   **`CPA_SYSTEM_PROMPT.md` at the repo root.** The CPA's purpose, tone,
+    and tool/scope boundaries are one reviewable Markdown file —
+    embedded by `freehold-orchestrator` and mounted into the CPA's pod as the
+    `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`, so the
+    pod re-reads it fresh on every spawn and editing the file + redeploying
+    is the only way CPA's behavior changes. (The `//go:embed
+    not-embedded-here` marker and the `/srv/freehold` path in
+    `internal/cli/rebuild.go` were fiction — the file simply didn't exist
+    until B1.)
+*   **The CPA's toolset is a live MCP surface.** The agent pods now run with
+    `BUZZ_ACP_MCP_COMMAND=/usr/local/bin/freehold-agent-tools` (+ args), so
+    the create/grant/manage-agent toolset Phase A built is what the
+    reasoning agent actually calls (Phase A's named deferral closes).
+
+### Deferred (named, not lost)
+
+*   A compute-only teardown/rebuild re-seeds the pod's prompt ConfigMap from
+    the orchestrator's embedded bytes; serving the prompt from the CP's
+    `/srv/data/cp` mount (so an edit survives a rebuild without a
+    re-deploy) is a named follow-up — see `roadmap/POC_CHUNK4.md`.
+
 ## [0.4.0] — Chunk 4 Phase A: the CPA on a real-agent harness
 
 ### Added

@@ -59,6 +59,20 @@ func sanitizePodName(name string) string {
 	return s
 }
 
+// CPAAbsolutePromptPath is where the CPA pod reads its purpose from: the
+// <pod>-prompt ConfigMap mounts CPA_SYSTEM_PROMPT.md (embedded from the repo
+// root) read-only into the pod, and the agent re-reads it on every spawn —
+// never cached.
+const CPAAbsolutePromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
+
+// CpaMcpCommand/CpaMcpArgs wire the CPA's dedicated toolset into the harness
+// (B2: the toolset is registered as an MCP surface the pod can actually
+// call, not a dead config knob). No skill-execution tools yet (Chunk 5/6).
+const (
+	CpaMcpCommand = "/usr/local/bin/freehold-agent-tools"
+	CpaMcpArgs    = "serve --addr 127.0.0.1:8787"
+)
+
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
 // agent is ONE pod (at-most-one-live-instance, I4); the harness is the
 // container's PID-1 process (entrypoint `exec`), presence is kind:20001, and
@@ -71,10 +85,27 @@ func sanitizePodName(name string) string {
 // same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
 // Service, and Secret.
+//
+// systemPromptPath is where the pod reads its purpose from — the <pod>-prompt
+// ConfigMap mounts it at CPAbsolutePromptPath and the agent re-reads it on
+// every spawn (never cached; editing CPA_SYSTEM_PROMPT.md and redeploying is
+// the only way the CPA's behavior changes). mcpCommand is the harness's
+// dedicated toolset server (CpaMcpCommand) so the pod actually exposes the
+// create/grant/manage-agent tools to the reasoning agent.
 func AgentPodManifest(agentName, relayURL, systemPromptPath string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
+	promptCm := pod + "-prompt"
 	return fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: agents
+data:
+  CPA_SYSTEM_PROMPT.md: |
+    %s
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: %s
@@ -93,6 +124,8 @@ spec:
     env:
     - {name: BUZZ_RELAY_URL, value: %q}
     - {name: BUZZ_ACP_SYSTEM_PROMPT_FILE, value: %q}
+    - {name: BUZZ_ACP_MCP_COMMAND, value: %q}
+    - {name: BUZZ_ACP_MCP_ARGS, value: %q}
     - {name: BUZZ_ACP_AGENT_COMMAND, value: "buzz-agent"}
     - {name: BUZZ_ACP_RESPOND_TO, value: "allowlist"}
     - name: BUZZ_PRIVATE_KEY
@@ -101,6 +134,11 @@ spec:
     - name: BUZZ_ACP_AGENT_OWNER
       valueFrom:
         secretKeyRef: {name: %s, key: owner}
+    volumeMounts:
+    - {name: prompt, mountPath: %s, readOnly: true}
+  volumes:
+  - name: prompt
+    configMap: {name: %s}
 ---
 apiVersion: v1
 kind: Service
@@ -112,8 +150,20 @@ spec:
   ports:
   - {port: 443}
 `,
+		promptCm, indentSystemPrompt(systemPromptPath),
 		pod, pod, agentName, pod, SprigImage, relayURL, systemPromptPath,
-		secret, secret, pod, pod)
+		CpaMcpCommand, CpaMcpArgs,
+		secret, secret, CPAAbsolutePromptPath, promptCm, pod, pod)
+}
+
+// indentSystemPrompt indents every prompt line by two spaces so it embeds as
+// a valid k8s ConfigMap block scalar (`  CPA_SYSTEM_PROMPT.md: |`).
+func indentSystemPrompt(prompt string) string {
+	lines := strings.Split(strings.TrimRight(prompt, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = "  " + l
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // CPAPodManifest is the CPA's pod manifest — AgentPodManifest with the CPA's

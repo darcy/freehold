@@ -319,8 +319,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 ### `CPA_SYSTEM_PROMPT.md` (the CPA's purpose)
 
-*   **`CPA_SYSTEM_PROMPT.md`** (at `/srv/data/cp` and baked into
-    `freehold-orchestrator`'s `agents/<name>/AGENT.md`) — not a Go file and
+*   **`CPA_SYSTEM_PROMPT.md`** (at the repo root, embedded into
+    `freehold-orchestrator` and mounted into every agent pod as the
+    `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
+    re-read fresh on every spawn) — not a Go file and
     not a "CPA host / LLM routing" spec. It says:
 
 *   The CPA is a **reasoning agent that lives in Buzz** and is the system's

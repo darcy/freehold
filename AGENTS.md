@@ -86,7 +86,9 @@ repo, not the history.
   relay outage. No relay fork or patch.
 - **The CPA is a real, LLM-backed reasoning agent — the system's main user touchpoint.**
   It runs on the same buzz-acp/goose-class harness as the expert agents it creates, gets its
-  purpose from `CPA_SYSTEM_PROMPT.md`, and delegates to the agents it spawns rather than
+  purpose from `CPA_SYSTEM_PROMPT.md` (repo root, embedded by the orchestrator; each pod
+  re-reads it fresh from its read-only `/srv/freehold/CPA_SYSTEM_PROMPT.md` ConfigMap mount
+  on every restart), and delegates to the agents it spawns rather than
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.

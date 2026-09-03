@@ -2189,6 +2189,12 @@ func cpaIdentityDir() string {
 	return filepath.Join(rbStateDir(), "agent-cpa")
 }
 
+// rbCPAPromptPath is the repo-root CPA_SYSTEM_PROMPT.md that the orchestrator
+// embeds and ships to the k3s guest as the CPA pod's ConfigMap.
+func rbCPAPromptPath() string {
+	return "CPA_SYSTEM_PROMPT.md"
+}
+
 // ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its
 // pubkey. Rebuilds reuse the recorded identity (identity continuity), so the
 // CPA's Buzz profile, presence, and DMs all survive.
@@ -2221,9 +2227,14 @@ func (e *rebuildEngine) stageCpa() error {
 	}
 	// The harness speaks WS to the relay; the config records the HTTP origin.
 	relayURL := strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
-	// The in-pod prompt path for CPA_SYSTEM_PROMPT.md (mounted/embedded by a
-	// later phase; the pod reads it from this fixed path today).
-	promptPath := "/srv/freehold/CPA_SYSTEM_PROMPT.md"
+	// B1/B3: the CPA's purpose lives in CPA_SYSTEM_PROMPT.md at the repo
+	// root (side-by-side with AGENTS.md). The bootstrap loads it into the
+	// harness config at first spawn and every restart re-reads it fresh from
+	// the pod's ConfigMap mount — never cached, never a generated file.
+	promptBytes, err := os.ReadFile(rbCPAPromptPath())
+	if err != nil {
+		return fmt.Errorf("read CPA system prompt: %w", err)
+	}
 
 	// Ensure the cpa-identity Secret (nsec + owner) exists in the namespace.
 	id, err := flows.LoadIdentity(cpaIdentityDir())
@@ -2237,9 +2248,11 @@ func (e *rebuildEngine) stageCpa() error {
 	}
 
 	// Apply the CPA pod via THIS binary self-exec'd through the runner (the
-	// same transport stageLitellm's exec uses), then record the agent.
-	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.CPAManifestScript(
-		k3sVmid, relayURL, promptPath, cpaName), 420))
+	// same transport stageLitellm's exec uses), then record the agent. The
+	// runner executes this verbatim on the k3s guest; the pod's ConfigMap
+	// carries the prompt, so nothing ships the .md to the CP LXC.
+	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.AgentManifestScript(
+		k3sVmid, relayURL, string(promptBytes), cpaName), 420))
 	if !ok {
 		return fmt.Errorf("cpa pod apply failed:\n%s", out)
 	}
