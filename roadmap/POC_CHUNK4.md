@@ -116,6 +116,16 @@ to run, idle and active.
 - [ ] D3. Full compute-only teardown + rebuild of the CPA's LXC (Phase 0.12's
       reattach-by-reference); confirm identity, memory, and agent-registry
       roster all survive.
+- [x] D4. **Rebuild reconciles the full desired world (cleanup).** Replace the
+      opt-*in* `--with-k3s`/`--with-litellm` flags with opt-*out*
+      `--no-k3s`/`--no-litellm`: a default `rebuild` brings up relay/cp/k3s/
+      litellm/CPA idempotently (stages skip what's already present; teardown
+      what you want replaced and rebuild to resurrect only the missing piece).
+      The CPA rides litellm (opt out of either and the CPA is skipped), the
+      litellm gateway reuses its already-sealed fireworks key on rebuilt (only
+      a truly cold world prompts/hard-errors for a fresh one), and the TUI `B`
+      form gained a litellm step (blank = on). D1–D3 drills (above) are the
+      live proof this reconcile behaves end to end.
 
 #### Phase E — Agent-creates-agent
 

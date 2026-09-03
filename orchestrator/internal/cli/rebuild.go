@@ -61,8 +61,8 @@ var rebuildCmd = &cobra.Command{
 		f.sizeGB, _ = cmd.Flags().GetUint64("size-gb")
 		f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 		f.thinPool, _ = cmd.Flags().GetString("thin-pool")
-		f.withK3s, _ = cmd.Flags().GetBool("with-k3s")
-		f.withLitellm, _ = cmd.Flags().GetBool("with-litellm")
+		f.noK3s, _ = cmd.Flags().GetBool("no-k3s")
+		f.noLitellm, _ = cmd.Flags().GetBool("no-litellm")
 		f.litellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
 		if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
 			f.litellmProviderKey = v
@@ -103,12 +103,12 @@ func init() {
 	rebuildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	rebuildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	rebuildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
-	rebuildCmd.Flags().Bool("with-k3s", true, "Boot + install the k3s substrate LXC as part of the world")
+	rebuildCmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC (defaults to the full world — relay/cp/k3s/litellm/CPA; stages reconcile idempotently and skip what is already present)")
 	rebuildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	rebuildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
 	rebuildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for STATIC guest IPs (unused with DHCP)")
-	rebuildCmd.Flags().Bool("with-litellm", false, "C0: deploy the litellm gateway (kube workloads + runner + model registration) during the rebuild")
-	rebuildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (C0 — supplied at bootstrap, never committed; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
+	rebuildCmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
+	rebuildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	rebuildCmd.Flags().String("relay-ip", "", "STATIC relay LXC IP (CIDR, e.g. 192.168.30.8/24) — absent => DHCP (Rust: the recorded config ip is re-booted static)")
 	rebuildCmd.Flags().String("cp-ip", "", "STATIC control-plane LXC IP (CIDR) — absent => DHCP")
 	rebuildCmd.Flags().String("k3s-ip", "", "STATIC k3s LXC IP (CIDR) — absent => DHCP")
@@ -129,8 +129,8 @@ type rebuildFlags struct {
 	sizeGB             uint64
 	poolSizeGB         uint64
 	thinPool           string
-	withK3s            bool
-	withLitellm        bool
+	noK3s              bool
+	noLitellm          bool
 	litellmProviderKey string
 	rootfsGB           uint32
 	memoryMB           uint32
@@ -382,7 +382,7 @@ func (e *rebuildEngine) run() error {
 	fmt.Fprintln(e.out, "  ✓ cp LXC booted + recorded")
 
 	// 12. the k3s substrate (boot-if-missing + in-guest install + record).
-	if e.f.withK3s {
+	if !e.f.noK3s {
 		fmt.Fprintln(e.out, "  · installing the k3s substrate (download + in-guest install; several minutes)…")
 		if err := e.stageK3s(); err != nil {
 			return err
@@ -404,8 +404,10 @@ func (e *rebuildEngine) run() error {
 
 	// 14.5. C0: the litellm gateway — provision the litellm runner (master +
 	// provider + postgres secrets sealed to it), apply the kube workloads,
-	// register the model, and record the coords for the Services row.
-	if e.f.withLitellm {
+	// register the model, and record the coords for the Services row. Part of
+	// the desired world whenever k3s is on (the CPA needs it to reason); only
+	// an explicit --no-litellm opts it out.
+	if !e.f.noK3s && !e.f.noLitellm {
 		fmt.Fprintln(e.out, "  · applying the litellm kube workloads (postgres + gateway; rollout up to 5m)…")
 		if err := e.stageLitellm(); err != nil {
 			return err
@@ -415,9 +417,9 @@ func (e *rebuildEngine) run() error {
 
 	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
 	// k3s Pod running the buzz-sprig harness (Chunk 4 Phase A: A2/A3/A5).
-	// It needs the k3s substrate; where k3s is present the CPA is part of
-	// the world (A1 made the display name a required install answer).
-	if e.f.withK3s {
+	// It needs both the k3s substrate and the litellm gateway to reason, so
+	// opting either out skips the CPA too (a brainless pod is a dead pod).
+	if !e.f.noK3s && !e.f.noLitellm {
 		fmt.Fprintln(e.out, "  · deploying the CPA (buzz-sprig pod into k3s; rollout up to 5m)…")
 		if err := e.stageCpa(); err != nil {
 			return err
@@ -893,25 +895,25 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 // k3s/litellm exactly when their flags were given. The pipeline's mid-stage
 // recorders append as they go; finalSave replaces the list wholesale so a
 // withheld flag drops its survivor.
-func managedForFlags(withK3s, withLitellm bool) []string {
+func managedForFlags(noK3s, noLitellm bool) []string {
 	m := []string{"relay", "cp"}
-	if withK3s {
+	if !noK3s {
 		m = append(m, "k3s")
 	}
-	if withLitellm {
+	if !noK3s && !noLitellm {
 		m = append(m, "litellm")
 	}
 	return m
 }
 
 // worldManaged is managedForFlags plus the k3s-guard: a k3s LXC that a prior
-// run recorded (vmid present) stays in the manifest even when this run
-// skipped k3s, so teardown still owns it. litellm needs no such carve-out —
+// run recorded (vmid present) stays in the manifest even when this run opted
+// it out --no-k3s, so teardown still owns it. litellm needs no such carve-out —
 // it is a kube workload with no guest of its own; its pods ride the k3s
 // guest's teardown.
-func worldManaged(withK3s, withLitellm bool, k3sVmid *uint32) []string {
-	m := managedForFlags(withK3s, withLitellm)
-	if !withK3s && k3sVmid != nil && !containsStr(m, "k3s") {
+func worldManaged(noK3s, noLitellm bool, k3sVmid *uint32) []string {
+	m := managedForFlags(noK3s, noLitellm)
+	if noK3s && k3sVmid != nil && !containsStr(m, "k3s") {
 		m = append(m, "k3s")
 	}
 	return m
@@ -945,16 +947,11 @@ func (e *rebuildEngine) finalSave() error {
 	}
 	cfg := mergeFromAnswers(e.fromAnswers(), prev)
 	// The rebuild OWNS the world manifest: managed = the pieces THIS run
-	// deployed. A surviving config entry (e.g. litellm after a rebuild run
-	// WITHOUT --with-litellm) must not keep claiming a service the pipeline
-	// did not stand up — that is how the Services view showed a phantom
-	// "litellm (gateway) … down" for a world that never got one.
-	// The rebuild OWNS the world manifest: managed = the pieces THIS run
 	// deployed. A k3s LXC recorded by a PRIOR run is still ours to tear
-	// down even when this run skipped it (`--with-k3s=false`) — dropping it
+	// down even when this run opted it out (`--no-k3s`) — dropping it
 	// would make teardown say "skipped k3s LXC (not managed)" and leak the
 	// guest + its thin LV forever.
-	cfg.Managed = worldManaged(e.f.withK3s, e.f.withLitellm, cfg.Lxc.K3s.Vmid)
+	cfg.Managed = worldManaged(e.f.noK3s, e.f.noLitellm, cfg.Lxc.K3s.Vmid)
 	if rpk, ok := e.relayPubkeyNip11(); ok {
 		cfg.RelayPubkey = &rpk
 	}
@@ -1908,7 +1905,20 @@ func (e *rebuildEngine) stageLitellm() error {
 	// `freehold rebuild` does not demand a fresh supply every time.
 	reusingKey := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
 	if e.f.litellmProviderKey == "" && !reusingKey {
-		return fmt.Errorf("litellm needs the provider key at bootstrap: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY")
+		if e.f.yes {
+			return fmt.Errorf("litellm needs the provider key and none is sealed: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --yes)")
+		}
+		// Interactive: prompt once for the operator's supply on this cold
+		// world (it is sealed into the runner and never asked for again).
+		fmt.Fprintf(e.out, "  litellm first provision needs the provider (fireworks) API key: ")
+		line, err := bufio.NewReader(e.in).ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("reading litellm provider key: %w", err)
+		}
+		e.f.litellmProviderKey = strings.TrimSpace(strings.TrimSuffix(line, "\n"))
+		if e.f.litellmProviderKey == "" {
+			return fmt.Errorf("no litellm provider key supplied")
+		}
 	}
 
 	cfg, err := config.Load(e.f.configPath)
@@ -2283,7 +2293,7 @@ func (e *rebuildEngine) stageCpa() error {
 		return fmt.Errorf("no relay URL in config — the CPA must join the community relay")
 	}
 	if cfg.Litellm.URL == "" {
-		return fmt.Errorf("no litellm gateway recorded — the CPA needs a reasoning model (rebuild with --with-litellm)")
+		return fmt.Errorf("no litellm gateway recorded — the CPA needs a reasoning model (litellm is part of the world unless --no-litellm)")
 	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	cpaName := cfg.CPAName

@@ -242,8 +242,11 @@ func TestCollectDefaultsCarryThrough(t *testing.T) {
 	if f.rootfsGB != 16 || f.memoryMB != 2048 {
 		t.Errorf("size defaults lost: rootfs=%d memory=%d", f.rootfsGB, f.memoryMB)
 	}
-	if !f.withK3s {
+	if f.noK3s {
 		t.Error("install must boot k3s by default (parity with rebuild)")
+	}
+	if f.noLitellm {
+		t.Error("install must deploy litellm by default (parity with rebuild)")
 	}
 }
 
@@ -299,7 +302,8 @@ func TestRunInstallHandsCollectedFlagsToEngine(t *testing.T) {
 		rootfsGB:         16,
 		memoryMB:         2048,
 		relayGw:          "192.168.30.1",
-		withK3s:          true,
+		noK3s:            false,
+		noLitellm:        false,
 		confirmStorage:   true,
 		configPath:       defaultConfigPath(),
 	}

@@ -220,28 +220,37 @@ ostype: debian
 }
 
 // TestWorldManaged keeps a recorded k3s guest in the manifest when a re-run
-// skips k3s, so teardown still destroys it instead of leaking the LXC + LV.
+// opted k3s out (--no-k3s), so teardown still destroys it instead of leaking
+// the LXC + LV. litellm rides k3s and needs no guest carve-out.
 func TestWorldManaged(t *testing.T) {
-	got := worldManaged(false, false, ptr(uint32(102)))
-	if !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+	// Full world (k3s + litellm on), recorded vmid / absent vmid.
+	if got := worldManaged(false, false, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full world with vmid = %v, want relay/cp/k3s/litellm", got)
+	}
+	if got := worldManaged(false, false, nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full world with no vmid = %v, want relay/cp/k3s/litellm", got)
+	}
+	// k3s on, litellm opted out.
+	if got := worldManaged(false, true, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+		t.Errorf("k3s-only world = %v, want relay/cp/k3s", got)
+	}
+	// k3s opted out but a recorded guest exists: it stays owned for teardown.
+	if got := worldManaged(true, false, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
 		t.Errorf("skipped k3s with recorded vmid = %v, want relay/cp/k3s", got)
 	}
-	if got := worldManaged(false, false, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
-		t.Errorf("skipped k3s with no vmid = %v, want relay/cp", got)
-	}
-	if got := worldManaged(true, true, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
-		t.Errorf("full world = %v", got)
+	if got := worldManaged(true, true, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("k3s+litellm opted out, no vmid = %v, want relay/cp", got)
 	}
 }
 
 func TestManagedForFlags(t *testing.T) {
-	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
-		t.Errorf("base = %v", got)
+	if got := managedForFlags(true, true); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("base (k3s+litellm out) = %v", got)
 	}
-	if got := managedForFlags(true, false); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+	if got := managedForFlags(false, true); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
 		t.Errorf("with k3s = %v", got)
 	}
-	if got := managedForFlags(true, true); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
 		t.Errorf("full = %v", got)
 	}
 }

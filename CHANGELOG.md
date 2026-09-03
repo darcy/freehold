@@ -25,6 +25,31 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.3] — Chunk 4 D4: rebuild reconciles the full desired world
+
+### Changed
+
+*   **`rebuild` is desired-world, not opt-in.** The opt-*in* `--with-k3s` /
+    `--with-litellm` flags are gone; `rebuild` brings up relay/cp/k3s/litellm/CPA
+    by default and is idempotent per stage (boot-if-missing, create-if-absent,
+    first-run-wins) — teardown what you want replaced, rebuild, and it resurrects
+    only the missing piece. `--no-k3s` / `--no-litellm` are explicit opt-outs for
+    iterative/dev worlds. The CPA rides litellm (opt out of either and the CPA is
+    skipped: a brainless pod is a dead pod). The TUI `B` rebuild form gained a
+    litellm step (blank = on).
+*   **The litellm provider key is sealed and reused, not re-demanded.** The
+    provider (fireworks) key ships once into the litellm runner (ciphertext) and
+    is reused on rebuilds; only a truly cold world prompts interactively for a
+    fresh one (or hard-errors under `--yes`). Rebuild no longer asks for it when
+    it already has it.
+
+### Fixed
+
+*   The CPA's system prompt no longer claims `create-agent`/`grant-agent`/
+    `manage-agent` are callable tools (the MCP toolset was deferred for D1–D3) —
+    it states the current phase honestly and instructs the CPA to describe-and-
+    not-fake a delegation request (closes the review's tool-contract mismatch).
+
 ## [0.4.2] — Chunk 4 Phase B: the embed is real, the prompt rides the manifest
 
 ### Fixed
