@@ -156,6 +156,9 @@ async function callLlm(prompt) {
       model: LLM_MODEL,
       temperature: 0.1,
       max_tokens: 3000,
+      // The model drifted into prose despite the "respond with ONLY JSON"
+      // instruction; force structured output so the parse can't silently fail.
+      response_format: { type: 'json_object' },
       messages: [{ role: 'user', content: prompt }],
     }),
   });
