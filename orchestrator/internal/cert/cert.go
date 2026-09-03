@@ -262,6 +262,20 @@ func ReuseIfValid(fullchainPath string, now time.Time, minLifetime time.Duration
 	if err != nil {
 		return time.Time{}, false
 	}
+	return reuse(exp, now, minLifetime)
+}
+
+// ReuseIfValidBytes is ReuseIfValid for in-memory fullchain bytes (e.g. pulled
+// out of the Caddy pod over the runner).
+func ReuseIfValidBytes(fullchain []byte, now time.Time, minLifetime time.Duration) (time.Time, bool) {
+	exp, err := LoadExpiryFromBytes(fullchain)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return reuse(exp, now, minLifetime)
+}
+
+func reuse(exp time.Time, now time.Time, minLifetime time.Duration) (time.Time, bool) {
 	if exp.IsZero() || exp.Before(now.Add(minLifetime)) {
 		return time.Time{}, false
 	}

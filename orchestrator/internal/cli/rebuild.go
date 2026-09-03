@@ -22,6 +22,7 @@ package cli
 import (
 	"bufio"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/orchestrator/internal/agent"
+	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/deploy"
@@ -446,6 +448,11 @@ func (e *rebuildEngine) run() error {
 			return err
 		}
 		fmt.Fprintln(e.out, "  ✓ Caddy TLS edge live")
+		fmt.Fprintln(e.out, "  · ensuring the wildcard cert for the edge (embedded lego DNS-01)…")
+		if err := e.stageCert(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.out, "  ✓ wildcard cert in place")
 	}
 
 	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
@@ -2475,6 +2482,281 @@ func (e *rebuildEngine) stageCaddy() error {
 		return err
 	}
 	return nil
+}
+
+// ---- the wildcard cert stage (F3: embedded lego DNS-01) ---------------------
+//
+// Issues / reuses the relay wildcard cert for the Caddy edge. The DNS provider
+// token is sealed to the ops identity (freehold's own encryption key) and held
+// in the durable state dir; lego runs in-process. Reconcile-always: a valid
+// cert already on the PVC (>= 30d left) is reused and DNS-01 is skipped.
+
+// certCredPath is where the sealed DNS provider credential lives (durable).
+func (e *rebuildEngine) certCredPath() string {
+	return filepath.Join(rbStateDir(), "dns-provider.json")
+}
+
+// certIdentSecret returns the ops identity's encryption secret (raw bytes), the
+// identity, or an error. The ops identity is freehold's own — the only key that
+// must be able to reopen the sealed DNS token (lego runs in-process, not in a
+// runner).
+func (e *rebuildEngine) certIdent() (*flows.Identity, []byte, []byte, error) {
+	id, err := flows.LoadIdentity(rbOpsDir())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("no ops identity for cert storage: %w", err)
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("ops identity enc secret: %w", err)
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return id, secret, pub, nil
+}
+
+// stageCert ensures the Caddy edge has a valid wildcard cert: reuse the durable
+// one when fresh, else collect (or reuse) the DNS provider token, pre-verify it,
+// issue via embedded lego, install into the Caddy pod, and reload.
+func (e *rebuildEngine) stageCert() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.Domain == "" || cfg.Lxc.K3s.Vmid == nil {
+		return nil // no edge / no k3s -> nothing to certify
+	}
+	if cfg.Caddy.Host == "" {
+		fmt.Fprintln(e.out, "  · Caddy edge not recorded — skipping cert issuance")
+		return nil
+	}
+	k3sVmid := *cfg.Lxc.K3s.Vmid
+
+	// 1. Reuse the durable cert on the PVC when it's fresh (>= 30d left).
+	existing, err := e.caddyFullchain(k3sVmid)
+	if err == nil && len(existing) > 0 {
+		exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour)
+		if ok {
+			fmt.Fprintf(e.out, "  · reusing existing wildcard cert (expires %s)\n", exp.UTC().Format(time.RFC3339))
+			return e.recordCert(cfg, exp, cfg.Caddy.CertIssuer)
+		}
+	}
+	if err != nil && !e.f.noK3s {
+		fmt.Fprintln(e.out, "  · no reusable cert on the edge — will issue a fresh one")
+	}
+
+	// 2. Resolve the DNS provider token (reuse sealed copy or interactive).
+	provider, env, err := e.promptDNSCred()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  · pre-verifying %s DNS credentials (throwaway TXT round-trip)…\n", provider)
+	if err := cert.Verify(cfg.Domain, provider, env); err != nil {
+		return fmt.Errorf("DNS provider pre-verify failed: %w", err)
+	}
+
+	// 3. Issue the wildcard via embedded lego.
+	fmt.Fprintf(e.out, "  · issuing *.%s via lego (%s)…\n", cfg.Domain, provider)
+	issued, err := cert.IssueWildcard(cfg.Domain, provider, env)
+	if err != nil {
+		return err
+	}
+
+	// 4. Install into the Caddy pod + reload.
+	if err := e.installCaddyCert(k3sVmid, issued.Fullchain, issued.Key); err != nil {
+		return err
+	}
+	exp := issued.NotAfter
+	if exp.IsZero() {
+		exp, _ = cert.LoadExpiryFromBytes(issued.Fullchain)
+	}
+	fmt.Fprintf(e.out, "  ✓ wildcard cert issued (expires %s)\n", exp.UTC().Format(time.RFC3339))
+	return e.recordCert(cfg, exp, provider)
+}
+
+// recordCert persists the cert expiry + issuer into the config.
+func (e *rebuildEngine) recordCert(cfg *config.Config, exp time.Time, issuer string) error {
+	cfg.Caddy.CertExpiry = exp.UTC().Format(time.RFC3339)
+	if issuer != "" {
+		cfg.Caddy.CertIssuer = issuer
+	}
+	return cfg.Save(e.f.configPath)
+}
+
+// caddyFullchain cats the edge's durable fullchain out of the pod (base64) so
+// the reuse gate can parse its expiry without re-issuing.
+func (e *rebuildEngine) caddyFullchain(k3sVmid uint32) ([]byte, error) {
+	cmd := fmt.Sprintf(
+		"pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n caddy exec deploy/caddy -- sh -c 'cat /data/tls/fullchain.pem' 2>/dev/null | base64 -w0",
+		k3sVmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60))
+	if !ok {
+		return nil, fmt.Errorf("caddy fullchain unreadable: %s", strings.TrimSpace(out))
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+	if err != nil {
+		return nil, fmt.Errorf("caddy fullchain base64: %w", err)
+	}
+	return dec, nil
+}
+
+// installCaddyCert writes the chain/key into the Caddy durable PVC via a
+// short-lived helper pod that mounts the same caddy-data volume (so it works
+// even while Caddy itself is crash-looping on the very first boot, before any
+// cert exists), then reloads the edge. The cert bytes are base64-embedded in
+// the runner command only — transient in memory, never persisted by freehold.
+func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, fullchain, key []byte) error {
+	fcB64 := base64.StdEncoding.EncodeToString(fullchain)
+	keyB64 := base64.StdEncoding.EncodeToString(key)
+	script := fmt.Sprintf(`set -e
+pct exec %d -- sh -c '
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+printf %s | base64 -d > /tmp/fc.pem
+printf %s | base64 -d > /tmp/key.pem
+# Helper pod over the SAME durable PVC (works before Caddy is healthy).
+cat > /tmp/cert-installer.yaml <<'"'"'YAMLEOF'"'"'
+apiVersion: v1
+kind: Pod
+metadata: {name: cert-installer, namespace: caddy}
+spec:
+  restartPolicy: Never
+  containers:
+  - {name: install, image: busybox:1.36, command: ["sleep", "infinity"],
+     volumeMounts: [{name: data, mountPath: /data}]}
+  volumes:
+  - {name: data, persistentVolumeClaim: {claimName: caddy-data}}
+YAMLEOF
+$K -n caddy delete pod cert-installer --ignore-not-found=true >/dev/null 2>&1 || true
+$K apply -f /tmp/cert-installer.yaml
+$K -n caddy wait --for=condition=Ready pod/cert-installer --timeout=60s
+$K -n caddy exec pod/cert-installer -- sh -c "mkdir -p /data/tls && cat > /data/tls/fullchain.pem" < /tmp/fc.pem
+$K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/key.pem" < /tmp/key.pem
+$K -n caddy delete pod cert-installer >/dev/null 2>&1 || true
+$K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
+rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
+'`, k3sVmid, shellSingleQuote(fcB64), shellSingleQuote(keyB64))
+	ok, out := e.runBin(e.bins.Self, e.execArgs(script, 180))
+	if !ok {
+		return fmt.Errorf("caddy cert install failed:\n%s", out)
+	}
+	return nil
+}
+
+// shellSingleQuote single-quotes an arg for the embedded sh -c command.
+func shellSingleQuote(s string) string { return "'" + s + "'" }
+
+// promptDNSCred returns the DNS provider name + its env map, reusing the sealed
+// credential on disk when present, else interactively collecting it (provider
+// from lego's full registry, the provider's own env-var names) and saving it
+// sealed to the ops identity. Under --yes it keeps the existing copy; a missing
+// one is a hard error (no interactive collection headless).
+func (e *rebuildEngine) promptDNSCred() (string, map[string]string, error) {
+	path := e.certCredPath()
+	_, secret, pub, err := e.certIdent()
+	if err != nil {
+		return "", nil, err
+	}
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+	open := func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) }
+
+	if cert.CredExists(path) {
+		provider, env, err := cert.LoadCreds(path, open, secret)
+		if err != nil {
+			return "", nil, fmt.Errorf("reusing DNS credential: %w", err)
+		}
+		fmt.Fprintf(e.out, "  · reusing sealed DNS credential (%s)\n", provider)
+		return provider, env, nil
+	}
+
+	if e.f.yes {
+		return "", nil, fmt.Errorf("no DNS provider credential stored and interactive collection is disabled (--yes); run without --yes once to store it")
+	}
+
+	provider, err := e.promptProvider()
+	if err != nil {
+		return "", nil, err
+	}
+	env, err := e.promptProviderEnv(provider)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns"); err != nil {
+		return "", nil, fmt.Errorf("storing DNS credential: %w", err)
+	}
+	return provider, env, nil
+}
+
+// promptProvider asks the operator to pick a DNS-01 provider from lego's full
+// registry (index or name), shown in chunks.
+func (e *rebuildEngine) promptProvider() (string, error) {
+	provs := cert.Providers()
+	fmt.Fprintln(e.out, "")
+	fmt.Fprintln(e.out, "Choose the DNS provider for the wildcard cert (DNS-01). All of lego's providers are available:")
+	const perLine = 4
+	for i := 0; i < len(provs); i += perLine {
+		end := i + perLine
+		if end > len(provs) {
+			end = len(provs)
+		}
+		var buf []string
+		for j := i; j < end; j++ {
+			buf = append(buf, fmt.Sprintf("%2d %s", j+1, provs[j]))
+		}
+		fmt.Fprintln(e.out, "   "+strings.Join(buf, "   "))
+	}
+	for {
+		ans, err := e.prompt("provider (1-based index or name, e.g. route53)")
+		if err != nil {
+			return "", err
+		}
+		a := strings.TrimSpace(ans)
+		if idx, perr := strconv.Atoi(a); perr == nil && idx >= 1 && idx <= len(provs) {
+			return provs[idx-1], nil
+		}
+		if cert.IsProvider(a) {
+			return a, nil
+		}
+		fmt.Fprintln(e.out, "  unknown provider — pick an index or a name lego supports")
+	}
+}
+
+// promptProviderEnv collects the provider's env-var fields (from lego-derived
+// names; freeform KEY=VAL lines for unknown/auto-detecting providers).
+func (e *rebuildEngine) promptProviderEnv(provider string) (map[string]string, error) {
+	names := cert.ProviderEnvNames(provider)
+	env := map[string]string{}
+	if len(names) == 0 {
+		fmt.Fprintln(e.out, "  this provider has no enumerated env fields — paste KEY=VAL entries (one per line; empty line to finish):")
+		for {
+			line, err := e.prompt("KEY=VAL (or blank to finish)")
+			if err != nil {
+				return nil, err
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				break
+			}
+			k, v, ok := strings.Cut(line, "=")
+			if !ok || strings.TrimSpace(k) == "" {
+				fmt.Fprintln(e.out, "  expected KEY=VAL")
+				continue
+			}
+			env[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		return env, nil
+	}
+	fmt.Fprintln(e.out, "  this provider reads the following environment fields; enter each (blank field = leave unset):")
+	for _, n := range names {
+		v, err := e.prompt(n)
+		if err != nil {
+			return nil, err
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			env[n] = v
+		}
+	}
+	return env, nil
 }
 
 // ---- the CPA stage (Chunk 4 Phase A) ---------------------------------------

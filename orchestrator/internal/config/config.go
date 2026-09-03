@@ -83,10 +83,13 @@ type LitellmSpec struct {
 
 // CaddySpec records the core TLS fronting proxy's coords (Services row +
 // teardown ownership). URL is the public relay URL Caddy fronts; Host is the
-// k3s guest name the proxy rides on.
+// k3s guest name the proxy rides on. CertExpiry is the wildcard cert's leaf
+// NotAfter (RFC3339) as last issued/reused — the Certs tab + reuse gate input.
 type CaddySpec struct {
-	URL  string `toml:"url,omitempty"`
-	Host string `toml:"host,omitempty"`
+	URL        string `toml:"url,omitempty"`
+	Host       string `toml:"host,omitempty"`
+	CertExpiry string `toml:"cert_expiry,omitempty"`
+	CertIssuer string `toml:"cert_issuer,omitempty"` // the DNS provider name
 }
 
 // LxcGuest is a managed LXC's connect/status coordinates.

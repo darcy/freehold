@@ -51,6 +51,10 @@ func TestReuseIfValid(t *testing.T) {
 	if got.Before(now.Add(69 * 24 * time.Hour)) {
 		t.Errorf("expiry parsed too early: %s", got)
 	}
+	raw, err := os.ReadFile(fc)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// expiring: min 45d but only 70-30? Use a cert with < min left.
 	fc2 := writeSelfSigned(t, dir, now.Add(10*24*time.Hour))
@@ -61,6 +65,11 @@ func TestReuseIfValid(t *testing.T) {
 	// missing file -> never reuse
 	if _, ok := ReuseIfValid(filepath.Join(dir, "nope.pem"), now, 0); ok {
 		t.Errorf("missing file must not be reused")
+	}
+
+	// bytes variant matches the path variant (snapshot BEFORE fc2 overwrote fc)
+	if expB, ok := ReuseIfValidBytes(raw, now, 30*24*time.Hour); !ok || !expB.Equal(got) {
+		t.Errorf("ReuseIfValidBytes = %s/%v, want %s/true", expB, ok, got)
 	}
 }
 
