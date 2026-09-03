@@ -79,8 +79,8 @@ to run, idle and active.
       `//go:embed` can reach it): purpose, tone, and explicit tool/scope
       boundaries.
 - [x] B2. Bootstrap loads this file into the harness config at first spawn
-      (the orchestrator embeds it — `//go:embed prompts/CPA_SYSTEM_PROMPT.md`,
-      relative to `orchestrator/` — and the CPA/agent pod mounts it as a
+      (the orchestrator embeds it — `//go:embed CPA_SYSTEM_PROMPT.md` in the
+      `orchestrator/prompts` package — and the CPA/agent pod mounts it as a
       `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`).
 - [x] B3. Every restart re-reads the current file from disk (never cached) —
       editing the prompt and redeploying is the only way CPA's purpose

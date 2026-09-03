@@ -320,7 +320,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 ### `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (the CPA's purpose)
 
 *   **`orchestrator/prompts/CPA_SYSTEM_PROMPT.md`** (embedded into
-    `freehold-orchestrator` via `//go:embed prompts/CPA_SYSTEM_PROMPT.md`
+    `freehold-orchestrator` via the `orchestrator/prompts` package's
+    `//go:embed CPA_SYSTEM_PROMPT.md`
     and mounted into every agent pod as the
     `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
     re-read fresh on every spawn) — not a Go file and

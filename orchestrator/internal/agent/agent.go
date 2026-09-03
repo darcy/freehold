@@ -60,9 +60,9 @@ func sanitizePodName(name string) string {
 }
 
 // CPASystemPromptPath is where the CPA pod reads its purpose from: the
-// <pod>-prompt ConfigMap mounts prompts/CPA_SYSTEM_PROMPT.md (embedded from
-// the repo root) read-only into the pod, and the agent re-reads it on every
-// spawn — never cached.
+// <pod>-prompt ConfigMap mounts the embedded prompts/CPA_SYSTEM_PROMPT.md
+// (embedded via the orchestrator's prompts package) read-only into the pod,
+// and the agent re-reads it on every spawn — never cached.
 const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
 
 // CpaMcpCommand/CpaMcpArgs wire the CPA's dedicated toolset into the harness

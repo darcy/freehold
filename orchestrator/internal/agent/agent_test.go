@@ -1,23 +1,20 @@
 package agent
 
 import (
-	"os"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"freehold/orchestrator/prompts"
 )
 
-// systemPrompt is the real multi-line prompt, loaded from the copy embedded
-// in internal/cli/prompts (what stageCpa passes to AgentManifestScript —
-// the old tests passed a path string, which is why the block-scalar bug
-// compiled).
+// systemPrompt is the real multi-line prompt exactly as production ships it:
+// stageCpa passes prompts.CPASystemPrompt into AgentManifestScript, so the
+// test uses that same embedded value — the old tests passed a path string,
+// which is why the block-scalar bug compiled.
 func systemPrompt() string {
-	b, err := os.ReadFile("../cli/prompts/CPA_SYSTEM_PROMPT.md")
-	if err != nil {
-		panic(err)
-	}
-	return string(b)
+	return prompts.CPASystemPrompt
 }
 
 func TestCPAPodManifestBasics(t *testing.T) {
@@ -106,7 +103,7 @@ func TestAgentPodManifestDistinctNames(t *testing.T) {
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", "/p/CPA_SYSTEM_PROMPT.md", "waldo")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo")
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,

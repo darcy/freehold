@@ -22,7 +22,6 @@ package cli
 import (
 	"bufio"
 	"crypto/rand"
-	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -43,6 +42,7 @@ import (
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/state"
 	"freehold/orchestrator/internal/wire"
+	"freehold/orchestrator/prompts"
 )
 
 var rebuildCmd = &cobra.Command{
@@ -2190,20 +2190,6 @@ func cpaIdentityDir() string {
 	return filepath.Join(rbStateDir(), "agent-cpa")
 }
 
-// rbCPAPromptPath is the prompt's in-pod path (/srv/freehold/...): the pod
-// re-reads the ConfigMap-mounted copy on every spawn, never a host-side file.
-func rbCPAPromptPath() string {
-	return "CPA_SYSTEM_PROMPT.md"
-}
-
-// cpaSystemPrompt is the CPA's purpose, embedded from
-// orchestrator/prompts/CPA_SYSTEM_PROMPT.md and baked into the CPA pod's
-// ConfigMap (the pod re-reads the mounted copy at
-// /srv/freehold/CPA_SYSTEM_PROMPT.md on every spawn).
-//
-//go:embed prompts/CPA_SYSTEM_PROMPT.md
-var cpaSystemPrompt string
-
 // ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its
 // pubkey. Rebuilds reuse the recorded identity (identity continuity), so the
 // CPA's Buzz profile, presence, and DMs all survive.
@@ -2236,14 +2222,12 @@ func (e *rebuildEngine) stageCpa() error {
 	}
 	// The harness speaks WS to the relay; the config records the HTTP origin.
 	relayURL := strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
-	// B1/B3: the CPA's purpose lives in CPA_SYSTEM_PROMPT.md at the repo
-	// root (side-by-side with AGENTS.md). The bootstrap loads it into the
-	// harness config at first spawn and every restart re-reads it fresh from
-	// the pod's ConfigMap mount — never cached, never a generated file.
-	promptBytes, err := os.ReadFile(rbCPAPromptPath())
-	if err != nil {
-		return fmt.Errorf("read CPA system prompt: %w", err)
-	}
+	// B1/B3: the CPA's purpose lives in the orchestrator's prompts package
+	// (prompts/CPA_SYSTEM_PROMPT.md), embedded into this binary at compile
+	// time and shipped into the pod's ConfigMap at spawn; the pod re-reads
+	// the mounted copy on every restart — never cached, never a host-side
+	// file read (which would break on CWD).
+	promptText := prompts.CPASystemPrompt
 
 	// Ensure the cpa-identity Secret (nsec + owner) exists in the namespace.
 	id, err := flows.LoadIdentity(cpaIdentityDir())
@@ -2261,7 +2245,7 @@ func (e *rebuildEngine) stageCpa() error {
 	// runner executes this verbatim on the k3s guest; the pod's ConfigMap
 	// carries the prompt, so nothing ships the .md to the CP LXC.
 	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.AgentManifestScript(
-		k3sVmid, relayURL, string(promptBytes), cpaName), 420))
+		k3sVmid, relayURL, promptText, cpaName), 420))
 	if !ok {
 		return fmt.Errorf("cpa pod apply failed:\n%s", out)
 	}

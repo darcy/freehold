@@ -29,11 +29,12 @@ list is current-state and kept there rather than duplicated here.
 
 ### Fixed
 
-*   **`//go:embed prompts/CPA_SYSTEM_PROMPT.md`** in
-    `orchestrator/internal/cli/rebuild.go` embeds the CPA's purpose from a
-    copy that rides inside the `orchestrator/` Go module (a `..` path or an
-    absolute path is invalid in a `//go:embed` directive, so the file can't
-    live at the repo root). `stageCpa` still passes the prompt's full text
+*   **`//go:embed CPA_SYSTEM_PROMPT.md`** in the new
+    `orchestrator/prompts` package embeds the CPA's purpose into
+    `freehold-orchestrator` at compile time (a `..` path or an absolute path
+    is invalid in a `//go:embed` directive, so the file lives inside the
+    `orchestrator/` Go module, not at the repo root). `stageCpa` passes the
+    embedded text
     into `agent.AgentPodManifest`, which embeds it as the
     `<pod>-prompt` ConfigMap's block scalar (indented four spaces per line,
     so `kubectl apply` parses it) and the pod mounts that at
