@@ -64,7 +64,7 @@ func (m *Model) load(cfgPath string) error {
 	}
 	m.HasConfig = true
 	m.Domain = cfg.Domain
-	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.LitellmLive, m.RunnerReach = false, false, false, false, false, false
+	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.LitellmLive, m.CaddyLive, m.RunnerReach = false, false, false, false, false, false, false
 	// ModeRunning until the boot check proves otherwise — the activity view
 	// covers the screen while the probes run, and the check settles the
 	// real mode (its k3s/world-state steps populate the dashboard rows).
@@ -134,6 +134,15 @@ func (m *Model) buildServices(cfg *config.Config) {
 			}
 			row.URL = cfg.Litellm.URL
 			row.Status = boolStatus(m.LitellmLive, "live", "down")
+		case "caddy":
+			row.Name = "caddy (TLS edge)"
+			if cfg.Caddy.Host != "" {
+				row.Where = "kube · " + cfg.Caddy.Host
+			} else {
+				row.Where = "kube · (no coords — not deployed this run)"
+			}
+			row.URL = cfg.Caddy.URL
+			row.Status = boolStatus(m.CaddyLive, "live", "down")
 		default:
 			row.Where = "managed"
 			row.Status = "—"
@@ -599,11 +608,12 @@ func (m *Model) runnerSourceLabel() string {
 }
 
 func renderProbes(m *Model) string {
-	return fmt.Sprintf("  relay %s  cp %s  k3s %s  litellm %s  runner %s",
+	return fmt.Sprintf("  relay %s  cp %s  k3s %s  litellm %s  caddy %s  runner %s",
 		boolStatus(m.RelayLive, "green", "red"),
 		boolStatus(m.CPLive, "green", "red"),
 		boolStatus(m.K3sLive, "green", "red"),
 		boolStatus(m.LitellmLive, "green", "red"),
+		boolStatus(m.CaddyLive, "green", "red"),
 		boolStatus(m.RunnerReach, "green", "red"),
 	)
 }

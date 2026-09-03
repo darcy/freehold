@@ -30,6 +30,7 @@ type Config struct {
 	Plane            PlaneSpec   `toml:"plane,omitempty"`
 	Dns              DnsSpec     `toml:"dns,omitempty"`
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
+	Caddy            CaddySpec   `toml:"caddy,omitempty"`
 	CPAName          string      `toml:"cpa_name,omitempty"`
 	Managed          []string    `toml:"managed"`
 }
@@ -78,6 +79,14 @@ type DnsSpec struct {
 type LitellmSpec struct {
 	URL  string `toml:"url,omitempty"`
 	Host string `toml:"host,omitempty"` // the k3s guest name
+}
+
+// CaddySpec records the core TLS fronting proxy's coords (Services row +
+// teardown ownership). URL is the public relay URL Caddy fronts; Host is the
+// k3s guest name the proxy rides on.
+type CaddySpec struct {
+	URL  string `toml:"url,omitempty"`
+	Host string `toml:"host,omitempty"`
 }
 
 // LxcGuest is a managed LXC's connect/status coordinates.

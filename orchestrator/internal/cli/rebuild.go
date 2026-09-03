@@ -39,6 +39,7 @@ import (
 	"freehold/orchestrator/internal/agent"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
+	"freehold/orchestrator/internal/deploy"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/state"
@@ -413,6 +414,18 @@ func (e *rebuildEngine) run() error {
 			return err
 		}
 		fmt.Fprintln(e.out, "  ✓ litellm gateway live")
+	}
+
+	// 14.6. C0: the core Caddy TLS fronting proxy — freehold's own edge. It
+	// fronts the relay over the wildcard cert (F3 issues it; F5 points the CPA
+	// at wss://relay.<domain>). Rides the k3s node (hostNetwork), so it needs
+	// the substrate; part of the desired world whenever k3s is on.
+	if !e.f.noK3s {
+		fmt.Fprintln(e.out, "  · applying the Caddy TLS fronting proxy (hostNetwork; relay vhost)…")
+		if err := e.stageCaddy(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.out, "  ✓ Caddy TLS edge live")
 	}
 
 	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
@@ -2364,6 +2377,91 @@ func (e *rebuildEngine) recordLitellm(url, host string) error {
 		cfg.Managed = append(cfg.Managed, "litellm")
 	}
 	return cfg.Save(e.f.configPath)
+}
+
+// ---- the core Caddy TLS fronting proxy (roadmap/CORE_TLS.md, F2) ----------
+//
+// Caddy is freehold's own TLS edge installed as a hostNetwork kube Deployment
+// on the k3s node. It fronts the relay LXC over TLS using the wildcard cert
+// that F3 (embedded lego DNS-01) writes into the caddy-data PVC. This stage
+// only deploys the proxy + the relay vhost; the cert issuance/reload is F3.
+
+// recordCaddy persists the proxy's coords into the config (caddy section +
+// managed) so the Services row + teardown see it.
+func (e *rebuildEngine) recordCaddy(url, host string) error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	cfg.Caddy = config.CaddySpec{URL: url, Host: host}
+	if !containsStr(cfg.Managed, "caddy") {
+		cfg.Managed = append(cfg.Managed, "caddy")
+	}
+	return cfg.Save(e.f.configPath)
+}
+
+// caddyManifestScript applies the Caddy kube resources inside the k3s LXC:
+// namespace, durable PVC, ConfigMap with the rendered Caddyfile, hostNetwork
+// Deployment, NodePort service. No secrets in argv (the Caddyfile is plain).
+func caddyManifestScript(k3sVmid uint32, caddyfile string) string {
+	script := strings.ReplaceAll(`set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+EX="pct exec __VMID__ -- sh -c"
+$EX "$K create ns caddy 2>/dev/null || true"
+# The Caddyfile is written HOST-side then pushed in + applied (same shape as
+# the litellm/postgres manifests). The certs are NOT here: F3 writes them into
+# the caddy-data PVC at /data/tls on each issuance.
+mkdir -p /tmp/caddy-manifests
+cat >/tmp/caddy-manifests/caddy.yaml <<'YAML'
+__CADDY__
+YAML
+pct push __VMID__ /tmp/caddy-manifests/caddy.yaml /tmp/caddy-manifests/caddy.yaml
+$EX "$K apply -f /tmp/caddy-manifests/caddy.yaml"
+$EX "$K rollout status deploy/caddy -n caddy --timeout=120s || true"
+echo CADDY_OK`,
+		"__VMID__", strconv.FormatUint(uint64(k3sVmid), 10),
+	)
+	script = strings.ReplaceAll(script, "__CADDY__", deploy.CaddyManifest(caddyfile))
+	return script
+}
+
+// stageCaddy deploys the core TLS fronting proxy + the relay vhost. It needs
+// the world domain + the relay LXC IP (the upstream) + the k3s substrate.
+// Idempotent (apply + record). Runs whenever k3s is on (a relay-fronting edge
+// is part of the desired world; cert issuance in F3).
+func (e *rebuildEngine) stageCaddy() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	if cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("no k3s coords recorded — Caddy needs the k3s substrate")
+	}
+	if cfg.Domain == "" {
+		return fmt.Errorf("no world domain in config — Caddy fronts relay.<domain>")
+	}
+	if cfg.Lxc.Relay.Ip == nil {
+		return fmt.Errorf("no relay LXC coords recorded — Caddy fronts the relay at its LAN IP")
+	}
+	k3sVmid := *cfg.Lxc.K3s.Vmid
+	relayIP := config.StripCIDR(*cfg.Lxc.Relay.Ip)
+	relayUpstream := fmt.Sprintf("%s:3000", relayIP)
+	caddyfile := deploy.RenderCaddyfile(cfg.Domain, relayUpstream)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyManifestScript(k3sVmid, caddyfile), 180))
+	if !ok {
+		return fmt.Errorf("caddy kube apply failed:\n%s", out)
+	}
+	style := fmt.Sprintf("https://relay.%s", cfg.Domain)
+	if err := e.recordCaddy(style, config.StripCIDR(*cfg.Lxc.K3s.Ip)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ---- the CPA stage (Chunk 4 Phase A) ---------------------------------------

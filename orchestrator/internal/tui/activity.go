@@ -181,6 +181,17 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			}
 			return "no answer at " + cfg.Litellm.URL, false
 		}},
+		{"caddy", func() (string, bool) {
+			if cfg.Caddy.URL == "" || cfg.Caddy.Host == "" {
+				m.CaddyLive = false
+				return "not deployed (no TLS edge coords)", true
+			}
+			m.CaddyLive = config.URLReachable("https://" + cfg.Caddy.Host)
+			if m.CaddyLive {
+				return "edge reachable at https://" + cfg.Caddy.Host, true
+			}
+			return "no TLS answer at https://" + cfg.Caddy.Host, false
+		}},
 		{"dns", func() (string, bool) {
 			// The CP resolver is authoritative: pull the live records once
 			// per refresh, keep the old snapshot on failure (fallback to the

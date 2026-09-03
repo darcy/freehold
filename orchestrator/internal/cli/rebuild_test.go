@@ -701,6 +701,36 @@ func TestRecordLitellm(t *testing.T) {
 	}
 }
 
+// TestRecordCaddy: coords land in config + managed (Services row + teardown
+// ownership), idempotently.
+func TestRecordCaddy(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	base := "domain = \"world.test\"\noperator_pubkey = \"" + strings.Repeat("a", 64) + "\"\nmanaged = [\"relay\", \"cp\", \"k3s\"]\n"
+	if err := os.WriteFile(cfgPath, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := &rebuildEngine{f: rebuildFlags{configPath: cfgPath}}
+	if err := e.recordCaddy("https://relay.world.test", "192.168.30.7"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Caddy.URL != "https://relay.world.test" || cfg.Caddy.Host != "192.168.30.7" {
+		t.Errorf("caddy coords = %+v", cfg.Caddy)
+	}
+	if !containsStr(cfg.Managed, "caddy") {
+		t.Errorf("managed must include caddy, got %v", cfg.Managed)
+	}
+	if err := e.recordCaddy("https://relay.world.test", "192.168.30.7"); err != nil {
+		t.Fatal(err)
+	}
+	if n := countStr(cfg.Managed, "caddy"); n != 1 {
+		t.Errorf("managed duplicated caddy %d times", n)
+	}
+}
+
 func countStr(list []string, s string) int {
 	n := 0
 	for _, v := range list {

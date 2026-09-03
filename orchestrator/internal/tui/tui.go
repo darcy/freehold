@@ -89,6 +89,7 @@ type Model struct {
 	CPLive      bool
 	K3sLive     bool
 	LitellmLive bool
+	CaddyLive   bool
 	RunnerReach bool
 	Converged   bool
 	ActiveView  View
