@@ -63,8 +63,17 @@ async function getCiStatus(headSha) {
   try {
     const { data } = await octokit.rest.checks.listForRef({ owner, repo, ref: headSha, per_page: 50 });
     if (data.total_count === 0) return 'No checks reported yet.';
-    const failing = data.check_runs.filter(c => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
-    const pending = data.check_runs.filter(c => !c.conclusion);
+    // Exclude this job's own check run — it's in_progress (no conclusion) while
+    // this code runs, so it always lands in the `pending` bucket and would make
+    // every round report "PENDING: AI PR Review" even when real CI is green.
+    // ponytail: filters by job name, which also excludes any same-named check
+    // run (review bots aren't CI gates anyway); refine by workflow name if a
+    // future real check collides on the job name.
+    const ownJob = github.context.job;
+    const runs = data.check_runs.filter(c => c.name !== ownJob);
+    if (runs.length === 0) return 'No checks reported yet.';
+    const failing = runs.filter(c => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
+    const pending = runs.filter(c => !c.conclusion);
     if (failing.length) return `FAILING: ${failing.map(c => c.name).join(', ')}`;
     if (pending.length) return `PENDING: ${pending.map(c => c.name).join(', ')}`;
     return 'All checks green.';
@@ -232,16 +241,23 @@ async function main() {
   const newInline = inline.filter(c => !seen.has(`${c.path}:${c.line}`));
 
   if (newInline.length > 0) {
-    await octokit.rest.pulls.createReview({
-      owner, repo, pull_number,
-      event: 'COMMENT',
-      comments: newInline.map(c => ({
-        path: c.path,
-        line: c.line,
-        side: 'RIGHT',
-        body: `**[${c.severity}]** ${c.comment}`,
-      })),
-    });
+    // A single hallucinated line (a line number not part of the diff) makes the
+    // whole createReview call 422. Isolate it so a bad inline comment can't
+    // prevent the round-summary/verdict comment from posting.
+    try {
+      await octokit.rest.pulls.createReview({
+        owner, repo, pull_number,
+        event: 'COMMENT',
+        comments: newInline.map(c => ({
+          path: c.path,
+          line: c.line,
+          side: 'RIGHT',
+          body: `**[${c.severity}]** ${c.comment}`,
+        })),
+      });
+    } catch (e) {
+      core.warning(`Skipped inline comments (${newInline.length}): ${e.message}`);
+    }
   }
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
