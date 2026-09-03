@@ -47,12 +47,12 @@ const (
 type tuiFlow struct {
 	Kind   flowKind
 	Step   int
-	Inputs [6]string
+	Inputs [7]string
 	Field  *textinput.Model
 	// Defaults are the prefilled answers per step — sourced from the
 	// recorded config when one exists (see flowDefaults). Blank = no
 	// recorded value; the prompt's own "(blank = N)" semantics apply.
-	Defaults [6]string
+	Defaults [7]string
 }
 
 type flowMsg struct {
@@ -98,8 +98,8 @@ func fieldFor(k flowKind, step int, def string) *textinput.Model {
 // would boot k3s). The two size prompts have no config record; blank keeps
 // their "(blank = N)" semantics. Absent/unreadable config = no defaults
 // (fresh-world behavior, unchanged).
-func flowDefaults(m *Model, k flowKind) [6]string {
-	var d [6]string
+func flowDefaults(m *Model, k flowKind) [7]string {
+	var d [7]string
 	if k != flowRebuild || m.CfgPath == "" {
 		return d
 	}
@@ -119,6 +119,9 @@ func flowDefaults(m *Model, k flowKind) [6]string {
 			break
 		}
 	}
+	if cfg.CPAName != "" {
+		d[6] = cfg.CPAName
+	}
 	return d
 }
 
@@ -133,7 +136,7 @@ func ncols(k flowKind) int {
 	case flowTeardown:
 		return 2
 	case flowRebuild:
-		return 6
+		return 7
 	default:
 		return 1
 	}
@@ -208,8 +211,10 @@ func promptLabel(k flowKind, step int) string {
 			return "thin-pool name (blank = reuse detected / carve default)"
 		case 4:
 			return "new thin-pool size GB (blank = 40, used when carving)"
-		default:
+		case 5:
 			return "boot k3s too? (y/n, blank = y)"
+		default:
+			return "CPA agent name (blank = freehold)"
 		}
 	default:
 		return "value"
@@ -380,6 +385,9 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			if strings.EqualFold(strings.TrimSpace(f.Inputs[5]), "n") {
 				args = append(args, "--with-k3s=false")
+			}
+			if name := strings.TrimSpace(f.Inputs[6]); name != "" {
+				args = append(args, "--agent-name", name)
 			}
 			return activityStartMsg{kind: "rebuild", title: "rebuilding " + domain, args: args}
 		}

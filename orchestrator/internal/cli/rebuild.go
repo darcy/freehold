@@ -35,10 +35,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"freehold/orchestrator/internal/agent"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/state"
 	"freehold/orchestrator/internal/wire"
 )
 
@@ -53,6 +55,7 @@ var rebuildCmd = &cobra.Command{
 		f.domain, _ = cmd.Flags().GetString("domain")
 		f.operatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
 		f.operatorIdentity, _ = cmd.Flags().GetString("operator-identity")
+		f.agentName, _ = cmd.Flags().GetString("agent-name")
 		f.sizeGB, _ = cmd.Flags().GetUint64("size-gb")
 		f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 		f.thinPool, _ = cmd.Flags().GetString("thin-pool")
@@ -94,6 +97,7 @@ func init() {
 	rebuildCmd.Flags().String("domain", "", "Relay identity domain (must resolve to the host — the A4 gate; REQUIRED)")
 	rebuildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
 	rebuildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
+	rebuildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
 	rebuildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	rebuildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	rebuildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
@@ -119,6 +123,7 @@ type rebuildFlags struct {
 	domain             string
 	operatorPubkey     string
 	operatorIdentity   string
+	agentName          string
 	sizeGB             uint64
 	poolSizeGB         uint64
 	thinPool           string
@@ -406,7 +411,19 @@ func (e *rebuildEngine) run() error {
 		fmt.Fprintln(e.out, "  ✓ litellm gateway live")
 	}
 
-	// 14.7. C0: register the CP resolver's explicit records (relay/cp/k3s +
+	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
+	// k3s Pod running the buzz-sprig harness (Chunk 4 Phase A: A2/A3/A5).
+	// It needs the k3s substrate; where k3s is present the CPA is part of
+	// the world (A1 made the display name a required install answer).
+	if e.f.withK3s {
+		fmt.Fprintln(e.out, "  · deploying the CPA (buzz-sprig pod into k3s; rollout up to 5m)…")
+		if err := e.stageCpa(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
+	}
+
+	// 14.75. C0: register the CP resolver's explicit records (relay/cp/k3s +
 	// litellm) INSIDE the deployed CP, then point every guest at it.
 	fmt.Fprintln(e.out, "  · writing the resolver records (relay/cp/k3s/litellm)…")
 	if err := e.stageDnsRegister(); err != nil {
@@ -818,6 +835,7 @@ func (e *rebuildEngine) fromAnswers() *config.Config {
 			Target: e.f.target,
 		},
 		Managed: []string{"relay", "cp"},
+		CPAName: e.f.agentName,
 	}
 	if e.f.operatorIdentity != "" {
 		v := e.f.operatorIdentity
@@ -2158,6 +2176,104 @@ func (e *rebuildEngine) recordLitellm(url, host string) error {
 		cfg.Managed = append(cfg.Managed, "litellm")
 	}
 	return cfg.Save(e.f.configPath)
+}
+
+// ---- the CPA stage (Chunk 4 Phase A) ---------------------------------------
+
+// cpaIdentityDir is where the CPA's durable Nostr identity lives. It sits on
+// the CP's durable-plane area so a compute-only teardown/rebuild (Phase 0.12)
+// reattaches the SAME keypair — the CPA's identity survives the body, exactly
+// as the remote-agent vision requires (VISION_REMOTE_AGENTS: the keypair is
+// the agent; the pod is disposable).
+func cpaIdentityDir() string {
+	return filepath.Join(rbStateDir(), "agent-cpa")
+}
+
+// ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its
+// pubkey. Rebuilds reuse the recorded identity (identity continuity), so the
+// CPA's Buzz profile, presence, and DMs all survive.
+func ensureCPAIdentity() (string, error) {
+	return agent.EnsureIdentity(cpaIdentityDir())
+}
+
+// stageCpa deploys the CPA as a k3s Pod running the buzz-sprig harness (A2),
+// wires its Buzz display name (A3), and registers it in the agent registry
+// (A5). Identity is durable across rebuilds so the same agent returns.
+func (e *rebuildEngine) stageCpa() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.Lxc.K3s.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("no k3s coords recorded — the CPA pod needs the k3s substrate")
+	}
+	if cfg.RelayURL == "" {
+		return fmt.Errorf("no relay URL in config — the CPA must join the community relay")
+	}
+	k3sVmid := *cfg.Lxc.K3s.Vmid
+	cpaName := cfg.CPAName
+	if cpaName == "" {
+		cpaName = agent.DefaultCPAName
+	}
+	cpaPub, err := ensureCPAIdentity()
+	if err != nil {
+		return err
+	}
+	// The harness speaks WS to the relay; the config records the HTTP origin.
+	relayURL := strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
+	// The in-pod prompt path for CPA_SYSTEM_PROMPT.md (mounted/embedded by a
+	// later phase; the pod reads it from this fixed path today).
+	promptPath := "/srv/freehold/CPA_SYSTEM_PROMPT.md"
+
+	// Ensure the cpa-identity Secret (nsec + owner) exists in the namespace.
+	id, err := flows.LoadIdentity(cpaIdentityDir())
+	if err != nil {
+		return fmt.Errorf("cpa identity unreadable after mint: %w", err)
+	}
+	ok, out := e.runBin(e.bins.Self, e.execArgs(agent.AgentIdentityScript(
+		k3sVmid, id.NostrSecretHex, e.f.operatorPubkey, cpaName), 120))
+	if !ok {
+		return fmt.Errorf("cpa identity secret failed:\n%s", out)
+	}
+
+	// Apply the CPA pod via THIS binary self-exec'd through the runner (the
+	// same transport stageLitellm's exec uses), then record the agent.
+	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.CPAManifestScript(
+		k3sVmid, relayURL, promptPath, cpaName), 420))
+	if !ok {
+		return fmt.Errorf("cpa pod apply failed:\n%s", out)
+	}
+	return e.recordCpa(cpaPub, cpaName)
+}
+
+// recordCpa writes the CPA's identity + name into the config (managed) so the
+// Services row + teardown + console see the agent, and registers it in the
+// control-plane agent registry (A5) so it shows up like any named agent. The
+// rest of the presence dot is the CPA's own relay kind:20001 publication —
+// the registry row carries identity, the relay carries liveness.
+func (e *rebuildEngine) recordCpa(cpaPub, cpaName string) error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	cfg.CPAName = cpaName
+	if !containsStr(cfg.Managed, "cpa") {
+		cfg.Managed = append(cfg.Managed, "cpa")
+	}
+	if err := cfg.Save(e.f.configPath); err != nil {
+		return err
+	}
+	// A5: register the CPA in the CP agent registry (the state store the
+	// console reads). Non-fatal if the store isn't present yet (a rebuild
+	// run may not have a full CP state); the presence dot is relay-side.
+	if store, err := state.Open(rbStateDir()); err == nil {
+		_ = agent.RegisterAgent(store, cpaName, cpaPub)
+		_ = store.Save()
+	}
+	return nil
 }
 
 // relayPubkeyNip11 reads the relay's signing pubkey via NIP-11 (best-effort

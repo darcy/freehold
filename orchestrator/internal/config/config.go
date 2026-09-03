@@ -29,6 +29,7 @@ type Config struct {
 	Plane            PlaneSpec   `toml:"plane,omitempty"`
 	Dns              DnsSpec     `toml:"dns,omitempty"`
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
+	CPAName          string      `toml:"cpa_name,omitempty"`
 	Managed          []string    `toml:"managed"`
 }
 

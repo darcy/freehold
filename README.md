@@ -12,8 +12,11 @@ B2 connectors, coarse grants, local admin/ops console) is live and hermetic-test
 management relay is live: bootstrap-provisioned LXCs under a domain identity, NIP-98 console
 auth, encrypted relay-persisted agent memory, delegation, and the runner lifecycle
 (runners-as-NIP-29-channels) all verified against a real Buzz relay with no custom kinds or
-relay patch. The CPA is not yet a live, talkable Buzz agent — that's the current focus (see
-`roadmap/POC.md`, Chunk 3). The Backblaze B2 connector is hermetic-verified; a live account
+relay patch. The CPA is a live, talkable Buzz agent: the operator names it at
+install, and it deploys as a k3s Pod running Buzz's `buzz-acp` harness with a
+dedicated create/grant/manage-agent toolset (Chunk 4) — its live durability
+proof (a real Buzz conversation surviving a full rebuild) is the rest of
+Chunk 4. The Backblaze B2 connector is hermetic-verified; a live account
 test is still open.
 
 ## Design in one paragraph

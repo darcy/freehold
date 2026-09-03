@@ -25,6 +25,40 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.0] — Chunk 4 Phase A: the CPA on a real-agent harness
+
+### Added
+
+*   **A1 — the operator names the CPA at install.** `freehold rebuild` gained
+    an interactive "CPA agent name" step (TUI form, seeded from a recorded
+    `cpa_name`, default `freehold`) and the `--agent-name`/`cpa_name` value now
+    persists through the rebuild config path instead of being a dead flag.
+*   **A2 — the CPA runs on Buzz's real-agent mechanism.** The CPA deploys as a
+    bare k3s Pod (`restartPolicy: Never` — an intentional exit stays terminal)
+    running the `ghcr.io/block/buzz-sprig` image (tracking the moving `:main`
+    tag today; a build-time digest pin is a named follow-up) whose entrypoint
+    `exec`s `buzz-acp`, joined to the community relay with its own
+    nsec — the remote-agent mechanism from Buzz's `VISION_REMOTE_AGENTS.md`
+    (a body on the k3s substrate, identity sealed in a first-run-wins k8s
+    Secret). A durable CPA identity under the CP's state dir means the same
+    agent returns after a compute-only teardown/rebuild.
+*   **A3 — the stored name is the CPA's Buzz identity.** The CPA's display
+    name rides the pod's `freehold.fh/agent-name` annotation and the config
+    `cpa_name`, and it derives every one of the pod's object names (Pod,
+    Service, `<pod>-identity` Secret) from its sanitized (DNS-1123) form — so
+    the agent the operator named at install is the agent that appears in
+    Buzz, and its objects never collide with another agent's.
+*   **A4 — a dedicated create/grant/manage-agent toolset.** The CPA gets
+    `create-agent` (deploy a named sprig pod whose Pod/Service/Secret are all
+    derived from that agent's own sanitized name, with its own durable
+    identity), `grant-agent` (agent ↔ runner whitelist), and `manage-agent`
+    (list/remove registry rows) — the dedicated toolset the roadmap calls
+    for, no skill-execution tools yet. (The toolset is built and
+    unit-tested; registering it as an MCP surface the buzz-acp harness can
+    call is a named Phase B deferral — see `roadmap/POC_CHUNK4.md`.)
+*   **A5 — the CPA registers like any named agent.** The CPA row lands in the
+    control-plane agent registry at deploy; live ●/○ availability is the CPA's
+    own relay kind:20001 presence, read fresh per view.
 
 ## [0.3.0] — Chunk 3: the Rust→Go refactor, the durable plane, and the Kube-slot plan
 
