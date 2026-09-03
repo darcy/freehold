@@ -60,7 +60,7 @@ func sanitizePodName(name string) string {
 }
 
 // CPAAbsolutePromptPath is where the CPA pod reads its purpose from: the
-// <pod>-prompt ConfigMap mounts CPA_SYSTEM_PROMPT.md (embedded from the repo
+// <pod>-prompt ConfigMap mounts prompts/CPA_SYSTEM_PROMPT.md (embedded from the repo
 // root) read-only into the pod, and the agent re-reads it on every spawn —
 // never cached.
 const CPAAbsolutePromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
@@ -88,7 +88,7 @@ const (
 //
 // systemPromptPath is where the pod reads its purpose from — the <pod>-prompt
 // ConfigMap mounts it at CPAbsolutePromptPath and the agent re-reads it on
-// every spawn (never cached; editing CPA_SYSTEM_PROMPT.md and redeploying is
+// every spawn (never cached; editing prompts/CPA_SYSTEM_PROMPT.md and redeploying is
 // the only way the CPA's behavior changes). mcpCommand is the harness's
 // dedicated toolset server (CpaMcpCommand) so the pod actually exposes the
 // create/grant/manage-agent tools to the reasoning agent.
@@ -102,7 +102,7 @@ metadata:
   name: %s
   namespace: agents
 data:
-  CPA_SYSTEM_PROMPT.md: |
+  prompts/CPA_SYSTEM_PROMPT.md: |
     %s
 ---
 apiVersion: v1
@@ -157,7 +157,7 @@ spec:
 }
 
 // indentSystemPrompt indents every prompt line by two spaces so it embeds as
-// a valid k8s ConfigMap block scalar (`  CPA_SYSTEM_PROMPT.md: |`).
+// a valid k8s ConfigMap block scalar (`  prompts/CPA_SYSTEM_PROMPT.md: |`).
 func indentSystemPrompt(prompt string) string {
 	lines := strings.Split(strings.TrimRight(prompt, "\n"), "\n")
 	for i, l := range lines {

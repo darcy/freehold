@@ -29,8 +29,9 @@ list is current-state and kept there rather than duplicated here.
 
 ### Added
 
-*   **`CPA_SYSTEM_PROMPT.md` at the repo root.** The CPA's purpose, tone,
-    and tool/scope boundaries are one reviewable Markdown file —
+*   **`prompts/CPA_SYSTEM_PROMPT.md`.** The CPA's purpose, tone,
+    and tool/scope boundaries are one reviewable Markdown file in the
+    repository's single `prompts/` directory —
     embedded by `freehold-orchestrator` and mounted into the CPA's pod as the
     `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`, so the
     pod re-reads it fresh on every spawn and editing the file + redeploying

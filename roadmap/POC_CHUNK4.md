@@ -14,7 +14,7 @@ wait for Chunk 6.
 
 *   **CPA runs on the same buzz-acp/goose-class harness as expert agents** —
     its own identity, a dedicated create/grant/manage-agent toolset instead of
-    a service-specific one, and its purpose defined by `CPA_SYSTEM_PROMPT.md`
+    a service-specific one, and its purpose defined by `prompts/CPA_SYSTEM_PROMPT.md`
     rather than improvised per spawn.
 *   **The deterministic runner/CP layer is unchanged.** Provisioning, grants,
     secret handling, and teardown/rebuild stay exactly as they are — CPA's
@@ -74,8 +74,8 @@ to run, idle and active.
 
 #### Phase B — CPA system prompt
 
-- [x] B1. Write `CPA_SYSTEM_PROMPT.md` at the repo root (sibling to
-      `AGENTS.md`): purpose, tone, and explicit tool/scope boundaries.
+- [x] B1. Write `prompts/CPA_SYSTEM_PROMPT.md` (the repo's single prompts
+      directory): purpose, tone, and explicit tool/scope boundaries.
 - [x] B2. Bootstrap loads this file into the harness config at first spawn
       (the orchestrator embeds it and the CPA/agent pod mounts it as a
       `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`; the
@@ -88,7 +88,7 @@ to run, idle and active.
 > **Phase B deferral (named, not lost):** the pod reads its prompt from a
 > `<pod>-prompt` ConfigMap (mounted read-only at
 > `/srv/freehold/CPA_SYSTEM_PROMPT.md`), seeded at apply time from the
-> orchestrator's embedded `CPA_SYSTEM_PROMPT.md`. A host restart of that pod
+> orchestrator's embedded `prompts/CPA_SYSTEM_PROMPT.md`. A host restart of that pod
 > re-reads the mounted copy, so editing the prompt and redeploying changes
 > CPA's behavior (B3 as planned). A compute-only teardown/rebuild (Phase
 > 0.12) re-seeds the pod from the *embedded* bytes, so a prompt edit made
@@ -155,7 +155,7 @@ to run, idle and active.
 *   CPA, asked in Buzz, creates a second agent (name + purpose only) that gets
     its own durable identity and is directly talkable — also surviving a
     rebuild.
-*   CPA's purpose is defined by `CPA_SYSTEM_PROMPT.md`; changing the file and
+*   CPA's purpose is defined by `prompts/CPA_SYSTEM_PROMPT.md`; changing the file and
     redeploying changes CPA's behavior.
 *   Baseline resource numbers recorded for one CPA + one created agent, idle
     and active.

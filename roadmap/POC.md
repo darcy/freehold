@@ -240,7 +240,7 @@ purpose from a versioned system prompt, and can create a new agent on request.
     collects the numbers.
     
 *   **CPA system-prompt:** The CPA's purpose, tone, and toolset boundaries live in a single Markdown file in the repo
-    (e.g. `CPA_SYSTEM_PROMPT.md` at the root, alongside `AGENTS.md`) — not generated at runtime,
+    (e.g. `prompts/CPA_SYSTEM_PROMPT.md` at the root, alongside `AGENTS.md`) — not generated at runtime,
     not improvised per spawn. Bootstrap loads it into the harness config at first spawn; every
     restart reloads the current file, so editing the prompt and redeploying is how CPA's purpose
     changes — versioned and reviewable like any other repo change, same as a per-expert
@@ -256,7 +256,7 @@ purpose from a versioned system prompt, and can create a new agent on request.
 *   CPA, asked in Buzz, creates a second agent (name + purpose only) that gets its own
     durable identity and is directly talkable — also surviving a rebuild.
     
-*   CPA's purpose is defined by `CPA_SYSTEM_PROMPT.md`; changing the file and redeploying
+*   CPA's purpose is defined by `prompts/CPA_SYSTEM_PROMPT.md`; changing the file and redeploying
     changes CPA's behavior.
     
 *   Baseline resource numbers recorded for one CPA + one created agent, idle and active.
