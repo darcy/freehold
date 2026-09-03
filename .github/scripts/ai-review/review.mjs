@@ -72,7 +72,9 @@ async function getCiStatus(headSha) {
     const ownJob = github.context.job;
     const runs = data.check_runs.filter(c => c.name !== ownJob);
     if (runs.length === 0) return 'No checks reported yet.';
-    const failing = runs.filter(c => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
+    // INTENTIONAL BUG (test): treats green checks as failing — the filter is
+    // inverted on purpose so the review bot posts an inline finding.
+    const failing = runs.filter(c => c.conclusion && ['success', 'skipped', 'neutral'].includes(c.conclusion));
     const pending = runs.filter(c => !c.conclusion);
     if (failing.length) return `FAILING: ${failing.map(c => c.name).join(', ')}`;
     if (pending.length) return `PENDING: ${pending.map(c => c.name).join(', ')}`;
@@ -101,7 +103,10 @@ function readContextFiles() {
 
 async function getPreviousRoundNotes() {
   const { data: comments } = await octokit.rest.issues.listComments({ owner, repo, issue_number: pull_number, per_page: 50 });
-  const tracking = comments.find(c => c.body?.includes(TRACKING_MARKER));
+  // Each round creates a NEW parent comment, so take the most recent one.
+  const tracking = comments
+    .filter(c => c.body?.includes(TRACKING_MARKER))
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
   return tracking ? tracking.body.replace(TRACKING_MARKER, '').trim() : '(first review round)';
 }
 
@@ -226,14 +231,15 @@ async function callLlm(prompt) {
   return parsed;
 }
 
-async function upsertTrackingComment(body) {
-  const { data: comments } = await octokit.rest.issues.listComments({ owner, repo, issue_number: pull_number, per_page: 50 });
-  const tracking = comments.find(c => c.body?.includes(TRACKING_MARKER));
-  if (tracking) {
-    await octokit.rest.issues.updateComment({ owner, repo, comment_id: tracking.id, body });
-  } else {
-    await octokit.rest.issues.createComment({ owner, repo, issue_number: pull_number, body });
-  }
+// Each commit gets a NEW parent comment. Create it with all checkboxes
+// unchecked, then update it (by id) as steps complete.
+let parentCommentId = null;
+async function createParentComment(body) {
+  const { data } = await octokit.rest.issues.createComment({ owner, repo, issue_number: pull_number, body });
+  parentCommentId = data.id;
+}
+async function updateParentComment(body) {
+  await octokit.rest.issues.updateComment({ owner, repo, comment_id: parentCommentId, body });
 }
 
 const PROGRESS_ITEMS = [
@@ -245,8 +251,8 @@ const PROGRESS_ITEMS = [
   'Post final summary with verdict',
 ];
 
-// The parent comment is the single tracking comment, updated as the review
-// progresses (like claude's parent) — inline comments are posted separately.
+// The parent comment is a fresh comment per commit; checkboxes start unchecked
+// and get checked as the review progresses (like claude's parent).
 function progressBody(doneCount, extra) {
   const checklist = PROGRESS_ITEMS.map((p, i) => `${i < doneCount ? '- [x]' : '- [ ]'} ${p}`);
   const parts = [TRACKING_MARKER, '### DeepSeek AI Review', ...checklist];
@@ -280,7 +286,7 @@ async function main() {
       guidance,
     ].join('\n\n');
 
-    await upsertTrackingComment(body);
+    await createParentComment(body);
 
     const message = `Diff too large to review reliably (${diffResult.reason}, ~${diffResult.totalChars} chars > ${MAX_DIFF_CHARS} limit).`;
     if (FAIL_ON_OVERSIZED_DIFF) {
@@ -293,14 +299,14 @@ async function main() {
 
   const diff = diffResult.diff;
 
-  // Read the previous round's notes BEFORE overwriting the tracking comment,
-  // then post the in-progress parent so the review shows progress while the
-  // check is still running.
+  // Read the previous round's notes BEFORE creating a NEW parent comment for
+  // this commit, then create it with all checkboxes unchecked (the review shows
+  // progress as boxes get checked on that comment while the check is running).
   const [ciStatus, previousRound] = await Promise.all([
     getCiStatus(headSha),
     getPreviousRoundNotes(),
   ]);
-  await upsertTrackingComment(progressBody(3, `**CI:** ${ciStatus}`));
+  await createParentComment(progressBody(0, `**CI:** ${ciStatus}`));
 
   const template = readFileSync(PROMPT_FILE, 'utf8');
   // Use function replacements: String.replace interprets $&, $', $$ etc. in the
@@ -324,8 +330,11 @@ async function main() {
   const seen = new Set(existingComments.filter(c => c.commit_id === headSha).map(c => `${c.path}:${c.line}`));
   const newInline = inline.filter(c => !seen.has(`${c.path}:${c.line}`));
 
+  // Progress: context/read/CI/review done.
+  await updateParentComment(progressBody(4, `**CI:** ${ciStatus}`));
+
   // Child inline comments are posted as a review (no body, like claude); the
-  // parent comment is the tracking comment updated above. A single hallucinated
+  // parent comment is the fresh comment created above. A single hallucinated
   // line (a line number not part of the diff) 422s the whole call, so isolate it.
   if (newInline.length > 0) {
     try {
@@ -344,6 +353,9 @@ async function main() {
     }
   }
 
+  // Progress: inline comments posted.
+  await updateParentComment(progressBody(5, `**CI:** ${ciStatus}`));
+
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
   const summaryText = [
     `### DeepSeek AI Review — round update`,
@@ -351,6 +363,7 @@ async function main() {
     result.summary || '',
     result.readme_note ? `**README:** ${result.readme_note}` : '',
     result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
+    `**Findings:** ${inline.length} reported · ${newInline.length} inline comment(s) posted`,
     legend,
     `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
   ].filter(Boolean).join('\n\n');
@@ -366,7 +379,7 @@ async function main() {
     `---`,
     summaryText,
   ].join('\n');
-  await upsertTrackingComment(finalBody);
+  await updateParentComment(finalBody);
 
   core.info(`Posted ${newInline.length} inline comment(s). Verdict: ${result.verdict}`);
 }
