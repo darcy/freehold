@@ -148,6 +148,41 @@ async function buildDiff() {
   return { ok: true, diff: annotatedFiles.map(f => f.text).join('\n\n') };
 }
 
+// flash-class models ignore response_format and answer in prose, but they
+// still honor function calling. Force the model into a `review` tool so it
+// emits the review as JSON tool-call arguments.
+const REVIEW_TOOL = {
+  type: 'function',
+  function: {
+    name: 'review',
+    description: 'Report the PR review findings as a single JSON object.',
+    parameters: {
+      type: 'object',
+      properties: {
+        verdict: { type: 'string', description: '"MERGE-READY: <reason>" or "NEEDS WORK: <n> blocking, <m> important"' },
+        summary: { type: 'string', description: '2-6 sentence prose summary of the review' },
+        readme_note: { type: 'string', description: 'one line, or empty string if no README drift' },
+        architecture_note: { type: 'string', description: 'one line, or empty string if no ARCHITECTURE drift' },
+        inline: {
+          type: 'array',
+          description: 'blocking/important findings only, each pinned to an exact line in the diff',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              line: { type: 'integer' },
+              severity: { type: 'string', enum: ['blocking', 'important'] },
+              comment: { type: 'string' },
+            },
+            required: ['path', 'line', 'severity', 'comment'],
+          },
+        },
+      },
+      required: ['verdict', 'summary', 'inline'],
+    },
+  },
+};
+
 async function callLlm(prompt) {
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
@@ -155,11 +190,10 @@ async function callLlm(prompt) {
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
-      max_tokens: 3000,
-      // The model drifted into prose despite the "respond with ONLY JSON"
-      // instruction; force structured output so the parse can't silently fail.
-      response_format: { type: 'json_object' },
+      max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }],
+      tools: [REVIEW_TOOL],
+      tool_choice: { type: 'function', function: { name: 'review' } },
     }),
   });
   if (!res.ok) throw new Error(`LLM API error ${res.status}: ${await res.text()}`);
@@ -167,13 +201,14 @@ async function callLlm(prompt) {
   const msg = data.choices?.[0]?.message;
   if (!msg) throw new Error(`LLM returned no message: ${JSON.stringify(data).slice(0, 200)}`);
 
-  // Reasoning models (DeepSeek R1-style) leave `content` empty and put the
-  // answer in `reasoning_content`; some providers return `content` as an array
-  // of parts. Normalize all three shapes, then log the raw output so a bad
-  // response is diagnosable from the step log.
-  let content = '';
-  if (typeof msg.content === 'string') content = msg.content;
-  else if (Array.isArray(msg.content)) content = msg.content.map(p => p?.text || '').join('');
+  // Function calling puts the JSON in tool_calls[].function.arguments; fall
+  // back to content (string / array) and then reasoning_content for providers
+  // that answer another way. Log the raw output for diagnosis.
+  let content = msg.tool_calls?.[0]?.function?.arguments?.trim() || '';
+  if (!content.trim()) {
+    if (typeof msg.content === 'string') content = msg.content;
+    else if (Array.isArray(msg.content)) content = msg.content.map(p => p?.text || '').join('');
+  }
   if (!content.trim() && typeof msg.reasoning_content === 'string') content = msg.reasoning_content;
   core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 240)}`);
 
