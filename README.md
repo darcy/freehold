@@ -5,7 +5,8 @@ AI-agent-operated — that lands a Proxmox VE / VPS + Kubernetes stack with Buzz
 control plane and a skill framework that installs and configures self-hosted OSS. The agent
 is the wall-breaker: you don't manage servers, you *ask*.
 
-**Version: 0.3.0.** See `CHANGELOG.md` for the history of how this plan got here.
+The current version is the top entry in `CHANGELOG.md` (never restated here). That file
+also records the history of how this plan got here.
 
 **Status:** the engine room (identity, secret provisioner, MCP runner primitive, SSH/Vultr/
 B2 connectors, coarse grants, local admin/ops console) is live and hermetic-tested. The
