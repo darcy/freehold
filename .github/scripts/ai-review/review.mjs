@@ -307,26 +307,25 @@ async function main() {
     `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
   ].filter(Boolean).join('\n\n');
 
-  if (newInline.length > 0) {
-    // A single hallucinated line (a line number not part of the diff) makes the
-    // whole createReview call 422. Isolate it so a bad inline comment can't
-    // prevent the round-summary/verdict comment from posting. The review body
-    // is the parent comment the inline comments roll up under.
-    try {
-      await octokit.rest.pulls.createReview({
-        owner, repo, pull_number,
-        event: 'COMMENT',
-        body: summaryText,
-        comments: newInline.map(c => ({
-          path: c.path,
-          line: c.line,
-          side: 'RIGHT',
-          body: `**[${c.severity}]** ${c.comment}`,
-        })),
-      });
-    } catch (e) {
-      core.warning(`Skipped inline comments (${newInline.length}): ${e.message}`);
-    }
+  // Always post the review with a body (the parent comment inline comments
+  // roll up under) — even when there are no new inline comments, so every
+  // round leaves a parent review comment. A single hallucinated line (a line
+  // number not part of the diff) makes the whole createReview call 422, so
+  // isolate it so a bad inline comment can't prevent the summary comment.
+  try {
+    await octokit.rest.pulls.createReview({
+      owner, repo, pull_number,
+      event: 'COMMENT',
+      body: summaryText,
+      comments: newInline.map(c => ({
+        path: c.path,
+        line: c.line,
+        side: 'RIGHT',
+        body: `**[${c.severity}]** ${c.comment}`,
+      })),
+    });
+  } catch (e) {
+    core.warning(`Review comment failed: ${e.message}`);
   }
 
   await upsertTrackingComment(`${TRACKING_MARKER}\n\n${summaryText}`);
