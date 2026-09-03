@@ -159,6 +159,12 @@ changelog.
   harness (buzz-agent in `ghcr.io/block/buzz-sprig:main`) honours exactly these env vars is
   verified against the packaged binary's config errors, but is not yet confirmed end-to-end on a
   live pod — the D1 drill is the first proof.
+- **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
+  the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
+  bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and
+  any Phase E-created agent reusing `AgentLiteLLMKeyScript` — can register/remove any model and
+  mint keys until scoped keys are wired. Minting a bootstrap virtual key and switching agent
+  pods to scoped per-agent keys is the named follow-up.
 
 ## Build / test
 

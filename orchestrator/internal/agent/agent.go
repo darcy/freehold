@@ -103,9 +103,12 @@ const AgentLiteLLMKeySecretKey = "key"
 // agent's behavior changes.
 //
 // The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
-// points the buzz-agent harness at litellmBaseURL with litellmModel and a
-// per-pod minted key (OPENAI_COMPAT_API_KEY from the `<pod>-litellm-key`
-// Secret by secretKeyRef). The API key NEVER rides the manifest.
+// points the buzz-agent harness at litellmBaseURL with litellmModel and an API
+// key (OPENAI_COMPAT_API_KEY from the `<pod>-litellm-key` Secret by
+// secretKeyRef). TODAY that key is the litellm gateway's admin master key
+// (litellm's /key/generate still needs a bootstrap virtual key before scoped
+// keys can be minted — see AGENTS.md "Known gaps"); the key NEVER rides the
+// manifest.
 //
 // The nsec also NEVER rides the manifest: it comes from the `<pod>-identity`
 // Secret (a `secretKeyRef`), which the deploy step writes ONLY when absent —
