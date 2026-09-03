@@ -5,9 +5,10 @@ Status: current work.
 ## What Chunk 4 actually builds (the CPA)
 
 Scope: a real reasoning agent arrives for the first time — this is new relative
-to Chunks 1–3, which shipped without one by design. Still no 
-skill execution, no workspace/git, no retry/escalation budgets — those are
-Chunk 5/6 concerns.
+to Chunks 1–3, which shipped without one by design. Still no skill
+execution, no workspace/git — those are Chunk 5's concerns — and no
+budgets, no postcondition-gated readiness, no Terraform deploys — those
+wait for Chunk 6.
 
 ### Locked decisions
 
@@ -107,7 +108,7 @@ to run, idle and active.
 
 - [ ] F1. With CPA and at least one created agent running concurrently,
       capture idle and active CPU/RAM footprint per agent process.
-- [ ] F2. Record the numbers as a decision input for Chunk 5's sleep/wake
+- [ ] F2. Record the numbers as a decision input for Chunk 6's sleep/wake
       work — this chunk measures, it does not build a watcher/reaper.
 
 ### Open decisions to make explicitly at kickoff (not pre-decided by this plan)
@@ -125,6 +126,10 @@ to run, idle and active.
     before Chunk 5 even if it seems easy in the moment — the point of this
     chunk is proving the identity/memory/rebuild pattern generalizes, not
     shipping a second capability surface early.
+*   **Budgets and the postcondition-gated readiness view** (the
+    budget-exceeded stop/report/offer path and the `verify:`-checked
+    🟢/🟡/🔴 gate) land with Chunk 6's provisioning work — no agent
+    provisions anything in this chunk.
 
 ### Chunk 4 acceptance (from `roadmap/POC.md`)
 

@@ -300,10 +300,29 @@ it to make and ship a real change — to Buzz's own git and/or GitHub.
 Goal: the same agent-does-real-work loop from Chunk 4 generalizes from an LXC target to a
 kube target.
 
+*   **The skill schema and the first skills.** A `provision` skill declares `target: lxc | pod |
+    either` — a *hint* the expert may override, not an authorization. The expert reasons
+    about its own target and asks CPA — never a peer directly; CPA resolves which named
+    peer fulfills the ask, gates cost/irreversibility, and delegates. The expert receives
+    only a slot descriptor (architecture, resource bounds, compute kind — never peer
+    identity). 
+
 *   Kube-slot fulfillment: a named peer hands out a namespace + ResourceQuota instead of an
     LXC, same "give me compute" shape.
     
+*   **Budget-exceeded is escalation, never action:** the agent stops, reports, and
+    *offers* — never performs — a rebuild for non-ephemeral state.
+    
+*   **Readiness is postcondition-gated:** 🟢/🟡/🔴 reflects the `verify:` checks a runner
+    runs *after* the expert reports done, so a confidently-wrong acceptance keeps the
+    service 🔴 rather than flipping it green on the agent's word.
+    
 *   An agent deploys a service to that slot, verified live.
+    
+*   **Terraform per kind:** `terraform/` plans per kind (proxmox-lxc, k3s, litellm-kube,
+    later vultr-vps/hetzner-vps) running runner-exec under the four locked disciplines (see
+    `AGENTS.md`'s "Locked model"); G6's teardown/rebuild rides `terraform destroy` /
+    `terraform apply` plus the verify harness.
     
 *   Sleep/wake for ad-hoc agents is built here (idle auto-reap on pods), using the resource
     numbers gathered in Chunk 3.
@@ -313,6 +332,15 @@ kube target.
 
 *   Same proof point as Chunk 4 (agent deploys a service), targeting a kube namespace
     instead of an LXC, via the same CPA-routed peer-fulfillment pattern.
+    
+*   A `target:`-declared skill never widens authority: the expert acts only through the
+    slot descriptor CPA hands it — architecture, resource bounds, compute kind, never peer
+    identity.
+    
+*   Blue/green flips with zero dropped requests (new version alongside → verify → flip →
+    soak → remove old); a budget blow-up stops at an offer, and a failed `verify:` keeps
+    readiness 🔴. Images/state versions ride a local `registry:2` with bounded retention
+    (the last 3).
     
 
 ## Chunk 7 — Remaining connectors exercised + North Star: portable backup & hardware migration
@@ -333,6 +361,9 @@ grants, and services.
     
 *   A bootstrap path that restores identity + memory + grants + running services from a
     backup — disaster recovery, distinct from the live compute-only reattach path.
+    
+*   VM-targeted deploys are deferred; G7's blue/green flip (Chunk 6) keeps the North Star's
+    cross-provider restore reproducible on the same discipline.
     
 *   This is also a standing dogfood tool once built: clone a running production freehold
     onto disposable hardware to test a risky change, without touching the real system, then
