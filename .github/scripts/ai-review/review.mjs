@@ -190,7 +190,7 @@ async function callLlm(prompt) {
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
-      max_tokens: 4000,
+      max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }],
       tools: [REVIEW_TOOL],
       tool_choice: { type: 'function', function: { name: 'review' } },
