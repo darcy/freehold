@@ -141,6 +141,14 @@ metadata:
     freehold.fh/agent-name: %s
 spec:
   restartPolicy: Never
+  # The agent must reach the community relay over the LAN (its own DNS +
+  # the relay LXC), but pod-CNI egress to non-cluster LAN IPs is often
+  # blocked (kube-router FORWARD policy DROP without SNAT). hostNetwork puts
+  # the pod on the node's network so it resolves via the node (CP resolver)
+  # and reaches the relay directly, like any guest. The agent is the
+  # appliance's own trained identity on the operator's relay — it does not
+  # need pod-CNI isolation from its own control plane.
+  hostNetwork: true
   containers:
   - name: %s
     image: %s

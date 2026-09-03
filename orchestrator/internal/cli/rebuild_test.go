@@ -768,3 +768,18 @@ func TestLitellmRunArgs(t *testing.T) {
 		t.Errorf("litellmRun must not use the nested exec --target form: %q", joined)
 	}
 }
+
+func TestRelayDomainHost(t *testing.T) {
+	cases := []struct{ domain, base, want string }{
+		{"freehold-test.darcydev.net", "darcydev.net", "freehold-test"},
+		{"example.com", "com", "example"},        // example.com under search com -> bare host example
+		{"freehold-test.darcydev.net", "", ""},   // no search base -> no record
+		{"a.b.darcydev.net", "darcydev.net", ""}, // dotted host not derivable (resolver rejects dots)
+		{"plain", "darcydev.net", ""},            // not a subdomain
+	}
+	for _, c := range cases {
+		if got := relayDomainHost(c.domain, c.base); got != c.want {
+			t.Errorf("relayDomainHost(%q,%q) = %q, want %q", c.domain, c.base, got, c.want)
+		}
+	}
+}

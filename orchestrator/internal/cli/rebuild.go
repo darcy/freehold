@@ -831,6 +831,7 @@ func (e *rebuildEngine) fromAnswers() *config.Config {
 	cfg := &config.Config{
 		Domain:         e.f.domain,
 		RelayURL:       "https://" + e.f.domain,
+		RelayWsURL:     "ws://" + e.f.domain + ":3000",
 		CPURL:          "https://cp-" + e.f.domain,
 		OperatorPubkey: e.f.operatorPubkey,
 		Runner: config.RunnerRef{
@@ -1639,6 +1640,11 @@ func (e *rebuildEngine) stageDnsRegister() error {
 	type rec struct{ name, ip, source string }
 	var recs []rec
 	cfg, _ := config.Load(e.f.configPath)
+	// The guests' resolv.conf carries PVE's `search` line; register it as the
+	// resolver's world domain so addn-hosts serves <name>.<search> FIRST (the
+	// glibc search-first lookup gets the split-horizon answer, not the
+	// public/tailscale record through upstream).
+	searchBase := e.guestSearchBase()
 	if cfg != nil {
 		for _, role := range []string{"relay", "cp", "k3s"} {
 			g := map[string]config.LxcGuest{
@@ -1650,6 +1656,18 @@ func (e *rebuildEngine) stageDnsRegister() error {
 		}
 		if cfg.Litellm.Host != "" {
 			recs = append(recs, rec{name: "litellm", ip: cfg.Litellm.Host, source: "litellm-apply"})
+		}
+		// Split horizon for the appliance's OWN relay domain: the community
+		// relay is served on the relay LXC, so the CP resolver answers
+		// <domain> -> the relay LXC IP for internal clients (k3s pods via
+		// CoreDNS forward) instead of forwarding to the public/Tailscale A
+		// record (unreachable from the LAN). Rendered as the bare host +
+		// <search> below. Only added when the domain is a subdomain of the
+		// search base (the standard deploy shape), so the host derives cleanly.
+		if cfg.Domain != "" && cfg.Lxc.Relay.Ip != nil {
+			if host := relayDomainHost(cfg.Domain, searchBase); host != "" {
+				recs = append(recs, rec{name: host, ip: config.StripCIDR(*cfg.Lxc.Relay.Ip), source: "self-domain"})
+			}
 		}
 	}
 	// Configure the mirror BEFORE the remote sync: if the CP is unreachable
@@ -1669,11 +1687,6 @@ func (e *rebuildEngine) stageDnsRegister() error {
 	if len(recs) == 0 {
 		return nil
 	}
-	// The guests' resolv.conf carries PVE's `search` line; register it as the
-	// resolver's world domain so addn-hosts serves <name>.<search> FIRST (the
-	// glibc search-first lookup gets the split-horizon answer, not the
-	// public/tailscale record through upstream).
-	searchBase := e.guestSearchBase()
 	for _, r := range recs {
 		args := []string{"dns", "add", r.name, r.ip, r.source}
 		if searchBase != "" {
@@ -1684,6 +1697,22 @@ func (e *rebuildEngine) stageDnsRegister() error {
 		}
 	}
 	return nil
+}
+
+// relayDomainHost is the bare (dotless) label prepended to the resolver's
+// search base to reproduce cfg.Domain — e.g. `freehold-test` for the domain
+// `freehold-test.darcydev.net` under search `darcydev.net`. Empty when the
+// domain isn't a subdomain of the search base (no clean split-horizon label
+// exists without dotted-record support in the resolver).
+func relayDomainHost(domain, searchBase string) string {
+	if searchBase == "" || !strings.HasSuffix(domain, "."+searchBase) {
+		return ""
+	}
+	host := strings.TrimSuffix(domain, "."+searchBase)
+	if host == "" || strings.Contains(host, ".") {
+		return ""
+	}
+	return host
 }
 
 // guestSearchBase reads the `search` line from the CP LXC's resolv.conf (PVE
@@ -2353,8 +2382,17 @@ func (e *rebuildEngine) stageCpa() error {
 	if err != nil {
 		return err
 	}
-	// The harness speaks WS to the relay; the config records the HTTP origin.
-	relayURL := strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
+	// The harness speaks WS to the relay. The pod joins the community relay
+	// over the LAN: resolve the domain internally to the relay LXC and speak
+	// plain ws on the relay's HTTP port (:3000 — the deployment's
+	// BUZZ_HTTP_PORT), because there is no TLS terminator on the LAN for the
+	// public wss:443 origin (that only exists on the external/Tailscale face).
+	// cfg.RelayWsURL records this internal origin; fall back to deriving wss
+	// from the public URL for worlds that do reach the relay over TLS.
+	relayURL := cfg.RelayWsURL
+	if relayURL == "" {
+		relayURL = strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
+	}
 	// B1/B3: the CPA's purpose lives in the orchestrator's prompts package
 	// (prompts/CPA_SYSTEM_PROMPT.md), embedded into this binary at compile
 	// time and shipped into the pod's ConfigMap at spawn; the pod re-reads

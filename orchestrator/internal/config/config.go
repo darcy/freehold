@@ -20,6 +20,7 @@ import (
 type Config struct {
 	Domain           string      `toml:"domain"`
 	RelayURL         string      `toml:"relay_url"`
+	RelayWsURL       string      `toml:"relay_ws_url,omitempty"`
 	RelayPubkey      *string     `toml:"relay_pubkey,omitempty"`
 	CPURL            string      `toml:"cp_url"`
 	OperatorPubkey   string      `toml:"operator_pubkey"`

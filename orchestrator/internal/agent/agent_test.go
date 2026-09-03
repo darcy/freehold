@@ -42,6 +42,10 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		"BUZZ_ACP_AGENT_COMMAND",
 		`value: "buzz-agent"`,
 		"restartPolicy: Never",
+		// The agent joins its own relay over the LAN (pod-CNI egress to
+		// external LAN IPs is often blocked); hostNetwork makes resolution +
+		// reachability go through the node exactly like any guest.
+		"hostNetwork: true",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("manifest missing %q", want)
