@@ -86,8 +86,8 @@ repo, not the history.
   relay outage. No relay fork or patch.
 - **The CPA is a real, LLM-backed reasoning agent — the system's main user touchpoint.**
   It runs on the same buzz-acp/goose-class harness as the expert agents it creates, gets its
-  purpose from `prompts/CPA_SYSTEM_PROMPT.md` (embedded by the orchestrator and mounted
-  into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
+  purpose from `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (embedded by the orchestrator and
+  mounted into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
   `/srv/freehold/CPA_SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
@@ -151,9 +151,11 @@ changelog.
 ## Build / test
 
 - Rust (`core/`, `runner/`, `control-plane/`, `console-client/`, `testkit/`, `acceptance/`):
-  `cargo build --workspace` + `cargo test --workspace`.
+  `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
+  declares `rust-version = "1.94"`).
 - Go (`orchestrator/` — the `freehold` and `freehold-orchestrator` binaries, the TUI, and the
-  `harness/` release gate): `cd orchestrator && go build ./... && go vet ./... &&
+  `harness/` release gate): run Go through mise (`mise exec go@1.25.0 -- go …`; `go.mod`
+  pins `go 1.25.0`); `cd orchestrator && go build ./... && go vet ./... &&
   go test ./...`; `go test ./harness/` drives `target/debug/freehold-harness-oracle` and
   gates every crypto primitive against the Rust `core` byte-for-byte.
 - No formatter/linter config beyond rustfmt + clippy defaults.

@@ -82,7 +82,7 @@ const (
 //
 // systemPrompt is the FULL text of prompts/CPA_SYSTEM_PROMPT.md (stageCpa
 // passes the file contents, not a path): it embeds as the <pod>-prompt
-// ConfigMap's content (indented two spaces per line so the `|` block scalar
+// ConfigMap's content (indented four spaces per line so the `|` block scalar
 // is valid YAML) and the pod mounts that ConfigMap read-only at
 // CPAbsolutePromptPath; the pod re-reads the mounted file on every spawn —
 // never cached. Editing the prompt and redeploying is the only way the
@@ -157,12 +157,13 @@ spec:
 		secret, secret, CPASystemPromptPath, promptCm, pod, pod)
 }
 
-// indentSystemPrompt indents every prompt line by two spaces so it embeds as
-// a valid k8s ConfigMap block scalar (`  CPA_SYSTEM_PROMPT.md: |`).
+// indentSystemPrompt indents every prompt line by four spaces so it embeds as
+// a valid k8s ConfigMap block scalar (the `data:` key `  CPA_SYSTEM_PROMPT.md:
+// |` is at 2 spaces, so the content must sit at 4 to parse as one scalar).
 func indentSystemPrompt(prompt string) string {
 	lines := strings.Split(strings.TrimRight(prompt, "\n"), "\n")
 	for i, l := range lines {
-		lines[i] = "  " + l
+		lines[i] = "    " + l
 	}
 	return strings.Join(lines, "\n")
 }

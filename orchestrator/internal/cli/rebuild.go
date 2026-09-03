@@ -2190,18 +2190,18 @@ func cpaIdentityDir() string {
 	return filepath.Join(rbStateDir(), "agent-cpa")
 }
 
-// rbCPAPromptPath is the repo-root prompts/CPA_SYSTEM_PROMPT.md that the
-// orchestrator embeds and ships to the k3s guest as the CPA pod's ConfigMap.
+// rbCPAPromptPath is the prompt's in-pod path (/srv/freehold/...): the pod
+// re-reads the ConfigMap-mounted copy on every spawn, never a host-side file.
 func rbCPAPromptPath() string {
 	return "CPA_SYSTEM_PROMPT.md"
 }
 
-// cpaSystemPrompt is the CPA's purpose, embedded from the repo root's
-// prompts/CPA_SYSTEM_PROMPT.md and baked into the CPA pod's ConfigMap (the
-// pod re-reads the mounted copy at /srv/freehold/CPA_SYSTEM_PROMPT.md on
-// every spawn).
+// cpaSystemPrompt is the CPA's purpose, embedded from
+// orchestrator/prompts/CPA_SYSTEM_PROMPT.md and baked into the CPA pod's
+// ConfigMap (the pod re-reads the mounted copy at
+// /srv/freehold/CPA_SYSTEM_PROMPT.md on every spawn).
 //
-//go:embed CPA_SYSTEM_PROMPT.md
+//go:embed prompts/CPA_SYSTEM_PROMPT.md
 var cpaSystemPrompt string
 
 // ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its

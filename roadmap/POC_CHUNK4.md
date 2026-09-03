@@ -74,13 +74,14 @@ to run, idle and active.
 
 #### Phase B — CPA system prompt
 
-- [x] B1. Write `prompts/CPA_SYSTEM_PROMPT.md` (the repo's single prompts
-      directory): purpose, tone, and explicit tool/scope boundaries.
+- [x] B1. Write `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (the single
+      prompts directory, inside the `freehold/orchestrator` Go module so the
+      `//go:embed` can reach it): purpose, tone, and explicit tool/scope
+      boundaries.
 - [x] B2. Bootstrap loads this file into the harness config at first spawn
-      (the orchestrator embeds it and the CPA/agent pod mounts it as a
-      `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`; the
-      old `//go:embed not-embedded-here` marker was fiction — the file
-      simply didn't exist until B1).
+      (the orchestrator embeds it — `//go:embed prompts/CPA_SYSTEM_PROMPT.md`,
+      relative to `orchestrator/` — and the CPA/agent pod mounts it as a
+      `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`).
 - [x] B3. Every restart re-reads the current file from disk (never cached) —
       editing the prompt and redeploying is the only way CPA's purpose
       changes.
@@ -88,8 +89,8 @@ to run, idle and active.
 > **Phase B deferral (named, not lost):** the pod reads its prompt from a
 > `<pod>-prompt` ConfigMap (mounted read-only at
 > `/srv/freehold/CPA_SYSTEM_PROMPT.md`), seeded at apply time from the
-> orchestrator's embedded `prompts/CPA_SYSTEM_PROMPT.md`. A host restart of that pod
-> re-reads the mounted copy, so editing the prompt and redeploying changes
+> orchestrator's embedded `orchestrator/prompts/CPA_SYSTEM_PROMPT.md`. A host restart of that
+> pod re-reads the mounted copy, so editing the prompt and redeploying changes
 > CPA's behavior (B3 as planned). A compute-only teardown/rebuild (Phase
 > 0.12) re-seeds the pod from the *embedded* bytes, so a prompt edit made
 > only in the CP's `/srv/data/cp` copy doesn't survive a rebuild until

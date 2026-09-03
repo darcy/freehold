@@ -29,16 +29,12 @@ list is current-state and kept there rather than duplicated here.
 
 ### Added
 
-*   **`prompts/CPA_SYSTEM_PROMPT.md`.** The CPA's purpose, tone,
-    and tool/scope boundaries are one reviewable Markdown file in the
-    repository's single `prompts/` directory —
-    embedded by `freehold-orchestrator` and mounted into the CPA's pod as the
-    `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`, so the
-    pod re-reads it fresh on every spawn and editing the file + redeploying
-    is the only way CPA's behavior changes. (The `//go:embed
-    not-embedded-here` marker and the `/srv/freehold` path in
-    `internal/cli/rebuild.go` were fiction — the file simply didn't exist
-    until B1.)
+*   **`prompts/CPA_SYSTEM_PROMPT.md` (under `orchestrator/`).** The CPA's
+    purpose, tone, and tool/scope boundaries are one reviewable Markdown
+    file, embedded by `freehold-orchestrator` and mounted into the CPA's pod
+    as the `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
+    so the pod re-reads it fresh on every spawn and editing the file +
+    redeploying is the only way CPA's behavior changes.
 *   **The CPA's toolset is a live MCP surface.** The agent pods now run with
     `BUZZ_ACP_MCP_COMMAND=/usr/local/bin/freehold-agent-tools` (+ args), so
     the create/grant/manage-agent toolset Phase A built is what the

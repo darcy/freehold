@@ -71,7 +71,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **CPA + experts live in Buzz:** the CPA is a real reasoning agent (the
     system's main user touchpoint); experts are deterministic or
-    reasoning-class. The CPA gets its purpose from `prompts/CPA_SYSTEM_PROMPT.md`.
+    reasoning-class. The CPA gets its purpose from `orchestrator/prompts/CPA_SYSTEM_PROMPT.md`.
 
 *   **Host-flexible:** Proxmox is the lead/default; VPS/cloud are first-class
     (the business path). The k8s layer (Chunks 6–7) and everything above the
@@ -317,10 +317,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **`[Enter]` continues** and re-runs the SAME args in place
     (`runShell`); it never returns to the 6-field auth form.
 
-### `prompts/CPA_SYSTEM_PROMPT.md` (the CPA's purpose)
+### `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (the CPA's purpose)
 
-*   **`prompts/CPA_SYSTEM_PROMPT.md`** (at the repo root, embedded into
-    `freehold-orchestrator` and mounted into every agent pod as the
+*   **`orchestrator/prompts/CPA_SYSTEM_PROMPT.md`** (embedded into
+    `freehold-orchestrator` via `//go:embed prompts/CPA_SYSTEM_PROMPT.md`
+    and mounted into every agent pod as the
     `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
     re-read fresh on every spawn) — not a Go file and
     not a "CPA host / LLM routing" spec. It says:
