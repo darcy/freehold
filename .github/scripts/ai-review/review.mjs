@@ -296,14 +296,27 @@ async function main() {
   const seen = new Set(existingComments.map(c => `${c.path}:${c.line}`));
   const newInline = inline.filter(c => !seen.has(`${c.path}:${c.line}`));
 
+  const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
+  const summaryText = [
+    `### DeepSeek AI Review — round update`,
+    `**CI:** ${ciStatus}`,
+    result.summary || '',
+    result.readme_note ? `**README:** ${result.readme_note}` : '',
+    result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
+    legend,
+    `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
+  ].filter(Boolean).join('\n\n');
+
   if (newInline.length > 0) {
     // A single hallucinated line (a line number not part of the diff) makes the
     // whole createReview call 422. Isolate it so a bad inline comment can't
-    // prevent the round-summary/verdict comment from posting.
+    // prevent the round-summary/verdict comment from posting. The review body
+    // is the parent comment the inline comments roll up under.
     try {
       await octokit.rest.pulls.createReview({
         owner, repo, pull_number,
         event: 'COMMENT',
+        body: summaryText,
         comments: newInline.map(c => ({
           path: c.path,
           line: c.line,
@@ -316,19 +329,7 @@ async function main() {
     }
   }
 
-  const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
-  const bodyParts = [
-    TRACKING_MARKER,
-    `### AI Review — round update`,
-    `**CI:** ${ciStatus}`,
-    result.summary || '',
-    result.readme_note ? `**README:** ${result.readme_note}` : '',
-    result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
-    legend,
-    `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
-  ].filter(Boolean);
-
-  await upsertTrackingComment(bodyParts.join('\n\n'));
+  await upsertTrackingComment(`${TRACKING_MARKER}\n\n${summaryText}`);
 
   core.info(`Posted ${newInline.length} inline comment(s). Verdict: ${result.verdict}`);
 }

@@ -1,4 +1,4 @@
-name: AI PR Review
+name: DeepSeek AI PR Review
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   checks: read
 
 jobs:
-  review:
+  deepseek-review:
     runs-on: ubuntu-latest
     if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
@@ -31,7 +31,10 @@ jobs:
       - name: Run AI review
         working-directory: .github/scripts/ai-review
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Comments author as this token's account. GITHUB_TOKEN posts as
+          # 'github-actions[bot]'; use a PAT from a GitHub account/bot named
+          # 'DeepSeek' (repo write + checks read scopes) so reviews show that name.
+          GITHUB_TOKEN: ${{ secrets.DEEPSEEK_BOT_TOKEN }}
 
           # ---- provider config: this is the only provider-specific part ----
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
@@ -41,7 +44,7 @@ jobs:
 
           PROMPT_FILE: "review-prompt.md"
           CONTEXT_FILES: "AGENTS.md,README.md,ARCHITECTURE.md"
-          EXCLUDE_PATTERNS: "package-lock.json,*.lock,*.md,dist/**,vendor/**"
+          EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,**/*.md,**/dist/**,**/vendor/**"
           MAX_DIFF_CHARS: "60000"
           MAX_CONTEXT_FILE_CHARS: "20000"
           FAIL_ON_OVERSIZED_DIFF: "true"
