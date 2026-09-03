@@ -1910,12 +1910,14 @@ func (e *rebuildEngine) stageLitellm() error {
 		}
 		// Interactive: prompt once for the operator's supply on this cold
 		// world (it is sealed into the runner and never asked for again).
-		fmt.Fprintf(e.out, "  litellm first provision needs the provider (fireworks) API key: ")
-		line, err := bufio.NewReader(e.in).ReadString('\n')
+		// Uses e.prompt, which reads the engine's ONE shared buffered stdin
+		// (a fresh bufio.Reader would drain bytes from the shared pipe — see
+		// the stdin field comment).
+		answer, err := e.prompt("litellm first provision: the provider (fireworks) API key")
 		if err != nil {
-			return fmt.Errorf("reading litellm provider key: %w", err)
+			return err
 		}
-		e.f.litellmProviderKey = strings.TrimSpace(strings.TrimSuffix(line, "\n"))
+		e.f.litellmProviderKey = strings.TrimSpace(answer)
 		if e.f.litellmProviderKey == "" {
 			return fmt.Errorf("no litellm provider key supplied")
 		}

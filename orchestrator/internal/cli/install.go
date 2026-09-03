@@ -158,21 +158,22 @@ func collectAnswers(ui *installerUI) (rebuildFlags, error) {
 	}
 
 	return rebuildFlags{
-		addr:             serve,
-		target:           runner,
-		host:             host,
-		domain:           domain,
-		operatorPubkey:   pk,
-		operatorIdentity: opDir,
-		sizeGB:           drive.TenantLVSizeGB,
-		poolSizeGB:       drive.FreshPoolSizeGB,
-		noK3s:            false,
-		noLitellm:        false,
-		rootfsGB:         rootfs,
-		memoryMB:         memory,
-		relayGw:          "192.168.30.1",
-		configPath:       defaultConfigPath(),
-		confirmStorage:   consent,
+		addr:               serve,
+		target:             runner,
+		host:               host,
+		domain:             domain,
+		operatorPubkey:     pk,
+		operatorIdentity:   opDir,
+		sizeGB:             drive.TenantLVSizeGB,
+		poolSizeGB:         drive.FreshPoolSizeGB,
+		noK3s:              false,
+		noLitellm:          false,
+		rootfsGB:           rootfs,
+		memoryMB:           memory,
+		relayGw:            "192.168.30.1",
+		litellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
+		configPath:         defaultConfigPath(),
+		confirmStorage:     consent,
 	}, nil
 }
 
