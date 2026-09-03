@@ -4,6 +4,23 @@ Status: APPROVED, implementation in progress by opencode. This file is the singl
 truth for the phase so work survives context compaction. Read `AGENTS.md` / `CHANGELOG.md` /
 `roadmap/POC_CHUNK4.md` for the surrounding context (Chunk 4 CPA, D1–D4 drills, PR 143).
 
+## Progress (checkpoint — resume here)
+- **F1 DONE** (`3ded298`, merged to branch + pushed): resolver accepts dotted FQDNs; config
+  derives `relay.<d>` / `cp.<d>`; new `dns wildcard` subcommand + dnsmasq
+  `address=/.<d>/<ip>` apex so `relay.`/`cp.`/`*.base` resolve internally to the k3s node;
+  rebuild `stageDnsWildcard` wires it (`record-caddy`); TUI DNS panel shows the wildcard row.
+- **F2 DONE** (`f5981b6`, pushed): core Caddy hostNetwork kube edge — `deploy/caddy.go`
+  (`RenderCaddyfile` + `CaddyManifest`: durable PVC, Caddyfile ConfigMap, hostNetwork
+  Deployment on 80/443, NodePort svc); `config.CaddySpec`; rebuild `stageCaddy`/
+  `caddyManifestScript`/`recordCaddy` (runs whenever k3s is on); TUI `caddy (TLS edge)` row +
+  probe. Relay vhost fronts relay LXC:3000; cp.<d> deferred until the CP console binds the LAN.
+- **F3 IN PROGRESS (next)**: embedded go-acme/lego DNS-01 — provider dropdown from lego's
+  registry, per-provider env collection, TXT pre-verify, store as runner ciphertext secret,
+  issue `*.domain` -> write certs into the caddy-data PVC at /data/tls, Caddy reload, reuse gate.
+- **F4–F6 PENDING**: Certs TUI tab; CPA pod -> wss://relay.<d> + live D1; tests/docs/PR.
+- Binaries already rebuilt + placed in `~/.cargo/bin/{freehold,control-plane}` for live deploy.
+
+
 ## Why this phase exists (the two hard blockers it fixes)
 
 The CPA pod (buzz-acp harness in `ghcr.io/block/buzz-sprig:main`) could not join the relay:
