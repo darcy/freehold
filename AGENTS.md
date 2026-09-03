@@ -147,6 +147,13 @@ changelog.
   unzeroized body bytes before a `Zeroizing` wrapper takes ownership (loopback, TLS-free —
   same exposure class as the CLI's stdin path); the console's signing key is re-derived on
   every readiness probe rather than cached once.
+- **The CPA's toolset is wired but its binary isn't built here yet.** The agent pods set
+  `BUZZ_ACP_MCP_COMMAND=/usr/local/bin/freehold-agent-tools` (+ args, in
+  `orchestrator/internal/agent/agent.go`), but no `freehold-agent-tools` binary is built or
+  packaged in this repo — whether it already ships in the upstream
+  `ghcr.io/block/buzz-sprig:main` image is unconfirmed. Until it's provably built from this
+  repo (or confirmed upstream), Phase B's toolset is a live config surface, not yet a live
+  callable one; the binary source + a build/image step are the named follow-up.
 
 ## Build / test
 
