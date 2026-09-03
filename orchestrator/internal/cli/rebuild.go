@@ -22,6 +22,7 @@ package cli
 import (
 	"bufio"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -2192,8 +2193,16 @@ func cpaIdentityDir() string {
 // rbCPAPromptPath is the repo-root prompts/CPA_SYSTEM_PROMPT.md that the
 // orchestrator embeds and ships to the k3s guest as the CPA pod's ConfigMap.
 func rbCPAPromptPath() string {
-	return "prompts/CPA_SYSTEM_PROMPT.md"
+	return "CPA_SYSTEM_PROMPT.md"
 }
+
+// cpaSystemPrompt is the CPA's purpose, embedded from the repo root's
+// prompts/CPA_SYSTEM_PROMPT.md and baked into the CPA pod's ConfigMap (the
+// pod re-reads the mounted copy at /srv/freehold/CPA_SYSTEM_PROMPT.md on
+// every spawn).
+//
+//go:embed CPA_SYSTEM_PROMPT.md
+var cpaSystemPrompt string
 
 // ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its
 // pubkey. Rebuilds reuse the recorded identity (identity continuity), so the

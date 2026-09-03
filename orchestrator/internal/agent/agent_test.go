@@ -1,14 +1,30 @@
 package agent
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
+// systemPrompt is the real multi-line prompt, loaded from the repo root's
+// prompts/ dir (what stageCpa passes to AgentManifestScript — the old tests
+// passed a path string, which is why the block-scalar bug compiled).
+func systemPrompt() string {
+	b, err := os.ReadFile("../../../prompts/CPA_SYSTEM_PROMPT.md")
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 func TestCPAPodManifestBasics(t *testing.T) {
-	m := CPAPodManifest("waldo", "wss://relay.test", "/prompts/CPA_SYSTEM_PROMPT.md")
+	sp := systemPrompt()
+	m := CPAPodManifest("waldo", "wss://relay.test", sp)
 	for _, want := range []string{
 		"kind: Pod",
+		"kind: ConfigMap",
 		"name: waldo",
 		"namespace: agents",
 		"image: ghcr.io/block/buzz-sprig:main",
@@ -16,7 +32,9 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		"BUZZ_RELAY_URL",
 		`value: "wss://relay.test"`,
 		"BUZZ_ACP_SYSTEM_PROMPT_FILE",
-		"/prompts/CPA_SYSTEM_PROMPT.md",
+		CPASystemPromptPath,
+		"BUZZ_ACP_MCP_COMMAND",
+		CpaMcpCommand,
 		"BUZZ_ACP_AGENT_COMMAND",
 		`value: "buzz-agent"`,
 		"restartPolicy: Never",
@@ -24,6 +42,25 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		if !strings.Contains(m, want) {
 			t.Errorf("manifest missing %q", want)
 		}
+	}
+	// The manifest must apply: every doc parses and the ConfigMap's block
+	// scalar (which embeds the real multi-line prompt) parses as one string.
+	docs := strings.Split(m, "\n---\n")
+	if len(docs) != 3 {
+		t.Fatalf("manifest has %d YAML docs, want 3", len(docs))
+	}
+	var cm struct {
+		Kind string            `yaml:"kind"`
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal([]byte(docs[0]), &cm); err != nil {
+		t.Fatalf("ConfigMap doc does not parse: %v", err)
+	}
+	if cm.Kind != "ConfigMap" {
+		t.Fatalf("first doc is %q, want ConfigMap", cm.Kind)
+	}
+	if got := cm.Data["CPA_SYSTEM_PROMPT.md"]; got != strings.TrimRight(sp, "\n") {
+		t.Errorf("ConfigMap content differs from the prompt file")
 	}
 	// The nsec must NEVER be embedded in the manifest (it rides the Secret).
 	if strings.Contains(m, "BUZZ_PRIVATE_KEY") {
@@ -68,7 +105,7 @@ func TestAgentPodManifestDistinctNames(t *testing.T) {
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", "/p/prompts/CPA_SYSTEM_PROMPT.md", "waldo")
+	s := CPAManifestScript(105, "wss://relay.test", "/p/CPA_SYSTEM_PROMPT.md", "waldo")
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,
