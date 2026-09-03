@@ -33,7 +33,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: "go.mod"
+          go-version-file: "orchestrator/go.mod"
 
       - name: Go build
         working-directory: orchestrator
