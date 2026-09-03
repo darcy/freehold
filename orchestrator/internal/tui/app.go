@@ -176,7 +176,8 @@ func dnsRowsLive(cfg *config.Config) []DnsRow {
 
 // parseDnsList extracts `name ip` pairs from the RECORDS TABLE of
 // `control-plane dns list` output: the indented metadata lines and the
-// "--- addn-hosts ---" section (ip-first lines) are both skipped. Pure.
+// "--- addn-hosts ---" section (ip-first lines) are both skipped. The
+// wildcard apex line is captured as `*.<apex>`. Pure.
 func parseDnsList(out string) []DnsRow {
 	var rows []DnsRow
 	for _, l := range strings.Split(out, "\n") {
@@ -186,6 +187,12 @@ func parseDnsList(out string) []DnsRow {
 		}
 		f := strings.Fields(l)
 		if len(f) > 0 && f[0][0] == '-' {
+			continue
+		}
+		if strings.HasPrefix(l, "wildcard") {
+			if len(f) >= 3 && f[1] != "(none)" {
+				rows = append(rows, DnsRow{Name: f[1], IP: f[2], Source: "wildcard (live)"})
+			}
 			continue
 		}
 		if len(f) >= 2 && !strings.Contains(f[0], ".") {

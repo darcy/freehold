@@ -201,6 +201,15 @@ relay 192.168.30.8
 	if got := parseDnsList("(no dns records — the resolver forwards everything upstream)\n"); len(got) != 0 {
 		t.Errorf("empty list should parse to 0 rows, got %+v", got)
 	}
+	// the wildcard apex line surfaces as *.<apex>
+	wc := parseDnsList("wildcard  *.freehold-test.darcydev.net\t192.168.30.7\n  source: record-caddy · created: 123\n--- addn-hosts ---\n192.168.30.7\n")
+	if len(wc) != 1 || wc[0].Name != "*.freehold-test.darcydev.net" || wc[0].IP != "192.168.30.7" || wc[0].Source != "wildcard (live)" {
+		t.Errorf("wildcard row = %+v", wc)
+	}
+	// `(none)` wildcard is not a row
+	if got := parseDnsList("wildcard  (none)\n"); len(got) != 0 {
+		t.Errorf("(none) should yield 0 rows, got %+v", got)
+	}
 }
 
 // TestRunnerSourceDefaultsToCpAndToggles covers the Runners view source:

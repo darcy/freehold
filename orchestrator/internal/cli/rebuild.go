@@ -438,6 +438,10 @@ func (e *rebuildEngine) run() error {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ internal DNS resolver live (CP-owned)")
+	fmt.Fprintln(e.out, "  · registering the Caddy wildcard apex (*.<domain> -> k3s node)…")
+	if err := e.stageDnsWildcard(); err != nil {
+		return err
+	}
 
 	// 15. the relay's signing key via NIP-11 (best-effort trust anchor).
 	if rpk, ok := e.relayPubkeyNip11(); ok {
@@ -1699,8 +1703,32 @@ func (e *rebuildEngine) stageDnsRegister() error {
 	return nil
 }
 
-// relayDomainHost is the bare (dotless) label prepended to the resolver's
-// search base to reproduce cfg.Domain — e.g. `freehold-test` for the domain
+// stageDnsWildcard registers the Caddy wildcard apex: every `<sub>.<domain>`
+// (relay., cp., *.base) resolves INSIDE the CP resolver to the k3s node (where
+// Caddy fronts 80/443 on the LAN). Rendered as dnsmasq `address=/.<domain>/<ip>`,
+// so the apex itself keeps its explicit record and only subdomains land on
+// Caddy. Idempotent. Skips when k3s/litellm is off (no Caddy node) or the
+// domain is empty.
+func (e *rebuildEngine) stageDnsWildcard() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Domain == "" || cfg.Litellm.Host == "" {
+		return nil
+	}
+	apex, ip := cfg.Domain, cfg.Litellm.Host
+	if cfg.Dns.Records == nil {
+		cfg.Dns.Records = map[string]string{}
+	}
+	cfg.Dns.Records["*."+apex] = ip
+	if err := cfg.Save(e.f.configPath); err != nil {
+		return err
+	}
+	if _, err := e.stageCpExec("dns", "wildcard", apex, ip, "record-caddy"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// relayDomainHost is the bare (dotless) label prepended to the resolver's// search base to reproduce cfg.Domain — e.g. `freehold-test` for the domain
 // `freehold-test.darcydev.net` under search `darcydev.net`. Empty when the
 // domain isn't a subdomain of the search base (no clean split-horizon label
 // exists without dotted-record support in the resolver).

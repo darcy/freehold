@@ -894,6 +894,7 @@ async fn dns_list(
     }
     Ok(Json(json!({
         "dns": records,
+        "resolver_wildcard": snap.resolver_wildcard,
         "addn_hosts": crate::dns::render_addn_hosts(&snap.dns, snap.resolver_domain.as_deref()),
     })))
 }
@@ -925,8 +926,10 @@ async fn dns_upsert(
             state.store.dir(),
             &snap.dns,
             snap.resolver_domain.as_deref(),
+            snap.resolver_wildcard.as_ref().map(|w| w.apex.as_str()),
+            snap.resolver_wildcard.as_ref().map(|w| w.ip.as_str()),
             &dns_write,
-            &dns_reload,
+            &|| dns_reload(state.store.dir()),
         )
     };
     match dns_err {
@@ -949,25 +952,30 @@ async fn dns_remove(
         state.store.dir(),
         &snap.dns,
         snap.resolver_domain.as_deref(),
+        snap.resolver_wildcard.as_ref().map(|w| w.apex.as_str()),
+        snap.resolver_wildcard.as_ref().map(|w| w.ip.as_str()),
         &dns_write,
-        &dns_reload,
+        &|| dns_reload(state.store.dir()),
     )
     .map_err(|e| dns_error(e).into_response())?;
     Ok(Json(json!({"ok": true, "name": req.name})))
 }
 
-/// Write the addn-hosts file under the CP state dir (durable plane).
+/// Write the addn-hosts / dnsmasq.conf files under the CP state dir (durable).
 fn dns_write(path: &std::path::Path, body: &str) -> Result<(), String> {
     std::fs::write(path, body).map_err(|e| e.to_string())
 }
 
-/// Ensure dnsmasq is installed, pointed at the addn-hosts file, and reloaded.
-fn dns_reload() -> Result<(), String> {
+/// Ensure dnsmasq is installed, pointed at the state-dir conf (which carries
+/// the explicit addn-hosts + the wildcard apex), and reloaded.
+fn dns_reload(state_dir: &std::path::Path) -> Result<(), String> {
+    let conf = crate::dns::dnsmasq_conf_path(state_dir);
     let _ = std::process::Command::new("sh")
         .arg("-c")
         .arg("command -v dnsmasq >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsmasq >/dev/null 2>&1); mkdir -p /etc/dnsmasq.d")
         .output()
         .map_err(|e| e.to_string())?;
+    std::fs::copy(&conf, "/etc/dnsmasq.d/freehold-names.conf").map_err(|e| e.to_string())?;
     let _ = std::process::Command::new("sh")
         .arg("-c")
         .arg("systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true")

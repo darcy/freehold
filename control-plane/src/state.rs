@@ -78,6 +78,18 @@ pub struct DnsRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsWildcard {
+    /// Apex domain ALL of whose subdomains resolve to `ip` (e.g.
+    /// `freehold-test.darcydev.net`).
+    pub apex: String,
+    /// The IP every `<sub>.<apex>` resolves to (the Caddy node). v4 for now.
+    pub ip: String,
+    /// Which registration wrote this (e.g. "record_caddy").
+    pub source: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRecord {
     /// Runner (service) this secret belongs to — one per runner in Chunk 1.
     pub runner: String,
@@ -103,6 +115,13 @@ pub struct ControlPlaneState {
     /// split-horizon answer instead of leaking upstream. Absent = bare only.
     #[serde(default)]
     pub resolver_domain: Option<String>,
+    /// A dnsmasq `address=/.<apex>/<ip>` wildcard apex (e.g. apex
+    /// `freehold-test.darcydev.net` -> the Caddy node). Rendered as a
+    /// leading-dot `address=` so ALL subdomains of the apex (`relay.`, `cp.`,
+    /// `*.`) resolve to the given IP without touching the apex itself. Set =
+    /// served; absent = only explicit records + the resolver domain are served.
+    #[serde(default)]
+    pub resolver_wildcard: Option<DnsWildcard>,
     /// Named AI agents stood up (the CPA records them when it creates one —
     /// e.g. the delegate-peer registers at start). Availability is probed
     /// LIVE against the relay; this table is the registry, not the status.
@@ -238,6 +257,18 @@ impl StateStore {
 
     pub fn set_resolver_domain(&self, resolver_domain: Option<String>) -> Result<(), StateError> {
         self.inner.write().resolver_domain = resolver_domain;
+        self.save()
+    }
+
+    pub fn resolver_wildcard(&self) -> Option<DnsWildcard> {
+        self.inner.read().resolver_wildcard.clone()
+    }
+
+    pub fn set_resolver_wildcard(
+        &self,
+        wildcard: Option<DnsWildcard>,
+    ) -> Result<(), StateError> {
+        self.inner.write().resolver_wildcard = wildcard;
         self.save()
     }
 

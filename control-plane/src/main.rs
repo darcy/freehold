@@ -198,6 +198,20 @@ enum DnsSub {
     List,
     /// (Re)write the addn-hosts file + reload dnsmasq without changing state
     Sync,
+    /// Set/clear the wildcard apex: APEX IP [source] — every `<sub>.<apex>` resolves
+    /// to IP (dnsmasq `address=/.<apex>/<ip>`). `dns wildcard` with no args clears.
+    Wildcard(DnsWildcardArgs),
+}
+
+#[derive(Args)]
+struct DnsWildcardArgs {
+    /// Apex domain whose subdomains all resolve to IP (e.g. freehold-test.darcydev.net)
+    apex: Option<String>,
+    /// The IP every subdomain resolves to (the Caddy node)
+    ip: Option<String>,
+    /// Registration source (record_caddy, manual)
+    #[arg(default_value = "manual")]
+    source: String,
 }
 
 #[derive(Args)]
@@ -549,6 +563,13 @@ async fn main() -> Result<()> {
                 }
                 DnsSub::List => {
                     let snap = store.snapshot();
+                    if snap.resolver_wildcard.is_some() {
+                        let w = snap.resolver_wildcard.as_ref().unwrap();
+                        println!("wildcard  *.{:<15} {}", w.apex, w.ip);
+                        println!("  source: {} · created: {}", w.source, w.created_at);
+                    } else {
+                        println!("wildcard  (none)");
+                    }
                     if snap.dns.is_empty() {
                         println!("(no dns records — the resolver forwards everything upstream)");
                     }
@@ -567,7 +588,30 @@ async fn main() -> Result<()> {
                 }
                 DnsSub::Sync => {
                     sync()?;
-                    println!("dnsmasq addn-hosts synced + reloaded");
+                    println!("dnsmasq addn-hosts + wildcard apex synced + reloaded");
+                }
+                DnsSub::Wildcard(wc) => {
+                    match (wc.apex, wc.ip) {
+                        (Some(apex), Some(ip)) => {
+                            freehold_control_plane::dns::validate_name(&apex)?;
+                            freehold_control_plane::dns::validate_ip(&ip)?;
+                            store.set_resolver_wildcard(Some(
+                                freehold_control_plane::state::DnsWildcard {
+                                    apex: apex.clone(),
+                                    ip: ip.clone(),
+                                    source: wc.source.clone(),
+                                    created_at: freehold_control_plane::state::now_secs(),
+                                },
+                            ))?;
+                            sync()?;
+                            println!("wildcard apex {apex} -> {ip} (source: {})", wc.source);
+                        }
+                        _ => {
+                            store.set_resolver_wildcard(None)?;
+                            sync()?;
+                            println!("wildcard apex cleared");
+                        }
+                    }
                 }
             }
             Ok(())
@@ -798,29 +842,26 @@ fn dns_sync_resolver(
 ) -> Result<(), freehold_control_plane::dns::DnsError> {
     let snap = store.snapshot();
     let path = freehold_control_plane::dns::addn_hosts_path(state_dir);
+    let conf = freehold_control_plane::dns::dnsmasq_conf_path(state_dir);
     freehold_control_plane::dns::sync_resolver(
         state_dir,
         &snap.dns,
         snap.resolver_domain.as_deref(),
+        snap.resolver_wildcard.as_ref().map(|w| w.apex.as_str()),
+        snap.resolver_wildcard.as_ref().map(|w| w.ip.as_str()),
         &|p: &std::path::Path, body: &str| -> Result<(), String> {
             std::fs::write(p, body).map_err(|e| e.to_string())
         },
         &|| -> Result<(), String> {
             // dnsmasq may not be installed yet (first boot): ensure it, then
-            // point it at the file + reload. Install + restarts are
-            // idempotent (apt returns ok on present; /etc/dnsmasq.d re-point
-            // is a no-op once set).
+            // point it at the state-dir conf (explicit addn-hosts + wildcard
+            // apex) + reload. Install + restarts are idempotent.
             let _ = std::process::Command::new("sh")
                 .arg("-c")
                 .arg("command -v dnsmasq >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsmasq >/dev/null 2>&1); mkdir -p /etc/dnsmasq.d")
                 .output()
                 .map_err(|e| e.to_string())?;
-            let conf = "/etc/dnsmasq.d/freehold-names.conf";
-            let conf_body = format!(
-                "addn-hosts={}\nno-negcache\n",
-                freehold_control_plane::dns::addn_hosts_path(state_dir).display()
-            );
-            std::fs::write(conf, conf_body).map_err(|e| e.to_string())?;
+            std::fs::copy(&conf, "/etc/dnsmasq.d/freehold-names.conf").map_err(|e| e.to_string())?;
             let _ = std::process::Command::new("sh")
                 .arg("-c")
                 .arg("systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true")
@@ -829,6 +870,6 @@ fn dns_sync_resolver(
             Ok(())
         },
     )?;
-    let _ = path; // path is used inside the closures above
+    let _ = path;
     Ok(())
 }

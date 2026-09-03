@@ -126,18 +126,47 @@ pub fn addn_hosts_path(state_dir: &Path) -> PathBuf {
     state_dir.join("dnsmasq.addn-hosts")
 }
 
-/// Writes the addn-hosts file (the resolver auto-reloads hosts changes via
-/// hostsdir semantics; a SIGHUP forces the reload). Pure — takes a write
-/// closure so the CLI/TUI can inject the target's local exec.
+/// The dnsmasq config file pointing at the addn-hosts file and carrying the
+/// optional `address=/.<apex>/<ip>` wildcard apex. dnsmasq reads this via
+/// `/etc/dnsmasq.d/freehold-names.conf`, which the resolver deploy installs
+/// (a symlink / copy of this file).
+pub fn dnsmasq_conf_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("dnsmasq.conf")
+}
+
+/// Full dnsmasq conf body: `addn-hosts=<file>` + optional leading-dot
+/// `address=/.<apex>/<ip>` (matches only subdomains of the apex, leaving the
+/// apex itself to the explicit addn-hosts records). Pure.
+pub fn render_dnsmasq_conf(state_dir: &Path, apex: Option<&str>, ip: Option<&str>) -> String {
+    let body = format!(
+        "addn-hosts={}\nno-negcache\n",
+        addn_hosts_path(state_dir).display()
+    );
+    match (apex, ip) {
+        (Some(a), Some(i)) => format!("{body}address=/.{a}/{i}\n"),
+        _ => body,
+    }
+}
+
+/// Writes the addn-hosts file + the dnsmasq conf (resolver auto-reloads hosts
+/// changes via hostsdir semantics; a SIGHUP forces the reload). Pure — takes
+/// a write closure so the CLI/TUI can inject the target's local exec.
 pub fn sync_resolver(
     state_dir: &Path,
     records: &std::collections::BTreeMap<String, DnsRecord>,
     domain: Option<&str>,
+    wildcard_apex: Option<&str>,
+    wildcard_ip: Option<&str>,
     write: &dyn Fn(&Path, &str) -> Result<(), String>,
     reload: &dyn Fn() -> Result<(), String>,
 ) -> Result<(), DnsError> {
     let path = addn_hosts_path(state_dir);
     write(&path, &render_addn_hosts(records, domain)).map_err(DnsError::Resolver)?;
+    write(
+        &dnsmasq_conf_path(state_dir),
+        &render_dnsmasq_conf(state_dir, wildcard_apex, wildcard_ip),
+    )
+    .map_err(DnsError::Resolver)?;
     ensure_resolver_readable(&path).map_err(|e| DnsError::Resolver(e.to_string()))?;
     reload().map_err(DnsError::Resolver)?;
     Ok(())
@@ -251,15 +280,22 @@ mod dns_tests {
     fn sync_writes_and_reloads() {
         let (store, tmp) = test_store();
         upsert(&store, "relay", "192.168.30.8", "t").unwrap();
-        let wrote = std::cell::RefCell::new(String::new());
+        let wrote_hosts = std::cell::RefCell::new(String::new());
+        let wrote_conf = std::cell::RefCell::new(String::new());
         let reloaded = std::cell::RefCell::new(false);
         sync_resolver(
             tmp.path(),
             &store.snapshot().dns,
             None,
+            Some("freehold-test.darcydev.net"),
+            Some("192.168.30.7"),
             &|p: &Path, body: &str| {
-                assert_eq!(p, &addn_hosts_path(tmp.path()));
-                *wrote.borrow_mut() = body.to_string();
+                if p == &addn_hosts_path(tmp.path()) {
+                    *wrote_hosts.borrow_mut() = body.to_string();
+                } else {
+                    assert_eq!(p, &dnsmasq_conf_path(tmp.path()));
+                    *wrote_conf.borrow_mut() = body.to_string();
+                }
                 Ok(())
             },
             &|| {
@@ -268,8 +304,27 @@ mod dns_tests {
             },
         )
         .unwrap();
-        assert!(wrote.borrow().contains("192.168.30.8 relay"));
+        assert!(wrote_hosts.borrow().contains("192.168.30.8 relay"));
+        assert!(wrote_conf
+            .borrow()
+            .contains("address=/.freehold-test.darcydev.net/192.168.30.7"));
+        assert!(wrote_conf.borrow().starts_with("addn-hosts="));
         assert!(*reloaded.borrow());
+    }
+    #[test]
+    fn render_conf_wildcard_leading_dot() {
+        let (_, tmp) = test_store();
+        let base = render_dnsmasq_conf(tmp.path(), None, None);
+        assert!(!base.contains("address="), "no wildcard => no address=: {base}");
+        let with = render_dnsmasq_conf(
+            tmp.path(),
+            Some("freehold-test.darcydev.net"),
+            Some("192.168.30.7"),
+        );
+        assert!(
+            with.contains("address=/.freehold-test.darcydev.net/192.168.30.7"),
+            "leading-dot apex wildcard: {with}"
+        );
     }
     #[test]
     fn resolver_readable_opens_0700_deploy_dirs() {
