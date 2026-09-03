@@ -32,9 +32,10 @@ jobs:
         working-directory: .github/scripts/ai-review
         env:
           # Comments author as this token's account. GITHUB_TOKEN posts as
-          # 'github-actions[bot]'; use a PAT from a GitHub account/bot named
-          # 'DeepSeek' (repo write + checks read scopes) so reviews show that name.
-          GITHUB_TOKEN: ${{ secrets.DEEPSEEK_BOT_TOKEN }}
+          # 'github-actions[bot]'; swap to secrets.DEEPSEEK_BOT_TOKEN (a PAT from
+          # a GitHub account/bot named 'DeepSeek', repo write + checks read) when
+          # one exists so reviews author as that name.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
           # ---- provider config: this is the only provider-specific part ----
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
