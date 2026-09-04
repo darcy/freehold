@@ -36,6 +36,10 @@ Only include `inline` entries for blocking and important severities, each
 pinned to an exact line number that appears in the diff below. Defer items go
 only in the summary, never inline.
 
+Inline comment formatting: write each `comment` for readability — use short
+lines or bullet points separated by newlines (`\n`), never one long paragraph
+that wraps. Keep it specific and actionable.
+
 Re-review discipline: this diff may include changes from a previous review
 round (see PREVIOUS ROUND NOTES below, if present). Focus on whether prior
 blocking/important items are actually closed, and on genuine regressions from

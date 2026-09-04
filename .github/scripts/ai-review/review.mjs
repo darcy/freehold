@@ -175,7 +175,7 @@ const REVIEW_TOOL = {
               path: { type: 'string' },
               line: { type: 'integer' },
               severity: { type: 'string', enum: ['blocking', 'important'] },
-              comment: { type: 'string' },
+              comment: { type: 'string', description: 'Specific and actionable. Format for readability with line breaks (short lines or bullet points), not one long paragraph.' },
             },
             required: ['path', 'line', 'severity', 'comment'],
           },
@@ -193,7 +193,7 @@ async function callLlmOnce(prompt) {
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
-      max_tokens: 12000,
+      max_tokens: 64000,
       messages: [{ role: 'user', content: prompt }],
       tools: [REVIEW_TOOL],
       tool_choice: { type: 'function', function: { name: 'review' } },
