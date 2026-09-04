@@ -27,6 +27,7 @@ if (!pull_number) {
 }
 
 function globToRegExp(glob) {
+  // Build a regex from a glob pattern; `**` becomes `.*`, `*` becomes `[^/]*`.
   const escaped = glob
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
     .replace(/\*\*/g, '{{GLOBSTAR}}')
