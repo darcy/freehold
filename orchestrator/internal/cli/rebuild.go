@@ -2570,6 +2570,7 @@ $EX "$K create ns caddy 2>/dev/null || true"
 # the litellm/postgres manifests). The certs are NOT here: F3 writes them into
 # the caddy-data PVC at /data/tls on each issuance.
 mkdir -p /tmp/caddy-manifests
+$EX "mkdir -p /tmp/caddy-manifests"
 cat >/tmp/caddy-manifests/caddy.yaml <<'YAML'
 __CADDY__
 YAML

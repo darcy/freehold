@@ -23,13 +23,16 @@ import (
 // relay LXC's plain-HTTP upstream. A CP vhost is added from the same Render
 // func once the CP console binds the LAN.
 func RenderCaddyfile(relayHost, relayUpstream string) string {
+	// The Caddyfile is embedded inside the kube ConfigMap's YAML block scalar,
+	// so its indentation must be SPACES — tabs in block-scalar content trip
+	// kubectl's YAML parser. Caddy accepts spaces.
 	return fmt.Sprintf(`{
-	auto_https off
+  auto_https off
 }
 
 %s {
-	tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem
-	reverse_proxy %s
+  tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem
+  reverse_proxy %s
 }
 `, relayHost, relayUpstream)
 }
@@ -63,7 +66,7 @@ metadata:
   namespace: caddy
 data:
   Caddyfile: |
-    %s
+%s
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -103,8 +106,8 @@ spec:
   type: NodePort
   selector: {app: caddy}
   ports:
-  - {port: 80, targetPort: 80, nodePort: 30080}
-  - {port: 443, targetPort: 443, nodePort: 30443}
+  - {name: http, port: 80, targetPort: 80, nodePort: 30080}
+  - {name: https, port: 443, targetPort: 443, nodePort: 30443}
 `, caddyfile)
 }
 
