@@ -29,6 +29,14 @@ const SprigImage = "ghcr.io/block/buzz-sprig:main"
 // DefaultCPAName is the default CPA display name (A1's fallback).
 const DefaultCPAName = "freehold"
 
+// AgentPodName returns the sanitized k8s object name (pod/service/secret base)
+// for an agent's display name — the prefix every derived object name hangs
+// off (`<pod>-identity`, `<pod>-prompt`, `<pod>-litellm-key`). Exported so the
+// orchestrator can derive the same names the manifest uses.
+func AgentPodName(agentName string) string {
+	return sanitizePodName(agentName)
+}
+
 // sanitizePodName turns an agent display name into a legal k8s object name
 // (DNS-1123: lowercase letters/digits with internal dashes, <=63 chars).
 // "My CPA!" -> "my-cpa". Every object name (pod/service/secret) is derived
@@ -59,6 +67,26 @@ func sanitizePodName(name string) string {
 	return s
 }
 
+// CPASystemPromptPath is where the CPA pod reads its purpose from: the
+// <pod>-prompt ConfigMap mounts the embedded prompts/CPA_SYSTEM_PROMPT.md
+// (embedded via the orchestrator's prompts package) read-only into the pod,
+// and the agent re-reads it on every spawn — never cached.
+const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
+
+// LiteLLMServiceURL is the in-kube OpenAI-compatible endpoint the agent
+// harness reaches the litellm gateway at (ClusterIP Service litellm.litellm
+// port 4000 — litellm's OpenAI-compat API lives under /v1). The CPA's
+// reasoning model (D1 wiring) routes here.
+const LiteLLMServiceURL = "http://litellm.litellm:4000/v1"
+
+// CpaLiteLLMModel is the litellm model alias the CPA talks to; it maps behind
+// the scenes to the deepseek route registered at deploy time.
+const CpaLiteLLMModel = "ControlPlaneAgent"
+
+// AgentLiteLLMKeySecretKey is the k8s Secret literal that carries the pod's
+// minted litellm key (referenced by secretKeyRef, never in the manifest).
+const AgentLiteLLMKeySecretKey = "key"
+
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
 // agent is ONE pod (at-most-one-live-instance, I4); the harness is the
 // container's PID-1 process (entrypoint `exec`), presence is kind:20001, and
@@ -66,15 +94,42 @@ func sanitizePodName(name string) string {
 // Never` honors I5 — an intentional clean exit stays terminal; the kubelet
 // must not resurrect a pod that stopped on purpose.
 //
-// The nsec NEVER rides the manifest: it comes from the `<pod>-identity` Secret
-// (a `secretKeyRef`), which the deploy step writes ONLY when absent — the
-// same first-run-wins discipline as litellm's keys. The object names are
+// systemPrompt is the FULL text of prompts/CPA_SYSTEM_PROMPT.md (stageCpa
+// passes the file contents, not a path): it embeds as the <pod>-prompt
+// ConfigMap's content (indented four spaces per line so the `|` block scalar
+// is valid YAML) and the pod mounts that ConfigMap read-only at
+// CPAbsolutePromptPath; the pod re-reads the mounted file on every spawn —
+// never cached. Editing the prompt and redeploying is the only way the
+// agent's behavior changes.
+//
+// The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
+// points the buzz-agent harness at litellmBaseURL with litellmModel and an API
+// key (OPENAI_COMPAT_API_KEY from the `<pod>-litellm-key` Secret by
+// secretKeyRef). TODAY that key is the litellm gateway's admin master key
+// (litellm's /key/generate still needs a bootstrap virtual key before scoped
+// keys can be minted — see AGENTS.md "Known gaps"); the key NEVER rides the
+// manifest.
+//
+// The nsec also NEVER rides the manifest: it comes from the `<pod>-identity`
+// Secret (a `secretKeyRef`), which the deploy step writes ONLY when absent —
+// the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
-// Service, and Secret.
-func AgentPodManifest(agentName, relayURL, systemPromptPath string) string {
+// Service, and Secrets.
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
+	promptCm := pod + "-prompt"
+	litellmKeySecret := pod + "-litellm-key"
 	return fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: agents
+data:
+  CPA_SYSTEM_PROMPT.md: |
+%s
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: %s
@@ -86,6 +141,14 @@ metadata:
     freehold.fh/agent-name: %s
 spec:
   restartPolicy: Never
+  # The agent must reach the community relay over the LAN (its own DNS +
+  # the relay LXC), but pod-CNI egress to non-cluster LAN IPs is often
+  # blocked (kube-router FORWARD policy DROP without SNAT). hostNetwork puts
+  # the pod on the node's network so it resolves via the node (CP resolver)
+  # and reaches the relay directly, like any guest. The agent is the
+  # appliance's own trained identity on the operator's relay — it does not
+  # need pod-CNI isolation from its own control plane.
+  hostNetwork: true
   containers:
   - name: %s
     image: %s
@@ -95,12 +158,26 @@ spec:
     - {name: BUZZ_ACP_SYSTEM_PROMPT_FILE, value: %q}
     - {name: BUZZ_ACP_AGENT_COMMAND, value: "buzz-agent"}
     - {name: BUZZ_ACP_RESPOND_TO, value: "allowlist"}
+    - {name: BUZZ_AGENT_PROVIDER, value: "openai-compat"}
+    - {name: OPENAI_COMPAT_BASE_URL, value: %q}
+    - {name: OPENAI_COMPAT_MODEL, value: %q}
+    - name: OPENAI_COMPAT_API_KEY
+      valueFrom:
+        secretKeyRef: {name: %s, key: %s}
     - name: BUZZ_PRIVATE_KEY
       valueFrom:
         secretKeyRef: {name: %s, key: nsec}
     - name: BUZZ_ACP_AGENT_OWNER
       valueFrom:
         secretKeyRef: {name: %s, key: owner}
+    - name: BUZZ_ACP_RESPOND_TO_ALLOWLIST
+      valueFrom:
+        secretKeyRef: {name: %s, key: owner}
+    volumeMounts:
+    - {name: prompt, mountPath: %s, readOnly: true, subPath: CPA_SYSTEM_PROMPT.md}
+  volumes:
+  - name: prompt
+    configMap: {name: %s}
 ---
 apiVersion: v1
 kind: Service
@@ -112,26 +189,44 @@ spec:
   ports:
   - {port: 443}
 `,
-		pod, pod, agentName, pod, SprigImage, relayURL, systemPromptPath,
-		secret, secret, pod, pod)
+		promptCm, indentSystemPrompt(systemPrompt),
+		pod, pod, agentName, pod, SprigImage, relayURL, CPASystemPromptPath,
+		litellmBaseURL, litellmModel,
+		litellmKeySecret, AgentLiteLLMKeySecretKey,
+		secret, secret, secret, CPASystemPromptPath, promptCm, pod, pod)
+}
+
+// indentSystemPrompt indents every prompt line by four spaces so it embeds as
+// a valid k8s ConfigMap block scalar (the `data:` key `  CPA_SYSTEM_PROMPT.md:
+// |` is at 2 spaces, so the content must sit at 4 to parse as one scalar).
+func indentSystemPrompt(prompt string) string {
+	lines := strings.Split(strings.TrimRight(prompt, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = "    " + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 // CPAPodManifest is the CPA's pod manifest — AgentPodManifest with the CPA's
-// display name (A1's stored value, default freehold).
-func CPAPodManifest(cpaName, relayURL, systemPromptPath string) string {
-	return AgentPodManifest(cpaName, relayURL, systemPromptPath)
+// display name (A1's stored value, default freehold) wired to the litellm
+// gateway (LiteLLMServiceURL + CpaLiteLLMModel).
+func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
+	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel)
 }
 
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
 // litellmManifestScript. agentName is the display name (sanitized into the
 // pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here).
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPromptPath, agentName string) string {
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName string) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec %d -- sh -c"
 $EX "$K create ns agents 2>/dev/null || true"
+# The pct push destination needs /tmp/agent-manifests to EXIST IN THE GUEST;
+# a bare host-side mkdir is not enough (the guest mount is separate).
+$EX "mkdir -p /tmp/agent-manifests"
 mkdir -p /tmp/agent-manifests
 cat >/tmp/agent-manifests/%s.yaml <<'YAML'
 %s
@@ -140,14 +235,14 @@ pct push %d /tmp/agent-manifests/%s.yaml /tmp/agent-manifests/%s.yaml
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPromptPath),
+		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel),
 		k3sVmid, pod, pod, pod, pod)
 }
 
 // CPAManifestScript applies the CPA pod (AgentManifestScript with the CPA
 // display name).
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPromptPath, cpaName string) string {
-	return AgentManifestScript(k3sVmid, relayURL, systemPromptPath, cpaName)
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName string) string {
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, cpaName)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in
@@ -171,6 +266,22 @@ echo AGENT_IDENTITY_OK`,
 // with the CPA display name).
 func CPAIdentityScript(k3sVmid uint32, nsecSecretHex, ownerPub string) string {
 	return AgentIdentityScript(k3sVmid, nsecSecretHex, ownerPub, "")
+}
+
+// AgentLiteLLMKeyScript seeds the agents-namespace Secret the pod's
+// OPENAI_COMPAT_API_KEY references (first-run-wins, like the identity secret).
+// key is the litellm credential the pod talks to the gateway with. It travels
+// as a shell-quoted literal — the same shape the identity nsec uses.
+func AgentLiteLLMKeyScript(k3sVmid uint32, key, agentName string) string {
+	pod := sanitizePodName(agentName)
+	secret := pod + "-litellm-key"
+	return fmt.Sprintf(`set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+EX="pct exec %d -- sh -c"
+$EX "$K create ns agents 2>/dev/null || true"
+$EX "$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=%s"
+echo AGENT_LITELLM_KEY_OK`,
+		k3sVmid, secret, secret, shQ(key))
 }
 
 // shQ single-quotes a value for a shell-embedded literal (no embedded quotes

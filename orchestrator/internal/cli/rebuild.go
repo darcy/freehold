@@ -22,7 +22,9 @@ package cli
 import (
 	"bufio"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -36,16 +38,57 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/orchestrator/internal/agent"
+	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
+	"freehold/orchestrator/internal/deploy"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/state"
 	"freehold/orchestrator/internal/wire"
+	"freehold/orchestrator/prompts"
 )
 
-var rebuildCmd = &cobra.Command{
-	Use:   "rebuild",
+// dnsCredCmd stores the Caddy edge's DNS provider credential (provider + env)
+// ahead of any install, so a headless /--yes or TUI rebuild reuses it without
+// prompting. Interactively: provider from lego's full registry, the provider's
+// own env fields, pre-verified (throwaway TXT) then sealed to the ops identity.
+// Idempotent — a stored copy is reported and left untouched.
+var dnsCredCmd = &cobra.Command{
+	Use:   "dns-cred",
+	Short: "Store (and pre-verify) the DNS provider credential for the wildcard cert — one-time seeding the rebuild reuses",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		domain, _ := cmd.Flags().GetString("domain")
+		cfgPath, _ := cmd.Flags().GetString("config")
+		if domain == "" {
+			if cfg, err := config.Load(cfgPath); err == nil && cfg != nil {
+				domain = cfg.Domain
+			}
+		}
+		if domain == "" {
+			return fmt.Errorf("dns-cred needs a domain (--domain or a config on record) so the pre-verify can target its zone")
+		}
+		e := &rebuildEngine{
+			f:   rebuildFlags{domain: domain},
+			out: os.Stdout,
+			in:  os.Stdin,
+		}
+		provider, _, err := e.promptDNSCred()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(e.out, "  ✓ DNS provider credential saved (%s) — rebuilds will reuse it\n", provider)
+		fmt.Fprintf(e.out, "  stored sealed at %s\n", e.certCredPath())
+		return nil
+	},
+}
+
+func init() {
+	dnsCredCmd.Flags().String("domain", "", "World domain (the wildcard cert apex the pre-verify targets); defaults to the recorded config")
+	dnsCredCmd.Flags().String("config", defaultConfigPath(), "Config path to read the domain from")
+}
+
+var rebuildCmd = &cobra.Command{Use: "rebuild",
 	Short: "Bring the whole world up end to end: door, runner, durable plane, relay + CP + k3s LXCs, deploys — the installer pipeline as one command",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		f := rebuildFlags{}
@@ -53,14 +96,16 @@ var rebuildCmd = &cobra.Command{
 		f.target, _ = cmd.Flags().GetString("target")
 		f.host, _ = cmd.Flags().GetString("host")
 		f.domain, _ = cmd.Flags().GetString("domain")
+		f.relayDomain, _ = cmd.Flags().GetString("relay-domain")
+		f.cpDomain, _ = cmd.Flags().GetString("cp-domain")
 		f.operatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
 		f.operatorIdentity, _ = cmd.Flags().GetString("operator-identity")
 		f.agentName, _ = cmd.Flags().GetString("agent-name")
 		f.sizeGB, _ = cmd.Flags().GetUint64("size-gb")
 		f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 		f.thinPool, _ = cmd.Flags().GetString("thin-pool")
-		f.withK3s, _ = cmd.Flags().GetBool("with-k3s")
-		f.withLitellm, _ = cmd.Flags().GetBool("with-litellm")
+		f.noK3s, _ = cmd.Flags().GetBool("no-k3s")
+		f.noLitellm, _ = cmd.Flags().GetBool("no-litellm")
 		f.litellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
 		if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
 			f.litellmProviderKey = v
@@ -94,19 +139,21 @@ func init() {
 	rebuildCmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
 	rebuildCmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
 	rebuildCmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
-	rebuildCmd.Flags().String("domain", "", "Relay identity domain (must resolve to the host — the A4 gate; REQUIRED)")
+	rebuildCmd.Flags().String("domain", "", "World base domain (used for the durable-plane/LXC naming and the wildcard cert apex; REQUIRED)")
+	rebuildCmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — NOT derived from the world domain. Absent => the relay is served at the world domain itself.")
+	rebuildCmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — NOT derived from the world domain. Absent => the CP is served at the world domain itself.")
 	rebuildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
 	rebuildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
 	rebuildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
 	rebuildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	rebuildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	rebuildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
-	rebuildCmd.Flags().Bool("with-k3s", true, "Boot + install the k3s substrate LXC as part of the world")
+	rebuildCmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC (defaults to the full world — relay/cp/k3s/litellm/CPA; stages reconcile idempotently and skip what is already present)")
 	rebuildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	rebuildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
 	rebuildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for STATIC guest IPs (unused with DHCP)")
-	rebuildCmd.Flags().Bool("with-litellm", false, "C0: deploy the litellm gateway (kube workloads + runner + model registration) during the rebuild")
-	rebuildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (C0 — supplied at bootstrap, never committed; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
+	rebuildCmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
+	rebuildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	rebuildCmd.Flags().String("relay-ip", "", "STATIC relay LXC IP (CIDR, e.g. 192.168.30.8/24) — absent => DHCP (Rust: the recorded config ip is re-booted static)")
 	rebuildCmd.Flags().String("cp-ip", "", "STATIC control-plane LXC IP (CIDR) — absent => DHCP")
 	rebuildCmd.Flags().String("k3s-ip", "", "STATIC k3s LXC IP (CIDR) — absent => DHCP")
@@ -121,14 +168,16 @@ type rebuildFlags struct {
 	target             string
 	host               string
 	domain             string
+	relayDomain        string
+	cpDomain           string
 	operatorPubkey     string
 	operatorIdentity   string
 	agentName          string
 	sizeGB             uint64
 	poolSizeGB         uint64
 	thinPool           string
-	withK3s            bool
-	withLitellm        bool
+	noK3s              bool
+	noLitellm          bool
 	litellmProviderKey string
 	rootfsGB           uint32
 	memoryMB           uint32
@@ -345,6 +394,28 @@ func (e *rebuildEngine) run() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
+	// 6.5. The relay + control-plane hosts are ASKED (never derived). When the
+	// operator supplied --relay-domain/--cp-domain (or is headless --yes) the
+	// values stand; otherwise each is prompted up front, defaulting to the
+	// world domain so a bare ENTER keeps that service at the world domain.
+	if !e.f.yes {
+		if err := e.promptDomains(); err != nil {
+			return err
+		}
+	}
+
+	// 6.6. DNS provider credential for the Caddy edge's wildcard cert. Asked
+	// UP FRONT (like the other prompts) so a later stage failure can't strand
+	// a long install without its DN-01 token: if a sealed copy exists it's
+	// reused silently; otherwise the operator is prompted + pre-verified now,
+	// and stageCert at the end just reads it back. No-op under --yes unless a
+	// stored copy is already present (then stageCert fails loudly at the end).
+	if e.worldHasEdge() {
+		if _, _, err := e.promptDNSCred(); err != nil {
+			return fmt.Errorf("DNS provider credential: %w", err)
+		}
+	}
+
 	// 7a. plane placement: where do the tenant LVs live — reuse the VG's
 	// detected thin pool, or carve a dedicated new one?
 	placement, err := e.stagePlacement()
@@ -380,7 +451,7 @@ func (e *rebuildEngine) run() error {
 	fmt.Fprintln(e.out, "  ✓ cp LXC booted + recorded")
 
 	// 12. the k3s substrate (boot-if-missing + in-guest install + record).
-	if e.f.withK3s {
+	if !e.f.noK3s {
 		fmt.Fprintln(e.out, "  · installing the k3s substrate (download + in-guest install; several minutes)…")
 		if err := e.stageK3s(); err != nil {
 			return err
@@ -393,17 +464,19 @@ func (e *rebuildEngine) run() error {
 	if err := e.stageDeployRelay(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.domain)
+	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", firstNonEmpty(e.f.relayDomain, e.f.domain))
 	fmt.Fprintln(e.out, "  · deploying the control plane (release binaries into the cp LXC)…")
 	if err := e.stageDeployCp(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  ✓ control plane live at https://cp-%s\n", e.f.domain)
+	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", firstNonEmpty(e.f.cpDomain, e.f.domain))
 
 	// 14.5. C0: the litellm gateway — provision the litellm runner (master +
 	// provider + postgres secrets sealed to it), apply the kube workloads,
-	// register the model, and record the coords for the Services row.
-	if e.f.withLitellm {
+	// register the model, and record the coords for the Services row. Part of
+	// the desired world whenever k3s is on (the CPA needs it to reason); only
+	// an explicit --no-litellm opts it out.
+	if !e.f.noK3s && !e.f.noLitellm {
 		fmt.Fprintln(e.out, "  · applying the litellm kube workloads (postgres + gateway; rollout up to 5m)…")
 		if err := e.stageLitellm(); err != nil {
 			return err
@@ -411,20 +484,12 @@ func (e *rebuildEngine) run() error {
 		fmt.Fprintln(e.out, "  ✓ litellm gateway live")
 	}
 
-	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
-	// k3s Pod running the buzz-sprig harness (Chunk 4 Phase A: A2/A3/A5).
-	// It needs the k3s substrate; where k3s is present the CPA is part of
-	// the world (A1 made the display name a required install answer).
-	if e.f.withK3s {
-		fmt.Fprintln(e.out, "  · deploying the CPA (buzz-sprig pod into k3s; rollout up to 5m)…")
-		if err := e.stageCpa(); err != nil {
-			return err
-		}
-		fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
-	}
-
-	// 14.75. C0: register the CP resolver's explicit records (relay/cp/k3s +
-	// litellm) INSIDE the deployed CP, then point every guest at it.
+	// 14.6. C0: register the CP resolver's explicit records (relay/cp/k3s +
+	// litellm) INSIDE the deployed CP, then point every guest at it. This runs
+	// BEFORE the Caddy edge and the CPA so a cold world's first CPA boot never
+	// races the very DNS wiring it dials: by the time the pod comes up, the
+	// split-horizon <domain> -> relay record exists and the k3s guest's
+	// nameserver is already pointed at the CP resolver (hostNetwork pod).
 	fmt.Fprintln(e.out, "  · writing the resolver records (relay/cp/k3s/litellm)…")
 	if err := e.stageDnsRegister(); err != nil {
 		return err
@@ -434,6 +499,41 @@ func (e *rebuildEngine) run() error {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ internal DNS resolver live (CP-owned)")
+	fmt.Fprintln(e.out, "  · registering the Caddy wildcard apex (*.<domain> -> k3s node)…")
+	if err := e.stageDnsWildcard(); err != nil {
+		return err
+	}
+
+	// 14.65. C0: the core Caddy TLS fronting proxy — freehold's own edge. It
+	// fronts the relay over the wildcard cert (F3 issues it; F5 points the CPA
+	// at wss://relay.<domain>). Rides the k3s node (hostNetwork), so it needs
+	// the substrate; part of the desired world whenever k3s is on.
+	if !e.f.noK3s {
+		fmt.Fprintln(e.out, "  · applying the Caddy TLS fronting proxy (hostNetwork; relay vhost)…")
+		if err := e.stageCaddy(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.out, "  ✓ Caddy TLS edge live")
+		fmt.Fprintln(e.out, "  · ensuring the wildcard cert for the edge (embedded lego DNS-01)…")
+		if err := e.stageCert(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.out, "  ✓ wildcard cert in place")
+	}
+
+	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
+	// k3s Pod running the buzz-sprig harness (Chunk 4 Phase A: A2/A3/A5).
+	// It needs both the k3s substrate and the litellm gateway to reason, so
+	// opting either out skips the CPA too (a brainless pod is a dead pod).
+	// The DNS stages above (14.6) run first so the relay address it dials is
+	// already LAN-resolvable through the node on first boot.
+	if !e.f.noK3s && !e.f.noLitellm {
+		fmt.Fprintln(e.out, "  · deploying the CPA (buzz-sprig pod into k3s; rollout up to 5m)…")
+		if err := e.stageCpa(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
+	}
 
 	// 15. the relay's signing key via NIP-11 (best-effort trust anchor).
 	if rpk, ok := e.relayPubkeyNip11(); ok {
@@ -455,10 +555,10 @@ func (e *rebuildEngine) run() error {
   ╰─────────────────────────────────────────────────────────╯
 
   relay:          https://%s
-  control plane:  https://cp-%s
+  control plane:  https://%s
   runner:         serving on %s
   operator pk:    %s
-`, e.f.domain, e.f.domain, e.f.addr, e.f.operatorPubkey)
+`, firstNonEmpty(e.f.relayDomain, e.f.domain), firstNonEmpty(e.f.cpDomain, e.f.domain), e.f.addr, e.f.operatorPubkey)
 	return nil
 }
 
@@ -824,10 +924,20 @@ func (e *rebuildEngine) stopRunner(pid string) {
 // config::Config::from_answers). runner pubkey resolved from the package.
 func (e *rebuildEngine) fromAnswers() *config.Config {
 	runnerPK, _ := loadRPubkey(filepath.Join(rbRunnerPkgs(), e.f.target))
+	// The relay, CP, and world domains are INDEPENDENT inputs now — never
+	// derived (a relay has no guarantee of a "relay." prefix; it may sit at
+	// the world domain or anywhere the operator chooses). When a relay or CP
+	// domain isn't given, that service is served at the world domain itself.
+	relayDomain := firstNonEmpty(e.f.relayDomain, e.f.domain)
+	cpDomain := firstNonEmpty(e.f.cpDomain, e.f.domain)
+	// RelayWsURL is the CPA pod's relay origin. It follows the relay's own
+	// host (wss://<relayDomain> — the public, TLS-fronted form the edge
+	// serves); stageCpa falls back to wss://RelayURL when empty.
 	cfg := &config.Config{
 		Domain:         e.f.domain,
-		RelayURL:       "https://" + e.f.domain,
-		CPURL:          "https://cp-" + e.f.domain,
+		RelayURL:       "https://" + relayDomain,
+		RelayWsURL:     "wss://" + relayDomain,
+		CPURL:          "https://" + cpDomain,
 		OperatorPubkey: e.f.operatorPubkey,
 		Runner: config.RunnerRef{
 			Addr:   e.f.addr,
@@ -891,25 +1001,25 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 // k3s/litellm exactly when their flags were given. The pipeline's mid-stage
 // recorders append as they go; finalSave replaces the list wholesale so a
 // withheld flag drops its survivor.
-func managedForFlags(withK3s, withLitellm bool) []string {
+func managedForFlags(noK3s, noLitellm bool) []string {
 	m := []string{"relay", "cp"}
-	if withK3s {
+	if !noK3s {
 		m = append(m, "k3s")
 	}
-	if withLitellm {
+	if !noK3s && !noLitellm {
 		m = append(m, "litellm")
 	}
 	return m
 }
 
 // worldManaged is managedForFlags plus the k3s-guard: a k3s LXC that a prior
-// run recorded (vmid present) stays in the manifest even when this run
-// skipped k3s, so teardown still owns it. litellm needs no such carve-out —
+// run recorded (vmid present) stays in the manifest even when this run opted
+// it out --no-k3s, so teardown still owns it. litellm needs no such carve-out —
 // it is a kube workload with no guest of its own; its pods ride the k3s
 // guest's teardown.
-func worldManaged(withK3s, withLitellm bool, k3sVmid *uint32) []string {
-	m := managedForFlags(withK3s, withLitellm)
-	if !withK3s && k3sVmid != nil && !containsStr(m, "k3s") {
+func worldManaged(noK3s, noLitellm bool, k3sVmid *uint32) []string {
+	m := managedForFlags(noK3s, noLitellm)
+	if noK3s && k3sVmid != nil && !containsStr(m, "k3s") {
 		m = append(m, "k3s")
 	}
 	return m
@@ -943,16 +1053,11 @@ func (e *rebuildEngine) finalSave() error {
 	}
 	cfg := mergeFromAnswers(e.fromAnswers(), prev)
 	// The rebuild OWNS the world manifest: managed = the pieces THIS run
-	// deployed. A surviving config entry (e.g. litellm after a rebuild run
-	// WITHOUT --with-litellm) must not keep claiming a service the pipeline
-	// did not stand up — that is how the Services view showed a phantom
-	// "litellm (gateway) … down" for a world that never got one.
-	// The rebuild OWNS the world manifest: managed = the pieces THIS run
 	// deployed. A k3s LXC recorded by a PRIOR run is still ours to tear
-	// down even when this run skipped it (`--with-k3s=false`) — dropping it
+	// down even when this run opted it out (`--no-k3s`) — dropping it
 	// would make teardown say "skipped k3s LXC (not managed)" and leak the
 	// guest + its thin LV forever.
-	cfg.Managed = worldManaged(e.f.withK3s, e.f.withLitellm, cfg.Lxc.K3s.Vmid)
+	cfg.Managed = worldManaged(e.f.noK3s, e.f.noLitellm, cfg.Lxc.K3s.Vmid)
 	if rpk, ok := e.relayPubkeyNip11(); ok {
 		cfg.RelayPubkey = &rpk
 	}
@@ -1494,7 +1599,7 @@ func (e *rebuildEngine) stageDeployRelay() error {
 		"--target", e.f.target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
 		"--domain", e.f.domain,
-		"--relay-url", "https://" + e.f.domain,
+		"--relay-url", "https://" + firstNonEmpty(e.f.relayDomain, e.f.domain),
 		"--owner-pubkey", e.f.operatorPubkey,
 		"--operator-pubkey", e.f.operatorPubkey,
 	}
@@ -1520,7 +1625,7 @@ func (e *rebuildEngine) stageDeployCp() error {
 	args := []string{"deploy-cp",
 		"--target", e.f.target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
-		"--relay-url", "https://" + e.f.domain,
+		"--relay-url", "https://" + firstNonEmpty(e.f.relayDomain, e.f.domain),
 		"--binary", e.bins.ReleaseCP,
 		"--runner-binary", e.bins.ReleaseRun,
 		"--operator-pubkey", e.f.operatorPubkey,
@@ -1640,6 +1745,11 @@ func (e *rebuildEngine) stageDnsRegister() error {
 	type rec struct{ name, ip, source string }
 	var recs []rec
 	cfg, _ := config.Load(e.f.configPath)
+	// The guests' resolv.conf carries PVE's `search` line; register it as the
+	// resolver's world domain so addn-hosts serves <name>.<search> FIRST (the
+	// glibc search-first lookup gets the split-horizon answer, not the
+	// public/tailscale record through upstream).
+	searchBase := e.guestSearchBase()
 	if cfg != nil {
 		for _, role := range []string{"relay", "cp", "k3s"} {
 			g := map[string]config.LxcGuest{
@@ -1651,6 +1761,18 @@ func (e *rebuildEngine) stageDnsRegister() error {
 		}
 		if cfg.Litellm.Host != "" {
 			recs = append(recs, rec{name: "litellm", ip: cfg.Litellm.Host, source: "litellm-apply"})
+		}
+		// Split horizon for the appliance's OWN relay domain: the community
+		// relay is served on the relay LXC, so the CP resolver answers
+		// <domain> -> the relay LXC IP for internal clients (k3s pods via
+		// CoreDNS forward) instead of forwarding to the public/Tailscale A
+		// record (unreachable from the LAN). Rendered as the bare host +
+		// <search> below. Only added when the domain is a subdomain of the
+		// search base (the standard deploy shape), so the host derives cleanly.
+		if cfg.Domain != "" && cfg.Lxc.Relay.Ip != nil {
+			if host := relayDomainHost(cfg.Domain, searchBase); host != "" {
+				recs = append(recs, rec{name: host, ip: config.StripCIDR(*cfg.Lxc.Relay.Ip), source: "self-domain"})
+			}
 		}
 	}
 	// Configure the mirror BEFORE the remote sync: if the CP is unreachable
@@ -1670,11 +1792,6 @@ func (e *rebuildEngine) stageDnsRegister() error {
 	if len(recs) == 0 {
 		return nil
 	}
-	// The guests' resolv.conf carries PVE's `search` line; register it as the
-	// resolver's world domain so addn-hosts serves <name>.<search> FIRST (the
-	// glibc search-first lookup gets the split-horizon answer, not the
-	// public/tailscale record through upstream).
-	searchBase := e.guestSearchBase()
 	for _, r := range recs {
 		args := []string{"dns", "add", r.name, r.ip, r.source}
 		if searchBase != "" {
@@ -1685,6 +1802,46 @@ func (e *rebuildEngine) stageDnsRegister() error {
 		}
 	}
 	return nil
+}
+
+// stageDnsWildcard registers the Caddy wildcard apex: every `<sub>.<domain>`
+// (relay., cp., *.base) resolves INSIDE the CP resolver to the k3s node (where
+// Caddy fronts 80/443 on the LAN). Rendered as dnsmasq `address=/.<domain>/<ip>`,
+// so the apex itself keeps its explicit record and only subdomains land on
+// Caddy. Idempotent. Skips when k3s/litellm is off (no Caddy node) or the
+// domain is empty.
+func (e *rebuildEngine) stageDnsWildcard() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Domain == "" || cfg.Litellm.Host == "" {
+		return nil
+	}
+	apex, ip := cfg.Domain, cfg.Litellm.Host
+	if cfg.Dns.Records == nil {
+		cfg.Dns.Records = map[string]string{}
+	}
+	cfg.Dns.Records["*."+apex] = ip
+	if err := cfg.Save(e.f.configPath); err != nil {
+		return err
+	}
+	if _, err := e.stageCpExec("dns", "wildcard", apex, ip, "record-caddy"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// relayDomainHost is the bare (dotless) label prepended to the resolver's// search base to reproduce cfg.Domain — e.g. `freehold-test` for the domain
+// `freehold-test.darcydev.net` under search `darcydev.net`. Empty when the
+// domain isn't a subdomain of the search base (no clean split-horizon label
+// exists without dotted-record support in the resolver).
+func relayDomainHost(domain, searchBase string) string {
+	if searchBase == "" || !strings.HasSuffix(domain, "."+searchBase) {
+		return ""
+	}
+	host := strings.TrimSuffix(domain, "."+searchBase)
+	if host == "" || strings.Contains(host, ".") {
+		return ""
+	}
+	return host
 }
 
 // guestSearchBase reads the `search` line from the CP LXC's resolv.conf (PVE
@@ -1898,9 +2055,32 @@ func (e *rebuildEngine) stageDnsPoint() error {
 //	THROUGH it with the secrets requested BY NAME — the runner decrypts,
 //	injects env, redacts output (the locked agent-vs-secret shape).
 func (e *rebuildEngine) stageLitellm() error {
-	if e.f.litellmProviderKey == "" {
-		return fmt.Errorf("litellm needs the provider key at bootstrap: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY")
+	runnerDir := filepath.Join(rbRunnerPkgs(), "litellm")
+
+	// The provider key (operator's fireworks/upstream supply) is needed
+	// ONCE, at first shipment, to seed the litellm runner — after that it is
+	// sealed in the runner package (ciphertext) and reused on rebuilds, so a
+	// `freehold rebuild` does not demand a fresh supply every time.
+	reusingKey := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
+	if e.f.litellmProviderKey == "" && !reusingKey {
+		if e.f.yes {
+			return fmt.Errorf("litellm needs the provider key and none is sealed: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --yes)")
+		}
+		// Interactive: prompt once for the operator's supply on this cold
+		// world (it is sealed into the runner and never asked for again).
+		// Uses e.prompt, which reads the engine's ONE shared buffered stdin
+		// (a fresh bufio.Reader would drain bytes from the shared pipe — see
+		// the stdin field comment).
+		answer, err := e.prompt("litellm first provision: the provider (fireworks) API key")
+		if err != nil {
+			return err
+		}
+		e.f.litellmProviderKey = strings.TrimSpace(answer)
+		if e.f.litellmProviderKey == "" {
+			return fmt.Errorf("no litellm provider key supplied")
+		}
 	}
+
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil || cfg.Lxc.K3s.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
 		return fmt.Errorf("no k3s coords recorded — cannot place the litellm gateway")
@@ -1909,9 +2089,16 @@ func (e *rebuildEngine) stageLitellm() error {
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	gwURL := "http://" + k3sIP + ":31400"
 
-	masterKey := genSecretHex()  // litellm's admin key (re-mint)
-	postgresPw := genSecretHex() // postgres password
-	providerKey := e.f.litellmProviderKey
+	// The gateway master key must MATCH the running gateway's LITELLM_MASTER_KEY
+	// (the first-run-wins k8s `litellm-keys` Secret is canonical across
+	// rebuilds). Resolve it back and re-seal the runner to it below; only a
+	// fresh world (no Secret yet) mints a brand-new one.
+	masterKey := e.litellmMasterKey(k3sVmid)
+	if masterKey == "" {
+		masterKey = genSecretHex()
+	}
+	postgresPw := genSecretHex()          // postgres password
+	providerKey := e.f.litellmProviderKey // "" when reusing the sealed key
 
 	// ---- Leg 1: kube workloads. The k8s Secrets (master + postgres pw) are
 	// CP-GENERATED installer material (like deploy flags) — they cross the
@@ -1924,7 +2111,6 @@ func (e *rebuildEngine) stageLitellm() error {
 	}
 
 	// ---- Leg 2: model registration through the litellm runner. -----------
-	runnerDir := filepath.Join(rbRunnerPkgs(), "litellm")
 	agentPK := e.opsAgentPubkey()
 	env := append(
 		[]string{"FREEHOLD_LITELLM_MASTER=" + masterKey},
@@ -1946,8 +2132,15 @@ func (e *rebuildEngine) stageLitellm() error {
 		{"provider-key", "FREEHOLD_LITELLM_PROVIDER"},
 		{"postgres-pw", "FREEHOLD_LITELLM_PG"},
 	} {
+		val := map[string]string{"provider-key": providerKey, "postgres-pw": postgresPw}[extra.name]
+		if val == "" && extra.name == "provider-key" && reusingKey {
+			// The provider key is already sealed in the runner package —
+			// re-shipping an empty value would clobber nothing but must be
+			// skipped so a rebuild reuses the stored one.
+			continue
+		}
 		extraEnv := append(
-			[]string{extra.env + "=" + map[string]string{"provider-key": providerKey, "postgres-pw": postgresPw}[extra.name]},
+			[]string{extra.env + "=" + val},
 			os.Environ()...,
 		)
 		if ok, out := e.runEnv(e.bins.ControlPlane, extraEnv, []string{
@@ -1959,6 +2152,23 @@ func (e *rebuildEngine) stageLitellm() error {
 		}
 	}
 
+	// Re-seal the runner's `litellm` secret to the gateway's canonical master
+	// every run: `provision` on a reused package is a no-op, so the runner
+	// keeps an OLD (possibly divergent) sealed master — exactly the mismatch
+	// that makes every admin call 401. Driving it with add-secret re-encrypts
+	// the SAME value, keeping $LITELLM in lockstep with the live gateway.
+	masterEnv := append(
+		[]string{"FREEHOLD_LITELLM_MASTER=" + masterKey},
+		os.Environ()...,
+	)
+	if ok, out := e.runEnv(e.bins.ControlPlane, masterEnv, []string{
+		"add-secret", "litellm", "litellm",
+		"--state-dir", rbStateDir(),
+		"--secret-env", "FREEHOLD_LITELLM_MASTER",
+	}); !ok {
+		return fmt.Errorf("add-secret litellm (master) failed:\n%s", out)
+	}
+
 	// Serve the litellm runner on loopback, exec the registration through it.
 	pid, err := e.stageServeRunner("litellm", runnerDir)
 	if err != nil {
@@ -1966,11 +2176,27 @@ func (e *rebuildEngine) stageLitellm() error {
 	}
 	defer e.stopRunner(pid)
 
-	regScript := litellmRegisterScript()
-	ok, out = e.runEnv(e.bins.Self, os.Environ(), e.execArgs(
-		fmt.Sprintf("exec --target litellm --secrets litellm,provider-key %s", regScript), 120))
+	// Register the model THROUGH the litellm runner (its own ciphertext: master
+	// + provider-key), against the gateway's real URL.
+	ok, out = e.litellmRun(litellmRegisterScript(gwURL), 120, "litellm", "provider-key")
 	if !ok {
 		return fmt.Errorf("litellm model registration failed:\n%s", out)
+	}
+
+	// The CPA's litellm key is the gateway master itself: litellm /key/generate
+	// now requires a pre-existing virtual key to mint scoped keys (quadrant
+	// blocked until one exists), while the master is accepted for chat AND
+	// admin. The pod reads it as its OPENAI_COMPAT_API_KEY from the
+	// <pod>-litellm-key Secret (seeded first-run-wins via pct). Minting scoped
+	// virtual keys is the named follow-up once a bootstrap virtual key exists.
+	cpaName := cfg.CPAName
+	if cpaName == "" {
+		cpaName = agent.DefaultCPAName
+	}
+	ok, out = e.runBin(e.bins.Self, e.execArgs(
+		agent.AgentLiteLLMKeyScript(k3sVmid, masterKey, cpaName), 60))
+	if !ok {
+		return fmt.Errorf("seed CPA litellm key secret failed:\n%s", out)
 	}
 
 	return e.recordLitellm(gwURL, k3sIP)
@@ -2131,14 +2357,77 @@ spec:
   - {port: 4000, targetPort: 4000, nodePort: 31400}`
 
 // litellmRegisterScript registers the model through the litellm runner: the
-// runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name.
-func litellmRegisterScript() string {
-	return `set -euo pipefail
-BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
-curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://127.0.0.1:31400/model/new" | head -c 300
+// runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name. The
+// model_name is the ControlPlaneAgent alias the CPA pod talks to (agent.go's
+// CpaLiteLLMModel); litellm maps it to the deepseek route behind the scenes.
+// litellmRegisterScript registers the model through the litellm runner: the
+// runner injects LITELLM (master, Bearer) + PROVIDER_KEY (body) by name, and
+// curl's the gateway's REAL URL (gwURL — never 127.0.0.1, which is dead on the
+// runner host; the gateway is reached at its k3s-node NodePort). The model_name
+// is the ControlPlaneAgent alias the CPA pod talks to (agent.go's
+// CpaLiteLLMModel); litellm maps it to the deepseek route behind the scenes.
+func litellmRegisterScript(gwURL string) string {
+	return fmt.Sprintf(`set -euo pipefail
+BODY=$(printf '{"model_name":"%s","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%%s"}}' "$PROVIDER_KEY")
+curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "%s/model/new" | head -c 300
 echo
 echo LEG2_OK
-`
+`, agent.CpaLiteLLMModel, gwURL)
+}
+
+// litellmHasProviderKey reports whether the litellm runner package already
+// carries a sealed provider-key (so a rebuild can reuse it instead of demanding
+// a fresh supply). It inspects only the ciphertext map's secret NAMES — never
+// any value.
+func litellmHasProviderKey(runnerDir string) bool {
+	b, err := os.ReadFile(filepath.Join(runnerDir, "secrets.json"))
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Secrets map[string]string `json:"secrets"`
+	}
+	if err := json.Unmarshal(b, &pkg); err != nil {
+		return false
+	}
+	_, ok := pkg.Secrets["provider-key"]
+	return ok
+}
+
+// litellmMasterKey resolves the litellm gateway's ACTUAL admin master key: the
+// canonical copy is the first-run-wins k8s `litellm-keys` Secret (it survives
+// rebuilds while provisioning reuses the old sealed runner key), so on a reuse
+// run we read the canonical one back and re-seal the runner to it — a re-minted
+// master would diverge from the running gateway and every admin call would 401.
+// Returns "" only when the Secret doesn't exist yet (a fresh run mints it).
+func (e *rebuildEngine) litellmMasterKey(k3sVmid uint32) string {
+	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
+		k3sVmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return "" // a read failure is treated as "no canonical master yet" — a fresh run mints one
+	}
+	return strings.TrimSpace(out)
+}
+
+// litellmRun executes a script THROUGH the dedicated litellm runner (served on
+// loopback 127.0.0.1:8788, target "litellm"), injecting the named secrets by
+// env. This is where the litellm admin calls run: the runner host is this
+// machine — from which the gateway URL is reachable — and the secrets
+// (litellm = master, provider-key) are the litellm runner package's own
+// ciphertext. (Not the main proxmox-box runner, and not a nested
+// "exec --target …" prefix — that prefix is a shell no-op the old code leaned
+// on and never injected the secrets at all.)
+func (e *rebuildEngine) litellmRun(script string, timeoutS int, secrets ...string) (bool, string) {
+	args := []string{"exec", "--addr", "127.0.0.1:8788", "--agent-dir", rbOpsDir()}
+	if timeoutS > 0 {
+		args = append(args, "--timeout", strconv.Itoa(timeoutS))
+	}
+	for _, s := range secrets {
+		args = append(args, "--secret", s)
+	}
+	args = append(args, "litellm", script)
+	return e.runEnv(e.bins.Self, os.Environ(), args)
 }
 
 // opsAgentPubkey returns the ops-agent's pubkey (the rebuild's signing
@@ -2178,6 +2467,428 @@ func (e *rebuildEngine) recordLitellm(url, host string) error {
 	return cfg.Save(e.f.configPath)
 }
 
+// ---- the core Caddy TLS fronting proxy (roadmap/CORE_TLS.md, F2) ----------
+//
+// Caddy is freehold's own TLS edge installed as a hostNetwork kube Deployment
+// on the k3s node. It fronts the relay LXC over TLS using the wildcard cert
+// that F3 (embedded lego DNS-01) writes into the caddy-data PVC. This stage
+// only deploys the proxy + the relay vhost; the cert issuance/reload is F3.
+
+// recordCaddy persists the proxy's coords into the config (caddy section +
+// managed) so the Services row + teardown see it.
+func (e *rebuildEngine) recordCaddy(url, host string) error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	cfg.Caddy = config.CaddySpec{URL: url, Host: host}
+	if !containsStr(cfg.Managed, "caddy") {
+		cfg.Managed = append(cfg.Managed, "caddy")
+	}
+	return cfg.Save(e.f.configPath)
+}
+
+// caddyManifestScript applies the Caddy kube resources inside the k3s LXC:
+// namespace, durable PVC, ConfigMap with the rendered Caddyfile, hostNetwork
+// Deployment, NodePort service. No secrets in argv (the Caddyfile is plain).
+func caddyManifestScript(k3sVmid uint32, caddyfile string) string {
+	script := strings.ReplaceAll(`set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+EX="pct exec __VMID__ -- sh -c"
+$EX "$K create ns caddy 2>/dev/null || true"
+# The Caddyfile is written HOST-side then pushed in + applied (same shape as
+# the litellm/postgres manifests). The certs are NOT here: F3 writes them into
+# the caddy-data PVC at /data/tls on each issuance.
+mkdir -p /tmp/caddy-manifests
+cat >/tmp/caddy-manifests/caddy.yaml <<'YAML'
+__CADDY__
+YAML
+pct push __VMID__ /tmp/caddy-manifests/caddy.yaml /tmp/caddy-manifests/caddy.yaml
+$EX "$K apply -f /tmp/caddy-manifests/caddy.yaml"
+$EX "$K rollout status deploy/caddy -n caddy --timeout=120s || true"
+echo CADDY_OK`,
+		"__VMID__", strconv.FormatUint(uint64(k3sVmid), 10),
+	)
+	script = strings.ReplaceAll(script, "__CADDY__", deploy.CaddyManifest(caddyfile))
+	return script
+}
+
+// stageCaddy deploys the core TLS fronting proxy + the relay vhost. It needs
+// the world domain + the relay LXC IP (the upstream) + the k3s substrate.
+// Idempotent (apply + record). Runs whenever k3s is on (a relay-fronting edge
+// is part of the desired world; cert issuance in F3).
+func (e *rebuildEngine) stageCaddy() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	if cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("no k3s coords recorded — Caddy needs the k3s substrate")
+	}
+	if cfg.Domain == "" {
+		return fmt.Errorf("no world domain in config — Caddy fronts relay.<domain>")
+	}
+	if cfg.Lxc.Relay.Ip == nil {
+		return fmt.Errorf("no relay LXC coords recorded — Caddy fronts the relay at its LAN IP")
+	}
+	k3sVmid := *cfg.Lxc.K3s.Vmid
+	relayIP := config.StripCIDR(*cfg.Lxc.Relay.Ip)
+	relayUpstream := fmt.Sprintf("%s:3000", relayIP)
+	// The relay's own public host from the config (RelayURL) — never derived.
+	relayHost := cfg.RelayHost()
+	caddyfile := deploy.RenderCaddyfile(relayHost, relayUpstream)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyManifestScript(k3sVmid, caddyfile), 180))
+	if !ok {
+		return fmt.Errorf("caddy kube apply failed:\n%s", out)
+	}
+	if err := e.recordCaddy(cfg.RelayURL, config.StripCIDR(*cfg.Lxc.K3s.Ip)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ---- the wildcard cert stage (F3: embedded lego DNS-01) ---------------------
+//
+// Issues / reuses the relay wildcard cert for the Caddy edge. The DNS provider
+// token is sealed to the ops identity (freehold's own encryption key) and held
+// in the durable state dir; lego runs in-process. Reconcile-always: a valid
+// cert already on the PVC (>= 30d left) is reused and DNS-01 is skipped.
+
+// certCredPath is where the sealed DNS provider credential lives (durable).
+func (e *rebuildEngine) certCredPath() string {
+	return filepath.Join(rbStateDir(), "dns-provider.json")
+}
+
+// certIdentSecret returns the ops identity's encryption secret (raw bytes), the
+// identity, or an error. The ops identity is freehold's own — the only key that
+// must be able to reopen the sealed DNS token (lego runs in-process, not in a
+// runner).
+func (e *rebuildEngine) certIdent() (*flows.Identity, []byte, []byte, error) {
+	id, err := flows.LoadIdentity(rbOpsDir())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("no ops identity for cert storage: %w", err)
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("ops identity enc secret: %w", err)
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return id, secret, pub, nil
+}
+
+// stageCert ensures the Caddy edge has a valid wildcard cert: reuse the durable
+// one when fresh, else collect (or reuse) the DNS provider token, pre-verify it,
+// issue via embedded lego, install into the Caddy pod, and reload.
+func (e *rebuildEngine) stageCert() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.Domain == "" || cfg.Lxc.K3s.Vmid == nil {
+		return nil // no edge / no k3s -> nothing to certify
+	}
+	if cfg.Caddy.Host == "" {
+		fmt.Fprintln(e.out, "  · Caddy edge not recorded — skipping cert issuance")
+		return nil
+	}
+	k3sVmid := *cfg.Lxc.K3s.Vmid
+
+	// 1. Reuse the durable cert on the PVC when it's fresh (>= 30d left).
+	existing, err := e.caddyFullchain(k3sVmid)
+	if err == nil && len(existing) > 0 {
+		exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour)
+		if ok {
+			fmt.Fprintf(e.out, "  · reusing existing wildcard cert (expires %s)\n", exp.UTC().Format(time.RFC3339))
+			return e.recordCert(cfg, exp, cfg.Caddy.CertIssuer)
+		}
+	}
+	if err != nil && !e.f.noK3s {
+		fmt.Fprintln(e.out, "  · no reusable cert on the edge — will issue a fresh one")
+	}
+
+	// 2. Resolve the DNS provider token (reuse sealed copy or interactive).
+	provider, env, err := e.promptDNSCred()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  · pre-verifying %s DNS credentials (throwaway TXT round-trip)…\n", provider)
+	if err := cert.Verify(cfg.Domain, provider, env); err != nil {
+		return fmt.Errorf("DNS provider pre-verify failed: %w", err)
+	}
+
+	// 3. Issue the wildcard via embedded lego.
+	fmt.Fprintf(e.out, "  · issuing *.%s via lego (%s)…\n", cfg.Domain, provider)
+	issued, err := cert.IssueWildcard(cfg.Domain, provider, env)
+	if err != nil {
+		return err
+	}
+
+	// 4. Install into the Caddy pod + reload.
+	if err := e.installCaddyCert(k3sVmid, issued.Fullchain, issued.Key); err != nil {
+		return err
+	}
+	exp := issued.NotAfter
+	if exp.IsZero() {
+		exp, _ = cert.LoadExpiryFromBytes(issued.Fullchain)
+	}
+	fmt.Fprintf(e.out, "  ✓ wildcard cert issued (expires %s)\n", exp.UTC().Format(time.RFC3339))
+	return e.recordCert(cfg, exp, provider)
+}
+
+// recordCert persists the cert expiry + issuer into the config.
+func (e *rebuildEngine) recordCert(cfg *config.Config, exp time.Time, issuer string) error {
+	cfg.Caddy.CertExpiry = exp.UTC().Format(time.RFC3339)
+	if issuer != "" {
+		cfg.Caddy.CertIssuer = issuer
+	}
+	return cfg.Save(e.f.configPath)
+}
+
+// caddyFullchain cats the edge's durable fullchain out of the pod (base64) so
+// the reuse gate can parse its expiry without re-issuing.
+func (e *rebuildEngine) caddyFullchain(k3sVmid uint32) ([]byte, error) {
+	cmd := fmt.Sprintf(
+		"pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n caddy exec deploy/caddy -- sh -c 'cat /data/tls/fullchain.pem' 2>/dev/null | base64 -w0",
+		k3sVmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60))
+	if !ok {
+		return nil, fmt.Errorf("caddy fullchain unreadable: %s", strings.TrimSpace(out))
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+	if err != nil {
+		return nil, fmt.Errorf("caddy fullchain base64: %w", err)
+	}
+	return dec, nil
+}
+
+// installCaddyCert writes the chain/key into the Caddy durable PVC via a
+// short-lived helper pod that mounts the same caddy-data volume (so it works
+// even while Caddy itself is crash-looping on the very first boot, before any
+// cert exists), then reloads the edge. The cert bytes are base64-embedded in
+// the runner command only — transient in memory, never persisted by freehold.
+func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, fullchain, key []byte) error {
+	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyCertInstallScript(k3sVmid, fullchain, key), 180))
+	if !ok {
+		return fmt.Errorf("caddy cert install failed:\n%s", out)
+	}
+	return nil
+}
+
+// caddyCertInstallScript writes the chain/key into the Caddy durable PVC via a
+// short-lived helper pod that mounts the same caddy-data volume (so it works
+// even while Caddy itself is crash-looping on the very first boot, before any
+// cert exists), then reloads the edge. The cert bytes are base64-embedded in
+// the runner command only — transient in memory, never persisted by freehold.
+// Both the outer and inner (guest) shells run set -e so a failed helper-pod
+// write FAILS the stage instead of silently claiming an issued cert.
+func caddyCertInstallScript(k3sVmid uint32, fullchain, key []byte) string {
+	fcB64 := base64.StdEncoding.EncodeToString(fullchain)
+	keyB64 := base64.StdEncoding.EncodeToString(key)
+	return fmt.Sprintf(`set -e
+pct exec %d -- sh -c '
+set -e
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+printf %s | base64 -d > /tmp/fc.pem
+printf %s | base64 -d > /tmp/key.pem
+# Helper pod over the SAME durable PVC (works before Caddy is healthy).
+cat > /tmp/cert-installer.yaml <<'"'"'YAMLEOF'"'"'
+apiVersion: v1
+kind: Pod
+metadata: {name: cert-installer, namespace: caddy}
+spec:
+  restartPolicy: Never
+  containers:
+  - {name: install, image: busybox:1.36, command: ["sleep", "infinity"],
+     volumeMounts: [{name: data, mountPath: /data}]}
+  volumes:
+  - {name: data, persistentVolumeClaim: {claimName: caddy-data}}
+YAMLEOF
+$K -n caddy delete pod cert-installer --ignore-not-found=true >/dev/null 2>&1 || true
+$K apply -f /tmp/cert-installer.yaml
+$K -n caddy wait --for=condition=Ready pod/cert-installer --timeout=60s
+$K -n caddy exec pod/cert-installer -- sh -c "mkdir -p /data/tls && cat > /data/tls/fullchain.pem" < /tmp/fc.pem
+$K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/key.pem" < /tmp/key.pem
+$K -n caddy delete pod cert-installer >/dev/null 2>&1 || true
+$K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
+rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
+'`, k3sVmid, shellSingleQuote(fcB64), shellSingleQuote(keyB64))
+}
+
+// shellSingleQuote single-quotes an arg for the embedded sh -c command.
+func shellSingleQuote(s string) string { return "'" + s + "'" }
+
+// firstNonEmpty returns the first non-empty of its arguments.
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// worldHasEdge reports whether this rebuild's desired world includes the Caddy
+// TLS edge (and therefore needs a DNS provider credential): k3s is on and a
+// world domain is set.
+func (e *rebuildEngine) worldHasEdge() bool {
+	return !e.f.noK3s && e.f.domain != ""
+}
+
+// promptDomains asks for the relay + control-plane hosts up front. Each
+// defaults to the world domain (bare ENTER), so nothing is derived — the
+// operator explicitly names them (they may be the world domain, a subdomain,
+// or on a wholly different zone). Flags already set (or a headless --yes run)
+// skip the prompt.
+func (e *rebuildEngine) promptDomains() error {
+	if e.f.relayDomain == "" && !e.f.yes {
+		ans, err := e.prompt("relay domain (its Buzz origin; bare ENTER = the world domain " + e.f.domain + ")")
+		if err != nil {
+			return err
+		}
+		if a := strings.TrimSpace(ans); a != "" {
+			e.f.relayDomain = a
+		}
+	}
+	if e.f.cpDomain == "" && !e.f.yes {
+		ans, err := e.prompt("control-plane domain (bare ENTER = the world domain " + e.f.domain + ")")
+		if err != nil {
+			return err
+		}
+		if a := strings.TrimSpace(ans); a != "" {
+			e.f.cpDomain = a
+		}
+	}
+	// The wildcard cert is issued for *.<world-domain> / <world-domain>, so a
+	// relay or CP host on a DIFFERENT zone won't be covered by it. Surface
+	// that honestly rather than implying it will work.
+	for _, hv := range []struct {
+		name, host string
+	}{{"relay", e.f.relayDomain}, {"control plane", e.f.cpDomain}} {
+		if hv.host != "" && !domainCoveredByWildcard(e.f.domain, hv.host) {
+			fmt.Fprintf(e.out, "  ⚠ %s is on %q — outside the wildcard cert's %s zone; TLS for it needs a separate issuance (follow-up).\n",
+				hv.name, hv.host, "*."+e.f.domain)
+		}
+	}
+	return nil
+}
+
+// domainCoveredByWildcard reports whether host is served by a lego DNS-01
+// wildcard issued for `apex` (SANs *.apex + apex). A wildcard matches ONE label
+// deep: the apex itself, or exactly a single-label subdomain (relay.apex), NOT
+// a multi-label subdomain (a.b.apex).
+func domainCoveredByWildcard(apex, host string) bool {
+	if host == apex {
+		return true
+	}
+	if !strings.HasSuffix(host, "."+apex) {
+		return false
+	}
+	sub := strings.TrimSuffix(host, "."+apex)
+	return sub != "" && !strings.Contains(sub, ".")
+}
+
+// promptDNSCred returns the DNS provider name + its env map, reusing the sealed
+// credential on disk when present, else interactively collecting it (provider
+// from lego's full registry, the provider's own env-var names) and saving it
+// sealed to the ops identity. Under --yes it keeps the existing copy; a missing
+// one is a hard error (no interactive collection headless).
+func (e *rebuildEngine) promptDNSCred() (string, map[string]string, error) {
+	path := e.certCredPath()
+	_, secret, pub, err := e.certIdent()
+	if err != nil {
+		return "", nil, err
+	}
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+	open := func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) }
+
+	if cert.CredExists(path) {
+		provider, env, err := cert.LoadCreds(path, open, secret)
+		if err != nil {
+			return "", nil, fmt.Errorf("reusing DNS credential: %w", err)
+		}
+		fmt.Fprintf(e.out, "  · reusing sealed DNS credential (%s)\n", provider)
+		return provider, env, nil
+	}
+
+	if e.f.yes {
+		return "", nil, fmt.Errorf("no DNS provider credential stored and interactive collection is disabled (--yes); run without --yes once to store it")
+	}
+
+	provider, err := e.promptProvider()
+	if err != nil {
+		return "", nil, err
+	}
+	env, err := e.promptProviderEnv(provider)
+	if err != nil {
+		return "", nil, err
+	}
+	if e.f.domain != "" {
+		fmt.Fprintf(e.out, "  · pre-verifying %s credentials (throwaway TXT round-trip)…\n", provider)
+		if err := cert.Verify(e.f.domain, provider, env); err != nil {
+			return "", nil, fmt.Errorf("DNS provider pre-verify failed — fix the credential and try again: %w", err)
+		}
+	}
+	if err := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns"); err != nil {
+		return "", nil, fmt.Errorf("storing DNS credential: %w", err)
+	}
+	return provider, env, nil
+}
+
+// promptProvider asks the operator to pick a DNS-01 provider from lego's full
+// registry via an interactive, scrollable + type-ahead-searchable list picker
+// (bubbletea list). The 201-provider registry is otherwise unreadable when
+// enumerated inline.
+func (e *rebuildEngine) promptProvider() (string, error) {
+	return runProviderPicker(cert.Providers())
+}
+
+// promptProviderEnv collects the provider's env-var fields (from lego-derived
+// names; freeform KEY=VAL lines for unknown/auto-detecting providers).
+func (e *rebuildEngine) promptProviderEnv(provider string) (map[string]string, error) {
+	names := cert.ProviderEnvNames(provider)
+	env := map[string]string{}
+	if len(names) == 0 {
+		fmt.Fprintln(e.out, "  this provider has no enumerated env fields — paste KEY=VAL entries (one per line; empty line to finish):")
+		for {
+			line, err := e.prompt("KEY=VAL (or blank to finish)")
+			if err != nil {
+				return nil, err
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				break
+			}
+			k, v, ok := strings.Cut(line, "=")
+			if !ok || strings.TrimSpace(k) == "" {
+				fmt.Fprintln(e.out, "  expected KEY=VAL")
+				continue
+			}
+			env[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		return env, nil
+	}
+	fmt.Fprintln(e.out, "  this provider reads the following environment fields; enter each (blank field = leave unset):")
+	for _, n := range names {
+		v, err := e.prompt(n)
+		if err != nil {
+			return nil, err
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			env[n] = v
+		}
+	}
+	return env, nil
+}
+
 // ---- the CPA stage (Chunk 4 Phase A) ---------------------------------------
 
 // cpaIdentityDir is where the CPA's durable Nostr identity lives. It sits on
@@ -2210,6 +2921,9 @@ func (e *rebuildEngine) stageCpa() error {
 	if cfg.RelayURL == "" {
 		return fmt.Errorf("no relay URL in config — the CPA must join the community relay")
 	}
+	if cfg.Litellm.URL == "" {
+		return fmt.Errorf("no litellm gateway recorded — the CPA needs a reasoning model (litellm is part of the world unless --no-litellm)")
+	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	cpaName := cfg.CPAName
 	if cpaName == "" {
@@ -2219,11 +2933,25 @@ func (e *rebuildEngine) stageCpa() error {
 	if err != nil {
 		return err
 	}
-	// The harness speaks WS to the relay; the config records the HTTP origin.
-	relayURL := strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
-	// The in-pod prompt path for CPA_SYSTEM_PROMPT.md (mounted/embedded by a
-	// later phase; the pod reads it from this fixed path today).
-	promptPath := "/srv/freehold/CPA_SYSTEM_PROMPT.md"
+	// The harness speaks WS to the relay. The pod joins the community relay
+	// over the LAN: resolve the domain internally to the relay LXC (the CP
+	// resolver's split-horizon record wired before this stage) and speak
+	// plain ws on the relay's HTTP port (:3000 — the deployment's
+	// BUZZ_HTTP_PORT). The Caddy edge fronts TLS at wss://relay.<domain>, but
+	// the pod keeps the LAN ws origin until F5 flips it (roadmap/CORE_TLS.md)
+	// — a wss:443 host with no live cert yet would be a dead pod.
+	// cfg.RelayWsURL records this internal origin; fall back to deriving wss
+	// from the public URL for worlds that do reach the relay over TLS.
+	relayURL := cfg.RelayWsURL
+	if relayURL == "" {
+		relayURL = strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
+	}
+	// B1/B3: the CPA's purpose lives in the orchestrator's prompts package
+	// (prompts/CPA_SYSTEM_PROMPT.md), embedded into this binary at compile
+	// time and shipped into the pod's ConfigMap at spawn; the pod re-reads
+	// the mounted copy on every restart — never cached, never a host-side
+	// file read (which would break on CWD).
+	promptText := prompts.CPASystemPrompt
 
 	// Ensure the cpa-identity Secret (nsec + owner) exists in the namespace.
 	id, err := flows.LoadIdentity(cpaIdentityDir())
@@ -2237,9 +2965,11 @@ func (e *rebuildEngine) stageCpa() error {
 	}
 
 	// Apply the CPA pod via THIS binary self-exec'd through the runner (the
-	// same transport stageLitellm's exec uses), then record the agent.
+	// same transport stageLitellm's exec uses), then record the agent. The
+	// runner executes this verbatim on the k3s guest; the pod's ConfigMap
+	// carries the prompt, so nothing ships the .md to the CP LXC.
 	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.CPAManifestScript(
-		k3sVmid, relayURL, promptPath, cpaName), 420))
+		k3sVmid, relayURL, promptText, cpaName), 420))
 	if !ok {
 		return fmt.Errorf("cpa pod apply failed:\n%s", out)
 	}
@@ -2279,7 +3009,7 @@ func (e *rebuildEngine) recordCpa(cpaPub, cpaName string) error {
 // relayPubkeyNip11 reads the relay's signing pubkey via NIP-11 (best-effort
 // trust anchor; not fatal when unreadable).
 func (e *rebuildEngine) relayPubkeyNip11() (string, bool) {
-	text, ok := e.curlGet("https://" + e.f.domain + "/")
+	text, ok := e.curlGet("https://" + firstNonEmpty(e.f.relayDomain, e.f.domain) + "/")
 	if !ok {
 		return "", false
 	}

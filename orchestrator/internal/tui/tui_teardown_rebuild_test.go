@@ -76,9 +76,9 @@ func TestTeardownFormSteps(t *testing.T) {
 	}
 }
 
-// TestRebuildFormSteps walks the 7-step rebuild form to completion and
+// TestRebuildFormSteps walks the rebuild form to completion and
 // confirms the inputs land in order (operator pk, domain, LV size,
-// thin-pool name, pool size, k3s, CPA agent name).
+// thin-pool name, pool size, k3s, CPA agent name, litellm).
 func TestRebuildFormSteps(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap}
 	if !keyPress(m, "B") {
@@ -87,12 +87,17 @@ func TestRebuildFormSteps(t *testing.T) {
 	if m.Flow == nil || m.Flow.Kind != flowRebuild {
 		t.Fatal("expected a rebuild flow after pressing B")
 	}
-	if ncols(flowRebuild) != 7 {
-		t.Fatalf("rebuild form should have 7 steps, got %d", ncols(flowRebuild))
+	if ncols(flowRebuild) != 10 {
+		t.Fatalf("rebuild form should have 10 steps, got %d", ncols(flowRebuild))
 	}
-	answers := []string{strings.Repeat("a", 64), "world.test", "10", "freehold-thin", "40", "y", "my-cpa"}
+	answers := []string{strings.Repeat("a", 64), "world.test", "10", "freehold-thin", "40", "y", "my-cpa", "y"}
 	for i := range answers {
 		typeText(m, answers[i])
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	// Advance through the two blank fields (relay + CP domain; blank = the
+	// world domain) to COMPLETION — dispatch happens on the 10th step.
+	for i := 0; i < 2; i++ {
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if m.Flow == nil {
@@ -101,6 +106,28 @@ func TestRebuildFormSteps(t *testing.T) {
 	for i, want := range answers {
 		if m.Flow.Inputs[i] != want {
 			t.Errorf("rebuild inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want)
+		}
+	}
+	if m.Flow.Inputs[8] != "" || m.Flow.Inputs[9] != "" {
+		t.Errorf("relay/cp domains should default to blank (= the world domain), got %q/%q", m.Flow.Inputs[8], m.Flow.Inputs[9])
+	}
+	// Completing the form dispatches the rebuild subprocess. Default k3s+litellm
+	// on = full world reconcile; the named CPA agent is forwarded.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if cmd == nil {
+		t.Fatal("completed 10-step rebuild form did not dispatch")
+	}
+	start, ok := cmd().(activityStartMsg)
+	if !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
+	}
+	got := strings.Join(start.args, " ")
+	if !strings.Contains(got, "--agent-name my-cpa") {
+		t.Errorf("rebuild args %q missing --agent-name my-cpa", got)
+	}
+	for _, banned := range []string{"--no-k3s", "--no-litellm"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("rebuild args must keep %s on when not opted out: %q", banned, got)
 		}
 	}
 
@@ -150,6 +177,15 @@ func TestNewFlowLabels(t *testing.T) {
 	if got := promptLabel(flowRebuild, 6); got != "CPA agent name (blank = freehold)" {
 		t.Errorf("rebuild step6 label = %q", got)
 	}
+	if got := promptLabel(flowRebuild, 7); got != "deploy litellm gateway + CPA model? (y/n, blank = y)" {
+		t.Errorf("rebuild step7 label = %q", got)
+	}
+	if got := promptLabel(flowRebuild, 8); got != "relay domain (its Buzz origin; blank = the world domain)" {
+		t.Errorf("rebuild step8 label = %q", got)
+	}
+	if got := promptLabel(flowRebuild, 9); got != "control-plane domain (blank = the world domain)" {
+		t.Errorf("rebuild step9 label = %q", got)
+	}
 }
 
 // TestRebuildFormSeededFromConfig: when a config exists, pressing B opens
@@ -170,8 +206,8 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 		t.Fatal("B did not start the rebuild flow")
 	}
 
-	want := [7]string{op, "world.test", "", "freehold-thin", "", "y", ""}
-	for i := 0; i < 7; i++ {
+	want := [10]string{op, "world.test", "", "freehold-thin", "", "", "", "", "", ""}
+	for i := 0; i < 10; i++ {
 		if m.Flow == nil {
 			t.Fatalf("flow vanished at step %d", i)
 		}
@@ -183,7 +219,7 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 	if m.Flow == nil {
 		t.Fatal("flow vanished before inputs were captured")
 	}
-	for i := 0; i < 7; i++ {
+	for i := 0; i < 10; i++ {
 		if m.Flow.Inputs[i] != want[i] {
 			t.Errorf("inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want[i])
 		}
@@ -219,7 +255,7 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
-	for i := 0; i < 7; i++ {
+	for i := 0; i < 10; i++ {
 		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if msg == nil {
@@ -235,8 +271,11 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 			t.Errorf("rebuild args %q missing %q", joined, want)
 		}
 	}
-	if strings.Contains(joined, "--with-k3s=false") {
-		t.Errorf("k3s is managed in the config — the args must not disable it: %q", joined)
+	// Full world by default: k3s and litellm are on unless opted out.
+	for _, banned := range []string{"--no-k3s", "--no-litellm"} {
+		if strings.Contains(joined, banned) {
+			t.Errorf("seeded defaults must not opt out of %s: %q", banned, joined)
+		}
 	}
 }
 
@@ -260,9 +299,12 @@ func TestRebuildFormAgentNameRoundTrip(t *testing.T) {
 		t.Fatalf("agent-name step seeded %q, want %q", got, "waldo")
 	}
 	var msg tea.Cmd
-	for i := 0; i < 7; i++ {
-		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	// Advance through all 8 fields (discarding the in-flight updates), then one
+	// Tab on the completed form dispatches the rebuild subprocess.
+	for i := 0; i < ncols(flowRebuild); i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
+	_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	if msg == nil {
 		t.Fatal("no activity message was dispatched")
 	}
@@ -275,9 +317,10 @@ func TestRebuildFormAgentNameRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRebuildFormNoSeedWithoutConfig: no config = the old fresh-world
-// behavior (nothing prefilled), and a config WITHOUT k3s seeds "n" — that
-// prompt's blank default is y, so blank would boot k3s on a k3s-off world.
+// TestRebuildFormNoSeedWithoutConfig: no config = nothing prefilled, and k3s
+// (d[5]) and litellm (d[7]) default BLANK — the arg builder reads blank as
+// "y", so the desired world reconciles to FULL by default; opting out is an
+// explicit "n".
 func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: "/nonexistent/config.toml"}
 	keyPress(m, "B")
@@ -294,15 +337,18 @@ func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
 	if m2.Flow == nil {
 		t.Fatal("B did not start the rebuild flow")
 	}
-	if got := flowDefaults(m2, flowRebuild)[5]; got != "n" {
-		t.Errorf("config without k3s must seed the k3s answer as %q, got %q", "n", got)
+	if got := flowDefaults(m2, flowRebuild)[5]; got != "" {
+		t.Errorf("k3s must default blank (= on, reconcile-always), got %q", got)
+	}
+	if got := flowDefaults(m2, flowRebuild)[7]; got != "" {
+		t.Errorf("litellm must default blank (= on, reconcile-always), got %q", got)
 	}
 }
 
-// TestRebuildFormK3sOffWorldStaysOff: six bare enters on a k3s-off world
-// must dispatch --with-k3s=false — the seeded "n" has to round-trip into
-// the args (a blank would have booted k3s: the prompt default is y).
-func TestRebuildFormK3sOffWorldStaysOff(t *testing.T) {
+// TestRebuildFormExplicitOptOut: typing "n" at the k3s step (and the litellm
+// step) must dispatch --no-k3s / --no-litellm — the full-world defaults are
+// opt-outs, not blank-boot surprises.
+func TestRebuildFormExplicitOptOut(t *testing.T) {
 	cfgPath := writeRebuildCfg(t,
 		"domain = \"world.test\"\n"+
 			"operator_pubkey = \""+strings.Repeat("b", 64)+"\"\n"+
@@ -310,9 +356,13 @@ func TestRebuildFormK3sOffWorldStaysOff(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
-	for i := 0; i < 7; i++ {
-		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	for i := 0; i < ncols(flowRebuild); i++ {
+		if i == 5 || i == 7 {
+			typeText(m, "n")
+		}
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
+	_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	if msg == nil {
 		t.Fatal("no activity message was dispatched")
 	}
@@ -321,8 +371,11 @@ func TestRebuildFormK3sOffWorldStaysOff(t *testing.T) {
 		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
 	}
 	joined := strings.Join(start.args, " ")
-	if !strings.Contains(joined, "--with-k3s=false") {
-		t.Errorf("k3s-off world must dispatch --with-k3s=false, got %q", joined)
+	if !strings.Contains(joined, "--no-k3s") {
+		t.Errorf("type 'n' at the k3s step must dispatch --no-k3s, got %q", joined)
+	}
+	if !strings.Contains(joined, "--no-litellm") {
+		t.Errorf("type 'n' at the litellm step must dispatch --no-litellm, got %q", joined)
 	}
 }
 
@@ -778,5 +831,28 @@ func TestFailTailKeepsTheCause(t *testing.T) {
 	}
 	if !strings.Contains(got, "the pool is NOT removed") {
 		t.Errorf("tail must keep the trailing clause too, got %q", got)
+	}
+}
+
+// TestIsSkipDetail: a legitimate no-op probe ("not deployed", "unreachable",
+// "no coords") must classify as a skip (neutral marker) — NOT as a success that
+// renders a misleading green check.
+func TestIsSkipDetail(t *testing.T) {
+	skips := []string{
+		"caddy not deployed (no TLS edge coords)",
+		"dns resolver unreachable (mirror fallback)",
+		"litellm not managed",
+		"k3s not on record — skipped",
+	}
+	for _, s := range skips {
+		if !isSkipDetail(s) {
+			t.Errorf("isSkipDetail(%q) = false, want true", s)
+		}
+	}
+	oks := []string{"live (/_liveness ok)", "gateway healthy at http://x", "API healthy at 1.2.3.4:6443"}
+	for _, s := range oks {
+		if isSkipDetail(s) {
+			t.Errorf("isSkipDetail(%q) = true, want false", s)
+		}
 	}
 }

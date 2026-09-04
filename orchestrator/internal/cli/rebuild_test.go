@@ -4,6 +4,7 @@ import "reflect"
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -220,28 +221,37 @@ ostype: debian
 }
 
 // TestWorldManaged keeps a recorded k3s guest in the manifest when a re-run
-// skips k3s, so teardown still destroys it instead of leaking the LXC + LV.
+// opted k3s out (--no-k3s), so teardown still destroys it instead of leaking
+// the LXC + LV. litellm rides k3s and needs no guest carve-out.
 func TestWorldManaged(t *testing.T) {
-	got := worldManaged(false, false, ptr(uint32(102)))
-	if !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+	// Full world (k3s + litellm on), recorded vmid / absent vmid.
+	if got := worldManaged(false, false, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full world with vmid = %v, want relay/cp/k3s/litellm", got)
+	}
+	if got := worldManaged(false, false, nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+		t.Errorf("full world with no vmid = %v, want relay/cp/k3s/litellm", got)
+	}
+	// k3s on, litellm opted out.
+	if got := worldManaged(false, true, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+		t.Errorf("k3s-only world = %v, want relay/cp/k3s", got)
+	}
+	// k3s opted out but a recorded guest exists: it stays owned for teardown.
+	if got := worldManaged(true, false, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
 		t.Errorf("skipped k3s with recorded vmid = %v, want relay/cp/k3s", got)
 	}
-	if got := worldManaged(false, false, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
-		t.Errorf("skipped k3s with no vmid = %v, want relay/cp", got)
-	}
-	if got := worldManaged(true, true, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
-		t.Errorf("full world = %v", got)
+	if got := worldManaged(true, true, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("k3s+litellm opted out, no vmid = %v, want relay/cp", got)
 	}
 }
 
 func TestManagedForFlags(t *testing.T) {
-	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
-		t.Errorf("base = %v", got)
+	if got := managedForFlags(true, true); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+		t.Errorf("base (k3s+litellm out) = %v", got)
 	}
-	if got := managedForFlags(true, false); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+	if got := managedForFlags(false, true); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
 		t.Errorf("with k3s = %v", got)
 	}
-	if got := managedForFlags(true, true); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+	if got := managedForFlags(false, false); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
 		t.Errorf("full = %v", got)
 	}
 }
@@ -363,7 +373,57 @@ func TestMergeFromAnswersPreservesPrevFacts(t *testing.T) {
 
 func u32(v uint32) *uint32 { return &v }
 
+// TestFromAnswersRelayWsURLInternal confirms the relay/CP domains are NEVER
+// derived: each is exactly what the operator supplied (defaulting to the world
+// domain when absent), and the CPA origin follows the relay's own host.
+func TestFromAnswersRelayWsURLInternal(t *testing.T) {
+	// no explicit relay/cp domains -> both live at the world domain.
+	e := &rebuildEngine{f: rebuildFlags{domain: "freehold-test.darcydev.net", agentName: "cpa"}}
+	cfg := e.fromAnswers()
+	if cfg.RelayWsURL != "wss://freehold-test.darcydev.net" {
+		t.Errorf("RelayWsURL = %q, want wss://<world-domain> (no derivation)", cfg.RelayWsURL)
+	}
+	if cfg.RelayURL != "https://freehold-test.darcydev.net" {
+		t.Errorf("RelayURL = %q, want https://<world-domain> (no relay. prefix)", cfg.RelayURL)
+	}
+	if cfg.CPURL != "https://freehold-test.darcydev.net" {
+		t.Errorf("CPURL = %q, want https://<world-domain> (no cp. prefix)", cfg.CPURL)
+	}
+
+	// explicit relay/cp domains are used verbatim.
+	e2 := &rebuildEngine{f: rebuildFlags{
+		domain:      "freehold-test.darcydev.net",
+		relayDomain: "relay.freehold-test.darcydev.net",
+		cpDomain:    "cp.freehold-test.darcydev.net",
+		agentName:   "cpa",
+	}}
+	cfg2 := e2.fromAnswers()
+	if cfg2.RelayURL != "https://relay.freehold-test.darcydev.net" || cfg2.RelayWsURL != "wss://relay.freehold-test.darcydev.net" {
+		t.Errorf("explicit relay domain not honored: %+v", cfg2)
+	}
+	if cfg2.CPURL != "https://cp.freehold-test.darcydev.net" {
+		t.Errorf("explicit cp domain not honored: %+v", cfg2)
+	}
+}
 func sptr(v string) *string { return &v }
+
+// TestDomainCoveredByWildcard: a wildcard issued for *.apex/apex covers the
+// apex and proper subdomains but not other zones (the prompt warns on those).
+func TestDomainCoveredByWildcard(t *testing.T) {
+	apex := "freehold-test.darcydev.net"
+	covered := []string{apex, "relay." + apex, "cp." + apex}
+	uncovered := []string{"", "other.net", "darcydev.net", apex + "x", "." + apex, "a.b." + apex}
+	for _, h := range covered {
+		if !domainCoveredByWildcard(apex, h) {
+			t.Errorf("domainCoveredByWildcard(%q, %q) = false, want true", apex, h)
+		}
+	}
+	for _, h := range uncovered {
+		if domainCoveredByWildcard(apex, h) {
+			t.Errorf("domainCoveredByWildcard(%q, %q) = true, want false", apex, h)
+		}
+	}
+}
 
 // ---- door + NIP-11 parsing ----------------------------------------------------
 
@@ -647,11 +707,14 @@ func TestLitellmManifestScript(t *testing.T) {
 // TestLitellmRegisterScript: the registration leg asks the runner for the
 // two secrets BY NAME and uses them in env, never literal.
 func TestLitellmRegisterScript(t *testing.T) {
-	out := litellmRegisterScript()
-	for _, want := range []string{"$LITELLM", "$PROVIDER_KEY", "/model/new", "deepseek-v4-flash", "LEG2_OK"} {
+	out := litellmRegisterScript("http://192.168.30.7:31400")
+	for _, want := range []string{"$LITELLM", "$PROVIDER_KEY", "/model/new", "deepseek-v4-flash", "LEG2_OK", "http://192.168.30.7:31400"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("register script missing %q", want)
 		}
+	}
+	if strings.Contains(out, "127.0.0.1:31400") {
+		t.Error("register script must target the real gateway URL, not loopback")
 	}
 	if strings.Contains(out, "fw_") {
 		t.Error("register script leaked the provider key")
@@ -689,6 +752,35 @@ func TestRecordLitellm(t *testing.T) {
 	}
 }
 
+// TestRecordCaddy: coords land in config + managed (Services row + teardown
+// ownership), idempotently.
+func TestRecordCaddy(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	base := "domain = \"world.test\"\noperator_pubkey = \"" + strings.Repeat("a", 64) + "\"\nmanaged = [\"relay\", \"cp\", \"k3s\"]\n"
+	if err := os.WriteFile(cfgPath, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := &rebuildEngine{f: rebuildFlags{configPath: cfgPath}}
+	if err := e.recordCaddy("https://relay.world.test", "192.168.30.7"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Caddy.URL != "https://relay.world.test" || cfg.Caddy.Host != "192.168.30.7" {
+		t.Errorf("caddy coords = %+v", cfg.Caddy)
+	}
+	if !containsStr(cfg.Managed, "caddy") {
+		t.Errorf("managed must include caddy, got %v", cfg.Managed)
+	}
+	if err := e.recordCaddy("https://relay.world.test", "192.168.30.7"); err != nil {
+		t.Fatal(err)
+	}
+	if n := countStr(cfg.Managed, "caddy"); n != 1 {
+		t.Errorf("managed duplicated caddy %d times", n)
+	}
+}
 func countStr(list []string, s string) int {
 	n := 0
 	for _, v := range list {
@@ -697,4 +789,109 @@ func countStr(list []string, s string) int {
 		}
 	}
 	return n
+}
+
+// TestCaddyCertInstallScript guards the review finding that the cert-install
+// helper script must FAIL (not silently succeed) when the PVC write doesn't
+// happen: both shells run set -e, the helper pod waits for Ready before the
+// writes, and the base64 payloads are single-quoted (no shell metachars).
+func TestCaddyCertInstallScript(t *testing.T) {
+	fc := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+	key := []byte("-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
+	s := caddyCertInstallScript(102, fc, key)
+
+	// set -e in BOTH the outer wrapper and the inner (guest) script.
+	if got := strings.Count(s, "set -e"); got != 2 {
+		t.Errorf("want set -e in outer + inner shells, got %d occurrences:\n%s", got, s)
+	}
+	// the busybox helper reads the same durable PVC and is waited-for before
+	// the cert/key writes.
+	for _, want := range []string{"image: busybox", "claimName: caddy-data", "--timeout=60s",
+		"persistentVolumeClaim", "rollout restart deploy/caddy"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("script missing %q", want)
+		}
+	}
+	// base64 payloads present + single-quoted (safe, no shell metacharacters).
+	fcB64 := base64.StdEncoding.EncodeToString(fc)
+	keyB64 := base64.StdEncoding.EncodeToString(key)
+	if !strings.Contains(s, "'"+fcB64+"'") {
+		t.Errorf("fullchain base64 not single-quoted-embedded")
+	}
+	if !strings.Contains(s, "'"+keyB64+"'") {
+		t.Errorf("key base64 not single-quoted-embedded")
+	}
+}
+
+func TestLitellmHasProviderKey(t *testing.T) {
+	dir := t.TempDir()
+	write := func(s string) {
+		if err := os.WriteFile(filepath.Join(dir, "secrets.json"), []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// provider-key present -> reuse.
+	write(`{"secrets":{"litellm":"abc","provider-key":"def"},"targets":["litellm"],"grants":[]}`)
+	if !litellmHasProviderKey(dir) {
+		t.Error("expected provider-key detected as present")
+	}
+	// missing -> require a fresh supply.
+	write(`{"secrets":{"litellm":"abc"},"targets":["litellm"],"grants":[]}`)
+	if litellmHasProviderKey(dir) {
+		t.Error("expected no provider-key")
+	}
+	// corrupted / absent file -> conservative (treat as absent).
+	write(`{not json`)
+	if litellmHasProviderKey(dir) {
+		t.Error("expected corrupt package to read as no provider-key")
+	}
+	if err := os.Remove(filepath.Join(dir, "secrets.json")); err != nil {
+		t.Fatal(err)
+	}
+	if litellmHasProviderKey(dir) {
+		t.Error("expected missing package to read as no provider-key")
+	}
+}
+
+// TestLitellmRunArgs: the litellm admin leg must exec the dedicated litellm
+// runner (loopback 8788, target "litellm") with the named secrets — NOT the
+// main proxmox-box runner via a nested "exec --target …" prefix (which bash
+// swallows and never injects the secrets).
+func TestLitellmRunArgs(t *testing.T) {
+	var got [][]string
+	eng := &rebuildEngine{}
+	eng.bins.Self = "/bin/true"
+	eng.runEnv = func(_ string, _ []string, args []string) (bool, string) {
+		got = append(got, args)
+		return true, ""
+	}
+	eng.litellmRun("echo hi", 60, "litellm", "provider-key")
+	if len(got) != 1 {
+		t.Fatalf("litellmRun ran %d execs, want 1", len(got))
+	}
+	args := got[0]
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"exec", "--addr", "127.0.0.1:8788", "--secret", "litellm", "--secret", "provider-key", "litellm"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("litellmRun args %q missing %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "exec --target litellm") {
+		t.Errorf("litellmRun must not use the nested exec --target form: %q", joined)
+	}
+}
+
+func TestRelayDomainHost(t *testing.T) {
+	cases := []struct{ domain, base, want string }{
+		{"freehold-test.darcydev.net", "darcydev.net", "freehold-test"},
+		{"example.com", "com", "example"},        // example.com under search com -> bare host example
+		{"freehold-test.darcydev.net", "", ""},   // no search base -> no record
+		{"a.b.darcydev.net", "darcydev.net", ""}, // dotted host not derivable (resolver rejects dots)
+		{"plain", "darcydev.net", ""},            // not a subdomain
+	}
+	for _, c := range cases {
+		if got := relayDomainHost(c.domain, c.base); got != c.want {
+			t.Errorf("relayDomainHost(%q,%q) = %q, want %q", c.domain, c.base, got, c.want)
+		}
+	}
 }

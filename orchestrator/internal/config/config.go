@@ -20,6 +20,7 @@ import (
 type Config struct {
 	Domain           string      `toml:"domain"`
 	RelayURL         string      `toml:"relay_url"`
+	RelayWsURL       string      `toml:"relay_ws_url,omitempty"`
 	RelayPubkey      *string     `toml:"relay_pubkey,omitempty"`
 	CPURL            string      `toml:"cp_url"`
 	OperatorPubkey   string      `toml:"operator_pubkey"`
@@ -29,6 +30,7 @@ type Config struct {
 	Plane            PlaneSpec   `toml:"plane,omitempty"`
 	Dns              DnsSpec     `toml:"dns,omitempty"`
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
+	Caddy            CaddySpec   `toml:"caddy,omitempty"`
 	CPAName          string      `toml:"cpa_name,omitempty"`
 	Managed          []string    `toml:"managed"`
 }
@@ -58,6 +60,26 @@ type RunnerRef struct {
 	Target string `toml:"target"`
 }
 
+// RelayHost returns the relay's own public host (its Buzz origin) from
+// RelayURL — never derived; it is whatever the operator chose.
+func (c *Config) RelayHost() string {
+	return urlHost(c.RelayURL)
+}
+
+// CPHost returns the control plane's own public host from CPURL.
+func (c *Config) CPHost() string {
+	return urlHost(c.CPURL)
+}
+
+// urlHost strips scheme+path, returning the bare host from a base URL.
+func urlHost(u string) string {
+	u = strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")
+	if i := strings.IndexAny(u, "/:"); i >= 0 {
+		u = u[:i]
+	}
+	return u
+}
+
 // LxcSpec holds the managed LXC coordinates.
 type LxcSpec struct {
 	Relay LxcGuest `toml:"relay"`
@@ -77,6 +99,17 @@ type DnsSpec struct {
 type LitellmSpec struct {
 	URL  string `toml:"url,omitempty"`
 	Host string `toml:"host,omitempty"` // the k3s guest name
+}
+
+// CaddySpec records the core TLS fronting proxy's coords (Services row +
+// teardown ownership). URL is the public relay URL Caddy fronts; Host is the
+// k3s guest name the proxy rides on. CertExpiry is the wildcard cert's leaf
+// NotAfter (RFC3339) as last issued/reused — the Certs tab + reuse gate input.
+type CaddySpec struct {
+	URL        string `toml:"url,omitempty"`
+	Host       string `toml:"host,omitempty"`
+	CertExpiry string `toml:"cert_expiry,omitempty"`
+	CertIssuer string `toml:"cert_issuer,omitempty"` // the DNS provider name
 }
 
 // LxcGuest is a managed LXC's connect/status coordinates.

@@ -30,6 +30,44 @@ func testCfg() *config.Config {
 	}
 }
 
+// TestBuildCerts exercises the Certs view: no cert -> empty; with an expiry +
+// issuer -> one row with the status derived from the expiry.
+func TestBuildCerts(t *testing.T) {
+	cfg := testCfg()
+	m := &Model{Mode: ModeRunning, cfg: cfg}
+	m.buildCerts(cfg)
+	if len(m.Certs) != 0 {
+		t.Fatalf("no cert on record should yield 0 rows, got %+v", m.Certs)
+	}
+
+	cfg.Caddy = config.CaddySpec{
+		URL:        "https://relay.example.test",
+		CertExpiry: time.Now().Add(60 * 24 * time.Hour).UTC().Format(time.RFC3339),
+		CertIssuer: "route53",
+	}
+	m.buildCerts(cfg)
+	if len(m.Certs) != 1 {
+		t.Fatalf("want 1 cert row, got %d", len(m.Certs))
+	}
+	c := m.Certs[0]
+	if c.URL != "https://relay.example.test" || c.Issuer != "route53" {
+		t.Errorf("cert row = %+v", c)
+	}
+	if !strings.Contains(c.Domain, "example.test") {
+		t.Errorf("domain = %q", c.Domain)
+	}
+	if !strings.Contains(c.Status, "valid") {
+		t.Errorf("status = %q, want valid", c.Status)
+	}
+
+	// expired -> red status
+	cfg.Caddy.CertExpiry = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	m.buildCerts(cfg)
+	if !strings.Contains(m.Certs[0].Status, "EXPIRED") {
+		t.Errorf("expired status = %q", m.Certs[0].Status)
+	}
+}
+
 // TestBuildServicesK3sRow confirms the Services view renders the k3s row —
 // name, recorded CIDR ip stripped, API URL — with its live status.
 func TestBuildServicesK3sRow(t *testing.T) {
@@ -200,6 +238,15 @@ relay 192.168.30.8
 	// empty output -> no rows (caller falls back to the mirror)
 	if got := parseDnsList("(no dns records — the resolver forwards everything upstream)\n"); len(got) != 0 {
 		t.Errorf("empty list should parse to 0 rows, got %+v", got)
+	}
+	// the wildcard apex line surfaces as *.<apex>
+	wc := parseDnsList("wildcard  *.freehold-test.darcydev.net\t192.168.30.7\n  source: record-caddy · created: 123\n--- addn-hosts ---\n192.168.30.7\n")
+	if len(wc) != 1 || wc[0].Name != "*.freehold-test.darcydev.net" || wc[0].IP != "192.168.30.7" || wc[0].Source != "wildcard (live)" {
+		t.Errorf("wildcard row = %+v", wc)
+	}
+	// `(none)` wildcard is not a row
+	if got := parseDnsList("wildcard  (none)\n"); len(got) != 0 {
+		t.Errorf("(none) should yield 0 rows, got %+v", got)
 	}
 }
 

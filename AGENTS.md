@@ -86,7 +86,9 @@ repo, not the history.
   relay outage. No relay fork or patch.
 - **The CPA is a real, LLM-backed reasoning agent — the system's main user touchpoint.**
   It runs on the same buzz-acp/goose-class harness as the expert agents it creates, gets its
-  purpose from `CPA_SYSTEM_PROMPT.md`, and delegates to the agents it spawns rather than
+  purpose from `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (embedded by the orchestrator and
+  mounted into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
+  `/srv/freehold/CPA_SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.
@@ -145,13 +147,33 @@ changelog.
   unzeroized body bytes before a `Zeroizing` wrapper takes ownership (loopback, TLS-free —
   same exposure class as the CLI's stdin path); the console's signing key is re-derived on
   every readiness probe rather than cached once.
+- **The CPA toolset (create-agent / grant-agent / manage-agent) is deferred — not wired as an
+  MCP surface.** The Go methods are built and unit-tested (`orchestrator/internal/agent/tools.go`),
+  but the CPA pod sets no `BUZZ_ACP_MCP_COMMAND` (the `freehold-agent-tools` scaffold was dropped
+  for D1–D3), so the harness has no callable create/grant/manage tools yet. Wiring them as a real
+  MCP server (or an equivalent surfaced toolset) is the named follow-up for Phase E
+  (agent-creates-agent); D1–D3 need conversation only and don't require it.
+- **The CPA talks its reasoning model through the litellm gateway as an OpenAI-compatible
+  endpoint.** The pod routes `BUZZ_AGENT_PROVIDER=openai-compat` to the in-kube
+  `litellm.litellm:4000/v1` service (alias `ControlPlaneAgent` → deepseek). Whether the live
+  harness (buzz-agent in `ghcr.io/block/buzz-sprig:main`) honours exactly these env vars is
+  verified against the packaged binary's config errors, but is not yet confirmed end-to-end on a
+  live pod — the D1 drill is the first proof.
+- **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
+  the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
+  bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and
+  any Phase E-created agent reusing `AgentLiteLLMKeyScript` — can register/remove any model and
+  mint keys until scoped keys are wired. Minting a bootstrap virtual key and switching agent
+  pods to scoped per-agent keys is the named follow-up.
 
 ## Build / test
 
 - Rust (`core/`, `runner/`, `control-plane/`, `console-client/`, `testkit/`, `acceptance/`):
-  `cargo build --workspace` + `cargo test --workspace`.
+  `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
+  declares `rust-version = "1.94"`).
 - Go (`orchestrator/` — the `freehold` and `freehold-orchestrator` binaries, the TUI, and the
-  `harness/` release gate): `cd orchestrator && go build ./... && go vet ./... &&
+  `harness/` release gate): run Go through mise (`mise exec go@1.25.0 -- go …`; `go.mod`
+  pins `go 1.25.0`); `cd orchestrator && go build ./... && go vet ./... &&
   go test ./...`; `go test ./harness/` drives `target/debug/freehold-harness-oracle` and
   gates every crypto primitive against the Rust `core` byte-for-byte.
 - No formatter/linter config beyond rustfmt + clippy defaults.

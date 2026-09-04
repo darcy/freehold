@@ -64,12 +64,13 @@ func (m *Model) load(cfgPath string) error {
 	}
 	m.HasConfig = true
 	m.Domain = cfg.Domain
-	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.LitellmLive, m.RunnerReach = false, false, false, false, false, false
+	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.LitellmLive, m.CaddyLive, m.RunnerReach = false, false, false, false, false, false, false
 	// ModeRunning until the boot check proves otherwise — the activity view
 	// covers the screen while the probes run, and the check settles the
 	// real mode (its k3s/world-state steps populate the dashboard rows).
 	m.Mode = ModeRunning
 	m.buildServices(cfg)
+	m.buildCerts(cfg)
 	m.cfg = cfg
 	if m.RunnerSource == "" {
 		m.RunnerSource = RunnerSourceCP
@@ -134,6 +135,15 @@ func (m *Model) buildServices(cfg *config.Config) {
 			}
 			row.URL = cfg.Litellm.URL
 			row.Status = boolStatus(m.LitellmLive, "live", "down")
+		case "caddy":
+			row.Name = "caddy (TLS edge)"
+			if cfg.Caddy.Host != "" {
+				row.Where = "kube · " + cfg.Caddy.Host
+			} else {
+				row.Where = "kube · (no coords — not deployed this run)"
+			}
+			row.URL = cfg.Caddy.URL
+			row.Status = boolStatus(m.CaddyLive, "live", "down")
 		default:
 			row.Where = "managed"
 			row.Status = "—"
@@ -143,8 +153,7 @@ func (m *Model) buildServices(cfg *config.Config) {
 	if len(m.Services) == 0 {
 		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
 	}
-	// The CP resolver's explicit records (C0 DNS panel). The live probe
-	// (dns activity step) sets m.DNS — the CP is authoritative. This render
+	// The CP resolver's explicit records (C0 DNS panel). The live probe	// (dns activity step) sets m.DNS — the CP is authoritative. This render
 	// stays PURE (no exec): it falls back to the config mirror ONLY when the
 	// live probe has never produced a snapshot.
 	if len(m.DNS) == 0 {
@@ -152,6 +161,46 @@ func (m *Model) buildServices(cfg *config.Config) {
 			m.DNS = append(m.DNS, DnsRow{Name: name, IP: ip, Source: "config mirror"})
 		}
 	}
+}
+
+// buildCerts fills the Certs view from the config's recorded edge cert (written
+// by the F3 stage on rebuild). Pure — no exec. Status derives from the expiry.
+func (m *Model) buildCerts(cfg *config.Config) {
+	m.Certs = nil
+	domain := cfg.Domain
+	if cfg.Caddy.URL == "" && cfg.Caddy.CertExpiry == "" {
+		return
+	}
+	status := "no expiry on record"
+	expiry := "—"
+	issuer := cfg.Caddy.CertIssuer
+	if issuer == "" {
+		issuer = "lego (DNS-01)"
+	}
+	if cfg.Caddy.CertExpiry != "" {
+		expiry = cfg.Caddy.CertExpiry
+		if t, err := time.Parse(time.RFC3339, cfg.Caddy.CertExpiry); err == nil {
+			switch {
+			case t.Before(time.Now()):
+				status = styleRed.Render("EXPIRED")
+			case t.Before(time.Now().Add(30 * 24 * time.Hour)):
+				status = styleYellow.Render("expiring <30d")
+			default:
+				status = styleGreen.Render("valid")
+			}
+		}
+	}
+	url := cfg.Caddy.URL
+	if url == "" {
+		url = "https://relay." + domain
+	}
+	m.Certs = append(m.Certs, CertRow{
+		Domain: "*. " + domain,
+		URL:    url,
+		Expiry: expiry,
+		Issuer: issuer,
+		Status: status,
+	})
 }
 
 // dnsRowsLive execs `control-plane dns list` inside the cp LXC through the
@@ -176,7 +225,8 @@ func dnsRowsLive(cfg *config.Config) []DnsRow {
 
 // parseDnsList extracts `name ip` pairs from the RECORDS TABLE of
 // `control-plane dns list` output: the indented metadata lines and the
-// "--- addn-hosts ---" section (ip-first lines) are both skipped. Pure.
+// "--- addn-hosts ---" section (ip-first lines) are both skipped. The
+// wildcard apex line is captured as `*.<apex>`. Pure.
 func parseDnsList(out string) []DnsRow {
 	var rows []DnsRow
 	for _, l := range strings.Split(out, "\n") {
@@ -186,6 +236,12 @@ func parseDnsList(out string) []DnsRow {
 		}
 		f := strings.Fields(l)
 		if len(f) > 0 && f[0][0] == '-' {
+			continue
+		}
+		if strings.HasPrefix(l, "wildcard") {
+			if len(f) >= 3 && f[1] != "(none)" {
+				rows = append(rows, DnsRow{Name: f[1], IP: f[2], Source: "wildcard (live)"})
+			}
 			continue
 		}
 		if len(f) >= 2 && !strings.Contains(f[0], ".") {
@@ -542,14 +598,14 @@ func (m *Model) nextView() {
 		m.ActiveView = ViewServices
 		return
 	}
-	m.ActiveView = View((int(m.ActiveView) + 1) % 5)
+	m.ActiveView = View((int(m.ActiveView) + 1) % 6)
 }
 func (m *Model) prevView() {
 	if m.Mode != ModeRunning {
 		m.ActiveView = ViewServices
 		return
 	}
-	m.ActiveView = View((int(m.ActiveView) + 4) % 5)
+	m.ActiveView = View((int(m.ActiveView) + 5) % 6)
 }
 
 // ---- View ----------------------------------------------------------------
@@ -592,11 +648,12 @@ func (m *Model) runnerSourceLabel() string {
 }
 
 func renderProbes(m *Model) string {
-	return fmt.Sprintf("  relay %s  cp %s  k3s %s  litellm %s  runner %s",
+	return fmt.Sprintf("  relay %s  cp %s  k3s %s  litellm %s  caddy %s  runner %s",
 		boolStatus(m.RelayLive, "green", "red"),
 		boolStatus(m.CPLive, "green", "red"),
 		boolStatus(m.K3sLive, "green", "red"),
 		boolStatus(m.LitellmLive, "green", "red"),
+		boolStatus(m.CaddyLive, "green", "red"),
 		boolStatus(m.RunnerReach, "green", "red"),
 	)
 }
@@ -620,7 +677,7 @@ func (m *Model) footer() string {
 
 func renderViews(m *Model) string {
 	var b strings.Builder
-	for v := ViewServices; v <= ViewData; v++ {
+	for v := ViewServices; v <= ViewCerts; v++ {
 		label := " " + v.String() + " "
 		if v == m.ActiveView {
 			label = "[" + v.String() + "]"
@@ -672,6 +729,15 @@ func renderViews(m *Model) string {
 		}
 		for _, d := range m.Storage {
 			rows = append(rows, []string{d.Role, d.Mount, d.Size, d.Used, d.Fill, d.Source, d.Live})
+		}
+	case ViewCerts:
+		title = "Certs · the Caddy edge's wildcard certificate"
+		headers = []string{"domain", "edge", "expires", "issuer", "status"}
+		if len(m.Certs) == 0 {
+			rows = append(rows, []string{styleDim.Render("(no cert on record — rebuild stages the wildcard cert for the edge)")})
+		}
+		for _, c := range m.Certs {
+			rows = append(rows, []string{c.Domain, c.URL, c.Expiry, c.Issuer, c.Status})
 		}
 	}
 	return b.String() + renderTable(title, headers, rows)

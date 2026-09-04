@@ -14,7 +14,7 @@ wait for Chunk 6.
 
 *   **CPA runs on the same buzz-acp/goose-class harness as expert agents** —
     its own identity, a dedicated create/grant/manage-agent toolset instead of
-    a service-specific one, and its purpose defined by `CPA_SYSTEM_PROMPT.md`
+    a service-specific one, and its purpose defined by `prompts/CPA_SYSTEM_PROMPT.md`
     rather than improvised per spawn.
 *   **The deterministic runner/CP layer is unchanged.** Provisioning, grants,
     secret handling, and teardown/rebuild stay exactly as they are — CPA's
@@ -66,20 +66,44 @@ to run, idle and active.
       register and report ●/○ availability from relay presence) so CPA shows
       up the same way any agent does.
 
-> **Phase A deferral (named, not lost):** A4's toolset is built and
-> unit-tested, but nothing yet registers it as an MCP surface the buzz-acp
-> harness process can actually call — that wiring (system prompt + tool
-> config) lands with Phase B. A4 is ticked for the toolset itself; the
-> live Buzz proof (CPA *using* it to create an agent) lands in Phases D/E.
+> **Phase B deferral (named, not lost):** A4's toolset is built and
+> unit-tested, but it is **not** wired as an MCP surface for D1–D3 — the
+> `freehold-agent-tools` MCP command was dropped for this pass, so the harness
+> has no callable create/grant/manage tools yet. A4 is ticked for the toolset
+> itself; wiring it as a real MCP server (or an equivalent surfaced toolset) is
+> the named follow-up for Phase E (agent-creates-agent).
+
+> **D1 model wiring:** the CPA's reasoning rides the litellm gateway as an
+> OpenAI-compatible endpoint — the pod sets `BUZZ_AGENT_PROVIDER=openai-compat`,
+> `OPENAI_COMPAT_BASE_URL=http://litellm.litellm:4000/v1`,
+> `OPENAI_COMPAT_MODEL=ControlPlaneAgent` (alias → deepseek), with the API key
+> from the `<pod>-litellm-key` Secret (`secretKeyRef`). D1 is the first live
+> proof the harness honours these env vars end to end.
 
 #### Phase B — CPA system prompt
 
-- [ ] B1. Write `CPA_SYSTEM_PROMPT.md` at the repo root (sibling to
-      `AGENTS.md`): purpose, tone, and explicit tool/scope boundaries.
-- [ ] B2. Bootstrap loads this file into the harness config at first spawn.
-- [ ] B3. Every restart re-reads the current file from disk (never cached) —
+- [x] B1. Write `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (the single
+      prompts directory, inside the `freehold/orchestrator` Go module so the
+      `//go:embed` can reach it): purpose, tone, and explicit tool/scope
+      boundaries.
+- [x] B2. Bootstrap loads this file into the harness config at first spawn
+      (the orchestrator embeds it — `//go:embed CPA_SYSTEM_PROMPT.md` in the
+      `orchestrator/prompts` package — and the CPA/agent pod mounts it as a
+      `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`).
+- [x] B3. Every restart re-reads the current file from disk (never cached) —
       editing the prompt and redeploying is the only way CPA's purpose
       changes.
+
+> **Phase B deferral (named, not lost):** the pod reads its prompt from a
+> `<pod>-prompt` ConfigMap (mounted read-only at
+> `/srv/freehold/CPA_SYSTEM_PROMPT.md`), seeded at apply time from the
+> orchestrator's embedded `orchestrator/prompts/CPA_SYSTEM_PROMPT.md`. A host restart of that
+> pod re-reads the mounted copy, so editing the prompt and redeploying changes
+> CPA's behavior (B3 as planned). A compute-only teardown/rebuild (Phase
+> 0.12) re-seeds the pod from the *embedded* bytes, so a prompt edit made
+> only in the CP's `/srv/data/cp` copy doesn't survive a rebuild until
+> re-deployed — wiring the pod to the CP's durable mount is a named
+> follow-up.
 
 #### Phase D — Live durability proof
 
@@ -92,6 +116,16 @@ to run, idle and active.
 - [ ] D3. Full compute-only teardown + rebuild of the CPA's LXC (Phase 0.12's
       reattach-by-reference); confirm identity, memory, and agent-registry
       roster all survive.
+- [x] D4. **Rebuild reconciles the full desired world (cleanup).** Replace the
+      opt-*in* `--with-k3s`/`--with-litellm` flags with opt-*out*
+      `--no-k3s`/`--no-litellm`: a default `rebuild` brings up relay/cp/k3s/
+      litellm/CPA idempotently (stages skip what's already present; teardown
+      what you want replaced and rebuild to resurrect only the missing piece).
+      The CPA rides litellm (opt out of either and the CPA is skipped), the
+      litellm gateway reuses its already-sealed fireworks key on rebuilt (only
+      a truly cold world prompts/hard-errors for a fresh one), and the TUI `B`
+      form gained a litellm step (blank = on). D1–D3 drills (above) are the
+      live proof this reconcile behaves end to end.
 
 #### Phase E — Agent-creates-agent
 
@@ -140,7 +174,7 @@ to run, idle and active.
 *   CPA, asked in Buzz, creates a second agent (name + purpose only) that gets
     its own durable identity and is directly talkable — also surviving a
     rebuild.
-*   CPA's purpose is defined by `CPA_SYSTEM_PROMPT.md`; changing the file and
+*   CPA's purpose is defined by `prompts/CPA_SYSTEM_PROMPT.md`; changing the file and
     redeploying changes CPA's behavior.
 *   Baseline resource numbers recorded for one CPA + one created agent, idle
     and active.

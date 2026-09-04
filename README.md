@@ -111,7 +111,7 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 
 ## Getting started (current Chunk-1 state)
 
-Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.23+
+Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
 (the `orchestrator/` module).
 
 ```sh

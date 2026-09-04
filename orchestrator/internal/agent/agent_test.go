@@ -3,12 +3,26 @@ package agent
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"freehold/orchestrator/prompts"
 )
 
+// systemPrompt is the real multi-line prompt exactly as production ships it:
+// stageCpa passes prompts.CPASystemPrompt into AgentManifestScript, so the
+// test uses that same embedded value — the old tests passed a path string,
+// which is why the block-scalar bug compiled.
+func systemPrompt() string {
+	return prompts.CPASystemPrompt
+}
+
 func TestCPAPodManifestBasics(t *testing.T) {
-	m := CPAPodManifest("waldo", "wss://relay.test", "/prompts/CPA_SYSTEM_PROMPT.md")
+	sp := systemPrompt()
+	m := CPAPodManifest("waldo", "wss://relay.test", sp)
 	for _, want := range []string{
 		"kind: Pod",
+		"kind: ConfigMap",
 		"name: waldo",
 		"namespace: agents",
 		"image: ghcr.io/block/buzz-sprig:main",
@@ -16,14 +30,45 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		"BUZZ_RELAY_URL",
 		`value: "wss://relay.test"`,
 		"BUZZ_ACP_SYSTEM_PROMPT_FILE",
-		"/prompts/CPA_SYSTEM_PROMPT.md",
+		CPASystemPromptPath,
+		// D1: the CPA reaches its reasoning model through the litellm gateway
+		// as an OpenAI-compatible endpoint (alias ControlPlaneAgent).
+		"BUZZ_AGENT_PROVIDER",
+		`value: "openai-compat"`,
+		"OPENAI_COMPAT_BASE_URL",
+		LiteLLMServiceURL,
+		"OPENAI_COMPAT_MODEL",
+		CpaLiteLLMModel,
 		"BUZZ_ACP_AGENT_COMMAND",
 		`value: "buzz-agent"`,
 		"restartPolicy: Never",
+		// The agent joins its own relay over the LAN (pod-CNI egress to
+		// external LAN IPs is often blocked); hostNetwork makes resolution +
+		// reachability go through the node exactly like any guest.
+		"hostNetwork: true",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("manifest missing %q", want)
 		}
+	}
+	// The manifest must apply: every doc parses and the ConfigMap's block
+	// scalar (which embeds the real multi-line prompt) parses as one string.
+	docs := strings.Split(m, "\n---\n")
+	if len(docs) != 3 {
+		t.Fatalf("manifest has %d YAML docs, want 3", len(docs))
+	}
+	var cm struct {
+		Kind string            `yaml:"kind"`
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal([]byte(docs[0]), &cm); err != nil {
+		t.Fatalf("ConfigMap doc does not parse: %v", err)
+	}
+	if cm.Kind != "ConfigMap" {
+		t.Fatalf("first doc is %q, want ConfigMap", cm.Kind)
+	}
+	if got := cm.Data["CPA_SYSTEM_PROMPT.md"]; got != strings.TrimRight(sp, "\n") {
+		t.Errorf("ConfigMap content differs from the prompt file")
 	}
 	// The nsec must NEVER be embedded in the manifest (it rides the Secret).
 	if strings.Contains(m, "BUZZ_PRIVATE_KEY") {
@@ -35,6 +80,25 @@ func TestCPAPodManifestBasics(t *testing.T) {
 	// from the sanitized name — never a shared/fixed name.
 	if !strings.Contains(m, "secretKeyRef: {name: waldo-identity, key: nsec}") {
 		t.Errorf("manifest missing the agent-specific identity Secret ref")
+	}
+	// The allowlist gate must carry the owner pubkey (from the identity
+	// Secret's owner), or buzz-acp refuses to boot (allowlist needs pubkeys).
+	if !strings.Contains(m, "BUZZ_ACP_RESPOND_TO_ALLOWLIST") {
+		t.Errorf("manifest missing BUZZ_ACP_RESPOND_TO_ALLOWLIST")
+	}
+	if !strings.Contains(m, "secretKeyRef: {name: waldo-identity, key: owner}") {
+		t.Errorf("allowlist must come from the identity Secret's owner, not a literal")
+	}
+	// The litellm key must also ride a per-agent Secret (waldo-litellm-key),
+	// never a literal in the manifest.
+	if !strings.Contains(m, "OPENAI_COMPAT_API_KEY") {
+		t.Errorf("manifest missing OPENAI_COMPAT_API_KEY")
+	}
+	if !strings.Contains(m, "secretKeyRef: {name: waldo-litellm-key, key: key}") {
+		t.Errorf("litellm key must come from the waldo-litellm-key Secret, not a literal")
+	}
+	if strings.Contains(m, "sk-") || strings.Contains(m, "Bearer ") {
+		t.Errorf("manifest embeds a litellm key literal")
 	}
 	// The display name must appear only as the agent-name annotation.
 	if !strings.Contains(m, "freehold.fh/agent-name: waldo") {
@@ -68,7 +132,7 @@ func TestAgentPodManifestDistinctNames(t *testing.T) {
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", "/p/CPA_SYSTEM_PROMPT.md", "waldo")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo")
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,
@@ -85,10 +149,10 @@ func TestCPAManifestScriptApplies(t *testing.T) {
 // TestSanitizePodName: display names become DNS-1123-safe object names.
 func TestSanitizePodName(t *testing.T) {
 	for in, want := range map[string]string{
-		"freehold":  "freehold",
-		"My CPA!":   "my-cpa",
-		"Über":      "ber", // non-ASCII -> dashes; leading/trailing dashes trimmed (DNS-1123)
-		"---":       "agent", // all dashes -> fallback
+		"freehold": "freehold",
+		"My CPA!":  "my-cpa",
+		"Über":     "ber",   // non-ASCII -> dashes; leading/trailing dashes trimmed (DNS-1123)
+		"---":      "agent", // all dashes -> fallback
 	} {
 		if got := sanitizePodName(in); got != want {
 			t.Errorf("sanitizePodName(%q) = %q, want %q", in, got, want)

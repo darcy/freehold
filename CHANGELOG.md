@@ -25,6 +25,69 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.3] — Chunk 4 D4: rebuild reconciles the full desired world
+
+### Changed
+
+*   **`rebuild` is desired-world, not opt-in.** The opt-*in* `--with-k3s` /
+    `--with-litellm` flags are gone; `rebuild` brings up relay/cp/k3s/litellm/CPA
+    by default and is idempotent per stage (boot-if-missing, create-if-absent,
+    first-run-wins) — teardown what you want replaced, rebuild, and it resurrects
+    only the missing piece. `--no-k3s` / `--no-litellm` are explicit opt-outs for
+    iterative/dev worlds. The CPA rides litellm (opt out of either and the CPA is
+    skipped: a brainless pod is a dead pod). The TUI `B` rebuild form gained a
+    litellm step (blank = on).
+*   **The litellm provider key is sealed and reused, not re-demanded.** The
+    provider (fireworks) key ships once into the litellm runner (ciphertext) and
+    is reused on rebuilds; only a truly cold world prompts interactively for a
+    fresh one (or hard-errors under `--yes`). Rebuild no longer asks for it when
+    it already has it.
+
+### Fixed
+
+*   The CPA's system prompt no longer claims `create-agent`/`grant-agent`/
+    `manage-agent` are callable tools (the MCP toolset was deferred for D1–D3) —
+    it states the current phase honestly and instructs the CPA to describe-and-
+    not-fake a delegation request (closes the review's tool-contract mismatch).
+
+## [0.4.2] — Chunk 4 Phase B: the embed is real, the prompt rides the manifest
+
+### Fixed
+
+*   **`//go:embed CPA_SYSTEM_PROMPT.md`** in the new
+    `orchestrator/prompts` package embeds the CPA's purpose into
+    `freehold-orchestrator` at compile time (a `..` path or an absolute path
+    is invalid in a `//go:embed` directive, so the file lives inside the
+    `orchestrator/` Go module, not at the repo root). `stageCpa` passes the
+    embedded text
+    into `agent.AgentPodManifest`, which embeds it as the
+    `<pod>-prompt` ConfigMap's block scalar (indented four spaces per line,
+    so `kubectl apply` parses it) and the pod mounts that at
+    `/srv/freehold/CPA_SYSTEM_PROMPT.md`, re-reading it fresh on every
+    spawn.
+*   **The CPA's reasoning model rides the litellm gateway.** The agent pod
+    points the buzz-agent harness at the in-kube OpenAI-compatible endpoint as
+    `BUZZ_AGENT_PROVIDER=openai-compat` +
+    `OPENAI_COMPAT_BASE_URL=http://litellm.litellm:4000/v1` +
+    `OPENAI_COMPAT_MODEL=ControlPlaneAgent` (litellm alias → the registered
+    deepseek route), with the API key from a per-pod `<pod>-litellm-key` Secret
+    (`secretKeyRef` — never a literal). `stageLitellm` now registers the model
+    under the `ControlPlaneAgent` alias and mints a scoped key for the CPA pod.
+    D1 (a live Buzz conversation) is the first end-to-end proof of this wiring
+    against the packaged harness.
+
+### Deferred (named, not lost)
+
+*   A compute-only teardown/rebuild re-seeds the pod's prompt ConfigMap from
+    the orchestrator's embedded bytes; serving the prompt from the CP's
+    `/srv/data/cp` mount (so an edit survives a rebuild without a
+    re-deploy) is a named follow-up — see `roadmap/POC_CHUNK4.md`.
+*   **The CPA toolset (create/grant/manage) is not yet an MCP surface.** The
+    Go methods stay built and unit-tested, but the pod no longer sets
+    `BUZZ_ACP_MCP_COMMAND` (the `freehold-agent-tools` scaffold was dropped for
+    D1–D3); wiring it as a real MCP server is the Phase E follow-up for
+    agent-creates-agent.
+
 ## [0.4.0] — Chunk 4 Phase A: the CPA on a real-agent harness
 
 ### Added
