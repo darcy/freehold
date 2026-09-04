@@ -46,20 +46,17 @@ const (
 	flowDeployCp
 	flowTeardown
 	flowRebuild
-	// flowDNSCred is a short pre-rebuild form that collects the DNS provider
-	// + credentials for the edge's per-host certs when none are stored yet.
-	flowDNSCred
 )
 
 type tuiFlow struct {
 	Kind   flowKind
 	Step   int
-	Inputs [10]string
+	Inputs [11]string
 	Field  *textinput.Model
 	// Defaults are the prefilled answers per step — sourced from the
 	// recorded config when one exists (see flowDefaults). Blank = no
 	// recorded value; the prompt's own "(blank = N)" semantics apply.
-	Defaults [10]string
+	Defaults [11]string
 }
 
 type flowMsg struct {
@@ -105,8 +102,8 @@ func fieldFor(k flowKind, step int, def string) *textinput.Model {
 // would boot k3s). The two size prompts have no config record; blank keeps
 // their "(blank = N)" semantics. Absent/unreadable config = no defaults
 // (fresh-world behavior, unchanged).
-func flowDefaults(m *Model, k flowKind) [10]string {
-	var d [10]string
+func flowDefaults(m *Model, k flowKind) [11]string {
+	var d [11]string
 	if k != flowRebuild || m.CfgPath == "" {
 		// No config: nothing to prefill. k3s (d[6]) and litellm (d[8]) stay
 		// BLANK, which the arg builder reads as "y" — the full desired world
@@ -144,9 +141,7 @@ func ncols(k flowKind) int {
 	case flowTeardown:
 		return 2
 	case flowRebuild:
-		return 9
-	case flowDNSCred:
-		return 2
+		return 11
 	default:
 		return 1
 	}
@@ -227,12 +222,9 @@ func promptLabel(k flowKind, step int) string {
 			return "boot k3s too? (y/n, blank = y)"
 		case 7:
 			return "CPA agent name (blank = freehold)"
-		default:
+		case 8:
 			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
-		}
-	case flowDNSCred:
-		switch step {
-		case 0:
+		case 9:
 			return "DNS provider for the certs (e.g. route53; blank = reuse stored)"
 		default:
 			return "DNS env KEY=VAL,KEY=VAL (blank = auto-detect, e.g. ~/.aws)"
@@ -274,21 +266,18 @@ func (m *Model) handleFlow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			f.Field = fieldFor(f.Kind, next, f.Defaults[next])
 			return m, nil
 		}
-		// Rebuild: if the edge needs DNS credentials and none are stored
-		// yet, chain the pre-rebuild DNS flow so the operator is ASKED in the
-		// TUI (the headless rebuild subprocess cannot prompt under --yes).
+		// Rebuild: build the args and dispatch. DNS provider credentials are a
+		// VISIBLE form step (after litellm); a blank provider reuses any stored
+		// credential. Any provided DNS info is stored (pre-verified) here.
 		if f.Kind == flowRebuild {
 			args, err := rebuildArgs(f)
 			if err != nil {
 				return m, func() tea.Msg { return flowMsg{err: err} }
 			}
-			if edgeNeedsDNS(f) && !tuiRelayDnsStored(m) {
-				m.pendingRebuild = args
-				m.pendingRelayDomain = strings.TrimSpace(f.Inputs[1])
-				m.beginPrompt(flowDNSCred)
-				return m, nil
-			}
 			return m, func() tea.Msg {
+				if err := storeRebuildDNS(f); err != nil {
+					return flowMsg{err: err}
+				}
 				return activityStartMsg{kind: "rebuild", title: "rebuilding " + strings.TrimSpace(f.Inputs[1]), args: args}
 			}
 		}
@@ -410,8 +399,6 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				return flowMsg{err: err}
 			}
 			return activityStartMsg{kind: "rebuild", title: "rebuilding " + strings.TrimSpace(f.Inputs[1]), args: args}
-		case flowDNSCred:
-			return m.forwardDNSCred(f)
 		}
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
@@ -536,76 +523,51 @@ func edgeNeedsDNS(f *tuiFlow) bool {
 		!strings.EqualFold(strings.TrimSpace(f.Inputs[6]), "n")
 }
 
-// tuiDNSStored reports whether a DNS provider credential is already stored for
-// the relay slot (the pre-rebuild flow is skipped then — the headless rebuild
-// reuses it; cp auto-copies under --yes).
-func tuiRelayDnsStored(m *Model) bool {
-	dir := freeholdStateDir()
-	_, err := os.Stat(filepath.Join(dir, "dns-provider-relay.json"))
-	if err == nil {
-		return true
+// storeRebuildDNS seals the DNS provider credential the operator typed into the
+// rebuild form (fields 9/10) into BOTH relay + cp slots (pre-verified against
+// the relay host), so the headless rebuild reuses it. A blank provider leaves any
+// stored credential untouched (the rebuild reuses the one already on disk).
+func storeRebuildDNS(f *tuiFlow) error {
+	provider := strings.TrimSpace(f.Inputs[9])
+	if provider == "" {
+		return nil
 	}
-	// legacy single-file credential still works (migrated on the rebuild run).
-	_, err = os.Stat(filepath.Join(dir, "dns-provider.json"))
-	return err == nil
-}
-
-// forwardDNSCred finishes the pre-rebuild DNS flow: store the collected
-// provider + env (sealed to the ops identity) into BOTH slots, then dispatch
-// the pending rebuild. A blank provider keeps any stored credential untouched
-// and just proceeds.
-func (m *Model) forwardDNSCred(f *tuiFlow) tea.Msg {
-	if m == nil || len(m.pendingRebuild) == 0 {
-		return flowMsg{err: fmt.Errorf("no pending rebuild to dispatch")}
+	if !cert.IsProvider(provider) {
+		return fmt.Errorf("unknown DNS provider %q", provider)
 	}
-	provider := strings.TrimSpace(f.Inputs[0])
-	if provider != "" {
-		if !cert.IsProvider(provider) {
-			return flowMsg{err: fmt.Errorf("unknown DNS provider %q", provider)}
-		}
-		env := map[string]string{}
-		if v := strings.TrimSpace(f.Inputs[1]); v != "" {
-			for _, kv := range strings.Split(v, ",") {
-				k, val, ok := strings.Cut(kv, "=")
-				if !ok || strings.TrimSpace(k) == "" {
-					return flowMsg{err: fmt.Errorf("DNS env expects KEY=VAL,KEY=VAL — bad entry %q", kv)}
-				}
-				env[strings.TrimSpace(k)] = strings.TrimSpace(val)
+	env := map[string]string{}
+	if v := strings.TrimSpace(f.Inputs[10]); v != "" {
+		for _, kv := range strings.Split(v, ",") {
+			k, val, ok := strings.Cut(kv, "=")
+			if !ok || strings.TrimSpace(k) == "" {
+				return fmt.Errorf("DNS env expects KEY=VAL,KEY=VAL — bad entry %q", kv)
 			}
-		}
-		if m.pendingRelayDomain != "" {
-			if err := cert.Verify(m.pendingRelayDomain, provider, env); err != nil {
-				return flowMsg{err: fmt.Errorf("DNS pre-verify failed: %w", err)}
-			}
-		}
-		id, err := flows.LoadIdentity(freeholdStateDir() + "/agent-ops")
-		if err != nil {
-			return flowMsg{err: err}
-		}
-		secret, err := hex.DecodeString(id.EncSecretHex)
-		if err != nil {
-			return flowMsg{err: err}
-		}
-		pub, err := crypto.X25519PublicKey(secret)
-		if err != nil {
-			return flowMsg{err: err}
-		}
-		seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
-		for _, slot := range []string{"relay", "cp"} {
-			if err := cert.SaveCreds(filepath.Join(freeholdStateDir(), "dns-provider-"+slot+".json"), provider, env, seal, pub, "cert-dns-"+slot); err != nil {
-				return flowMsg{err: fmt.Errorf("storing %s DNS credential: %w", slot, err)}
-			}
-		}
-		m.Msg = "DNS credentials saved (" + provider + ") — rebuilding"
-	}
-	args := m.pendingRebuild
-	m.pendingRebuild = nil
-	m.pendingRelayDomain = ""
-	title := "rebuilding the world"
-	for i, a := range args {
-		if a == "--relay-domain" && i+1 < len(args) {
-			title = "rebuilding " + args[i+1]
+			env[strings.TrimSpace(k)] = strings.TrimSpace(val)
 		}
 	}
-	return activityStartMsg{kind: "rebuild", title: title, args: args}
+	relayHost := strings.TrimSpace(f.Inputs[1])
+	if relayHost != "" {
+		if err := cert.Verify(relayHost, provider, env); err != nil {
+			return fmt.Errorf("DNS pre-verify failed: %w", err)
+		}
+	}
+	id, err := flows.LoadIdentity(freeholdStateDir() + "/agent-ops")
+	if err != nil {
+		return err
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+	for _, slot := range []string{"relay", "cp"} {
+		if err := cert.SaveCreds(filepath.Join(freeholdStateDir(), "dns-provider-"+slot+".json"), provider, env, seal, pub, "cert-dns-"+slot); err != nil {
+			return fmt.Errorf("storing %s DNS credential: %w", slot, err)
+		}
+	}
+	return nil
 }

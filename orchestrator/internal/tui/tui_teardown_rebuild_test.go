@@ -88,10 +88,10 @@ func TestRebuildFormSteps(t *testing.T) {
 	if m.Flow == nil || m.Flow.Kind != flowRebuild {
 		t.Fatal("expected a rebuild flow after pressing B")
 	}
-	if ncols(flowRebuild) != 9 {
-		t.Fatalf("rebuild form should have 9 steps, got %d", ncols(flowRebuild))
+	if ncols(flowRebuild) != 11 {
+		t.Fatalf("rebuild form should have 11 steps, got %d", ncols(flowRebuild))
 	}
-	answers := []string{strings.Repeat("a", 64), "relay.example.test", "cp.example.test", "10", "freehold-thin", "40", "y", "my-cpa", "y"}
+	answers := []string{strings.Repeat("a", 64), "relay.example.test", "cp.example.test", "10", "freehold-thin", "40", "y", "my-cpa", "y", "", ""}
 	for i := range answers {
 		typeText(m, answers[i])
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -108,7 +108,7 @@ func TestRebuildFormSteps(t *testing.T) {
 	// on = full world reconcile; the named CPA agent is forwarded.
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	if cmd == nil {
-		t.Fatal("completed 9-step rebuild form did not dispatch")
+		t.Fatal("completed 11-step rebuild form did not dispatch")
 	}
 	start, ok := cmd().(activityStartMsg)
 	if !ok {
@@ -184,6 +184,12 @@ func TestNewFlowLabels(t *testing.T) {
 	if got := promptLabel(flowRebuild, 8); got != "deploy litellm gateway + CPA model? (y/n, blank = y)" {
 		t.Errorf("rebuild step8 label = %q", got)
 	}
+	if got := promptLabel(flowRebuild, 9); got != "DNS provider for the certs (e.g. route53; blank = reuse stored)" {
+		t.Errorf("rebuild step9 label = %q", got)
+	}
+	if got := promptLabel(flowRebuild, 10); !strings.Contains(got, "DNS env") {
+		t.Errorf("rebuild step10 label = %q", got)
+	}
 }
 
 // TestRebuildFormSeededFromConfig: when a config exists, pressing B opens
@@ -255,7 +261,7 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
-	for i := 0; i < 9; i++ {
+	for i := 0; i < ncols(flowRebuild); i++ {
 		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if msg == nil {
@@ -907,28 +913,40 @@ func stubDnsCred(t *testing.T) {
 	t.Cleanup(func() { os.Setenv("FREEHOLD_HOME", prev) })
 }
 
-// TestRebuildFormDNSChain: with k3s on + relay/CP domains but NO stored DNS
-// credential, completing the rebuild form must chain to flowDNSCred (so the TUI
-// ASKS), not dispatch immediately.
-func TestRebuildFormDNSChain(t *testing.T) {
-	// Isolate from any real stored credential: point FREEHOLD_HOME at an empty
-	// temp dir so the rebuild form chains into the DNS pre-flow.
-	prev := os.Getenv("FREEHOLD_HOME")
-	os.Setenv("FREEHOLD_HOME", t.TempDir())
-	t.Cleanup(func() { os.Setenv("FREEHOLD_HOME", prev) })
+// TestRebuildFormHasDNSFields: the DNS provider/env are visible steps in the
+// rebuild form (after the litellm field), so the operator always SEES them —
+// regardless of a stored credential. Completing with blank DNS just dispatches.
+func TestRebuildFormHasDNSFields(t *testing.T) {
 	cfgPath := writeRebuildCfg(t,
 		"operator_pubkey = \""+strings.Repeat("d", 64)+"\"\n"+
 			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
-	answers := []string{strings.Repeat("d", 64), "relay.test", "cp.test", "", "", "", "", "", ""}
+	if m.Flow == nil || m.Flow.Kind != flowRebuild {
+		t.Fatal("expected the rebuild form")
+	}
+	// type the required fields (op pubkey, relay, cp), then advance to the DNS
+	// provider step (field 9) and confirm the label is reached.
+	answers := []string{strings.Repeat("d", 64), "relay.test", "cp.test"}
 	for i := range answers {
 		typeText(m, answers[i])
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
-	// giving the last field a tab ends the form — the DNS pre-flow must start.
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if m.Flow == nil || m.Flow.Kind != flowDNSCred {
-		t.Fatalf("expected the DNS pre-rebuild flow to start, got flow=%+v", m.Flow)
+	for i := 3; i < 9; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if got := promptLabel(flowRebuild, 9); !strings.Contains(got, "DNS provider for the certs") {
+		t.Errorf("step9 label = %q", got)
+	}
+	// completing the form (blank DNS) dispatches the rebuild
+	for i := 9; i < ncols(flowRebuild); i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if cmd == nil {
+		t.Fatal("completed 11-step rebuild form did not dispatch")
+	}
+	if _, ok := cmd().(activityStartMsg); !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
 	}
 }
