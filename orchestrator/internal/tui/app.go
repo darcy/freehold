@@ -563,26 +563,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Mode == ModeRunning {
 				m.beginPrompt(flowGrant)
 			}
-		case "b":
-			if m.Mode == ModeBootstrap {
-				m.beginPrompt(flowBootstrap)
-			}
-		case "d":
-			if m.Mode == ModeConfigure {
-				m.beginPrompt(flowDeployRelay)
-			}
-		case "c":
-			if m.Mode == ModeConfigure {
-				m.beginPrompt(flowDeployCp)
-			}
-		case "t":
-			if m.Mode == ModeRunning {
-				m.beginPrompt(flowTeardown)
-			}
-		case "B":
-			if m.Mode == ModeBootstrap || m.Mode == ModeConfigure {
-				m.beginPrompt(flowRebuild)
-			}
+			// Build/bootstrap/teardown/deploy are NOT run from the TUI — the TUI is
+			// a status/operating dashboard. Run `freehold build` / `freehold teardown`
+			// in a terminal instead (single canonical flow).
 		}
 	case flowMsg:
 		m.Flow = nil
@@ -636,13 +619,11 @@ func (m *Model) View() string {
 	}
 	if m.Mode == ModeBootstrap {
 		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")
-		b.WriteString("press " + styleYellow.Render("b") + " to bootstrap a target (kind · domain · operator pubkey)\n")
-		b.WriteString("press " + styleYellow.Render("B") + " to rebuild the whole world (door · plane · LXCs · deploys)\n")
+		b.WriteString("run " + styleYellow.Render("freehold build") + " to bring up the world (bootstraps then reconciles)\n")
 	} else if m.Mode == ModeConfigure {
 		b.WriteString(styleYellow.Render("config present, world NOT converged") + "\n")
 		b.WriteString(renderProbes(m) + "\n\n")
-		b.WriteString("press " + styleYellow.Render("d") + " to deploy the relay, " + styleYellow.Render("c") + " to deploy the control plane\n")
-		b.WriteString("press " + styleYellow.Render("B") + " to rebuild the whole world (tear + re-create everything)\n")
+		b.WriteString("run " + styleYellow.Render("freehold build") + " to converge the world (tear + re-create as needed)\n")
 	} else {
 		b.WriteString(renderProbes(m) + "\n")
 		b.WriteString(renderViews(m))
@@ -678,13 +659,11 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second))) +
-			"   " + styleDim.Render("l login · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · t teardown")
+			"   " + styleDim.Render("l login · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
-	case ModeBootstrap:
-		return styleFooter.Render("q quit · b bootstrap · B rebuild")
-	case ModeConfigure:
-		return styleFooter.Render("q quit · d deploy-relay · c deploy-cp · B rebuild")
+	case ModeBootstrap, ModeConfigure:
+		return styleFooter.Render("q quit · run `freehold build` to bring up / converge the world")
 	default:
 		return styleFooter.Render("q quit")
 	}

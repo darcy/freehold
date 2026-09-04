@@ -15,142 +15,12 @@ import (
 // TestTeardownFormSteps walks the 2-step teardown form (data? then the
 // world-destroy CONFIRM) and confirms the answers are captured, the confirm
 // GATES the dispatch, and teardown only starts in RUNNING mode.
-func TestTeardownFormSteps(t *testing.T) {
-	m := &Model{Mode: ModeRunning}
-	if !keyPress(m, "t") {
-		t.Fatal("t did not start the teardown flow")
-	}
-	if m.Flow == nil || m.Flow.Kind != flowTeardown {
-		t.Fatal("expected a teardown flow after pressing t")
-	}
-	if ncols(flowTeardown) != 2 {
-		t.Fatalf("teardown form should have 2 steps, got %d", ncols(flowTeardown))
-	}
-	typeText(m, "yes")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if m.Flow == nil || m.Flow.Inputs[0] != "yes" {
-		t.Fatalf("teardown input not captured: %+v", m.Flow)
-	}
-
-	// (the form is already at step 1 from the walk above)
-	typeText(m, "no") // confirm = NOT yes -> abort
-	var cmd tea.Cmd
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if cmd == nil {
-		t.Fatal("the confirm step must produce a dispatch outcome")
-	}
-	if start, ok := cmd().(activityStartMsg); ok {
-		t.Fatalf("a non-yes confirm must NOT dispatch teardown, got %+v", start)
-	}
-	msg := cmd() // resolve the flowMsg
-	m.Update(msg)
-	if m.Flow != nil {
-		t.Fatal("the aborted teardown flow should be finished after the flowMsg")
-	}
-
-	// an explicit "yes" on the confirm step dispatches teardown --yes.
-	m2 := &Model{Mode: ModeRunning}
-	_ = keyPress(m2, "t")
-	typeText(m2, "no") // data
-	_, _ = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
-	typeText(m2, "yes") // confirm
-	_, cmd = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if cmd == nil {
-		t.Fatal("a confirmed teardown must dispatch")
-	}
-	start, ok := cmd().(activityStartMsg)
-	if !ok {
-		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
-	}
-	if strings.Join(start.args, " ") != "teardown --yes" {
-		t.Errorf("args = %v, want teardown --yes (no --data)", start.args)
-	}
-
-	// teardown must NOT start outside running mode (config absent = the
-	// teardown CLI would no-op anyway, but the hint isn't offered there).
-	for _, mode := range []Mode{ModeBootstrap, ModeConfigure} {
-		m3 := &Model{Mode: mode}
-		if keyPress(m3, "t") {
-			t.Errorf("t must not start a teardown flow in %s", mode)
-		}
-	}
-}
 
 // TestRebuildFormSteps walks the rebuild form to completion and confirms the
 // inputs land in order (operator pk, relay domain, cp domain, LV size, thin-pool
 // name, pool size, k3s, CPA agent name, litellm) — no world/base domain.
-func TestRebuildFormSteps(t *testing.T) {
-	stubDnsCred(t)
-	m := &Model{Mode: ModeBootstrap}
-	if !keyPress(m, "B") {
-		t.Fatal("B did not start the rebuild flow in bootstrap mode")
-	}
-	if m.Flow == nil || m.Flow.Kind != flowRebuild {
-		t.Fatal("expected a rebuild flow after pressing B")
-	}
-	if ncols(flowRebuild) != 11 {
-		t.Fatalf("rebuild form should have 11 steps, got %d", ncols(flowRebuild))
-	}
-	answers := []string{strings.Repeat("a", 64), "relay.example.test", "cp.example.test", "10", "freehold-thin", "40", "y", "my-cpa", "y", "", ""}
-	for i := range answers {
-		typeText(m, answers[i])
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	if m.Flow == nil {
-		t.Fatal("flow vanished before inputs were captured")
-	}
-	for i, want := range answers {
-		if m.Flow.Inputs[i] != want {
-			t.Errorf("rebuild inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want)
-		}
-	}
-	// Completing the form dispatches the rebuild subprocess. Default k3s+litellm
-	// on = full world reconcile; the named CPA agent is forwarded.
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if cmd == nil {
-		t.Fatal("completed 11-step rebuild form did not dispatch")
-	}
-	start, ok := cmd().(activityStartMsg)
-	if !ok {
-		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
-	}
-	got := strings.Join(start.args, " ")
-	for _, want := range []string{"--agent-name my-cpa", "--relay-domain relay.example.test", "--cp-domain cp.example.test"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("rebuild args %q missing %q", got, want)
-		}
-	}
-	for _, banned := range []string{"--no-k3s", "--no-litellm", "--domain "} {
-		if strings.Contains(got, banned) {
-			t.Errorf("rebuild args must not contain %s: %q", banned, got)
-		}
-	}
-
-	// rebuild must also start in configure mode (half-built worlds).
-	m2 := &Model{Mode: ModeConfigure}
-	if !keyPress(m2, "B") {
-		t.Fatal("B did not start the rebuild flow in configure mode")
-	}
-	// and NOT in running mode (tear down first — the running footer offers
-	// t teardown + B rebuild is intentionally absent there).
-	m3 := &Model{Mode: ModeRunning}
-	if keyPress(m3, "B") {
-		t.Error("B must not start a rebuild flow in running mode")
-	}
-}
 
 // TestRebuildFormEscCancels confirms esc aborts a rebuild flow.
-func TestRebuildFormEscCancels(t *testing.T) {
-	m := &Model{Mode: ModeBootstrap}
-	keyPress(m, "B")
-	if m.Flow == nil {
-		t.Fatal("flow not started")
-	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.Flow != nil {
-		t.Error("esc should cancel the rebuild flow")
-	}
-}
 
 // TestNewFlowLabels sanity-checks the teardown/rebuild prompt labels.
 func TestNewFlowLabels(t *testing.T) {
@@ -196,198 +66,27 @@ func TestNewFlowLabels(t *testing.T) {
 // the rebuild form with the RECORDED answers prefilled — operator pubkey,
 // relay + CP hosts (never derived), and the carved thin-pool. The two size
 // prompts stay blank: the config records nothing about them.
-func TestRebuildFormSeededFromConfig(t *testing.T) {
-	op := strings.Repeat("b", 64)
-	cfgPath := writeRebuildCfg(t,
-		"relay_url = \"https://relay.world.test\"\n"+
-			"cp_url = \"https://cp.world.test\"\n"+
-			"operator_pubkey = \""+op+"\"\n"+
-			"managed = [\"relay\", \"cp\", \"k3s\"]\n"+
-			"[plane]\nthin_pool = \"freehold-thin\"\n")
-
-	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	if !keyPress(m, "B") {
-		t.Fatal("B did not start the rebuild flow")
-	}
-
-	want := [10]string{op, "relay.world.test", "cp.world.test", "", "freehold-thin", "", "", "", "", ""}
-	for i := 0; i < 9; i++ {
-		if m.Flow == nil {
-			t.Fatalf("flow vanished at step %d", i)
-		}
-		if got := m.Flow.Field.Value(); got != want[i] {
-			t.Errorf("step %d prefilled %q, want %q", i, got, want[i])
-		}
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	if m.Flow == nil {
-		t.Fatal("flow vanished before inputs were captured")
-	}
-	for i := 0; i < 9; i++ {
-		if m.Flow.Inputs[i] != want[i] {
-			t.Errorf("inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want[i])
-		}
-	}
-}
 
 // TestRebuildFormSeedCanBeEdited: the prefills are EDITABLE, not locked —
 // appended typing changes the answer (cursor sits at the end of the seed).
-func TestRebuildFormSeedCanBeEdited(t *testing.T) {
-	cfgPath := writeRebuildCfg(t, "domain = \"world.test\"\noperator_pubkey = \""+strings.Repeat("b", 64)+"\"\n")
-	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	keyPress(m, "B")
-	if m.Flow == nil {
-		t.Fatal("B did not start the rebuild flow")
-	}
-	typeText(m, "-new")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if got := m.Flow.Inputs[0]; !strings.HasSuffix(got, "-new") {
-		t.Errorf("edited seed should keep the prefix + the appended text, got %q", got)
-	}
-}
 
 // TestRebuildFormAcceptsSeededDefaults: six bare enters on a seeded form
 // must launch the rebuild with the RECORDED world — same args the operator
 // would have typed by hand.
-func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
-	stubDnsCred(t)
-	op := strings.Repeat("b", 64)
-	cfgPath := writeRebuildCfg(t,
-		"relay_url = \"https://relay.world.test\"\n"+
-			"cp_url = \"https://cp.world.test\"\n"+
-			"operator_pubkey = \""+op+"\"\n"+
-			"managed = [\"relay\", \"cp\", \"k3s\"]\n"+
-			"[plane]\nthin_pool = \"freehold-thin\"\n")
-	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	keyPress(m, "B")
-	var msg tea.Cmd
-	for i := 0; i < ncols(flowRebuild); i++ {
-		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	if msg == nil {
-		t.Fatal("no activity message was dispatched")
-	}
-	start, ok := msg().(activityStartMsg)
-	if !ok {
-		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
-	}
-	joined := strings.Join(start.args, " ")
-	for _, want := range []string{"--operator-pubkey " + op, "--relay-domain relay.world.test", "--cp-domain cp.world.test", "--thin-pool freehold-thin"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("rebuild args %q missing %q", joined, want)
-		}
-	}
-	// Full world by default: k3s and litellm are on unless opted out.
-	for _, banned := range []string{"--no-k3s", "--no-litellm", "--domain "} {
-		if strings.Contains(joined, banned) {
-			t.Errorf("seeded defaults must not contain %s: %q", banned, joined)
-		}
-	}
-}
 
 // TestRebuildFormAgentNameRoundTrip: a config with cpa_name seeds the
 // agent-name step, and seven bare enters dispatch --agent-name with that
 // recorded value — the name the operator chose at install round-trips into
 // the rebuild args (A1: persist the CPA name).
-func TestRebuildFormAgentNameRoundTrip(t *testing.T) {
-	stubDnsCred(t)
-	op := strings.Repeat("b", 64)
-	cfgPath := writeRebuildCfg(t,
-		"relay_url = \"https://relay.world.test\"\n"+
-			"cp_url = \"https://cp.world.test\"\n"+
-			"operator_pubkey = \""+op+"\"\n"+
-			"cpa_name = \"waldo\"\n"+
-			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
-	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	keyPress(m, "B")
-	if m.Flow == nil {
-		t.Fatal("B did not start the rebuild flow")
-	}
-	if got := m.Flow.Defaults[7]; got != "waldo" {
-		t.Fatalf("agent-name step seeded %q, want %q", got, "waldo")
-	}
-	var msg tea.Cmd
-	// Advance through all 8 fields (discarding the in-flight updates), then one
-	// Tab on the completed form dispatches the rebuild subprocess.
-	for i := 0; i < ncols(flowRebuild); i++ {
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if msg == nil {
-		t.Fatal("no activity message was dispatched")
-	}
-	start, ok := msg().(activityStartMsg)
-	if !ok {
-		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
-	}
-	if got := strings.Join(start.args, " "); !strings.Contains(got, "--agent-name waldo") {
-		t.Errorf("rebuild args %q missing --agent-name waldo", got)
-	}
-}
 
 // TestRebuildFormNoSeedWithoutConfig: no config = nothing prefilled, and k3s
 // (d[5]) and litellm (d[7]) default BLANK — the arg builder reads blank as
 // "y", so the desired world reconciles to FULL by default; opting out is an
 // explicit "n".
-func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
-	m := &Model{Mode: ModeBootstrap, CfgPath: "/nonexistent/config.toml"}
-	keyPress(m, "B")
-	if m.Flow == nil {
-		t.Fatal("B did not start the rebuild flow")
-	}
-	if got := m.Flow.Field.Value(); got != "" {
-		t.Errorf("no config = nothing prefilled, got %q", got)
-	}
-
-	cfgPath := writeRebuildCfg(t, "domain = \"world.test\"\noperator_pubkey = \""+strings.Repeat("b", 64)+"\"\n")
-	m2 := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	keyPress(m2, "B")
-	if m2.Flow == nil {
-		t.Fatal("B did not start the rebuild flow")
-	}
-	if got := flowDefaults(m2, flowRebuild)[6]; got != "" {
-		t.Errorf("k3s must default blank (= on, reconcile-always), got %q", got)
-	}
-	if got := flowDefaults(m2, flowRebuild)[8]; got != "" {
-		t.Errorf("litellm must default blank (= on, reconcile-always), got %q", got)
-	}
-}
 
 // TestRebuildFormExplicitOptOut: typing "n" at the k3s step (and the litellm
 // step) must dispatch --no-k3s / --no-litellm — the full-world defaults are
 // opt-outs, not blank-boot surprises.
-func TestRebuildFormExplicitOptOut(t *testing.T) {
-	stubDnsCred(t)
-	cfgPath := writeRebuildCfg(t,
-		"relay_url = \"https://relay.world.test\"\n"+
-			"cp_url = \"https://cp.world.test\"\n"+
-			"operator_pubkey = \""+strings.Repeat("b", 64)+"\"\n"+
-			"managed = [\"relay\", \"cp\"]\n")
-	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	keyPress(m, "B")
-	var msg tea.Cmd
-	for i := 0; i < ncols(flowRebuild); i++ {
-		if i == 6 || i == 8 {
-			typeText(m, "n")
-		}
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if msg == nil {
-		t.Fatal("no activity message was dispatched")
-	}
-	start, ok := msg().(activityStartMsg)
-	if !ok {
-		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
-	}
-	joined := strings.Join(start.args, " ")
-	if !strings.Contains(joined, "--no-k3s") {
-		t.Errorf("type 'n' at the k3s step must dispatch --no-k3s, got %q", joined)
-	}
-	if !strings.Contains(joined, "--no-litellm") {
-		t.Errorf("type 'n' at the litellm step must dispatch --no-litellm, got %q", joined)
-	}
-}
 
 // writeRebuildCfg writes a scratch config.toml and returns its path.
 func writeRebuildCfg(t *testing.T, body string) string {
@@ -399,27 +98,31 @@ func writeRebuildCfg(t *testing.T, body string) string {
 	return p
 }
 
-// TestTeardownRebuildHints confirms the footers + views offer the new keys.
+// TestTeardownRebuildHints confirms the TUI is status-only: footers + views
+// point at `freehold build` / `freehold teardown` and NO build/teardown keys.
 func TestTeardownRebuildHints(t *testing.T) {
 	run := (&Model{Mode: ModeRunning}).footer()
-	if !strings.Contains(run, "t teardown") {
-		t.Errorf("running footer should offer t teardown, got:\n%s", run)
+	if !strings.Contains(run, "build/teardown run from the shell") {
+		t.Errorf("running footer should note build/teardown run from the shell, got:\n%s", run)
+	}
+	if strings.Contains(run, " t ") || strings.Contains(run, "t teardown") {
+		t.Errorf("running footer must not offer a t teardown key, got:\n%s", run)
 	}
 	boot := (&Model{Mode: ModeBootstrap}).footer()
-	if !strings.Contains(boot, "B rebuild") {
-		t.Errorf("bootstrap footer should offer B rebuild, got:\n%s", boot)
+	if !strings.Contains(boot, "freehold build") {
+		t.Errorf("bootstrap footer should point at freehold build, got:\n%s", boot)
 	}
 	conf := (&Model{Mode: ModeConfigure}).footer()
-	if !strings.Contains(conf, "B rebuild") {
-		t.Errorf("configure footer should offer B rebuild, got:\n%s", conf)
+	if !strings.Contains(conf, "freehold build") {
+		t.Errorf("configure footer should point at freehold build, got:\n%s", conf)
 	}
 	bootView := (&Model{Mode: ModeBootstrap, CfgPath: "/nonexistent/config.toml"}).View()
-	if !strings.Contains(bootView, "rebuild the whole world") {
-		t.Errorf("bootstrap view should advertise B rebuild, got:\n%s", bootView)
+	if !strings.Contains(bootView, "freehold build") {
+		t.Errorf("bootstrap view should point at freehold build, got:\n%s", bootView)
 	}
 	confView := (&Model{Mode: ModeConfigure, Domain: "example.test"}).View()
-	if !strings.Contains(confView, "rebuild the whole world") {
-		t.Errorf("configure view should advertise B rebuild, got:\n%s", confView)
+	if !strings.Contains(confView, "freehold build") {
+		t.Errorf("configure view should point at freehold build, got:\n%s", confView)
 	}
 }
 
@@ -871,82 +574,11 @@ func TestIsSkipDetail(t *testing.T) {
 // completed rebuild form: --yes + --relay-domain + --cp-domain + --operator-pubkey,
 // and NO --domain (the removed world-domain flag). The headless run then reuses
 // the stored DNS credential (or errors under --yes only if truly absent).
-func TestRebuildFormDispatchArgs(t *testing.T) {
-	stubDnsCred(t)
-	op := strings.Repeat("c", 64)
-	cfgPath := writeRebuildCfg(t,
-		"relay_url = \"https://relay.world.test\"\n"+
-			"cp_url = \"https://cp.world.test\"\n"+
-			"operator_pubkey = \""+op+"\"\n"+
-			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
-	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	keyPress(m, "B")
-	var last tea.Cmd
-	for i := 0; i < ncols(flowRebuild); i++ {
-		_, last = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	start, ok := last().(activityStartMsg)
-	if !ok {
-		t.Fatalf("dispatched a %T, want activityStartMsg", last())
-	}
-	got := strings.Join(start.args, " ")
-	for _, want := range []string{"--yes", "--relay-domain", "relay.world.test", "--cp-domain", "cp.world.test", "--operator-pubkey " + op} {
-		if !strings.Contains(got, want) {
-			t.Errorf("dispatch args %q missing %q", got, want)
-		}
-	}
-	if strings.Contains(got, "--domain") {
-		t.Errorf("dispatch must not contain the removed --domain flag: %q", got)
-	}
-}
 
 // stubDnsCred points FREEHOLD_HOME at a temp dir with a stored relay DNS cred
 // present, so a completed rebuild form dispatches immediately (the pre-rebuild
 // DNS flow is skipped when a credential is already stored). Restored on cleanup.
-func stubDnsCred(t *testing.T) {
-	t.Helper()
-	prev := os.Getenv("FREEHOLD_HOME")
-	dir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(dir, "control-plane"), 0o755)
-	_ = os.WriteFile(filepath.Join(dir, "control-plane", "dns-provider-relay.json"), []byte("{}"), 0o600)
-	os.Setenv("FREEHOLD_HOME", dir)
-	t.Cleanup(func() { os.Setenv("FREEHOLD_HOME", prev) })
-}
 
 // TestRebuildFormHasDNSFields: the DNS provider/env are visible steps in the
 // rebuild form (after the litellm field), so the operator always SEES them —
 // regardless of a stored credential. Completing with blank DNS just dispatches.
-func TestRebuildFormHasDNSFields(t *testing.T) {
-	cfgPath := writeRebuildCfg(t,
-		"operator_pubkey = \""+strings.Repeat("d", 64)+"\"\n"+
-			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
-	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
-	keyPress(m, "B")
-	if m.Flow == nil || m.Flow.Kind != flowRebuild {
-		t.Fatal("expected the rebuild form")
-	}
-	// type the required fields (op pubkey, relay, cp), then advance to the DNS
-	// provider step (field 9) and confirm the label is reached.
-	answers := []string{strings.Repeat("d", 64), "relay.test", "cp.test"}
-	for i := range answers {
-		typeText(m, answers[i])
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	for i := 3; i < 9; i++ {
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	if got := promptLabel(flowRebuild, 9); !strings.Contains(got, "DNS provider for the certs") {
-		t.Errorf("step9 label = %q", got)
-	}
-	// completing the form (blank DNS) dispatches the rebuild
-	for i := 9; i < ncols(flowRebuild); i++ {
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if cmd == nil {
-		t.Fatal("completed 11-step rebuild form did not dispatch")
-	}
-	if _, ok := cmd().(activityStartMsg); !ok {
-		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
-	}
-}

@@ -139,8 +139,8 @@ func init() {
 	dnsCredCmd.Flags().String("config", defaultConfigPath(), "Config path to read the host from")
 }
 
-var rebuildCmd = &cobra.Command{Use: "rebuild",
-	Short: "Bring the whole world up end to end: door, runner, durable plane, relay + CP + k3s LXCs, deploys — the installer pipeline as one command",
+var buildCmd = &cobra.Command{Use: "build",
+	Short: "Bring the whole world up end to end (fresh bootstrap OR rebuild — the same reconciling pipeline): door, runner, durable plane, relay + CP + k3s LXCs, deploys",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		f := rebuildFlags{}
 		f.addr, _ = cmd.Flags().GetString("addr")
@@ -189,7 +189,7 @@ var rebuildCmd = &cobra.Command{Use: "rebuild",
 }
 
 // applyConfigDefaults fills any omitted rebuild flag from the stored config, so
-// `freehold rebuild` is smooth: it reuses the recorded operator key, relay/CP
+// `freehold build` is smooth: it reuses the recorded operator key, relay/CP
 // hosts, thin-pool, agent name, and proxy IP instead of forcing re-entry. An
 // explicit flag always wins; the config only fills blanks.
 func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
@@ -222,28 +222,28 @@ func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
 }
 
 func init() {
-	rebuildCmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
-	rebuildCmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
-	rebuildCmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
-	rebuildCmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
-	rebuildCmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
-	rebuildCmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — REQUIRED, never derived")
-	rebuildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
-	rebuildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
-	rebuildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
-	rebuildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
-	rebuildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
-	rebuildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
-	rebuildCmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC (defaults to the full world — relay/cp/k3s/litellm/CPA; stages reconcile idempotently and skip what is already present)")
-	rebuildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
-	rebuildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
-	rebuildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for the proxy's STATIC guest IP (unused with DHCP)")
-	rebuildCmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
-	rebuildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
-	rebuildCmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24) — the ONE static address; relay/CP hosts resolve to it. Absent => DHCP")
-	rebuildCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
-	rebuildCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
-	rebuildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
+	buildCmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
+	buildCmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
+	buildCmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
+	buildCmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
+	buildCmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
+	buildCmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — REQUIRED, never derived")
+	buildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
+	buildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
+	buildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
+	buildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
+	buildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
+	buildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
+	buildCmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC (defaults to the full world — relay/cp/k3s/litellm/CPA; stages reconcile idempotently and skip what is already present)")
+	buildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
+	buildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
+	buildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for the proxy's STATIC guest IP (unused with DHCP)")
+	buildCmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
+	buildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
+	buildCmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24) — the ONE static address; relay/CP hosts resolve to it. Absent => DHCP")
+	buildCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
+	buildCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
+	buildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
 }
 
 // rebuildFlags is the command's collected answers.
@@ -928,7 +928,7 @@ func (e *rebuildEngine) stageVerify() error {
   Still failing after %d tries. If this runner predates the ssh-key
   serialization fix, its PRIVATE key may be unloadable by the SSH client —
   authorized_keys edits can't help that.
-  Fresh start:  rm -rf ~/.freehold && freehold rebuild ...
+  Fresh start:  rm -rf ~/.freehold && freehold build ...
 `, failures)
 		}
 		if _, err := e.prompt("Fix authorized_keys on the host, then press ENTER to retry ('q' to quit)"); err != nil {
@@ -2118,7 +2118,7 @@ func (e *rebuildEngine) stageLitellm() error {
 	// The provider key (operator's fireworks/upstream supply) is needed
 	// ONCE, at first shipment, to seed the litellm runner — after that it is
 	// sealed in the runner package (ciphertext) and reused on rebuilds, so a
-	// `freehold rebuild` does not demand a fresh supply every time.
+	// `freehold build` does not demand a fresh supply every time.
 	reusingKey := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
 	if e.f.litellmProviderKey == "" && !reusingKey {
 		if e.f.yes {
