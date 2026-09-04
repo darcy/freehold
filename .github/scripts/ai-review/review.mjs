@@ -27,6 +27,7 @@ if (!pull_number) {
 }
 
 function globToRegExp(glob) {
+  // Build a regex from a glob pattern; `**` becomes `.*`, `*` becomes `[^/]*`.
   const escaped = glob
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
     .replace(/\*\*/g, '{{GLOBSTAR}}')
@@ -336,12 +337,24 @@ async function main() {
   const result = await callLlm(prompt);
   const inline = Array.isArray(result.inline) ? result.inline : [];
 
-  // Re-flag only against comments already on THIS commit, so findings still get
-  // a child inline comment on a new push (matching claude's per-commit inline
-  // comments) without duplicating comments within the same commit.
+  // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
+  // findings (already commented in a prior round — don't re-post inline, just
+  // re-capture the high-level in the parent). GitHub rewrites a prior comment's
+  // `commit_id` to the current head when its line persists, so matching on
+  // `commit_id === headSha` reliably detects prior-round re-flags.
   const existingComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number, per_page: 100 });
   const seen = new Set(existingComments.filter(c => c.commit_id === headSha).map(c => `${c.path}:${c.line}`));
-  const newInline = inline.filter(c => !seen.has(`${c.path}:${c.line}`));
+  const priorSeverity = new Map();
+  for (const c of existingComments) {
+    const m = c.body?.match(/\[(blocking|important)\]/) || [];
+    if (m[1]) priorSeverity.set(`${c.path}:${c.line}`, m[1]);
+  }
+  const newInline = [];
+  const reflagged = [];
+  for (const c of inline) {
+    if (seen.has(`${c.path}:${c.line}`)) reflagged.push(c);
+    else newInline.push(c);
+  }
 
   // Progress: context/read/CI/review done.
   await updateParentComment(progressBody(4, `**CI:** ${ciStatus}`));
@@ -370,13 +383,23 @@ async function main() {
   await updateParentComment(progressBody(5, `**CI:** ${ciStatus}`));
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
+  const loc = (c) => `\`${c.path}${typeof c.line === 'number' ? `:${c.line}` : ''}\``;
+  const findingsLines = [
+    ...newInline.map(c => `- [NEW] **${c.severity}** — ${loc(c)} — ${c.comment} — inline comment posted`),
+    ...reflagged.map(c => {
+      const prior = priorSeverity.get(`${c.path}:${c.line}`);
+      const drift = prior && prior !== c.severity ? ` (prior round: ${prior})` : '';
+      return `- [prior round] **${c.severity}**${drift} — ${loc(c)} — ${c.comment} — re-flagged from a prior round; not re-posted inline`;
+    }),
+  ];
   const summaryText = [
     `### DeepSeek AI Review — round update`,
     `**CI:** ${ciStatus}`,
     result.summary || '',
     result.readme_note ? `**README:** ${result.readme_note}` : '',
     result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
-    `**Findings:** ${inline.length} reported · ${newInline.length} inline comment(s) posted`,
+    `**Findings:** ${newInline.length} new · ${reflagged.length} re-flagged from prior rounds`,
+    ...(findingsLines.length ? findingsLines : ['(no findings this round)']),
     legend,
     `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
   ].filter(Boolean).join('\n\n');
@@ -395,6 +418,14 @@ async function main() {
   await updateParentComment(finalBody);
 
   core.info(`Posted ${newInline.length} inline comment(s). Verdict: ${result.verdict}`);
+
+  // Fail the check (red) when the review reports blocking/important findings —
+  // green only on MERGE-READY. Comments are already posted above.
+  if (inline.length > 0 || /NEEDS WORK/i.test(result.verdict || '')) {
+    core.setFailed(`Review found ${inline.length} blocking/important finding(s) (${newInline.length} new, ${reflagged.length} re-flagged) — see the parent comment.`);
+  } else {
+    core.info('Review passed — MERGE-READY.');
+  }
 }
 
 main().catch(err => core.setFailed(err.message));
