@@ -58,6 +58,8 @@ var rebuildCmd = &cobra.Command{
 		f.target, _ = cmd.Flags().GetString("target")
 		f.host, _ = cmd.Flags().GetString("host")
 		f.domain, _ = cmd.Flags().GetString("domain")
+		f.relayDomain, _ = cmd.Flags().GetString("relay-domain")
+		f.cpDomain, _ = cmd.Flags().GetString("cp-domain")
 		f.operatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
 		f.operatorIdentity, _ = cmd.Flags().GetString("operator-identity")
 		f.agentName, _ = cmd.Flags().GetString("agent-name")
@@ -99,7 +101,9 @@ func init() {
 	rebuildCmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
 	rebuildCmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
 	rebuildCmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
-	rebuildCmd.Flags().String("domain", "", "Relay identity domain (must resolve to the host — the A4 gate; REQUIRED)")
+	rebuildCmd.Flags().String("domain", "", "World base domain (used for the durable-plane/LXC naming and the wildcard cert apex; REQUIRED)")
+	rebuildCmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — NOT derived from the world domain. Absent => the relay is served at the world domain itself.")
+	rebuildCmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — NOT derived from the world domain. Absent => the CP is served at the world domain itself.")
 	rebuildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
 	rebuildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
 	rebuildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
@@ -126,6 +130,8 @@ type rebuildFlags struct {
 	target             string
 	host               string
 	domain             string
+	relayDomain        string
+	cpDomain           string
 	operatorPubkey     string
 	operatorIdentity   string
 	agentName          string
@@ -295,23 +301,6 @@ func curlGetDefault(url string) (string, bool) {
 
 // ---- freehold home paths (mirror installer::lib.rs) ----------------------
 
-// normalizeWorldDomain reduces a relay/cp-prefixed entry to the BASE world
-// domain freehold derives its topology from. The world domain IS the base
-// (relay.<domain>/cp.<domain> are derived), so entering "relay." or "cp." as
-// the domain would otherwise double the prefix into relay.relay.<base>. A
-// leading relay./cp. label is stripped as forgiveness for that common entry;
-// any other domain is returned unchanged.
-func normalizeWorldDomain(d string) string {
-	for _, p := range []string{"relay.", "cp."} {
-		if strings.HasPrefix(d, p) {
-			if base := strings.TrimPrefix(d, p); base != "" && !strings.HasPrefix(base, ".") {
-				return base
-			}
-		}
-	}
-	return d
-}
-
 func rbStateDir() string   { return filepath.Join(freeholdHome(), "control-plane") }
 func rbOpsDir() string     { return filepath.Join(rbStateDir(), "agent-ops") }
 func rbRunnerPkgs() string { return filepath.Join(freeholdHome(), "runner") }
@@ -320,7 +309,6 @@ func rbServeLog() string   { return filepath.Join(freeholdHome(), "installer", "
 // ---- the pipeline ---------------------------------------------------------
 
 func (e *rebuildEngine) run() error {
-	e.f.domain = normalizeWorldDomain(e.f.domain)
 	fmt.Fprintf(e.out, "rebuilding world %s (runner %s @ %s)\n", e.f.domain, e.f.target, e.f.addr)
 
 	// 1. the ops agent identity (minted on demand; its pubkey is the grant).
@@ -428,12 +416,12 @@ func (e *rebuildEngine) run() error {
 	if err := e.stageDeployRelay(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.domain)
+	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", firstNonEmpty(e.f.relayDomain, e.f.domain))
 	fmt.Fprintln(e.out, "  · deploying the control plane (release binaries into the cp LXC)…")
 	if err := e.stageDeployCp(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  ✓ control plane live at https://cp.%s\n", e.f.domain)
+	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", firstNonEmpty(e.f.cpDomain, e.f.domain))
 
 	// 14.5. C0: the litellm gateway — provision the litellm runner (master +
 	// provider + postgres secrets sealed to it), apply the kube workloads,
@@ -519,10 +507,10 @@ func (e *rebuildEngine) run() error {
   ╰─────────────────────────────────────────────────────────╯
 
   relay:          https://%s
-  control plane:  https://cp.%s
+  control plane:  https://%s
   runner:         serving on %s
   operator pk:    %s
-`, e.f.domain, e.f.domain, e.f.addr, e.f.operatorPubkey)
+`, firstNonEmpty(e.f.relayDomain, e.f.domain), firstNonEmpty(e.f.cpDomain, e.f.domain), e.f.addr, e.f.operatorPubkey)
 	return nil
 }
 
@@ -888,18 +876,20 @@ func (e *rebuildEngine) stopRunner(pid string) {
 // config::Config::from_answers). runner pubkey resolved from the package.
 func (e *rebuildEngine) fromAnswers() *config.Config {
 	runnerPK, _ := loadRPubkey(filepath.Join(rbRunnerPkgs(), e.f.target))
-	// RelayWsURL stays on the relay's plain internal ws://<domain>:3000 origin
-	// — the connection verified live in the D1 world — until the Caddy edge
-	// actually serves TLS (F5 of roadmap/CORE_TLS.md flips it to
-	// wss://relay.<domain> once the wildcard cert is live). Pointing it at a
-	// host with no working 443 terminator before then would regress every
-	// rebuild. RelayURL/CPURL (public, operator-facing) already use the
-	// relay./cp. subdomain topology the edge will serve.
+	// The relay, CP, and world domains are INDEPENDENT inputs now — never
+	// derived (a relay has no guarantee of a "relay." prefix; it may sit at
+	// the world domain or anywhere the operator chooses). When a relay or CP
+	// domain isn't given, that service is served at the world domain itself.
+	relayDomain := firstNonEmpty(e.f.relayDomain, e.f.domain)
+	cpDomain := firstNonEmpty(e.f.cpDomain, e.f.domain)
+	// RelayWsURL is the CPA pod's relay origin. It follows the relay's own
+	// host (wss://<relayDomain> — the public, TLS-fronted form the edge
+	// serves); stageCpa falls back to wss://RelayURL when empty.
 	cfg := &config.Config{
 		Domain:         e.f.domain,
-		RelayURL:       "https://relay." + e.f.domain,
-		RelayWsURL:     "ws://" + e.f.domain + ":3000",
-		CPURL:          "https://cp." + e.f.domain,
+		RelayURL:       "https://" + relayDomain,
+		RelayWsURL:     "wss://" + relayDomain,
+		CPURL:          "https://" + cpDomain,
 		OperatorPubkey: e.f.operatorPubkey,
 		Runner: config.RunnerRef{
 			Addr:   e.f.addr,
@@ -1561,7 +1551,7 @@ func (e *rebuildEngine) stageDeployRelay() error {
 		"--target", e.f.target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
 		"--domain", e.f.domain,
-		"--relay-url", "https://" + e.f.domain,
+		"--relay-url", "https://" + firstNonEmpty(e.f.relayDomain, e.f.domain),
 		"--owner-pubkey", e.f.operatorPubkey,
 		"--operator-pubkey", e.f.operatorPubkey,
 	}
@@ -1587,7 +1577,7 @@ func (e *rebuildEngine) stageDeployCp() error {
 	args := []string{"deploy-cp",
 		"--target", e.f.target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
-		"--relay-url", "https://" + e.f.domain,
+		"--relay-url", "https://" + firstNonEmpty(e.f.relayDomain, e.f.domain),
 		"--binary", e.bins.ReleaseCP,
 		"--runner-binary", e.bins.ReleaseRun,
 		"--operator-pubkey", e.f.operatorPubkey,
@@ -2502,13 +2492,14 @@ func (e *rebuildEngine) stageCaddy() error {
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	relayIP := config.StripCIDR(*cfg.Lxc.Relay.Ip)
 	relayUpstream := fmt.Sprintf("%s:3000", relayIP)
-	caddyfile := deploy.RenderCaddyfile(cfg.Domain, relayUpstream)
+	// The relay's own public host from the config (RelayURL) — never derived.
+	relayHost := cfg.RelayHost()
+	caddyfile := deploy.RenderCaddyfile(relayHost, relayUpstream)
 	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyManifestScript(k3sVmid, caddyfile), 180))
 	if !ok {
 		return fmt.Errorf("caddy kube apply failed:\n%s", out)
 	}
-	style := fmt.Sprintf("https://relay.%s", cfg.Domain)
-	if err := e.recordCaddy(style, config.StripCIDR(*cfg.Lxc.K3s.Ip)); err != nil {
+	if err := e.recordCaddy(cfg.RelayURL, config.StripCIDR(*cfg.Lxc.K3s.Ip)); err != nil {
 		return err
 	}
 	return nil
@@ -2686,6 +2677,16 @@ rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.
 func shellSingleQuote(s string) string { return "'" + s + "'" }
+
+// firstNonEmpty returns the first non-empty of its arguments.
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // worldHasEdge reports whether this rebuild's desired world includes the Caddy
 // TLS edge (and therefore needs a DNS provider credential): k3s is on and a
@@ -2927,7 +2928,7 @@ func (e *rebuildEngine) recordCpa(cpaPub, cpaName string) error {
 // relayPubkeyNip11 reads the relay's signing pubkey via NIP-11 (best-effort
 // trust anchor; not fatal when unreadable).
 func (e *rebuildEngine) relayPubkeyNip11() (string, bool) {
-	text, ok := e.curlGet("https://" + e.f.domain + "/")
+	text, ok := e.curlGet("https://" + firstNonEmpty(e.f.relayDomain, e.f.domain) + "/")
 	if !ok {
 		return "", false
 	}

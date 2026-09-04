@@ -373,45 +373,36 @@ func TestMergeFromAnswersPreservesPrevFacts(t *testing.T) {
 
 func u32(v uint32) *uint32 { return &v }
 
-// TestFromAnswersRelayWsURLInternal is the guard for the review finding that
-// TestNormalizeWorldDomain: entering "relay.<base>" / "cp.<base>" as the world
-// domain (a common mistake — the relay/cp hosts ARE the topology) must be
-// reduced to the base so freehold derives relay.<base>/cp.<base> once, not
-// relay.relay.<base>.
-func TestNormalizeWorldDomain(t *testing.T) {
-	cases := map[string]string{
-		"freehold-test.darcydev.net":       "freehold-test.darcydev.net",
-		"relay.freehold-test.darcydev.net": "freehold-test.darcydev.net",
-		"cp.freehold-test.darcydev.net":    "freehold-test.darcydev.net",
-		"darcydev.net":                     "darcydev.net",
-		"anything.example.com":             "anything.example.com",
-		"relay.x":                          "x",
-		"relay":                            "relay",
-		".relay.example.com":               ".relay.example.com",
-		"relayX.example.com":               "relayX.example.com",
-	}
-	for in, want := range cases {
-		if got := normalizeWorldDomain(in); got != want {
-			t.Errorf("normalizeWorldDomain(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// TestFromAnswersRelayWsURLInternal is the guard for the review finding that// the CPA relay origin must stay on the relay's plain internal ws://<domain>:3000
-// shape until the Caddy edge serves TLS (CORE_TLS.md F5 flips it to
-// wss://relay.<domain>). Asserting it locks in the non-regression so a rebuild
-// from a fresh world never points the CPA at a host with no live 443 terminator.
+// TestFromAnswersRelayWsURLInternal confirms the relay/CP domains are NEVER
+// derived: each is exactly what the operator supplied (defaulting to the world
+// domain when absent), and the CPA origin follows the relay's own host.
 func TestFromAnswersRelayWsURLInternal(t *testing.T) {
+	// no explicit relay/cp domains -> both live at the world domain.
 	e := &rebuildEngine{f: rebuildFlags{domain: "freehold-test.darcydev.net", agentName: "cpa"}}
 	cfg := e.fromAnswers()
-	if cfg.RelayWsURL != "ws://freehold-test.darcydev.net:3000" {
-		t.Errorf("RelayWsURL = %q, want internal ws://<domain>:3000", cfg.RelayWsURL)
+	if cfg.RelayWsURL != "wss://freehold-test.darcydev.net" {
+		t.Errorf("RelayWsURL = %q, want wss://<world-domain> (no derivation)", cfg.RelayWsURL)
 	}
-	if cfg.RelayURL != "https://relay.freehold-test.darcydev.net" {
-		t.Errorf("RelayURL = %q, want public https://relay.<domain>", cfg.RelayURL)
+	if cfg.RelayURL != "https://freehold-test.darcydev.net" {
+		t.Errorf("RelayURL = %q, want https://<world-domain> (no relay. prefix)", cfg.RelayURL)
 	}
-	if cfg.CPURL != "https://cp.freehold-test.darcydev.net" {
-		t.Errorf("CPURL = %q, want https://cp.<domain>", cfg.CPURL)
+	if cfg.CPURL != "https://freehold-test.darcydev.net" {
+		t.Errorf("CPURL = %q, want https://<world-domain> (no cp. prefix)", cfg.CPURL)
+	}
+
+	// explicit relay/cp domains are used verbatim.
+	e2 := &rebuildEngine{f: rebuildFlags{
+		domain:      "freehold-test.darcydev.net",
+		relayDomain: "relay.freehold-test.darcydev.net",
+		cpDomain:    "cp.freehold-test.darcydev.net",
+		agentName:   "cpa",
+	}}
+	cfg2 := e2.fromAnswers()
+	if cfg2.RelayURL != "https://relay.freehold-test.darcydev.net" || cfg2.RelayWsURL != "wss://relay.freehold-test.darcydev.net" {
+		t.Errorf("explicit relay domain not honored: %+v", cfg2)
+	}
+	if cfg2.CPURL != "https://cp.freehold-test.darcydev.net" {
+		t.Errorf("explicit cp domain not honored: %+v", cfg2)
 	}
 }
 func sptr(v string) *string { return &v }

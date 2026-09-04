@@ -6,10 +6,10 @@ import (
 )
 
 func TestRenderCaddyfile(t *testing.T) {
-	out := RenderCaddyfile("freehold-test.darcydev.net", "192.168.30.8:3000")
+	out := RenderCaddyfile("relay.example.test", "192.168.30.8:3000")
 	for _, want := range []string{
 		"auto_https off",
-		"relay.freehold-test.darcydev.net {",
+		"relay.example.test {",
 		"tls /data/tls/fullchain.pem /data/tls/key.pem",
 		"reverse_proxy 192.168.30.8:3000",
 	} {
@@ -40,7 +40,7 @@ func TestCaddyManifest(t *testing.T) {
 	// The rendered Caddyfile must be indented under the block scalar (>= 2
 	// spaces; we emit 4) and NOT appear flattned (a 0-indent site block would
 	// break YAML).
-	if !strings.Contains(out, "\n    relay.d.example {") {
+	if !strings.Contains(out, "\n    d.example {") {
 		t.Errorf("Caddyfile not block-indented:\n%s", out)
 	}
 }

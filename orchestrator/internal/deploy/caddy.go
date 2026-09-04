@@ -17,20 +17,21 @@ import (
 // so Caddy never fights the operator's external nginx for 80/443 or reaches for
 // ACME itself.
 //
-// RelayUpstream selects which host Caddy fronts today: only the relay LXC
-// (192.168.30.8:3000) is an in-band TLS/D1 blocker. The CP console still binds
-// loopback by default, so cp.<domain> is left for when that bind moves to the
-// LAN — Caddy will pick up a CP vhost from the same Render func then.
-func RenderCaddyfile(domain, relayUpstream string) string {
+// relayHost is the relay's own public host (its Buzz origin) — NEVER derived,
+// freehold asks for it (it may sit at the world domain or anywhere the
+// operator chooses). Caddy fronts exactly that host and reverse-proxies to the
+// relay LXC's plain-HTTP upstream. A CP vhost is added from the same Render
+// func once the CP console binds the LAN.
+func RenderCaddyfile(relayHost, relayUpstream string) string {
 	return fmt.Sprintf(`{
 	auto_https off
 }
 
-relay.%s {
+%s {
 	tls /data/tls/fullchain.pem /data/tls/key.pem
 	reverse_proxy %s
 }
-`, domain, relayUpstream)
+`, relayHost, relayUpstream)
 }
 
 // CaddyManifest is the kube body applied inside the k3s LXC: a durable PVC for

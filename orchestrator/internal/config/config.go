@@ -60,6 +60,26 @@ type RunnerRef struct {
 	Target string `toml:"target"`
 }
 
+// RelayHost returns the relay's own public host (its Buzz origin) from
+// RelayURL — never derived; it is whatever the operator chose.
+func (c *Config) RelayHost() string {
+	return urlHost(c.RelayURL)
+}
+
+// CPHost returns the control plane's own public host from CPURL.
+func (c *Config) CPHost() string {
+	return urlHost(c.CPURL)
+}
+
+// urlHost strips scheme+path, returning the bare host from a base URL.
+func urlHost(u string) string {
+	u = strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")
+	if i := strings.IndexAny(u, "/:"); i >= 0 {
+		u = u[:i]
+	}
+	return u
+}
+
 // LxcSpec holds the managed LXC coordinates.
 type LxcSpec struct {
 	Relay LxcGuest `toml:"relay"`
