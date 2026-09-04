@@ -1,5 +1,6 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
+import { graphql } from '@octokit/graphql';
 import { readFileSync, existsSync } from 'fs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -258,6 +259,50 @@ async function updateParentComment(body) {
   await octokit.rest.issues.updateComment({ owner, repo, comment_id: parentCommentId, body });
 }
 
+// Resolve prior review-comment threads whose finding is no longer flagged in
+// this round (the finding was fixed). Thread resolution is GraphQL-only; the
+// comment id maps to its thread via a reviewThreads query.
+async function resolveFixedThreads(fixedComments) {
+  if (!fixedComments.length) return 0;
+  const gql = graphql.defaults({ auth: GITHUB_TOKEN });
+  let threadQuery;
+  try {
+    threadQuery = await gql(`query($owner:String!, $repo:String!, $pr:Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: 50) {
+            nodes {
+              id
+              isResolved
+              comments(first: 20) { nodes { id } }
+            }
+          }
+        }
+      }
+    }`, { owner, repo, pr: pull_number });
+  } catch (e) {
+    core.warning(`Could not read review threads: ${e.message}`);
+    return 0;
+  }
+  const commentToThread = new Map();
+  for (const t of threadQuery.repository.pullRequest.reviewThreads.nodes) {
+    if (t.isResolved) continue;
+    for (const c of t.comments.nodes) commentToThread.set(c.id, t.id);
+  }
+  let resolved = 0;
+  for (const c of fixedComments) {
+    const threadId = commentToThread.get(c.id);
+    if (!threadId) continue;
+    try {
+      await gql(`mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id } } }`, { threadId });
+      resolved += 1;
+    } catch (e) {
+      core.warning(`Could not resolve comment ${c.id}: ${e.message}`);
+    }
+  }
+  return resolved;
+}
+
 const PROGRESS_ITEMS = [
   'Gather context (AGENTS.md, README.md, ARCHITECTURE.md, CI status)',
   'Read changed files',
@@ -358,6 +403,16 @@ async function main() {
     else newInline.push(c);
   }
 
+  // Prior blocking/important comments whose finding is no longer flagged this
+  // round are treated as fixed — resolve their threads (GraphQL-only).
+  const currentFindings = new Set(inline.map(c => `${c.path}:${c.line}`));
+  const fixedComments = existingComments.filter(c =>
+    !c.in_reply_to_id &&
+    /\[\[(blocking|important)\]\]/.test(c.body || '') &&
+    !currentFindings.has(`${c.path}:${c.line}`)
+  );
+  const resolvedCount = await resolveFixedThreads(fixedComments);
+
   // Progress: context/read/CI/review done.
   await updateParentComment(progressBody(4, `**CI:** ${ciStatus}`));
 
@@ -402,6 +457,7 @@ async function main() {
     result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
     `**Findings:** ${newInline.length} new · ${reflagged.length} re-flagged from prior rounds`,
     ...(findingsLines.length ? findingsLines : ['(no findings this round)']),
+    ...(resolvedCount ? [`**Resolved:** ${resolvedCount} prior finding(s) — ${fixedComments.map(c => loc(c)).join(', ')}`] : []),
     legend,
     `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
   ].filter(Boolean).join('\n\n');
