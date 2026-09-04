@@ -168,11 +168,18 @@ var buildCmd = &cobra.Command{Use: "build",
 		f.configPath, _ = cmd.Flags().GetString("config")
 		f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 		f.yes, _ = cmd.Flags().GetBool("yes")
+		f.resetDNS, _ = cmd.Flags().GetBool("reset-dns")
 		// Smooth rebuild: pull any omitted value from the stored config so a
 		// rebuild is not forced to re-enter the operator key, relay/CP hosts,
 		// thin-pool, etc.
 		if err := applyConfigDefaults(&f, f.configPath); err != nil {
 			return err
+		}
+		// Forget any stored DNS provider credentials so the build re-asks for
+		// them (e.g. the stored one is stale/wrong from prior testing).
+		if f.resetDNS {
+			clearStoredDNSCreds()
+			fmt.Fprintln(cmd.OutOrStdout(), "  (cleared stored DNS provider credentials — the build will ask for them again)")
 		}
 		// The ONE static IP (the proxy/Caddy node) must be CIDR — pct create's
 		// net0=ip= wants host/prefix; relay/cp/k3s LXCs are DHCP behind it.
@@ -244,6 +251,7 @@ func init() {
 	buildCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	buildCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	buildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
+	buildCmd.Flags().Bool("reset-dns", false, "Forget any stored DNS provider credentials so the build prompts for them again")
 }
 
 // rebuildFlags is the command's collected answers.
@@ -269,6 +277,7 @@ type rebuildFlags struct {
 	relayGw            string
 	configPath         string
 	confirmStorage     bool
+	resetDNS           bool
 	yes                bool
 }
 
@@ -2622,6 +2631,16 @@ func (e *rebuildEngine) stageCaddy() error {
 // "cp") — kept SEPARATE (they may differ), durable.
 func (e *rebuildEngine) certCredPath(slot string) string {
 	return filepath.Join(rbStateDir(), "dns-provider-"+slot+".json")
+}
+
+// clearStoredDNSCreds removes the stored DNS provider credentials (per-slot +
+// the legacy single-file copy) so the build prompts for them again. Used by
+// --reset-dns when the stored credential is stale/wrong.
+func clearStoredDNSCreds() {
+	dir := rbStateDir()
+	for _, name := range []string{"dns-provider-relay.json", "dns-provider-cp.json", "dns-provider.json"} {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
 }
 
 // certIdentSecret returns the ops identity's encryption secret (raw bytes), the
