@@ -411,8 +411,8 @@ func sptr(v string) *string { return &v }
 // apex and proper subdomains but not other zones (the prompt warns on those).
 func TestDomainCoveredByWildcard(t *testing.T) {
 	apex := "freehold-test.darcydev.net"
-	covered := []string{apex, "relay." + apex, "cp." + apex, "a.b." + apex}
-	uncovered := []string{"", "other.net", "darcydev.net", apex + "x", "." + apex}
+	covered := []string{apex, "relay." + apex, "cp." + apex}
+	uncovered := []string{"", "other.net", "darcydev.net", apex + "x", "." + apex, "a.b." + apex}
 	for _, h := range covered {
 		if !domainCoveredByWildcard(apex, h) {
 			t.Errorf("domainCoveredByWildcard(%q, %q) = false, want true", apex, h)

@@ -2781,14 +2781,19 @@ func (e *rebuildEngine) promptDomains() error {
 	return nil
 }
 
-// domainCoveredByWildcard reports whether host is served by a wildcard issued
-// for `apex` (i.e. host == apex, or host is a non-empty proper subdomain of
-// apex).
+// domainCoveredByWildcard reports whether host is served by a lego DNS-01
+// wildcard issued for `apex` (SANs *.apex + apex). A wildcard matches ONE label
+// deep: the apex itself, or exactly a single-label subdomain (relay.apex), NOT
+// a multi-label subdomain (a.b.apex).
 func domainCoveredByWildcard(apex, host string) bool {
 	if host == apex {
 		return true
 	}
-	return strings.HasSuffix(host, "."+apex) && len(host) > len(apex)+1
+	if !strings.HasSuffix(host, "."+apex) {
+		return false
+	}
+	sub := strings.TrimSuffix(host, "."+apex)
+	return sub != "" && !strings.Contains(sub, ".")
 }
 
 // promptDNSCred returns the DNS provider name + its env map, reusing the sealed
