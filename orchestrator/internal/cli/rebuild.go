@@ -350,6 +350,18 @@ func (e *rebuildEngine) run() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
+	// 6.5. DNS provider credential for the Caddy edge's wildcard cert. Asked
+	// UP FRONT (like the other prompts) so a later stage failure can't strand
+	// a long install without its DN-01 token: if a sealed copy exists it's
+	// reused silently; otherwise the operator is prompted + pre-verified now,
+	// and stageCert at the end just reads it back. No-op under --yes unless a
+	// stored copy is already present (then stageCert fails loudly at the end).
+	if e.worldHasEdge() {
+		if _, _, err := e.promptDNSCred(); err != nil {
+			return fmt.Errorf("DNS provider credential: %w", err)
+		}
+	}
+
 	// 7a. plane placement: where do the tenant LVs live — reuse the VG's
 	// detected thin pool, or carve a dedicated new one?
 	placement, err := e.stagePlacement()
@@ -2656,6 +2668,13 @@ rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.
 func shellSingleQuote(s string) string { return "'" + s + "'" }
+
+// worldHasEdge reports whether this rebuild's desired world includes the Caddy
+// TLS edge (and therefore needs a DNS provider credential): k3s is on and a
+// world domain is set.
+func (e *rebuildEngine) worldHasEdge() bool {
+	return !e.f.noK3s && e.f.domain != ""
+}
 
 // promptDNSCred returns the DNS provider name + its env map, reusing the sealed
 // credential on disk when present, else interactively collecting it (provider
