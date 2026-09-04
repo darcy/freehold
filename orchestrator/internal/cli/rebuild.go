@@ -2818,37 +2818,11 @@ func (e *rebuildEngine) promptDNSCred() (string, map[string]string, error) {
 }
 
 // promptProvider asks the operator to pick a DNS-01 provider from lego's full
-// registry (index or name), shown in chunks.
+// registry via an interactive, scrollable + type-ahead-searchable list picker
+// (bubbletea list). The 201-provider registry is otherwise unreadable when
+// enumerated inline.
 func (e *rebuildEngine) promptProvider() (string, error) {
-	provs := cert.Providers()
-	fmt.Fprintln(e.out, "")
-	fmt.Fprintln(e.out, "Choose the DNS provider for the wildcard cert (DNS-01). All of lego's providers are available:")
-	const perLine = 4
-	for i := 0; i < len(provs); i += perLine {
-		end := i + perLine
-		if end > len(provs) {
-			end = len(provs)
-		}
-		var buf []string
-		for j := i; j < end; j++ {
-			buf = append(buf, fmt.Sprintf("%2d %s", j+1, provs[j]))
-		}
-		fmt.Fprintln(e.out, "   "+strings.Join(buf, "   "))
-	}
-	for {
-		ans, err := e.prompt("provider (1-based index or name, e.g. route53)")
-		if err != nil {
-			return "", err
-		}
-		a := strings.TrimSpace(ans)
-		if idx, perr := strconv.Atoi(a); perr == nil && idx >= 1 && idx <= len(provs) {
-			return provs[idx-1], nil
-		}
-		if cert.IsProvider(a) {
-			return a, nil
-		}
-		fmt.Fprintln(e.out, "  unknown provider — pick an index or a name lego supports")
-	}
+	return runProviderPicker(cert.Providers())
 }
 
 // promptProviderEnv collects the provider's env-var fields (from lego-derived
