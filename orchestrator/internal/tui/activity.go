@@ -51,6 +51,10 @@ const (
 	stepRunning
 	stepOK
 	stepFail
+	// stepSkip is a legitimate no-op/skipped probe (not deployed, not on
+	// record, unreachable) — rendered with a neutral marker, never a green ✓
+	// that looks like a success.
+	stepSkip
 )
 
 // activity is one full-screen run. EXACTLY one of steps/lines is used.
@@ -229,6 +233,23 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	return tea.Batch(m.runBootStep(0), a.spin.Tick)
 }
 
+// isSkipDetail reports whether a boot-probe detail is a legitimate no-op/skip
+// rather than an actual success — so the view renders a neutral marker instead
+// of a green check that reads as "up".
+func isSkipDetail(detail string) bool {
+	for _, p := range []string{
+		"not deployed", "not on record", "not managed",
+		"no gateway coords", "no TLS edge coords", "no :8080 answer",
+		"resolver unreachable", "unreachable (mirror", "not recorded",
+		"live probe failed", "no live snapshot",
+	} {
+		if strings.Contains(detail, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) runBootStep(i int) tea.Cmd {
 	return func() tea.Msg {
 		a := m.activity
@@ -321,10 +342,13 @@ func (m *Model) handleActivityMsg(msg tea.Msg) (bool, tea.Model, tea.Cmd) {
 		}
 		if v.idx < len(a.steps) {
 			a.steps[v.idx].detail = v.detail
-			if v.ok {
-				a.steps[v.idx].state = stepOK
-			} else {
+			switch {
+			case !v.ok:
 				a.steps[v.idx].state = stepFail
+			case isSkipDetail(v.detail):
+				a.steps[v.idx].state = stepSkip
+			default:
+				a.steps[v.idx].state = stepOK
 			}
 		}
 		next := v.idx + 1
@@ -461,6 +485,12 @@ func (m *Model) activityView() string {
 		switch s.state {
 		case stepOK:
 			line := styleOK.Render("✓") + " " + s.label
+			if s.detail != "" {
+				line += " " + styleDots.Render(s.detail)
+			}
+			b.WriteString("  " + line + "\n")
+		case stepSkip:
+			line := styleDots.Render("–") + " " + s.label
 			if s.detail != "" {
 				line += " " + styleDots.Render(s.detail)
 			}

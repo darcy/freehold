@@ -816,3 +816,26 @@ func TestFailTailKeepsTheCause(t *testing.T) {
 		t.Errorf("tail must keep the trailing clause too, got %q", got)
 	}
 }
+
+// TestIsSkipDetail: a legitimate no-op probe ("not deployed", "unreachable",
+// "no coords") must classify as a skip (neutral marker) — NOT as a success that
+// renders a misleading green check.
+func TestIsSkipDetail(t *testing.T) {
+	skips := []string{
+		"caddy not deployed (no TLS edge coords)",
+		"dns resolver unreachable (mirror fallback)",
+		"litellm not managed",
+		"k3s not on record — skipped",
+	}
+	for _, s := range skips {
+		if !isSkipDetail(s) {
+			t.Errorf("isSkipDetail(%q) = false, want true", s)
+		}
+	}
+	oks := []string{"live (/_liveness ok)", "gateway healthy at http://x", "API healthy at 1.2.3.4:6443"}
+	for _, s := range oks {
+		if isSkipDetail(s) {
+			t.Errorf("isSkipDetail(%q) = true, want false", s)
+		}
+	}
+}
