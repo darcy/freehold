@@ -186,14 +186,14 @@ const REVIEW_TOOL = {
   },
 };
 
-async function callLlm(prompt) {
+async function callLlmOnce(prompt) {
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
-      max_tokens: 8000,
+      max_tokens: 12000,
       messages: [{ role: 'user', content: prompt }],
       tools: [REVIEW_TOOL],
       tool_choice: { type: 'function', function: { name: 'review' } },
@@ -227,6 +227,21 @@ async function callLlm(prompt) {
     throw new Error(`LLM response missing verdict (raw: ${raw.slice(0, 120)}). Check the model/prompt.`);
   }
   return parsed;
+}
+
+// The flash model intermittently drifts into prose instead of the JSON tool
+// call, so retry a few times before failing the run.
+async function callLlm(prompt) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await callLlmOnce(prompt);
+    } catch (e) {
+      lastErr = e;
+      core.warning(`LLM attempt ${attempt}/3 failed: ${e.message}`);
+    }
+  }
+  throw lastErr;
 }
 
 // Each commit gets a NEW parent comment. Create it with all checkboxes
