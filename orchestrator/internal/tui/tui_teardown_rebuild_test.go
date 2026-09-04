@@ -87,8 +87,8 @@ func TestRebuildFormSteps(t *testing.T) {
 	if m.Flow == nil || m.Flow.Kind != flowRebuild {
 		t.Fatal("expected a rebuild flow after pressing B")
 	}
-	if ncols(flowRebuild) != 8 {
-		t.Fatalf("rebuild form should have 8 steps, got %d", ncols(flowRebuild))
+	if ncols(flowRebuild) != 10 {
+		t.Fatalf("rebuild form should have 10 steps, got %d", ncols(flowRebuild))
 	}
 	answers := []string{strings.Repeat("a", 64), "world.test", "10", "freehold-thin", "40", "y", "my-cpa", "y"}
 	for i := range answers {
@@ -169,6 +169,12 @@ func TestNewFlowLabels(t *testing.T) {
 	if got := promptLabel(flowRebuild, 7); got != "deploy litellm gateway + CPA model? (y/n, blank = y)" {
 		t.Errorf("rebuild step7 label = %q", got)
 	}
+	if got := promptLabel(flowRebuild, 8); got != "relay domain (its Buzz origin; blank = the world domain)" {
+		t.Errorf("rebuild step8 label = %q", got)
+	}
+	if got := promptLabel(flowRebuild, 9); got != "control-plane domain (blank = the world domain)" {
+		t.Errorf("rebuild step9 label = %q", got)
+	}
 }
 
 // TestRebuildFormSeededFromConfig: when a config exists, pressing B opens
@@ -189,8 +195,8 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 		t.Fatal("B did not start the rebuild flow")
 	}
 
-	want := [8]string{op, "world.test", "", "freehold-thin", "", "", "", ""}
-	for i := 0; i < 8; i++ {
+	want := [10]string{op, "world.test", "", "freehold-thin", "", "", "", "", "", ""}
+	for i := 0; i < 10; i++ {
 		if m.Flow == nil {
 			t.Fatalf("flow vanished at step %d", i)
 		}
@@ -202,7 +208,7 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 	if m.Flow == nil {
 		t.Fatal("flow vanished before inputs were captured")
 	}
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 10; i++ {
 		if m.Flow.Inputs[i] != want[i] {
 			t.Errorf("inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want[i])
 		}
@@ -238,7 +244,7 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 10; i++ {
 		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if msg == nil {

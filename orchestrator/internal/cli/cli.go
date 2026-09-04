@@ -70,6 +70,7 @@ func init() {
 		relaySetupCmd,
 		storageCmd,
 		rebuildCmd,
+		dnsCredCmd,
 		installCmd,
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")

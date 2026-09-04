@@ -47,12 +47,12 @@ const (
 type tuiFlow struct {
 	Kind   flowKind
 	Step   int
-	Inputs [8]string
+	Inputs [10]string
 	Field  *textinput.Model
 	// Defaults are the prefilled answers per step — sourced from the
 	// recorded config when one exists (see flowDefaults). Blank = no
 	// recorded value; the prompt's own "(blank = N)" semantics apply.
-	Defaults [8]string
+	Defaults [10]string
 }
 
 type flowMsg struct {
@@ -98,8 +98,8 @@ func fieldFor(k flowKind, step int, def string) *textinput.Model {
 // would boot k3s). The two size prompts have no config record; blank keeps
 // their "(blank = N)" semantics. Absent/unreadable config = no defaults
 // (fresh-world behavior, unchanged).
-func flowDefaults(m *Model, k flowKind) [8]string {
-	var d [8]string
+func flowDefaults(m *Model, k flowKind) [10]string {
+	var d [10]string
 	if k != flowRebuild || m.CfgPath == "" {
 		// No config: nothing to prefill. k3s (d[5]) and litellm (d[7]) stay
 		// BLANK, which the arg builder reads as "y" — the full desired world
@@ -114,13 +114,19 @@ func flowDefaults(m *Model, k flowKind) [8]string {
 	d[1] = cfg.Domain
 	if cfg.Plane.ThinPool != nil {
 		d[3] = *cfg.Plane.ThinPool
-	}
-	// The desired world is FULL (reconcile-always): k3s (d[5]) and litellm
+	} // The desired world is FULL (reconcile-always): k3s (d[5]) and litellm
 	// (d[7]) are left blank ("y" when dispatched) regardless of what the
 	// recorded config listed, so a partial world is pulled up to the whole by
 	// default. Opting out is an explicit "n".
 	if cfg.CPAName != "" {
 		d[6] = cfg.CPAName
+	}
+	// Seed the relay + CP hosts from the recorded config (never derived).
+	if r := cfg.RelayHost(); r != "" {
+		d[8] = r
+	}
+	if c := cfg.CPHost(); c != "" {
+		d[9] = c
 	}
 	return d
 }
@@ -136,7 +142,7 @@ func ncols(k flowKind) int {
 	case flowTeardown:
 		return 2
 	case flowRebuild:
-		return 8
+		return 10
 	default:
 		return 1
 	}
@@ -215,8 +221,12 @@ func promptLabel(k flowKind, step int) string {
 			return "boot k3s too? (y/n, blank = y)"
 		case 6:
 			return "CPA agent name (blank = freehold)"
-		default:
+		case 7:
 			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
+		case 8:
+			return "relay domain (its Buzz origin; blank = the world domain)"
+		default:
+			return "control-plane domain (blank = the world domain)"
 		}
 	default:
 		return "value"
@@ -395,6 +405,12 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				// Opt out of the litellm gateway (and thus the CPA, which needs
 				// it to reason). Default is on: the full world reconciles.
 				args = append(args, "--no-litellm")
+			}
+			if r := strings.TrimSpace(f.Inputs[8]); r != "" {
+				args = append(args, "--relay-domain", r)
+			}
+			if c := strings.TrimSpace(f.Inputs[9]); c != "" {
+				args = append(args, "--cp-domain", c)
 			}
 			return activityStartMsg{kind: "rebuild", title: "rebuilding " + domain, args: args}
 		}

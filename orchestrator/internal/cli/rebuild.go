@@ -49,8 +49,46 @@ import (
 	"freehold/orchestrator/prompts"
 )
 
-var rebuildCmd = &cobra.Command{
-	Use:   "rebuild",
+// dnsCredCmd stores the Caddy edge's DNS provider credential (provider + env)
+// ahead of any install, so a headless /--yes or TUI rebuild reuses it without
+// prompting. Interactively: provider from lego's full registry, the provider's
+// own env fields, pre-verified (throwaway TXT) then sealed to the ops identity.
+// Idempotent — a stored copy is reported and left untouched.
+var dnsCredCmd = &cobra.Command{
+	Use:   "dns-cred",
+	Short: "Store (and pre-verify) the DNS provider credential for the wildcard cert — one-time seeding the rebuild reuses",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		domain, _ := cmd.Flags().GetString("domain")
+		cfgPath, _ := cmd.Flags().GetString("config")
+		if domain == "" {
+			if cfg, err := config.Load(cfgPath); err == nil && cfg != nil {
+				domain = cfg.Domain
+			}
+		}
+		if domain == "" {
+			return fmt.Errorf("dns-cred needs a domain (--domain or a config on record) so the pre-verify can target its zone")
+		}
+		e := &rebuildEngine{
+			f:   rebuildFlags{domain: domain},
+			out: os.Stdout,
+			in:  os.Stdin,
+		}
+		provider, _, err := e.promptDNSCred()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(e.out, "  ✓ DNS provider credential saved (%s) — rebuilds will reuse it\n", provider)
+		fmt.Fprintf(e.out, "  stored sealed at %s\n", e.certCredPath())
+		return nil
+	},
+}
+
+func init() {
+	dnsCredCmd.Flags().String("domain", "", "World domain (the wildcard cert apex the pre-verify targets); defaults to the recorded config")
+	dnsCredCmd.Flags().String("config", defaultConfigPath(), "Config path to read the domain from")
+}
+
+var rebuildCmd = &cobra.Command{Use: "rebuild",
 	Short: "Bring the whole world up end to end: door, runner, durable plane, relay + CP + k3s LXCs, deploys — the installer pipeline as one command",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		f := rebuildFlags{}
@@ -2766,6 +2804,12 @@ func (e *rebuildEngine) promptDNSCred() (string, map[string]string, error) {
 	env, err := e.promptProviderEnv(provider)
 	if err != nil {
 		return "", nil, err
+	}
+	if e.f.domain != "" {
+		fmt.Fprintf(e.out, "  · pre-verifying %s credentials (throwaway TXT round-trip)…\n", provider)
+		if err := cert.Verify(e.f.domain, provider, env); err != nil {
+			return "", nil, fmt.Errorf("DNS provider pre-verify failed — fix the credential and try again: %w", err)
+		}
 	}
 	if err := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns"); err != nil {
 		return "", nil, fmt.Errorf("storing DNS credential: %w", err)
