@@ -761,7 +761,7 @@ func countStr(list []string, s string) int {
 func TestCaddyCertInstallScript(t *testing.T) {
 	fc := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
 	key := []byte("-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
-	s := caddyCertInstallScript(102, "relay", fc, key)
+	s := caddyCertInstallScript(102, "relay", fc)
 
 	// set -e in BOTH the outer wrapper and the inner (guest) script.
 	if got := strings.Count(s, "set -e"); got != 2 {
@@ -775,14 +775,18 @@ func TestCaddyCertInstallScript(t *testing.T) {
 			t.Errorf("script missing %q", want)
 		}
 	}
-	// base64 payloads present + single-quoted (safe, no shell metacharacters).
+	// The public fullchain is base64-embedded; the PRIVATE KEY must NOT be —
+	// it comes from the runner-injected sealed secret env ($CERT_KEY_RELAY),
+	// so the audited command never carries the key bytes.
 	fcB64 := base64.StdEncoding.EncodeToString(fc)
-	keyB64 := base64.StdEncoding.EncodeToString(key)
 	if !strings.Contains(s, "'"+fcB64+"'") {
 		t.Errorf("fullchain base64 not single-quoted-embedded")
 	}
-	if !strings.Contains(s, "'"+keyB64+"'") {
-		t.Errorf("key base64 not single-quoted-embedded")
+	if strings.Contains(s, string(key)) || strings.Contains(s, base64.StdEncoding.EncodeToString(key)) {
+		t.Errorf("private key must not appear in the audited install script:\n%s", s)
+	}
+	if !strings.Contains(s, `"${CERT_KEY_RELAY}"`) {
+		t.Errorf("script must source the private key from ${CERT_KEY_RELAY}")
 	}
 }
 

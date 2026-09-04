@@ -2721,31 +2721,59 @@ func (e *rebuildEngine) caddyFullchain(k3sVmid uint32, slot string) ([]byte, err
 // installCaddyCert writes the chain/key into a slot's dir on the Caddy durable
 // PVC via a short-lived helper pod that mounts the same caddy-data volume (so
 // it works even while Caddy itself is crash-looping on the very first boot,
-// before any cert exists), then reloads the edge.
+// before any cert exists), then reloads the edge. The PRIVATE KEY is shipped as
+// a SEALED RUNNER SECRET (env-injected by the runner, never bytes in the audited
+// command); only the public fullchain is embedded in the command text.
 func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, slot string, fullchain, key []byte) error {
-	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyCertInstallScript(k3sVmid, slot, fullchain, key), 180))
+	keyEnv := slotCertKeyEnv(slot)
+	if err := e.sealRunnerSecret("cert-key-"+slot, keyEnv, string(key)); err != nil {
+		return fmt.Errorf("seal %s key: %w", slot, err)
+	}
+	args := []string{"exec", "--addr", e.f.addr, "--agent-dir", rbOpsDir(),
+		"--timeout", "180", "--secret", "cert-key-" + slot, e.f.target,
+		caddyCertInstallScript(k3sVmid, slot, fullchain)}
+	ok, out := e.runBin(e.bins.Self, args)
 	if !ok {
 		return fmt.Errorf("caddy %s cert install failed:\n%s", slot, out)
 	}
 	return nil
 }
 
-// caddyCertInstallScript writes the chain/key into /data/tls/<slot>/ within the
+// slotCertKeyEnv is the env var the runner injects for the slot's cert key.
+func slotCertKeyEnv(slot string) string { return "CERT_KEY_" + strings.ToUpper(slot) }
+
+// sealRunnerSecret seals a value into the current target runner's secrets
+// package under `name`, so a later `exec --secret <name>` injects it as
+// $<UPPER_SNAKE> into the command's environment (values never in command text).
+func (e *rebuildEngine) sealRunnerSecret(name, envVar, val string) error {
+	env := append([]string{envVar + "=" + val}, os.Environ()...)
+	ok, out := e.runEnv(e.bins.ControlPlane, env, []string{
+		"add-secret", e.f.target, name,
+		"--state-dir", rbStateDir(),
+		"--secret-env", envVar,
+	})
+	if !ok {
+		return fmt.Errorf("add-secret %s failed:\n%s", name, out)
+	}
+	return nil
+}
+
+// caddyCertInstallScript writes the chain into /data/tls/<slot>/ within the
 // Caddy durable PVC via a short-lived helper pod that mounts the same caddy-data
-// volume (so it works even while Caddy itself is crash-looping on the very first
-// boot, before any cert exists), then reloads the edge. The cert bytes are
-// base64-embedded in the runner command only — transient in memory, never
-// persisted by freehold. Both the outer + inner (guest) shells run set -e so a
-// failed helper-pod write FAILS the stage instead of silently claiming issuance.
-func caddyCertInstallScript(k3sVmid uint32, slot string, fullchain, key []byte) string {
+// volume (so it works even while Caddy is crash-looping on the very first boot),
+// then reloads the edge. The PUBLIC fullchain is base64-embedded in the command;
+// the PRIVATE key is read from $CERT_KEY_<SLOT> (the runner injects it from the
+// sealed secret, so the audited command text never contains the key). Both the
+// outer + inner (guest) shells run set -e so a failed write FAILS the stage.
+func caddyCertInstallScript(k3sVmid uint32, slot string, fullchain []byte) string {
 	fcB64 := base64.StdEncoding.EncodeToString(fullchain)
-	keyB64 := base64.StdEncoding.EncodeToString(key)
+	keyEnv := slotCertKeyEnv(slot)
 	return fmt.Sprintf(`set -e
 pct exec %d -- sh -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 printf %s | base64 -d > /tmp/fc.pem
-printf %s | base64 -d > /tmp/key.pem
+printf "%%s" "${%s}" > /tmp/key.pem
 # Helper pod over the SAME durable PVC (works before Caddy is healthy).
 cat > /tmp/cert-installer.yaml <<'"'"'YAMLEOF'"'"'
 apiVersion: v1
@@ -2767,7 +2795,7 @@ $K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/%s/key.pem" < /tmp
 $K -n caddy delete pod cert-installer >/dev/null 2>&1 || true
 $K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
 rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
-'`, k3sVmid, shellSingleQuote(fcB64), shellSingleQuote(keyB64), slot, slot, slot)
+'`, k3sVmid, shellSingleQuote(fcB64), keyEnv, slot, slot, slot)
 }
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.
