@@ -17,7 +17,9 @@ func (p providerItem) FilterValue() string { return p.name }
 
 // providerPicker is a scrollable/paginated, filterable list over lego's full
 // provider registry — replacing the unreadable enumerate-and-type prompt for
-// the 201 supported providers (roadmap/CORE_TLS.md F3).
+// the 201 supported providers (roadmap/CORE_TLS.md F3). Uses the SIMPLE
+// delegate: one provider per line, no description padding; type-ahead filtering
+// (FilterValue = provider name) still works.
 type providerPicker struct {
 	list   list.Model
 	chosen *string
@@ -30,8 +32,14 @@ func runProviderPicker(providers []string) (string, error) {
 		items = append(items, providerItem{n})
 	}
 	delegate := list.NewDefaultDelegate()
-	m := &providerPicker{list: list.New(items, delegate, 44, 18)}
+	// Compact single-line rows: hide the (identical) description subtitle and
+	// collapse the per-item padding, so the 201 providers show densely.
+	delegate.ShowDescription = false
+	delegate.SetHeight(1)
+	delegate.SetSpacing(0)
+	m := &providerPicker{list: list.New(items, delegate, 40, 18)}
 	m.list.Title = "Choose the DNS-01 provider for the wildcard cert"
+	m.list.SetShowStatusBar(false)
 
 	p := tea.NewProgram(m, tea.WithInput(os.Stdin))
 	model, err := p.Run()
