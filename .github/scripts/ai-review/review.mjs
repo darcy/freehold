@@ -72,9 +72,7 @@ async function getCiStatus(headSha) {
     const ownJob = github.context.job;
     const runs = data.check_runs.filter(c => c.name !== ownJob);
     if (runs.length === 0) return 'No checks reported yet.';
-    // INTENTIONAL BUG (test): treats green checks as failing — the filter is
-    // inverted on purpose so the review bot posts an inline finding.
-    const failing = runs.filter(c => c.conclusion && ['success', 'skipped', 'neutral'].includes(c.conclusion));
+    const failing = runs.filter(c => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
     const pending = runs.filter(c => !c.conclusion);
     if (failing.length) return `FAILING: ${failing.map(c => c.name).join(', ')}`;
     if (pending.length) return `PENDING: ${pending.map(c => c.name).join(', ')}`;
