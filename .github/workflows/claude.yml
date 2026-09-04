@@ -4,6 +4,10 @@ on:
 
 jobs:
   review:
+    # Temporarily disabled during the ai-pr-review comparison window; the new
+    # bot posts on every push and two reviewers produce duplicate comments.
+    # Re-enable (remove the `if: false`) once the comparison settles.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

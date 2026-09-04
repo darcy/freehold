@@ -6,3 +6,6 @@ orchestrator/target/
 *.tfstate
 *.tfstate.*
 .terraform/
+
+# node deps for the ai-pr-review workflow
+node_modules/
