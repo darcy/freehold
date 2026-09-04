@@ -356,7 +356,17 @@ func (e *rebuildEngine) run() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
-	// 6.5. DNS provider credential for the Caddy edge's wildcard cert. Asked
+	// 6.5. The relay + control-plane hosts are ASKED (never derived). When the
+	// operator supplied --relay-domain/--cp-domain (or is headless --yes) the
+	// values stand; otherwise each is prompted up front, defaulting to the
+	// world domain so a bare ENTER keeps that service at the world domain.
+	if !e.f.yes {
+		if err := e.promptDomains(); err != nil {
+			return err
+		}
+	}
+
+	// 6.6. DNS provider credential for the Caddy edge's wildcard cert. Asked
 	// UP FRONT (like the other prompts) so a later stage failure can't strand
 	// a long install without its DN-01 token: if a sealed copy exists it's
 	// reused silently; otherwise the operator is prompted + pre-verified now,
@@ -2693,6 +2703,33 @@ func firstNonEmpty(vs ...string) string {
 // world domain is set.
 func (e *rebuildEngine) worldHasEdge() bool {
 	return !e.f.noK3s && e.f.domain != ""
+}
+
+// promptDomains asks for the relay + control-plane hosts up front. Each
+// defaults to the world domain (bare ENTER), so nothing is derived — the
+// operator explicitly names them (they may be the world domain, a subdomain,
+// or on a wholly different zone). Flags already set (or a headless --yes run)
+// skip the prompt.
+func (e *rebuildEngine) promptDomains() error {
+	if e.f.relayDomain == "" && !e.f.yes {
+		ans, err := e.prompt("relay domain (its Buzz origin; bare ENTER = the world domain " + e.f.domain + ")")
+		if err != nil {
+			return err
+		}
+		if a := strings.TrimSpace(ans); a != "" {
+			e.f.relayDomain = a
+		}
+	}
+	if e.f.cpDomain == "" && !e.f.yes {
+		ans, err := e.prompt("control-plane domain (bare ENTER = the world domain " + e.f.domain + ")")
+		if err != nil {
+			return err
+		}
+		if a := strings.TrimSpace(ans); a != "" {
+			e.f.cpDomain = a
+		}
+	}
+	return nil
 }
 
 // promptDNSCred returns the DNS provider name + its env map, reusing the sealed
