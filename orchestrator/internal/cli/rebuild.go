@@ -2720,25 +2720,15 @@ func (e *rebuildEngine) stageCert() error {
 		return nil
 	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
-	// Per-host LE cert-domain: defaults to the host; a "*.<base>" issues a
-	// wildcard that covers the host (DNS-01 challenge targets the apex the
-	// user's zone serves).
-	legoDomain := func(slot string) string {
-		cfg, _ := config.Load(e.f.configPath)
-		if cfg == nil {
-			return ""
-		}
-		if slot == "cp" && cfg.Caddy.CPLegoDomain != "" {
-			return cfg.Caddy.CPLegoDomain
-		}
-		if slot == "relay" && cfg.Caddy.RelayLegoDomain != "" {
-			return cfg.Caddy.RelayLegoDomain
-		}
-		if slot == "cp" {
-			return cfg.CPHost()
-		}
-		return cfg.RelayHost()
+	// Issue/reuse ONE cert per distinct LE cert-domain, then REUSE it for any
+	// later slot that has the SAME domain (e.g. both relay + cp = the same
+	// wildcard *.freehold-test.darcydev.net) — never create/overwrite a second
+	// DNS-01 challenge for an identical wildcard.
+	issuer := cfg.Caddy.CertIssuer
+	if issuer == "" {
+		issuer = "lego (DNS-01)"
 	}
+	byDomain := map[string]*cert.Issued{}
 	for _, svc := range []struct{ slot, host string }{
 		{"relay", cfg.RelayHost()},
 		{"cp", cfg.CPHost()},
@@ -2746,16 +2736,56 @@ func (e *rebuildEngine) stageCert() error {
 		if svc.host == "" {
 			continue
 		}
-		if err := e.ensureHostCert(k3sVmid, svc.slot, svc.host, legoDomain(svc.slot)); err != nil {
+		leDomain := e.legoDomain(svc.slot)
+		// Same cert-domain already issued/reused for an earlier slot -> copy it
+		// into this slot, don't re-issue.
+		if c, ok := byDomain[leDomain]; ok && c != nil {
+			if err := e.installCaddyCert(k3sVmid, svc.slot, c.Fullchain, c.Key); err != nil {
+				return err
+			}
+			exp := c.NotAfter
+			if exp.IsZero() {
+				exp, _ = cert.LoadExpiryFromBytes(c.Fullchain)
+			}
+			if err := e.recordCert(svc.slot, exp, issuer); err != nil {
+				return err
+			}
+			fmt.Fprintf(e.out, "  · %s: reusing the %s certificate (same cert-domain)\n", svc.slot, leDomain)
+			continue
+		}
+		got, err := e.ensureHostCert(k3sVmid, svc.slot, svc.host, leDomain)
+		if err != nil {
 			return err
 		}
+		byDomain[leDomain] = got
 	}
 	return nil
 }
 
+// legoDomain is the per-slot LE cert-domain for the rebuild engine's current
+// config (relay slot default = the relay host; cp default = the cp host;
+// "*.base" = a wildcard covering the host).
+func (e *rebuildEngine) legoDomain(slot string) string {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	if slot == "cp" && cfg.Caddy.CPLegoDomain != "" {
+		return cfg.Caddy.CPLegoDomain
+	}
+	if slot == "relay" && cfg.Caddy.RelayLegoDomain != "" {
+		return cfg.Caddy.RelayLegoDomain
+	}
+	if slot == "cp" {
+		return cfg.CPHost()
+	}
+	return cfg.RelayHost()
+}
+
 // ensureHostCert reuses or issues ONE slot's cert (its own slot), for the given
-// LE cert-domain (a "*.<base>" issues a wildcard covering the host).
-func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host, leDomain string) error {
+// LE cert-domain ("*.base" issues a wildcard covering the host). Returns the
+// cert bytes so a later slot sharing the same cert-domain can reuse them.
+func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host, leDomain string) (*cert.Issued, error) {
 	// 1. Reuse the durable per-slot cert on the PVC when fresh (>= 30d left).
 	if existing, err := e.caddyFullchain(k3sVmid, slot); err == nil && len(existing) > 0 {
 		if exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour); ok {
@@ -2765,7 +2795,14 @@ func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host, leDomain stri
 			if cfg != nil {
 				isr = cfg.Caddy.CertIssuer
 			}
-			return e.recordCert(slot, exp, isr)
+			if err := e.recordCert(slot, exp, isr); err != nil {
+				return nil, err
+			}
+			iss := &cert.Issued{Fullchain: existing}
+			if key, kerr := e.caddyKey(k3sVmid, slot); kerr == nil {
+				iss.Key = key
+			}
+			return iss, nil
 		}
 	}
 
@@ -2781,7 +2818,7 @@ func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host, leDomain stri
 	}
 	provider, env, err := e.promptDNSCred(slot, verifyTarget, reuseFrom)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 3. Issue via embedded lego: a wildcard *.base when the LE domain asks for
@@ -2796,19 +2833,22 @@ func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host, leDomain stri
 		issued, err = cert.Issue(leDomain, provider, env)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 4. Install into the Caddy pod (per-slot path) + reload.
 	if err := e.installCaddyCert(k3sVmid, slot, issued.Fullchain, issued.Key); err != nil {
-		return err
+		return nil, err
 	}
 	exp := issued.NotAfter
 	if exp.IsZero() {
 		exp, _ = cert.LoadExpiryFromBytes(issued.Fullchain)
 	}
 	fmt.Fprintf(e.out, "  ✓ %s cert issued (expires %s)\n", slot, exp.UTC().Format(time.RFC3339))
-	return e.recordCert(slot, exp, provider)
+	if err := e.recordCert(slot, exp, provider); err != nil {
+		return nil, err
+	}
+	return issued, nil
 }
 
 // recordCert persists the per-slot cert expiry + issuer into the config.
@@ -2846,6 +2886,19 @@ func (e *rebuildEngine) caddyFullchain(k3sVmid uint32, slot string) ([]byte, err
 		return nil, fmt.Errorf("caddy %s fullchain base64: %w", slot, err)
 	}
 	return dec, nil
+}
+
+// caddyKey cats a slot's private key out of the Caddy pod (base64). Read only to
+// copy a cert to a sibling slot that shares the same cert-domain.
+func (e *rebuildEngine) caddyKey(k3sVmid uint32, slot string) ([]byte, error) {
+	cmd := fmt.Sprintf(
+		"pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n caddy exec deploy/caddy -- sh -c 'cat /data/tls/%s/key.pem' 2>/dev/null | base64 -w0",
+		k3sVmid, slot)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60))
+	if !ok {
+		return nil, fmt.Errorf("caddy %s key unreadable: %s", slot, strings.TrimSpace(out))
+	}
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 }
 
 // installCaddyCert writes the chain/key into a slot's dir on the Caddy durable

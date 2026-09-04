@@ -141,10 +141,13 @@ func Issue(host, providerName string, env map[string]string) (*Issued, error) {
 	return issue([]string{host}, host, providerName, env)
 }
 
-// IssueWildcard obtains a certificate covering the apex and its wildcard
-// (kept for callers that still want a wildcard SAN).
+// IssueWildcard obtains a certificate for the wildcard domain via DNS-01. Only
+// the wildcard identifier is requested, so its single DNS-01 challenge is at
+// `_acme-challenge.<domain>` (the apex) — do NOT add the apex as a second SAN
+// here, which gives two identifiers mapping to the same challenge name and can
+// stall/fail validation.
 func IssueWildcard(domain, providerName string, env map[string]string) (*Issued, error) {
-	return issue([]string{"*." + domain, domain}, "*."+domain, providerName, env)
+	return issue([]string{"*." + domain}, "*."+domain, providerName, env)
 }
 
 func issue(domains []string, label, providerName string, env map[string]string) (*Issued, error) {
