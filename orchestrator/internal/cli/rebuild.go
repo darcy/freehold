@@ -2758,22 +2758,27 @@ func (e *rebuildEngine) sealRunnerSecret(name, envVar, val string) error {
 	return nil
 }
 
-// caddyCertInstallScript writes the chain into /data/tls/<slot>/ within the
-// Caddy durable PVC via a short-lived helper pod that mounts the same caddy-data
-// volume (so it works even while Caddy is crash-looping on the very first boot),
-// then reloads the edge. The PUBLIC fullchain is base64-embedded in the command;
-// the PRIVATE key is read from $CERT_KEY_<SLOT> (the runner injects it from the
-// sealed secret, so the audited command text never contains the key). Both the
-// outer + inner (guest) shells run set -e so a failed write FAILS the stage.
+// caddyCertInstallScript installs the chain into /data/tls/<slot>/ within the
+// Caddy durable PVC (via a short-lived helper pod that mounts the same
+// caddy-data volume, so it works even while Caddy crash-loops on the very first
+// boot) then reloads the edge.
+//
+// PVT KEY VIA SEALED SECRET: the runner injects $CERT_KEY_<SLOT> into this
+// command's env ON THE PVE HOST. A `pct exec` guest shell would NOT inherit it,
+// so the key is written to a HOST temp file first, `pct push`ed into the guest,
+// then written into the pod — the audited command text never carries the key.
+// The public fullchain is base64-embedded (public data). Both shells run set -e.
 func caddyCertInstallScript(k3sVmid uint32, slot string, fullchain []byte) string {
 	fcB64 := base64.StdEncoding.EncodeToString(fullchain)
 	keyEnv := slotCertKeyEnv(slot)
 	return fmt.Sprintf(`set -e
+printf '%%s' "${%s}" > /tmp/fh-key.pem
+printf %s | base64 -d > /tmp/fh-fc.pem
+pct push %d /tmp/fh-fc.pem /tmp/cf.pem
+pct push %d /tmp/fh-key.pem /tmp/ck.pem
 pct exec %d -- sh -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-printf %s | base64 -d > /tmp/fc.pem
-printf "%%s" "${%s}" > /tmp/key.pem
 # Helper pod over the SAME durable PVC (works before Caddy is healthy).
 cat > /tmp/cert-installer.yaml <<'"'"'YAMLEOF'"'"'
 apiVersion: v1
@@ -2790,12 +2795,14 @@ YAMLEOF
 $K -n caddy delete pod cert-installer --ignore-not-found=true >/dev/null 2>&1 || true
 $K apply -f /tmp/cert-installer.yaml
 $K -n caddy wait --for=condition=Ready pod/cert-installer --timeout=60s
-$K -n caddy exec pod/cert-installer -- sh -c "mkdir -p /data/tls/%s && cat > /data/tls/%s/fullchain.pem" < /tmp/fc.pem
-$K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/%s/key.pem" < /tmp/key.pem
+$K -n caddy exec pod/cert-installer -- sh -c "mkdir -p /data/tls/%s && cat > /data/tls/%s/fullchain.pem" < /tmp/cf.pem
+$K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/%s/key.pem" < /tmp/ck.pem
 $K -n caddy delete pod cert-installer >/dev/null 2>&1 || true
 $K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
-rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
-'`, k3sVmid, shellSingleQuote(fcB64), keyEnv, slot, slot, slot)
+rm -f /tmp/cf.pem /tmp/ck.pem /tmp/cert-installer.yaml
+'
+rm -f /tmp/fh-key.pem /tmp/fh-fc.pem
+`, keyEnv, shellSingleQuote(fcB64), k3sVmid, k3sVmid, k3sVmid, slot, slot, slot)
 }
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.

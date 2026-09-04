@@ -763,21 +763,19 @@ func TestCaddyCertInstallScript(t *testing.T) {
 	key := []byte("-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
 	s := caddyCertInstallScript(102, "relay", fc)
 
-	// set -e in BOTH the outer wrapper and the inner (guest) script.
-	if got := strings.Count(s, "set -e"); got != 2 {
-		t.Errorf("want set -e in outer + inner shells, got %d occurrences:\n%s", got, s)
-	}
 	// the busybox helper reads the same durable PVC and is waited-for before
 	// the cert/key writes, into the per-slot /data/tls/relay/ dir.
 	for _, want := range []string{"image: busybox", "claimName: caddy-data", "--timeout=60s",
-		"persistentVolumeClaim", "rollout restart deploy/caddy", "/data/tls/relay/fullchain.pem", "/data/tls/relay/key.pem"} {
+		"persistentVolumeClaim", "rollout restart deploy/caddy", "/data/tls/relay/fullchain.pem", "/data/tls/relay/key.pem",
+		"pct push 102"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script missing %q", want)
 		}
 	}
 	// The public fullchain is base64-embedded; the PRIVATE KEY must NOT be —
-	// it comes from the runner-injected sealed secret env ($CERT_KEY_RELAY),
-	// so the audited command never carries the key bytes.
+	// it comes from $CERT_KEY_RELAY on the HOST (runner-injected env), written
+	// to a temp file and pct-pushed into the guest (a pct exec guest shell
+	// would NOT inherit host env). The audited command never carries the key.
 	fcB64 := base64.StdEncoding.EncodeToString(fc)
 	if !strings.Contains(s, "'"+fcB64+"'") {
 		t.Errorf("fullchain base64 not single-quoted-embedded")
@@ -785,8 +783,21 @@ func TestCaddyCertInstallScript(t *testing.T) {
 	if strings.Contains(s, string(key)) || strings.Contains(s, base64.StdEncoding.EncodeToString(key)) {
 		t.Errorf("private key must not appear in the audited install script:\n%s", s)
 	}
-	if !strings.Contains(s, `"${CERT_KEY_RELAY}"`) {
-		t.Errorf("script must source the private key from ${CERT_KEY_RELAY}")
+	// the key env is read OUTSIDE pct exec (host side), and fh-key is cleaned up.
+	if !strings.Contains(s, `"${CERT_KEY_RELAY}" > /tmp/fh-key.pem`) {
+		t.Errorf("script must source the private key from ${CERT_KEY_RELAY} on the host")
+	}
+	if !strings.Contains(s, "/tmp/fh-key.pem") || !strings.Contains(s, "/tmp/fh-fc.pem") {
+		t.Errorf("host temp cert files must be used then removed")
+	}
+	if !strings.Contains(s, "rm -f /tmp/fh-key.pem /tmp/fh-fc.pem") {
+		t.Errorf("host temp cert files must be cleaned up")
+	}
+	// the guest shell (after the pct exec marker) must NOT reference the key
+	// env at all — a pct exec guest shell does not inherit the host env.
+	if i := strings.Index(s, "pct exec 102 -- sh -c"); i >= 0 &&
+		strings.Contains(s[i:], "${CERT_KEY_RELAY}") {
+		t.Errorf("the guest shell must not read ${CERT_KEY_RELAY} (pct exec does not inherit host env)")
 	}
 }
 
