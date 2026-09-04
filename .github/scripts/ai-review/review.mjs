@@ -391,7 +391,7 @@ async function main() {
   const seen = new Set(existingComments.filter(c => c.commit_id === headSha).map(c => `${c.path}:${c.line}`));
   const priorSeverity = new Map();
   for (const c of existingComments) {
-    const m = c.body?.match(/\[\[(blocking|important)\]\]/) || [];
+    const m = c.body?.match(/\[(blocking|important)\]/) || [];
     if (m[1]) priorSeverity.set(`${c.path}:${c.line}`, m[1]);
   }
   const newInline = [];
@@ -406,7 +406,7 @@ async function main() {
   const currentFindings = new Set(inline.map(c => `${c.path}:${c.line}`));
   const fixedComments = existingComments.filter(c =>
     !c.in_reply_to_id &&
-    /\[\[(blocking|important)\]\]/.test(c.body || '') &&
+    /\[(blocking|important)\]/.test(c.body || '') &&
     !currentFindings.has(`${c.path}:${c.line}`)
   );
   const resolvedCount = await resolveFixedThreads(fixedComments);
