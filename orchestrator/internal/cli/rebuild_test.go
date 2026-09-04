@@ -873,3 +873,44 @@ func TestRelayDomainHost(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyConfigDefaults: `freehold rebuild` with no flags must pull the
+// recorded operator key, relay/CP hosts, thin-pool, agent name, and proxy IP
+// from the stored config — a smooth rebuild, no forced re-entry. Explicit flags
+// win over the config.
+func TestApplyConfigDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	op := strings.Repeat("e", 64)
+	pool := "fh-thin"
+	proxy := "192.168.30.7/24"
+	if err := (&config.Config{
+		RelayURL:       "https://relay.world.test",
+		RelayWsURL:     "wss://relay.world.test",
+		CPURL:          "https://cp.world.test",
+		OperatorPubkey: op,
+		Proxy:          config.ProxySpec{Ip: &proxy},
+		Plane:          config.PlaneSpec{ThinPool: &pool},
+		CPAName:        "waldo",
+	}).Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	f := &rebuildFlags{}
+	if err := applyConfigDefaults(f, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if f.operatorPubkey != op || f.relayDomain != "relay.world.test" || f.cpDomain != "cp.world.test" {
+		t.Errorf("defaults = %q / %q / %q", f.operatorPubkey, f.relayDomain, f.cpDomain)
+	}
+	if f.thinPool != "fh-thin" || f.agentName != "waldo" || f.proxyIP != proxy {
+		t.Errorf("defaults = tp:%q agent:%q proxy:%q", f.thinPool, f.agentName, f.proxyIP)
+	}
+	// explicit flags win
+	f2 := &rebuildFlags{operatorPubkey: "y", relayDomain: "z", cpDomain: "w"}
+	if err := applyConfigDefaults(f2, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if f2.operatorPubkey != "y" || f2.relayDomain != "z" {
+		t.Errorf("explicit flags must win: %q/%q", f2.operatorPubkey, f2.relayDomain)
+	}
+}

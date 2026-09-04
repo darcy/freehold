@@ -168,6 +168,12 @@ var rebuildCmd = &cobra.Command{Use: "rebuild",
 		f.configPath, _ = cmd.Flags().GetString("config")
 		f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 		f.yes, _ = cmd.Flags().GetBool("yes")
+		// Smooth rebuild: pull any omitted value from the stored config so a
+		// rebuild is not forced to re-enter the operator key, relay/CP hosts,
+		// thin-pool, etc.
+		if err := applyConfigDefaults(&f, f.configPath); err != nil {
+			return err
+		}
 		// The ONE static IP (the proxy/Caddy node) must be CIDR — pct create's
 		// net0=ip= wants host/prefix; relay/cp/k3s LXCs are DHCP behind it.
 		if f.proxyIP != "" && !strings.Contains(f.proxyIP, "/") {
@@ -180,6 +186,39 @@ var rebuildCmd = &cobra.Command{Use: "rebuild",
 		}
 		return eng.run()
 	},
+}
+
+// applyConfigDefaults fills any omitted rebuild flag from the stored config, so
+// `freehold rebuild` is smooth: it reuses the recorded operator key, relay/CP
+// hosts, thin-pool, agent name, and proxy IP instead of forcing re-entry. An
+// explicit flag always wins; the config only fills blanks.
+func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return nil
+	}
+	if f.operatorPubkey == "" {
+		f.operatorPubkey = cfg.OperatorPubkey
+	}
+	if f.relayDomain == "" {
+		f.relayDomain = cfg.RelayHost()
+	}
+	if f.cpDomain == "" {
+		f.cpDomain = cfg.CPHost()
+	}
+	if f.thinPool == "" && cfg.Plane.ThinPool != nil {
+		f.thinPool = *cfg.Plane.ThinPool
+	}
+	if f.agentName == "" && cfg.CPAName != "" {
+		f.agentName = cfg.CPAName
+	}
+	if f.proxyIP == "" && cfg.Proxy.Ip != nil {
+		f.proxyIP = *cfg.Proxy.Ip
+	}
+	return nil
 }
 
 func init() {
