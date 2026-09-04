@@ -273,7 +273,7 @@ async function resolveFixedThreads(fixedComments) {
             nodes {
               id
               isResolved
-              comments(first: 20) { nodes { id } }
+              comments(first: 20) { nodes { id databaseId } }
             }
           }
         }
@@ -286,7 +286,8 @@ async function resolveFixedThreads(fixedComments) {
   const commentToThread = new Map();
   for (const t of threadQuery.repository.pullRequest.reviewThreads.nodes) {
     if (t.isResolved) continue;
-    for (const c of t.comments.nodes) commentToThread.set(c.id, t.id);
+    // `id` is the GraphQL node id; `databaseId` is the REST numeric id we match on.
+    for (const c of t.comments.nodes) commentToThread.set(c.databaseId, t.id);
   }
   let resolved = 0;
   for (const c of fixedComments) {
