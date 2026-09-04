@@ -501,8 +501,13 @@ func (m *Model) activityView() string {
 			}
 			b.WriteString("  " + line + "\n")
 		case stepPending:
-			// send-msg's empty result slots: placeholder dots.
-			b.WriteString("  " + styleDots.Render(strings.Repeat(".", 30)) + "\n")
+			// A queued slot: show its label dimmed (and a placeholder) so the
+			// list of steps being checked is visible — not anonymous dots.
+			label := s.label
+			if label == "" {
+				label = "…"
+			}
+			b.WriteString("  " + styleDots.Render("· "+label+" ·") + "\n")
 		case stepRunning:
 			line := a.spin.View() + " " + styleCurrent.Render(s.label+"…")
 			if s.detail != "" {

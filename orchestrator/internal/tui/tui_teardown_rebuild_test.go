@@ -471,8 +471,8 @@ func TestTeardownViewRendersCheckboxRows(t *testing.T) {
 	if !strings.Contains(out, "cp LXC 101…") {
 		t.Errorf("in-flight slot must render its label:\n%s", out)
 	}
-	if !strings.Contains(out, strings.Repeat(".", 30)) {
-		t.Errorf("queued slot must render placeholder dots:\n%s", out)
+	if !strings.Contains(out, "k3s LXC 102") {
+		t.Errorf("queued slot must render its label (so the pending check is visible):\n%s", out)
 	}
 	if !strings.Contains(out, "destroying cp LXC 101…") {
 		t.Errorf("the spinner line must name the LXC being destroyed:\n%s", out)
