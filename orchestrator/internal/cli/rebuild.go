@@ -3018,7 +3018,9 @@ func (e *rebuildEngine) promptProvider() (string, error) {
 }
 
 // promptProviderEnv collects the provider's env-var fields (from lego-derived
-// names; freeform KEY=VAL lines for unknown/auto-detecting providers).
+// names; freeform KEY=VAL lines for unknown/auto-detecting providers). The
+// credential trio is asked FIRST and REQUIRED (no blank); every other field is
+// collected after with "(optional)" (blank = unset).
 func (e *rebuildEngine) promptProviderEnv(provider string) (map[string]string, error) {
 	names := cert.ProviderEnvNames(provider)
 	env := map[string]string{}
@@ -3042,14 +3044,45 @@ func (e *rebuildEngine) promptProviderEnv(provider string) (map[string]string, e
 		}
 		return env, nil
 	}
-	fmt.Fprintln(e.out, "  this provider reads the following environment fields; enter each (blank field = leave unset):")
-	for _, n := range names {
-		v, err := e.prompt(n)
+	// The credential fields asked FIRST + REQUIRED. AWS/Route53: the access
+	// key, secret, and hosted zone are required to issue the wildcard cert.
+	required := map[string][]string{
+		"route53": {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_HOSTED_ZONE_ID"},
+	}[provider]
+	var requiredSet []string
+	for _, n := range required {
+		if containsStr(names, n) {
+			requiredSet = append(requiredSet, n)
+		}
+	}
+	fmt.Fprintln(e.out, "  enter the REQUIRED credential fields:")
+	for _, n := range requiredSet {
+		v, err := e.prompt(n + " (required)")
 		if err != nil {
 			return nil, err
 		}
-		if v = strings.TrimSpace(v); v != "" {
-			env[n] = v
+		if v = strings.TrimSpace(v); v == "" {
+			return nil, fmt.Errorf("%s is required for the %s credential", n, provider)
+		}
+		env[n] = v
+	}
+	// Everything else, marked optional.
+	var rest []string
+	for _, n := range names {
+		if !containsStr(requiredSet, n) {
+			rest = append(rest, n)
+		}
+	}
+	if len(rest) > 0 {
+		fmt.Fprintln(e.out, "  optional fields (blank = unset):")
+		for _, n := range rest {
+			v, err := e.prompt(n + " (optional)")
+			if err != nil {
+				return nil, err
+			}
+			if v = strings.TrimSpace(v); v != "" {
+				env[n] = v
+			}
 		}
 	}
 	return env, nil

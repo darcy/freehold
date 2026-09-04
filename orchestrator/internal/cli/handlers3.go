@@ -732,7 +732,7 @@ var teardownCmd = &cobra.Command{
 		if !yes {
 			fmt.Printf("teardown scope: %s (config %s)\n", scope, configPath)
 			if scope == teardown.ScopeWholeWorld && !data {
-				fmt.Println("keeps: config (LXC coordinates intact) · world home · door key · plane locations")
+				fmt.Println("keeps: config (LXC coords cleared so build re-creates them) · world home · door key · plane locations · DNS creds")
 			}
 			fmt.Printf("proceed? [type yes] ")
 			var answer string
@@ -754,6 +754,19 @@ var teardownCmd = &cobra.Command{
 			fmt.Println(report[:idx])
 		} else {
 			fmt.Println(report)
+		}
+		// Forget the recorded container ids + discovered ips so the NEXT build
+		// re-creates the guests from scratch (ids are NOT guaranteed to be
+		// reused). Keeps everything else (domains, runner, plane, DNS creds,
+		// door) intact.
+		if scope == teardown.ScopeWholeWorld {
+			cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
+			cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
+			cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
+			if err := cfg.Save(configPath); err != nil {
+				return err
+			}
+			fmt.Println("cleared recorded LXC coordinates (vmid + ip) — the next build re-creates them")
 		}
 		return nil
 	},
