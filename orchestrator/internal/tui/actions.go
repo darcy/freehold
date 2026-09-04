@@ -10,17 +10,21 @@ package tui
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/console"
+	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/flows"
 )
 
@@ -42,6 +46,9 @@ const (
 	flowDeployCp
 	flowTeardown
 	flowRebuild
+	// flowDNSCred is a short pre-rebuild form that collects the DNS provider
+	// + credentials for the edge's per-host certs when none are stored yet.
+	flowDNSCred
 )
 
 type tuiFlow struct {
@@ -138,6 +145,8 @@ func ncols(k flowKind) int {
 		return 2
 	case flowRebuild:
 		return 9
+	case flowDNSCred:
+		return 2
 	default:
 		return 1
 	}
@@ -221,6 +230,13 @@ func promptLabel(k flowKind, step int) string {
 		default:
 			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
 		}
+	case flowDNSCred:
+		switch step {
+		case 0:
+			return "DNS provider for the certs (e.g. route53; blank = reuse stored)"
+		default:
+			return "DNS env KEY=VAL,KEY=VAL (blank = auto-detect, e.g. ~/.aws)"
+		}
 	default:
 		return "value"
 	}
@@ -257,6 +273,24 @@ func (m *Model) handleFlow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			f.Step = next
 			f.Field = fieldFor(f.Kind, next, f.Defaults[next])
 			return m, nil
+		}
+		// Rebuild: if the edge needs DNS credentials and none are stored
+		// yet, chain the pre-rebuild DNS flow so the operator is ASKED in the
+		// TUI (the headless rebuild subprocess cannot prompt under --yes).
+		if f.Kind == flowRebuild {
+			args, err := rebuildArgs(f)
+			if err != nil {
+				return m, func() tea.Msg { return flowMsg{err: err} }
+			}
+			if edgeNeedsDNS(f) && !tuiRelayDnsStored(m) {
+				m.pendingRebuild = args
+				m.pendingRelayDomain = strings.TrimSpace(f.Inputs[1])
+				m.beginPrompt(flowDNSCred)
+				return m, nil
+			}
+			return m, func() tea.Msg {
+				return activityStartMsg{kind: "rebuild", title: "rebuilding " + strings.TrimSpace(f.Inputs[1]), args: args}
+			}
 		}
 		return m, runFlowAction(m, f)
 	}
@@ -371,37 +405,13 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			return activityStartMsg{kind: "teardown", title: "tearing down the world", args: args}
 		case flowRebuild:
-			op, relay := f.Inputs[0], f.Inputs[1]
-			cp := f.Inputs[2]
-			if op == "" || relay == "" || cp == "" {
-				return flowMsg{err: fmt.Errorf("rebuild needs operator pubkey, relay domain, and control-plane domain")}
+			args, err := rebuildArgs(f)
+			if err != nil {
+				return flowMsg{err: err}
 			}
-			args := []string{"rebuild", "--yes",
-				"--operator-pubkey", op,
-				"--relay-domain", relay,
-				"--cp-domain", cp,
-			}
-			if f.Inputs[3] != "" {
-				args = append(args, "--size-gb", f.Inputs[3])
-			}
-			if f.Inputs[4] != "" {
-				args = append(args, "--thin-pool", f.Inputs[4])
-			}
-			if f.Inputs[5] != "" {
-				args = append(args, "--pool-size-gb", f.Inputs[5])
-			}
-			if strings.EqualFold(strings.TrimSpace(f.Inputs[6]), "n") {
-				args = append(args, "--no-k3s")
-			}
-			if name := strings.TrimSpace(f.Inputs[7]); name != "" {
-				args = append(args, "--agent-name", name)
-			}
-			if strings.EqualFold(strings.TrimSpace(f.Inputs[8]), "n") {
-				// Opt out of the litellm gateway (and thus the CPA, which needs
-				// it to reason). Default is on: the full world reconciles.
-				args = append(args, "--no-litellm")
-			}
-			return activityStartMsg{kind: "rebuild", title: "rebuilding " + relay, args: args}
+			return activityStartMsg{kind: "rebuild", title: "rebuilding " + strings.TrimSpace(f.Inputs[1]), args: args}
+		case flowDNSCred:
+			return m.forwardDNSCred(f)
 		}
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
@@ -482,4 +492,120 @@ func doorKeyWaiting(out string) string {
 
 func (m *Model) refreshLocal() {
 	m.refreshRunners(m.cfg)
+}
+
+// rebuildArgs builds the `freehold rebuild --yes` args from a completed
+// rebuild form (shared by the flow dispatcher and the DNS pre-flow).
+func rebuildArgs(f *tuiFlow) ([]string, error) {
+	op, relay := strings.TrimSpace(f.Inputs[0]), strings.TrimSpace(f.Inputs[1])
+	cp := strings.TrimSpace(f.Inputs[2])
+	if op == "" || relay == "" || cp == "" {
+		return nil, fmt.Errorf("rebuild needs operator pubkey, relay domain, and control-plane domain")
+	}
+	args := []string{"rebuild", "--yes",
+		"--operator-pubkey", op,
+		"--relay-domain", relay,
+		"--cp-domain", cp,
+	}
+	if v := strings.TrimSpace(f.Inputs[3]); v != "" {
+		args = append(args, "--size-gb", v)
+	}
+	if v := strings.TrimSpace(f.Inputs[4]); v != "" {
+		args = append(args, "--thin-pool", v)
+	}
+	if v := strings.TrimSpace(f.Inputs[5]); v != "" {
+		args = append(args, "--pool-size-gb", v)
+	}
+	if strings.EqualFold(strings.TrimSpace(f.Inputs[6]), "n") {
+		args = append(args, "--no-k3s")
+	}
+	if name := strings.TrimSpace(f.Inputs[7]); name != "" {
+		args = append(args, "--agent-name", name)
+	}
+	if strings.EqualFold(strings.TrimSpace(f.Inputs[8]), "n") {
+		args = append(args, "--no-litellm")
+	}
+	return args, nil
+}
+
+// edgeNeedsDNS reports whether the rebuild form's world includes the Caddy edge
+// (k3s on + relay/CP domains set), i.e. it will need DNS provider credentials.
+func edgeNeedsDNS(f *tuiFlow) bool {
+	return strings.TrimSpace(f.Inputs[1]) != "" &&
+		strings.TrimSpace(f.Inputs[2]) != "" &&
+		!strings.EqualFold(strings.TrimSpace(f.Inputs[6]), "n")
+}
+
+// tuiDNSStored reports whether a DNS provider credential is already stored for
+// the relay slot (the pre-rebuild flow is skipped then — the headless rebuild
+// reuses it; cp auto-copies under --yes).
+func tuiRelayDnsStored(m *Model) bool {
+	dir := freeholdStateDir()
+	_, err := os.Stat(filepath.Join(dir, "dns-provider-relay.json"))
+	if err == nil {
+		return true
+	}
+	// legacy single-file credential still works (migrated on the rebuild run).
+	_, err = os.Stat(filepath.Join(dir, "dns-provider.json"))
+	return err == nil
+}
+
+// forwardDNSCred finishes the pre-rebuild DNS flow: store the collected
+// provider + env (sealed to the ops identity) into BOTH slots, then dispatch
+// the pending rebuild. A blank provider keeps any stored credential untouched
+// and just proceeds.
+func (m *Model) forwardDNSCred(f *tuiFlow) tea.Msg {
+	if m == nil || len(m.pendingRebuild) == 0 {
+		return flowMsg{err: fmt.Errorf("no pending rebuild to dispatch")}
+	}
+	provider := strings.TrimSpace(f.Inputs[0])
+	if provider != "" {
+		if !cert.IsProvider(provider) {
+			return flowMsg{err: fmt.Errorf("unknown DNS provider %q", provider)}
+		}
+		env := map[string]string{}
+		if v := strings.TrimSpace(f.Inputs[1]); v != "" {
+			for _, kv := range strings.Split(v, ",") {
+				k, val, ok := strings.Cut(kv, "=")
+				if !ok || strings.TrimSpace(k) == "" {
+					return flowMsg{err: fmt.Errorf("DNS env expects KEY=VAL,KEY=VAL — bad entry %q", kv)}
+				}
+				env[strings.TrimSpace(k)] = strings.TrimSpace(val)
+			}
+		}
+		if m.pendingRelayDomain != "" {
+			if err := cert.Verify(m.pendingRelayDomain, provider, env); err != nil {
+				return flowMsg{err: fmt.Errorf("DNS pre-verify failed: %w", err)}
+			}
+		}
+		id, err := flows.LoadIdentity(freeholdStateDir() + "/agent-ops")
+		if err != nil {
+			return flowMsg{err: err}
+		}
+		secret, err := hex.DecodeString(id.EncSecretHex)
+		if err != nil {
+			return flowMsg{err: err}
+		}
+		pub, err := crypto.X25519PublicKey(secret)
+		if err != nil {
+			return flowMsg{err: err}
+		}
+		seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+		for _, slot := range []string{"relay", "cp"} {
+			if err := cert.SaveCreds(filepath.Join(freeholdStateDir(), "dns-provider-"+slot+".json"), provider, env, seal, pub, "cert-dns-"+slot); err != nil {
+				return flowMsg{err: fmt.Errorf("storing %s DNS credential: %w", slot, err)}
+			}
+		}
+		m.Msg = "DNS credentials saved (" + provider + ") — rebuilding"
+	}
+	args := m.pendingRebuild
+	m.pendingRebuild = nil
+	m.pendingRelayDomain = ""
+	title := "rebuilding the world"
+	for i, a := range args {
+		if a == "--relay-domain" && i+1 < len(args) {
+			title = "rebuilding " + args[i+1]
+		}
+	}
+	return activityStartMsg{kind: "rebuild", title: title, args: args}
 }

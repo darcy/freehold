@@ -80,6 +80,7 @@ func TestTeardownFormSteps(t *testing.T) {
 // inputs land in order (operator pk, relay domain, cp domain, LV size, thin-pool
 // name, pool size, k3s, CPA agent name, litellm) — no world/base domain.
 func TestRebuildFormSteps(t *testing.T) {
+	stubDnsCred(t)
 	m := &Model{Mode: ModeBootstrap}
 	if !keyPress(m, "B") {
 		t.Fatal("B did not start the rebuild flow in bootstrap mode")
@@ -243,6 +244,7 @@ func TestRebuildFormSeedCanBeEdited(t *testing.T) {
 // must launch the rebuild with the RECORDED world — same args the operator
 // would have typed by hand.
 func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
+	stubDnsCred(t)
 	op := strings.Repeat("b", 64)
 	cfgPath := writeRebuildCfg(t,
 		"relay_url = \"https://relay.world.test\"\n"+
@@ -282,6 +284,7 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 // recorded value — the name the operator chose at install round-trips into
 // the rebuild args (A1: persist the CPA name).
 func TestRebuildFormAgentNameRoundTrip(t *testing.T) {
+	stubDnsCred(t)
 	op := strings.Repeat("b", 64)
 	cfgPath := writeRebuildCfg(t,
 		"relay_url = \"https://relay.world.test\"\n"+
@@ -348,6 +351,7 @@ func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
 // step) must dispatch --no-k3s / --no-litellm — the full-world defaults are
 // opt-outs, not blank-boot surprises.
 func TestRebuildFormExplicitOptOut(t *testing.T) {
+	stubDnsCred(t)
 	cfgPath := writeRebuildCfg(t,
 		"relay_url = \"https://relay.world.test\"\n"+
 			"cp_url = \"https://cp.world.test\"\n"+
@@ -862,6 +866,7 @@ func TestIsSkipDetail(t *testing.T) {
 // and NO --domain (the removed world-domain flag). The headless run then reuses
 // the stored DNS credential (or errors under --yes only if truly absent).
 func TestRebuildFormDispatchArgs(t *testing.T) {
+	stubDnsCred(t)
 	op := strings.Repeat("c", 64)
 	cfgPath := writeRebuildCfg(t,
 		"relay_url = \"https://relay.world.test\"\n"+
@@ -886,5 +891,44 @@ func TestRebuildFormDispatchArgs(t *testing.T) {
 	}
 	if strings.Contains(got, "--domain") {
 		t.Errorf("dispatch must not contain the removed --domain flag: %q", got)
+	}
+}
+
+// stubDnsCred points FREEHOLD_HOME at a temp dir with a stored relay DNS cred
+// present, so a completed rebuild form dispatches immediately (the pre-rebuild
+// DNS flow is skipped when a credential is already stored). Restored on cleanup.
+func stubDnsCred(t *testing.T) {
+	t.Helper()
+	prev := os.Getenv("FREEHOLD_HOME")
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "control-plane"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "control-plane", "dns-provider-relay.json"), []byte("{}"), 0o600)
+	os.Setenv("FREEHOLD_HOME", dir)
+	t.Cleanup(func() { os.Setenv("FREEHOLD_HOME", prev) })
+}
+
+// TestRebuildFormDNSChain: with k3s on + relay/CP domains but NO stored DNS
+// credential, completing the rebuild form must chain to flowDNSCred (so the TUI
+// ASKS), not dispatch immediately.
+func TestRebuildFormDNSChain(t *testing.T) {
+	// Isolate from any real stored credential: point FREEHOLD_HOME at an empty
+	// temp dir so the rebuild form chains into the DNS pre-flow.
+	prev := os.Getenv("FREEHOLD_HOME")
+	os.Setenv("FREEHOLD_HOME", t.TempDir())
+	t.Cleanup(func() { os.Setenv("FREEHOLD_HOME", prev) })
+	cfgPath := writeRebuildCfg(t,
+		"operator_pubkey = \""+strings.Repeat("d", 64)+"\"\n"+
+			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
+	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	keyPress(m, "B")
+	answers := []string{strings.Repeat("d", 64), "relay.test", "cp.test", "", "", "", "", "", ""}
+	for i := range answers {
+		typeText(m, answers[i])
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	// giving the last field a tab ends the form — the DNS pre-flow must start.
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.Flow == nil || m.Flow.Kind != flowDNSCred {
+		t.Fatalf("expected the DNS pre-rebuild flow to start, got flow=%+v", m.Flow)
 	}
 }

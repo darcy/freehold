@@ -113,6 +113,11 @@ type Model struct {
 	RunnerSource string
 	// last-loaded config — the `s` toggle and post-flow refreshes need it.
 	cfg *config.Config
+	// pendingRebuild holds the rebuild args while the pre-rebuild DNS-credential
+	// flow collects the provider + credentials; dispatched once it completes.
+	pendingRebuild []string
+	// pendingRelayDomain is the relay host the DNS pre-verify should target.
+	pendingRelayDomain string
 	// activity: while non-nil, the FULL-SCREEN activity view replaces the
 	// dashboard entirely (boot check, teardown, rebuild, bootstrap, deploys).
 	// The door-gate pause lives inside it too (its args ride a.args).
