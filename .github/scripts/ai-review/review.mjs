@@ -262,7 +262,8 @@ async function updateParentComment(body) {
 // comment id maps to its thread via a reviewThreads query.
 async function resolveFixedThreads(fixedComments) {
   if (!fixedComments.length) return 0;
-  const gql = graphql.defaults({ auth: GITHUB_TOKEN });
+  // @octokit/graphql authenticates via headers.authorization, not `auth:`.
+  const gql = graphql.defaults({ headers: { authorization: `token ${GITHUB_TOKEN}` } });
   let threadQuery;
   try {
     threadQuery = await gql(`query($owner:String!, $repo:String!, $pr:Int!) {
