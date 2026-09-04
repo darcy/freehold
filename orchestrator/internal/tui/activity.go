@@ -204,6 +204,7 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		}},
 		{"world state", func() (string, bool) {
 			m.buildServices(cfg)
+			m.buildCerts(cfg)
 			m.refreshRunners(cfg)
 			m.buildAgents(cfg)
 			m.refreshData(cfg)

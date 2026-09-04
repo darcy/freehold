@@ -63,6 +63,7 @@ const (
 	ViewRunners
 	ViewData
 	ViewDNS
+	ViewCerts
 )
 
 func (v View) String() string {
@@ -75,6 +76,8 @@ func (v View) String() string {
 		return "DATA"
 	case ViewDNS:
 		return "DNS"
+	case ViewCerts:
+		return "Certs"
 	default:
 		return "Services"
 	}
@@ -98,6 +101,7 @@ type Model struct {
 	DataAt      time.Time
 	Services    []ServiceRow
 	DNS         []DnsRow
+	Certs       []CertRow
 	Agents      []AgentRow
 	Runners     []RunnerRow
 	Storage     []DataRow
@@ -122,6 +126,16 @@ type DnsRow struct {
 	Name   string
 	IP     string
 	Source string
+}
+
+// CertRow is one wildcard cert row on the Certs view (written by the F3 lego
+// stage, shown read-only; renew happens via rebuild's cert stage).
+type CertRow struct {
+	Domain string
+	URL    string
+	Expiry string
+	Issuer string
+	Status string
 }
 
 type ServiceRow struct {
