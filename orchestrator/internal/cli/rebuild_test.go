@@ -4,6 +4,7 @@ import "reflect"
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -748,7 +749,6 @@ func TestRecordCaddy(t *testing.T) {
 		t.Errorf("managed duplicated caddy %d times", n)
 	}
 }
-
 func countStr(list []string, s string) int {
 	n := 0
 	for _, v := range list {
@@ -757,6 +757,38 @@ func countStr(list []string, s string) int {
 		}
 	}
 	return n
+}
+
+// TestCaddyCertInstallScript guards the review finding that the cert-install
+// helper script must FAIL (not silently succeed) when the PVC write doesn't
+// happen: both shells run set -e, the helper pod waits for Ready before the
+// writes, and the base64 payloads are single-quoted (no shell metachars).
+func TestCaddyCertInstallScript(t *testing.T) {
+	fc := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+	key := []byte("-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
+	s := caddyCertInstallScript(102, fc, key)
+
+	// set -e in BOTH the outer wrapper and the inner (guest) script.
+	if got := strings.Count(s, "set -e"); got != 2 {
+		t.Errorf("want set -e in outer + inner shells, got %d occurrences:\n%s", got, s)
+	}
+	// the busybox helper reads the same durable PVC and is waited-for before
+	// the cert/key writes.
+	for _, want := range []string{"image: busybox", "claimName: caddy-data", "--timeout=60s",
+		"persistentVolumeClaim", "rollout restart deploy/caddy"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("script missing %q", want)
+		}
+	}
+	// base64 payloads present + single-quoted (safe, no shell metacharacters).
+	fcB64 := base64.StdEncoding.EncodeToString(fc)
+	keyB64 := base64.StdEncoding.EncodeToString(key)
+	if !strings.Contains(s, "'"+fcB64+"'") {
+		t.Errorf("fullchain base64 not single-quoted-embedded")
+	}
+	if !strings.Contains(s, "'"+keyB64+"'") {
+		t.Errorf("key base64 not single-quoted-embedded")
+	}
 }
 
 func TestLitellmHasProviderKey(t *testing.T) {

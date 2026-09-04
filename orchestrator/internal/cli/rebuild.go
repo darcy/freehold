@@ -2607,10 +2607,26 @@ func (e *rebuildEngine) caddyFullchain(k3sVmid uint32) ([]byte, error) {
 // cert exists), then reloads the edge. The cert bytes are base64-embedded in
 // the runner command only — transient in memory, never persisted by freehold.
 func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, fullchain, key []byte) error {
+	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyCertInstallScript(k3sVmid, fullchain, key), 180))
+	if !ok {
+		return fmt.Errorf("caddy cert install failed:\n%s", out)
+	}
+	return nil
+}
+
+// caddyCertInstallScript writes the chain/key into the Caddy durable PVC via a
+// short-lived helper pod that mounts the same caddy-data volume (so it works
+// even while Caddy itself is crash-looping on the very first boot, before any
+// cert exists), then reloads the edge. The cert bytes are base64-embedded in
+// the runner command only — transient in memory, never persisted by freehold.
+// Both the outer and inner (guest) shells run set -e so a failed helper-pod
+// write FAILS the stage instead of silently claiming an issued cert.
+func caddyCertInstallScript(k3sVmid uint32, fullchain, key []byte) string {
 	fcB64 := base64.StdEncoding.EncodeToString(fullchain)
 	keyB64 := base64.StdEncoding.EncodeToString(key)
-	script := fmt.Sprintf(`set -e
+	return fmt.Sprintf(`set -e
 pct exec %d -- sh -c '
+set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 printf %s | base64 -d > /tmp/fc.pem
 printf %s | base64 -d > /tmp/key.pem
@@ -2636,11 +2652,6 @@ $K -n caddy delete pod cert-installer >/dev/null 2>&1 || true
 $K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
 rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
 '`, k3sVmid, shellSingleQuote(fcB64), shellSingleQuote(keyB64))
-	ok, out := e.runBin(e.bins.Self, e.execArgs(script, 180))
-	if !ok {
-		return fmt.Errorf("caddy cert install failed:\n%s", out)
-	}
-	return nil
 }
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.
