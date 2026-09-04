@@ -55,30 +55,32 @@ both blockers fall (public cert trusted; auth tag matches).
 
 ## APPROVED decisions (operator-confirmed)
 
-- **Topology**: base domain `freehold-test.darcydev.net`. Relay host `relay.freehold-test.darcydev.net`,
-  CP host `cp.freehold-test.darcydev.net`. Wildcard cert `*.freehold-test.darcydev.net`.
-  Config derivation moves from `cp-<domain>` to `cp.<domain>` / `relay.<domain>`; **drop `cp-`**
-  (clean adoption; test domain).
-- **Caddy placement**: k3s **Deployment on `hostNetwork`** binding 80/443 on the k3s node's LAN IP
-  (192.168.30.7) + NodePort Service + **durable PVC** (`/srv/data/k8s-volumes`, backed up) holding
-  Caddy config AND the issued certs. NOT a normal CNI ClusterIP service (pod->external-LAN egress
-  is blocked by kube-router; hostNetwork is required, same as the CPA pod).
-- **Cert issuance**: **go-acme/lego EMBEDDED** in the orchestrator (Go lib; no new shipped binary).
-  DNS-01 only. Provider chosen by the user from a **dropdown populated dynamically from lego's full
-  DNS-provider registry** (NOT a hardcoded shortlist). Credential env-var names derived from the chosen
-  provider (e.g. Route53 <- AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION; Cloudflare <-
-  CLOUDFLARE_DNS_API_TOKEN; DO <- DO_AUTH_TOKEN). Collect, **pre-verify** (throwaway TXT create+remove
-  through lego) before saving.
-- **DNS token storage**: existing **ciphertext runner-secret path** (like litellm's provider-key);
-  referenced by name; the runner injects the provider env vars when lego runs. Never plaintext.
-  If absent, the TUI (interactive) or a hard-error (`--yes`) collects it — same discipline as
-  litellm's provider key. NO Route53 hardcoding.
-- **Reconcile-always / no re-ask**: token already provisioned -> skip collection. Valid non-expiring
-  cert already on the durable volume -> reuse (skip DNS-01). Compute-only teardown/rebuild keeps both.
-- **Certs TUI tab**: list domains, issuer, **expiration date**, issue/renew action.
-- **CPA pod**: relay URL `wss://relay.freehold-test.darcydev.net` (443). hostNetwork pod (done).
-- Scope is a **dedicated phase** with its own review passes (per AGENTS PR rules), not bolted onto
-  Chunk-4/B. Future (chunk8?) = manual cert import + Tailscale cert; NOT in this phase.
+- **Topology — NO world/base domain.** The relay host and CP host are separate, LITERAL
+  user-supplied hostnames (never derived, no `relay.`/`cp.` prefix). Everything sits behind a
+  single static **proxy IP** (`Proxy.Ip`, the Caddy/k3s node), which both hosts resolve to.
+  Relay + CP LXCs are DHCP, internal, behind the proxy; the proxy is the ONE static address.
+- **Caddy placement**: k3s **Deployment on `hostNetwork`** binding 80/443 on the proxy's LAN IP
+  + NodePort Service + **durable PVC** (`/srv/data/k8s-volumes`, backed up) holding Caddy config
+  AND the issued certs. NOT a normal CNI ClusterIP service (pod->external-LAN egress is blocked
+  by kube-router; hostNetwork is required, same as the CPA pod).
+- **Cert issuance**: **go-acme/lego EMBEDDED** in the orchestrator (Go lib; no shipped binary).
+  DNS-01 only. **PER HOST**: one single-name cert for the relay host + one for the CP host
+  (two orders; no wildcard/base). Provider chosen from a **dropdown populated from lego's full
+  provider registry** (not a curated shortlist); per-provider env-var names derived from lego.
+  Collect + **pre-verify** (throwaway TXT) before saving.
+- **DNS credentials = PER DOMAIN** (each host has its own sealed slot,
+  `dns-provider-<slot>.json`), kept SEPARATE — may differ. When a slot is missing, the CP slot
+  offers to re-use the relay credential (copied into its own slot without re-entering). Never
+  plaintext: sealed to the ops identity (freehold runs lego in-process). `--yes` with a missing
+  slot hard-errors (run interactively once to store).
+- **Reconcile-always / no re-ask**: credential already sealed -> skipped; valid per-host cert on
+  the durable volume (>= 30d) -> reused (DNS-01 skipped). Compute-only teardown/rebuild keeps both.
+- **Certs TUI tab**: list both hosts (relay, cp), issuer, **expiration**, status.
+- **CPA pod**: relay origin `wss://<relay-host>` (443 via the proxy). hostNetwork pod (done).
+- **Domain gate REMOVED**: internal resolution (relay/cp hosts -> proxy IP in the CP resolver)
+  is enough for install; no A4 DNS-resolution gate.
+- **Naming**: LXC + plane slugs = the RELAY host slug + role suffix (`-relay`/`-cp`/`-k3s`).
+- Future (chunk8?) = manual cert import + Tailscale cert; NOT in this phase.
 
 ## Sequencing (each = a review pass; branch + PR -> main per AGENTS)
 
