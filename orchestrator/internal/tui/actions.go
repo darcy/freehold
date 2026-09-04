@@ -101,7 +101,7 @@ func fieldFor(k flowKind, step int, def string) *textinput.Model {
 func flowDefaults(m *Model, k flowKind) [10]string {
 	var d [10]string
 	if k != flowRebuild || m.CfgPath == "" {
-		// No config: nothing to prefill. k3s (d[5]) and litellm (d[7]) stay
+		// No config: nothing to prefill. k3s (d[6]) and litellm (d[8]) stay
 		// BLANK, which the arg builder reads as "y" — the full desired world
 		// reconciles by default; opting out is an explicit "n".
 		return d
@@ -111,22 +111,17 @@ func flowDefaults(m *Model, k flowKind) [10]string {
 		return d
 	}
 	d[0] = cfg.OperatorPubkey
-	d[1] = cfg.Domain
+	// relay + CP hosts are seeded from config (never derived).
+	d[1] = cfg.RelayHost()
+	d[2] = cfg.CPHost()
 	if cfg.Plane.ThinPool != nil {
-		d[3] = *cfg.Plane.ThinPool
-	} // The desired world is FULL (reconcile-always): k3s (d[5]) and litellm
-	// (d[7]) are left blank ("y" when dispatched) regardless of what the
+		d[4] = *cfg.Plane.ThinPool
+	} // The desired world is FULL (reconcile-always): k3s (d[6]) and litellm
+	// (d[8]) are left blank ("y" when dispatched) regardless of what the
 	// recorded config listed, so a partial world is pulled up to the whole by
 	// default. Opting out is an explicit "n".
 	if cfg.CPAName != "" {
-		d[6] = cfg.CPAName
-	}
-	// Seed the relay + CP hosts from the recorded config (never derived).
-	if r := cfg.RelayHost(); r != "" {
-		d[8] = r
-	}
-	if c := cfg.CPHost(); c != "" {
-		d[9] = c
+		d[7] = cfg.CPAName
 	}
 	return d
 }
@@ -142,7 +137,7 @@ func ncols(k flowKind) int {
 	case flowTeardown:
 		return 2
 	case flowRebuild:
-		return 10
+		return 9
 	default:
 		return 1
 	}
@@ -210,23 +205,21 @@ func promptLabel(k flowKind, step int) string {
 		case 0:
 			return "operator pubkey (npub1… or 64-hex)"
 		case 1:
-			return "domain (the relay's identity)"
+			return "relay domain (its Buzz origin — REQUIRED)"
 		case 2:
-			return "tenant LV size GB (blank = 10)"
+			return "control-plane domain (REQUIRED)"
 		case 3:
-			return "thin-pool name (blank = reuse detected / carve default)"
+			return "tenant LV size GB (blank = 10)"
 		case 4:
-			return "new thin-pool size GB (blank = 40, used when carving)"
+			return "thin-pool name (blank = reuse detected / carve default)"
 		case 5:
-			return "boot k3s too? (y/n, blank = y)"
+			return "new thin-pool size GB (blank = 40, used when carving)"
 		case 6:
-			return "CPA agent name (blank = freehold)"
+			return "boot k3s too? (y/n, blank = y)"
 		case 7:
-			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
-		case 8:
-			return "relay domain (its Buzz origin; blank = the world domain)"
+			return "CPA agent name (blank = freehold)"
 		default:
-			return "control-plane domain (blank = the world domain)"
+			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
 		}
 	default:
 		return "value"
@@ -378,41 +371,37 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			return activityStartMsg{kind: "teardown", title: "tearing down the world", args: args}
 		case flowRebuild:
-			op, domain := f.Inputs[0], f.Inputs[1]
-			if op == "" || domain == "" {
-				return flowMsg{err: fmt.Errorf("rebuild needs operator pubkey and domain")}
+			op, relay := f.Inputs[0], f.Inputs[1]
+			cp := f.Inputs[2]
+			if op == "" || relay == "" || cp == "" {
+				return flowMsg{err: fmt.Errorf("rebuild needs operator pubkey, relay domain, and control-plane domain")}
 			}
 			args := []string{"rebuild", "--yes",
 				"--operator-pubkey", op,
-				"--domain", domain,
-			}
-			if f.Inputs[2] != "" {
-				args = append(args, "--size-gb", f.Inputs[2])
+				"--relay-domain", relay,
+				"--cp-domain", cp,
 			}
 			if f.Inputs[3] != "" {
-				args = append(args, "--thin-pool", f.Inputs[3])
+				args = append(args, "--size-gb", f.Inputs[3])
 			}
 			if f.Inputs[4] != "" {
-				args = append(args, "--pool-size-gb", f.Inputs[4])
+				args = append(args, "--thin-pool", f.Inputs[4])
 			}
-			if strings.EqualFold(strings.TrimSpace(f.Inputs[5]), "n") {
+			if f.Inputs[5] != "" {
+				args = append(args, "--pool-size-gb", f.Inputs[5])
+			}
+			if strings.EqualFold(strings.TrimSpace(f.Inputs[6]), "n") {
 				args = append(args, "--no-k3s")
 			}
-			if name := strings.TrimSpace(f.Inputs[6]); name != "" {
+			if name := strings.TrimSpace(f.Inputs[7]); name != "" {
 				args = append(args, "--agent-name", name)
 			}
-			if strings.EqualFold(strings.TrimSpace(f.Inputs[7]), "n") {
+			if strings.EqualFold(strings.TrimSpace(f.Inputs[8]), "n") {
 				// Opt out of the litellm gateway (and thus the CPA, which needs
 				// it to reason). Default is on: the full world reconciles.
 				args = append(args, "--no-litellm")
 			}
-			if r := strings.TrimSpace(f.Inputs[8]); r != "" {
-				args = append(args, "--relay-domain", r)
-			}
-			if c := strings.TrimSpace(f.Inputs[9]); c != "" {
-				args = append(args, "--cp-domain", c)
-			}
-			return activityStartMsg{kind: "rebuild", title: "rebuilding " + domain, args: args}
+			return activityStartMsg{kind: "rebuild", title: "rebuilding " + relay, args: args}
 		}
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}

@@ -76,9 +76,9 @@ func TestTeardownFormSteps(t *testing.T) {
 	}
 }
 
-// TestRebuildFormSteps walks the rebuild form to completion and
-// confirms the inputs land in order (operator pk, domain, LV size,
-// thin-pool name, pool size, k3s, CPA agent name, litellm).
+// TestRebuildFormSteps walks the rebuild form to completion and confirms the
+// inputs land in order (operator pk, relay domain, cp domain, LV size, thin-pool
+// name, pool size, k3s, CPA agent name, litellm) — no world/base domain.
 func TestRebuildFormSteps(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap}
 	if !keyPress(m, "B") {
@@ -87,17 +87,12 @@ func TestRebuildFormSteps(t *testing.T) {
 	if m.Flow == nil || m.Flow.Kind != flowRebuild {
 		t.Fatal("expected a rebuild flow after pressing B")
 	}
-	if ncols(flowRebuild) != 10 {
-		t.Fatalf("rebuild form should have 10 steps, got %d", ncols(flowRebuild))
+	if ncols(flowRebuild) != 9 {
+		t.Fatalf("rebuild form should have 9 steps, got %d", ncols(flowRebuild))
 	}
-	answers := []string{strings.Repeat("a", 64), "world.test", "10", "freehold-thin", "40", "y", "my-cpa", "y"}
+	answers := []string{strings.Repeat("a", 64), "relay.example.test", "cp.example.test", "10", "freehold-thin", "40", "y", "my-cpa", "y"}
 	for i := range answers {
 		typeText(m, answers[i])
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	// Advance through the two blank fields (relay + CP domain; blank = the
-	// world domain) to COMPLETION — dispatch happens on the 10th step.
-	for i := 0; i < 2; i++ {
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if m.Flow == nil {
@@ -108,26 +103,25 @@ func TestRebuildFormSteps(t *testing.T) {
 			t.Errorf("rebuild inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want)
 		}
 	}
-	if m.Flow.Inputs[8] != "" || m.Flow.Inputs[9] != "" {
-		t.Errorf("relay/cp domains should default to blank (= the world domain), got %q/%q", m.Flow.Inputs[8], m.Flow.Inputs[9])
-	}
 	// Completing the form dispatches the rebuild subprocess. Default k3s+litellm
 	// on = full world reconcile; the named CPA agent is forwarded.
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	if cmd == nil {
-		t.Fatal("completed 10-step rebuild form did not dispatch")
+		t.Fatal("completed 9-step rebuild form did not dispatch")
 	}
 	start, ok := cmd().(activityStartMsg)
 	if !ok {
 		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
 	}
 	got := strings.Join(start.args, " ")
-	if !strings.Contains(got, "--agent-name my-cpa") {
-		t.Errorf("rebuild args %q missing --agent-name my-cpa", got)
+	for _, want := range []string{"--agent-name my-cpa", "--relay-domain relay.example.test", "--cp-domain cp.example.test"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rebuild args %q missing %q", got, want)
+		}
 	}
-	for _, banned := range []string{"--no-k3s", "--no-litellm"} {
+	for _, banned := range []string{"--no-k3s", "--no-litellm", "--domain "} {
 		if strings.Contains(got, banned) {
-			t.Errorf("rebuild args must keep %s on when not opted out: %q", banned, got)
+			t.Errorf("rebuild args must not contain %s: %q", banned, got)
 		}
 	}
 
@@ -165,38 +159,41 @@ func TestNewFlowLabels(t *testing.T) {
 	if got := promptLabel(flowRebuild, 0); got != "operator pubkey (npub1… or 64-hex)" {
 		t.Errorf("rebuild step0 label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 2); got != "tenant LV size GB (blank = 10)" {
+	if got := promptLabel(flowRebuild, 1); got != "relay domain (its Buzz origin — REQUIRED)" {
+		t.Errorf("rebuild step1 label = %q", got)
+	}
+	if got := promptLabel(flowRebuild, 2); got != "control-plane domain (REQUIRED)" {
 		t.Errorf("rebuild step2 label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 3); got != "thin-pool name (blank = reuse detected / carve default)" {
+	if got := promptLabel(flowRebuild, 3); got != "tenant LV size GB (blank = 10)" {
 		t.Errorf("rebuild step3 label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 5); got != "boot k3s too? (y/n, blank = y)" {
+	if got := promptLabel(flowRebuild, 4); got != "thin-pool name (blank = reuse detected / carve default)" {
+		t.Errorf("rebuild step4 label = %q", got)
+	}
+	if got := promptLabel(flowRebuild, 5); got != "new thin-pool size GB (blank = 40, used when carving)" {
 		t.Errorf("rebuild step5 label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 6); got != "CPA agent name (blank = freehold)" {
+	if got := promptLabel(flowRebuild, 6); got != "boot k3s too? (y/n, blank = y)" {
 		t.Errorf("rebuild step6 label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 7); got != "deploy litellm gateway + CPA model? (y/n, blank = y)" {
+	if got := promptLabel(flowRebuild, 7); got != "CPA agent name (blank = freehold)" {
 		t.Errorf("rebuild step7 label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 8); got != "relay domain (its Buzz origin; blank = the world domain)" {
+	if got := promptLabel(flowRebuild, 8); got != "deploy litellm gateway + CPA model? (y/n, blank = y)" {
 		t.Errorf("rebuild step8 label = %q", got)
-	}
-	if got := promptLabel(flowRebuild, 9); got != "control-plane domain (blank = the world domain)" {
-		t.Errorf("rebuild step9 label = %q", got)
 	}
 }
 
 // TestRebuildFormSeededFromConfig: when a config exists, pressing B opens
 // the rebuild form with the RECORDED answers prefilled — operator pubkey,
-// domain, the carved thin-pool (a reused stock pool is never recorded),
-// and k3s membership. The two size prompts stay blank: the config records
-// nothing about them, so their "(blank = N)" semantics hold.
+// relay + CP hosts (never derived), and the carved thin-pool. The two size
+// prompts stay blank: the config records nothing about them.
 func TestRebuildFormSeededFromConfig(t *testing.T) {
 	op := strings.Repeat("b", 64)
 	cfgPath := writeRebuildCfg(t,
-		"domain = \"world.test\"\n"+
+		"relay_url = \"https://relay.world.test\"\n"+
+			"cp_url = \"https://cp.world.test\"\n"+
 			"operator_pubkey = \""+op+"\"\n"+
 			"managed = [\"relay\", \"cp\", \"k3s\"]\n"+
 			"[plane]\nthin_pool = \"freehold-thin\"\n")
@@ -206,8 +203,8 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 		t.Fatal("B did not start the rebuild flow")
 	}
 
-	want := [10]string{op, "world.test", "", "freehold-thin", "", "", "", "", "", ""}
-	for i := 0; i < 10; i++ {
+	want := [10]string{op, "relay.world.test", "cp.world.test", "", "freehold-thin", "", "", "", "", ""}
+	for i := 0; i < 9; i++ {
 		if m.Flow == nil {
 			t.Fatalf("flow vanished at step %d", i)
 		}
@@ -219,7 +216,7 @@ func TestRebuildFormSeededFromConfig(t *testing.T) {
 	if m.Flow == nil {
 		t.Fatal("flow vanished before inputs were captured")
 	}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 9; i++ {
 		if m.Flow.Inputs[i] != want[i] {
 			t.Errorf("inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want[i])
 		}
@@ -248,14 +245,15 @@ func TestRebuildFormSeedCanBeEdited(t *testing.T) {
 func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 	op := strings.Repeat("b", 64)
 	cfgPath := writeRebuildCfg(t,
-		"domain = \"world.test\"\n"+
+		"relay_url = \"https://relay.world.test\"\n"+
+			"cp_url = \"https://cp.world.test\"\n"+
 			"operator_pubkey = \""+op+"\"\n"+
 			"managed = [\"relay\", \"cp\", \"k3s\"]\n"+
 			"[plane]\nthin_pool = \"freehold-thin\"\n")
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 9; i++ {
 		_, msg = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	if msg == nil {
@@ -266,15 +264,15 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 		t.Fatalf("dispatched a %T, want activityStartMsg", msg())
 	}
 	joined := strings.Join(start.args, " ")
-	for _, want := range []string{"--operator-pubkey " + op, "--domain world.test", "--thin-pool freehold-thin"} {
+	for _, want := range []string{"--operator-pubkey " + op, "--relay-domain relay.world.test", "--cp-domain cp.world.test", "--thin-pool freehold-thin"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("rebuild args %q missing %q", joined, want)
 		}
 	}
 	// Full world by default: k3s and litellm are on unless opted out.
-	for _, banned := range []string{"--no-k3s", "--no-litellm"} {
+	for _, banned := range []string{"--no-k3s", "--no-litellm", "--domain "} {
 		if strings.Contains(joined, banned) {
-			t.Errorf("seeded defaults must not opt out of %s: %q", banned, joined)
+			t.Errorf("seeded defaults must not contain %s: %q", banned, joined)
 		}
 	}
 }
@@ -286,7 +284,8 @@ func TestRebuildFormAcceptsSeededDefaults(t *testing.T) {
 func TestRebuildFormAgentNameRoundTrip(t *testing.T) {
 	op := strings.Repeat("b", 64)
 	cfgPath := writeRebuildCfg(t,
-		"domain = \"world.test\"\n"+
+		"relay_url = \"https://relay.world.test\"\n"+
+			"cp_url = \"https://cp.world.test\"\n"+
 			"operator_pubkey = \""+op+"\"\n"+
 			"cpa_name = \"waldo\"\n"+
 			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
@@ -295,7 +294,7 @@ func TestRebuildFormAgentNameRoundTrip(t *testing.T) {
 	if m.Flow == nil {
 		t.Fatal("B did not start the rebuild flow")
 	}
-	if got := m.Flow.Defaults[6]; got != "waldo" {
+	if got := m.Flow.Defaults[7]; got != "waldo" {
 		t.Fatalf("agent-name step seeded %q, want %q", got, "waldo")
 	}
 	var msg tea.Cmd
@@ -337,10 +336,10 @@ func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
 	if m2.Flow == nil {
 		t.Fatal("B did not start the rebuild flow")
 	}
-	if got := flowDefaults(m2, flowRebuild)[5]; got != "" {
+	if got := flowDefaults(m2, flowRebuild)[6]; got != "" {
 		t.Errorf("k3s must default blank (= on, reconcile-always), got %q", got)
 	}
-	if got := flowDefaults(m2, flowRebuild)[7]; got != "" {
+	if got := flowDefaults(m2, flowRebuild)[8]; got != "" {
 		t.Errorf("litellm must default blank (= on, reconcile-always), got %q", got)
 	}
 }
@@ -350,14 +349,15 @@ func TestRebuildFormNoSeedWithoutConfig(t *testing.T) {
 // opt-outs, not blank-boot surprises.
 func TestRebuildFormExplicitOptOut(t *testing.T) {
 	cfgPath := writeRebuildCfg(t,
-		"domain = \"world.test\"\n"+
+		"relay_url = \"https://relay.world.test\"\n"+
+			"cp_url = \"https://cp.world.test\"\n"+
 			"operator_pubkey = \""+strings.Repeat("b", 64)+"\"\n"+
 			"managed = [\"relay\", \"cp\"]\n")
 	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
 	keyPress(m, "B")
 	var msg tea.Cmd
 	for i := 0; i < ncols(flowRebuild); i++ {
-		if i == 5 || i == 7 {
+		if i == 6 || i == 8 {
 			typeText(m, "n")
 		}
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})

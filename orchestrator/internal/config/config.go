@@ -17,8 +17,12 @@ import (
 )
 
 // Config is the connection profile / desired world state.
+//
+// There is NO world/base domain anymore: the relay and control‑plane hosts are
+// separate literal hostnames (RelayURL/CPURL), and everything sits behind a
+// single static proxy IP (Proxy.Ip — the Caddy edge on the k3s node), which
+// both hosts resolve to. Relay/CP LXCs are DHCP, behind the proxy.
 type Config struct {
-	Domain           string      `toml:"domain"`
 	RelayURL         string      `toml:"relay_url"`
 	RelayWsURL       string      `toml:"relay_ws_url,omitempty"`
 	RelayPubkey      *string     `toml:"relay_pubkey,omitempty"`
@@ -26,6 +30,7 @@ type Config struct {
 	OperatorPubkey   string      `toml:"operator_pubkey"`
 	OperatorIdentity *string     `toml:"operator_identity,omitempty"`
 	Runner           RunnerRef   `toml:"runner"`
+	Proxy            ProxySpec   `toml:"proxy"`
 	Lxc              LxcSpec     `toml:"lxc"`
 	Plane            PlaneSpec   `toml:"plane,omitempty"`
 	Dns              DnsSpec     `toml:"dns,omitempty"`
@@ -33,6 +38,51 @@ type Config struct {
 	Caddy            CaddySpec   `toml:"caddy,omitempty"`
 	CPAName          string      `toml:"cpa_name,omitempty"`
 	Managed          []string    `toml:"managed"`
+}
+
+// ProxySpec is the single static address in the world: the proxy (Caddy) node,
+// which the relay + CP hosts resolve to and which Caddy binds for TLS. CIDR form.
+type ProxySpec struct {
+	Ip *string `toml:"ip,omitempty"`
+}
+
+// TenantSlug is a stable filesystem/LXC slug for the world, derived from the
+// RELAY host (never derived from a base domain — there is none).
+func (c *Config) TenantSlug() string { return slugFromHost(c.RelayHost(), "") }
+
+// Slug is the per-role slug (relay/cp/k3s), each built from the RELAY host plus
+// the role suffix, so mounts/LXC names survive compute-only rebuilds.
+func (c *Config) Slug(role string) string { return slugFromHost(c.RelayHost(), role) }
+
+// slugFromHost lowercases the host and maps every character outside [a-z0-9-]
+// (dots, etc.) to '-', collapsing runs, then appends "-"+role when non-empty.
+func slugFromHost(host, role string) string {
+	var b []byte
+	lastDash := false
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			b = append(b, c)
+			lastDash = false
+		case c >= 'A' && c <= 'Z':
+			b = append(b, c+('a'-'A'))
+			lastDash = false
+		case c >= '0' && c <= '9' || c == '-':
+			b = append(b, c)
+			lastDash = false
+		default:
+			if !lastDash {
+				b = append(b, '-')
+				lastDash = true
+			}
+		}
+	}
+	s := strings.Trim(string(b), "-")
+	if role != "" {
+		s = s + "-" + role
+	}
+	return s
 }
 
 // PlaneSpec is the durable volume plane (Phase 0.12).
@@ -80,7 +130,9 @@ func urlHost(u string) string {
 	return u
 }
 
-// LxcSpec holds the managed LXC coordinates.
+// LxcSpec holds the managed LXC coordinates. Relay/Cp are DHCP (their Ip is
+// the DISCOVERED address, populated after boot — the static is Proxy.Ip); K3s
+// carries no Ip because the k3s node's address IS Proxy.Ip (the one static).
 type LxcSpec struct {
 	Relay LxcGuest `toml:"relay"`
 	Cp    LxcGuest `toml:"cp"`
@@ -101,15 +153,16 @@ type LitellmSpec struct {
 	Host string `toml:"host,omitempty"` // the k3s guest name
 }
 
-// CaddySpec records the core TLS fronting proxy's coords (Services row +
-// teardown ownership). URL is the public relay URL Caddy fronts; Host is the
-// k3s guest name the proxy rides on. CertExpiry is the wildcard cert's leaf
-// NotAfter (RFC3339) as last issued/reused — the Certs tab + reuse gate input.
+// CaddySpec records the core TLS fronting proxy's coords. URL is the public
+// relay URL Caddy fronts; Host is the proxy's host (k3s). Per-host cert expiry
+// (RelayCert/CPCert, RFC3339) feeds the Certs tab + the reuse gate; CertIssuer
+// is the DNS provider used.
 type CaddySpec struct {
 	URL        string `toml:"url,omitempty"`
 	Host       string `toml:"host,omitempty"`
-	CertExpiry string `toml:"cert_expiry,omitempty"`
-	CertIssuer string `toml:"cert_issuer,omitempty"` // the DNS provider name
+	RelayCert  string `toml:"relay_cert_expiry,omitempty"`
+	CPCert     string `toml:"cp_cert_expiry,omitempty"`
+	CertIssuer string `toml:"cert_issuer,omitempty"`
 }
 
 // LxcGuest is a managed LXC's connect/status coordinates.
@@ -271,13 +324,13 @@ func StripCIDR(ip string) string {
 	return ip
 }
 
-// K3sLive: any HTTP answer from the kube-apiserver on the RECORDED k3s ip
-// (auth-gated 401 counts). Mirrors Rust k3s_live: the recorded ip is CIDR —
-// stripping the prefix keeps the URL from parsing as host:443 with the
-// "/24:6443/healthz" tail as a path.
+// K3sLive: any HTTP answer from the kube-apiserver on the PROXY static ip
+// (the k3s node = Proxy.Ip; auth-gated 401 counts). Mirrors Rust k3s_live: the
+// recorded ip is CIDR — stripping the prefix keeps the URL from parsing as
+// host:443 with the "/24:6443/healthz" tail as a path.
 func K3sLive(cfg *Config) bool {
-	if cfg.Lxc.K3s.Ip == nil {
+	if cfg.Proxy.Ip == nil {
 		return false
 	}
-	return HTTPAny("https://" + StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443/healthz")
+	return HTTPAny("https://" + StripCIDR(*cfg.Proxy.Ip) + ":6443/healthz")
 }

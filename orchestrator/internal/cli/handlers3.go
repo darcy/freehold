@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"freehold/orchestrator/internal/bootstrap"
 	"freehold/orchestrator/internal/client"
@@ -255,13 +254,11 @@ var bootstrapCmd = &cobra.Command{
 			return err
 		}
 		if res.IP == "" {
-			return fmt.Errorf("the %s driver did not report a target IP — the domain gate (A4) cannot proceed", kind)
+			return fmt.Errorf("the %s driver did not report a target IP", kind)
 		}
-		fmt.Printf("DOMAIN-GATE: target is up at %s; require '%s' to resolve there (map it in your LAN DNS, or /etc/hosts for the POC)\n", res.IP, domain)
-		waitSecs, _ := cmd.Flags().GetUint64("domain-wait-secs")
-		if err := bootstrap.WaitForDomainResolution(domain, res.IP, waitSecs, bootstrap.ResolveIP, time.Sleep); err != nil {
-			return err
-		}
+		// No A4 DNS gate: everything resolves internally behind the proxy, so
+		// we don't require the domain to map to this IP before continuing.
+		fmt.Printf("target is up at %s (no DNS gate — internal resolution is enough for install)\n", res.IP)
 		fmt.Printf("BOOTSTRAPPED %s (%s): %s\n", res.Name, res.Kind, res.Detail)
 		return nil
 	},
@@ -687,7 +684,7 @@ var teardownCmd = &cobra.Command{
 			Addr:            cfg.Runner.Addr,
 			AgentDir:        agentDir,
 			Runner:          cfg.Runner.Target,
-			Domain:          cfg.Domain,
+			Domain:          cfg.TenantSlug(),
 		}
 
 		// The door must work before anything remote: a signed exec probe.
@@ -710,7 +707,7 @@ var teardownCmd = &cobra.Command{
 			kind = *cfg.Plane.BackendKind
 		}
 		tcfg := &teardown.Cfg{
-			Domain:        cfg.Domain,
+			Domain:        cfg.TenantSlug(),
 			RunNTarget:    cfg.Runner.Target,
 			RunnerComment: cfg.Runner.Pubkey,
 			Managed:       cfg.Managed,

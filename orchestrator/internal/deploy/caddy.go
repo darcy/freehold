@@ -28,7 +28,7 @@ func RenderCaddyfile(relayHost, relayUpstream string) string {
 }
 
 %s {
-	tls /data/tls/fullchain.pem /data/tls/key.pem
+	tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem
 	reverse_proxy %s
 }
 `, relayHost, relayUpstream)

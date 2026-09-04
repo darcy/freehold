@@ -10,7 +10,7 @@ func TestRenderCaddyfile(t *testing.T) {
 	for _, want := range []string{
 		"auto_https off",
 		"relay.example.test {",
-		"tls /data/tls/fullchain.pem /data/tls/key.pem",
+		"tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem",
 		"reverse_proxy 192.168.30.8:3000",
 	} {
 		if !strings.Contains(out, want) {

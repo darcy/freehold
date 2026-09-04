@@ -135,8 +135,19 @@ func Verify(domain, providerName string, env map[string]string) error {
 	return nil
 }
 
-// IssueWildcard obtains a certificate covering the apex and its wildcard.
+// Issue obtains a SINGLE-NAME certificate for one host via DNS-01 (the
+// per-host model: relay and CP each get their own cert; no wildcard/base).
+func Issue(host, providerName string, env map[string]string) (*Issued, error) {
+	return issue([]string{host}, host, providerName, env)
+}
+
+// IssueWildcard obtains a certificate covering the apex and its wildcard
+// (kept for callers that still want a wildcard SAN).
 func IssueWildcard(domain, providerName string, env map[string]string) (*Issued, error) {
+	return issue([]string{"*." + domain, domain}, "*."+domain, providerName, env)
+}
+
+func issue(domains []string, label, providerName string, env map[string]string) (*Issued, error) {
 	p, err := buildProvider(providerName, env)
 	if err != nil {
 		return nil, err
@@ -164,14 +175,14 @@ func IssueWildcard(domain, providerName string, env map[string]string) (*Issued,
 	u.reg = reg
 
 	res, err := client.Certificate.Obtain(certificate.ObtainRequest{
-		Domains: []string{"*." + domain, domain},
+		Domains: domains,
 		Bundle:  true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("obtain %s: %w", "*."+domain, err)
+		return nil, fmt.Errorf("obtain %s: %w", label, err)
 	}
 	if res == nil || len(res.Certificate) == 0 {
-		return nil, fmt.Errorf("obtain returned no certificate for %s", "*."+domain)
+		return nil, fmt.Errorf("obtain returned no certificate for %s", label)
 	}
 	return &Issued{
 		Fullchain: res.Certificate,

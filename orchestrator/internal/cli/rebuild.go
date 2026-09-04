@@ -62,23 +62,23 @@ var dnsCredCmd = &cobra.Command{
 		cfgPath, _ := cmd.Flags().GetString("config")
 		if domain == "" {
 			if cfg, err := config.Load(cfgPath); err == nil && cfg != nil {
-				domain = cfg.Domain
+				domain = cfg.RelayHost()
 			}
 		}
 		if domain == "" {
-			return fmt.Errorf("dns-cred needs a domain (--domain or a config on record) so the pre-verify can target its zone")
+			return fmt.Errorf("dns-cred needs a relay domain (--domain or a config on record) so the pre-verify can target its zone")
 		}
 		e := &rebuildEngine{
-			f:   rebuildFlags{domain: domain},
+			f:   rebuildFlags{relayDomain: domain},
 			out: os.Stdout,
 			in:  os.Stdin,
 		}
-		provider, _, err := e.promptDNSCred()
+		provider, _, err := e.promptDNSCred("relay", domain, "")
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(e.out, "  ✓ DNS provider credential saved (%s) — rebuilds will reuse it\n", provider)
-		fmt.Fprintf(e.out, "  stored sealed at %s\n", e.certCredPath())
+		fmt.Fprintf(e.out, "  ✓ relay DNS provider credential saved (%s) — rebuilds will reuse it\n", provider)
+		fmt.Fprintf(e.out, "  stored sealed at %s\n", e.certCredPath("relay"))
 		return nil
 	},
 }
@@ -113,18 +113,14 @@ var rebuildCmd = &cobra.Command{Use: "rebuild",
 		f.rootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
 		f.memoryMB, _ = cmd.Flags().GetUint32("memory-mb")
 		f.relayGw, _ = cmd.Flags().GetString("relay-gw")
-		f.relayIP, _ = cmd.Flags().GetString("relay-ip")
-		f.cpIP, _ = cmd.Flags().GetString("cp-ip")
-		f.k3sIP, _ = cmd.Flags().GetString("k3s-ip")
+		f.proxyIP, _ = cmd.Flags().GetString("proxy-ip")
 		f.configPath, _ = cmd.Flags().GetString("config")
 		f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 		f.yes, _ = cmd.Flags().GetBool("yes")
-		// STATIC IPs must be CIDR — pct create's net0=ip= wants host/prefix,
-		// and failing that at stage 7 is a long-run failure; say it up front.
-		for _, ip := range []string{f.relayIP, f.cpIP, f.k3sIP} {
-			if ip != "" && !strings.Contains(ip, "/") {
-				return fmt.Errorf("STATIC guest IPs are CIDR (host/prefix) — got %q", ip)
-			}
+		// The ONE static IP (the proxy/Caddy node) must be CIDR — pct create's
+		// net0=ip= wants host/prefix; relay/cp/k3s LXCs are DHCP behind it.
+		if f.proxyIP != "" && !strings.Contains(f.proxyIP, "/") {
+			return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", f.proxyIP)
 		}
 
 		eng, err := newRebuildEngine(f)
@@ -139,9 +135,9 @@ func init() {
 	rebuildCmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
 	rebuildCmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
 	rebuildCmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
-	rebuildCmd.Flags().String("domain", "", "World base domain (used for the durable-plane/LXC naming and the wildcard cert apex; REQUIRED)")
-	rebuildCmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — NOT derived from the world domain. Absent => the relay is served at the world domain itself.")
-	rebuildCmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — NOT derived from the world domain. Absent => the CP is served at the world domain itself.")
+	rebuildCmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
+	rebuildCmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
+	rebuildCmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — REQUIRED, never derived")
 	rebuildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
 	rebuildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
 	rebuildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
@@ -151,12 +147,10 @@ func init() {
 	rebuildCmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC (defaults to the full world — relay/cp/k3s/litellm/CPA; stages reconcile idempotently and skip what is already present)")
 	rebuildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	rebuildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
-	rebuildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for STATIC guest IPs (unused with DHCP)")
+	rebuildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for the proxy's STATIC guest IP (unused with DHCP)")
 	rebuildCmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
 	rebuildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
-	rebuildCmd.Flags().String("relay-ip", "", "STATIC relay LXC IP (CIDR, e.g. 192.168.30.8/24) — absent => DHCP (Rust: the recorded config ip is re-booted static)")
-	rebuildCmd.Flags().String("cp-ip", "", "STATIC control-plane LXC IP (CIDR) — absent => DHCP")
-	rebuildCmd.Flags().String("k3s-ip", "", "STATIC k3s LXC IP (CIDR) — absent => DHCP")
+	rebuildCmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24) — the ONE static address; relay/CP hosts resolve to it. Absent => DHCP")
 	rebuildCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	rebuildCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	rebuildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
@@ -170,6 +164,7 @@ type rebuildFlags struct {
 	domain             string
 	relayDomain        string
 	cpDomain           string
+	proxyIP            string
 	operatorPubkey     string
 	operatorIdentity   string
 	agentName          string
@@ -182,9 +177,6 @@ type rebuildFlags struct {
 	rootfsGB           uint32
 	memoryMB           uint32
 	relayGw            string
-	relayIP            string
-	cpIP               string
-	k3sIP              string
 	configPath         string
 	confirmStorage     bool
 	yes                bool
@@ -347,7 +339,7 @@ func rbServeLog() string   { return filepath.Join(freeholdHome(), "installer", "
 // ---- the pipeline ---------------------------------------------------------
 
 func (e *rebuildEngine) run() error {
-	fmt.Fprintf(e.out, "rebuilding world %s (runner %s @ %s)\n", e.f.domain, e.f.target, e.f.addr)
+	fmt.Fprintf(e.out, "rebuilding world %s (runner %s @ %s)\n", e.f.relayDomain, e.f.target, e.f.addr)
 
 	// 1. the ops agent identity (minted on demand; its pubkey is the grant).
 	ensureAgentIdentity(rbOpsDir())
@@ -411,8 +403,11 @@ func (e *rebuildEngine) run() error {
 	// and stageCert at the end just reads it back. No-op under --yes unless a
 	// stored copy is already present (then stageCert fails loudly at the end).
 	if e.worldHasEdge() {
-		if _, _, err := e.promptDNSCred(); err != nil {
-			return fmt.Errorf("DNS provider credential: %w", err)
+		if _, _, err := e.promptDNSCred("relay", e.f.relayDomain, ""); err != nil {
+			return fmt.Errorf("relay DNS provider credential: %w", err)
+		}
+		if _, _, err := e.promptDNSCred("cp", e.f.cpDomain, "relay"); err != nil {
+			return fmt.Errorf("control-plane DNS provider credential: %w", err)
 		}
 	}
 
@@ -464,12 +459,12 @@ func (e *rebuildEngine) run() error {
 	if err := e.stageDeployRelay(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", firstNonEmpty(e.f.relayDomain, e.f.domain))
+	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.relayDomain)
 	fmt.Fprintln(e.out, "  · deploying the control plane (release binaries into the cp LXC)…")
 	if err := e.stageDeployCp(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", firstNonEmpty(e.f.cpDomain, e.f.domain))
+	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
 
 	// 14.5. C0: the litellm gateway — provision the litellm runner (master +
 	// provider + postgres secrets sealed to it), apply the kube workloads,
@@ -499,10 +494,6 @@ func (e *rebuildEngine) run() error {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ internal DNS resolver live (CP-owned)")
-	fmt.Fprintln(e.out, "  · registering the Caddy wildcard apex (*.<domain> -> k3s node)…")
-	if err := e.stageDnsWildcard(); err != nil {
-		return err
-	}
 
 	// 14.65. C0: the core Caddy TLS fronting proxy — freehold's own edge. It
 	// fronts the relay over the wildcard cert (F3 issues it; F5 points the CPA
@@ -558,7 +549,7 @@ func (e *rebuildEngine) run() error {
   control plane:  https://%s
   runner:         serving on %s
   operator pk:    %s
-`, firstNonEmpty(e.f.relayDomain, e.f.domain), firstNonEmpty(e.f.cpDomain, e.f.domain), e.f.addr, e.f.operatorPubkey)
+`, e.f.relayDomain, e.f.cpDomain, e.f.addr, e.f.operatorPubkey)
 	return nil
 }
 
@@ -924,17 +915,13 @@ func (e *rebuildEngine) stopRunner(pid string) {
 // config::Config::from_answers). runner pubkey resolved from the package.
 func (e *rebuildEngine) fromAnswers() *config.Config {
 	runnerPK, _ := loadRPubkey(filepath.Join(rbRunnerPkgs(), e.f.target))
-	// The relay, CP, and world domains are INDEPENDENT inputs now — never
-	// derived (a relay has no guarantee of a "relay." prefix; it may sit at
-	// the world domain or anywhere the operator chooses). When a relay or CP
-	// domain isn't given, that service is served at the world domain itself.
-	relayDomain := firstNonEmpty(e.f.relayDomain, e.f.domain)
-	cpDomain := firstNonEmpty(e.f.cpDomain, e.f.domain)
-	// RelayWsURL is the CPA pod's relay origin. It follows the relay's own
-	// host (wss://<relayDomain> — the public, TLS-fronted form the edge
-	// serves); stageCpa falls back to wss://RelayURL when empty.
+	// The relay + CP hosts are LITERAL inputs, never derived, and there is no
+	// world/base domain. Everything behind is a single static proxy IP.
+	relayDomain := e.f.relayDomain
+	cpDomain := e.f.cpDomain
+	// RelayWsURL is the CPA pod's relay origin: wss://<relayDomain> — the
+	// public, TLS-fronted form the edge serves.
 	cfg := &config.Config{
-		Domain:         e.f.domain,
 		RelayURL:       "https://" + relayDomain,
 		RelayWsURL:     "wss://" + relayDomain,
 		CPURL:          "https://" + cpDomain,
@@ -946,6 +933,10 @@ func (e *rebuildEngine) fromAnswers() *config.Config {
 		},
 		Managed: []string{"relay", "cp"},
 		CPAName: e.f.agentName,
+	}
+	if e.f.proxyIP != "" {
+		p := e.f.proxyIP
+		cfg.Proxy = config.ProxySpec{Ip: &p}
 	}
 	if e.f.operatorIdentity != "" {
 		v := e.f.operatorIdentity
@@ -1177,7 +1168,7 @@ func (e *rebuildEngine) stageStorage(placement *placement) error {
 			"--addr", e.f.addr, "--agent-dir", rbOpsDir(),
 			"--target", e.f.target,
 			"--tenant", tenant,
-			"--domain", e.f.domain,
+			"--domain", e.f.relayDomain,
 			"--pool", pool,
 			"--size-gb", strconv.FormatUint(e.f.sizeGB, 10),
 			"--pool-size-gb", strconv.FormatUint(e.f.poolSizeGB, 10),
@@ -1329,7 +1320,7 @@ func (e *rebuildEngine) stageBootstrap(role string) error {
 		"--kind", "proxmox-lxc",
 		"--role", role,
 		"--target", e.f.target,
-		"--domain", e.f.domain,
+		"--domain", e.f.relayDomain,
 		"--rootfs-gb", strconv.FormatUint(uint64(e.f.rootfsGB), 10),
 		"--memory-mb", strconv.FormatUint(uint64(e.f.memoryMB), 10),
 		"--operator-pubkey", e.f.operatorPubkey,
@@ -1354,18 +1345,20 @@ func (e *rebuildEngine) stageBootstrap(role string) error {
 	return err
 }
 
-// bootstrapStaticIP is the role's STATIC guest IP: an explicit --lxc-ip flag
-// wins; else the RECORDED config ip rides again (Rust Answers::from_config —
-// the operator owns the addressing + the proxy target); else "" = DHCP.
+// bootstrapStaticIP returns the role's STATIC address, OR "" = DHCP. With a
+// single static proxy now, ONLY the proxy node ("k3s") is static (f.proxyIP,
+// or the recorded cfg.Proxy.Ip riding again); relay + cp are always DHCP.
 func bootstrapStaticIP(role string, f rebuildFlags, cfg *config.Config) string {
-	ip := map[string]string{"relay": f.relayIP, "cp": f.cpIP, "k3s": f.k3sIP}[role]
-	if ip == "" && cfg != nil {
-		g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s}[role]
-		if g.Ip != nil && *g.Ip != "" {
-			ip = *g.Ip
-		}
+	if role != "k3s" {
+		return "" // relay/cp are behind the proxy
 	}
-	return ip
+	if f.proxyIP != "" {
+		return f.proxyIP
+	}
+	if cfg != nil && cfg.Proxy.Ip != nil {
+		return *cfg.Proxy.Ip
+	}
+	return ""
 }
 
 // stageRecordLxc persists the real post-boot coordinates into the config ON
@@ -1434,7 +1427,7 @@ func lxcName(domain, role string) string {
 // (a suffix-only match can hit ANOTHER world's container on a multi-world
 // host).
 func (e *rebuildEngine) findLxcVmidExact(role string) (uint32, error) {
-	exact := lxcName(e.f.domain, role)
+	exact := lxcName(e.f.relayDomain, role)
 	ok, out := e.runBin(e.bins.Self, e.execArgs("pct list", 0))
 	if !ok {
 		return 0, fmt.Errorf("pct list unreadable through the runner:\n%s", out)
@@ -1598,8 +1591,8 @@ func (e *rebuildEngine) stageDeployRelay() error {
 	args := []string{"deploy-relay",
 		"--target", e.f.target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
-		"--domain", e.f.domain,
-		"--relay-url", "https://" + firstNonEmpty(e.f.relayDomain, e.f.domain),
+		"--domain", e.f.relayDomain,
+		"--relay-url", "https://" + e.f.relayDomain,
 		"--owner-pubkey", e.f.operatorPubkey,
 		"--operator-pubkey", e.f.operatorPubkey,
 	}
@@ -1625,7 +1618,7 @@ func (e *rebuildEngine) stageDeployCp() error {
 	args := []string{"deploy-cp",
 		"--target", e.f.target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
-		"--relay-url", "https://" + firstNonEmpty(e.f.relayDomain, e.f.domain),
+		"--relay-url", "https://" + e.f.relayDomain,
 		"--binary", e.bins.ReleaseCP,
 		"--runner-binary", e.bins.ReleaseRun,
 		"--operator-pubkey", e.f.operatorPubkey,
@@ -1751,28 +1744,28 @@ func (e *rebuildEngine) stageDnsRegister() error {
 	// public/tailscale record through upstream).
 	searchBase := e.guestSearchBase()
 	if cfg != nil {
-		for _, role := range []string{"relay", "cp", "k3s"} {
-			g := map[string]config.LxcGuest{
-				"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s,
-			}[role]
+		for _, role := range []string{"relay", "cp"} {
+			g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp}[role]
 			if g.Ip != nil {
 				recs = append(recs, rec{name: role, ip: config.StripCIDR(*g.Ip), source: "record_lxc " + role})
 			}
 		}
+		// The proxy node (k3s) is the ONE static address.
+		if cfg.Proxy.Ip != nil {
+			recs = append(recs, rec{name: "proxy", ip: config.StripCIDR(*cfg.Proxy.Ip), source: "proxy-static"})
+			recs = append(recs, rec{name: "k3s", ip: config.StripCIDR(*cfg.Proxy.Ip), source: "proxy-static"})
+		}
 		if cfg.Litellm.Host != "" {
 			recs = append(recs, rec{name: "litellm", ip: cfg.Litellm.Host, source: "litellm-apply"})
 		}
-		// Split horizon for the appliance's OWN relay domain: the community
-		// relay is served on the relay LXC, so the CP resolver answers
-		// <domain> -> the relay LXC IP for internal clients (k3s pods via
-		// CoreDNS forward) instead of forwarding to the public/Tailscale A
-		// record (unreachable from the LAN). Rendered as the bare host +
-		// <search> below. Only added when the domain is a subdomain of the
-		// search base (the standard deploy shape), so the host derives cleanly.
-		if cfg.Domain != "" && cfg.Lxc.Relay.Ip != nil {
-			if host := relayDomainHost(cfg.Domain, searchBase); host != "" {
-				recs = append(recs, rec{name: host, ip: config.StripCIDR(*cfg.Lxc.Relay.Ip), source: "self-domain"})
-			}
+		// Split horizon: the relay + CP hosts resolve to the PROXY (Caddy),
+		// which fronts TLS and reverse-proxies to the LXCs behind it — never
+		// directly to a LXC. Both are explicit dotted records.
+		if rh := cfg.RelayHost(); rh != "" && cfg.Proxy.Ip != nil {
+			recs = append(recs, rec{name: rh, ip: config.StripCIDR(*cfg.Proxy.Ip), source: "relay-via-proxy"})
+		}
+		if ch := cfg.CPHost(); ch != "" && cfg.Proxy.Ip != nil {
+			recs = append(recs, rec{name: ch, ip: config.StripCIDR(*cfg.Proxy.Ip), source: "cp-via-proxy"})
 		}
 	}
 	// Configure the mirror BEFORE the remote sync: if the CP is unreachable
@@ -1800,31 +1793,6 @@ func (e *rebuildEngine) stageDnsRegister() error {
 		if _, err := e.stageCpExec(args...); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// stageDnsWildcard registers the Caddy wildcard apex: every `<sub>.<domain>`
-// (relay., cp., *.base) resolves INSIDE the CP resolver to the k3s node (where
-// Caddy fronts 80/443 on the LAN). Rendered as dnsmasq `address=/.<domain>/<ip>`,
-// so the apex itself keeps its explicit record and only subdomains land on
-// Caddy. Idempotent. Skips when k3s/litellm is off (no Caddy node) or the
-// domain is empty.
-func (e *rebuildEngine) stageDnsWildcard() error {
-	cfg, err := config.Load(e.f.configPath)
-	if err != nil || cfg == nil || cfg.Domain == "" || cfg.Litellm.Host == "" {
-		return nil
-	}
-	apex, ip := cfg.Domain, cfg.Litellm.Host
-	if cfg.Dns.Records == nil {
-		cfg.Dns.Records = map[string]string{}
-	}
-	cfg.Dns.Records["*."+apex] = ip
-	if err := cfg.Save(e.f.configPath); err != nil {
-		return err
-	}
-	if _, err := e.stageCpExec("dns", "wildcard", apex, ip, "record-caddy"); err != nil {
-		return err
 	}
 	return nil
 }
@@ -2082,10 +2050,10 @@ func (e *rebuildEngine) stageLitellm() error {
 	}
 
 	cfg, err := config.Load(e.f.configPath)
-	if err != nil || cfg == nil || cfg.Lxc.K3s.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
+	if err != nil || cfg == nil || cfg.Proxy.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
 		return fmt.Errorf("no k3s coords recorded — cannot place the litellm gateway")
 	}
-	k3sIP := config.StripCIDR(*cfg.Lxc.K3s.Ip)
+	k3sIP := config.StripCIDR(*cfg.Proxy.Ip)
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	gwURL := "http://" + k3sIP + ":31400"
 
@@ -2531,8 +2499,8 @@ func (e *rebuildEngine) stageCaddy() error {
 	if cfg.Lxc.K3s.Vmid == nil {
 		return fmt.Errorf("no k3s coords recorded — Caddy needs the k3s substrate")
 	}
-	if cfg.Domain == "" {
-		return fmt.Errorf("no world domain in config — Caddy fronts relay.<domain>")
+	if cfg.RelayHost() == "" {
+		return fmt.Errorf("no relay domain in config — Caddy fronts the relay's own host")
 	}
 	if cfg.Lxc.Relay.Ip == nil {
 		return fmt.Errorf("no relay LXC coords recorded — Caddy fronts the relay at its LAN IP")
@@ -2547,7 +2515,7 @@ func (e *rebuildEngine) stageCaddy() error {
 	if !ok {
 		return fmt.Errorf("caddy kube apply failed:\n%s", out)
 	}
-	if err := e.recordCaddy(cfg.RelayURL, config.StripCIDR(*cfg.Lxc.K3s.Ip)); err != nil {
+	if err := e.recordCaddy(cfg.RelayURL, config.StripCIDR(*cfg.Proxy.Ip)); err != nil {
 		return err
 	}
 	return nil
@@ -2560,9 +2528,10 @@ func (e *rebuildEngine) stageCaddy() error {
 // in the durable state dir; lego runs in-process. Reconcile-always: a valid
 // cert already on the PVC (>= 30d left) is reused and DNS-01 is skipped.
 
-// certCredPath is where the sealed DNS provider credential lives (durable).
-func (e *rebuildEngine) certCredPath() string {
-	return filepath.Join(rbStateDir(), "dns-provider.json")
+// certCredPath is the sealed DNS provider credential for a slot ("relay" or
+// "cp") — kept SEPARATE (they may differ), durable.
+func (e *rebuildEngine) certCredPath(slot string) string {
+	return filepath.Join(rbStateDir(), "dns-provider-"+slot+".json")
 }
 
 // certIdentSecret returns the ops identity's encryption secret (raw bytes), the
@@ -2585,112 +2554,139 @@ func (e *rebuildEngine) certIdent() (*flows.Identity, []byte, []byte, error) {
 	return id, secret, pub, nil
 }
 
-// stageCert ensures the Caddy edge has a valid wildcard cert: reuse the durable
-// one when fresh, else collect (or reuse) the DNS provider token, pre-verify it,
-// issue via embedded lego, install into the Caddy pod, and reload.
+// stageCert ensures the Caddy edge has a valid cert for EACH host it fronts
+// (relay + cp), each with its OWN durable cert + DNS credential (which may
+// differ). Per host: reuse the durable cert when fresh (>= 30d), else resolve
+// that slot's DNS credential (or reuse the relay one for cp), issue a
+// single-name DNS-01 cert, install it into the Caddy pod, and reload.
 func (e *rebuildEngine) stageCert() error {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil {
 		return err
 	}
-	if cfg == nil || cfg.Domain == "" || cfg.Lxc.K3s.Vmid == nil {
-		return nil // no edge / no k3s -> nothing to certify
+	if cfg == nil || cfg.Lxc.K3s.Vmid == nil {
+		return nil // no k3s -> no proxy edge to certify
 	}
 	if cfg.Caddy.Host == "" {
 		fmt.Fprintln(e.out, "  · Caddy edge not recorded — skipping cert issuance")
 		return nil
 	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
-
-	// 1. Reuse the durable cert on the PVC when it's fresh (>= 30d left).
-	existing, err := e.caddyFullchain(k3sVmid)
-	if err == nil && len(existing) > 0 {
-		exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour)
-		if ok {
-			fmt.Fprintf(e.out, "  · reusing existing wildcard cert (expires %s)\n", exp.UTC().Format(time.RFC3339))
-			return e.recordCert(cfg, exp, cfg.Caddy.CertIssuer)
+	for _, svc := range []struct{ slot, host string }{
+		{"relay", cfg.RelayHost()},
+		{"cp", cfg.CPHost()},
+	} {
+		if svc.host == "" {
+			continue
+		}
+		if err := e.ensureHostCert(k3sVmid, svc.slot, svc.host); err != nil {
+			return err
 		}
 	}
-	if err != nil && !e.f.noK3s {
-		fmt.Fprintln(e.out, "  · no reusable cert on the edge — will issue a fresh one")
+	return nil
+}
+
+// ensureHostCert reuses or issues ONE host's cert (its own slot).
+func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host string) error {
+	// 1. Reuse the durable per-slot cert on the PVC when fresh (>= 30d left).
+	if existing, err := e.caddyFullchain(k3sVmid, slot); err == nil && len(existing) > 0 {
+		if exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour); ok {
+			fmt.Fprintf(e.out, "  · %s: reusing existing cert (expires %s)\n", slot, exp.UTC().Format(time.RFC3339))
+			cfg, _ := config.Load(e.f.configPath)
+			isr := ""
+			if cfg != nil {
+				isr = cfg.Caddy.CertIssuer
+			}
+			return e.recordCert(slot, exp, isr)
+		}
 	}
 
-	// 2. Resolve the DNS provider token (reuse sealed copy or interactive).
-	provider, env, err := e.promptDNSCred()
+	// 2. That slot's DNS credential (relay's cred offered for reuse by cp).
+	reuseFrom := ""
+	if slot == "cp" {
+		reuseFrom = "relay"
+	}
+	provider, env, err := e.promptDNSCred(slot, host, reuseFrom)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(e.out, "  · pre-verifying %s DNS credentials (throwaway TXT round-trip)…\n", provider)
-	if err := cert.Verify(cfg.Domain, provider, env); err != nil {
-		return fmt.Errorf("DNS provider pre-verify failed: %w", err)
-	}
 
-	// 3. Issue the wildcard via embedded lego.
-	fmt.Fprintf(e.out, "  · issuing *.%s via lego (%s)…\n", cfg.Domain, provider)
-	issued, err := cert.IssueWildcard(cfg.Domain, provider, env)
+	// 3. Issue a single-name cert for this host via embedded lego.
+	fmt.Fprintf(e.out, "  · %s: issuing %s via lego (%s)…\n", slot, host, provider)
+	issued, err := cert.Issue(host, provider, env)
 	if err != nil {
 		return err
 	}
 
-	// 4. Install into the Caddy pod + reload.
-	if err := e.installCaddyCert(k3sVmid, issued.Fullchain, issued.Key); err != nil {
+	// 4. Install into the Caddy pod (per-slot path) + reload.
+	if err := e.installCaddyCert(k3sVmid, slot, issued.Fullchain, issued.Key); err != nil {
 		return err
 	}
 	exp := issued.NotAfter
 	if exp.IsZero() {
 		exp, _ = cert.LoadExpiryFromBytes(issued.Fullchain)
 	}
-	fmt.Fprintf(e.out, "  ✓ wildcard cert issued (expires %s)\n", exp.UTC().Format(time.RFC3339))
-	return e.recordCert(cfg, exp, provider)
+	fmt.Fprintf(e.out, "  ✓ %s cert issued (expires %s)\n", slot, exp.UTC().Format(time.RFC3339))
+	return e.recordCert(slot, exp, provider)
 }
 
-// recordCert persists the cert expiry + issuer into the config.
-func (e *rebuildEngine) recordCert(cfg *config.Config, exp time.Time, issuer string) error {
-	cfg.Caddy.CertExpiry = exp.UTC().Format(time.RFC3339)
+// recordCert persists the per-slot cert expiry + issuer into the config.
+func (e *rebuildEngine) recordCert(slot string, exp time.Time, issuer string) error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	if slot == "cp" {
+		cfg.Caddy.CPCert = exp.UTC().Format(time.RFC3339)
+	} else {
+		cfg.Caddy.RelayCert = exp.UTC().Format(time.RFC3339)
+	}
 	if issuer != "" {
 		cfg.Caddy.CertIssuer = issuer
 	}
 	return cfg.Save(e.f.configPath)
 }
 
-// caddyFullchain cats the edge's durable fullchain out of the pod (base64) so
-// the reuse gate can parse its expiry without re-issuing.
-func (e *rebuildEngine) caddyFullchain(k3sVmid uint32) ([]byte, error) {
+// caddyFullchain cats a slot's durable fullchain out of the pod (base64) so the
+// reuse gate can parse its expiry without re-issuing.
+func (e *rebuildEngine) caddyFullchain(k3sVmid uint32, slot string) ([]byte, error) {
 	cmd := fmt.Sprintf(
-		"pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n caddy exec deploy/caddy -- sh -c 'cat /data/tls/fullchain.pem' 2>/dev/null | base64 -w0",
-		k3sVmid)
+		"pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n caddy exec deploy/caddy -- sh -c 'cat /data/tls/%s/fullchain.pem' 2>/dev/null | base64 -w0",
+		k3sVmid, slot)
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60))
 	if !ok {
-		return nil, fmt.Errorf("caddy fullchain unreadable: %s", strings.TrimSpace(out))
+		return nil, fmt.Errorf("caddy %s fullchain unreadable: %s", slot, strings.TrimSpace(out))
 	}
 	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 	if err != nil {
-		return nil, fmt.Errorf("caddy fullchain base64: %w", err)
+		return nil, fmt.Errorf("caddy %s fullchain base64: %w", slot, err)
 	}
 	return dec, nil
 }
 
-// installCaddyCert writes the chain/key into the Caddy durable PVC via a
-// short-lived helper pod that mounts the same caddy-data volume (so it works
-// even while Caddy itself is crash-looping on the very first boot, before any
-// cert exists), then reloads the edge. The cert bytes are base64-embedded in
-// the runner command only — transient in memory, never persisted by freehold.
-func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, fullchain, key []byte) error {
-	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyCertInstallScript(k3sVmid, fullchain, key), 180))
+// installCaddyCert writes the chain/key into a slot's dir on the Caddy durable
+// PVC via a short-lived helper pod that mounts the same caddy-data volume (so
+// it works even while Caddy itself is crash-looping on the very first boot,
+// before any cert exists), then reloads the edge.
+func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, slot string, fullchain, key []byte) error {
+	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyCertInstallScript(k3sVmid, slot, fullchain, key), 180))
 	if !ok {
-		return fmt.Errorf("caddy cert install failed:\n%s", out)
+		return fmt.Errorf("caddy %s cert install failed:\n%s", slot, out)
 	}
 	return nil
 }
 
-// caddyCertInstallScript writes the chain/key into the Caddy durable PVC via a
-// short-lived helper pod that mounts the same caddy-data volume (so it works
-// even while Caddy itself is crash-looping on the very first boot, before any
-// cert exists), then reloads the edge. The cert bytes are base64-embedded in
-// the runner command only — transient in memory, never persisted by freehold.
-// Both the outer and inner (guest) shells run set -e so a failed helper-pod
-// write FAILS the stage instead of silently claiming an issued cert.
-func caddyCertInstallScript(k3sVmid uint32, fullchain, key []byte) string {
+// caddyCertInstallScript writes the chain/key into /data/tls/<slot>/ within the
+// Caddy durable PVC via a short-lived helper pod that mounts the same caddy-data
+// volume (so it works even while Caddy itself is crash-looping on the very first
+// boot, before any cert exists), then reloads the edge. The cert bytes are
+// base64-embedded in the runner command only — transient in memory, never
+// persisted by freehold. Both the outer + inner (guest) shells run set -e so a
+// failed helper-pod write FAILS the stage instead of silently claiming issuance.
+func caddyCertInstallScript(k3sVmid uint32, slot string, fullchain, key []byte) string {
 	fcB64 := base64.StdEncoding.EncodeToString(fullchain)
 	keyB64 := base64.StdEncoding.EncodeToString(key)
 	return fmt.Sprintf(`set -e
@@ -2715,12 +2711,12 @@ YAMLEOF
 $K -n caddy delete pod cert-installer --ignore-not-found=true >/dev/null 2>&1 || true
 $K apply -f /tmp/cert-installer.yaml
 $K -n caddy wait --for=condition=Ready pod/cert-installer --timeout=60s
-$K -n caddy exec pod/cert-installer -- sh -c "mkdir -p /data/tls && cat > /data/tls/fullchain.pem" < /tmp/fc.pem
-$K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/key.pem" < /tmp/key.pem
+$K -n caddy exec pod/cert-installer -- sh -c "mkdir -p /data/tls/%s && cat > /data/tls/%s/fullchain.pem" < /tmp/fc.pem
+$K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/%s/key.pem" < /tmp/key.pem
 $K -n caddy delete pod cert-installer >/dev/null 2>&1 || true
 $K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
 rm -f /tmp/fc.pem /tmp/key.pem /tmp/cert-installer.yaml
-'`, k3sVmid, shellSingleQuote(fcB64), shellSingleQuote(keyB64))
+'`, k3sVmid, shellSingleQuote(fcB64), shellSingleQuote(keyB64), slot, slot, slot)
 }
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.
@@ -2740,17 +2736,19 @@ func firstNonEmpty(vs ...string) string {
 // TLS edge (and therefore needs a DNS provider credential): k3s is on and a
 // world domain is set.
 func (e *rebuildEngine) worldHasEdge() bool {
-	return !e.f.noK3s && e.f.domain != ""
+	return !e.f.noK3s && e.f.relayDomain != ""
 }
 
-// promptDomains asks for the relay + control-plane hosts up front. Each
-// defaults to the world domain (bare ENTER), so nothing is derived — the
-// operator explicitly names them (they may be the world domain, a subdomain,
-// or on a wholly different zone). Flags already set (or a headless --yes run)
-// skip the prompt.
+// promptDomains asks for the relay + control-plane hosts up front. There is
+// NO world/base domain and no derivation — the two hosts are required, literal
+// inputs. A flag already set (or a headless --yes run) is honored; under --yes
+// a missing one hard-errors (interactive collection is the only source).
 func (e *rebuildEngine) promptDomains() error {
-	if e.f.relayDomain == "" && !e.f.yes {
-		ans, err := e.prompt("relay domain (its Buzz origin; bare ENTER = the world domain " + e.f.domain + ")")
+	if e.f.relayDomain == "" && e.f.yes {
+		return fmt.Errorf("no relay domain supplied and interactive collection is disabled (--yes); pass --relay-domain")
+	}
+	if e.f.relayDomain == "" {
+		ans, err := e.prompt("relay domain (its Buzz origin — REQUIRED)")
 		if err != nil {
 			return err
 		}
@@ -2758,8 +2756,14 @@ func (e *rebuildEngine) promptDomains() error {
 			e.f.relayDomain = a
 		}
 	}
-	if e.f.cpDomain == "" && !e.f.yes {
-		ans, err := e.prompt("control-plane domain (bare ENTER = the world domain " + e.f.domain + ")")
+	if e.f.relayDomain == "" {
+		return fmt.Errorf("relay domain is required")
+	}
+	if e.f.cpDomain == "" && e.f.yes {
+		return fmt.Errorf("no control-plane domain supplied and interactive collection is disabled (--yes); pass --cp-domain")
+	}
+	if e.f.cpDomain == "" {
+		ans, err := e.prompt("control-plane domain (REQUIRED)")
 		if err != nil {
 			return err
 		}
@@ -2767,42 +2771,21 @@ func (e *rebuildEngine) promptDomains() error {
 			e.f.cpDomain = a
 		}
 	}
-	// The wildcard cert is issued for *.<world-domain> / <world-domain>, so a
-	// relay or CP host on a DIFFERENT zone won't be covered by it. Surface
-	// that honestly rather than implying it will work.
-	for _, hv := range []struct {
-		name, host string
-	}{{"relay", e.f.relayDomain}, {"control plane", e.f.cpDomain}} {
-		if hv.host != "" && !domainCoveredByWildcard(e.f.domain, hv.host) {
-			fmt.Fprintf(e.out, "  ⚠ %s is on %q — outside the wildcard cert's %s zone; TLS for it needs a separate issuance (follow-up).\n",
-				hv.name, hv.host, "*."+e.f.domain)
-		}
+	if e.f.cpDomain == "" {
+		return fmt.Errorf("control-plane domain is required")
 	}
 	return nil
 }
 
-// domainCoveredByWildcard reports whether host is served by a lego DNS-01
-// wildcard issued for `apex` (SANs *.apex + apex). A wildcard matches ONE label
-// deep: the apex itself, or exactly a single-label subdomain (relay.apex), NOT
-// a multi-label subdomain (a.b.apex).
-func domainCoveredByWildcard(apex, host string) bool {
-	if host == apex {
-		return true
-	}
-	if !strings.HasSuffix(host, "."+apex) {
-		return false
-	}
-	sub := strings.TrimSuffix(host, "."+apex)
-	return sub != "" && !strings.Contains(sub, ".")
-}
-
-// promptDNSCred returns the DNS provider name + its env map, reusing the sealed
-// credential on disk when present, else interactively collecting it (provider
-// from lego's full registry, the provider's own env-var names) and saving it
-// sealed to the ops identity. Under --yes it keeps the existing copy; a missing
-// one is a hard error (no interactive collection headless).
-func (e *rebuildEngine) promptDNSCred() (string, map[string]string, error) {
-	path := e.certCredPath()
+// promptDNSCred returns the DNS provider name + its env map for one slot
+// ("relay"/"cp"), reusing the sealed copy when present. When the slot has no
+// credential, reuseFrom (if given + stored) offers to COPY that slot's
+// credential into this one without re-entering — but the two stay separate and
+// may differ. Otherwise it interactively collects (provider from lego's full
+// registry, the provider's own env-var names), pre-verifies against host, and
+// saves sealed. Under --yes a missing credential is a hard error.
+func (e *rebuildEngine) promptDNSCred(slot, host, reuseFrom string) (string, map[string]string, error) {
+	path := e.certCredPath(slot)
 	_, secret, pub, err := e.certIdent()
 	if err != nil {
 		return "", nil, err
@@ -2813,14 +2796,35 @@ func (e *rebuildEngine) promptDNSCred() (string, map[string]string, error) {
 	if cert.CredExists(path) {
 		provider, env, err := cert.LoadCreds(path, open, secret)
 		if err != nil {
-			return "", nil, fmt.Errorf("reusing DNS credential: %w", err)
+			return "", nil, fmt.Errorf("reusing %s DNS credential: %w", slot, err)
 		}
-		fmt.Fprintf(e.out, "  · reusing sealed DNS credential (%s)\n", provider)
+		fmt.Fprintf(e.out, "  · reusing sealed %s DNS credential (%s)\n", slot, provider)
 		return provider, env, nil
 	}
 
+	if reuseFrom != "" {
+		fromPath := e.certCredPath(reuseFrom)
+		if cert.CredExists(fromPath) && !e.f.yes {
+			ans, err := e.prompt(fmt.Sprintf("%s has no DNS credential — reuse the %s one? (y/n)", slot, reuseFrom))
+			if err != nil {
+				return "", nil, err
+			}
+			if strings.EqualFold(strings.TrimSpace(ans), "y") {
+				provider, env, err := cert.LoadCreds(fromPath, open, secret)
+				if err != nil {
+					return "", nil, err
+				}
+				if err := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns-"+slot); err != nil {
+					return "", nil, fmt.Errorf("storing %s DNS credential: %w", slot, err)
+				}
+				fmt.Fprintf(e.out, "  · %s reuses the %s DNS credential (%s) — copies kept separate\n", slot, reuseFrom, provider)
+				return provider, env, nil
+			}
+		}
+	}
+
 	if e.f.yes {
-		return "", nil, fmt.Errorf("no DNS provider credential stored and interactive collection is disabled (--yes); run without --yes once to store it")
+		return "", nil, fmt.Errorf("no %s DNS provider credential stored and interactive collection is disabled (--yes); run without --yes once to store it", slot)
 	}
 
 	provider, err := e.promptProvider()
@@ -2831,13 +2835,13 @@ func (e *rebuildEngine) promptDNSCred() (string, map[string]string, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	if e.f.domain != "" {
+	if host != "" {
 		fmt.Fprintf(e.out, "  · pre-verifying %s credentials (throwaway TXT round-trip)…\n", provider)
-		if err := cert.Verify(e.f.domain, provider, env); err != nil {
+		if err := cert.Verify(host, provider, env); err != nil {
 			return "", nil, fmt.Errorf("DNS provider pre-verify failed — fix the credential and try again: %w", err)
 		}
 	}
-	if err := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns"); err != nil {
+	if err := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns-"+slot); err != nil {
 		return "", nil, fmt.Errorf("storing DNS credential: %w", err)
 	}
 	return provider, env, nil
@@ -2915,7 +2919,7 @@ func (e *rebuildEngine) stageCpa() error {
 	if err != nil {
 		return err
 	}
-	if cfg == nil || cfg.Lxc.K3s.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
+	if cfg == nil || cfg.Proxy.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
 		return fmt.Errorf("no k3s coords recorded — the CPA pod needs the k3s substrate")
 	}
 	if cfg.RelayURL == "" {
@@ -3009,7 +3013,7 @@ func (e *rebuildEngine) recordCpa(cpaPub, cpaName string) error {
 // relayPubkeyNip11 reads the relay's signing pubkey via NIP-11 (best-effort
 // trust anchor; not fatal when unreadable).
 func (e *rebuildEngine) relayPubkeyNip11() (string, bool) {
-	text, ok := e.curlGet("https://" + firstNonEmpty(e.f.relayDomain, e.f.domain) + "/")
+	text, ok := e.curlGet("https://" + e.f.relayDomain + "/")
 	if !ok {
 		return "", false
 	}

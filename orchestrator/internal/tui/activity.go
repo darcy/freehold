@@ -131,7 +131,7 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		m.Mode, m.HasConfig, m.activity = ModeBootstrap, false, nil
 		return nil
 	}
-	m.HasConfig, m.Domain = true, cfg.Domain
+	m.HasConfig, m.Domain = true, cfg.RelayHost()
 
 	a := &activity{kind: "boot", title: title, spin: newSpinner()}
 	type def struct {
@@ -140,9 +140,8 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	}
 	defs := []def{
 		{"config", func() (string, bool) {
-			return cfg.Domain + " · " + m.CfgPath, true
-		}},
-		{"runner", func() (string, bool) {
+			return cfg.RelayHost() + " · " + m.CfgPath, true
+		}}, {"runner", func() (string, bool) {
 			m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
 			if m.RunnerReach {
 				return cfg.Runner.Addr + " reachable", true

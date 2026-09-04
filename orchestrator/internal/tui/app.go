@@ -63,7 +63,7 @@ func (m *Model) load(cfgPath string) error {
 		return nil
 	}
 	m.HasConfig = true
-	m.Domain = cfg.Domain
+	m.Domain = cfg.RelayHost()
 	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.LitellmLive, m.CaddyLive, m.RunnerReach = false, false, false, false, false, false, false
 	// ModeRunning until the boot check proves otherwise — the activity view
 	// covers the screen while the probes run, and the check settles the
@@ -163,44 +163,59 @@ func (m *Model) buildServices(cfg *config.Config) {
 	}
 }
 
-// buildCerts fills the Certs view from the config's recorded edge cert (written
-// by the F3 stage on rebuild). Pure — no exec. Status derives from the expiry.
+// buildCerts fills the Certs view from the config's recorded per-host edge certs
+// (written by the F3 stage on rebuild). Pure — no exec. Two rows (relay, cp),
+// each deriving its status from that slot's expiry.
 func (m *Model) buildCerts(cfg *config.Config) {
 	m.Certs = nil
-	domain := cfg.Domain
-	if cfg.Caddy.URL == "" && cfg.Caddy.CertExpiry == "" {
-		return
-	}
-	status := "no expiry on record"
-	expiry := "—"
 	issuer := cfg.Caddy.CertIssuer
 	if issuer == "" {
 		issuer = "lego (DNS-01)"
 	}
-	if cfg.Caddy.CertExpiry != "" {
-		expiry = cfg.Caddy.CertExpiry
-		if t, err := time.Parse(time.RFC3339, cfg.Caddy.CertExpiry); err == nil {
-			switch {
-			case t.Before(time.Now()):
-				status = styleRed.Render("EXPIRED")
-			case t.Before(time.Now().Add(30 * 24 * time.Hour)):
-				status = styleYellow.Render("expiring <30d")
-			default:
-				status = styleGreen.Render("valid")
+	slots := []struct {
+		name, host, expiry string
+	}{
+		{"relay", cfg.RelayHost(), cfg.Caddy.RelayCert},
+		{"control plane", cfg.CPHost(), cfg.Caddy.CPCert},
+	}
+	for _, s := range slots {
+		status, expiry := "no expiry on record", "—"
+		if s.expiry != "" {
+			expiry = s.expiry
+			if t, err := time.Parse(time.RFC3339, s.expiry); err == nil {
+				switch {
+				case t.Before(time.Now()):
+					status = styleRed.Render("EXPIRED")
+				case t.Before(time.Now().Add(30 * 24 * time.Hour)):
+					status = styleYellow.Render("expiring <30d")
+				default:
+					status = styleGreen.Render("valid")
+				}
 			}
 		}
+		m.Certs = append(m.Certs, CertRow{
+			Domain: s.host,
+			URL:    caddyURL(cfg, s.name),
+			Expiry: expiry,
+			Issuer: issuer,
+			Status: status,
+		})
 	}
-	url := cfg.Caddy.URL
-	if url == "" {
-		url = "https://relay." + domain
+}
+
+// caddyURL returns the edge URL for a service (relay -> the Caddy URL / relay
+// host; control plane -> the cp host), falling back to the bare host.
+func caddyURL(cfg *config.Config, name string) string {
+	if name == "control plane" {
+		if cfg.CPURL != "" {
+			return cfg.CPURL
+		}
+		return "https://" + cfg.CPHost()
 	}
-	m.Certs = append(m.Certs, CertRow{
-		Domain: "*. " + domain,
-		URL:    url,
-		Expiry: expiry,
-		Issuer: issuer,
-		Status: status,
-	})
+	if cfg.Caddy.URL != "" {
+		return cfg.Caddy.URL
+	}
+	return "https://" + cfg.RelayHost()
 }
 
 // dnsRowsLive execs `control-plane dns list` inside the cp LXC through the
