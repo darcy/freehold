@@ -295,6 +295,23 @@ func curlGetDefault(url string) (string, bool) {
 
 // ---- freehold home paths (mirror installer::lib.rs) ----------------------
 
+// normalizeWorldDomain reduces a relay/cp-prefixed entry to the BASE world
+// domain freehold derives its topology from. The world domain IS the base
+// (relay.<domain>/cp.<domain> are derived), so entering "relay." or "cp." as
+// the domain would otherwise double the prefix into relay.relay.<base>. A
+// leading relay./cp. label is stripped as forgiveness for that common entry;
+// any other domain is returned unchanged.
+func normalizeWorldDomain(d string) string {
+	for _, p := range []string{"relay.", "cp."} {
+		if strings.HasPrefix(d, p) {
+			if base := strings.TrimPrefix(d, p); base != "" && !strings.HasPrefix(base, ".") {
+				return base
+			}
+		}
+	}
+	return d
+}
+
 func rbStateDir() string   { return filepath.Join(freeholdHome(), "control-plane") }
 func rbOpsDir() string     { return filepath.Join(rbStateDir(), "agent-ops") }
 func rbRunnerPkgs() string { return filepath.Join(freeholdHome(), "runner") }
@@ -303,6 +320,7 @@ func rbServeLog() string   { return filepath.Join(freeholdHome(), "installer", "
 // ---- the pipeline ---------------------------------------------------------
 
 func (e *rebuildEngine) run() error {
+	e.f.domain = normalizeWorldDomain(e.f.domain)
 	fmt.Fprintf(e.out, "rebuilding world %s (runner %s @ %s)\n", e.f.domain, e.f.target, e.f.addr)
 
 	// 1. the ops agent identity (minted on demand; its pubkey is the grant).

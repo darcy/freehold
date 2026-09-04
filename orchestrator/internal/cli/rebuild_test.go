@@ -374,7 +374,30 @@ func TestMergeFromAnswersPreservesPrevFacts(t *testing.T) {
 func u32(v uint32) *uint32 { return &v }
 
 // TestFromAnswersRelayWsURLInternal is the guard for the review finding that
-// the CPA relay origin must stay on the relay's plain internal ws://<domain>:3000
+// TestNormalizeWorldDomain: entering "relay.<base>" / "cp.<base>" as the world
+// domain (a common mistake — the relay/cp hosts ARE the topology) must be
+// reduced to the base so freehold derives relay.<base>/cp.<base> once, not
+// relay.relay.<base>.
+func TestNormalizeWorldDomain(t *testing.T) {
+	cases := map[string]string{
+		"freehold-test.darcydev.net":       "freehold-test.darcydev.net",
+		"relay.freehold-test.darcydev.net": "freehold-test.darcydev.net",
+		"cp.freehold-test.darcydev.net":    "freehold-test.darcydev.net",
+		"darcydev.net":                     "darcydev.net",
+		"anything.example.com":             "anything.example.com",
+		"relay.x":                          "x",
+		"relay":                            "relay",
+		".relay.example.com":               ".relay.example.com",
+		"relayX.example.com":               "relayX.example.com",
+	}
+	for in, want := range cases {
+		if got := normalizeWorldDomain(in); got != want {
+			t.Errorf("normalizeWorldDomain(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestFromAnswersRelayWsURLInternal is the guard for the review finding that// the CPA relay origin must stay on the relay's plain internal ws://<domain>:3000
 // shape until the Caddy edge serves TLS (CORE_TLS.md F5 flips it to
 // wss://relay.<domain>). Asserting it locks in the non-regression so a rebuild
 // from a fresh world never points the CPA at a host with no live 443 terminator.
