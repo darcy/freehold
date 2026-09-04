@@ -856,3 +856,35 @@ func TestIsSkipDetail(t *testing.T) {
 		}
 	}
 }
+
+// TestRebuildFormDispatchArgs pins the EXACT args the TUI dispatches for a
+// completed rebuild form: --yes + --relay-domain + --cp-domain + --operator-pubkey,
+// and NO --domain (the removed world-domain flag). The headless run then reuses
+// the stored DNS credential (or errors under --yes only if truly absent).
+func TestRebuildFormDispatchArgs(t *testing.T) {
+	op := strings.Repeat("c", 64)
+	cfgPath := writeRebuildCfg(t,
+		"relay_url = \"https://relay.world.test\"\n"+
+			"cp_url = \"https://cp.world.test\"\n"+
+			"operator_pubkey = \""+op+"\"\n"+
+			"managed = [\"relay\", \"cp\", \"k3s\"]\n")
+	m := &Model{Mode: ModeBootstrap, CfgPath: cfgPath}
+	keyPress(m, "B")
+	var last tea.Cmd
+	for i := 0; i < ncols(flowRebuild); i++ {
+		_, last = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	start, ok := last().(activityStartMsg)
+	if !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", last())
+	}
+	got := strings.Join(start.args, " ")
+	for _, want := range []string{"--yes", "--relay-domain", "relay.world.test", "--cp-domain", "cp.world.test", "--operator-pubkey " + op} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dispatch args %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "--domain") {
+		t.Errorf("dispatch must not contain the removed --domain flag: %q", got)
+	}
+}
