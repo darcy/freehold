@@ -184,15 +184,16 @@ changelog.
 ### Testing the TUI (`freehold`, `cmd/freehold` → bubbletea dashboard)
 
 `go test` under `internal/tui/` verifies form logic, but it does NOT prove the running TUI.
-Always manually drive the real binary when you change a TUI flow (forms, keybindings, dispatch,
-pre-flow chaining like the rebuild→DNS ask), and rebuild `~/.cargo/bin/freehold` so the change is
-actually in what an operator launches — a passing `go test` does not re-place the installed binary.
-
-You are likely inside **herdr** (`HERDR_ENV=1`). Drive a real TUI in an isolated pane and watch
-it render:
+**Always test the BUILT binary** — never reason from `go test` + a stale `~/.cargo/bin/freehold`.
+The test step below rebuilds it FIRST, so there is nothing to remember: if you change a TUI flow
+(forms, keybindings, dispatch, pre-flow chaining like the rebuild→DNS ask), rebuild + test the
+installed binary in one go:
 
 ```bash
-# 1. isolate state so the flow you're testing is deterministic (e.g. no DNS cred already stored):
+# 0. rebuild + place the binary FIRST (a passing go test does not re-place it):
+cd orchestrator && go build -o target/debug/freehold ./cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
+
+# 1. isolate state so the flow is deterministic (e.g. no DNS cred already stored):
 cat > /tmp/fh-tui-config.toml <<'EOF'
 relay_url = 'https://relay.verify.example'
 relay_ws_url = 'wss://relay.verify.example'
@@ -202,7 +203,7 @@ managed = ['relay','cp']
 EOF
 mkdir -p /tmp/fh-tui-home
 
-# 2. a sibling pane, then launch the real binary there:
+# 2. a sibling pane, then launch THE BUILT BINARY there:
 herdr pane split --current --direction right --cwd "$PWD" --no-focus
 herdr pane run <pane> "cd $PWD && FREEHOLD_HOME=/tmp/fh-tui-home ~/.cargo/bin/freehold --config /tmp/fh-tui-config.toml"
 
@@ -219,12 +220,8 @@ The same approach works in a plain **tmux** session (`tmux new-session -d`, `tmu
 Isolate state via `FREEHOLD_HOME` (DNS provider creds, ops identity live there) and a temp
 `--config` so you aren't exercising/mutating the operator's real world; clean both up after.
 
-**After ANY TUI change, rebuild the binary before finishing** — a passing `go test` does NOT
-re-place `~/.cargo/bin/freehold`, and telling the operator it's ready from a stale binary is a
-recurring trap. Always:
-```bash
-cd orchestrator && go build -o target/debug/freehold ./cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
-```
+Because step 0 rebuilds the binary before testing it, the installed `~/.cargo/bin/freehold` is
+always current — a TUI change is never "tested" against a stale build.
 
 ## Code style
 
