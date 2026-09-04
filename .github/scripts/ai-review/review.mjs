@@ -476,6 +476,14 @@ async function main() {
   await updateParentComment(finalBody);
 
   core.info(`Posted ${newInline.length} inline comment(s). Verdict: ${result.verdict}`);
+
+  // Fail the check (red) when the review reports blocking/important findings —
+  // green only on MERGE-READY. Comments are already posted above.
+  if (inline.length > 0 || /NEEDS WORK/i.test(result.verdict || '')) {
+    core.setFailed(`Review found ${inline.length} blocking/important finding(s) (${newInline.length} new, ${reflagged.length} re-flagged) — see the parent comment.`);
+  } else {
+    core.info('Review passed — MERGE-READY.');
+  }
 }
 
 main().catch(err => core.setFailed(err.message));
