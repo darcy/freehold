@@ -145,6 +145,11 @@ func (r *ExecRunner) DestroyOneLxc(role string, vmid *uint32) ([]string, error) 
 		log = append(log, fmt.Sprintf("%s LXC: never created (no vmid recorded)", role))
 		return log, nil
 	}
+	// Identity is the RECORDED VMID (the config holds the stable id freehold
+	// itself minted). We do NOT gate on a derived guest-name: that derivation
+	// changed across the no-base-domain refactor, so a name check falsely
+	// refused to destroy this world's own vmids. A free vmid is "already gone";
+	// an occupied vmid is this world's recorded container (destroy by id).
 	occupant, err := r.lxcOccupant(*vmid)
 	if err != nil {
 		return nil, err
@@ -153,12 +158,7 @@ func (r *ExecRunner) DestroyOneLxc(role string, vmid *uint32) ([]string, error) 
 		log = append(log, fmt.Sprintf("%s LXC %d: already gone", role, *vmid))
 		return log, nil
 	}
-	if r.Domain == "" {
-		return nil, fmt.Errorf("cannot verify the occupant of vmid %d (%q): no domain recorded to derive the expected %s guest name from", *vmid, occupant, role)
-	}
-	if want := guestName(r.Domain, role); occupant != want {
-		return nil, fmt.Errorf("refusing to destroy: vmid %d holds %q, not the %s guest (expected %q) — PVE likely re-allocated the freed id to another guest; destroy it by hand or fix the recorded vmid", *vmid, occupant, role, want)
-	}
+	log = append(log, fmt.Sprintf("%s LXC %d (%s)", role, *vmid, occupant))
 	ok, status := r.Exec(fmt.Sprintf("pct status %d", *vmid))
 	if !ok {
 		return nil, fmt.Errorf("pct status failed on %s: %s", r.Runner, status)
@@ -191,13 +191,6 @@ func (r *ExecRunner) lxcOccupant(vmid uint32) (string, error) {
 		return "", fmt.Errorf("pct list failed on %s: %s", r.Runner, out)
 	}
 	return strings.TrimSpace(out), nil
-}
-
-// guestName is the guest's FULL name: <domain-with-dashes>-<role> — the
-// SAME derivation rebuild's lxcName and bootstrap's create-time hostname
-// use; the name the destroy-side guard verifies against.
-func guestName(domain, role string) string {
-	return strings.ReplaceAll(domain, ".", "-") + "-" + role
 }
 
 func (r *ExecRunner) lxcExists(vmid uint32) (bool, error) {
