@@ -488,6 +488,25 @@ func (e *rebuildEngine) run() error {
 		return fmt.Errorf("rebuild needs --relay-domain and --cp-domain (or an interactive run)")
 	}
 
+	// 5.6 The ONE static proxy IP (the Caddy/k3s node). relay/CP have no static
+	// addresses — everything sits behind the proxy, which is the only way into
+	// them. Asked when not supplied (--yes requires the flag or a stored value).
+	if e.f.proxyIP == "" && !e.f.yes {
+		ans, err := e.prompt("proxy static IP (CIDR, e.g. 192.168.30.8/24) — REQUIRED, the one address relay/CP resolve to")
+		if err != nil {
+			return err
+		}
+		if a := strings.TrimSpace(ans); a != "" {
+			e.f.proxyIP = a
+		}
+	}
+	if e.f.proxyIP == "" {
+		return fmt.Errorf("rebuild needs --proxy-ip (the single static proxy/Caddy address)")
+	}
+	if !strings.Contains(e.f.proxyIP, "/") {
+		return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", e.f.proxyIP)
+	}
+
 	// 6. write the INITIAL config so stage_storage has somewhere to record
 	// the durable-plane mapping (merge preserves a surviving config's facts).
 	if err := e.writeInitialConfig(); err != nil {
@@ -1057,9 +1076,12 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	// The mid-pipeline recorders (recordLitellm, stageDnsRegister) persist
 	// their sections to disk BEFORE finalSave rebuilds from answers from
 	// scratch — dropping them here would silently erase the gateway coords
-	// and the resolver mirror on every run. Keep them, like Plane.
+	// and the resolver mirror on every run. Keep them, like Plane. Also keep
+	// Caddy (coords + the per-host LE cert-domains + expiry) so a rebuild does
+	// not drop the wildcard cert-domain config or an existing cert's metadata.
 	cfg.Dns = prev.Dns
 	cfg.Litellm = prev.Litellm
+	cfg.Caddy = prev.Caddy
 	if cfg.RelayPubkey == nil {
 		cfg.RelayPubkey = prev.RelayPubkey
 	}
@@ -2551,7 +2573,17 @@ func (e *rebuildEngine) recordCaddy(url, host string) error {
 	if cfg == nil {
 		return fmt.Errorf("no config at %s", e.f.configPath)
 	}
-	cfg.Caddy = config.CaddySpec{URL: url, Host: host}
+	// Preserve the recorded cert-domain/issuer/expiry — only coords refresh here.
+	prev := cfg.Caddy
+	cfg.Caddy = config.CaddySpec{
+		URL:             url,
+		Host:            host,
+		RelayCert:       prev.RelayCert,
+		CPCert:          prev.CPCert,
+		CertIssuer:      prev.CertIssuer,
+		RelayLegoDomain: prev.RelayLegoDomain,
+		CPLegoDomain:    prev.CPLegoDomain,
+	}
 	if !containsStr(cfg.Managed, "caddy") {
 		cfg.Managed = append(cfg.Managed, "caddy")
 	}
@@ -2605,12 +2637,18 @@ func (e *rebuildEngine) stageCaddy() error {
 	if cfg.Lxc.Relay.Ip == nil {
 		return fmt.Errorf("no relay LXC coords recorded — Caddy fronts the relay at its LAN IP")
 	}
+	if cfg.Lxc.Cp.Ip == nil {
+		return fmt.Errorf("no cp LXC coords recorded — Caddy fronts the control plane at its LAN IP")
+	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 	relayIP := config.StripCIDR(*cfg.Lxc.Relay.Ip)
 	relayUpstream := fmt.Sprintf("%s:3000", relayIP)
-	// The relay's own public host from the config (RelayURL) — never derived.
+	cpIP := config.StripCIDR(*cfg.Lxc.Cp.Ip)
+	cpUpstream := fmt.Sprintf("%s:8080", cpIP)
+	// The relay + CP hosts from the config (never derived).
 	relayHost := cfg.RelayHost()
-	caddyfile := deploy.RenderCaddyfile(relayHost, relayUpstream)
+	cpHost := cfg.CPHost()
+	caddyfile := deploy.RenderCaddyfile(relayHost, relayUpstream, cpHost, cpUpstream)
 	ok, out := e.runBin(e.bins.Self, e.execArgs(caddyManifestScript(k3sVmid, caddyfile), 180))
 	if !ok {
 		return fmt.Errorf("caddy kube apply failed:\n%s", out)
@@ -2682,6 +2720,25 @@ func (e *rebuildEngine) stageCert() error {
 		return nil
 	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
+	// Per-host LE cert-domain: defaults to the host; a "*.<base>" issues a
+	// wildcard that covers the host (DNS-01 challenge targets the apex the
+	// user's zone serves).
+	legoDomain := func(slot string) string {
+		cfg, _ := config.Load(e.f.configPath)
+		if cfg == nil {
+			return ""
+		}
+		if slot == "cp" && cfg.Caddy.CPLegoDomain != "" {
+			return cfg.Caddy.CPLegoDomain
+		}
+		if slot == "relay" && cfg.Caddy.RelayLegoDomain != "" {
+			return cfg.Caddy.RelayLegoDomain
+		}
+		if slot == "cp" {
+			return cfg.CPHost()
+		}
+		return cfg.RelayHost()
+	}
 	for _, svc := range []struct{ slot, host string }{
 		{"relay", cfg.RelayHost()},
 		{"cp", cfg.CPHost()},
@@ -2689,15 +2746,16 @@ func (e *rebuildEngine) stageCert() error {
 		if svc.host == "" {
 			continue
 		}
-		if err := e.ensureHostCert(k3sVmid, svc.slot, svc.host); err != nil {
+		if err := e.ensureHostCert(k3sVmid, svc.slot, svc.host, legoDomain(svc.slot)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// ensureHostCert reuses or issues ONE host's cert (its own slot).
-func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host string) error {
+// ensureHostCert reuses or issues ONE slot's cert (its own slot), for the given
+// LE cert-domain (a "*.<base>" issues a wildcard covering the host).
+func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host, leDomain string) error {
 	// 1. Reuse the durable per-slot cert on the PVC when fresh (>= 30d left).
 	if existing, err := e.caddyFullchain(k3sVmid, slot); err == nil && len(existing) > 0 {
 		if exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour); ok {
@@ -2716,14 +2774,27 @@ func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host string) error 
 	if slot == "cp" {
 		reuseFrom = "relay"
 	}
-	provider, env, err := e.promptDNSCred(slot, host, reuseFrom)
+	// The pre-verify + issuance target the LE cert-domain (apex for a wildcard).
+	verifyTarget := host
+	if strings.HasPrefix(leDomain, "*.") {
+		verifyTarget = strings.TrimPrefix(leDomain, "*.")
+	}
+	provider, env, err := e.promptDNSCred(slot, verifyTarget, reuseFrom)
 	if err != nil {
 		return err
 	}
 
-	// 3. Issue a single-name cert for this host via embedded lego.
-	fmt.Fprintf(e.out, "  · %s: issuing %s via lego (%s)…\n", slot, host, provider)
-	issued, err := cert.Issue(host, provider, env)
+	// 3. Issue via embedded lego: a wildcard *.base when the LE domain asks for
+	// it (challenge at _acme-challenge.<base>), else a single-name cert.
+	var issued *cert.Issued
+	if strings.HasPrefix(leDomain, "*.") {
+		apex := strings.TrimPrefix(leDomain, "*.")
+		fmt.Fprintf(e.out, "  · %s: issuing wildcard %s via lego (%s)…\n", slot, leDomain, provider)
+		issued, err = cert.IssueWildcard(apex, provider, env)
+	} else {
+		fmt.Fprintf(e.out, "  · %s: issuing %s via lego (%s)…\n", slot, leDomain, provider)
+		issued, err = cert.Issue(leDomain, provider, env)
+	}
 	if err != nil {
 		return err
 	}

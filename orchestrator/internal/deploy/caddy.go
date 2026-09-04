@@ -21,11 +21,14 @@ import (
 // freehold asks for it (it may sit at the world domain or anywhere the
 // operator chooses). Caddy fronts exactly that host and reverse-proxies to the
 // relay LXC's plain-HTTP upstream. A CP vhost is added from the same Render
-// func once the CP console binds the LAN.
-func RenderCaddyfile(relayHost, relayUpstream string) string {
-	// The Caddyfile is embedded inside the kube ConfigMap's YAML block scalar,
-	// so its indentation must be SPACES — tabs in block-scalar content trip
-	// kubectl's YAML parser. Caddy accepts spaces.
+// RenderCaddyfile builds Caddy's runtime config for freehold's TLS fronting
+// proxy. It fronts BOTH the relay and CP hosts (each a per-slot wildcard cert),
+// reverse-proxying to the plain-HTTP LXC upstreams on the LAN. Caddy neither
+// runs its own ACME client nor auto-HTTPS here — freehold issues the per-host
+// (possibly wildcard) certs through embedded lego and presents them from the
+// durable volume, so nothing fights for 80/443 or reaches for ACME itself.
+// Indentation is SPACES (not tabs) so it embeds cleanly in the ConfigMap YAML.
+func RenderCaddyfile(relayHost, relayUpstream, cpHost, cpUpstream string) string {
 	return fmt.Sprintf(`{
   auto_https off
 }
@@ -34,7 +37,12 @@ func RenderCaddyfile(relayHost, relayUpstream string) string {
   tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem
   reverse_proxy %s
 }
-`, relayHost, relayUpstream)
+
+%s {
+  tls /data/tls/cp/fullchain.pem /data/tls/cp/key.pem
+  reverse_proxy %s
+}
+`, relayHost, relayUpstream, cpHost, cpUpstream)
 }
 
 // CaddyManifest is the kube body applied inside the k3s LXC: a durable PVC for

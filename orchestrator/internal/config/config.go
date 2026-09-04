@@ -156,13 +156,18 @@ type LitellmSpec struct {
 // CaddySpec records the core TLS fronting proxy's coords. URL is the public
 // relay URL Caddy fronts; Host is the proxy's host (k3s). Per-host cert expiry
 // (RelayCert/CPCert, RFC3339) feeds the Certs tab + the reuse gate; CertIssuer
-// is the DNS provider used.
+// is the DNS provider used. RelayLegoDomain/CPLegoDomain are the Let's Encrypt
+// cert-domain per host (default = the respective host; set "*.base" to issue a
+// wildcard that covers the host — e.g. *.freehold-test.darcydev.net — so the
+// DNS-01 challenge targets the apex the user's zone serves).
 type CaddySpec struct {
-	URL        string `toml:"url,omitempty"`
-	Host       string `toml:"host,omitempty"`
-	RelayCert  string `toml:"relay_cert_expiry,omitempty"`
-	CPCert     string `toml:"cp_cert_expiry,omitempty"`
-	CertIssuer string `toml:"cert_issuer,omitempty"`
+	URL             string `toml:"url,omitempty"`
+	Host            string `toml:"host,omitempty"`
+	RelayCert       string `toml:"relay_cert_expiry,omitempty"`
+	CPCert          string `toml:"cp_cert_expiry,omitempty"`
+	CertIssuer      string `toml:"cert_issuer,omitempty"`
+	RelayLegoDomain string `toml:"relay_lego_domain,omitempty"`
+	CPLegoDomain    string `toml:"cp_lego_domain,omitempty"`
 }
 
 // LxcGuest is a managed LXC's connect/status coordinates.
