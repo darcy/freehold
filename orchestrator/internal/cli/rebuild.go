@@ -50,28 +50,76 @@ import (
 )
 
 // dnsCredCmd stores the Caddy edge's DNS provider credential (provider + env)
-// ahead of any install, so a headless /--yes or TUI rebuild reuses it without
-// prompting. Interactively: provider from lego's full registry, the provider's
-// own env fields, pre-verified (throwaway TXT) then sealed to the ops identity.
-// Idempotent — a stored copy is reported and left untouched.
+// for a slot ahead of any install, so a headless /--yes or TUI rebuild reuses
+// it without prompting. Interactive (no --provider): provider from lego's full
+// registry + the provider's own env fields. Headless (--provider, optional
+// --env), or left empty for auto-detecting providers (e.g. route53 via
+// ~/.aws). Always pre-verified (throwaway TXT) then sealed to the ops identity.
+// Idempotent — a stored copy is reported and left untouched (unless --force).
 var dnsCredCmd = &cobra.Command{
 	Use:   "dns-cred",
-	Short: "Store (and pre-verify) the DNS provider credential for the wildcard cert — one-time seeding the rebuild reuses",
+	Short: "Store (and pre-verify) a DNS provider credential for a cert slot — one-time seeding a rebuild reuses",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		domain, _ := cmd.Flags().GetString("domain")
 		cfgPath, _ := cmd.Flags().GetString("config")
+		slot, _ := cmd.Flags().GetString("slot")
+		provider, _ := cmd.Flags().GetString("provider")
+		envCSV, _ := cmd.Flags().GetString("env")
 		if domain == "" {
 			if cfg, err := config.Load(cfgPath); err == nil && cfg != nil {
-				domain = cfg.RelayHost()
+				if slot == "cp" && cfg.CPHost() != "" {
+					domain = cfg.CPHost()
+				} else {
+					domain = cfg.RelayHost()
+				}
 			}
 		}
 		if domain == "" {
-			return fmt.Errorf("dns-cred needs a relay domain (--domain or a config on record) so the pre-verify can target its zone")
+			return fmt.Errorf("dns-cred needs a domain (--domain or a config on record) so the pre-verify can target its zone")
 		}
 		e := &rebuildEngine{
-			f:   rebuildFlags{relayDomain: domain},
+			f:   rebuildFlags{relayDomain: domain, cpDomain: domain},
 			out: os.Stdout,
 			in:  os.Stdin,
+		}
+		env := map[string]string{}
+		if envCSV != "" {
+			for _, kv := range strings.Split(envCSV, ",") {
+				k, v, ok := strings.Cut(kv, "=")
+				if !ok || strings.TrimSpace(k) == "" {
+					return fmt.Errorf("--env expects KEY=VAL,... — bad entry %q", kv)
+				}
+				env[strings.TrimSpace(k)] = strings.TrimSpace(v)
+			}
+		}
+		if provider != "" {
+			if !cert.IsProvider(provider) {
+				return fmt.Errorf("unknown DNS provider %q", provider)
+			}
+			if err := cert.Verify(domain, provider, env); err != nil {
+				return fmt.Errorf("pre-verify failed for %s: %w", provider, err)
+			}
+			_, _, pub, err := e.certIdent()
+			if err != nil {
+				return err
+			}
+			seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+			if err := cert.SaveCreds(e.certCredPath(slot), provider, env, seal, pub, "cert-dns-"+slot); err != nil {
+				return err
+			}
+			fmt.Fprintf(e.out, "  ✓ %s DNS provider credential saved (%s) — rebuilds will reuse it\n", slot, provider)
+			fmt.Fprintf(e.out, "  stored sealed at %s\n", e.certCredPath(slot))
+			return nil
+		}
+		// Interactive: provider picker + env collection.
+		if slot == "cp" {
+			e.f.relayDomain = domain
+			provider, _, err := e.promptDNSCred(slot, domain, "relay")
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(e.out, "  ✓ %s DNS provider credential saved (%s) — rebuilds will reuse it\n", slot, provider)
+			return nil
 		}
 		provider, _, err := e.promptDNSCred("relay", domain, "")
 		if err != nil {
@@ -84,8 +132,11 @@ var dnsCredCmd = &cobra.Command{
 }
 
 func init() {
-	dnsCredCmd.Flags().String("domain", "", "World domain (the wildcard cert apex the pre-verify targets); defaults to the recorded config")
-	dnsCredCmd.Flags().String("config", defaultConfigPath(), "Config path to read the domain from")
+	dnsCredCmd.Flags().String("domain", "", "Host the pre-verify targets (default: relay host from the recorded config, or the cp host with --slot cp)")
+	dnsCredCmd.Flags().String("slot", "relay", "Credential slot: relay | cp")
+	dnsCredCmd.Flags().String("provider", "", "DNS provider name (lego registry) — omit for the interactive picker")
+	dnsCredCmd.Flags().String("env", "", "Provider env as KEY=VAL,KEY=VAL (omit/empty for auto-detecting providers like route53)")
+	dnsCredCmd.Flags().String("config", defaultConfigPath(), "Config path to read the host from")
 }
 
 var rebuildCmd = &cobra.Command{Use: "rebuild",
@@ -253,9 +304,6 @@ type rebuildEngine struct {
 }
 
 func newRebuildEngine(f rebuildFlags) (*rebuildEngine, error) {
-	if f.domain == "" {
-		return nil, fmt.Errorf("rebuild needs --domain (the relay's identity)")
-	}
 	if f.operatorPubkey == "" {
 		return nil, fmt.Errorf("rebuild needs --operator-pubkey (64-hex or npub1…)")
 	}
@@ -379,6 +427,19 @@ func (e *rebuildEngine) run() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ the door works — %s is reachable\n", e.f.host)
 
+	// 5.5. The relay + control-plane hosts are ASKED (never derived; there is
+	// no world domain). Flags (or a headless --yes run) honor the values;
+	// otherwise each is prompted up front. Must run BEFORE any config build so
+	// RelayURL/CPURL are correct from the initial write.
+	if !e.f.yes {
+		if err := e.promptDomains(); err != nil {
+			return err
+		}
+	}
+	if e.f.relayDomain == "" || e.f.cpDomain == "" {
+		return fmt.Errorf("rebuild needs --relay-domain and --cp-domain (or an interactive run)")
+	}
+
 	// 6. write the INITIAL config so stage_storage has somewhere to record
 	// the durable-plane mapping (merge preserves a surviving config's facts).
 	if err := e.writeInitialConfig(); err != nil {
@@ -386,22 +447,12 @@ func (e *rebuildEngine) run() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
-	// 6.5. The relay + control-plane hosts are ASKED (never derived). When the
-	// operator supplied --relay-domain/--cp-domain (or is headless --yes) the
-	// values stand; otherwise each is prompted up front, defaulting to the
-	// world domain so a bare ENTER keeps that service at the world domain.
-	if !e.f.yes {
-		if err := e.promptDomains(); err != nil {
-			return err
-		}
-	}
-
-	// 6.6. DNS provider credential for the Caddy edge's wildcard cert. Asked
-	// UP FRONT (like the other prompts) so a later stage failure can't strand
-	// a long install without its DN-01 token: if a sealed copy exists it's
-	// reused silently; otherwise the operator is prompted + pre-verified now,
-	// and stageCert at the end just reads it back. No-op under --yes unless a
-	// stored copy is already present (then stageCert fails loudly at the end).
+	// 6.6. DNS provider credentials for the edge's per-host certs. Asked UP
+	// FRONT (like the other prompts) so a later stage failure can't strand a
+	// long install without its DNS-01 tokens: sealed copies are reused
+	// silently; otherwise each slot is prompted + pre-verified now, and
+	// stageCert at the end reads them back. No-op under --yes unless a stored
+	// copy already exists (then stageCert fails loudly at the end).
 	if e.worldHasEdge() {
 		if _, _, err := e.promptDNSCred("relay", e.f.relayDomain, ""); err != nil {
 			return fmt.Errorf("relay DNS provider credential: %w", err)
