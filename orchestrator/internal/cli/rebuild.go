@@ -2872,6 +2872,20 @@ func (e *rebuildEngine) promptDNSCred(slot, host, reuseFrom string) (string, map
 	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
 	open := func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) }
 
+	// Migrate the legacy single-file credential (dns-provider.json) into the
+	// relay slot, then fall through to the normal reuse so an already-entered
+	// credential keeps working after the per-slot split. Best-effort: if the
+	// legacy blob can't be unsealed, ignore it and collect a fresh one.
+	if slot == "relay" && !cert.CredExists(path) {
+		if legacy := filepath.Join(rbStateDir(), "dns-provider.json"); cert.CredExists(legacy) {
+			if provider, env, lerr := cert.LoadCreds(legacy, open, secret); lerr == nil {
+				if serr := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns-"+slot); serr == nil {
+					fmt.Fprintf(e.out, "  · migrated your stored DNS credential (%s) into the %s slot\n", provider, slot)
+				}
+			}
+		}
+	}
+
 	if cert.CredExists(path) {
 		provider, env, err := cert.LoadCreds(path, open, secret)
 		if err != nil {
@@ -2883,12 +2897,16 @@ func (e *rebuildEngine) promptDNSCred(slot, host, reuseFrom string) (string, map
 
 	if reuseFrom != "" {
 		fromPath := e.certCredPath(reuseFrom)
-		if cert.CredExists(fromPath) && !e.f.yes {
-			ans, err := e.prompt(fmt.Sprintf("%s has no DNS credential — reuse the %s one? (y/n)", slot, reuseFrom))
-			if err != nil {
-				return "", nil, err
+		if cert.CredExists(fromPath) {
+			reuse := e.f.yes // headless: auto-copy the shared credential
+			if !e.f.yes {
+				ans, err := e.prompt(fmt.Sprintf("%s has no DNS credential — reuse the %s one? (y/n)", slot, reuseFrom))
+				if err != nil {
+					return "", nil, err
+				}
+				reuse = strings.EqualFold(strings.TrimSpace(ans), "y")
 			}
-			if strings.EqualFold(strings.TrimSpace(ans), "y") {
+			if reuse {
 				provider, env, err := cert.LoadCreds(fromPath, open, secret)
 				if err != nil {
 					return "", nil, err

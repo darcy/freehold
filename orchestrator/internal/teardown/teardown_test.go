@@ -139,17 +139,20 @@ func TestWholeWorldDataRemovesEverything(t *testing.T) {
 	if !sawSed {
 		t.Errorf("--data must remove the door key: %v", r.execs)
 	}
-	if _, err := os.Stat(cfg.WorldHome); !os.IsNotExist(err) {
-		t.Error("--data must remove the world home")
+	// freehold's operator-side state (world home = runner + ops identity +
+	// DNS creds; config = recorded coords) is KEPT even on --data, so a
+	// rebuild reuses the package and doesn't re-enter DNS/operator material.
+	if _, err := os.Stat(cfg.WorldHome); os.IsNotExist(err) {
+		t.Error("--data must KEEP the world home (DNS creds + identity survive)")
 	}
-	if _, err := os.Stat(cfg.ConfigPath); !os.IsNotExist(err) {
-		t.Error("--data must remove the config")
+	if _, err := os.Stat(cfg.ConfigPath); os.IsNotExist(err) {
+		t.Error("--data must KEEP the config")
 	}
 	if !strings.Contains(report, "removed freehold-created thin pool") {
 		t.Errorf("report must mention the pool removal:\n%s", report)
 	}
-	if strings.Contains(report, "config KEPT") {
-		t.Errorf("report must not claim the config was kept:\n%s", report)
+	if !strings.Contains(report, "kept world home") || !strings.Contains(report, "kept config") {
+		t.Errorf("report must say the world home + config were kept:\n%s", report)
 	}
 }
 

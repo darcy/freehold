@@ -22,7 +22,6 @@ package teardown
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 )
@@ -314,21 +313,17 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 		}
 		say(fmt.Sprintf("door removed from %s (%s — verified)", cfg.RunnerComment, cfg.RunNTarget))
 
+		// freehold's operator-side state is KEPT even on a full --data
+		// teardown: the config (recorded coords), the world home (runner
+		// packages + ops identity + sealed DNS provider credentials + door
+		// key) survive, so a rebuild reuses the package + does not require
+		// re-entering DNS/operator material. Only the appliance's data
+		// (LXCs, datasets, thin pool) is torn down above.
 		if cfg.WorldHome != "" {
-			if _, err := os.Stat(cfg.WorldHome); err == nil {
-				if err := os.RemoveAll(cfg.WorldHome); err != nil {
-					return "", err
-				}
-				say("removed world " + cfg.WorldHome)
-			}
+			say("kept world home " + cfg.WorldHome)
 		}
 		if cfg.ConfigPath != "" {
-			if _, err := os.Stat(cfg.ConfigPath); err == nil {
-				if err := os.Remove(cfg.ConfigPath); err != nil {
-					return "", err
-				}
-				say("removed config " + cfg.ConfigPath)
-			}
+			say("kept config " + cfg.ConfigPath)
 		}
 	case scope == ScopeWholeWorld:
 		// The config SURVIVES INTACT: domain, runner identity, the plane's
