@@ -181,6 +181,51 @@ changelog.
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
   `freehold-acceptance` reproduces Chunk 1's acceptance criteria hermetically on loopback.
 
+### Testing the TUI (`freehold`, `cmd/freehold` → bubbletea dashboard)
+
+`go test` under `internal/tui/` verifies form logic, but it does NOT prove the running TUI.
+Always manually drive the real binary when you change a TUI flow (forms, keybindings, dispatch,
+pre-flow chaining like the rebuild→DNS ask), and rebuild `~/.cargo/bin/freehold` so the change is
+actually in what an operator launches — a passing `go test` does not re-place the installed binary.
+
+You are likely inside **herdr** (`HERDR_ENV=1`). Drive a real TUI in an isolated pane and watch
+it render:
+
+```bash
+# 1. isolate state so the flow you're testing is deterministic (e.g. no DNS cred already stored):
+cat > /tmp/fh-tui-config.toml <<'EOF'
+relay_url = 'https://relay.verify.example'
+relay_ws_url = 'wss://relay.verify.example'
+cp_url = 'https://cp.verify.example'
+operator_pubkey = '<64-hex>'
+managed = ['relay','cp']
+EOF
+mkdir -p /tmp/fh-tui-home
+
+# 2. a sibling pane, then launch the real binary there:
+herdr pane split --current --direction right --cwd "$PWD" --no-focus
+herdr pane run <pane> "cd $PWD && FREEHOLD_HOME=/tmp/fh-tui-home ~/.cargo/bin/freehold --config /tmp/fh-tui-config.toml"
+
+# 3. watch + drive it (herdr captures the alt-screen viewport):
+herdr pane read <pane> --source visible --lines 40     # see the boot check / mode
+herdr pane send-keys <pane> B                          # open a form
+herdr pane send-keys <pane> Tab                        # advance a field
+herdr pane send-text <pane> some-value                 # type into a text field
+# then re-read to assert the expected next screen (e.g. chained into the DNS ask)
+```
+
+The same approach works in a plain **tmux** session (`tmux new-session -d`, `tmux send-keys/…`,
+`tmux capture-pane -p`), or any pty you can feed and screenshot (`script -qec … /dev/null`).
+Isolate state via `FREEHOLD_HOME` (DNS provider creds, ops identity live there) and a temp
+`--config` so you aren't exercising/mutating the operator's real world; clean both up after.
+
+**After ANY TUI change, rebuild the binary before finishing** — a passing `go test` does NOT
+re-place `~/.cargo/bin/freehold`, and telling the operator it's ready from a stale binary is a
+recurring trap. Always:
+```bash
+cd orchestrator && go build -o target/debug/freehold ./cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
+```
+
 ## Code style
 
 - Rust: follow rustfmt; small crates; keep the runner↔CP contract at the crate boundary and
