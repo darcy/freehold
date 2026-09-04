@@ -2767,7 +2767,28 @@ func (e *rebuildEngine) promptDomains() error {
 			e.f.cpDomain = a
 		}
 	}
+	// The wildcard cert is issued for *.<world-domain> / <world-domain>, so a
+	// relay or CP host on a DIFFERENT zone won't be covered by it. Surface
+	// that honestly rather than implying it will work.
+	for _, hv := range []struct {
+		name, host string
+	}{{"relay", e.f.relayDomain}, {"control plane", e.f.cpDomain}} {
+		if hv.host != "" && !domainCoveredByWildcard(e.f.domain, hv.host) {
+			fmt.Fprintf(e.out, "  ⚠ %s is on %q — outside the wildcard cert's %s zone; TLS for it needs a separate issuance (follow-up).\n",
+				hv.name, hv.host, "*."+e.f.domain)
+		}
+	}
 	return nil
+}
+
+// domainCoveredByWildcard reports whether host is served by a wildcard issued
+// for `apex` (i.e. host == apex, or host is a non-empty proper subdomain of
+// apex).
+func domainCoveredByWildcard(apex, host string) bool {
+	if host == apex {
+		return true
+	}
+	return strings.HasSuffix(host, "."+apex) && len(host) > len(apex)+1
 }
 
 // promptDNSCred returns the DNS provider name + its env map, reusing the sealed

@@ -407,6 +407,24 @@ func TestFromAnswersRelayWsURLInternal(t *testing.T) {
 }
 func sptr(v string) *string { return &v }
 
+// TestDomainCoveredByWildcard: a wildcard issued for *.apex/apex covers the
+// apex and proper subdomains but not other zones (the prompt warns on those).
+func TestDomainCoveredByWildcard(t *testing.T) {
+	apex := "freehold-test.darcydev.net"
+	covered := []string{apex, "relay." + apex, "cp." + apex, "a.b." + apex}
+	uncovered := []string{"", "other.net", "darcydev.net", apex + "x", "." + apex}
+	for _, h := range covered {
+		if !domainCoveredByWildcard(apex, h) {
+			t.Errorf("domainCoveredByWildcard(%q, %q) = false, want true", apex, h)
+		}
+	}
+	for _, h := range uncovered {
+		if domainCoveredByWildcard(apex, h) {
+			t.Errorf("domainCoveredByWildcard(%q, %q) = true, want false", apex, h)
+		}
+	}
+}
+
 // ---- door + NIP-11 parsing ----------------------------------------------------
 
 func TestExtractSSHKey(t *testing.T) {

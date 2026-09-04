@@ -40,6 +40,10 @@ func runProviderPicker(providers []string) (string, error) {
 	m := &providerPicker{list: list.New(items, delegate, 40, 18)}
 	m.list.Title = "Choose the DNS-01 provider for the wildcard cert"
 	m.list.SetShowStatusBar(false)
+	// Type-ahead search: filter by typing. bubbles/list does NOT filter by
+	// default — it must be enabled explicitly.
+	m.list.Filter = list.DefaultFilter
+	m.list.SetFilteringEnabled(true)
 
 	p := tea.NewProgram(m, tea.WithInput(os.Stdin))
 	model, err := p.Run()
@@ -66,7 +70,14 @@ func (m *providerPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.done = true
 				return m, tea.Quit
 			}
-		case "q", "ctrl+c":
+		case "q":
+			// Only treat q as Quit outside the type-ahead filter: while the
+			// list is Filtering, q must reach the filter box (a real provider,
+			// "httpreq", contains q) — mirroring bubbles/list's own guard.
+			if m.list.FilterState() != list.Filtering {
+				return m, tea.Quit
+			}
+		case "ctrl+c":
 			return m, tea.Quit
 		}
 	}

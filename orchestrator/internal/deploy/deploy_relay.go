@@ -136,7 +136,7 @@ func DeployRelay(clientConn *client.McpClient, target string, spec *RelayDeployS
 		return nil, err
 	}
 
-	dl := fmt.Sprintf("set -e; mkdir -p %s && for i in 1 2 3; do curl -fsSL --retry 2 https://github.com/block/buzz/archive/%s.tar.gz -o %s/buzz.tar.gz && break || sleep 3; done",
+	dl := fmt.Sprintf("set -e; mkdir -p %s && ok=0; for i in 1 2 3; do if curl -fsSL --retry 2 https://github.com/block/buzz/archive/%s.tar.gz -o %s/buzz.tar.gz; then ok=1; break; fi; sleep 3; done; [ \"$ok\" = 1 ]",
 		spec.DeployDir, spec.BuzzRef, spec.DeployDir)
 	if _, err := bootstrap.ExecToOK(clientConn, target, lxcCmd(spec.LXc, dl), "download bundle", 600); err != nil {
 		return nil, err

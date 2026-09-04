@@ -95,6 +95,11 @@ func TestRebuildFormSteps(t *testing.T) {
 		typeText(m, answers[i])
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
+	// Advance through the two blank fields (relay + CP domain; blank = the
+	// world domain) to COMPLETION — dispatch happens on the 10th step.
+	for i := 0; i < 2; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
 	if m.Flow == nil {
 		t.Fatal("flow vanished before inputs were captured")
 	}
@@ -103,20 +108,26 @@ func TestRebuildFormSteps(t *testing.T) {
 			t.Errorf("rebuild inputs[%d] = %q, want %q", i, m.Flow.Inputs[i], want)
 		}
 	}
+	if m.Flow.Inputs[8] != "" || m.Flow.Inputs[9] != "" {
+		t.Errorf("relay/cp domains should default to blank (= the world domain), got %q/%q", m.Flow.Inputs[8], m.Flow.Inputs[9])
+	}
 	// Completing the form dispatches the rebuild subprocess. Default k3s+litellm
 	// on = full world reconcile; the named CPA agent is forwarded.
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if cmd != nil {
-		if start, ok := cmd().(activityStartMsg); ok {
-			got := strings.Join(start.args, " ")
-			if !strings.Contains(got, "--agent-name my-cpa") {
-				t.Errorf("rebuild args %q missing --agent-name my-cpa", got)
-			}
-			for _, banned := range []string{"--no-k3s", "--no-litellm"} {
-				if strings.Contains(got, banned) {
-					t.Errorf("rebuild args must keep %s on when not opted out: %q", banned, got)
-				}
-			}
+	if cmd == nil {
+		t.Fatal("completed 10-step rebuild form did not dispatch")
+	}
+	start, ok := cmd().(activityStartMsg)
+	if !ok {
+		t.Fatalf("dispatched a %T, want activityStartMsg", cmd())
+	}
+	got := strings.Join(start.args, " ")
+	if !strings.Contains(got, "--agent-name my-cpa") {
+		t.Errorf("rebuild args %q missing --agent-name my-cpa", got)
+	}
+	for _, banned := range []string{"--no-k3s", "--no-litellm"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("rebuild args must keep %s on when not opted out: %q", banned, got)
 		}
 	}
 
