@@ -132,13 +132,16 @@ func TestAgentPodManifestDistinctNames(t *testing.T) {
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1")
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,
 		"create ns agents 2>/dev/null || true",
 		"apply -f /tmp/agent-manifests/waldo.yaml",
+		"delete pod waldo -n agents",
 		"wait --for=condition=Ready pod/waldo -n agents --timeout=300s",
+		"http://192.168.30.8:31400/v1",
+		"buzz-dev-mcp",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("deploy script missing %q", want)

@@ -159,6 +159,9 @@ spec:
     - {name: BUZZ_ACP_AGENT_COMMAND, value: "buzz-agent"}
     - {name: BUZZ_ACP_RESPOND_TO, value: "allowlist"}
     - {name: BUZZ_AGENT_PROVIDER, value: "openai-compat"}
+    - {name: RUST_LOG, value: "debug"}
+    - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
+    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
     - {name: OPENAI_COMPAT_BASE_URL, value: %q}
     - {name: OPENAI_COMPAT_MODEL, value: %q}
     - name: OPENAI_COMPAT_API_KEY
@@ -232,17 +235,25 @@ cat >/tmp/agent-manifests/%s.yaml <<'YAML'
 %s
 YAML
 pct push %d /tmp/agent-manifests/%s.yaml /tmp/agent-manifests/%s.yaml
+# A Pod's spec is immutable: re-applying a changed Pod (e.g. a new litellm URL
+# or prompt ConfigMap ref) errors. Delete it first so apply recreates it with
+# the current manifest. ConfigMap/Service are mutable and apply cleanly.
+$EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
 		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel),
-		k3sVmid, pod, pod, pod, pod)
+		k3sVmid, pod, pod, pod, pod, pod)
 }
 
 // CPAManifestScript applies the CPA pod (AgentManifestScript with the CPA
-// display name).
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName string) string {
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, cpaName)
+// display name and the reachable litellm gateway base URL). The CPA runs
+// hostNetwork (it must reach the relay over the LAN), so it resolves via the
+// NODE's resolver and cannot see the in-kube service name `litellm.litellm` —
+// litellmBaseURL must therefore be the recorded NodePort URL (cfg.Litellm.URL,
+// e.g. http://192.168.30.8:31400/v1), which the node itself answers.
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL string) string {
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in
