@@ -69,7 +69,7 @@ func init() {
 		relayJoinCmd,
 		relaySetupCmd,
 		storageCmd,
-		rebuildCmd,
+		buildCmd,
 		dnsCredCmd,
 		installCmd,
 	)

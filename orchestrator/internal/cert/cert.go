@@ -115,6 +115,12 @@ func buildProvider(providerName string, env map[string]string) (challenge.Provid
 	return p, nil
 }
 
+// NewDNSProvider is the exported form of buildProvider (used by the resumable
+// issuance driver in rebuild).
+func NewDNSProvider(providerName string, env map[string]string) (challenge.Provider, error) {
+	return buildProvider(providerName, env)
+}
+
 // Verify runs a throwaway TXT present+cleanup through lego to prove the chosen
 // provider's credentials "work" before they are saved. It exercises the provider
 // API (create+remove a challenge record) but never the public resolver.
@@ -135,8 +141,22 @@ func Verify(domain, providerName string, env map[string]string) error {
 	return nil
 }
 
-// IssueWildcard obtains a certificate covering the apex and its wildcard.
+// Issue obtains a SINGLE-NAME certificate for one host via DNS-01 (the
+// per-host model: relay and CP each get their own cert; no wildcard/base).
+func Issue(host, providerName string, env map[string]string) (*Issued, error) {
+	return issue([]string{host}, host, providerName, env)
+}
+
+// IssueWildcard obtains a certificate for the wildcard domain via DNS-01. Only
+// the wildcard identifier is requested, so its single DNS-01 challenge is at
+// `_acme-challenge.<domain>` (the apex) — do NOT add the apex as a second SAN
+// here, which gives two identifiers mapping to the same challenge name and can
+// stall/fail validation.
 func IssueWildcard(domain, providerName string, env map[string]string) (*Issued, error) {
+	return issue([]string{"*." + domain}, "*."+domain, providerName, env)
+}
+
+func issue(domains []string, label, providerName string, env map[string]string) (*Issued, error) {
 	p, err := buildProvider(providerName, env)
 	if err != nil {
 		return nil, err
@@ -164,14 +184,14 @@ func IssueWildcard(domain, providerName string, env map[string]string) (*Issued,
 	u.reg = reg
 
 	res, err := client.Certificate.Obtain(certificate.ObtainRequest{
-		Domains: []string{"*." + domain, domain},
+		Domains: domains,
 		Bundle:  true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("obtain %s: %w", "*."+domain, err)
+		return nil, fmt.Errorf("obtain %s: %w", label, err)
 	}
 	if res == nil || len(res.Certificate) == 0 {
-		return nil, fmt.Errorf("obtain returned no certificate for %s", "*."+domain)
+		return nil, fmt.Errorf("obtain returned no certificate for %s", label)
 	}
 	return &Issued{
 		Fullchain: res.Certificate,

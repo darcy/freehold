@@ -63,7 +63,7 @@ func (m *Model) load(cfgPath string) error {
 		return nil
 	}
 	m.HasConfig = true
-	m.Domain = cfg.Domain
+	m.Domain = cfg.RelayHost()
 	m.Converged, m.RelayLive, m.CPLive, m.K3sLive, m.LitellmLive, m.CaddyLive, m.RunnerReach = false, false, false, false, false, false, false
 	// ModeRunning until the boot check proves otherwise — the activity view
 	// covers the screen while the probes run, and the check settles the
@@ -163,44 +163,59 @@ func (m *Model) buildServices(cfg *config.Config) {
 	}
 }
 
-// buildCerts fills the Certs view from the config's recorded edge cert (written
-// by the F3 stage on rebuild). Pure — no exec. Status derives from the expiry.
+// buildCerts fills the Certs view from the config's recorded per-host edge certs
+// (written by the F3 stage on rebuild). Pure — no exec. Two rows (relay, cp),
+// each deriving its status from that slot's expiry.
 func (m *Model) buildCerts(cfg *config.Config) {
 	m.Certs = nil
-	domain := cfg.Domain
-	if cfg.Caddy.URL == "" && cfg.Caddy.CertExpiry == "" {
-		return
-	}
-	status := "no expiry on record"
-	expiry := "—"
 	issuer := cfg.Caddy.CertIssuer
 	if issuer == "" {
 		issuer = "lego (DNS-01)"
 	}
-	if cfg.Caddy.CertExpiry != "" {
-		expiry = cfg.Caddy.CertExpiry
-		if t, err := time.Parse(time.RFC3339, cfg.Caddy.CertExpiry); err == nil {
-			switch {
-			case t.Before(time.Now()):
-				status = styleRed.Render("EXPIRED")
-			case t.Before(time.Now().Add(30 * 24 * time.Hour)):
-				status = styleYellow.Render("expiring <30d")
-			default:
-				status = styleGreen.Render("valid")
+	slots := []struct {
+		name, host, expiry string
+	}{
+		{"relay", cfg.RelayHost(), cfg.Caddy.RelayCert},
+		{"control plane", cfg.CPHost(), cfg.Caddy.CPCert},
+	}
+	for _, s := range slots {
+		status, expiry := "no expiry on record", "—"
+		if s.expiry != "" {
+			expiry = s.expiry
+			if t, err := time.Parse(time.RFC3339, s.expiry); err == nil {
+				switch {
+				case t.Before(time.Now()):
+					status = styleRed.Render("EXPIRED")
+				case t.Before(time.Now().Add(30 * 24 * time.Hour)):
+					status = styleYellow.Render("expiring <30d")
+				default:
+					status = styleGreen.Render("valid")
+				}
 			}
 		}
+		m.Certs = append(m.Certs, CertRow{
+			Domain: s.host,
+			URL:    caddyURL(cfg, s.name),
+			Expiry: expiry,
+			Issuer: issuer,
+			Status: status,
+		})
 	}
-	url := cfg.Caddy.URL
-	if url == "" {
-		url = "https://relay." + domain
+}
+
+// caddyURL returns the edge URL for a service (relay -> the Caddy URL / relay
+// host; control plane -> the cp host), falling back to the bare host.
+func caddyURL(cfg *config.Config, name string) string {
+	if name == "control plane" {
+		if cfg.CPURL != "" {
+			return cfg.CPURL
+		}
+		return "https://" + cfg.CPHost()
 	}
-	m.Certs = append(m.Certs, CertRow{
-		Domain: "*. " + domain,
-		URL:    url,
-		Expiry: expiry,
-		Issuer: issuer,
-		Status: status,
-	})
+	if cfg.Caddy.URL != "" {
+		return cfg.Caddy.URL
+	}
+	return "https://" + cfg.RelayHost()
 }
 
 // dnsRowsLive execs `control-plane dns list` inside the cp LXC through the
@@ -548,26 +563,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Mode == ModeRunning {
 				m.beginPrompt(flowGrant)
 			}
-		case "b":
-			if m.Mode == ModeBootstrap {
-				m.beginPrompt(flowBootstrap)
-			}
-		case "d":
-			if m.Mode == ModeConfigure {
-				m.beginPrompt(flowDeployRelay)
-			}
-		case "c":
-			if m.Mode == ModeConfigure {
-				m.beginPrompt(flowDeployCp)
-			}
-		case "t":
-			if m.Mode == ModeRunning {
-				m.beginPrompt(flowTeardown)
-			}
-		case "B":
-			if m.Mode == ModeBootstrap || m.Mode == ModeConfigure {
-				m.beginPrompt(flowRebuild)
-			}
+			// Build/bootstrap/teardown/deploy are NOT run from the TUI — the TUI is
+			// a status/operating dashboard. Run `freehold build` / `freehold teardown`
+			// in a terminal instead (single canonical flow).
 		}
 	case flowMsg:
 		m.Flow = nil
@@ -621,13 +619,11 @@ func (m *Model) View() string {
 	}
 	if m.Mode == ModeBootstrap {
 		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")
-		b.WriteString("press " + styleYellow.Render("b") + " to bootstrap a target (kind · domain · operator pubkey)\n")
-		b.WriteString("press " + styleYellow.Render("B") + " to rebuild the whole world (door · plane · LXCs · deploys)\n")
+		b.WriteString("run " + styleYellow.Render("freehold build") + " to bring up the world (bootstraps then reconciles)\n")
 	} else if m.Mode == ModeConfigure {
 		b.WriteString(styleYellow.Render("config present, world NOT converged") + "\n")
 		b.WriteString(renderProbes(m) + "\n\n")
-		b.WriteString("press " + styleYellow.Render("d") + " to deploy the relay, " + styleYellow.Render("c") + " to deploy the control plane\n")
-		b.WriteString("press " + styleYellow.Render("B") + " to rebuild the whole world (tear + re-create everything)\n")
+		b.WriteString("run " + styleYellow.Render("freehold build") + " to converge the world (tear + re-create as needed)\n")
 	} else {
 		b.WriteString(renderProbes(m) + "\n")
 		b.WriteString(renderViews(m))
@@ -663,13 +659,11 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second))) +
-			"   " + styleDim.Render("l login · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · t teardown")
+			"   " + styleDim.Render("l login · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
-	case ModeBootstrap:
-		return styleFooter.Render("q quit · b bootstrap · B rebuild")
-	case ModeConfigure:
-		return styleFooter.Render("q quit · d deploy-relay · c deploy-cp · B rebuild")
+	case ModeBootstrap, ModeConfigure:
+		return styleFooter.Render("q quit · run `freehold build` to bring up / converge the world")
 	default:
 		return styleFooter.Render("q quit")
 	}

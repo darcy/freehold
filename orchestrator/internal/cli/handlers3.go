@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"freehold/orchestrator/internal/bootstrap"
+	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/client"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/deploy"
+	"freehold/orchestrator/internal/dnsman"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/planebase"
@@ -255,13 +256,11 @@ var bootstrapCmd = &cobra.Command{
 			return err
 		}
 		if res.IP == "" {
-			return fmt.Errorf("the %s driver did not report a target IP — the domain gate (A4) cannot proceed", kind)
+			return fmt.Errorf("the %s driver did not report a target IP", kind)
 		}
-		fmt.Printf("DOMAIN-GATE: target is up at %s; require '%s' to resolve there (map it in your LAN DNS, or /etc/hosts for the POC)\n", res.IP, domain)
-		waitSecs, _ := cmd.Flags().GetUint64("domain-wait-secs")
-		if err := bootstrap.WaitForDomainResolution(domain, res.IP, waitSecs, bootstrap.ResolveIP, time.Sleep); err != nil {
-			return err
-		}
+		// No A4 DNS gate: everything resolves internally behind the proxy, so
+		// we don't require the domain to map to this IP before continuing.
+		fmt.Printf("target is up at %s (no DNS gate — internal resolution is enough for install)\n", res.IP)
 		fmt.Printf("BOOTSTRAPPED %s (%s): %s\n", res.Name, res.Kind, res.Detail)
 		return nil
 	},
@@ -658,12 +657,13 @@ func parseInfoMount(s string) (drive.MountArg, error) {
 
 var teardownCmd = &cobra.Command{
 	Use:   "teardown",
-	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config INTACT (recorded LXC coordinates included — rebuild re-boots the same vmids + IPs), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then wipes door key + world home + config",
+	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (recorded LXC coordinates are cleared so the next build re-creates them), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT so a cheap rebuild re-uses the DNS creds + identity)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		configPath, _ := cmd.Flags().GetString("config")
 		yes, _ := cmd.Flags().GetBool("yes")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		data, _ := cmd.Flags().GetBool("data")
+		removeDNS, _ := cmd.Flags().GetBool("remove-dns")
 		scope := teardown.ScopeFor(optOf(tenant), data)
 
 		cfg, err := config.Load(configPath)
@@ -687,7 +687,7 @@ var teardownCmd = &cobra.Command{
 			Addr:            cfg.Runner.Addr,
 			AgentDir:        agentDir,
 			Runner:          cfg.Runner.Target,
-			Domain:          cfg.Domain,
+			Domain:          cfg.TenantSlug(),
 		}
 
 		// The door must work before anything remote: a signed exec probe.
@@ -710,7 +710,7 @@ var teardownCmd = &cobra.Command{
 			kind = *cfg.Plane.BackendKind
 		}
 		tcfg := &teardown.Cfg{
-			Domain:        cfg.Domain,
+			Domain:        cfg.TenantSlug(),
 			RunNTarget:    cfg.Runner.Target,
 			RunnerComment: cfg.Runner.Pubkey,
 			Managed:       cfg.Managed,
@@ -735,12 +735,21 @@ var teardownCmd = &cobra.Command{
 		if !yes {
 			fmt.Printf("teardown scope: %s (config %s)\n", scope, configPath)
 			if scope == teardown.ScopeWholeWorld && !data {
-				fmt.Println("keeps: config (LXC coordinates intact) · world home · door key · plane locations")
+				fmt.Println("keeps: config (LXC coords cleared so build re-creates them) · world home · door key · plane locations · DNS creds")
 			}
 			fmt.Printf("proceed? [type yes] ")
 			var answer string
 			if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
 				return fmt.Errorf("teardown aborted (not confirmed)")
+			}
+		}
+		// --remove-dns: delete the world's freehold-managed A records; default
+		// leaves them. Runs BEFORE the physical teardown so the sealed relay
+		// credential (and the in-memory cfg hosts) are still readable even on a
+		// --data wipe that removes the world home/config.
+		if removeDNS {
+			if err := removeManagedDNS(cfg); err != nil {
+				return err
 			}
 		}
 		// Stream every line as it lands (--yes runs have no operator to
@@ -758,6 +767,19 @@ var teardownCmd = &cobra.Command{
 		} else {
 			fmt.Println(report)
 		}
+		// Forget the recorded container ids + discovered ips so the NEXT build
+		// re-creates the guests from scratch (ids are NOT guaranteed to be
+		// reused). Keeps everything else (domains, runner, plane, DNS creds,
+		// door) intact.
+		if scope == teardown.ScopeWholeWorld {
+			cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
+			cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
+			cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
+			if err := cfg.Save(configPath); err != nil {
+				return err
+			}
+			fmt.Println("cleared recorded LXC coordinates (vmid + ip) — the next build re-creates them")
+		}
 		return nil
 	},
 }
@@ -767,7 +789,49 @@ func init() {
 	teardownCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	teardownCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
 	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown")
-	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: the FULL teardown — all datasets + the freehold-created thin pool, then door key + world home + config. Without it the config, world home, and door key are KEPT for a cheap rebuild")
+	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: the FULL teardown — all datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT — the rebuild re-uses the DNS creds + identity). Without it the door key, world home, and config are all kept for a cheap rebuild")
+	teardownCmd.Flags().Bool("remove-dns", false, "ALSO delete the freehold-managed relay/cp A records on the DNS provider recorded in config (Dns.Manager, created by `build --manage-dns`). Default leaves them")
+}
+
+// removeManagedDNS deletes the world's freehold-managed relay/cp A records on
+// the provider recorded in config.Dns.Manager (teardown --remove-dns). Resolves
+// the sealed relay-slot credential (the same one --manage-dns used for the
+// records + the LE cert) to drive the manager.
+func removeManagedDNS(cfg *config.Config) error {
+	m := cfg.Dns.Manager
+	if m == nil || !m.Managed {
+		fmt.Println("  (no freehold-managed DNS recorded — nothing to remove)")
+		return nil
+	}
+	secretHex, err := encSecretFromDir(filepath.Join(freeholdHome(), "control-plane", "agent-ops"))
+	if err != nil {
+		return fmt.Errorf("no ops identity for DNS removal: %w", err)
+	}
+	secret, err := hexBytes(secretHex)
+	if err != nil {
+		return fmt.Errorf("ops identity enc secret: %w", err)
+	}
+	open := func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) }
+	provider, env, err := cert.LoadCreds(filepath.Join(freeholdHome(), "control-plane", "dns-provider-relay.json"), open, secret)
+	if err != nil {
+		return fmt.Errorf("load relay DNS credential for removal: %w", err)
+	}
+	if provider != "cloudflare" {
+		return fmt.Errorf("recorded DNS manager %q cannot remove records yet", provider)
+	}
+	man, err := dnsman.For(provider, env)
+	if err != nil {
+		return err
+	}
+	for _, h := range []string{cfg.RelayHost(), cfg.CPHost()} {
+		if h == "" {
+			continue
+		}
+		if err := man.DeleteA(h); err != nil {
+			return fmt.Errorf("remove DNS record %s: %w", h, err)
+		}
+	}
+	return nil
 }
 
 func defaultConfigPath() string {

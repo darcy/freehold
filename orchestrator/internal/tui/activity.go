@@ -131,7 +131,7 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		m.Mode, m.HasConfig, m.activity = ModeBootstrap, false, nil
 		return nil
 	}
-	m.HasConfig, m.Domain = true, cfg.Domain
+	m.HasConfig, m.Domain = true, cfg.RelayHost()
 
 	a := &activity{kind: "boot", title: title, spin: newSpinner()}
 	type def struct {
@@ -140,9 +140,8 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	}
 	defs := []def{
 		{"config", func() (string, bool) {
-			return cfg.Domain + " · " + m.CfgPath, true
-		}},
-		{"runner", func() (string, bool) {
+			return cfg.RelayHost() + " · " + m.CfgPath, true
+		}}, {"runner", func() (string, bool) {
 			m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
 			if m.RunnerReach {
 				return cfg.Runner.Addr + " reachable", true
@@ -502,8 +501,13 @@ func (m *Model) activityView() string {
 			}
 			b.WriteString("  " + line + "\n")
 		case stepPending:
-			// send-msg's empty result slots: placeholder dots.
-			b.WriteString("  " + styleDots.Render(strings.Repeat(".", 30)) + "\n")
+			// A queued slot: show its label dimmed (and a placeholder) so the
+			// list of steps being checked is visible — not anonymous dots.
+			label := s.label
+			if label == "" {
+				label = "…"
+			}
+			b.WriteString("  " + styleDots.Render("· "+label+" ·") + "\n")
 		case stepRunning:
 			line := a.spin.View() + " " + styleCurrent.Render(s.label+"…")
 			if s.detail != "" {

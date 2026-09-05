@@ -253,8 +253,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `internal/teardown/teardown.go`'s `Run` destroys LXCs, KEEPS the
     recorded coords (operator-owned facts; no `PruneLxcCoords`), so a
     rebuild re-boots the SAME world — and `--data` adds the tenant datasets
-    + `freehold-thin` before the door key/world home/config go LAST
-    (`installer/src/teardown.rs` removes config).
+    + `freehold-thin`. freehold's own operator-side state (config, world home
+    = runner packages + ops identity + sealed DNS provider creds + door key)
+    is KEPT even on `--data`, so a rebuild reuses the credentials and metrics
+    and never re-asks for DNS/operator material.
 
 *   `stageLocalLvm` honors the plane: `ChownGuestUid` is NON-recursive (top
     dir only — PVE's own invariant; a recursive sweep re-roots every

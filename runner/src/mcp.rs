@@ -371,18 +371,22 @@ async fn handle_exec(
             }
             let value =
                 exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret)?;
-            let redaction = [(exec::env_name(&meta.secret), value.clone())];
+            // Every requested secret becomes an env var ON THE REMOTE BODY (like
+            // the API connector): the target's own credential for auth, plus any
+            // extras the agent asked for by name. All are redacted from output.
+            let secrets =
+                exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
             let endpoint = SshTarget::parse(&target, &meta.address)
                 .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
             let started = exec::now_secs();
             let mut result = state
                 .ssh
-                .exec(&endpoint, value.as_str(), &cmd, args.timeout_s)
+                .exec(&endpoint, value.as_str(), &cmd, &secrets, args.timeout_s)
                 .await
                 .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
             // Same rule as local: secret values never reach the agent.
-            exec::redact(&mut result.stdout, &redaction);
-            exec::redact(&mut result.stderr, &redaction);
+            exec::redact(&mut result.stdout, &secrets);
+            exec::redact(&mut result.stderr, &secrets);
             // The locked model signs EVERY executed command — ssh included.
             state
                 .exec

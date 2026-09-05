@@ -17,7 +17,6 @@ func u32Ptr(u uint32) *uint32 { return &u }
 // testCfg builds a minimal full config for Services/DATA tests.
 func testCfg() *config.Config {
 	return &config.Config{
-		Domain:   "example.test",
 		RelayURL: "https://example.test",
 		CPURL:    "https://cp.example.test",
 		Runner:   config.RunnerRef{Addr: "127.0.0.1:8787", Pubkey: "aa", Target: "box"},
@@ -30,41 +29,48 @@ func testCfg() *config.Config {
 	}
 }
 
-// TestBuildCerts exercises the Certs view: no cert -> empty; with an expiry +
-// issuer -> one row with the status derived from the expiry.
+// TestBuildCerts exercises the Certs view: two per-host rows (relay, cp), each
+// with its own expiry + a status derived from it.
 func TestBuildCerts(t *testing.T) {
 	cfg := testCfg()
 	m := &Model{Mode: ModeRunning, cfg: cfg}
 	m.buildCerts(cfg)
-	if len(m.Certs) != 0 {
-		t.Fatalf("no cert on record should yield 0 rows, got %+v", m.Certs)
+	// Rows exist even without expiry (carrying "no expiry on record"); testCfg
+	// sets RelayURL/CPURL so both hosts resolve.
+	if len(m.Certs) != 2 {
+		t.Fatalf("want 2 cert rows (relay + cp), got %d: %+v", len(m.Certs), m.Certs)
+	}
+	for _, c := range m.Certs {
+		if !strings.Contains(c.Status, "no expiry") {
+			t.Errorf("expected 'no expiry on record' for %q, got %q", c.Domain, c.Status)
+		}
 	}
 
 	cfg.Caddy = config.CaddySpec{
 		URL:        "https://relay.example.test",
-		CertExpiry: time.Now().Add(60 * 24 * time.Hour).UTC().Format(time.RFC3339),
+		RelayCert:  time.Now().Add(60 * 24 * time.Hour).UTC().Format(time.RFC3339),
+		CPCert:     time.Now().Add(60 * 24 * time.Hour).UTC().Format(time.RFC3339),
 		CertIssuer: "route53",
 	}
 	m.buildCerts(cfg)
-	if len(m.Certs) != 1 {
-		t.Fatalf("want 1 cert row, got %d", len(m.Certs))
+	if len(m.Certs) != 2 {
+		t.Fatalf("want 2 cert rows, got %d", len(m.Certs))
 	}
-	c := m.Certs[0]
-	if c.URL != "https://relay.example.test" || c.Issuer != "route53" {
-		t.Errorf("cert row = %+v", c)
+	if c := m.Certs[0]; !strings.HasPrefix(c.Domain, "example.test") || !strings.Contains(c.Status, "valid") || c.Issuer != "route53" {
+		t.Errorf("relay row = %+v", c)
 	}
-	if !strings.Contains(c.Domain, "example.test") {
-		t.Errorf("domain = %q", c.Domain)
-	}
-	if !strings.Contains(c.Status, "valid") {
-		t.Errorf("status = %q, want valid", c.Status)
+	if c := m.Certs[1]; !strings.Contains(c.Status, "valid") || c.Issuer != "route53" {
+		t.Errorf("cp row = %+v", c)
 	}
 
-	// expired -> red status
-	cfg.Caddy.CertExpiry = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	// expired relay -> red status on that slot only
+	cfg.Caddy.RelayCert = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
 	m.buildCerts(cfg)
 	if !strings.Contains(m.Certs[0].Status, "EXPIRED") {
-		t.Errorf("expired status = %q", m.Certs[0].Status)
+		t.Errorf("relay expired status = %q", m.Certs[0].Status)
+	}
+	if !strings.Contains(m.Certs[1].Status, "valid") {
+		t.Errorf("cp should still be valid, got %q", m.Certs[1].Status)
 	}
 }
 

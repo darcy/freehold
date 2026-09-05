@@ -262,7 +262,8 @@ func TestRecordLxcFreshLoadClobber(t *testing.T) {
 	pool := "pve"
 	kind := "lvmth"
 	seed := &config.Config{
-		Domain:         "world.test",
+		RelayURL:       "https://world.test",
+		CPURL:          "https://cp.world.test",
 		Managed:        []string{"relay", "cp"},
 		OperatorPubkey: strings.Repeat("a", 64),
 		Plane: config.PlaneSpec{
@@ -319,7 +320,7 @@ func TestRecordLxcBailsWithoutConfig(t *testing.T) {
 // ---- merge_from_answers ------------------------------------------------------
 
 func TestMergeFromAnswersNilPrev(t *testing.T) {
-	ans := &config.Config{Domain: "d", Managed: []string{"relay", "cp"}}
+	ans := &config.Config{RelayURL: "https://relay.d", CPURL: "https://cp.d", Managed: []string{"relay", "cp"}}
 	if got := mergeFromAnswers(ans, nil); got != ans {
 		t.Error("nil prev must return the answers config untouched")
 	}
@@ -342,8 +343,9 @@ func TestMergeFromAnswersPreservesPrevFacts(t *testing.T) {
 		Managed: []string{"relay", "cp", "k3s"},
 	}
 	ans := &config.Config{
-		Domain:  "d",
-		Managed: []string{"relay", "cp"},
+		RelayURL: "https://relay.d",
+		CPURL:    "https://cp.d",
+		Managed:  []string{"relay", "cp"},
 	}
 	cfg := mergeFromAnswers(ans, prev)
 	if cfg.RelayPubkey == nil || *cfg.RelayPubkey != rpk {
@@ -373,57 +375,27 @@ func TestMergeFromAnswersPreservesPrevFacts(t *testing.T) {
 
 func u32(v uint32) *uint32 { return &v }
 
-// TestFromAnswersRelayWsURLInternal confirms the relay/CP domains are NEVER
-// derived: each is exactly what the operator supplied (defaulting to the world
-// domain when absent), and the CPA origin follows the relay's own host.
+// TestFromAnswersRelayWsURLInternal confirms relay + CP domains are NEVER
+// derived: each is exactly what the operator supplies, and the CPA origin
+// follows the relay's own host. There is no world/base domain anymore.
 func TestFromAnswersRelayWsURLInternal(t *testing.T) {
-	// no explicit relay/cp domains -> both live at the world domain.
-	e := &rebuildEngine{f: rebuildFlags{domain: "freehold-test.darcydev.net", agentName: "cpa"}}
-	cfg := e.fromAnswers()
-	if cfg.RelayWsURL != "wss://freehold-test.darcydev.net" {
-		t.Errorf("RelayWsURL = %q, want wss://<world-domain> (no derivation)", cfg.RelayWsURL)
-	}
-	if cfg.RelayURL != "https://freehold-test.darcydev.net" {
-		t.Errorf("RelayURL = %q, want https://<world-domain> (no relay. prefix)", cfg.RelayURL)
-	}
-	if cfg.CPURL != "https://freehold-test.darcydev.net" {
-		t.Errorf("CPURL = %q, want https://<world-domain> (no cp. prefix)", cfg.CPURL)
-	}
-
-	// explicit relay/cp domains are used verbatim.
-	e2 := &rebuildEngine{f: rebuildFlags{
-		domain:      "freehold-test.darcydev.net",
+	e := &rebuildEngine{f: rebuildFlags{
 		relayDomain: "relay.freehold-test.darcydev.net",
 		cpDomain:    "cp.freehold-test.darcydev.net",
 		agentName:   "cpa",
 	}}
-	cfg2 := e2.fromAnswers()
-	if cfg2.RelayURL != "https://relay.freehold-test.darcydev.net" || cfg2.RelayWsURL != "wss://relay.freehold-test.darcydev.net" {
-		t.Errorf("explicit relay domain not honored: %+v", cfg2)
+	cfg := e.fromAnswers()
+	if cfg.RelayURL != "https://relay.freehold-test.darcydev.net" {
+		t.Errorf("RelayURL = %q, want the supplied relay host", cfg.RelayURL)
 	}
-	if cfg2.CPURL != "https://cp.freehold-test.darcydev.net" {
-		t.Errorf("explicit cp domain not honored: %+v", cfg2)
+	if cfg.RelayWsURL != "wss://relay.freehold-test.darcydev.net" {
+		t.Errorf("RelayWsURL = %q, want wss://<relay-domain>", cfg.RelayWsURL)
+	}
+	if cfg.CPURL != "https://cp.freehold-test.darcydev.net" {
+		t.Errorf("CPURL = %q, want the supplied cp host", cfg.CPURL)
 	}
 }
 func sptr(v string) *string { return &v }
-
-// TestDomainCoveredByWildcard: a wildcard issued for *.apex/apex covers the
-// apex and proper subdomains but not other zones (the prompt warns on those).
-func TestDomainCoveredByWildcard(t *testing.T) {
-	apex := "freehold-test.darcydev.net"
-	covered := []string{apex, "relay." + apex, "cp." + apex}
-	uncovered := []string{"", "other.net", "darcydev.net", apex + "x", "." + apex, "a.b." + apex}
-	for _, h := range covered {
-		if !domainCoveredByWildcard(apex, h) {
-			t.Errorf("domainCoveredByWildcard(%q, %q) = false, want true", apex, h)
-		}
-	}
-	for _, h := range uncovered {
-		if domainCoveredByWildcard(apex, h) {
-			t.Errorf("domainCoveredByWildcard(%q, %q) = true, want false", apex, h)
-		}
-	}
-}
 
 // ---- door + NIP-11 parsing ----------------------------------------------------
 
@@ -626,36 +598,27 @@ func TestStageVerifyUnrecoverable(t *testing.T) {
 
 // ---- static IP resolution (Rust Answers::from_config parity) --------------
 
-func TestBootstrapStaticIPFlagWins(t *testing.T) {
-	ip := "10.0.0.8/24"
-	cfg := &config.Config{}
-	cfg.Lxc.Relay.Ip = &ip
-	// explicit flag beats the recorded config ip.
-	if got := bootstrapStaticIP("relay", rebuildFlags{relayIP: "192.168.30.8/24"}, cfg); got != "192.168.30.8/24" {
-		t.Errorf("flag should win, got %q", got)
+func TestBootstrapStaticIPProxyOnly(t *testing.T) {
+	// Only the proxy node ("k3s") can be static; its value is f.proxyIP first,
+	// else the recorded cfg.Proxy.Ip, else DHCP.
+	if got := bootstrapStaticIP("k3s", rebuildFlags{proxyIP: "192.168.30.7/24"}, &config.Config{}); got != "192.168.30.7/24" {
+		t.Errorf("proxy flag should win, got %q", got)
 	}
-}
-
-func TestBootstrapStaticIPRecordedFallsBack(t *testing.T) {
-	ip := "192.168.30.9/24"
-	cfg := &config.Config{}
-	cfg.Lxc.Cp.Ip = &ip
-	// no flag => the recorded ip rides again (the proxy/DNS target is owned).
-	if got := bootstrapStaticIP("cp", rebuildFlags{}, cfg); got != "192.168.30.9/24" {
-		t.Errorf("recorded ip should ride again, got %q", got)
+	ip := "192.168.30.7/24"
+	cfg := &config.Config{Proxy: config.ProxySpec{Ip: &ip}}
+	if got := bootstrapStaticIP("k3s", rebuildFlags{}, cfg); got != "192.168.30.7/24" {
+		t.Errorf("recorded proxy ip should ride again, got %q", got)
 	}
-}
-
-func TestBootstrapStaticIPNoneIsDHCP(t *testing.T) {
-	// no flag, no recorded ip => DHCP.
 	if got := bootstrapStaticIP("k3s", rebuildFlags{}, &config.Config{}); got != "" {
-		t.Errorf("absent ip should be DHCP, got %q", got)
+		t.Errorf("absent proxy ip should be DHCP, got %q", got)
 	}
-	// nil config (no file yet) => DHCP.
-	if got := bootstrapStaticIP("relay", rebuildFlags{}, nil); got != "" {
-		t.Errorf("nil config should be DHCP, got %q", got)
+	// relay/cp are ALWAYS DHCP behind the proxy, even with a recorded LXC ip.
+	if got := bootstrapStaticIP("relay", rebuildFlags{proxyIP: "x"}, cfg); got != "" {
+		t.Errorf("relay must stay DHCP, got %q", got)
 	}
-
+	if got := bootstrapStaticIP("cp", rebuildFlags{}, cfg); got != "" {
+		t.Errorf("cp must stay DHCP, got %q", got)
+	}
 }
 
 // TestGenSecretHex: the re-minted master key + postgres password are 32-byte
@@ -798,28 +761,46 @@ func countStr(list []string, s string) int {
 func TestCaddyCertInstallScript(t *testing.T) {
 	fc := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
 	key := []byte("-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
-	s := caddyCertInstallScript(102, fc, key)
+	s := caddyCertInstallScript(102, "relay", fc)
 
-	// set -e in BOTH the outer wrapper and the inner (guest) script.
-	if got := strings.Count(s, "set -e"); got != 2 {
-		t.Errorf("want set -e in outer + inner shells, got %d occurrences:\n%s", got, s)
-	}
-	// the busybox helper reads the same durable PVC and is waited-for before
-	// the cert/key writes.
-	for _, want := range []string{"image: busybox", "claimName: caddy-data", "--timeout=60s",
-		"persistentVolumeClaim", "rollout restart deploy/caddy"} {
+	// The cert/key land DIRECTLY in the local-path backing dir on the k3s node
+	// (the directory Caddy's hostNetwork pod bind-mounts at /data) — no
+	// kubectl-exec/stdin hop (which never forwards stdin and wrote 0-byte files).
+	// The PV backing dir is resolved from the PV's .spec.local.path (so it still
+	// works when local-path points at the durable plane), and the cert is ALSO
+	// mirrored to the durable plane for teardown-proof recovery.
+	for _, want := range []string{"$PDIR/tls/relay", "spec.local.path",
+		"caddy-edge/relay", "rollout restart deploy/caddy", "pct push 102", "chmod 600"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script missing %q", want)
 		}
 	}
-	// base64 payloads present + single-quoted (safe, no shell metacharacters).
+	// The public fullchain is base64-embedded; the PRIVATE KEY must NOT be —
+	// it comes from $CERT_KEY_RELAY on the HOST (runner-injected env), written
+	// to a temp file and pct-pushed into the guest (a pct exec guest shell
+	// would NOT inherit host env). The audited command never carries the key.
 	fcB64 := base64.StdEncoding.EncodeToString(fc)
-	keyB64 := base64.StdEncoding.EncodeToString(key)
 	if !strings.Contains(s, "'"+fcB64+"'") {
 		t.Errorf("fullchain base64 not single-quoted-embedded")
 	}
-	if !strings.Contains(s, "'"+keyB64+"'") {
-		t.Errorf("key base64 not single-quoted-embedded")
+	if strings.Contains(s, string(key)) || strings.Contains(s, base64.StdEncoding.EncodeToString(key)) {
+		t.Errorf("private key must not appear in the audited install script:\n%s", s)
+	}
+	// the key env is read OUTSIDE pct exec (host side), and fh-key is cleaned up.
+	if !strings.Contains(s, `"${CERT_KEY_RELAY}" > /tmp/fh-key.pem`) {
+		t.Errorf("script must source the private key from ${CERT_KEY_RELAY} on the host")
+	}
+	if !strings.Contains(s, "/tmp/fh-key.pem") || !strings.Contains(s, "/tmp/fh-fc.pem") {
+		t.Errorf("host temp cert files must be used then removed")
+	}
+	if !strings.Contains(s, "rm -f /tmp/fh-key.pem /tmp/fh-fc.pem") {
+		t.Errorf("host temp cert files must be cleaned up")
+	}
+	// the guest shell (after the pct exec marker) must NOT reference the key
+	// env at all — a pct exec guest shell does not inherit the host env.
+	if i := strings.Index(s, "pct exec 102 -- sh -c"); i >= 0 &&
+		strings.Contains(s[i:], "${CERT_KEY_RELAY}") {
+		t.Errorf("the guest shell must not read ${CERT_KEY_RELAY} (pct exec does not inherit host env)")
 	}
 }
 
@@ -892,6 +873,63 @@ func TestRelayDomainHost(t *testing.T) {
 	for _, c := range cases {
 		if got := relayDomainHost(c.domain, c.base); got != c.want {
 			t.Errorf("relayDomainHost(%q,%q) = %q, want %q", c.domain, c.base, got, c.want)
+		}
+	}
+}
+
+// TestApplyConfigDefaults: `freehold rebuild` with no flags must pull the
+// recorded operator key, relay/CP hosts, thin-pool, agent name, and proxy IP
+// from the stored config — a smooth rebuild, no forced re-entry. Explicit flags
+// win over the config.
+func TestApplyConfigDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	op := strings.Repeat("e", 64)
+	pool := "fh-thin"
+	proxy := "192.168.30.7/24"
+	if err := (&config.Config{
+		RelayURL:       "https://relay.world.test",
+		RelayWsURL:     "wss://relay.world.test",
+		CPURL:          "https://cp.world.test",
+		OperatorPubkey: op,
+		Proxy:          config.ProxySpec{Ip: &proxy},
+		Plane:          config.PlaneSpec{ThinPool: &pool},
+		CPAName:        "waldo",
+	}).Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	f := &rebuildFlags{}
+	if err := applyConfigDefaults(f, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if f.operatorPubkey != op || f.relayDomain != "relay.world.test" || f.cpDomain != "cp.world.test" {
+		t.Errorf("defaults = %q / %q / %q", f.operatorPubkey, f.relayDomain, f.cpDomain)
+	}
+	if f.thinPool != "fh-thin" || f.agentName != "waldo" || f.proxyIP != proxy {
+		t.Errorf("defaults = tp:%q agent:%q proxy:%q", f.thinPool, f.agentName, f.proxyIP)
+	}
+	// explicit flags win
+	f2 := &rebuildFlags{operatorPubkey: "y", relayDomain: "z", cpDomain: "w"}
+	if err := applyConfigDefaults(f2, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if f2.operatorPubkey != "y" || f2.relayDomain != "z" {
+		t.Errorf("explicit flags must win: %q/%q", f2.operatorPubkey, f2.relayDomain)
+	}
+}
+
+func TestLegoDomainForHost(t *testing.T) {
+	cases := []struct{ host, configured, want string }{
+		{"relay.librem.freehold.technology", "", "relay.librem.freehold.technology"},
+		{"relay.librem.freehold.technology", "relay.librem.freehold.technology", "relay.librem.freehold.technology"},
+		{"relay.librem.freehold.technology", "*.librem.freehold.technology", "*.librem.freehold.technology"},
+		{"relay.librem.freehold.technology", "*.freehold-test.darcydev.net", "relay.librem.freehold.technology"}, // stale
+		{"relay.librem.freehold.technology", "other.bad.net", "relay.librem.freehold.technology"},                // mismatched
+		{"", "*.anything.net", ""},
+	}
+	for _, c := range cases {
+		if got := legoDomainForHost(c.host, c.configured); got != c.want {
+			t.Errorf("legoDomainForHost(%q,%q) = %q, want %q", c.host, c.configured, got, c.want)
 		}
 	}
 }

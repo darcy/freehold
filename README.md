@@ -284,10 +284,9 @@ freehold demo --addr 127.0.0.1:8787 \
 # World bring-up, one step at a time (every command routes through the
 # provisioning runner — the workstation never holds a PVE credential itself).
 #   bootstrap: create + start + verify a fresh LXC via pct on the PVE host,
-#   install docker+compose in the guest, then BLOCK on the A4 domain gate
-#   (the domain must resolve to the target IP or the operator's proxy).
-#   --role relay|cp derives the LXC name from --domain; pass --lxc-ip/--lxc-gw
-#   for a STATIC guest address (cloud DHCP won't lease to LXC veths).
+#   then install docker+compose in the guest. No A4 DNS gate — the relay/CP
+#   hosts resolve internally behind the proxy, so install never blocks on DNS.
+#   --role relay|cp derives the LXC name from --domain.
 freehold bootstrap --kind proxmox-lxc --role relay \
   --vmid 100 --lxc-ip <lan-ip>/24 --lxc-gw <lan-gw> --domain <relay-domain> \
   --operator-pubkey <your-64-hex> --addr 127.0.0.1:8787 \
@@ -357,15 +356,15 @@ cargo run -p freehold-control-plane -- rebuild --relay-url https://<relay-domain
 
 Every command routes through a **provisioning runner** (one `exec(cmd, target)` — the same
 primitive agents use), so the workstation never holds a PVE credential of its own: the
-runner's injected SSH key is the only door. The domain is identity (never an IP): the A4
-gate blocks until `--domain` resolves to the target or to the operator's proxy. Consoles
-**mint their identity on the box** (a keypair is never shipped); the relay runs under the
-domain with owner = the CP console.
+runner's injected SSH key is the only door. The relay + CP hosts are identity (never an IP):
+they resolve internally behind freehold's Caddy proxy, so install does not block on DNS.
+Consoles **mint their identity on the box** (a keypair is never shipped); the relay runs under
+its host with owner = the CP console.
 
 **The same story as a sequence:** four lifelines — operator, PVE host (where the runner
 lives), relay LXC, cp LXC. Solid arrows = commands (the runner executes them over SSH);
 dotted arrowheads = replies that end their command; dotted-open (async) = a report sent
-while the bootstrap call is still in flight through the A4 gate.
+while a bootstrap call is still in flight.
 
 ```mermaid
 sequenceDiagram
@@ -377,13 +376,11 @@ sequenceDiagram
     OP->>PVE: bootstrap --role relay + cp (signed MCP via the runner)
     PVE->>R: create + start + verify + docker+compose (relay LXC)
     PVE->>C: create + start + verify + docker+compose (cp LXC)
-    PVE--)OP: assigned IPs reported — bootstrap still waiting on the A4 gate
-    Note over OP: operator maps domain.example to the LXC IP (DNS or proxy) — manual
-    OP->>OP: CLI waits until domain.example resolves (A4 gate)
-    OP->>PVE: gate passes — deploy-cp
+    PVE--)OP: assigned IPs reported (no DNS gate — internal resolution suffices)
+    OP->>PVE: continue — deploy-cp
     PVE->>C: ship binaries · serve :8080 · mint console key · adopt runner
     C-->>OP: console pubkey + cp-domain.example
-    OP->>PVE: gate passes — deploy-relay (owner = the console)
+    OP->>PVE: continue — deploy-relay (owner = the console)
     PVE->>R: fetch bundle · compose up · /_liveness
     R-->>OP: relay live at domain.example
     OP->>PVE: relay-member — operator + runners + agents pubkeys

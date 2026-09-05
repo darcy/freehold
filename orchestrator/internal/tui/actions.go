@@ -10,17 +10,21 @@ package tui
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/console"
+	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/flows"
 )
 
@@ -47,12 +51,12 @@ const (
 type tuiFlow struct {
 	Kind   flowKind
 	Step   int
-	Inputs [10]string
+	Inputs [11]string
 	Field  *textinput.Model
 	// Defaults are the prefilled answers per step — sourced from the
 	// recorded config when one exists (see flowDefaults). Blank = no
 	// recorded value; the prompt's own "(blank = N)" semantics apply.
-	Defaults [10]string
+	Defaults [11]string
 }
 
 type flowMsg struct {
@@ -98,10 +102,10 @@ func fieldFor(k flowKind, step int, def string) *textinput.Model {
 // would boot k3s). The two size prompts have no config record; blank keeps
 // their "(blank = N)" semantics. Absent/unreadable config = no defaults
 // (fresh-world behavior, unchanged).
-func flowDefaults(m *Model, k flowKind) [10]string {
-	var d [10]string
+func flowDefaults(m *Model, k flowKind) [11]string {
+	var d [11]string
 	if k != flowRebuild || m.CfgPath == "" {
-		// No config: nothing to prefill. k3s (d[5]) and litellm (d[7]) stay
+		// No config: nothing to prefill. k3s (d[6]) and litellm (d[8]) stay
 		// BLANK, which the arg builder reads as "y" — the full desired world
 		// reconciles by default; opting out is an explicit "n".
 		return d
@@ -111,22 +115,17 @@ func flowDefaults(m *Model, k flowKind) [10]string {
 		return d
 	}
 	d[0] = cfg.OperatorPubkey
-	d[1] = cfg.Domain
+	// relay + CP hosts are seeded from config (never derived).
+	d[1] = cfg.RelayHost()
+	d[2] = cfg.CPHost()
 	if cfg.Plane.ThinPool != nil {
-		d[3] = *cfg.Plane.ThinPool
-	} // The desired world is FULL (reconcile-always): k3s (d[5]) and litellm
-	// (d[7]) are left blank ("y" when dispatched) regardless of what the
+		d[4] = *cfg.Plane.ThinPool
+	} // The desired world is FULL (reconcile-always): k3s (d[6]) and litellm
+	// (d[8]) are left blank ("y" when dispatched) regardless of what the
 	// recorded config listed, so a partial world is pulled up to the whole by
 	// default. Opting out is an explicit "n".
 	if cfg.CPAName != "" {
-		d[6] = cfg.CPAName
-	}
-	// Seed the relay + CP hosts from the recorded config (never derived).
-	if r := cfg.RelayHost(); r != "" {
-		d[8] = r
-	}
-	if c := cfg.CPHost(); c != "" {
-		d[9] = c
+		d[7] = cfg.CPAName
 	}
 	return d
 }
@@ -142,7 +141,7 @@ func ncols(k flowKind) int {
 	case flowTeardown:
 		return 2
 	case flowRebuild:
-		return 10
+		return 11
 	default:
 		return 1
 	}
@@ -210,23 +209,25 @@ func promptLabel(k flowKind, step int) string {
 		case 0:
 			return "operator pubkey (npub1… or 64-hex)"
 		case 1:
-			return "domain (the relay's identity)"
+			return "relay domain (its Buzz origin — REQUIRED)"
 		case 2:
-			return "tenant LV size GB (blank = 10)"
+			return "control-plane domain (REQUIRED)"
 		case 3:
-			return "thin-pool name (blank = reuse detected / carve default)"
+			return "tenant LV size GB (blank = 10)"
 		case 4:
-			return "new thin-pool size GB (blank = 40, used when carving)"
+			return "thin-pool name (blank = reuse detected / carve default)"
 		case 5:
-			return "boot k3s too? (y/n, blank = y)"
+			return "new thin-pool size GB (blank = 40, used when carving)"
 		case 6:
-			return "CPA agent name (blank = freehold)"
+			return "boot k3s too? (y/n, blank = y)"
 		case 7:
-			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
+			return "CPA agent name (blank = freehold)"
 		case 8:
-			return "relay domain (its Buzz origin; blank = the world domain)"
+			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
+		case 9:
+			return "DNS provider for the certs (e.g. route53; blank = reuse stored)"
 		default:
-			return "control-plane domain (blank = the world domain)"
+			return "DNS env KEY=VAL,KEY=VAL (blank = auto-detect, e.g. ~/.aws)"
 		}
 	default:
 		return "value"
@@ -264,6 +265,21 @@ func (m *Model) handleFlow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			f.Step = next
 			f.Field = fieldFor(f.Kind, next, f.Defaults[next])
 			return m, nil
+		}
+		// Rebuild: build the args and dispatch. DNS provider credentials are a
+		// VISIBLE form step (after litellm); a blank provider reuses any stored
+		// credential. Any provided DNS info is stored (pre-verified) here.
+		if f.Kind == flowRebuild {
+			args, err := rebuildArgs(f)
+			if err != nil {
+				return m, func() tea.Msg { return flowMsg{err: err} }
+			}
+			return m, func() tea.Msg {
+				if err := storeRebuildDNS(f); err != nil {
+					return flowMsg{err: err}
+				}
+				return activityStartMsg{kind: "rebuild", title: "rebuilding " + strings.TrimSpace(f.Inputs[1]), args: args}
+			}
 		}
 		return m, runFlowAction(m, f)
 	}
@@ -378,41 +394,11 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			return activityStartMsg{kind: "teardown", title: "tearing down the world", args: args}
 		case flowRebuild:
-			op, domain := f.Inputs[0], f.Inputs[1]
-			if op == "" || domain == "" {
-				return flowMsg{err: fmt.Errorf("rebuild needs operator pubkey and domain")}
+			args, err := rebuildArgs(f)
+			if err != nil {
+				return flowMsg{err: err}
 			}
-			args := []string{"rebuild", "--yes",
-				"--operator-pubkey", op,
-				"--domain", domain,
-			}
-			if f.Inputs[2] != "" {
-				args = append(args, "--size-gb", f.Inputs[2])
-			}
-			if f.Inputs[3] != "" {
-				args = append(args, "--thin-pool", f.Inputs[3])
-			}
-			if f.Inputs[4] != "" {
-				args = append(args, "--pool-size-gb", f.Inputs[4])
-			}
-			if strings.EqualFold(strings.TrimSpace(f.Inputs[5]), "n") {
-				args = append(args, "--no-k3s")
-			}
-			if name := strings.TrimSpace(f.Inputs[6]); name != "" {
-				args = append(args, "--agent-name", name)
-			}
-			if strings.EqualFold(strings.TrimSpace(f.Inputs[7]), "n") {
-				// Opt out of the litellm gateway (and thus the CPA, which needs
-				// it to reason). Default is on: the full world reconciles.
-				args = append(args, "--no-litellm")
-			}
-			if r := strings.TrimSpace(f.Inputs[8]); r != "" {
-				args = append(args, "--relay-domain", r)
-			}
-			if c := strings.TrimSpace(f.Inputs[9]); c != "" {
-				args = append(args, "--cp-domain", c)
-			}
-			return activityStartMsg{kind: "rebuild", title: "rebuilding " + domain, args: args}
+			return activityStartMsg{kind: "rebuild", title: "rebuilding " + strings.TrimSpace(f.Inputs[1]), args: args}
 		}
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
@@ -493,4 +479,95 @@ func doorKeyWaiting(out string) string {
 
 func (m *Model) refreshLocal() {
 	m.refreshRunners(m.cfg)
+}
+
+// rebuildArgs builds the `freehold rebuild --yes` args from a completed
+// rebuild form (shared by the flow dispatcher and the DNS pre-flow).
+func rebuildArgs(f *tuiFlow) ([]string, error) {
+	op, relay := strings.TrimSpace(f.Inputs[0]), strings.TrimSpace(f.Inputs[1])
+	cp := strings.TrimSpace(f.Inputs[2])
+	if op == "" || relay == "" || cp == "" {
+		return nil, fmt.Errorf("rebuild needs operator pubkey, relay domain, and control-plane domain")
+	}
+	args := []string{"rebuild", "--yes",
+		"--operator-pubkey", op,
+		"--relay-domain", relay,
+		"--cp-domain", cp,
+	}
+	if v := strings.TrimSpace(f.Inputs[3]); v != "" {
+		args = append(args, "--size-gb", v)
+	}
+	if v := strings.TrimSpace(f.Inputs[4]); v != "" {
+		args = append(args, "--thin-pool", v)
+	}
+	if v := strings.TrimSpace(f.Inputs[5]); v != "" {
+		args = append(args, "--pool-size-gb", v)
+	}
+	if strings.EqualFold(strings.TrimSpace(f.Inputs[6]), "n") {
+		args = append(args, "--no-k3s")
+	}
+	if name := strings.TrimSpace(f.Inputs[7]); name != "" {
+		args = append(args, "--agent-name", name)
+	}
+	if strings.EqualFold(strings.TrimSpace(f.Inputs[8]), "n") {
+		args = append(args, "--no-litellm")
+	}
+	return args, nil
+}
+
+// edgeNeedsDNS reports whether the rebuild form's world includes the Caddy edge
+// (k3s on + relay/CP domains set), i.e. it will need DNS provider credentials.
+func edgeNeedsDNS(f *tuiFlow) bool {
+	return strings.TrimSpace(f.Inputs[1]) != "" &&
+		strings.TrimSpace(f.Inputs[2]) != "" &&
+		!strings.EqualFold(strings.TrimSpace(f.Inputs[6]), "n")
+}
+
+// storeRebuildDNS seals the DNS provider credential the operator typed into the
+// rebuild form (fields 9/10) into BOTH relay + cp slots (pre-verified against
+// the relay host), so the headless rebuild reuses it. A blank provider leaves any
+// stored credential untouched (the rebuild reuses the one already on disk).
+func storeRebuildDNS(f *tuiFlow) error {
+	provider := strings.TrimSpace(f.Inputs[9])
+	if provider == "" {
+		return nil
+	}
+	if !cert.IsProvider(provider) {
+		return fmt.Errorf("unknown DNS provider %q", provider)
+	}
+	env := map[string]string{}
+	if v := strings.TrimSpace(f.Inputs[10]); v != "" {
+		for _, kv := range strings.Split(v, ",") {
+			k, val, ok := strings.Cut(kv, "=")
+			if !ok || strings.TrimSpace(k) == "" {
+				return fmt.Errorf("DNS env expects KEY=VAL,KEY=VAL — bad entry %q", kv)
+			}
+			env[strings.TrimSpace(k)] = strings.TrimSpace(val)
+		}
+	}
+	relayHost := strings.TrimSpace(f.Inputs[1])
+	if relayHost != "" {
+		if err := cert.Verify(relayHost, provider, env); err != nil {
+			return fmt.Errorf("DNS pre-verify failed: %w", err)
+		}
+	}
+	id, err := flows.LoadIdentity(freeholdStateDir() + "/agent-ops")
+	if err != nil {
+		return err
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+	for _, slot := range []string{"relay", "cp"} {
+		if err := cert.SaveCreds(filepath.Join(freeholdStateDir(), "dns-provider-"+slot+".json"), provider, env, seal, pub, "cert-dns-"+slot); err != nil {
+			return fmt.Errorf("storing %s DNS credential: %w", slot, err)
+		}
+	}
+	return nil
 }

@@ -139,17 +139,20 @@ func TestWholeWorldDataRemovesEverything(t *testing.T) {
 	if !sawSed {
 		t.Errorf("--data must remove the door key: %v", r.execs)
 	}
-	if _, err := os.Stat(cfg.WorldHome); !os.IsNotExist(err) {
-		t.Error("--data must remove the world home")
+	// freehold's operator-side state (world home = runner + ops identity +
+	// DNS creds; config = recorded coords) is KEPT even on --data, so a
+	// rebuild reuses the package and doesn't re-enter DNS/operator material.
+	if _, err := os.Stat(cfg.WorldHome); os.IsNotExist(err) {
+		t.Error("--data must KEEP the world home (DNS creds + identity survive)")
 	}
-	if _, err := os.Stat(cfg.ConfigPath); !os.IsNotExist(err) {
-		t.Error("--data must remove the config")
+	if _, err := os.Stat(cfg.ConfigPath); os.IsNotExist(err) {
+		t.Error("--data must KEEP the config")
 	}
 	if !strings.Contains(report, "removed freehold-created thin pool") {
 		t.Errorf("report must mention the pool removal:\n%s", report)
 	}
-	if strings.Contains(report, "config KEPT") {
-		t.Errorf("report must not claim the config was kept:\n%s", report)
+	if !strings.Contains(report, "kept world home") || !strings.Contains(report, "kept config") {
+		t.Errorf("report must say the world home + config were kept:\n%s", report)
 	}
 }
 
@@ -308,40 +311,40 @@ func (p *pctHost) execFn(cmd string) (bool, string) {
 	return true, ""
 }
 
-// TestExecRunnerRefusesForeignGuestAtRecordedVmid is the vmid-reuse guard:
-// the config kept vmid 100 after a compute teardown, PVE handed the freed
-// id to the operator's next guest, and a second teardown must REFUSE — no
-// pct stop, no pct destroy.
-func TestExecRunnerRefusesForeignGuestAtRecordedVmid(t *testing.T) {
-	host := &pctHost{names: map[uint32]string{100: "operators-new-ct"}}
+// TestExecRunnerDestroysByRecordedVmid: identity is the RECORDED vmid — teardown
+// destroys by id even when the occupant's name doesn't match a derived guest
+// name (the old name-guard falsely refused these after the no-domain refactor).
+func TestExecRunnerDestroysByRecordedVmid(t *testing.T) {
+	host := &pctHost{names: map[uint32]string{100: "old-scheme-guest-name"}}
 	r := &ExecRunner{Domain: "world.test", execFn: host.execFn}
-	_, err := r.DestroyOneLxc("relay", ptr32(100))
-	if err == nil {
-		t.Fatal("destroy must refuse when the recorded vmid holds a foreign guest")
+	log, err := r.DestroyOneLxc("relay", ptr32(100))
+	if err != nil {
+		t.Fatalf("recorded vmid must destroy regardless of occupant name, got: %v", err)
 	}
-	for _, c := range []string{"operators-new-ct", "world-test-relay"} {
-		if !strings.Contains(err.Error(), c) {
-			t.Errorf("refusal must name both the occupant %q and the expected %q, got: %v", "operators-new-ct", "world-test-relay", err)
-		}
+	last := log[len(log)-1]
+	if !strings.Contains(last, "destroyed relay LXC 100") {
+		t.Errorf("log = %v", log)
 	}
+	var destroyed bool
 	for _, cmd := range host.execs {
-		if strings.HasPrefix(cmd, "pct destroy") || strings.HasPrefix(cmd, "pct stop") {
-			t.Errorf("no destroy/stop may run on a foreign occupant, got: %q", cmd)
+		if cmd == "pct destroy 100" {
+			destroyed = true
 		}
+	}
+	if !destroyed {
+		t.Errorf("pct destroy 100 never ran: %v", host.execs)
 	}
 }
 
-// TestExecRunnerDestroysMatchingGuest: the occupant at the recorded vmid IS
-// the freehold guest (same name rebuild creates) — the full destroy path
-// runs and reports it.
-func TestExecRunnerDestroysMatchingGuest(t *testing.T) {
+// TestExecRunnerDestroyMatchingGuestLog: a matching guest destroys and reports.
+func TestExecRunnerDestroyMatchingGuestLog(t *testing.T) {
 	host := &pctHost{names: map[uint32]string{100: "world-test-relay"}}
 	r := &ExecRunner{Domain: "world.test", execFn: host.execFn}
 	log, err := r.DestroyOneLxc("relay", ptr32(100))
 	if err != nil {
 		t.Fatalf("matching occupant must destroy, got: %v", err)
 	}
-	if len(log) != 1 || !strings.Contains(log[0], "destroyed relay LXC 100") {
+	if len(log) < 2 || !strings.Contains(log[len(log)-1], "destroyed relay LXC 100") {
 		t.Errorf("log = %v", log)
 	}
 	var destroyed bool
@@ -374,17 +377,20 @@ func TestExecRunnerAbsentVmidIsNoop(t *testing.T) {
 	}
 }
 
-// TestExecRunnerRefusesWithoutDomain: no domain recorded = no expected name
-// to verify against = fail closed (never destroy by vmid alone).
-func TestExecRunnerRefusesWithoutDomain(t *testing.T) {
-	host := &pctHost{names: map[uint32]string{100: "world-test-relay"}}
+// TestExecRunnerNilVmidNoop: no recorded vmid = "never created", nothing runs.
+func TestExecRunnerNilVmidNoop(t *testing.T) {
+	host := &pctHost{names: map[uint32]string{}}
 	r := &ExecRunner{execFn: host.execFn}
-	if _, err := r.DestroyOneLxc("relay", ptr32(100)); err == nil {
-		t.Fatal("no domain must refuse — the occupant cannot be verified")
+	log, err := r.DestroyOneLxc("relay", nil)
+	if err != nil {
+		t.Fatalf("nil vmid is a no-op, got: %v", err)
+	}
+	if len(log) != 1 || !strings.Contains(log[0], "never created") {
+		t.Errorf("log = %v", log)
 	}
 	for _, cmd := range host.execs {
 		if strings.HasPrefix(cmd, "pct destroy") {
-			t.Errorf("no destroy may run without a domain guard, got: %q", cmd)
+			t.Errorf("no destroy may run without a recorded vmid, got: %q", cmd)
 		}
 	}
 }
