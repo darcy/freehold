@@ -135,14 +135,20 @@ to run, idle and active.
 
 #### Phase E — Agent-creates-agent
 
-- [ ] E1. Give CPA a create-agent tool: given a name and a one-line purpose,
+- [x] E1. Give CPA a create-agent tool: given a name and a one-line purpose,
       it stands up a new buzz-acp-class identity with its own durable,
-      relay-scoped memory.
-- [ ] E2. The created agent ships with no skill and no target — purely
+      relay-scoped memory. (`freehold create-agent` + `watch-agents` executor:
+      mints a durable identity under the CP control-plane area, adds the pubkey
+      as a relay member, seats it in #freehold + publishes its profile, and
+      applies its pod via the runner. The CPA posts `create-agent name: X
+      purpose: Y` to #freehold; the watcher executes it and confirms.)
+- [x] E2. The created agent ships with no skill and no target — purely
       conversational, holding its own memory, same as CPA at this stage.
-- [ ] E3. Verify the created agent is directly reachable in Buzz (not only
+- [x] E3. Verify the created agent is directly reachable in Buzz (not only
       reachable through CPA) and survives the same restart/rebuild drill as
-      D2/D3.
+      D2/D3. (Verified 2026-09-05: `helper` pod online in #freehold, relay
+      accepts its publishes; survived a full teardown+rebuild with the same
+      pubkey — the build reconciles created agents recorded in the config.)
 
 #### Phase F — Resource baseline
 

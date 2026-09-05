@@ -67,6 +67,14 @@ func sanitizePodName(name string) string {
 	return s
 }
 
+// KeySecretFor returns the name of the litellm-key k8s Secret an agent's pod
+// reads its OPENAI_COMPAT_API_KEY from: the sanitized pod name + "-litellm-key".
+// stageLitellm seeds the CPA's with this name; a created agent either gets its
+// own seeded secret or reuses the CPA's gateway key secret.
+func KeySecretFor(agentName string) string {
+	return sanitizePodName(agentName) + "-litellm-key"
+}
+
 // CPASystemPromptPath is where the CPA pod reads its purpose from: the
 // <pod>-prompt ConfigMap mounts the embedded prompts/CPA_SYSTEM_PROMPT.md
 // (embedded via the orchestrator's prompts package) read-only into the pod,
@@ -115,11 +123,10 @@ const AgentLiteLLMKeySecretKey = "key"
 // the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
 // Service, and Secrets.
-func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel string) string {
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
-	litellmKeySecret := pod + "-litellm-key"
 	return fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -214,14 +221,14 @@ func indentSystemPrompt(prompt string) string {
 // display name (A1's stored value, default freehold) wired to the litellm
 // gateway (LiteLLMServiceURL + CpaLiteLLMModel).
 func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
-	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel)
+	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, sanitizePodName(cpaName)+"-litellm-key")
 }
 
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
 // litellmManifestScript. agentName is the display name (sanitized into the
 // pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here).
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName string) string {
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret string) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
@@ -242,7 +249,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel),
+		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 
@@ -252,8 +259,12 @@ echo AGENT_LEG1_OK`,
 // NODE's resolver and cannot see the in-kube service name `litellm.litellm` —
 // litellmBaseURL must therefore be the recorded NodePort URL (cfg.Litellm.URL,
 // e.g. http://192.168.30.8:31400/v1), which the node itself answers.
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL string) string {
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName)
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret string) string {
+	keySec := litellmKeySecret
+	if keySec == "" {
+		keySec = sanitizePodName(cpaName) + "-litellm-key"
+	}
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in

@@ -132,7 +132,7 @@ func TestAgentPodManifestDistinctNames(t *testing.T) {
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key")
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,

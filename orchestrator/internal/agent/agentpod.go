@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"freehold/orchestrator/internal/flows"
 )
@@ -22,6 +23,8 @@ type AgentPod struct {
 	SystemPromptPath string
 	IdentityDir      string // durable identity dir (survives rebuilds)
 	OwnerPub         string // respond-to allowlist owner
+	LiteLLMKeySecret string // k8s Secret (agents ns) for OPENAI_COMPAT key; "" → own <pod>-litellm-key
+	LiteLLMBaseURL   string // reachable litellm base URL (hostNetwork: NodePort, else in-kube)
 }
 
 // Prepare mints (or reuses) the agent's durable identity, returns its pubkey,
@@ -46,9 +49,18 @@ func (p *AgentPod) Prepare() (pubkey string, identityScript, manifestScript stri
 	if err != nil {
 		return "", "", "", err
 	}
+	base := p.LiteLLMBaseURL
+	if base == "" {
+		base = LiteLLMServiceURL
+	}
+	base = strings.TrimSuffix(base, "/") + "/v1"
+	keySec := p.LiteLLMKeySecret
+	if keySec == "" {
+		keySec = sanitizePodName(p.Name) + "-litellm-key"
+	}
 	return pubkey,
 		AgentIdentityScript(p.K3sVmid, id.NostrSecretHex, p.OwnerPub, p.Name),
-		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, LiteLLMServiceURL, CpaLiteLLMModel, p.Name),
+		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, base, CpaLiteLLMModel, p.Name, keySec),
 		nil
 }
 

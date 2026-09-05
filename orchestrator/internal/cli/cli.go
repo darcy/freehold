@@ -72,6 +72,8 @@ func init() {
 		buildCmd,
 		dnsCredCmd,
 		installCmd,
+		createAgentCmd,
+		watchAgentsCmd,
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.Version = "0.1.0"
