@@ -8,10 +8,12 @@ import (
 	"strings"
 
 	"freehold/orchestrator/internal/bootstrap"
+	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/client"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/deploy"
+	"freehold/orchestrator/internal/dnsman"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/planebase"
@@ -661,6 +663,7 @@ var teardownCmd = &cobra.Command{
 		yes, _ := cmd.Flags().GetBool("yes")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		data, _ := cmd.Flags().GetBool("data")
+		removeDNS, _ := cmd.Flags().GetBool("remove-dns")
 		scope := teardown.ScopeFor(optOf(tenant), data)
 
 		cfg, err := config.Load(configPath)
@@ -740,6 +743,15 @@ var teardownCmd = &cobra.Command{
 				return fmt.Errorf("teardown aborted (not confirmed)")
 			}
 		}
+		// --remove-dns: delete the world's freehold-managed A records; default
+		// leaves them. Runs BEFORE the physical teardown so the sealed relay
+		// credential (and the in-memory cfg hosts) are still readable even on a
+		// --data wipe that removes the world home/config.
+		if removeDNS {
+			if err := removeManagedDNS(cfg); err != nil {
+				return err
+			}
+		}
 		// Stream every line as it lands (--yes runs have no operator to
 		// page through; the TUI subprocess stream shows the same bytes).
 		tcfg.Live = func(line string) { fmt.Println("  " + line) }
@@ -778,6 +790,48 @@ func init() {
 	teardownCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
 	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown")
 	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: the FULL teardown — all datasets + the freehold-created thin pool, then door key + world home + config. Without it the config, world home, and door key are KEPT for a cheap rebuild")
+	teardownCmd.Flags().Bool("remove-dns", false, "ALSO delete the freehold-managed relay/cp A records on the DNS provider recorded in config (Dns.Manager, created by `build --manage-dns`). Default leaves them")
+}
+
+// removeManagedDNS deletes the world's freehold-managed relay/cp A records on
+// the provider recorded in config.Dns.Manager (teardown --remove-dns). Resolves
+// the sealed relay-slot credential (the same one --manage-dns used for the
+// records + the LE cert) to drive the manager.
+func removeManagedDNS(cfg *config.Config) error {
+	m := cfg.Dns.Manager
+	if m == nil || !m.Managed {
+		fmt.Println("  (no freehold-managed DNS recorded — nothing to remove)")
+		return nil
+	}
+	secretHex, err := encSecretFromDir(filepath.Join(freeholdHome(), "control-plane", "agent-ops"))
+	if err != nil {
+		return fmt.Errorf("no ops identity for DNS removal: %w", err)
+	}
+	secret, err := hexBytes(secretHex)
+	if err != nil {
+		return fmt.Errorf("ops identity enc secret: %w", err)
+	}
+	open := func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) }
+	provider, env, err := cert.LoadCreds(filepath.Join(freeholdHome(), "control-plane", "dns-provider-relay.json"), open, secret)
+	if err != nil {
+		return fmt.Errorf("load relay DNS credential for removal: %w", err)
+	}
+	if provider != "cloudflare" {
+		return fmt.Errorf("recorded DNS manager %q cannot remove records yet", provider)
+	}
+	man, err := dnsman.For(provider, env)
+	if err != nil {
+		return err
+	}
+	for _, h := range []string{cfg.RelayHost(), cfg.CPHost()} {
+		if h == "" {
+			continue
+		}
+		if err := man.DeleteA(h); err != nil {
+			return fmt.Errorf("remove DNS record %s: %w", h, err)
+		}
+	}
+	return nil
 }
 
 func defaultConfigPath() string {

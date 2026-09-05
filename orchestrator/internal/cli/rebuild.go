@@ -42,6 +42,7 @@ import (
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/deploy"
+	"freehold/orchestrator/internal/dnsman"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/state"
@@ -169,6 +170,7 @@ var buildCmd = &cobra.Command{Use: "build",
 		f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 		f.yes, _ = cmd.Flags().GetBool("yes")
 		f.resetDNS, _ = cmd.Flags().GetBool("reset-dns")
+		f.manageDNS, _ = cmd.Flags().GetBool("manage-dns")
 		// Smooth rebuild: pull any omitted value from the stored config so a
 		// rebuild is not forced to re-enter the operator key, relay/CP hosts,
 		// thin-pool, etc.
@@ -252,6 +254,7 @@ func init() {
 	buildCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	buildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
 	buildCmd.Flags().Bool("reset-dns", false, "Forget any stored DNS provider credentials so the build prompts for them again")
+	buildCmd.Flags().Bool("manage-dns", false, "Opt-in: freehold MANAGEs the world's DNS — creates/updates relay/cp <domain> A records -> the proxy IP on your provider (currently Cloudflare only), using the same credential the Let's Encrypt cert will reuse. Interactive runs ask when omitted; --yes requires this flag")
 }
 
 // rebuildFlags is the command's collected answers.
@@ -278,6 +281,7 @@ type rebuildFlags struct {
 	configPath         string
 	confirmStorage     bool
 	resetDNS           bool
+	manageDNS          bool
 	yes                bool
 }
 
@@ -349,6 +353,10 @@ type rebuildEngine struct {
 	runSh    func(script string) (string, error)
 	portOpen func(addr string) bool
 	curlGet  func(url string) (string, bool)
+
+	// certRuns holds the background DNS-01 issuances started early in the build
+	// (per distinct LE cert-domain), awaited after the Caddy edge is up.
+	certRuns map[string]*certRun
 }
 
 func newRebuildEngine(f rebuildFlags) (*rebuildEngine, error) {
@@ -514,6 +522,27 @@ func (e *rebuildEngine) run() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
+	// 6.4. Freehold-managed DNS (opt-in --manage-dns). Asked BEFORE the LE
+	// DNS credential collection: if accepted, freehold creates/updates the
+	// world's A records (relay.<d> + cp.<d> -> the proxy static IP) on the
+	// operator's provider (currently Cloudflare only), using the SAME sealed
+	// credential the Let's Encrypt wildcard will reuse just below.
+	if e.worldHasEdge() {
+		manage := e.f.manageDNS
+		if !manage && !e.f.yes {
+			ans, err := e.prompt("manage the domain's DNS? freehold can point relay/cp A records at the proxy on Cloudflare. (y/n)")
+			if err != nil {
+				return err
+			}
+			manage = strings.EqualFold(strings.TrimSpace(ans), "y")
+		}
+		if manage {
+			if err := e.manageDomainDNS(); err != nil {
+				return err
+			}
+		}
+	}
+
 	// 6.6. DNS provider credentials for the edge's per-host certs. Asked UP
 	// FRONT (like the other prompts) so a later stage failure can't strand a
 	// long install without its DNS-01 tokens: sealed copies are reused
@@ -526,6 +555,18 @@ func (e *rebuildEngine) run() error {
 		}
 		if _, _, err := e.promptDNSCred("cp", e.f.cpDomain, "relay"); err != nil {
 			return fmt.Errorf("control-plane DNS provider credential: %w", err)
+		}
+	}
+
+	// 6.7. Kick off the edge's cert issuance EARLY. The DNS-01 challenge TXT is
+	// pre-placed NOW so a slow DNS provider (e.g. a freshly-activated Cloudflare
+	// zone propagating _acme-challenge TXT over minutes) gets the whole build to
+	// serve it, instead of being created for the first time at the END and
+	// timing out lego's short propagation window. Runs in the background; the
+	// Caddy stage awaits + installs the result (30s poll) once the edge is up.
+	if e.worldHasEdge() {
+		if err := e.startCertIssuance(); err != nil {
+			return fmt.Errorf("start cert issuance: %w", err)
 		}
 	}
 
@@ -623,11 +664,11 @@ func (e *rebuildEngine) run() error {
 			return err
 		}
 		fmt.Fprintln(e.out, "  ✓ Caddy TLS edge live")
-		fmt.Fprintln(e.out, "  · ensuring the wildcard cert for the edge (embedded lego DNS-01)…")
-		if err := e.stageCert(); err != nil {
+		fmt.Fprintln(e.out, "  · awaiting the edge certs (pre-placed challenges; polling every 30s)…")
+		if err := e.awaitCertIssuance(); err != nil {
 			return err
 		}
-		fmt.Fprintln(e.out, "  ✓ wildcard cert in place")
+		fmt.Fprintln(e.out, "  ✓ edge certs in place")
 	}
 
 	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
@@ -1079,7 +1120,18 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	// and the resolver mirror on every run. Keep them, like Plane. Also keep
 	// Caddy (coords + the per-host LE cert-domains + expiry) so a rebuild does
 	// not drop the wildcard cert-domain config or an existing cert's metadata.
-	cfg.Dns = prev.Dns
+	// Dns.Records (resolver mirror) + Dns.Manager survive; a run that manages
+	// DNS itself overrides the manager, otherwise the recorded one stays so
+	// teardown --remove-dns still knows whom to ask.
+	records := prev.Dns.Records
+	if records == nil {
+		records = ans.Dns.Records
+	}
+	mgr := prev.Dns.Manager
+	if ans.Dns.Manager != nil {
+		mgr = ans.Dns.Manager
+	}
+	cfg.Dns = config.DnsSpec{Records: records, Manager: mgr}
 	cfg.Litellm = prev.Litellm
 	cfg.Caddy = prev.Caddy
 	if cfg.RelayPubkey == nil {
@@ -1607,7 +1659,7 @@ DEBIAN_FRONTEND=noninteractive apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq
 if ! command -v kubectl >/dev/null 2>&1; then
   curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh
-  INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
+  INSTALL_K3S_EXEC="server --disable traefik --disable servicelb --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
 fi
 if ! grep -q KubeletInUserNamespace /etc/systemd/system/k3s.service 2>/dev/null; then
 cat > /etc/systemd/system/k3s.service <<UNIT
@@ -1623,7 +1675,7 @@ Type=notify
 EnvironmentFile=-/etc/default/%N
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-ExecStart=/usr/local/bin/k3s server --kubelet-arg feature-gates=KubeletInUserNamespace=true
+ExecStart=/usr/local/bin/k3s server --disable traefik --disable servicelb --kubelet-arg feature-gates=KubeletInUserNamespace=true
 KillMode=process
 Delegate=yes
 LimitNOFILE=1048576
@@ -2702,33 +2754,44 @@ func (e *rebuildEngine) certIdent() (*flows.Identity, []byte, []byte, error) {
 	return id, secret, pub, nil
 }
 
-// stageCert ensures the Caddy edge has a valid cert for EACH host it fronts
-// (relay + cp), each with its OWN durable cert + DNS credential (which may
-// differ). Per host: reuse the durable cert when fresh (>= 30d), else resolve
-// that slot's DNS credential (or reuse the relay one for cp), issue a
-// single-name DNS-01 cert, install it into the Caddy pod, and reload.
-func (e *rebuildEngine) stageCert() error {
+// certRun is one in-flight LE DNS-01 issuance. Pursued as a RESUMABLE order:
+// the challenge TXT is placed early (so a slow DNS provider has the whole build
+// to serve it) and the ACME order identity is persisted, so a re-run after a
+// timeout can RESUME the same order and re-check whether the already-placed
+// challenge finally landed — instead of re-challenging everything from zero.
+type certRun struct {
+	slot      string            // owning slot (for issuer messaging)
+	leDomain  string            // effective LE cert-domain (may be "*.base")
+	challenge string            // full challenge fqdn: _acme-challenge.<target>
+	reuse     bool              // a valid cert already exists — skip issuance
+	reuseExp  time.Time         // the reused cert's expiry (reuse==true)
+	prepared  chan struct{}     // closed once the resume handle is ready
+	resume    *cert.Resume      // the resumable-driver handle
+	pending   *cert.PendingOrder // the begun/resumed ACME order
+	issued    *cert.Issued
+	err       error
+}
+
+// startCertIssuance kicks off the edge's DNS-01 issuance for EACH host in the
+// background NOW: it begins (or RESUMES) a resumable ACME order and pre-places
+// its challenge TXT, so a slow DNS provider (e.g. a freshly-activated Cloudflare
+// zone that takes minutes to serve a new _acme-challenge TXT) has the whole
+// pipeline to propagate before the Caddy edge awaits validation at the end. If a
+// valid cert is already on the durable edge PVC (reuse gate >= 30d), the slot is
+// marked for reuse and NO challenge is placed. Completed by awaitCertIssuance.
+func (e *rebuildEngine) startCertIssuance() error {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil {
 		return err
 	}
-	if cfg == nil || cfg.Lxc.K3s.Vmid == nil {
-		return nil // no k3s -> no proxy edge to certify
+	if cfg == nil || cfg.Caddy.Host == "" {
+		return nil // no Caddy edge to certify yet
 	}
-	if cfg.Caddy.Host == "" {
-		fmt.Fprintln(e.out, "  · Caddy edge not recorded — skipping cert issuance")
-		return nil
+	_, secret, pub, err := e.certIdent()
+	if err != nil {
+		return err
 	}
-	k3sVmid := *cfg.Lxc.K3s.Vmid
-	// Issue/reuse ONE cert per distinct LE cert-domain, then REUSE it for any
-	// later slot that has the SAME domain (e.g. both relay + cp = the same
-	// wildcard *.freehold-test.darcydev.net) — never create/overwrite a second
-	// DNS-01 challenge for an identical wildcard.
-	issuer := cfg.Caddy.CertIssuer
-	if issuer == "" {
-		issuer = "lego (DNS-01)"
-	}
-	byDomain := map[string]*cert.Issued{}
+	e.certRuns = map[string]*certRun{}
 	for _, svc := range []struct{ slot, host string }{
 		{"relay", cfg.RelayHost()},
 		{"cp", cfg.CPHost()},
@@ -2737,122 +2800,294 @@ func (e *rebuildEngine) stageCert() error {
 			continue
 		}
 		leDomain := e.legoDomain(svc.slot)
-		// Same cert-domain already issued/reused for an earlier slot -> copy it
-		// into this slot, don't re-issue.
-		if c, ok := byDomain[leDomain]; ok && c != nil {
-			if err := e.installCaddyCert(k3sVmid, svc.slot, c.Fullchain, c.Key); err != nil {
-				return err
-			}
-			exp := c.NotAfter
-			if exp.IsZero() {
-				exp, _ = cert.LoadExpiryFromBytes(c.Fullchain)
-			}
-			if err := e.recordCert(svc.slot, exp, issuer); err != nil {
-				return err
-			}
-			fmt.Fprintf(e.out, "  · %s: reusing the %s certificate (same cert-domain)\n", svc.slot, leDomain)
-			continue
+		if _, ok := e.certRuns[leDomain]; ok {
+			continue // shared cert-domain — one order, one challenge
 		}
-		got, err := e.ensureHostCert(k3sVmid, svc.slot, svc.host, leDomain)
-		if err != nil {
-			return err
+		verifyTarget := svc.host
+		if strings.HasPrefix(leDomain, "*.") {
+			verifyTarget = strings.TrimPrefix(leDomain, "*.")
 		}
-		byDomain[leDomain] = got
+		run := &certRun{
+			slot:      svc.slot,
+			leDomain:  leDomain,
+			challenge: "_acme-challenge." + verifyTarget,
+			prepared:  make(chan struct{}),
+		}
+		// Reuse gate: a valid cert already on the durable edge PVC means "we have
+		// got our cert" — don't begin/resume an order or place a challenge. Only
+		// meaningful when the k3s node (and thus Caddy's PVC) is up (a reconcile);
+		// on a cold boot there is nothing to read, so we issue.
+		if cfg.Lxc.K3s.Vmid != nil {
+			k3s := *cfg.Lxc.K3s.Vmid
+			if existing, rerr := e.caddyFullchain(k3s, svc.slot); rerr == nil && len(existing) > 0 {
+				if exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour); ok {
+					fmt.Fprintf(e.out, "  · %s: reusing existing cert (expires %s) — not re-issuing\n", svc.slot, exp.UTC().Format(time.RFC3339))
+					run.reuse = true
+					run.reuseExp = exp
+					e.certRuns[leDomain] = run
+					continue
+				}
+			}
+		}
+		// The slot's stored credential (promptDNSCred reuses the sealed copy after
+		// 6.6, so this does not prompt again).
+		provider, env, perr := e.promptDNSCred(svc.slot, verifyTarget, "")
+		if perr != nil {
+			return perr
+		}
+		// Challenge records stay SHORT-TTL so rebuilds don't overlap leftovers.
+		if _, ok := env["CLOUDFLARE_TTL"]; !ok {
+			env["CLOUDFLARE_TTL"] = "120"
+		}
+		statePath := filepath.Join(rbStateDir(), "cert-pending-"+certSlug(leDomain)+".json")
+		seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+		open := func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) }
+		dp, derr := cert.NewDNSProvider(provider, env)
+		if derr != nil {
+			return fmt.Errorf("%s dns provider: %w", svc.slot, derr)
+		}
+		run.resume = &cert.Resume{
+			Domain:    leDomain,
+			Wildcard:  strings.HasPrefix(leDomain, "*."),
+			Provider:  dp,
+			Seal:      seal,
+			Open:      open,
+			SealPub:   pub,
+			OpenSec:   secret,
+			Path:      statePath,
+		}
+		fmt.Fprintf(e.out, "  · %s: preparing the %s certificate challenge (lego %s, resumable)…\n", svc.slot, leDomain, provider)
+		go e.prepareCertRun(run, provider, cloneMap(env))
+		e.certRuns[leDomain] = run
 	}
 	return nil
 }
 
+// certSlug maps a cert-domain to a safe state-file basename.
+func certSlug(domain string) string {
+	var b strings.Builder
+	for _, c := range strings.ToLower(domain) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			b.WriteRune(c)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+// prepareCertRun begins (or RESUMES) a run's ACME order in the background. A
+// resumed order does NOT re-place a challenge — its record is already in the
+// zone and is what we want to re-check. A fresh order first clears any leftover
+// challenge record at the name, then begins (place + persist). Signals prepared.
+func (e *rebuildEngine) prepareCertRun(run *certRun, provider string, env map[string]string) {
+	defer close(run.prepared)
+	po, ok, err := run.resume.TryLoad()
+	if err != nil {
+		run.err = fmt.Errorf("%s resume state: %w", run.slot, err)
+		return
+	}
+	if ok {
+		fmt.Fprintf(e.out, "  · %s: resuming pending order %s — will re-check whether the challenge finally landed\n", run.slot, run.leDomain)
+		run.pending = po
+		return
+	}
+	// Fresh: clear ANY leftover challenge at the name (a stale dead digest would
+	// shadow the value we place), then begin a new resumable order.
+	if provider == "cloudflare" {
+		if mgr, merr := dnsman.For(provider, env); merr == nil {
+			if dErr := mgr.DeleteTXT(run.challenge); dErr != nil {
+				fmt.Fprintf(e.out, "  · %s: clearing stale challenge %s: %v\n", run.slot, run.challenge, dErr)
+			}
+		}
+	}
+	po, err = run.resume.Begin()
+	if err != nil {
+		run.err = fmt.Errorf("%s begin issuance: %w", run.slot, err)
+		return
+	}
+	fmt.Fprintf(e.out, "  · %s: challenge pre-placed + persisted (resumable order %s)\n", run.slot, run.leDomain)
+	run.pending = po
+}
+
+// awaitCertIssuance runs after the Caddy edge is up: for each slot it takes the
+// background run's result (polling every 30s while a slow DNS provider
+// propagates), installs the per-slot cert into the edge pod, and records it. A
+// slot marked for reuse records the already-present cert without reinstalling.
+func (e *rebuildEngine) awaitCertIssuance() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.Lxc.K3s.Vmid == nil {
+		return nil
+	}
+	if cfg.Caddy.Host == "" {
+		fmt.Fprintln(e.out, "  · Caddy edge not recorded — skipping cert installation")
+		return nil
+	}
+	k3sVmid := *cfg.Lxc.K3s.Vmid
+	issuer := cfg.Caddy.CertIssuer
+	if issuer == "" {
+		issuer = "lego (DNS-01)"
+	}
+	// Phase A: resolve EVERY slot's certificate first (Reuse slots only record).
+	// Reuse (a valid cert already on the PVC) is recorded and skipped; issued
+	// slots are collected for sealed install afterwards.
+	type installed struct {
+		slot     string
+		leDomain string
+		issued   *cert.Issued
+	}
+	var installs []installed
+	for _, svc := range []struct{ slot, host string }{
+		{"relay", cfg.RelayHost()},
+		{"cp", cfg.CPHost()},
+	} {
+		if svc.host == "" {
+			continue
+		}
+		leDomain := e.legoDomain(svc.slot)
+		run := e.certRuns[leDomain]
+		if run == nil {
+			continue // no issuance was started for this domain
+		}
+		if run.reuse {
+			if err := e.recordCert(svc.slot, run.reuseExp, issuer, leDomain); err != nil {
+				return err
+			}
+			fmt.Fprintf(e.out, "  · %s: using existing cert (expires %s)\n", svc.slot, run.reuseExp.UTC().Format(time.RFC3339))
+			continue
+		}
+		// Wait (polling every 30s) for the run's resume handle, then RESOLVE it:
+		// accept the (already-placed, possibly only-now-propagated) challenge so
+		// Let's Encrypt validates it, finalize, download.
+		e.waitSignal(run.prepared, fmt.Sprintf("%s: awaiting %s order preparation", svc.slot, leDomain))
+		if run.err != nil {
+			return fmt.Errorf("%s cert issuance: %w", svc.slot, run.err)
+		}
+		if run.pending == nil {
+			return fmt.Errorf("%s: no resumable order prepared", svc.slot)
+		}
+		resolved := make(chan struct{})
+		go func() {
+			defer close(resolved)
+			run.issued, run.err = run.resume.Resolve(run.pending)
+		}()
+		e.waitSignal(resolved, fmt.Sprintf("%s: awaiting %s validation", svc.slot, leDomain))
+		if run.err != nil {
+			return fmt.Errorf("%s cert issuance: %w", svc.slot, run.err)
+		}
+		installs = append(installs, installed{slot: svc.slot, leDomain: leDomain, issued: run.issued})
+	}
+	// Phase B–D: seal every cert key, restart the runner so its in-memory package
+	// (loaded ONCE at boot) picks up the freshly-sealed keys, then install each.
+	if len(installs) > 0 {
+		for _, ic := range installs {
+			if err := e.sealCertKey(ic.slot, ic.issued.Key); err != nil {
+				return err
+			}
+		}
+		// The runner loads its package at boot only; secrets added via add-secret
+		// after boot are NOT visible to it. A fresh serve re-reads secrets.json
+		// (which now holds every cert-key-<slot>) so the install execs resolve.
+		if _, err := e.stageServe(); err != nil {
+			return fmt.Errorf("restart runner for cert install: %w", err)
+		}
+		for _, ic := range installs {
+			if err := e.installCaddyCert(k3sVmid, ic.slot, ic.issued.Fullchain); err != nil {
+				return err
+			}
+			if err := e.recordCert(ic.slot, ic.issued.NotAfter, issuer, ic.leDomain); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// waitSignal blocks until sig closes (or is already closed), printing msg with a
+// "…(polling every 30s)" heartbeat so a long ACME wait stays observable.
+func (e *rebuildEngine) waitSignal(sig <-chan struct{}, msg string) {
+	if sig == nil {
+		return
+	}
+	select {
+	case <-sig:
+		return
+	default:
+	}
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-sig:
+			return
+		case <-t.C:
+			fmt.Fprintf(e.out, "  · %s (polling every 30s)…\n", msg)
+		}
+	}
+}
+
+// cloneMap returns a shallow copy of env (issuance goroutines must not mutate a
+// shared credential map).
+func cloneMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // legoDomain is the per-slot LE cert-domain for the rebuild engine's current
 // config (relay slot default = the relay host; cp default = the cp host;
-// "*.base" = a wildcard covering the host).
+// "*.base" = a wildcard covering the host). The recorded value is VALIDATED
+// against the CURRENT host so a stale per-host wildcard (e.g. the previous
+// world's *.freehold-test.darcydev.net) surviving a domain change cannot issue
+// for the wrong zone.
 func (e *rebuildEngine) legoDomain(slot string) string {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil {
 		return ""
 	}
-	if slot == "cp" && cfg.Caddy.CPLegoDomain != "" {
-		return cfg.Caddy.CPLegoDomain
-	}
-	if slot == "relay" && cfg.Caddy.RelayLegoDomain != "" {
-		return cfg.Caddy.RelayLegoDomain
-	}
+	var host, configured string
 	if slot == "cp" {
-		return cfg.CPHost()
-	}
-	return cfg.RelayHost()
-}
-
-// ensureHostCert reuses or issues ONE slot's cert (its own slot), for the given
-// LE cert-domain ("*.base" issues a wildcard covering the host). Returns the
-// cert bytes so a later slot sharing the same cert-domain can reuse them.
-func (e *rebuildEngine) ensureHostCert(k3sVmid uint32, slot, host, leDomain string) (*cert.Issued, error) {
-	// 1. Reuse the durable per-slot cert on the PVC when fresh (>= 30d left).
-	if existing, err := e.caddyFullchain(k3sVmid, slot); err == nil && len(existing) > 0 {
-		if exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour); ok {
-			fmt.Fprintf(e.out, "  · %s: reusing existing cert (expires %s)\n", slot, exp.UTC().Format(time.RFC3339))
-			cfg, _ := config.Load(e.f.configPath)
-			isr := ""
-			if cfg != nil {
-				isr = cfg.Caddy.CertIssuer
-			}
-			if err := e.recordCert(slot, exp, isr); err != nil {
-				return nil, err
-			}
-			iss := &cert.Issued{Fullchain: existing}
-			if key, kerr := e.caddyKey(k3sVmid, slot); kerr == nil {
-				iss.Key = key
-			}
-			return iss, nil
-		}
-	}
-
-	// 2. That slot's DNS credential (relay's cred offered for reuse by cp).
-	reuseFrom := ""
-	if slot == "cp" {
-		reuseFrom = "relay"
-	}
-	// The pre-verify + issuance target the LE cert-domain (apex for a wildcard).
-	verifyTarget := host
-	if strings.HasPrefix(leDomain, "*.") {
-		verifyTarget = strings.TrimPrefix(leDomain, "*.")
-	}
-	provider, env, err := e.promptDNSCred(slot, verifyTarget, reuseFrom)
-	if err != nil {
-		return nil, err
-	}
-
-	// 3. Issue via embedded lego: a wildcard *.base when the LE domain asks for
-	// it (challenge at _acme-challenge.<base>), else a single-name cert.
-	var issued *cert.Issued
-	if strings.HasPrefix(leDomain, "*.") {
-		apex := strings.TrimPrefix(leDomain, "*.")
-		fmt.Fprintf(e.out, "  · %s: issuing wildcard %s via lego (%s)…\n", slot, leDomain, provider)
-		issued, err = cert.IssueWildcard(apex, provider, env)
+		host = cfg.CPHost()
+		configured = cfg.Caddy.CPLegoDomain
 	} else {
-		fmt.Fprintf(e.out, "  · %s: issuing %s via lego (%s)…\n", slot, leDomain, provider)
-		issued, err = cert.Issue(leDomain, provider, env)
+		host = cfg.RelayHost()
+		configured = cfg.Caddy.RelayLegoDomain
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	// 4. Install into the Caddy pod (per-slot path) + reload.
-	if err := e.installCaddyCert(k3sVmid, slot, issued.Fullchain, issued.Key); err != nil {
-		return nil, err
-	}
-	exp := issued.NotAfter
-	if exp.IsZero() {
-		exp, _ = cert.LoadExpiryFromBytes(issued.Fullchain)
-	}
-	fmt.Fprintf(e.out, "  ✓ %s cert issued (expires %s)\n", slot, exp.UTC().Format(time.RFC3339))
-	if err := e.recordCert(slot, exp, provider); err != nil {
-		return nil, err
-	}
-	return issued, nil
+	return legoDomainForHost(host, configured)
 }
 
-// recordCert persists the per-slot cert expiry + issuer into the config.
-func (e *rebuildEngine) recordCert(slot string, exp time.Time, issuer string) error {
+// legoDomainForHost returns the effective LE cert-domain for a host: the
+// configured value when it still covers the CURRENT host (the host exactly, or
+// a wildcard "*.base" whose base is the host or one of its parents); otherwise
+// the host itself (a single-name cert for the current host). Empty host -> "".
+func legoDomainForHost(host, configured string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return host
+	}
+	if configured == host {
+		return configured
+	}
+	base := strings.TrimPrefix(configured, "*.")
+	if base != configured && (host == base || strings.HasSuffix(host, "."+base)) {
+		return configured
+	}
+	return host
+}
+
+// recordCert persists the per-slot cert expiry + issuer into the config. leDomain
+// (when non-empty) records the EFFECTIVE LE cert-domain actually used, so a stale
+// recorded domain is self-healed on the first issuance of the current host.
+func (e *rebuildEngine) recordCert(slot string, exp time.Time, issuer, leDomain string) error {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil {
 		return err
@@ -2862,8 +3097,14 @@ func (e *rebuildEngine) recordCert(slot string, exp time.Time, issuer string) er
 	}
 	if slot == "cp" {
 		cfg.Caddy.CPCert = exp.UTC().Format(time.RFC3339)
+		if leDomain != "" {
+			cfg.Caddy.CPLegoDomain = leDomain
+		}
 	} else {
 		cfg.Caddy.RelayCert = exp.UTC().Format(time.RFC3339)
+		if leDomain != "" {
+			cfg.Caddy.RelayLegoDomain = leDomain
+		}
 	}
 	if issuer != "" {
 		cfg.Caddy.CertIssuer = issuer
@@ -2888,32 +3129,25 @@ func (e *rebuildEngine) caddyFullchain(k3sVmid uint32, slot string) ([]byte, err
 	return dec, nil
 }
 
-// caddyKey cats a slot's private key out of the Caddy pod (base64). Read only to
-// copy a cert to a sibling slot that shares the same cert-domain.
-func (e *rebuildEngine) caddyKey(k3sVmid uint32, slot string) ([]byte, error) {
-	cmd := fmt.Sprintf(
-		"pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n caddy exec deploy/caddy -- sh -c 'cat /data/tls/%s/key.pem' 2>/dev/null | base64 -w0",
-		k3sVmid, slot)
-	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60))
-	if !ok {
-		return nil, fmt.Errorf("caddy %s key unreadable: %s", slot, strings.TrimSpace(out))
-	}
-	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+// sealCertKey seals a slot's cert private key into the runner's secrets package
+// under "cert-key-<slot>", so a later `exec --secret cert-key-<slot>` injects it.
+func (e *rebuildEngine) sealCertKey(slot string, key []byte) error {
+	return e.sealRunnerSecret("cert-key-"+slot, slotCertKeyEnv(slot), string(key))
 }
 
-// installCaddyCert writes the chain/key into a slot's dir on the Caddy durable
-// PVC via a short-lived helper pod that mounts the same caddy-data volume (so
-// it works even while Caddy itself is crash-looping on the very first boot,
-// before any cert exists), then reloads the edge. The PRIVATE KEY is shipped as
-// a SEALED RUNNER SECRET (env-injected by the runner, never bytes in the audited
-// command); only the public fullchain is embedded in the command text.
-func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, slot string, fullchain, key []byte) error {
-	keyEnv := slotCertKeyEnv(slot)
-	if err := e.sealRunnerSecret("cert-key-"+slot, keyEnv, string(key)); err != nil {
-		return fmt.Errorf("seal %s key: %w", slot, err)
-	}
+// installCaddyCert writes the chain into a slot's dir on the Caddy durable PVC
+// via a short-lived helper pod that mounts the same caddy-data volume (so it
+// works even while Caddy itself is crash-looping on the very first boot, before
+// any cert exists), then reloads the edge. The PRIVATE KEY must ALREADY be sealed
+// under "cert-key-<slot>" (sealCertKey) — the runner injects it as an env var,
+// never bytes in the audited command; only the public fullchain is embedded here.
+func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, slot string, fullchain []byte) error {
 	args := []string{"exec", "--addr", e.f.addr, "--agent-dir", rbOpsDir(),
-		"--timeout", "180", "--secret", "cert-key-" + slot, e.f.target,
+		"--timeout", "180",
+		// The runner requires the SSH target's OWN credential among the requested
+		// secrets whenever --secret refs are given (it does not default to it
+		// then); otherwise exec refuses with "requires secret <target>".
+		"--secret", e.f.target, "--secret", "cert-key-" + slot, e.f.target,
 		caddyCertInstallScript(k3sVmid, slot, fullchain)}
 	ok, out := e.runBin(e.bins.Self, args)
 	if !ok {
@@ -2942,50 +3176,43 @@ func (e *rebuildEngine) sealRunnerSecret(name, envVar, val string) error {
 }
 
 // caddyCertInstallScript installs the chain into /data/tls/<slot>/ within the
-// Caddy durable PVC (via a short-lived helper pod that mounts the same
-// caddy-data volume, so it works even while Caddy crash-loops on the very first
-// boot) then reloads the edge.
+// Caddy durable PVC then reloads the edge.
+//
+// The cert files are written DIRECTLY into the local-path backing directory on
+// the k3s node — the very directory Caddy's hostNetwork pod bind-mounts at
+// /data. (The prior helper-pod approach fed the files in over `kubectl exec ...
+// < file` stdin, but stdin is never forwarded through the runner→pct→guest→
+// kubectl chain, so `cat` read EOF and every install left 0-byte certs. Writing
+// to the node directory is the same on-disk bytes, without the stdin hop.) This
+// works even while Caddy crash-loops on an empty cert, before it is healthy.
 //
 // PVT KEY VIA SEALED SECRET: the runner injects $CERT_KEY_<SLOT> into this
 // command's env ON THE PVE HOST. A `pct exec` guest shell would NOT inherit it,
-// so the key is written to a HOST temp file first, `pct push`ed into the guest,
-// then written into the pod — the audited command text never carries the key.
-// The public fullchain is base64-embedded (public data). Both shells run set -e.
+// so the key is written to a HOST temp file first and `pct push`ed into the
+// guest — the audited command text never carries the key. The public fullchain
+// is base64-embedded (public data). Both shells run set -e.
 func caddyCertInstallScript(k3sVmid uint32, slot string, fullchain []byte) string {
 	fcB64 := base64.StdEncoding.EncodeToString(fullchain)
 	keyEnv := slotCertKeyEnv(slot)
 	return fmt.Sprintf(`set -e
 printf '%%s' "${%s}" > /tmp/fh-key.pem
 printf %s | base64 -d > /tmp/fh-fc.pem
-pct push %d /tmp/fh-fc.pem /tmp/cf.pem
-pct push %d /tmp/fh-key.pem /tmp/ck.pem
+pct push %d /tmp/fh-fc.pem /tmp/fc-%s.pem
+pct push %d /tmp/fh-key.pem /tmp/key-%s.pem
 pct exec %d -- sh -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-# Helper pod over the SAME durable PVC (works before Caddy is healthy).
-cat > /tmp/cert-installer.yaml <<'"'"'YAMLEOF'"'"'
-apiVersion: v1
-kind: Pod
-metadata: {name: cert-installer, namespace: caddy}
-spec:
-  restartPolicy: Never
-  containers:
-  - {name: install, image: busybox:1.36, command: ["sleep", "infinity"],
-     volumeMounts: [{name: data, mountPath: /data}]}
-  volumes:
-  - {name: data, persistentVolumeClaim: {claimName: caddy-data}}
-YAMLEOF
-$K -n caddy delete pod cert-installer --ignore-not-found=true >/dev/null 2>&1 || true
-$K apply -f /tmp/cert-installer.yaml
-$K -n caddy wait --for=condition=Ready pod/cert-installer --timeout=60s
-$K -n caddy exec pod/cert-installer -- sh -c "mkdir -p /data/tls/%s && cat > /data/tls/%s/fullchain.pem" < /tmp/cf.pem
-$K -n caddy exec pod/cert-installer -- sh -c "cat > /data/tls/%s/key.pem" < /tmp/ck.pem
-$K -n caddy delete pod cert-installer >/dev/null 2>&1 || true
+PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+DIR=/var/lib/rancher/k3s/storage/${PV}_caddy_caddy-data/tls/%s
+mkdir -p "$DIR"
+cp /tmp/fc-%s.pem "$DIR/fullchain.pem"
+cp /tmp/key-%s.pem "$DIR/key.pem"
+chmod 600 "$DIR/key.pem"
 $K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
-rm -f /tmp/cf.pem /tmp/ck.pem /tmp/cert-installer.yaml
+rm -f /tmp/fc-%s.pem /tmp/key-%s.pem
 '
 rm -f /tmp/fh-key.pem /tmp/fh-fc.pem
-`, keyEnv, shellSingleQuote(fcB64), k3sVmid, k3sVmid, k3sVmid, slot, slot, slot)
+`, keyEnv, shellSingleQuote(fcB64), k3sVmid, slot, k3sVmid, slot, k3sVmid, slot, slot, slot, slot, slot)
 }
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.
@@ -2999,6 +3226,47 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+// manageDomainDNS runs the --manage-dns branch: ensures the relay slot's DNS
+// credential (the one LE will reuse), builds the provider's dnsman Manager,
+// upserts relay.<d> + cp.<d> A records -> the proxy's static IP, and records
+// the manager assertion into the config. Only Cloudflare can manage records
+// today; a different stored provider is an actionable error.
+func (e *rebuildEngine) manageDomainDNS() error {
+	ip := config.StripCIDR(e.f.proxyIP)
+	provider, env, err := e.promptDNSCred("relay", e.f.relayDomain, "")
+	if err != nil {
+		return fmt.Errorf("relay DNS provider credential (for management): %w", err)
+	}
+	if provider != "cloudflare" {
+		return fmt.Errorf(
+			"freehold can manage DNS on Cloudflare only right now, but the relay credential uses %q — run `freehold dns-cred --provider cloudflare --domain %s` (or pick No for manual DNS)",
+			provider, e.f.relayDomain)
+	}
+	m, err := dnsman.For(provider, env)
+	if err != nil {
+		return err
+	}
+	for _, host := range []string{e.f.relayDomain, e.f.cpDomain} {
+		if host == "" {
+			continue
+		}
+		if err := m.UpsertA(host, ip); err != nil {
+			return fmt.Errorf("manage DNS for %s: %w", host, err)
+		}
+	}
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg != nil {
+		cfg.Dns.Manager = &config.DnsManager{Provider: provider, Managed: true, IP: ip}
+		if err := cfg.Save(e.f.configPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // worldHasEdge reports whether this rebuild's desired world includes the Caddy
@@ -3171,8 +3439,11 @@ func (e *rebuildEngine) promptProviderEnv(provider string) (map[string]string, e
 	}
 	// The credential fields asked FIRST + REQUIRED. AWS/Route53: the access
 	// key, secret, and hosted zone are required to issue the wildcard cert.
+	// Cloudflare: the DNS API token is the primary credential (also used by
+	// --manage-dns's record management).
 	required := map[string][]string{
-		"route53": {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_HOSTED_ZONE_ID"},
+		"route53":    {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_HOSTED_ZONE_ID"},
+		"cloudflare": {"CLOUDFLARE_DNS_API_TOKEN"},
 	}[provider]
 	var requiredSet []string
 	for _, n := range required {

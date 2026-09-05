@@ -144,6 +144,19 @@ type LxcSpec struct {
 // panel + the services-at-a-glance render (the CP is authoritative).
 type DnsSpec struct {
 	Records map[string]string `toml:"records,omitempty"`
+	// Manager records that freehold MANAGES this world's relay/cp DNS
+	// records (opt-in --manage-dns). Provider is the dnsman provider that
+	// owns the A records; Managed=true means freehold (re)creates
+	// relay.<domain>/cp.<domain> -> Proxy.Ip on build; IP is the address they
+	// point at. Teardown leaves them by default; --remove-dns deletes them.
+	Manager *DnsManager `toml:"manager,omitempty"`
+}
+
+// DnsManager is freehold's DNS-manager assertion (see DnsSpec.Manager).
+type DnsManager struct {
+	Provider string `toml:"provider,omitempty"`
+	Managed  bool   `toml:"managed"`
+	IP       string `toml:"ip,omitempty"`
 }
 
 // LitellmSpec is the C0 gateway's coords: the kube NodePort URL the agents

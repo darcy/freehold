@@ -763,11 +763,11 @@ func TestCaddyCertInstallScript(t *testing.T) {
 	key := []byte("-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
 	s := caddyCertInstallScript(102, "relay", fc)
 
-	// the busybox helper reads the same durable PVC and is waited-for before
-	// the cert/key writes, into the per-slot /data/tls/relay/ dir.
-	for _, want := range []string{"image: busybox", "claimName: caddy-data", "--timeout=60s",
-		"persistentVolumeClaim", "rollout restart deploy/caddy", "/data/tls/relay/fullchain.pem", "/data/tls/relay/key.pem",
-		"pct push 102"} {
+	// The cert/key land DIRECTLY in the local-path backing dir on the k3s node
+	// (the directory Caddy's hostNetwork pod bind-mounts at /data) — no
+	// kubectl-exec/stdin hop (which never forwards stdin and wrote 0-byte files).
+	for _, want := range []string{"storage/${PV}_caddy_caddy-data/tls/relay",
+		"rollout restart deploy/caddy", "pct push 102", "chmod 600"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script missing %q", want)
 		}
@@ -912,5 +912,21 @@ func TestApplyConfigDefaults(t *testing.T) {
 	}
 	if f2.operatorPubkey != "y" || f2.relayDomain != "z" {
 		t.Errorf("explicit flags must win: %q/%q", f2.operatorPubkey, f2.relayDomain)
+	}
+}
+
+func TestLegoDomainForHost(t *testing.T) {
+	cases := []struct{ host, configured, want string }{
+		{"relay.librem.freehold.technology", "", "relay.librem.freehold.technology"},
+		{"relay.librem.freehold.technology", "relay.librem.freehold.technology", "relay.librem.freehold.technology"},
+		{"relay.librem.freehold.technology", "*.librem.freehold.technology", "*.librem.freehold.technology"},
+		{"relay.librem.freehold.technology", "*.freehold-test.darcydev.net", "relay.librem.freehold.technology"}, // stale
+		{"relay.librem.freehold.technology", "other.bad.net", "relay.librem.freehold.technology"},               // mismatched
+		{"", "*.anything.net", ""},
+	}
+	for _, c := range cases {
+		if got := legoDomainForHost(c.host, c.configured); got != c.want {
+			t.Errorf("legoDomainForHost(%q,%q) = %q, want %q", c.host, c.configured, got, c.want)
+		}
 	}
 }

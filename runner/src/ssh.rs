@@ -19,6 +19,7 @@ use russh::client;
 use russh::keys::ssh_key::PublicKey;
 use russh::keys::{self, PrivateKeyWithHashAlg, decode_secret_key};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::exec::ExecResult;
 
@@ -371,6 +372,7 @@ impl SshPool {
         target: &SshTarget,
         key_pem: &str,
         cmd: &str,
+        envs: &[(String, Zeroizing<String>)],
         timeout_s: Option<u64>,
     ) -> Result<ExecResult, SshError> {
         let key = decode_secret_key(key_pem, None)?;
@@ -382,9 +384,22 @@ impl SshPool {
         // host (and must not evict the in-use connection).
         let handle = conn.lock().await;
 
+        // Prefix the remote command with `export` for every requested secret:
+        // the ssh channel carries no env of its own, so the requested names
+        // must be re-declared in the remote shell. The value is single-quote
+        // escaped; the exported names are matched by the redactor, and this
+        // prefix is built AFTER the (original `cmd`) audit is signed, so the
+        // secret never appears in the audited command text.
+        let mut remote = String::new();
+        for (name, val) in envs {
+            let esc = val.replace('\'', "'\\''");
+            remote.push_str(&format!("export {}='{}';\n", name, esc));
+        }
+        remote.push_str(cmd);
+
         let run = async move {
             let mut channel = handle.channel_open_session().await?;
-            channel.exec(false, cmd).await?;
+            channel.exec(false, remote).await?;
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let mut exit_code = None;
@@ -477,7 +492,7 @@ impl SshPool {
 
     /// Runner's OWN self-check against the target: run a trivial command.
     pub async fn self_check(&self, target: &SshTarget, key_pem: &str) -> Result<bool, SshError> {
-        let r = self.exec(target, key_pem, "uname -s", Some(10)).await?;
+        let r = self.exec(target, key_pem, "uname -s", &[], Some(10)).await?;
         Ok(r.exit_code == Some(0))
     }
 }

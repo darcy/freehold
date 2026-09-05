@@ -115,6 +115,12 @@ func buildProvider(providerName string, env map[string]string) (challenge.Provid
 	return p, nil
 }
 
+// NewDNSProvider is the exported form of buildProvider (used by the resumable
+// issuance driver in rebuild).
+func NewDNSProvider(providerName string, env map[string]string) (challenge.Provider, error) {
+	return buildProvider(providerName, env)
+}
+
 // Verify runs a throwaway TXT present+cleanup through lego to prove the chosen
 // provider's credentials "work" before they are saved. It exercises the provider
 // API (create+remove a challenge record) but never the public resolver.
