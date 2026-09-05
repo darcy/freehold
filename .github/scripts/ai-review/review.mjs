@@ -67,11 +67,11 @@ async function getCiStatus(headSha) {
     // Exclude this job's own check run — it's in_progress (no conclusion) while
     // this code runs, so it always lands in the `pending` bucket and would make
     // every round report "PENDING: AI PR Review" even when real CI is green.
-    // ponytail: filters by job name, which also excludes any same-named check
-    // run (review bots aren't CI gates anyway); refine by workflow name if a
-    // future real check collides on the job name.
+    // Match by job id AND workflow name, since a check run's `name` may be
+    // either; this job has no `name:` override so c.name === job id.
     const ownJob = github.context.job;
-    const runs = data.check_runs.filter(c => c.name !== ownJob);
+    const ownWorkflow = process.env.GITHUB_WORKFLOW;
+    const runs = data.check_runs.filter(c => c.name !== ownJob && c.name !== ownWorkflow);
     if (runs.length === 0) return 'No checks reported yet.';
     const failing = runs.filter(c => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
     const pending = runs.filter(c => !c.conclusion);

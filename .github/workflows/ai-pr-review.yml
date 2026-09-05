@@ -32,11 +32,12 @@ jobs:
       - name: Run AI review
         working-directory: .github/scripts/ai-review
         env:
-          # Comments author as this token's account. GITHUB_TOKEN posts as
-          # 'github-actions[bot]'; swap to secrets.DEEPSEEK_BOT_TOKEN (a PAT from
-          # a GitHub account/bot named 'DeepSeek', repo write + checks read) when
-          # one exists so reviews author as that name.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Token for comments + review-thread resolution. GITHUB_TOKEN is
+          # forbidden from resolveReviewThread ("Resource not accessible by
+          # integration"); use a PAT (classic `repo` scope, or fine-grained
+          # "Pull requests: read/write" + "Issues: read/write") from a bot
+          # account named 'DeepSeek'. Reviews also author as that account.
+          GITHUB_TOKEN: ${{ secrets.AI_REVIEW_BOT_TOKEN }}
 
           # ---- provider config: this is the only provider-specific part ----
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
