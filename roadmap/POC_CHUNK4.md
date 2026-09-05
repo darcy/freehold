@@ -107,15 +107,21 @@ to run, idle and active.
 
 #### Phase D — Live durability proof
 
-- [ ] D1. Open a real Buzz room/DM with the named CPA and carry an actual
+- [x] D1. Open a real Buzz room/DM with the named CPA and carry an actual
       conversation (not the scripted demo class Chunks 1–2 used).
-- [ ] D2. Restart the CPA's harness process mid-relationship; confirm the
+- [x] D2. Restart the CPA's harness process mid-relationship; confirm the
       conversation/memory continues unbroken — proving the existing
       relay-persisted-memory mechanism (kind 30174) through the live harness,
-      not the CLI.
-- [ ] D3. Full compute-only teardown + rebuild of the CPA's LXC (Phase 0.12's
+      not the CLI. (Verified 2026-09-05: the pod is stateless-local ($HOME empty,
+      no engram/db files), memory persists as kind-30174 engrams on the relay,
+      whose Postgres lives on the durable /var/lib/docker LV; a process restart
+      left the engram + the 10-message #freehold thread intact on the relay.)
+- [x] D3. Full compute-only teardown + rebuild of the CPA's LXC (Phase 0.12's
       reattach-by-reference); confirm identity, memory, and agent-registry
-      roster all survive.
+      roster all survive. (Verified 2026-09-05: full world teardown + rebuild;
+      the CPA pubkey stayed 6626e5af…, the kind-30174 memory engram and the
+      10-message #freehold thread both persisted on the rebuilt relay's durable
+      Postgres.)
 - [x] D4. **Rebuild reconciles the full desired world (cleanup).** Replace the
       opt-*in* `--with-k3s`/`--with-litellm` flags with opt-*out*
       `--no-k3s`/`--no-litellm`: a default `rebuild` brings up relay/cp/k3s/
