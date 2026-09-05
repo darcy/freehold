@@ -25,6 +25,31 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.4] — Chunk 4: the freehold agent is live and conversational in Buzz
+
+### Added
+
+*   `rebuild` on-boards the CPA to the community relay: its pubkey is added as a
+    relay member (`buzz-admin add-member`), its kind-0 Buzz profile (display
+    name, default "freehold") is published, and it is seated in the
+    deterministic `#freehold` channel — all idempotent, so a rebuild keeps the
+    same agent identity and presence.
+*   The CPA pod now spawns the bundled Buzz CLI MCP server
+    (`BUZZ_ACP_MCP_COMMAND=/usr/local/bin/buzz-dev-mcp`, with `/usr/local/bin`
+    on PATH) so the harness actually exposes the message tools and the agent can
+    reply to `@freehold` mentions. This was the missing piece that left the
+    agent able to generate answers it could never post (its native HTTP fallback
+    is 403'd by the relay; a kind-9 channel post is what the tools use).
+
+### Fixed
+
+*   The CPA talks litellm through the recorded NodePort URL (`cfg.Litellm.URL`,
+    e.g. `http://192.168.30.8:31400/v1`) instead of the in-kube service name
+    `litellm.litellm`, which a `hostNetwork` pod cannot resolve through the node
+    resolver — previously every LLM call died at the transport layer.
+*   `AgentManifestScript` deletes the (immutable-spec) Pod before applying, so a
+    changed agent environment reliably recreates the pod instead of failing apply.
+
 ## [0.4.3] — Chunk 4 D4: rebuild reconciles the full desired world
 
 ### Changed
