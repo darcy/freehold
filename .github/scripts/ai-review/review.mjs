@@ -377,7 +377,27 @@ async function main() {
     .replace('{{DIFF}}', () => diff);
 
   const result = await callLlm(prompt);
-  const inline = Array.isArray(result.inline) ? result.inline : [];
+
+  // The weak flash model commonly stops after the first finding. Iterate:
+  // while findings exist, ask again for ADDITIONAL distinct findings until the
+  // model reports none new (capped) — so a review doesn't stop at one issue.
+  const merged = (Array.isArray(result.inline) ? result.inline : []).slice();
+  const already = () => new Set(merged.map(f => `${f.path}:${f.line}`));
+  for (let pass = 1; pass <= 3 && merged.length > 0; pass++) {
+    const foundText = merged.map(f => `- [${f.severity}] ${f.path}${typeof f.line === 'number' ? `:${f.line}` : ''}`).join('\n');
+    const followUp = `PR ${owner}/${repo} #${pull_number}\n\nThese blocking/important findings are ALREADY reported:\n${foundText}\n\nReview the diff again. Report ONLY ADDITIONAL distinct blocking/important findings you have NOT already covered above — one per file:line. If there are no more, return an empty "inline" array and verdict "MERGE-READY".\n\nDo not repeat findings already listed.\n\nDIFF:\n${diff}`;
+    let more;
+    try {
+      more = await callLlm(followUp);
+    } catch (e) {
+      core.warning(`Follow-up pass ${pass} failed: ${e.message}`);
+      break;
+    }
+    const added = (Array.isArray(more.inline) ? more.inline : []).filter(f => !already().has(`${f.path}:${f.line}`));
+    if (added.length === 0) break;
+    merged.push(...added);
+  }
+  const inline = merged;
 
   // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
   // findings (already commented in a prior round — don't re-post inline, just
