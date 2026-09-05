@@ -256,6 +256,48 @@ async function updateParentComment(body) {
   await octokit.rest.issues.updateComment({ owner, repo, comment_id: parentCommentId, body });
 }
 
+// Resolve prior review-comment threads whose finding is no longer flagged this
+// round (the finding was fixed). GraphQL-only; the token is sent explicitly.
+async function resolveFixedThreads(fixedComments) {
+  if (!fixedComments.length) return 0;
+  const gh = (query, variables) => fetch('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `token ${GITHUB_TOKEN}` },
+    body: JSON.stringify({ query, variables }),
+  }).then(async (r) => {
+    const body = await r.json();
+    if (!r.ok || body.errors) throw new Error(JSON.stringify(body.errors || body));
+    return body.data;
+  });
+  let data;
+  try {
+    data = await gh(`query($owner:String!,$repo:String!,$pr:Int!){
+      repository(owner:$owner,name:$repo){ pullRequest(number:$pr){ reviewThreads(first:50){ nodes {
+        id isResolved comments(first:20){ nodes { id databaseId } }
+      } } } } }`, { owner, repo, pr: pull_number });
+  } catch (e) {
+    core.warning(`Could not read review threads: ${e.message}`);
+    return 0;
+  }
+  const commentToThread = new Map();
+  for (const t of data.repository.pullRequest.reviewThreads.nodes) {
+    if (t.isResolved) continue;
+    for (const c of t.comments.nodes) commentToThread.set(c.databaseId, t.id);
+  }
+  let resolved = 0;
+  for (const c of fixedComments) {
+    const threadId = commentToThread.get(c.id);
+    if (!threadId) continue;
+    try {
+      await gh(`mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread { id } } }`, { threadId });
+      resolved += 1;
+    } catch (e) {
+      core.warning(`Could not resolve comment ${c.id}: ${e.message}`);
+    }
+  }
+  return resolved;
+}
+
 const PROGRESS_ITEMS = [
   'Gather context (AGENTS.md, README.md, ARCHITECTURE.md, CI status)',
   'Read changed files',
@@ -356,26 +398,35 @@ async function main() {
     else newInline.push(c);
   }
 
+  // Prior blocking/important comments whose finding is no longer flagged this
+  // round are treated as fixed — resolve their threads (GraphQL-only).
+  const currentFindings = new Set(inline.map(c => `${c.path}:${c.line}`));
+  const fixedComments = existingComments.filter(c =>
+    !c.in_reply_to_id &&
+    /\[(blocking|important)\]/.test(c.body || '') &&
+    !currentFindings.has(`${c.path}:${c.line}`)
+  );
+  const resolvedCount = await resolveFixedThreads(fixedComments);
+
   // Progress: context/read/CI/review done.
   await updateParentComment(progressBody(4, `**CI:** ${ciStatus}`));
 
-  // Child inline comments are posted as a review (no body, like claude); the
-  // parent comment is the fresh comment created above. A single hallucinated
-  // line (a line number not part of the diff) 422s the whole call, so isolate it.
+  // Post each NEW finding as its own review comment (thread) so every finding
+  // shows up as a separate inline comment and a single bad/hallucinated line
+  // 422s only that one, not the whole batch. Track how many actually posted.
+  let postedInline = 0;
   if (newInline.length > 0) {
-    try {
-      await octokit.rest.pulls.createReview({
-        owner, repo, pull_number,
-        event: 'COMMENT',
-        comments: newInline.map(c => ({
-          path: c.path,
-          line: c.line,
-          side: 'RIGHT',
-          body: `**[${c.severity}]** ${c.comment}`,
-        })),
-      });
-    } catch (e) {
-      core.warning(`Inline comments failed (${newInline.length}): ${e.message}`);
+    for (const c of newInline) {
+      try {
+        await octokit.rest.pulls.createReview({
+          owner, repo, pull_number,
+          event: 'COMMENT',
+          comments: [{ path: c.path, line: c.line, side: 'RIGHT', body: `**[${c.severity}]** ${c.comment}` }],
+        });
+        postedInline += 1;
+      } catch (e) {
+        core.warning(`Inline comment on ${c.path}:${c.line} failed: ${e.message}`);
+      }
     }
   }
 
@@ -400,6 +451,7 @@ async function main() {
     result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
     `**Findings:** ${newInline.length} new · ${reflagged.length} re-flagged from prior rounds`,
     ...(findingsLines.length ? findingsLines : ['(no findings this round)']),
+    ...(resolvedCount ? [`**Resolved:** ${resolvedCount} prior finding(s) — ${fixedComments.map(c => loc(c)).join(', ')}`] : []),
     legend,
     `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
   ].filter(Boolean).join('\n\n');

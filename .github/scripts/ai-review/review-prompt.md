@@ -36,6 +36,11 @@ Only include `inline` entries for blocking and important severities, each
 pinned to an exact line number that appears in the diff below. Defer items go
 only in the summary, never inline.
 
+Report EVERY real blocking/important issue you find in the diff — do not stop
+after the first finding. Each distinct problem gets its own `inline` entry (one
+per file:line). Leaving a real bug out of `inline` because you already found
+one is a failed review.
+
 Inline comment formatting: write each `comment` for readability — use short
 lines or bullet points separated by newlines (`\n`), never one long paragraph
 that wraps. Keep it specific and actionable.
