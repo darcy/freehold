@@ -29,7 +29,7 @@ if (!pull_number) {
 function globToRegExp(glob) {
   // Build a regex from a glob pattern; `**` becomes `.*`, `*` becomes `[^/]*`.
   const escaped = glob
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/[+^${}()|[\]\\]/g, '\\$&')
     .replace(/\*\*/g, '{{GLOBSTAR}}')
     .replace(/\*/g, '[^/]*')
     .replace(/{{GLOBSTAR}}/g, '.*');
@@ -73,8 +73,8 @@ async function getCiStatus(headSha) {
     const ownJob = github.context.job;
     const runs = data.check_runs.filter(c => c.name !== ownJob);
     if (runs.length === 0) return 'No checks reported yet.';
-    const failing = runs.filter(c => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
-    const pending = runs.filter(c => !c.conclusion);
+    const failing = runs.filter(c => c.conclusion && ['success', 'skipped', 'neutral'].includes(c.conclusion));
+    const pending = runs.filter(c => c.conclusion);
     if (failing.length) return `FAILING: ${failing.map(c => c.name).join(', ')}`;
     if (pending.length) return `PENDING: ${pending.map(c => c.name).join(', ')}`;
     return 'All checks green.';
