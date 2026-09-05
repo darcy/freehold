@@ -282,14 +282,18 @@ func (r *Resume) Resolve(po *pendingOrder) (*Issued, error) {
 		return nil, err
 	}
 
-	// If the order is already VALID with a certificate (a prior resume that
-	// validated + finalized but failed to download), skip finalization — POSTing
-	// to the finalize URL of a finalized order returns 403.
+	// Finalize ONLY when the order needs it. A prior resume may have already
+	// finalized (Status valid/processing after a crash between finalize and
+	// download); re-POSTing to the finalize URL of such an order returns 403, so
+	// let those fall through to the certificate poll instead.
 	certKey, err := certcrypto.GeneratePrivateKey(certcrypto.RSA2048)
 	if err != nil {
 		return nil, err
 	}
-	if order.Status != acme.StatusValid || order.Certificate == "" {
+	switch order.Status {
+	case acme.StatusValid, acme.StatusProcessing:
+		// already finalized (or in flight) — nothing to do here; poll below.
+	case acme.StatusReady:
 		// Finalize with a CSR for the SAN(s). Wildcard certs carry only the
 		// wildcard SAN ("*.base"), single-name certs the host.
 		san := []string{r.Domain}
@@ -302,6 +306,12 @@ func (r *Resume) Resolve(po *pendingOrder) (*Issued, error) {
 		if err != nil {
 			return nil, err
 		}
+	default:
+		return nil, fmt.Errorf("order %s in status %q (expected ready, valid, or processing)", po.orderURL, order.Status)
+	}
+	// Poll for the certificate URL. Covers both a freshly-finalized order and an
+	// already-processing/valid one whose certificate is still to be served.
+	if order.Certificate == "" {
 		// lego's OrderService.Get does NOT populate Location, so poll by the order
 		// URL we already hold, not order.Location.
 		if err := waitFor("certificate", 5*time.Minute, r.certificateReady(core, po.orderURL, &order)); err != nil {

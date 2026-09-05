@@ -492,7 +492,9 @@ impl SshPool {
 
     /// Runner's OWN self-check against the target: run a trivial command.
     pub async fn self_check(&self, target: &SshTarget, key_pem: &str) -> Result<bool, SshError> {
-        let r = self.exec(target, key_pem, "uname -s", &[], Some(10)).await?;
+        let r = self
+            .exec(target, key_pem, "uname -s", &[], Some(10))
+            .await?;
         Ok(r.exit_code == Some(0))
     }
 }

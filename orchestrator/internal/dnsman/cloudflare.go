@@ -263,7 +263,7 @@ func (e *cfAPIError) Error() string {
 }
 
 type cfEnvelope struct {
-	Success bool   `json:"success"`
+	Success bool `json:"success"`
 	Errors  []struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`

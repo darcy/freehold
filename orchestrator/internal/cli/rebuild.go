@@ -2842,14 +2842,14 @@ func (e *rebuildEngine) certIdent() (*flows.Identity, []byte, []byte, error) {
 // timeout can RESUME the same order and re-check whether the already-placed
 // challenge finally landed — instead of re-challenging everything from zero.
 type certRun struct {
-	slot         string            // owning slot (for issuer messaging)
-	leDomain     string            // effective LE cert-domain (may be "*.base")
-	challenge    string            // full challenge fqdn: _acme-challenge.<target>
-	reuse        bool              // a valid cert already exists — skip issuance
-	reuseDurable bool              // reuse came from the durable plane copy (seed the PVC from it)
-	reuseExp     time.Time         // the reused cert's expiry (reuse==true)
-	prepared     chan struct{}     // closed once the resume handle is ready
-	resume       *cert.Resume      // the resumable-driver handle
+	slot         string             // owning slot (for issuer messaging)
+	leDomain     string             // effective LE cert-domain (may be "*.base")
+	challenge    string             // full challenge fqdn: _acme-challenge.<target>
+	reuse        bool               // a valid cert already exists — skip issuance
+	reuseDurable bool               // reuse came from the durable plane copy (seed the PVC from it)
+	reuseExp     time.Time          // the reused cert's expiry (reuse==true)
+	prepared     chan struct{}      // closed once the resume handle is ready
+	resume       *cert.Resume       // the resumable-driver handle
 	pending      *cert.PendingOrder // the begun/resumed ACME order
 	issued       *cert.Issued
 	err          error
@@ -2945,14 +2945,14 @@ func (e *rebuildEngine) startCertIssuance() error {
 			return fmt.Errorf("%s dns provider: %w", svc.slot, derr)
 		}
 		run.resume = &cert.Resume{
-			Domain:    leDomain,
-			Wildcard:  strings.HasPrefix(leDomain, "*."),
-			Provider:  dp,
-			Seal:      seal,
-			Open:      open,
-			SealPub:   pub,
-			OpenSec:   secret,
-			Path:      statePath,
+			Domain:   leDomain,
+			Wildcard: strings.HasPrefix(leDomain, "*."),
+			Provider: dp,
+			Seal:     seal,
+			Open:     open,
+			SealPub:  pub,
+			OpenSec:  secret,
+			Path:     statePath,
 		}
 		fmt.Fprintf(e.out, "  · %s: preparing the %s certificate challenge (lego %s, resumable)…\n", svc.slot, leDomain, provider)
 		go e.prepareCertRun(run, provider, cloneMap(env))

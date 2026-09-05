@@ -14,7 +14,7 @@ func TestMatchZone(t *testing.T) {
 		{"relay.librem.freehold.technology", "apex"},
 		{"cp.librem.freehold.technology", "apex"},
 		{"_acme-challenge.freehold.technology", "apex"},
-		{"freehold.technology.", "apex"}, // trailing dot normalized
+		{"freehold.technology.", "apex"},         // trailing dot normalized
 		{"relay.freehold-test.darcydev.net", ""}, // not in this account
 		{"relay.example.com", "other"},
 	}

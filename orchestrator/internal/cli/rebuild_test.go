@@ -924,7 +924,7 @@ func TestLegoDomainForHost(t *testing.T) {
 		{"relay.librem.freehold.technology", "relay.librem.freehold.technology", "relay.librem.freehold.technology"},
 		{"relay.librem.freehold.technology", "*.librem.freehold.technology", "*.librem.freehold.technology"},
 		{"relay.librem.freehold.technology", "*.freehold-test.darcydev.net", "relay.librem.freehold.technology"}, // stale
-		{"relay.librem.freehold.technology", "other.bad.net", "relay.librem.freehold.technology"},               // mismatched
+		{"relay.librem.freehold.technology", "other.bad.net", "relay.librem.freehold.technology"},                // mismatched
 		{"", "*.anything.net", ""},
 	}
 	for _, c := range cases {

@@ -374,7 +374,8 @@ async fn handle_exec(
             // Every requested secret becomes an env var ON THE REMOTE BODY (like
             // the API connector): the target's own credential for auth, plus any
             // extras the agent asked for by name. All are redacted from output.
-            let secrets = exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
+            let secrets =
+                exec::resolve_secrets(&state.ctx.identity, &state.ctx.package, &args.secrets)?;
             let endpoint = SshTarget::parse(&target, &meta.address)
                 .map_err(|e| exec::ExecError::Ssh(e.to_string()))?;
             let started = exec::now_secs();
