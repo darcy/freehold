@@ -41,10 +41,12 @@ import (
 	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
+	"freehold/orchestrator/internal/delegate"
 	"freehold/orchestrator/internal/deploy"
 	"freehold/orchestrator/internal/dnsman"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/relay"
 	"freehold/orchestrator/internal/state"
 	"freehold/orchestrator/internal/wire"
 	"freehold/orchestrator/prompts"
@@ -3671,6 +3673,59 @@ func cpaIdentityDir() string {
 	return filepath.Join(rbStateDir(), "agent-cpa")
 }
 
+// relayComposeDir is where the relay's docker-compose stack lives INSIDE the
+// relay LXC; buzz-admin (relay membership) runs through it.
+const relayComposeDir = "/srv/data/relay/deploy/compose"
+
+// relayFreeholdChannel is the deterministic #freehold channel (NIP-29) that the
+// CPA joins so a human can hold a conversation with it. Clients render the NAME
+// from the channel metadata, so only the id needs to be stable.
+const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
+
+// relayAddMember adds a Nostr pubkey as a relay member by running buzz-admin
+// add-member inside the relay LXC's compose stack. Idempotent: re-adding an
+// existing member prints "already a member ... (no change)" and exits 0.
+func (e *rebuildEngine) relayAddMember(cfg *config.Config, pubkey string) error {
+	if cfg.Lxc.Relay.Vmid == nil {
+		return fmt.Errorf("no relay LXC recorded — cannot add the agent as a relay member")
+	}
+	cmdLine := fmt.Sprintf("cd %s && docker compose exec -T relay buzz-admin add-member --pubkey %s", relayComposeDir, pubkey)
+	full := fmt.Sprintf("pct exec %d -- sh -c '%s'", *cfg.Lxc.Relay.Vmid, cmdLine)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(full, 120))
+	if !ok {
+		return fmt.Errorf("buzz-admin add-member: %s", strings.TrimSpace(out))
+	}
+	fmt.Fprintf(e.out, "  · relay member added: %s\n", pubkey)
+	return nil
+}
+
+// relayEnsureChannel publishes the CPA's Buzz profile (kind-0 metadata — the
+// NAME Buzz shows), ensures the #freehold channel exists, and joins the CPA to
+// it (kind 9000 create + kind 9021 join), all signed by the CPA identity. Every
+// step is an idempotent Open-relay publish (re-publishing the same channel/join
+// is accepted; re-publishing kind-0 just updates the name). Runs over the
+// relay's HTTP edge origin, which is what the relay-setup path uses.
+func (e *rebuildEngine) relayEnsureChannel(cfg *config.Config, secretHex, name string) error {
+	if cfg.RelayURL == "" {
+		return fmt.Errorf("no relay URL — cannot publish the CPA profile or join a channel")
+	}
+	sec, err := hex.DecodeString(secretHex)
+	if err != nil {
+		return fmt.Errorf("cpa nostr secret hex: %w", err)
+	}
+	if err := relay.PublishProfile(cfg.RelayURL, sec, name, "freehold control plane agent"); err != nil {
+		return fmt.Errorf("publish CPA profile (%s): %w", name, err)
+	}
+	if err := delegate.EnsureChannel(cfg.RelayURL, sec, relayFreeholdChannel, "#freehold"); err != nil {
+		return fmt.Errorf("ensure #freehold channel: %w", err)
+	}
+	if err := relay.JoinChannel(cfg.RelayURL, sec, relayFreeholdChannel); err != nil {
+		return fmt.Errorf("join #freehold channel: %w", err)
+	}
+	fmt.Fprintf(e.out, "  · CPA joined the #freehold relay channel (%s)\n", name)
+	return nil
+}
+
 // ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its
 // pubkey. Rebuilds reuse the recorded identity (identity continuity), so the
 // CPA's Buzz profile, presence, and DMs all survive.
@@ -3704,6 +3759,13 @@ func (e *rebuildEngine) stageCpa() error {
 	if err != nil {
 		return err
 	}
+	// A2-onboard: bring the CPA onto the COMMUNITY relay BEFORE the pod starts
+	// so its very first connect is authorized (the relay is membership-restricted
+	// and rejects "not a relay member"), and seat it in the #freehold channel so
+	// a person can hold a conversation with it. Both are idempotent on reconcile.
+	if err := e.relayAddMember(cfg, cpaPub); err != nil {
+		return fmt.Errorf("add CPA relay membership: %w", err)
+	}
 	// The harness speaks WS to the relay. The pod joins the community relay
 	// over the LAN: resolve the domain internally to the relay LXC (the CP
 	// resolver's split-horizon record wired before this stage) and speak
@@ -3729,6 +3791,11 @@ func (e *rebuildEngine) stageCpa() error {
 	if err != nil {
 		return fmt.Errorf("cpa identity unreadable after mint: %w", err)
 	}
+	// Seat the CPA in the #freehold channel + publish its Buzz profile name
+	// (idempotent re-publish).
+	if err := e.relayEnsureChannel(cfg, id.NostrSecretHex, cpaName); err != nil {
+		return fmt.Errorf("seat CPA in #freehold: %w", err)
+	}
 	ok, out := e.runBin(e.bins.Self, e.execArgs(agent.AgentIdentityScript(
 		k3sVmid, id.NostrSecretHex, e.f.operatorPubkey, cpaName), 120))
 	if !ok {
@@ -3739,8 +3806,16 @@ func (e *rebuildEngine) stageCpa() error {
 	// same transport stageLitellm's exec uses), then record the agent. The
 	// runner executes this verbatim on the k3s guest; the pod's ConfigMap
 	// carries the prompt, so nothing ships the .md to the CP LXC.
+	// The litellm base URL is the recorded NodePort addr (cfg.Litellm.URL ,
+	// with /v1) — the CPA is hostNetwork and cannot resolve the in-kube
+	// `litellm.litellm` service name through the node's resolver.
+	litellmBase := cfg.Litellm.URL
+	if litellmBase == "" {
+		litellmBase = agent.LiteLLMServiceURL
+	}
+	litellmBase = strings.TrimSuffix(litellmBase, "/") + "/v1"
 	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.CPAManifestScript(
-		k3sVmid, relayURL, promptText, cpaName), 420))
+		k3sVmid, relayURL, promptText, cpaName, litellmBase), 420))
 	if !ok {
 		return fmt.Errorf("cpa pod apply failed:\n%s", out)
 	}
