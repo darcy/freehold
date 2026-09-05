@@ -766,8 +766,11 @@ func TestCaddyCertInstallScript(t *testing.T) {
 	// The cert/key land DIRECTLY in the local-path backing dir on the k3s node
 	// (the directory Caddy's hostNetwork pod bind-mounts at /data) — no
 	// kubectl-exec/stdin hop (which never forwards stdin and wrote 0-byte files).
-	for _, want := range []string{"storage/${PV}_caddy_caddy-data/tls/relay",
-		"rollout restart deploy/caddy", "pct push 102", "chmod 600"} {
+	// The PV backing dir is resolved from the PV's .spec.local.path (so it still
+	// works when local-path points at the durable plane), and the cert is ALSO
+	// mirrored to the durable plane for teardown-proof recovery.
+	for _, want := range []string{"$PDIR/tls/relay", "spec.local.path",
+		"caddy-edge/relay", "rollout restart deploy/caddy", "pct push 102", "chmod 600"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script missing %q", want)
 		}

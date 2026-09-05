@@ -558,17 +558,11 @@ func (e *rebuildEngine) run() error {
 		}
 	}
 
-	// 6.7. Kick off the edge's cert issuance EARLY. The DNS-01 challenge TXT is
-	// pre-placed NOW so a slow DNS provider (e.g. a freshly-activated Cloudflare
-	// zone propagating _acme-challenge TXT over minutes) gets the whole build to
-	// serve it, instead of being created for the first time at the END and
-	// timing out lego's short propagation window. Runs in the background; the
-	// Caddy stage awaits + installs the result (30s poll) once the edge is up.
-	if e.worldHasEdge() {
-		if err := e.startCertIssuance(); err != nil {
-			return fmt.Errorf("start cert issuance: %w", err)
-		}
-	}
+	// 6.7. NOTE: the edge's cert issuance is NOT started here. It must come
+	// AFTER the k3s stage (12) so the DURABLE-plane cert mirror is readable:
+	// the recovery gate (reuse an existing cert, no LE order) reads
+	// /srv/data/k8s-volumes/caddy-edge/<slot> on the k3s node, which only
+	// exists once the node is up and its mount is present. See 12.x.
 
 	// 7a. plane placement: where do the tenant LVs live — reuse the VG's
 	// detected thin pool, or carve a dedicated new one?
@@ -611,6 +605,18 @@ func (e *rebuildEngine) run() error {
 			return err
 		}
 		fmt.Fprintln(e.out, "  ✓ k3s substrate ready")
+	}
+
+	// 12.x. Kick off the edge's cert issuance NOW: after k3s is up, the durable
+	// recovery gate can read /srv/data/k8s-volumes/caddy-edge/<slot> and REUSE an
+	// existing cert (no LE order, no rate-limit) — a teardown+rebuild comes back
+	// on the same cert. On a first issue it begins (or resumes) a resumable
+	// DNS-01 order and pre-places the challenge; the Caddy stage awaits + installs
+	// the result (awaitCertIssuance polls the propagation window).
+	if e.worldHasEdge() {
+		if err := e.startCertIssuance(); err != nil {
+			return fmt.Errorf("start cert issuance: %w", err)
+		}
 	}
 
 	// 13-14. deploy the relay + the control plane.
@@ -1699,6 +1705,79 @@ $K get nodes 2>&1 | tail -2 | head -1
 mkdir -p /srv/data/k8s-volumes
 `
 
+// k3sLocalPathDurableScript re-points the local-path StorageClass's backing
+// store at the DURABLE plane mount (/srv/data/k8s-volumes — backup=1, survives
+// a compute teardown) instead of the default /var/lib/rancher/k3s/storage on the
+// ephemeral rootfs, so k8s PVCs (Caddy's cert, litellm postgres) survive a
+// compute teardown and a rebuild. The WHOLE ConfigMap is re-emitted (config.json
+// + helperPod/setup/teardown) so `apply` replaces the k3s-managed default
+// wholesale rather than dropping the helper-pod config. Re-asserted on every
+// reconcile: the k3s local-storage Addon can reset the ConfigMap on a k3s
+// restart. Idempotent.
+//
+// SINGLE-QUOTE-FREE (like k3sInstallScript): it travels inside a
+// `pct exec ... -- bash -c '%s'` single-quote wrapper, so no ' may appear. The
+// ConfigMap is written with an UNQUOTED heredoc; its setup/teardown shell keys
+// use \$VOL_DIR so the writer heredoc emits a literal $VOL_DIR and the wrapping
+// `set -u` never sees an unbound variable.
+const k3sLocalPathDurableScript = `set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+mkdir -p /tmp/local-path
+cat > /tmp/local-path/local-path-config.yaml <<YAMLEOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+      "nodePathMap":[
+      {
+        "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
+        "paths":["/srv/data/k8s-volumes"]
+      }
+      ]
+    }
+  helperPod.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      containers:
+      - name: helper-pod
+        image: "rancher/mirrored-library-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
+  setup: |
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "\$VOL_DIR"
+    chmod 700 "\$VOL_DIR/.."
+  teardown: |
+    #!/bin/sh
+    set -eu
+    rm -rf "\$VOL_DIR"
+YAMLEOF
+$K -n kube-system apply -f /tmp/local-path/local-path-config.yaml
+$K -n kube-system rollout restart deployment/local-path-provisioner >/dev/null 2>&1 || true
+$K -n kube-system rollout status deployment/local-path-provisioner --timeout=120s >/dev/null 2>&1 || true
+rm -rf /tmp/local-path
+echo LOCALPATH_DURABLE_OK
+`
+
+// stageK3sLocalPath points local-path at the durable plane (re-asserted every
+// reconcile — see k3sLocalPathDurableScript). Aborting on failure would sink the
+// whole world for a wiring detail, so a failure is surfaced but not fatal (the
+// build continues; a later stage/reconcile re-asserts).
+func (e *rebuildEngine) stageK3sLocalPath(k3sVmid uint32) {
+	ok, out := e.runBin(e.bins.Self, e.execArgs(
+		fmt.Sprintf("pct exec %d -- bash -c '%s'", k3sVmid, strings.TrimSpace(k3sLocalPathDurableScript)), 180))
+	if !ok {
+		fmt.Fprintf(e.out, "  · local-path durable wiring did not report OK:\n%s\n", printTail(out, 6))
+	}
+}
+
 // stageK3s boots the k3s LXC if missing, installs k3s inside it
 // (unprivileged-LXC posture: KubeletInUserNamespace), and records the guest
 // coords + the managed piece (best-effort write-back, Rust stage_k3s).
@@ -1730,6 +1809,9 @@ func (e *rebuildEngine) stageK3s() error {
 	}
 	// best-effort write-back: a failed record must not sink the stage.
 	_, _ = e.stageRecordLxc("k3s")
+	// Point local-path at the durable plane so k8s PVCs (Caddy's cert, litellm
+	// postgres) survive a compute teardown. Every reconcile re-asserts it.
+	e.stageK3sLocalPath(vmid)
 	return nil
 }
 
@@ -2760,23 +2842,28 @@ func (e *rebuildEngine) certIdent() (*flows.Identity, []byte, []byte, error) {
 // timeout can RESUME the same order and re-check whether the already-placed
 // challenge finally landed — instead of re-challenging everything from zero.
 type certRun struct {
-	slot      string            // owning slot (for issuer messaging)
-	leDomain  string            // effective LE cert-domain (may be "*.base")
-	challenge string            // full challenge fqdn: _acme-challenge.<target>
-	reuse     bool              // a valid cert already exists — skip issuance
-	reuseExp  time.Time         // the reused cert's expiry (reuse==true)
-	prepared  chan struct{}     // closed once the resume handle is ready
-	resume    *cert.Resume      // the resumable-driver handle
-	pending   *cert.PendingOrder // the begun/resumed ACME order
-	issued    *cert.Issued
-	err       error
+	slot         string            // owning slot (for issuer messaging)
+	leDomain     string            // effective LE cert-domain (may be "*.base")
+	challenge    string            // full challenge fqdn: _acme-challenge.<target>
+	reuse        bool              // a valid cert already exists — skip issuance
+	reuseDurable bool              // reuse came from the durable plane copy (seed the PVC from it)
+	reuseExp     time.Time         // the reused cert's expiry (reuse==true)
+	prepared     chan struct{}     // closed once the resume handle is ready
+	resume       *cert.Resume      // the resumable-driver handle
+	pending      *cert.PendingOrder // the begun/resumed ACME order
+	issued       *cert.Issued
+	err          error
 }
 
-// startCertIssuance kicks off the edge's DNS-01 issuance for EACH host in the
-// background NOW: it begins (or RESUMES) a resumable ACME order and pre-places
-// its challenge TXT, so a slow DNS provider (e.g. a freshly-activated Cloudflare
-// zone that takes minutes to serve a new _acme-challenge TXT) has the whole
-// pipeline to propagate before the Caddy edge awaits validation at the end. If a
+// startCertIssuance kicks off the edge's certificate resolution for EACH host.
+// It runs AFTER the k3s stage so the DURABLE-recovery gate can be consulted
+// first: if a valid cert survives at /srv/data/k8s-volumes/caddy-edge/<slot>
+// (mirrored on a prior issue; survives a compute teardown), the slot is marked
+// reuse-durable and NO Let's Encrypt order is begun — a teardown+rebuild comes
+// back on the same cert with no challenge and no rate-limit exposure. Otherwise
+// it BEGINS (or RESUMES) a resumable DNS-01 order and pre-places its challenge
+// TXT, so a slow DNS provider has the remaining pipeline to propagate before the
+// Caddy edge awaits validation at the end. If a
 // valid cert is already on the durable edge PVC (reuse gate >= 30d), the slot is
 // marked for reuse and NO challenge is placed. Completed by awaitCertIssuance.
 func (e *rebuildEngine) startCertIssuance() error {
@@ -2813,12 +2900,23 @@ func (e *rebuildEngine) startCertIssuance() error {
 			challenge: "_acme-challenge." + verifyTarget,
 			prepared:  make(chan struct{}),
 		}
-		// Reuse gate: a valid cert already on the durable edge PVC means "we have
-		// got our cert" — don't begin/resume an order or place a challenge. Only
-		// meaningful when the k3s node (and thus Caddy's PVC) is up (a reconcile);
-		// on a cold boot there is nothing to read, so we issue.
+		// Reuse gate: if a valid cert survives on the DURABLE plane mirror
+		// (/srv/data/k8s-volumes/caddy-edge/<slot> — survives a compute
+		// teardown; read without any Caddy/PVC dependency, so it works on a cold
+		// rebuild) OR already on the live Caddy edge PVC (a plain reconcile), we
+		// "have our cert" — don't begin/resume an order or place a challenge.
 		if cfg.Lxc.K3s.Vmid != nil {
 			k3s := *cfg.Lxc.K3s.Vmid
+			if existing, rerr := e.caddyDurableFullchain(k3s, svc.slot); rerr == nil && e.caddyDurableKeyPresent(k3s, svc.slot) {
+				if exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour); ok {
+					fmt.Fprintf(e.out, "  · %s: recovering durable cert (expires %s) — no challenge\n", svc.slot, exp.UTC().Format(time.RFC3339))
+					run.reuse = true
+					run.reuseDurable = true
+					run.reuseExp = exp
+					e.certRuns[leDomain] = run
+					continue
+				}
+			}
 			if existing, rerr := e.caddyFullchain(k3s, svc.slot); rerr == nil && len(existing) > 0 {
 				if exp, ok := cert.ReuseIfValidBytes(existing, time.Now(), 30*24*time.Hour); ok {
 					fmt.Fprintf(e.out, "  · %s: reusing existing cert (expires %s) — not re-issuing\n", svc.slot, exp.UTC().Format(time.RFC3339))
@@ -2931,9 +3029,10 @@ func (e *rebuildEngine) awaitCertIssuance() error {
 	if issuer == "" {
 		issuer = "lego (DNS-01)"
 	}
-	// Phase A: resolve EVERY slot's certificate first (Reuse slots only record).
-	// Reuse (a valid cert already on the PVC) is recorded and skipped; issued
-	// slots are collected for sealed install afterwards.
+	// Phase A: resolve EVERY slot's certificate first (Reuse slots only record,
+	// and a durable-reuse slot seeds the fresh PVC from the mirror). Reuse (a
+	// valid cert found at start) is recorded and skipped; issued slots are
+	// collected for sealed install afterwards.
 	type installed struct {
 		slot     string
 		leDomain string
@@ -2953,6 +3052,13 @@ func (e *rebuildEngine) awaitCertIssuance() error {
 			continue // no issuance was started for this domain
 		}
 		if run.reuse {
+			if run.reuseDurable {
+				// A fresh rebuild's PVC is empty — seed it from the durable mirror
+				// so Caddy can serve it, without issuing anything.
+				if err := e.installCaddyCertFromDurable(k3sVmid, svc.slot); err != nil {
+					return err
+				}
+			}
 			if err := e.recordCert(svc.slot, run.reuseExp, issuer, leDomain); err != nil {
 				return err
 			}
@@ -3114,6 +3220,15 @@ func (e *rebuildEngine) recordCert(slot string, exp time.Time, issuer, leDomain 
 
 // caddyFullchain cats a slot's durable fullchain out of the pod (base64) so the
 // reuse gate can parse its expiry without re-issuing.
+// caddyEdgeDurableDir returns the stable durable-plane path a slot's edge cert
+// is mirrored to (/srv/data/k8s-volumes — backup=1, survives a compute
+// teardown). It is independent of the PVC's per-rebuild local-path id, so a
+// teardown+rebuild can recover the issued cert from here and skip a fresh LE
+// order entirely.
+func caddyEdgeDurableDir(slot string) string {
+	return "/srv/data/k8s-volumes/caddy-edge/" + slot
+}
+
 func (e *rebuildEngine) caddyFullchain(k3sVmid uint32, slot string) ([]byte, error) {
 	cmd := fmt.Sprintf(
 		"pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n caddy exec deploy/caddy -- sh -c 'cat /data/tls/%s/fullchain.pem' 2>/dev/null | base64 -w0",
@@ -3159,6 +3274,59 @@ func (e *rebuildEngine) installCaddyCert(k3sVmid uint32, slot string, fullchain 
 // slotCertKeyEnv is the env var the runner injects for the slot's cert key.
 func slotCertKeyEnv(slot string) string { return "CERT_KEY_" + strings.ToUpper(slot) }
 
+// caddyDurableFullchain reads a slot's fullchain from the durable-plane mirror
+// (/srv/data/k8s-volumes/caddy-edge/<slot>/fullchain.pem). Unlike the live-PVC
+// read, this works BEFORE the Caddy edge is deployed (it is a plain node file),
+// which is what lets startCertIssuance recover a cert on a cold rebuild.
+func (e *rebuildEngine) caddyDurableFullchain(k3sVmid uint32, slot string) ([]byte, error) {
+	cmd := fmt.Sprintf(
+		"pct exec %d -- bash -c 'test -s %s/fullchain.pem 2>/dev/null && base64 -w0 < %s/fullchain.pem'",
+		k3sVmid, caddyEdgeDurableDir(slot), caddyEdgeDurableDir(slot))
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60))
+	if !ok || strings.TrimSpace(out) == "" {
+		return nil, fmt.Errorf("no durable mirror for %s", slot)
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+	if err != nil {
+		return nil, fmt.Errorf("durable %s fullchain base64: %w", slot, err)
+	}
+	return dec, nil
+}
+
+// caddyDurableKeyPresent reports whether the durable mirror also holds a
+// non-empty key.pem for the slot (a fullchain alone is not enough to serve TLS).
+func (e *rebuildEngine) caddyDurableKeyPresent(k3sVmid uint32, slot string) bool {
+	cmd := fmt.Sprintf("pct exec %d -- bash -c 'test -s %s/key.pem'", k3sVmid, caddyEdgeDurableDir(slot))
+	ok, _ := e.runBin(e.bins.Self, e.execArgs(cmd, 60))
+	return ok
+}
+
+// installCaddyCertFromDurable seeds a slot's Caddy PVC backing dir from the
+// durable-plane mirror (recovery path) and restarts the edge. No private key
+// ever transits a command or the audit — both files come from the node's own
+// durable volume. Same PV-path resolution the fresh-install script uses.
+func (e *rebuildEngine) installCaddyCertFromDurable(k3sVmid uint32, slot string) error {
+	ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf(`set -e
+pct exec %d -- bash -c '
+set -e
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+DIR=$PDIR/tls/%s
+SRC=%s
+mkdir -p "$DIR"
+cp "$SRC/fullchain.pem" "$DIR/fullchain.pem"
+cp "$SRC/key.pem" "$DIR/key.pem"
+chmod 600 "$DIR/key.pem"
+$K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
+echo DURABLE_SEED_OK
+'`, k3sVmid, slot, caddyEdgeDurableDir(slot)), 120))
+	if !ok {
+		return fmt.Errorf("caddy %s durable seed failed:\n%s", slot, strings.TrimSpace(out))
+	}
+	return nil
+}
+
 // sealRunnerSecret seals a value into the current target runner's secrets
 // package under `name`, so a later `exec --secret <name>` injects it as
 // $<UPPER_SNAKE> into the command's environment (values never in command text).
@@ -3203,16 +3371,24 @@ pct exec %d -- sh -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
-DIR=/var/lib/rancher/k3s/storage/${PV}_caddy_caddy-data/tls/%s
-mkdir -p "$DIR"
+PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+DIR=$PDIR/tls/%s
+DUR=%s
+mkdir -p "$DIR" "$DUR"
 cp /tmp/fc-%s.pem "$DIR/fullchain.pem"
 cp /tmp/key-%s.pem "$DIR/key.pem"
 chmod 600 "$DIR/key.pem"
+cp /tmp/fc-%s.pem "$DUR/fullchain.pem"
+cp /tmp/key-%s.pem "$DUR/key.pem"
+chmod 600 "$DUR/key.pem"
 $K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
 rm -f /tmp/fc-%s.pem /tmp/key-%s.pem
 '
 rm -f /tmp/fh-key.pem /tmp/fh-fc.pem
-`, keyEnv, shellSingleQuote(fcB64), k3sVmid, slot, k3sVmid, slot, k3sVmid, slot, slot, slot, slot, slot)
+`,
+		keyEnv, shellSingleQuote(fcB64), k3sVmid, slot, k3sVmid, slot, k3sVmid, // 1-7
+		slot, caddyEdgeDurableDir(slot), // 8-9 (DIR tls/slot, DUR)
+		slot, slot, slot, slot, slot, slot) // 10-15
 }
 
 // shellSingleQuote single-quotes an arg for the embedded sh -c command.

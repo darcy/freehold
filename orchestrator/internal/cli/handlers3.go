@@ -657,7 +657,7 @@ func parseInfoMount(s string) (drive.MountArg, error) {
 
 var teardownCmd = &cobra.Command{
 	Use:   "teardown",
-	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config INTACT (recorded LXC coordinates included — rebuild re-boots the same vmids + IPs), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then wipes door key + world home + config",
+	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (recorded LXC coordinates are cleared so the next build re-creates them), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT so a cheap rebuild re-uses the DNS creds + identity)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		configPath, _ := cmd.Flags().GetString("config")
 		yes, _ := cmd.Flags().GetBool("yes")
@@ -789,7 +789,7 @@ func init() {
 	teardownCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	teardownCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
 	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown")
-	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: the FULL teardown — all datasets + the freehold-created thin pool, then door key + world home + config. Without it the config, world home, and door key are KEPT for a cheap rebuild")
+	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: the FULL teardown — all datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT — the rebuild re-uses the DNS creds + identity). Without it the door key, world home, and config are all kept for a cheap rebuild")
 	teardownCmd.Flags().Bool("remove-dns", false, "ALSO delete the freehold-managed relay/cp A records on the DNS provider recorded in config (Dns.Manager, created by `build --manage-dns`). Default leaves them")
 }
 
