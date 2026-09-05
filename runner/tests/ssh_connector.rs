@@ -36,7 +36,13 @@ async fn exec_roundtrip_over_ssh() {
     let pool = make_pool(dir.path());
 
     let res = pool
-        .exec(&target("t", &addr), &pem, "echo hello-over-ssh", Some(10))
+        .exec(
+            &target("t", &addr),
+            &pem,
+            "echo hello-over-ssh",
+            &[],
+            Some(10),
+        )
         .await
         .unwrap();
     assert_eq!(res.stdout.trim(), "hello-over-ssh");
@@ -45,7 +51,7 @@ async fn exec_roundtrip_over_ssh() {
 
     // Exit status propagates.
     let res = pool
-        .exec(&target("t", &addr), &pem, "exit 7", Some(10))
+        .exec(&target("t", &addr), &pem, "exit 7", &[], Some(10))
         .await
         .unwrap();
     assert_eq!(res.exit_code, Some(7));
@@ -59,9 +65,15 @@ async fn connection_is_pooled_across_execs() {
     let pool = make_pool(dir.path());
     let t = target("t", &addr);
 
-    pool.exec(&t, &pem, "echo one", Some(10)).await.unwrap();
-    pool.exec(&t, &pem, "echo two", Some(10)).await.unwrap();
-    pool.exec(&t, &pem, "echo three", Some(10)).await.unwrap();
+    pool.exec(&t, &pem, "echo one", &[], Some(10))
+        .await
+        .unwrap();
+    pool.exec(&t, &pem, "echo two", &[], Some(10))
+        .await
+        .unwrap();
+    pool.exec(&t, &pem, "echo three", &[], Some(10))
+        .await
+        .unwrap();
 
     assert_eq!(
         state.connections.load(Ordering::SeqCst),
@@ -78,7 +90,7 @@ async fn wrong_key_is_rejected() {
     let pool = make_pool(dir.path());
 
     let err = pool
-        .exec(&target("t", &addr), &pem, "echo x", Some(10))
+        .exec(&target("t", &addr), &pem, "echo x", &[], Some(10))
         .await
         .expect_err("server rejects all keys");
     assert!(
@@ -96,7 +108,7 @@ async fn timeout_bounds_ssh_exec() {
 
     let start = std::time::Instant::now();
     let res = pool
-        .exec(&target("t", &addr), &pem, "sleep 30", Some(1))
+        .exec(&target("t", &addr), &pem, "sleep 30", &[], Some(1))
         .await
         .unwrap_or_else(|e| panic!("ssh exec must not hard-error on timeout, got {e}"));
     assert!(
@@ -122,13 +134,18 @@ async fn host_keys_are_tofu_and_tamper_is_rejected() {
     let t = target("t", &addr);
 
     // First connect: host key stored (TOFU add).
-    pool.exec(&t, &pem, "echo first", Some(10)).await.unwrap();
+    pool.exec(&t, &pem, "echo first", &[], Some(10))
+        .await
+        .unwrap();
     let known = dir.path().join(ssh::KNOWN_HOSTS_FILE);
     assert!(known.exists(), "TOFU must persist the host key");
 
     // Second connect (fresh pool, same store): key matches, still works.
     let pool2 = make_pool(dir.path());
-    pool2.exec(&t, &pem, "echo second", Some(10)).await.unwrap();
+    pool2
+        .exec(&t, &pem, "echo second", &[], Some(10))
+        .await
+        .unwrap();
 
     // Semantic tamper: a FOREIGN key planted under a NEW label before ever
     // connecting there. The next connect to that label sees a key that does
@@ -151,7 +168,7 @@ async fn host_keys_are_tofu_and_tamper_is_rejected() {
 
     let fresh_pool = make_pool(dir.path());
     let err = fresh_pool
-        .exec(&t_evil, &pem, "echo mitm", Some(10))
+        .exec(&t_evil, &pem, "echo mitm", &[], Some(10))
         .await
         .expect_err("changed host key must reject");
     assert!(
