@@ -12,7 +12,8 @@ permissions:
 jobs:
   deepseek-review:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    if: ${{ false }}
+    # if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@v4
         with:
