@@ -511,7 +511,11 @@ func (m *Model) buildAgents(cfg *config.Config) {
 		m.Agents = []AgentRow{{Name: "(no CP toolset)", Available: styleDim.Render("converge the world (build) to deploy freehold-agent-tools")}}
 		return
 	}
-	if _, err := oplogin.SecretHex(); err != nil {
+	// Gated on the live console session (like readCpRunners), NOT a disk
+	// secret check: buildAgents is called from load() BEFORE the first frame,
+	// so at startup m.console == nil and we take this free hint path. The real
+	// agent-tools fetch happens after auto-login via refreshLocal().
+	if m.console == nil || m.console.client == nil {
 		m.Agents = []AgentRow{{Name: "(not logged into a console)", Available: styleDim.Render("press l to log in to see the CP agent roster")}}
 		return
 	}
