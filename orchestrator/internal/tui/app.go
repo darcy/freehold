@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,9 +12,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"freehold/orchestrator/internal/client"
 	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/oplogin"
 	"freehold/orchestrator/internal/planebase"
 	"freehold/orchestrator/internal/state"
 )
@@ -495,41 +499,48 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 	}
 }
 
-// buildAgents fills the Agents view from the CP's /api/agents — the console's
-// authoritative, relay-probed agent roster (the durable source of truth after
-// 0.4.6 moved creation to freehold-agent-tools). Not logged in = a hint row,
-// not the stale local loopback state.
+// buildAgents fills the Agents view from freehold-agent-tools `manage_agent` —
+// the CP-side MCP server's durable agent registry, the source of truth for
+// agents created through create_agent after 0.4.6 (the console's /api/agents
+// is empty; the toolset keeps its own registry). Signed as the operator (the
+// persisted nsec), who is a roster grant. Not logged in or no agent-tools
+// coords = a hint row, not the stale local loopback state.
 func (m *Model) buildAgents(cfg *config.Config) {
-	if m.console == nil || m.console.client == nil {
-		m.Agents = []AgentRow{{
-			Name:      "(not logged into a console)",
-			Available: styleDim.Render("press l to log in to see the CP agent roster"),
-		}}
-		return
-	}
-	agents, err := m.console.client.Agents()
-	if err != nil {
-		m.Agents = []AgentRow{{
-			Name:      "(agent roster failed)",
-			Available: styleRed.Render(clip(err.Error(), 48)),
-		}}
-		return
-	}
 	m.Agents = nil
+	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
+		m.Agents = []AgentRow{{Name: "(no CP toolset)", Available: styleDim.Render("converge the world (build) to deploy freehold-agent-tools")}}
+		return
+	}
+	if _, err := oplogin.SecretHex(); err != nil {
+		m.Agents = []AgentRow{{Name: "(not logged into a console)", Available: styleDim.Render("press l to log in to see the CP agent roster")}}
+		return
+	}
+	auth, err := flows.AgentAuth(oplogin.Dir())
+	if err != nil {
+		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		return
+	}
+	mc, err := client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
+	if err != nil {
+		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		return
+	}
+	raw, err := mc.CallText("manage_agent", map[string]interface{}{})
+	if err != nil {
+		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		return
+	}
+	var agents []console.AgentInfo
+	if err := json.Unmarshal(raw, &agents); err != nil {
+		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		return
+	}
 	for _, a := range agents {
 		created := "just now"
 		if a.CreatedAt > 0 {
 			created = humanize(time.Since(time.Unix(int64(a.CreatedAt), 0)))
 		}
-		avail := "—"
-		if a.Available != nil {
-			if *a.Available {
-				avail = "online"
-			} else {
-				avail = "offline"
-			}
-		}
-		m.Agents = append(m.Agents, AgentRow{Name: a.Name, Pubkey: a.Pubkey, Available: avail, Created: created})
+		m.Agents = append(m.Agents, AgentRow{Name: a.Name, Pubkey: a.Pubkey, Created: created})
 	}
 	if len(m.Agents) == 0 {
 		m.Agents = []AgentRow{{Name: "(no agents on the console)", Created: styleDim.Render("created via the CP toolset")}}
