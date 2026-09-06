@@ -75,6 +75,11 @@ func KeySecretFor(agentName string) string {
 	return sanitizePodName(agentName) + "-litellm-key"
 }
 
+// PodName is the sanitized k8s object name (pod/service/secret/configmap
+// prefix) an agent display name maps to. Exported so callers can guard against
+// names that would collide with the CPA or another pce agent.
+func PodName(agentName string) string { return sanitizePodName(agentName) }
+
 // CPASystemPromptPath is where the CPA pod reads its purpose from: the
 // <pod>-prompt ConfigMap mounts the embedded prompts/CPA_SYSTEM_PROMPT.md
 // (embedded via the orchestrator's prompts package) read-only into the pod,

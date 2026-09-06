@@ -61,6 +61,13 @@ func (e *rebuildEngine) stageCreateAgent(cfg *config.Config, name, purpose strin
 	if cfg.Litellm.URL == "" {
 		return "", fmt.Errorf("no litellm gateway recorded — a created agent needs a reasoning model")
 	}
+	// Collision guards: agent pods/ConfigMaps are keyed by sanitizePodName(name)
+	// in the same `agents` namespace, so a name that sanitizes to the CPA's pod
+	// name (or an already-created agent's) would DELETE + re-apply the CPA pod
+	// (silently downgrading its brain) or collide with another agent. Reject it.
+	if err := createAgentNameError(cfg, name); err != nil {
+		return "", err
+	}
 	k3sVmid := *cfg.Lxc.K3s.Vmid
 
 	dir := agentDirForName(name)
@@ -151,6 +158,34 @@ func (e *rebuildEngine) reconcileCreatedAgents() error {
 		}
 		if _, err := e.stageCreateAgent(cfg, a.Name, a.Purpose); err != nil {
 			return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
+		}
+	}
+	return nil
+}
+
+// createAgentNameError rejects a create name whose sanitized pod name collides
+// with the CPA's pod or an already-created agent's pod (all share the `agents`
+// namespace). Returns nil when the name is safe.
+func createAgentNameError(cfg *config.Config, name string) error {
+	if name == "" {
+		return fmt.Errorf("create-agent needs a non-empty name")
+	}
+	pod := agent.PodName(name)
+	defCPAName := agent.DefaultCPAName
+	if cfg != nil && cfg.CPAName != "" {
+		defCPAName = cfg.CPAName
+	}
+	if pod == agent.PodName(defCPAName) {
+		return fmt.Errorf("create-agent %q: the sanitized pod name %q collides with the control plane agent (%q)", name, pod, defCPAName)
+	}
+	if cfg != nil {
+		for _, a := range cfg.Agents {
+			if a.Name == "" {
+				continue
+			}
+			if agent.PodName(a.Name) == pod {
+				return fmt.Errorf("create-agent %q: a created agent named %q already occupies pod name %q", name, a.Name, pod)
+			}
 		}
 	}
 	return nil
@@ -274,6 +309,10 @@ var watchAgentsCmd = &cobra.Command{
 		if poll < 1000 {
 			poll = 10 * time.Second
 		}
+		// seen dedupes same-second events (Nostr timestamps are second-resolution,
+		// so a second create-agent in the SAME second would otherwise be skipped
+		// forever by a strict `>` watermark). Only the boundary second is kept.
+		seen := map[string]bool{}
 		for {
 			time.Sleep(poll)
 			msgs, perr := delegate.PollStream(cfg.RelayURL, sec, relayFreeholdChannel, since)
@@ -281,11 +320,21 @@ var watchAgentsCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "watch-agents: poll error: %v\n", perr)
 				continue
 			}
+			maxCt := since
 			for _, m := range msgs {
-				if m.CreatedAt <= since {
+				if m.CreatedAt < since {
 					continue
 				}
-				since = m.CreatedAt
+				if m.CreatedAt > maxCt {
+					maxCt = m.CreatedAt
+				}
+				// Dedupe same-second events (process every one in this batch, not just
+				// the last, which is what let a twin request get dropped).
+				sig := fmt.Sprintf("%d:%s:%s", m.CreatedAt, m.Author, m.Content)
+				if seen[sig] {
+					continue
+				}
+				seen[sig] = true
 				if !strings.HasPrefix(m.Author, cpaPub) {
 					continue
 				}
@@ -305,6 +354,13 @@ var watchAgentsCmd = &cobra.Command{
 				resp := fmt.Sprintf("created agent %s — pubkey %s, live in its own channel", name, pub)
 				_ = delegate.PostMessage(cfg.RelayURL, sec, relayFreeholdChannel, "", resp)
 				fmt.Fprintf(os.Stderr, "watch-agents: %s\n", resp)
+			}
+			since = maxCt
+			// Bound `seen` to the new boundary second so it can't grow unbounded.
+			for sig := range seen {
+				if !strings.HasPrefix(sig, fmt.Sprintf("%d:", since)) {
+					delete(seen, sig)
+				}
 			}
 		}
 	},
