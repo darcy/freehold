@@ -25,6 +25,34 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.5] — Chunk 4 Phase E: the CPA can create agents
+
+### Added
+
+*   **Agent-creates-agent is live.** The CPA, asked in Buzz to create a new
+    agent, posts `create-agent name: X purpose: Y` to #freehold; the
+    `watch-agents` executor deploys it: `freehold create-agent` mints a durable
+    identity (under the CP control-plane area), adds the pubkey as a relay
+    member, seats it in #freehold + publishes its profile, applies its pod via
+    the runner, and registers it. Created agents are conversational-only (no
+    skill/target) with their own relay-persisted memory (E1/E2).
+*   **Created agents survive a rebuild.** They're recorded in the config and the
+    build reconciles them after the CPA, redeploying them with the same durable
+    pubkey; `mergeFromAnswers` carries the created-agents list forward (E3).
+*   **Durability proven live (D1–D3):** a real conversation, a process restart,
+    and a full teardown+rebuild — the CPA's identity, memory (kind-30174
+    engram), and thread all survive on the relay's durable store.
+
+### Fixed
+
+*   `create-agent` rejects a name that sanitizes to the CPA's pod name or an
+    existing created agent's (no silent clobbering of the live control-plane
+    agent), while still allowing idempotent re-deploy of the same agent during
+    rebuild reconcile.
+*   `watch-agents` no longer drops a second create-agent request that lands in
+    the same Nostr second (it dedupes by event signature instead of a strict
+    timestamp watermark).
+
 ## [0.4.4] — Chunk 4: the freehold agent is live and conversational in Buzz
 
 ### Added
