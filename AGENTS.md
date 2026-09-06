@@ -186,6 +186,10 @@ changelog.
   pins `go 1.25.0`); `cd orchestrator && go build ./... && go vet ./... &&
   go test ./...`; `go test ./harness/` drives `target/debug/freehold-harness-oracle` and
   gates every crypto primitive against the Rust `core` byte-for-byte.
+- **`freehold-agent-tools` must be built statically** (`CGO_ENABLED=0 go build -C orchestrator
+  -o target/release/freehold-agent-tools ./cmd/freehold-agent-tools`): the CP server ships
+  its own binary to agent pods, which run Alpine/musl — a glibc-dynamic build "silently not
+  found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
 - No formatter/linter config beyond rustfmt + clippy defaults.
 - `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.

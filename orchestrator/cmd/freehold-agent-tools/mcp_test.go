@@ -109,7 +109,15 @@ func TestBridgeProxyAndDispatch(t *testing.T) {
 	if err := runBridge(strings.NewReader(input), &out, b); err != nil {
 		t.Fatalf("runBridge: %v", err)
 	}
+	// Exactly one NDJSON line per response — a doubled trailing newline would
+	// emit a blank line that desyncs the harness's reader.
+	if strings.Contains(out.String(), "\n\n") {
+		t.Fatalf("blank line emitted between responses:\n%q", out.String())
+	}
 	lines := nonEmptyLines2(out.String())
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 response lines, got %d:\n%s", len(lines), out.String())
+	}
 
 	if listLine := findJSONByID2(lines, 2); !strings.Contains(listLine, "buzz_send") || !strings.Contains(listLine, "create_agent") || !strings.Contains(listLine, "manage_agent") {
 		t.Fatalf("tools/list not merged: %s", listLine)

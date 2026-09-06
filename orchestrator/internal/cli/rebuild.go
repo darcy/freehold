@@ -330,7 +330,7 @@ func resolveRebuildBins() (rebuildBins, error) {
 	}
 	if len(missing) > 0 {
 		return b, fmt.Errorf(
-			"sibling binaries missing: %s\n  build them once, then re-run:\n    cargo build --bin control-plane --bin runner && cargo build --release --bin control-plane --bin runner && go build -C orchestrator -o target/release/freehold-agent-tools ./cmd/freehold-agent-tools",
+			"sibling binaries missing: %s\n  build them once, then re-run:\n    cargo build --bin control-plane --bin runner && cargo build --release --bin control-plane --bin runner && CGO_ENABLED=0 go build -C orchestrator -o target/release/freehold-agent-tools ./cmd/freehold-agent-tools",
 			strings.Join(missing, ", "))
 	}
 	return b, nil

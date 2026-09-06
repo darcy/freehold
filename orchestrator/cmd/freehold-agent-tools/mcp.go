@@ -226,9 +226,7 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 					logBridge("forward-error", err.Error())
 					resp = rpcErrorWrapper(raw, err)
 				}
-				w.Write(resp)
-				w.WriteByte('\n')
-				w.Flush()
+				writeResp(w, resp)
 				continue
 			}
 		}
@@ -238,12 +236,21 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 			resp = rpcErrorWrapper(raw, err)
 		}
 		if resp != nil {
-			w.Write(resp)
-			w.WriteByte('\n')
-			w.Flush()
+			writeResp(w, resp)
 		}
 	}
 	return sc.Err()
+}
+
+// writeResp emits exactly one NDJSON line per response. Responses may already
+// end in a newline (ReadString keeps the delimiter; the agent-tools server's
+// json.Encoder appends one) — trimming before the single delimiter prevents a
+// blank line that could desync the harness's NDJSON reader.
+func writeResp(w *bufio.Writer, resp []byte) {
+	resp = bytes.TrimRight(resp, "\r\n")
+	w.Write(resp)
+	w.WriteByte('\n')
+	w.Flush()
 }
 
 // rpcErrorWrapper returns a JSON-RPC error envelope for a failed forward/sign,
