@@ -56,6 +56,8 @@ func main() {
 		cmdIdentity(os.Args[2:])
 	case "seed":
 		cmdSeed(os.Args[2:])
+	case "mcp":
+		cmdMCP(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	default:
@@ -180,6 +182,7 @@ func cmdServe(args []string) {
 	cpaName := fs.String("cpa-name", agent.DefaultCPAName, "CPA display name")
 	ownerPub := fs.String("owner-pubkey", "", "operator pubkey (agent identity secret owner)")
 	litellmBase := fs.String("litellm-base", "", "litellm gateway base URL for agent pods")
+	selfURL := fs.String("self-url", "", "this server's reachable HTTP base URL (e.g. http://<cpIP>:8089) the CPA pod bootstraps its mcp bridge from")
 	fs.Parse(args)
 
 	if *stateDir == "" || *relayURL == "" {
@@ -190,6 +193,9 @@ func cmdServe(args []string) {
 	}
 	if *ownerPub == "" {
 		log.Fatal("serve needs --owner-pubkey (the operator identity that owns agent identity secrets)")
+	}
+	if *selfURL == "" {
+		log.Fatal("serve needs --self-url (the reachable URL the CPA pod bootstraps its mcp bridge from)")
 	}
 	if relayLxc == 0 || k3sVmid == 0 {
 		log.Fatal("serve needs --relay-lxc and --k3s-vmid")
@@ -237,6 +243,7 @@ func cmdServe(args []string) {
 		litellmBaseURL: litellmBaseURL,
 		sec:            secBytes,
 		audience:       audience,
+		selfURL:        strings.TrimSuffix(*selfURL, "/"),
 	}
 
 	// Roster-fresh whitelist, fail-closed: a relay read error yields empty
@@ -267,7 +274,17 @@ func cmdServe(args []string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", srv.ServeHTTP)
-	log.Printf("freehold-agent-tools serving on %s (audience %s)", *addr, audience)
+	// Serve this binary so the CPA pod can fetch the `mcp` stdio bridge at
+	// bootstrap (the image doesn't ship freehold-agent-tools).
+	mux.HandleFunc("/freehold-agent-tools-binary", func(w http.ResponseWriter, r *http.Request) {
+		self, err := os.Executable()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.ServeFile(w, r, self)
+	})
+	log.Printf("freehold-agent-tools serving on %s (audience %s, self-url %s)", *addr, audience, *selfURL)
 	s := &http.Server{Addr: *addr, Handler: mux}
 	if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
@@ -293,6 +310,7 @@ type deploySpec struct {
 	litellmBaseURL string
 	sec            []byte
 	audience       string
+	selfURL        string
 }
 
 func (s *deploySpec) client() (*client.McpClient, error) {
@@ -378,12 +396,22 @@ func buildCreateAgentFn(spec *deploySpec) agent.CreateAgentFn {
 		}
 		var manifest string
 		if name == spec.cpaName {
-			manifest = agent.CPAManifestScript(spec.k3sVmid, spec.relayWS, prompts.CPASystemPrompt, name, spec.litellmBaseURL, "")
+			manifest = agent.CPAManifestScript(spec.k3sVmid, spec.relayWS, prompts.CPASystemPrompt, name, spec.litellmBaseURL, "", spec.selfURL, spec.audience)
 		} else {
-			manifest = agent.AgentManifestScript(spec.k3sVmid, spec.relayWS, prompts.AgentSystemPrompt(name, purpose), spec.litellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.cpaName))
+			manifest = agent.AgentManifestScript(spec.k3sVmid, spec.relayWS, prompts.AgentSystemPrompt(name, purpose), spec.litellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.cpaName), spec.selfURL, spec.audience)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
+		}
+		// The CPA is the server's first-class caller: member it into this
+		// server's own roster (the channel owner is this server, signing the
+		// put-user with its secret) so its harness (via the mcp stdio bridge)
+		// is authorized to call create/grant/manage — the same audited path the
+		// build dogfoods. Idempotent on re-deploy.
+		if name == spec.cpaName {
+			if err := relay.PutUser(spec.relayURL, spec.sec, spec.audience, pub); err != nil {
+				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
+			}
 		}
 		return pub, nil
 	}

@@ -152,12 +152,12 @@ changelog.
   (`orchestrator/internal/agent/tools.go`) are served by a dedicated CP-side binary
   (`cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
   shared signed-header scheme and authorized against the server's own relay roster (its
-  NIP-29 channel + 39002 membership, read fresh per call, fail-closed). Seeded at bootstrap;
+  NIP-29 channel + 39002 membership, read fresh per call, fail-closed).   Seeded at bootstrap;
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
-  the CP registry holds. The CPA pod's harness has NOT yet attached this toolset as callable
-  MCP tools — a stdio MCP facade the buzz-sprig pod would spawn (so the CPA itself can call
-  create/grant/manage) is the named follow-up. **`grant_agent` on the toolset is not wired
-  yet**: binding an agent to a runner's whitelist is a relay roster change owned by the
+  the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
+  via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
+  aggregates buzz-dev-mcp's message tools with create/grant/manage, signed as the agent and
+  authorized by the server's roster. **`grant_agent` on the toolset is not wired yet**: binding an agent to a runner's whitelist is a relay roster change owned by the
   console (the runner's channel owner), and the server does not hold that credential — it
   fails loudly ("not wired") rather than silently succeeding; operators grant via the console
   today.

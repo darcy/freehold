@@ -34,12 +34,13 @@ type DeployAgentToolsSpec struct {
 	CpaName            string
 	OwnerPubkey        string
 	LiteLLMBase        string
+	SelfURL            string // reachable base URL of this server (http://<cpIP>:8089)
 	GrantsCSV          string // bootstrap member pubkeys ("pk1,pk2")
 }
 
 // DeployAgentToolsResult is the agent-tools deploy outcome.
 type DeployAgentToolsResult struct {
-	Pubkey  string // the server's own Nostr pubkey (its MCP audience)
+	Pubkey   string // the server's own Nostr pubkey (its MCP audience)
 	BindAddr string
 	StateDir string
 }
@@ -126,6 +127,9 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 		spec.K3sVmid, spec.RunnerAddr, spec.RunnerPubkey, spec.RunnerTarget, spec.CpaName, spec.OwnerPubkey)
 	if spec.LiteLLMBase != "" {
 		serveFlags += " --litellm-base " + spec.LiteLLMBase
+	}
+	if spec.SelfURL != "" {
+		serveFlags += " --self-url " + spec.SelfURL
 	}
 	if spec.RelayURL != "" && spec.RelayWS != "" {
 		serveFlags += " --relay-ws " + spec.RelayWS

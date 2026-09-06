@@ -36,8 +36,8 @@ type Config struct {
 	Dns              DnsSpec     `toml:"dns,omitempty"`
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
 	Caddy            CaddySpec   `toml:"caddy,omitempty"`
-	CPAName          string   `toml:"cpa_name,omitempty"`
-	Managed          []string `toml:"managed"`
+	CPAName          string      `toml:"cpa_name,omitempty"`
+	Managed          []string    `toml:"managed"`
 	// AgentTools is the CP's freehold-agent-tools MCP server (create/grant/
 	// manage-agent), recorded once deployed so the build (stageCpa + reconcile)
 	// and later the CPA call it over the shared signed-header MCP surface.

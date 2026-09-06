@@ -72,8 +72,19 @@ reverts it and reimplements it correctly.
   shell). `w` opens the web console pre-authorized (single-use portal token).
   The **Runners** tab toggles between the CP console and the local loopback
   list with `s`, and the **Agents** tab now shows the CP's *live* agent roster
-  (name/pubkey/presence) instead of the stale local loopback registry — `l`
-  fixes what was a broken agent-ops (non-admin) login before.
+  (name/pubkey/presence) from the freehold-agent-tools registry instead of the
+  stale local loopback registry — `l` fixes what was a broken agent-ops
+  (non-admin) login before.
+- **The CPA's harness can now actually call the CP toolset.** `freehold-agent-tools`
+  gained an `mcp` stdio bridge that aggregates buzz-dev-mcp's message tools with
+  `create_agent`/`grant_agent`/`manage_agent`; the CPA pod fetches it from the
+  CP server at boot (a static Alpine-compatible build, into `/tmp` since the
+  image runs non-root), points `BUZZ_ACP_MCP_COMMAND` at it (falling back to
+  plain buzz-dev-mcp if the fetch fails), and signs calls as its own nsec — the
+  CPA is membered into the agent-tools roster at create time so it is
+  authorized. Verified: `manage_agent` from inside the pod returns the real
+  registry. The system prompt now reflects that create/grant/manage are real,
+  callable tools (closing the honesty note).
 
 ### Removed
 

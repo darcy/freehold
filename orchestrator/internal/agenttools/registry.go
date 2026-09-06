@@ -10,16 +10,16 @@ import (
 	"time"
 
 	"freehold/orchestrator/internal/console"
-)// Registry is the freehold-agent-tools server's durable agent registry: the CP
+) // Registry is the freehold-agent-tools server's durable agent registry: the CP
 // holds it under the server's own state dir, so a compute-only teardown keeps
 // every created agent's identity + row and a rebuild reconciles it. It satisfies
 // agent.ConsoleOps with the local registry file — direct and in-process, never a
 // console HTTP hop and never a cross-process write to the console's state.json
 // (which the running console process owns in memory).
 type Registry struct {
-	mu    sync.Mutex
-	path  string
-	rows  map[string]console.AgentInfo
+	mu   sync.Mutex
+	path string
+	rows map[string]console.AgentInfo
 }
 
 // OpenRegistry loads (creating if needed) the registry at path.

@@ -3798,6 +3798,7 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		CpaName:            cpaName,
 		OwnerPubkey:        cfg.OperatorPubkey,
 		LiteLLMBase:        litellmBase,
+		SelfURL:            "http://" + cpIP + ":8089",
 		GrantsCSV:          grantsCSV,
 	})
 	if err != nil {
