@@ -36,11 +36,16 @@ func TestCreateAgentNameError(t *testing.T) {
 		name string
 		want bool // true = should be rejected
 	}{
-		{"helper", true},
-		{"Freehold", true}, // sanitize collides with CPA
-		{"freehold", true},
+		{"freehold", true}, // sanitize collides with CPA
+		{"Freehold", true}, // case-variant still collides with CPA
+		{"helper", false},  // re-processing the same agent (idempotent) — not a collision
+		{"HELPER", true},   // distinct display name, same slug as existing agent
 		{"scribe", false},
 		{"my-helper", false},
+	}
+	// A *different* display name that sanitizes to an existing agent's slug must be rejected.
+	if err := createAgentNameError(&config.Config{CPAName: "freehold", Agents: []config.AgentSpec{{Name: "My-Helper"}}}, "my-helper"); err == nil {
+		t.Errorf("expected rejection for a distinct name sanitizing to an existing slug")
 	}
 	for _, c := range cases {
 		err := createAgentNameError(cfg, c.name)

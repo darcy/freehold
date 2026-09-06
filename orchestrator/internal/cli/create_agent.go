@@ -183,6 +183,11 @@ func createAgentNameError(cfg *config.Config, name string) error {
 			if a.Name == "" {
 				continue
 			}
+			if a.Name == name {
+				// Re-deploying/reconciling this same agent (idempotent) — not a
+				// collision; a rebuild's reconcile re-runs every recorded name.
+				continue
+			}
 			if agent.PodName(a.Name) == pod {
 				return fmt.Errorf("create-agent %q: a created agent named %q already occupies pod name %q", name, a.Name, pod)
 			}
