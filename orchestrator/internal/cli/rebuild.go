@@ -691,6 +691,12 @@ func (e *rebuildEngine) run() error {
 			return err
 		}
 		fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
+		if agentsCfg, aerr := config.Load(e.f.configPath); aerr == nil && agentsCfg != nil && len(agentsCfg.Agents) > 0 {
+			fmt.Fprintln(e.out, "  · reconciling created agents…")
+			if err := e.reconcileCreatedAgents(); err != nil {
+				return err
+			}
+		}
 	}
 
 	// 15. the relay's signing key via NIP-11 (best-effort trust anchor).
@@ -1142,6 +1148,9 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	cfg.Dns = config.DnsSpec{Records: records, Manager: mgr}
 	cfg.Litellm = prev.Litellm
 	cfg.Caddy = prev.Caddy
+	// Created agents (Chunk 4 Phase E) survive across teardown+rebuild so the
+	// reconciler redeploys them; carry the recorded list forward like Plane/Dns.
+	cfg.Agents = prev.Agents
 	if cfg.RelayPubkey == nil {
 		cfg.RelayPubkey = prev.RelayPubkey
 	}
@@ -3815,7 +3824,7 @@ func (e *rebuildEngine) stageCpa() error {
 	}
 	litellmBase = strings.TrimSuffix(litellmBase, "/") + "/v1"
 	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.CPAManifestScript(
-		k3sVmid, relayURL, promptText, cpaName, litellmBase), 420))
+		k3sVmid, relayURL, promptText, cpaName, litellmBase, ""), 420))
 	if !ok {
 		return fmt.Errorf("cpa pod apply failed:\n%s", out)
 	}
