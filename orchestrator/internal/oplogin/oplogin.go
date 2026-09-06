@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
+
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/crypto"
@@ -101,12 +103,10 @@ func Interactive() error {
 		}
 	}
 	if !have {
-		fmt.Fprint(os.Stderr, "operator nsec (nsec1… or 64-hex): ")
-		sc := bufio.NewScanner(os.Stdin)
-		if !sc.Scan() {
-			return fmt.Errorf("no nsec provided")
+		raw, err := readNsec()
+		if err != nil {
+			return err
 		}
-		raw := strings.TrimSpace(sc.Text())
 		if raw == "" {
 			return fmt.Errorf("no nsec provided")
 		}
@@ -137,6 +137,30 @@ func Interactive() error {
 	}
 	fmt.Printf("logged in as %s (session cookie %s)\n", pk, cookie)
 	return nil
+}
+
+// readNsec prompts for the operator nsec WITHOUT echo when stdin is a terminal
+// (the key must never appear on screen); piped input (scripts/tests) reads a
+// plain line. Mirrors installer::ask_nsec. The read bytes are zeroed on return.
+func readNsec() (string, error) {
+	fmt.Fprint(os.Stderr, "operator nsec (nsec1… or 64-hex): ")
+	if term.IsTerminal(os.Stdin.Fd()) {
+		b, err := term.ReadPassword(os.Stdin.Fd())
+		fmt.Fprintln(os.Stderr) // the suppressed Enter
+		if err != nil && len(b) == 0 {
+			return "", fmt.Errorf("no input")
+		}
+		s := strings.TrimSpace(string(b))
+		for i := range b {
+			b[i] = 0
+		}
+		return s, nil
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	if !sc.Scan() {
+		return "", fmt.Errorf("no input")
+	}
+	return strings.TrimSpace(sc.Text()), nil
 }
 
 func zero32(s *[32]byte) {
