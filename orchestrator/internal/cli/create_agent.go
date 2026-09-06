@@ -229,6 +229,7 @@ var watchAgentsCmd = &cobra.Command{
 		addr, _ := cmd.Flags().GetString("addr")
 		pk, _ := cmd.Flags().GetString("operator-pubkey")
 		pollMs, _ := cmd.Flags().GetInt("poll-ms")
+		sinceUnix, _ := cmd.Flags().GetInt64("since")
 
 		cfg, err := config.Load(configPath)
 		if err != nil {
@@ -266,6 +267,9 @@ var watchAgentsCmd = &cobra.Command{
 
 		fmt.Fprintf(os.Stderr, "watch-agents: watching #%s for create-agent requests from %s…\n", relayFreeholdChannel, cpaPub[:12])
 		since := time.Now().Unix()
+		if sinceUnix > 0 {
+			since = sinceUnix
+		}
 		poll := time.Duration(pollMs) * time.Millisecond
 		if poll < 1000 {
 			poll = 10 * time.Second
@@ -312,6 +316,7 @@ func init() {
 	watchAgentsCmd.Flags().String("config", defaultConfigPath(), "Config path")
 	watchAgentsCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (defaults to the config's)")
 	watchAgentsCmd.Flags().Int("poll-ms", 10000, "Control-channel poll interval in ms")
+	watchAgentsCmd.Flags().Int64("since", 0, "Unix-seconds to start polling from (0 = now)")
 }
 
 // cpaNostrSecret loads the CPA identity's nostr secret (the relay member used
