@@ -114,9 +114,6 @@ func Interactive() error {
 		if err != nil {
 			return fmt.Errorf("bad nsec: %w", err)
 		}
-		if _, err := Save(secret); err != nil {
-			return err
-		}
 	}
 
 	pk, err := crypto.PubkeyFromSecret(secret[:])
@@ -126,6 +123,13 @@ func Interactive() error {
 	c, err := Login(cfg.CPURL, secret)
 	if err != nil {
 		return fmt.Errorf("login to %s failed: %w", cfg.CPURL, err)
+	}
+	// Only a successful login is persisted as "the operator" — a mistyped key
+	// never poisons the auto-login ledger.
+	if !have {
+		if _, err := Save(secret); err != nil {
+			return err
+		}
 	}
 	cookie := c.Cookie()
 	if len(cookie) > 12 {

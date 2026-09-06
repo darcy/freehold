@@ -379,9 +379,6 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			if err != nil {
 				return flowMsg{err: fmt.Errorf("login: bad nsec: %w", err)}
 			}
-			if _, err := oplogin.Save(secret); err != nil {
-				return flowMsg{err: fmt.Errorf("login: save operator identity: %w", err)}
-			}
 			pk, err := crypto.PubkeyFromSecret(secret[:])
 			if err != nil {
 				return flowMsg{err: err}
@@ -389,6 +386,11 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			c, err := oplogin.Login(url, secret)
 			if err != nil {
 				return flowMsg{err: fmt.Errorf("login to %s: %w", url, err)}
+			}
+			// Only a SUCCESSFUL login is persisted as "the operator" — a
+			// mistyped/wrong nsec never poisons the auto-login ledger.
+			if _, err := oplogin.Save(secret); err != nil {
+				return flowMsg{err: fmt.Errorf("login: save operator identity: %w", err)}
 			}
 			m.console = &consoleClient{client: c}
 			m.consolePK = pk
