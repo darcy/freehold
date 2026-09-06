@@ -144,17 +144,24 @@ freehold --help               # both surfaces
 - **configure** — config present, world not converged: an idempotent
   check-then-run pipeline (relay/cp LXCs, deploy relay + cp). Failed stages
   show their tail; `r` retries.
-- **running** — the post-bring-up dashboard, four views cycled with
+- **running** — the post-bring-up dashboard, six views cycled with
   `Tab` / `Shift-Tab`: **Services** (everything provisioned — name / where /
   status / data / url: relay + control plane today, k3s / litellm as their
-  coordinates land in the config), **Agents** (named agents stood up so far),
-  **Data** (the live durable plane — host capacity + each mount's size /
-  used / guest bind-mount liveness, read-only through the signed runner
-  channel), **Runners** (the console API parity — same data as the web UI — toggled to
-  the local loopback list with `t`). A one-line world strip keeps the
-  liveness glance; `w` opens the web console in your browser already
-  authenticated (single-use portal token — no `console-login`); keys are
-  scoped to the active view.
+  coordinates land in the config), **Agents** (the CP's live agent roster —
+  name / pubkey / online status from the relay presence probe), **Runners**
+  (the console API parity — same data as the web UI — toggled to the local
+  loopback list with `s`), **Data** (the live durable plane — host capacity +
+  each mount's size / used / guest bind-mount liveness, read-only through the
+  signed runner channel), **DNS**, **Certs**. A one-line world strip keeps the
+  liveness glance.
+- **Remote-CP access**: `l` logs you into the CP console with **your operator
+  nsec** (`nsec1…` or hex — it is the console admin, so it grants every remote
+  operation locally: overview, provision, grant, revoke, agents), persisting
+  the key 0600 under `~/.freehold/control-plane/operator` so every later TUI
+  launch **auto-logs in**; `freehold --login` does the same from the shell.
+  `w` then opens the web console in your browser already authenticated
+  (single-use portal token — no `console-login`). Keys are scoped to the
+  active view.
 
 The same session flows bootstrap → configure → running as the world converges.
 

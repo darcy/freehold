@@ -109,6 +109,9 @@ type Model struct {
 	Msg         string
 	Flow        *tuiFlow
 	console     *consoleClient
+	// consolePK is the operator pubkey of the live console session ("" = not
+	// logged in), shown in the footer / views.
+	consolePK string
 	// Runners view source: RunnerSourceCP (default) | RunnerSourceLocal.
 	RunnerSource string
 	// last-loaded config — the `s` toggle and post-flow refreshes need it.

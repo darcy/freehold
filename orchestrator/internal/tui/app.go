@@ -28,6 +28,12 @@ func (m *Model) Init() tea.Cmd {
 		// timeout before anything rendered).
 		cmds = append(cmds, m.startBootActivity("checking the world"))
 	}
+	// A persisted operator identity means we can already drive the remote CP
+	// (Runners-CP, Agents, provision/grant/revoke, the web portal): re-login
+	// silently so those views are authorized without pressing `l` each time.
+	if cmd := m.autoLoginCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -489,23 +495,44 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 	}
 }
 
-// buildAgents fills the Agents view from the local state registry.
+// buildAgents fills the Agents view from the CP's /api/agents — the console's
+// authoritative, relay-probed agent roster (the durable source of truth after
+// 0.4.6 moved creation to freehold-agent-tools). Not logged in = a hint row,
+// not the stale local loopback state.
 func (m *Model) buildAgents(cfg *config.Config) {
-	st, err := state.Open(freeholdStateDir())
+	if m.console == nil || m.console.client == nil {
+		m.Agents = []AgentRow{{
+			Name:      "(not logged into a console)",
+			Available: styleDim.Render("press l to log in to see the CP agent roster"),
+		}}
+		return
+	}
+	agents, err := m.console.client.Agents()
 	if err != nil {
-		m.Agents = nil
+		m.Agents = []AgentRow{{
+			Name:      "(agent roster failed)",
+			Available: styleRed.Render(clip(err.Error(), 48)),
+		}}
 		return
 	}
 	m.Agents = nil
-	for name, rec := range st.Snapshot().Agents {
+	for _, a := range agents {
 		created := "just now"
-		if rec.CreatedAt > 0 {
-			created = humanize(time.Since(time.Unix(int64(rec.CreatedAt), 0)))
+		if a.CreatedAt > 0 {
+			created = humanize(time.Since(time.Unix(int64(a.CreatedAt), 0)))
 		}
-		m.Agents = append(m.Agents, AgentRow{Name: name, Pubkey: rec.Pubkey, Available: "—", Created: created})
+		avail := "—"
+		if a.Available != nil {
+			if *a.Available {
+				avail = "online"
+			} else {
+				avail = "offline"
+			}
+		}
+		m.Agents = append(m.Agents, AgentRow{Name: a.Name, Pubkey: a.Pubkey, Available: avail, Created: created})
 	}
 	if len(m.Agents) == 0 {
-		m.Agents = []AgentRow{{Name: "(no agents)", Created: styleDim.Render("nothing stood up yet")}}
+		m.Agents = []AgentRow{{Name: "(no agents on the console)", Created: styleDim.Render("created via the CP toolset")}}
 	}
 }
 
@@ -580,6 +607,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.LastRef = time.Now()
 		}
 		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+	case loginMsg:
+		if v.err != nil {
+			// Auto-login is best-effort (e.g. the console isn't reachable yet
+			// during a boot check): stay unauthenticated, nudge the operator
+			// to `l` once the world is up. Not a persistent error.
+			m.Msg = "auto-login failed — press l to log in: " + clip(v.err.Error(), 48)
+			return m, nil
+		}
+		if v.auth && v.client != nil {
+			m.console = &consoleClient{client: v.client}
+			m.consolePK = v.pubkey
+			m.RunnerSource = RunnerSourceCP
+			m.refreshLocal()
+			m.Msg = "auto-logged into the CP as " + v.pubkey[:12]
+		}
+		return m, nil
 	case activityStartMsg:
 		// the world-mutation forms all land here: full-screen streaming.
 		m.Flow = nil
@@ -656,10 +699,14 @@ func renderProbes(m *Model) string {
 
 func (m *Model) footer() string {
 	if m.Mode == ModeRunning {
+		op := ""
+		if m.consolePK != "" {
+			op = " · op " + m.consolePK[:12]
+		}
 		return styleFooter.Render(fmt.Sprintf(
-			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s",
-			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second))) +
-			"   " + styleDim.Render("l login · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · build/teardown run from the shell")
+			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s%s",
+			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second), op)) +
+			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
 	case ModeBootstrap, ModeConfigure:

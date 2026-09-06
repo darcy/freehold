@@ -62,6 +62,19 @@ reverts it and reimplements it correctly.
   `freehold-agent-tools` on it, and it applies agent pods through it — so runtime agent
   creation does not depend on an operator-box process.
 
+### Added
+
+- **The TUI drives the remote CP.** `l` logs into the CP console with the
+  **operator's nsec** (the console admin — so it grants every remote operation
+  locally: overview, provision, grant, revoke, agents, the web portal), persists
+  the key 0600 under `~/.freehold/control-plane/operator`, and every later TUI
+  launch **auto-logs in** from it (`freehold --login` does the same from the
+  shell). `w` opens the web console pre-authorized (single-use portal token).
+  The **Runners** tab toggles between the CP console and the local loopback
+  list with `s`, and the **Agents** tab now shows the CP's *live* agent roster
+  (name/pubkey/presence) instead of the stale local loopback registry — `l`
+  fixes what was a broken agent-ops (non-admin) login before.
+
 ### Removed
 
 - `freehold watch-agents`, its `--since`/`--poll-ms` flags, and the `#freehold` control-
