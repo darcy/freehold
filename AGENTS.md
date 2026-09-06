@@ -156,7 +156,11 @@ changelog.
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
   the CP registry holds. The CPA pod's harness has NOT yet attached this toolset as callable
   MCP tools — a stdio MCP facade the buzz-sprig pod would spawn (so the CPA itself can call
-  create/grant/manage) is the named follow-up.
+  create/grant/manage) is the named follow-up. **`grant_agent` on the toolset is not wired
+  yet**: binding an agent to a runner's whitelist is a relay roster change owned by the
+  console (the runner's channel owner), and the server does not hold that credential — it
+  fails loudly ("not wired") rather than silently succeeding; operators grant via the console
+  today.
 - **The CPA talks its reasoning model through the litellm gateway as an OpenAI-compatible
   endpoint.** The pod routes `BUZZ_AGENT_PROVIDER=openai-compat` to the recorded litellm NodePort
   URL (`cfg.Litellm.URL`, e.g. `http://192.168.30.8:31400/v1` — the CPA is `hostNetwork`, so the

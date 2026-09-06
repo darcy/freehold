@@ -61,6 +61,22 @@ func (r *Registry) RegisterAgent(name, pubkey, channel string) (json.RawMessage,
 	return json.RawMessage(`{}`), nil
 }
 
+// SetPurpose records an agent's one-line purpose on its registry row (the tool
+// knows it at create time; threading it separately keeps ConsoleOps mirroring
+// the console client, which has no purpose field). Saved with the row so a
+// rebuild reconciler can recreate the agent's system prompt verbatim.
+func (r *Registry) SetPurpose(name, purpose string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	row, ok := r.rows[name]
+	if !ok {
+		return fmt.Errorf("register %s before setting its purpose", name)
+	}
+	row.Purpose = purpose
+	r.rows[name] = row
+	return r.save()
+}
+
 // UnregisterAgent drops a registry row.
 func (r *Registry) UnregisterAgent(name string) (json.RawMessage, error) {
 	r.mu.Lock()

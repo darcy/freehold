@@ -156,6 +156,14 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose)
+		// Persist the purpose on the created agent's registry row so a rebuild
+		// reconciler can recreate its system prompt verbatim (E3 without
+		// silently dropping the agent's reason to exist).
+		if err == nil {
+			if reg, ok := s.Tools.Console.(*Registry); ok {
+				_ = reg.SetPurpose(a.Name, a.Purpose)
+			}
+		}
 		s.textResult(w, id, err, pub)
 	case "grant_agent":
 		var a grantAgentArgs
