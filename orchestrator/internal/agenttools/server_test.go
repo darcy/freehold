@@ -53,7 +53,7 @@ func TestVerifyRequest(t *testing.T) {
 func TestServerAuthGateAndDispatch(t *testing.T) {
 	srv := &Server{
 		Audience: "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55",
-		Grants:   []string{},
+		Grants:   func() ([]string, error) { return []string{}, nil },
 		Tools:    &agent.Tools{Console: nil, Create: nil},
 	}
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"bob"}}}`

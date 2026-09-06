@@ -36,17 +36,13 @@ type Config struct {
 	Dns              DnsSpec     `toml:"dns,omitempty"`
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
 	Caddy            CaddySpec   `toml:"caddy,omitempty"`
-	CPAName          string      `toml:"cpa_name,omitempty"`
-	Managed          []string    `toml:"managed"`
-	Agents           []AgentSpec `toml:"agents,omitempty"`
-}
-
-// AgentSpec is one created agent (Chunk 4 Phase E): its name + one-line purpose
-// and the durable pubkey the build redeploys on every reconcile (E3).
-type AgentSpec struct {
-	Name    string `toml:"name"`
-	Purpose string `toml:"purpose,omitempty"`
-	Pubkey  string `toml:"pubkey,omitempty"`
+	CPAName          string   `toml:"cpa_name,omitempty"`
+	Managed          []string `toml:"managed"`
+	// AgentTools is the CP's freehold-agent-tools MCP server (create/grant/
+	// manage-agent), recorded once deployed so the build (stageCpa + reconcile)
+	// and later the CPA call it over the shared signed-header MCP surface.
+	AgentToolsURL    string `toml:"agent_tools_url,omitempty"`
+	AgentToolsPubkey string `toml:"agent_tools_pubkey,omitempty"`
 }
 
 // ProxySpec is the single static address in the world: the proxy (Caddy) node,

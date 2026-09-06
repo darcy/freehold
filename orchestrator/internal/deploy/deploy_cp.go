@@ -240,11 +240,11 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		}
 		adopt := fmt.Sprintf("%s/control-plane adopt --kind %s --address %s --package-dir %s --state-dir %s --mcp-addr 127.0.0.1:8787 %s",
 			spec.BinDir, kind, address, runnerDir, spec.StateDir, runnerName)
-		if _, err := bootstrap.ExecToOK(clientConn, target, lxcCmd(spec.LXc, adopt), "adopt co-located runner", 60); err != nil {
+		if _, err := execTolerantAlreadyExists(clientConn, target, lxcCmd(spec.LXc, adopt), "adopt co-located runner", 60); err != nil {
 			return nil, err
 		}
-		grant := fmt.Sprintf("%s/control-plane grant --state-dir %s %s %s",
-			spec.BinDir, spec.StateDir, runnerName, pubkey)
+		grant := fmt.Sprintf("%s/control-plane grant --state-dir %s --pubkey %s %s",
+			spec.BinDir, spec.StateDir, pubkey, runnerName)
 		if _, err := bootstrap.ExecToOK(clientConn, target, lxcCmd(spec.LXc, grant), "self-grant console to co-located runner", 60); err != nil {
 			return nil, err
 		}
@@ -263,6 +263,23 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	detail := fmt.Sprintf("control plane deployed in OPERATE mode: state %s, %s; relay scope %s (C4: relay authoritative post-port, local state = offline cache mirror); the box's console identity (%s) GENERATED ON THE BOX — add it as a relay member with `freehold relay-member --pubkey %s`",
 		spec.StateDir, bindHint, spec.RelayURL, pubkey, pubkey)
 	return &DeployCpResult{StateDir: spec.StateDir, BindAddr: spec.BindAddr, Pubkey: pubkey, Detail: detail}, nil
+}
+
+// execTolerantAlreadyExists runs cmd through the runner and returns nil when
+// it succeeds OR the runner adoption reports "already exists" (the CP state
+// survived the rebuild — the package + serve were already re-shipped, so
+// re-adopting is a no-op). Any other non-zero exit is an error.
+func execTolerantAlreadyExists(clientConn *client.McpClient, target, cmd, step string, timeoutS uint64) (*client.ExecOutcome, error) {
+	out, err := bootstrap.Exec(clientConn, target, cmd, timeoutS)
+	if err != nil {
+		return nil, err
+	}
+	if out.ExitCode != nil && *out.ExitCode != 0 {
+		if !strings.Contains(out.Stdout+out.Stderr, "already exists") {
+			return out, fmt.Errorf("%s: exit %d: %s %s", step, *out.ExitCode, out.Stdout, out.Stderr)
+		}
+	}
+	return out, nil
 }
 
 // base64StdEncode is std base64 encode.

@@ -16,9 +16,13 @@ type Server struct {
 	// Audience is this server's own pubkey — the caller's signature binds to
 	// it, closing cross-audience replay, exactly like a runner's pubkey.
 	Audience string
-	// Grants are the caller pubkeys allowed to call this server. Seeded at
-	// bootstrap with the operator pubkey (see the Phase 1 seed step).
-	Grants []string
+	// Grants returns the CURRENT whitelist of caller pubkeys allowed to call
+	// this server, read fresh for every tools/call. It is the server's own
+	// relay roster (39002 channel membership), read live per call and
+	// fail-closed on relay error — the same grant model a runner uses. Seeded
+	// at bootstrap with the operator/build identity, and revocable without a
+	// restart (revocation is a roster change, not a process state change).
+	Grants func() ([]string, error)
 
 	// Tools holds the bound agent-management actions (Console + the deploy
 	// path). create_agent / grant_agent / manage_agent dispatch here.
@@ -64,8 +68,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Everything else is authorized with the shared signed-header scheme.
-	caller, aerr := VerifyRequest(s.Grants, s.Audience,
+	// Everything else is authorized with the shared signed-header scheme. The
+	// whitelist is this server's roster, read fresh per call (a revocation is
+	// a relay roster change and lands on the very next request); a relay
+	// outage fails closed (empty grants => deny all).
+	grants, gerr := s.Grants()
+	if gerr != nil {
+		s.rpcError(w, req.ID, -32001, "authorization unreadable (roster): "+gerr.Error())
+		return
+	}
+	caller, aerr := VerifyRequest(grants, s.Audience,
 		r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
 	if aerr != nil {
 		s.rpcError(w, req.ID, -32001, aerr.Error())

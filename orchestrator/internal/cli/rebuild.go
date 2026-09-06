@@ -39,17 +39,16 @@ import (
 
 	"freehold/orchestrator/internal/agent"
 	"freehold/orchestrator/internal/cert"
+	"freehold/orchestrator/internal/client"
 	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/crypto"
-	"freehold/orchestrator/internal/delegate"
 	"freehold/orchestrator/internal/deploy"
 	"freehold/orchestrator/internal/dnsman"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
-	"freehold/orchestrator/internal/relay"
 	"freehold/orchestrator/internal/state"
 	"freehold/orchestrator/internal/wire"
-	"freehold/orchestrator/prompts"
 )
 
 // dnsCredCmd stores the Caddy edge's DNS provider credential (provider + env)
@@ -292,11 +291,12 @@ type rebuildFlags struct {
 // dir (the layout ships all bins together in target/debug/, release pairs
 // in target/release/).
 type rebuildBins struct {
-	Self         string // this binary — the orchestrator (teardown-engine pattern)
-	ControlPlane string // target/debug/control-plane (Rust)
-	Runner       string // target/debug/runner (Rust)
-	ReleaseCP    string // target/release/control-plane (deploy-cp --binary)
-	ReleaseRun   string // target/release/runner (deploy-cp --runner-binary)
+	Self              string // this binary — the orchestrator (teardown-engine pattern)
+	ControlPlane      string // target/debug/control-plane (Rust)
+	Runner            string // target/debug/runner (Rust)
+	ReleaseCP         string // target/release/control-plane (deploy-cp --binary)
+	ReleaseRun        string // target/release/runner (deploy-cp --runner-binary)
+	ReleaseAgentTools string // target/release/freehold-agent-tools (the CP's agent-tools MCP server)
 }
 
 // resolveRebuildBins checks the binaries the pipeline actually execs and
@@ -309,11 +309,12 @@ func resolveRebuildBins() (rebuildBins, error) {
 	selfDir := filepath.Dir(self)
 	releaseDir := filepath.Join(selfDir, "..", "release")
 	b := rebuildBins{
-		Self:         self,
-		ControlPlane: filepath.Join(selfDir, "control-plane"),
-		Runner:       filepath.Join(selfDir, "runner"),
-		ReleaseCP:    filepath.Join(releaseDir, "control-plane"),
-		ReleaseRun:   filepath.Join(releaseDir, "runner"),
+		Self:              self,
+		ControlPlane:      filepath.Join(selfDir, "control-plane"),
+		Runner:            filepath.Join(selfDir, "runner"),
+		ReleaseCP:         filepath.Join(releaseDir, "control-plane"),
+		ReleaseRun:        filepath.Join(releaseDir, "runner"),
+		ReleaseAgentTools: filepath.Join(releaseDir, "freehold-agent-tools"),
 	}
 	var missing []string
 	for _, p := range []struct{ path, label string }{
@@ -321,6 +322,7 @@ func resolveRebuildBins() (rebuildBins, error) {
 		{b.Runner, "runner"},
 		{b.ReleaseCP, "../release/control-plane"},
 		{b.ReleaseRun, "../release/runner"},
+		{b.ReleaseAgentTools, "../release/freehold-agent-tools"},
 	} {
 		if _, err := os.Stat(p.path); err != nil {
 			missing = append(missing, filepath.Join(filepath.Base(selfDir), p.label))
@@ -328,7 +330,7 @@ func resolveRebuildBins() (rebuildBins, error) {
 	}
 	if len(missing) > 0 {
 		return b, fmt.Errorf(
-			"sibling binaries missing: %s\n  build them once, then re-run:\n    cargo build --bin control-plane --bin runner && cargo build --release --bin control-plane --bin runner",
+			"sibling binaries missing: %s\n  build them once, then re-run:\n    cargo build --bin control-plane --bin runner && cargo build --release --bin control-plane --bin runner && go build -C orchestrator -o target/release/freehold-agent-tools ./cmd/freehold-agent-tools",
 			strings.Join(missing, ", "))
 	}
 	return b, nil
@@ -679,23 +681,31 @@ func (e *rebuildEngine) run() error {
 		fmt.Fprintln(e.out, "  ✓ edge certs in place")
 	}
 
-	// 14.7. C0: the CPA — the system's reasoning touchpoint — deployed as a
-	// k3s Pod running the buzz-sprig harness (Chunk 4 Phase A: A2/A3/A5).
-	// It needs both the k3s substrate and the litellm gateway to reason, so
-	// opting either out skips the CPA too (a brainless pod is a dead pod).
-	// The DNS stages above (14.6) run first so the relay address it dials is
-	// already LAN-resolvable through the node on first boot.
+	// 14.65. the CP's freehold-agent-tools MCP server — the privileged home of
+	// create/grant/manage-agent. Deployed AFTER the CP + co-located runner +
+	// relay + DNS/Caddy are up (it dials the relay over the CP's resolver and
+	// deploys pods through the co-located runner), and BEFORE the CPA so stageCpa
+	// dogfoods create_agent over MCP. Idempotent: a rebuild re-seeds + relaunches.
+	fmt.Fprintln(e.out, "  · deploying the freehold-agent-tools MCP server on the CP…")
+	if err := e.stageDeployAgentTools(); err != nil {
+		return err
+	}
+
+	// 14.7. C0: the CPA — the system's reasoning touchpoint — created through
+	// freehold-agent-tools' create_agent (the same audited path agent-creates-
+	// agent uses). It needs both the k3s substrate and the litellm gateway to
+	// reason, so opting either out skips the CPA too (a brainless pod is a dead
+	// pod). The DNS stages above (14.6) run first so the relay address it dials
+	// is already LAN-resolvable through the node on first boot.
 	if !e.f.noK3s && !e.f.noLitellm {
-		fmt.Fprintln(e.out, "  · deploying the CPA (buzz-sprig pod into k3s; rollout up to 5m)…")
+		fmt.Fprintln(e.out, "  · creating the CPA via freehold-agent-tools (buzz-sprig pod into k3s; rollout up to 5m)…")
 		if err := e.stageCpa(); err != nil {
 			return err
 		}
 		fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
-		if agentsCfg, aerr := config.Load(e.f.configPath); aerr == nil && agentsCfg != nil && len(agentsCfg.Agents) > 0 {
-			fmt.Fprintln(e.out, "  · reconciling created agents…")
-			if err := e.reconcileCreatedAgents(); err != nil {
-				return err
-			}
+		fmt.Fprintln(e.out, "  · reconciling created agents (re-deploy anything the CP registry holds)…")
+		if err := e.reconcileCreatedAgents(); err != nil {
+			return err
 		}
 	}
 
@@ -1148,9 +1158,14 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	cfg.Dns = config.DnsSpec{Records: records, Manager: mgr}
 	cfg.Litellm = prev.Litellm
 	cfg.Caddy = prev.Caddy
-	// Created agents (Chunk 4 Phase E) survive across teardown+rebuild so the
-	// reconciler redeploys them; carry the recorded list forward like Plane/Dns.
-	cfg.Agents = prev.Agents
+	// The CP's freehold-agent-tools coords survive across teardown+rebuild so
+	// the reconciler can call the (re-seeded) server; a fresh run fills them in.
+	if cfg.AgentToolsURL == "" {
+		cfg.AgentToolsURL = prev.AgentToolsURL
+	}
+	if cfg.AgentToolsPubkey == "" {
+		cfg.AgentToolsPubkey = prev.AgentToolsPubkey
+	}
 	if cfg.RelayPubkey == nil {
 		cfg.RelayPubkey = prev.RelayPubkey
 	}
@@ -1887,6 +1902,7 @@ func (e *rebuildEngine) stageDeployCp() error {
 		"--relay-url", "https://" + e.f.relayDomain,
 		"--binary", e.bins.ReleaseCP,
 		"--runner-binary", e.bins.ReleaseRun,
+		"--runner-package", rbRunnerPkgs() + "/" + e.f.target,
 		"--operator-pubkey", e.f.operatorPubkey,
 	}
 	if cpRoot != "" {
@@ -3673,85 +3689,154 @@ func (e *rebuildEngine) promptProviderEnv(provider string) (map[string]string, e
 
 // ---- the CPA stage (Chunk 4 Phase A) ---------------------------------------
 
-// cpaIdentityDir is where the CPA's durable Nostr identity lives. It sits on
-// the CP's durable-plane area so a compute-only teardown/rebuild (Phase 0.12)
-// reattaches the SAME keypair — the CPA's identity survives the body, exactly
-// as the remote-agent vision requires (VISION_REMOTE_AGENTS: the keypair is
-// the agent; the pod is disposable).
-func cpaIdentityDir() string {
-	return filepath.Join(rbStateDir(), "agent-cpa")
-}
-
 // relayComposeDir is where the relay's docker-compose stack lives INSIDE the
 // relay LXC; buzz-admin (relay membership) runs through it.
 const relayComposeDir = "/srv/data/relay/deploy/compose"
 
-// relayFreeholdChannel is the deterministic #freehold channel (NIP-29) that the
-// CPA joins so a human can hold a conversation with it. Clients render the NAME
-// from the channel metadata, so only the id needs to be stable.
-const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
-
-// relayAddMember adds a Nostr pubkey as a relay member by running buzz-admin
-// add-member inside the relay LXC's compose stack. Idempotent: re-adding an
-// existing member prints "already a member ... (no change)" and exits 0.
-func (e *rebuildEngine) relayAddMember(cfg *config.Config, pubkey string) error {
-	if cfg.Lxc.Relay.Vmid == nil {
-		return fmt.Errorf("no relay LXC recorded — cannot add the agent as a relay member")
+// agentToolsMcp returns a signed MCP client to the CP's freehold-agent-tools
+// server, authenticated as the build/ops identity (the roster grant seeded at
+// bootstrap). The audience is the agent-tools server's own pubkey — the same
+// signed-header scheme a runner caller uses.
+func (e *rebuildEngine) agentToolsMcp(cfg *config.Config) (*client.McpClient, error) {
+	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
+		return nil, fmt.Errorf("no freehold-agent-tools coords recorded — deploy the agent-tools stage first")
 	}
-	cmdLine := fmt.Sprintf("cd %s && docker compose exec -T relay buzz-admin add-member --pubkey %s", relayComposeDir, pubkey)
-	full := fmt.Sprintf("pct exec %d -- sh -c '%s'", *cfg.Lxc.Relay.Vmid, cmdLine)
-	ok, out := e.runBin(e.bins.Self, e.execArgs(full, 120))
-	if !ok {
-		return fmt.Errorf("buzz-admin add-member: %s", strings.TrimSpace(out))
-	}
-	fmt.Fprintf(e.out, "  · relay member added: %s\n", pubkey)
-	return nil
-}
-
-// relayEnsureChannel publishes the CPA's Buzz profile (kind-0 metadata — the
-// NAME Buzz shows), ensures the #freehold channel exists, and joins the CPA to
-// it (kind 9000 create + kind 9021 join), all signed by the CPA identity. Every
-// step is an idempotent Open-relay publish (re-publishing the same channel/join
-// is accepted; re-publishing kind-0 just updates the name). Runs over the
-// relay's HTTP edge origin, which is what the relay-setup path uses.
-func (e *rebuildEngine) relayEnsureChannel(cfg *config.Config, secretHex, name string) error {
-	if cfg.RelayURL == "" {
-		return fmt.Errorf("no relay URL — cannot publish the CPA profile or join a channel")
-	}
-	sec, err := hex.DecodeString(secretHex)
+	auth, err := flows.AgentAuth(rbOpsDir())
 	if err != nil {
-		return fmt.Errorf("cpa nostr secret hex: %w", err)
+		return nil, err
 	}
-	if err := relay.PublishProfile(cfg.RelayURL, sec, name, "freehold control plane agent"); err != nil {
-		return fmt.Errorf("publish CPA profile (%s): %w", name, err)
+	return client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
+}
+
+// callAgentToolsText issues one tool call to a freehold-agent-tools client and
+// returns the result.content[0].text payload (e.g. the new agent's pubkey).
+func callAgentToolsText(mc *client.McpClient, tool string, args map[string]interface{}) (string, error) {
+	raw, err := mc.Call(tool, args)
+	if err != nil {
+		return "", err
 	}
-	if err := delegate.EnsureChannel(cfg.RelayURL, sec, relayFreeholdChannel, "#freehold"); err != nil {
-		return fmt.Errorf("ensure #freehold channel: %w", err)
+	var env struct {
+		Result *struct {
+			Content []map[string]any `json:"content"`
+		} `json:"result"`
 	}
-	if err := relay.JoinChannel(cfg.RelayURL, sec, relayFreeholdChannel); err != nil {
-		return fmt.Errorf("join #freehold channel: %w", err)
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", fmt.Errorf("agent-tools %s: bad envelope: %w", tool, err)
 	}
-	fmt.Fprintf(e.out, "  · CPA joined the #freehold relay channel (%s)\n", name)
+	if env.Result == nil || len(env.Result.Content) == 0 {
+		return "", fmt.Errorf("agent-tools %s: empty result", tool)
+	}
+	t, _ := env.Result.Content[0]["text"].(string)
+	return t, nil
+}
+
+// stageDeployAgentTools ships + seeds + launches the CP's freehold-agent-tools
+// MCP server (after the CP + co-located runner + relay + DNS/Caddy are up), and
+// records its coords so stageCpa/reconcile can call it. The server's roster is
+// seeded with the build/ops + operator identities, and the server is granted on
+// the CP's co-located runner so it can apply agent pods.
+func (e *rebuildEngine) stageDeployAgentTools() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	if cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.Relay.Vmid == nil || cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("need cp/relay/k3s coords to deploy agent-tools")
+	}
+	binDir, stateDir, err := e.cpGuestDirs()
+	if err != nil {
+		return err
+	}
+	root := filepath.Dir(stateDir)
+	agentToolsState := filepath.Join(root, "agent-tools")
+
+	auth, err := flows.AgentAuth(rbOpsDir())
+	if err != nil {
+		return err
+	}
+	dclient, err := client.New(client.ConnectURL(e.f.addr), auth, cfg.Runner.Pubkey)
+	if err != nil {
+		return err
+	}
+	opsPK, err := loadRPubkey(rbOpsDir())
+	if err != nil {
+		return err
+	}
+	grantsCSV := strings.Join([]string{opsPK, cfg.OperatorPubkey}, ",")
+	litellmBase := ""
+	if cfg.Litellm.URL != "" {
+		litellmBase = strings.TrimSuffix(cfg.Litellm.URL, "/")
+	}
+	cpaName := cfg.CPAName
+	if cpaName == "" {
+		cpaName = agent.DefaultCPAName
+	}
+	cpIP := ""
+	if cfg.Lxc.Cp.Ip != nil {
+		cpIP = config.StripCIDR(*cfg.Lxc.Cp.Ip)
+	}
+	res, err := deploy.DeployAgentTools(dclient, e.f.target, &deploy.DeployAgentToolsSpec{
+		LXc:                cfg.Lxc.Cp.Vmid,
+		BinDir:             binDir,
+		StateDir:           stateDir,
+		AgentToolsBinary:   e.bins.ReleaseAgentTools,
+		AgentToolsStateDir: agentToolsState,
+		BindAddr:           "0.0.0.0:8089",
+		RelayURL:           cfg.RelayURL,
+		RelayPubkey:        derefStrPtr(cfg.RelayPubkey),
+		RelayWS:            cfg.RelayWsURL,
+		RelayLxc:           cfg.Lxc.Relay.Vmid,
+		RelayCompose:       relayComposeDir,
+		K3sVmid:            *cfg.Lxc.K3s.Vmid,
+		RunnerAddr:         "127.0.0.1:8787",
+		RunnerPubkey:       cfg.Runner.Pubkey,
+		RunnerTarget:       cfg.Runner.Target,
+		RunnerName:         cfg.Runner.Target,
+		CpaName:            cpaName,
+		OwnerPubkey:        cfg.OperatorPubkey,
+		LiteLLMBase:        litellmBase,
+		GrantsCSV:          grantsCSV,
+	})
+	if err != nil {
+		return fmt.Errorf("deploy agent-tools: %w", err)
+	}
+	if cpIP == "" {
+		return fmt.Errorf("no cp IP recorded to reach the agent-tools server")
+	}
+	cfg.AgentToolsURL = fmt.Sprintf("http://%s:8089", cpIP)
+	cfg.AgentToolsPubkey = res.Pubkey
+	if err := cfg.Save(e.f.configPath); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ freehold-agent-tools live on the CP (audience %s)\n", res.Pubkey[:12])
 	return nil
 }
 
-// ensureCPAIdentity mints the CPA's Nostr keypair on first use and returns its
-// pubkey. Rebuilds reuse the recorded identity (identity continuity), so the
-// CPA's Buzz profile, presence, and DMs all survive.
-func ensureCPAIdentity() (string, error) {
-	return agent.EnsureIdentity(cpaIdentityDir())
+func derefStrPtr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
-// stageCpa deploys the CPA as a k3s Pod running the buzz-sprig harness (A2),
-// wires its Buzz display name (A3), and registers it in the agent registry
-// (A5). Identity is durable across rebuilds so the same agent returns.
+// stageCpa provisions the CPA through the CP's freehold-agent-tools MCP server
+// — the SAME audited create_agent the CPA itself will use for agent-creates-
+// agent. The agent-tools server mints the CPA identity on the CP's durable
+// plane, onboards it as a relay member, seats it in #freehold, applies its pod
+// (branching to the CPA manifest/prompt for the CPA name), and registers it.
+// The build signs the MCP call as the build/ops identity — the roster grant
+// seeded at bootstrap. Identity is CP-durable, so the same agent returns across
+// a rebuild.
 func (e *rebuildEngine) stageCpa() error {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil {
 		return err
 	}
-	if cfg == nil || cfg.Proxy.Ip == nil || cfg.Lxc.K3s.Vmid == nil {
-		return fmt.Errorf("no k3s coords recorded — the CPA pod needs the k3s substrate")
+	if cfg == nil || cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("no cp/k3s coords recorded — the CPA pod needs the k3s substrate")
 	}
 	if cfg.RelayURL == "" {
 		return fmt.Errorf("no relay URL in config — the CPA must join the community relay")
@@ -3759,76 +3844,78 @@ func (e *rebuildEngine) stageCpa() error {
 	if cfg.Litellm.URL == "" {
 		return fmt.Errorf("no litellm gateway recorded — the CPA needs a reasoning model (litellm is part of the world unless --no-litellm)")
 	}
-	k3sVmid := *cfg.Lxc.K3s.Vmid
 	cpaName := cfg.CPAName
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	cpaPub, err := ensureCPAIdentity()
+	mc, err := e.agentToolsMcp(cfg)
 	if err != nil {
 		return err
 	}
-	// A2-onboard: bring the CPA onto the COMMUNITY relay BEFORE the pod starts
-	// so its very first connect is authorized (the relay is membership-restricted
-	// and rejects "not a relay member"), and seat it in the #freehold channel so
-	// a person can hold a conversation with it. Both are idempotent on reconcile.
-	if err := e.relayAddMember(cfg, cpaPub); err != nil {
-		return fmt.Errorf("add CPA relay membership: %w", err)
-	}
-	// The harness speaks WS to the relay. The pod joins the community relay
-	// over the LAN: resolve the domain internally to the relay LXC (the CP
-	// resolver's split-horizon record wired before this stage) and speak
-	// plain ws on the relay's HTTP port (:3000 — the deployment's
-	// BUZZ_HTTP_PORT). The Caddy edge fronts TLS at wss://relay.<domain>, but
-	// the pod keeps the LAN ws origin until F5 flips it (roadmap/CORE_TLS.md)
-	// — a wss:443 host with no live cert yet would be a dead pod.
-	// cfg.RelayWsURL records this internal origin; fall back to deriving wss
-	// from the public URL for worlds that do reach the relay over TLS.
-	relayURL := cfg.RelayWsURL
-	if relayURL == "" {
-		relayURL = strings.Replace(cfg.RelayURL, "https://", "wss://", 1)
-	}
-	// B1/B3: the CPA's purpose lives in the orchestrator's prompts package
-	// (prompts/CPA_SYSTEM_PROMPT.md), embedded into this binary at compile
-	// time and shipped into the pod's ConfigMap at spawn; the pod re-reads
-	// the mounted copy on every restart — never cached, never a host-side
-	// file read (which would break on CWD).
-	promptText := prompts.CPASystemPrompt
-
-	// Ensure the cpa-identity Secret (nsec + owner) exists in the namespace.
-	id, err := flows.LoadIdentity(cpaIdentityDir())
+	text, err := callAgentToolsText(mc, "create_agent", map[string]interface{}{
+		"name":    cpaName,
+		"purpose": "the control plane agent — freehold's main reasoning touchpoint",
+	})
 	if err != nil {
-		return fmt.Errorf("cpa identity unreadable after mint: %w", err)
+		return fmt.Errorf("create CPA over agent-tools: %w", err)
 	}
-	// Seat the CPA in the #freehold channel + publish its Buzz profile name
-	// (idempotent re-publish).
-	if err := e.relayEnsureChannel(cfg, id.NostrSecretHex, cpaName); err != nil {
-		return fmt.Errorf("seat CPA in #freehold: %w", err)
+	cpaPub := strings.TrimSpace(text)
+	if !isHex64(cpaPub) {
+		return fmt.Errorf("create CPA returned a non-pubkey result: %q", cpaPub)
 	}
-	ok, out := e.runBin(e.bins.Self, e.execArgs(agent.AgentIdentityScript(
-		k3sVmid, id.NostrSecretHex, e.f.operatorPubkey, cpaName), 120))
-	if !ok {
-		return fmt.Errorf("cpa identity secret failed:\n%s", out)
-	}
-
-	// Apply the CPA pod via THIS binary self-exec'd through the runner (the
-	// same transport stageLitellm's exec uses), then record the agent. The
-	// runner executes this verbatim on the k3s guest; the pod's ConfigMap
-	// carries the prompt, so nothing ships the .md to the CP LXC.
-	// The litellm base URL is the recorded NodePort addr (cfg.Litellm.URL ,
-	// with /v1) — the CPA is hostNetwork and cannot resolve the in-kube
-	// `litellm.litellm` service name through the node's resolver.
-	litellmBase := cfg.Litellm.URL
-	if litellmBase == "" {
-		litellmBase = agent.LiteLLMServiceURL
-	}
-	litellmBase = strings.TrimSuffix(litellmBase, "/") + "/v1"
-	ok, out = e.runBin(e.bins.Self, e.execArgs(agent.CPAManifestScript(
-		k3sVmid, relayURL, promptText, cpaName, litellmBase, ""), 420))
-	if !ok {
-		return fmt.Errorf("cpa pod apply failed:\n%s", out)
-	}
+	fmt.Fprintf(e.out, "  · CPA live in Buzz (%s)\n", cpaName)
 	return e.recordCpa(cpaPub, cpaName)
+}
+
+// reconcileCreatedAgents redeploys every agent the CP's freehold-agent-tools
+// registry holds (the CP-durable source of truth — the CPA plus everything
+// created through create_agent), so a rebuild resurrects them idempotently with
+// the same durable pubkeys (E3). The CPA name itself is created by stageCpa.
+func (e *rebuildEngine) reconcileCreatedAgents() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.AgentToolsURL == "" {
+		return nil
+	}
+	cpaName := cfg.CPAName
+	if cpaName == "" {
+		cpaName = agent.DefaultCPAName
+	}
+	mc, err := e.agentToolsMcp(cfg)
+	if err != nil {
+		return err
+	}
+	listText, err := callAgentToolsText(mc, "manage_agent", map[string]interface{}{})
+	if err != nil {
+		return fmt.Errorf("list agents over agent-tools: %w", err)
+	}
+	var agents []console.AgentInfo
+	if err := json.Unmarshal([]byte(listText), &agents); err != nil {
+		return fmt.Errorf("parse agent list: %w: %s", err, listText)
+	}
+	for _, a := range agents {
+		if a.Name == "" || a.Name == cpaName {
+			continue
+		}
+		// create_agent is idempotent (the CP-durable identity is reused), so
+		// re-creating reseats the pod with the same pubkey across a rebuild.
+		text, cerr := callAgentToolsText(mc, "create_agent", map[string]interface{}{"name": a.Name})
+		if cerr != nil {
+			return fmt.Errorf("reconcile created agent %s: %w", a.Name, cerr)
+		}
+		fmt.Fprintf(e.out, "  · reconciled agent %s (pubkey %s)\n", a.Name, firstHex(text))
+	}
+	return nil
+}
+
+func firstHex(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 64 {
+		return s[:64]
+	}
+	return s
 }
 
 // recordCpa writes the CPA's identity + name into the config (managed) so the
