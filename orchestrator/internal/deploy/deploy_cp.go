@@ -215,6 +215,16 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	if spec.RunnerBinary != nil && spec.RunnerPackage != nil {
 		runnerName := filepathBase(*spec.RunnerPackage)
 		runnerDir := fmt.Sprintf("%s/runner/%s", spec.StateDir, runnerName)
+		// Stop a RUNNING co-located runner BEFORE re-shipping its binary: pct
+		// push cannot atomically overwrite the live-executable inode (the old
+		// process keeps the old inode, so the shipped-binary size check reads
+		// stale bytes and deploy-cp fails on the surviving binary). deploy-cp
+		// restarts it below. Tolerated when it isn't running.
+		if _, err := bootstrap.ExecToOK(clientConn, target,
+			lxcCmd(spec.LXc, "systemctl stop freehold-runner 2>/dev/null; true"),
+			"stop co-located runner", 30); err != nil {
+			return nil, err
+		}
 		if err := shipFile(clientConn, target, spec, *spec.RunnerBinary,
 			spec.BinDir+"/freehold-runner", "runner binary"); err != nil {
 			return nil, err
