@@ -117,9 +117,98 @@ func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	if got.CpPubkey != cpPubkey {
 		t.Errorf("cp_pubkey not seeded: %s", got.CpPubkey)
 	}
-	// Identity ledger persisted.
+	// The box's own provisioning identity is materialized on disk (the actor a
+	// CP-side grant binds), but login does NOT fabricate a [runner] block — a
+	// box has no deployed runner until `freehold build` authors one.
+	opsPK, err := OpsPubkey()
+	if err != nil {
+		t.Fatalf("box ops identity not materialized: %v", err)
+	}
+	if opsPK == "" {
+		t.Fatal("box ops identity pubkey empty")
+	}
+	if got.Runner.Pubkey != "" {
+		t.Errorf("login must not fabricate a runner pubkey (no deployed runner yet): %s", got.Runner.Pubkey)
+	}
+	// Operator identity ledger persisted.
 	if gotSec, err := SecretHex(); err != nil || gotSec != nsecHex {
 		t.Errorf("operator identity not persisted: %q err=%v", gotSec, err)
+	}
+}
+
+// TestInteractivePreservesSurvivingRunner guards the reviewer-flagged clobber:
+// on an already-built box, a re-login must NOT overwrite [runner] with the
+// box's agent-ops (caller) identity — [runner].pubkey is the DEPLOYED runner's
+// own identity, the audience of every signed call.
+func TestInteractivePreservesSurvivingRunner(t *testing.T) {
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const nsecHex = "b9100ce43b1deac5c5189f48bc6d97b287e122211d5f271488c0bcae2b350ad6"
+	srv := mockCP(t, "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff")
+	defer srv.Close()
+
+	// A world that was already `build`-deployed, with the runner's OWN identity
+	// recorded (distinct from the box's agent-ops caller identity).
+	deployedPub := "9999999999999999999999999999999999999999999999999999999999999999"
+	pre := &config.Config{}
+	pre.CPURL = srv.URL
+	pre.CpPubkey = "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff"
+	pre.Runner = config.RunnerRef{Addr: "127.0.0.1:8787", Pubkey: deployedPub, Target: "proxmox-box"}
+	if err := pre.Save(config.DefaultPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	pipeR, pipeW, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = pipeR
+	go func() { pipeW.WriteString(nsecHex + "\n"); pipeW.Close() }()
+	defer func() { os.Stdin = oldStdin }()
+
+	if err := Interactive(); err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+	got, err := config.Load(config.DefaultPath())
+	if err != nil || got == nil {
+		t.Fatalf("config: %v", err)
+	}
+	if got.Runner.Pubkey != deployedPub {
+		t.Errorf("re-login clobbered the deployed runner pubkey: got %q want %q", got.Runner.Pubkey, deployedPub)
+	}
+	if got.Runner.Target != "proxmox-box" {
+		t.Errorf("re-login clobbered runner target: %q", got.Runner.Target)
+	}
+}
+
+// TestEnsureOpsIdentityFirstRunWins proves the box provisioning identity is
+// minted once and never clobbered (idempotent across re-logins).
+func TestEnsureOpsIdentityFirstRunWins(t *testing.T) {
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	pk1, err := EnsureOpsIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pk1 == "" {
+		t.Fatal("empty ops pubkey")
+	}
+	// Second call (re-login) must return the SAME identity, not a new one.
+	pk2, err := EnsureOpsIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pk2 != pk1 {
+		t.Fatalf("ops identity not first-run-wins: %s vs %s", pk1, pk2)
+	}
+	// Logout clears the operator LEDGER only — the box's own identity survives
+	// (it is not the operator's nsec; the box stays a durable actor).
+	if err := Logout(); err != nil {
+		t.Fatal(err)
+	}
+	pk3, err := EnsureOpsIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pk3 != pk1 {
+		t.Fatalf("logout must not erase the box's own provisioning identity")
 	}
 }
 

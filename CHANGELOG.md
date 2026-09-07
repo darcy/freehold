@@ -53,6 +53,14 @@ world-state, migrations, async cert) extend it as they land.
   **CP console's `/api/world` endpoint behind it** (`control-plane/src/web.rs`): a
   logged-in operator pulls relay + CP coords themself, so the recovery source of
   truth is the CP — `login` seeds from real CP state, not a mock.
+- **Login materializes the box's own provisioning identity.** After a successful
+  `freehold login`, `internal/oplogin` mints (first-run-wins) the box's
+  `control-plane/agent-ops` ops identity — the same identity `freehold build` /
+  `teardown` sign with — on disk. A freshly-logged-in box is therefore a durable,
+  self-owned actor whose grant to the CP can live locally; it does **not**
+  fabricate a `[runner]` block (that's the deployed runner's own identity,
+  authored by `build`). `logout` clears the operator nsec ledger only and never
+  erases this box identity.
 
 ### Fixed
 
