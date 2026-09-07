@@ -8,8 +8,10 @@ The current version is the top entry in `CHANGELOG.md` — this file deliberatel
 restates a version number, so it can't go stale. Chunk 1 (engine room) and Chunk 2 (relay
 scope), including the durable volume plane (Phase 0.12), are implemented and live-verified
 against real infrastructure (a real PVE host, a real relay/CP pair under a real domain).
-Chunk 3 (the Rust→Go refactor) is complete; Chunk 4 (a real, reasoning CPA that lives in
-Buzz) is the current focus — see `roadmap/POC.md`. For how we got here, see
+Chunk 3 (the Rust→Go refactor) is complete. Chunk 4 (a real, reasoning CPA that lives in
+Buzz) is live: the CPA holds conversations, survives a full rebuild, and creates new agents
+itself when asked; its remaining Phase-F resource baseline is the current focus — see
+`roadmap/POC.md`. For how we got here, see
 `CHANGELOG.md`; this file describes the current state and the rules for working in this
 repo, not the history.
 
@@ -161,14 +163,6 @@ changelog.
   console (the runner's channel owner), and the server does not hold that credential — it
   fails loudly ("not wired") rather than silently succeeding; operators grant via the console
   today.
-- **The CPA talks its reasoning model through the litellm gateway as an OpenAI-compatible
-  endpoint.** The pod routes `BUZZ_AGENT_PROVIDER=openai-compat` to the recorded litellm NodePort
-  URL (`cfg.Litellm.URL`, e.g. `http://192.168.30.8:31400/v1` — the CPA is `hostNetwork`, so the
-  in-kube service name `litellm.litellm` would not resolve), model alias `ControlPlaneAgent` →
-  deepseek. Whether the live
-  harness (buzz-agent in `ghcr.io/block/buzz-sprig:main`) honours exactly these env vars is
-  verified against the packaged binary's config errors, but is not yet confirmed end-to-end on a
-  live pod — the D1 drill is the first proof.
 - **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
   the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
   bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and

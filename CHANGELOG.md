@@ -99,10 +99,19 @@ reverts it and reimplements it correctly.
 - **0.4.5 mints created-agent identities on the operator box** (`FREEHOLD_HOME/control-plane/
   agent-<name>`), which would not survive the CP's LXC teardown. Creation now mints on the
   CP's durable plane, closing that hole — and the CPA's identity follows it in.
-- The CPA prompt no longer claims it calls create/grant/manage tools its harness does not yet
-  attach (a stdio MCP facade the CPA pod would spawn to reach `freehold-agent-tools` is the
-  named follow-up — see AGENTS.md Known gaps), keeping the same honesty as the 0.4.3
-  tool-contract fix.
+- The CPA prompt now reflects that its harness actually runs the `freehold-agent-tools` stdio
+  MCP bridge (create/grant/manage are real, callable tools — verified live, a CPA asked in
+  Buzz created an agent end-to-end), closing the original 0.4.1/0.4.3 tool-contract honesty
+  gap for good.
+
+### Docs
+
+- **Docs updated to current reality (a locked hygiene obligation).** README, AGENTS.md,
+  VISION.md, ARCHITECTURE.md and the roadmap now describe what 0.4.6 shipped: the CP-side
+  `freehold-agent-tools` toolset, the CPA's live agent creation, and the remote-CP TUI
+  access. ARCHITECTURE's stale "Pieces" (the old freehold-delegate / four-view TUI / Go
+  control-plane fiction) was rewritten to match the code, and `roadmap/SSL_FIX.md` — a note
+  about a temporary, already-resolved issue — is removed.
 
 ### Known gaps at this version
 

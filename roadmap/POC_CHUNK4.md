@@ -70,13 +70,6 @@ to run, idle and active.
       register and report ●/○ availability from relay presence) so CPA shows
       up the same way any agent does.
 
-> **Phase B deferral (named, not lost):** A4's toolset is built and
-> unit-tested, but it is **not** wired as an MCP surface for D1–D3 — the
-> `freehold-agent-tools` MCP command was dropped for this pass, so the harness
-> has no callable create/grant/manage tools yet. A4 is ticked for the toolset
-> itself; wiring it as a real MCP server (or an equivalent surfaced toolset) is
-> the named follow-up for Phase E (agent-creates-agent).
-
 > **D1 model wiring:** the CPA's reasoning rides the litellm gateway as an
 > OpenAI-compatible endpoint — the pod sets `BUZZ_AGENT_PROVIDER=openai-compat`,
 > `OPENAI_COMPAT_BASE_URL=http://litellm.litellm:4000/v1`,
@@ -145,8 +138,9 @@ to run, idle and active.
       (mints a durable identity under the CP's durable plane, adds the pubkey
       as a relay member, seats it in #freehold + publishes its profile, applies
       its pod through the CP's co-located runner, and registers it). The build
-      dogfoods this exact call to bring the CPA up; the CPA pod's own harness
-      attachment (a stdio MCP facade it would spawn) is the named follow-up.
+      dogfoods this exact call to bring the CPA up; the CPA pod's harness
+      attaches the toolset via the stdio `mcp` bridge (fetched at boot), and
+      this is verified live — a CPA asked in Buzz created an agent end-to-end.
 - [x] E2. The created agent ships with no skill and no target — purely
       conversational, holding its own memory, same as CPA at this stage.
 - [x] E3. Verify the created agent is directly reachable in Buzz (not only
