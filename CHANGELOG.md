@@ -77,10 +77,12 @@ world-state, migrations, async cert) extend it as they land.
   agent-tools serve `--relay-host/--relay-ip/--cp-ip`), registers + points the
   CP-owned split-horizon resolver (`--cp-lxc/--proxy-ip/--litellm-ip` carry the
   coords), re-ensures the durable volume plane (`--plane-pool/--plane-kind/
-  --thin-pool`), and brings the litellm gateway up CP-side (kube workloads +
-  model registration through the co-located runner — the operator's provider
-  key rides the sealed co-located runner package, never argv); the cert install
-  extends it toward the full CP-driven build, and the box `build` slims to
+  --thin-pool`), brings the litellm gateway up CP-side (kube workloads + model
+  registration through the co-located runner — the operator's provider key
+  rides the sealed co-located runner package, never argv), and resolves the edge
+  certs CP-side (durable-reuse gate — no LE order when the durable mirror has a
+  valid cert — else an in-process resumable DNS-01 issue, sealed cred on the
+  CP, install through the co-located runner); the box `build` slims to
   CP-bring-up + trigger. The CPA
   harness is
   deliberately NOT given the mutating world tools (locked "conversation + create only").

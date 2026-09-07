@@ -24,7 +24,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -32,12 +34,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/term"
 
 	"freehold/orchestrator/internal/agent"
 	"freehold/orchestrator/internal/agenttools"
 	"freehold/orchestrator/internal/bootstrap"
+	"freehold/orchestrator/internal/cert"
 	"freehold/orchestrator/internal/client"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
@@ -570,6 +574,193 @@ func (s *deploySpec) worldStorage() error {
 	return nil
 }
 
+// ---- the edge cert on the CP (the box's F3 start/await pair, CP-side) ------
+//
+// Durable-reuse gate FIRST (read-only on the node, no LE order when a valid
+// cert survives the durable mirror at /srv/data/k8s-volumes/caddy-edge/<slot>):
+// a teardown+rebuild comes back on the same cert with no challenge and no
+// rate-limit exposure — the PVC is seeded from the mirror. Only when no valid
+// cert exists does issuance run: lego IN-PROCESS (the DNS-01 provider cred is
+// sealed to the agent-tools identity under <stateDir>/world-secrets, opened in
+// memory, resumable), the private key is sealed into the co-located runner
+// package (which the box's own issuance already ships), and the install runs
+// through the runner with the key requested BY NAME.
+
+// durableFullchain reads a slot's fullchain from the durable-plane mirror
+// (/srv/data/k8s-volumes/caddy-edge/<slot>) — a plain node file, readable
+// BEFORE the Caddy edge exists (the cold-rebuild recovery gate).
+func (s *deploySpec) durableFullchain(k3sVmid uint32, slot string) ([]byte, error) {
+	out, err := s.runOut(fmt.Sprintf("pct exec %d -- bash -c 'test -s %s/fullchain.pem 2>/dev/null && base64 -w0 < %s/fullchain.pem'",
+		k3sVmid, stages.CaddyEdgeDurableDir(slot), stages.CaddyEdgeDurableDir(slot)), 60)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return nil, fmt.Errorf("no durable mirror for %s", slot)
+	}
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+}
+
+// durableKeyPresent reports whether the durable mirror also holds a non-empty
+// key.pem (a fullchain alone is not enough to serve TLS).
+func (s *deploySpec) durableKeyPresent(k3sVmid uint32, slot string) bool {
+	return s.run(fmt.Sprintf("pct exec %d -- bash -c 'test -s %s/key.pem'", k3sVmid, stages.CaddyEdgeDurableDir(slot)), 60) == nil
+}
+
+// seedCaddyCertFromDurable seeds a slot's Caddy PVC backing dir from the
+// durable-plane mirror and restarts the edge. No private key transits a
+// command or the audit — both files come from the node's own durable volume.
+func (s *deploySpec) seedCaddyCertFromDurable(k3sVmid uint32, slot string) error {
+	cmd := fmt.Sprintf(`set -e
+pct exec %d -- bash -c '
+set -e
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+DIR=$PDIR/tls/%s
+SRC=%s
+mkdir -p "$DIR"
+cp "$SRC/fullchain.pem" "$DIR/fullchain.pem"
+cp "$SRC/key.pem" "$DIR/key.pem"
+chmod 600 "$DIR/key.pem"
+$K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
+echo DURABLE_SEED_OK
+'`, k3sVmid, slot, stages.CaddyEdgeDurableDir(slot))
+	return s.run(cmd, 120)
+}
+
+// dnsCredFromStore opens the operator's DNS-01 provider credential for a slot
+// from the CP's durable sealed store (<stateDir>/world-secrets/dns-<slot>.json,
+// sealed to the agent-tools identity — written by the box build's hand-off).
+// Errors loudly when no copy has been handed off yet (the ISSUE path needs it;
+// the durable-reuse path does not).
+func (s *deploySpec) dnsCredFromStore(slot string) (string, map[string]string, error) {
+	path := filepath.Join(s.stateDir, "world-secrets", "dns-"+slot+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("no DNS provider credential on the CP at %s — run `freehold build` to hand it off (or the durable-reuse path serves an existing cert)", path)
+		}
+		return "", nil, err
+	}
+	var st struct {
+		Provider string            `json:"provider"`
+		Env      map[string]string `json:"env"`
+		Sealed   string            `json:"sealed"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return "", nil, err
+	}
+	id, err := flows.LoadIdentity(s.stateDir)
+	if err != nil {
+		return "", nil, err
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return "", nil, err
+	}
+	blob, err := hex.DecodeString(st.Sealed)
+	if err != nil {
+		return "", nil, err
+	}
+	env, err := crypto.Open(secret, []byte("dns-"+slot), blob)
+	if err != nil {
+		return "", nil, err
+	}
+	var envMap map[string]string
+	if err := json.Unmarshal(env, &envMap); err != nil {
+		return "", nil, err
+	}
+	return st.Provider, envMap, nil
+}
+
+// issueCert runs the resumable DNS-01 issuance IN-PROCESS for one slot's host
+// (lego via internal/cert; the sealed DNS cred opened in memory), so a re-run
+// after a timeout RESUMES the same order instead of re-challenging.
+func (s *deploySpec) issueCert(slot, host, provider string, env map[string]string) (*cert.Issued, error) {
+	id, err := flows.LoadIdentity(s.stateDir)
+	if err != nil {
+		return nil, err
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return nil, err
+	}
+	dp, err := cert.NewDNSProvider(provider, env)
+	if err != nil {
+		return nil, err
+	}
+	statePath := filepath.Join(s.stateDir, "world-secrets", "cert-pending-"+slot+".json")
+	resume := &cert.Resume{
+		Domain:   host,
+		Provider: dp,
+		Seal:     func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) },
+		Open:     func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) },
+		SealPub:  pub,
+		OpenSec:  secret,
+		Path:     statePath,
+	}
+	po, ok, err := resume.TryLoad()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		po, err = resume.Begin()
+		if err != nil {
+			return nil, err
+		}
+	}
+	issued, err := resume.Resolve(po)
+	if err != nil {
+		return nil, err
+	}
+	return issued, nil
+}
+
+// worldCert resolves each edge slot's cert CP-side: the durable-reuse gate
+// (valid mirror => seed the PVC, no LE order) else an in-process resumable
+// DNS-01 issue, then install through the co-located runner with the private key
+// requested BY NAME from its package (the box's own issuance ships cert-key-
+// <slot> into the proxmox-box package, which deploy-cp re-ships).
+func (s *deploySpec) worldCert() error {
+	for _, sl := range []struct{ slot, host string }{
+		{"relay", s.relayHost}, {"cp", s.cpHost},
+	} {
+		if sl.host == "" {
+			continue
+		}
+		// Durable-reuse gate: a valid cert on the durable mirror (>= 30d left)
+		// means no LE order, no challenge, no rate-limit — seed the PVC from it.
+		if fc, err := s.durableFullchain(s.k3sVmid, sl.slot); err == nil && s.durableKeyPresent(s.k3sVmid, sl.slot) {
+			if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok {
+				if err := s.seedCaddyCertFromDurable(s.k3sVmid, sl.slot); err != nil {
+					return fmt.Errorf("cert %s durable seed: %w", sl.slot, err)
+				}
+				continue
+			}
+		}
+		// Issue path: needs the sealed DNS cred on the CP + the cert key in the
+		// co-located runner (the box's issuance ships it; the CP self-sufficient
+		// issuance lands with the box-slim). Fail loudly otherwise.
+		if !s.runnerHasSecret("cert-key-" + sl.slot) {
+			return fmt.Errorf("cert %s: no cert-key-%s in the co-located runner and the durable mirror is not reusable — run `freehold build` to issue/seed", sl.slot, sl.slot)
+		}
+		provider, env, err := s.dnsCredFromStore(sl.slot)
+		if err != nil {
+			return fmt.Errorf("cert %s: %w", sl.slot, err)
+		}
+		issued, err := s.issueCert(sl.slot, sl.host, provider, env)
+		if err != nil {
+			return fmt.Errorf("cert %s issue: %w", sl.slot, err)
+		}
+		if err := s.runSecrets(stages.CaddyCertInstallScript(s.k3sVmid, sl.slot, issued.Fullchain), 180, "cert-key-"+sl.slot); err != nil {
+			return fmt.Errorf("cert %s install: %w", sl.slot, err)
+		}
+	}
+	return nil
+}
+
 // ---- litellm on the CP (the two-leg box stageLitellm, CP-side) -------------
 //
 // Leg 1 (kube workloads, no operator secret): the master key + postgres pw are
@@ -708,6 +899,15 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 				return "", fmt.Errorf("world-build caddy edge: %w", err)
 			}
 			report = append(report, "caddy TLS edge re-applied")
+		}
+		// 7. The edge certs: durable-reuse gate (no LE order when the durable
+		// mirror has a valid cert) else an in-process resumable DNS-01 issue,
+		// then install into the Caddy PVC through the co-located runner.
+		if spec.k3sVmid != 0 && (spec.relayHost != "" || spec.cpHost != "") {
+			if err := spec.worldCert(); err != nil {
+				return "", fmt.Errorf("world-build cert: %w", err)
+			}
+			report = append(report, "cert issued/installed (or already present)")
 		}
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")
