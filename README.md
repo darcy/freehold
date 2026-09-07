@@ -174,9 +174,14 @@ freehold --help               # both surfaces
   sync — it is a box-local, user-held key). The CP **pubkey** is the box's
   trust anchor for a CP it has never met: `login` cross-checks the operator-
   supplied value against the CP's own `/api/world` report and refuses to seed on
-  mismatch (blank falls back to the CP's report; neither → error). In the TUI,
-  `l` re-logs into the CP console with that persisted nsec, and `freehold logout`
-  clears the local ledger only (CP/world untouched).
+   mismatch (blank falls back to the CP's report; neither → error). `login` also
+  materializes the box's **own** provisioning identity (`~/.freehold/control-
+  plane/agent-ops`, first-run-wins — the identity `freehold build`/`teardown`
+  sign with), so the box is a durable, self-owned actor; it does **not** fabricate
+  a `[runner]` block (that is the deployed runner's own identity, authored by
+  `build`). In the TUI, `l` re-logs into the CP console with that persisted
+  nsec, and `freehold logout` clears the local ledger only (CP/world untouched,
+  box identity kept).
   `w` then opens the web console in your browser already authenticated
   (single-use portal token — no `console-login`). Keys are scoped to the
   active view.

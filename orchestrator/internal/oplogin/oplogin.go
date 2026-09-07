@@ -27,12 +27,6 @@ import (
 	"freehold/orchestrator/internal/wire"
 )
 
-// addressOf is the box's local provisioning-runner address default. The box's
-// own runner is the identity every build/teardown call signs with; login
-// records it so a freshly-logged-in box is immediately an actor whose ROSTER
-// grant can live locally — the "we only need to login once" property.
-const runnerAddr = "127.0.0.1:8787"
-
 // OpsDir is where the BOX's own provisioning identity lives — the same
 // `agent-ops` identity `freehold build` / `teardown` sign with (rbOpsDir,
 // internal/cli). Login materializes it so a fresh box is a durable, self-owned
@@ -243,14 +237,13 @@ func Interactive() error {
 	if err != nil {
 		return err
 	}
-	// Materialize the box's own provisioning identity (first-run-wins) and
-	// record it: this is how the box is a durable, self-owned actor whose grant
-	// to the CP lives locally — the "we only need to login once" property.
-	opsPK, err := EnsureOpsIdentity()
-	if err != nil {
+	// Materialize the box's own provisioning identity (first-run-wins): this is
+	// how the box is a durable, self-owned actor whose grant to the CP can live
+	// locally — the "we only need to login once" property.
+	if _, err := EnsureOpsIdentity(); err != nil {
 		return err
 	}
-	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey, opsPK); err != nil {
+	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey); err != nil {
 		return err
 	}
 	fmt.Printf("logged in as %s against %s — run `freehold` to operate the world\n", pk, cpURL)
@@ -277,7 +270,7 @@ func resolveCPPubkey(user, world string) (string, error) {
 // seed writes the logged-in connection/desire profile back to the config path,
 // preserving any surviving local facts (plane, runners, coords) the box already
 // holds and filling the connection coordinates login just established.
-func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, relayPubkey, opsPK string) error {
+func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, relayPubkey string) error {
 	cfg.CPURL = cpURL
 	if cpPubkey != "" {
 		cfg.CpPubkey = cpPubkey
@@ -292,14 +285,16 @@ func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, re
 	if relayPubkey != "" {
 		cfg.RelayPubkey = &relayPubkey
 	}
-	// The box's own provisioning runner: its signing identity + loopback
-	// address — the actor `freehold build`/`teardown` and the CP grants. The
-	// operator identity dir records where this box's console-admin nsec ledger
-	// lives (the same ledger the TUI auto-logs in from).
+	// The operator identity dir records where this box's console-admin nsec
+	// ledger lives (the same ledger the TUI auto-logs in from).
 	opDir := Dir()
 	cfg.OperatorIdentity = &opDir
-	cfg.Runner.Addr = runnerAddr
-	cfg.Runner.Pubkey = opsPK
+	// [runner] is deliberately NOT touched: it is the DEPLOYED provisioning
+	// runner's own identity, authored by `freehold build` and used as the
+	// audience of every signed call — a box has no deployed runner at login,
+	// fabricating one here would clobber a surviving local fact. The box's own
+	// agent-ops identity is materialized on disk only (EnsureOpsIdentity);
+	// opsPK is the box's caller identity, never the runner's.
 	return cfg.Save(config.DefaultPath())
 }
 
