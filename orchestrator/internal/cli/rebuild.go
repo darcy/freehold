@@ -2086,23 +2086,10 @@ func (e *rebuildEngine) cpGuestGateway() string {
 
 // parsePctGateway extracts the `net0` `gw=` value from a `pct config` dump.
 // Static guests carry `gw=<router>`; DHCP guests (`ip=dhcp`) have NO gw= —
-// an empty result routes the caller to the default-route fallback.
+// an empty result routes the caller to the default-route fallback. Shared with
+// the CP executor via internal/stages.
 func parsePctGateway(out string) string {
-	for _, l := range strings.Split(out, "\n") {
-		if !strings.HasPrefix(l, "net0:") {
-			continue
-		}
-		for _, kv := range strings.Split(l, ",") {
-			v, found := strings.CutPrefix(kv, "gw=")
-			if found {
-				v = strings.TrimSpace(v)
-				if v != "" && strings.ContainsAny(v, "0123456789") {
-					return v
-				}
-			}
-		}
-	}
-	return ""
+	return stages.ParsePctGateway(out)
 }
 
 // stageDnsPoint points every managed guest at the CP resolver: write
@@ -3447,6 +3434,9 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		RelayLxc:           cfg.Lxc.Relay.Vmid,
 		RelayCompose:       stages.RelayComposeDir,
 		K3sVmid:            *cfg.Lxc.K3s.Vmid,
+		CpLxc:              cfg.Lxc.Cp.Vmid,
+		ProxyIP:            config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
+		LiteLLMIP:          cfg.Litellm.Host,
 		RunnerAddr:         "127.0.0.1:8787",
 		RunnerPubkey:       cfg.Runner.Pubkey,
 		RunnerTarget:       cfg.Runner.Target,

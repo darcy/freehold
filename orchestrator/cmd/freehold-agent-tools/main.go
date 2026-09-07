@@ -102,6 +102,13 @@ serve FLAGS:
   --relay-lxc       VMID         the relay LXC's vmid (relay membership runs through the runner's pct exec)
   --relay-compose   DIR          relay compose dir inside the relay LXC (buzz-admin runs there)
   --k3s-vmid        VMID         the k3s LXC's vmid (agent pods apply here)
+  --relay-host      HOST         relay's public host (Caddy edge front)
+  --relay-ip        IP           relay LXC LAN IP (Caddy upstream), CIDR ok
+  --cp-host         HOST         control plane's public host (Caddy edge front)
+  --cp-ip           IP           cp LXC LAN IP (Caddy upstream), CIDR ok
+  --cp-lxc          VMID         the cp LXC's vmid (the dnsmasq resolver lives here)
+  --proxy-ip        IP           proxy/k3s node static IP (CIDR ok) the public hosts resolve to
+  --litellm-ip      IP           litellm gateway node IP (k3s node), CIDR ok
   --runner-addr     ADDR         the CP's co-located runner MCP addr (127.0.0.1:8787) deploys run through
   --runner-pubkey   HEX          the runner's pubkey (audience for the deploy exec)
   --runner-target   TGT          the runner target whose door reaches the box (e.g. proxmox-box)
@@ -196,6 +203,10 @@ func cmdServe(args []string) {
 	relayIP := fs.String("relay-ip", "", "relay LXC LAN IP (Caddy upstream), CIDR ok")
 	cpHost := fs.String("cp-host", "", "control plane's public host (Caddy edge front)")
 	cpIP := fs.String("cp-ip", "", "cp LXC LAN IP (Caddy upstream), CIDR ok")
+	var cpLxc uint
+	fs.UintVar(&cpLxc, "cp-lxc", 0, "cp LXC vmid (the dnsmasq resolver lives here)")
+	proxyIP := fs.String("proxy-ip", "", "proxy/k3s node static IP (CIDR ok) the public hosts resolve to")
+	litellmIP := fs.String("litellm-ip", "", "litellm gateway node IP (k3s node), CIDR ok")
 	runnerAddr := fs.String("runner-addr", "127.0.0.1:8787", "CP co-located runner MCP addr")
 	runnerPK := fs.String("runner-pubkey", "", "runner pubkey (deploy exec audience)")
 	runnerTarget := fs.String("runner-target", "", "runner target that reaches the box")
@@ -256,6 +267,9 @@ func cmdServe(args []string) {
 		relayIP:        strings.TrimSpace(config.StripCIDR(*relayIP)),
 		cpHost:         *cpHost,
 		cpIP:           strings.TrimSpace(config.StripCIDR(*cpIP)),
+		cpLxc:          uint32(cpLxc),
+		proxyIP:        strings.TrimSpace(config.StripCIDR(*proxyIP)),
+		litellmIP:      strings.TrimSpace(config.StripCIDR(*litellmIP)),
 		relayLxc:       uint32(relayLxc),
 		relayCompose:   *relayCompose,
 		k3sVmid:        uint32(k3sVmid),
@@ -329,6 +343,9 @@ type deploySpec struct {
 	relayIP        string
 	cpHost         string
 	cpIP           string
+	cpLxc          uint32
+	proxyIP        string
+	litellmIP      string
 	relayLxc       uint32
 	relayCompose   string
 	k3sVmid        uint32
@@ -350,23 +367,126 @@ func (s *deploySpec) client() (*client.McpClient, error) {
 	return client.New(client.ConnectURL(s.runnerAddr), auth, s.runnerPK)
 }
 
-func (s *deploySpec) run(cmd string, timeoutS uint64) error {
+// runOut runs cmd through the co-located runner (target = the box) and returns
+// its stdout. Secrets requested: the runner requires the SSH target's OWN
+// credential among the requested secrets (it does not default to it then).
+func (s *deploySpec) runOut(cmd string, timeoutS uint64) (string, error) {
 	mc, err := s.client()
 	if err != nil {
-		return err
+		return "", err
 	}
 	out, err := mc.Exec(s.runnerTarget, cmd, []string{s.runnerTarget}, timeoutS)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !out.TimedOut && out.ExitCode != nil && *out.ExitCode == 0 {
-		return nil
+	if out.TimedOut || out.ExitCode == nil || *out.ExitCode != 0 {
+		ec := -1
+		if out.ExitCode != nil {
+			ec = *out.ExitCode
+		}
+		return "", fmt.Errorf("runner exec failed (timed=%v exit=%d): %s %s", out.TimedOut, ec, strings.TrimSpace(out.Stdout), strings.TrimSpace(out.Stderr))
 	}
-	ec := -1
-	if out.ExitCode != nil {
-		ec = *out.ExitCode
+	return out.Stdout, nil
+}
+
+func (s *deploySpec) run(cmd string, timeoutS uint64) error {
+	_, err := s.runOut(cmd, timeoutS)
+	return err
+}
+
+// cpGuestDirs derives the deployed control-plane's bin + state dirs inside the
+// cp LXC from the agent-tools state dir (<root>/agent-tools -> <root>/bin +
+// <root>/control-plane, the cpGuestDirs layout deploy-cp uses).
+func (s *deploySpec) cpGuestDirs() (binDir, stateDir string) {
+	root := filepath.Dir(s.stateDir)
+	return filepath.Join(root, "bin"), filepath.Join(root, "control-plane")
+}
+
+// guestSearchBase reads the `search` line from the CP LXC's resolv.conf (PVE
+// writes the same search domain to every guest it manages). Empty when absent.
+func (s *deploySpec) guestSearchBase() string {
+	out, err := s.runOut(fmt.Sprintf("pct exec %d -- sh -c \"grep '^search' /etc/resolv.conf | head -1 | cut -d' ' -f2-\"", s.cpLxc), 30)
+	if err != nil {
+		return ""
 	}
-	return fmt.Errorf("runner exec failed (timed=%v exit=%d): %s %s", out.TimedOut, ec, strings.TrimSpace(out.Stdout), strings.TrimSpace(out.Stderr))
+	base := strings.TrimSpace(out)
+	if base == "" || strings.ContainsAny(base, " \"'`$;(){}") || !strings.Contains(base, ".") {
+		return ""
+	}
+	return base
+}
+
+// guestNameserver returns the CP LXC's dnsmasq UPSTREAM (the router), tried in
+// order: the PVE-owned net0 gw= (static guests only), then the default route,
+// then the resolv.conf nameserver that isn't the resolver's own IP.
+func (s *deploySpec) guestNameserver() string {
+	if out, err := s.runOut(fmt.Sprintf("pct config %d", s.cpLxc), 30); err == nil {
+		if gw := stages.ParsePctGateway(out); gw != "" {
+			return gw
+		}
+	}
+	if out, err := s.runOut(fmt.Sprintf("pct exec %d -- sh -c \"ip route show default | head -1 | cut -d' ' -f3\"", s.cpLxc), 30); err == nil {
+		if ns := strings.TrimSpace(out); ns != "" && strings.ContainsAny(ns, "0123456789") {
+			return ns
+		}
+	}
+	if out, err := s.runOut(fmt.Sprintf("pct exec %d -- sh -c \"grep '^nameserver' /etc/resolv.conf | cut -d' ' -f2\"", s.cpLxc), 30); err == nil {
+		for _, l := range strings.Split(out, "\n") {
+			ns := strings.TrimSpace(l)
+			if ns != "" && ns != s.cpIP && strings.ContainsAny(ns, "0123456789") {
+				return ns
+			}
+		}
+	}
+	return ""
+}
+
+// worldDNS registers the CP resolver's explicit records and points every guest
+// at it (the stageDnsRegister + stageDnsPoint pair, CP-side): upsert the
+// split-horizon names via `control-plane dns add` inside the CP, pct-set the
+// guests' nameserver, rewrite their resolv.conf now (pct regenerates it only at
+// the next boot), and prove the resolver ANSWERS a record from its own loopback.
+func (s *deploySpec) worldDNS() error {
+	binDir, stateDir := s.cpGuestDirs()
+	searchBase := s.guestSearchBase()
+	for _, r := range stages.DnsRecords(s.relayHost, s.relayIP, s.cpHost, s.cpIP, s.proxyIP, s.litellmIP) {
+		if err := s.run(stages.DnsAddCmd(s.cpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
+			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
+		}
+	}
+	router := s.guestNameserver()
+	for _, role := range []struct {
+		name string
+		vmid uint32
+	}{
+		{"relay", s.relayLxc}, {"cp", s.cpLxc}, {"k3s", s.k3sVmid},
+	} {
+		if role.vmid == 0 {
+			continue
+		}
+		r := ""
+		if role.name == "cp" {
+			r = router
+		}
+		pctSet, resolvConf := stages.DnsPointCmd(role.vmid, s.cpIP, r, searchBase)
+		if err := s.run(pctSet, 60); err != nil {
+			return fmt.Errorf("world-build dns point %s: %w", role.name, err)
+		}
+		if err := s.run(resolvConf, 60); err != nil {
+			return fmt.Errorf("world-build dns point %s resolv.conf: %w", role.name, err)
+		}
+	}
+	for _, q := range []struct{ name, want string }{
+		{"relay", s.relayIP}, {"litellm", s.litellmIP},
+	} {
+		if q.want == "" {
+			continue
+		}
+		if err := s.run(stages.DnsVerifyCmd(s.cpLxc, q.name, q.want), 30); err != nil {
+			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
+		}
+	}
+	return nil
 }
 
 // buildWorldApply returns the CP's world-build/reconcile driver: it runs the
@@ -400,7 +520,17 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			}
 			report = append(report, "relay compose reconverged")
 		}
-		// 3. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
+		// 3. The CP-owned resolver: register the split-horizon names (bare
+		// guests + the dotted public hosts via the proxy) and point every guest
+		// at the CP as its nameserver, then verify the resolver actually ANSWERS
+		// (dnsmasq served the records, not merely tcp/53 open). No secrets.
+		if spec.cpLxc != 0 && spec.cpIP != "" {
+			if err := spec.worldDNS(); err != nil {
+				return "", err
+			}
+			report = append(report, "dns register/point applied")
+		}
+		// 4. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
 		// coords are recorded. No secrets (the Caddyfile is plain); cert
 		// issuance/install remain a separate stage.
 		if spec.k3sVmid != 0 && spec.relayHost != "" && spec.cpHost != "" && spec.relayIP != "" {

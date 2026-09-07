@@ -3,6 +3,7 @@ package deploy
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,9 @@ type DeployAgentToolsSpec struct {
 	RelayLxc           *uint32 // relay vmid
 	RelayCompose       string
 	K3sVmid            uint32
+	CpLxc              *uint32 // cp vmid (the dnsmasq resolver world_build drives)
+	ProxyIP            string  // proxy/k3s node static IP (public hosts resolve to it)
+	LiteLLMIP          string  // litellm gateway node IP (k3s node)
 	RunnerAddr         string
 	RunnerPubkey       string
 	RunnerTarget       string
@@ -137,6 +141,15 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	}
 	if spec.RelayURL != "" && spec.RelayWS != "" {
 		serveFlags += " --relay-ws " + spec.RelayWS
+	}
+	if spec.CpLxc != nil && *spec.CpLxc != 0 {
+		serveFlags += " --cp-lxc " + strconv.FormatUint(uint64(*spec.CpLxc), 10)
+	}
+	if spec.ProxyIP != "" {
+		serveFlags += " --proxy-ip " + spec.ProxyIP
+	}
+	if spec.LiteLLMIP != "" {
+		serveFlags += " --litellm-ip " + spec.LiteLLMIP
 	}
 	if spec.RelayHost != "" {
 		serveFlags += " --relay-host " + spec.RelayHost

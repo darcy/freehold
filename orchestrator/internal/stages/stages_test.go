@@ -89,6 +89,109 @@ func TestLitellmRegisterScript(t *testing.T) {
 	}
 }
 
+// TestDnsRecords: the split-horizon record set — bare guest names + the dotted
+// public hosts resolving to the PROXY (never a LXC); empty fields drop records.
+func TestDnsRecords(t *testing.T) {
+	recs := DnsRecords("relay.d", "10.0.0.5", "cp.d", "10.0.0.6", "10.0.0.7", "10.0.0.7")
+	var got []string
+	for _, r := range recs {
+		got = append(got, r.Name)
+	}
+	for _, want := range []string{"relay", "cp", "proxy", "k3s", "litellm", "relay.d", "cp.d"} {
+		if !containsStr(got, want) {
+			t.Errorf("records missing %q: %v", want, got)
+		}
+	}
+	for _, r := range recs {
+		switch r.Name {
+		case "relay":
+			if r.IP != "10.0.0.5" {
+				t.Errorf("relay must resolve to the relay LXC IP, got %s", r.IP)
+			}
+		case "relay.d", "cp.d":
+			if r.IP != "10.0.0.7" {
+				t.Errorf("%s must resolve to the proxy (Caddy), got %s", r.Name, r.IP)
+			}
+		}
+	}
+	noHost := DnsRecords("", "10.0.0.5", "", "10.0.0.6", "10.0.0.7", "")
+	for _, r := range noHost {
+		if r.Name == "relay.d" || r.Name == "cp.d" || r.Name == "litellm" {
+			t.Errorf("empty field must drop the record, got %+v", r)
+		}
+	}
+}
+
+// TestDnsAddCmd pins the register command shape: the inner control-plane
+// invocation is single-quoted once (the values are validated names/IPs), and a
+// search base rides --domain when supplied.
+func TestDnsAddCmd(t *testing.T) {
+	cmd := DnsAddCmd(101, "/srv/data/cp/bin", "/srv/data/cp/control-plane", "relay", "10.0.0.5", "world-build relay", "d")
+	for _, want := range []string{
+		"pct exec 101 -- sh -c",
+		"'/srv/data/cp/bin/control-plane' 'dns' --state-dir '/srv/data/cp/control-plane' 'add' 'relay' '10.0.0.5' 'world-build relay' '--domain' 'd'",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("DnsAddCmd missing %q:\n%s", want, cmd)
+		}
+	}
+	noBase := DnsAddCmd(101, "/srv/data/cp/bin", "/srv/data/cp/control-plane", "cp", "10.0.0.6", "world-build cp", "")
+	if strings.Contains(noBase, "--domain") {
+		t.Errorf("no --domain when search base empty:\n%s", noBase)
+	}
+}
+
+// TestDnsPointCmd: the pct set carries the resolver (+ the router only when
+// passed, i.e. the CP guest keeps upstream), and the resolv.conf rewrite is a
+// literal printf (no nested-quote hang).
+func TestDnsPointCmd(t *testing.T) {
+	pctSet, resolvConf := DnsPointCmd(100, "10.0.0.6", "", "d")
+	if !strings.Contains(pctSet, "pct 'set' '100' '--nameserver' '10.0.0.6' '--searchdomain' 'd'") {
+		t.Errorf("unexpected pct set:\n%s", pctSet)
+	}
+	if !strings.Contains(resolvConf, "printf 'search d\nnameserver 10.0.0.6\n' > /etc/resolv.conf") {
+		t.Errorf("unexpected resolv.conf rewrite:\n%s", resolvConf)
+	}
+	cpSet, cpResolv := DnsPointCmd(101, "10.0.0.6", "10.0.0.1", "d")
+	if !strings.Contains(cpSet, "'--nameserver' '10.0.0.6 10.0.0.1'") {
+		t.Errorf("CP guest must keep the router as secondary:\n%s", cpSet)
+	}
+	if !strings.Contains(cpResolv, "nameserver 10.0.0.1") {
+		t.Errorf("CP resolv.conf must list the router second:\n%s", cpResolv)
+	}
+}
+
+// TestDnsVerifyCmd pins the honest-gate probe (dig against the resolver's own
+// loopback, exact-IP grep).
+func TestDnsVerifyCmd(t *testing.T) {
+	cmd := DnsVerifyCmd(101, "relay", "10.0.0.5")
+	for _, want := range []string{"dig +short +time=2 +tries=1 relay @127.0.0.1", "grep -qx '10.0.0.5'"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("DnsVerifyCmd missing %q:\n%s", want, cmd)
+		}
+	}
+}
+
+// TestParsePctGateway ports the box parser: static guests carry gw= on net0;
+// DHCP guests (ip=dhcp) have none.
+func TestParsePctGateway(t *testing.T) {
+	if got := ParsePctGateway("net0: name=eth0,bridge=vmbr0,gw=10.0.0.1,ip=10.0.0.6/24"); got != "10.0.0.1" {
+		t.Errorf("static gw = %q", got)
+	}
+	if got := ParsePctGateway("net0: name=eth0,bridge=vmbr0,ip=dhcp"); got != "" {
+		t.Errorf("dhcp gw must be empty, got %q", got)
+	}
+}
+
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCaddyCertInstallScript guards the review finding that the cert-install
 // helper script must FAIL (not silently succeed) when the PVC write doesn't
 // happen: both shells run set -e, and the base64 payloads are single-quoted.

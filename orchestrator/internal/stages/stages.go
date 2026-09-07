@@ -355,6 +355,112 @@ echo CADDY_OK`,
 	return script
 }
 
+// DnsRec is one explicit record the CP-owned resolver serves (split-horizon
+// <name> -> <ip>, registered via `control-plane dns add` inside the CP LXC).
+type DnsRec struct {
+	Name   string
+	IP     string
+	Source string
+}
+
+// DnsRecords is the world's explicit resolver records, in register order: the
+// guest bare names (relay/cp/proxy/k3s/litellm) plus the dotted public hosts
+// (relayHost/cpHost) that must resolve to the PROXY (Caddy), never directly to
+// a LXC. A caller drops a record by passing an empty value for its field.
+func DnsRecords(relayHost, relayIP, cpHost, cpIP, proxyIP, litellmIP string) []DnsRec {
+	var recs []DnsRec
+	if relayIP != "" {
+		recs = append(recs, DnsRec{Name: "relay", IP: relayIP, Source: "world-build relay"})
+	}
+	if cpIP != "" {
+		recs = append(recs, DnsRec{Name: "cp", IP: cpIP, Source: "world-build cp"})
+	}
+	if proxyIP != "" {
+		recs = append(recs, DnsRec{Name: "proxy", IP: proxyIP, Source: "world-build proxy-static"})
+		recs = append(recs, DnsRec{Name: "k3s", IP: proxyIP, Source: "world-build proxy-static"})
+	}
+	if litellmIP != "" {
+		recs = append(recs, DnsRec{Name: "litellm", IP: litellmIP, Source: "world-build litellm"})
+	}
+	if relayHost != "" && proxyIP != "" {
+		recs = append(recs, DnsRec{Name: relayHost, IP: proxyIP, Source: "world-build relay-via-proxy"})
+	}
+	if cpHost != "" && proxyIP != "" {
+		recs = append(recs, DnsRec{Name: cpHost, IP: proxyIP, Source: "world-build cp-via-proxy"})
+	}
+	return recs
+}
+
+// DnsAddCmd is the pct exec that runs `control-plane dns add <name> <ip>
+// <source> [--domain <base>]` INSIDE the CP LXC (the dnsmasq resolver), the
+// same shape stageDnsRegister uses. Single-quote-wrapped at the innermost
+// level only; callers pass validated names/IPs.
+func DnsAddCmd(cpLxc uint32, binDir, stateDir, name, ip, source, searchBase string) string {
+	rest := []string{"'add'", shellSingleQuote(name), shellSingleQuote(ip), shellSingleQuote(source)}
+	if searchBase != "" {
+		rest = append(rest, "'--domain'", shellSingleQuote(searchBase))
+	}
+	inner := fmt.Sprintf("'%s/control-plane' 'dns' --state-dir '%s' %s",
+		binDir, stateDir, strings.Join(rest, " "))
+	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
+}
+
+// DnsPointCmd builds the two commands that point ONE guest at the CP resolver:
+// the PVE-managed `pct set --nameserver` (durable across guest reboots) and the
+// immediate resolv.conf rewrite (pct only regenerates it at the NEXT boot).
+// router is the resolver's upstream nameserver — passed only for the CP guest
+// itself (it keeps the router as a secondary so dnsmasq still has upstream);
+// empty for relay/k3s.
+func DnsPointCmd(vmid uint32, resolver, router string, searchBase string) (pctSet, resolvConf string) {
+	nsList := resolver
+	if router != "" {
+		nsList += " " + router
+	}
+	parts := []string{"'set'", "'" + strconv.FormatUint(uint64(vmid), 10) + "'", "'--nameserver'", shellSingleQuote(nsList)}
+	if searchBase != "" {
+		parts = append(parts, "'--searchdomain'", shellSingleQuote(searchBase))
+	}
+	pctSet = "pct " + strings.Join(parts, " ")
+	body := "nameserver " + resolver + "\n"
+	if router != "" {
+		body += "nameserver " + router + "\n"
+	}
+	if searchBase != "" {
+		body = "search " + searchBase + "\n" + body
+	}
+	resolvConf = fmt.Sprintf("pct exec %d -- sh -c \"printf '%s' > /etc/resolv.conf\"", vmid, body)
+	return pctSet, resolvConf
+}
+
+// DnsVerifyCmd asks the CP resolver's OWN loopback for a record and fails
+// unless it answers exactly wantIP — proving the whole chain (render -> write ->
+// dnsmasq load) landed, not merely that tcp/53 is open.
+func DnsVerifyCmd(cpLxc uint32, name, wantIP string) string {
+	return fmt.Sprintf("pct exec %d -- sh -c \"dig +short +time=2 +tries=1 %s @127.0.0.1 2>/dev/null | grep -qx '%s'\"",
+		cpLxc, name, wantIP)
+}
+
+// ParsePctGateway extracts the `net0` `gw=` value from a `pct config` dump.
+// Static guests carry `gw=<router>`; DHCP guests (`ip=dhcp`) have NO gw= —
+// an empty result routes the caller to the default-route fallback.
+func ParsePctGateway(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(l, "net0:") {
+			continue
+		}
+		for _, kv := range strings.Split(l, ",") {
+			v, found := strings.CutPrefix(kv, "gw=")
+			if found {
+				v = strings.TrimSpace(v)
+				if v != "" && strings.ContainsAny(v, "0123456789") {
+					return v
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // CaddyCertInstallScript writes a slot's issued fullchain + the runner-injected
 // private key ($CERT_KEY_<SLOT>) into the caddy-data PVC /data/tls/<slot> AND the
 // durable mirror /srv/data/k8s-volumes/caddy-edge/<slot>, then rolls caddy. The
