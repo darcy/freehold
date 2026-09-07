@@ -27,19 +27,86 @@ import (
 	"freehold/orchestrator/internal/wire"
 )
 
+// addressOf is the box's local provisioning-runner address default. The box's
+// own runner is the identity every build/teardown call signs with; login
+// records it so a freshly-logged-in box is immediately an actor whose ROSTER
+// grant can live locally — the "we only need to login once" property.
+const runnerAddr = "127.0.0.1:8787"
+
+// OpsDir is where the BOX's own provisioning identity lives — the same
+// `agent-ops` identity `freehold build` / `teardown` sign with (rbOpsDir,
+// internal/cli). Login materializes it so a fresh box is a durable, self-owned
+// actor; it is box-local and excluded from any off-box backup.
+func OpsDir() string {
+	return filepath.Join(controlPlaneDir(), "agent-ops")
+}
+
+// controlPlaneDir is the box's local control-plane state area (FREEHOLD_HOME's
+// `control-plane`, the parent of both the operator ledger and agent-ops).
+func controlPlaneDir() string {
+	return filepath.Join(identityHome(), "control-plane")
+}
+
+// identityHome is the box's freehold state root (FREEHOLD_HOME or ~/.freehold).
+func identityHome() string {
+	if home := os.Getenv("FREEHOLD_HOME"); home != "" {
+		return home
+	}
+	home := "~/.freehold"
+	if h := os.Getenv("HOME"); h != "" {
+		home = h + "/.freehold"
+	}
+	return home
+}
+
+// EnsureOpsIdentity mints the box's own provisioning identity if missing
+// (first-run-wins), returning its Nostr pubkey. idempotent + hermetic.
+func EnsureOpsIdentity() (string, error) {
+	if _, err := os.Stat(filepath.Join(OpsDir(), identityFile)); err == nil {
+		return OpsPubkey()
+	}
+	if err := mintIdentity(OpsDir()); err != nil {
+		return "", err
+	}
+	return OpsPubkey()
+}
+
+// OpsPubkey loads the box ops identity's Nostr pubkey.
+func OpsPubkey() (string, error) {
+	id, err := flows.LoadIdentity(OpsDir())
+	if err != nil {
+		return "", err
+	}
+	return id.NostrPubkeyHex()
+}
+
+// mintIdentity writes a fresh nostr + enc identity (identity.json 0600, dir
+// 0700) at dir — the same shape `freehold build` mints for agent-ops.
+func mintIdentity(dir string) error {
+	if err := wire.EnsurePrivateDir(dir); err != nil {
+		return err
+	}
+	nostrSecret := make([]byte, 32)
+	encSecret := make([]byte, 32)
+	if _, err := rand.Read(nostrSecret); err != nil {
+		return err
+	}
+	if _, err := rand.Read(encSecret); err != nil {
+		return err
+	}
+	doc := map[string]string{
+		"nostr_secret_hex": hex.EncodeToString(nostrSecret),
+		"enc_secret_hex":   hex.EncodeToString(encSecret),
+	}
+	return wire.WriteJSON0600(filepath.Join(dir, identityFile), doc)
+}
+
 // identityFile is the operator identity ledger file name within Dir().
 const identityFile = "identity.json"
 
 // Dir returns the durable operator identity dir (the operator's own nsec).
 func Dir() string {
-	home := os.Getenv("FREEHOLD_HOME")
-	if home == "" {
-		home = "~/.freehold"
-		if h := os.Getenv("HOME"); h != "" {
-			home = h + "/.freehold"
-		}
-	}
-	return filepath.Join(home, "control-plane", "operator")
+	return filepath.Join(controlPlaneDir(), "operator")
 }
 
 // SecretHex returns the persisted operator nsec hex, or an error when none is
@@ -176,7 +243,14 @@ func Interactive() error {
 	if err != nil {
 		return err
 	}
-	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey); err != nil {
+	// Materialize the box's own provisioning identity (first-run-wins) and
+	// record it: this is how the box is a durable, self-owned actor whose grant
+	// to the CP lives locally — the "we only need to login once" property.
+	opsPK, err := EnsureOpsIdentity()
+	if err != nil {
+		return err
+	}
+	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey, opsPK); err != nil {
 		return err
 	}
 	fmt.Printf("logged in as %s against %s — run `freehold` to operate the world\n", pk, cpURL)
@@ -203,7 +277,7 @@ func resolveCPPubkey(user, world string) (string, error) {
 // seed writes the logged-in connection/desire profile back to the config path,
 // preserving any surviving local facts (plane, runners, coords) the box already
 // holds and filling the connection coordinates login just established.
-func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, relayPubkey string) error {
+func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, relayPubkey, opsPK string) error {
 	cfg.CPURL = cpURL
 	if cpPubkey != "" {
 		cfg.CpPubkey = cpPubkey
@@ -218,6 +292,14 @@ func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, re
 	if relayPubkey != "" {
 		cfg.RelayPubkey = &relayPubkey
 	}
+	// The box's own provisioning runner: its signing identity + loopback
+	// address — the actor `freehold build`/`teardown` and the CP grants. The
+	// operator identity dir records where this box's console-admin nsec ledger
+	// lives (the same ledger the TUI auto-logs in from).
+	opDir := Dir()
+	cfg.OperatorIdentity = &opDir
+	cfg.Runner.Addr = runnerAddr
+	cfg.Runner.Pubkey = opsPK
 	return cfg.Save(config.DefaultPath())
 }
 

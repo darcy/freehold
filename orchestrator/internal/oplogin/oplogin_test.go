@@ -117,9 +117,54 @@ func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	if got.CpPubkey != cpPubkey {
 		t.Errorf("cp_pubkey not seeded: %s", got.CpPubkey)
 	}
-	// Identity ledger persisted.
+	// The box's own provisioning identity is materialized + recorded as the
+	// actor a CP-side grant binds (the "we only need login once" property).
+	opsPK, err := OpsPubkey()
+	if err != nil {
+		t.Fatalf("box ops identity not materialized: %v", err)
+	}
+	if got.Runner.Pubkey != opsPK {
+		t.Errorf("config runner.pubkey not the box ops identity: got %s want %s", got.Runner.Pubkey, opsPK)
+	}
+	if got.Runner.Addr != runnerAddr {
+		t.Errorf("config runner.addr not recorded: %s", got.Runner.Addr)
+	}
+	// Operator identity ledger persisted.
 	if gotSec, err := SecretHex(); err != nil || gotSec != nsecHex {
 		t.Errorf("operator identity not persisted: %q err=%v", gotSec, err)
+	}
+}
+
+// TestEnsureOpsIdentityFirstRunWins proves the box provisioning identity is
+// minted once and never clobbered (idempotent across re-logins).
+func TestEnsureOpsIdentityFirstRunWins(t *testing.T) {
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	pk1, err := EnsureOpsIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pk1 == "" {
+		t.Fatal("empty ops pubkey")
+	}
+	// Second call (re-login) must return the SAME identity, not a new one.
+	pk2, err := EnsureOpsIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pk2 != pk1 {
+		t.Fatalf("ops identity not first-run-wins: %s vs %s", pk1, pk2)
+	}
+	// Logout clears the operator LEDGER only — the box's own identity survives
+	// (it is not the operator's nsec; the box stays a durable actor).
+	if err := Logout(); err != nil {
+		t.Fatal(err)
+	}
+	pk3, err := EnsureOpsIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pk3 != pk1 {
+		t.Fatalf("logout must not erase the box's own provisioning identity")
 	}
 }
 
