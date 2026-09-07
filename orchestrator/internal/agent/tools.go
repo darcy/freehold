@@ -45,6 +45,9 @@ type Tools struct {
 	// Migrate runs the CP's pending verify-gated migrations (the versioned
 	// config/prompt/repair path). nil = migrations unsupported.
 	Migrate Migrator
+	// World drives the CP's world-build/reconcile stages through its co-located
+	// runner (the "box = login + trigger" entry point). nil = unsupported.
+	World WorldApply
 }
 
 // Migrator applies pending CP migrations and returns their verify-gated results.
@@ -56,6 +59,22 @@ func (t *Tools) WorldMigrate() ([]migrations.Result, error) {
 		return nil, fmt.Errorf("world-migrate: no migrations runner bound")
 	}
 	return t.Migrate()
+}
+
+// WorldApply is a CP-driven world reconcile step: it runs one of the shared
+// stage commands (internal/stages) through the CP's co-located runner, so the
+// box can "login + trigger" the CP to (re)assert part of the world. Returns a
+// human report.
+type WorldApply func() (string, error)
+
+// WorldBuild applies the CP owned bring-up/reconcile stages through the
+// co-located runner (the "box = login + trigger" entry point). nil Apply =
+// unsupported.
+func (t *Tools) WorldBuild() (string, error) {
+	if t.World == nil {
+		return "", fmt.Errorf("world-build: no CP build driver bound")
+	}
+	return t.World()
 }
 
 // CreateAgent stands up a new named agent: deploys its sprig pod via Create,

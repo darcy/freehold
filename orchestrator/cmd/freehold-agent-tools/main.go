@@ -43,6 +43,7 @@ import (
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/migrations"
 	"freehold/orchestrator/internal/relay"
+	"freehold/orchestrator/internal/stages"
 	"freehold/orchestrator/prompts"
 )
 
@@ -284,6 +285,7 @@ func cmdServe(args []string) {
 
 	tools := &agent.Tools{Console: reg, Create: buildCreateAgentFn(spec)}
 	tools.Migrate = buildMigrator(spec)
+	tools.World = buildWorldApply(spec)
 	srv := &agenttools.Server{Audience: audience, Grants: grants, Tools: tools}
 
 	mux := http.NewServeMux()
@@ -351,6 +353,27 @@ func (s *deploySpec) run(cmd string, timeoutS uint64) error {
 		ec = *out.ExitCode
 	}
 	return fmt.Errorf("runner exec failed (timed=%v exit=%d): %s %s", out.TimedOut, ec, strings.TrimSpace(out.Stdout), strings.TrimSpace(out.Stderr))
+}
+
+// buildWorldApply returns the CP's world-build/reconcile driver: it runs the
+// shared stage commands (internal/stages) through the co-located runner into
+// the k3s LXC, so the box can "login + trigger" the CP to re-assert part of the
+// world. Slice 1: re-assert the k3s durable local-path (the stage the box build
+// re-asserts on every reconcile). Subsequent slices extend this to caddy/dns.
+func buildWorldApply(spec *deploySpec) agent.WorldApply {
+	return func() (string, error) {
+		if spec.k3sVmid == 0 {
+			return "", fmt.Errorf("world-build: no k3s vmid recorded")
+		}
+		var report []string
+		// Re-assert the durable local-path wiring (idempotent).
+		cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", spec.k3sVmid, strings.TrimSpace(stages.K3sLocalPathDurableScript))
+		if err := spec.run(cmd, 180); err != nil {
+			return "", fmt.Errorf("world-build k3s local-path: %w", err)
+		}
+		report = append(report, "k3s durable local-path re-asserted")
+		return strings.Join(report, "\n"), nil
+	}
 }
 
 // buildCreateAgentFn returns the create-agent deploy: mint a durable identity

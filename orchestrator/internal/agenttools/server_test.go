@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 6 {
-		t.Fatalf("expected 6 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 7 {
+		t.Fatalf("expected 7 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate"} {
+	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -216,5 +216,16 @@ func TestWorldStatusAndTeardown(t *testing.T) {
 	}
 	if !strings.Contains(out, "001-x") {
 		t.Fatalf("world_migrate result missing migration: %s", out)
+	}
+
+	// world_build runs the CP world-build/reconcile driver.
+	built := false
+	srv.Tools.World = func() (string, error) { built = true; return "world-build ok", nil }
+	out = call(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"world_build","arguments":{}}}`)
+	if !built {
+		t.Fatal("world_build did not invoke the CP build driver")
+	}
+	if !strings.Contains(out, "world-build ok") {
+		t.Fatalf("world_build result missing report: %s", out)
 	}
 }
