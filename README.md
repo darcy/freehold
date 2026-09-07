@@ -130,6 +130,9 @@ cargo fmt --all --check          # CI gate
 
 ```sh
 freehold                      # no args → the interactive TUI (bubbletea); a subcommand → the CLI
+freehold login                # root-free: CP address + CP pubkey + operator nsec (NIP-98) → authorize,
+freehold                      #   seed a local connection profile from the CP, then END — just run `freehold`
+freehold logout               # clear THIS box's login ledger (CP/world untouched)
 freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
 freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
 freehold deploy-relay …       #   memory, console-login, grant, storage …)
@@ -161,11 +164,19 @@ freehold --help               # both surfaces
   each mount's size / used / guest bind-mount liveness, read-only through the
   signed runner channel), **DNS**, **Certs**. A one-line world strip keeps the
   liveness glance.
-- **Remote-CP access**: `l` logs you into the CP console with **your operator
-  nsec** (`nsec1…` or hex — it is the console admin, so it grants every remote
-  operation locally: overview, provision, grant, revoke, agents), persisting
-  the key 0600 under `~/.freehold/control-plane/operator` so every later TUI
-  launch **auto-logs in**; `freehold --login` does the same from the shell.
+- **Remote-CP access**: `freehold login` (**root-free**) authorizes this
+  operator against the CP by **CP address + CP pubkey + operator nsec**
+  (NIP-98), then **ends** — afterwards just run `freehold`. It pulls the CP's
+  `/api/world` summary and seeds a local connection/desire profile (relay + CP
+  coords, the operator pubkey derived from the nsec), so a fresh box recovers
+  with nothing that lived only on a lost one. The operator nsec persists 0600
+  under `~/.freehold/control-plane/operator` (excluded from any off-box backup/
+  sync — it is a box-local, user-held key). The CP **pubkey** is the box's
+  trust anchor for a CP it has never met: `login` cross-checks the operator-
+  supplied value against the CP's own `/api/world` report and refuses to seed on
+  mismatch (blank falls back to the CP's report; neither → error). In the TUI,
+  `l` re-logs into the CP console with that persisted nsec, and `freehold logout`
+  clears the local ledger only (CP/world untouched).
   `w` then opens the web console in your browser already authenticated
   (single-use portal token — no `console-login`). Keys are scoped to the
   active view.

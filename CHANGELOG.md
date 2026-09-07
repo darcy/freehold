@@ -25,7 +25,39 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
-## [0.4.6] — Chunk 4 Phase E, corrected: agent-creation is a CP toolset, not a chat post
+## [0.4.7] — Chunk 4 Phase G: operator-box ⇄ CP decoupling (login foundation)
+
+Phase G wraps Chunk 4 with the CP-decoupling base: the operator box stops being
+the single root of trust, so a fresh box can rejoin a world whose CP survives.
+This entry covers the phase as it lands; remaining Phase-G steps (slim `build`
+to CP-bring-up, CP build/teardown action, `teardown` reorder, durable
+world-state, migrations, async cert) extend it as they land.
+
+### Added
+
+- **`freehold login`, root-free.** Prompts **CP address + CP pubkey + operator
+  nsec**, authorizes this operator against that CP via NIP-98 (`internal/oplogin`
+  reworked), then **ends** — afterwards the operator just runs `freehold`. It
+  pulls the CP's `/api/world` summary and seeds a local connection/desire profile
+  (relay + CP coords, operator pubkey derived from the nsec), so a fresh box
+  recovers with nothing that lived only on a lost one. The old nsec-only
+  `--login` is superseded.
+- **The CP pubkey is an enforced trust anchor.** `config.CpPubkey` records the
+  CP identity a box has never met; `resolveCPPubkey` cross-checks the
+  operator-supplied value against the CP's own `/api/world` report — hard error
+  on mismatch, blank falls back to the report, neither → no anchor (so a wrong/
+  hijacked CP address never seeds a bogus anchor).
+- **`freehold logout`.** Clears this box's login ledger only; CP/world untouched
+  (idempotent).
+- **`console.World()`** (`GET /api/world`) + `WorldSummary` client method.
+
+### Fixed
+
+- All login prompts share **ONE buffered stdin reader** (the AGENTS.md
+  discipline): a fresh reader per prompt read ahead past the first newline and
+  broke back-to-back/piped auth on a fresh box.
+
+
 
 0.4.5 shipped agent-creates-agent as **relay-message watching**: a `watch-agents` daemon on
 the operator box polled #freehold for a natural-language `create-agent name: X purpose: Y`

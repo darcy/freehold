@@ -220,12 +220,19 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     state), `w` open the web console, `l` log in with the operator nsec,
     `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
 
-*   **Remote-CP access.** `l` (and the CLI's `freehold --login`) log the
-    operator's own nsec into the CP console (`internal/oplogin` persists it
-    0600 under the operator dir, so every launch auto-logs in). The Agents
-    tab reads the CP toolset registry (`freehold-agent-tools manage_agent`);
-    the Runners-CP view reads the console `/api/overview`. `w` opens the web
-    console pre-authorized via a single-use portal token.
+*   **Remote-CP access.** `freehold login` (root-free) authorizes this operator
+    against the CP by **CP address + CP pubkey + operator nsec** (NIP-98), then
+    ends; `internal/oplogin` persists the nsec 0600 under the operator dir and
+    seeds a local connection/desire profile from the CP's `/api/world` summary,
+    so every launch auto-logs in and a fresh box recovers with nothing from a
+    lost one. The operator-supplied CP **pubkey** is cross-checked against the
+    CP's own `/api/world` report (`resolveCPPubkey` — hard error on mismatch,
+    blank falls back to the CP's report; neither → no anchor) so a wrong or
+    hijacked CP address never seeds a bogus trust anchor. `freehold logout`
+    clears this box's local ledger only. The Agents tab reads the CP toolset
+    registry (`freehold-agent-tools manage_agent`); the Runners-CP view reads
+    the console `/api/overview`. `w` opens the web console pre-authorized via a
+    single-use portal token.
 
 *   **One activity surface for long ops.** `internal/tui/activity.go`
     streams the boot probe rows and the subprocess windows, `ctrl+c` aborts;

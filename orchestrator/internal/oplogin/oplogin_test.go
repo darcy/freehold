@@ -75,27 +75,7 @@ func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	}
 	const cpPubkey = "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff"
 
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/auth/challenge":
-			writeJSON(w, map[string]string{"nonce": "deadbeef"})
-		case "/api/auth/login":
-			w.Header().Set("Set-Cookie", "fh_session=tok123; Path=/; HttpOnly")
-			writeJSON(w, map[string]string{"ok": "true"})
-		case "/api/world":
-			writeJSON(w, map[string]string{
-				"relay_url":       "https://relay.example",
-				"relay_ws_url":    "wss://relay.example",
-				"relay_pubkey":    "11111",
-				"cp_url":          srv.URL,
-				"cp_pubkey":       cpPubkey,
-				"operator_pubkey": wantOpPK,
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	srv := mockCP(t, cpPubkey)
 	defer srv.Close()
 
 	// Pre-write the CP address+pubkey; relay/operator fields are absent (a
@@ -143,6 +123,75 @@ func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	}
 }
 
+// TestInteractiveRejectsCPPubkeyMismatch proves the trust anchor is enforced:
+// if the operator supplies a CP pubkey that disagrees with the CP's own /api/world
+// report, login refuses to seed rather than trusting the wrong control plane.
+func TestInteractiveRejectsCPPubkeyMismatch(t *testing.T) {
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	const nsecHex = "b9100ce43b1deac5c5189f48bc6d97b287e122211d5f271488c0bcae2b350ad6"
+	srv := mockCP(t, "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff")
+	defer srv.Close()
+
+	// Operator believes the CP Identity is a DIFFERENT pubkey — a wrong/MITM'd address.
+	pre := &config.Config{}
+	pre.CPURL = srv.URL
+	pre.CpPubkey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	if err := pre.Save(config.DefaultPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	pipeR, pipeW, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = pipeR
+	go func() { pipeW.WriteString(nsecHex + "\n"); pipeW.Close() }()
+	defer func() { os.Stdin = oldStdin }()
+
+	if err := Interactive(); err == nil {
+		t.Fatal("login must fail when the CP pubkey mismatches the CP's self-report")
+	}
+}
+
+// TestInteractiveFallsBackToWorldPubkey proves a blank operator pubkey degrades
+// to the CP's own reported identity (only when the CP offers one), never to a
+// hole.
+func TestInteractiveFallsBackToWorldPubkey(t *testing.T) {
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	const nsecHex = "b9100ce43b1deac5c5189f48bc6d97b287e122211d5f271488c0bcae2b350ad6"
+	const worldPub = "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff"
+	srv := mockCP(t, worldPub)
+	defer srv.Close()
+
+	// CP address known, but NO CpPubkey recorded — the box stays silent (a fresh
+	// partial seed); login must fall back to the CP's reported identity.
+	pre := &config.Config{}
+	pre.CPURL = srv.URL
+	if err := pre.Save(config.DefaultPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Blank cap_pubkey line, then the nsec.
+	pipeR, pipeW, _ := os.Pipe()
+	oldStdin := os.Stdin
+	os.Stdin = pipeR
+	go func() { pipeW.WriteString("\n" + nsecHex + "\n"); pipeW.Close() }()
+	defer func() { os.Stdin = oldStdin }()
+
+	if err := Interactive(); err != nil {
+		t.Fatalf("login with blank pubkey + world fallback failed: %v", err)
+	}
+	got, err := config.Load(config.DefaultPath())
+	if err != nil || got == nil {
+		t.Fatalf("seeded config: %v", err)
+	}
+	if got.CpPubkey != worldPub {
+		t.Errorf("trust anchor should fall back to the CP's reported pubkey, got %q", got.CpPubkey)
+	}
+}
+
 // TestLogoutClearsOnlyLocalLedger verifies logout drops the box's operator
 // identity while touching nothing else.
 func TestLogoutClearsOnlyLocalLedger(t *testing.T) {
@@ -170,6 +219,34 @@ func TestLogoutClearsOnlyLocalLedger(t *testing.T) {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// mockCP is a minimal stand-in control plane: NIP-98 challenge/login session +
+// a /api/world summary reporting `cpPubkey` as its own identity.
+func mockCP(t *testing.T, cpPubkey string) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/challenge":
+			writeJSON(w, map[string]string{"nonce": "deadbeef"})
+		case "/api/auth/login":
+			w.Header().Set("Set-Cookie", "fh_session=tok123; Path=/; HttpOnly")
+			writeJSON(w, map[string]string{"ok": "true"})
+		case "/api/world":
+			writeJSON(w, map[string]string{
+				"relay_url":       "https://relay.example",
+				"relay_ws_url":    "wss://relay.example",
+				"relay_pubkey":    "11111",
+				"cp_url":          srv.URL,
+				"cp_pubkey":       cpPubkey,
+				"operator_pubkey": "operator",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	return srv
 }
 
 func mustHex(t *testing.T, s string) []byte {

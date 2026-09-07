@@ -161,17 +161,43 @@ func Interactive() error {
 	// the operator just authorized against + the relay/CP identities the CP itself
 	// reports. Degrades gracefully if the CP predates /api/world — the CP the box
 	// dialed + the operator key are always recorded.
-	var relayURL, relayWS, relayPubkey string
+	var relayURL, relayWS, relayPubkey, worldCPPub string
 	if w, werr := c.World(); werr == nil {
-		relayURL, relayWS, relayPubkey = w.RelayURL, w.RelayWsURL, w.RelayPubkey
+		relayURL, relayWS, relayPubkey, worldCPPub = w.RelayURL, w.RelayWsURL, w.RelayPubkey, w.CPPubkey
 	} else {
 		fmt.Fprintf(os.Stderr, "  (note: world summary not available — %v)\n", werr)
 	}
-	if err := seed(cfg, cpURL, cpPubkey, pk, relayURL, relayWS, relayPubkey); err != nil {
+	// The CP pubkey is the box's trust anchor for a CP it has never met: NIP-98
+	// proves the OPERATOR's identity to whatever answers at cpURL, never the CP
+	// back — so cross-check the operator-supplied pubkey against the CP's own
+	// /api/world report (hard error on mismatch), and fall back to that report
+	// only when the operator offered none. A bogus/hijacked anchor never seeds.
+	anchor, err := resolveCPPubkey(cpPubkey, worldCPPub)
+	if err != nil {
+		return err
+	}
+	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey); err != nil {
 		return err
 	}
 	fmt.Printf("logged in as %s against %s — run `freehold` to operate the world\n", pk, cpURL)
 	return nil
+}
+
+// resolveCPPubkey establishes the recorded CP trust anchor. A user-supplied
+// pubkey must match what the CP reports about itself; a blank one is accepted
+// only when the CP offers one. Neither source yields an anchor -> error (the
+// box must not trust a CP it cannot identify).
+func resolveCPPubkey(user, world string) (string, error) {
+	if user != "" && world != "" && user != world {
+		return "", fmt.Errorf("CP pubkey mismatch: you supplied %.10s…, but the CP reported %.10s… — aborting to avoid trusting the wrong control plane", user, world)
+	}
+	if user != "" {
+		return user, nil
+	}
+	if world != "" {
+		return world, nil
+	}
+	return "", fmt.Errorf("no CP pubkey provided and the CP reported none — cannot establish a trust anchor")
 }
 
 // seed writes the logged-in connection/desire profile back to the config path,
