@@ -156,6 +156,40 @@ to run, idle and active.
 - [ ] F2. Record the numbers as a decision input for Chunk 6's sleep/wake
       work — this chunk measures, it does not build a watcher/reaper.
 
+### Phase G — operator-box ⇄ CP decoupling (Chunk 4 wrap)
+
+Goal: the operator box stops being the single root of trust, so a fresh box can
+`login` and rejoin a world whose CP survives. Shipped (0.4.7, PRs #158–#162):
+
+- [x] G1. **`freehold login`, root-free** (#158): CP address + CP pubkey +
+      operator nsec → NIP-98 authorize → end; seeds a local connection/desire
+      profile from the CP's `/api/world`, so a fresh box recovers with nothing
+      from a lost one. The operator-supplied CP pubkey is cross-checked against
+      the CP's report (`resolveCPPubkey` — mismatch aborts, blank falls back),
+      so a wrong/hijacked CP address never seeds a bogus trust anchor.
+- [x] G2. **The CP serves `/api/world` from real state** (#159): a session-gated
+      console endpoint returns relay + CP coords + who the operator is — the
+      recovery source of truth, not a mock.
+- [x] G3. **`freehold logout`** (#158) clears the local operator ledger only
+      (CP/world untouched, idempotent). All login prompts share ONE buffered
+      stdin reader (AGENTS.md discipline).
+- [x] G4. **Login materializes the box's provisioning identity** (#160):
+      `control-plane/agent-ops` (first-run-wins, the identity `build`/`teardown`
+      sign with); login does NOT fabricate a `[runner]` block.
+- [x] G5. **`freehold teardown` is CP-first** (#161): a whole-world teardown asks
+      the CP (`POST /api/teardown`) to remove what it manages (runners+secrets,
+      agents, DNS) before the box destroys the CP LXC — best-effort when the CP
+      is down.
+- [x] G6. **A CP world-action surface** (#162): roster-gated `world_status` /
+      `world_teardown` on the agent-tools toolset so the box can "login +
+      trigger" the stateful half of the CP. The CPA harness deliberately does
+      NOT get `world_teardown` (locked conversation+create-only).
+
+Deferred (need a live PVE/CP/relay world to verify — not this chunk's clean
+handover): slim `freehold build` to CP-bring-up with in-memory secret capture,
+the CP `build`/`upgrade` infra provisioning (k3s / litellm / Caddy / relay
+Terraform + cert), and the durable world-state / migrations / async-cert steps.
+
 ### Open decisions to make explicitly at kickoff (not pre-decided by this plan)
 
 *   **How literally CPA reuses the expert harness.** Two shapes were on the
