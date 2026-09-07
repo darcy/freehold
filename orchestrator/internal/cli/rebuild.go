@@ -2301,25 +2301,40 @@ func (e *rebuildEngine) stageLitellm() error {
 		return fmt.Errorf("add-secret litellm (master) failed:\n%s", out)
 	}
 
-	// Serve the litellm runner on loopback, exec the apply + registration
-	// through it (secrets requested BY NAME — the runner injects + redacts
-	// them; the audited cmd carries only the $REF, never the value).
-	pid, err := e.stageServeRunner("litellm", runnerDir)
-	if err != nil {
+	// The kube-workload apply + the CPA-key seed run pct commands as ROOT, so
+	// they must go through the PROXMOX-BOX runner, not the (non-root) litellm
+	// runner. Seal the litellm master + postgres pw into the box runner package
+	// BY NAME and re-serve it fresh (a runner loads its package at boot only) —
+	// then the execs request the secrets and the runner injects + redacts them.
+	if err := e.sealRunnerSecret("litellm", "FREEHOLD_LITELLM_MASTER", masterKey); err != nil {
 		return err
 	}
-	defer e.stopRunner(pid)
+	if err := e.sealRunnerSecret("postgres-pw", "FREEHOLD_LITELLM_PG", postgresPw); err != nil {
+		return err
+	}
+	if _, err := e.stageServe(); err != nil {
+		return fmt.Errorf("re-serve the box runner for the litellm secrets: %w", err)
+	}
 
 	// ---- Leg 1: kube workloads. The k8s Secrets read their values from the
 	// runner-injected env ($LITELLM master + $POSTGRES_PW), never literals —
 	// the k8s Secrets are created first-run-wins and preserved thereafter.
-	ok, out = e.litellmRun(stages.LitellmManifestScript(k3sVmid), 420, "litellm", "postgres-pw")
+	leg1 := []string{"exec", "--addr", e.f.addr, "--agent-dir", rbOpsDir(),
+		"--timeout", "420",
+		"--secret", e.f.target, "--secret", "litellm", "--secret", "postgres-pw",
+		e.f.target, stages.LitellmManifestScript(k3sVmid)}
+	ok, out = e.runBin(e.bins.Self, leg1)
 	if !ok {
 		return fmt.Errorf("litellm kube apply failed:\n%s", out)
 	}
 
 	// ---- Leg 2: model registration through the litellm runner (its own
 	// ciphertext: master + provider-key), against the gateway's real URL.
+	pid, err := e.stageServeRunner("litellm", runnerDir)
+	if err != nil {
+		return err
+	}
+	defer e.stopRunner(pid)
 	ok, out = e.litellmRun(stages.LitellmRegisterScript(gwURL, agent.CpaLiteLLMModel), 120, "litellm", "provider-key")
 	if !ok {
 		return fmt.Errorf("litellm model registration failed:\n%s", out)
@@ -2335,7 +2350,11 @@ func (e *rebuildEngine) stageLitellm() error {
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	ok, out = e.litellmRun(agent.AgentLiteLLMKeyScript(k3sVmid, cpaName), 60, "litellm")
+	seedKey := []string{"exec", "--addr", e.f.addr, "--agent-dir", rbOpsDir(),
+		"--timeout", "60",
+		"--secret", e.f.target, "--secret", "litellm",
+		e.f.target, agent.AgentLiteLLMKeyScript(k3sVmid, cpaName)}
+	ok, out = e.runBin(e.bins.Self, seedKey)
 	if !ok {
 		return fmt.Errorf("seed CPA litellm key secret failed:\n%s", out)
 	}
