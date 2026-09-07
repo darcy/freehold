@@ -73,10 +73,12 @@ world-state, migrations, async cert) extend it as they land.
   `world_build` (the CP runs its owned bring-up/reconcile stages through the co-located
   runner via the shared `internal/stages`), giving the box a post-login "trigger" for
   the world. `world_build` re-asserts the k3s durable local-path, reconverges the
-  relay compose stack, and re-applies the Caddy TLS edge (edge coords ride the
-  agent-tools serve `--relay-host/--relay-ip/--cp-ip`); DNS / litellm + the cert
-  install extend it toward the full CP-driven build, and the box `build` slims to
-  CP-bring-up + trigger. The CPA harness is
+  relay compose stack, re-applies the Caddy TLS edge (edge coords ride the
+  agent-tools serve `--relay-host/--relay-ip/--cp-ip`), and registers + points the
+  CP-owned split-horizon resolver (`--cp-lxc/--proxy-ip/--litellm-ip` carry the
+  coords); litellm / storage / the cert install extend it toward the full
+  CP-driven build, and the box `build` slims to CP-bring-up + trigger. The CPA
+  harness is
   deliberately NOT given the mutating world tools (locked "conversation + create only").
 - **A shared stage library (`internal/stages`).** The pure world-bring-up command
   builders (k3s install/local-path scripts, litellm + Caddy kube manifests, the
