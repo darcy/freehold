@@ -159,3 +159,19 @@ func findJSONByID2(lines []string, wantID int) string {
 	}
 	return ""
 }
+
+// TestBridgeByDefault pins the regression that broke the CPA: buzz-agent spawns
+// the MCP server with NO subcommand over a pipe (build_mcp_servers sets
+// args=[]), so a bare invocation on a pipe MUST run the mcp bridge, not print
+// usage and exit. Argument order: (argc past argv[0], isTTY).
+func TestBridgeByDefault(t *testing.T) {
+	if !bridgeByDefault(0, false) {
+		t.Fatal("no subcommand + piped stdin must run the mcp bridge (buzz-agent spawns like this)")
+	}
+	if bridgeByDefault(0, true) {
+		t.Fatal("no subcommand on a real TTY must print usage, not silently run the bridge")
+	}
+	if bridgeByDefault(1, false) {
+		t.Fatal("a subcommand must not be treated as the bridge")
+	}
+}

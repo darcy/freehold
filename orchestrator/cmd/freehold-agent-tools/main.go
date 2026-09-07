@@ -47,18 +47,19 @@ import (
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 
+// bridgeByDefault reports whether a bare invocation (NO subcommand) should run
+// as the mcp stdio bridge: the harness drives it over a stdin PIPE with empty
+// args, whereas an operator sitting at a real terminal meant to use a
+// subcommand and should see usage instead. Any explicit subcommand always wins.
+func bridgeByDefault(argc int, stdinTTY bool) bool { return argc == 0 && !stdinTTY }
+
 func main() {
 	log.SetFlags(0)
+	if bridgeByDefault(len(os.Args)-1, term.IsTerminal(os.Stdin.Fd())) {
+		cmdMCP(nil)
+		return
+	}
 	if len(os.Args) < 2 {
-		// buzz-agent spawns the MCP server via BUZZ_ACP_MCP_COMMAND with NO
-		// subcommand and empty args (build_mcp_servers sets args=[]). When
-		// stdin is a pipe (a harness driving us as the stdio bridge), run the
-		// `mcp` bridge; only a real terminal means the operator forgot a
-		// subcommand and should see usage instead.
-		if !term.IsTerminal(os.Stdin.Fd()) {
-			cmdMCP(nil)
-			return
-		}
 		usage()
 		os.Exit(2)
 	}
