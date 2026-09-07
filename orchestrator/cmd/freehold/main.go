@@ -32,6 +32,10 @@ Modes (auto-detected):
     running     config present, everything reachable
 
 CLI:
+    freehold login     authorize this operator against a CP (CP address + pubkey +
+                       nsec) and end — root-free. Afterwards just run freehold.
+                       Seeds a local connection profile from the CP's world summary.
+    freehold logout    clear the local login ledger on this box (CP/world untouched)
     freehold build     bring the world up (fresh bootstrap OR rebuild — the same
                        reconciling pipeline; reads the recorded config, asks only
                        what's missing, picks the DNS provider from lego's list)
@@ -62,6 +66,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "login:", err)
 			os.Exit(1)
 		}
+		return
+	case "logout", "--logout":
+		if err := oplogin.Logout(); err != nil {
+			fmt.Fprintln(os.Stderr, "logout:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "logged out — local login ledger cleared")
 		return
 	default:
 		os.Exit(cli.Run(args))
