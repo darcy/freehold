@@ -24,6 +24,10 @@ type DeployAgentToolsSpec struct {
 	RelayURL           string
 	RelayPubkey        string
 	RelayWS            string
+	RelayHost          string  // relay public host (Caddy edge front)
+	RelayIP            string  // relay LXC IP (Caddy upstream)
+	CpHost             string  // control plane public host (Caddy edge front)
+	CpIP               string  // cp LXC IP (Caddy upstream)
 	RelayLxc           *uint32 // relay vmid
 	RelayCompose       string
 	K3sVmid            uint32
@@ -133,6 +137,18 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	}
 	if spec.RelayURL != "" && spec.RelayWS != "" {
 		serveFlags += " --relay-ws " + spec.RelayWS
+	}
+	if spec.RelayHost != "" {
+		serveFlags += " --relay-host " + spec.RelayHost
+	}
+	if spec.RelayIP != "" {
+		serveFlags += " --relay-ip " + spec.RelayIP
+	}
+	if spec.CpHost != "" {
+		serveFlags += " --cp-host " + spec.CpHost
+	}
+	if spec.CpIP != "" {
+		serveFlags += " --cp-ip " + spec.CpIP
 	}
 	start := fmt.Sprintf(
 		"setsid nohup %s serve %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
