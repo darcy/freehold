@@ -195,7 +195,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`), authorized per call
     against the server's own relay roster (NIP-29 channel + 39002,
     fail-closed); its `mcp` stdio mode is the bridge agent pods fetch at boot.
-    The build dogfoods `create_agent` to bring the CPA up.
+    The build dogfoods `create_agent` to bring the CPA up. It also carries the
+    CP world-action surface (`world_status` / `world_teardown`, roster-gated)
+    so an operator box can "login + trigger" the stateful half of the world;
+    the infra provisioning half rides the build/upgrade follow-up.
 
 *   **`internal/cli/rebuild.go` is the world pipeline.** `collectAnswers` →
     `rebuildFlags` → `newRebuildEngine` threads the stage set
