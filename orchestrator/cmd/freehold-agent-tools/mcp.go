@@ -125,8 +125,11 @@ func (b *mcpBridge) startDev() error {
 
 // forwardDev sends raw to buzz-dev-mcp stdin. If the request carries an id
 // (expects a response), reads dev responses until the id-matching reply and
-// returns it. Merges freehold tools into a tools/list reply.
-func (b *mcpBridge) forwardDev(raw []byte) ([]byte, error) {
+// returns it. Any unsolicited dev line is relayed to the harness through the
+// SAME buffered writer runBridge owns (a second direct os.Stdout writer would
+// interleave mid-line and desync the NDJSON stream). Merges freehold tools into
+// a tools/list reply.
+func (b *mcpBridge) forwardDev(raw []byte, out *bufio.Writer) ([]byte, error) {
 	if err := b.startDev(); err != nil {
 		return nil, err
 	}
@@ -155,6 +158,7 @@ func (b *mcpBridge) forwardDev(raw []byte) ([]byte, error) {
 			Error  *map[string]interface{} `json:"error"`
 		}
 		_ = json.Unmarshal([]byte(line), &resp)
+		logBridge("dev", req.Method, firstMethod([]byte(line)))
 		if resp.ID != nil && bytes.Equal(resp.ID, req.ID) {
 			// The reply for our request: merge freehold tools into tools/list.
 			if req.Method == "tools/list" {
@@ -163,36 +167,34 @@ func (b *mcpBridge) forwardDev(raw []byte) ([]byte, error) {
 			return append([]byte(nil), line...), nil
 		}
 		// Unsolicited (e.g. a notification from dev-mcp) — relay as-is to the
-		// harness and keep looking for our reply. Best-effort.
-		relayDevMessage(line)
+		// harness through the shared writer and keep looking for our reply.
+		out.WriteString(line)
+		out.Flush()
 	}
 }
 
-// mergeToolsList appends the freehold agent tools to a tools/list result.
+// mergeToolsList appends the freehold agent tools to a tools/list result,
+// preserving every other top-level field the server replied with (jsonrpc, id,
+// _meta …) — a struct-based re-marshal dropped `jsonrpc`, and rmcp rejects a
+// response that lacks it with a parse error, which is what deadlocked the CPA.
 func mergeToolsList(line string) string {
-	var env struct {
-		ID     json.RawMessage `json:"id"`
-		Result *struct {
-			Tools json.RawMessage `json:"tools"`
-		} `json:"result"`
+	var env map[string]interface{}
+	if err := json.Unmarshal([]byte(line), &env); err != nil {
+		return line
 	}
-	if err := json.Unmarshal([]byte(line), &env); err != nil || env.Result == nil {
+	result, ok := env["result"].(map[string]interface{})
+	if !ok {
 		return line
 	}
 	var tools []map[string]interface{}
-	_ = json.Unmarshal(env.Result.Tools, &tools)
+	if raw, present := result["tools"]; present {
+		b, _ := json.Marshal(raw)
+		_ = json.Unmarshal(b, &tools)
+	}
 	tools = append(tools, freeholdToolDefs()...)
-	merged, _ := json.Marshal(tools)
-	env.Result.Tools = merged
+	result["tools"] = tools
 	out, _ := json.Marshal(env)
 	return string(out)
-}
-
-// relayDevMessage writes an unsolicited dev-mcp line to stdout (best-effort).
-var devRelayOut = os.Stdout
-
-func relayDevMessage(line string) {
-	fmt.Fprint(devRelayOut, line)
 }
 
 // runBridge is the NDJSON request/response loop, testable via injected fds.
@@ -212,6 +214,7 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return err
 		}
+		logBridge("req", req.Method, trunc(raw))
 		// A freehold tool call is answered by agent-tools (signed), never
 		// buzz-dev-mcp.
 		if req.Method == "tools/call" {
@@ -230,7 +233,7 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 				continue
 			}
 		}
-		resp, err := b.forwardDev(raw)
+		resp, err := b.forwardDev(raw, w)
 		if err != nil {
 			logBridge("forward-error", err.Error())
 			resp = rpcErrorWrapper(raw, err)
@@ -247,10 +250,31 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 // json.Encoder appends one) — trimming before the single delimiter prevents a
 // blank line that could desync the harness's NDJSON reader.
 func writeResp(w *bufio.Writer, resp []byte) {
+	logBridge("reply", firstMethod(resp))
 	resp = bytes.TrimRight(resp, "\r\n")
 	w.Write(resp)
 	w.WriteByte('\n')
 	w.Flush()
+}
+
+// firstMethod extracts a JSON-RPC method name for diagnostics ("" absent).
+func firstMethod(raw []byte) string {
+	var v struct {
+		Method string `json:"method"`
+	}
+	_ = json.Unmarshal(raw, &v)
+	if v.Method != "" {
+		return v.Method
+	}
+	var e struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &e) == nil && e.Error != nil {
+		return "err:" + e.Error.Message
+	}
+	return ""
 }
 
 // rpcErrorWrapper returns a JSON-RPC error envelope for a failed forward/sign,
@@ -368,6 +392,15 @@ func logBridge(v ...interface{}) {
 	if bridgeLog != nil {
 		fmt.Fprintln(bridgeLog, append([]interface{}{time.Now().Format(time.RFC3339)}, v...)...)
 	}
+}
+
+// trunc keeps a short diagnostic prefix of a line.
+func trunc(b []byte) string {
+	s := strings.ReplaceAll(string(b), "\n", "\\n")
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
 }
 
 // logNsec mirrors log.Print but named to avoid a clash.

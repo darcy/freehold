@@ -175,3 +175,37 @@ func TestBridgeByDefault(t *testing.T) {
 		t.Fatal("a subcommand must not be treated as the bridge")
 	}
 }
+
+// TestMergeToolsListPreservesEnvelope pins the deadlock root cause: merging
+// freehold tools into tools/list must keep jsonrpc + id so the harness's rmcp
+// parser accepts the response (it rejects a reply lacking jsonrpc with a
+// -32700 parse error).
+func TestMergeToolsListPreservesEnvelope(t *testing.T) {
+	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`))
+	var m map[string]interface{}
+	if err := json.Unmarshal(merged, &m); err != nil {
+		t.Fatalf("merged tools/list is not valid JSON: %v\n%s", err, merged)
+	}
+	if m["jsonrpc"] != "2.0" {
+		t.Fatalf("jsonrpc dropped: %s", merged)
+	}
+	if _, ok := m["id"]; !ok {
+		t.Fatalf("id dropped: %s", merged)
+	}
+	res, ok := m["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("result missing: %s", merged)
+	}
+	tools, _ := res["tools"].([]interface{})
+	nameSet := map[string]bool{}
+	for _, tl := range tools {
+		if mm, ok := tl.(map[string]interface{}); ok {
+			nameSet[mm["name"].(string)] = true
+		}
+	}
+	for _, want := range []string{"buzz_send", "create_agent", "grant_agent", "manage_agent"} {
+		if !nameSet[want] {
+			t.Fatalf("merged tools/list missing %q:\n%s", want, merged)
+		}
+	}
+}
