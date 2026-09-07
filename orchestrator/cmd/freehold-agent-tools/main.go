@@ -410,8 +410,11 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 				cpUpstream = fmt.Sprintf("%s:8080", spec.cpIP)
 			}
 			caddyfile := deploy.RenderCaddyfile(spec.relayHost, relayUpstream, spec.cpHost, cpUpstream)
-			cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", spec.k3sVmid, strings.TrimSpace(stages.CaddyManifestScript(spec.k3sVmid, deploy.CaddyManifest(caddyfile))))
-			if err := spec.run(cmd, 180); err != nil {
+			// CaddyManifestScript is written to run ON THE PVE HOST (it wraps
+			// pct push/pct exec itself), so spec.run executes it raw — never
+			// wrapped in an outer pct exec (that would run the script inside
+			// the guest, where pct doesn't exist).
+			if err := spec.run(stages.CaddyManifestScript(spec.k3sVmid, deploy.CaddyManifest(caddyfile)), 180); err != nil {
 				return "", fmt.Errorf("world-build caddy edge: %w", err)
 			}
 			report = append(report, "caddy TLS edge re-applied")
