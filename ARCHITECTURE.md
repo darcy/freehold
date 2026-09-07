@@ -18,7 +18,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
               tools ▼      │   ▲ agents connect with their OWN keypair
         ┌──────────────────┘   │   (gates: signature, audience, expiry, replay)
         ▼                      ▼
-   freehold-orchestrator / freehold-runner (Go, independent)
+   freehold-orchestrator (Go) drives freehold-runner (Rust, independent)
         │  single `exec` MCP tool (runShell) — dumb privileged hands
         │  signed, addressable, audited
         │  NO LLM, NO router, NO key vault in either
@@ -171,224 +171,116 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 * **`teardown.go` and `prune_lxc_coords` keep the COMPUTE/data split**
   (`DestroysLxc` keeps config; `DestroysData` erases it).
 
-### `freehold-orchestrator` (Go; the single privileged hand)
+### `freehold-orchestrator` (Go; the operator's toolchain)
 
-*   **The whole orchestrator/installer surface is Go.** `orchestrator/` is
-    the Go module `freehold/orchestrator` (go 1.25), and both binaries —
-    `freehold` and `freehold-orchestrator` — are Go. `internal/` carries 18
-    packages: bootstrap, cli, client, config, console, crypto, delegate,
-    deploy, drive, flows, harness, planebase, provisioner, relay, state,
-    teardown, tui, wire.
+*   **The whole operator toolchain is Go, three binaries.** `orchestrator/` is
+    the Go module `freehold/orchestrator` (go 1.25): `freehold` (interactive
+    TUI; a subcommand routes to the CLI), `freehold-orchestrator`, and
+    `freehold-agent-tools` (the CP's agent-management MCP server). `internal/`
+    carries agent, agenttools, bootstrap, cert, cli, client, config, console,
+    crypto, delegate, deploy, dnsman, drive, flows, oplogin, planebase,
+    provisioner, relay, state, teardown, tui, wire.
 
-*   **`orchestrator` = the dumb privileged hand.** A dumb, privileged MCP
-    tool server (`internal/delegate` + `internal/cli`): `tools/list` returns
-    *exactly one* entry, `"exec"`; `tools/call` runs the command *verbatim*
-    and streams stdout/stderr.
+*   **The privileged `exec` funnel lives in the RUST runner, not the
+    orchestrator.** `orchestrator` is the operator's CLI/TUI/installer: it
+    drives a running runner over its MCP endpoint (`internal/client/mcp.go`,
+    the shared signed-header scheme) and re-enters itself (`freehold exec …`)
+    for its world-bring-up stages. The runner (`runner/`, Rust) is the dumb
+    privileged hands — `exec(cmd, target, stream?)`, signed by a granted
+    pubkey, fail-closed, auditors per command.
 
-*   **MCP server, not a proxy.** `internal/delegate/mcp.go` serves the
-    `freehold-delegate` MCP server with the single `exec` tool;
-    `cmd/freehold-delegate` (alias `cmd/freehold` → `freehold`) and
-    `cmd/freehold-runner` both wire `delegate`'s `RunCall`.
+*   **`freehold-agent-tools` is a distinct SEMANTIC surface on the CP**, not
+    the runner's `exec`. Its Go methods (`internal/agent/tools.go`,
+    `create_agent`/`grant_agent`/`manage_agent`) are served in-process by
+    `cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`), authorized per call
+    against the server's own relay roster (NIP-29 channel + 39002,
+    fail-closed); its `mcp` stdio mode is the bridge agent pods fetch at boot.
+    The build dogfoods `create_agent` to bring the CPA up.
 
-*   **`run_call(call, rawJSON)` → `{stream:[stdout…, stderr…]}`.** It parses
-    the `RunnerCall`, verifies the signature over canonical bytes, checks
-    nonce/expiry, looks up issuer in the roster (fail-closed), selects the
-    connector, and executes the `exec` command verbatim.
+*   **`internal/cli/rebuild.go` is the world pipeline.** `collectAnswers` →
+    `rebuildFlags` → `newRebuildEngine` threads the stage set
+    (door → runner → durable plane → relay → CP → k3s → litellm → Caddy →
+    `freehold-agent-tools` → CPA → reconcile); `install` hands the same
+    engine the TUI's answers. Teardown keeps the config (compute-only) unless
+    `--data` erases the tenant datasets.
 
-*   **A stream is a property of `exec`.** `tools/call` with `stream=true`
-    yields `content[0].text`, a JSON array of interleaved
-    `["stdout"|"stderr", line]` pairs; `false` yields a single
-    `{stdout, stderr, code}` object.
-
-*   **Gates:** signature validity against the roster, audience binding,
-    `ts + timeout_s` expiry, and nonce replay — each a separate rejection
-    path; `identity.json` → `identity.priv`.
-
-*   **`readFile` is NOT a tool.** Any agent that can `exec` can `cat` a
-    file; the only way to erase a capability is to revoke it from the
-    channel (`RevokeRunner` → 9003).
-
-*   **`FreeholdRuntime` (above) is the contract oracle:** `run_call` is the
-    single funnel, `resolve_target` stays pure, and `verify_envelope` guards
-    replay in memory only.
-
-*   **The Go engine reads the contract verbatim.** `newRebuildEngine` threads
-    the stage set without interpretation (`internal/cli/rebuild.go`);
-    `collectAnswers` → `rebuildFlags` hands `install` the same engine
-    (`eng.stdin = ui.in`); `runReconstruct` does `stateFromRunner` →
-    `resolve` → `ensure` → `bootstrap relay` → `bootstrap CP`.
-
-*   **The CLI's single stdin is load-bearing:** `prompt()` reads through one
-    persistent `bufio.Reader` over `cmd.InOrStdin()`; a new mid-pipeline
-    prompt never opens a second reader.
-
-*   **`internal/tui` (`freehold`) and `cmd/freehold-orchestrator` are the
-    operator's only UI.** `internal/tui/activity.go` (548 lines) provides
-    one activity surface for ALL long ops (the `send-msg`/`tui-daemon-combo`
-    pattern): spinner + live label on the top line, ✓/✗ result rows (boot
-    probes — config → runner → relay → cp → k3s → world state, 6s each) or a
-    streaming last-12-lines window (subprocess runs), `ctrl+c` aborts — no
-    dashboard, no shortcut footer, while active.
-
-*   **A rebuild bailing at the door is an EXPECTED pause** (`a.wait`,
-    rendered "waiting for the operator" and YELLOW): `main.go` maps
-    `!GateOpen` to `ErrWait` → `ActionWait` → `model{wait: m.act, …}`;
-    ENTER re-runs the SAME args in place (never back to the 6-field form),
-    ESC cancels.
-
-*   **`recoverDoorKey()` re-derives the door ssh PUBLIC line** (and only the
-    public line) from `identity.json` + the sealed `secrets.json`
-    (aad = secret name) when a reused package skips the gate but the key
-    was never installed; `crypto.ExtractED25519PublicKeyLine` parses past
-    the private half and never returns/writes it.
-
-*   **`storage.go` honors `plane.backend_kind`; `resolve.go`/`ensure.go`
-    honor it.** The plane stage is NEVER skipped — `ensure` is idempotent
-    and runs EVERY converge (`backend.is_some()` in the config is not proof
-    the plane is live). `TestManagedForFlags`, `TestWorldManaged` and
-    `TestParsePctGateway` in `internal/cli/rebuild_test.go` anchor this
-    region.
-
-*   **Teardown (Chunk 3): whole-world is COMPUTE teardown.**
-    `internal/teardown/teardown.go`'s `Run` destroys LXCs, KEEPS the
-    recorded coords (operator-owned facts; no `PruneLxcCoords`), so a
-    rebuild re-boots the SAME world — and `--data` adds the tenant datasets
-    + `freehold-thin`. freehold's own operator-side state (config, world home
-    = runner packages + ops identity + sealed DNS provider creds + door key)
-    is KEPT even on `--data`, so a rebuild reuses the credentials and metrics
-    and never re-asks for DNS/operator material.
-
-*   `stageLocalLvm` honors the plane: `ChownGuestUid` is NON-recursive (top
-    dir only — PVE's own invariant; a recursive sweep re-roots every
-    container-owned subtree and EACCESes redis/postgres/buzz).
-
-*   **The teardown TUI is ACTIVE with checkboxes.** `Run` announces each LXC
-    *before* it destroys it (`destroying relay LXC 100` streams via
-    `say()`/Live before `DestroyOneLxc`; the `destroyed / already gone /
-    never created` contract holds), and `freehold/teardown`'s `state.go`
-    seeds one slot per MANAGED LXC (`relay LXC 100` …) that flips to ✓ as
-    lines arrive; `tail()` keeps the last 3 non-empty lines so the
-    embedded cause is never lost.
-
-*   **No `vm_snapshot`/`vm_rollback`/`vm_restore`/`vm_exec`/`pct_*` tools**
-    in `run_call` — all of these are `exec`.
-
-*   **`internal/state` is a file store** (`secrets.json`, `providers.json`):
-    `state.go: managedStore{root}` at `/srv/data/cp`, never inside the
-    read-only module (`store.go`'s `managed: true`).
-
-*   **A crash-dump symbolized on the target** (`coredumptl` /
-    `coredumpctl copy` → `internal/tui/coredump.go`) is evidence of a real
-    problem, never a fallback.
+*   **`internal/state` is a file store** (`state.json`: runners, secrets,
+    agents) under the operator/CP state dir; agent registries are
+    CP-durable (see `freehold-agent-tools`).
 
 ### `freehold` TUI (bubbletea; the operator's console)
 
 *   **It is bubbletea, not HTML.** `internal/tui/tui.go` is full-screen
-    alt-screen: `tea.NewProgram(m, WithAltScreen(), WithMouseCellArea(…))`.
+    alt-screen (`tea.NewProgram(m, WithAltScreen(), …)`); `freehold` with no
+    args enters it, a subcommand routes to the CLI.
 
-*   **Four views** (`<Tab> next view`, `1` Services, `2` Agents, `3`
-    Runners, `4` DATA): `newDashboardModel()` (services),
-    `newAgentModel()` (agents), `newRunnerModel()` (runners),
-    `newDataModel()` (DATA); the dashboard renders ONLY when nothing is
-    active (`state.go` → `actStepMsg{kind: "done"}`) — it never scrolls
-    under an open activity.
+*   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
+    Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
+    recheck the world, `s` toggle the Runners source (CP console ⇄ local
+    state), `w` open the web console, `l` log in with the operator nsec,
+    `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
 
-*   **The six auth fields** (`domain`, `pve_host`, `pve_user`, `pve_pass`,
-    `relay_gw`, `sizing`) are collected once, in order (`stepAfter` is
-    `func(int) int { return 1 }`; `nextStep` is unreachable — enforced).
+*   **Remote-CP access.** `l` (and the CLI's `freehold --login`) log the
+    operator's own nsec into the CP console (`internal/oplogin` persists it
+    0600 under the operator dir, so every launch auto-logs in). The Agents
+    tab reads the CP toolset registry (`freehold-agent-tools manage_agent`);
+    the Runners-CP view reads the console `/api/overview`. `w` opens the web
+    console pre-authorized via a single-use portal token.
 
-*   **Nothing may hardcode `local`** (`source.go: func Default`,
-    `func Resolve`); the store is a `managed` store, so a machine with no
-    recorded `mp*` mounts is *not* an authenticated appliance yet.
+*   **One activity surface for long ops.** `internal/tui/activity.go`
+    streams the boot probe rows and the subprocess windows, `ctrl+c` aborts;
+    the dashboard never scrolls under an open activity. The world-mutation
+    forms re-exec `freehold` as a subprocess (the same CLI drivers).
 
-*   **`identity.json` and `providers.json`** (with `params`) live in
-    `/srv/data/cp`; they are freehold state, never part of the read-only
-    `go:embed` module.
-
-*   **No secrets ever ride the wire or enter an agent's context**
-    (`mcp.go: func (h *Handler) callTool`); the `exec` stream frames
-    (`//> …` / `<! …`) carry only command text and stdout/stderr lines.
-
-*   **`<Tab>` cycles** `services → agents → runners → data → services`;
-    **`2` (or clicking) goes straight to Agents**; there is no `3`/`4`.
-
-*   **`<Ctrl+C>` aborts** mid-run (the tea ctx ends `RunShell`; the
-    process group is killed with `SIGKILL`, and `Wait` waits for pipes);
-    `[Q]` quits (`cmdQuit` → `tea.Quit`).
-
-*   **`[Enter]` continues** and re-runs the SAME args in place
-    (`runShell`); it never returns to the 6-field auth form.
+*   **Testing the TUI means the BUILT binary** — `go test` under
+    `internal/tui/` verifies form logic, not the running app (see AGENTS.md
+    for the rebuild+tmux/herdr discipline).
 
 ### `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (the CPA's purpose)
 
-*   **`orchestrator/prompts/CPA_SYSTEM_PROMPT.md`** (embedded into
+*   **`orchestrator/prompts/CPA_SYSTEM_PROMPT.md`** is embedded into
     `freehold-orchestrator` via the `orchestrator/prompts` package's
-    `//go:embed CPA_SYSTEM_PROMPT.md`
-    and mounted into every agent pod as the
+    `//go:embed CPA_SYSTEM_PROMPT.md` and mounted into every agent pod as the
     `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
-    re-read fresh on every spawn) — not a Go file and
-    not a "CPA host / LLM routing" spec. It says:
+    re-read fresh on every spawn. `freehold-agent-tools` ships it verbatim for
+    the CPA when the build creates it.
 
 *   The CPA is a **reasoning agent that lives in Buzz** and is the system's
-    **main user touchpoint**; it runs on the same `goose`/`omp` harnesses as
-    the expert agents it creates.
+    **main user touchpoint**; it runs on the same `buzz-acp` harness
+    (`buzz-agent`) as the agents it creates.
 
-*   It **delegates** expert work — drives a `target`'s `Runner` via `exec`,
-    or hits an **API directly** — instead of doing expert-level work itself.
+*   It is **conversation + agent-creation only** in this phase: it calls the
+    CP toolset's `create_agent` / `grant_agent` / `manage_agent` (through the
+    `freehold-agent-tools mcp` stdio bridge, signed as its own nsec and
+    authorized by the server's roster). It does not run arbitrary `exec` or
+    provision targets — that boundary is unchanged: reasoning decides *what*
+    to do, the deterministic runner/CP layer does it auditably.
 
-*   **It never sees plaintext secrets**, never writes secrets to files, and
-    references credentials by name only.
+*   **It never sees plaintext secrets** and references credentials by name
+    only.
 
-*   `## Example: "Create a VM with Nextcloud"` — "Create a Nextcloud
-    instance" / "Back it up."
+*   The prompt is honest about what is actually callable: it does not claim
+    tools the harness lacks; it reports tool errors plainly rather than
+    inventing results.
 
-*   **`run_call` returns `{stdout, stderr}`** (or `{error}`).
+### `control-plane` (Rust; the console + provisioner)
 
-*   **The `exec` tool** (`{cmd, target, stream?}`) is the ONLY one.
+*   **The control plane console + secret provisioner is a Rust crate**
+    (`control-plane/`: `src/state.rs`, `src/provisioner.rs`, `src/web.rs` —
+    the loopback admin/ops web console with NIP-98 operator login —
+    `src/console.rs`, `src/main.rs`). The console is the CP's own identity
+    (0600) that signs readiness probes against each runner — no side door,
+    the runner still fails closed.
 
-*   **The `exec` stream** is a `tools/call` to `freehold-orchestrator`
-    (`{"stream": true}` → `result.content[0].text` = JSON array of
-    `["stdout"|"stderr", line]` pairs).
+*   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
+    master key). `providers.json` (control-plane only) holds opaque `params`
+    per connector the system never parses.
 
-*   **Every long-running operation** — a `run_call`, or a subprocess like
-    `install`/`rebuild`/`teardown` — gets **one activity view** that is
-    ALWAYS the top line: `spinner + live label`, then `✓/✗ result rows`
-    (boot probes) or a `streaming last-12-lines window`.
-
-*   **The agent must NEVER:** re-derive a secret from `identity.json`, put a
-    secret in a URL, type `ssh host 'nc …'`, or hand a credential to a
-    container via `--env`.
-
-### `freehold-control-plane` (Go; the provisioning brain)
-
-*   **The `control-plane` module is `freehold/control-plane`, not a Rust
-    crate** — `internal/provisioner` (`provision.go`, `secrets.go`,
-    `providers.go`) and `internal/client` (`litellm.go`, `openrouter.go`,
-    …) live only under `orchestrator/`.
-
-*   **The `control-plane` binary's whole job is the LLM plane.** It
-    *provisions* providers and *seals* credentials into a
-    `SecretPackage`-shaped `secrets.json`; **there is no
-    `cp provision-provider`, no `cp rotate-secret`, no `cp
-    list-secret-names`.**
-
-*   **`providers.json` (at `state/providers.json`)** and **`secrets.json`
-    (at `secrets.json`)** are read-only to the `freehold` TUI/CLI and
-    written ONLY by the `control-plane` CLI.
-
-*   **`provisioner.go: func (f *Flags) Provision`** runs the whole
-    sequence — `resolve` → `writeSecrets` → `recordPackage` → `relaunch` —
-    in ONE pass; `rotate.go`'s `Rotate` *generates* a fresh keypair,
-    *re-seals* `secrets.json` under it, rewrites the `secrets/` and
-    `providers/` dirs, and *relaunches* the LXC.
-
-*   **`internal/provisioner/secrets.go: Destroy` and `provision.go`
-    both call `teardown.Run`;** `storeDir` is `state/`, and a failed
-    sequence rolls the dir back (`store.go: func (*managedStore) …`).
-
-*   **`providers.go` (the only "semantic tools" left):** a provider's
-    `params` are **opaque to the system** and *never* parsed, so there is
-    no `litellm.chat` / `litellm.list_keys` / `openrouter.list_models`.
+*   **The Go toolchain mirrors the surfaces it drives:** `internal/provisioner`
+    (`ProvisionRunner`) reproduces provision for onboarding existing
+    services; `internal/client/mcp.go` is the signed MCP client that drives a
+    runner (`exec`/`status`/`upload`); `internal/console` talks to the CP
+    console's `/api/*` (overview/agents/portal) as an operator session.
 
 *   **`internal/deploy` reads `providers.json`/`secrets.json` and builds
     a k3s `manifests.yaml`** (see `freehold-deploy/` below).
@@ -541,10 +433,11 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     anchors the LVM path at `drive/lvm_test.go:463`.
 
 4.  **Chunk 4 — A resilient CPA that creates agents and lives in Buzz:**
-    the CPA runs in a **Kube-slot** (the `goose`/`omp` harness — see
-    `roadmap/POC_CHUNK4.md`); `freehold-teardown` destroys LXCs but keeps
-    the **recorded coordinates**; `freehold-install` is a thin front-end to
-    the same engine.
+    the CPA runs on the `buzz-acp`/`goose-class` harness as a k3s pod (see
+    `roadmap/POC_CHUNK4.md`), with the CP's `freehold-agent-tools` toolset
+    and the durable-plane identity/memory guarantees; `freehold-teardown`
+    destroys LXCs but keeps the **recorded coordinates**; `freehold-install`
+    is a thin front-end to the same engine.
 
 5.  **Chunk 5 — Agent workspaces + git/GitHub:** one workspace at
     `/srv/data/<agent>/` (`.freehold/config.json` + `SKILL.md`);

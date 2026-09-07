@@ -214,7 +214,7 @@ deliverables actually shipped are the pre-C0 items:
 
 ## Chunk 4 — A resilient CPA that creates agents and lives in Buzz
 
-Goal: `@freehold` is a real, LLM-backed reasoning agent runnning in a Kube-slot — the system's main user
+Goal: `@freehold` is a real, LLM-backed reasoning agent running in a Kube-slot — the system's main user
 touchpoint. It is responsive in Buzz, durable and rebuildable with no data loss, gets its
 purpose from a versioned system prompt, and can create a new agent on request.
 

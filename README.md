@@ -15,10 +15,10 @@ auth, encrypted relay-persisted agent memory, delegation, and the runner lifecyc
 (runners-as-NIP-29-channels) all verified against a real Buzz relay with no custom kinds or
 relay patch. The CPA is a live, talkable Buzz agent: the operator names it at
 install, and it deploys as a k3s Pod running Buzz's `buzz-acp` harness with a
-dedicated create/grant/manage-agent toolset (Chunk 4) — its live durability
-proof (a real Buzz conversation surviving a full rebuild) is the rest of
-Chunk 4. The Backblaze B2 connector is hermetic-verified; a live account
-test is still open.
+dedicated create/grant/manage-agent toolset (Chunk 4) that it now drives
+directly from conversation — it survives a full rebuild and creates new
+agents itself when asked in Buzz. The Backblaze B2 connector is
+hermetic-verified; a live account test is still open.
 
 ## Design in one paragraph
 
@@ -47,6 +47,12 @@ orchestrator/         freehold (Go): the full CLI + interactive TUI — the live
                       against the Rust core by the oracle-harness gate (`go test
                       ./orchestrator/harness/...`). The Rust tui, freehold-orchestrator,
                       and installer crates are REMOVED (superseded by the Go binary).
+orchestrator/cmd/freehold-agent-tools
+                      (third binary) the CP's agent-management MCP server on the control
+                      plane: create_agent / grant_agent / manage_agent (roster-authed),
+                      plus `mcp` — the stdio bridge the agent pods fetch at boot to expose
+                      those tools to their harness. 22 Go packages under internal/
+                      (incl. agent, agenttools, oplogin, relay, state, …).
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -147,8 +153,9 @@ freehold --help               # both surfaces
 - **running** — the post-bring-up dashboard, six views cycled with
   `Tab` / `Shift-Tab`: **Services** (everything provisioned — name / where /
   status / data / url: relay + control plane today, k3s / litellm as their
-  coordinates land in the config), **Agents** (the CP's live agent roster —
-  name / pubkey / online status from the relay presence probe), **Runners**
+  coordinates land in the config), **Agents** (the CP toolset's agent registry
+  — name / pubkey / age of the agents the control plane has created),
+  **Runners**
   (the console API parity — same data as the web UI — toggled to the local
   loopback list with `s`), **Data** (the live durable plane — host capacity +
   each mount's size / used / guest bind-mount liveness, read-only through the

@@ -24,11 +24,12 @@ The agent is the key that breaks down the wall. Most people can't configure a ro
 provision a server — but they can _ask_. An agent can do both, and more. It doesn't just  
 run software for you; it **gives you back the agency** that complexity and lock-in took away.
 
-**Status:** Chunk 3 Phase 0.12 is implemented and live-verified on the real PVE host  
-(VG `pve`, LVM-thin `freehold-thin`); `storage resolve|ensure|destroy` work against that  
-host. C0 (bootstrap) has not yet started; the first expert (pihole / tailscale) lands on  
-the already-staged LXC harness (goose + buzz-acp + LiteLLM key) while C0 stands up  
-Kubernetes in parallel.
+**Status:** the appliance is up and live on a real PVE host under a real domain — relay,
+control plane, k3s, the litellm gateway, and a Caddy TLS edge all converge on one
+`freehold build`. Chunk 4's CPA is live in Buzz: it holds real conversations, survives a
+full teardown+rebuild with its identity and relay-persisted memory intact, and creates new
+agents itself when asked. Chunks 5–7 (agent workspaces + git/GitHub, Kubernetes deploys,
+and hardware portability) build from here.
 
 ## The "break down the wall" feeling
 
