@@ -49,7 +49,10 @@ world-state, migrations, async cert) extend it as they land.
   hijacked CP address never seeds a bogus anchor).
 - **`freehold logout`.** Clears this box's login ledger only; CP/world untouched
   (idempotent).
-- **`console.World()`** (`GET /api/world`) + `WorldSummary` client method.
+- **`console.World()`** (`GET /api/world`) + `WorldSummary` client method, and the
+  **CP console's `/api/world` endpoint behind it** (`control-plane/src/web.rs`): a
+  logged-in operator pulls relay + CP coords themself, so the recovery source of
+  truth is the CP — `login` seeds from real CP state, not a mock.
 
 ### Fixed
 

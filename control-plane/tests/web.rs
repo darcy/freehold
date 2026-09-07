@@ -78,6 +78,103 @@ fn assert_no_plaintext(v: &Value, secrets: &[&str]) {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn world_serves_operator_seed_after_login() {
+    let base = tempfile::tempdir().unwrap();
+    let cp_dir = base.path().join("cp");
+    let store = StateStore::open(&cp_dir).unwrap();
+    store
+        .set_relay_url(Some("https://relay.example".into()))
+        .unwrap();
+    store
+        .set_relay_pubkey(Some(
+            "9797abc9797abc9797abc9797abc9797abc9797abc9797abc9797abc9797abc".into(),
+        ))
+        .unwrap();
+    let console = Console::load_or_create(&cp_dir).unwrap();
+    let console_pk = console.pubkey();
+
+    // An operator admin seeded with the NIP-98 whitelist.
+    let admin_sk: [u8; 32] = [0x42; 32];
+    let (admin_pk, _, _) = freehold_core::nip98::sign_event(&admin_sk, 0, 0, vec![], "").unwrap();
+
+    let app = web::router(
+        Arc::new(store),
+        console,
+        Some(Arc::new(web::Auth::new(vec![admin_pk.clone()]))),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{addr}");
+
+    // 1. Without a session /api/world must fail closed (auth is ON).
+    let anon = reqwest::get(format!("{base_url}/api/world")).await.unwrap();
+    assert!(
+        anon.status() == reqwest::StatusCode::UNAUTHORIZED
+            || anon.status() == reqwest::StatusCode::FORBIDDEN,
+        "unauth world status={}",
+        anon.status()
+    );
+
+    // 2. NIP-98 login (challenge -> sign -> session cookie).
+    let challenge: serde_json::Value = reqwest::get(format!("{base_url}/api/auth/challenge"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nonce = challenge["nonce"].as_str().unwrap().to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let tags = vec![
+        vec!["u".to_string(), base_url.clone()],
+        vec!["method".to_string(), "login".to_string()],
+    ];
+    let (pubkey, _, sig) =
+        freehold_core::nip98::sign_event(&admin_sk, 27235, ts, tags.clone(), &nonce).unwrap();
+    assert_eq!(pubkey, admin_pk);
+    let login = reqwest::Client::new()
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "nonce": nonce, "pubkey": pubkey, "created_at": ts, "tags": tags, "sig": sig,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), reqwest::StatusCode::OK);
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // 3. The logged-in operator pulls the world seed.
+    let world = reqwest::Client::new()
+        .get(format!("{base_url}/api/world"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(world.status(), reqwest::StatusCode::OK);
+    let w: serde_json::Value = world.json().await.unwrap();
+    assert_eq!(w["relay_url"], "https://relay.example");
+    assert_eq!(w["relay_ws_url"], "wss://relay.example");
+    assert_eq!(w["cp_pubkey"], console_pk);
+    assert_eq!(w["operator_pubkey"], admin_pk);
+    assert!(w["relay_pubkey"].is_string());
+
+    server.abort();
+}
+
 fn console_pubkey(base: &str) -> String {
     get_json(base, "/api/overview", None)
         .1
