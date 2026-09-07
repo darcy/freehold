@@ -375,8 +375,11 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			report = append(report, "k3s durable local-path re-asserted")
 		}
 		// 2. Relay compose stack reconverge (up-if-not-running, idempotent).
+		// set -o pipefail so the pipeline's exit is docker compose's (not tail's),
+		// else a failing bring-up would still echo RELAY_COMPOSE_OK and
+		// spec.run would report success falsely.
 		if spec.relayLxc != 0 && spec.relayCompose != "" {
-			cmd := fmt.Sprintf("pct exec %d -- bash -c 'cd %s && docker compose up -d --no-recreate 2>&1 | tail -3 && echo RELAY_COMPOSE_OK'",
+			cmd := fmt.Sprintf("pct exec %d -- bash -c 'set -o pipefail; cd %s && docker compose up -d --no-recreate 2>&1 | tail -3 && echo RELAY_COMPOSE_OK'",
 				spec.relayLxc, spec.relayCompose)
 			if err := spec.run(cmd, 240); err != nil {
 				return "", fmt.Errorf("world-build relay compose: %w", err)
