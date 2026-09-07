@@ -269,9 +269,17 @@ impl StateStore {
         self.save()
     }
 
+    pub fn relay_url(&self) -> Option<String> {
+        self.inner.read().relay_url.clone()
+    }
+
     pub fn set_relay_url(&self, relay_url: Option<String>) -> Result<(), StateError> {
         self.inner.write().relay_url = relay_url;
         self.save()
+    }
+
+    pub fn relay_pubkey(&self) -> Option<String> {
+        self.inner.read().relay_pubkey.clone()
     }
 
     pub fn set_relay_pubkey(&self, relay_pubkey: Option<String>) -> Result<(), StateError> {

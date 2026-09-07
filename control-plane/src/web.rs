@@ -405,6 +405,7 @@ pub fn router(
         .route("/api/auth/portal", post(portal_token))
         .route("/api/auth/portal/{token}", get(portal_land))
         .route("/api/overview", get(overview))
+        .route("/api/world", get(world))
         .route("/api/provision", post(provision))
         .route("/api/rotate", post(rotate))
         .route("/api/revoke", post(revoke))
@@ -682,6 +683,42 @@ async fn overview(
         "console_pubkey": console_pk,
         "runners": runners,
     })))
+}
+
+/// /api/world — the connection/desire-profile slice a FRESH operator box seeds
+/// after `freehold login` (`oplogin.Interactive` pulls this then writes a local
+/// config). It tells a box where the relay is + who this CP is, so recovery
+/// needs nothing that lived only on the lost box. Session-gated like every
+/// /api route: only an authenticated operator reads world state, and the
+/// `operator_pubkey` returned is that operator's own.
+async fn world(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let operator = require_session_pubkey(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+    let relay_url = state.store.relay_url();
+    let relay_ws_url = relay_url.as_deref().map(ws_of);
+    Ok(Json(json!({
+        "relay_url": relay_url,
+        "relay_ws_url": relay_ws_url,
+        "relay_pubkey": state.store.relay_pubkey(),
+        "cp_url": state.public_origin,
+        "cp_pubkey": state.console.pubkey(),
+        "operator_pubkey": operator,
+    })))
+}
+
+/// ws_of maps an http(s) URL to its ws (wss/ws) twin for the same host/path —
+/// the WebSocket endpoint Buzz serves alongside the relay's HTTP origin.
+fn ws_of(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return format!("wss://{rest}");
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        return format!("ws://{rest}");
+    }
+    url.to_string()
 }
 
 #[derive(Deserialize)]
