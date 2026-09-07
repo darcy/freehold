@@ -14,6 +14,7 @@ import (
 
 	"freehold/orchestrator/internal/cli"
 	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/oplogin"
 	"freehold/orchestrator/internal/tui"
 )
 
@@ -55,6 +56,12 @@ func main() {
 			os.Exit(2)
 		}
 		runTUI(args[1])
+		return
+	case "login", "--login":
+		if err := oplogin.Interactive(); err != nil {
+			fmt.Fprintln(os.Stderr, "login:", err)
+			os.Exit(1)
+		}
 		return
 	default:
 		os.Exit(cli.Run(args))

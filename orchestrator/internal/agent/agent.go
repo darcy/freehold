@@ -128,10 +128,60 @@ const AgentLiteLLMKeySecretKey = "key"
 // the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
 // Service, and Secrets.
-func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret string) string {
+// agentBridgeBootstrap returns the pod container command that fetches this
+// binary's `mcp` stdio bridge from the CP's freehold-agent-tools server and
+// points BUZZ_ACP_MCP_COMMAND at it (each boot); on fetch failure it falls back
+// to the plain buzz-dev-mcp MCP command so the agent never loses message tools.
+// The image runs non-root, so the bridge + config land in /tmp (world-writable),
+// not /usr/local. Empty agentToolsURL => no bridge (plain buzz-dev-mcp).
+func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string) string {
+	if agentToolsURL == "" {
+		return "exec buzz-acp"
+	}
+	// Single-line key=value config: no embedded newlines or quotes, so the
+	// bootstrap command embeds cleanly in the Pod manifest's JSON string.
+	conf := "url=" + agentToolsURL + " pubkey=" + agentToolsPubkey
+	return "if curl -fsSL --max-time 25 '" + agentToolsURL + "/freehold-agent-tools-binary' -o /tmp/freehold-agent-tools && chmod +x /tmp/freehold-agent-tools 2>/dev/null && printf '" + conf + "' > /tmp/freehold-agent-tools.conf; then export BUZZ_ACP_MCP_COMMAND=/tmp/freehold-agent-tools; fi; exec buzz-acp"
+}
+
+// AgentPodManifest is the agent Pod + Service manifest for a named agent. The
+// agent is ONE pod (at-most-one-live-instance, I4); the harness is the
+// container's PID-1 process (entrypoint `exec`), presence is kind:20001, and
+// the pod is reaped by the k3s namespace's own lifecycle. `restartPolicy:
+// Never` honors I5 — an intentional clean exit stays terminal; the kubelet
+// must not resurrect a pod that stopped on purpose.
+//
+// systemPrompt is the FULL text of prompts/CPA_SYSTEM_PROMPT.md (stageCpa
+// passes the file contents, not a path): it embeds as the <pod>-prompt
+// ConfigMap's content (indented four spaces per line so the `|` block scalar
+// is valid YAML) and the pod mounts that ConfigMap read-only at
+// CPAbsolutePromptPath; the pod re-reads the mounted file on every spawn —
+// never cached. Editing the prompt and redeploying is the only way the
+// agent's behavior changes.
+//
+// The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
+// points the buzz-agent harness at litellmBaseURL with litellmModel and an API
+// key (OPENAI_COMPAT_API_KEY from the `<pod>-litellm-key` Secret by
+// secretKeyRef). TODAY that key is the litellm gateway's admin master key
+// (litellm's /key/generate still needs a bootstrap virtual key before scoped
+// keys can be minted — see AGENTS.md "Known gaps"); the key NEVER rides the
+// manifest.
+//
+// When agentToolsURL is set, the pod's MCP command is the freehold-agent-tools
+// stdio bridge (agentBridgeBootstrap): it aggregates buzz-dev-mcp's message
+// tools with create/grant/manage-agent (signed as this agent's nsec), so the
+// agent can drive the CP toolset from conversation.
+//
+// The nsec also NEVER rides the manifest: it comes from the `<pod>-identity`
+// Secret (a `secretKeyRef`), which the deploy step writes ONLY when absent —
+// the same first-run-wins discipline as litellm's keys. The object names are
+// derived from the agent's sanitized name, so each agent owns its own Pod,
+// Service, and Secrets.
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
+	podCmd := agentBridgeBootstrap(agentToolsURL, agentToolsPubkey)
 	return fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -164,7 +214,7 @@ spec:
   containers:
   - name: %s
     image: %s
-    command: ["/bin/bash", "-c", "exec buzz-acp"]
+    command: ["/bin/bash", "-c", "%s"]
     env:
     - {name: BUZZ_RELAY_URL, value: %q}
     - {name: BUZZ_ACP_SYSTEM_PROMPT_FILE, value: %q}
@@ -173,6 +223,8 @@ spec:
     - {name: BUZZ_AGENT_PROVIDER, value: "openai-compat"}
     - {name: RUST_LOG, value: "debug"}
     - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
+    - {name: FREEHOLD_AGENT_TOOLS_URL, value: %q}
+    - {name: FREEHOLD_AGENT_TOOLS_PUBKEY, value: %q}
     - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
     - {name: OPENAI_COMPAT_BASE_URL, value: %q}
     - {name: OPENAI_COMPAT_MODEL, value: %q}
@@ -205,7 +257,8 @@ spec:
   - {port: 443}
 `,
 		promptCm, indentSystemPrompt(systemPrompt),
-		pod, pod, agentName, pod, SprigImage, relayURL, CPASystemPromptPath,
+		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, CPASystemPromptPath,
+		agentToolsURL, agentToolsPubkey,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
 		secret, secret, secret, CPASystemPromptPath, promptCm, pod, pod)
@@ -226,14 +279,15 @@ func indentSystemPrompt(prompt string) string {
 // display name (A1's stored value, default freehold) wired to the litellm
 // gateway (LiteLLMServiceURL + CpaLiteLLMModel).
 func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
-	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, sanitizePodName(cpaName)+"-litellm-key")
+	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, sanitizePodName(cpaName)+"-litellm-key", "", "")
 }
 
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
 // litellmManifestScript. agentName is the display name (sanitized into the
 // pod name). The nsec is provided separately via the identity-secret step
-// (never embedded here).
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret string) string {
+// (never embedded here). agentToolsURL/pubkey wires the CP toolset bridge when
+// non-empty.
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey string) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
@@ -254,7 +308,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret),
+		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 
@@ -263,13 +317,15 @@ echo AGENT_LEG1_OK`,
 // hostNetwork (it must reach the relay over the LAN), so it resolves via the
 // NODE's resolver and cannot see the in-kube service name `litellm.litellm` —
 // litellmBaseURL must therefore be the recorded NodePort URL (cfg.Litellm.URL,
-// e.g. http://192.168.30.8:31400/v1), which the node itself answers.
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret string) string {
+// e.g. http://192.168.30.8:31400/v1), which the node itself answers. It wires
+// the agent-tools stdio bridge (agentToolsURL/pubkey) so the CPA can drive the
+// CP toolset.
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey string) string {
 	keySec := litellmKeySecret
 	if keySec == "" {
 		keySec = sanitizePodName(cpaName) + "-litellm-key"
 	}
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec)
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in

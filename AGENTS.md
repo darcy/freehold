@@ -147,13 +147,20 @@ changelog.
   unzeroized body bytes before a `Zeroizing` wrapper takes ownership (loopback, TLS-free —
   same exposure class as the CLI's stdin path); the console's signing key is re-derived on
   every readiness probe rather than cached once.
-- **The freehold CP toolset (create-agent / grant-agent / manage-agent) is deferred — not wired as
-  an MCP surface.** The Go methods are built and unit-tested (`orchestrator/internal/agent/tools.go`),
-  and the CPA pod sets `BUZZ_ACP_MCP_COMMAND` to the bundled Buzz CLI server (`buzz-dev-mcp`), but
-  that exposes only message tools (`buzz messages send`/get), not the freehold own create/grant/
-  manage tools. Wiring freehold's agent-management toolset as a real MCP server (or an equivalent
-  surfaced toolset) is the named follow-up for Phase E (agent-creates-agent); D1–D3 need conversation
-  only and don't require it.
+- **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP
+  surface on the CP (`freehold-agent-tools`), not chat.** The Go methods
+  (`orchestrator/internal/agent/tools.go`) are served by a dedicated CP-side binary
+  (`cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
+  shared signed-header scheme and authorized against the server's own relay roster (its
+  NIP-29 channel + 39002 membership, read fresh per call, fail-closed).   Seeded at bootstrap;
+  the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
+  the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
+  via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
+  aggregates buzz-dev-mcp's message tools with create/grant/manage, signed as the agent and
+  authorized by the server's roster. **`grant_agent` on the toolset is not wired yet**: binding an agent to a runner's whitelist is a relay roster change owned by the
+  console (the runner's channel owner), and the server does not hold that credential — it
+  fails loudly ("not wired") rather than silently succeeding; operators grant via the console
+  today.
 - **The CPA talks its reasoning model through the litellm gateway as an OpenAI-compatible
   endpoint.** The pod routes `BUZZ_AGENT_PROVIDER=openai-compat` to the recorded litellm NodePort
   URL (`cfg.Litellm.URL`, e.g. `http://192.168.30.8:31400/v1` — the CPA is `hostNetwork`, so the
@@ -179,6 +186,10 @@ changelog.
   pins `go 1.25.0`); `cd orchestrator && go build ./... && go vet ./... &&
   go test ./...`; `go test ./harness/` drives `target/debug/freehold-harness-oracle` and
   gates every crypto primitive against the Rust `core` byte-for-byte.
+- **`freehold-agent-tools` must be built statically** (`CGO_ENABLED=0 go build -C orchestrator
+  -o target/release/freehold-agent-tools ./cmd/freehold-agent-tools`): the CP server ships
+  its own binary to agent pods, which run Alpine/musl — a glibc-dynamic build "silently not
+  found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
 - No formatter/linter config beyond rustfmt + clippy defaults.
 - `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.

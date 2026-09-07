@@ -55,6 +55,11 @@ type AgentInfo struct {
 	CreatedAt uint64  `json:"created_at"`
 	Available *bool   `json:"available,omitempty"`
 	Note      *string `json:"note,omitempty"`
+	// Purpose is the agent's one-line purpose, preserved by freehold-agent-tools'
+	// local registry so a rebuild reconciler can recreate the agent's system
+	// prompt verbatim. The console API does not carry it; the local registry row
+	// does. omitempty keeps it out of console-client serializations upstream.
+	Purpose string `json:"purpose,omitempty"`
 }
 
 // ProvisionReq mirrors console-client ProvisionReq.

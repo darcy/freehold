@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,10 +25,57 @@ import (
 	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/oplogin"
 )
 
 type consoleClient struct {
 	client *console.Client
+}
+
+// loginMsg reports the outcome of a background auto-login (from a persisted
+// operator identity on TUI start). auth=false means no persisted identity.
+type loginMsg struct {
+	auth   bool
+	client *console.Client
+	pubkey string
+	err    error
+}
+
+// cfgURL is the console base URL to log into: the recorded CP URL (the only
+// console URL freehold records). Empty when none is configured.
+func (m *Model) cfgURL() string {
+	if m.cfg != nil && m.cfg.CPURL != "" {
+		return m.cfg.CPURL
+	}
+	return ""
+}
+
+// autoLoginCmd silently re-establishes the console session on TUI start from a
+// persisted operator identity (installed via `l` or `freehold --login`). No-op
+// when none is recorded or no console is configured. The result arrives as a
+// loginMsg.
+func (m *Model) autoLoginCmd() tea.Cmd {
+	if m.cfg == nil || m.cfg.CPURL == "" {
+		return nil
+	}
+	hexStr, err := oplogin.SecretHex()
+	if err != nil {
+		return nil
+	}
+	secret := [32]byte{}
+	if b, derr := hex.DecodeString(hexStr); derr == nil && len(b) == 32 {
+		copy(secret[:], b)
+	} else {
+		return nil
+	}
+	return func() tea.Msg {
+		c, err := oplogin.Login(m.cfg.CPURL, secret)
+		if err != nil {
+			return loginMsg{auth: true, err: err}
+		}
+		pk, _ := crypto.PubkeyFromSecret(secret[:])
+		return loginMsg{auth: true, client: c, pubkey: pk}
+	}
 }
 
 type flowKind int
@@ -83,12 +129,16 @@ func textInputNew(placeholder string) *textinput.Model {
 
 // fieldFor builds one step's input: the label as placeholder, the recorded
 // default as the prefilled value (cursor at the end so the operator just
-// hits enter — or edits it).
+// hits enter — or edits it). The login nsec step is masked (a secret, like a
+// password) and never prefilled from disk.
 func fieldFor(k flowKind, step int, def string) *textinput.Model {
 	ti := textInputNew(promptLabel(k, step))
-	if def != "" {
+	if def != "" && !(k == flowLogin && step == 0) {
 		ti.SetValue(def)
 		ti.CursorEnd()
+	}
+	if k == flowLogin && step == 0 {
+		ti.EchoMode = textinput.EchoPassword
 	}
 	return ti
 }
@@ -104,14 +154,20 @@ func fieldFor(k flowKind, step int, def string) *textinput.Model {
 // (fresh-world behavior, unchanged).
 func flowDefaults(m *Model, k flowKind) [11]string {
 	var d [11]string
+	cfg, cerr := config.Load(m.CfgPath)
+	if cerr != nil || cfg == nil {
+		return d
+	}
+	if k == flowLogin {
+		// The login URL defaults to the recorded CP URL (the operator's nsec
+		// is never prefilled).
+		d[1] = cfg.CPURL
+		return d
+	}
 	if k != flowRebuild || m.CfgPath == "" {
 		// No config: nothing to prefill. k3s (d[6]) and litellm (d[8]) stay
 		// BLANK, which the arg builder reads as "y" — the full desired world
 		// reconciles by default; opting out is an explicit "n".
-		return d
-	}
-	cfg, err := config.Load(m.CfgPath)
-	if err != nil || cfg == nil {
 		return d
 	}
 	d[0] = cfg.OperatorPubkey
@@ -134,6 +190,8 @@ func ncols(k flowKind) int {
 	switch k {
 	case flowProvision, flowRotate, flowGrant:
 		return 2
+	case flowLogin:
+		return 2
 	case flowDeployRelay, flowDeployCp:
 		return 3
 	case flowBootstrap:
@@ -150,6 +208,9 @@ func ncols(k flowKind) int {
 func promptLabel(k flowKind, step int) string {
 	switch k {
 	case flowLogin:
+		if step == 0 {
+			return "your nsec (nsec1… or 64-hex) — logs you into the CP and is saved locally"
+		}
 		return "console base URL"
 	case flowProvision:
 		if step == 0 {
@@ -310,18 +371,31 @@ func runSelf(args ...string) (string, error) {
 func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 	return func() tea.Msg {
 		if f.Kind == flowLogin {
-			agentDir := freeholdStateDir() + "/agent-ops"
-			auth, err := flows.AgentAuth(agentDir)
-			if err != nil {
-				return flowMsg{err: fmt.Errorf("login: no agent identity: %w", err)}
+			url := strings.TrimSpace(f.Inputs[1])
+			if url == "" {
+				url = m.cfgURL()
 			}
-			defer auth.Zero()
-			c, err := console.Login(f.Inputs[0], auth.Secret[:], 15*time.Second)
+			secret, err := oplogin.NsecToSecret(strings.TrimSpace(f.Inputs[0]))
+			if err != nil {
+				return flowMsg{err: fmt.Errorf("login: bad nsec: %w", err)}
+			}
+			pk, err := crypto.PubkeyFromSecret(secret[:])
 			if err != nil {
 				return flowMsg{err: err}
 			}
+			c, err := oplogin.Login(url, secret)
+			if err != nil {
+				return flowMsg{err: fmt.Errorf("login to %s: %w", url, err)}
+			}
+			// Only a SUCCESSFUL login is persisted as "the operator" — a
+			// mistyped/wrong nsec never poisons the auto-login ledger.
+			if _, err := oplogin.Save(secret); err != nil {
+				return flowMsg{err: fmt.Errorf("login: save operator identity: %w", err)}
+			}
 			m.console = &consoleClient{client: c}
-			return flowMsg{ok: "console login ok — cookie " + c.Cookie()[:10] + "..."}
+			m.consolePK = pk
+			m.RunnerSource = RunnerSourceCP
+			return flowMsg{ok: fmt.Sprintf("console login ok — operator %.12s", pk)}
 		}
 
 		// The five world-mutation forms all become FULL-SCREEN streaming
@@ -479,6 +553,7 @@ func doorKeyWaiting(out string) string {
 
 func (m *Model) refreshLocal() {
 	m.refreshRunners(m.cfg)
+	m.buildAgents(m.cfg)
 }
 
 // rebuildArgs builds the `freehold rebuild --yes` args from a completed

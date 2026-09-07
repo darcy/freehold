@@ -25,6 +25,92 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.6] — Chunk 4 Phase E, corrected: agent-creation is a CP toolset, not a chat post
+
+0.4.5 shipped agent-creates-agent as **relay-message watching**: a `watch-agents` daemon on
+the operator box polled #freehold for a natural-language `create-agent name: X purpose: Y`
+post and turned it into a deploy. That built the control-plane toolset as a regex over a
+chat channel, on the operator box, and taught the CPA to "say a creation request in the
+relay." It contravened the locked design (BUZZ_SURFACE: grants are native NIP-29 channel
+membership, and A4 calls for a dedicated create/grant/manage toolset) — so this phase
+reverts it and reimplements it correctly.
+
+### Changed
+
+- **A real CP-side toolset replaces watch-agents.** `freehold-agent-tools` is now a dedicated
+  Go MCP server **on the control plane** exposing `create_agent` / `grant_agent` /
+  `manage_agent`; each handler calls `internal/agent/tools.go` in-process (direct, not a
+  proxy). The `watch-agents` executor and the CPA prompt instructing it to post `create-agent`
+  to #freehold are deleted. Agent creation is a control-plane action, not a chat post.
+- **Grants are a roster, not a static list.** The server authenticates callers with the
+  shared signed-header scheme and authorizes them against **its own relay roster**: a private
+  NIP-29 channel (9007), grants as channel membership (9000 put-user / 9001 remove-user), and
+  the live whitelist as the relay's signed 39002 roster, read fresh per call and fail-closed
+  on relay outage — the exact model a runner's grants follow. Seeded at bootstrap with the
+  build/operator identity; revocation is a roster change and needs no restart.
+- **The build dogfoods the audited path.** `stageCpa` no longer deploys the CPA in-binary —
+  it calls the CP's `create_agent` over MCP, signed as the build identity (the seeded grant),
+  the same call shape agent-creates-agent will use. The CPA is now the *first product* of the
+  one audited path.
+- **The local `freehold create-agent` CLI is gone.** All agent creation flows through the CP's
+  `freehold-agent-tools` server. Identity minting moved to the CP's durable plane
+  (`/srv/data/cp/agent-tools/…`), so it survives an LXC teardown. The durable source of truth
+  for "which agents exist" is the CP registry: a rebuild reconciles it, re-creating agents
+  idempotently with the same durable pubkeys (E3).
+- **The CPA's deploy runner is the CP's own co-located runner.** The build co-locates the
+  runner inside the CP (the IDH server's privileged transport into the box), grants
+  `freehold-agent-tools` on it, and it applies agent pods through it — so runtime agent
+  creation does not depend on an operator-box process.
+
+### Added
+
+- **The TUI drives the remote CP.** `l` logs into the CP console with the
+  **operator's nsec** (the console admin — so it grants every remote operation
+  locally: overview, provision, grant, revoke, agents, the web portal), persists
+  the key 0600 under `~/.freehold/control-plane/operator`, and every later TUI
+  launch **auto-logs in** from it (`freehold --login` does the same from the
+  shell). `w` opens the web console pre-authorized (single-use portal token).
+  The **Runners** tab toggles between the CP console and the local loopback
+  list with `s`, and the **Agents** tab now shows the CP's *live* agent roster
+  (name/pubkey/presence) from the freehold-agent-tools registry instead of the
+  stale local loopback registry — `l` fixes what was a broken agent-ops
+  (non-admin) login before.
+- **The CPA's harness can now actually call the CP toolset.** `freehold-agent-tools`
+  gained an `mcp` stdio bridge that aggregates buzz-dev-mcp's message tools with
+  `create_agent`/`grant_agent`/`manage_agent`; the CPA pod fetches it from the
+  CP server at boot (a static Alpine-compatible build, into `/tmp` since the
+  image runs non-root), points `BUZZ_ACP_MCP_COMMAND` at it (falling back to
+  plain buzz-dev-mcp if the fetch fails), and signs calls as its own nsec — the
+  CPA is membered into the agent-tools roster at create time so it is
+  authorized. Verified: `manage_agent` from inside the pod returns the real
+  registry. The system prompt now reflects that create/grant/manage are real,
+  callable tools (closing the honesty note).
+
+### Removed
+
+- `freehold watch-agents`, its `--since`/`--poll-ms` flags, and the `#freehold` control-
+  channel parsing (`parseCreateReq`/`cpaNostrSecret`/`createReqRe`).
+- The CPA system prompt's write-a-structured-request-to-#freehold ritual.
+- The operator-side `create-agent` command, its deploy engine, and the config's recorded
+  `[[agents]]` list (the CP registry now owns agent durability).
+
+### Fixed
+
+- **0.4.5 mints created-agent identities on the operator box** (`FREEHOLD_HOME/control-plane/
+  agent-<name>`), which would not survive the CP's LXC teardown. Creation now mints on the
+  CP's durable plane, closing that hole — and the CPA's identity follows it in.
+- The CPA prompt no longer claims it calls create/grant/manage tools its harness does not yet
+  attach (a stdio MCP facade the CPA pod would spawn to reach `freehold-agent-tools` is the
+  named follow-up — see AGENTS.md Known gaps), keeping the same honesty as the 0.4.3
+  tool-contract fix.
+
+### Known gaps at this version
+
+See `AGENTS.md`'s Known gaps. Most relevant to this phase: the CPA pod's harness has not yet
+attached `freehold-agent-tools` as callable MCP tools (a stdio MCP facade the pod would spawn
+is the follow-up); and `freehold-agent-tools` deploys pods through the CP's co-located runner,
+so runtime agent-creation depends on that runner being reachable.
+
 ## [0.4.5] — Chunk 4 Phase E: the CPA can create agents
 
 ### Added

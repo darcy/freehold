@@ -61,7 +61,11 @@ to run, idle and active.
 - [x] A3. Use stored name as the CPA's Buzz handle / profile
       display name — not a fixed brand name baked into the product.
 - [x] A4. Give it a dedicated toolset (create-agent, grant, manage) in place
-      of a service-specific one. No skill-execution tools yet.
+      of a service-specific one: `freehold-agent-tools`, a real MCP server on
+      the CP exposing `create_agent` / `grant_agent` / `manage_agent`, handlers
+      calling `internal/agent/tools.go` in-process, authorized per call against
+      the server's own relay roster (NIP-29 channel + 39002 membership,
+      fail-closed), seeded at bootstrap and dogfooded by the build. No skill-execution tools yet.
 - [x] A5. Wire it into the existing agent registry (already live: named agents
       register and report ●/○ availability from relay presence) so CPA shows
       up the same way any agent does.
@@ -137,18 +141,19 @@ to run, idle and active.
 
 - [x] E1. Give CPA a create-agent tool: given a name and a one-line purpose,
       it stands up a new buzz-acp-class identity with its own durable,
-      relay-scoped memory. (`freehold create-agent` + `watch-agents` executor:
-      mints a durable identity under the CP control-plane area, adds the pubkey
-      as a relay member, seats it in #freehold + publishes its profile, and
-      applies its pod via the runner. The CPA posts `create-agent name: X
-      purpose: Y` to #freehold; the watcher executes it and confirms.)
+      relay-scoped memory — the CP's `freehold-agent-tools` `create_agent`
+      (mints a durable identity under the CP's durable plane, adds the pubkey
+      as a relay member, seats it in #freehold + publishes its profile, applies
+      its pod through the CP's co-located runner, and registers it). The build
+      dogfoods this exact call to bring the CPA up; the CPA pod's own harness
+      attachment (a stdio MCP facade it would spawn) is the named follow-up.
 - [x] E2. The created agent ships with no skill and no target — purely
       conversational, holding its own memory, same as CPA at this stage.
 - [x] E3. Verify the created agent is directly reachable in Buzz (not only
       reachable through CPA) and survives the same restart/rebuild drill as
-      D2/D3. (Verified 2026-09-05: `helper` pod online in #freehold, relay
-      accepts its publishes; survived a full teardown+rebuild with the same
-      pubkey — the build reconciles created agents recorded in the config.)
+      D2/D3. The CP registry is the durable source of truth: a rebuild
+      reconciles it, re-creating agents idempotently with the same durable
+      pubkeys.
 
 #### Phase F — Resource baseline
 

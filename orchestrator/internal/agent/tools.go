@@ -1,10 +1,23 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"freehold/orchestrator/internal/console"
 )
+
+// ConsoleOps is what a tool handler needs from the registry backing it. The
+// runner-facing console.Client satisfies it; freehold-agent-tools binds it to
+// the CP's local durable agent registry (direct, in-process — no admin login,
+// no HTTP hop, no cross-process state.json writes). Signatures mirror the
+// console client so either implementation satisfies it.
+type ConsoleOps interface {
+	RegisterAgent(name, pubkey, channel string) (json.RawMessage, error)
+	UnregisterAgent(name string) (json.RawMessage, error)
+	Agents() ([]console.AgentInfo, error)
+	Grant(runner, pubkey string) (json.RawMessage, error)
+}
 
 // CreateAgentFn deploys a named agent's sprig pod + mints its identity and
 // returns the new agent's pubkey. Supplied by the caller (the harness runtime
@@ -22,9 +35,10 @@ type CreateAgentFn func(name, purpose string) (pubkey string, err error)
 // registry rows. All side effects flow through the console — the same audited
 // surface the operators and delegate-peers already use.
 
-// Tools wraps the console client with the create/grant/manage operations.
+// Tools wraps the agent-management operations: the registry backend (a
+// ConsoleOps) plus the create deploy path (deploy on the runner).
 type Tools struct {
-	Console *console.Client
+	Console ConsoleOps
 	// Create deploys a new agent pod (mint + apply). nil = create unsupported.
 	Create CreateAgentFn
 }
