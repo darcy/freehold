@@ -242,6 +242,28 @@ func (c *Client) World() (*WorldSummary, error) {
 	return &w, nil
 }
 
+// TeardownResult is what /api/teardown removed from the CP's managed scope.
+type TeardownResult struct {
+	RunnersRemoved int `json:"runners_removed"`
+	AgentsRemoved  int `json:"agents_removed"`
+	DnsRemoved     int `json:"dns_removed"`
+}
+
+// Teardown asks the CP to remove what IT manages (runners + secrets, the agent
+// registry, DNS records) before the box destroys the CP itself — the CP-first
+// hand-off in `freehold teardown`. Session-gated.
+func (c *Client) Teardown() (*TeardownResult, error) {
+	raw, err := c.request(http.MethodPost, "/api/teardown", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var v TeardownResult
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // Overview fetches the console overview.
 func (c *Client) Overview() (*Overview, error) {
 	raw, err := c.request(http.MethodGet, "/api/overview", nil)

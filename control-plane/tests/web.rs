@@ -510,3 +510,144 @@ async fn admin_page_escapes_remote_readiness_text() {
     );
     server.abort();
 }
+
+/// /api/teardown is the CP-first teardown hand-off: an authed operator POSTs it
+/// and the CP clears what IT manages (runners+secrets, agents, DNS) before the
+/// box destroys the CP itself. Session-gated (anon is refused); idempotent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn teardown_clears_cp_managed_scope_after_login() {
+    let base = tempfile::tempdir().unwrap();
+    let cp_dir = base.path().join("cp");
+    let store = StateStore::open(&cp_dir).unwrap();
+    store.insert_runner(
+        "pg",
+        freehold_control_plane::state::RunnerRecord {
+            nostr_pubkey: "11".into(),
+            enc_pubkey: "22".into(),
+            status: freehold_control_plane::state::RunnerStatus::Active,
+            package_dir: cp_dir.join("runner/pg"),
+            created_at: 1,
+            mcp_addr: None,
+            risk_level: None,
+        },
+    );
+    store.insert_secret(
+        "pg",
+        freehold_control_plane::state::SecretRecord {
+            runner: "pg".into(),
+            kind: "ssh".into(),
+            address: "10.0.0.5".into(),
+            ciphertext_hex: "aa".into(),
+            created_at: 1,
+            rotated_at: None,
+        },
+    );
+    store.insert_agent(
+        "blog",
+        freehold_control_plane::state::AgentRecord {
+            pubkey: "33".into(),
+            created_at: 1,
+            channel: Some("blog".into()),
+        },
+    );
+    store.insert_dns(
+        "relay",
+        freehold_control_plane::state::DnsRecord {
+            ip: "10.0.0.1".into(),
+            source: "record_lxc relay".into(),
+            created_at: 1,
+        },
+    );
+    store.save().unwrap();
+
+    let console = Console::load_or_create(&cp_dir).unwrap();
+    let admin_sk: [u8; 32] = [0x42; 32];
+    let (admin_pk, _, _) = freehold_core::nip98::sign_event(&admin_sk, 0, 0, vec![], "").unwrap();
+    let app = web::router(
+        Arc::new(store),
+        console,
+        Some(Arc::new(web::Auth::new(vec![admin_pk]))),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{addr}");
+
+    // Anon teardown is refused (fail closed).
+    let anon = reqwest::Client::new()
+        .post(format!("{base_url}/api/teardown"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        anon.status() == reqwest::StatusCode::UNAUTHORIZED
+            || anon.status() == reqwest::StatusCode::FORBIDDEN,
+        "anon /api/teardown status={}",
+        anon.status()
+    );
+
+    // Login -> session cookie.
+    let challenge: serde_json::Value = reqwest::get(format!("{base_url}/api/auth/challenge"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nonce = challenge["nonce"].as_str().unwrap().to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let tags = vec![
+        vec!["u".to_string(), base_url.clone()],
+        vec!["method".to_string(), "login".to_string()],
+    ];
+    let (pubkey, _, sig) =
+        freehold_core::nip98::sign_event(&admin_sk, 27235, ts, tags.clone(), &nonce).unwrap();
+    let login = reqwest::Client::new()
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "nonce": nonce, "pubkey": pubkey, "created_at": ts, "tags": tags, "sig": sig,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // Teardown clears the CP's managed scope.
+    let td = reqwest::Client::new()
+        .post(format!("{base_url}/api/teardown"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(td.status(), reqwest::StatusCode::OK);
+    let v: serde_json::Value = td.json().await.unwrap();
+    assert_eq!(v["runners_removed"].as_u64().unwrap(), 1);
+    assert_eq!(v["agents_removed"].as_u64().unwrap(), 1);
+    assert_eq!(v["dns_removed"].as_u64().unwrap(), 1);
+
+    // Overview now shows no runners; agents empty too (idempotent next call).
+    let ov = reqwest::Client::new()
+        .get(format!("{base_url}/api/overview"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(ov["runners"].as_array().unwrap().len(), 0);
+
+    server.abort();
+}

@@ -16,6 +16,7 @@ import (
 	"freehold/orchestrator/internal/dnsman"
 	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/oplogin"
 	"freehold/orchestrator/internal/planebase"
 	"freehold/orchestrator/internal/teardown"
 	"github.com/spf13/cobra"
@@ -752,6 +753,17 @@ var teardownCmd = &cobra.Command{
 				return err
 			}
 		}
+		// CP-FIRST teardown (whole-world): ask the CP to remove what IT manages
+		// (runners + secrets, agent registry, DNS records) BEFORE the box
+		// destroys the CP itself, so the world unwinds gracefully instead of the
+		// substrate dying under managed state. Best-effort: the CP may be down
+		// or this box may lack the operator session — the local teardown still
+		// runs, with a clear warning, since it is the last resource standing.
+		if scope == teardown.ScopeWholeWorld {
+			if err := cpFirstTeardown(cfg); err != nil {
+				fmt.Printf("  (warning: CP teardown hand-off not performed — destroying anyway: %v)\n", err)
+			}
+		}
 		// Stream every line as it lands (--yes runs have no operator to
 		// page through; the TUI subprocess stream shows the same bytes).
 		tcfg.Live = func(line string) { fmt.Println("  " + line) }
@@ -882,6 +894,36 @@ func init() {
 	storageInfoCmd.Flags().StringArray("mount", nil, "Mount ref <role>:<source>:<guest>:<vmid|-> (repeatable; vmid '-' skips the guest probe)")
 	storageResolveCmd.Flags().String("device", "", "Physical device for a NEW zpool (e.g. /dev/sdb) — required only on the consent-gated create path, when no existing backend is detected")
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a backend (zpool OR LVM-thin) when none is detected. Absent + no backend = actionable bail")
+}
+
+// cpFirstTeardown is the CP-first teardown hand-off: the BOX logs into the CP
+// console as the operator and asks it to remove what it manages (runners +
+// secrets, agent registry, DNS records). Best-effort — any failure is returned
+// for the caller to warn on and continue, because teardown of the last resource
+// standing must not be blocked by a CP that is already down.
+func cpFirstTeardown(cfg *config.Config) error {
+	if cfg == nil || cfg.CPURL == "" {
+		return fmt.Errorf("no CP URL in config")
+	}
+	hexStr, err := oplogin.SecretHex()
+	if err != nil {
+		return fmt.Errorf("no operator session on this box (%v) — log in with `freehold login` to enable the CP hand-off", err)
+	}
+	secret, err := oplogin.NsecToSecret(hexStr)
+	if err != nil {
+		return err
+	}
+	c, err := oplogin.Login(cfg.CPURL, secret)
+	if err != nil {
+		return err
+	}
+	res, err := c.Teardown()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  CP teardown: removed %d runner(s)/secrets, %d agent(s), %d DNS record(s)\n",
+		res.RunnersRemoved, res.AgentsRemoved, res.DnsRemoved)
+	return nil
 }
 
 var _ = strconv.Itoa

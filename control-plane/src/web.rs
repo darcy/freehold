@@ -406,6 +406,7 @@ pub fn router(
         .route("/api/auth/portal/{token}", get(portal_land))
         .route("/api/overview", get(overview))
         .route("/api/world", get(world))
+        .route("/api/teardown", post(teardown))
         .route("/api/provision", post(provision))
         .route("/api/rotate", post(rotate))
         .route("/api/revoke", post(revoke))
@@ -716,6 +717,46 @@ fn ws_of(url: &str) -> String {
         return format!("ws://{rest}");
     }
     url.to_string()
+}
+
+/// POST /api/teardown — the CP-first teardown hand-off. A `freehold teardown`
+/// on the operator box asks the CP, BEFORE destroying the CP itself, to remove
+/// what IT manages: its runners + sealed secrets, the agent registry, and the
+/// DNS resolver records. Session-gated. Idempotent — an already-empty registry
+/// tears down to nothing.
+async fn teardown(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    require_session(&state, &headers).map_err(|b| *b)?;
+    check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
+
+    let snap = state.store.snapshot();
+    let runners: Vec<String> = snap.runners.keys().cloned().collect();
+    let agents: Vec<String> = snap.agents.keys().cloned().collect();
+    let dns: Vec<String> = snap.dns.keys().cloned().collect();
+    for name in &runners {
+        state.store.remove_runner(name);
+        state.store.remove_secret(name);
+    }
+    for name in &agents {
+        state.store.remove_agent(name);
+    }
+    for name in &dns {
+        state.store.remove_dns(name);
+    }
+    state.store.save().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "teardown failed to persist CP state"})),
+        )
+            .into_response()
+    })?;
+    Ok(Json(json!({
+        "runners_removed": runners.len(),
+        "agents_removed": agents.len(),
+        "dns_removed": dns.len(),
+    })))
 }
 
 #[derive(Deserialize)]
