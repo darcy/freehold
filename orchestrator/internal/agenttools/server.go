@@ -133,6 +133,10 @@ func (s *Server) toolList() []map[string]interface{} {
 			"name": "world_migrate", "description": "Run pending CP migrations (verify-gated: a migration is done only when its postcondition verifies, 🟢/🔴).",
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
+		{
+			"name": "world_build", "description": "Run the CP-owned world-build/reconcile stages through the CP's co-located runner (the box's login + trigger).",
+			"inputSchema": i(map[string]interface{}{}, []string{}),
+		},
 	}
 }
 
@@ -223,6 +227,13 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		}
 		b, _ := json.Marshal(res)
 		s.textResult(w, id, nil, string(b))
+	case "world_build":
+		out, err := s.Tools.WorldBuild()
+		if err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, out)
 	default:
 		s.rpcError(w, id, -32601, "unknown tool: "+call.Name)
 	}

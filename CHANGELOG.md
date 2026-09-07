@@ -69,11 +69,13 @@ world-state, migrations, async cert) extend it as they land.
   operator session, teardown warns and still runs (it is the last resource
   standing). Server endpoint + Go client + box wiring are hermetic-tested.
 - **A CP world-action surface on the agent-tools toolset.** Roster-gated `world_status`
-  (what the CP manages — its agent registry) and `world_teardown` (clears it), giving
-  the box a post-login "trigger" for the stateful half of the world. The infra half
-  (`build`/`upgrade`: k3s / litellm / Caddy / relay provisioning) is the named
-  follow-up that needs a live world + the `build` slim; the CPA harness is deliberately
-  NOT given `world_teardown` (locked "conversation + create only").
+  (what the CP manages — its agent registry), `world_teardown` (clears it), and
+  `world_build` (the CP runs its owned bring-up/reconcile stages through the co-located
+  runner via the shared `internal/stages`), giving the box a post-login "trigger" for
+  the world. `world_build` slice 1 re-asserts the k3s durable local-path; relay /
+  k3s / DNS / Caddy / litellm + the cert install extend it toward the full CP-driven
+  build, and the box `build` slims to CP-bring-up + trigger. The CPA harness is
+  deliberately NOT given the mutating world tools (locked "conversation + create only").
 - **A shared stage library (`internal/stages`).** The pure world-bring-up command
   builders (k3s install/local-path scripts, litellm + Caddy kube manifests, the
   cert-install script, DNS/LXC coord + secret-mint helpers) are extracted from
