@@ -2,6 +2,7 @@ package agenttools
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -120,6 +121,14 @@ func (s *Server) toolList() []map[string]interface{} {
 				"remove": map[string]interface{}{"type": "string"},
 			}, []string{}),
 		},
+		{
+			"name": "world_status", "description": "What the CP currently manages (its agent registry) — the box's post-login trigger surface.",
+			"inputSchema": i(map[string]interface{}{}, []string{}),
+		},
+		{
+			"name": "world_teardown", "description": "Clear the CP's managed agent registry (roster-gated world teardown).",
+			"inputSchema": i(map[string]interface{}{}, []string{}),
+		},
 	}
 }
 
@@ -186,6 +195,22 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		}
 		b, _ := json.Marshal(agents)
 		s.textResult(w, id, nil, string(b))
+	case "world_status":
+		agents, err := s.Tools.WorldStatus()
+		if err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		out := map[string]interface{}{"cp_pubkey": s.Audience, "agents": agents}
+		b, _ := json.Marshal(out)
+		s.textResult(w, id, nil, string(b))
+	case "world_teardown":
+		n, err := s.Tools.WorldTeardown()
+		if err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, fmt.Sprintf("removed %d agent(s)", n))
 	default:
 		s.rpcError(w, id, -32601, "unknown tool: "+call.Name)
 	}

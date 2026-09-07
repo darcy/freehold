@@ -68,6 +68,12 @@ world-state, migrations, async cert) extend it as they land.
   under managed state. Best-effort: if the CP is down or this box lacks the
   operator session, teardown warns and still runs (it is the last resource
   standing). Server endpoint + Go client + box wiring are hermetic-tested.
+- **A CP world-action surface on the agent-tools toolset.** Roster-gated `world_status`
+  (what the CP manages — its agent registry) and `world_teardown` (clears it), giving
+  the box a post-login "trigger" for the stateful half of the world. The infra half
+  (`build`/`upgrade`: k3s / litellm / Caddy / relay provisioning) is the named
+  follow-up that needs a live world + the `build` slim; the CPA harness is deliberately
+  NOT given `world_teardown` (locked "conversation + create only").
 
 ### Fixed
 

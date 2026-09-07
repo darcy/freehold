@@ -90,3 +90,34 @@ func (t *Tools) ManageAgent(remove string) ([]console.AgentInfo, error) {
 	}
 	return t.Console.Agents()
 }
+
+// WorldStatus is the CP's world-action surface for the box's "login + trigger":
+// what the CP currently manages (its agent registry). The infra half (k3s /
+// litellm / Caddy / relay provisioning) is the build/upgrade follow-up that
+// needs a live world; status + teardown are the roster-gated first slice.
+func (t *Tools) WorldStatus() ([]console.AgentInfo, error) {
+	if t.Console == nil {
+		return nil, fmt.Errorf("world-status: no console client bound")
+	}
+	return t.Console.Agents()
+}
+
+// WorldTeardown clears the CP's managed agent registry (the world-action pair to
+// the console's /api/teardown, roster-gated here). Returns how many were removed.
+func (t *Tools) WorldTeardown() (int, error) {
+	if t.Console == nil {
+		return 0, fmt.Errorf("world-teardown: no console client bound")
+	}
+	agents, err := t.Console.Agents()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, a := range agents {
+		if _, err := t.Console.UnregisterAgent(a.Name); err != nil {
+			return n, fmt.Errorf("world-teardown remove %s: %w", a.Name, err)
+		}
+		n++
+	}
+	return n, nil
+}
