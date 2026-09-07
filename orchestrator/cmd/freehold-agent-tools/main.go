@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -367,15 +368,18 @@ func (s *deploySpec) client() (*client.McpClient, error) {
 	return client.New(client.ConnectURL(s.runnerAddr), auth, s.runnerPK)
 }
 
-// runOut runs cmd through the co-located runner (target = the box) and returns
-// its stdout. Secrets requested: the runner requires the SSH target's OWN
-// credential among the requested secrets (it does not default to it then).
-func (s *deploySpec) runOut(cmd string, timeoutS uint64) (string, error) {
+// execOut runs cmd through the co-located runner (target = the box) and
+// returns its stdout. Secrets requested: the runner requires the SSH target's
+// OWN credential among the requested secrets (it does not default to it then),
+// so the target name is always first; extraSecrets add requested secrets by
+// name (the runner injects each as an env var + redacts it).
+func (s *deploySpec) execOut(cmd string, timeoutS uint64, extraSecrets ...string) (string, error) {
 	mc, err := s.client()
 	if err != nil {
 		return "", err
 	}
-	out, err := mc.Exec(s.runnerTarget, cmd, []string{s.runnerTarget}, timeoutS)
+	secrets := append([]string{s.runnerTarget}, extraSecrets...)
+	out, err := mc.Exec(s.runnerTarget, cmd, secrets, timeoutS)
 	if err != nil {
 		return "", err
 	}
@@ -389,8 +393,20 @@ func (s *deploySpec) runOut(cmd string, timeoutS uint64) (string, error) {
 	return out.Stdout, nil
 }
 
+func (s *deploySpec) runOut(cmd string, timeoutS uint64) (string, error) {
+	return s.execOut(cmd, timeoutS)
+}
+
 func (s *deploySpec) run(cmd string, timeoutS uint64) error {
-	_, err := s.runOut(cmd, timeoutS)
+	_, err := s.execOut(cmd, timeoutS)
+	return err
+}
+
+// runSecrets runs cmd through the co-located runner requesting extra secret
+// names by name (e.g. the litellm master + provider key the register curl
+// reads from $LITELLM / $PROVIDER_KEY).
+func (s *deploySpec) runSecrets(cmd string, timeoutS uint64, extra ...string) error {
+	_, err := s.execOut(cmd, timeoutS, extra...)
 	return err
 }
 
@@ -489,6 +505,179 @@ func (s *deploySpec) worldDNS() error {
 	return nil
 }
 
+// ---- litellm on the CP (the two-leg box stageLitellm, CP-side) -------------
+//
+// Leg 1 (kube workloads, no operator secret): the master key + postgres pw are
+// CP-generated (first-run-wins, the k8s Secrets are canonical across rebuilds;
+// the master is read back for lockstep on reuse). The operator's provider key
+// is NOT here — it rides the co-located runner package.
+// Leg 2 (admin call, runner-decrypted): the model-registration curl runs
+// THROUGH the co-located runner with the litellm master + provider key
+// requested BY NAME — the runner decrypts, injects env, redacts output.
+
+// litellmMasterKey resolves the gateway's ACTUAL admin master key: the
+// canonical copy is the first-run-wins k8s `litellm-keys` Secret, so on a
+// reuse run we read it back (a re-minted master would diverge from the running
+// gateway and every admin call would 401). Returns "" only when the Secret
+// doesn't exist yet (a fresh run mints it).
+func (s *deploySpec) litellmMasterKey() string {
+	out, err := s.runOut(fmt.Sprintf("pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d", s.k3sVmid), 30)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// providerKeyFromStore opens the operator's litellm provider key from the CP's
+// durable sealed store (<stateDir>/world-secrets/litellm-provider.json, sealed
+// to the agent-tools identity — written by the box build's hand-off). Returns
+// "" when no copy has been handed off yet.
+func (s *deploySpec) providerKeyFromStore() (string, error) {
+	path := filepath.Join(s.stateDir, "world-secrets", "litellm-provider.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var st struct {
+		Sealed string `json:"sealed"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return "", err
+	}
+	blob, err := hex.DecodeString(st.Sealed)
+	if err != nil {
+		return "", err
+	}
+	id, err := flows.LoadIdentity(s.stateDir)
+	if err != nil {
+		return "", err
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return "", err
+	}
+	plain, err := crypto.Open(secret, []byte("litellm-provider"), blob)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+// runnerHasSecret reports whether the co-located runner package inside the cp
+// LXC already carries a secret by name (a reuse skip — it must not be clobbered
+// with an empty re-seal).
+func (s *deploySpec) runnerHasSecret(name string) bool {
+	_, stateDir := s.cpGuestDirs()
+	runnerDir := filepath.Join(stateDir, "runner", s.runnerTarget)
+	out, err := s.runOut(fmt.Sprintf("pct exec %d -- sh -c \"grep -q '\\\"%s\\\"' %s/secrets.json 2>/dev/null && echo HAVE || echo NONE\"", s.cpLxc, name, runnerDir), 30)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out, "HAVE")
+}
+
+// addRunnerSecretFile seals a plaintext value into the co-located runner
+// package WITHOUT the value crossing argv/audit (the operator's provider key
+// AND the CP-generated master/postgres — no credential is ever a shell literal
+// in the audited command): write a temp file on the CP, sftp-upload to the
+// box, pct push into the guest, add-secret from a shell-read env var, then
+// clean up both temps.
+func (s *deploySpec) addRunnerSecretFile(name string, plain []byte) error {
+	binDir, stateDir := s.cpGuestDirs()
+	mc, err := s.client()
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("", "fh-sec-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	defer os.Remove(tmpPath)
+	if err := os.WriteFile(tmpPath, plain, 0o600); err != nil {
+		return err
+	}
+	if _, err := mc.Upload(s.runnerTarget, tmpPath, "/tmp/fh-sec", 60); err != nil {
+		return err
+	}
+	inner := fmt.Sprintf("V=$(cat /tmp/fh-sec); export V; %s/control-plane add-secret %s %s --state-dir %s --secret-env V; rm -f /tmp/fh-sec",
+		binDir, s.runnerTarget, name, stateDir)
+	cmd := fmt.Sprintf("pct push %d /tmp/fh-sec /tmp/fh-sec && pct exec %d -- sh -c '%s' && rm -f /tmp/fh-sec", s.cpLxc, s.cpLxc, inner)
+	return s.run(cmd, 90)
+}
+
+// restartCoLocatedRunner restarts the CP's co-located runner and waits for it
+// to be active: it loads its package (the freshly-sealed litellm secrets) at
+// boot only, so a register exec after add-secret needs the restart.
+func (s *deploySpec) restartCoLocatedRunner() error {
+	cmd := fmt.Sprintf("pct exec %d -- sh -c 'systemctl restart freehold-runner 2>/dev/null; for i in $(seq 1 15); do systemctl is-active freehold-runner >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1'", s.cpLxc)
+	return s.run(cmd, 60)
+}
+
+// worldLiteLLM brings the litellm gateway up CP-side (the box stageLitellm
+// pair, driven through the co-located runner): seal the master + postgres pw +
+// provider key into the co-located runner package (all file-transit, never
+// argv/audit), restart it so the package reloads, then apply the postgres +
+// gateway kube workloads, register the model, and seed the CPA pod's litellm
+// key — each exec requests its secrets BY NAME so the runner injects (and
+// redacts) the values. Fails loudly when no provider key is on the CP yet (the
+// box build's hand-off ships it).
+func (s *deploySpec) worldLiteLLM() error {
+	gwURL := "http://" + s.litellmIP + ":31400"
+	masterKey := s.litellmMasterKey()
+	if masterKey == "" {
+		masterKey = stages.GenSecretHex()
+	}
+	postgresPw := stages.GenSecretHex()
+	providerKey, err := s.providerKeyFromStore()
+	if err != nil {
+		return fmt.Errorf("litellm provider key: %w", err)
+	}
+	hasProvider := providerKey != "" || s.runnerHasSecret("provider-key")
+	if !hasProvider {
+		return fmt.Errorf("litellm needs the provider key on the CP and none is present: no sealed copy at %s and none in the co-located runner — run `freehold build` to hand it off (or seal it via control-plane add-secret %s provider-key)",
+			filepath.Join(s.stateDir, "world-secrets", "litellm-provider.json"), s.runnerTarget)
+	}
+	// Seal the co-located runner's package: master + postgres every run (the
+	// canonical values the k8s Secrets were seeded with), provider key once
+	// (only when handed off this run). All file-transit.
+	if err := s.addRunnerSecretFile("litellm", []byte(masterKey)); err != nil {
+		return fmt.Errorf("seal litellm master: %w", err)
+	}
+	if err := s.addRunnerSecretFile("postgres-pw", []byte(postgresPw)); err != nil {
+		return fmt.Errorf("seal litellm postgres pw: %w", err)
+	}
+	if providerKey != "" {
+		if err := s.addRunnerSecretFile("provider-key", []byte(providerKey)); err != nil {
+			return fmt.Errorf("seal litellm provider key: %w", err)
+		}
+	}
+	if err := s.restartCoLocatedRunner(); err != nil {
+		return fmt.Errorf("co-located runner restart: %w", err)
+	}
+	// Leg 1: kube workloads — the k8s Secrets read the injected env by name.
+	if err := s.runSecrets(stages.LitellmManifestScript(s.k3sVmid), 420, "litellm", "postgres-pw"); err != nil {
+		return fmt.Errorf("litellm kube apply: %w", err)
+	}
+	// Leg 2: register the model through the co-located runner (its own
+	// ciphertext: master + provider-key) against the gateway's real NodePort.
+	if err := s.runSecrets(stages.LitellmRegisterScript(gwURL, agent.CpaLiteLLMModel), 120, "litellm", "provider-key"); err != nil {
+		return fmt.Errorf("litellm model registration: %w", err)
+	}
+	// The CPA's litellm key is the gateway master (the scoped-key follow-up
+	// stands); seed the pod's Secret first-run-wins from the injected env.
+	if err := s.runSecrets(agent.AgentLiteLLMKeyScript(s.k3sVmid, s.cpaName), 60, "litellm"); err != nil {
+		return fmt.Errorf("seed CPA litellm key: %w", err)
+	}
+	return nil
+}
+
 // buildWorldApply returns the CP's world-build/reconcile driver: it runs the
 // shared stage commands (internal/stages) through the co-located runner, so the
 // box can "login + trigger" the CP to (re)assert the world. Each step is
@@ -530,7 +719,16 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			}
 			report = append(report, "dns register/point applied")
 		}
-		// 4. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
+		// 4. The litellm gateway (kube workloads + model registration through the
+		// co-located runner) — CP-owned; the operator's provider key rides the
+		// CP (hand-off) or the co-located runner package, never argv.
+		if spec.k3sVmid != 0 && spec.litellmIP != "" {
+			if err := spec.worldLiteLLM(); err != nil {
+				return "", fmt.Errorf("world-build litellm: %w", err)
+			}
+			report = append(report, "litellm gateway live")
+		}
+		// 5. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
 		// coords are recorded. No secrets (the Caddyfile is plain); cert
 		// issuance/install remain a separate stage.
 		if spec.k3sVmid != 0 && spec.relayHost != "" && spec.cpHost != "" && spec.relayIP != "" {
