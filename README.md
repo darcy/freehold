@@ -54,8 +54,8 @@ orchestrator/cmd/freehold-agent-tools
                       actions (migrate runs the CP's verify-gated `internal/migrations`
                       runner), over the relay-signed roster; `mcp` is the stdio bridge
                       the agent PODS fetch at boot (the world actions deliberately do NOT
-                      reach the CPA's conversation+create-only harness). 22 Go packages
-                      under internal/ (incl. agent, agenttools, oplogin, relay, state, …).
+                      reach the CPA's conversation+create-only harness). 23 Go packages
+                      under internal/ (incl. agent, agenttools, migrations, oplogin, relay, state, …).
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
