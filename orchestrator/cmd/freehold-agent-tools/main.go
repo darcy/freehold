@@ -33,6 +33,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/x/term"
+
 	"freehold/orchestrator/internal/agent"
 	"freehold/orchestrator/internal/agenttools"
 	"freehold/orchestrator/internal/client"
@@ -48,6 +50,15 @@ const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
+		// buzz-agent spawns the MCP server via BUZZ_ACP_MCP_COMMAND with NO
+		// subcommand and empty args (build_mcp_servers sets args=[]). When
+		// stdin is a pipe (a harness driving us as the stdio bridge), run the
+		// `mcp` bridge; only a real terminal means the operator forgot a
+		// subcommand and should see usage instead.
+		if !term.IsTerminal(os.Stdin.Fd()) {
+			cmdMCP(nil)
+			return
+		}
 		usage()
 		os.Exit(2)
 	}
