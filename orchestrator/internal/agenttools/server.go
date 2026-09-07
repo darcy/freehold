@@ -129,6 +129,10 @@ func (s *Server) toolList() []map[string]interface{} {
 			"name": "world_teardown", "description": "Clear the CP's managed agent registry (roster-gated world teardown).",
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
+		{
+			"name": "world_migrate", "description": "Run pending CP migrations (verify-gated: a migration is done only when its postcondition verifies, 🟢/🔴).",
+			"inputSchema": i(map[string]interface{}{}, []string{}),
+		},
 	}
 }
 
@@ -211,6 +215,14 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		s.textResult(w, id, nil, fmt.Sprintf("removed %d agent(s)", n))
+	case "world_migrate":
+		res, err := s.Tools.WorldMigrate()
+		if err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		b, _ := json.Marshal(res)
+		s.textResult(w, id, nil, string(b))
 	default:
 		s.rpcError(w, id, -32601, "unknown tool: "+call.Name)
 	}

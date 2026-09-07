@@ -41,6 +41,7 @@ import (
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/delegate"
 	"freehold/orchestrator/internal/flows"
+	"freehold/orchestrator/internal/migrations"
 	"freehold/orchestrator/internal/relay"
 	"freehold/orchestrator/prompts"
 )
@@ -282,6 +283,7 @@ func cmdServe(args []string) {
 	}
 
 	tools := &agent.Tools{Console: reg, Create: buildCreateAgentFn(spec)}
+	tools.Migrate = buildMigrator(spec)
 	srv := &agenttools.Server{Audience: audience, Grants: grants, Tools: tools}
 
 	mux := http.NewServeMux()
@@ -354,6 +356,34 @@ func (s *deploySpec) run(cmd string, timeoutS uint64) error {
 // buildCreateAgentFn returns the create-agent deploy: mint a durable identity
 // on the CP, add it as a relay member, seat it in #freehold, apply its pod
 // through the co-located runner, and hand the minted pubkey to Tools.CreateAgent
+// buildMigrator wires the CP's verify-gated migration runner (Step 7): a
+// durable ledger at <stateDir>/migrations.json (backed up with the CP plane),
+// running pending idempotent migrations gated on their postcondition (🟢/🔴).
+// First registered migration: the agent-tools durable registry must be a valid,
+// loadable store. The CPA-prompt/config migrations land with the live-world
+// build/upgrade, reusing this same runner.
+func buildMigrator(spec *deploySpec) agent.Migrator {
+	return func() ([]migrations.Result, error) {
+		st, err := migrations.Open(filepath.Join(spec.stateDir, "migrations.json"))
+		if err != nil {
+			return nil, err
+		}
+		registryPath := filepath.Join(spec.stateDir, "registry.json")
+		all := []migrations.Migration{{
+			Name: "001-agent-tools-registry-loadable",
+			Apply: func() error {
+				_, err := agenttools.OpenRegistry(registryPath)
+				return err
+			},
+			Verify: func() error {
+				_, err := agenttools.OpenRegistry(registryPath)
+				return err
+			},
+		}}
+		return st.Run(all)
+	}
+}
+
 // (which registers the registry row). Branches to the CPA manifest/prompt when
 // the name is the CPA's, so stageCpa's dogfooded create_agent produces the CPA.
 func buildCreateAgentFn(spec *deploySpec) agent.CreateAgentFn {

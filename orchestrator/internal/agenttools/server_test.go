@@ -15,6 +15,7 @@ import (
 	"freehold/orchestrator/internal/agent"
 	"freehold/orchestrator/internal/console"
 	"freehold/orchestrator/internal/crypto"
+	"freehold/orchestrator/internal/migrations"
 )
 
 func signForTest(secret []byte, audience string, ts int64, raw string) string {
@@ -92,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 5 {
-		t.Fatalf("expected 5 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 6 {
+		t.Fatalf("expected 6 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown"} {
+	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -201,5 +202,19 @@ func TestWorldStatusAndTeardown(t *testing.T) {
 	left, _ := ops.Agents()
 	if got := len(left); got != 0 {
 		t.Fatalf("world_teardown left %d agents", got)
+	}
+
+	// world_migrate runs the bound verify-gated migration runner.
+	migrated := false
+	srv.Tools.Migrate = func() ([]migrations.Result, error) {
+		migrated = true
+		return []migrations.Result{{Name: "001-x", OK: true, Applied: true}}, nil
+	}
+	out := call(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"world_migrate","arguments":{}}}`)
+	if !migrated {
+		t.Fatal("world_migrate did not invoke the bound migrator")
+	}
+	if !strings.Contains(out, "001-x") {
+		t.Fatalf("world_migrate result missing migration: %s", out)
 	}
 }
