@@ -25,7 +25,6 @@ package main
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -515,60 +514,10 @@ func (s *deploySpec) worldDNS() error {
 // THROUGH the co-located runner with the litellm master + provider key
 // requested BY NAME — the runner decrypts, injects env, redacts output.
 
-// litellmMasterKey resolves the gateway's ACTUAL admin master key: the
-// canonical copy is the first-run-wins k8s `litellm-keys` Secret, so on a
-// reuse run we read it back (a re-minted master would diverge from the running
-// gateway and every admin call would 401). Returns "" only when the Secret
-// doesn't exist yet (a fresh run mints it).
-func (s *deploySpec) litellmMasterKey() string {
-	out, err := s.runOut(fmt.Sprintf("pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d", s.k3sVmid), 30)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(out)
-}
-
-// providerKeyFromStore opens the operator's litellm provider key from the CP's
-// durable sealed store (<stateDir>/world-secrets/litellm-provider.json, sealed
-// to the agent-tools identity — written by the box build's hand-off). Returns
-// "" when no copy has been handed off yet.
-func (s *deploySpec) providerKeyFromStore() (string, error) {
-	path := filepath.Join(s.stateDir, "world-secrets", "litellm-provider.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	var st struct {
-		Sealed string `json:"sealed"`
-	}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return "", err
-	}
-	blob, err := hex.DecodeString(st.Sealed)
-	if err != nil {
-		return "", err
-	}
-	id, err := flows.LoadIdentity(s.stateDir)
-	if err != nil {
-		return "", err
-	}
-	secret, err := hex.DecodeString(id.EncSecretHex)
-	if err != nil {
-		return "", err
-	}
-	plain, err := crypto.Open(secret, []byte("litellm-provider"), blob)
-	if err != nil {
-		return "", err
-	}
-	return string(plain), nil
-}
-
 // runnerHasSecret reports whether the co-located runner package inside the cp
-// LXC already carries a secret by name (a reuse skip — it must not be clobbered
-// with an empty re-seal).
+// LXC already carries a secret by name (the box build's stageLitellm seals the
+// litellm master/postgres/provider into the proxmox-box package, and deploy-cp
+// re-ships it into the guest — the runner loads it at boot).
 func (s *deploySpec) runnerHasSecret(name string) bool {
 	_, stateDir := s.cpGuestDirs()
 	runnerDir := filepath.Join(stateDir, "runner", s.runnerTarget)
@@ -579,89 +528,27 @@ func (s *deploySpec) runnerHasSecret(name string) bool {
 	return strings.Contains(out, "HAVE")
 }
 
-// addRunnerSecretFile seals a plaintext value into the co-located runner
-// package WITHOUT the value crossing argv/audit (the operator's provider key
-// AND the CP-generated master/postgres — no credential is ever a shell literal
-// in the audited command): write a temp file on the CP, sftp-upload to the
-// box, pct push into the guest, add-secret from a shell-read env var, then
-// clean up both temps.
-func (s *deploySpec) addRunnerSecretFile(name string, plain []byte) error {
-	binDir, stateDir := s.cpGuestDirs()
-	mc, err := s.client()
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp("", "fh-sec-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	defer os.Remove(tmpPath)
-	if err := os.WriteFile(tmpPath, plain, 0o600); err != nil {
-		return err
-	}
-	if _, err := mc.Upload(s.runnerTarget, tmpPath, "/tmp/fh-sec", 60); err != nil {
-		return err
-	}
-	inner := fmt.Sprintf("V=$(cat /tmp/fh-sec); export V; %s/control-plane add-secret %s %s --state-dir %s --secret-env V; rm -f /tmp/fh-sec",
-		binDir, s.runnerTarget, name, stateDir)
-	cmd := fmt.Sprintf("pct push %d /tmp/fh-sec /tmp/fh-sec && pct exec %d -- sh -c '%s' && rm -f /tmp/fh-sec", s.cpLxc, s.cpLxc, inner)
-	return s.run(cmd, 90)
-}
-
-// restartCoLocatedRunner restarts the CP's co-located runner and waits for it
-// to be active: it loads its package (the freshly-sealed litellm secrets) at
-// boot only, so a register exec after add-secret needs the restart.
-func (s *deploySpec) restartCoLocatedRunner() error {
-	cmd := fmt.Sprintf("pct exec %d -- sh -c 'systemctl restart freehold-runner 2>/dev/null; for i in $(seq 1 15); do systemctl is-active freehold-runner >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1'", s.cpLxc)
-	return s.run(cmd, 60)
-}
-
 // worldLiteLLM brings the litellm gateway up CP-side (the box stageLitellm
-// pair, driven through the co-located runner): seal the master + postgres pw +
-// provider key into the co-located runner package (all file-transit, never
-// argv/audit), restart it so the package reloads, then apply the postgres +
-// gateway kube workloads, register the model, and seed the CPA pod's litellm
-// key — each exec requests its secrets BY NAME so the runner injects (and
-// redacts) the values. Fails loudly when no provider key is on the CP yet (the
-// box build's hand-off ships it).
+// pair, driven through the co-located runner): apply the postgres + gateway
+// kube workloads, register the model, and seed the CPA pod's litellm key —
+// each exec requests its secrets BY NAME so the runner injects (and redacts)
+// the values and the audited cmd carries only the $REF. The co-located runner
+// package carries the litellm secrets (the box build's stageLitellm seals them
+// into the proxmox-box package, which deploy-cp re-ships into the guest; the
+// runner loads its package at boot — it is NEVER restarted mid-call, which
+// would kill the very process serving this world_build). Fails loudly when a
+// required secret is absent (no prior box build).
 func (s *deploySpec) worldLiteLLM() error {
 	gwURL := "http://" + s.litellmIP + ":31400"
-	masterKey := s.litellmMasterKey()
-	if masterKey == "" {
-		masterKey = stages.GenSecretHex()
-	}
-	postgresPw := stages.GenSecretHex()
-	providerKey, err := s.providerKeyFromStore()
-	if err != nil {
-		return fmt.Errorf("litellm provider key: %w", err)
-	}
-	hasProvider := providerKey != "" || s.runnerHasSecret("provider-key")
-	if !hasProvider {
-		return fmt.Errorf("litellm needs the provider key on the CP and none is present: no sealed copy at %s and none in the co-located runner — run `freehold build` to hand it off (or seal it via control-plane add-secret %s provider-key)",
-			filepath.Join(s.stateDir, "world-secrets", "litellm-provider.json"), s.runnerTarget)
-	}
-	// Seal the co-located runner's package: master + postgres every run (the
-	// canonical values the k8s Secrets were seeded with), provider key once
-	// (only when handed off this run). All file-transit.
-	if err := s.addRunnerSecretFile("litellm", []byte(masterKey)); err != nil {
-		return fmt.Errorf("seal litellm master: %w", err)
-	}
-	if err := s.addRunnerSecretFile("postgres-pw", []byte(postgresPw)); err != nil {
-		return fmt.Errorf("seal litellm postgres pw: %w", err)
-	}
-	if providerKey != "" {
-		if err := s.addRunnerSecretFile("provider-key", []byte(providerKey)); err != nil {
-			return fmt.Errorf("seal litellm provider key: %w", err)
+	// The runner requires the target's own credential AND every requested name
+	// to exist in its package — gate on presence so the failure is actionable.
+	for _, name := range []string{"litellm", "postgres-pw", "provider-key"} {
+		if !s.runnerHasSecret(name) {
+			return fmt.Errorf("litellm needs secret %q in the co-located runner package and none is present — run `freehold build` to seed it (the box stageLitellm seals it, deploy-cp re-ships it)", name)
 		}
 	}
-	if err := s.restartCoLocatedRunner(); err != nil {
-		return fmt.Errorf("co-located runner restart: %w", err)
-	}
-	// Leg 1: kube workloads — the k8s Secrets read the injected env by name.
+	// Leg 1: kube workloads — the k8s Secrets read the injected env by name
+	// (first-run-wins; the `||` guard preserves the canonical values).
 	if err := s.runSecrets(stages.LitellmManifestScript(s.k3sVmid), 420, "litellm", "postgres-pw"); err != nil {
 		return fmt.Errorf("litellm kube apply: %w", err)
 	}
