@@ -96,8 +96,7 @@ async fn world_serves_operator_seed_after_login() {
 
     // An operator admin seeded with the NIP-98 whitelist.
     let admin_sk: [u8; 32] = [0x42; 32];
-    let (admin_pk, _, _) =
-        freehold_core::nip98::sign_event(&admin_sk, 0, 0, vec![], "").unwrap();
+    let (admin_pk, _, _) = freehold_core::nip98::sign_event(&admin_sk, 0, 0, vec![], "").unwrap();
 
     let app = web::router(
         Arc::new(store),

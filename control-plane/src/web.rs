@@ -691,10 +691,7 @@ async fn overview(
 /// needs nothing that lived only on the lost box. Session-gated like every
 /// /api route: only an authenticated operator reads world state, and the
 /// `operator_pubkey` returned is that operator's own.
-async fn world(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, Response> {
+async fn world(State(state): State<WebState>, headers: HeaderMap) -> Result<Json<Value>, Response> {
     let operator = require_session_pubkey(&state, &headers).map_err(|b| *b)?;
     check_origin(&headers, state.public_origin.as_deref()).map_err(|b| *b)?;
     let relay_url = state.store.relay_url();
