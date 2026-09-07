@@ -61,6 +61,13 @@ world-state, migrations, async cert) extend it as they land.
   fabricate a `[runner]` block (that's the deployed runner's own identity,
   authored by `build`). `logout` clears the operator nsec ledger only and never
   erases this box identity.
+- **`freehold teardown` is CP-first.** A whole-world teardown first asks the CP
+  (via `POST /api/teardown` on the console) to remove what IT manages — runners
+  + sealed secrets, the agent registry, DNS records — before the box destroys
+  the CP LXC, so the world unwinds gracefully instead of the substrate dying
+  under managed state. Best-effort: if the CP is down or this box lacks the
+  operator session, teardown warns and still runs (it is the last resource
+  standing). Server endpoint + Go client + box wiring are hermetic-tested.
 
 ### Fixed
 
