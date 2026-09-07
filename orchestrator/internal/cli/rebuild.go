@@ -2240,18 +2240,10 @@ func (e *rebuildEngine) stageLitellm() error {
 	postgresPw := stages.GenSecretHex()   // postgres password
 	providerKey := e.f.litellmProviderKey // "" when reusing the sealed key
 
-	// ---- Leg 1: kube workloads. The k8s Secrets (master + postgres pw) are
-	// CP-GENERATED installer material (like deploy flags) — they cross the
-	// ssh runner as shell-quoted literals in the script. The OPERATOR's
-	// provider key is NOT here: it rides ONLY the runner package (leg 2).
-	leg1 := stages.LitellmManifestScript(k3sVmid, masterKey, postgresPw, providerKey)
-	ok, out := e.runBin(e.bins.Self, e.execArgs(leg1, 420))
-	if !ok {
-		return fmt.Errorf("litellm kube apply failed:\n%s", out)
-	}
-
-	// ---- Leg 2: model registration through the litellm runner. -----------
+	// ---- Leg 2 (setup): the litellm runner holds the secrets by name. -----
 	agentPK := e.opsAgentPubkey()
+	var ok bool
+	var out string
 	env := append(
 		[]string{"FREEHOLD_LITELLM_MASTER=" + masterKey},
 		os.Environ()...,
@@ -2309,15 +2301,25 @@ func (e *rebuildEngine) stageLitellm() error {
 		return fmt.Errorf("add-secret litellm (master) failed:\n%s", out)
 	}
 
-	// Serve the litellm runner on loopback, exec the registration through it.
+	// Serve the litellm runner on loopback, exec the apply + registration
+	// through it (secrets requested BY NAME — the runner injects + redacts
+	// them; the audited cmd carries only the $REF, never the value).
 	pid, err := e.stageServeRunner("litellm", runnerDir)
 	if err != nil {
 		return err
 	}
 	defer e.stopRunner(pid)
 
-	// Register the model THROUGH the litellm runner (its own ciphertext: master
-	// + provider-key), against the gateway's real URL.
+	// ---- Leg 1: kube workloads. The k8s Secrets read their values from the
+	// runner-injected env ($LITELLM master + $POSTGRES_PW), never literals —
+	// the k8s Secrets are created first-run-wins and preserved thereafter.
+	ok, out = e.litellmRun(stages.LitellmManifestScript(k3sVmid), 420, "litellm", "postgres-pw")
+	if !ok {
+		return fmt.Errorf("litellm kube apply failed:\n%s", out)
+	}
+
+	// ---- Leg 2: model registration through the litellm runner (its own
+	// ciphertext: master + provider-key), against the gateway's real URL.
 	ok, out = e.litellmRun(stages.LitellmRegisterScript(gwURL, agent.CpaLiteLLMModel), 120, "litellm", "provider-key")
 	if !ok {
 		return fmt.Errorf("litellm model registration failed:\n%s", out)
@@ -2333,8 +2335,7 @@ func (e *rebuildEngine) stageLitellm() error {
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	ok, out = e.runBin(e.bins.Self, e.execArgs(
-		agent.AgentLiteLLMKeyScript(k3sVmid, masterKey, cpaName), 60))
+	ok, out = e.litellmRun(agent.AgentLiteLLMKeyScript(k3sVmid, cpaName), 60, "litellm")
 	if !ok {
 		return fmt.Errorf("seed CPA litellm key secret failed:\n%s", out)
 	}

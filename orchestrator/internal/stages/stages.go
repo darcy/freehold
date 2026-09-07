@@ -266,21 +266,28 @@ spec:
   - {port: 4000, targetPort: 4000, nodePort: 31400}`
 
 // LitellmManifestScript applies the postgres + litellm kube resources inside
-// the k3s LXC: namespace, Secrets (values from exec env), PVC (local-path ->
-// the durable plane), deployments, NodePort service. No secrets in argv.
-func LitellmManifestScript(k3sVmid uint32, masterKey, postgresPw, providerKey string) string {
-	sb := strings.ReplaceAll(`set -euo pipefail
+// the k3s LXC: namespace, Secrets, PVC (local-path -> the durable plane),
+// deployments, NodePort service.
+//
+// The k8s Secrets read their values from the RUNNER-INJECTED env (requested by
+// name in the exec — $LITELLM = the gateway master, $POSTGRES_PW = the postgres
+// password) — NEVER shell literals, so no credential crosses the audited
+// command or the logs (the runner redacts injected env values from output; the
+// audit carries only the $REF). The provider key is deliberately absent: it
+// rides the runner package for the registration leg, and nothing in k8s reads
+// it.
+func LitellmManifestScript(k3sVmid uint32) string {
+	script := strings.ReplaceAll(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec __VMID__ -- sh -c"
 $EX "mkdir -p /tmp/litellm-manifests"
 $EX "$K create ns litellm 2>/dev/null || true"
-# Secrets: CP-generated values are shell-quoted literals (deploy-flag shape);
-# the operator's provider key is deliberately absent here (runner-only).
-# Secrets are created ONLY when absent: the first run's values are the
-# authoritative ones (postgres initializes PGDATA against them, and the
-# reused runner package keeps them) — a re-run must never re-roll them.
-$EX "$K get secret litellm-keys -n litellm >/dev/null 2>&1 || $K create secret generic litellm-keys -n litellm --from-literal=master-key=__MASTER_ESC__ --from-literal=provider-key=__PROVIDER_ESC__"
-$EX "$K get secret litellm-pg -n litellm >/dev/null 2>&1 || $K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=__PG_ESC__"
+# Secrets come from the runner-injected env (by name), never literals. They
+# are created ONLY when absent: the first run's values are the authoritative
+# ones (postgres initializes PGDATA against them, and the reused runner package
+# keeps them) — a re-run must never re-roll them.
+$EX "$K get secret litellm-keys -n litellm >/dev/null 2>&1 || $K create secret generic litellm-keys -n litellm --from-literal=master-key=\"$LITELLM\""
+$EX "$K get secret litellm-pg -n litellm >/dev/null 2>&1 || $K create secret generic litellm-pg -n litellm --from-literal=postgres-pw=\"$POSTGRES_PW\""
 # Manifests: written HOST-side (this exec runs on the PVE host where pct
 # lives), pushed INTO the guest, then applied with the full kubectl path.
 mkdir -p /tmp/litellm-manifests
@@ -298,19 +305,9 @@ $EX "$K rollout status deploy/litellm -n litellm --timeout=300s"
 echo LEG1_OK`,
 		"__VMID__", strconv.FormatUint(uint64(k3sVmid), 10),
 	)
-	sb = strings.ReplaceAll(sb, "__POSTGRES__", litellmPostgresManifest)
-	sb = strings.ReplaceAll(sb, "__LITELLM__", litellmGatewayManifest)
-	sb = strings.ReplaceAll(sb, "__MASTER_ESC__", shQuoteLiteral(masterKey))
-	sb = strings.ReplaceAll(sb, "__PG_ESC__", shQuoteLiteral(postgresPw))
-	sb = strings.ReplaceAll(sb, "__PROVIDER_ESC__", shQuoteLiteral(providerKey))
-	return sb
-}
-
-// shQuoteLiteral single-quotes a value for a shell command embedded in the
-// exec script (CP-generated secrets only; the operator's keys never come here
-// — they ride the runner package).
-func shQuoteLiteral(v string) string {
-	return "'" + v + "'"
+	script = strings.ReplaceAll(script, "__POSTGRES__", litellmPostgresManifest)
+	script = strings.ReplaceAll(script, "__LITELLM__", litellmGatewayManifest)
+	return script
 }
 
 // LitellmRegisterScript registers the model through the litellm runner: the

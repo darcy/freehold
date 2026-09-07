@@ -353,18 +353,19 @@ func CPAIdentityScript(k3sVmid uint32, nsecSecretHex, ownerPub string) string {
 
 // AgentLiteLLMKeyScript seeds the agents-namespace Secret the pod's
 // OPENAI_COMPAT_API_KEY references (first-run-wins, like the identity secret).
-// key is the litellm credential the pod talks to the gateway with. It travels
-// as a shell-quoted literal — the same shape the identity nsec uses.
-func AgentLiteLLMKeyScript(k3sVmid uint32, key, agentName string) string {
+// The value comes from the runner-injected $LITELLM env (requested by name in
+// the exec) — never a shell literal, so no credential crosses the audited
+// command.
+func AgentLiteLLMKeyScript(k3sVmid uint32, agentName string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-litellm-key"
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec %d -- sh -c"
 $EX "$K create ns agents 2>/dev/null || true"
-$EX "$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=%s"
+$EX "$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=\"$LITELLM\""
 echo AGENT_LITELLM_KEY_OK`,
-		k3sVmid, secret, secret, shQ(key))
+		k3sVmid, secret, secret)
 }
 
 // shQ single-quotes a value for a shell-embedded literal (no embedded quotes

@@ -41,15 +41,16 @@ func TestK3sScriptsSingleQuoteFree(t *testing.T) {
 	}
 }
 
-// TestLitellmManifestScript: the apply script creates the Secrets FROM ENV
-// (never a literal), embeds both workloads, and pins the durable PVC + the
-// fireworks egress — the C0 kube surface.
+// TestLitellmManifestScript: the apply script creates the Secrets FROM the
+// runner-injected env ($LITELLM / $POSTGRES_PW — requested by name, redacted
+// by the runner, never shell literals), embeds both workloads, and pins the
+// durable PVC + the fireworks egress — the C0 kube surface.
 func TestLitellmManifestScript(t *testing.T) {
-	out := LitellmManifestScript(102, "masterkey", "pgpw", "providerkey")
+	out := LitellmManifestScript(102)
 	for _, want := range []string{
 		"pct exec 102 -- sh -c",
-		"master-key='masterkey'",
-		"postgres-pw='pgpw'",
+		`master-key=\"$LITELLM\"`,
+		`postgres-pw=\"$POSTGRES_PW\"`,
 		"storageClassName: local-path",
 		"nodePort: 31400",
 		"35.207.52.96",                  // fireworks egress pin
@@ -61,11 +62,15 @@ func TestLitellmManifestScript(t *testing.T) {
 			t.Errorf("manifest script missing %q", want)
 		}
 	}
-	// The script must NEVER carry a literal secret value.
-	for _, forbidden := range []string{"fw_", "masterKey", "postgresPw", "$LITELLM"} {
+	// The script must NEVER carry a secret VALUE — only the env REFS (the
+	// runner injects + redacts the values; the audit carries the $REF only).
+	for _, forbidden := range []string{"fw_", "masterkey", "postgrespw", "providerkey", "master-key='", "postgres-pw='"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("script leaked a literal: %q", forbidden)
 		}
+	}
+	if strings.Contains(out, "provider-key") {
+		t.Error("script must not seed a provider-key literal (it rides the runner)")
 	}
 	if strings.Contains(out, "FREEHOLD_LITELLM_MASTER=") {
 		t.Error("script must not embed the secret value")
