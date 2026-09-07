@@ -201,7 +201,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     world: `world_build` runs the CP's owned bring-up/reconcile stages
     (`internal/stages`) through its co-located runner — the direction
     `freehold build` (box) slims toward (CP-bring-up + trigger; the CP owns
-    relay/k3s/litellm/Caddy/cert). `world_migrate` runs `internal/migrations` —
+    relay/k3s/DNS/litellm/Caddy/cert). `world_migrate` runs `internal/migrations` —
     the CP's verify-gated migration runner (durable ledger at
     `/srv/data/cp/migrations.json`, a migration is done only when its
     postcondition verifies), for versioned config/prompt/repair changes that
