@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"freehold/orchestrator/internal/console"
+	"freehold/orchestrator/internal/migrations"
 )
 
 // ConsoleOps is what a tool handler needs from the registry backing it. The
@@ -41,6 +42,20 @@ type Tools struct {
 	Console ConsoleOps
 	// Create deploys a new agent pod (mint + apply). nil = create unsupported.
 	Create CreateAgentFn
+	// Migrate runs the CP's pending verify-gated migrations (the versioned
+	// config/prompt/repair path). nil = migrations unsupported.
+	Migrate Migrator
+}
+
+// Migrator applies pending CP migrations and returns their verify-gated results.
+type Migrator func() ([]migrations.Result, error)
+
+// WorldMigrate runs pending CP migrations (idempotent, 🟢/🔴 verify-gated).
+func (t *Tools) WorldMigrate() ([]migrations.Result, error) {
+	if t.Migrate == nil {
+		return nil, fmt.Errorf("world-migrate: no migrations runner bound")
+	}
+	return t.Migrate()
 }
 
 // CreateAgent stands up a new named agent: deploys its sprig pod via Create,

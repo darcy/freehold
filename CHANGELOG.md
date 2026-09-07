@@ -74,6 +74,17 @@ world-state, migrations, async cert) extend it as they land.
   (`build`/`upgrade`: k3s / litellm / Caddy / relay provisioning) is the named
   follow-up that needs a live world + the `build` slim; the CPA harness is deliberately
   NOT given `world_teardown` (locked "conversation + create only").
+- **A verify-gated migration runner on the CP (`internal/migrations`).** The
+  Omarchy-style model for versioned config/prompt/repair changes, but with the
+  community critique addressed: completion is recorded against an explicit
+  postcondition, not a bare "ran" marker. The durable ledger (`/srv/data/cp/
+  migrations.json`) records `{name, status, verify_at, last_error}`; a migration
+  is DONE only when `Apply` succeeds AND `Verify` confirms convergence (🟢) —
+  an apply-that-fails-verify is left pending and retried (idempotent). Exposed as
+  the roster-gated `world_migrate` tool on the toolset; the first registered
+  migration asserts the agent-tools registry is a usable store. The live-world
+  CPA-prompt/config migrations (which need the deployed pods) ride this same
+  runner.
 
 ### Fixed
 

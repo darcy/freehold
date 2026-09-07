@@ -50,11 +50,12 @@ orchestrator/         freehold (Go): the full CLI + interactive TUI — the live
 orchestrator/cmd/freehold-agent-tools
                       (third binary) the CP's agent-management MCP server on the control
                       plane: create_agent / grant_agent / manage_agent plus the
-                      roster-gated world_status / world_teardown actions, over the
-                      relay-signed roster; `mcp` is the stdio bridge the agent PODS fetch
-                      at boot (the world actions deliberately do NOT reach the CPA's
-                      conversation+create-only harness). 22 Go packages under internal/
-                      (incl. agent, agenttools, oplogin, relay, state, …).
+                      roster-gated world_status / world_teardown / world_migrate
+                      actions (migrate runs the CP's verify-gated `internal/migrations`
+                      runner), over the relay-signed roster; `mcp` is the stdio bridge
+                      the agent PODS fetch at boot (the world actions deliberately do NOT
+                      reach the CPA's conversation+create-only harness). 22 Go packages
+                      under internal/ (incl. agent, agenttools, oplogin, relay, state, …).
 AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
