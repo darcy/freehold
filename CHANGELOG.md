@@ -74,6 +74,14 @@ world-state, migrations, async cert) extend it as they land.
   (`build`/`upgrade`: k3s / litellm / Caddy / relay provisioning) is the named
   follow-up that needs a live world + the `build` slim; the CPA harness is deliberately
   NOT given `world_teardown` (locked "conversation + create only").
+- **A shared stage library (`internal/stages`).** The pure world-bring-up command
+  builders (k3s install/local-path scripts, litellm + Caddy kube manifests, the
+  cert-install script, DNS/LXC coord + secret-mint helpers) are extracted from
+  `internal/cli/rebuild.go` into a dependency-light `internal/stages` — net-zero
+  wire for the box, and the foundation for the CP `world_build` executor to run
+  the SAME stage bytes through its co-located runner. The stage builders keep the
+  secret discipline (provider/cert keys never in argv — they ride the runner
+  package and are injected by name); single-quote-free invariant is tested.
 - **A verify-gated migration runner on the CP (`internal/migrations`).** The
   Omarchy-style model for versioned config/prompt/repair changes, but with the
   community critique addressed: completion is recorded against an explicit
