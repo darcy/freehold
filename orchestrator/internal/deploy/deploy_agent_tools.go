@@ -26,6 +26,7 @@ type DeployAgentToolsSpec struct {
 	RelayWS            string
 	RelayHost          string  // relay public host (Caddy edge front)
 	RelayIP            string  // relay LXC IP (Caddy upstream)
+	CpHost             string  // control plane public host (Caddy edge front)
 	CpIP               string  // cp LXC IP (Caddy upstream)
 	RelayLxc           *uint32 // relay vmid
 	RelayCompose       string
@@ -142,6 +143,9 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	}
 	if spec.RelayIP != "" {
 		serveFlags += " --relay-ip " + spec.RelayIP
+	}
+	if spec.CpHost != "" {
+		serveFlags += " --cp-host " + spec.CpHost
 	}
 	if spec.CpIP != "" {
 		serveFlags += " --cp-ip " + spec.CpIP

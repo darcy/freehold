@@ -3442,6 +3442,7 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		RelayWS:            cfg.RelayWsURL,
 		RelayHost:          cfg.RelayHost(),
 		RelayIP:            config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip)),
+		CpHost:             cfg.CPHost(),
 		CpIP:               config.StripCIDR(derefStrPtr(cfg.Lxc.Cp.Ip)),
 		RelayLxc:           cfg.Lxc.Relay.Vmid,
 		RelayCompose:       stages.RelayComposeDir,

@@ -194,6 +194,7 @@ func cmdServe(args []string) {
 	fs.UintVar(&k3sVmid, "k3s-vmid", 0, "k3s LXC vmid")
 	relayHost := fs.String("relay-host", "", "relay's public host (Caddy edge front)")
 	relayIP := fs.String("relay-ip", "", "relay LXC LAN IP (Caddy upstream), CIDR ok")
+	cpHost := fs.String("cp-host", "", "control plane's public host (Caddy edge front)")
 	cpIP := fs.String("cp-ip", "", "cp LXC LAN IP (Caddy upstream), CIDR ok")
 	runnerAddr := fs.String("runner-addr", "127.0.0.1:8787", "CP co-located runner MCP addr")
 	runnerPK := fs.String("runner-pubkey", "", "runner pubkey (deploy exec audience)")
@@ -253,6 +254,7 @@ func cmdServe(args []string) {
 		relayPK:        *relayPK,
 		relayHost:      *relayHost,
 		relayIP:        strings.TrimSpace(config.StripCIDR(*relayIP)),
+		cpHost:         *cpHost,
 		cpIP:           strings.TrimSpace(config.StripCIDR(*cpIP)),
 		relayLxc:       uint32(relayLxc),
 		relayCompose:   *relayCompose,
@@ -325,6 +327,7 @@ type deploySpec struct {
 	relayPK        string
 	relayHost      string
 	relayIP        string
+	cpHost         string
 	cpIP           string
 	relayLxc       uint32
 	relayCompose   string
@@ -397,16 +400,16 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			}
 			report = append(report, "relay compose reconverged")
 		}
-		// 3. Caddy TLS edge re-apply (the relay vhost front) when the edge coords
-		// are recorded. No secrets (the Caddyfile is plain); cert issuance/
-		// install remain a separate stage.
-		if spec.k3sVmid != 0 && spec.relayHost != "" && spec.relayIP != "" {
+		// 3. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
+		// coords are recorded. No secrets (the Caddyfile is plain); cert
+		// issuance/install remain a separate stage.
+		if spec.k3sVmid != 0 && spec.relayHost != "" && spec.cpHost != "" && spec.relayIP != "" {
 			relayUpstream := fmt.Sprintf("%s:3000", spec.relayIP)
 			cpUpstream := ""
 			if spec.cpIP != "" {
 				cpUpstream = fmt.Sprintf("%s:8080", spec.cpIP)
 			}
-			caddyfile := deploy.RenderCaddyfile(spec.relayHost, relayUpstream, spec.relayHost, cpUpstream)
+			caddyfile := deploy.RenderCaddyfile(spec.relayHost, relayUpstream, spec.cpHost, cpUpstream)
 			cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", spec.k3sVmid, strings.TrimSpace(stages.CaddyManifestScript(spec.k3sVmid, deploy.CaddyManifest(caddyfile))))
 			if err := spec.run(cmd, 180); err != nil {
 				return "", fmt.Errorf("world-build caddy edge: %w", err)
