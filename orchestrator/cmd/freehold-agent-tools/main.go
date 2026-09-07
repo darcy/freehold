@@ -356,22 +356,36 @@ func (s *deploySpec) run(cmd string, timeoutS uint64) error {
 }
 
 // buildWorldApply returns the CP's world-build/reconcile driver: it runs the
-// shared stage commands (internal/stages) through the co-located runner into
-// the k3s LXC, so the box can "login + trigger" the CP to re-assert part of the
-// world. Slice 1: re-assert the k3s durable local-path (the stage the box build
-// re-asserts on every reconcile). Subsequent slices extend this to caddy/dns.
+// shared stage commands (internal/stages) through the co-located runner, so the
+// box can "login + trigger" the CP to (re)assert the world. Each step is
+// idempotent. Slice 2: re-assert the k3s durable local-path AND bring the relay
+// compose stack up if not running — the two stateful bring-up stages the CP can
+// own without any operator-side secret (k3s plans no secret; relay reconverge is
+// plain compose in the durable deploy dir). caddy/dns/litellm/cert extend it
+// toward the full CP-driven build.
 func buildWorldApply(spec *deploySpec) agent.WorldApply {
 	return func() (string, error) {
-		if spec.k3sVmid == 0 {
-			return "", fmt.Errorf("world-build: no k3s vmid recorded")
-		}
 		var report []string
-		// Re-assert the durable local-path wiring (idempotent).
-		cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", spec.k3sVmid, strings.TrimSpace(stages.K3sLocalPathDurableScript))
-		if err := spec.run(cmd, 180); err != nil {
-			return "", fmt.Errorf("world-build k3s local-path: %w", err)
+		// 1. k3s durable local-path re-assert (idempotent).
+		if spec.k3sVmid != 0 {
+			cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", spec.k3sVmid, strings.TrimSpace(stages.K3sLocalPathDurableScript))
+			if err := spec.run(cmd, 180); err != nil {
+				return "", fmt.Errorf("world-build k3s local-path: %w", err)
+			}
+			report = append(report, "k3s durable local-path re-asserted")
 		}
-		report = append(report, "k3s durable local-path re-asserted")
+		// 2. Relay compose stack reconverge (up-if-not-running, idempotent).
+		if spec.relayLxc != 0 && spec.relayCompose != "" {
+			cmd := fmt.Sprintf("pct exec %d -- bash -c 'cd %s && docker compose up -d --no-recreate 2>&1 | tail -3 && echo RELAY_COMPOSE_OK'",
+				spec.relayLxc, spec.relayCompose)
+			if err := spec.run(cmd, 240); err != nil {
+				return "", fmt.Errorf("world-build relay compose: %w", err)
+			}
+			report = append(report, "relay compose reconverged")
+		}
+		if len(report) == 0 {
+			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")
+		}
 		return strings.Join(report, "\n"), nil
 	}
 }
