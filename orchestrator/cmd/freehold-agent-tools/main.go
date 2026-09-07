@@ -26,7 +26,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -627,26 +626,15 @@ echo DURABLE_SEED_OK
 }
 
 // dnsCredFromStore opens the operator's DNS-01 provider credential for a slot
-// from the CP's durable sealed store (<stateDir>/world-secrets/dns-<slot>.json,
-// sealed to the agent-tools identity — written by the box build's hand-off).
-// Errors loudly when no copy has been handed off yet (the ISSUE path needs it;
-// the durable-reuse path does not).
+// from the CP's durable sealed store (<stateDir>/world-secrets/dns-<slot>.json)
+// via the established cert.LoadCreds record (sealed to the agent-tools
+// identity — written by the box build's hand-off). Errors loudly when no copy
+// has been handed off yet (the ISSUE path needs it; the durable-reuse path
+// does not).
 func (s *deploySpec) dnsCredFromStore(slot string) (string, map[string]string, error) {
 	path := filepath.Join(s.stateDir, "world-secrets", "dns-"+slot+".json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil, fmt.Errorf("no DNS provider credential on the CP at %s — run `freehold build` to hand it off (or the durable-reuse path serves an existing cert)", path)
-		}
-		return "", nil, err
-	}
-	var st struct {
-		Provider string            `json:"provider"`
-		Env      map[string]string `json:"env"`
-		Sealed   string            `json:"sealed"`
-	}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return "", nil, err
+	if !cert.CredExists(path) {
+		return "", nil, fmt.Errorf("no DNS provider credential on the CP at %s — run `freehold build` to hand it off (or the durable-reuse path serves an existing cert)", path)
 	}
 	id, err := flows.LoadIdentity(s.stateDir)
 	if err != nil {
@@ -656,19 +644,8 @@ func (s *deploySpec) dnsCredFromStore(slot string) (string, map[string]string, e
 	if err != nil {
 		return "", nil, err
 	}
-	blob, err := hex.DecodeString(st.Sealed)
-	if err != nil {
-		return "", nil, err
-	}
-	env, err := crypto.Open(secret, []byte("dns-"+slot), blob)
-	if err != nil {
-		return "", nil, err
-	}
-	var envMap map[string]string
-	if err := json.Unmarshal(env, &envMap); err != nil {
-		return "", nil, err
-	}
-	return st.Provider, envMap, nil
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	return cert.LoadCreds(path, open, secret)
 }
 
 // issueCert runs the resumable DNS-01 issuance IN-PROCESS for one slot's host
@@ -718,11 +695,77 @@ func (s *deploySpec) issueCert(slot, host, provider string, env map[string]strin
 	return issued, nil
 }
 
+// installCaddyCertFile writes a slot's FRESH issued fullchain + key into the
+// caddy-data PVC /data/tls/<slot> AND the durable mirror, then rolls caddy.
+// The key is file-transited (sftp upload + pct push) — NEVER the runner's
+// sealed cert-key-<slot>, which would be a STALE key mismatching the fresh
+// fullchain (and the serving co-located runner cannot be restarted mid-call to
+// reload a fresh seal). No credential crosses argv/audit.
+func (s *deploySpec) installCaddyCertFile(k3sVmid uint32, slot string, fullchain, key []byte) error {
+	mc, err := s.client()
+	if err != nil {
+		return err
+	}
+	fcTmp, err := os.CreateTemp("", "fh-fc-*")
+	if err != nil {
+		return err
+	}
+	keyTmp, err := os.CreateTemp("", "fh-key-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(fcTmp.Name())
+	defer os.Remove(keyTmp.Name())
+	if err := fcTmp.Close(); err != nil {
+		return err
+	}
+	if err := keyTmp.Close(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(fcTmp.Name(), fullchain, 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(keyTmp.Name(), key, 0o600); err != nil {
+		return err
+	}
+	if _, err := mc.Upload(s.runnerTarget, fcTmp.Name(), "/tmp/fh-fc-"+slot+".pem", 60); err != nil {
+		return err
+	}
+	if _, err := mc.Upload(s.runnerTarget, keyTmp.Name(), "/tmp/fh-key-"+slot+".pem", 60); err != nil {
+		return err
+	}
+	cmd := fmt.Sprintf(`set -e
+pct push %d /tmp/fh-fc-%s.pem /tmp/fc-%s.pem
+pct push %d /tmp/fh-key-%s.pem /tmp/key-%s.pem
+pct exec %d -- sh -c '
+set -e
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+DIR=$PDIR/tls/%s
+DUR=%s
+mkdir -p "$DIR" "$DUR"
+cp /tmp/fc-%s.pem "$DIR/fullchain.pem"
+cp /tmp/key-%s.pem "$DIR/key.pem"
+chmod 600 "$DIR/key.pem"
+cp /tmp/fc-%s.pem "$DUR/fullchain.pem"
+cp /tmp/key-%s.pem "$DUR/key.pem"
+chmod 600 "$DUR/key.pem"
+$K -n caddy rollout restart deploy/caddy >/dev/null 2>&1 || true
+rm -f /tmp/fc-%s.pem /tmp/key-%s.pem
+'
+rm -f /tmp/fh-fc-%s.pem /tmp/fh-key-%s.pem
+`,
+		k3sVmid, slot, slot, k3sVmid, slot, slot, k3sVmid, // 1-7
+		slot, stages.CaddyEdgeDurableDir(slot), // 8-9 (DIR tls/slot, DUR)
+		slot, slot, slot, slot, slot, slot, slot, slot) // 10-17
+	return s.run(cmd, 180)
+}
+
 // worldCert resolves each edge slot's cert CP-side: the durable-reuse gate
 // (valid mirror => seed the PVC, no LE order) else an in-process resumable
-// DNS-01 issue, then install through the co-located runner with the private key
-// requested BY NAME from its package (the box's own issuance ships cert-key-
-// <slot> into the proxmox-box package, which deploy-cp re-ships).
+// DNS-01 issue, then install the FRESH pair through the co-located runner with
+// the key file-transited (never a stale runner-package key).
 func (s *deploySpec) worldCert() error {
 	for _, sl := range []struct{ slot, host string }{
 		{"relay", s.relayHost}, {"cp", s.cpHost},
@@ -740,12 +783,9 @@ func (s *deploySpec) worldCert() error {
 				continue
 			}
 		}
-		// Issue path: needs the sealed DNS cred on the CP + the cert key in the
-		// co-located runner (the box's issuance ships it; the CP self-sufficient
-		// issuance lands with the box-slim). Fail loudly otherwise.
-		if !s.runnerHasSecret("cert-key-" + sl.slot) {
-			return fmt.Errorf("cert %s: no cert-key-%s in the co-located runner and the durable mirror is not reusable — run `freehold build` to issue/seed", sl.slot, sl.slot)
-		}
+		// Issue path: the sealed DNS cred must be on the CP (the box build's
+		// hand-off ships it). The fresh fullchain+key pair is installed by
+		// file-transit — no restart of the serving co-located runner.
 		provider, env, err := s.dnsCredFromStore(sl.slot)
 		if err != nil {
 			return fmt.Errorf("cert %s: %w", sl.slot, err)
@@ -754,7 +794,7 @@ func (s *deploySpec) worldCert() error {
 		if err != nil {
 			return fmt.Errorf("cert %s issue: %w", sl.slot, err)
 		}
-		if err := s.runSecrets(stages.CaddyCertInstallScript(s.k3sVmid, sl.slot, issued.Fullchain), 180, "cert-key-"+sl.slot); err != nil {
+		if err := s.installCaddyCertFile(s.k3sVmid, sl.slot, issued.Fullchain, issued.Key); err != nil {
 			return fmt.Errorf("cert %s install: %w", sl.slot, err)
 		}
 	}
