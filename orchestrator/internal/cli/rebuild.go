@@ -3464,6 +3464,11 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		CpaName:            cpaName,
 		OwnerPubkey:        cfg.OperatorPubkey,
 		LiteLLMBase:        litellmBase,
+		PlanePool:          derefStrPtr(cfg.Plane.Backend),
+		PlaneKind:          derefStrPtr(cfg.Plane.BackendKind),
+		ThinPool:           derefStrPtr(cfg.Plane.ThinPool),
+		SizeGB:             e.f.sizeGB,
+		PoolSizeGB:         e.f.poolSizeGB,
 		SelfURL:            "http://" + cpIP + ":8089",
 		GrantsCSV:          grantsCSV,
 	})

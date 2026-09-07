@@ -42,6 +42,11 @@ type DeployAgentToolsSpec struct {
 	CpaName            string
 	OwnerPubkey        string
 	LiteLLMBase        string
+	PlanePool          string // durable-plane backend pool (VG or zpool)
+	PlaneKind          string // recorded backend kind (zfs|lvmth)
+	ThinPool           string // the freehold-CREATED thin pool (LVM-thin)
+	SizeGB             uint64 // per-tenant LV size GB
+	PoolSizeGB         uint64 // thin-pool size GB when carved
 	SelfURL            string // reachable base URL of this server (http://<cpIP>:8089)
 	GrantsCSV          string // bootstrap member pubkeys ("pk1,pk2")
 }
@@ -135,6 +140,21 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 		spec.K3sVmid, spec.RunnerAddr, spec.RunnerPubkey, spec.RunnerTarget, spec.CpaName, spec.OwnerPubkey)
 	if spec.LiteLLMBase != "" {
 		serveFlags += " --litellm-base " + spec.LiteLLMBase
+	}
+	if spec.PlanePool != "" {
+		serveFlags += " --plane-pool " + spec.PlanePool
+	}
+	if spec.PlaneKind != "" {
+		serveFlags += " --plane-kind " + spec.PlaneKind
+	}
+	if spec.ThinPool != "" {
+		serveFlags += " --thin-pool " + spec.ThinPool
+	}
+	if spec.SizeGB != 0 {
+		serveFlags += " --size-gb " + strconv.FormatUint(spec.SizeGB, 10)
+	}
+	if spec.PoolSizeGB != 0 {
+		serveFlags += " --pool-size-gb " + strconv.FormatUint(spec.PoolSizeGB, 10)
 	}
 	if spec.SelfURL != "" {
 		serveFlags += " --self-url " + spec.SelfURL
