@@ -37,13 +37,16 @@ import (
 
 	"freehold/orchestrator/internal/agent"
 	"freehold/orchestrator/internal/agenttools"
+	"freehold/orchestrator/internal/bootstrap"
 	"freehold/orchestrator/internal/client"
 	"freehold/orchestrator/internal/config"
 	"freehold/orchestrator/internal/crypto"
 	"freehold/orchestrator/internal/delegate"
 	"freehold/orchestrator/internal/deploy"
+	"freehold/orchestrator/internal/drive"
 	"freehold/orchestrator/internal/flows"
 	"freehold/orchestrator/internal/migrations"
+	"freehold/orchestrator/internal/planebase"
 	"freehold/orchestrator/internal/relay"
 	"freehold/orchestrator/internal/stages"
 	"freehold/orchestrator/prompts"
@@ -109,6 +112,11 @@ serve FLAGS:
   --cp-lxc          VMID         the cp LXC's vmid (the dnsmasq resolver lives here)
   --proxy-ip        IP           proxy/k3s node static IP (CIDR ok) the public hosts resolve to
   --litellm-ip      IP           litellm gateway node IP (k3s node), CIDR ok
+  --plane-pool      POOL         durable-plane backend pool (VG or zpool), e.g. pve
+  --plane-kind      KIND         recorded backend kind (zfs|lvmth); detect when empty
+  --thin-pool       POOL         the freehold-CREATED thin pool (LVM-thin backend)
+  --size-gb         GB           per-tenant LV size GB (LVM-thin)
+  --pool-size-gb    GB           thin-pool size GB when carved
   --runner-addr     ADDR         the CP's co-located runner MCP addr (127.0.0.1:8787) deploys run through
   --runner-pubkey   HEX          the runner's pubkey (audience for the deploy exec)
   --runner-target   TGT          the runner target whose door reaches the box (e.g. proxmox-box)
@@ -207,6 +215,12 @@ func cmdServe(args []string) {
 	fs.UintVar(&cpLxc, "cp-lxc", 0, "cp LXC vmid (the dnsmasq resolver lives here)")
 	proxyIP := fs.String("proxy-ip", "", "proxy/k3s node static IP (CIDR ok) the public hosts resolve to")
 	litellmIP := fs.String("litellm-ip", "", "litellm gateway node IP (k3s node), CIDR ok")
+	planePool := fs.String("plane-pool", "", "durable-plane backend pool (VG or zpool), e.g. pve")
+	planeKind := fs.String("plane-kind", "", "recorded backend kind (zfs|lvmth); detect when empty")
+	thinPool := fs.String("thin-pool", "", "the freehold-CREATED thin pool (LVM-thin backend)")
+	var sizeGB, poolSizeGB uint
+	fs.UintVar(&sizeGB, "size-gb", 10, "per-tenant LV size GB (LVM-thin)")
+	fs.UintVar(&poolSizeGB, "pool-size-gb", 40, "thin-pool size GB when carved")
 	runnerAddr := fs.String("runner-addr", "127.0.0.1:8787", "CP co-located runner MCP addr")
 	runnerPK := fs.String("runner-pubkey", "", "runner pubkey (deploy exec audience)")
 	runnerTarget := fs.String("runner-target", "", "runner target that reaches the box")
@@ -270,6 +284,11 @@ func cmdServe(args []string) {
 		cpLxc:          uint32(cpLxc),
 		proxyIP:        strings.TrimSpace(config.StripCIDR(*proxyIP)),
 		litellmIP:      strings.TrimSpace(config.StripCIDR(*litellmIP)),
+		planePool:      *planePool,
+		planeKind:      *planeKind,
+		thinPool:       *thinPool,
+		sizeGB:         uint64(sizeGB),
+		poolSizeGB:     uint64(poolSizeGB),
 		relayLxc:       uint32(relayLxc),
 		relayCompose:   *relayCompose,
 		k3sVmid:        uint32(k3sVmid),
@@ -346,6 +365,11 @@ type deploySpec struct {
 	cpLxc          uint32
 	proxyIP        string
 	litellmIP      string
+	planePool      string
+	planeKind      string
+	thinPool       string
+	sizeGB         uint64
+	poolSizeGB     uint64
 	relayLxc       uint32
 	relayCompose   string
 	k3sVmid        uint32
@@ -504,6 +528,48 @@ func (s *deploySpec) worldDNS() error {
 	return nil
 }
 
+// worldStorage re-ensures the durable volume plane CP-side (the box's
+// stagePlacement + stageStorage ensure half): resolve the backend kind
+// (recorded --plane-kind, else detect like the box's parseKind), then ensure
+// each tenant's dataset/LV onto the recorded pool and chown it guest-writable
+// — idempotent, no box-side secret (the storage ops run on the PVE host
+// through the co-located runner, exactly as the box drives them).
+func (s *deploySpec) worldStorage() error {
+	mc, err := s.client()
+	if err != nil {
+		return err
+	}
+	kind := planebase.BackendKind(s.planeKind)
+	if kind == "" {
+		action, err := bootstrap.ResolveProxmox(mc, s.runnerTarget, false, nil)
+		if err != nil {
+			return fmt.Errorf("storage resolve: %w", err)
+		}
+		if action.Kind != "Reuse" {
+			return fmt.Errorf("no storage backend to ensure onto: %s", action.Message)
+		}
+		if *action.Detected == planebase.ExistingZfs {
+			kind = planebase.KindZfs
+		} else {
+			kind = planebase.KindLvmThin
+		}
+	}
+	for _, tenant := range []planebase.Tenant{planebase.TenantRelay, planebase.TenantCp, planebase.TenantK3sVolumes} {
+		switch kind {
+		case planebase.KindZfs:
+			_, err = drive.ResolveTenantMounts(mc, s.runnerTarget, s.planePool, s.relayHost, tenant)
+		case planebase.KindLvmThin:
+			_, err = drive.ResolveLvmMounts(mc, s.runnerTarget, s.planePool, s.relayHost, tenant, s.sizeGB, s.poolSizeGB, s.thinPool)
+		default:
+			return fmt.Errorf("unknown storage backend kind %q (zfs|lvmth)", kind)
+		}
+		if err != nil {
+			return fmt.Errorf("storage ensure %s: %w", tenant, err)
+		}
+	}
+	return nil
+}
+
 // ---- litellm on the CP (the two-leg box stageLitellm, CP-side) -------------
 //
 // Leg 1 (kube workloads, no operator secret): the master key + postgres pw are
@@ -576,7 +642,16 @@ func (s *deploySpec) worldLiteLLM() error {
 func buildWorldApply(spec *deploySpec) agent.WorldApply {
 	return func() (string, error) {
 		var report []string
-		// 1. k3s durable local-path re-assert (idempotent).
+		// 1. The durable volume plane: re-ensure each tenant's dataset/LV onto
+		// the recorded pool (idempotent, guest-writable). Runs FIRST — the
+		// k3s local-path / relay-compose reconverges depend on the mounts.
+		if spec.planePool != "" && spec.relayHost != "" {
+			if err := spec.worldStorage(); err != nil {
+				return "", fmt.Errorf("world-build storage: %w", err)
+			}
+			report = append(report, "durable plane ensured")
+		}
+		// 2. k3s durable local-path re-assert (idempotent).
 		if spec.k3sVmid != 0 {
 			cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", spec.k3sVmid, strings.TrimSpace(stages.K3sLocalPathDurableScript))
 			if err := spec.run(cmd, 180); err != nil {
@@ -584,7 +659,7 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			}
 			report = append(report, "k3s durable local-path re-asserted")
 		}
-		// 2. Relay compose stack reconverge (up-if-not-running, idempotent).
+		// 3. Relay compose stack reconverge (up-if-not-running, idempotent).
 		// set -o pipefail so the pipeline's exit is docker compose's (not tail's),
 		// else a failing bring-up would still echo RELAY_COMPOSE_OK and
 		// spec.run would report success falsely.
@@ -596,7 +671,7 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			}
 			report = append(report, "relay compose reconverged")
 		}
-		// 3. The CP-owned resolver: register the split-horizon names (bare
+		// 4. The CP-owned resolver: register the split-horizon names (bare
 		// guests + the dotted public hosts via the proxy) and point every guest
 		// at the CP as its nameserver, then verify the resolver actually ANSWERS
 		// (dnsmasq served the records, not merely tcp/53 open). No secrets.
@@ -606,7 +681,7 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			}
 			report = append(report, "dns register/point applied")
 		}
-		// 4. The litellm gateway (kube workloads + model registration through the
+		// 5. The litellm gateway (kube workloads + model registration through the
 		// co-located runner) — CP-owned; the operator's provider key rides the
 		// CP (hand-off) or the co-located runner package, never argv.
 		if spec.k3sVmid != 0 && spec.litellmIP != "" {
@@ -615,7 +690,7 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 			}
 			report = append(report, "litellm gateway live")
 		}
-		// 5. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
+		// 6. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
 		// coords are recorded. No secrets (the Caddyfile is plain); cert
 		// issuance/install remain a separate stage.
 		if spec.k3sVmid != 0 && spec.relayHost != "" && spec.cpHost != "" && spec.relayIP != "" {

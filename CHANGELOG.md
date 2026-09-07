@@ -76,11 +76,12 @@ world-state, migrations, async cert) extend it as they land.
   relay compose stack, re-applies the Caddy TLS edge (edge coords ride the
   agent-tools serve `--relay-host/--relay-ip/--cp-ip`), registers + points the
   CP-owned split-horizon resolver (`--cp-lxc/--proxy-ip/--litellm-ip` carry the
-  coords), and brings the litellm gateway up CP-side (kube workloads + model
-  registration through the co-located runner — the operator's provider key
-  rides the CP's sealed store or the co-located runner package, never argv);
-  storage / the cert install extend it toward the full CP-driven build, and the
-  box `build` slims to CP-bring-up + trigger. The CPA
+  coords), re-ensures the durable volume plane (`--plane-pool/--plane-kind/
+  --thin-pool`), and brings the litellm gateway up CP-side (kube workloads +
+  model registration through the co-located runner — the operator's provider
+  key rides the sealed co-located runner package, never argv); the cert install
+  extends it toward the full CP-driven build, and the box `build` slims to
+  CP-bring-up + trigger. The CPA
   harness is
   deliberately NOT given the mutating world tools (locked "conversation + create only").
 - **A shared stage library (`internal/stages`).** The pure world-bring-up command
