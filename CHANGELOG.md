@@ -56,10 +56,11 @@ world-state, migrations, async cert) extend it as they land.
 - **Login materializes the box's own provisioning identity.** After a successful
   `freehold login`, `internal/oplogin` mints (first-run-wins) the box's
   `control-plane/agent-ops` ops identity — the same identity `freehold build` /
-  `teardown` sign with — and records its pubkey + the loopback runner address
-  (`[runner]`) in the seeded config. A freshly-logged-in box is therefore a
-  durable, self-owned actor whose grant to the CP can live locally; `logout`
-  clears the operator nsec ledger only and never erases this box identity.
+  `teardown` sign with — on disk. A freshly-logged-in box is therefore a durable,
+  self-owned actor whose grant to the CP can live locally; it does **not**
+  fabricate a `[runner]` block (that's the deployed runner's own identity,
+  authored by `build`). `logout` clears the operator nsec ledger only and never
+  erases this box identity.
 
 ### Fixed
 
