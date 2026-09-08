@@ -3859,7 +3859,11 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		AgentToolsBinary:   e.bins.ReleaseAgentTools,
 		AgentToolsStateDir: agentToolsState,
 		BindAddr:           "0.0.0.0:8089",
-		RelayURL:           cfg.RelayURL,
+		// The agent-tools serve's OWN relay ops (roster, seed, create-agent
+		// publish) use the relay's LAN URL — reachable BEFORE the Caddy edge
+		// (world_build deploys it later); the public URL only works through
+		// Caddy. The pods dial the PUBLIC --relay-ws (unchanged below).
+		RelayURL:           "http://" + config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip)) + ":3000",
 		RelayPubkey:        derefStrPtr(cfg.RelayPubkey),
 		RelayWS:            cfg.RelayWsURL,
 		RelayHost:          cfg.RelayHost(),
