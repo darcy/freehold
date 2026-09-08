@@ -1869,6 +1869,18 @@ func (e *rebuildEngine) stageDeployCp() error {
 		"--runner-package", rbRunnerPkgs() + "/" + e.f.target,
 		"--operator-pubkey", e.f.operatorPubkey,
 	}
+	// The relay signing pubkey is the /api/world trust anchor a fresh login box
+	// seeds — read it from the relay's own compose .env (deterministic, unlike
+	// NIP-11) so the deployed CP serves WITH its relay coords recorded.
+	if rpk := e.relaySigningPubkey(); rpk != "" {
+		args = append(args, "--relay-pubkey", rpk)
+	}
+	// The agent-tools coords survive a rebuild (recorded after the first
+	// deploy-cp, before agent-tools exists) — re-pass them so the CP serves
+	// /api/world WITH the toolset coords a fresh login box needs.
+	if cfg, _ := config.Load(e.f.configPath); cfg != nil && cfg.AgentToolsURL != "" && cfg.AgentToolsPubkey != "" {
+		args = append(args, "--agent-tools-url", cfg.AgentToolsURL, "--agent-tools-pubkey", cfg.AgentToolsPubkey)
+	}
 	// Pin the relay's LAN IP into the CP guest's /etc/hosts so the console +
 	// agent-tools can RESOLVE + reach the relay DOMAIN directly (pre-Caddy):
 	// buzz keys the community to the Host header, so a raw-IP URL fails.
@@ -2428,6 +2440,13 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 	if cfg == nil {
 		return fmt.Errorf("no config at %s", e.f.configPath)
 	}
+	// Fresh-build path: deploy-cp ran BEFORE agent-tools existed, so the CP
+	// serve does not yet record the toolset coords. After the deploy below we
+	// re-run deploy-cp (idempotent — stops the prior serve, re-ships, restarts
+	// WITH the new flags) so /api/world serves them for a future login box. On
+	// rebuild the coords survive in config, stageDeployCp passed them up front,
+	// and this re-deploy is skipped.
+	hadCoords := cfg.AgentToolsURL != "" && cfg.AgentToolsPubkey != ""
 	if cfg.Lxc.Cp.Vmid == nil {
 		return fmt.Errorf("need cp coords to deploy agent-tools")
 	}
@@ -2523,6 +2542,13 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		return err
 	}
 	fmt.Fprintf(e.out, "  ✓ freehold-agent-tools live on the CP (audience %s)\n", res.Pubkey[:12])
+
+	if !hadCoords {
+		fmt.Fprintln(e.out, "  · re-running deploy-cp to record the agent-tools coords on the CP serve…")
+		if err := e.stageDeployCp(); err != nil {
+			return fmt.Errorf("re-deploy-cp to record agent-tools coords: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -2703,6 +2729,39 @@ func extractNip11Pubkey(text string) (string, bool) {
 		}
 	}
 	return pk, true
+}
+
+// relaySigningPubkey resolves the relay's signing pubkey (the 39002 trust
+// anchor /api/world reports) DETERMINISTICALLY at deploy-cp time, instead of
+// the NIP-11 best-effort that often comes back empty. The authoritative source
+// is the relay's own signing secret (BUZZ_RELAY_PRIVATE_KEY in the relay LXC's
+// compose .env, written by deploy-relay) — read in-guest, the secret never
+// leaves the relay; only the DERIVED pubkey is returned. Falls back to NIP-11,
+// then to the recorded config value. Returns "" when unreadable (the serve
+// relay-url/pubkey coupling is relaxed, so a missing pubkey no longer blocks).
+func (e *rebuildEngine) relaySigningPubkey() string {
+	if cfg, err := config.Load(e.f.configPath); err == nil && cfg != nil && cfg.Lxc.Relay.Vmid != nil {
+		ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf(
+			"pct exec %d -- sh -c \"sed -n 's/^BUZZ_RELAY_PRIVATE_KEY=//p' %s/.env 2>/dev/null\"",
+			*cfg.Lxc.Relay.Vmid, stages.RelayComposeDir), 30))
+		if ok {
+			secret := strings.TrimSpace(out)
+			if _, err := hex.DecodeString(secret); err == nil && len(secret) == 64 {
+				if raw, err := hex.DecodeString(secret); err == nil {
+					if pk, err := crypto.PubkeyFromSecret(raw); err == nil && len(pk) == 64 {
+						return pk
+					}
+				}
+			}
+		}
+	}
+	if rpk, ok := e.relayPubkeyNip11(); ok {
+		return rpk
+	}
+	if cfg, err := config.Load(e.f.configPath); err == nil && cfg != nil && cfg.RelayPubkey != nil {
+		return *cfg.RelayPubkey
+	}
+	return ""
 }
 
 // printTail returns the last n non-empty lines, indented (Rust print_tail).

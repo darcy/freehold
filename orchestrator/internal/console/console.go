@@ -218,12 +218,14 @@ func (c *Client) request(method, path string, body interface{}) (json.RawMessage
 // box learns where the relay is and who the relay/CP trust without anything
 // that lived only on the lost box.
 type WorldSummary struct {
-	RelayURL       string `json:"relay_url"`
-	RelayWsURL     string `json:"relay_ws_url,omitempty"`
-	RelayPubkey    string `json:"relay_pubkey,omitempty"`
-	CPURL          string `json:"cp_url"`
-	CPPubkey       string `json:"cp_pubkey"`
-	OperatorPubkey string `json:"operator_pubkey,omitempty"`
+	RelayURL         string `json:"relay_url"`
+	RelayWsURL       string `json:"relay_ws_url,omitempty"`
+	RelayPubkey      string `json:"relay_pubkey,omitempty"`
+	CPURL            string `json:"cp_url"`
+	CPPubkey         string `json:"cp_pubkey"`
+	OperatorPubkey   string `json:"operator_pubkey,omitempty"`
+	AgentToolsURL    string `json:"agent_tools_url,omitempty"`
+	AgentToolsPubkey string `json:"agent_tools_pubkey,omitempty"`
 }
 
 // World fetches the CP's world summary for a fresh-box login seed.

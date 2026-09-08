@@ -14,18 +14,20 @@ import (
 
 // DeployCpSpec mirrors orchestrator::deploy_cp::DeployCpSpec.
 type DeployCpSpec struct {
-	StateDir      string
-	BinDir        string
-	BindAddr      string
-	BinaryPath    string
-	RelayURL      string
-	RelayPubkey   *string
-	RelayHostIP   *string
-	AdminPubkeys  []string
-	LXc           *uint32
-	PublicOrigin  *string
-	RunnerBinary  *string
-	RunnerPackage *string
+	StateDir         string
+	BinDir           string
+	BindAddr         string
+	BinaryPath       string
+	RelayURL         string
+	RelayPubkey      *string
+	RelayHostIP      *string
+	AdminPubkeys     []string
+	LXc              *uint32
+	PublicOrigin     *string
+	RunnerBinary     *string
+	RunnerPackage    *string
+	AgentToolsURL    *string
+	AgentToolsPubkey *string
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -154,6 +156,13 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	if relayPK != nil && *relayPK != "" {
 		relayFlag = fmt.Sprintf(" --relay-url %s --relay-pubkey %s --relay-host %s", scopeURL, *relayPK, domain)
 	}
+	atFlag := ""
+	if spec.AgentToolsURL != nil && *spec.AgentToolsURL != "" {
+		atFlag = fmt.Sprintf(" --agent-tools-url %s", *spec.AgentToolsURL)
+	}
+	if spec.AgentToolsPubkey != nil && *spec.AgentToolsPubkey != "" {
+		atFlag += fmt.Sprintf(" --agent-tools-pubkey %s", *spec.AgentToolsPubkey)
+	}
 	// Pin the relay host into the guest's /etc/hosts. grep -Fq (fixed string):
 	// a regex grep would let '.' match '-' and falsely match the guest's own
 	// dashed hostname (relay-librem-...-relay), skipping the pin forever.
@@ -167,8 +176,8 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	}
 
 	start := fmt.Sprintf(
-		"setsid nohup %s/control-plane serve --state-dir %s --addr %s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
-		spec.BinDir, spec.StateDir, spec.BindAddr, adminFlag, originFlag, relayFlag, spec.StateDir, spec.StateDir)
+		"setsid nohup %s/control-plane serve --state-dir %s --addr %s%s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
+		spec.BinDir, spec.StateDir, spec.BindAddr, adminFlag, originFlag, relayFlag, atFlag, spec.StateDir, spec.StateDir)
 	out, err := bootstrap.ExecToOK(clientConn, target, lxcCmd(spec.LXc, start), "start control plane", 30)
 	if err != nil {
 		return nil, err

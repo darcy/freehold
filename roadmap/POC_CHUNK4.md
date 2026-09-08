@@ -169,7 +169,13 @@ Goal: the operator box stops being the single root of trust, so a fresh box can
       so a wrong/hijacked CP address never seeds a bogus trust anchor.
 - [x] G2. **The CP serves `/api/world` from real state** (#159): a session-gated
       console endpoint returns relay + CP coords + who the operator is — the
-      recovery source of truth, not a mock.
+      recovery source of truth, not a mock. Now served WITH the agent-tools
+      coords (`agent_tools_url`/`agent_tools_pubkey`) a fresh box needs for the
+      Agents view, and the deployed CP reliably records its relay scope: the
+      build resolves the relay signing pubkey deterministically from the
+      relay's own compose `.env` (no NIP-11 best-effort), and `serve` accepts
+      `--relay-url` alone (the pubkey pairing is a soft guard, not a start
+      blocker).
 - [x] G3. **`freehold logout`** (#158) clears the local operator ledger only
       (CP/world untouched, idempotent). All login prompts share ONE buffered
       stdin reader (AGENTS.md discipline).

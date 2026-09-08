@@ -148,6 +148,14 @@ pub struct ControlPlaneState {
     /// verified roster view; the runner enforces with its own copy.
     #[serde(default)]
     pub relay_pubkey: Option<String>,
+    /// The CP's freehold-agent-tools MCP server coords — served on
+    /// /api/world so a fresh `freehold login` box can drive the agent
+    /// registry (Agents view / create/grant/manage) without anything that
+    /// lived only on the box that deployed it.
+    #[serde(default)]
+    pub agent_tools_url: Option<String>,
+    #[serde(default)]
+    pub agent_tools_pubkey: Option<String>,
 }
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -284,6 +292,24 @@ impl StateStore {
 
     pub fn set_relay_pubkey(&self, relay_pubkey: Option<String>) -> Result<(), StateError> {
         self.inner.write().relay_pubkey = relay_pubkey;
+        self.save()
+    }
+
+    pub fn agent_tools_url(&self) -> Option<String> {
+        self.inner.read().agent_tools_url.clone()
+    }
+
+    pub fn set_agent_tools_url(&self, url: Option<String>) -> Result<(), StateError> {
+        self.inner.write().agent_tools_url = url;
+        self.save()
+    }
+
+    pub fn agent_tools_pubkey(&self) -> Option<String> {
+        self.inner.read().agent_tools_pubkey.clone()
+    }
+
+    pub fn set_agent_tools_pubkey(&self, pubkey: Option<String>) -> Result<(), StateError> {
+        self.inner.write().agent_tools_pubkey = pubkey;
         self.save()
     }
 

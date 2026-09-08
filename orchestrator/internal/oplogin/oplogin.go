@@ -222,9 +222,10 @@ func Interactive() error {
 	// the operator just authorized against + the relay/CP identities the CP itself
 	// reports. Degrades gracefully if the CP predates /api/world — the CP the box
 	// dialed + the operator key are always recorded.
-	var relayURL, relayWS, relayPubkey, worldCPPub string
+	var relayURL, relayWS, relayPubkey, worldCPPub, atURL, atPubkey string
 	if w, werr := c.World(); werr == nil {
 		relayURL, relayWS, relayPubkey, worldCPPub = w.RelayURL, w.RelayWsURL, w.RelayPubkey, w.CPPubkey
+		atURL, atPubkey = w.AgentToolsURL, w.AgentToolsPubkey
 	} else {
 		fmt.Fprintf(os.Stderr, "  (note: world summary not available — %v)\n", werr)
 	}
@@ -243,7 +244,7 @@ func Interactive() error {
 	if _, err := EnsureOpsIdentity(); err != nil {
 		return err
 	}
-	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey); err != nil {
+	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey, atURL, atPubkey); err != nil {
 		return err
 	}
 	fmt.Printf("logged in as %s against %s — run `freehold` to operate the world\n", pk, cpURL)
@@ -270,7 +271,7 @@ func resolveCPPubkey(user, world string) (string, error) {
 // seed writes the logged-in connection/desire profile back to the config path,
 // preserving any surviving local facts (plane, runners, coords) the box already
 // holds and filling the connection coordinates login just established.
-func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, relayPubkey string) error {
+func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, relayPubkey, atURL, atPubkey string) error {
 	cfg.CPURL = cpURL
 	if cpPubkey != "" {
 		cfg.CpPubkey = cpPubkey
@@ -284,6 +285,15 @@ func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, re
 	}
 	if relayPubkey != "" {
 		cfg.RelayPubkey = &relayPubkey
+	}
+	// The agent-tools coords (MCP URL + roster audience) the CP reports —
+	// a fresh box then drives the Agents view / create-grant-manage without
+	// anything that lived on the box that deployed the toolset.
+	if atURL != "" {
+		cfg.AgentToolsURL = atURL
+	}
+	if atPubkey != "" {
+		cfg.AgentToolsPubkey = atPubkey
 	}
 	// The operator identity dir records where this box's console-admin nsec
 	// ledger lives (the same ledger the TUI auto-logs in from).

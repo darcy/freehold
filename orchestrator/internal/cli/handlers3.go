@@ -130,6 +130,12 @@ var deployCpCmd = &cobra.Command{
 		if relayHostIP != "" {
 			spec.RelayHostIP = optOf(relayHostIP)
 		}
+		if atURL, _ := cmd.Flags().GetString("agent-tools-url"); atURL != "" {
+			spec.AgentToolsURL = optOf(atURL)
+		}
+		if atPK, _ := cmd.Flags().GetString("agent-tools-pubkey"); atPK != "" {
+			spec.AgentToolsPubkey = optOf(atPK)
+		}
 		if publicOrigin != "" {
 			spec.PublicOrigin = optOf(publicOrigin)
 		}
@@ -171,6 +177,8 @@ func init() {
 	deployCpCmd.Flags().String("relay-url", "", "The relay this CP helps serve (the ONE scope; C4 posture record)")
 	deployCpCmd.Flags().String("relay-pubkey", "", "The RELAY's signing pubkey (the 39002 roster trust anchor). When omitted, the deploy tries NIP-11 discovery (best-effort — Buzz often advertises none; pass it when known)")
 	deployCpCmd.Flags().String("relay-host-ip", "", "The relay LXC's LAN IP — pinned into the CP guest's /etc/hosts so the console can RESOLVE the relay domain (the operator's DNS may not reach inside the guests: tailnet etc.)")
+	deployCpCmd.Flags().String("agent-tools-url", "", "The CP's freehold-agent-tools MCP URL (http://<cp-ip>:8089) — served on /api/world for a fresh login box")
+	deployCpCmd.Flags().String("agent-tools-pubkey", "", "The agent-tools server's Nostr pubkey (the audience of its roster) — paired with --agent-tools-url")
 	deployCpCmd.Flags().String("lxc", "", "Deploy INTO this LXC on the target — the CP lives in its OWN guest, a different LXC than the relay's by default (omitted = the target host)")
 	deployCpCmd.Flags().String("runner-binary", "", "LOCAL path of the built freehold-runner binary (co-locates the CP's own runner: ship + systemd unit + adopt + self-grant)")
 	deployCpCmd.Flags().String("runner-package", "", "LOCAL dir of an EXISTING runner package to co-locate + adopt")

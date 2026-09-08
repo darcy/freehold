@@ -142,6 +142,12 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		{"config", func() (string, bool) {
 			return cfg.RelayHost() + " · " + m.CfgPath, true
 		}}, {"runner", func() (string, bool) {
+			if cfg.Runner.Addr == "" {
+				// A login-only box has no LOCAL provisioning runner — operating
+				// through the CP, so reachability is the console session's.
+				m.RunnerReach = true
+				return "no local runner (login-only — operating through the CP)", true
+			}
 			m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
 			if m.RunnerReach {
 				return cfg.Runner.Addr + " reachable", true
@@ -156,6 +162,16 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			return "no answer at " + cfg.RelayURL, false
 		}},
 		{"control plane", func() (string, bool) {
+			if cfg.Runner.Addr == "" {
+				// Login-only: the CP's liveness is its own console session —
+				// /api/overview answers through the NIP-98 session, not the
+				// (absent) local runner.
+				m.CPLive = cpConsoleLive(m, cfg)
+				if m.CPLive {
+					return "healthy (console session answered /api/overview)", true
+				}
+				return "down (no console session answer)", false
+			}
 			m.CPLive = cpLive(cfg)
 			if m.CPLive {
 				return "healthy (:8080 answered from inside its LXC)", true
