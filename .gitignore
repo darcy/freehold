@@ -12,3 +12,4 @@ orchestrator/freehold-agent-tools
 
 # node deps for the ai-pr-review workflow
 node_modules/
+roadmap/CP_DRIVEN_BUILD.md
