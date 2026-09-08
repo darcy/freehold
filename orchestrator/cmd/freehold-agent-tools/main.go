@@ -138,11 +138,28 @@ serve FLAGS:
 func cmdIdentity(args []string) {
 	fs := flag.NewFlagSet("identity", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "durable state dir")
+	encPubkey := fs.Bool("enc-pubkey", false, "print the ENCRYPTION pubkey (X25519 of the enc secret) instead of the nostr pubkey")
 	fs.Parse(args)
 	if *stateDir == "" {
 		log.Fatal("identity needs --state-dir")
 	}
-	_, pk, err := serverIdentity(*stateDir)
+	id, _, err := serverIdentity(*stateDir)
+	if err != nil {
+		log.Fatalf("identity: %v", err)
+	}
+	if *encPubkey {
+		secret, err := hex.DecodeString(id.EncSecretHex)
+		if err != nil {
+			log.Fatalf("identity enc secret: %v", err)
+		}
+		pk, err := crypto.X25519PublicKey(secret)
+		if err != nil {
+			log.Fatalf("identity enc pubkey: %v", err)
+		}
+		fmt.Println(hex.EncodeToString(pk))
+		return
+	}
+	pk, err := id.NostrPubkeyHex()
 	if err != nil {
 		log.Fatalf("identity: %v", err)
 	}
