@@ -95,6 +95,11 @@ func QueryEvents(relayURL string, authSecret []byte, filters interface{}) ([]map
 	if err != nil {
 		return nil, fmt.Errorf("query request failed: %w", err)
 	}
+	// Buzz keys the community to the REQUEST HOST and does NOT strip a port.
+	// A LAN relay URL (http://<domain>:3000, pre-Caddy) must present the bare
+	// domain as the Host header or ingest 404s "no community is configured";
+	// the public URL (https://<domain>) is already portless and unchanged.
+	req.Host = req.URL.Hostname()
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := agent().Do(req)
@@ -128,6 +133,9 @@ func PublishEventJSON(relayURL string, authSecret []byte, eventJSON string) erro
 	if err != nil {
 		return fmt.Errorf("event publish request failed: %w", err)
 	}
+	// Bare-domain Host (buzz keys the community to it; a LAN :3000 dial must
+	// not present "domain:3000"). The public URL is unchanged.
+	req.Host = req.URL.Hostname()
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := agent().Do(req)
