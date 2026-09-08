@@ -120,6 +120,11 @@ serve FLAGS:
   --thin-pool       POOL         the freehold-CREATED thin pool (LVM-thin backend)
   --size-gb         GB           per-tenant LV size GB (LVM-thin)
   --pool-size-gb    GB           thin-pool size GB when carved
+  --rootfs-gb       GB           LXC rootfs size GB (relay/k3s boots)
+  --memory-mb       MB           LXC memory MB (relay/k3s boots)
+  --storage         NAME         PVE LXC storage (relay/k3s boots)
+  --relay-gw        IP           gateway for the k3s STATIC guest IP
+  --bridge          NAME         PVE LXC bridge (relay/k3s boots)
   --runner-addr     ADDR         the CP's co-located runner MCP addr (127.0.0.1:8787) deploys run through
   --runner-pubkey   HEX          the runner's pubkey (audience for the deploy exec)
   --runner-target   TGT          the runner target whose door reaches the box (e.g. proxmox-box)
@@ -224,6 +229,11 @@ func cmdServe(args []string) {
 	var sizeGB, poolSizeGB uint
 	fs.UintVar(&sizeGB, "size-gb", 10, "per-tenant LV size GB (LVM-thin)")
 	fs.UintVar(&poolSizeGB, "pool-size-gb", 40, "thin-pool size GB when carved")
+	rootfsGB := fs.Uint("rootfs-gb", 16, "LXC rootfs size GB (relay/k3s boots)")
+	memoryMB := fs.Uint("memory-mb", 2048, "LXC memory MB (relay/k3s boots)")
+	storageName := fs.String("storage", "local-lvm", "PVE LXC storage (relay/k3s boots)")
+	relayGW := fs.String("relay-gw", "192.168.30.1", "gateway for the k3s STATIC guest IP")
+	bridge := fs.String("bridge", "vmbr0", "PVE LXC bridge (relay/k3s boots)")
 	runnerAddr := fs.String("runner-addr", "127.0.0.1:8787", "CP co-located runner MCP addr")
 	runnerPK := fs.String("runner-pubkey", "", "runner pubkey (deploy exec audience)")
 	runnerTarget := fs.String("runner-target", "", "runner target that reaches the box")
@@ -292,6 +302,11 @@ func cmdServe(args []string) {
 		thinPool:       *thinPool,
 		sizeGB:         uint64(sizeGB),
 		poolSizeGB:     uint64(poolSizeGB),
+		rootfsGB:       uint32(*rootfsGB),
+		memoryMB:       uint32(*memoryMB),
+		storageName:    *storageName,
+		relayGW:        *relayGW,
+		bridge:         *bridge,
 		relayLxc:       uint32(relayLxc),
 		relayCompose:   *relayCompose,
 		k3sVmid:        uint32(k3sVmid),
@@ -373,6 +388,11 @@ type deploySpec struct {
 	thinPool       string
 	sizeGB         uint64
 	poolSizeGB     uint64
+	rootfsGB       uint32
+	memoryMB       uint32
+	storageName    string
+	relayGW        string
+	bridge         string
 	relayLxc       uint32
 	relayCompose   string
 	k3sVmid        uint32
@@ -536,20 +556,21 @@ func (s *deploySpec) worldDNS() error {
 // (recorded --plane-kind, else detect like the box's parseKind), then ensure
 // each tenant's dataset/LV onto the recorded pool and chown it guest-writable
 // — idempotent, no box-side secret (the storage ops run on the PVE host
-// through the co-located runner, exactly as the box drives them).
-func (s *deploySpec) worldStorage() error {
+// through the co-located runner, exactly as the box drives them). Returns the
+// ensured mounts per tenant (the born-at-create mounts the LXC boots bake).
+func (s *deploySpec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error) {
 	mc, err := s.client()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	kind := planebase.BackendKind(s.planeKind)
 	if kind == "" {
 		action, err := bootstrap.ResolveProxmox(mc, s.runnerTarget, false, nil)
 		if err != nil {
-			return fmt.Errorf("storage resolve: %w", err)
+			return nil, fmt.Errorf("storage resolve: %w", err)
 		}
 		if action.Kind != "Reuse" {
-			return fmt.Errorf("no storage backend to ensure onto: %s", action.Message)
+			return nil, fmt.Errorf("no storage backend to ensure onto: %s", action.Message)
 		}
 		if *action.Detected == planebase.ExistingZfs {
 			kind = planebase.KindZfs
@@ -557,18 +578,143 @@ func (s *deploySpec) worldStorage() error {
 			kind = planebase.KindLvmThin
 		}
 	}
+	mounts := map[planebase.Tenant][]planebase.MountSpec{}
 	for _, tenant := range []planebase.Tenant{planebase.TenantRelay, planebase.TenantCp, planebase.TenantK3sVolumes} {
+		var ms []planebase.MountSpec
 		switch kind {
 		case planebase.KindZfs:
-			_, err = drive.ResolveTenantMounts(mc, s.runnerTarget, s.planePool, s.relayHost, tenant)
+			ms, err = drive.ResolveTenantMounts(mc, s.runnerTarget, s.planePool, s.relayHost, tenant)
 		case planebase.KindLvmThin:
-			_, err = drive.ResolveLvmMounts(mc, s.runnerTarget, s.planePool, s.relayHost, tenant, s.sizeGB, s.poolSizeGB, s.thinPool)
+			ms, err = drive.ResolveLvmMounts(mc, s.runnerTarget, s.planePool, s.relayHost, tenant, s.sizeGB, s.poolSizeGB, s.thinPool)
 		default:
-			return fmt.Errorf("unknown storage backend kind %q (zfs|lvmth)", kind)
+			return nil, fmt.Errorf("unknown storage backend kind %q (zfs|lvmth)", kind)
 		}
 		if err != nil {
-			return fmt.Errorf("storage ensure %s: %w", tenant, err)
+			return nil, fmt.Errorf("storage ensure %s: %w", tenant, err)
 		}
+		mounts[tenant] = ms
+	}
+	return mounts, nil
+}
+
+// bootLxc boots (or reuses) a role's LXC via the shared bootstrap driver
+// through the co-located runner, baking the durable-plane mounts at create.
+// role's static address (k3s = the proxy IP; relay/cp are DHCP behind the
+// proxy) rides the spec.
+func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) error {
+	hostname, err := bootstrap.DomainLXCName(s.relayHost, role)
+	if err != nil {
+		return err
+	}
+	spec := &bootstrap.ProxmoxLxcSpec{
+		Hostname: hostname,
+		Storage:  s.storageName,
+		RootfsGB: s.rootfsGB,
+		MemoryMB: s.memoryMB,
+		Bridge:   s.bridge,
+		Mounts:   mounts,
+	}
+	if vmid != 0 {
+		spec.VMID = &vmid
+	}
+	if role == "k3s" && s.proxyIP != "" {
+		ip := s.proxyIP
+		gw := s.relayGW
+		spec.NetIP = &ip
+		spec.NetGW = &gw
+	}
+	mc, err := s.client()
+	if err != nil {
+		return err
+	}
+	if _, err := bootstrap.BootstrapProxmoxLxc(mc, s.runnerTarget, spec); err != nil {
+		return fmt.Errorf("boot %s LXC: %w", role, err)
+	}
+	return nil
+}
+
+// refreshGuestIPs re-reads the relay/cp/k3s guests' CURRENT IPv4 after a boot
+// (a DHCP re-lease can change an address the recorded coords no longer match),
+// updating the fields the DNS/caddy/litellm/cert steps consume. Best-effort.
+func (s *deploySpec) refreshGuestIPs() {
+	type role struct {
+		vmid uint32
+		ip   *string
+	}
+	for _, r := range []role{
+		{s.relayLxc, &s.relayIP},
+		{s.cpLxc, &s.cpIP},
+		{s.k3sVmid, &s.proxyIP},
+	} {
+		if r.vmid == 0 {
+			continue
+		}
+		out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", r.vmid), 30)
+		if err != nil {
+			continue
+		}
+		for _, t := range strings.Fields(out) {
+			if strings.Contains(t, "/") && t != "127.0.0.1/8" {
+				// ip -4 -o addr reports CIDR; the downstream consumers
+				// (DNS records, Caddy/litellm upstreams) expect a bare IP.
+				*r.ip = config.StripCIDR(t)
+				break
+			}
+		}
+	}
+}
+
+// worldBootRelay boots the relay LXC (if missing) + deploys the Buzz stack
+// into it via the shared deploy driver (idempotent compose bring-up).
+func (s *deploySpec) worldBootRelay(mounts []planebase.MountSpec) error {
+	if err := s.bootLxc("relay", s.relayLxc, mounts); err != nil {
+		return err
+	}
+	deployDir := ""
+	for _, m := range mounts {
+		if m.GuestPath != "/var/lib/docker" {
+			deployDir = m.GuestPath
+			break
+		}
+	}
+	if deployDir == "" {
+		deployDir = "/srv/data/relay"
+	}
+	mc, err := s.client()
+	if err != nil {
+		return err
+	}
+	host := s.relayHost
+	relayURL := "https://" + host
+	if _, err := deploy.DeployRelay(mc, s.runnerTarget, &deploy.RelayDeploySpec{
+		RelayName:      "relay",
+		DeployDir:      deployDir,
+		HTTPPort:       3000,
+		BuzzRef:        deploy.DefaultBufRef,
+		LXc:            &s.relayLxc,
+		OwnerPubkey:    s.ownerPub,
+		RelayURL:       relayURL,
+		OperatorPubkey: s.ownerPub,
+		Domain:         &host,
+	}); err != nil {
+		return fmt.Errorf("deploy relay: %w", err)
+	}
+	return nil
+}
+
+// worldBootK3s boots the k3s LXC (if missing), installs k3s inside it (the
+// shared in-guest install script), and re-asserts the durable local-path.
+func (s *deploySpec) worldBootK3s(mounts []planebase.MountSpec) error {
+	if err := s.bootLxc("k3s", s.k3sVmid, mounts); err != nil {
+		return err
+	}
+	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", s.k3sVmid, strings.TrimSpace(stages.K3sInstallScript))
+	if err := s.run(cmd, 900); err != nil {
+		return fmt.Errorf("k3s install: %w", err)
+	}
+	cmd = fmt.Sprintf("pct exec %d -- bash -c '%s'", s.k3sVmid, strings.TrimSpace(stages.K3sLocalPathDurableScript))
+	if err := s.run(cmd, 180); err != nil {
+		return fmt.Errorf("k3s local-path: %w", err)
 	}
 	return nil
 }
@@ -874,34 +1020,37 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 	return func() (string, error) {
 		var report []string
 		// 1. The durable volume plane: re-ensure each tenant's dataset/LV onto
-		// the recorded pool (idempotent, guest-writable). Runs FIRST — the
-		// k3s local-path / relay-compose reconverges depend on the mounts.
+		// the recorded pool (idempotent, guest-writable) and capture the
+		// born-at-create mounts. Runs FIRST — the LXC boots bake the mounts.
+		var mounts map[planebase.Tenant][]planebase.MountSpec
 		if spec.planePool != "" && spec.relayHost != "" {
-			if err := spec.worldStorage(); err != nil {
+			var err error
+			mounts, err = spec.worldStorage()
+			if err != nil {
 				return "", fmt.Errorf("world-build storage: %w", err)
 			}
 			report = append(report, "durable plane ensured")
 		}
-		// 2. k3s durable local-path re-assert (idempotent).
+		// 2. The relay LXC: boot if missing (baking the durable mounts at
+		// create) + deploy the Buzz stack (idempotent compose bring-up).
+		if spec.relayHost != "" {
+			if err := spec.worldBootRelay(mounts[planebase.TenantRelay]); err != nil {
+				return "", fmt.Errorf("world-build relay: %w", err)
+			}
+			report = append(report, "relay booted + stack deployed")
+		}
+		// 3. The k3s substrate: boot the LXC if missing, install k3s inside it,
+		// and re-assert the durable local-path.
 		if spec.k3sVmid != 0 {
-			cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", spec.k3sVmid, strings.TrimSpace(stages.K3sLocalPathDurableScript))
-			if err := spec.run(cmd, 180); err != nil {
-				return "", fmt.Errorf("world-build k3s local-path: %w", err)
+			if err := spec.worldBootK3s(mounts[planebase.TenantK3sVolumes]); err != nil {
+				return "", fmt.Errorf("world-build k3s: %w", err)
 			}
-			report = append(report, "k3s durable local-path re-asserted")
+			report = append(report, "k3s substrate ready")
 		}
-		// 3. Relay compose stack reconverge (up-if-not-running, idempotent).
-		// set -o pipefail so the pipeline's exit is docker compose's (not tail's),
-		// else a failing bring-up would still echo RELAY_COMPOSE_OK and
-		// spec.run would report success falsely.
-		if spec.relayLxc != 0 && spec.relayCompose != "" {
-			cmd := fmt.Sprintf("pct exec %d -- bash -c 'set -o pipefail; cd %s && docker compose up -d --no-recreate 2>&1 | tail -3 && echo RELAY_COMPOSE_OK'",
-				spec.relayLxc, spec.relayCompose)
-			if err := spec.run(cmd, 240); err != nil {
-				return "", fmt.Errorf("world-build relay compose: %w", err)
-			}
-			report = append(report, "relay compose reconverged")
-		}
+		// 3.5. Re-read the guests' CURRENT IPs (a DHCP re-lease changes an
+		// address the recorded coords no longer match) — the DNS/caddy/litellm
+		// steps below consume them. Best-effort.
+		spec.refreshGuestIPs()
 		// 4. The CP-owned resolver: register the split-horizon names (bare
 		// guests + the dotted public hosts via the proxy) and point every guest
 		// at the CP as its nameserver, then verify the resolver actually ANSWERS
