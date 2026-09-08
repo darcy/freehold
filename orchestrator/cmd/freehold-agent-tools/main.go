@@ -1116,6 +1116,10 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 		}
 		// 2. The relay LXC: boot if missing (baking the durable mounts at
 		// create) + deploy the Buzz stack (idempotent compose bring-up).
+		// Resolve any EXISTING guest vmids by hostname FIRST so a boot reuses
+		// an already-created LXC (a fresh/partial world with 0 recorded vmids;
+		// PickFreeVMID refuses a name that already exists).
+		spec.resolveGuestVmids()
 		if spec.relayHost != "" {
 			if err := spec.worldBootRelay(mounts[planebase.TenantRelay]); err != nil {
 				return "", fmt.Errorf("world-build relay: %w", err)
