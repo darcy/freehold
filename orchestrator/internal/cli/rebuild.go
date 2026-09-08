@@ -3818,7 +3818,13 @@ func (e *rebuildEngine) agentToolsMcp(cfg *config.Config) (*client.McpClient, er
 // callAgentToolsText issues one tool call to a freehold-agent-tools client and
 // returns the result.content[0].text payload (e.g. the new agent's pubkey).
 func callAgentToolsText(mc *client.McpClient, tool string, args map[string]interface{}) (string, error) {
+	// world_build runs its stages synchronously for minutes — use the long
+	// deadline (the short default would time out awaiting the response).
+	long := map[string]bool{"world_build": true}
 	raw, err := mc.Call(tool, args)
+	if long[tool] {
+		raw, err = mc.CallLong(tool, args)
+	}
 	if err != nil {
 		return "", err
 	}
