@@ -897,6 +897,13 @@ func (e *rebuildEngine) runSlim() error {
 	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
 
 	// 11. deploy freehold-agent-tools (the trigger surface + world_build home).
+	// Its seed/roster dial the relay DOMAIN (buzz keys the community to the
+	// Host header) — re-pin the relay LAN IP into the CP guest's /etc/hosts so
+	// that dial reaches the relay directly, pre-Caddy (a DHCP re-lease between
+	// the relay boot/record and here would otherwise leave a stale pin).
+	if err := e.pinRelayInCp(); err != nil {
+		return err
+	}
 	if err := e.stageDeployAgentTools(); err != nil {
 		return err
 	}
@@ -1063,6 +1070,27 @@ func (e *rebuildEngine) handoffDNS() error {
 			return fmt.Errorf("ship %s DNS cred to the CP failed:\n%s", slot, out)
 		}
 		fmt.Fprintf(e.out, "  ✓ %s DNS credential handed off to the CP\n", slot)
+	}
+	return nil
+}
+
+// pinRelayInCp (re-)pins the relay LAN IP into the CP guest's /etc/hosts so
+// the agent-tools seed/roster dial `http://<relayDomain>:3000` directly,
+// pre-Caddy (buzz keys the community to the Host header — a raw IP gets
+// "no community is configured for this host"). Idempotent (grep -Fq guard);
+// a DHCP re-lease between the relay boot/record and here is corrected.
+func (e *rebuildEngine) pinRelayInCp() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.Relay.Ip == nil {
+		return fmt.Errorf("no cp/relay coords to pin the relay host")
+	}
+	relayIP := config.StripCIDR(*cfg.Lxc.Relay.Ip)
+	host := cfg.RelayHost()
+	cmd := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"",
+		*cfg.Lxc.Cp.Vmid, host, relayIP, host)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return fmt.Errorf("pin the relay host into the cp LXC failed:\n%s", out)
 	}
 	return nil
 }
