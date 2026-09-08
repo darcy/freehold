@@ -622,10 +622,10 @@ func (s *deploySpec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec,
 // through the co-located runner, baking the durable-plane mounts at create.
 // role's static address (k3s = the proxy IP; relay/cp are DHCP behind the
 // proxy) rides the spec.
-func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) error {
+func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (uint32, error) {
 	hostname, err := bootstrap.DomainLXCName(s.relayHost, role)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	spec := &bootstrap.ProxmoxLxcSpec{
 		Hostname: hostname,
@@ -646,12 +646,21 @@ func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountS
 	}
 	mc, err := s.client()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, err := bootstrap.BootstrapProxmoxLxc(mc, s.runnerTarget, spec); err != nil {
-		return fmt.Errorf("boot %s LXC: %w", role, err)
+	res, err := bootstrap.BootstrapProxmoxLxc(mc, s.runnerTarget, spec)
+	if err != nil {
+		return 0, fmt.Errorf("boot %s LXC: %w", role, err)
 	}
-	return nil
+	if res.ID != "" {
+		if v, perr := strconv.ParseUint(res.ID, 10, 32); perr == nil {
+			return uint32(v), nil
+		}
+	}
+	if vmid != 0 {
+		return vmid, nil
+	}
+	return 0, fmt.Errorf("boot %s LXC: no vmid resolved", role)
 }
 
 // resolveGuestVmids fills any UNKNOWN guest vmid (0 — a fresh world whose
@@ -722,9 +731,11 @@ func (s *deploySpec) refreshGuestIPs() {
 // worldBootRelay boots the relay LXC (if missing) + deploys the Buzz stack
 // into it via the shared deploy driver (idempotent compose bring-up).
 func (s *deploySpec) worldBootRelay(mounts []planebase.MountSpec) error {
-	if err := s.bootLxc("relay", s.relayLxc, mounts); err != nil {
+	vmid, err := s.bootLxc("relay", s.relayLxc, mounts)
+	if err != nil {
 		return err
 	}
+	s.relayLxc = vmid
 	deployDir := ""
 	for _, m := range mounts {
 		if m.GuestPath != "/var/lib/docker" {
@@ -757,12 +768,15 @@ func (s *deploySpec) worldBootRelay(mounts []planebase.MountSpec) error {
 	return nil
 }
 
-// worldBootK3s boots the k3s LXC (if missing), installs k3s inside it (the
-// shared in-guest install script), and re-asserts the durable local-path.
+// worldBootK3s boots the k3s LXC (if missing — the driver picks a free vmid on
+// a fresh world), installs k3s inside it (the shared in-guest install script),
+// and re-asserts the durable local-path.
 func (s *deploySpec) worldBootK3s(mounts []planebase.MountSpec) error {
-	if err := s.bootLxc("k3s", s.k3sVmid, mounts); err != nil {
+	vmid, err := s.bootLxc("k3s", s.k3sVmid, mounts)
+	if err != nil {
 		return err
 	}
+	s.k3sVmid = vmid
 	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", s.k3sVmid, strings.TrimSpace(stages.K3sInstallScript))
 	if err := s.run(cmd, 900); err != nil {
 		return fmt.Errorf("k3s install: %w", err)
@@ -1096,7 +1110,7 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 		}
 		// 3. The k3s substrate: boot the LXC if missing, install k3s inside it,
 		// and re-assert the durable local-path.
-		if spec.k3sVmid != 0 {
+		if spec.relayHost != "" {
 			if err := spec.worldBootK3s(mounts[planebase.TenantK3sVolumes]); err != nil {
 				return "", fmt.Errorf("world-build k3s: %w", err)
 			}
