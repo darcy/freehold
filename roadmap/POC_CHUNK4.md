@@ -186,9 +186,15 @@ Goal: the operator box stops being the single root of trust, so a fresh box can
       NOT get `world_teardown` (locked conversation+create-only).
 
 Deferred (need a live PVE/CP/relay world to verify — not this chunk's clean
-handover): slim `freehold build` to CP-bring-up with in-memory secret capture,
-the CP `build`/`upgrade` infra provisioning (k3s / litellm / Caddy / relay
-Terraform + cert), and the durable world-state / migrations / async-cert steps.
+handover): durable world-state under `/srv/data/cp` (world_build currently
+learns coords by hostname + the box re-records post-trigger; a durable
+world-state makes the CP self-sufficient for a truly cold world), and the
+final docs close-out. **Resolved live (PRs #172–#181):** slim `freehold build`
+to CP-bring-up with in-memory secret capture + hand-off + trigger, the CP
+`world_build` infra provisioning (relay/k3s boot + install, storage, DNS,
+litellm, Caddy + cert issue/install — the deferred "CP build/upgrade" items),
+and the cert install as a CP step (durable-reuse gate → in-process DNS-01 →
+file-transit install).
 
 ### Open decisions to make explicitly at kickoff (not pre-decided by this plan)
 

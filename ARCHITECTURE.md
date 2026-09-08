@@ -207,12 +207,18 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     postcondition verifies), for versioned config/prompt/repair changes that
     don't have clean desired-state semantics.
 
-*   **`internal/cli/rebuild.go` is the world pipeline.** `collectAnswers` →
-    `rebuildFlags` → `newRebuildEngine` threads the stage set
-    (door → runner → durable plane → relay → CP → k3s → litellm → Caddy →
-    `freehold-agent-tools` → CPA → reconcile); `install` hands the same
-    engine the TUI's answers. Teardown keeps the config (compute-only) unless
-    `--data` erases the tenant datasets.
+*   **`internal/cli/rebuild.go` is the slim CP-driven build.** `collectAnswers` →
+    `rebuildFlags` → `newRebuildEngine` → `runSlim`: door → runner → durable
+    plane → seed the litellm secrets into the box runner (deploy-cp ships it as
+    the co-located runner) → boot the CP LXC → boot + deploy the relay stack
+    (the agent-tools roster lives on it) → deploy-cp → deploy
+    `freehold-agent-tools` → hand the world's secrets to the CP (DNS creds
+    sealed to the agent-tools identity, litellm secrets sealed into the runner)
+    → **trigger `world_build`** (the CP brings up k3s/storage/DNS/litellm/
+    Caddy/cert through its co-located runner) → record the post-world coords →
+    CPA + reconcile. `install` hands the same engine the TUI's answers.
+    Teardown keeps the config (compute-only) unless `--data` erases the tenant
+    datasets.
 
 *   **`internal/state` is a file store** (`state.json`: runners, secrets,
     agents) under the operator/CP state dir; agent registries are

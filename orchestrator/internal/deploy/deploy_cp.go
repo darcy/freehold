@@ -155,8 +155,8 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		relayFlag = fmt.Sprintf(" --relay-url %s --relay-pubkey %s --relay-host %s", scopeURL, *relayPK, domain)
 	}
 	// Pin the relay host into the guest's /etc/hosts. grep -Fq (fixed string):
-// a regex grep would let '.' match '-' and falsely match the guest's own
-// dashed hostname (relay-librem-...-relay), skipping the pin forever.
+	// a regex grep would let '.' match '-' and falsely match the guest's own
+	// dashed hostname (relay-librem-...-relay), skipping the pin forever.
 	if spec.RelayHostIP != nil {
 		host := strings.TrimSuffix(domain, "/")
 		host = strings.Split(host, ":")[0]

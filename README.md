@@ -389,12 +389,18 @@ cargo run -p freehold-control-plane -- rebuild --relay-url https://<relay-domain
 
 ## Bootstrap flow (from zero to a live world)
 
-Every command routes through a **provisioning runner** (one `exec(cmd, target)` — the same
-primitive agents use), so the workstation never holds a PVE credential of its own: the
-runner's injected SSH key is the only door. The relay + CP hosts are identity (never an IP):
-they resolve internally behind freehold's Caddy proxy, so install does not block on DNS.
-Consoles **mint their identity on the box** (a keypair is never shipped); the relay runs under
-its host with owner = the CP console.
+`freehold build` is **CP-bring-up + trigger**: the box brings up the CP (and
+the relay LXC, which the agent-tools roster lives on), hands the world's
+secrets to the CP, and **triggers `world_build`** — the CP then builds the rest
+of the world (k3s → DNS → litellm → Caddy → cert install) through its own
+co-located runner. A fresh box only needs `freehold login` (root-free) → then
+`freehold` to trigger. Every command routes through a **provisioning runner**
+(one `exec(cmd, target)` — the same primitive agents use), so the workstation
+never holds a PVE credential of its own: the runner's injected SSH key is the
+only door. The relay + CP hosts are identity (never an IP): they resolve
+internally behind freehold's Caddy proxy, so install does not block on DNS.
+Consoles **mint their identity on the box** (a keypair is never shipped); the
+relay runs under its host with owner = the CP console.
 
 **The same story as a sequence:** four lifelines — operator, PVE host (where the runner
 lives), relay LXC, cp LXC. Solid arrows = commands (the runner executes them over SSH);
@@ -407,21 +413,17 @@ sequenceDiagram
     participant PVE as "PVE host (runner)"
     participant R as "relay LXC (new-relay only)<br/>attach flow reuses an existing relay"
     participant C as cp LXC
+    participant CP as "CP (world_build)"
 
-    OP->>PVE: bootstrap --role relay + cp (signed MCP via the runner)
-    PVE->>R: create + start + verify + docker+compose (relay LXC)
-    PVE->>C: create + start + verify + docker+compose (cp LXC)
-    PVE--)OP: assigned IPs reported (no DNS gate — internal resolution suffices)
-    OP->>PVE: continue — deploy-cp
-    PVE->>C: ship binaries · serve :8080 · mint console key · adopt runner
-    C-->>OP: console pubkey + cp-domain.example
-    OP->>PVE: continue — deploy-relay (owner = the console)
-    PVE->>R: fetch bundle · compose up · /_liveness
-    R-->>OP: relay live at domain.example
-    OP->>PVE: relay-member — operator + runners + agents pubkeys
-    PVE->>R: buzz-admin add-member (per pubkey)
-    OP->>C: console-login — own nsec (NIP-98)
-    C-->>OP: live world: relay + console wired
+    OP->>PVE: build (signed MCP via the runner): CP-bring-up + trigger
+    PVE->>C: create + start + verify + docker (cp LXC)
+    PVE->>R: create + start + verify + docker + compose (relay LXC)
+    PVE->>C: deploy-cp + freehold-agent-tools · hand the DNS creds to the CP
+    OP->>CP: trigger world_build (roster-gated, signed as the box)
+    CP->>PVE: (co-located runner) k3s boot + install · DNS register/point · litellm · Caddy · cert
+    CP-->>OP: world_build report (each stage) → Freehold is up
+    OP->>C: console-login — own nsec (NIP-98) / w in the TUI
+    C-->>OP: live world: relay + console + CPA wired
 ```
 
 The reload path (`freehold rebuild --relay-url`) folds a respawned/rebuild CP from the

@@ -483,6 +483,9 @@ func ReadMemory(relayURL string, agentNostrSecret []byte, key string) (string, b
 	if err != nil {
 		return "", false, fmt.Errorf("memory query request failed: %w", err)
 	}
+	// Bare-domain Host (buzz keys the community to it; a LAN :3000 dial must
+	// not present "domain:3000" — same rule as QueryEvents/PublishEventJSON).
+	req.Host = req.URL.Hostname()
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := agent().Do(req)
