@@ -866,7 +866,9 @@ func (e *rebuildEngine) runSlim() error {
 		return err
 	}
 
-	// 9. boot the CP LXC + record its coordinates.
+	// 9. boot the CP LXC + record its coordinates, then boot + deploy the RELAY
+	// (its IP must be recorded BEFORE deploy-cp so the CP guest's /etc/hosts
+	// pin reaches it; the agent-tools roster also needs the relay live).
 	fmt.Fprintln(e.out, "  · booting the cp LXC (create → docker; can take minutes)…")
 	if err := e.stageBootstrap("cp"); err != nil {
 		return err
@@ -875,17 +877,7 @@ func (e *rebuildEngine) runSlim() error {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ cp LXC booted + recorded")
-
-	// 10. deploy the CP + its co-located runner.
-	if err := e.stageDeployCp(); err != nil {
-		return err
-	}
-	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
-
-	// 10.5. Boot + deploy the RELAY stack box-side — the agent-tools server
-	// seeds its roster channel ON the relay (fail-closed), so the relay must be
-	// reachable BEFORE agent-tools deploys + before the world_build trigger
-	// (which the roster authorizes). The CP owns everything else.
+	fmt.Fprintln(e.out, "  · booting the relay LXC (create → docker; can take minutes)…")
 	if err := e.stageBootstrap("relay"); err != nil {
 		return err
 	}
@@ -896,6 +888,13 @@ func (e *rebuildEngine) runSlim() error {
 		return err
 	}
 	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.relayDomain)
+
+	// 10. deploy the CP + its co-located runner (the relay IP is now recorded,
+	// so the CP guest pins the domain for pre-Caddy relay ops).
+	if err := e.stageDeployCp(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
 
 	// 11. deploy freehold-agent-tools (the trigger surface + world_build home).
 	if err := e.stageDeployAgentTools(); err != nil {
@@ -2222,6 +2221,12 @@ func (e *rebuildEngine) stageDeployCp() error {
 		"--runner-binary", e.bins.ReleaseRun,
 		"--runner-package", rbRunnerPkgs() + "/" + e.f.target,
 		"--operator-pubkey", e.f.operatorPubkey,
+	}
+	// Pin the relay's LAN IP into the CP guest's /etc/hosts so the console +
+	// agent-tools can RESOLVE + reach the relay DOMAIN directly (pre-Caddy):
+	// buzz keys the community to the Host header, so a raw-IP URL fails.
+	if cfg, _ := config.Load(e.f.configPath); cfg != nil && cfg.Lxc.Relay.Ip != nil {
+		args = append(args, "--relay-host-ip", config.StripCIDR(*cfg.Lxc.Relay.Ip))
 	}
 	if cpRoot != "" {
 		args = append(args, "--state-dir", cpRoot+"/control-plane", "--bin-dir", cpRoot+"/bin")
