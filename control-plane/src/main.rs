@@ -780,7 +780,9 @@ async fn main() -> Result<()> {
             }
             if let Some(pk) = &args.agent_tools_pubkey {
                 if !freehold_control_plane::is_hex64(pk) {
-                    anyhow::bail!("--agent-tools-pubkey must be a 64-hex Nostr pubkey (got {pk:?})");
+                    anyhow::bail!(
+                        "--agent-tools-pubkey must be a 64-hex Nostr pubkey (got {pk:?})"
+                    );
                 }
                 store.set_agent_tools_pubkey(Some(pk.clone()))?;
                 tracing::info!("console agent-tools pubkey set");

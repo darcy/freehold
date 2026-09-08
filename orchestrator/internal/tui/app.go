@@ -112,19 +112,19 @@ func cpLive(cfg *config.Config) bool {
 }
 
 // cpConsoleLive is the login-only-box CP liveness probe: a NIP-98 console
-// session that answers /api/overview means the CP is up. No session yet (auto-
-// login hasn't landed) or a failed overview = down — there is no local runner
-// to probe through.
+// session that answers /api/overview means the CP is up. A failed overview = down
+// (an established session that stops answering is a dead CP, not a live one). No
+// session yet (auto-login hasn't landed) falls back to bare TCP reachability of
+// the CP host, so a fresh box can see its CP is up without a local runner.
 func cpConsoleLive(m *Model, cfg *config.Config) bool {
 	if m.console != nil && m.console.client != nil {
+		// An established session is authoritative: a failed overview is a real
+		// down — never fall through to the TCP reachability shortcut.
 		ov, err := m.console.client.Overview()
-		if err == nil && ov != nil {
-			return true
-		}
+		return err == nil && ov != nil
 	}
-	// No session (or a session that hasn't connected yet) — fall back to bare
-	// TCP reachability of the CP host: a fresh box must see its CP is up without
-	// a local runner. The honest session check is the primary path above.
+	// No session yet — bare TCP reachability, the only signal a fresh box has
+	// before auto-login lands. The honest session check is the primary path.
 	return cfg != nil && cfg.CPURL != "" && config.URLReachable(cfg.CPURL)
 }
 

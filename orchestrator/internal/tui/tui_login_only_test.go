@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"freehold/orchestrator/internal/config"
+	"freehold/orchestrator/internal/console"
 )
 
 // A login-only profile (cp_url + cp_pubkey + operator identity, NO [runner])
@@ -64,6 +65,28 @@ func TestCpConsoleLiveReachability(t *testing.T) {
 	dead := &config.Config{CPURL: "http://127.0.0.1:1"} // nothing listens
 	if cpConsoleLive(m, dead) {
 		t.Fatal("dead CP must be reported down")
+	}
+}
+
+// cpConsoleLive with an ESTABLISHED session whose /api/overview call fails must
+// be reported DOWN — never fall through to a bare TCP reachability check that
+// could report a session that's stopped authenticating as still live (the
+// false-positive this PR eliminates). cfg.CPURL stays live so any errant
+// reachability fallback would return true, which is exactly what must NOT happen.
+func TestCpConsoleLiveEstablishedSessionFailureIsDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "session expired", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL}
+	// An ESTABLISHED session (a session cookie in hand) whose overview errors.
+	m := &Model{console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	if _, err := m.console.client.Overview(); err == nil {
+		t.Fatal("test client must error Overview")
+	}
+	if cpConsoleLive(m, cfg) {
+		t.Fatal("established session with a failed overview must be DOWN, not fall through to TCP reachability")
 	}
 }
 
