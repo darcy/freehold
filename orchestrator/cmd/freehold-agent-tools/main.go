@@ -655,7 +655,9 @@ func (s *deploySpec) refreshGuestIPs() {
 		}
 		for _, t := range strings.Fields(out) {
 			if strings.Contains(t, "/") && t != "127.0.0.1/8" {
-				*r.ip = t
+				// ip -4 -o addr reports CIDR; the downstream consumers
+				// (DNS records, Caddy/litellm upstreams) expect a bare IP.
+				*r.ip = config.StripCIDR(t)
 				break
 			}
 		}
