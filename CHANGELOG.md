@@ -25,6 +25,77 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.8] — Chunk 4 Phase G wrap: a fresh box truly operates the CP (login-only Running + world coords)
+
+Phase G's `login` foundation shipped the *mechanics* but left two gaps that
+blocked the actual "fresh box operates the world" claim: the deployed CP
+rarely carried its relay coords (so `/api/world` seeded no relay), and a
+login-only box (cp_url + cp_pubkey + operator identity, no local `[runner]`)
+could never reach Running because the mode gate demanded a local runner's
+reachability. This phase closes both, plus the agent-tools coords a fresh box
+needs for the Agents view.
+
+### Fixed
+
+- **The deployed CP now serves its relay coords.** `deploy-cp` only passed
+  `--relay-url … --relay-pubkey` to `control-plane serve` when a relay pubkey
+  was *supplied*, and the box never supplied one (NIP-11 best-effort is often
+  empty) — so the CP started with no relay scope at all and `/api/world`
+  returned `relay_url: null`, leaving a fresh login box with nothing to seed.
+  `stageDeployCp` now resolves the relay signing pubkey **deterministically**
+  from the relay's own compose `.env` (`BUZZ_RELAY_PRIVATE_KEY`, read in-guest
+  through the runner — the secret never leaves the relay, only the derived
+  pubkey is returned), falling back to NIP-11 then the recorded config. A
+  rebuild's surviving `agent_tools_*` coords are re-passed too.
+- **`--relay-url` alone no longer refuses to serve.** The CP's `serve` treated
+  `--relay-url`/`--relay-pubkey` as an inseparable pair and *refused to start*
+  with only one. The pairing is now a soft guard: URL alone records (so
+  `/api/world` seeds a relay even before the pubkey is known); the verified
+  roster view stays disabled until both land.
+- **A login-only box reaches Running.** The boot gate
+  `Converged = RelayLive && CPLive && RunnerReach` demanded a LOCAL
+  provisioning runner, which a login-only box deliberately has none of (and
+  `CPLive` probed *through* it via `pct exec`). The runner probe is now
+  satisfied on a runnerless profile ("no local runner — operating through the
+  CP"), and `CPLive` sources from the console session (`/api/overview`) with a
+  bare-host reachability fallback — no `pct exec` needed. A fresh
+  `freehold login` box enters Running immediately and operates the CP console
+  (Runners-CP, provision/grant/revoke, portal).
+- **`/api/world` carries the agent-tools coords.** A fresh box's Agents view
+  (`buildAgents`) needed `agent_tools_url`/`agent_tools_pubkey`, which login
+  never seeded and `/api/world` never served. `control-plane serve` now accepts
+  `--agent-tools-url`/`--agent-tools-pubkey` (persisted in `state.json`),
+  `/api/world` serves them, `console.WorldSummary` + `oplogin.seed()` record
+  them, and the box feeds them at deploy: `stageDeployCp` re-passes surviving
+  coords on rebuild, and `stageDeployAgentTools` re-runs `deploy-cp` (idempotent
+  — stops the prior serve, restarts with the new flags) on the fresh-build path
+  where agent-tools was deployed after the CP.
+
+### Tests
+
+- `control-plane/tests/web.rs`'s `world_serves_operator_seed_after_login` now
+  asserts the agent-tools coords round-trip through `/api/world`.
+- `internal/oplogin`'s interactive-seed test asserts the mock CP's
+  `agent_tools_url`/`agent_tools_pubkey` land in the seeded config.
+- New `internal/tui/tui_login_only_test.go`: the runnerless runner-probe branch
+  and `cpConsoleLive`'s reachability fallback (live up / dead down).
+
+### Docs
+
+- `ARCHITECTURE.md`, `AGENTS.md`, and `roadmap/POC_CHUNK4.md` updated to the
+  current reality: the login-only Running path and the CP's served world coords
+  (see the docs-hygiene rule — current-state only, history lives here).
+
+### Handoff
+
+- The **live CP** must be re-deployed once with the fixed code path (a normal
+  `freehold build`/rebuild, or a manual `deploy-cp` with
+  `--relay-url --relay-pubkey`) for `/api/world` to serve the relay coords —
+  the code change makes a rebuild produce it automatically. The **other box**
+  takes the fixed `freehold` binary (TUI mode gate + login seed) and re-runs
+  `freehold login` — it now reaches Running and operates the CP without any
+  local runner.
+
 ## [0.4.7] — Chunk 4 Phase G: operator-box ⇄ CP decoupling (login foundation)
 
 Phase G wraps Chunk 4 with the CP-decoupling base: the operator box stops being

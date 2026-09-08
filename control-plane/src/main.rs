@@ -282,6 +282,15 @@ struct ServeArgs {
     /// strict host map would otherwise refuse.
     #[arg(long)]
     relay_host: Option<String>,
+    /// The CP's freehold-agent-tools MCP server URL (http://<cp-ip>:8089) —
+    /// served on /api/world so a fresh login box can drive the agent
+    /// registry. Persisted in state.json.
+    #[arg(long)]
+    agent_tools_url: Option<String>,
+    /// The agent-tools server's Nostr pubkey (the audience of its roster) —
+    /// paired with `agent_tools_url`; served on /api/world.
+    #[arg(long)]
+    agent_tools_pubkey: Option<String>,
     /// Comma-separated operator/admin Nostr pubkeys (64-hex). Non-empty =>
     /// NIP-98 console auth is ON and a non-loopback bind is allowed (C3.5);
     /// empty => the loopback-only posture (C3) holds.
@@ -756,9 +765,27 @@ async fn main() -> Result<()> {
                 tracing::info!("console relay pubkey set");
             }
             if (args.relay_url.is_some()) != (args.relay_pubkey.is_some()) {
-                anyhow::bail!(
-                    "--relay-url and --relay-pubkey must be set TOGETHER (the roster view                      verifies relay-signed snapshots; one without the other is a misconfig)"
+                // The pairing is a convenience, not a hard gate: recording the
+                // relay URL alone (pubkey not yet known) still lets /api/world
+                // seed a fresh login box's relay coords; the roster view simply
+                // can't verify relay-signed snapshots until the pubkey arrives.
+                tracing::warn!(
+                    "serve started with only one of --relay-url/--relay-pubkey — the verified \
+                     roster view stays disabled until both are set"
                 );
+            }
+            if let Some(url) = &args.agent_tools_url {
+                store.set_agent_tools_url(Some(url.clone()))?;
+                tracing::info!(url = %url, "console agent-tools scope set");
+            }
+            if let Some(pk) = &args.agent_tools_pubkey {
+                if !freehold_control_plane::is_hex64(pk) {
+                    anyhow::bail!(
+                        "--agent-tools-pubkey must be a 64-hex Nostr pubkey (got {pk:?})"
+                    );
+                }
+                store.set_agent_tools_pubkey(Some(pk.clone()))?;
+                tracing::info!("console agent-tools pubkey set");
             }
             let auth = if admins.is_empty() {
                 None

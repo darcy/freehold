@@ -117,6 +117,12 @@ func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	if got.CpPubkey != cpPubkey {
 		t.Errorf("cp_pubkey not seeded: %s", got.CpPubkey)
 	}
+	if got.AgentToolsURL != "http://10.0.0.5:8089" {
+		t.Errorf("agent_tools_url not seeded: %s", got.AgentToolsURL)
+	}
+	if got.AgentToolsPubkey != "22222" {
+		t.Errorf("agent_tools_pubkey not seeded: %s", got.AgentToolsPubkey)
+	}
 	// The box's own provisioning identity is materialized on disk (the actor a
 	// CP-side grant binds), but login does NOT fabricate a [runner] block — a
 	// box has no deployed runner until `freehold build` authors one.
@@ -324,12 +330,14 @@ func mockCP(t *testing.T, cpPubkey string) *httptest.Server {
 			writeJSON(w, map[string]string{"ok": "true"})
 		case "/api/world":
 			writeJSON(w, map[string]string{
-				"relay_url":       "https://relay.example",
-				"relay_ws_url":    "wss://relay.example",
-				"relay_pubkey":    "11111",
-				"cp_url":          srv.URL,
-				"cp_pubkey":       cpPubkey,
-				"operator_pubkey": "operator",
+				"relay_url":          "https://relay.example",
+				"relay_ws_url":       "wss://relay.example",
+				"relay_pubkey":       "11111",
+				"cp_url":             srv.URL,
+				"cp_pubkey":          cpPubkey,
+				"operator_pubkey":    "operator",
+				"agent_tools_url":    "http://10.0.0.5:8089",
+				"agent_tools_pubkey": "22222",
 			})
 		default:
 			http.NotFound(w, r)

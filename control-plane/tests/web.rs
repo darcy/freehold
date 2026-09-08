@@ -91,6 +91,11 @@ async fn world_serves_operator_seed_after_login() {
             "9797abc9797abc9797abc9797abc9797abc9797abc9797abc9797abc9797abc".into(),
         ))
         .unwrap();
+    store
+        .set_agent_tools_url(Some("http://10.0.0.5:8089".into()))
+        .unwrap();
+    let at_pk = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    store.set_agent_tools_pubkey(Some(at_pk.into())).unwrap();
     let console = Console::load_or_create(&cp_dir).unwrap();
     let console_pk = console.pubkey();
 
@@ -171,6 +176,8 @@ async fn world_serves_operator_seed_after_login() {
     assert_eq!(w["cp_pubkey"], console_pk);
     assert_eq!(w["operator_pubkey"], admin_pk);
     assert!(w["relay_pubkey"].is_string());
+    assert_eq!(w["agent_tools_url"], "http://10.0.0.5:8089");
+    assert_eq!(w["agent_tools_pubkey"], at_pk);
 
     server.abort();
 }

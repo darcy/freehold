@@ -111,6 +111,23 @@ func cpLive(cfg *config.Config) bool {
 	return strings.Contains(out, " 200 ") || strings.Contains(out, "200 OK")
 }
 
+// cpConsoleLive is the login-only-box CP liveness probe: a NIP-98 console
+// session that answers /api/overview means the CP is up. A failed overview = down
+// (an established session that stops answering is a dead CP, not a live one). No
+// session yet (auto-login hasn't landed) falls back to bare TCP reachability of
+// the CP host, so a fresh box can see its CP is up without a local runner.
+func cpConsoleLive(m *Model, cfg *config.Config) bool {
+	if m.console != nil && m.console.client != nil {
+		// An established session is authoritative: a failed overview is a real
+		// down — never fall through to the TCP reachability shortcut.
+		ov, err := m.console.client.Overview()
+		return err == nil && ov != nil
+	}
+	// No session yet — bare TCP reachability, the only signal a fresh box has
+	// before auto-login lands. The honest session check is the primary path.
+	return cfg != nil && cfg.CPURL != "" && config.URLReachable(cfg.CPURL)
+}
+
 // buildServices fills the Services view from the config's managed pieces
 // (mirrors Rust build_services, incl. the k3s row).
 func (m *Model) buildServices(cfg *config.Config) {

@@ -245,10 +245,17 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     CP's own `/api/world` report (`resolveCPPubkey` — hard error on mismatch,
     blank falls back to the CP's report; neither → no anchor) so a wrong or
     hijacked CP address never seeds a bogus trust anchor. `freehold logout`
-    clears this box's local ledger only. The Agents tab reads the CP toolset
-    registry (`freehold-agent-tools manage_agent`); the Runners-CP view reads
-    the console `/api/overview`. `w` opens the web console pre-authorized via a
-    single-use portal token.
+    clears this box's local ledger only. `/api/world` carries the relay coords
+    (served from `state.json` — the CP records them when `serve` is started
+    with `--relay-url`, paired or not with `--relay-pubkey`) plus the
+    `agent_tools_url`/`agent_tools_pubkey` the Agents view needs. The Agents
+    tab reads the CP toolset registry (`freehold-agent-tools manage_agent`);
+    the Runners-CP view reads the console `/api/overview`. `w` opens the web
+    console pre-authorized via a single-use portal token.
+    **A login-only box (cp_url + cp_pubkey + operator, no local `[runner]`)
+    reaches Running**: the boot gate treats a runnerless profile as having its
+    runner reach satisfied and sources CP liveness from the console session
+    (`/api/overview`), not the `pct exec` probe a box with a local runner uses.
 
 *   **One activity surface for long ops.** `internal/tui/activity.go`
     streams the boot probe rows and the subprocess windows, `ctrl+c` aborts;

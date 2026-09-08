@@ -703,6 +703,8 @@ async fn world(State(state): State<WebState>, headers: HeaderMap) -> Result<Json
         "relay_pubkey": state.store.relay_pubkey(),
         "cp_url": state.public_origin,
         "cp_pubkey": state.console.pubkey(),
+        "agent_tools_url": state.store.agent_tools_url(),
+        "agent_tools_pubkey": state.store.agent_tools_pubkey(),
         "operator_pubkey": operator,
     })))
 }
