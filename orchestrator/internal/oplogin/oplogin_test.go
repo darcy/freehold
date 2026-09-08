@@ -218,6 +218,34 @@ func TestEnsureOpsIdentityFirstRunWins(t *testing.T) {
 	}
 }
 
+// TestResolveCPPubkeyNpubMatchesHex proves the trust-anchor comparison is
+// format-agnostic: an operator-supplied npub1<bech32> that decodes to the CP's
+// reported 64-hex pubkey is a MATCH (a format difference is not a trust
+// difference), and the normalized hex is what gets recorded.
+func TestResolveCPPubkeyNpubMatchesHex(t *testing.T) {
+	const hexPK = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+	const npubPK = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6"
+
+	got, err := resolveCPPubkey(npubPK, hexPK)
+	if err != nil {
+		t.Fatalf("npub supplied against hex report must match: %v", err)
+	}
+	if got != hexPK {
+		t.Fatalf("anchor should be the normalized hex form, got %q", got)
+	}
+
+	// And the reverse: hex supplied against a hex report still matches.
+	if got, err := resolveCPPubkey(hexPK, hexPK); err != nil || got != hexPK {
+		t.Fatalf("hex/hex match failed: got=%q err=%v", got, err)
+	}
+
+	// A genuinely different pubkey (even in npub form) still refuses.
+	other := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, err := resolveCPPubkey(npubPK, other); err == nil {
+		t.Fatal("a different reported pubkey must still be refused")
+	}
+}
+
 // TestInteractiveRejectsCPPubkeyMismatch proves the trust anchor is enforced:
 // if the operator supplies a CP pubkey that disagrees with the CP's own /api/world
 // report, login refuses to seed rather than trusting the wrong control plane.
