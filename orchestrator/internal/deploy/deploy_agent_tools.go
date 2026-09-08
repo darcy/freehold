@@ -47,6 +47,11 @@ type DeployAgentToolsSpec struct {
 	ThinPool           string // the freehold-CREATED thin pool (LVM-thin)
 	SizeGB             uint64 // per-tenant LV size GB
 	PoolSizeGB         uint64 // thin-pool size GB when carved
+	RootfsGB           uint32 // LXC rootfs size GB (relay/k3s boots)
+	MemoryMB           uint32 // LXC memory MB (relay/k3s boots)
+	Storage            string // PVE LXC storage (relay/k3s boots)
+	RelayGW            string // gateway for the k3s STATIC guest IP
+	Bridge             string // PVE LXC bridge (relay/k3s boots)
 	SelfURL            string // reachable base URL of this server (http://<cpIP>:8089)
 	GrantsCSV          string // bootstrap member pubkeys ("pk1,pk2")
 }
@@ -155,6 +160,21 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	}
 	if spec.PoolSizeGB != 0 {
 		serveFlags += " --pool-size-gb " + strconv.FormatUint(spec.PoolSizeGB, 10)
+	}
+	if spec.RootfsGB != 0 {
+		serveFlags += " --rootfs-gb " + strconv.FormatUint(uint64(spec.RootfsGB), 10)
+	}
+	if spec.MemoryMB != 0 {
+		serveFlags += " --memory-mb " + strconv.FormatUint(uint64(spec.MemoryMB), 10)
+	}
+	if spec.Storage != "" {
+		serveFlags += " --storage " + spec.Storage
+	}
+	if spec.RelayGW != "" {
+		serveFlags += " --relay-gw " + spec.RelayGW
+	}
+	if spec.Bridge != "" {
+		serveFlags += " --bridge " + spec.Bridge
 	}
 	if spec.SelfURL != "" {
 		serveFlags += " --self-url " + spec.SelfURL

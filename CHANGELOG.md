@@ -72,8 +72,9 @@ world-state, migrations, async cert) extend it as they land.
   (what the CP manages — its agent registry), `world_teardown` (clears it), and
   `world_build` (the CP runs its owned bring-up/reconcile stages through the co-located
   runner via the shared `internal/stages`), giving the box a post-login "trigger" for
-  the world. `world_build` re-asserts the k3s durable local-path, reconverges the
-  relay compose stack, re-applies the Caddy TLS edge (edge coords ride the
+  the world. `world_build` boots the relay + k3s LXCs (baking the durable-plane
+  mounts at create), deploys the relay stack + installs k3s, re-asserts the k3s
+  durable local-path, re-applies the Caddy TLS edge (edge coords ride the
   agent-tools serve `--relay-host/--relay-ip/--cp-ip`), registers + points the
   CP-owned split-horizon resolver (`--cp-lxc/--proxy-ip/--litellm-ip` carry the
   coords), re-ensures the durable volume plane (`--plane-pool/--plane-kind/

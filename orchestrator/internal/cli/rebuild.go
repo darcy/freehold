@@ -166,6 +166,8 @@ var buildCmd = &cobra.Command{Use: "build",
 		f.rootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
 		f.memoryMB, _ = cmd.Flags().GetUint32("memory-mb")
 		f.relayGw, _ = cmd.Flags().GetString("relay-gw")
+		f.storageName, _ = cmd.Flags().GetString("storage")
+		f.bridge, _ = cmd.Flags().GetString("bridge")
 		f.proxyIP, _ = cmd.Flags().GetString("proxy-ip")
 		f.configPath, _ = cmd.Flags().GetString("config")
 		f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
@@ -248,6 +250,8 @@ func init() {
 	buildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	buildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
 	buildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for the proxy's STATIC guest IP (unused with DHCP)")
+	buildCmd.Flags().String("storage", "local-lvm", "PVE LXC storage (relay/k3s boots)")
+	buildCmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge (relay/k3s boots)")
 	buildCmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
 	buildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	buildCmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24) — the ONE static address; relay/CP hosts resolve to it. Absent => DHCP")
@@ -279,6 +283,8 @@ type rebuildFlags struct {
 	rootfsGB           uint32
 	memoryMB           uint32
 	relayGw            string
+	storageName        string
+	bridge             string
 	configPath         string
 	confirmStorage     bool
 	resetDNS           bool
@@ -3469,6 +3475,11 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		ThinPool:           derefStrPtr(cfg.Plane.ThinPool),
 		SizeGB:             e.f.sizeGB,
 		PoolSizeGB:         e.f.poolSizeGB,
+		RootfsGB:           e.f.rootfsGB,
+		MemoryMB:           e.f.memoryMB,
+		Storage:            e.f.storageName,
+		RelayGW:            e.f.relayGw,
+		Bridge:             e.f.bridge,
 		SelfURL:            "http://" + cpIP + ":8089",
 		GrantsCSV:          grantsCSV,
 	})
