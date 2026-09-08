@@ -177,7 +177,7 @@ func Interactive() error {
 
 	cpPubkey := cfg.CpPubkey
 	if cpPubkey == "" {
-		cpPubkey = strings.TrimSpace(promptLine(stdin, "CP pubkey (64-hex): "))
+		cpPubkey = strings.TrimSpace(promptLine(stdin, "CP pubkey (64-hex or npub1…): "))
 	}
 
 	secret := [32]byte{}
@@ -254,16 +254,29 @@ func Interactive() error {
 // resolveCPPubkey establishes the recorded CP trust anchor. A user-supplied
 // pubkey must match what the CP reports about itself; a blank one is accepted
 // only when the CP offers one. Neither source yields an anchor -> error (the
-// box must not trust a CP it cannot identify).
+// box must not trust a CP it cannot identify). The operator may supply either
+// npub1<bech32> or 64-hex — both normalize to the lowercase 64-hex form the CP
+// reports, so a format mismatch is not a trust mismatch.
 func resolveCPPubkey(user, world string) (string, error) {
-	if user != "" && world != "" && user != world {
-		return "", fmt.Errorf("CP pubkey mismatch: you supplied %.10s…, but the CP reported %.10s… — aborting to avoid trusting the wrong control plane", user, world)
+	norm := func(pk string) string {
+		if pk == "" {
+			return ""
+		}
+		out, err := crypto.ParsePubkeyInput(pk)
+		if err != nil {
+			return pk // let the mismatch/fallback paths surface it
+		}
+		return out
 	}
-	if user != "" {
-		return user, nil
+	u, w := norm(user), norm(world)
+	if u != "" && w != "" && u != w {
+		return "", fmt.Errorf("CP pubkey mismatch: you supplied %.10s…, but the CP reported %.10s… — aborting to avoid trusting the wrong control plane", u, w)
 	}
-	if world != "" {
-		return world, nil
+	if u != "" {
+		return u, nil
+	}
+	if w != "" {
+		return w, nil
 	}
 	return "", fmt.Errorf("no CP pubkey provided and the CP reported none — cannot establish a trust anchor")
 }
