@@ -167,10 +167,11 @@ Goal: the operator box stops being the single root of trust, so a fresh box can
       The operator key **is** the credential (the console only admits NIP-98
       operators minted into its admin whitelist at deploy); the recorded
       `cp_pubkey` is the CP's *own* identity, adopted from its `/api/world`
-      self-report (`resolveCPPubkey` normalizes to 64-hex) — never typed by the
-      operator, since a would-be hijacked CP could not complete the operator's
-      admin login. The old cross-check-against-an-operator-supplied-pubkey
-      prompt is removed (it invited operators to paste their OWN key).
+      self-report (`resolveCPPubkey` normalizes to 64-hex) and informational,
+      never typed (the trust boundary for a wrong/hijacked `cp_url` is TLS/DNS
+      on that URL, not this recorded anchor). The old
+      cross-check-against-an-operator-supplied-pubkey prompt is removed (it
+      invited operators to paste their OWN key).
 - [x] G2. **The CP serves `/api/world` from real state** (#159): a session-gated
       console endpoint returns relay + CP coords + who the operator is — the
       recovery source of truth, not a mock. Now served WITH the agent-tools

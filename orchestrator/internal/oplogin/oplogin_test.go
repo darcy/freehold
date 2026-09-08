@@ -244,9 +244,8 @@ func TestResolveCPPubkeyNormalizes(t *testing.T) {
 // TestInteractiveAdoptsCPReportOverStaleCpPubkey proves the old footgun is gone:
 // even when the config holds a stale/wrong cp_pubkey (here, one that disagrees
 // with what the CP reports about itself), login does NOT force an operator-typed
-// pubkey through a cross-check — the operator's NIP-98 admin login already proved
-// we reached the real CP, so the recorded anchor is simply the CP's report. The
-// stale value is overwritten, never allowed to hard-abort login.
+// pubkey through a cross-check — the recorded anchor is simply the CP's report.
+// The stale value is overwritten, never allowed to hard-abort login.
 func TestInteractiveAdoptsCPReportOverStaleCpPubkey(t *testing.T) {
 	t.Setenv("FREEHOLD_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

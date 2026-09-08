@@ -245,10 +245,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     operators whose pubkey was minted into its admin whitelist at deploy, so
     logging in as yourself from any box unlocks the world. The recorded
     `cp_pubkey` is the CP's *own* identity, adopted from its `/api/world`
-    self-report (`resolveCPPubkey` normalizes to 64-hex) — this box never asks
-    the operator for it, because a would-be hijacked CP could not complete the
-    operator's admin login: the successful login is the anti-spoof proof, so the
-    anchor is adopted, not typed. `freehold logout` clears this box's local
+    self-report (`resolveCPPubkey` normalizes to 64-hex) and informational —
+    never typed, since a legitimate login to the actual CP needs no separately
+    known pubkey. (The trust boundary for a wrong/hijacked `cp_url` is TLS/DNS
+    on that URL, not this recorded anchor.) `freehold logout` clears this box's local
     ledger only. `/api/world` carries the relay coords (served from
     `state.json` — the CP records them when `serve` is started with
     `--relay-url`, paired or not with `--relay-pubkey`) plus the

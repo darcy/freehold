@@ -180,10 +180,10 @@ freehold --help               # both surfaces
   **is** the credential: the console only admits NIP-98 operators whose pubkey
   was minted into its admin whitelist at deploy, so logging in as yourself from
   any box unlocks the world. The recorded `cp_pubkey` is the CP's *own* identity
-  (its `/api/world` self-report), a trust anchor for a CP a fresh box has never
-  met — this box never asks the operator for it (a would-be hijacked CP could
-  not complete the operator's admin login, so the successful login is the
-  proof; the anchor is adopted, not typed). `login` also materializes the box's
+  adopted from its `/api/world` self-report — informational, never typed (a
+  legitimate login to the actual CP needs no separately-known pubkey, and the
+  trust boundary for a wrong/hijacked `cp_url` is TLS/DNS on that URL, not this
+  recorded anchor). `login` also materializes the box's
   **own** provisioning identity (`~/.freehold/control-plane/agent-ops`,
   first-run-wins — the identity `freehold build`/`teardown` sign with), so the
   box is a durable, self-owned actor; it does **not** fabricate a `[runner]`

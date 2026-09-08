@@ -155,10 +155,12 @@ func Login(base string, secret [32]byte) (*console.Client, error) {
 // This is the fresh-box recovery path: nothing that lived only on a lost box is
 // needed — only CP address (where the world is) + the operator's own nsec (who
 // the operator is). The CP's world summary seeds the relay/CP coordinates AND
-// the CP's own identity (cp_pubkey): NIP-98 proves the OPERATOR to whatever
-// answers at cp_url (the console only authorizes admin-minted pubkeys), so by
-// the time the login returns the box is talking to the real CP and its
-// self-reported pubkey is the anchor — the operator never needs to know it.
+// the CP's own identity (cp_pubkey): NIP-98 authorizes the OPERATOR to whatever
+// answers at cp_url (the console only admits admin-minted operator pubkeys), so
+// a legitimate box logging into its actual CP needs no separately-known CP
+// pubkey — the anchor is simply the CP's own self-report. The trust boundary
+// for a wrong-or-hijacked cp_url is TLS/DNS on that URL, not this recorded
+// anchor, so the operator never needs to type or know the CP pubkey here.
 func Interactive() error {
 	cfg, err := config.Load(config.DefaultPath())
 	if err != nil {
@@ -228,13 +230,13 @@ func Interactive() error {
 	} else {
 		fmt.Fprintf(os.Stderr, "  (note: world summary not available — %v)\n", werr)
 	}
-	// The CP pubkey is the box's trust anchor for a CP it has never met. The
-	// operator does NOT supply it (the console only admits admin-minted NIP-98
-	// operators, so a successful login here already proves we reached the real
-	// CP) — the anchor is simply the CP's own /api/world self-report, normalized
-	// to 64-hex. No operator-typed value can ever disagree (and a hijacked CP
-	// could not complete the operator's admin login), so the old cross-check
-	// footgun — where an operator pasted their OWN key and hit a wall — is gone.
+	// The CP pubkey is the box's record of the CP's own identity — adopted, never
+	// typed. NIP-98 only admits admin-minted operator pubkeys, so a legitimate box
+	// logging into its actual CP never needs to know it up front; the anchor is
+	// the CP's /api/world self-report, normalized to 64-hex. (The boundary for a
+	// wrong-or-hijacked cp_url is TLS/DNS on that URL — a malicious server at the
+	// wrong address can report any pubkey it likes — which is why this is an
+	// informational anchor, not a substitute for verifying the CP endpoint.)
 	anchor := resolveCPPubkey(worldCPPub)
 	// Materialize the box's own provisioning identity (first-run-wins): this is
 	// how the box is a durable, self-owned actor whose grant to the CP can live

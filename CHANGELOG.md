@@ -32,20 +32,21 @@ list is current-state and kept there rather than duplicated here.
 - **`freehold login` no longer prompts for a CP pubkey.** The operator key
   (`nsec`) is the only credential: the console only admits NIP-98 operators
   whose pubkey was minted into its admin whitelist at deploy (`--operator-pubkey`
-  → `web.rs is_admin`), so a successful login already proves the box reached the
-  real CP — a would-be hijacked CP could not complete the operator's admin
-  login. The recorded `cp_pubkey` is therefore the CP's *own* identity, adopted
-  from its `/api/world` self-report and normalized to 64-hex
-  (`resolveCPPubkey(world)`), never typed by the operator.
+  → `web.rs is_admin`), so a legitimate login to the actual CP needs no
+  separately-known CP pubkey. The recorded `cp_pubkey` is therefore the CP's
+  *own* identity, adopted from its `/api/world` self-report and normalized to
+  64-hex (`resolveCPPubkey(world)`), never typed by the operator. (It is an
+  informational anchor — the trust boundary for a wrong-or-hijacked `cp_url` is
+  TLS/DNS on that URL, not this recorded field.)
 - **The cross-check footgun is removed.** Previously login prompted "CP pubkey
   (64-hex or npub1…)" and compared the operator-typed value against the CP's
   report; operators plausibly pasted their OWN operator pubkey there and hit a
   hard "CP pubkey mismatch" abort — which is correct only if a competing CP
   identity is expected, but wrong for the operator's own key, and invited
   exactly the confusion it was meant to prevent. No operator-typed value
-  can disagree with the anchor now: the CP's self-report (after the operator's
-  authenticated login) is authoritative, and a stale/wrong `cp_pubkey` in the
-  config is overwritten by that report rather than allowed to hard-fail login.
+  can disagree with the anchor now: the CP's self-report is authoritative, and a
+  stale/wrong `cp_pubkey` in the config is overwritten by that report rather
+  than allowed to hard-fail login.
 - `config.CpPubkey`'s meaning is now recorded purely as the CP's own identity
   for future signed-CP calls (an informational trust anchor), not a user-input
   validation gate. README / ARCHITECTURE / POC_CHUNK4.G1 updated accordingly.
