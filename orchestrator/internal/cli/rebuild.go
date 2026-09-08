@@ -3860,10 +3860,13 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		AgentToolsStateDir: agentToolsState,
 		BindAddr:           "0.0.0.0:8089",
 		// The agent-tools serve's OWN relay ops (roster, seed, create-agent
-		// publish) use the relay's LAN URL — reachable BEFORE the Caddy edge
-		// (world_build deploys it later); the public URL only works through
-		// Caddy. The pods dial the PUBLIC --relay-ws (unchanged below).
-		RelayURL:           "http://" + config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip)) + ":3000",
+		// publish) use the relay's LAN-REACHABLE DOMAIN URL — the CP guest's
+		// /etc/hosts (deploy-cp pins it) maps the domain to the relay LXC IP,
+		// so it works BEFORE the Caddy edge (world_build deploys it later) AND
+		// the buzz Host header is the configured community domain (a raw-IP
+		// Host gets "no community is configured for this host"). The pods dial
+		// the PUBLIC --relay-ws (unchanged below).
+		RelayURL:           "http://" + cfg.RelayHost() + ":3000",
 		RelayPubkey:        derefStrPtr(cfg.RelayPubkey),
 		RelayWS:            cfg.RelayWsURL,
 		RelayHost:          cfg.RelayHost(),
