@@ -647,7 +647,13 @@ func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountS
 		spec.VMID = &vmid
 	}
 	if role == "k3s" && s.proxyIP != "" {
+		// pct net0 wants CIDR (host/prefix); the serve flag carries the bare
+		// proxy IP (the DNS/caddy consumers expect bare), so rebuild the CIDR
+		// — the recorded proxy world is a /24 home LAN (default relay-gw).
 		ip := s.proxyIP
+		if !strings.Contains(ip, "/") {
+			ip += "/24"
+		}
 		gw := s.relayGW
 		spec.NetIP = &ip
 		spec.NetGW = &gw
