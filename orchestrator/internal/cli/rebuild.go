@@ -987,36 +987,28 @@ func (e *rebuildEngine) slimSeedLiteLLM() error {
 	return nil
 }
 
-// agentToolsEncPubkey returns the agent-tools identity's ENCRYPTION pubkey
-// (read from the deployed server's identity in the cp LXC) — the recipient the
-// box seals the world's secrets to for the hand-off (world_build opens them
-// with the same identity's enc secret, in-process).
+// agentToolsEncPubkey returns the agent-tools identity's ENCRYPTION pubkey —
+// read from the deployed server IN THE cp LXC via its own `identity --enc-pubkey`
+// subcommand (the private enc secret NEVER leaves the CP; only the derived
+// pubkey is returned). It is the recipient the box seals the world's secrets to
+// for the hand-off (world_build opens them with the same identity's enc secret,
+// in-process).
 func (e *rebuildEngine) agentToolsEncPubkey() ([]byte, error) {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
 		return nil, fmt.Errorf("no cp coords for the agent-tools hand-off")
 	}
-	tmp := filepath.Join(os.TempDir(), "fh-agenttools-identity")
-	defer os.RemoveAll(tmp)
-	if err := os.MkdirAll(tmp, 0o700); err != nil {
-		return nil, err
-	}
-	ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- cat /srv/data/cp/agent-tools/identity.json", *cfg.Lxc.Cp.Vmid), 30))
+	ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf(
+		"pct exec %d -- sh -c '/srv/data/cp/bin/freehold-agent-tools identity --state-dir /srv/data/cp/agent-tools --enc-pubkey'",
+		*cfg.Lxc.Cp.Vmid), 30))
 	if !ok {
-		return nil, fmt.Errorf("agent-tools identity unreadable in the cp LXC:\n%s", out)
+		return nil, fmt.Errorf("agent-tools enc pubkey unreadable in the cp LXC:\n%s", out)
 	}
-	if err := os.WriteFile(filepath.Join(tmp, "identity.json"), []byte(out), 0o600); err != nil {
-		return nil, err
+	pk := strings.TrimSpace(out)
+	if len(pk) != 64 {
+		return nil, fmt.Errorf("agent-tools enc pubkey readback not 64-hex: %q", pk)
 	}
-	id, err := flows.LoadIdentity(tmp)
-	if err != nil {
-		return nil, err
-	}
-	secret, err := hex.DecodeString(id.EncSecretHex)
-	if err != nil {
-		return nil, err
-	}
-	return crypto.X25519PublicKey(secret)
+	return hex.DecodeString(pk)
 }
 
 // handoffDNS ships the world's DNS provider creds (relay + cp slots) to the CP,
@@ -1107,7 +1099,11 @@ func (e *rebuildEngine) recordPostWorld() error {
 				case "k3s":
 					cfg.Lxc.K3s = config.LxcGuest{Vmid: &vmid, Ip: &ipCIDR}
 				}
+			} else {
+				fmt.Fprintf(e.out, "  (record %s coords: ip readback failed: %v)\n", role, ierr)
 			}
+		} else {
+			fmt.Fprintf(e.out, "  (record %s coords: no guest found by hostname — is the world_build boot complete? %v)\n", role, verr)
 		}
 	}
 	proxyIP := config.StripCIDR(e.f.proxyIP)

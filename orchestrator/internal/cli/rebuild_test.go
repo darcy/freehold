@@ -195,6 +195,110 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// TestRecordPostWorld: after world_build brings up the world, the box records
+// the relay/k3s coords it read back (DHCP re-lease aware) + the deterministic
+// litellm/caddy coords, so the config/TUI/teardown agree with the CP-built
+// world. The runBin mock answers the pct-list + ip readback probes.
+func TestRecordPostWorld(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	domain := "relay.librem.freehold.technology"
+	cfg := &config.Config{
+		RelayURL: "https://" + domain,
+		CPURL:    "https://cp.librem.freehold.technology",
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	relayName := lxcName(domain, "relay")
+	k3sName := lxcName(domain, "k3s")
+	e := &rebuildEngine{
+		f: rebuildFlags{
+			configPath:     cfgPath,
+			relayDomain:    domain,
+			proxyIP:        "192.168.30.8/24",
+			operatorPubkey: strings.Repeat("ab", 32),
+		},
+		bins: rebuildBins{Self: "freehold"},
+		out:  &bytes.Buffer{},
+		runBin: func(bin string, args []string) (bool, string) {
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, "pct list"):
+				return true, "VMID Status Name\n100 running " + relayName + "\n102 running " + k3sName + "\n"
+			case strings.Contains(joined, "pct exec 100 -- ip -4 -o addr show eth0"):
+				return true, "2: eth0    inet 192.168.30.220/24 brd 192.168.30.255 scope global eth0"
+			case strings.Contains(joined, "pct exec 102 -- ip -4 -o addr show eth0"):
+				return true, "2: eth0    inet 192.168.30.8/24 brd 192.168.30.255 scope global eth0"
+			case strings.Contains(joined, "relayPubkeyNip11") || strings.Contains(joined, "curl"):
+				return true, ""
+			}
+			return false, "unexpected: " + joined
+		},
+	}
+	if err := e.recordPostWorld(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Lxc.Relay.Vmid == nil || *got.Lxc.Relay.Vmid != 100 || got.Lxc.Relay.Ip == nil || *got.Lxc.Relay.Ip != "192.168.30.220/24" {
+		t.Errorf("relay coords not recorded: %+v", got.Lxc.Relay)
+	}
+	if got.Lxc.K3s.Vmid == nil || *got.Lxc.K3s.Vmid != 102 || got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "192.168.30.8/24" {
+		t.Errorf("k3s coords not recorded: %+v", got.Lxc.K3s)
+	}
+	if got.Litellm.URL != "http://192.168.30.8:31400" || got.Litellm.Host != "192.168.30.8" {
+		t.Errorf("litellm coords not recorded: %+v", got.Litellm)
+	}
+	if got.Caddy.Host != "192.168.30.8" {
+		t.Errorf("caddy coords not recorded: %+v", got.Caddy)
+	}
+	if !containsStr(got.Managed, "litellm") || !containsStr(got.Managed, "caddy") {
+		t.Errorf("managed missing litellm/caddy: %v", got.Managed)
+	}
+}
+
+// TestBuildRunDispatch: the build command's engine dispatcher sends the default
+// run to the slim CP-driven pipeline and --full to the box-side one. The
+// engines carry full seam mocks so the pipelines reach their stage-verify gate
+// (where the empty mock output fails) — the assertion is which pipeline was
+// reached, not completion.
+func TestBuildRunDispatch(t *testing.T) {
+	mk := func() *rebuildEngine {
+		return &rebuildEngine{
+			f:    rebuildFlags{relayDomain: "d.example", target: "t", addr: "127.0.0.1:8787"},
+			bins: rebuildBins{Self: "freehold"},
+			out:  &bytes.Buffer{},
+			runBin: func(bin string, args []string) (bool, string) {
+				return true, ""
+			},
+			runSh:    func(script string) (string, error) { return "123", nil },
+			portOpen: func(addr string) bool { return true },
+		}
+	}
+	// Default (no --full): must reach runSlim — its preamble line prints the
+	// "building world" / "CP-bring-up" header, then it fails at the door
+	// verify (empty mock output), not the box-side preamble.
+	def := mk()
+	err := buildRun(false, def)
+	if err == nil {
+		t.Fatal("buildRun(false) should fail at the verify gate on an empty mock")
+	}
+	if !strings.Contains(def.out.(*bytes.Buffer).String(), "building world") {
+		t.Errorf("default did not dispatch to runSlim: output %q", def.out.(*bytes.Buffer).String())
+	}
+	// --full must reach run()'s box-side preamble.
+	full := mk()
+	if err := buildRun(true, full); err == nil {
+		t.Fatal("buildRun(true) should fail at the verify gate on an empty mock")
+	}
+	if !strings.Contains(full.out.(*bytes.Buffer).String(), "rebuilding world") {
+		t.Errorf("--full did not dispatch to run(): output %q", full.out.(*bytes.Buffer).String())
+	}
+}
+
 // TestParsePctGateway covers the gw= parser: static guests carry the
 // router, DHCP guests (`ip=dhcp`) have NO gw= and must yield "" so the
 // caller falls back to the default route (the review-flagged regression:
