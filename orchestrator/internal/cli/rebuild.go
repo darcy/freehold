@@ -755,14 +755,16 @@ func (e *rebuildEngine) run() error {
 	return nil
 }
 
-// runSlim is the CP-decoupled build: the box brings up the CONTROL PLANE only
-// (door → verify → CP dataset → CP LXC → deploy-cp → agent-tools), hands the
-// world-state + secrets to the CP (DNS creds sealed to the agent-tools
-// identity + the litellm secrets sealed into the box runner, which deploy-cp
-// ships as the co-located runner), then TRIGGERS world_build — the CP brings up
-// relay/k3s/storage/DNS/litellm/caddy/cert through its co-located runner. The
-// box then records the post-world coords + brings the CPA up over the CP
-// toolset. The box is login + trigger for a world the CP owns.
+// runSlim is the CP-decoupled build: the box brings up the CP AND the relay
+// LXC (door → verify → CP dataset → CP LXC → deploy the relay stack — the
+// agent-tools roster lives on the relay, so it must be up before agent-tools →
+// deploy-cp → agent-tools), hands the world-state + secrets to the CP (DNS
+// creds sealed to the agent-tools identity + the litellm secrets sealed into
+// the box runner, which deploy-cp ships as the co-located runner), then
+// TRIGGERS world_build — the CP brings up k3s/storage/DNS/litellm/caddy/cert
+// through its co-located runner. The box then records the post-world coords +
+// brings the CPA up over the CP toolset. The box is login + trigger for a
+// world the CP owns.
 func (e *rebuildEngine) runSlim() error {
 	fmt.Fprintf(e.out, "building world %s (CP-bring-up + trigger — the CP owns relay/k3s/DNS/litellm/caddy/cert)\n", e.f.relayDomain)
 
@@ -3819,11 +3821,16 @@ func (e *rebuildEngine) agentToolsMcp(cfg *config.Config) (*client.McpClient, er
 // returns the result.content[0].text payload (e.g. the new agent's pubkey).
 func callAgentToolsText(mc *client.McpClient, tool string, args map[string]interface{}) (string, error) {
 	// world_build runs its stages synchronously for minutes — use the long
-	// deadline (the short default would time out awaiting the response).
+	// deadline (the short default would time out awaiting the response). Call
+	// exactly ONE path: the 30s Call would ALSO start the tool server-side and
+	// leave it running while a second call raced it.
 	long := map[string]bool{"world_build": true}
-	raw, err := mc.Call(tool, args)
+	var raw json.RawMessage
+	var err error
 	if long[tool] {
 		raw, err = mc.CallLong(tool, args)
+	} else {
+		raw, err = mc.Call(tool, args)
 	}
 	if err != nil {
 		return "", err
