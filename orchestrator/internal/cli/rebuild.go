@@ -3802,8 +3802,8 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 	if cfg == nil {
 		return fmt.Errorf("no config at %s", e.f.configPath)
 	}
-	if cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.Relay.Vmid == nil || cfg.Lxc.K3s.Vmid == nil {
-		return fmt.Errorf("need cp/relay/k3s coords to deploy agent-tools")
+	if cfg.Lxc.Cp.Vmid == nil {
+		return fmt.Errorf("need cp coords to deploy agent-tools")
 	}
 	binDir, stateDir, err := e.cpGuestDirs()
 	if err != nil {
@@ -3853,7 +3853,7 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		CpIP:               config.StripCIDR(derefStrPtr(cfg.Lxc.Cp.Ip)),
 		RelayLxc:           cfg.Lxc.Relay.Vmid,
 		RelayCompose:       stages.RelayComposeDir,
-		K3sVmid:            *cfg.Lxc.K3s.Vmid,
+		K3sVmid:            derefU32(cfg.Lxc.K3s.Vmid),
 		CpLxc:              cfg.Lxc.Cp.Vmid,
 		ProxyIP:            config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
 		LiteLLMIP:          cfg.Litellm.Host,
@@ -3895,6 +3895,13 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 func derefStrPtr(p *string) string {
 	if p == nil {
 		return ""
+	}
+	return *p
+}
+
+func derefU32(p *uint32) uint32 {
+	if p == nil {
+		return 0
 	}
 	return *p
 }

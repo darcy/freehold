@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -272,8 +273,11 @@ func cmdServe(args []string) {
 	if *selfURL == "" {
 		log.Fatal("serve needs --self-url (the reachable URL the CPA pod bootstraps its mcp bridge from)")
 	}
-	if relayLxc == 0 || k3sVmid == 0 {
-		log.Fatal("serve needs --relay-lxc and --k3s-vmid")
+	// The relay/k3s vmids are OPTIONAL: a fresh world (coords cleared at
+	// teardown) has none recorded yet — world_build discovers + boots them and
+	// the create-agent relay membership resolves the relay vmid by hostname.
+	if relayLxc == 0 && k3sVmid == 0 {
+		log.Print("serve: no relay/k3s vmids recorded — world_build will discover them (fresh world)")
 	}
 	// The secret is this server's durable identity (minted by `identity`/
 	// `seed` in --state-dir); load it when not passed explicitly so the launch
@@ -618,10 +622,10 @@ func (s *deploySpec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec,
 // through the co-located runner, baking the durable-plane mounts at create.
 // role's static address (k3s = the proxy IP; relay/cp are DHCP behind the
 // proxy) rides the spec.
-func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) error {
+func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (uint32, error) {
 	hostname, err := bootstrap.DomainLXCName(s.relayHost, role)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	spec := &bootstrap.ProxmoxLxcSpec{
 		Hostname: hostname,
@@ -642,12 +646,55 @@ func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountS
 	}
 	mc, err := s.client()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, err := bootstrap.BootstrapProxmoxLxc(mc, s.runnerTarget, spec); err != nil {
-		return fmt.Errorf("boot %s LXC: %w", role, err)
+	res, err := bootstrap.BootstrapProxmoxLxc(mc, s.runnerTarget, spec)
+	if err != nil {
+		return 0, fmt.Errorf("boot %s LXC: %w", role, err)
 	}
-	return nil
+	if res.ID != "" {
+		if v, perr := strconv.ParseUint(res.ID, 10, 32); perr == nil {
+			return uint32(v), nil
+		}
+	}
+	if vmid != 0 {
+		return vmid, nil
+	}
+	return 0, fmt.Errorf("boot %s LXC: no vmid resolved", role)
+}
+
+// resolveGuestVmids fills any UNKNOWN guest vmid (0 — a fresh world whose
+// coords were cleared at teardown) by looking up the deterministic hostname
+// (DomainLXCName) on the host, so the DNS/caddy/litellm/cert steps address the
+// REAL vmids world_build just booted.
+func (s *deploySpec) resolveGuestVmids() {
+	for _, r := range []struct {
+		role string
+		vmid *uint32
+	}{
+		{"relay", &s.relayLxc}, {"cp", &s.cpLxc}, {"k3s", &s.k3sVmid},
+	} {
+		if *r.vmid != 0 {
+			continue
+		}
+		name, err := bootstrap.DomainLXCName(s.relayHost, r.role)
+		if err != nil {
+			continue
+		}
+		out, err := s.runOut("pct list", 30)
+		if err != nil {
+			continue
+		}
+		for _, l := range strings.Split(out, "\n")[1:] {
+			cols := strings.Fields(l)
+			if len(cols) >= 2 && cols[len(cols)-1] == name {
+				if v, perr := strconv.ParseUint(cols[0], 10, 32); perr == nil {
+					*r.vmid = uint32(v)
+				}
+				break
+			}
+		}
+	}
 }
 
 // refreshGuestIPs re-reads the relay/cp/k3s guests' CURRENT IPv4 after a boot
@@ -684,9 +731,11 @@ func (s *deploySpec) refreshGuestIPs() {
 // worldBootRelay boots the relay LXC (if missing) + deploys the Buzz stack
 // into it via the shared deploy driver (idempotent compose bring-up).
 func (s *deploySpec) worldBootRelay(mounts []planebase.MountSpec) error {
-	if err := s.bootLxc("relay", s.relayLxc, mounts); err != nil {
+	vmid, err := s.bootLxc("relay", s.relayLxc, mounts)
+	if err != nil {
 		return err
 	}
+	s.relayLxc = vmid
 	deployDir := ""
 	for _, m := range mounts {
 		if m.GuestPath != "/var/lib/docker" {
@@ -719,12 +768,15 @@ func (s *deploySpec) worldBootRelay(mounts []planebase.MountSpec) error {
 	return nil
 }
 
-// worldBootK3s boots the k3s LXC (if missing), installs k3s inside it (the
-// shared in-guest install script), and re-asserts the durable local-path.
+// worldBootK3s boots the k3s LXC (if missing — the driver picks a free vmid on
+// a fresh world), installs k3s inside it (the shared in-guest install script),
+// and re-asserts the durable local-path.
 func (s *deploySpec) worldBootK3s(mounts []planebase.MountSpec) error {
-	if err := s.bootLxc("k3s", s.k3sVmid, mounts); err != nil {
+	vmid, err := s.bootLxc("k3s", s.k3sVmid, mounts)
+	if err != nil {
 		return err
 	}
+	s.k3sVmid = vmid
 	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", s.k3sVmid, strings.TrimSpace(stages.K3sInstallScript))
 	if err := s.run(cmd, 900); err != nil {
 		return fmt.Errorf("k3s install: %w", err)
@@ -1058,15 +1110,16 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 		}
 		// 3. The k3s substrate: boot the LXC if missing, install k3s inside it,
 		// and re-assert the durable local-path.
-		if spec.k3sVmid != 0 {
+		if spec.relayHost != "" {
 			if err := spec.worldBootK3s(mounts[planebase.TenantK3sVolumes]); err != nil {
 				return "", fmt.Errorf("world-build k3s: %w", err)
 			}
 			report = append(report, "k3s substrate ready")
 		}
-		// 3.5. Re-read the guests' CURRENT IPs (a DHCP re-lease changes an
-		// address the recorded coords no longer match) — the DNS/caddy/litellm
-		// steps below consume them. Best-effort.
+		// 3.5. Re-read the guests' CURRENT vmids + IPs (a fresh world whose coords
+		// were cleared at teardown has 0 vmids; the boot steps just picked
+		// them). The DNS/caddy/litellm steps below consume both. Best-effort.
+		spec.resolveGuestVmids()
 		spec.refreshGuestIPs()
 		// 4. The CP-owned resolver: register the split-horizon names (bare
 		// guests + the dotted public hosts via the proxy) and point every guest
@@ -1180,9 +1233,15 @@ func buildCreateAgentFn(spec *deploySpec) agent.CreateAgentFn {
 		}
 
 		// Relay membership (relay-administered; the CP cannot self-add — runs
-		// buzz-admin through the co-located runner into the relay LXC).
+		// buzz-admin through the co-located runner into the relay LXC). The
+		// relay vmid may be unknown (fresh world) — resolve it by hostname.
+		relayLxc := spec.relayLxc
+		if relayLxc == 0 {
+			spec.resolveGuestVmids()
+			relayLxc = spec.relayLxc
+		}
 		cmdLine := fmt.Sprintf("cd %s && docker compose exec -T relay buzz-admin add-member --pubkey %s", spec.relayCompose, pub)
-		full := fmt.Sprintf("pct exec %d -- sh -c '%s'", spec.relayLxc, cmdLine)
+		full := fmt.Sprintf("pct exec %d -- sh -c '%s'", relayLxc, cmdLine)
 		if err := spec.run(full, 120); err != nil {
 			return "", fmt.Errorf("add relay member %s: %w", pub, err)
 		}
