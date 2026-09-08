@@ -161,12 +161,16 @@ to run, idle and active.
 Goal: the operator box stops being the single root of trust, so a fresh box can
 `login` and rejoin a world whose CP survives. Shipped (0.4.7, PRs #158–#162):
 
-- [x] G1. **`freehold login`, root-free** (#158): CP address + CP pubkey +
-      operator nsec → NIP-98 authorize → end; seeds a local connection/desire
-      profile from the CP's `/api/world`, so a fresh box recovers with nothing
-      from a lost one. The operator-supplied CP pubkey is cross-checked against
-      the CP's report (`resolveCPPubkey` — mismatch aborts, blank falls back),
-      so a wrong/hijacked CP address never seeds a bogus trust anchor.
+- [x] G1. **`freehold login`, root-free** (#158): CP address + operator nsec →
+      NIP-98 authorize → end; seeds a local connection/desire profile from the
+      CP's `/api/world`, so a fresh box recovers with nothing from a lost one.
+      The operator key **is** the credential (the console only admits NIP-98
+      operators minted into its admin whitelist at deploy); the recorded
+      `cp_pubkey` is the CP's *own* identity, adopted from its `/api/world`
+      self-report (`resolveCPPubkey` normalizes to 64-hex) — never typed by the
+      operator, since a would-be hijacked CP could not complete the operator's
+      admin login. The old cross-check-against-an-operator-supplied-pubkey
+      prompt is removed (it invited operators to paste their OWN key).
 - [x] G2. **The CP serves `/api/world` from real state** (#159): a session-gated
       console endpoint returns relay + CP coords + who the operator is — the
       recovery source of truth, not a mock. Now served WITH the agent-tools

@@ -25,6 +25,31 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.4.9] — login stops asking for the CP pubkey (the operator key is the credential)
+
+### Changed
+
+- **`freehold login` no longer prompts for a CP pubkey.** The operator key
+  (`nsec`) is the only credential: the console only admits NIP-98 operators
+  whose pubkey was minted into its admin whitelist at deploy (`--operator-pubkey`
+  → `web.rs is_admin`), so a successful login already proves the box reached the
+  real CP — a would-be hijacked CP could not complete the operator's admin
+  login. The recorded `cp_pubkey` is therefore the CP's *own* identity, adopted
+  from its `/api/world` self-report and normalized to 64-hex
+  (`resolveCPPubkey(world)`), never typed by the operator.
+- **The cross-check footgun is removed.** Previously login prompted "CP pubkey
+  (64-hex or npub1…)" and compared the operator-typed value against the CP's
+  report; operators plausibly pasted their OWN operator pubkey there and hit a
+  hard "CP pubkey mismatch" abort — which is correct only if a competing CP
+  identity is expected, but wrong for the operator's own key, and invited
+  exactly the confusion it was meant to prevent. No operator-typed value
+  can disagree with the anchor now: the CP's self-report (after the operator's
+  authenticated login) is authoritative, and a stale/wrong `cp_pubkey` in the
+  config is overwritten by that report rather than allowed to hard-fail login.
+- `config.CpPubkey`'s meaning is now recorded purely as the CP's own identity
+  for future signed-CP calls (an informational trust anchor), not a user-input
+  validation gate. README / ARCHITECTURE / POC_CHUNK4.G1 updated accordingly.
+
 ## [0.4.8] — Chunk 4 Phase G wrap: a fresh box truly operates the CP (login-only Running + world coords)
 
 Phase G's `login` foundation shipped the *mechanics* but left two gaps that

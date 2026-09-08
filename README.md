@@ -135,7 +135,7 @@ cargo fmt --all --check          # CI gate
 
 ```sh
 freehold                      # no args → the interactive TUI (bubbletea); a subcommand → the CLI
-freehold login                # root-free: CP address + CP pubkey + operator nsec (NIP-98) → authorize,
+freehold login                # root-free: CP address + operator nsec (NIP-98) → authorize,
 freehold                      #   seed a local connection profile from the CP, then END — just run `freehold`
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
 freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
@@ -170,26 +170,29 @@ freehold --help               # both surfaces
   signed runner channel), **DNS**, **Certs**. A one-line world strip keeps the
   liveness glance.
 - **Remote-CP access**: `freehold login` (**root-free**) authorizes this
-  operator against the CP by **CP address + CP pubkey + operator nsec**
-  (NIP-98), then **ends** — afterwards just run `freehold`. It pulls the CP's
+  operator against the CP by **CP address + operator nsec** (NIP-98), then
+  **ends** — afterwards just run `freehold`. It pulls the CP's
   `/api/world` summary and seeds a local connection/desire profile (relay + CP
-  coords, the operator pubkey derived from the nsec), so a fresh box recovers
-  with nothing that lived only on a lost one. The operator nsec persists 0600
-  under `~/.freehold/control-plane/operator` (excluded from any off-box backup/
-  sync — it is a box-local, user-held key). The CP **pubkey** is the box's
-  trust anchor for a CP it has never met: `login` cross-checks the operator-
-  supplied value against the CP's own `/api/world` report and refuses to seed on
-   mismatch (blank falls back to the CP's report; neither → error). `login` also
-  materializes the box's **own** provisioning identity (`~/.freehold/control-
-  plane/agent-ops`, first-run-wins — the identity `freehold build`/`teardown`
-  sign with), so the box is a durable, self-owned actor; it does **not** fabricate
-  a `[runner]` block (that is the deployed runner's own identity, authored by
-  `build`). In the TUI, `l` re-logs into the CP console with that persisted
-  nsec, and `freehold logout` clears the local ledger only (CP/world untouched,
-  box identity kept).
-  `w` then opens the web console in your browser already authenticated
-  (single-use portal token — no `console-login`). Keys are scoped to the
-  active view.
+  coords, the CP's own identity, the operator pubkey derived from the nsec), so
+  a fresh box recovers with nothing that lived only on a lost one. The operator
+  nsec persists 0600 under `~/.freehold/control-plane/operator` (excluded from
+  any off-box backup/sync — it is a box-local, user-held key). The operator key
+  **is** the credential: the console only admits NIP-98 operators whose pubkey
+  was minted into its admin whitelist at deploy, so logging in as yourself from
+  any box unlocks the world. The recorded `cp_pubkey` is the CP's *own* identity
+  (its `/api/world` self-report), a trust anchor for a CP a fresh box has never
+  met — this box never asks the operator for it (a would-be hijacked CP could
+  not complete the operator's admin login, so the successful login is the
+  proof; the anchor is adopted, not typed). `login` also materializes the box's
+  **own** provisioning identity (`~/.freehold/control-plane/agent-ops`,
+  first-run-wins — the identity `freehold build`/`teardown` sign with), so the
+  box is a durable, self-owned actor; it does **not** fabricate a `[runner]`
+  block (that is the deployed runner's own identity, authored by `build`). In
+  the TUI, `l` re-logs into the CP console with that persisted nsec, and
+  `freehold logout` clears the local ledger only (CP/world untouched, box
+  identity kept). `w` then opens the web console in your browser already
+  authenticated (single-use portal token — no `console-login`). Keys are scoped
+  to the active view.
 
 The same session flows bootstrap → configure → running as the world converges.
 

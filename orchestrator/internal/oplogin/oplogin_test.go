@@ -218,46 +218,47 @@ func TestEnsureOpsIdentityFirstRunWins(t *testing.T) {
 	}
 }
 
-// TestResolveCPPubkeyNpubMatchesHex proves the trust-anchor comparison is
-// format-agnostic: an operator-supplied npub1<bech32> that decodes to the CP's
-// reported 64-hex pubkey is a MATCH (a format difference is not a trust
-// difference), and the normalized hex is what gets recorded.
-func TestResolveCPPubkeyNpubMatchesHex(t *testing.T) {
+// TestResolveCPPubkeyNormalizes proves the recorded trust anchor is always the
+// CP's self-report in normalized lowercase 64-hex (npub1<bech32>, hex, or a
+// cased/whitespace variety all collapse to the same hex), and a blank report is
+// blank.
+func TestResolveCPPubkeyNormalizes(t *testing.T) {
 	const hexPK = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
 	const npubPK = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6"
+	const upperPK = "3BF0C63FCB93463407AF97A5E5EE64FA883D107EF9E558472C4EB9AAAEFA459D"
 
-	got, err := resolveCPPubkey(npubPK, hexPK)
-	if err != nil {
-		t.Fatalf("npub supplied against hex report must match: %v", err)
+	if got := resolveCPPubkey(npubPK); got != hexPK {
+		t.Fatalf("npub report should normalize to hex, got %q", got)
 	}
-	if got != hexPK {
-		t.Fatalf("anchor should be the normalized hex form, got %q", got)
+	if got := resolveCPPubkey(hexPK); got != hexPK {
+		t.Fatalf("hex report should stay hex, got %q", got)
 	}
-
-	// And the reverse: hex supplied against a hex report still matches.
-	if got, err := resolveCPPubkey(hexPK, hexPK); err != nil || got != hexPK {
-		t.Fatalf("hex/hex match failed: got=%q err=%v", got, err)
+	if got := resolveCPPubkey(upperPK); got != hexPK {
+		t.Fatalf("uppercase hex should normalize to lowercase, got %q", got)
 	}
-
-	// A genuinely different pubkey (even in npub form) still refuses.
-	other := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if _, err := resolveCPPubkey(npubPK, other); err == nil {
-		t.Fatal("a different reported pubkey must still be refused")
+	if got := resolveCPPubkey(""); got != "" {
+		t.Fatalf("blank report should yield a blank anchor, got %q", got)
 	}
 }
 
-// TestInteractiveRejectsCPPubkeyMismatch proves the trust anchor is enforced:
-// if the operator supplies a CP pubkey that disagrees with the CP's own /api/world
-// report, login refuses to seed rather than trusting the wrong control plane.
-func TestInteractiveRejectsCPPubkeyMismatch(t *testing.T) {
+// TestInteractiveAdoptsCPReportOverStaleCpPubkey proves the old footgun is gone:
+// even when the config holds a stale/wrong cp_pubkey (here, one that disagrees
+// with what the CP reports about itself), login does NOT force an operator-typed
+// pubkey through a cross-check — the operator's NIP-98 admin login already proved
+// we reached the real CP, so the recorded anchor is simply the CP's report. The
+// stale value is overwritten, never allowed to hard-abort login.
+func TestInteractiveAdoptsCPReportOverStaleCpPubkey(t *testing.T) {
 	t.Setenv("FREEHOLD_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	const nsecHex = "b9100ce43b1deac5c5189f48bc6d97b287e122211d5f271488c0bcae2b350ad6"
-	srv := mockCP(t, "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff")
+	const worldPub = "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff"
+	srv := mockCP(t, worldPub)
 	defer srv.Close()
 
-	// Operator believes the CP Identity is a DIFFERENT pubkey — a wrong/MITM'd address.
+	// A stale/wrong anchor from an earlier UI iteration (e.g. the operator's own
+	// key pasted into a "CP pubkey" prompt). A fresh login must adopt the CP's
+	// real report instead of either trusting this stale value or dying on it.
 	pre := &config.Config{}
 	pre.CPURL = srv.URL
 	pre.CpPubkey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -271,47 +272,15 @@ func TestInteractiveRejectsCPPubkeyMismatch(t *testing.T) {
 	go func() { pipeW.WriteString(nsecHex + "\n"); pipeW.Close() }()
 	defer func() { os.Stdin = oldStdin }()
 
-	if err := Interactive(); err == nil {
-		t.Fatal("login must fail when the CP pubkey mismatches the CP's self-report")
-	}
-}
-
-// TestInteractiveFallsBackToWorldPubkey proves a blank operator pubkey degrades
-// to the CP's own reported identity (only when the CP offers one), never to a
-// hole.
-func TestInteractiveFallsBackToWorldPubkey(t *testing.T) {
-	t.Setenv("FREEHOLD_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	const nsecHex = "b9100ce43b1deac5c5189f48bc6d97b287e122211d5f271488c0bcae2b350ad6"
-	const worldPub = "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff"
-	srv := mockCP(t, worldPub)
-	defer srv.Close()
-
-	// CP address known, but NO CpPubkey recorded — the box stays silent (a fresh
-	// partial seed); login must fall back to the CP's reported identity.
-	pre := &config.Config{}
-	pre.CPURL = srv.URL
-	if err := pre.Save(config.DefaultPath()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Blank cap_pubkey line, then the nsec.
-	pipeR, pipeW, _ := os.Pipe()
-	oldStdin := os.Stdin
-	os.Stdin = pipeR
-	go func() { pipeW.WriteString("\n" + nsecHex + "\n"); pipeW.Close() }()
-	defer func() { os.Stdin = oldStdin }()
-
 	if err := Interactive(); err != nil {
-		t.Fatalf("login with blank pubkey + world fallback failed: %v", err)
+		t.Fatalf("login with a stale cp_pubkey must succeed and adopt the CP report: %v", err)
 	}
 	got, err := config.Load(config.DefaultPath())
 	if err != nil || got == nil {
 		t.Fatalf("seeded config: %v", err)
 	}
 	if got.CpPubkey != worldPub {
-		t.Errorf("trust anchor should fall back to the CP's reported pubkey, got %q", got.CpPubkey)
+		t.Errorf("stale cp_pubkey must be overwritten by the CP's report, got %q want %q", got.CpPubkey, worldPub)
 	}
 }
 
