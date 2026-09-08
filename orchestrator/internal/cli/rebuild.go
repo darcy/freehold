@@ -141,7 +141,7 @@ func init() {
 }
 
 var buildCmd = &cobra.Command{Use: "build",
-	Short: "Bring the whole world up: CP-bring-up + trigger (the CP owns relay/k3s/storage/DNS/litellm/caddy/cert through its co-located runner); --full runs the old box-side pipeline",
+	Short: "Bring the whole world up: CP-bring-up + trigger (the CP owns relay/k3s/storage/DNS/litellm/caddy/cert through its co-located runner)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		f := rebuildFlags{}
 		f.addr, _ = cmd.Flags().GetString("addr")
