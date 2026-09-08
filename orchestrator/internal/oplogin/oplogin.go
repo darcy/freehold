@@ -146,15 +146,21 @@ func Login(base string, secret [32]byte) (*console.Client, error) {
 	return console.Login(base, secret[:], 15*time.Second)
 }
 
-// Interactive is `freehold login` (root-free): prompt for the CP address + CP
-// pubkey + operator nsec, establish the NIP-98 console session (authorizing this
-// operator against that CP), then seed a local connection/desire profile so the
-// operator can just run `freehold` afterwards. It ends the command — build /
-// teardown are separate (root-requiring) commands that never ride login.
+// Interactive is `freehold login` (root-free): prompt for the CP address + the
+// operator nsec, establish the NIP-98 console session (authorizing this operator
+// against that CP), then seed a local connection/desire profile so the operator
+// can just run `freehold` afterwards. It ends the command — build / teardown are
+// separate (root-requiring) commands that never ride login.
 //
 // This is the fresh-box recovery path: nothing that lived only on a lost box is
-// needed — only CP address + pubkey (where the world is) + the operator's own
-// nsec (who the operator is). The CP's world summary seeds relay/CP coordinates.
+// needed — only CP address (where the world is) + the operator's own nsec (who
+// the operator is). The CP's world summary seeds the relay/CP coordinates AND
+// the CP's own identity (cp_pubkey): NIP-98 authorizes the OPERATOR to whatever
+// answers at cp_url (the console only admits admin-minted operator pubkeys), so
+// a legitimate box logging into its actual CP needs no separately-known CP
+// pubkey — the anchor is simply the CP's own self-report. The trust boundary
+// for a wrong-or-hijacked cp_url is TLS/DNS on that URL, not this recorded
+// anchor, so the operator never needs to type or know the CP pubkey here.
 func Interactive() error {
 	cfg, err := config.Load(config.DefaultPath())
 	if err != nil {
@@ -173,11 +179,6 @@ func Interactive() error {
 	}
 	if cpURL == "" {
 		return fmt.Errorf("no CP address provided — where is the control plane?")
-	}
-
-	cpPubkey := cfg.CpPubkey
-	if cpPubkey == "" {
-		cpPubkey = strings.TrimSpace(promptLine(stdin, "CP pubkey (64-hex or npub1…): "))
 	}
 
 	secret := [32]byte{}
@@ -229,15 +230,14 @@ func Interactive() error {
 	} else {
 		fmt.Fprintf(os.Stderr, "  (note: world summary not available — %v)\n", werr)
 	}
-	// The CP pubkey is the box's trust anchor for a CP it has never met: NIP-98
-	// proves the OPERATOR's identity to whatever answers at cpURL, never the CP
-	// back — so cross-check the operator-supplied pubkey against the CP's own
-	// /api/world report (hard error on mismatch), and fall back to that report
-	// only when the operator offered none. A bogus/hijacked anchor never seeds.
-	anchor, err := resolveCPPubkey(cpPubkey, worldCPPub)
-	if err != nil {
-		return err
-	}
+	// The CP pubkey is the box's record of the CP's own identity — adopted, never
+	// typed. NIP-98 only admits admin-minted operator pubkeys, so a legitimate box
+	// logging into its actual CP never needs to know it up front; the anchor is
+	// the CP's /api/world self-report, normalized to 64-hex. (The boundary for a
+	// wrong-or-hijacked cp_url is TLS/DNS on that URL — a malicious server at the
+	// wrong address can report any pubkey it likes — which is why this is an
+	// informational anchor, not a substitute for verifying the CP endpoint.)
+	anchor := resolveCPPubkey(worldCPPub)
 	// Materialize the box's own provisioning identity (first-run-wins): this is
 	// how the box is a durable, self-owned actor whose grant to the CP can live
 	// locally — the "we only need to login once" property.
@@ -251,34 +251,20 @@ func Interactive() error {
 	return nil
 }
 
-// resolveCPPubkey establishes the recorded CP trust anchor. A user-supplied
-// pubkey must match what the CP reports about itself; a blank one is accepted
-// only when the CP offers one. Neither source yields an anchor -> error (the
-// box must not trust a CP it cannot identify). The operator may supply either
-// npub1<bech32> or 64-hex — both normalize to the lowercase 64-hex form the CP
-// reports, so a format mismatch is not a trust mismatch.
-func resolveCPPubkey(user, world string) (string, error) {
-	norm := func(pk string) string {
-		if pk == "" {
-			return ""
-		}
-		out, err := crypto.ParsePubkeyInput(pk)
-		if err != nil {
-			return pk // let the mismatch/fallback paths surface it
-		}
-		return out
+// resolveCPPubkey normalizes the CP's own self-reported pubkey (from /api/world)
+// to lowercase 64-hex for the recorded trust anchor. Accepts npub1<bech32> or
+// hex (plus trim/case) via the shared pubkey parser; a blank or unparseable
+// report is returned as-is ("" / the raw value) — login still seeds the operator
+// + CP coords, since the operator's NIP-98 admin session IS the authorization.
+func resolveCPPubkey(world string) string {
+	if world == "" {
+		return ""
 	}
-	u, w := norm(user), norm(world)
-	if u != "" && w != "" && u != w {
-		return "", fmt.Errorf("CP pubkey mismatch: you supplied %.10s…, but the CP reported %.10s… — aborting to avoid trusting the wrong control plane", u, w)
+	out, err := crypto.ParsePubkeyInput(world)
+	if err != nil {
+		return world
 	}
-	if u != "" {
-		return u, nil
-	}
-	if w != "" {
-		return w, nil
-	}
-	return "", fmt.Errorf("no CP pubkey provided and the CP reported none — cannot establish a trust anchor")
+	return out
 }
 
 // seed writes the logged-in connection/desire profile back to the config path,

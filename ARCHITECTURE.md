@@ -237,17 +237,21 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
 
 *   **Remote-CP access.** `freehold login` (root-free) authorizes this operator
-    against the CP by **CP address + CP pubkey + operator nsec** (NIP-98), then
-    ends; `internal/oplogin` persists the nsec 0600 under the operator dir and
-    seeds a local connection/desire profile from the CP's `/api/world` summary,
-    so every launch auto-logs in and a fresh box recovers with nothing from a
-    lost one. The operator-supplied CP **pubkey** is cross-checked against the
-    CP's own `/api/world` report (`resolveCPPubkey` — hard error on mismatch,
-    blank falls back to the CP's report; neither → no anchor) so a wrong or
-    hijacked CP address never seeds a bogus trust anchor. `freehold logout`
-    clears this box's local ledger only. `/api/world` carries the relay coords
-    (served from `state.json` — the CP records them when `serve` is started
-    with `--relay-url`, paired or not with `--relay-pubkey`) plus the
+    against the CP by **CP address + operator nsec** (NIP-98), then ends;
+    `internal/oplogin` persists the nsec 0600 under the operator dir and seeds a
+    local connection/desire profile from the CP's `/api/world` summary, so every
+    launch auto-logs in and a fresh box recovers with nothing from a lost one.
+    The operator key **is** the credential — the console only admits NIP-98
+    operators whose pubkey was minted into its admin whitelist at deploy, so
+    logging in as yourself from any box unlocks the world. The recorded
+    `cp_pubkey` is the CP's *own* identity, adopted from its `/api/world`
+    self-report (`resolveCPPubkey` normalizes to 64-hex) and informational —
+    never typed, since a legitimate login to the actual CP needs no separately
+    known pubkey. (The trust boundary for a wrong/hijacked `cp_url` is TLS/DNS
+    on that URL, not this recorded anchor.) `freehold logout` clears this box's local
+    ledger only. `/api/world` carries the relay coords (served from
+    `state.json` — the CP records them when `serve` is started with
+    `--relay-url`, paired or not with `--relay-pubkey`) plus the
     `agent_tools_url`/`agent_tools_pubkey` the Agents view needs. The Agents
     tab reads the CP toolset registry (`freehold-agent-tools manage_agent`);
     the Runners-CP view reads the console `/api/overview`. `w` opens the web

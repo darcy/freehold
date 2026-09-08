@@ -27,10 +27,10 @@ type Config struct {
 	RelayWsURL       string      `toml:"relay_ws_url,omitempty"`
 	RelayPubkey      *string     `toml:"relay_pubkey,omitempty"`
 	CPURL            string      `toml:"cp_url"`
-	// CpPubkey is the control plane's own Nostr pubkey — the box's trust
-	// anchor for signing calls / verifying directories to the CP. Recorded by
-	// `freehold login` (the operator supplies it) and by build once the CP is
-	// minted; it is what a fresh box needs to trust a CP it has never met.
+	// CpPubkey is the control plane's own Nostr pubkey — the box's trust anchor
+	// for a CP it has never met. Recorded by `freehold login` (adopted from the
+	// CP's own `/api/world` report — the operator never supplies it) and by build
+	// once the CP is minted; it identifies the CP itself, never who logs in.
 	CpPubkey         string      `toml:"cp_pubkey,omitempty"`
 	OperatorPubkey   string      `toml:"operator_pubkey"`
 	OperatorIdentity *string     `toml:"operator_identity,omitempty"`
