@@ -84,10 +84,15 @@ world-state, migrations, async cert) extend it as they land.
   certs CP-side (durable-reuse gate — no LE order when the durable mirror has a
   valid cert — else an in-process resumable DNS-01 issue, sealed cred on the
   CP, install through the co-located runner); the box `build` is now
-  CP-bring-up + trigger: door → CP LXC → deploy CP + agent-tools → hand-off
+  CP-bring-up + trigger: door → CP LXC → boot + deploy the relay stack (the
+  agent-tools roster lives on it) → deploy CP + agent-tools → hand-off
   (DNS creds sealed to the agent-tools identity, litellm secrets sealed into
-  the shipped runner) → trigger world_build → record coords → CPA (`--full`
-  keeps the old box-side pipeline reachable as a fallback). The CPA
+  the shipped runner; the relay LAN dial + canonical NIP-98 auth URL let the
+  seed/roster work pre-Caddy) → trigger world_build → record coords → CPA
+  (`--full` keeps the old box-side pipeline reachable as a fallback). A full
+  teardown + slim `freehold build` reconverges the whole world with the CP
+  doing the bring-up (fresh-world coords are resolved by hostname + the relay
+  host is re-pinned into the CP guest pre-Caddy). The CPA
   harness is
   deliberately NOT given the mutating world tools (locked "conversation + create only").
 - **A shared stage library (`internal/stages`).** The pure world-bring-up command

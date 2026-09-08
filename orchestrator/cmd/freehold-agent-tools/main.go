@@ -191,7 +191,8 @@ func serverIdentity(dir string) (*flows.Identity, string, error) {
 func cmdSeed(args []string) {
 	fs := flag.NewFlagSet("seed", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "durable state dir")
-	relayURL := fs.String("relay-url", "", "relay HTTP origin")
+	relayURL := fs.String("relay-url", "", "relay HTTP origin (dial URL; LAN http://<domain>:3000 pre-Caddy)")
+	relayAuthURL := fs.String("relay-auth-url", "", "relay CANONICAL URL for NIP-98 signing (public https://<domain>); defaults to relay-url")
 	granted := fs.String("granted", "", "comma-separated bootstrap grant pubkeys to member")
 	name := fs.String("name", "agent-tools", "channel/identity display name")
 	fs.Parse(args)
@@ -206,7 +207,11 @@ func cmdSeed(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := relay.CreateRunnerChannel(*relayURL, sec, pk, *name); err != nil {
+	authURL := *relayAuthURL
+	if authURL == "" {
+		authURL = *relayURL
+	}
+	if err := relay.CreateRunnerChannelAuth(*relayURL, authURL, sec, pk, *name); err != nil {
 		log.Fatalf("seed channel: %v", err)
 	}
 	for _, g := range strings.Split(*granted, ",") {
@@ -214,7 +219,7 @@ func cmdSeed(args []string) {
 		if g == "" {
 			continue
 		}
-		if err := relay.PutUser(*relayURL, sec, pk, g); err != nil {
+		if err := relay.PutUserAuth(*relayURL, authURL, sec, pk, g); err != nil {
 			log.Fatalf("seed member %s: %v", g, err)
 		}
 	}
@@ -226,7 +231,8 @@ func cmdServe(args []string) {
 	stateDir := fs.String("state-dir", "", "durable state dir")
 	addr := fs.String("addr", "127.0.0.1:8089", "HTTP MCP bind address")
 	secret := fs.String("secret", "", "this server's Nostr secret hex (audience)")
-	relayURL := fs.String("relay-url", "", "relay HTTP origin")
+	relayURL := fs.String("relay-url", "", "relay HTTP origin (dial URL; LAN http://<domain>:3000 pre-Caddy)")
+	relayAuthURL := fs.String("relay-auth-url", "", "relay CANONICAL URL for NIP-98 signing (public https://<domain>); defaults to relay-url")
 	relayWS := fs.String("relay-ws", "", "relay wss:// origin for agent pods")
 	relayPK := fs.String("relay-pubkey", "", "relay signing pubkey (roster trust anchor)")
 	var relayLxc, k3sVmid uint
@@ -309,6 +315,7 @@ func cmdServe(args []string) {
 	spec := &deploySpec{
 		stateDir:       *stateDir,
 		relayURL:       *relayURL,
+		relayAuthURL:   *relayAuthURL,
 		relayWS:        relayWSURL,
 		relayPK:        *relayPK,
 		relayHost:      *relayHost,
@@ -352,7 +359,7 @@ func cmdServe(args []string) {
 		// to it when it matches the roster author and falls back to
 		// self-consistent verification when it doesn't (the relay is the sole
 		// 39002 publisher, so a present-and-valid roster IS the relay's).
-		m, err := agenttools.QueryRoster(*relayURL, *relayPK, audience, secBytes)
+		m, err := agenttools.QueryRosterAuth(*relayURL, *relayAuthURL, *relayPK, audience, secBytes)
 		if err != nil {
 			log.Printf("freehold-agent-tools: roster unreadable — failing closed: %v", err)
 			return nil, nil
@@ -395,6 +402,7 @@ func cmdServe(args []string) {
 type deploySpec struct {
 	stateDir       string
 	relayURL       string
+	relayAuthURL   string
 	relayWS        string
 	relayPK        string
 	relayHost      string
@@ -639,7 +647,13 @@ func (s *deploySpec) bootLxc(role string, vmid uint32, mounts []planebase.MountS
 		spec.VMID = &vmid
 	}
 	if role == "k3s" && s.proxyIP != "" {
+		// pct net0 wants CIDR (host/prefix); the serve flag carries the bare
+		// proxy IP (the DNS/caddy consumers expect bare), so rebuild the CIDR
+		// — the recorded proxy world is a /24 home LAN (default relay-gw).
 		ip := s.proxyIP
+		if !strings.Contains(ip, "/") {
+			ip += "/24"
+		}
 		gw := s.relayGW
 		spec.NetIP = &ip
 		spec.NetGW = &gw
@@ -1102,6 +1116,10 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 		}
 		// 2. The relay LXC: boot if missing (baking the durable mounts at
 		// create) + deploy the Buzz stack (idempotent compose bring-up).
+		// Resolve any EXISTING guest vmids by hostname FIRST so a boot reuses
+		// an already-created LXC (a fresh/partial world with 0 recorded vmids;
+		// PickFreeVMID refuses a name that already exists).
+		spec.resolveGuestVmids()
 		if spec.relayHost != "" {
 			if err := spec.worldBootRelay(mounts[planebase.TenantRelay]); err != nil {
 				return "", fmt.Errorf("world-build relay: %w", err)
@@ -1246,18 +1264,23 @@ func buildCreateAgentFn(spec *deploySpec) agent.CreateAgentFn {
 			return "", fmt.Errorf("add relay member %s: %w", pub, err)
 		}
 
-		// Profile + #freehold channel + join, signed by the agent.
+		// Profile + #freehold channel + join, signed by the agent (NIP-98 against the
+		// CANONICAL relay URL; the dial may be the LAN form pre-Caddy).
 		nSec, err := hex.DecodeString(id.NostrSecretHex)
 		if err != nil {
 			return "", err
 		}
-		if err := relay.PublishProfile(spec.relayURL, nSec, name, "freehold agent"); err != nil {
+		authURL := spec.relayAuthURL
+		if authURL == "" {
+			authURL = spec.relayURL
+		}
+		if err := relay.PublishProfileAuth(spec.relayURL, authURL, nSec, name, "freehold agent"); err != nil {
 			return "", fmt.Errorf("publish %s profile: %w", name, err)
 		}
-		if err := delegate.EnsureChannel(spec.relayURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+		if err := delegate.EnsureChannelAuth(spec.relayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
 			return "", fmt.Errorf("ensure #freehold channel: %w", err)
 		}
-		if err := relay.JoinChannel(spec.relayURL, nSec, relayFreeholdChannel); err != nil {
+		if err := relay.JoinChannelAuth(spec.relayURL, authURL, nSec, relayFreeholdChannel); err != nil {
 			return "", fmt.Errorf("join #freehold channel: %w", err)
 		}
 
@@ -1279,7 +1302,11 @@ func buildCreateAgentFn(spec *deploySpec) agent.CreateAgentFn {
 		// is authorized to call create/grant/manage — the same audited path the
 		// build dogfoods. Idempotent on re-deploy.
 		if name == spec.cpaName {
-			if err := relay.PutUser(spec.relayURL, spec.sec, spec.audience, pub); err != nil {
+			authURL := spec.relayAuthURL
+			if authURL == "" {
+				authURL = spec.relayURL
+			}
+			if err := relay.PutUserAuth(spec.relayURL, authURL, spec.sec, spec.audience, pub); err != nil {
 				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
 			}
 		}

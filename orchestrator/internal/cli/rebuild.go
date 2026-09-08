@@ -755,14 +755,16 @@ func (e *rebuildEngine) run() error {
 	return nil
 }
 
-// runSlim is the CP-decoupled build: the box brings up the CONTROL PLANE only
-// (door → verify → CP dataset → CP LXC → deploy-cp → agent-tools), hands the
-// world-state + secrets to the CP (DNS creds sealed to the agent-tools
-// identity + the litellm secrets sealed into the box runner, which deploy-cp
-// ships as the co-located runner), then TRIGGERS world_build — the CP brings up
-// relay/k3s/storage/DNS/litellm/caddy/cert through its co-located runner. The
-// box then records the post-world coords + brings the CPA up over the CP
-// toolset. The box is login + trigger for a world the CP owns.
+// runSlim is the CP-decoupled build: the box brings up the CP AND the relay
+// LXC (door → verify → CP dataset → CP LXC → deploy the relay stack — the
+// agent-tools roster lives on the relay, so it must be up before agent-tools →
+// deploy-cp → agent-tools), hands the world-state + secrets to the CP (DNS
+// creds sealed to the agent-tools identity + the litellm secrets sealed into
+// the box runner, which deploy-cp ships as the co-located runner), then
+// TRIGGERS world_build — the CP brings up k3s/storage/DNS/litellm/caddy/cert
+// through its co-located runner. The box then records the post-world coords +
+// brings the CPA up over the CP toolset. The box is login + trigger for a
+// world the CP owns.
 func (e *rebuildEngine) runSlim() error {
 	fmt.Fprintf(e.out, "building world %s (CP-bring-up + trigger — the CP owns relay/k3s/DNS/litellm/caddy/cert)\n", e.f.relayDomain)
 
@@ -866,7 +868,9 @@ func (e *rebuildEngine) runSlim() error {
 		return err
 	}
 
-	// 9. boot the CP LXC + record its coordinates.
+	// 9. boot the CP LXC + record its coordinates, then boot + deploy the RELAY
+	// (its IP must be recorded BEFORE deploy-cp so the CP guest's /etc/hosts
+	// pin reaches it; the agent-tools roster also needs the relay live).
 	fmt.Fprintln(e.out, "  · booting the cp LXC (create → docker; can take minutes)…")
 	if err := e.stageBootstrap("cp"); err != nil {
 		return err
@@ -875,14 +879,33 @@ func (e *rebuildEngine) runSlim() error {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ cp LXC booted + recorded")
+	fmt.Fprintln(e.out, "  · booting the relay LXC (create → docker; can take minutes)…")
+	if err := e.stageBootstrap("relay"); err != nil {
+		return err
+	}
+	if _, err := e.stageRecordLxc("relay"); err != nil {
+		return err
+	}
+	if err := e.stageDeployRelay(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.relayDomain)
 
-	// 10. deploy the CP + its co-located runner.
+	// 10. deploy the CP + its co-located runner (the relay IP is now recorded,
+	// so the CP guest pins the domain for pre-Caddy relay ops).
 	if err := e.stageDeployCp(); err != nil {
 		return err
 	}
 	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
 
 	// 11. deploy freehold-agent-tools (the trigger surface + world_build home).
+	// Its seed/roster dial the relay DOMAIN (buzz keys the community to the
+	// Host header) — re-pin the relay LAN IP into the CP guest's /etc/hosts so
+	// that dial reaches the relay directly, pre-Caddy (a DHCP re-lease between
+	// the relay boot/record and here would otherwise leave a stale pin).
+	if err := e.pinRelayInCp(); err != nil {
+		return err
+	}
 	if err := e.stageDeployAgentTools(); err != nil {
 		return err
 	}
@@ -1049,6 +1072,27 @@ func (e *rebuildEngine) handoffDNS() error {
 			return fmt.Errorf("ship %s DNS cred to the CP failed:\n%s", slot, out)
 		}
 		fmt.Fprintf(e.out, "  ✓ %s DNS credential handed off to the CP\n", slot)
+	}
+	return nil
+}
+
+// pinRelayInCp (re-)pins the relay LAN IP into the CP guest's /etc/hosts so
+// the agent-tools seed/roster dial `http://<relayDomain>:3000` directly,
+// pre-Caddy (buzz keys the community to the Host header — a raw IP gets
+// "no community is configured for this host"). Idempotent (grep -Fq guard);
+// a DHCP re-lease between the relay boot/record and here is corrected.
+func (e *rebuildEngine) pinRelayInCp() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.Relay.Ip == nil {
+		return fmt.Errorf("no cp/relay coords to pin the relay host")
+	}
+	relayIP := config.StripCIDR(*cfg.Lxc.Relay.Ip)
+	host := cfg.RelayHost()
+	cmd := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"",
+		*cfg.Lxc.Cp.Vmid, host, relayIP, host)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return fmt.Errorf("pin the relay host into the cp LXC failed:\n%s", out)
 	}
 	return nil
 }
@@ -2207,6 +2251,12 @@ func (e *rebuildEngine) stageDeployCp() error {
 		"--runner-binary", e.bins.ReleaseRun,
 		"--runner-package", rbRunnerPkgs() + "/" + e.f.target,
 		"--operator-pubkey", e.f.operatorPubkey,
+	}
+	// Pin the relay's LAN IP into the CP guest's /etc/hosts so the console +
+	// agent-tools can RESOLVE + reach the relay DOMAIN directly (pre-Caddy):
+	// buzz keys the community to the Host header, so a raw-IP URL fails.
+	if cfg, _ := config.Load(e.f.configPath); cfg != nil && cfg.Lxc.Relay.Ip != nil {
+		args = append(args, "--relay-host-ip", config.StripCIDR(*cfg.Lxc.Relay.Ip))
 	}
 	if cpRoot != "" {
 		args = append(args, "--state-dir", cpRoot+"/control-plane", "--bin-dir", cpRoot+"/bin")
@@ -3770,7 +3820,18 @@ func (e *rebuildEngine) agentToolsMcp(cfg *config.Config) (*client.McpClient, er
 // callAgentToolsText issues one tool call to a freehold-agent-tools client and
 // returns the result.content[0].text payload (e.g. the new agent's pubkey).
 func callAgentToolsText(mc *client.McpClient, tool string, args map[string]interface{}) (string, error) {
-	raw, err := mc.Call(tool, args)
+	// world_build runs its stages synchronously for minutes — use the long
+	// deadline (the short default would time out awaiting the response). Call
+	// exactly ONE path: the 30s Call would ALSO start the tool server-side and
+	// leave it running while a second call raced it.
+	long := map[string]bool{"world_build": true}
+	var raw json.RawMessage
+	var err error
+	if long[tool] {
+		raw, err = mc.CallLong(tool, args)
+	} else {
+		raw, err = mc.Call(tool, args)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -3844,7 +3905,15 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		AgentToolsBinary:   e.bins.ReleaseAgentTools,
 		AgentToolsStateDir: agentToolsState,
 		BindAddr:           "0.0.0.0:8089",
-		RelayURL:           cfg.RelayURL,
+		// The agent-tools serve's OWN relay ops (roster, seed, create-agent
+		// publish) use the relay's LAN-REACHABLE DOMAIN URL — the CP guest's
+		// /etc/hosts (deploy-cp pins it) maps the domain to the relay LXC IP,
+		// so it works BEFORE the Caddy edge (world_build deploys it later) AND
+		// the buzz Host header is the configured community domain (a raw-IP
+		// Host gets "no community is configured for this host"). The pods dial
+		// the PUBLIC --relay-ws (unchanged below).
+		RelayURL:           "http://" + cfg.RelayHost() + ":3000",
+		RelayAuthURL:       cfg.RelayURL,
 		RelayPubkey:        derefStrPtr(cfg.RelayPubkey),
 		RelayWS:            cfg.RelayWsURL,
 		RelayHost:          cfg.RelayHost(),

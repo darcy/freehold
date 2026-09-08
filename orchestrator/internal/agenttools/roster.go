@@ -20,13 +20,19 @@ import (
 // additionally require the author to match; empty means self-consistent only.
 // Any query/parse error yields an empty roster (deny all).
 func QueryRoster(relayURL, relayPubkey, ownPubkey string, secret []byte) ([]string, error) {
+	return QueryRosterAuth(relayURL, relayURL, relayPubkey, ownPubkey, secret)
+}
+
+// QueryRosterAuth is QueryRoster with a separate NIP-98 auth URL (the
+// pre-Caddy LAN-dial case in agent-tools).
+func QueryRosterAuth(dialURL, authURL, relayPubkey, ownPubkey string, secret []byte) ([]string, error) {
 	cid := relay.RunnerChannelID(ownPubkey)
 	filters := []interface{}{map[string]interface{}{
 		"kinds": []interface{}{wire.GroupMembers},
 		"#d":    []interface{}{cid},
 		"limit": 100,
 	}}
-	events, err := relay.QueryEvents(relayURL, secret, filters)
+	events, err := relay.QueryEventsAuth(dialURL, authURL, secret, filters)
 	if err != nil {
 		return nil, err
 	}

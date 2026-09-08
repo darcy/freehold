@@ -191,6 +191,13 @@ func (c *McpClient) Call(name string, arguments interface{}) (json.RawMessage, e
 	return c.call(defaultAgent(), name, arguments)
 }
 
+// CallLong issues tools/call with a LONG deadline (a world_build trigger runs
+// its stages synchronously for minutes — the short default would time out
+// awaiting the response while the CP keeps working).
+func (c *McpClient) CallLong(name string, arguments interface{}) (json.RawMessage, error) {
+	return c.call(&http.Client{Timeout: 15 * time.Minute}, name, arguments)
+}
+
 // CallText parses the tool's text payload.
 func (c *McpClient) CallText(name string, arguments interface{}) (json.RawMessage, error) {
 	resp, err := c.call(defaultAgent(), name, arguments)

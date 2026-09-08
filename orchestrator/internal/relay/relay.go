@@ -85,8 +85,15 @@ func nip98Authorization(secret []byte, method, url string) (string, error) {
 // QueryEvents POSTs /query with a filters ARRAY (NIP-98 auth), status
 // checked, body parsed as an event array.
 func QueryEvents(relayURL string, authSecret []byte, filters interface{}) ([]map[string]interface{}, error) {
-	url := strings.TrimSuffix(relayURL, "/") + "/query"
-	auth, err := nip98Authorization(authSecret, "POST", url)
+	return QueryEventsAuth(relayURL, relayURL, authSecret, filters)
+}
+
+// QueryEventsAuth is QueryEvents with a separate NIP-98 auth URL (the
+// pre-Caddy LAN-dial case: the dial reaches the relay directly, the auth is
+// signed against the canonical public URL).
+func QueryEventsAuth(dialURL, authURL string, authSecret []byte, filters interface{}) ([]map[string]interface{}, error) {
+	url := strings.TrimSuffix(dialURL, "/") + "/query"
+	auth, err := nip98Authorization(authSecret, "POST", strings.TrimSuffix(authURL, "/")+"/query")
 	if err != nil {
 		return nil, fmt.Errorf("query auth: %w", err)
 	}
@@ -95,6 +102,11 @@ func QueryEvents(relayURL string, authSecret []byte, filters interface{}) ([]map
 	if err != nil {
 		return nil, fmt.Errorf("query request failed: %w", err)
 	}
+	// Buzz keys the community to the REQUEST HOST and does NOT strip a port.
+	// A LAN relay URL (http://<domain>:3000, pre-Caddy) must present the bare
+	// domain as the Host header or ingest 404s "no community is configured";
+	// the public URL (https://<domain>) is already portless and unchanged.
+	req.Host = req.URL.Hostname()
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := agent().Do(req)
@@ -119,8 +131,17 @@ func QueryEvents(relayURL string, authSecret []byte, filters interface{}) ([]map
 // PublishEventJSON POSTs an already-signed Nostr event JSON to /events
 // (NIP-98 auth). Status checked.
 func PublishEventJSON(relayURL string, authSecret []byte, eventJSON string) error {
-	url := strings.TrimSuffix(relayURL, "/") + "/events"
-	auth, err := nip98Authorization(authSecret, "POST", url)
+	return PublishEventJSONAuth(relayURL, relayURL, authSecret, eventJSON)
+}
+
+// PublishEventJSONAuth is PublishEventJSON with a separate NIP-98 AUTH URL: a
+// pre-Caddy LAN dial (http://<domain>:3000) must reach the relay directly, but
+// the relay verifies the NIP-98 signature against its CANONICAL public URL
+// (https://<domain>) — a dial-URL-signed auth 401s with a URL mismatch. The
+// request presents the bare-domain Host (buzz keys the community to it).
+func PublishEventJSONAuth(dialURL, authURL string, authSecret []byte, eventJSON string) error {
+	url := strings.TrimSuffix(dialURL, "/") + "/events"
+	auth, err := nip98Authorization(authSecret, "POST", strings.TrimSuffix(authURL, "/")+"/events")
 	if err != nil {
 		return fmt.Errorf("event publish auth: %w", err)
 	}
@@ -128,6 +149,7 @@ func PublishEventJSON(relayURL string, authSecret []byte, eventJSON string) erro
 	if err != nil {
 		return fmt.Errorf("event publish request failed: %w", err)
 	}
+	req.Host = req.URL.Hostname()
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := agent().Do(req)
@@ -144,6 +166,10 @@ func PublishEventJSON(relayURL string, authSecret []byte, eventJSON string) erro
 
 // publishEvent builds a signed NIP-01 event and publishes it.
 func publishEvent(relayURL string, secret []byte, kind uint32, tags [][]string, content string) error {
+	return publishEventAuth(relayURL, relayURL, secret, kind, tags, content)
+}
+
+func publishEventAuth(dialURL, authURL string, secret []byte, kind uint32, tags [][]string, content string) error {
 	ts := time.Now().Unix()
 	pubkey, id, sig, err := wire.SignEvent(secret, kind, ts, tags, content)
 	if err != nil {
@@ -154,24 +180,35 @@ func publishEvent(relayURL string, secret []byte, kind uint32, tags [][]string, 
 		"tags": tags, "content": content, "sig": sig,
 	}
 	evBytes, _ := json.Marshal(ev)
-	return PublishEventJSON(relayURL, secret, string(evBytes))
+	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
 }
 
 // CreateRunnerChannel creates (or re-asserts) a runner's private channel
 // (kind 9007): tags h + name + visibility=private. Idempotent.
 func CreateRunnerChannel(relayURL string, consoleSecret []byte, runnerNostrPubkey, name string) error {
+	return CreateRunnerChannelAuth(relayURL, relayURL, consoleSecret, runnerNostrPubkey, name)
+}
+
+// CreateRunnerChannelAuth is CreateRunnerChannel with a separate NIP-98 auth
+// URL (see PublishEventJSONAuth for the pre-Caddy LAN dial reason).
+func CreateRunnerChannelAuth(dialURL, authURL string, consoleSecret []byte, runnerNostrPubkey, name string) error {
 	h := RunnerChannelID(runnerNostrPubkey)
 	tags := [][]string{
 		{"h", h},
 		{"name", "#runner-" + name},
 		{"visibility", "private"},
 	}
-	return publishEvent(relayURL, consoleSecret, wire.ChannelCreate, tags, "")
+	return publishEventAuth(dialURL, authURL, consoleSecret, wire.ChannelCreate, tags, "")
 }
 
 // PutUser adds a member to a runner channel (kind 9000 put-user), idempotent.
 func PutUser(relayURL string, consoleSecret []byte, runnerNostrPubkey, memberPubkey string) error {
-	return membershipCommand(relayURL, consoleSecret, wire.PutUser, runnerNostrPubkey, memberPubkey)
+	return PutUserAuth(relayURL, relayURL, consoleSecret, runnerNostrPubkey, memberPubkey)
+}
+
+// PutUserAuth is PutUser with a separate NIP-98 auth URL.
+func PutUserAuth(dialURL, authURL string, consoleSecret []byte, runnerNostrPubkey, memberPubkey string) error {
+	return membershipCommandAuth(dialURL, authURL, consoleSecret, wire.PutUser, runnerNostrPubkey, memberPubkey)
 }
 
 // RemoveUser removes a member from a runner channel (kind 9001 remove-user).
@@ -180,9 +217,13 @@ func RemoveUser(relayURL string, consoleSecret []byte, runnerNostrPubkey, member
 }
 
 func membershipCommand(relayURL string, consoleSecret []byte, kind uint32, runnerNostrPubkey, memberPubkey string) error {
+	return membershipCommandAuth(relayURL, relayURL, consoleSecret, kind, runnerNostrPubkey, memberPubkey)
+}
+
+func membershipCommandAuth(dialURL, authURL string, consoleSecret []byte, kind uint32, runnerNostrPubkey, memberPubkey string) error {
 	h := RunnerChannelID(runnerNostrPubkey)
 	tags := [][]string{{"h", h}, {"p", memberPubkey}}
-	return publishEvent(relayURL, consoleSecret, kind, tags, "")
+	return publishEventAuth(dialURL, authURL, consoleSecret, kind, tags, "")
 }
 
 // PublishRunnerMeta publishes (or replaces) a runner profile as a kind-9
@@ -491,6 +532,11 @@ func ReadMemory(relayURL string, agentNostrSecret []byte, key string) (string, b
 
 // PublishProfile publishes kind-0 metadata for an identity (name/about).
 func PublishProfile(relayURL string, secret []byte, name, about string) error {
+	return PublishProfileAuth(relayURL, relayURL, secret, name, about)
+}
+
+// PublishProfileAuth is PublishProfile with a separate NIP-98 auth URL.
+func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about string) error {
 	content, _ := json.Marshal(map[string]string{"name": name, "about": about, "display_name": name})
 	ts := time.Now().Unix()
 	pubkey, id, sig, err := wire.SignEvent(secret, 0, ts, [][]string{}, string(content))
@@ -502,11 +548,16 @@ func PublishProfile(relayURL string, secret []byte, name, about string) error {
 		"tags": [][]string{}, "content": string(content), "sig": sig,
 	}
 	evBytes, _ := json.Marshal(ev)
-	return PublishEventJSON(relayURL, secret, string(evBytes))
+	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
 }
 
 // JoinChannel requests to join a channel (kind 9021).
 func JoinChannel(relayURL string, secret []byte, channelID string) error {
+	return JoinChannelAuth(relayURL, relayURL, secret, channelID)
+}
+
+// JoinChannelAuth is JoinChannel with a separate NIP-98 auth URL.
+func JoinChannelAuth(dialURL, authURL string, secret []byte, channelID string) error {
 	tags := [][]string{{"h", channelID}}
-	return publishEvent(relayURL, secret, 9021, tags, "")
+	return publishEventAuth(dialURL, authURL, secret, 9021, tags, "")
 }
