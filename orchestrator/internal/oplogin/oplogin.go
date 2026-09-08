@@ -177,7 +177,7 @@ func Interactive() error {
 
 	cpPubkey := cfg.CpPubkey
 	if cpPubkey == "" {
-		cpPubkey = strings.TrimSpace(promptLine(stdin, "CP pubkey (64-hex): "))
+		cpPubkey = strings.TrimSpace(promptLine(stdin, "CP pubkey (64-hex or npub1…): "))
 	}
 
 	secret := [32]byte{}
