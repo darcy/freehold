@@ -23,6 +23,7 @@ type DeployAgentToolsSpec struct {
 	AgentToolsStateDir string  // durable server state dir on the cp (e.g. /srv/data/cp/agent-tools)
 	BindAddr           string  // serve bind (0.0.0.0:8089)
 	RelayURL           string
+	RelayAuthURL       string // the relay's CANONICAL public URL (NIP-98 signing; the dial may be LAN pre-Caddy)
 	RelayPubkey        string
 	RelayWS            string
 	RelayHost          string  // relay public host (Caddy edge front)
@@ -123,9 +124,12 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 
 	// Seed the server's own channel + member the bootstrap grants into its
 	// roster (the one-time seed; the roster is then the durable source).
-	seed := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
+	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
 		agentToolsBin, spec.AgentToolsStateDir, spec.RelayURL, spec.GrantsCSV)
-	if _, err := bootstrap.ExecToOK(clientConn, target, lxcCmd(spec.LXc, seed), "seed agent-tools roster", 60); err != nil {
+	if spec.RelayAuthURL != "" {
+		seedFlags += " --relay-auth-url " + spec.RelayAuthURL
+	}
+	if _, err := bootstrap.ExecToOK(clientConn, target, lxcCmd(spec.LXc, seedFlags), "seed agent-tools roster", 60); err != nil {
 		return nil, fmt.Errorf("seed agent-tools roster: %w", err)
 	}
 
@@ -143,6 +147,9 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 		"--state-dir %s --addr %s --relay-url %s --relay-pubkey %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s",
 		spec.AgentToolsStateDir, spec.BindAddr, spec.RelayURL, spec.RelayPubkey, deref(spec.RelayLxc), spec.RelayCompose,
 		spec.K3sVmid, spec.RunnerAddr, spec.RunnerPubkey, spec.RunnerTarget, spec.CpaName, spec.OwnerPubkey)
+	if spec.RelayAuthURL != "" {
+		serveFlags += " --relay-auth-url " + spec.RelayAuthURL
+	}
 	if spec.LiteLLMBase != "" {
 		serveFlags += " --litellm-base " + spec.LiteLLMBase
 	}

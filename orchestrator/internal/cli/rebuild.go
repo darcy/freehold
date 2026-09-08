@@ -3900,6 +3900,7 @@ func (e *rebuildEngine) stageDeployAgentTools() error {
 		// Host gets "no community is configured for this host"). The pods dial
 		// the PUBLIC --relay-ws (unchanged below).
 		RelayURL:           "http://" + cfg.RelayHost() + ":3000",
+		RelayAuthURL:       cfg.RelayURL,
 		RelayPubkey:        derefStrPtr(cfg.RelayPubkey),
 		RelayWS:            cfg.RelayWsURL,
 		RelayHost:          cfg.RelayHost(),

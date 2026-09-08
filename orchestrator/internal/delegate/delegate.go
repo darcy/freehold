@@ -57,7 +57,13 @@ func ParseEnvelope(content string) *Envelope {
 // EnsureChannel creates (idempotently) the auto-ops OPEN channel (kind 9007,
 // h/name/visibility=open).
 func EnsureChannel(relayURL string, secret []byte, channelID, name string) error {
-	return publishSigned(relayURL, secret, ChannelCreateKind, [][]string{
+	return EnsureChannelAuth(relayURL, relayURL, secret, channelID, name)
+}
+
+// EnsureChannelAuth is EnsureChannel with a separate NIP-98 auth URL (the
+// pre-Caddy LAN-dial case in agent-tools).
+func EnsureChannelAuth(dialURL, authURL string, secret []byte, channelID, name string) error {
+	return publishSignedAuth(dialURL, authURL, secret, ChannelCreateKind, [][]string{
 		{"h", channelID},
 		{"name", name},
 		{"visibility", "open"},
@@ -94,6 +100,10 @@ func PollStreamP(relayURL string, secret []byte, channelID, mentionPubkey string
 }
 
 func publishSigned(relayURL string, secret []byte, kind uint32, tags [][]string, content string) error {
+	return publishSignedAuth(relayURL, relayURL, secret, kind, tags, content)
+}
+
+func publishSignedAuth(dialURL, authURL string, secret []byte, kind uint32, tags [][]string, content string) error {
 	ts := time.Now().Unix()
 	pubkey, id, sig, err := wire.SignEvent(secret, kind, ts, tags, content)
 	if err != nil {
@@ -104,7 +114,7 @@ func publishSigned(relayURL string, secret []byte, kind uint32, tags [][]string,
 		"tags": tags, "content": content, "sig": sig,
 	}
 	evBytes, _ := json.Marshal(ev)
-	return relay.PublishEventJSON(relayURL, secret, string(evBytes))
+	return relay.PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
 }
 
 func poll(relayURL string, secret []byte, channelID, p string, since int64) ([]PollResult, error) {
