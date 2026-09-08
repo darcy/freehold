@@ -882,6 +882,21 @@ func (e *rebuildEngine) runSlim() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
 
+	// 10.5. Boot + deploy the RELAY stack box-side — the agent-tools server
+	// seeds its roster channel ON the relay (fail-closed), so the relay must be
+	// reachable BEFORE agent-tools deploys + before the world_build trigger
+	// (which the roster authorizes). The CP owns everything else.
+	if err := e.stageBootstrap("relay"); err != nil {
+		return err
+	}
+	if _, err := e.stageRecordLxc("relay"); err != nil {
+		return err
+	}
+	if err := e.stageDeployRelay(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.relayDomain)
+
 	// 11. deploy freehold-agent-tools (the trigger surface + world_build home).
 	if err := e.stageDeployAgentTools(); err != nil {
 		return err
