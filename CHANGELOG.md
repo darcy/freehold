@@ -92,7 +92,11 @@ world-state, migrations, async cert) extend it as they land.
   (`--full` keeps the old box-side pipeline reachable as a fallback). A full
   teardown + slim `freehold build` reconverges the whole world with the CP
   doing the bring-up (fresh-world coords are resolved by hostname + the relay
-  host is re-pinned into the CP guest pre-Caddy). The CPA
+  host is re-pinned into the CP guest pre-Caddy). The retired `--full`
+  box-side pipeline + the now-dead box stages (`run()` / `stageK3s` /
+  `stageDnsRegister`/`Point` / `stageCaddy` / `stageLitellm` / the box cert
+  start/await) are deleted — the slim path is the only build, and the relay
+  client's `ReadMemory` presents the bare-domain Host. The CPA
   harness is
   deliberately NOT given the mutating world tools (locked "conversation + create only").
 - **A shared stage library (`internal/stages`).** The pure world-bring-up command

@@ -260,68 +260,6 @@ func TestRecordPostWorld(t *testing.T) {
 	}
 }
 
-// TestBuildRunDispatch: the build command's engine dispatcher sends the default
-// run to the slim CP-driven pipeline and --full to the box-side one. The
-// engines carry full seam mocks so the pipelines reach their stage-verify gate
-// (where the empty mock output fails) — the assertion is which pipeline was
-// reached, not completion.
-func TestBuildRunDispatch(t *testing.T) {
-	mk := func() *rebuildEngine {
-		return &rebuildEngine{
-			f:    rebuildFlags{relayDomain: "d.example", target: "t", addr: "127.0.0.1:8787"},
-			bins: rebuildBins{Self: "freehold"},
-			out:  &bytes.Buffer{},
-			runBin: func(bin string, args []string) (bool, string) {
-				return true, ""
-			},
-			runSh:    func(script string) (string, error) { return "123", nil },
-			portOpen: func(addr string) bool { return true },
-		}
-	}
-	// Default (no --full): must reach runSlim — its preamble line prints the
-	// "building world" / "CP-bring-up" header, then it fails at the door
-	// verify (empty mock output), not the box-side preamble.
-	def := mk()
-	err := buildRun(false, def)
-	if err == nil {
-		t.Fatal("buildRun(false) should fail at the verify gate on an empty mock")
-	}
-	if !strings.Contains(def.out.(*bytes.Buffer).String(), "building world") {
-		t.Errorf("default did not dispatch to runSlim: output %q", def.out.(*bytes.Buffer).String())
-	}
-	// --full must reach run()'s box-side preamble.
-	full := mk()
-	if err := buildRun(true, full); err == nil {
-		t.Fatal("buildRun(true) should fail at the verify gate on an empty mock")
-	}
-	if !strings.Contains(full.out.(*bytes.Buffer).String(), "rebuilding world") {
-		t.Errorf("--full did not dispatch to run(): output %q", full.out.(*bytes.Buffer).String())
-	}
-}
-
-// TestParsePctGateway covers the gw= parser: static guests carry the
-// router, DHCP guests (`ip=dhcp`) have NO gw= and must yield "" so the
-// caller falls back to the default route (the review-flagged regression:
-// gw-only reading silently lost dnsmasq's upstream on the default world).
-func TestParsePctGateway(t *testing.T) {
-	static := `arch: amd64
-cores: 2
-net0: name=eth0,bridge=vmbr0,gw=192.168.30.1,hwaddr=BC:24:11:71:48:B5,ip=192.168.30.9/24,type=veth
-ostype: debian
-`
-	if got := parsePctGateway(static); got != "192.168.30.1" {
-		t.Errorf("static gw = %q, want 192.168.30.1", got)
-	}
-	dhcp := `arch: amd64
-cores: 2
-net0: name=eth0,bridge=vmbr0,ip=dhcp,type=veth
-ostype: debian
-`
-	if got := parsePctGateway(dhcp); got != "" {
-		t.Errorf("dhcp gw = %q, want empty (no gw= key)", got)
-	}
-}
-
 // TestWorldManaged keeps a recorded k3s guest in the manifest when a re-run
 // opted k3s out (--no-k3s), so teardown still destroys it instead of leaking
 // the LXC + LV. litellm rides k3s and needs no guest carve-out.
@@ -722,69 +660,6 @@ func TestBootstrapStaticIPProxyOnly(t *testing.T) {
 		t.Errorf("cp must stay DHCP, got %q", got)
 	}
 }
-
-// TestGenSecretHex: the re-minted master key + postgres password are 32-byte
-// random hex — valid input for every consumer (and never committed).
-// TestRecordLitellm: coords land in config + managed (Services row + DNS + a
-// teardown sees the gateway).
-func TestRecordLitellm(t *testing.T) {
-	cfgPath := filepath.Join(t.TempDir(), "config.toml")
-	base := "domain = \"world.test\"\noperator_pubkey = \"" + strings.Repeat("a", 64) + "\"\nmanaged = [\"relay\", \"cp\", \"k3s\"]\n"
-	if err := os.WriteFile(cfgPath, []byte(base), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e := &rebuildEngine{f: rebuildFlags{configPath: cfgPath}}
-	if err := e.recordLitellm("http://192.168.30.7:31400", "192.168.30.7"); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Litellm.URL != "http://192.168.30.7:31400" || cfg.Litellm.Host != "192.168.30.7" {
-		t.Errorf("litellm coords = %+v", cfg.Litellm)
-	}
-	if !containsStr(cfg.Managed, "litellm") {
-		t.Errorf("managed must include litellm, got %v", cfg.Managed)
-	}
-	// idempotent: a second record doesn't duplicate the managed entry.
-	if err := e.recordLitellm("http://192.168.30.7:31400", "192.168.30.7"); err != nil {
-		t.Fatal(err)
-	}
-	if n := countStr(cfg.Managed, "litellm"); n != 1 {
-		t.Errorf("managed duplicated litellm %d times", n)
-	}
-}
-
-// TestRecordCaddy: coords land in config + managed (Services row + teardown
-// ownership), idempotently.
-func TestRecordCaddy(t *testing.T) {
-	cfgPath := filepath.Join(t.TempDir(), "config.toml")
-	base := "domain = \"world.test\"\noperator_pubkey = \"" + strings.Repeat("a", 64) + "\"\nmanaged = [\"relay\", \"cp\", \"k3s\"]\n"
-	if err := os.WriteFile(cfgPath, []byte(base), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e := &rebuildEngine{f: rebuildFlags{configPath: cfgPath}}
-	if err := e.recordCaddy("https://relay.world.test", "192.168.30.7"); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Caddy.URL != "https://relay.world.test" || cfg.Caddy.Host != "192.168.30.7" {
-		t.Errorf("caddy coords = %+v", cfg.Caddy)
-	}
-	if !containsStr(cfg.Managed, "caddy") {
-		t.Errorf("managed must include caddy, got %v", cfg.Managed)
-	}
-	if err := e.recordCaddy("https://relay.world.test", "192.168.30.7"); err != nil {
-		t.Fatal(err)
-	}
-	if n := countStr(cfg.Managed, "caddy"); n != 1 {
-		t.Errorf("managed duplicated caddy %d times", n)
-	}
-}
 func countStr(list []string, s string) int {
 	n := 0
 	for _, v := range list {
@@ -853,21 +728,6 @@ func TestLitellmRunArgs(t *testing.T) {
 	}
 }
 
-func TestRelayDomainHost(t *testing.T) {
-	cases := []struct{ domain, base, want string }{
-		{"freehold-test.darcydev.net", "darcydev.net", "freehold-test"},
-		{"example.com", "com", "example"},        // example.com under search com -> bare host example
-		{"freehold-test.darcydev.net", "", ""},   // no search base -> no record
-		{"a.b.darcydev.net", "darcydev.net", ""}, // dotted host not derivable (resolver rejects dots)
-		{"plain", "darcydev.net", ""},            // not a subdomain
-	}
-	for _, c := range cases {
-		if got := relayDomainHost(c.domain, c.base); got != c.want {
-			t.Errorf("relayDomainHost(%q,%q) = %q, want %q", c.domain, c.base, got, c.want)
-		}
-	}
-}
-
 // TestApplyConfigDefaults: `freehold rebuild` with no flags must pull the
 // recorded operator key, relay/CP hosts, thin-pool, agent name, and proxy IP
 // from the stored config — a smooth rebuild, no forced re-entry. Explicit flags
@@ -906,21 +766,5 @@ func TestApplyConfigDefaults(t *testing.T) {
 	}
 	if f2.operatorPubkey != "y" || f2.relayDomain != "z" {
 		t.Errorf("explicit flags must win: %q/%q", f2.operatorPubkey, f2.relayDomain)
-	}
-}
-
-func TestLegoDomainForHost(t *testing.T) {
-	cases := []struct{ host, configured, want string }{
-		{"relay.librem.freehold.technology", "", "relay.librem.freehold.technology"},
-		{"relay.librem.freehold.technology", "relay.librem.freehold.technology", "relay.librem.freehold.technology"},
-		{"relay.librem.freehold.technology", "*.librem.freehold.technology", "*.librem.freehold.technology"},
-		{"relay.librem.freehold.technology", "*.freehold-test.darcydev.net", "relay.librem.freehold.technology"}, // stale
-		{"relay.librem.freehold.technology", "other.bad.net", "relay.librem.freehold.technology"},                // mismatched
-		{"", "*.anything.net", ""},
-	}
-	for _, c := range cases {
-		if got := legoDomainForHost(c.host, c.configured); got != c.want {
-			t.Errorf("legoDomainForHost(%q,%q) = %q, want %q", c.host, c.configured, got, c.want)
-		}
 	}
 }
