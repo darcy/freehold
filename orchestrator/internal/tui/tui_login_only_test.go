@@ -98,3 +98,24 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// A login-only (runnerless) box is operable once the CP console answers — an
+// unseeded/unreachable relay must NOT lock it into configure mode (the fresh-box
+// path still has relay_url empty until the deployed CP reseeds it).
+func TestConvergedLoginOnlyIgnoresRelay(t *testing.T) {
+	// Runnerless + CP live + relay dead -> Running.
+	if !converged("", false, true, true) {
+		t.Fatal("login-only box with a reachable CP console must be Running even when the relay is unseeded")
+	}
+	// Runnerless + CP down -> configure.
+	if converged("", true, false, true) {
+		t.Fatal("login-only box whose CP console is down must NOT be Running")
+	}
+	// A runnerful (local-world) box still requires every pillar.
+	if converged("127.0.0.1:8787", false, true, true) {
+		t.Fatal("local-world box must still converge on relay+cp+runner")
+	}
+	if !converged("127.0.0.1:8787", true, true, true) {
+		t.Fatal("all-live local-world box must converge")
+	}
+}

@@ -236,7 +236,7 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		a.bootFns = append(a.bootFns, d.fn)
 	}
 	a.bootDone = func() {
-		m.Converged = m.RelayLive && m.CPLive && m.RunnerReach
+		m.Converged = converged(cfg.Runner.Addr, m.RelayLive, m.CPLive, m.RunnerReach)
 		if m.Converged {
 			m.Mode = ModeRunning
 		} else {
@@ -246,6 +246,20 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	}
 	m.activity = a
 	return tea.Batch(m.runBootStep(0), a.spin.Tick)
+}
+
+// converged settles the running/configure decision. A box WITH a local runner
+// is a converging world: every pillar must be live. A runnerless box is a
+// login-only OPERATOR — there is no local world to converge; it is operable as
+// soon as the CP console it logged into answers. The relay may be unseeded on a
+// fresh login box (the CP's /api/world feeds it once the deployed CP carries
+// its relay coords), so an unknown/unreachable relay must not lock the operator
+// out of the CP console — the probe row still shows it honestly.
+func converged(runnerAddr string, relayLive, cpLive, runnerReach bool) bool {
+	if runnerAddr == "" {
+		return cpLive
+	}
+	return relayLive && cpLive && runnerReach
 }
 
 // isSkipDetail reports whether a boot-probe detail is a legitimate no-op/skip
