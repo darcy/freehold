@@ -142,7 +142,7 @@ func init() {
 }
 
 var buildCmd = &cobra.Command{Use: "build",
-	Short: "Bring the whole world up end to end (fresh bootstrap OR rebuild — the same reconciling pipeline): door, runner, durable plane, relay + CP + k3s LXCs, deploys",
+	Short: "Bring the whole world up: CP-bring-up + trigger (the CP owns relay/k3s/storage/DNS/litellm/caddy/cert through its co-located runner); --full runs the old box-side pipeline",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		f := rebuildFlags{}
 		f.addr, _ = cmd.Flags().GetString("addr")
@@ -196,8 +196,20 @@ var buildCmd = &cobra.Command{Use: "build",
 		if err != nil {
 			return err
 		}
-		return eng.run()
+		full, _ := cmd.Flags().GetBool("full")
+		return buildRun(full, eng)
 	},
+}
+
+// buildRun is the build command's engine dispatcher: the slim CP-driven
+// build is the default; --full keeps the pre-slim box-side pipeline reachable
+// as a fallback (every post-CP stage run on the box) until the box-side
+// stages are removed.
+func buildRun(full bool, eng *rebuildEngine) error {
+	if full {
+		return eng.run()
+	}
+	return eng.runSlim()
 }
 
 // applyConfigDefaults fills any omitted rebuild flag from the stored config, so
@@ -260,6 +272,7 @@ func init() {
 	buildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
 	buildCmd.Flags().Bool("reset-dns", false, "Forget any stored DNS provider credentials so the build prompts for them again")
 	buildCmd.Flags().Bool("manage-dns", false, "Opt-in: freehold MANAGEs the world's DNS — creates/updates relay/cp <domain> A records -> the proxy IP on your provider (currently Cloudflare only), using the same credential the Let's Encrypt cert will reuse. Interactive runs ask when omitted; --yes requires this flag")
+	buildCmd.Flags().Bool("full", false, "Run the OLD box-side pipeline (the box runs every post-CP stage itself) instead of the default CP-driven build (CP-bring-up + trigger)")
 }
 
 // rebuildFlags is the command's collected answers.
@@ -740,6 +753,391 @@ func (e *rebuildEngine) run() error {
   operator pk:    %s
 `, e.f.relayDomain, e.f.cpDomain, e.f.addr, e.f.operatorPubkey)
 	return nil
+}
+
+// runSlim is the CP-decoupled build: the box brings up the CONTROL PLANE only
+// (door → verify → CP dataset → CP LXC → deploy-cp → agent-tools), hands the
+// world-state + secrets to the CP (DNS creds sealed to the agent-tools
+// identity + the litellm secrets sealed into the box runner, which deploy-cp
+// ships as the co-located runner), then TRIGGERS world_build — the CP brings up
+// relay/k3s/storage/DNS/litellm/caddy/cert through its co-located runner. The
+// box then records the post-world coords + brings the CPA up over the CP
+// toolset. The box is login + trigger for a world the CP owns.
+func (e *rebuildEngine) runSlim() error {
+	fmt.Fprintf(e.out, "building world %s (CP-bring-up + trigger — the CP owns relay/k3s/DNS/litellm/caddy/cert)\n", e.f.relayDomain)
+
+	// 1. the ops agent identity + the door (same as run()).
+	ensureAgentIdentity(rbOpsDir())
+	agentPK, err := loadRPubkey(rbOpsDir())
+	if err != nil {
+		return fmt.Errorf("ops agent identity unreadable at %s: %w", rbOpsDir(), err)
+	}
+	doorKey, err := e.stageProvision(agentPK)
+	if err != nil {
+		return err
+	}
+	if doorKey != "" {
+		if err := e.doorGate(doorKey); err != nil {
+			return err
+		}
+	}
+	if err := e.stageGrant(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ ops agent granted on %s\n", e.f.target)
+	if _, err := e.stageServe(); err != nil {
+		return err
+	}
+	if err := e.stageVerify(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ the door works — %s is reachable\n", e.f.host)
+
+	// 5.5. domains + 5.6. the ONE static proxy IP (same as run()).
+	if !e.f.yes {
+		if err := e.promptDomains(); err != nil {
+			return err
+		}
+	}
+	if e.f.relayDomain == "" || e.f.cpDomain == "" {
+		return fmt.Errorf("rebuild needs --relay-domain and --cp-domain (or an interactive run)")
+	}
+	if e.f.proxyIP == "" && !e.f.yes {
+		ans, err := e.prompt("proxy static IP (CIDR, e.g. 192.168.30.8/24) — REQUIRED, the one address relay/CP resolve to")
+		if err != nil {
+			return err
+		}
+		if a := strings.TrimSpace(ans); a != "" {
+			e.f.proxyIP = a
+		}
+	}
+	if e.f.proxyIP == "" {
+		return fmt.Errorf("rebuild needs --proxy-ip (the single static proxy/Caddy address)")
+	}
+	if !strings.Contains(e.f.proxyIP, "/") {
+		return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", e.f.proxyIP)
+	}
+
+	// 6. initial config so the plane mapping has somewhere to record.
+	if err := e.writeInitialConfig(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
+
+	// 6.4/6.6. DNS-manage opt-in + the DNS provider creds (captured IN MEMORY,
+	// sealed for the hand-off; promptDNSCred reuses the sealed box copies).
+	if e.worldHasEdge() {
+		manage := e.f.manageDNS
+		if !manage && !e.f.yes {
+			ans, err := e.prompt("manage the domain's DNS? freehold can point relay/cp A records at the proxy on Cloudflare. (y/n)")
+			if err != nil {
+				return err
+			}
+			manage = strings.EqualFold(strings.TrimSpace(ans), "y")
+		}
+		if manage {
+			if err := e.manageDomainDNS(); err != nil {
+				return err
+			}
+		}
+		if _, _, err := e.promptDNSCred("relay", e.f.relayDomain, ""); err != nil {
+			return fmt.Errorf("relay DNS provider credential: %w", err)
+		}
+		if _, _, err := e.promptDNSCred("cp", e.f.cpDomain, "relay"); err != nil {
+			return fmt.Errorf("control-plane DNS provider credential: %w", err)
+		}
+	}
+
+	// 7. the durable volume plane (the CP boot needs the cp dataset; the
+	// relay/k3s datasets are re-ensured by world_build, idempotently).
+	placement, err := e.stagePlacement()
+	if err != nil {
+		return err
+	}
+	if err := e.stageStorage(placement); err != nil {
+		return err
+	}
+	fmt.Fprintln(e.out, "  ✓ durable volume plane ready")
+
+	// 8. Seal the litellm secrets into the box runner package BEFORE deploy-cp
+	// ships it as the CP's co-located runner (world_build's litellm step then
+	// applies + registers by name).
+	if err := e.slimSeedLiteLLM(); err != nil {
+		return err
+	}
+
+	// 9. boot the CP LXC + record its coordinates.
+	fmt.Fprintln(e.out, "  · booting the cp LXC (create → docker; can take minutes)…")
+	if err := e.stageBootstrap("cp"); err != nil {
+		return err
+	}
+	if _, err := e.stageRecordLxc("cp"); err != nil {
+		return err
+	}
+	fmt.Fprintln(e.out, "  ✓ cp LXC booted + recorded")
+
+	// 10. deploy the CP + its co-located runner.
+	if err := e.stageDeployCp(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
+
+	// 11. deploy freehold-agent-tools (the trigger surface + world_build home).
+	if err := e.stageDeployAgentTools(); err != nil {
+		return err
+	}
+
+	// 12. hand the world's secrets to the CP: the DNS provider creds sealed to
+	// the agent-tools identity (world_build's cert issue path reads them).
+	if err := e.handoffDNS(); err != nil {
+		return err
+	}
+
+	// 13. TRIGGER world_build — the CP brings up the whole world through its
+	// co-located runner.
+	if err := e.triggerWorldBuild(); err != nil {
+		return err
+	}
+
+	// 14. record the post-world coordinates (relay/k3s coords + litellm/caddy
+	// coords world_build established) so the config + TUI + teardown agree.
+	if err := e.recordPostWorld(); err != nil {
+		return err
+	}
+
+	// 15. the CPA + created-agent reconcile (through the CP toolset, the audited
+	// create path).
+	if err := e.stageCpa(); err != nil {
+		return err
+	}
+	fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
+	if err := e.reconcileCreatedAgents(); err != nil {
+		return err
+	}
+
+	// 16. the relay's signing key (best-effort) + final merge save.
+	if rpk, ok := e.relayPubkeyNip11(); ok {
+		fmt.Fprintf(e.out, "  ✓ relay signing key: %s\n", rpk)
+	} else {
+		fmt.Fprintln(e.out, "  (relay signing key unreadable via NIP-11 — read it from the relay's data dir when you need --relay-pubkey)")
+	}
+	if err := e.finalSave(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
+
+	fmt.Fprintf(e.out, `
+  ╭─────────────────────────────────────────────────────────╮
+  │                    Freehold is up                      │
+  ╰─────────────────────────────────────────────────────────╯
+
+  relay:          https://%s
+  control plane:  https://%s
+  runner:         serving on %s
+  operator pk:    %s
+  (the CP owns relay/k3s/storage/DNS/litellm/caddy/cert — a fresh box only
+   needs: freehold login → freehold)
+`, e.f.relayDomain, e.f.cpDomain, e.f.addr, e.f.operatorPubkey)
+	return nil
+}
+
+// slimSeedLiteLLM seals the litellm master + postgres pw + provider key into
+// the PROXMOX-BOX runner package, which deploy-cp re-ships as the CP's
+// co-located runner — world_build's litellm step then applies the kube
+// workloads + registers the model with the secrets requested BY NAME. The
+// master is read back from the canonical k8s Secret when the k3s node is up,
+// else minted (first-run-wins, preserved in the runner package).
+func (e *rebuildEngine) slimSeedLiteLLM() error {
+	masterKey := ""
+	if cfg, _ := config.Load(e.f.configPath); cfg != nil && cfg.Lxc.K3s.Vmid != nil {
+		masterKey = e.litellmMasterKey(*cfg.Lxc.K3s.Vmid)
+	}
+	if masterKey == "" {
+		masterKey = stages.GenSecretHex()
+	}
+	postgresPw := stages.GenSecretHex()
+	runnerDir := filepath.Join(rbRunnerPkgs(), e.f.target)
+	reusing := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
+	providerKey := e.f.litellmProviderKey
+	if !reusing && providerKey == "" {
+		if e.f.yes {
+			return fmt.Errorf("litellm needs the provider key and none is sealed: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --yes)")
+		}
+		answer, err := e.prompt("litellm first provision: the provider (fireworks) API key")
+		if err != nil {
+			return err
+		}
+		providerKey = strings.TrimSpace(answer)
+		if providerKey == "" {
+			return fmt.Errorf("no litellm provider key supplied")
+		}
+	}
+	// Seal into the box runner package (shipped to the co-located runner).
+	if err := e.sealRunnerSecret("litellm", "FREEHOLD_LITELLM_MASTER", masterKey); err != nil {
+		return err
+	}
+	if err := e.sealRunnerSecret("postgres-pw", "FREEHOLD_LITELLM_PG", postgresPw); err != nil {
+		return err
+	}
+	if !reusing && providerKey != "" {
+		if err := e.sealRunnerSecret("provider-key", "FREEHOLD_LITELLM_PROVIDER", providerKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// agentToolsEncPubkey returns the agent-tools identity's ENCRYPTION pubkey
+// (read from the deployed server's identity in the cp LXC) — the recipient the
+// box seals the world's secrets to for the hand-off (world_build opens them
+// with the same identity's enc secret, in-process).
+func (e *rebuildEngine) agentToolsEncPubkey() ([]byte, error) {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return nil, fmt.Errorf("no cp coords for the agent-tools hand-off")
+	}
+	tmp := filepath.Join(os.TempDir(), "fh-agenttools-identity")
+	defer os.RemoveAll(tmp)
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return nil, err
+	}
+	ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- cat /srv/data/cp/agent-tools/identity.json", *cfg.Lxc.Cp.Vmid), 30))
+	if !ok {
+		return nil, fmt.Errorf("agent-tools identity unreadable in the cp LXC:\n%s", out)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "identity.json"), []byte(out), 0o600); err != nil {
+		return nil, err
+	}
+	id, err := flows.LoadIdentity(tmp)
+	if err != nil {
+		return nil, err
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.X25519PublicKey(secret)
+}
+
+// handoffDNS ships the world's DNS provider creds (relay + cp slots) to the CP,
+// sealed to the agent-tools identity via the established cert.SaveCreds record,
+// under the CP's world-secrets dir (world_build's cert issue path opens them).
+func (e *rebuildEngine) handoffDNS() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return fmt.Errorf("no cp coords for the DNS hand-off")
+	}
+	pub, err := e.agentToolsEncPubkey()
+	if err != nil {
+		return err
+	}
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+	for _, slot := range []string{"relay", "cp"} {
+		host := e.f.relayDomain
+		if slot == "cp" {
+			host = e.f.cpDomain
+		}
+		provider, env, err := e.promptDNSCred(slot, host, "")
+		if err != nil {
+			return fmt.Errorf("%s DNS provider credential: %w", slot, err)
+		}
+		local := filepath.Join(os.TempDir(), "fh-dns-"+slot+".json")
+		if err := cert.SaveCreds(local, provider, env, seal, pub, "cert-dns-"+slot); err != nil {
+			return err
+		}
+		remote := "/srv/data/cp/agent-tools/world-secrets/dns-" + slot + ".json"
+		cp := *cfg.Lxc.Cp.Vmid
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p /srv/data/cp/agent-tools/world-secrets'", cp), 30)); !ok {
+			_ = os.Remove(local)
+			return fmt.Errorf("mkdir CP world-secrets failed:\n%s", out)
+		}
+		ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct push %d %s %s", cp, local, remote), 60))
+		_ = os.Remove(local)
+		if !ok {
+			return fmt.Errorf("ship %s DNS cred to the CP failed:\n%s", slot, out)
+		}
+		fmt.Fprintf(e.out, "  ✓ %s DNS credential handed off to the CP\n", slot)
+	}
+	return nil
+}
+
+// triggerWorldBuild signs world_build over the agent-tools MCP (the box ops
+// identity — roster-granted at bootstrap) and prints the CP's report.
+func (e *rebuildEngine) triggerWorldBuild() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return err
+	}
+	mc, err := e.agentToolsMcp(cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(e.out, "  · triggering the CP world_build (relay/k3s/storage/DNS/litellm/caddy/cert through the co-located runner; several minutes)…")
+	text, err := callAgentToolsText(mc, "world_build", map[string]interface{}{})
+	if err != nil {
+		return fmt.Errorf("world_build trigger: %w", err)
+	}
+	for _, l := range strings.Split(text, "\n") {
+		if strings.TrimSpace(l) != "" {
+			fmt.Fprintf(e.out, "  ✓ %s\n", strings.TrimSpace(l))
+		}
+	}
+	return nil
+}
+
+// recordPostWorld records what world_build established: the relay/k3s coords
+// (read back through the runner) + the litellm/caddy coords (deterministic
+// from the proxy IP) + the DNS record mirror, so the config + TUI + teardown
+// agree with the CP-built world.
+func (e *rebuildEngine) recordPostWorld() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	for _, role := range []string{"relay", "k3s"} {
+		if vmid, verr := e.findLxcVmidExact(role); verr == nil {
+			if ip, ierr := e.readLxcIP(vmid); ierr == nil {
+				ipCIDR := ip
+				if !strings.Contains(ip, "/") {
+					ipCIDR = ip + "/24"
+				}
+				switch role {
+				case "relay":
+					cfg.Lxc.Relay = config.LxcGuest{Vmid: &vmid, Ip: &ipCIDR}
+				case "k3s":
+					cfg.Lxc.K3s = config.LxcGuest{Vmid: &vmid, Ip: &ipCIDR}
+				}
+			}
+		}
+	}
+	proxyIP := config.StripCIDR(e.f.proxyIP)
+	cfg.Litellm = config.LitellmSpec{URL: "http://" + proxyIP + ":31400", Host: proxyIP}
+	if !containsStr(cfg.Managed, "litellm") {
+		cfg.Managed = append(cfg.Managed, "litellm")
+	}
+	cfg.Caddy = config.CaddySpec{URL: cfg.RelayURL, Host: proxyIP}
+	if !containsStr(cfg.Managed, "caddy") {
+		cfg.Managed = append(cfg.Managed, "caddy")
+	}
+	// DNS mirror (the records world_build registered).
+	recs := map[string]string{}
+	for _, r := range stages.DnsRecords(cfg.RelayHost(), lxcIP(cfg.Lxc.Relay), cfg.CPHost(), lxcIP(cfg.Lxc.Cp), proxyIP, proxyIP) {
+		recs[r.Name] = r.IP
+	}
+	if cfg.Dns.Records == nil {
+		cfg.Dns.Records = map[string]string{}
+	}
+	for k, v := range recs {
+		cfg.Dns.Records[k] = v
+	}
+	return cfg.Save(e.f.configPath)
+}
+
+func lxcIP(g config.LxcGuest) string {
+	if g.Ip == nil {
+		return ""
+	}
+	return config.StripCIDR(*g.Ip)
 }
 
 // stageProvision runs control-plane provision; returns the fresh ssh public

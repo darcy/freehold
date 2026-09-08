@@ -104,7 +104,7 @@ func runInstallWith(in io.Reader, out io.Writer, newEngine func(rebuildFlags) (*
 	}
 	// Share the ONE buffered reader — see package comment above.
 	eng.stdin = ui.in
-	return eng.run()
+	return eng.runSlim()
 }
 
 // collectAnswers is the Rust collect() port: the world details, the

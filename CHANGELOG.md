@@ -83,8 +83,11 @@ world-state, migrations, async cert) extend it as they land.
   rides the sealed co-located runner package, never argv), and resolves the edge
   certs CP-side (durable-reuse gate — no LE order when the durable mirror has a
   valid cert — else an in-process resumable DNS-01 issue, sealed cred on the
-  CP, install through the co-located runner); the box `build` slims to
-  CP-bring-up + trigger. The CPA
+  CP, install through the co-located runner); the box `build` is now
+  CP-bring-up + trigger: door → CP LXC → deploy CP + agent-tools → hand-off
+  (DNS creds sealed to the agent-tools identity, litellm secrets sealed into
+  the shipped runner) → trigger world_build → record coords → CPA (`--full`
+  keeps the old box-side pipeline reachable as a fallback). The CPA
   harness is
   deliberately NOT given the mutating world tools (locked "conversation + create only").
 - **A shared stage library (`internal/stages`).** The pure world-bring-up command
