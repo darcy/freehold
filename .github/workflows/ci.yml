@@ -47,7 +47,15 @@ jobs:
         working-directory: control-plane
         run: go build ./...
 
-      - name: Go vet
+      - name: Go vet (contract)
+        working-directory: contract
+        run: go vet ./...
+
+      - name: Go vet (platform)
+        working-directory: platform
+        run: go vet ./...
+
+      - name: Go vet (control-plane)
         working-directory: control-plane
         run: go vet ./...
 
