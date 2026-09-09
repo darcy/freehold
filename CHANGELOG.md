@@ -45,11 +45,14 @@ perform CP-lifecycle work — not just the box that first built the world.
   `$` / `(` / `;` / `&` / `|` / newlines) BEFORE it is ever single-quoted into
   the append/remove shell command. `TestDoorKeyRe` pins the rejects.
 - **`freehold door authorize|revoke`** — the box derives its door key
-  **deterministically** from its agent-ops identity `enc_secret` seed
-  (`crypto.SSHPublicKeyFromSeed` — the private half never leaves the box, only
+  **deterministically** from its agent-ops identity `nostr_secret` seed — the
+  SAME key that signs its world API calls (DOOR_SPEC §3) —
+  (`crypto.SSHPublicKeyFromSeed`: the private half never leaves the box, only
   the public line is presented, and the key is stable across re-logins so a
   revoke actually removes it) and calls the world tool signed as its ops
-  identity.
+  identity. Revoke is exact-line removal with a real error on a real failure
+  (no masked `|| true` — a false "revoked" for the lost/compromised-box lever
+  would be a silent security lie).
 
 ### Notes
 

@@ -1351,7 +1351,14 @@ func buildWorldDoor(spec *deploySpec) (agent.DoorAuthorizeAppend, agent.DoorRevo
 		if !doorKeyRe.MatchString(pubkey) {
 			return fmt.Errorf("world-revoke-door: pubkey must match a strict authorized_keys line (key type + base64 body + optional safe comment, no shell metacharacters)")
 		}
-		cmd := "sed -i '\\|" + pubkey + "|d' ~/.ssh/authorized_keys 2>/dev/null || true"
+		// Exact-line removal with a real error on a real failure (NO `|| true`
+		// masking — a false "revoked" for the lost/compromised-box lever is a
+		// silent security lie). Run only when the file exists (absent = nothing
+		// to revoke, not an error). The `.` in the comment is the ONLY regex
+		// special the doorKeyRe charset allows — escape it so the sed address
+		// is a literal line, matching authorize's grep -Fqx exact-line check.
+		escaped := strings.ReplaceAll(pubkey, ".", `\.`)
+		cmd := "if [ -f ~/.ssh/authorized_keys ]; then sed -i '\\|" + escaped + "|d' ~/.ssh/authorized_keys; fi"
 		if _, err := spec.execOut(cmd, 30); err != nil {
 			return fmt.Errorf("world-revoke-door: %w", err)
 		}
