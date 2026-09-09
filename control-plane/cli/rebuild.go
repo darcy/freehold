@@ -229,6 +229,12 @@ func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
 	if f.proxyIP == "" && cfg.Proxy.Ip != nil {
 		f.proxyIP = *cfg.Proxy.Ip
 	}
+	// A rebuild of an already-DNS-managed world keeps managing DNS: seed
+	// --manage-dns from the recorded [dns.manager] so the prompt is skipped
+	// (the operator doesn't re-answer "y/n" every build).
+	if !f.manageDNS && cfg.Dns.Manager != nil && cfg.Dns.Manager.Managed {
+		f.manageDNS = true
+	}
 	return nil
 }
 
