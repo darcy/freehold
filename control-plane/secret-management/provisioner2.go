@@ -40,10 +40,17 @@ func RotateSecret(store *state.StateStore, name string, newSecret []byte) (*stat
 		return nil, err
 	}
 	ciphertextHex := fmt.Sprintf("%x", sealed)
+	// Grants are read STRICTLY (the doc contract: a read error is an error —
+	// silently shipping a runner nobody may call hides the reason). Fail the
+	// rotate rather than strip every grant from the re-shipped package.
+	grants, err := loadGrants(runnerRec.PackageDir)
+	if err != nil {
+		return nil, fmt.Errorf("rotate %s: read shipped grants: %w", name, err)
+	}
 	pkg := wire.New(
 		map[string]string{name: ciphertextHex},
 		map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name}},
-		currentGrants(runnerRec.PackageDir),
+		grants,
 	)
 	if err := pkg.WriteToDir(runnerRec.PackageDir); err != nil {
 		return nil, err
@@ -379,16 +386,8 @@ func runnerProfile(store *state.StateStore, name string) (*relay.RunnerProfile, 
 	}, nil
 }
 
-// currentGrants loads the shipped-package grants (a read error is an error —
-// silently shipping a runner nobody may call hides the reason).
-func currentGrants(dir string) []string {
-	g, err := loadGrants(dir)
-	if err != nil {
-		return []string{}
-	}
-	return g
-}
-
+// currentGrantsOrEmpty loads the shipped-package grants BEST-EFFORT for a
+// rollback path (a restore failure must not block the rollback).
 func currentGrantsOrEmpty(dir string) []string {
 	g, err := loadGrants(dir)
 	if err != nil {
