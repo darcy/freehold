@@ -35,19 +35,19 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"freehold/control-plane/api/agent"
-	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
-	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
-	"freehold/platform/services/externaldns/cloudflare"
-	"freehold/platform/provisioning/drive"
-	"freehold/control-plane/cli/flows"
-	"freehold/platform/provisioning/stages"
 	"freehold/contract/state"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agent"
+	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
+	"freehold/control-plane/cli/flows"
+	"freehold/platform/provisioning/drive"
+	"freehold/platform/provisioning/stages"
+	"freehold/platform/services/certificates/letsencrypt"
+	"freehold/platform/services/externaldns/cloudflare"
 )
 
 // dnsCredCmd stores the Caddy edge's DNS provider credential (provider + env)
@@ -301,7 +301,7 @@ type rebuildFlags struct {
 	// seed must only fill the omitted case so an operator can still opt out).
 	manageDNSExplicit bool
 	manageDNS         bool
-	yes                bool
+	yes               bool
 }
 
 // rebuildBins are the resolved sibling binary paths. Go has no
