@@ -1,8 +1,10 @@
 /target/
-orchestrator/target/
-# a local `go build -o ../target/...` mishap can drop a binary directly under
-# orchestrator/ — never commit it
-orchestrator/freehold-agent-tools
+control-plane/target/
+contract/target/
+platform/target/
+# a local `go build -o ../target/...` mishap can drop a binary directly under a
+# module dir — never commit it
+control-plane/freehold-agent-tools
 **/.freehold/
 
 # terraform state is sensitive — never committed

@@ -63,7 +63,7 @@ to run, idle and active.
 - [x] A4. Give it a dedicated toolset (create-agent, grant, manage) in place
       of a service-specific one: `freehold-agent-tools`, a real MCP server on
       the CP exposing `create_agent` / `grant_agent` / `manage_agent`, handlers
-      calling `internal/agent/tools.go` in-process, authorized per call against
+      calling `control-plane/api/agent/tools.go` in-process, authorized per call against
       the server's own relay roster (NIP-29 channel + 39002 membership,
       fail-closed), seeded at bootstrap and dogfooded by the build. No skill-execution tools yet.
 - [x] A5. Wire it into the existing agent registry (already live: named agents
@@ -79,13 +79,13 @@ to run, idle and active.
 
 #### Phase B — CPA system prompt
 
-- [x] B1. Write `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (the single
-      prompts directory, inside the `freehold/orchestrator` Go module so the
+- [x] B1. Write `platform/agents/freehold/prompt.md` (the single
+      prompts directory, inside the `freehold/platform` Go module so the
       `//go:embed` can reach it): purpose, tone, and explicit tool/scope
       boundaries.
 - [x] B2. Bootstrap loads this file into the harness config at first spawn
-      (the orchestrator embeds it — `//go:embed CPA_SYSTEM_PROMPT.md` in the
-      `orchestrator/prompts` package — and the CPA/agent pod mounts it as a
+      (the `platform/agents` Go package embeds it — `//go:embed freehold/prompt.md` in the
+      `platform/agents` package — and the CPA/agent pod mounts it as a
       `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`).
 - [x] B3. Every restart re-reads the current file from disk (never cached) —
       editing the prompt and redeploying is the only way CPA's purpose
@@ -94,7 +94,7 @@ to run, idle and active.
 > **Phase B deferral (named, not lost):** the pod reads its prompt from a
 > `<pod>-prompt` ConfigMap (mounted read-only at
 > `/srv/freehold/CPA_SYSTEM_PROMPT.md`), seeded at apply time from the
-> orchestrator's embedded `orchestrator/prompts/CPA_SYSTEM_PROMPT.md`. A host restart of that
+> the control plane's embedded `platform/agents/freehold/prompt.md`. A host restart of that
 > pod re-reads the mounted copy, so editing the prompt and redeploying changes
 > CPA's behavior (B3 as planned). A compute-only teardown/rebuild (Phase
 > 0.12) re-seeds the pod from the *embedded* bytes, so a prompt edit made

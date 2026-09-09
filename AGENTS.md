@@ -88,7 +88,8 @@ repo, not the history.
   relay outage. No relay fork or patch.
 - **The CPA is a real, LLM-backed reasoning agent — the system's main user touchpoint.**
   It runs on the same buzz-acp/goose-class harness as the expert agents it creates, gets its
-  purpose from `orchestrator/prompts/CPA_SYSTEM_PROMPT.md` (embedded by the orchestrator and
+  purpose from `platform/agents/freehold/prompt.md` (embedded by the `platform/agents` Go
+  package and shipped by the control plane,
   mounted into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
   `/srv/freehold/CPA_SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
@@ -151,8 +152,8 @@ changelog.
   every readiness probe rather than cached once.
 - **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP
   surface on the CP (`freehold-agent-tools`), not chat.** The Go methods
-  (`orchestrator/internal/agent/tools.go`) are served by a dedicated CP-side binary
-  (`cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
+  (`control-plane/api/agent/tools.go`) are served by a dedicated CP-side binary
+  (`control-plane/api/cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
   shared signed-header scheme and authorized against the server's own relay roster (its
   NIP-29 channel + 39002 membership, read fresh per call, fail-closed).   Seeded at bootstrap;
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
@@ -172,16 +173,23 @@ changelog.
 
 ## Build / test
 
-- Rust (`core/`, `runner/`, `control-plane/`, `console-client/`, `testkit/`, `acceptance/`):
+- Rust (`control-plane/core/`, `control-plane/runner/`, `control-plane/console/`,
+  `control-plane/console-client/`, `control-plane/testkit/`, `control-plane/acceptance/`):
   `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
   declares `rust-version = "1.94"`).
-- Go (`orchestrator/` — the `freehold` and `freehold-orchestrator` binaries, the TUI, and the
-  `harness/` release gate): run Go through mise (`mise exec go@1.25.0 -- go …`; `go.mod`
-  pins `go 1.25.0`); `cd orchestrator && go build ./... && go vet ./... &&
-  go test ./...`; `go test ./harness/` drives `target/debug/freehold-harness-oracle` and
-  gates every crypto primitive against the Rust `core` byte-for-byte.
-- **`freehold-agent-tools` must be built statically** (`CGO_ENABLED=0 go build -C orchestrator
-  -o target/release/freehold-agent-tools ./cmd/freehold-agent-tools`): the CP server ships
+- Go — three modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
+  `go 1.25.0`):
+  - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
+    console/relay/state): `cd contract && go build ./... && go vet ./... && go test ./...`
+  - `platform/` (`freehold/platform` — the evolving world: services/provisioning/agents/
+    migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`
+  - `control-plane/` (`freehold/control-plane` — the mechanism: api/cli/secret-management;
+    the `freehold` and `freehold-orchestrator` binaries, the TUI, and the `harness/` release
+    gate): `cd control-plane && go build ./... && go vet ./... && go test ./...`;
+    `go test ./core/harness/` drives `target/debug/freehold-harness-oracle` and gates every
+    crypto primitive against the Rust `core` byte-for-byte.
+- **`freehold-agent-tools` must be built statically** (`CGO_ENABLED=0 go build -C control-plane
+  -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools`): the CP server ships
   its own binary to agent pods, which run Alpine/musl — a glibc-dynamic build "silently not
   found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
 - No formatter/linter config beyond rustfmt + clippy defaults.
@@ -189,9 +197,9 @@ changelog.
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
   `freehold-acceptance` reproduces Chunk 1's acceptance criteria hermetically on loopback.
 
-### Testing the TUI (`freehold`, `cmd/freehold` → bubbletea dashboard)
+### Testing the TUI (`freehold`, `control-plane/cli/cmd/freehold` → bubbletea dashboard)
 
-`go test` under `internal/tui/` verifies form logic, but it does NOT prove the running TUI.
+`go test` under `control-plane/cli/tui/` verifies form logic, but it does NOT prove the running TUI.
 **Always test the BUILT binary** — never reason from `go test` + a stale `~/.cargo/bin/freehold`.
 The test step below rebuilds it FIRST, so there is nothing to remember: if you change a TUI flow
 (forms, keybindings, dispatch, pre-flow chaining like the rebuild→DNS ask), rebuild + test the
@@ -199,7 +207,7 @@ installed binary in one go:
 
 ```bash
 # 0. rebuild + place the binary FIRST (a passing go test does not re-place it):
-cd orchestrator && go build -o target/debug/freehold ./cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
+cd control-plane && go build -o target/debug/freehold ./cli/cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
 
 # 1. isolate state so the flow is deterministic (e.g. no DNS cred already stored):
 cat > /tmp/fh-tui-config.toml <<'EOF'
@@ -234,7 +242,8 @@ always current — a TUI change is never "tested" against a stale build.
 ## Code style
 
 - Rust: follow rustfmt; small crates; keep the runner↔CP contract at the crate boundary and
-  language-agnostic (MCP over HTTP). Go: `gofmt` + `go vet` clean across `orchestrator/`.
+  language-agnostic (MCP over HTTP). Go: `gofmt` + `go vet` clean across `contract/`,
+  `control-plane/`, and `platform/`.
 - **Never** put secrets in code, config, tests, logs, or committed files. Private keys arrive
   via env var / mounted secret. No secret dumps in output or agent context.
 - Keep `exec` generic — do not add semantic tools to work around a connector's API.

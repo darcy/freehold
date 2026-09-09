@@ -6,18 +6,16 @@ scope, per-tenant teardown, the durable volume plane) and the Chunk-4 work
 live in `roadmap/POC.md`; the rest of the carried backlog
 (C1–C7, D1–D4, E1–E6, F1–F3, G1–G7) was never written down anywhere else.
 
-## The Rust→Go refactor (orchestrator, installer, control-plane)
+## The Rust→Go refactor (the three-module tree)
 
-*   **The whole orchestrator/installer surface is Go.** `orchestrator/` is the
-    Go module `freehold/orchestrator` (go 1.25), and both binaries —
-    `freehold` (no args = the bubbletea TUI; `freehold <subcmd>` = the CLI)
-    and `freehold-orchestrator` — are Go. `internal/` carries 18 packages:
-    bootstrap, cli, client, config, console, crypto, delegate, deploy, drive,
-    flows, harness, planebase, provisioner, relay, state, teardown, tui,
-    wire.
+*   **The whole operator surface is Go, three modules.** `contract/` is the
+    shared wire/trust leaf (`freehold/contract`), `control-plane/` is the
+    stable mechanism (`freehold/control-plane` — `freehold` with no args = the
+    bubbletea TUI; `freehold <subcmd>` = the CLI), and `platform/` is the
+    evolving world (`freehold/platform`).
 
 *   **The Rust `core` (crypto/identity/wire) and `runner` stay Rust** as the
-    byte-exact reference oracle. `orchestrator/harness/` (`harness_test.go`
+    byte-exact reference oracle. `control-plane/core/harness/` (`harness_test.go`
     drives `target/debug/freehold-harness-oracle`, the Rust oracle crate) is
     the release gate: the Go crypto reproduces the Rust `core` surface
     byte-exactly — BIP-340 Schnorr via btcec/v2 (parity-negated scalar aux
@@ -125,7 +123,7 @@ live in `roadmap/POC.md`; the rest of the carried backlog
 *   **Go↔Rust gates stay green.** `cargo build --workspace` clean, `cargo
     test --workspace` 0 fail, `go vet ./...` clean, `go test ./...` green
     (harness byte-exact gate + all packages); both Go binaries build from
-    `target/debug/` (`go build -C orchestrator -o ../target/debug/…`), and
+    `target/debug/` (`go build -C control-plane -o ../target/debug/…`), and
     `go test ./harness/` is the release gate for every primitive.
 
 ## Pre-C0 and Chunk 4 planning
