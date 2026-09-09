@@ -101,7 +101,7 @@ passes this regex is a key line, not a shell payload.
 - The append is idempotent (grep-before-append), so re-login/re-append is
   safe; the revoke is exact-line removal.
 
-### 6. Protection of the mechanism
+### 5. Protection of the mechanism
 
 - The door pubkeys are **not secrets** (public keys), so the CP can hold them
   in its durable state (`/srv/data/cp/...`) for auditability. The private
