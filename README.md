@@ -61,8 +61,7 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       change with the console's own channel-owner identity)
   cli/                the operator interface: tui/ (bubbletea dashboard), login/
                       (freehold login/logout), flows/, teardown/, bootstrap-cp/
-                      (the day-0 mechanism install), cmd/ (the freehold and
-                      freehold-orchestrator binaries)
+                      (the day-0 mechanism install), cmd/ (the freehold binary)
   secret-management/  provision/rotate/revoke/grant (the provisioner)
   core/               (Rust) the byte-exact contract oracle + harness/ (the
                       Go↔Rust byte-gate, test-only)
@@ -316,12 +315,10 @@ package, errors instead of destroying a runner's key.
 ### freehold: the CLI (the scripted CPA stand-in)
 
 The CLI binary is `freehold`, built from the `control-plane/` Go module
-(the `freehold-orchestrator` binary keeps the old name so teardown and the TUI
-can resolve it as a sibling):
+(the `freehold-orchestrator` binary folded into it — one binary, two surfaces):
 
 ```sh
 go build -C control-plane -o ../target/debug/freehold ./cli/cmd/freehold
-go build -C control-plane -o ../target/debug/freehold-orchestrator ./cli/cmd/freehold-orchestrator
 freehold --help
 ```
 

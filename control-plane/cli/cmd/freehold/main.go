@@ -3,7 +3,7 @@
 //
 //   - no args                -> the interactive TUI dashboard
 //   - --config <path>        -> the TUI with an explicit config
-//   - freehold <subcommand>  -> the CLI (the freehold-orchestrator surface)
+//   - freehold <subcommand>  -> the CLI (the operator surface)
 package main
 
 import (

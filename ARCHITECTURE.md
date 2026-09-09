@@ -167,7 +167,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **The mechanism is one Go module** (go 1.25): `api/` (the unified scoped
     API — agent toolset + world actions), `cli/` (the operator interface:
     `tui/`, `login/`, `flows/`, `teardown/`, `bootstrap-cp/`, `cmd/` for the
-    `freehold` and `freehold-orchestrator` binaries), `secret-management/`
+    `freehold` binary), `secret-management/`
     (provision/rotate/revoke/grant), and the Rust crates `core/` (the
     byte-exact contract oracle + the `harness/` Go byte-gate), `runner/`,
     `console/` (the CP console + secret provisioner), `console-client/`,
