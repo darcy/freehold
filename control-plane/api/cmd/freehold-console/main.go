@@ -24,7 +24,7 @@ import (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|adopt|add-secret|identity> …")
+		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|adopt|add-secret|revoke|identity> …")
 		os.Exit(2)
 	}
 	var err error
@@ -39,10 +39,12 @@ func main() {
 		err = cmdAdopt(os.Args[2:])
 	case "add-secret":
 		err = cmdAddSecret(os.Args[2:])
+	case "revoke":
+		err = cmdRevoke(os.Args[2:])
 	case "identity":
 		err = cmdIdentity(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|identity)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -155,6 +157,39 @@ func cmdServe(args []string) error {
 	}
 	log.Printf("freehold-console (Go) serving on %s (console agent %s)", *addr, consolePK)
 	return http.ListenAndServe(*addr, srv)
+}
+
+func cmdRevoke(args []string) error {
+	fs := flag.NewFlagSet("revoke", flag.ExitOnError)
+	relayURL := fs.String("relay-url", "", "relay to cut the runner off on")
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	name := ""
+	if len(pos) > 0 {
+		name = pos[0]
+	}
+	if name == "" || *stateDir == "" {
+		return fmt.Errorf("revoke <name> --state-dir")
+	}
+	store, err := state.Open(*stateDir)
+	if err != nil {
+		return err
+	}
+	rec, err := provisioner.RevokeRunner(store, name)
+	if err != nil {
+		return err
+	}
+	if *relayURL != "" {
+		if err := provisioner.RevokeRunnerChannel(store, *relayURL, name, *stateDir); err != nil {
+			return err
+		}
+		fmt.Printf("revoked %s on the relay (%s)\n", name, *relayURL)
+	}
+	fmt.Printf("revoked runner %s (was %s)\n", name, rec.NostrPubkey)
+	return nil
 }
 
 func cmdIdentity(args []string) error {

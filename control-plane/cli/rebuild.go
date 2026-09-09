@@ -882,7 +882,7 @@ func (e *rebuildEngine) stageProvision(agentPK string) (string, error) {
 		// state record with a deleted package cascades on every later stage.
 		if _, err := os.Stat(filepath.Join(runnerDir, "identity.json")); err != nil {
 			return "", fmt.Errorf(
-				"a runner %q record exists but its package at %s is gone — wipe the world for a clean re-bootstrap:\n  rm -rf ~/.freehold\n(or revoke the record: control-plane revoke %s --state-dir %s)",
+				"a runner %q record exists but its package at %s is gone — wipe the world for a clean re-bootstrap:\n  rm -rf ~/.freehold\n(or revoke the record: freehold-console revoke %s --state-dir %s)",
 				e.f.target, runnerDir, e.f.target, rbStateDir())
 		}
 		return "", nil
