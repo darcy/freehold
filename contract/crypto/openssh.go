@@ -105,7 +105,7 @@ func GenerateSSHKeypair(comment string) (privatePEM []byte, pubLine string, err 
 
 // SSHPublicKeyFromSeed derives the authorized_keys public line from a fixed
 // 32-byte ed25519 seed (deterministic — same seed → same line). The login
-// door uses the box's own identity seed (its enc_secret) so the box's door
+// door uses the box's own identity seed (its nostr_secret) so the box's door
 // key is stable across re-logins; only the public line is ever presented.
 func SSHPublicKeyFromSeed(seed []byte, comment string) (string, error) {
 	if len(seed) != ed25519.SeedSize {

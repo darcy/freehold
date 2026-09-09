@@ -59,7 +59,7 @@ func TestSSHPublicKeyFromSeedDeterministic(t *testing.T) {
 	if c == a {
 		t.Fatal("different seed must yield a different door key")
 	}
-	// The seed round-trips through hex (the CLI decodes enc_secret hex).
+	// The seed round-trips through hex (the CLI decodes nostr_secret hex).
 	if _, err := hex.DecodeString(hex.EncodeToString(seed)); err != nil {
 		t.Fatal(err)
 	}
