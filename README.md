@@ -142,9 +142,11 @@ control-plane/acceptance/  freehold-acceptance — the Chunk-1 acceptance script
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(three modules: `contract/`, `control-plane/`, `platform/`) + `just`
-([just](https://github.com/casey/just) — `cargo install just`, or `brew install
-just`).
+(three modules: `contract/`, `control-plane/`, `platform/`) + `mise`
+(the justfile recipes run `go`/`rust` through `mise exec` so the right
+toolchain versions are guaranteed — `curl https://mise.run | sh` or `brew
+install mise`) + `just` ([just](https://github.com/casey/just) — `cargo
+install just`, or `brew install just`).
 
 ```sh
 # build the full binary set a `freehold build`/`teardown` resolves
