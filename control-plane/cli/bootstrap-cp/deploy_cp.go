@@ -119,7 +119,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		}
 	}
 
-	mkdir := fmt.Sprintf("mkdir -p %s/console && mkdir -p %s && rm -f %s/control-plane.b64",
+	mkdir := fmt.Sprintf("mkdir -p %s/console && mkdir -p %s && rm -f %s/freehold-console.b64",
 		spec.StateDir, spec.BinDir, spec.BinDir)
 	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, mkdir), "mkdir deploy dirs", 30); err != nil {
 		return nil, err
@@ -132,9 +132,9 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		return nil, err
 	}
 
-	// Ship the control-plane binary.
+	// Ship the Go console binary (the CP CLI + web server).
 	if err := shipFile(clientConn, target, spec, spec.BinaryPath,
-		spec.BinDir+"/control-plane", "control-plane binary"); err != nil {
+		spec.BinDir+"/freehold-console", "console binary"); err != nil {
 		return nil, err
 	}
 
@@ -177,7 +177,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	}
 
 	start := fmt.Sprintf(
-		"setsid nohup %s/control-plane serve --state-dir %s --addr %s%s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
+		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
 		spec.BinDir, spec.StateDir, spec.BindAddr, adminFlag, originFlag, relayFlag, atFlag, spec.StateDir, spec.StateDir)
 	out, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, start), "start control plane", 30)
 	if err != nil {
@@ -214,7 +214,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 
 	// Read back the box's console identity pubkey.
 	out, err = bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc,
-		spec.BinDir+"/control-plane identity --state-dir "+spec.StateDir), "console identity pubkey", 30)
+		spec.BinDir+"/freehold-console identity --state-dir "+spec.StateDir), "console identity pubkey", 30)
 	if err != nil {
 		return nil, err
 	}
@@ -260,13 +260,13 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 			k, a := firstTargetKA(string(raw))
 			kind, address = k, a
 		}
-		adopt := fmt.Sprintf("%s/control-plane adopt --kind %s --address %s --package-dir %s --state-dir %s --mcp-addr 127.0.0.1:8787 %s",
-			spec.BinDir, kind, address, runnerDir, spec.StateDir, runnerName)
+		adopt := fmt.Sprintf("%s/freehold-console adopt %s --kind %s --address %s --package-dir %s --state-dir %s --mcp-addr 127.0.0.1:8787",
+			spec.BinDir, runnerName, kind, address, runnerDir, spec.StateDir)
 		if _, err := execTolerantAlreadyExists(clientConn, target, deploy.LxcCmd(spec.LXc, adopt), "adopt co-located runner", 60); err != nil {
 			return nil, err
 		}
-		grant := fmt.Sprintf("%s/control-plane grant --state-dir %s --pubkey %s %s",
-			spec.BinDir, spec.StateDir, pubkey, runnerName)
+		grant := fmt.Sprintf("%s/freehold-console grant %s --state-dir %s --pubkey %s",
+			spec.BinDir, runnerName, spec.StateDir, pubkey)
 		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, grant), "self-grant console to co-located runner", 60); err != nil {
 			return nil, err
 		}

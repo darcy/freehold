@@ -346,19 +346,22 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 ### The console (Go; the loopback admin/ops web surface)
 
-*   **The control plane console is a Go server** (`control-plane/api/console/`
+*   **The control plane console is a Go server + CP CLI** (`control-plane/api/console/`
     + `control-plane/api/cmd/freehold-console`), ported from the Rust console
     crate at parity: the same `/api/*` routes (auth/overview/world/teardown/
     provision/rotate/revoke/grant/DNS/agents/portal) with the SAME security
     guards — NIP-98 operator login (challenge/session), `HttpOnly;
     SameSite=Strict` session cookies, single-use portal tokens, login
     freshness windows, the DNS-rebinding `Origin` guard, and the
-    loopback-only-until-authn bind guard. The console is the CP's own identity
-    (0600, minted on the box at first serve — never shipped) that signs
-    readiness probes against each runner — no side door, the runner still
-    fails closed. `contract/console` is the Go client that talks to it; the
-    Rust console crate is scheduled for deletion once the deploy ships the Go
-    binary (REFACTOR-PLAN Phase 3).
+    loopback-only-until-authn bind guard. It also carries the box-side CP CLI
+    verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`), so the deploy
+    and the rebuild engine ship + drive a Go console end to end. The console
+    is the CP's own identity (0600, minted on the box at first serve — never
+    shipped) that signs readiness probes against each runner — no side door,
+    the runner still fails closed. `contract/console` is the Go client that
+    talks to it. The Rust console crate is still in the tree only as the
+    `acceptance` harness's hermetic fixture (the deletion waits on porting that
+    gate to Go).
 
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`

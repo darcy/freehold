@@ -174,7 +174,7 @@ func init() {
 	deployCpCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "Remote state dir on the box (also holds the seeded console identity)")
 	deployCpCmd.Flags().String("bin-dir", cpdeploy.DefaultCPBinDir(), "Remote dir for the shipped binary")
 	deployCpCmd.Flags().String("bind", "", "Loopback bind for the console (C3: non-loopback is refused). An EXPLICIT value is always honored. (Option so the default flip under --operator-pubkey can't swallow a deliberate --bind 127.0.0.1:8080.)")
-	deployCpCmd.Flags().String("binary", "", "LOCAL path of the built control-plane binary")
+	deployCpCmd.Flags().String("binary", "", "LOCAL path of the built freehold-console binary")
 	deployCpCmd.Flags().String("relay-url", "", "The relay this CP helps serve (the ONE scope; C4 posture record)")
 	deployCpCmd.Flags().String("relay-pubkey", "", "The RELAY's signing pubkey (the 39002 roster trust anchor). When omitted, the deploy tries NIP-11 discovery (best-effort — Buzz often advertises none; pass it when known)")
 	deployCpCmd.Flags().String("relay-host-ip", "", "The relay LXC's LAN IP — pinned into the CP guest's /etc/hosts so the console can RESOLVE the relay domain (the operator's DNS may not reach inside the guests: tailnet etc.)")

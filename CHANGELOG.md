@@ -25,6 +25,40 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.5] — Phase 3: the deploy ships the Go console (runtime is Go end to end)
+
+The REFACTOR-PLAN's "Rust only where it earns its keep" now holds for the
+mechanism's runtime: the CP console that `deploy-cp` ships and the box-side CP
+CLI verbs are Go. The Rust console crate survives only as the `acceptance`
+harness's hermetic fixture (the crate deletion is the final Phase-3 step, tied
+to porting that gate to Go).
+
+### Changed
+
+- **`deploy-cp` ships `freehold-console` (Go) instead of the Rust
+  `control-plane` binary.** `DeployCp` serves it with the Go flag shape
+  (`--admin-pubkeys`, `--public-origin`, `--relay-*`, `--agent-tools-*`),
+  reads the console identity back via `freehold-console identity`, and
+  adopts/grants the co-located runner via `freehold-console adopt`/`grant`.
+- **The box's own CP CLI verbs are Go.** `freehold-console` now carries
+  `provision` (incl. the ssh-door keypair generation that prints the public
+  line for `authorized_keys`), `grant` (defaulting to the console identity —
+  the first-run grant needs no argument), `adopt`, `add-secret`, `identity`,
+  and `serve`. `resolveRebuildBins` resolves `freehold-console` (was the Rust
+  `control-plane`) as the console sibling; `stageProvision`/`stageGrant`/
+  `sealRunnerSecret`/`deploy_agent_tools` use it.
+- **`contract/crypto.GenerateSSHKeypair`** is exported (the byte-exact
+  openssh-key-v1 generator) for the ssh-door provision path.
+- The interspersed-flags parser (`provision <name> --flag …`) matches the box's
+  call shape (Go's `flag` stops at the first positional).
+
+### Notes
+
+- The Rust `control-plane/console` + `console-client` crates are still in the
+  tree as the `acceptance` gate's dependency; the deploy no longer ships them.
+  Deleting them requires porting `freehold-acceptance`'s console-dependent
+  checks to the Go provisioner/console — the tracked final Phase-3 step.
+
 ## [0.5.4] — Phase 3 core: the Go console server (web.rs ported at parity)
 
 The big Phase 3 piece: the Rust console's loopback admin/ops web surface

@@ -136,8 +136,8 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 
 	// Grant the server on the co-located runner so it can apply agent pods.
 	if spec.RunnerName != "" {
-		grant := fmt.Sprintf("%s/control-plane grant --state-dir %s --pubkey %s %s",
-			spec.BinDir, spec.StateDir, pubkey, spec.RunnerName)
+		grant := fmt.Sprintf("%s/freehold-console grant %s --state-dir %s --pubkey %s",
+			spec.BinDir, spec.RunnerName, spec.StateDir, pubkey)
 		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, grant), "grant agent-tools on runner", 60); err != nil {
 			return nil, fmt.Errorf("grant agent-tools on the co-located runner: %w", err)
 		}
