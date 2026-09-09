@@ -56,6 +56,28 @@ already-authorized flow:
 
 Only the pubkey the caller presented is appended; the CP appends no other key.
 
+### 2.5. Input validation at the API boundary (shell-injection guard)
+
+The operator-presented pubkey is interpolated into a shell command executed as
+the host-privileged runner identity, so it MUST be validated to a strict
+`authorized_keys` line shape BEFORE it is ever placed in a command string.
+Reject anything that does not match:
+
+```
+^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+=? ?[A-Za-z0-9._@-]*$
+```
+
+- exactly one whitespace-separated key-type + base64 body (a comment with
+  `[A-Za-z0-9._@-]` is optional)
+- **no** whitespace runs, no quotes, no backticks, no `$`, no `(`, no `;`,
+  no `&`, no `|`, no newlines/CRLF
+- reject at the API boundary with a clear error before constructing the shell
+  command; a rejected pubkey never reaches the runner's `exec`
+
+This is the same class of guard as the existing single-quote-free invariant on
+the stage builders (`platform/provisioning/stages`). A crafted "pubkey" that
+passes this regex is a key line, not a shell payload.
+
 ### 3. Scoping
 
 - The append targets ONLY the host the CP manages (the runner's `target`), and
@@ -79,7 +101,7 @@ Only the pubkey the caller presented is appended; the CP appends no other key.
 - The append is idempotent (grep-before-append), so re-login/re-append is
   safe; the revoke is exact-line removal.
 
-### 5. Protection of the mechanism
+### 6. Protection of the mechanism
 
 - The door pubkeys are **not secrets** (public keys), so the CP can hold them
   in its durable state (`/srv/data/cp/...`) for auditability. The private

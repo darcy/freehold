@@ -443,7 +443,7 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 	if m.console == nil || m.console.client == nil {
 		m.Runners = []RunnerRow{{
 			Name:   "(not logged into a console)",
-			Status: styleDim.Render("press l to log in — s switches to the local list"),
+			Status: styleDim.Render("press l to log in to see the CP runner list"),
 			Addr:   cfg.Runner.Addr,
 		}}
 		return
