@@ -92,6 +92,17 @@ func encodeED25519OpenSSH(seed []byte, comment string) (privatePEM []byte, pubLi
 	return pem.Bytes(), pubLine, nil
 }
 
+// GenerateSSHKeypair generates a fresh ed25519 keypair (private PEM +
+// authorized_keys public line), byte-matching core::generate_ssh_keypair. The
+// private half is the sealed door credential — it never leaves the box.
+func GenerateSSHKeypair(comment string) (privatePEM []byte, pubLine string, err error) {
+	seed := make([]byte, ed25519.SeedSize)
+	if _, err := rand.Read(seed); err != nil {
+		return nil, "", err
+	}
+	return encodeED25519OpenSSH(seed, comment)
+}
+
 // ExtractED25519PublicKeyLine derives the authorized_keys public line from
 // an openssh-key-v1 private-key PEM (ed25519 only — the only kind the
 // provisioner generates). This is the door-key RECOVERY path: a reused

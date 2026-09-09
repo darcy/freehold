@@ -297,9 +297,9 @@ type rebuildFlags struct {
 // in target/release/).
 type rebuildBins struct {
 	Self              string // this binary — the operator CLI (teardown-engine pattern)
-	ControlPlane      string // target/debug/control-plane (Rust)
+	Console           string // target/debug/freehold-console (Go CP CLI + console server)
 	Runner            string // target/debug/runner (Rust)
-	ReleaseCP         string // target/release/control-plane (deploy-cp --binary)
+	ReleaseConsole    string // target/release/freehold-console (deploy-cp --binary)
 	ReleaseRun        string // target/release/runner (deploy-cp --runner-binary)
 	ReleaseAgentTools string // target/release/freehold-agent-tools (the CP's agent-tools MCP server)
 }
@@ -315,17 +315,17 @@ func resolveRebuildBins() (rebuildBins, error) {
 	releaseDir := filepath.Join(selfDir, "..", "release")
 	b := rebuildBins{
 		Self:              self,
-		ControlPlane:      filepath.Join(selfDir, "control-plane"),
+		Console:           filepath.Join(selfDir, "freehold-console"),
 		Runner:            filepath.Join(selfDir, "runner"),
-		ReleaseCP:         filepath.Join(releaseDir, "control-plane"),
+		ReleaseConsole:    filepath.Join(releaseDir, "freehold-console"),
 		ReleaseRun:        filepath.Join(releaseDir, "runner"),
 		ReleaseAgentTools: filepath.Join(releaseDir, "freehold-agent-tools"),
 	}
 	var missing []string
 	for _, p := range []struct{ path, label string }{
-		{b.ControlPlane, "control-plane"},
+		{b.Console, "freehold-console"},
 		{b.Runner, "runner"},
-		{b.ReleaseCP, "../release/control-plane"},
+		{b.ReleaseConsole, "../release/freehold-console"},
 		{b.ReleaseRun, "../release/runner"},
 		{b.ReleaseAgentTools, "../release/freehold-agent-tools"},
 	} {
@@ -335,7 +335,7 @@ func resolveRebuildBins() (rebuildBins, error) {
 	}
 	if len(missing) > 0 {
 		return b, fmt.Errorf(
-			"sibling binaries missing: %s\n  build them once, then re-run:\n    cargo build --bin control-plane --bin runner && cargo build --release --bin control-plane --bin runner && CGO_ENABLED=0 go build -C control-plane -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools",
+			"sibling binaries missing: %s\n  build them once, then re-run:\n    go build -C control-plane -o target/debug/freehold-console ./api/cmd/freehold-console && go build -C control-plane -o target/release/freehold-console ./api/cmd/freehold-console && cargo build --bin runner && cargo build --release --bin runner && CGO_ENABLED=0 go build -C control-plane -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools",
 			strings.Join(missing, ", "))
 	}
 	return b, nil
@@ -866,7 +866,7 @@ func lxcIP(g config.LxcGuest) string {
 // key line when a NEW door key was generated ("" on reuse).
 func (e *rebuildEngine) stageProvision(agentPK string) (string, error) {
 	runnerDir := filepath.Join(rbRunnerPkgs(), e.f.target)
-	ok, out := e.runBin(e.bins.ControlPlane, []string{
+	ok, out := e.runBin(e.bins.Console, []string{
 		"provision", e.f.target,
 		"--kind", "ssh",
 		"--address", e.f.host,
@@ -882,7 +882,7 @@ func (e *rebuildEngine) stageProvision(agentPK string) (string, error) {
 		// state record with a deleted package cascades on every later stage.
 		if _, err := os.Stat(filepath.Join(runnerDir, "identity.json")); err != nil {
 			return "", fmt.Errorf(
-				"a runner %q record exists but its package at %s is gone — wipe the world for a clean re-bootstrap:\n  rm -rf ~/.freehold\n(or revoke the record: control-plane revoke %s --state-dir %s)",
+				"a runner %q record exists but its package at %s is gone — wipe the world for a clean re-bootstrap:\n  rm -rf ~/.freehold\n(or revoke the record: freehold-console revoke %s --state-dir %s)",
 				e.f.target, runnerDir, e.f.target, rbStateDir())
 		}
 		return "", nil
@@ -1055,7 +1055,7 @@ func parseGB(s string, def uint64, what string) (uint64, error) {
 }
 
 func (e *rebuildEngine) stageGrant() error {
-	ok, out := e.runBin(e.bins.ControlPlane, []string{
+	ok, out := e.runBin(e.bins.Console, []string{
 		"grant", e.f.target, "--state-dir", rbStateDir(),
 	})
 	if !ok {
@@ -1864,7 +1864,7 @@ func (e *rebuildEngine) stageDeployCp() error {
 		"--target", e.f.target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
 		"--relay-url", "https://" + e.f.relayDomain,
-		"--binary", e.bins.ReleaseCP,
+		"--binary", e.bins.ReleaseConsole,
 		"--runner-binary", e.bins.ReleaseRun,
 		"--runner-package", rbRunnerPkgs() + "/" + e.f.target,
 		"--operator-pubkey", e.f.operatorPubkey,
@@ -2097,7 +2097,7 @@ func clearStoredDNSCreds() {
 // runner).
 func (e *rebuildEngine) sealRunnerSecret(name, envVar, val string) error {
 	env := append([]string{envVar + "=" + val}, os.Environ()...)
-	ok, out := e.runEnv(e.bins.ControlPlane, env, []string{
+	ok, out := e.runEnv(e.bins.Console, env, []string{
 		"add-secret", e.f.target, name,
 		"--state-dir", rbStateDir(),
 		"--secret-env", envVar,

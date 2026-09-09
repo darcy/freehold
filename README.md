@@ -105,8 +105,10 @@ control-plane/api/console/  the Go console server (web.rs ported at parity): the
                       world/provision/rotate/revoke/grant/DNS/agents/portal with
                       the SAME security guards (NIP-98 login, HttpOnly session
                       cookies, single-use portal, DNS-rebinding Origin guard,
-                      loopback-until-authn bind). cmd/freehold-console serves it;
-                      the Rust console crate ships until the deploy switch.
+                      loopback-until-authn bind). cmd/freehold-console serves it and carries the
+                      box-side CP CLI verbs (provision/grant/adopt/add-secret/
+                      identity); the deploy ships it end to end. The Rust console
+                      crate remains only as the acceptance harness's fixture.
 control-plane/console/ (Rust, until the deploy switch) freehold-control-plane —
                       src/state.rs (runners + secrets store, atomic 0600, pubkeys +
                       ciphertext only), src/provisioner.rs (provision/rotate/revoke/
