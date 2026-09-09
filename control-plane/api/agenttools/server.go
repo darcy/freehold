@@ -145,6 +145,18 @@ func (s *Server) toolList() []map[string]interface{} {
 			"name": "world_build", "description": "Run the CP-owned world-build/reconcile stages through the CP's co-located runner (the box's login + trigger).",
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
+		{
+			"name": "world_authorize_door", "description": "Append an operator box's public door key to the host door through the co-located runner (DOOR_SPEC).",
+			"inputSchema": i(map[string]interface{}{
+				"pubkey": map[string]interface{}{"type": "string"},
+			}, []string{"pubkey"}),
+		},
+		{
+			"name": "world_revoke_door", "description": "Remove an operator box's public door key from the host door.",
+			"inputSchema": i(map[string]interface{}{
+				"pubkey": map[string]interface{}{"type": "string"},
+			}, []string{"pubkey"}),
+		},
 	}
 }
 
@@ -161,15 +173,16 @@ type manageAgentArgs struct {
 }
 
 // isWorldTool reports whether a tool is an operator-scoped action: granting an
-// agent onto a runner's whitelist and the world_* actions both mutate what the
-// operator owns. grant_agent is operator-only because a grant hands direct
-// exec access to a runner's MCP surface — letting a prompt-reachable agent
-// (e.g. the CPA) bind an arbitrary pubkey onto an arbitrary runner (incl. the
-// CP's own co-located runner) would bypass this very boundary. The CPA's agent
-// toolset is create + manage only.
+// agent onto a runner's whitelist, the world_* actions, and the door
+// authorize/revoke all mutate what the operator owns. grant_agent is
+// operator-only because a grant hands direct exec access to a runner's MCP
+// surface — letting a prompt-reachable agent (e.g. the CPA) bind an arbitrary
+// pubkey onto an arbitrary runner (incl. the CP's own co-located runner) would
+// bypass this very boundary. The CPA's agent toolset is create + manage only.
 func isWorldTool(name string) bool {
 	switch name {
-	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build":
+	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build",
+		"world_authorize_door", "world_revoke_door":
 		return true
 	}
 	return false
@@ -267,6 +280,32 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		s.textResult(w, id, nil, out)
+	case "world_authorize_door":
+		var a struct {
+			Pubkey string `json:"pubkey"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.Pubkey == "" {
+			s.rpcError(w, id, -32602, "world_authorize_door arguments: pubkey required")
+			return
+		}
+		if err := s.Tools.AuthorizeDoor(a.Pubkey); err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, "door key authorized")
+	case "world_revoke_door":
+		var a struct {
+			Pubkey string `json:"pubkey"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.Pubkey == "" {
+			s.rpcError(w, id, -32602, "world_revoke_door arguments: pubkey required")
+			return
+		}
+		if err := s.Tools.RevokeDoor(a.Pubkey); err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, "door key revoked")
 	default:
 		s.rpcError(w, id, -32601, "unknown tool: "+call.Name)
 	}

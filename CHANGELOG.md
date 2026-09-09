@@ -25,6 +25,38 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.6] — Phase 2 part 2: the login-authorized door (DOOR_SPEC implemented)
+
+The §9-gated door mechanism from `docs/DOOR_SPEC.md` is implemented. A fresh
+box that logs into the CP can now authorize its own door key on the host and
+perform CP-lifecycle work — not just the box that first built the world.
+
+### Added
+
+- **`world_authorize_door` / `world_revoke_door`** (operator-scoped tools on
+  the agent-tools server). The CP appends/removes the caller-presented public
+  door key on the host door **through its co-located runner** (the same runner
+  that already holds the host door and drives `world_build`). Both are
+  operator-only (denied to registry agents with `-32003`, like the world_* and
+  grant tools).
+- **The DOOR_SPEC §2.5 shell-injection gate** is enforced at the API boundary:
+  the pubkey must match the strict `authorized_keys`-line regex (key type +
+  base64 body + optional safe comment, no whitespace runs / quotes / backticks /
+  `$` / `(` / `;` / `&` / `|` / newlines) BEFORE it is ever single-quoted into
+  the append/remove shell command. `TestDoorKeyRe` pins the rejects.
+- **`freehold door authorize|revoke`** — the box derives its door key
+  **deterministically** from its agent-ops identity `enc_secret` seed
+  (`crypto.SSHPublicKeyFromSeed` — the private half never leaves the box, only
+  the public line is presented, and the key is stable across re-logins so a
+  revoke actually removes it) and calls the world tool signed as its ops
+  identity.
+
+### Notes
+
+- The append is idempotent (grep-before-append) and scoped to the caller's
+  presented pubkey; revocation is exact-line removal. Only operators (NIP-98 →
+  admin whitelist → roster) can authorize a door.
+
 ## [0.5.5] — Phase 3: the deploy ships the Go console (runtime is Go end to end)
 
 The REFACTOR-PLAN's "Rust only where it earns its keep" now holds for the
