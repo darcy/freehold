@@ -28,12 +28,12 @@ install: build
 
 # Verify every sibling `freehold build`/`teardown` resolves is present.
 check-siblings:
-    @test -x target/debug/freehold && echo "ok  target/debug/freehold" || (echo "MISSING target/debug/freehold — run `just build`"; exit 1)
-    @test -x target/debug/freehold-console && echo "ok  target/debug/freehold-console" || (echo "MISSING target/debug/freehold-console — run `just build`"; exit 1)
-    @test -x target/release/freehold-console && echo "ok  target/release/freehold-console" || (echo "MISSING target/release/freehold-console — run `just build`"; exit 1)
-    @test -x target/debug/runner && echo "ok  target/debug/runner" || (echo "MISSING target/debug/runner — run `just build`"; exit 1)
-    @test -x target/release/runner && echo "ok  target/release/runner" || (echo "MISSING target/release/runner — run `just build`"; exit 1)
-    @test -x target/release/freehold-agent-tools && echo "ok  target/release/freehold-agent-tools" || (echo "MISSING target/release/freehold-agent-tools — run `just build`"; exit 1)
+    @test -x target/debug/freehold && echo "ok  target/debug/freehold" || (echo "MISSING target/debug/freehold (run: just build)"; exit 1)
+    @test -x target/debug/freehold-console && echo "ok  target/debug/freehold-console" || (echo "MISSING target/debug/freehold-console (run: just build)"; exit 1)
+    @test -x target/release/freehold-console && echo "ok  target/release/freehold-console" || (echo "MISSING target/release/freehold-console (run: just build)"; exit 1)
+    @test -x target/debug/runner && echo "ok  target/debug/runner" || (echo "MISSING target/debug/runner (run: just build)"; exit 1)
+    @test -x target/release/runner && echo "ok  target/release/runner" || (echo "MISSING target/release/runner (run: just build)"; exit 1)
+    @test -x target/release/freehold-agent-tools && echo "ok  target/release/freehold-agent-tools" || (echo "MISSING target/release/freehold-agent-tools (run: just build)"; exit 1)
     @echo "✓ all siblings present"
 
 # Run the full gate: cargo fmt/build/test + Go build/vet/test across the three
