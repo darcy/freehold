@@ -24,8 +24,8 @@ build:
 # installed `freehold build`/`teardown` resolve the sibling binaries
 # (resolveRebuildBins looks for them relative to the running executable:
 # ~/.cargo/bin/{freehold-console,runner} + ~/.cargo/release/{freehold-console,
-# runner,freehold-agent-tools}). Use `just build-world`/`just teardown` to run
-# the colocated repo binary directly.
+# runner,freehold-agent-tools}). The operator then runs `freehold build` to
+# bring the world up.
 install: build
     mkdir -p ~/.cargo/bin ~/.cargo/release
     cp target/debug/freehold ~/.cargo/bin/freehold
