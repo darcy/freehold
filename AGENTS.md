@@ -198,6 +198,16 @@ changelog.
   -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools`): the CP server ships
   its own binary to agent pods, which run Alpine/musl — a glibc-dynamic build "silently not
   found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
+- **The full binary set a `rebuild`/`teardown` box needs** (`resolveRebuildBins` fails the
+  pipeline until every sibling is present, and prints the exact build one-liner):
+  - `target/debug/freehold` (the CLI+TUI) — `go build -C control-plane -o target/debug/freehold ./cli/cmd/freehold`
+  - `target/debug/freehold-console` **and** `target/release/freehold-console` (the Go CP CLI
+    the box-side provision/grant/adopt/add-secret/revoke stages call, and what `deploy-cp`
+    ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
+  - `target/{debug,release}/runner` (Rust) — `cargo build --bin runner && cargo build --release --bin runner`
+  - `target/release/freehold-agent-tools` (static, above)
+  This is the same set `freehold build`/`freehold teardown` resolve as siblings of the running
+  binary — a box doing world bring-up needs all five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
 - `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.

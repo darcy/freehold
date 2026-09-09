@@ -812,7 +812,7 @@ func (e *rebuildEngine) recordPostWorld() error {
 	if err != nil || cfg == nil {
 		return fmt.Errorf("no config at %s", e.f.configPath)
 	}
-	for _, role := range []string{"relay", "k3s"} {
+	for _, role := range []string{"relay", "cp", "k3s"} {
 		if vmid, verr := e.findLxcVmidExact(role); verr == nil {
 			if ip, ierr := e.readLxcIP(vmid); ierr == nil {
 				ipCIDR := ip
@@ -822,6 +822,8 @@ func (e *rebuildEngine) recordPostWorld() error {
 				switch role {
 				case "relay":
 					cfg.Lxc.Relay = config.LxcGuest{Vmid: &vmid, Ip: &ipCIDR}
+				case "cp":
+					cfg.Lxc.Cp = config.LxcGuest{Vmid: &vmid, Ip: &ipCIDR}
 				case "k3s":
 					cfg.Lxc.K3s = config.LxcGuest{Vmid: &vmid, Ip: &ipCIDR}
 				}
@@ -831,6 +833,14 @@ func (e *rebuildEngine) recordPostWorld() error {
 		} else {
 			fmt.Fprintf(e.out, "  (record %s coords: no guest found by hostname — is the world_build boot complete? %v)\n", role, verr)
 		}
+	}
+	// Reconcile the agent-tools URL to the CURRENT cp IP: it was recorded at
+	// deploy-agent-tools time (frozen), and a DHCP-lease change mid-build (the
+	// cp LXC is dhcp unless pinned) would otherwise leave it pointing at a dead
+	// IP — breaking `world status` and the fresh-box Agents view until manually
+	// corrected. The agent-tools pubkey is durable and unchanged.
+	if cfg.Lxc.Cp.Ip != nil {
+		cfg.AgentToolsURL = "http://" + config.StripCIDR(*cfg.Lxc.Cp.Ip) + ":8089"
 	}
 	proxyIP := config.StripCIDR(e.f.proxyIP)
 	cfg.Litellm = config.LitellmSpec{URL: "http://" + proxyIP + ":31400", Host: proxyIP}

@@ -25,6 +25,50 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.7] — UAT: a real teardown→rebuild→TUI→separate-box-login, and the `justfile`
+
+A full UAT against the live world (teardown → rebuild shipping the Go console →
+TUI on the operator box → login + operate from a separate box) surfaced two
+real bugs and added the build ergonomics. Both bugs are fixed.
+
+### Added
+
+- **`justfile`** — one-command build ergonomics for a UAT/rebuild box: `just
+  build` (all five sibling binaries a `rebuild`/`teardown` resolves),
+  `just install`, `just check-siblings`, `just test`, `just teardown`, and
+  `just build-world`. `build`/`teardown` run `./target/debug/freehold` — the
+  COLOCATED binary — because `resolveRebuildBins` finds siblings relative to
+  the running executable, so a copy installed elsewhere (e.g.
+  `~/.cargo/bin/freehold`) has no siblings and `build` bails "sibling binaries
+  missing". AGENTS.md documents the exact binary set + one-liners.
+
+### Fixed (UAT-surfaced)
+
+- **`agent_tools_url` froze at the deploy-time IP (a DHCP-lease change
+  mid-build left it pointing at a dead IP).** `stageDeployAgentTools` records
+  `cfg.AgentToolsURL` from the cp IP at that moment, and `recordPostWorld`
+  updated the cp LXC coords but not `agent_tools_url` — so after a rebuild
+  where the DHCP-assigned cp IP changed, `world status` and a fresh box's
+  Agents view hit a dead `192.168.30.x`. `recordPostWorld` now records the cp
+  coords too and reconciles `cfg.AgentToolsURL` to the CURRENT cp IP (the
+  pubkey is durable/unchanged).
+- **The `world`/`door` CLI verbs signed as the box's `agent-ops` identity,
+  which a fresh login-only box's locally-minted agent-ops is NOT a toolset
+  roster member of — `world status` got `-32001` denied on a fresh box.** The
+  TUI already signs as the OPERATOR identity (a console admin, in the roster).
+  `worldMcp` now signs as the operator identity too, so a fresh login-only box
+  can operate the world (verified: fresh-box `world status` returns the full
+  inventory).
+
+### Notes
+
+- The console's `/api/overview` reads its in-memory state, loaded at serve —
+  a runner adopted into state.json AFTER serve (the co-located runner during
+  `deploy-cp`) is stale until the console restarts (the Runners view shows
+  "(no runners on the console)"). This matches the Rust console's behavior
+  (pre-existing, not a regression); a `deploy-cp` re-run restarts the console
+  and it reloads the adopted runner (verified: `proxmox-box` appears).
+
 ## [0.5.6] — Phase 2 part 2: the login-authorized door (DOOR_SPEC implemented)
 
 The §9-gated door mechanism from `docs/DOOR_SPEC.md` is implemented. A fresh
