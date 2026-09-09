@@ -142,12 +142,38 @@ control-plane/acceptance/  freehold-acceptance — the Chunk-1 acceptance script
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(three modules: `contract/`, `control-plane/`, `platform/`).
+(three modules: `contract/`, `control-plane/`, `platform/`) + `just`
+([just](https://github.com/casey/just) — `cargo install just`, or `brew install
+just`).
 
 ```sh
+# build the full binary set a `freehold build`/`teardown` resolves
+# (freehold + freehold-console debug/release + runner debug/release +
+# freehold-agent-tools static) into target/debug + target/release:
+just build
+
+# install freehold AND its sibling binaries onto PATH (~/.cargo/bin +
+# ~/.cargo/release) so the installed `freehold build`/`teardown` resolve them
+# relative to the running executable:
+just install
+
+# run the full gate: cargo fmt/build/test + Go build/vet/test across the three
+# modules + the harness byte-gate + Chunk-1 acceptance (hermetic):
+just test
+
+# the manual equivalents, if you don't use just:
 cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,console,console-client,testkit,acceptance}
 for m in contract platform control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the three Go modules + the byte-exact harness gate
 cargo fmt --all --check          # CI gate
+```
+
+Then operate the world yourself (the justfile does NOT drive the world — it
+only builds + installs):
+
+```sh
+freehold build      # bring the world up (CP-bring-up + trigger world_build)
+freehold teardown   # tear it down (compute-only: keeps coords + /srv/data)
+freehold            # the TUI dashboard
 ```
 
 ### The appliance (`freehold` — one binary, two surfaces)
