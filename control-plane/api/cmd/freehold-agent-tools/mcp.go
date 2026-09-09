@@ -40,11 +40,6 @@ func freeholdToolDefs() []map[string]interface{} {
 				"name":    map[string]interface{}{"type": "string"},
 				"purpose": map[string]interface{}{"type": "string"},
 			}, []string{"name"})},
-		{"name": "grant_agent", "description": "Bind agent pubkeys to a runner's whitelist.",
-			"inputSchema": i(map[string]interface{}{
-				"runner":  map[string]interface{}{"type": "string"},
-				"pubkeys": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-			}, []string{"runner", "pubkeys"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},
 	}
