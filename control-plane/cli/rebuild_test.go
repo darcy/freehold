@@ -785,4 +785,13 @@ func TestApplyConfigDefaults(t *testing.T) {
 	if !f3.manageDNS {
 		t.Error("recorded dns.manager.managed=true must seed manageDNS=true (no re-prompt)")
 	}
+	// an EXPLICIT --manage-dns=false still opts out (the config only fills the
+	// omitted case — e.g. after teardown --remove-dns).
+	f4 := &rebuildFlags{manageDNS: false, manageDNSExplicit: true}
+	if err := applyConfigDefaults(f4, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if f4.manageDNS {
+		t.Error("explicit --manage-dns=false must NOT be overridden by the config seed")
+	}
 }

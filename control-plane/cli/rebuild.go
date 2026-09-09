@@ -173,6 +173,7 @@ var buildCmd = &cobra.Command{Use: "build",
 		f.yes, _ = cmd.Flags().GetBool("yes")
 		f.resetDNS, _ = cmd.Flags().GetBool("reset-dns")
 		f.manageDNS, _ = cmd.Flags().GetBool("manage-dns")
+		f.manageDNSExplicit = cmd.Flags().Changed("manage-dns")
 		// Smooth rebuild: pull any omitted value from the stored config so a
 		// rebuild is not forced to re-enter the operator key, relay/CP hosts,
 		// thin-pool, etc.
@@ -231,8 +232,10 @@ func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
 	}
 	// A rebuild of an already-DNS-managed world keeps managing DNS: seed
 	// --manage-dns from the recorded [dns.manager] so the prompt is skipped
-	// (the operator doesn't re-answer "y/n" every build).
-	if !f.manageDNS && cfg.Dns.Manager != nil && cfg.Dns.Manager.Managed {
+	// (the operator doesn't re-answer "y/n" every build). An EXPLICIT
+	// --manage-dns=false still opts out (the config only fills the omitted
+	// case — e.g. after `teardown --remove-dns`).
+	if !f.manageDNSExplicit && !f.manageDNS && cfg.Dns.Manager != nil && cfg.Dns.Manager.Managed {
 		f.manageDNS = true
 	}
 	return nil
@@ -293,7 +296,11 @@ type rebuildFlags struct {
 	configPath         string
 	confirmStorage     bool
 	resetDNS           bool
-	manageDNS          bool
+	// manageDNSExplicit records whether --manage-dns was EXPLICITLY passed (a
+	// bool flag reads false for both omitted and --manage-dns=false; the config
+	// seed must only fill the omitted case so an operator can still opt out).
+	manageDNSExplicit bool
+	manageDNS         bool
 	yes                bool
 }
 
