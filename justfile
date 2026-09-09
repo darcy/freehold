@@ -20,11 +20,21 @@ build:
     @cd control-plane && mise exec go@1.25.0 -- sh -c 'CGO_ENABLED=0 go build -o ../target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools'
     @echo "✓ all binaries built"
 
-# Install the freehold CLI onto PATH (~/.cargo/bin/freehold) — for the TUI and
-# the CLI verbs. NOTE: build/teardown must run `./target/debug/freehold` (the
-# colocated binary) so resolveRebuildBins finds the sibling binaries.
+# Install the freehold CLI + ALL its siblings onto PATH (~/.cargo/bin) so the
+# installed `freehold build`/`teardown` resolve the sibling binaries
+# (resolveRebuildBins looks for them relative to the running executable:
+# ~/.cargo/bin/{freehold-console,runner} + ~/.cargo/release/{freehold-console,
+# runner,freehold-agent-tools}). Use `just build-world`/`just teardown` to run
+# the colocated repo binary directly.
 install: build
+    mkdir -p ~/.cargo/bin ~/.cargo/release
     cp target/debug/freehold ~/.cargo/bin/freehold
+    cp target/debug/freehold-console ~/.cargo/bin/freehold-console
+    cp target/debug/runner ~/.cargo/bin/runner
+    cp target/release/freehold-console ~/.cargo/release/freehold-console
+    cp target/release/runner ~/.cargo/release/runner
+    cp target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
+    @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release)"
 
 # Verify every sibling `freehold build`/`teardown` resolves is present.
 check-siblings:
@@ -50,14 +60,3 @@ test:
     @echo "→ Chunk-1 acceptance (hermetic)"
     @mise exec rust@1.98.0 -- cargo run -p freehold-acceptance
     @echo "✓ all gates green"
-
-# Tear the world down (compute-only: keeps coords + /srv/data). Runs the
-# COLOCATED binary — resolveRebuildBins finds the sibling binaries relative to
-# the running executable (target/debug/ + target/release/), so build/teardown
-# must use ./target/debug/freehold, NOT a copy installed elsewhere.
-teardown: build check-siblings
-    ./target/debug/freehold teardown
-
-# Bring the world up (CP-bring-up + trigger world_build).
-build-world: build check-siblings
-    ./target/debug/freehold build
