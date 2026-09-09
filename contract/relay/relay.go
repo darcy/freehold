@@ -25,6 +25,9 @@ const (
 	httpTimeoutSec    = 30
 )
 
+// ProfileMessageTag is the runner-profile kind-9 message tag (t=fh-profile).
+func ProfileMessageTag() string { return profileMessageTag }
+
 // RunnerProfile mirrors core::relay_http::RunnerProfile.
 type RunnerProfile struct {
 	Name        string  `json:"name"`

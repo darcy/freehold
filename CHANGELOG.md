@@ -25,6 +25,64 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.4] — Phase 3 core: the Go console server (web.rs ported at parity)
+
+The big Phase 3 piece: the Rust console's loopback admin/ops web surface
+(`control-plane/console/src/web.rs`, ~2.1k lines) is ported to Go with the
+SAME routes and the SAME security guards. The Rust console crate still ships
+until the deploy switch (the next PR); this PR lands the Go replacement,
+hermetically tested.
+
+### Added
+
+- **`control-plane/api/console/`** — the Go console server:
+  - `auth.go` — the NIP-98 operator auth (challenge/session/portal) with the
+    web.rs guard constants (60s freshness, 120s challenge, 24h sliding session,
+    60s single-use portal), `HttpOnly; SameSite=Strict` cookies, the
+    DNS-rebinding `Origin` guard (loopback + the configured public origin
+    only), and the loopback-until-authn bind guard.
+  - `server.go` — every `/api/*` route at parity: auth challenge/login/portal,
+    overview (with the console-signed LIVE readiness probe — the runner still
+    fails closed; a `-32001` denial reads as "console not granted"),
+    world (the fresh-box seed), teardown, provision/rotate/revoke/grant/
+    revoke-grant/runner-addr (each re-syncing the runner's relay channel when a
+    relay scope is set), DNS list/upsert/remove (with the dnsmasq addn-hosts
+    render + reload), the runner channel view (relay roster/profile/messages),
+    and agents list/register/remove (with kind-9 presence probes).
+  - `dns.go` — the internal resolver renderer (port of dns.rs): validate_name/
+    ip, render_addn_hosts, upsert/remove, dnsmasq conf + sync + the
+    dnsmasq-readable permissions sweep.
+  - `index.html` — the single self-contained admin page, extracted verbatim
+    from the Rust source.
+- **`control-plane/api/cmd/freehold-console`** — the Go serve binary (port of
+  the Rust `serve`): the bind guard (loopback-only until an admin whitelist is
+  seeded), the admin/relay/agent-tools scope flags persisted to state.json, and
+  first-serve console identity minting (a keypair is NEVER shipped — it is
+  born on the box, 0600).
+- **`contract/state`** extended to full `ControlPlaneState` parity: `dns`,
+  `resolver_domain`, `resolver_wildcard`, `agent_tools_url/pubkey` + accessors.
+- **`secret-management` extended to full provisioner parity** (port of
+  provisioner.rs): `RotateSecret` (B2), `RevokeRunner` (B3), `GrantAgent`/
+  `RevokeGrant` (D2 shipped-package), `AdoptRunner`, `AddSecret`, and the
+  relay channel sync (`SyncRunnerChannel`, `PutUserMembership`,
+  `RemoveUserMembership`, `RevokeRunnerChannel`) through the absorbed
+  console-owner credential (`cpstate.ConsoleSecret`).
+
+### Tests
+
+`TestAuthChallengeSessionPortal`, `TestCheckOrigin`, `TestLoginRoundtrip`
+(+ rejects: stale timestamp, non-admin), `TestPortalSingleUse`,
+`TestWorldRequiresAuthWhenConfigured`, `TestOverviewListsRunners`,
+`TestLoopbackBindGuard` — the security-guard core is pinned hermetically.
+
+### Notes
+
+- The Rust console crate is NOT deleted yet: the deploy switch (ship
+  `freehold-console` instead of the Rust `control-plane` binary, switch
+  `resolveRebuildBins`, delete the crate + `console-client`) is the next PR —
+  the Go console lands tested first, so the live bring-up swaps to a proven
+  surface.
+
 ## [0.5.3] — Phase 3 (part 1): `freehold-orchestrator` folds into `freehold`
 
 REFACTOR-PLAN §3.5/§8 Phase 3's binary fold. The `freehold-orchestrator`

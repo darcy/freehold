@@ -344,27 +344,32 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     tools the harness lacks; it reports tool errors plainly rather than
     inventing results.
 
-### `control-plane/console/` (Rust; the console + provisioner)
+### The console (Go; the loopback admin/ops web surface)
 
-*   **The control plane console + secret provisioner is a Rust crate**
-    (`control-plane/console/`: `src/state.rs`, `src/provisioner.rs`,
-    `src/web.rs` — the loopback admin/ops web console with NIP-98 operator
-    login — `src/console.rs`, `src/main.rs`). The console is the CP's own
-    identity (0600) that signs readiness probes against each runner — no side
-    door, the runner still fails closed. The Rust console is the mechanism's
-    surface until its routes are ported into the Go `api/` (the REFACTOR-PLAN
-    Phase 3 parity work); `contract/console` is the Go client that mirrors it.
+*   **The control plane console is a Go server** (`control-plane/api/console/`
+    + `control-plane/api/cmd/freehold-console`), ported from the Rust console
+    crate at parity: the same `/api/*` routes (auth/overview/world/teardown/
+    provision/rotate/revoke/grant/DNS/agents/portal) with the SAME security
+    guards — NIP-98 operator login (challenge/session), `HttpOnly;
+    SameSite=Strict` session cookies, single-use portal tokens, login
+    freshness windows, the DNS-rebinding `Origin` guard, and the
+    loopback-only-until-authn bind guard. The console is the CP's own identity
+    (0600, minted on the box at first serve — never shipped) that signs
+    readiness probes against each runner — no side door, the runner still
+    fails closed. `contract/console` is the Go client that talks to it; the
+    Rust console crate is scheduled for deletion once the deploy ships the Go
+    binary (REFACTOR-PLAN Phase 3).
 
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`
     per connector the system never parses.
 
 *   **The Go toolchain mirrors the surfaces it drives:**
-    `control-plane/secret-management/` (`ProvisionRunner`) reproduces
-    provision for onboarding existing services; `contract/client/mcp.go` is
-    the signed MCP client that drives a runner (`exec`/`status`/`upload`);
-    `contract/console` talks to the CP console's `/api/*`
-    (overview/agents/portal) as an operator session.
+    `control-plane/secret-management/` reproduces the full provisioner
+    (provision/rotate/revoke/grant/adopt/add-secret + the relay channel sync);
+    `contract/client/mcp.go` is the signed MCP client that drives a runner
+    (`exec`/`status`/`upload`); `contract/console` talks to the console's
+    `/api/*` (overview/agents/portal) as an operator session.
 
 *   **`control-plane/cli/bootstrap-cp/` reads `providers.json`/`secrets.json`
     and builds a k3s `manifests.yaml`** (see `platform/terraform/` below).

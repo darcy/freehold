@@ -100,21 +100,21 @@ control-plane/runner/ freehold-runner — the privileged connector bridge
                       from ciphertext, redacted from every response, audited
   src/ssh.rs          russh connector: in-memory keys, pooled connections, TOFU host keys
   src/main.rs         CLI: `runner keys init`, `runner serve`
-control-plane/console/ freehold-control-plane — the engine room
-  src/state.rs        runners + secrets store (atomic 0600 JSON; pubkeys + ciphertext only)
-  src/provisioner.rs  B1 provision (generate identity → seal → ship → record pubkeys),
-                      B2 rotate-secret, B3 revoke, D grant/revoke-grant (re-ship package),
-                      with save-failure rollback
-  src/console.rs      the console AGENT: the CP's own identity (0600) that signs
-                      readiness probes against each runner — no side door, the
-                      runner still fails closed
-  src/web.rs          Phase F: loopback admin/ops web console (axum) — services at a
-                      glance with LIVE readiness, and provision/rotate/revoke/grant
-                      management. Not chat (Buzz owns conversation).
-  src/main.rs         CLI: provision / rotate-secret / revoke / grant / revoke-grant /
-                      list / adopt / rebuild / identity / agent-create / serve (web console)
+control-plane/api/console/  the Go console server (web.rs ported at parity): the
+                      loopback admin/ops web surface — /api/* auth/overview/
+                      world/provision/rotate/revoke/grant/DNS/agents/portal with
+                      the SAME security guards (NIP-98 login, HttpOnly session
+                      cookies, single-use portal, DNS-rebinding Origin guard,
+                      loopback-until-authn bind). cmd/freehold-console serves it;
+                      the Rust console crate ships until the deploy switch.
+control-plane/console/ (Rust, until the deploy switch) freehold-control-plane —
+                      src/state.rs (runners + secrets store, atomic 0600, pubkeys +
+                      ciphertext only), src/provisioner.rs (provision/rotate/revoke/
+                      grant), src/web.rs (the loopback web console the Go
+                      control-plane/api/console replaces), src/main.rs (serve + the
+                      provision CLI)
 control-plane/console-client/  freehold-console-client — ONE console API contract, two clients:
-                      the web page (control-plane/console/src/web.rs) and the TUI's Runners view;
+                      the web page and the TUI's Runners view;
                       NIP-98 login + overview/actions + the single-use web-launch portal
 control-plane/testkit/  freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
                       an in-process russh sshd (shared by the connector tests)
