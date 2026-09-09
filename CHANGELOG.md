@@ -25,6 +25,39 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.2] — Phase 2 (part 1): the CLI is an API client — the box-local mirror is gone
+
+REFACTOR-PLAN Phase 2's first slice: the box stops holding a second, local
+picture of the world. The TUI's Runners view read either the console
+`/api/overview` (CP) or the box-local `~/.freehold/control-plane/state.json`
+mirror, toggled with `s`. The mirror is a stale parallel reality the plan
+deletes.
+
+### Removed
+
+- **The `s` Runners-source toggle + the box-local `state.json` mirror.** The
+  Runners view now reads the console `/api/overview` only (the CP's
+  authoritative runner list); `readLocalRunners`, `RunnerSourceLocal`,
+  `runnerSourceLabel`, and the `s` keybinding are deleted. The `contract/state`
+  import is gone from the TUI. World ops are API calls; the box holds no local
+  world-state mirror.
+
+### Added
+
+- **`docs/DOOR_SPEC.md` — the login-authorized door security spec** (the §9
+  design gate that gates Phase 2's door work). The spec names what the CP
+  authorizes (the box's own agent-ops public key), how it proves the box is a
+  logged-in operator (NIP-98 session → admin whitelist, appended through the
+  CP's co-located runner), scoping (idempotent, caller-presented pubkey only),
+  and revocation (`world_revoke_door` removes the exact line). The door
+  mechanism is not implemented yet — the spec is the reviewable gate.
+
+### Notes
+
+- The CP-lifecycle side of Phase 2 (`bootstrap-cp`/`teardown-cp` on the box's
+  door, the slim build) stays behind the §9 gate until the door spec is
+  reviewed; this PR ships the mirror deletion + the spec.
+
 ## [0.5.1] — Phase 1: the unified scoped API (the one inventory, scope-gated, grant wired)
 
 The REFACTOR-PLAN's Phase 1 behavior change lands on the 0.5.0 tree: the
