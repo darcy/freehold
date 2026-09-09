@@ -46,6 +46,21 @@ type AgentRecord struct {
 	Channel   *string `json:"channel,omitempty"`
 }
 
+// DnsRecord is one explicit DNS record the CP resolver serves (name -> record).
+type DnsRecord struct {
+	IP        string `json:"ip"`
+	Source    string `json:"source"`
+	CreatedAt uint64 `json:"created_at"`
+}
+
+// DnsWildcard is the resolver's wildcard apex (all subdomains of apex -> ip).
+type DnsWildcard struct {
+	Apex      string `json:"apex"`
+	IP        string `json:"ip"`
+	Source    string `json:"source"`
+	CreatedAt uint64 `json:"created_at"`
+}
+
 // SecretRecord is a runner's secret (ciphertext only).
 type SecretRecord struct {
 	Runner        string  `json:"runner"`
@@ -58,13 +73,18 @@ type SecretRecord struct {
 
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
 type ControlPlaneState struct {
-	Runners     map[string]RunnerRecord `json:"runners"`
-	Secrets     map[string]SecretRecord `json:"secrets"`
-	Agents      map[string]AgentRecord  `json:"agents"`
-	RelayHost   *string                 `json:"relay_host,omitempty"`
-	Admins      []string                `json:"admins"`
-	RelayURL    *string                 `json:"relay_url,omitempty"`
-	RelayPubkey *string                 `json:"relay_pubkey,omitempty"`
+	Runners          map[string]RunnerRecord `json:"runners"`
+	Secrets          map[string]SecretRecord `json:"secrets"`
+	DNS              map[string]DnsRecord    `json:"dns"`
+	ResolverDomain   *string                 `json:"resolver_domain,omitempty"`
+	ResolverWildcard *DnsWildcard            `json:"resolver_wildcard,omitempty"`
+	Agents           map[string]AgentRecord  `json:"agents"`
+	RelayHost        *string                 `json:"relay_host,omitempty"`
+	Admins           []string                `json:"admins"`
+	RelayURL         *string                 `json:"relay_url,omitempty"`
+	RelayPubkey      *string                 `json:"relay_pubkey,omitempty"`
+	AgentToolsURL    *string                 `json:"agent_tools_url,omitempty"`
+	AgentToolsPubkey *string                 `json:"agent_tools_pubkey,omitempty"`
 }
 
 // StateStore wraps the in-memory control-plane state with atomic-0600 save.
@@ -100,6 +120,7 @@ func defaultState() ControlPlaneState {
 	return ControlPlaneState{
 		Runners: map[string]RunnerRecord{},
 		Secrets: map[string]SecretRecord{},
+		DNS:     map[string]DnsRecord{},
 		Agents:  map[string]AgentRecord{},
 		Admins:  []string{},
 	}
@@ -111,6 +132,9 @@ func ensureMaps(cp *ControlPlaneState) {
 	}
 	if cp.Secrets == nil {
 		cp.Secrets = map[string]SecretRecord{}
+	}
+	if cp.DNS == nil {
+		cp.DNS = map[string]DnsRecord{}
 	}
 	if cp.Agents == nil {
 		cp.Agents = map[string]AgentRecord{}
@@ -195,6 +219,54 @@ func (s *StateStore) SetRelayURL(u *string) error {
 // SetRelayPubkey sets the relay pubkey + saves.
 func (s *StateStore) SetRelayPubkey(p *string) error {
 	s.state.RelayPubkey = p
+	return s.Save()
+}
+
+// GetDNS returns a DNS record.
+func (s *StateStore) GetDNS(name string) (DnsRecord, bool) {
+	r, ok := s.state.DNS[name]
+	return r, ok
+}
+
+// InsertDNS records a DNS record.
+func (s *StateStore) InsertDNS(name string, rec DnsRecord) { s.state.DNS[name] = rec }
+
+// RemoveDNS deletes a DNS record.
+func (s *StateStore) RemoveDNS(name string) { delete(s.state.DNS, name) }
+
+// ResolverDomain returns the resolver's world-domain suffix.
+func (s *StateStore) ResolverDomain() *string { return s.state.ResolverDomain }
+
+// SetResolverDomain sets the resolver domain + saves.
+func (s *StateStore) SetResolverDomain(d *string) error {
+	s.state.ResolverDomain = d
+	return s.Save()
+}
+
+// ResolverWildcard returns the resolver wildcard apex.
+func (s *StateStore) ResolverWildcard() *DnsWildcard { return s.state.ResolverWildcard }
+
+// SetResolverWildcard sets the resolver wildcard + saves.
+func (s *StateStore) SetResolverWildcard(w *DnsWildcard) error {
+	s.state.ResolverWildcard = w
+	return s.Save()
+}
+
+// AgentToolsURL returns the recorded agent-tools URL.
+func (s *StateStore) AgentToolsURL() *string { return s.state.AgentToolsURL }
+
+// SetAgentToolsURL sets the agent-tools URL + saves.
+func (s *StateStore) SetAgentToolsURL(u *string) error {
+	s.state.AgentToolsURL = u
+	return s.Save()
+}
+
+// AgentToolsPubkey returns the recorded agent-tools pubkey.
+func (s *StateStore) AgentToolsPubkey() *string { return s.state.AgentToolsPubkey }
+
+// SetAgentToolsPubkey sets the agent-tools pubkey + saves.
+func (s *StateStore) SetAgentToolsPubkey(p *string) error {
+	s.state.AgentToolsPubkey = p
 	return s.Save()
 }
 
