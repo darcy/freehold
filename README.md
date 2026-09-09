@@ -47,13 +47,18 @@ contract/             freehold/contract — the shared wire/trust leaf BOTH the
                       platform → contract ← control-plane (no module cycle).
 control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       Rust only for runner + core + console):
-  api/                the unified scoped API: agent toolset (agent/, agenttools/)
-                      + the roster-gated world_status / world_teardown /
-                      world_migrate / world_build actions + cmd/freehold-agent-tools
-                      (the CP's agent-management MCP server; `mcp` is the stdio
-                      bridge the agent PODS fetch at boot — the world actions
-                      deliberately do NOT reach the CPA's conversation+create-only
-                      harness)
+  api/                the unified scoped API: agent toolset (agent/, agenttools/,
+                      cpstate/) + the operator-scoped world_status / world_teardown /
+                      world_migrate / world_build actions (world_status = the single
+                      inventory read: agents + the console's runners/DNS; world_build
+                      = the CP runs its world stages through the co-located runner)
+                      + cmd/freehold-agent-tools (the CP's agent-management MCP
+                      server; `mcp` is the stdio bridge the agent PODS fetch at boot
+                      — the world actions deliberately do NOT reach the CPA's
+                      conversation+create-only harness, scope-gated server-side:
+                      registry agents get create/manage only, operators get
+                      world_* + grant_agent; grant_agent publishes the runner-roster
+                      change with the console's own channel-owner identity)
   cli/                the operator interface: tui/ (bubbletea dashboard), login/
                       (freehold login/logout), flows/, teardown/, bootstrap-cp/
                       (the day-0 mechanism install), cmd/ (the freehold and
@@ -151,6 +156,10 @@ freehold                      # no args → the interactive TUI (bubbletea); a s
 freehold login                # root-free: CP address + operator nsec (NIP-98) → authorize,
 freehold                      #   seed a local connection profile from the CP, then END — just run `freehold`
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
+freehold world status         # the CP's single inventory (agents + runners + DNS)
+freehold world build          # trigger the CP's world-build (co-located runner)
+freehold world teardown       # the CP unwinds what it manages (relay+k3s LXCs first)
+freehold world migrate        # run the CP's verify-gated migrations
 freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
 freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
 freehold deploy-relay …       #   memory, console-login, grant, storage …)

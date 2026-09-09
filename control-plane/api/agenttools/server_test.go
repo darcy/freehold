@@ -229,3 +229,147 @@ func TestWorldStatusAndTeardown(t *testing.T) {
 		t.Fatalf("world_build result missing report: %s", out)
 	}
 }
+
+// TestServerScopeAuth proves the per-channel tool-visibility split: a REGISTRY
+// agent caller (a pubkey in the registry) is denied the world_* actions while
+// an operator caller (roster member, not in the registry) can drive them — the
+// same boundary the CPA's stdio bridge filters, now enforced server-side so a
+// direct call cannot bypass it.
+func TestServerScopeAuth(t *testing.T) {
+	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	agentSec := make([]byte, 32)
+	agentSec[0] = 9
+	agentPK, err := crypto.PubkeyFromSecret(agentSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opSec := make([]byte, 32)
+	opSec[0] = 10
+	opPK, err := crypto.PubkeyFromSecret(opSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := &fakeOps{}
+	_, _ = ops.RegisterAgent("cpa", agentPK, "cpa")
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{agentPK, opPK}, nil },
+		Tools:    &agent.Tools{Console: ops},
+		IsAgent: func(pk string) bool {
+			return pk == agentPK // the CPA row
+		},
+	}
+
+	post := func(secret []byte, pk, tool string) (string, bool) {
+		t.Helper()
+		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":{}}}`
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, pk)
+		req.Header.Set(SigHeader, signForTest(secret, aud, ts, raw))
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		var resp struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if resp.Error == nil {
+			return "", false
+		}
+		return resp.Error.Message, true
+	}
+
+	// The CPA (a registry agent) must be DENIED world_* AND grant_agent (both
+	// operator-scoped: a grant hands direct exec access to a runner).
+	msg, denied := post(agentSec, agentPK, "world_status")
+	if !denied || !strings.Contains(msg, "cannot call") {
+		t.Fatalf("registry agent must be denied world_status, got denied=%v msg=%q", denied, msg)
+	}
+	msg, denied = post(agentSec, agentPK, "world_teardown")
+	if !denied || !strings.Contains(msg, "cannot call") {
+		t.Fatalf("registry agent must be denied world_teardown, got denied=%v msg=%q", denied, msg)
+	}
+	msg, denied = post(agentSec, agentPK, "grant_agent")
+	if !denied || !strings.Contains(msg, "cannot call") {
+		t.Fatalf("registry agent must be denied grant_agent (operator-scoped), got denied=%v msg=%q", denied, msg)
+	}
+
+	// The operator (roster member, NOT in the registry) drives world_* freely.
+	if _, denied := post(opSec, opPK, "world_status"); denied {
+		t.Fatal("operator must be allowed world_status")
+	}
+
+	// The CPA can still create/manage agents (the toolset it has).
+	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"manage_agent","arguments":{}}}`
+	ts := time.Now().Unix()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+	req.Header.Set(PubkeyHeader, agentPK)
+	req.Header.Set(SigHeader, signForTest(agentSec, aud, ts, raw))
+	req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "-32003") {
+		t.Fatalf("registry agent manage_agent must be allowed: %s", rec.Body.String())
+	}
+}
+
+// TestWorldStatusInventory proves the single-inventory read: the bound Status
+// closure feeds agents + runners + DNS into one world_status payload.
+func TestWorldStatusInventory(t *testing.T) {
+	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	sec := make([]byte, 32)
+	sec[0] = 3
+	pk, _ := crypto.PubkeyFromSecret(sec)
+	ops := &fakeOps{}
+	_, _ = ops.RegisterAgent("cpa", pk, "cpa")
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{pk}, nil },
+		Tools: &agent.Tools{
+			Console: ops,
+			Status: func() (map[string]interface{}, error) {
+				return map[string]interface{}{
+					"agents": []console.AgentInfo{{Name: "cpa", Pubkey: pk}},
+					"runners": []map[string]interface{}{{"name": "box", "nostr_pubkey": "R1"}},
+					"dns":     []map[string]interface{}{{"name": "relay", "ip": "192.168.30.8"}},
+				}, nil
+			},
+		},
+	}
+	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"world_status","arguments":{}}}`
+	ts := time.Now().Unix()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+	req.Header.Set(PubkeyHeader, pk)
+	req.Header.Set(SigHeader, signForTest(sec, aud, ts, raw))
+	req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{"cpa", "R1", "192.168.30.8"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("world_status inventory missing %q: %s", want, body)
+		}
+	}
+}
+
+// TestRegistryGrantFailClosed proves grant_agent fails loudly (never silently
+// succeeds) when the console-owner wiring is absent, and refuses an unprovisioned
+// runner name when wired.
+func TestRegistryGrantFailClosed(t *testing.T) {
+	r, err := OpenRegistry(t.TempDir() + "/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Grant("box", "AA"); err == nil {
+		t.Fatal("grant without console-owner wiring must fail closed")
+	}
+	r.ConsoleStateDir = t.TempDir()
+	r.RelayURL = "http://127.0.0.1:9" // unreachable; the runner lookup fails first
+	r.ConsoleSecret = make([]byte, 32)
+	if _, err := r.Grant("nope", "AA"); err == nil {
+		t.Fatal("grant for an unprovisioned runner must refuse")
+	}
+}

@@ -546,17 +546,19 @@ func (m *Model) buildAgents(cfg *config.Config) {
 		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
 		return
 	}
-	raw, err := mc.CallText("manage_agent", map[string]interface{}{})
+	raw, err := mc.CallText("world_status", map[string]interface{}{})
 	if err != nil {
 		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
 		return
 	}
-	var agents []console.AgentInfo
-	if err := json.Unmarshal(raw, &agents); err != nil {
+	var status struct {
+		Agents []console.AgentInfo `json:"agents"`
+	}
+	if err := json.Unmarshal(raw, &status); err != nil {
 		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
 		return
 	}
-	for _, a := range agents {
+	for _, a := range status.Agents {
 		created := "just now"
 		if a.CreatedAt > 0 {
 			created = humanize(time.Since(time.Unix(int64(a.CreatedAt), 0)))

@@ -40,6 +40,7 @@ import (
 
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/api/cpstate"
 	"freehold/control-plane/cli/flows"
 	"freehold/contract/client"
 	"freehold/contract/config"
@@ -230,6 +231,7 @@ func cmdSeed(args []string) {
 func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "durable state dir")
+	consoleStateDir := fs.String("console-state-dir", "/srv/data/cp/control-plane", "the CONSOLE's durable state dir (its state.json + console identity — the roster owner this server fronts)")
 	addr := fs.String("addr", "127.0.0.1:8089", "HTTP MCP bind address")
 	secret := fs.String("secret", "", "this server's Nostr secret hex (audience)")
 	relayURL := fs.String("relay-url", "", "relay HTTP origin (dial URL; LAN http://<domain>:3000 pre-Caddy)")
@@ -372,11 +374,42 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatalf("open registry: %v", err)
 	}
+	// The console-owner credential for roster writes (grant_agent): the
+	// console's OWN identity, read from ITS state dir (0600 durable plane),
+	// used in-process to sign put-user publishes. Missing = grants refuse
+	// loudly (fail-closed), never silently succeed.
+	consoleSecret, cerr := cpstate.ConsoleSecret(*consoleStateDir)
+	if cerr != nil {
+		log.Printf("serve: console-owner credential unreadable at %s — grant_agent will fail closed: %v", *consoleStateDir, cerr)
+	}
+	reg.RelayURL = *relayURL
+	reg.ConsoleSecret = consoleSecret
+	reg.ConsoleStateDir = *consoleStateDir
 
 	tools := &agent.Tools{Console: reg, Create: buildCreateAgentFn(spec)}
-	tools.Migrate = buildMigrator(spec)
+	tools.Migrate = buildMigrator(spec, *consoleStateDir)
 	tools.World = buildWorldApply(spec)
-	srv := &agenttools.Server{Audience: audience, Grants: grants, Tools: tools}
+	tools.Status = buildWorldStatus(spec, reg, *consoleStateDir)
+	srv := &agenttools.Server{
+		Audience: audience,
+		Grants:   grants,
+		Tools:    tools,
+		IsAgent: func(caller string) bool {
+			agents, err := reg.Agents()
+			if err != nil {
+				// Fail CLOSED on a registry-read error: if we cannot prove the
+				// caller is an operator (not in the registry), treat it as an
+				// agent and deny the operator-scoped tools.
+				return true
+			}
+			for _, a := range agents {
+				if a.Pubkey == caller {
+					return true
+				}
+			}
+			return false
+		},
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", srv.ServeHTTP)
@@ -1203,7 +1236,7 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 // First registered migration: the agent-tools durable registry must be a valid,
 // loadable store. The CPA-prompt/config migrations land with the live-world
 // build/upgrade, reusing this same runner.
-func buildMigrator(spec *deploySpec) agent.Migrator {
+func buildMigrator(spec *deploySpec, consoleStateDir string) agent.Migrator {
 	return func() ([]migrations.Result, error) {
 		st, err := migrations.Open(filepath.Join(spec.stateDir, "migrations.json"))
 		if err != nil {
@@ -1220,8 +1253,102 @@ func buildMigrator(spec *deploySpec) agent.Migrator {
 				_, err := agenttools.OpenRegistry(registryPath)
 				return err
 			},
+		}, {
+			// One-time fold of the console state.json agents map into the
+			// authoritative registry.json (the two-registry divergence from the
+			// 0.4.x console-era). ADDITIVE-ONLY: a name already in the registry
+			// keeps its current row (the registry is authoritative — a stale
+			// console pubkey must never clobber a current one). Postcondition:
+			// every console agent is present; skipped-existing rows verify.
+			Name: "002-import-console-agents",
+			Apply: func() error {
+				st, err := cpstate.Read(consoleStateDir)
+				if err != nil {
+					return err
+				}
+				reg, err := agenttools.OpenRegistry(registryPath)
+				if err != nil {
+					return err
+				}
+				rows, err := reg.Agents()
+				if err != nil {
+					return err
+				}
+				byName := map[string]bool{}
+				for _, r := range rows {
+					byName[r.Name] = true
+				}
+				for _, a := range st.Agents {
+					if a.Pubkey == "" || byName[a.Name] {
+						continue
+					}
+					ch := a.Name
+					if a.Channel != nil && *a.Channel != "" {
+						ch = *a.Channel
+					}
+					if _, err := reg.RegisterAgent(a.Name, a.Pubkey, ch); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+			Verify: func() error {
+				st, err := cpstate.Read(consoleStateDir)
+				if err != nil {
+					return err
+				}
+				reg, err := agenttools.OpenRegistry(registryPath)
+				if err != nil {
+					return err
+				}
+				rows, err := reg.Agents()
+				if err != nil {
+					return err
+				}
+				have := map[string]bool{}
+				for _, r := range rows {
+					have[r.Pubkey] = true
+				}
+				for _, a := range st.Agents {
+					if a.Pubkey != "" && !have[a.Pubkey] {
+						return fmt.Errorf("console agent %q (%s) missing from the registry", a.Name, a.Pubkey)
+					}
+				}
+				return nil
+			},
 		}}
 		return st.Run(all)
+	}
+}
+
+// buildWorldStatus builds the single-inventory world_status payload: the
+// registry agents + the console's runners/DNS read underneath (the console's
+// state.json on the box — what /api/overview + /api/dns serve).
+func buildWorldStatus(spec *deploySpec, reg *agenttools.Registry, consoleStateDir string) agent.WorldStatusFunc {
+	return func() (map[string]interface{}, error) {
+		agents, err := reg.Agents()
+		if err != nil {
+			return nil, err
+		}
+		cs, err := cpstate.Read(consoleStateDir)
+		if err != nil {
+			return nil, err
+		}
+		runners := []map[string]interface{}{}
+		for _, r := range cs.Runners {
+			runners = append(runners, map[string]interface{}{
+				"name": r.Name, "nostr_pubkey": r.NostrPubkey, "mcp_addr": r.McpAddr,
+			})
+		}
+		dns := []map[string]interface{}{}
+		for _, d := range cs.DNS {
+			dns = append(dns, map[string]interface{}{"name": d.Name, "ip": d.IP})
+		}
+		return map[string]interface{}{
+			"agents":  agents,
+			"runners": runners,
+			"dns":     dns,
+		}, nil
 	}
 }
 

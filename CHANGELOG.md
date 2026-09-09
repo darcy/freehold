@@ -25,6 +25,67 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.1] — Phase 1: the unified scoped API (the one inventory, scope-gated, grant wired)
+
+The REFACTOR-PLAN's Phase 1 behavior change lands on the 0.5.0 tree: the
+agent-tools server becomes the unified api/ front — scope-gated by caller
+class, with `world_status` as the single inventory read, the agent-registry
+reconcile, and `grant_agent` finally wired through the console-owner
+credential.
+
+### Added
+
+- **Server-side scope auth (per-channel tool visibility).** `agenttools.Server`
+  now classifies each caller: a pubkey in the CP's agent registry is an AGENT
+  (create/manage only), a roster member not in the registry is an
+  OPERATOR (full toolset incl. world_* and `grant_agent`). The world_* actions
+  AND `grant_agent` are denied to agents with a distinct `-32003` — so the CPA's
+  "conversation + create only" boundary, previously only enforced by its stdio
+  bridge's client-side filter, is now enforced on the server and cannot be
+  bypassed by calling the server directly. `grant_agent` is operator-scoped
+  because a grant hands direct exec access to a runner's MCP surface (a
+  prompt-reachable agent binding an arbitrary pubkey onto the CP's own
+  co-located runner would bypass this very boundary). `TestServerScopeAuth`
+  pins it.
+- **`world_status` is the single inventory read.** It now returns agents + the
+  console's runners/DNS read underneath (the console's state.json on the box —
+  what `/api/overview` + `/api/dns` serve), via the new `control-plane/api/cpstate`
+  package. The TUI's Agents view and the new `freehold world status` verb
+  consume it. `TestWorldStatusInventory` pins the shape.
+- **`freehold world <status|build|teardown|migrate>` CLI verb.** The box's
+  post-login world surface: every world op goes through the CP's api/ over MCP,
+  signed as the box's ops identity — no local runner/door needed (world ops are
+  API calls; the CP drives the world through its co-located runner).
+- **`grant_agent` is wired.** The AGENTS.md known-gap entry is closed: the
+  server loads the console's own identity (its channel-owner credential) from
+  the console's state dir (`/srv/data/cp/control-plane/console`, 0600 durable)
+  and publishes the kind-9000 put-user to the runner's channel in-process — the
+  runner re-reads its signed 39002 roster per call, so the grant lands without
+  a restart. Missing wiring fails closed, never silently succeeds
+  (`TestRegistryGrantFailClosed`).
+- **Agent-registry reconcile.** Migration `002-import-console-agents` folds the
+  console state.json `agents` map into the authoritative `registry.json`,
+  ADDITIVE-ONLY (a name already in the registry keeps its current row — a stale
+  console pubkey never clobbers a current one), verify-gated (postcondition:
+  every console agent is in the registry) — the two-registry divergence from the
+  console era converges on one source. `TestMigrateImportConsoleAgentsAdditiveOnly`
+  proves an existing row survives.
+
+### Changed
+
+- The toolset's `serve` takes `--console-state-dir` (default
+  `/srv/data/cp/control-plane`) so it can front the console's store + identity.
+- The TUI Agents view reads `world_status` (the single inventory) instead of
+  `manage_agent` directly.
+
+### Notes
+
+- The Rust console is NOT folded here — it stays the `/api/*` surface this
+  phase (the api/ server reads its store, it does not serve its routes); the
+  full port + crate deletion is Phase 3.
+- Docs updated to current state (AGENTS.md known-gap entry closed,
+  ARCHITECTURE.md toolset section).
+
 ## [0.5.0] — the three-module tree (REFACTOR-PLAN Phase 0: contract / control-plane / platform)
 
 The REFACTOR-PLAN's Phase 0 lands: the repo is restructured around what the
