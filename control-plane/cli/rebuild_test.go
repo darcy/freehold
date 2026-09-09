@@ -767,4 +767,31 @@ func TestApplyConfigDefaults(t *testing.T) {
 	if f2.operatorPubkey != "y" || f2.relayDomain != "z" {
 		t.Errorf("explicit flags must win: %q/%q", f2.operatorPubkey, f2.relayDomain)
 	}
+	// a recorded [dns.manager] managed=true seeds --manage-dns so a rebuild of
+	// an already-DNS-managed world skips the y/n prompt.
+	if err := (&config.Config{
+		RelayURL: "https://relay.world.test",
+		CPURL:    "https://cp.world.test",
+		Dns: config.DnsSpec{Manager: &config.DnsManager{
+			Provider: "cloudflare", Managed: true, IP: "192.168.30.7",
+		}},
+	}).Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	f3 := &rebuildFlags{}
+	if err := applyConfigDefaults(f3, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if !f3.manageDNS {
+		t.Error("recorded dns.manager.managed=true must seed manageDNS=true (no re-prompt)")
+	}
+	// an EXPLICIT --manage-dns=false still opts out (the config only fills the
+	// omitted case — e.g. after teardown --remove-dns).
+	f4 := &rebuildFlags{manageDNS: false, manageDNSExplicit: true}
+	if err := applyConfigDefaults(f4, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if f4.manageDNS {
+		t.Error("explicit --manage-dns=false must NOT be overridden by the config seed")
+	}
 }

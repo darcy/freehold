@@ -35,19 +35,19 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"freehold/control-plane/api/agent"
-	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
-	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
-	"freehold/platform/services/externaldns/cloudflare"
-	"freehold/platform/provisioning/drive"
-	"freehold/control-plane/cli/flows"
-	"freehold/platform/provisioning/stages"
 	"freehold/contract/state"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agent"
+	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
+	"freehold/control-plane/cli/flows"
+	"freehold/platform/provisioning/drive"
+	"freehold/platform/provisioning/stages"
+	"freehold/platform/services/certificates/letsencrypt"
+	"freehold/platform/services/externaldns/cloudflare"
 )
 
 // dnsCredCmd stores the Caddy edge's DNS provider credential (provider + env)
@@ -173,6 +173,7 @@ var buildCmd = &cobra.Command{Use: "build",
 		f.yes, _ = cmd.Flags().GetBool("yes")
 		f.resetDNS, _ = cmd.Flags().GetBool("reset-dns")
 		f.manageDNS, _ = cmd.Flags().GetBool("manage-dns")
+		f.manageDNSExplicit = cmd.Flags().Changed("manage-dns")
 		// Smooth rebuild: pull any omitted value from the stored config so a
 		// rebuild is not forced to re-enter the operator key, relay/CP hosts,
 		// thin-pool, etc.
@@ -228,6 +229,14 @@ func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
 	}
 	if f.proxyIP == "" && cfg.Proxy.Ip != nil {
 		f.proxyIP = *cfg.Proxy.Ip
+	}
+	// A rebuild of an already-DNS-managed world keeps managing DNS: seed
+	// --manage-dns from the recorded [dns.manager] so the prompt is skipped
+	// (the operator doesn't re-answer "y/n" every build). An EXPLICIT
+	// --manage-dns=false still opts out (the config only fills the omitted
+	// case — e.g. after `teardown --remove-dns`).
+	if !f.manageDNSExplicit && !f.manageDNS && cfg.Dns.Manager != nil && cfg.Dns.Manager.Managed {
+		f.manageDNS = true
 	}
 	return nil
 }
@@ -287,8 +296,12 @@ type rebuildFlags struct {
 	configPath         string
 	confirmStorage     bool
 	resetDNS           bool
-	manageDNS          bool
-	yes                bool
+	// manageDNSExplicit records whether --manage-dns was EXPLICITLY passed (a
+	// bool flag reads false for both omitted and --manage-dns=false; the config
+	// seed must only fill the omitted case so an operator can still opt out).
+	manageDNSExplicit bool
+	manageDNS         bool
+	yes               bool
 }
 
 // rebuildBins are the resolved sibling binary paths. Go has no
