@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"freehold/contract/console"
+	"freehold/contract/relay"
+	"freehold/control-plane/api/cpstate"
 ) // Registry is the freehold-agent-tools server's durable agent registry: the CP
 // holds it under the server's own state dir, so a compute-only teardown keeps
 // every created agent's identity + row and a rebuild reconciles it. It satisfies
@@ -20,6 +22,15 @@ type Registry struct {
 	mu   sync.Mutex
 	path string
 	rows map[string]console.AgentInfo
+
+	// Grant wiring (the console-owner credential): RelayURL is the relay to
+	// publish roster writes to, ConsoleSecret is the console's OWN nostr secret
+	// (its channel-owner key, loaded from the console state dir — 0600 durable,
+	// in-process only), and ConsoleStateDir resolves runner names → their
+	// nostr pubkeys. Empty RelayURL/ConsoleSecret = grants stay unwired.
+	RelayURL         string
+	ConsoleSecret    []byte
+	ConsoleStateDir  string
 }
 
 // OpenRegistry loads (creating if needed) the registry at path.
@@ -104,8 +115,21 @@ func (r *Registry) Agents() ([]console.AgentInfo, error) {
 
 // Grant binds agent pubkeys to a runner's whitelist — in the locked model that
 // is a RELAY roster change on the runner's private channel, signed by the
-// channel owner (the console), not a registry-file op. Honest "not wired" until
-// the server holds that owner credential; the operator grants via the console.
+// channel owner (the console). The unified api/ absorbed the console's owner
+// credential, so this now publishes kind-9000 put-user to the runner's channel
+// with the console's own identity: the runner re-reads its signed 39002 roster
+// per call, so the grant lands without a restart. Fail-closed: no relay/console
+// wiring means the grant refuses loudly, never silently succeeding.
 func (r *Registry) Grant(runner, pubkey string) (json.RawMessage, error) {
-	return nil, fmt.Errorf("grant_agent %s→%s: the runner's whitelist is its relay roster, owned by the console — not wired from the CP toolset yet (operator grants via the console)", pubkey, runner)
+	if r.RelayURL == "" || len(r.ConsoleSecret) == 0 {
+		return nil, fmt.Errorf("grant_agent %s→%s: server holds no relay/console-owner wiring (deploy the agent-tools stage with --console-state-dir and a relay)", pubkey, runner)
+	}
+	runnerPK, err := cpstate.RunnerNostrPubkey(r.ConsoleStateDir, runner)
+	if err != nil {
+		return nil, fmt.Errorf("grant_agent %s→%s: %w", pubkey, runner, err)
+	}
+	if err := relay.PutUser(r.RelayURL, r.ConsoleSecret, runnerPK, pubkey); err != nil {
+		return nil, fmt.Errorf("grant_agent %s→%s: publish roster change: %w", pubkey, runner, err)
+	}
+	return json.RawMessage(`{}`), nil
 }

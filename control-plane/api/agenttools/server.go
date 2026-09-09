@@ -28,6 +28,15 @@ type Server struct {
 	// Tools holds the bound agent-management actions (Console + the deploy
 	// path). create_agent / grant_agent / manage_agent dispatch here.
 	Tools *agent.Tools
+
+	// IsAgent reports whether a caller pubkey is a REGISTRY agent (a row in
+	// the CP's agent registry). Scope rule: registry agents get the
+	// create/grant/manage toolset only; operator callers (roster members NOT
+	// in the registry — the admin/seed grants minted at bootstrap) get the
+	// full toolset including the world_* actions. Keyed on the registry, read
+	// fresh per call, so a revoked registry row loses world access on the
+	// next request. nil = everyone is an operator (no registry filtering).
+	IsAgent func(callerPubkey string) bool
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -84,11 +93,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rpcError(w, req.ID, -32001, aerr.Error())
 		return
 	}
-	_ = caller // audit use later
 
 	switch req.Method {
 	case "tools/call":
-		s.dispatch(w, req.ID, req.Params)
+		s.dispatch(w, req.ID, req.Params, caller)
 	default:
 		s.rpcError(w, req.ID, -32601, "method not found: "+req.Method)
 	}
@@ -152,7 +160,16 @@ type manageAgentArgs struct {
 	Remove string `json:"remove"`
 }
 
-func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json.RawMessage) {
+// isWorldTool reports whether a tool is a world-action (operator-only scope).
+func isWorldTool(name string) bool {
+	switch name {
+	case "world_status", "world_teardown", "world_migrate", "world_build":
+		return true
+	}
+	return false
+}
+
+func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json.RawMessage, caller string) {
 	if s.Tools == nil {
 		s.rpcError(w, id, -32002, "freehold-agent-tools not bound (no agent actions)")
 		return
@@ -163,6 +180,16 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 	}
 	if err := json.Unmarshal(params, &call); err != nil || call.Name == "" {
 		s.rpcError(w, id, -32602, "tools/call requires name")
+		return
+	}
+	// Scope auth (per-channel tool visibility): the world_* actions mutate the
+	// world — registry AGENTS are excluded from them (conversation + create/
+	// grant/manage only); only OPERATOR callers (roster members not in the
+	// registry) drive world_*. The CPA's stdio bridge already filters to
+	// create/grant/manage; this is the same boundary enforced server-side so
+	// it cannot be bypassed by calling the server directly.
+	if isWorldTool(call.Name) && s.IsAgent != nil && s.IsAgent(caller) {
+		s.rpcError(w, id, -32003, "unauthorized: registry agents cannot drive world_* actions ("+call.Name+")")
 		return
 	}
 	switch call.Name {
@@ -204,12 +231,12 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		b, _ := json.Marshal(agents)
 		s.textResult(w, id, nil, string(b))
 	case "world_status":
-		agents, err := s.Tools.WorldStatus()
+		out, err := s.Tools.WorldStatus()
 		if err != nil {
 			s.textResult(w, id, err, "")
 			return
 		}
-		out := map[string]interface{}{"cp_pubkey": s.Audience, "agents": agents}
+		out["cp_pubkey"] = s.Audience
 		b, _ := json.Marshal(out)
 		s.textResult(w, id, nil, string(b))
 	case "world_teardown":

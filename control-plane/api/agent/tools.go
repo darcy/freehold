@@ -48,6 +48,9 @@ type Tools struct {
 	// World drives the CP's world-build/reconcile stages through its co-located
 	// runner (the "box = login + trigger" entry point). nil = unsupported.
 	World WorldApply
+	// Status builds the single inventory world_status returns (agents + the
+	// console's runners/DNS read underneath). nil = agents only.
+	Status WorldStatusFunc
 }
 
 // Migrator applies pending CP migrations and returns their verify-gated results.
@@ -125,15 +128,28 @@ func (t *Tools) ManageAgent(remove string) ([]console.AgentInfo, error) {
 	return t.Console.Agents()
 }
 
+// WorldStatusFunc builds the single-inventory world_status payload (agents +
+// the console's runners/DNS read underneath) — one read the TUI and the world
+// CLI consume.
+type WorldStatusFunc func() (map[string]interface{}, error)
+
 // WorldStatus is the CP's world-action surface for the box's "login + trigger":
-// what the CP currently manages (its agent registry). The infra half (k3s /
+// the single inventory read — what the CP manages (its agent registry) plus the
+// console's runners/DNS (the "console underneath"). The infra half (k3s /
 // litellm / Caddy / relay provisioning) is the build/upgrade follow-up that
 // needs a live world; status + teardown are the roster-gated first slice.
-func (t *Tools) WorldStatus() ([]console.AgentInfo, error) {
+func (t *Tools) WorldStatus() (map[string]interface{}, error) {
+	if t.Status != nil {
+		return t.Status()
+	}
 	if t.Console == nil {
 		return nil, fmt.Errorf("world-status: no console client bound")
 	}
-	return t.Console.Agents()
+	agents, err := t.Console.Agents()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"agents": agents}, nil
 }
 
 // WorldTeardown clears the CP's managed agent registry (the world-action pair to

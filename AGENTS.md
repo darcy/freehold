@@ -160,10 +160,12 @@ changelog.
   the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
   via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
   aggregates buzz-dev-mcp's message tools with create/grant/manage, signed as the agent and
-  authorized by the server's roster. **`grant_agent` on the toolset is not wired yet**: binding an agent to a runner's whitelist is a relay roster change owned by the
-  console (the runner's channel owner), and the server does not hold that credential — it
-  fails loudly ("not wired") rather than silently succeeding; operators grant via the console
-  today.
+  authorized by the server's roster. **`grant_agent` is wired through the absorbed
+  console-owner credential**: the server loads the console's own identity from the console's
+  state dir (`/srv/data/cp/control-plane/console`, 0600 durable plane) and publishes the
+  kind-9000 put-user to the runner's channel in-process — the runner re-reads its signed
+  39002 roster per call, so the grant lands without a restart. A missing console credential
+  fails closed ("no relay/console-owner wiring") rather than silently succeeding.
 - **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
   the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
   bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and
