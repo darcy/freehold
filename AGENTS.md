@@ -190,7 +190,7 @@ changelog.
   - `platform/` (`freehold/platform` — the evolving world: services/provisioning/agents/
     migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`
   - `control-plane/` (`freehold/control-plane` — the mechanism: api/cli/secret-management;
-    the `freehold` and `freehold-orchestrator` binaries, the TUI, and the `harness/` release
+    the `freehold` binary, the TUI, and the `harness/` release
     gate): `cd control-plane && go build ./... && go vet ./... && go test ./...`;
     `go test ./core/harness/` drives `target/debug/freehold-harness-oracle` and gates every
     crypto primitive against the Rust `core` byte-for-byte.

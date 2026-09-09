@@ -1,4 +1,5 @@
-// Package cli holds the cobra command tree for freehold-orchestrator.
+// Package cli holds the cobra command tree for freehold (the operator CLI —
+// the freehold-orchestrator binary folded into it).
 //
 // The CLI contract (flag names, existence, defaults, help text) mirrors the
 // old Rust `clap` surface so teardown, the TUI, and `freehold install` can
@@ -14,7 +15,7 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "freehold-orchestrator",
+	Use:   "freehold",
 	Short: "Freehold CLI: the scripted CPA stand-in that drives the engine room",
 	Long: "Freehold CLI: the scripted CPA stand-in that drives the engine room\n" +
 		"Freehold bootstrap, provisioning, and repair engine.",
@@ -22,8 +23,8 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 }
 
-// Execute runs the CLI with the process args (the freehold-orchestrator
-// binary entry point) and returns any error.
+// Execute runs the CLI with the process args (the freehold binary entry
+// point) and returns any error.
 func Execute() error {
 	return runErr(rootCmd.Execute())
 }

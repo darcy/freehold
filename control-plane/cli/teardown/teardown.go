@@ -92,7 +92,7 @@ type LxcRef struct {
 
 // ExecRunner is the subprocess driver that runs `freehold exec`.
 type ExecRunner struct {
-	OrchestratorBin string // path to the freehold-orchestrator binary
+	OrchestratorBin string // path to the running freehold binary
 	Addr            string // runner MCP addr
 	AgentDir        string // ops identity dir
 	Runner          string // runner target name

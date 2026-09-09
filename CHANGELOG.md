@@ -25,6 +25,29 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.3] — Phase 3 (part 1): `freehold-orchestrator` folds into `freehold`
+
+REFACTOR-PLAN §3.5/§8 Phase 3's binary fold. The `freehold-orchestrator`
+binary was vestigial: the `freehold` binary already routes every subcommand to
+the same cobra tree (`cli.Run`), and the rebuild/teardown engines re-exec the
+CURRENT binary (`os.Executable()` — `OrchestratorBin: self`), never
+`freehold-orchestrator` by name. `resolveRebuildBins` resolves the
+runner/control-plane/agent-tools siblings, not this binary.
+
+### Removed
+
+- **`control-plane/cli/cmd/freehold-orchestrator/` (the binary).** One binary,
+  two surfaces: `freehold` with no args = the TUI, `freehold <subcmd>` = the
+  CLI. The sibling-resolution contract is preserved (teardown re-execs the
+  running binary). The cobra root's `Use` is now `freehold` (was
+  `freehold-orchestrator`).
+
+### Notes
+
+- The Rust console port + `console-client` deletion remain Phase 3's core
+  work; this PR ships the fold so the build/docs stop promising a second
+  binary.
+
 ## [0.5.2] — Phase 2 (part 1): the CLI is an API client — the box-local mirror is gone
 
 REFACTOR-PLAN Phase 2's first slice: the box stops holding a second, local
