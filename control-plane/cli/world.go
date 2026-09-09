@@ -9,6 +9,7 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/control-plane/cli/flows"
+	"freehold/control-plane/cli/login"
 )
 
 // worldCmd is the box's post-login world surface: every world op goes through
@@ -112,16 +113,19 @@ func printWorldStatus(text string) error {
 	return nil
 }
 
-// worldMcp builds the agent-tools MCP client for the world verb (the same
-// construction the rebuild engine uses: box ops identity + the recorded
-// agent-tools coords).
+// worldMcp builds the agent-tools MCP client for the world verb. It signs as
+// the OPERATOR identity (the persisted nsec — a console-admin, in the toolset
+// roster), NOT the box's agent-ops identity: a fresh login-only box's
+// agent-ops is minted locally and is NOT a toolset-roster member, so signing
+// with it would get world_* denied with -32001. The operator key is the
+// credential (0.4.9) — the same identity the TUI's Agents view uses.
 func worldMcp(cfg *config.Config) (*client.McpClient, error) {
 	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
 		return nil, fmt.Errorf("no freehold-agent-tools coords recorded (run `freehold login` against the CP)")
 	}
-	auth, err := flows.AgentAuth(rbOpsDir())
+	auth, err := flows.AgentAuth(oplogin.Dir())
 	if err != nil {
-		return nil, fmt.Errorf("this box has no ops identity at %s (run `freehold login` to materialize it): %v", rbOpsDir(), err)
+		return nil, fmt.Errorf("this box has no operator identity at %s (run `freehold login` to materialize it): %v", oplogin.Dir(), err)
 	}
 	return client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
 }
