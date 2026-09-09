@@ -47,12 +47,6 @@ func (m Mode) String() string {
 	}
 }
 
-// Runner sources for the Runners view: the console API (CP — the default)
-// or the local loopback state.json. Toggle with `s`.
-const (
-	RunnerSourceCP    = "cp"
-	RunnerSourceLocal = "local"
-)
 
 // View is the running dashboard's active view.
 type View int
@@ -112,8 +106,6 @@ type Model struct {
 	// consolePK is the operator pubkey of the live console session ("" = not
 	// logged in), shown in the footer / views.
 	consolePK string
-	// Runners view source: RunnerSourceCP (default) | RunnerSourceLocal.
-	RunnerSource string
 	// last-loaded config — the `s` toggle and post-flow refreshes need it.
 	cfg *config.Config
 	// activity: while non-nil, the FULL-SCREEN activity view replaces the

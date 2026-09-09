@@ -247,9 +247,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
     Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
-    recheck the world, `s` toggle the Runners source (CP console ⇄ local
-    state), `w` open the web console, `l` log in with the operator nsec,
+    recheck the world, `w` open the web console, `l` log in with the operator nsec,
     `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
+    (The `s` Runners-source toggle is gone: the box-local `state.json` mirror
+    is deleted — the Runners view reads the console `/api/overview` only. The
+    CP-lifecycle door model is specified in `docs/DOOR_SPEC.md`.)
 
 *   **Remote-CP access.** `freehold login` (root-free) authorizes this operator
     against the CP by **CP address + operator nsec** (NIP-98), then ends;

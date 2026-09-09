@@ -256,51 +256,25 @@ relay 192.168.30.8
 	}
 }
 
-// TestRunnerSourceDefaultsToCpAndToggles covers the Runners view source:
-// new models default to the CP (console) source, and `s` toggles to local
-// and back, re-filling the view each time.
-func TestRunnerSourceDefaultsToCpAndToggles(t *testing.T) {
+// TestRunnersViewDefaultsToCpSource covers the Runners view: it reads the CP
+// console overview (there is no local loopback toggle — the box-local
+// state.json mirror is deleted), and a not-logged-in box gets the login hint.
+func TestRunnersViewDefaultsToCpSource(t *testing.T) {
 	cfg := testCfg()
 	if cfg == nil {
 		t.Fatal("testCfg returned nil")
 	}
 	m := &Model{Mode: ModeRunning, cfg: cfg}
-	if m.RunnerSource == "" {
-		m.RunnerSource = RunnerSourceCP
-	}
 	m.refreshRunners(cfg)
-	if m.RunnerSource != RunnerSourceCP {
-		t.Fatalf("default source = %q, want cp", m.RunnerSource)
-	}
 	// not logged into a console -> the CP source shows the login hint row.
 	if len(m.Runners) == 0 || !strings.Contains(m.Runners[0].Name, "not logged") {
 		t.Fatalf("cp source without login should hint, got %+v", m.Runners)
 	}
-	// toggle to local via the same switch the `s` key drives.
-	toggle := func() {
-		if m.RunnerSource == RunnerSourceLocal {
-			m.RunnerSource = RunnerSourceCP
-		} else {
-			m.RunnerSource = RunnerSourceLocal
-		}
-		m.refreshRunners(cfg)
-	}
-	toggle()
-	if m.RunnerSource != RunnerSourceLocal {
-		t.Fatalf("after toggle source = %q, want local", m.RunnerSource)
-	}
-	if got := m.runnerSourceLabel(); !strings.Contains(got, "loopback") {
-		t.Errorf("local label = %q", got)
-	}
-	toggle()
-	if m.RunnerSource != RunnerSourceCP {
-		t.Fatalf("second toggle source = %q, want cp", m.RunnerSource)
-	}
-	// the Runners view title carries the source label + toggle hint.
+	// the Runners view title names the CP source.
 	m.ActiveView = ViewRunners
 	out := m.View()
-	if !strings.Contains(out, "Runners · ") || !strings.Contains(out, "s toggles") {
-		t.Errorf("runners view should show the source toggle hint:\n%s", out)
+	if !strings.Contains(out, "Runners · ") || !strings.Contains(out, "CP (console") {
+		t.Errorf("runners view should show the CP source title:\n%s", out)
 	}
 }
 

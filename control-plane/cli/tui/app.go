@@ -19,7 +19,6 @@ import (
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
 	"freehold/platform/provisioning/planebase"
-	"freehold/contract/state"
 )
 
 // ---- bubbletea lifecycle -------------------------------------------------
@@ -82,9 +81,6 @@ func (m *Model) load(cfgPath string) error {
 	m.buildServices(cfg)
 	m.buildCerts(cfg)
 	m.cfg = cfg
-	if m.RunnerSource == "" {
-		m.RunnerSource = RunnerSourceCP
-	}
 	m.refreshRunners(cfg)
 	m.buildAgents(cfg)
 	return nil
@@ -430,40 +426,11 @@ func (m *Model) launchWeb() {
 	m.Msg = "web opened: " + url
 }
 
-// readLocalRunners fills the Runners view from the local CP state.json (the
-// loopback authn path — mirror of running.rs::read_local).
-func (m *Model) readLocalRunners(cfg *config.Config) {
-	st, err := state.Open(freeholdStateDir())
-	if err != nil {
-		m.Runners = nil
-		return
-	}
-	m.Runners = nil
-	for name, rec := range st.Snapshot().Runners {
-		addr := "—"
-		if rec.McpAddr != nil {
-			addr = *rec.McpAddr
-		} else if cfg != nil {
-			addr = cfg.Runner.Addr
-		}
-		m.Runners = append(m.Runners, RunnerRow{
-			Name: name, Status: string(rec.Status), Pubkey: rec.NostrPubkey,
-			Addr: addr, Readiness: "—",
-		})
-	}
-	if len(m.Runners) == 0 {
-		m.Runners = []RunnerRow{{Name: "(no runners)", Status: styleDim.Render("provision one in the CLI")}}
-	}
-}
-
-// refreshRunners fills the Runners view from the ACTIVE source: the console
-// API (CP — default) or the local loopback state.json.
+// refreshRunners fills the Runners view from the console /api/overview (the
+// CP's authoritative runner list). There is no local loopback toggle: the
+// box-local state.json mirror is deleted (Phase 2) — world ops read the CP.
 func (m *Model) refreshRunners(cfg *config.Config) {
 	if cfg == nil {
-		return
-	}
-	if m.RunnerSource == RunnerSourceLocal {
-		m.readLocalRunners(cfg)
 		return
 	}
 	m.readCpRunners(cfg)
@@ -521,7 +488,7 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 // agents created through create_agent after 0.4.6 (the console's /api/agents
 // is empty; the toolset keeps its own registry). Signed as the operator (the
 // persisted nsec), who is a roster grant. Not logged in or no agent-tools
-// coords = a hint row, not the stale local loopback state.
+// coords = a hint row, never a blank dashboard.
 func (m *Model) buildAgents(cfg *config.Config) {
 	m.Agents = nil
 	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
@@ -594,16 +561,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Mode == ModeRunning {
 				return m, m.startBootActivity("checking the world")
 			}
-		case "s":
-			if m.Mode == ModeRunning {
-				if m.RunnerSource == RunnerSourceLocal {
-					m.RunnerSource = RunnerSourceCP
-				} else {
-					m.RunnerSource = RunnerSourceLocal
-				}
-				m.refreshRunners(m.cfg)
-				m.Msg = "runners: " + m.runnerSourceLabel()
-			}
 		case "w":
 			if m.Mode == ModeRunning {
 				m.launchWeb()
@@ -652,7 +609,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.auth && v.client != nil {
 			m.console = &consoleClient{client: v.client}
 			m.consolePK = v.pubkey
-			m.RunnerSource = RunnerSourceCP
 			m.refreshLocal()
 			m.Msg = "auto-logged into the CP as " + v.pubkey[:12]
 		}
@@ -712,14 +668,6 @@ func (m *Model) View() string {
 	return lipgloss.NewStyle().Render(b.String())
 }
 
-// runnerSourceLabel names the active Runners view source.
-func (m *Model) runnerSourceLabel() string {
-	if m.RunnerSource == RunnerSourceLocal {
-		return "local (loopback state.json)"
-	}
-	return "CP (console /api/overview)"
-}
-
 func renderProbes(m *Model) string {
 	return fmt.Sprintf("  relay %s  cp %s  k3s %s  litellm %s  caddy %s  runner %s",
 		boolStatus(m.RelayLive, "green", "red"),
@@ -740,7 +688,7 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s%s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second), op)) +
-			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · build/teardown run from the shell")
+			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
 	case ModeBootstrap, ModeConfigure:
@@ -787,7 +735,7 @@ func renderViews(m *Model) string {
 			rows = append(rows, []string{a.Name, clip(a.Pubkey, 16), a.Available, a.Created})
 		}
 	case ViewRunners:
-		title = "Runners · " + m.runnerSourceLabel() + " · s toggles"
+		title = "Runners · CP (console /api/overview)"
 		headers = []string{"name", "status", "pubkey", "addr", "grants", "readiness"}
 		for _, r := range m.Runners {
 			rows = append(rows, []string{r.Name, r.Status, clip(r.Pubkey, 16), r.Addr, r.Grants, r.Readiness})

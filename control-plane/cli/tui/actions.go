@@ -394,7 +394,6 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			m.console = &consoleClient{client: c}
 			m.consolePK = pk
-			m.RunnerSource = RunnerSourceCP
 			return flowMsg{ok: fmt.Sprintf("console login ok — operator %.12s", pk)}
 		}
 

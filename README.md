@@ -186,8 +186,7 @@ freehold --help               # both surfaces
   coordinates land in the config), **Agents** (the CP toolset's agent registry
   — name / pubkey / age of the agents the control plane has created),
   **Runners**
-  (the console API parity — same data as the web UI — toggled to the local
-  loopback list with `s`), **Data** (the live durable plane — host capacity +
+  (the console API parity — same data as the web UI), **Data** (the live durable plane — host capacity +
   each mount's size / used / guest bind-mount liveness, read-only through the
   signed runner channel), **DNS**, **Certs**. A one-line world strip keeps the
   liveness glance.
