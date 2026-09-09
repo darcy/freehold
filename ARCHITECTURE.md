@@ -251,7 +251,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
     (The `s` Runners-source toggle is gone: the box-local `state.json` mirror
     is deleted — the Runners view reads the console `/api/overview` only. The
-    CP-lifecycle door model is specified in `docs/DOOR_SPEC.md`.)
+    CP-lifecycle door model — implemented as `world_authorize_door` /
+    `world_revoke_door` + `freehold door authorize|revoke`, spec'd in
+    `docs/DOOR_SPEC.md` — lets a fresh logged-in box authorize its own door key
+    on the host.)
 
 *   **Remote-CP access.** `freehold login` (root-free) authorizes this operator
     against the CP by **CP address + operator nsec** (NIP-98), then ends;

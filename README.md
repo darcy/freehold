@@ -161,6 +161,8 @@ freehold world status         # the CP's single inventory (agents + runners + DN
 freehold world build          # trigger the CP's world-build (co-located runner)
 freehold world teardown       # the CP unwinds what it manages (relay+k3s LXCs first)
 freehold world migrate        # run the CP's verify-gated migrations
+freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
+freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
 freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
 freehold deploy-relay …       #   memory, console-login, grant, storage …)

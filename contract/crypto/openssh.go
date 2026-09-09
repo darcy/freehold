@@ -103,6 +103,18 @@ func GenerateSSHKeypair(comment string) (privatePEM []byte, pubLine string, err 
 	return encodeED25519OpenSSH(seed, comment)
 }
 
+// SSHPublicKeyFromSeed derives the authorized_keys public line from a fixed
+// 32-byte ed25519 seed (deterministic — same seed → same line). The login
+// door uses the box's own identity seed (its nostr_secret) so the box's door
+// key is stable across re-logins; only the public line is ever presented.
+func SSHPublicKeyFromSeed(seed []byte, comment string) (string, error) {
+	if len(seed) != ed25519.SeedSize {
+		return "", fmt.Errorf("seed must be 32 bytes, got %d", len(seed))
+	}
+	_, pubLine, err := encodeED25519OpenSSH(seed, comment)
+	return pubLine, err
+}
+
 // ExtractED25519PublicKeyLine derives the authorized_keys public line from
 // an openssh-key-v1 private-key PEM (ed25519 only — the only kind the
 // provisioner generates). This is the door-key RECOVERY path: a reused

@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -390,6 +391,9 @@ func cmdServe(args []string) {
 	tools.Migrate = buildMigrator(spec, *consoleStateDir)
 	tools.World = buildWorldApply(spec)
 	tools.Status = buildWorldStatus(spec, reg, *consoleStateDir)
+	doorAuth, doorRevoke := buildWorldDoor(spec)
+	tools.DoorAuthorize = doorAuth
+	tools.DoorRevoke = doorRevoke
 	srv := &agenttools.Server{
 		Audience: audience,
 		Grants:   grants,
@@ -1319,6 +1323,48 @@ func buildMigrator(spec *deploySpec, consoleStateDir string) agent.Migrator {
 		}}
 		return st.Run(all)
 	}
+}
+
+// doorKeyRe is the DOOR_SPEC §2.5 strict authorized_keys-line gate: key type +
+// base64 body + an optional safe comment, with NO whitespace runs, quotes,
+// backticks, $, (, ;, &, |, or newlines. A string passing this is a key line,
+// not a shell payload — safe to single-quote into the append/remove command.
+var doorKeyRe = regexp.MustCompile(`^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+=? ?[A-Za-z0-9._@-]*$`)
+
+// buildWorldDoor builds the DOOR_SPEC authorize/revoke drivers: the CP appends
+// an operator box's public door key to (or removes it from) the host door
+// through its co-located runner — the same runner that already holds the host
+// door and drives world_build. The pubkey is validated against doorKeyRe at
+// the API boundary BEFORE it ever reaches the shell.
+func buildWorldDoor(spec *deploySpec) (agent.DoorAuthorizeAppend, agent.DoorRevoke) {
+	authorize := func(pubkey string) error {
+		if !doorKeyRe.MatchString(pubkey) {
+			return fmt.Errorf("world-authorize-door: pubkey must match a strict authorized_keys line (key type + base64 body + optional safe comment, no shell metacharacters)")
+		}
+		cmd := "mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -Fqx '" + pubkey + "' ~/.ssh/authorized_keys || (touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo '" + pubkey + "' >> ~/.ssh/authorized_keys)"
+		if _, err := spec.execOut(cmd, 30); err != nil {
+			return fmt.Errorf("world-authorize-door: %w", err)
+		}
+		return nil
+	}
+	revoke := func(pubkey string) error {
+		if !doorKeyRe.MatchString(pubkey) {
+			return fmt.Errorf("world-revoke-door: pubkey must match a strict authorized_keys line (key type + base64 body + optional safe comment, no shell metacharacters)")
+		}
+		// Exact-line removal with a real error on a real failure (NO `|| true`
+		// masking — a false "revoked" for the lost/compromised-box lever is a
+		// silent security lie). Run only when the file exists (absent = nothing
+		// to revoke, not an error). The `.` in the comment is the ONLY regex
+		// special the doorKeyRe charset allows — escape it so the sed address
+		// is a literal line, matching authorize's grep -Fqx exact-line check.
+		escaped := strings.ReplaceAll(pubkey, ".", `\.`)
+		cmd := "if [ -f ~/.ssh/authorized_keys ]; then sed -i '\\|" + escaped + "|d' ~/.ssh/authorized_keys; fi"
+		if _, err := spec.execOut(cmd, 30); err != nil {
+			return fmt.Errorf("world-revoke-door: %w", err)
+		}
+		return nil
+	}
+	return authorize, revoke
 }
 
 // buildWorldStatus builds the single-inventory world_status payload: the

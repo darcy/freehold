@@ -51,10 +51,39 @@ type Tools struct {
 	// Status builds the single inventory world_status returns (agents + the
 	// console's runners/DNS read underneath). nil = agents only.
 	Status WorldStatusFunc
+	// DoorAuthorize/Revoke authorize/revoke an operator box's door key on the
+	// host (DOOR_SPEC). nil = door unsupported.
+	DoorAuthorize DoorAuthorizeAppend
+	DoorRevoke    DoorRevoke
 }
 
 // Migrator applies pending CP migrations and returns their verify-gated results.
 type Migrator func() ([]migrations.Result, error)
+
+// DoorAuthorizeAppend authorizes a box's public door key onto the host door
+// through the CP's co-located runner. nil = door unsupported.
+type DoorAuthorizeAppend func(pubkey string) error
+
+// DoorRevoke removes a box's public door key from the host door.
+type DoorRevoke func(pubkey string) error
+
+// AuthorizeDoor appends an operator box's SSH public key to the host door
+// (DOOR_SPEC): the CP runs the append through its co-located runner, scoped to
+// the caller-presented pubkey. Operator-only (dispatch gates it).
+func (t *Tools) AuthorizeDoor(pubkey string) error {
+	if t.DoorAuthorize == nil {
+		return fmt.Errorf("world-authorize-door: no door driver bound")
+	}
+	return t.DoorAuthorize(pubkey)
+}
+
+// RevokeDoor removes an operator box's SSH public key from the host door.
+func (t *Tools) RevokeDoor(pubkey string) error {
+	if t.DoorRevoke == nil {
+		return fmt.Errorf("world-revoke-door: no door driver bound")
+	}
+	return t.DoorRevoke(pubkey)
+}
 
 // WorldMigrate runs pending CP migrations (idempotent, 🟢/🔴 verify-gated).
 func (t *Tools) WorldMigrate() ([]migrations.Result, error) {
