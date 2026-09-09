@@ -282,14 +282,19 @@ func TestServerScopeAuth(t *testing.T) {
 		return resp.Error.Message, true
 	}
 
-	// The CPA (a registry agent) must be DENIED world_*.
+	// The CPA (a registry agent) must be DENIED world_* AND grant_agent (both
+	// operator-scoped: a grant hands direct exec access to a runner).
 	msg, denied := post(agentSec, agentPK, "world_status")
-	if !denied || !strings.Contains(msg, "cannot drive world_*") {
+	if !denied || !strings.Contains(msg, "cannot call") {
 		t.Fatalf("registry agent must be denied world_status, got denied=%v msg=%q", denied, msg)
 	}
 	msg, denied = post(agentSec, agentPK, "world_teardown")
-	if !denied || !strings.Contains(msg, "cannot drive world_*") {
+	if !denied || !strings.Contains(msg, "cannot call") {
 		t.Fatalf("registry agent must be denied world_teardown, got denied=%v msg=%q", denied, msg)
+	}
+	msg, denied = post(agentSec, agentPK, "grant_agent")
+	if !denied || !strings.Contains(msg, "cannot call") {
+		t.Fatalf("registry agent must be denied grant_agent (operator-scoped), got denied=%v msg=%q", denied, msg)
 	}
 
 	// The operator (roster member, NOT in the registry) drives world_* freely.

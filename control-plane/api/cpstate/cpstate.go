@@ -79,6 +79,20 @@ func Read(consoleStateDir string) (*State, error) {
 	if st.Agents == nil {
 		st.Agents = map[string]Agent{}
 	}
+	// The console keys runners/dns/agents BY NAME; carry the key into each row
+	// (JSON map keys don't populate a Name field on their own).
+	for name, r := range st.Runners {
+		r.Name = name
+		st.Runners[name] = r
+	}
+	for name, d := range st.DNS {
+		d.Name = name
+		st.DNS[name] = d
+	}
+	for name, a := range st.Agents {
+		a.Name = name
+		st.Agents[name] = a
+	}
 	return &st, nil
 }
 

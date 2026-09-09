@@ -37,12 +37,16 @@ credential.
 
 - **Server-side scope auth (per-channel tool visibility).** `agenttools.Server`
   now classifies each caller: a pubkey in the CP's agent registry is an AGENT
-  (create/grant/manage only), a roster member not in the registry is an
-  OPERATOR (full toolset incl. world_*). The world_* actions are denied to
-  agents with a distinct `-32003` — so the CPA's "conversation + create only"
-  boundary, previously only enforced by its stdio bridge's client-side filter,
-  is now enforced on the server and cannot be bypassed by calling the server
-  directly. `TestServerScopeAuth` pins it.
+  (create/manage only), a roster member not in the registry is an
+  OPERATOR (full toolset incl. world_* and `grant_agent`). The world_* actions
+  AND `grant_agent` are denied to agents with a distinct `-32003` — so the CPA's
+  "conversation + create only" boundary, previously only enforced by its stdio
+  bridge's client-side filter, is now enforced on the server and cannot be
+  bypassed by calling the server directly. `grant_agent` is operator-scoped
+  because a grant hands direct exec access to a runner's MCP surface (a
+  prompt-reachable agent binding an arbitrary pubkey onto the CP's own
+  co-located runner would bypass this very boundary). `TestServerScopeAuth`
+  pins it.
 - **`world_status` is the single inventory read.** It now returns agents + the
   console's runners/DNS read underneath (the console's state.json on the box —
   what `/api/overview` + `/api/dns` serve), via the new `control-plane/api/cpstate`
@@ -61,8 +65,11 @@ credential.
   (`TestRegistryGrantFailClosed`).
 - **Agent-registry reconcile.** Migration `002-import-console-agents` folds the
   console state.json `agents` map into the authoritative `registry.json`,
-  verify-gated (postcondition: every console agent is in the registry) — the
-  two-registry divergence from the console era converges on one source.
+  ADDITIVE-ONLY (a name already in the registry keeps its current row — a stale
+  console pubkey never clobbers a current one), verify-gated (postcondition:
+  every console agent is in the registry) — the two-registry divergence from the
+  console era converges on one source. `TestMigrateImportConsoleAgentsAdditiveOnly`
+  proves an existing row survives.
 
 ### Changed
 

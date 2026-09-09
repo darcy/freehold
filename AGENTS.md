@@ -159,13 +159,17 @@ changelog.
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
   the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
   via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
-  aggregates buzz-dev-mcp's message tools with create/grant/manage, signed as the agent and
+  aggregates buzz-dev-mcp's message tools with create/manage, signed as the agent and
   authorized by the server's roster. **`grant_agent` is wired through the absorbed
-  console-owner credential**: the server loads the console's own identity from the console's
-  state dir (`/srv/data/cp/control-plane/console`, 0600 durable plane) and publishes the
-  kind-9000 put-user to the runner's channel in-process — the runner re-reads its signed
-  39002 roster per call, so the grant lands without a restart. A missing console credential
-  fails closed ("no relay/console-owner wiring") rather than silently succeeding.
+  console-owner credential and is OPERATOR-scoped** (not reachable by the CPA's
+  conversation+create-only harness): the server loads the console's own identity from the
+  console's state dir (`/srv/data/cp/control-plane/console`, 0600 durable plane) and
+  publishes the kind-9000 put-user to the runner's channel in-process — the runner
+  re-reads its signed 39002 roster per call, so the grant lands without a restart. A
+  missing console credential fails closed ("no relay/console-owner wiring") rather than
+  silently succeeding. An agent granting onto an arbitrary runner would hand direct exec
+  access to that runner's MCP surface, so grants are the operator's call (server-enforced,
+  `-32003` for agents).
 - **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
   the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
   bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and

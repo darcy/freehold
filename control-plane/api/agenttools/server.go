@@ -160,10 +160,16 @@ type manageAgentArgs struct {
 	Remove string `json:"remove"`
 }
 
-// isWorldTool reports whether a tool is a world-action (operator-only scope).
+// isWorldTool reports whether a tool is an operator-scoped action: granting an
+// agent onto a runner's whitelist and the world_* actions both mutate what the
+// operator owns. grant_agent is operator-only because a grant hands direct
+// exec access to a runner's MCP surface — letting a prompt-reachable agent
+// (e.g. the CPA) bind an arbitrary pubkey onto an arbitrary runner (incl. the
+// CP's own co-located runner) would bypass this very boundary. The CPA's agent
+// toolset is create + manage only.
 func isWorldTool(name string) bool {
 	switch name {
-	case "world_status", "world_teardown", "world_migrate", "world_build":
+	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build":
 		return true
 	}
 	return false
@@ -182,14 +188,14 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		s.rpcError(w, id, -32602, "tools/call requires name")
 		return
 	}
-	// Scope auth (per-channel tool visibility): the world_* actions mutate the
-	// world — registry AGENTS are excluded from them (conversation + create/
-	// grant/manage only); only OPERATOR callers (roster members not in the
-	// registry) drive world_*. The CPA's stdio bridge already filters to
-	// create/grant/manage; this is the same boundary enforced server-side so
-	// it cannot be bypassed by calling the server directly.
+	// Scope auth (per-channel tool visibility): the world_* actions and
+	// grant_agent mutate what the operator owns — registry AGENTS are excluded
+	// from them (conversation + create/manage only); only OPERATOR callers
+	// (roster members not in the registry) drive them. The CPA's stdio bridge
+	// already filters to create/manage; this is the same boundary enforced
+	// server-side so it cannot be bypassed by calling the server directly.
 	if isWorldTool(call.Name) && s.IsAgent != nil && s.IsAgent(caller) {
-		s.rpcError(w, id, -32003, "unauthorized: registry agents cannot drive world_* actions ("+call.Name+")")
+		s.rpcError(w, id, -32003, "unauthorized: registry agents cannot call "+call.Name+" (operator-scoped)")
 		return
 	}
 	switch call.Name {

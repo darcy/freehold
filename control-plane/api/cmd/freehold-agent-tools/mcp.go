@@ -52,7 +52,10 @@ func freeholdToolDefs() []map[string]interface{} {
 
 func isFreeholdTool(name string) bool {
 	switch name {
-	case "create_agent", "grant_agent", "manage_agent":
+	// grant_agent is deliberately absent: it is operator-scoped (a grant hands
+	// direct exec access to a runner), so the CPA's conversation+create-only
+	// harness must not advertise or call it.
+	case "create_agent", "manage_agent":
 		return true
 	}
 	return false

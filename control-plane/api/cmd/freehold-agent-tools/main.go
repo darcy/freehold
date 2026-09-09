@@ -397,7 +397,10 @@ func cmdServe(args []string) {
 		IsAgent: func(caller string) bool {
 			agents, err := reg.Agents()
 			if err != nil {
-				return false
+				// Fail CLOSED on a registry-read error: if we cannot prove the
+				// caller is an operator (not in the registry), treat it as an
+				// agent and deny the operator-scoped tools.
+				return true
 			}
 			for _, a := range agents {
 				if a.Pubkey == caller {
@@ -1253,8 +1256,10 @@ func buildMigrator(spec *deploySpec, consoleStateDir string) agent.Migrator {
 		}, {
 			// One-time fold of the console state.json agents map into the
 			// authoritative registry.json (the two-registry divergence from the
-			// 0.4.x console-era). Postcondition: every console agent row is in
-			// the registry — a failed reconcile stays pending and retries.
+			// 0.4.x console-era). ADDITIVE-ONLY: a name already in the registry
+			// keeps its current row (the registry is authoritative — a stale
+			// console pubkey must never clobber a current one). Postcondition:
+			// every console agent is present; skipped-existing rows verify.
 			Name: "002-import-console-agents",
 			Apply: func() error {
 				st, err := cpstate.Read(consoleStateDir)
@@ -1265,8 +1270,16 @@ func buildMigrator(spec *deploySpec, consoleStateDir string) agent.Migrator {
 				if err != nil {
 					return err
 				}
+				rows, err := reg.Agents()
+				if err != nil {
+					return err
+				}
+				byName := map[string]bool{}
+				for _, r := range rows {
+					byName[r.Name] = true
+				}
 				for _, a := range st.Agents {
-					if a.Pubkey == "" {
+					if a.Pubkey == "" || byName[a.Name] {
 						continue
 					}
 					ch := a.Name

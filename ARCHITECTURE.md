@@ -186,13 +186,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
     authorized per call against the server's own relay roster (NIP-29 channel
     + 39002, fail-closed) **and scoped by caller class**: a pubkey in the CP's
-    agent registry is an AGENT (create/grant/manage only — the world_* actions
-    are denied server-side, so the CPA's "conversation + create only" boundary
-    cannot be bypassed by calling the server directly); a roster member not in
-    the registry is an OPERATOR (full toolset incl. world_*). Its `mcp` stdio
-    mode is the bridge agent pods fetch at boot (same create/grant/manage-only
-    filter, now defense-in-depth). The build dogfoods `create_agent` to bring
-    the CPA up. It
+    agent registry is an AGENT (create/manage only — the world_* actions AND
+    `grant_agent` are denied server-side, so the CPA's "conversation + create
+    only" boundary cannot be bypassed by calling the server directly); a roster
+    member not in the registry is an OPERATOR (full toolset incl. world_* and
+    grant). Its `mcp` stdio mode is the bridge agent pods fetch at boot (same
+    create/manage-only filter, now defense-in-depth). The build dogfoods
+    `create_agent` to bring the CPA up. It
     also carries the CP world-action surface (`world_status` / `world_teardown`
     / `world_migrate` / `world_build`, operator-scoped) so an operator box can
     "login + trigger" the world: `world_build` runs the CP's owned
@@ -202,11 +202,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     cert). `world_status` is the **single inventory read** (agents + the
     console's runners/DNS read underneath — the console's state.json on the
     box), consumed by the TUI and `freehold world status`. `grant_agent` is
-    **wired through the absorbed console-owner credential**: the server loads
+    **operator-scoped and wired through the absorbed console-owner
+    credential**: the server loads
     the console's own identity from its state dir (0600 durable plane) and
     publishes the kind-9000 put-user to the runner's channel in-process — the
     runner re-reads its signed 39002 roster per call, so the grant lands
-    without a restart (missing credential fails closed). `world_migrate` runs
+    without a restart (missing credential fails closed; agents are denied with
+    `-32003`, since a grant hands direct exec access to the runner). `world_migrate` runs
     `platform/migrations` — the CP's verify-gated migration runner (durable
     ledger at `/srv/data/cp/migrations.json`, a migration is done only when
     its postcondition verifies), for versioned config/prompt/repair changes

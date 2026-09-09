@@ -56,9 +56,9 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       server; `mcp` is the stdio bridge the agent PODS fetch at boot
                       — the world actions deliberately do NOT reach the CPA's
                       conversation+create-only harness, scope-gated server-side:
-                      registry agents get create/grant/manage only, operators get
-                      world_*; grant_agent publishes the runner-roster change with
-                      the console's own channel-owner identity)
+                      registry agents get create/manage only, operators get
+                      world_* + grant_agent; grant_agent publishes the runner-roster
+                      change with the console's own channel-owner identity)
   cli/                the operator interface: tui/ (bubbletea dashboard), login/
                       (freehold login/logout), flows/, teardown/, bootstrap-cp/
                       (the day-0 mechanism install), cmd/ (the freehold and
