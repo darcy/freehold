@@ -35,33 +35,46 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 ## Repository layout (what things do in the code)
 
 ```
-Cargo.toml            workspace: core, runner, console-client, control-plane, testkit,
-                      acceptance, orchestrator/harness/oracle
-orchestrator/         freehold (Go): the full CLI + interactive TUI — the live toolchain.
-                      Subcommands mirror the 16-command contract, plus the world-bring-up
-                      drivers (bootstrap proxmox-lxc / vultr-vps / hetzner-vps,
-                      deploy-relay, deploy-cp, relay-member, console-login, teardown,
-                      rebuild, install) and the agent surface (onboard/exec/demo/
-                      readiness, memory, delegate/delegate-peer, relay-profile/relay-join/
-                      relay-setup); the crypto/wire layer is byte-exact cross-verified
-                      against the Rust core by the oracle-harness gate (`go test
-                      ./orchestrator/harness/...`). The Rust tui, freehold-orchestrator,
-                      and installer crates are REMOVED (superseded by the Go binary).
-orchestrator/cmd/freehold-agent-tools
-                      (third binary) the CP's agent-management MCP server on the control
-                      plane: create_agent / grant_agent / manage_agent plus the
-                      roster-gated world_status / world_teardown / world_migrate /
-                      world_build actions (migrate runs the CP's verify-gated
-                      `internal/migrations` runner; build runs the CP's world stages
-                      through its co-located runner), over the relay-signed roster; `mcp`
-                      is the stdio bridge the agent PODS fetch at boot (the world actions
+Cargo.toml            workspace: control-plane/core, control-plane/runner,
+                      control-plane/console, control-plane/console-client,
+                      control-plane/testkit, control-plane/acceptance,
+                      control-plane/core/harness/oracle
+contract/             freehold/contract — the shared wire/trust leaf BOTH the
+                      control plane and the platform import: crypto/ (Go repro of
+                      the Rust core, byte-exact cross-verified by the harness),
+                      wire/, client/ (the signed MCP client), config/, console/,
+                      relay/, state/, delegate/. Its own Go module so the edge is
+                      platform → contract ← control-plane (no module cycle).
+control-plane/        freehold/control-plane — the stable mechanism (Go logic,
+                      Rust only for runner + core + console):
+  api/                the unified scoped API: agent toolset (agent/, agenttools/)
+                      + the roster-gated world_status / world_teardown /
+                      world_migrate / world_build actions + cmd/freehold-agent-tools
+                      (the CP's agent-management MCP server; `mcp` is the stdio
+                      bridge the agent PODS fetch at boot — the world actions
                       deliberately do NOT reach the CPA's conversation+create-only
-                      harness). 24 Go packages under internal/ (incl. agent, agenttools,
-                      migrations, oplogin, relay, stages, state, …).
-AGENTS.md             agent guidance: locked model, conventions, known Chunk-1 gaps
+                      harness)
+  cli/                the operator interface: tui/ (bubbletea dashboard), login/
+                      (freehold login/logout), flows/, teardown/, bootstrap-cp/
+                      (the day-0 mechanism install), cmd/ (the freehold and
+                      freehold-orchestrator binaries)
+  secret-management/  provision/rotate/revoke/grant (the provisioner)
+  core/               (Rust) the byte-exact contract oracle + harness/ (the
+                      Go↔Rust byte-gate, test-only)
+  runner/  console/  console-client/  testkit/  acceptance/   (Rust crates)
+platform/             freehold/platform — the evolving world the mechanism
+                      installs/evolves: services/<capability>/<impl>/ (relay/buzz,
+                      webproxy/caddy, externaldns/cloudflare, certificates/letsencrypt,
+                      …), provisioning/ (bootstrap, planebase, drive, stages, deploy),
+                      migrations/ (verify-gated), agents/ (freehold/prompt.md — the
+                      CPA's purpose, embedded by the platform/agents Go package),
+                      terraform/ (the IaC the CP executes). Adding a service or agent
+                      touches only this module — never control-plane/.
+AGENTS.md             agent guidance: locked model, conventions, known gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
-core/                 freehold-core — shared by every crate, no product logic
+control-plane/core/   freehold-core — the Rust contract oracle, shared by every
+                      crate, no product logic
   src/identity.rs     Nostr (secp256k1) + X25519 keypairs; env-inject or 0600 file
   src/auth.rs         the signed-call protocol: BIP-340 signatures over
                       `runner_pubkey|ts|raw_body` — the runner verifies, every
@@ -74,7 +87,7 @@ core/                 freehold-core — shared by every crate, no product logic
   src/audit.rs        BIP-340-signed audit log (0600), caller pubkey recorded
   src/futil.rs        atomic file discipline: unique 0600-at-birth temp + fsync + rename;
                       0700 state dirs — used everywhere secret material touches disk
-runner/               freehold-runner — the privileged connector bridge
+control-plane/runner/ freehold-runner — the privileged connector bridge
   src/mcp.rs          MCP-over-HTTP tool server (JSON-RPC 2.0). Contract tools: list,
                       exec, config, status, snapshot — all live. Every tools/call is
                       signed by a GRANTED agent pubkey or fails closed (D).
@@ -83,7 +96,7 @@ runner/               freehold-runner — the privileged connector bridge
                       from ciphertext, redacted from every response, audited
   src/ssh.rs          russh connector: in-memory keys, pooled connections, TOFU host keys
   src/main.rs         CLI: `runner keys init`, `runner serve`
-control-plane/        freehold-control-plane — the engine room
+control-plane/console/ freehold-control-plane — the engine room
   src/state.rs        runners + secrets store (atomic 0600 JSON; pubkeys + ciphertext only)
   src/provisioner.rs  B1 provision (generate identity → seal → ship → record pubkeys),
                       B2 rotate-secret, B3 revoke, D grant/revoke-grant (re-ship package),
@@ -96,12 +109,12 @@ control-plane/        freehold-control-plane — the engine room
                       management. Not chat (Buzz owns conversation).
   src/main.rs         CLI: provision / rotate-secret / revoke / grant / revoke-grant /
                       list / adopt / rebuild / identity / agent-create / serve (web console)
-console-client/       freehold-console-client — ONE console API contract, two clients:
-                      the web page (control-plane/src/web.rs) and the TUI's Runners view;
+control-plane/console-client/  freehold-console-client — ONE console API contract, two clients:
+                      the web page (control-plane/console/src/web.rs) and the TUI's Runners view;
                       NIP-98 login + overview/actions + the single-use web-launch portal
-testkit/              freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
+control-plane/testkit/  freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
                       an in-process russh sshd (shared by the connector tests)
-acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G): 9 checks,
+control-plane/acceptance/  freehold-acceptance — the Chunk-1 acceptance script (G): 9 checks,
                       G1 happy path + G2 three connectors via the runner + G3 security
                       invariants; `cargo run -p freehold-acceptance`
 ```
@@ -123,11 +136,11 @@ acceptance/           freehold-acceptance — the Chunk-1 acceptance script (G):
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(the `orchestrator/` module).
+(three modules: `contract/`, `control-plane/`, `platform/`).
 
 ```sh
-cargo build --workspace && cargo test --workspace   # the Rust crates: core / runner / console-client / control-plane / testkit / acceptance
-cd orchestrator && go build ./... && go vet ./... && go test ./...   # the Go CLI/TUI + the byte-exact harness gate
+cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,console,console-client,testkit,acceptance}
+for m in contract platform control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the three Go modules + the byte-exact harness gate
 cargo fmt --all --check          # CI gate
 ```
 
@@ -197,8 +210,8 @@ freehold --help               # both surfaces
 The same session flows bootstrap → configure → running as the world converges.
 
 The TUI's bring-up flows and the `freehold install` command drive the SAME
-rebuild engine (`orchestrator/internal/cli/rebuild.go`) — one pipeline, no
-duplicated logic (the old Rust installer crate is gone). Re-runs are safe: an
+rebuild engine (`control-plane/cli/rebuild.go`) — one pipeline, no
+duplicated logic. Re-runs are safe: an
 existing runner package is reused, the door is re-verified, and a matching LXC
 is reused (a foreign container on the vmid is refused).
 
@@ -294,13 +307,13 @@ package, errors instead of destroying a runner's key.
 
 ### freehold: the CLI (the scripted CPA stand-in)
 
-The CLI binary is `freehold`, built from the Go module under `orchestrator/`
+The CLI binary is `freehold`, built from the `control-plane/` Go module
 (the `freehold-orchestrator` binary keeps the old name so teardown and the TUI
 can resolve it as a sibling):
 
 ```sh
-go build -C orchestrator -o ../target/debug/freehold ./cmd/freehold
-go build -C orchestrator -o ../target/debug/freehold-orchestrator ./cmd/freehold-orchestrator
+go build -C control-plane -o ../target/debug/freehold ./cli/cmd/freehold
+go build -C control-plane -o ../target/debug/freehold-orchestrator ./cli/cmd/freehold-orchestrator
 freehold --help
 ```
 

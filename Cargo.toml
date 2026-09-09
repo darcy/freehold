@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["core", "runner", "console-client",
-    "testkit", "control-plane",
-    "acceptance", "orchestrator/harness/oracle"]
+members = ["control-plane/core", "control-plane/runner",
+    "control-plane/console-client", "control-plane/testkit",
+    "control-plane/console", "control-plane/acceptance",
+    "control-plane/core/harness/oracle"]
 
 [workspace.package]
 version = "0.1.0"

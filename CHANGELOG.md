@@ -25,6 +25,78 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.0] — the three-module tree (REFACTOR-PLAN Phase 0: contract / control-plane / platform)
+
+The REFACTOR-PLAN's Phase 0 lands: the repo is restructured around what the
+system actually is — **a control plane that is the stable mechanism** and **a
+platform of services/agents it installs and evolves**. The `orchestrator/`
+name is gone; the operator surface is now three Go modules with one-way
+dependency edges.
+
+### Changed
+
+- **The tree is three Go modules.** `contract/` (`freehold/contract`) is the
+  shared wire/trust leaf BOTH the mechanism and the platform import;
+  `control-plane/` (`freehold/control-plane`) is the stable mechanism (api,
+  cli, secret-management, plus the Rust runner/core/console crates);
+  `platform/` (`freehold/platform`) is the evolving world (services,
+  provisioning, migrations, agents, terraform). The contract being its own
+  module is what keeps the edge acyclic (`platform → contract ←
+  control-plane`, never `platform → control-plane`), so `platform/provisioning`
+  and `platform/services` can import the signed-runner client without a cycle
+  (REFACTOR-PLAN §4 G4′).
+- **`orchestrator/` is deleted as a name** — packages, paths, binaries, and
+  prose. `internal/{crypto,wire,client,config,console,relay,state,delegate}`
+  → `contract/`; `internal/{bootstrap,planebase,drive,stages,migrations,dnsman,
+  cert}` → `platform/`; `internal/{cli,tui,flows,oplogin,teardown,agent,
+  agenttools,provisioner}` + `cmd/*` → `control-plane/`. The `freehold` /
+  `freehold-orchestrator` binaries keep their names (the sibling-resolution
+  contract — engines resolve binaries relative to `os.Executable()` — is
+  preserved); `freehold-agent-tools` moves to `control-plane/api/cmd/` and its
+  static `CGO_ENABLED=0` build contract is unchanged.
+- **`internal/deploy` is split to its target homes.** `deploy_relay.go` →
+  `platform/services/relay/buzz/`, `caddy.go` →
+  `platform/services/webproxy/caddy/`, `deploy_cp.go` + `deploy_agent_tools.go`
+  → `control-plane/cli/bootstrap-cp/` (the day-0 mechanism install), and the
+  generic runner-exec helpers (`LxcCmd`, `SafeDeployDir`, `CheckDocker`) →
+  `platform/provisioning/deploy/` (exported, since the split moved them to a
+  shared package both sides import).
+- **The CPA prompt moves to its platform home.** `orchestrator/prompts/
+  CPA_SYSTEM_PROMPT.md` → `platform/agents/freehold/prompt.md`, embedded by
+  the new `platform/agents` Go package (a Go package cannot `//go:embed`
+  outside its own module, so `control-plane` imports the value, never
+  re-embeds — REFACTOR-PLAN §4 seam 1). The pod mount path
+  (`/srv/freehold/CPA_SYSTEM_PROMPT.md`) is unchanged.
+- **The harness byte-gate moves with the contract it verifies.**
+  `orchestrator/harness/` → `control-plane/core/harness/` (Go test-only
+  package in `freehold/control-plane`, gating `contract/crypto` against the
+  Rust `freehold-harness-oracle`); the oracle crate nests at
+  `control-plane/core/harness/oracle/`.
+- **The Rust crates fold under `control-plane/`.** `core/`, `runner/`,
+  `console-client/`, `testkit/`, `acceptance/`, and the `control-plane`
+  console crate (→ `control-plane/console/`) move; the Cargo workspace member
+  list and the two changed path deps (acceptance→console, oracle→core) are
+  updated. The console crate lives at `control-plane/console/` until Phase 3
+  ports its routes into the Go `api/` and deletes it.
+- **`terraform/` → `platform/terraform/`.** `migrate-go.md` and
+  `orchestrator/WIRE.md` are deleted (superseded; the plan's truth now lives
+  in the tree's current docs).
+- **CI runs the three modules.** `ci.yml` builds/vets/tests each module; the
+  cargo gates are unchanged.
+- **Docs updated to current state** (AGENTS.md, ARCHITECTURE.md, README.md,
+  roadmap, docs/phase-0.12-plane-gate.md) — the docs-hygiene rule applied, so
+  the old paths are gone from current-state prose. `REFACTOR-PLAN.md` stays as
+  the plan document for Phases 1–3.
+
+### Notes
+
+- The functional behavior is unchanged by this phase — it is the mechanical
+  re-org so every later change (Phases 1–3, Chunk 5) lands in its true home.
+  All Rust + Go gates run green; `freehold-acceptance` and the harness byte-gate
+  pass at the move boundary.
+- `RUNTIME_CONTRACT.md` (referenced by ARCHITECTURE.md for the `RunnerCall`
+  schema) is a pre-existing dangling reference, carried forward unchanged.
+
 ## [0.4.9] — login stops asking for the CP pubkey (the operator key is the credential)
 
 ### Changed

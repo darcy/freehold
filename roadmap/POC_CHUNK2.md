@@ -548,9 +548,9 @@ V1. **Driver reshape.** `bootstrap --kind vultr-vps | hetzner-vps` becomes
     the custom-ISO/unattended-answer variant was DROPPED during the spike),
     wait for PVE to respond — then the existing `bootstrap proxmox-lxc`,
     `deploy-relay`, `deploy-cp` flows run IDENTICALLY. No VM-per-service
-    host driver exists anymore.  (Implemented: `orchestrator/src/bootstrap.rs`
+    host driver exists anymore.  (Implemented: `platform/provisioning/bootstrap`
     `bootstrap_vultr_vps`/`bootstrap_hetzner_vps` — create/poll/wait/destroy
-    shapes; hermetic tests in `orchestrator/tests/bootstrap.rs`. Right =
+    shapes; hermetic tests in `platform/provisioning/bootstrap` tests. Right =
     live: the appliance ran on BOTH providers — Vultr 45.76.255.185 and
     Hetzner 178.156.179.204 (the spike, real accounts; see the LIVE
     VERIFICATION note below).)

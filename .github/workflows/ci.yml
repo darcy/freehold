@@ -33,16 +33,40 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: "orchestrator/go.mod"
+          go-version-file: "control-plane/go.mod"
 
-      - name: Go build
-        working-directory: orchestrator
+      - name: Go build (contract)
+        working-directory: contract
         run: go build ./...
 
-      - name: Go vet
-        working-directory: orchestrator
+      - name: Go build (platform)
+        working-directory: platform
+        run: go build ./...
+
+      - name: Go build (control-plane)
+        working-directory: control-plane
+        run: go build ./...
+
+      - name: Go vet (contract)
+        working-directory: contract
         run: go vet ./...
 
-      - name: Go test
-        working-directory: orchestrator
+      - name: Go vet (platform)
+        working-directory: platform
+        run: go vet ./...
+
+      - name: Go vet (control-plane)
+        working-directory: control-plane
+        run: go vet ./...
+
+      - name: Go test (contract)
+        working-directory: contract
+        run: go test ./...
+
+      - name: Go test (platform)
+        working-directory: platform
+        run: go test ./...
+
+      - name: Go test (control-plane)
+        working-directory: control-plane
         run: go test ./...

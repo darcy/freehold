@@ -11,12 +11,12 @@ truth for the phase so work survives context compaction. Read `AGENTS.md` / `CHA
   (`RenderCaddyfile` + `CaddyManifest`: durable PVC, Caddyfile ConfigMap, hostNetwork Deployment
   on 80/443, NodePort svc); `config.CaddySpec`; `stageCaddy`/`caddyManifestScript`/`recordCaddy`;
   TUI `caddy (TLS edge)` row + probe.
-- **F3a DONE**: embedded go-acme/lego + `internal/cert` package —
-  `providers_gen.go` GENERATED from lego's own registry (`go run ./internal/cert/genproviders`):
+- **F3a DONE**: embedded go-acme/lego + `platform/services/certificates/letsencrypt` —
+  `providers_gen.go` GENERATED from lego's own registry (`go run ./platform/services/certificates/letsencrypt/genproviders`):
   201 provider names + per-provider env-var table; `Providers()`/`ProviderEnvNames()`/`IsProvider()`;
   `Verify()` (throwaway TXT); `IssueWildcard()` (DNS-01 via `SetDNS01Provider`); `WriteTLS()`;
   `LoadExpiry()`/`ReuseIfValid()`/`ReuseIfValidBytes()` reuse gate. Tests green.
-- **F3b DONE**: `internal/cert/store.go` seals the DNS token to the ops identity
+- **F3b DONE**: `platform/services/certificates/letsencrypt/store.go` seals the DNS token to the ops identity
   (AAD-bound, regenerable by freehold which runs lego in-process — never plaintext);
   `stageCert()` right after `stageCaddy`: reuse the durable PVC cert when fresh (>=30d),
   else resolve the token (sealed copy or interactive provider dropdown + lego-derived
@@ -63,7 +63,7 @@ both blockers fall (public cert trusted; auth tag matches).
   + NodePort Service + **durable PVC** (`/srv/data/k8s-volumes`, backed up) holding Caddy config
   AND the issued certs. NOT a normal CNI ClusterIP service (pod->external-LAN egress is blocked
   by kube-router; hostNetwork is required, same as the CPA pod).
-- **Cert issuance**: **go-acme/lego EMBEDDED** in the orchestrator (Go lib; no shipped binary).
+- **Cert issuance**: **go-acme/lego EMBEDDED** in the control plane (Go lib; no shipped binary).
   DNS-01 only. **PER HOST**: one single-name cert for the relay host + one for the CP host
   (two orders; no wildcard/base). Provider chosen from a **dropdown populated from lego's full
   provider registry** (not a curated shortlist); per-provider env-var names derived from lego.
@@ -92,7 +92,7 @@ both blockers fall (public cert trusted; auth tag matches).
     the base) — this is the mechanism; register it in `stageDnsRegister`/the resolver. The current
     addn-hosts has no wildcard and can't do the 3-label `relay.freehold-test.darcydev.net` —
     `address=` is the clean answer.
-  - `orchestrator/internal/config/config.go` + `rebuild.go fromAnswers`: derive RelayURL
+  - `contract/config/config.go` + `rebuild.go fromAnswers`: derive RelayURL
     `https://relay.<domain>`, CPURL `https://cp.<domain>`; drop the `cp-` prefix.
 - **F2. Core Caddy kube service** (mirror `stageLitellm`/`recordLitellm` shape):
   - Caddy manifest: Deployment hostNetwork, ports 80/443, NodePort Service, durable PVC, readiness.
@@ -120,7 +120,7 @@ both blockers fall (public cert trusted; auth tag matches).
   (proxmox-box, litellm with sealed provider-key). Runners serve on 127.0.0.1:8787 / 8788.
 - Driving the host from THIS box: `freehold exec --addr 127.0.0.1:8787 --agent-dir
   ~/.freehold/control-plane/agent-ops proxmox-box '<pct ...>'`. `freehold` live binary =
-  `~/.cargo/bin/freehold` (rebuild via `cd orchestrator && mise exec go@1.25.0 -- go build -o
+  `~/.cargo/bin/freehold` (rebuild via `cd control-plane && mise exec go@1.25.0 -- go build -o
   target/debug/freehold ./cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold`).
   Rust siblings = `~/.cargo/bin/{control-plane,runner}` + `~/.cargo/release/*` (already built+placed).
 - Backlog we can NOT fully hold a long live rebuild in the sandbox tool (its process-cleanup kills
@@ -155,7 +155,7 @@ both blockers fall (public cert trusted; auth tag matches).
 - Embedded-lego gated behind a provider pre-verify seam (hermetic).
 
 ## Build / test / review workflow (AGENTS)
-- Go: `cd orchestrator && gofmt -l .; go build ./... && go vet ./... && go test ./...`.
+- Go: `cd contract && gofmt -l .; go build ./... (and platform/, control-plane/) && go vet ./... && go test ./...`.
   Rebuild live freehold as above.
 - Rust (resolver change): `mise exec rust@1.94.0 -- cargo build --bin control-plane --bin runner`
   (debug) + release; re-place `~/.cargo/bin/{control-plane,runner}` and `~/.cargo/release/*`.
