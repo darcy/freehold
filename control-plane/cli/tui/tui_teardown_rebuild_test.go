@@ -556,13 +556,15 @@ func TestIsSkipDetail(t *testing.T) {
 		"dns resolver unreachable (mirror fallback)",
 		"litellm not managed",
 		"k3s not on record — skipped",
+		"relay awaiting CP world facts (auto-login)",
+		"k3s awaiting CP (k3s)",
 	}
 	for _, s := range skips {
 		if !isSkipDetail(s) {
 			t.Errorf("isSkipDetail(%q) = false, want true", s)
 		}
 	}
-	oks := []string{"live (/_liveness ok)", "gateway healthy at http://x", "API healthy at 1.2.3.4:6443"}
+	oks := []string{"live (/_liveness ok)", "gateway healthy at http://x", "API healthy at 1.2.3.4:6443", "k3s healthy via CP (k3s)"}
 	for _, s := range oks {
 		if isSkipDetail(s) {
 			t.Errorf("isSkipDetail(%q) = true, want false", s)

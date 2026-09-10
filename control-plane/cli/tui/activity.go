@@ -283,6 +283,7 @@ func isSkipDetail(detail string) bool {
 		"no gateway coords", "no TLS edge coords", "no :8080 answer",
 		"resolver unreachable", "unreachable (mirror", "not recorded",
 		"live probe failed", "no live snapshot",
+		"awaiting CP", "waiting on auto-login",
 	} {
 		if strings.Contains(detail, p) {
 			return true
