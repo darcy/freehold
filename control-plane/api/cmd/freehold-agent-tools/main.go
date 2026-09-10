@@ -387,14 +387,20 @@ func cmdServe(args []string) {
 	reg.ConsoleSecret = consoleSecret
 	reg.ConsoleStateDir = *consoleStateDir
 
+	facts, err := agenttools.OpenFacts(filepath.Join(*stateDir, "facts.json"))
+	if err != nil {
+		log.Fatalf("open world facts: %v", err)
+	}
+
 	tools := &agent.Tools{Console: reg, Create: buildCreateAgentFn(spec)}
 	tools.Migrate = buildMigrator(spec, *consoleStateDir)
 	tools.World = buildWorldApply(spec)
-	tools.Status = buildWorldStatus(spec, reg, *consoleStateDir)
+	tools.Status = buildWorldStatus(spec, reg, *consoleStateDir, facts)
 	doorAuth, doorRevoke := buildWorldDoor(spec)
 	tools.DoorAuthorize = doorAuth
 	tools.DoorRevoke = doorRevoke
 	srv := &agenttools.Server{
+		Facts: facts,
 		Audience: audience,
 		Grants:   grants,
 		Tools:    tools,
@@ -1406,7 +1412,7 @@ func buildWorldDoor(spec *deploySpec) (agent.DoorAuthorizeAppend, agent.DoorRevo
 // buildWorldStatus builds the single-inventory world_status payload: the
 // registry agents + the console's runners/DNS read underneath (the console's
 // state.json on the box — what /api/overview + /api/dns serve).
-func buildWorldStatus(spec *deploySpec, reg *agenttools.Registry, consoleStateDir string) agent.WorldStatusFunc {
+func buildWorldStatus(spec *deploySpec, reg *agenttools.Registry, consoleStateDir string, facts *agenttools.FactsStore) agent.WorldStatusFunc {
 	return func() (map[string]interface{}, error) {
 		agents, err := reg.Agents()
 		if err != nil {
@@ -1426,11 +1432,17 @@ func buildWorldStatus(spec *deploySpec, reg *agenttools.Registry, consoleStateDi
 		for _, d := range cs.DNS {
 			dns = append(dns, map[string]interface{}{"name": d.Name, "ip": d.IP})
 		}
-		return map[string]interface{}{
+		out := map[string]interface{}{
 			"agents":  agents,
 			"runners": runners,
 			"dns":     dns,
-		}, nil
+		}
+		// The deployer-side facts (plane/certs/domains) registered at build —
+		// a management box renders DATA/Certs from these.
+		if facts != nil {
+			out["facts"] = facts.Facts()
+		}
+		return out, nil
 	}
 }
 

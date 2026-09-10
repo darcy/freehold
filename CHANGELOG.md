@@ -25,6 +25,39 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.13] — world facts: the CP carries the deployer-side inventory (DATA + Certs parity)
+
+The real asymmetry closed: a management/login-only box can now render the DATA
+and Certs views from the CP, instead of needing the deployer box's local config
++ host probes.
+
+### Added
+
+- **`world_register_facts`** (operator-scoped tool on the agent-tools server) —
+  the box registers the deployer-side world facts at the end of `freehold
+  build` (the "register-at-build" mechanism): the durable-plane layout
+  (backend/kind/pool + the `/srv/data` tenant mounts with their `backup` flags),
+  the canonical domains (relay/cp/proxy), and the edge cert metadata. Stored
+  durably under the agent-tools state dir (`facts.json` — survives compute-only
+  teardown, like the registry).
+- **`world_status` now carries `facts`** — the single-inventory read serves the
+  plane/certs/domains a management box needs.
+- **The build reads each edge cert's `notAfter` from the durable mirror**
+  (`/srv/data/k8s-volumes/caddy-edge/<slot>/fullchain.pem` via `openssl x509
+  -enddate`) and registers it — the Certs view finally shows a REAL expiry
+  (the config fields were never populated before).
+- **The TUI DATA + Certs views render from the facts** on a box without a local
+  runner: `refreshLocal` (post-auto-login) re-runs `buildCerts` + `refreshData`,
+  so a login-only box shows the plane layout (live usage marked "—" — the live
+  probe needs the deployer box) and the cert domains/expiry/issuer.
+
+### Verified live
+
+A rebuild registered the facts on the CP; a login-only box (fresh config, no
+`[runner]`) auto-logged in and rendered DATA (the 4 durable mounts) and Certs
+(relay + cp with real 2026 expiry) from `world_status` — full parity with the
+deployer box's views.
+
 ## [0.5.12] — pin the k3s version (bypasses the flaky update.k3s.io channel lookup)
 
 `world_build`'s k3s install failed on this network: the installer's version

@@ -16,6 +16,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/platform/provisioning/drive"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
 	"freehold/platform/provisioning/planebase"
@@ -233,7 +234,40 @@ func relaySlotHost(m *Model, cfg *config.Config) string {
 	return cfg.RelayHost()
 }
 
-func (m *Model) buildCerts(cfg *config.Config) {	m.Certs = nil
+func (m *Model) buildCerts(cfg *config.Config) {
+	m.Certs = nil
+	// The CP's world facts carry the edge cert metadata (registered at build),
+	// so a management/login-only box renders the Certs view from the CP.
+	if m.Facts != nil && len(m.Facts.Certs) > 0 {
+		for _, c := range m.Facts.Certs {
+			status, expiry := "no expiry on record", "—"
+			if c.Expiry != "" {
+				expiry = c.Expiry
+				if t, err := time.Parse(time.RFC3339, c.Expiry); err == nil {
+					switch {
+					case t.Before(time.Now()):
+						status = styleRed.Render("EXPIRED")
+					case t.Before(time.Now().Add(30 * 24 * time.Hour)):
+						status = styleYellow.Render("expiring <30d")
+					default:
+						status = styleGreen.Render("valid")
+					}
+				}
+			}
+			m.Certs = append(m.Certs, CertRow{
+				Domain: c.Domain,
+				URL:    "https://" + c.Domain,
+				Expiry: expiry,
+				Issuer: c.Issuer,
+				Status: status,
+			})
+		}
+		if len(m.Certs) == 0 {
+			m.Certs = []CertRow{{Domain: "(no cert on record)", Status: styleDim.Render("rebuild stages the wildcard cert for the edge")}}
+		}
+		return
+	}
+	// Fallback: the deployer's local config (pre-facts or offline).
 	issuer := cfg.Caddy.CertIssuer
 	if issuer == "" {
 		issuer = "lego (DNS-01)"
@@ -358,8 +392,29 @@ func guestLocation(vmid *uint32, ip *string) string {
 // plane/runner keeps the last good snapshot; a probe failure degrades to
 // the notice in m.Msg.
 func (m *Model) refreshData(cfg *config.Config) {
-	if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil {
-		return
+	// A management/login-only box has no local runner to probe the host — it
+	// renders the durable-plane LAYOUT from the CP's world facts (registered
+	// at build) with the live usage columns marked unavailable.
+	if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil || cfg.Runner.Addr == "" {
+		if m.Facts != nil && len(m.Facts.Plane.Mounts) > 0 {
+			m.DataAt = time.Now()
+			m.Storage = nil
+			for _, mu := range m.Facts.Plane.Mounts {
+				live := "—"
+				m.Storage = append(m.Storage, DataRow{
+					Role: mu.Tenant, Mount: mu.GuestPath, Size: "—", Used: "—",
+					Fill: "—", Source: mu.Source, Live: live,
+				})
+			}
+			if len(m.Storage) == 0 {
+				m.Storage = []DataRow{{Role: "(no mounts)"}}
+			}
+			m.Msg = "data layout from the CP (live usage needs the deployer box)"
+			return
+		}
+		if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil {
+			return
+		}
 	}
 	var kind planebase.BackendKind
 	switch *cfg.Plane.BackendKind {
@@ -568,12 +623,16 @@ func (m *Model) buildAgents(cfg *config.Config) {
 		return
 	}
 	var status struct {
-		Agents []console.AgentInfo `json:"agents"`
+		Agents []console.AgentInfo  `json:"agents"`
+		Facts  *agenttools.WorldFacts `json:"facts"`
 	}
 	if err := json.Unmarshal(raw, &status); err != nil {
 		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
 		return
 	}
+	// The world facts ride the same world_status read — the DATA + Certs views
+	// render from them on a management box.
+	m.Facts = status.Facts
 	for _, a := range status.Agents {
 		created := "just now"
 		if a.CreatedAt > 0 {

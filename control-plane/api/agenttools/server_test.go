@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 9 {
-		t.Fatalf("expected 9 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 10 {
+		t.Fatalf("expected 10 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_authorize_door", "world_revoke_door"} {
+	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -303,6 +303,10 @@ func TestServerScopeAuth(t *testing.T) {
 	msg, denied = post(agentSec, agentPK, "world_revoke_door")
 	if !denied || !strings.Contains(msg, "cannot call") {
 		t.Fatalf("registry agent must be denied world_revoke_door, got denied=%v msg=%q", denied, msg)
+	}
+	msg, denied = post(agentSec, agentPK, "world_register_facts")
+	if !denied || !strings.Contains(msg, "cannot call") {
+		t.Fatalf("registry agent must be denied world_register_facts, got denied=%v msg=%q", denied, msg)
 	}
 
 	// The operator (roster member, NOT in the registry) drives world_* freely.

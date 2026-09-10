@@ -29,6 +29,10 @@ type Server struct {
 	// path). create_agent / grant_agent / manage_agent dispatch here.
 	Tools *agent.Tools
 
+	// Facts is the durable world-facts store (plane/certs/domains registered at
+	// build). nil = the world-facts surface is unregistered.
+	Facts *FactsStore
+
 	// IsAgent reports whether a caller pubkey is a REGISTRY agent (a row in
 	// the CP's agent registry). Scope rule: registry agents get the
 	// create/grant/manage toolset only; operator callers (roster members NOT
@@ -157,6 +161,12 @@ func (s *Server) toolList() []map[string]interface{} {
 				"pubkey": map[string]interface{}{"type": "string"},
 			}, []string{"pubkey"}),
 		},
+		{
+			"name": "world_register_facts", "description": "Register the deployer-side world facts (plane/storage layout, canonical domains, cert metadata) so a management box renders DATA/Certs from the CP.",
+			"inputSchema": i(map[string]interface{}{
+				"facts": map[string]interface{}{"type": "object"},
+			}, []string{"facts"}),
+		},
 	}
 }
 
@@ -182,7 +192,7 @@ type manageAgentArgs struct {
 func isWorldTool(name string) bool {
 	switch name {
 	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build",
-		"world_authorize_door", "world_revoke_door":
+		"world_authorize_door", "world_revoke_door", "world_register_facts":
 		return true
 	}
 	return false
@@ -306,6 +316,28 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		s.textResult(w, id, nil, "door key revoked")
+	case "world_register_facts":
+		var a struct {
+			Facts json.RawMessage `json:"facts"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || len(a.Facts) == 0 {
+			s.rpcError(w, id, -32602, "world_register_facts arguments: facts required")
+			return
+		}
+		if s.Facts == nil {
+			s.textResult(w, id, fmt.Errorf("world-register-facts: no facts store bound"), "")
+			return
+		}
+		var facts WorldFacts
+		if err := json.Unmarshal(a.Facts, &facts); err != nil {
+			s.textResult(w, id, fmt.Errorf("world-register-facts: bad facts: %w", err), "")
+			return
+		}
+		if err := s.Facts.Register(facts); err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, "world facts registered")
 	default:
 		s.rpcError(w, id, -32601, "unknown tool: "+call.Name)
 	}

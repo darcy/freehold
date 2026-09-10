@@ -16,6 +16,7 @@ import (
 
 	"freehold/contract/config"
 	"freehold/contract/console"
+	"freehold/control-plane/api/agenttools"
 )
 
 var (
@@ -100,10 +101,14 @@ type Model struct {
 	Agents      []AgentRow
 	Runners     []RunnerRow
 	Storage     []DataRow
-	Err         string
-	Msg         string
-	Flow        *tuiFlow
-	console     *consoleClient
+	// Facts are the deployer-side world facts (plane/certs/domains) the CP
+	// serves on world_status — the DATA + Certs views render from these on a
+	// management/login-only box that has no local config + host probes.
+	Facts *agenttools.WorldFacts
+	Err   string
+	Msg   string
+	Flow  *tuiFlow
+	console *consoleClient
 	// worldSvc maps a service kind (k3s|litellm|caddy) to the CP-served live
 	// health (from /api/world on the console session). Populated by the
 	// management-box login hook and used to render a logged-in box's world
