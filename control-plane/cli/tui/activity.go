@@ -180,7 +180,10 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		}},
 		{"k3s", func() (string, bool) {
 			if cfg.Lxc.K3s.Ip == nil {
-				m.K3sLive = false
+				// Management box (no local coords): the CP-served health
+				// (applyCPWorldHealth) is authoritative. Do NOT reset the flag
+				// to false — a boot probe landing after the CP hook would
+				// clobber green back to red. Leave it; the CP hook owns it.
 				return "not on record — skipped", true
 			}
 			m.K3sLive = config.K3sLive(cfg)
@@ -191,7 +194,6 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		}},
 		{"litellm", func() (string, bool) {
 			if cfg.Litellm.URL == "" {
-				m.LitellmLive = false
 				return "not deployed (no gateway coords)", true
 			}
 			m.LitellmLive = config.LitellmLive(cfg)
@@ -202,7 +204,6 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		}},
 		{"caddy", func() (string, bool) {
 			if cfg.Caddy.URL == "" || cfg.Caddy.Host == "" {
-				m.CaddyLive = false
 				return "not deployed (no TLS edge coords)", true
 			}
 			m.CaddyLive = config.URLReachable("https://" + cfg.Caddy.Host)

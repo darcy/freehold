@@ -200,6 +200,31 @@ func TestRelayDomainPrefersServerRelayHost(t *testing.T) {
 	}
 }
 
+// A management box must adopt the CP-served relay_url when its config holds a
+// stale LAN IP (the relay LXC can move after a rebuild/DHCP), so the relay
+// pillar probes the live relay and doesn't stay red against a dead snapshot.
+func TestAdoptsCPRelayURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/world" {
+			w.Write([]byte(`{"cp_pubkey":"aa","relay_url":"http://192.168.30.243:3000","relay_ws_url":"ws://192.168.30.243:3000","services":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa", RelayURL: "http://192.168.30.220:3000"}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	m.applyCPWorldHealth()
+	if m.cfg.RelayURL != "http://192.168.30.243:3000" {
+		t.Fatalf("management box should adopt the CP-served relay_url, got %q", m.cfg.RelayURL)
+	}
+	if m.cfg.RelayWsURL != "ws://192.168.30.243:3000" {
+		t.Fatalf("relay ws url not adopted, got %q", m.cfg.RelayWsURL)
+	}
+}
+
 // A box WITH local coords (a deployer) keeps its own co-located probe — the CP
 // health only fills pillars this box has no local record of.
 func TestApplyCPWorldHealthKeepsDeployerProbe(t *testing.T) {
