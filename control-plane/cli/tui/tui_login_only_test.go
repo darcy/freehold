@@ -3,6 +3,7 @@ package tui
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"freehold/contract/config"
@@ -100,30 +101,102 @@ func contains(s, sub string) bool {
 }
 
 // A management box (admin login, NO local world coords of its own) must render
-// its k3s/litellm/caddy pillars green from the CP's /api/world health — not stay
-// red just because it didn't deploy the world. This is the "login = fully-vetted
+// its k3s/litellm/caddy pillars green, its Services view + DNS filled, and its
+// header domain resolved from the CP's /api/world — not stay red/empty just
+// because it didn't deploy the world. This is the "login = fully-vetted
 // management box, more than one allowed" path.
 func TestApplyCPWorldHealthManagementBoxGreen(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/world" {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"cp_pubkey":"aa","services":[` +
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/world":
+			w.Write([]byte(`{"cp_pubkey":"aa","relay_host":"relay.here.freehold.technology","services":[` +
 				`{"name":"k3s","kind":"k3s","up":true},` +
 				`{"name":"litellm","kind":"litellm","up":true},` +
 				`{"name":"caddy","kind":"caddy","up":true}]}`))
-			return
+		case "/api/dns":
+			w.Write([]byte(`{"dns":[{"name":"relay","ip":"10.0.0.5","source":"record_lxc"},` +
+				`{"name":"litellm","ip":"10.0.0.6","source":"litellm apply"}]}`))
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	// Management box: cp_url + operator session, NO [lxc]/[litellm]/[caddy] coords.
-	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa"}
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa", RelayURL: "http://192.168.30.220:3000"}
 	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
 	m.applyCPWorldHealth()
+
 	if !m.K3sLive || !m.LitellmLive || !m.CaddyLive {
 		t.Fatalf("management box should render world green from CP services: k3s=%v litellm=%v caddy=%v",
 			m.K3sLive, m.LitellmLive, m.CaddyLive)
+	}
+	if m.Domain != "relay.here.freehold.technology" {
+		t.Fatalf("header domain should be the CP's relay host, got %q", m.Domain)
+	}
+	if len(m.Services) == 0 || m.Services[0].Name == "(none managed)" {
+		t.Fatal("management box Services view should be filled from the CP world, not '(none managed)'")
+	}
+	if len(m.DNS) != 2 || m.DNS[0].Name != "relay" {
+		t.Fatalf("management box DNS view should be filled from the CP resolver, got %+v", m.DNS)
+	}
+}
+
+// The relay public domain must derive from the CP resolver's `relay.<domain>`
+// record even when the console predates serving relay_host — a management box
+// then shows the domain (Certs relay row + header), not the LAN IP it dialed.
+func TestRelayDomainDerivesFromDNS(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/world":
+			w.Write([]byte(`{"cp_pubkey":"aa","services":[{"name":"k3s","kind":"k3s","up":true}]}`))
+		case "/api/dns":
+			w.Write([]byte(`{"dns":[{"name":"relay","ip":"10.0.0.5","source":"record_lxc"},` +
+				`{"name":"relay.here.freehold.technology","ip":"10.0.0.8","source":"cp_public"},` +
+				`{"name":"litellm","ip":"10.0.0.6","source":"litellm apply"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa", RelayURL: "http://192.168.30.220:3000"}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	m.applyCPWorldHealth()
+
+	if m.Domain != "relay.here.freehold.technology" {
+		t.Fatalf("relay domain should derive from the CP resolver, got %q", m.Domain)
+	}
+	m.buildCerts(cfg)
+	if len(m.Certs) == 0 || !strings.Contains(m.Certs[0].Domain, "here.freehold.technology") {
+		t.Fatalf("certs relay row should show the derived domain, got %+v", m.Certs)
+	}
+}
+
+// When the CP serves a relay_host AND the resolver carries a differing
+// relay.<domain> record, the served relay_host is authoritative — a stale
+// resolver entry must never override it (the DNS path is fallback only).
+func TestRelayDomainPrefersServerRelayHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/world":
+			w.Write([]byte(`{"cp_pubkey":"aa","relay_host":"relay.authoritative.freehold.technology","services":[{"name":"k3s","kind":"k3s","up":true}]}`))
+		case "/api/dns":
+			w.Write([]byte(`{"dns":[{"name":"relay.stale.freehold.technology","ip":"10.0.0.9","source":"stale"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa", RelayURL: "http://192.168.30.220:3000"}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	m.applyCPWorldHealth()
+	if m.Domain != "relay.authoritative.freehold.technology" {
+		t.Fatalf("served relay_host must win over the resolver, got %q", m.Domain)
 	}
 }
 

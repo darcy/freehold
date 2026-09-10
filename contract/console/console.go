@@ -221,6 +221,7 @@ type WorldSummary struct {
 	RelayURL         string `json:"relay_url"`
 	RelayWsURL       string `json:"relay_ws_url,omitempty"`
 	RelayPubkey      string `json:"relay_pubkey,omitempty"`
+	RelayHost        string `json:"relay_host,omitempty"`
 	CPURL            string `json:"cp_url"`
 	CPPubkey         string `json:"cp_pubkey"`
 	OperatorPubkey   string `json:"operator_pubkey,omitempty"`

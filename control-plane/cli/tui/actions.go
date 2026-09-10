@@ -557,21 +557,38 @@ func (m *Model) refreshLocal() {
 
 // applyCPWorldHealth is the MANAGEMENT-BOX world-health hook: a box that logs
 // in as operator but holds no local coords of its own (it didn't deploy the
-// world) renders its k3s/litellm/caddy pillars from the CP-served /api/world
-// health instead of local config probes. Deployer boxes (local coords present)
-// keep their own co-located probes. Only ever turns a pillar green from a live
-// CP answer; never fabricates an "up".
+// world) renders its k3s/litellm/caddy pillars, Services view, DNS and header
+// domain from the CP's /api/world + /api/dns instead of local config probes.
+// Deployer boxes (local coords present) keep their own co-located probes. Only
+// ever turns a pillar green from a live CP answer; never fabricates an "up".
 func (m *Model) applyCPWorldHealth() {
 	if m.console == nil || m.console.client == nil || m.cfg == nil {
 		return
 	}
 	w, err := m.console.client.World()
-	if err != nil || len(w.Services) == 0 {
+	if err != nil {
 		return
 	}
+	m.cpWorld = w
 	m.worldSvc = make(map[string]bool, len(w.Services))
 	for _, s := range w.Services {
 		m.worldSvc[s.Kind] = s.Up
+	}
+	// DNS: the CP resolver is authoritative; a management box has no local
+	// runner through which to exec `control-plane dns list`, so read /api/dns.
+	if m.cfg.Runner.Addr == "" {
+		if rows, ok := m.cpDnsRows(); ok {
+			m.DNS = rows
+		}
+	}
+	// Header domain: prefer the CP's recorded relay host (the public domain)
+	// — set once at deploy and authoritative. Only when the console predates
+	// serving relay_host does the resolver's explicit `relay.<domain>` record
+	// derive it instead. Both beat the LAN IP a management box dialed.
+	if w.RelayHost != "" && w.RelayHost != m.cfg.RelayHost() {
+		m.Domain = w.RelayHost
+	} else if d := m.relayPublicHost(); d != "" && d != m.Domain {
+		m.Domain = d
 	}
 	if v, ok := m.worldSvc["k3s"]; ok && m.cfg.Lxc.K3s.Ip == nil {
 		m.K3sLive = v
@@ -582,6 +599,49 @@ func (m *Model) applyCPWorldHealth() {
 	if v, ok := m.worldSvc["caddy"]; ok && m.cfg.Caddy.URL == "" {
 		m.CaddyLive = v
 	}
+	m.buildServices(m.cfg)
+	m.buildCerts(m.cfg)
+}
+
+// cpDnsRows fills the DNS view from the console's /api/dns (the CP resolver),
+// used by a management box with no local runner. Returns whether rows exist.
+func (m *Model) cpDnsRows() ([]DnsRow, bool) {	if m.console == nil || m.console.client == nil {
+		return nil, false
+	}
+	v, err := m.console.client.ListDNS()
+	if err != nil || len(v.DNS) == 0 {
+		return nil, false
+	}
+	rows := make([]DnsRow, 0, len(v.DNS))
+	for _, d := range v.DNS {
+		rows = append(rows, DnsRow{Name: d.Name, IP: d.IP, Source: "CP resolver"})
+	}
+	return rows, true
+}
+
+// relayPublicHost derives the relay's public hostname from the resolver's
+// explicit `relay.<domain>` A record (the CP DNS the management box just read).
+// A bare `relay` record or an IP-only name is skipped; a dotted hostname with
+// letters is the public relay host — the domain a deployer box shows from its
+// own relay_url, recovered on a management box without needing a CP console
+// that serves relay_host.
+func (m *Model) relayPublicHost() string {
+	for _, d := range m.DNS {
+		if !strings.HasPrefix(d.Name, "relay.") || !hostnameHasLetters(d.Name) {
+			continue
+		}
+		return d.Name
+	}
+	return ""
+}
+
+func hostnameHasLetters(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 // rebuildArgs builds the `freehold rebuild --yes` args from a completed

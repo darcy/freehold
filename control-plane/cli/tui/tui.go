@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"freehold/contract/config"
+	"freehold/contract/console"
 )
 
 var (
@@ -108,6 +109,11 @@ type Model struct {
 	// management-box login hook and used to render a logged-in box's world
 	// green even when this box has no local coords of its own.
 	worldSvc map[string]bool
+	// cpWorld is the last-fetched /api/world summary on the console session.
+	// A management box (no local runner/coords) renders its Services view, DNS
+	// and header domain from it, mirroring what the deploying box shows from
+	// its own config.
+	cpWorld *console.WorldSummary
 	// consolePK is the operator pubkey of the live console session ("" = not
 	// logged in), shown in the footer / views.
 	consolePK string

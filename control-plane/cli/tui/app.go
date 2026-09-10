@@ -173,6 +173,12 @@ func (m *Model) buildServices(cfg *config.Config) {
 		}
 		m.Services = append(m.Services, row)
 	}
+	if len(m.Services) == 0 && m.cpWorld != nil && len(m.cpWorld.Services) > 0 {
+		// A management box (no local `managed`/coords): render the world the CP
+		// serves — relay + control plane + each recorded world service — so the
+		// view mirrors what the deploying box shows from its own config.
+		m.buildCpServices(cfg)
+	}
 	if len(m.Services) == 0 {
 		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
 	}
@@ -186,11 +192,48 @@ func (m *Model) buildServices(cfg *config.Config) {
 	}
 }
 
+// buildCpServices renders the Services view for a management box from the CP's
+// /api/world: the relay + control plane (from the box's recorded coords) plus
+// each world service the CP monitors (k3s/litellm/caddy), health included.
+func (m *Model) buildCpServices(cfg *config.Config) {
+	m.Services = nil
+	add := func(name, where, url, status string) {
+		m.Services = append(m.Services, ServiceRow{Name: name, Where: where, URL: url, Status: status})
+	}
+	add("relay", "CP-served", cfg.RelayURL, boolStatus(m.RelayLive, "live", "down"))
+	add("control plane", "CP-served", cfg.CPURL, boolStatus(m.CPLive, "live", "down"))
+	for _, s := range m.cpWorld.Services {
+		add(serviceRowName(s.Kind), "CP-served · "+s.Kind, s.URL, boolStatus(s.Up, "live", "down"))
+	}
+}
+
+func serviceRowName(kind string) string {
+	switch kind {
+	case "k3s":
+		return "k3s (kube)"
+	case "litellm":
+		return "litellm (gateway)"
+	case "caddy":
+		return "caddy (TLS edge)"
+	default:
+		return kind
+	}
+}
+
 // buildCerts fills the Certs view from the config's recorded per-host edge certs
 // (written by the F3 stage on rebuild). Pure — no exec. Two rows (relay, cp),
 // each deriving its status from that slot's expiry.
-func (m *Model) buildCerts(cfg *config.Config) {
-	m.Certs = nil
+// relaySlotHost is the Certs view's relay host: the box's resolved public relay
+// domain (m.Domain — CP/DNS-derived on a management box, config-derived on a
+// deployer), or the config host when m.Domain isn't populated.
+func relaySlotHost(m *Model, cfg *config.Config) string {
+	if m.Domain != "" {
+		return m.Domain
+	}
+	return cfg.RelayHost()
+}
+
+func (m *Model) buildCerts(cfg *config.Config) {	m.Certs = nil
 	issuer := cfg.Caddy.CertIssuer
 	if issuer == "" {
 		issuer = "lego (DNS-01)"
@@ -198,7 +241,11 @@ func (m *Model) buildCerts(cfg *config.Config) {
 	slots := []struct {
 		name, host, expiry string
 	}{
-		{"relay", cfg.RelayHost(), cfg.Caddy.RelayCert},
+		// relay host: m.Domain is the public relay host (config-derived on a
+		// deployer box; CP-relay_host- or DNS-derived on a management box),
+		// falling back to the config host — so a management box shows the
+		// domain, not the LAN IP it connected to.
+		{"relay", relaySlotHost(m, cfg), cfg.Caddy.RelayCert},
 		{"control plane", cfg.CPHost(), cfg.Caddy.CPCert},
 	}
 	for _, s := range slots {
@@ -218,7 +265,7 @@ func (m *Model) buildCerts(cfg *config.Config) {
 		}
 		m.Certs = append(m.Certs, CertRow{
 			Domain: s.host,
-			URL:    caddyURL(cfg, s.name),
+			URL:    caddyURL(m, cfg, s.name),
 			Expiry: expiry,
 			Issuer: issuer,
 			Status: status,
@@ -227,8 +274,10 @@ func (m *Model) buildCerts(cfg *config.Config) {
 }
 
 // caddyURL returns the edge URL for a service (relay -> the Caddy URL / relay
-// host; control plane -> the cp host), falling back to the bare host.
-func caddyURL(cfg *config.Config, name string) string {
+// host; control plane -> the cp host), falling back to the bare host. The relay
+// fallback uses the resolved public relay domain (m.Domain — CP/DNS-derived on
+// a management box), not the LAN IP the box connected to.
+func caddyURL(m *Model, cfg *config.Config, name string) string {
 	if name == "control plane" {
 		if cfg.CPURL != "" {
 			return cfg.CPURL
@@ -238,7 +287,7 @@ func caddyURL(cfg *config.Config, name string) string {
 	if cfg.Caddy.URL != "" {
 		return cfg.Caddy.URL
 	}
-	return "https://" + cfg.RelayHost()
+	return "https://" + relaySlotHost(m, cfg)
 }
 
 // dnsRowsLive execs `control-plane dns list` inside the cp LXC through the
