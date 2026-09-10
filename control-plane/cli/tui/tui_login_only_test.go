@@ -3,6 +3,7 @@ package tui
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"freehold/contract/config"
@@ -139,6 +140,38 @@ func TestApplyCPWorldHealthManagementBoxGreen(t *testing.T) {
 	}
 	if len(m.DNS) != 2 || m.DNS[0].Name != "relay" {
 		t.Fatalf("management box DNS view should be filled from the CP resolver, got %+v", m.DNS)
+	}
+}
+
+// The relay public domain must derive from the CP resolver's `relay.<domain>`
+// record even when the console predates serving relay_host — a management box
+// then shows the domain (Certs relay row + header), not the LAN IP it dialed.
+func TestRelayDomainDerivesFromDNS(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/world":
+			w.Write([]byte(`{"cp_pubkey":"aa","services":[{"name":"k3s","kind":"k3s","up":true}]}`))
+		case "/api/dns":
+			w.Write([]byte(`{"dns":[{"name":"relay","ip":"10.0.0.5","source":"record_lxc"},` +
+				`{"name":"relay.here.freehold.technology","ip":"10.0.0.8","source":"cp_public"},` +
+				`{"name":"litellm","ip":"10.0.0.6","source":"litellm apply"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa", RelayURL: "http://192.168.30.220:3000"}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	m.applyCPWorldHealth()
+
+	if m.Domain != "relay.here.freehold.technology" {
+		t.Fatalf("relay domain should derive from the CP resolver, got %q", m.Domain)
+	}
+	m.buildCerts(cfg)
+	if len(m.Certs) == 0 || !strings.Contains(m.Certs[0].Domain, "here.freehold.technology") {
+		t.Fatalf("certs relay row should show the derived domain, got %+v", m.Certs)
 	}
 }
 

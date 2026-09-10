@@ -574,17 +574,22 @@ func (m *Model) applyCPWorldHealth() {
 	for _, s := range w.Services {
 		m.worldSvc[s.Kind] = s.Up
 	}
-	// Header domain: prefer the CP's recorded relay host (the public domain)
-	// over the raw LAN IP the box connected to for co-located probes.
-	if w.RelayHost != "" && w.RelayHost != m.cfg.RelayHost() {
-		m.Domain = w.RelayHost
-	}
 	// DNS: the CP resolver is authoritative; a management box has no local
 	// runner through which to exec `control-plane dns list`, so read /api/dns.
 	if m.cfg.Runner.Addr == "" {
 		if rows, ok := m.cpDnsRows(); ok {
 			m.DNS = rows
 		}
+	}
+	// Header domain: prefer the CP's recorded relay host (the public domain),
+	// else derive it from the resolver's explicit `relay.<domain>` record —
+	// both beat the LAN IP a management box connected to for co-located probes.
+	// The DNS-derive covers a CP console that predates serving relay_host.
+	if w.RelayHost != "" && w.RelayHost != m.cfg.RelayHost() {
+		m.Domain = w.RelayHost
+	}
+	if d := m.relayPublicHost(); d != "" && d != m.Domain {
+		m.Domain = d
 	}
 	if v, ok := m.worldSvc["k3s"]; ok && m.cfg.Lxc.K3s.Ip == nil {
 		m.K3sLive = v
@@ -596,12 +601,12 @@ func (m *Model) applyCPWorldHealth() {
 		m.CaddyLive = v
 	}
 	m.buildServices(m.cfg)
+	m.buildCerts(m.cfg)
 }
 
 // cpDnsRows fills the DNS view from the console's /api/dns (the CP resolver),
 // used by a management box with no local runner. Returns whether rows exist.
-func (m *Model) cpDnsRows() ([]DnsRow, bool) {
-	if m.console == nil || m.console.client == nil {
+func (m *Model) cpDnsRows() ([]DnsRow, bool) {	if m.console == nil || m.console.client == nil {
 		return nil, false
 	}
 	v, err := m.console.client.ListDNS()
@@ -613,6 +618,31 @@ func (m *Model) cpDnsRows() ([]DnsRow, bool) {
 		rows = append(rows, DnsRow{Name: d.Name, IP: d.IP, Source: "CP resolver"})
 	}
 	return rows, true
+}
+
+// relayPublicHost derives the relay's public hostname from the resolver's
+// explicit `relay.<domain>` A record (the CP DNS the management box just read).
+// A bare `relay` record or an IP-only name is skipped; a dotted hostname with
+// letters is the public relay host — the domain a deployer box shows from its
+// own relay_url, recovered on a management box without needing a CP console
+// that serves relay_host.
+func (m *Model) relayPublicHost() string {
+	for _, d := range m.DNS {
+		if !strings.HasPrefix(d.Name, "relay.") || !hostnameHasLetters(d.Name) {
+			continue
+		}
+		return d.Name
+	}
+	return ""
+}
+
+func hostnameHasLetters(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 // rebuildArgs builds the `freehold rebuild --yes` args from a completed
