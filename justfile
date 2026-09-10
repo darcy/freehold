@@ -28,12 +28,14 @@ build:
 # bring the world up.
 install: build
     mkdir -p ~/.cargo/bin ~/.cargo/release
-    cp target/debug/freehold ~/.cargo/bin/freehold
-    cp target/debug/freehold-console ~/.cargo/bin/freehold-console
-    cp target/debug/runner ~/.cargo/bin/runner
-    cp target/release/freehold-console ~/.cargo/release/freehold-console
-    cp target/release/runner ~/.cargo/release/runner
-    cp target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
+    # install (temp+rename, not cp) so a RUNNING sibling (e.g. the
+    # provisioning runner) is replaced atomically instead of "Text file busy".
+    install -m 755 target/debug/freehold ~/.cargo/bin/freehold
+    install -m 755 target/debug/freehold-console ~/.cargo/bin/freehold-console
+    install -m 755 target/debug/runner ~/.cargo/bin/runner
+    install -m 755 target/release/freehold-console ~/.cargo/release/freehold-console
+    install -m 755 target/release/runner ~/.cargo/release/runner
+    install -m 755 target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
     @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release)"
 
 # Verify every sibling `freehold build`/`teardown` resolves is present.
