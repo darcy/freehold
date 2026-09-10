@@ -173,6 +173,12 @@ func (m *Model) buildServices(cfg *config.Config) {
 		}
 		m.Services = append(m.Services, row)
 	}
+	if len(m.Services) == 0 && m.cpWorld != nil && len(m.cpWorld.Services) > 0 {
+		// A management box (no local `managed`/coords): render the world the CP
+		// serves — relay + control plane + each recorded world service — so the
+		// view mirrors what the deploying box shows from its own config.
+		m.buildCpServices(cfg)
+	}
 	if len(m.Services) == 0 {
 		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
 	}
@@ -183,6 +189,34 @@ func (m *Model) buildServices(cfg *config.Config) {
 		for name, ip := range cfg.Dns.Records {
 			m.DNS = append(m.DNS, DnsRow{Name: name, IP: ip, Source: "config mirror"})
 		}
+	}
+}
+
+// buildCpServices renders the Services view for a management box from the CP's
+// /api/world: the relay + control plane (from the box's recorded coords) plus
+// each world service the CP monitors (k3s/litellm/caddy), health included.
+func (m *Model) buildCpServices(cfg *config.Config) {
+	m.Services = nil
+	add := func(name, where, url, status string) {
+		m.Services = append(m.Services, ServiceRow{Name: name, Where: where, URL: url, Status: status})
+	}
+	add("relay", "CP-served", cfg.RelayURL, boolStatus(m.RelayLive, "live", "down"))
+	add("control plane", "CP-served", cfg.CPURL, boolStatus(m.CPLive, "live", "down"))
+	for _, s := range m.cpWorld.Services {
+		add(serviceRowName(s.Kind), "CP-served · "+s.Kind, s.URL, boolStatus(s.Up, "live", "down"))
+	}
+}
+
+func serviceRowName(kind string) string {
+	switch kind {
+	case "k3s":
+		return "k3s (kube)"
+	case "litellm":
+		return "litellm (gateway)"
+	case "caddy":
+		return "caddy (TLS edge)"
+	default:
+		return kind
 	}
 }
 

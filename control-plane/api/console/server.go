@@ -209,10 +209,15 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		ws := wsOf(*snap.RelayURL)
 		relayWS = &ws
 	}
+	var relayHost string
+	if snap.RelayHost != nil {
+		relayHost = *snap.RelayHost
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"relay_url":          snap.RelayURL,
 		"relay_ws_url":       relayWS,
 		"relay_pubkey":       snap.RelayPubkey,
+		"relay_host":         relayHost,
 		"cp_url":             s.PublicOrigin,
 		"cp_pubkey":          s.ConsolePubkey,
 		"agent_tools_url":    snap.AgentToolsURL,

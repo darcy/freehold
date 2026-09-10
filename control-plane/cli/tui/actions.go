@@ -557,21 +557,34 @@ func (m *Model) refreshLocal() {
 
 // applyCPWorldHealth is the MANAGEMENT-BOX world-health hook: a box that logs
 // in as operator but holds no local coords of its own (it didn't deploy the
-// world) renders its k3s/litellm/caddy pillars from the CP-served /api/world
-// health instead of local config probes. Deployer boxes (local coords present)
-// keep their own co-located probes. Only ever turns a pillar green from a live
-// CP answer; never fabricates an "up".
+// world) renders its k3s/litellm/caddy pillars, Services view, DNS and header
+// domain from the CP's /api/world + /api/dns instead of local config probes.
+// Deployer boxes (local coords present) keep their own co-located probes. Only
+// ever turns a pillar green from a live CP answer; never fabricates an "up".
 func (m *Model) applyCPWorldHealth() {
 	if m.console == nil || m.console.client == nil || m.cfg == nil {
 		return
 	}
 	w, err := m.console.client.World()
-	if err != nil || len(w.Services) == 0 {
+	if err != nil {
 		return
 	}
+	m.cpWorld = w
 	m.worldSvc = make(map[string]bool, len(w.Services))
 	for _, s := range w.Services {
 		m.worldSvc[s.Kind] = s.Up
+	}
+	// Header domain: prefer the CP's recorded relay host (the public domain)
+	// over the raw LAN IP the box connected to for co-located probes.
+	if w.RelayHost != "" && w.RelayHost != m.cfg.RelayHost() {
+		m.Domain = w.RelayHost
+	}
+	// DNS: the CP resolver is authoritative; a management box has no local
+	// runner through which to exec `control-plane dns list`, so read /api/dns.
+	if m.cfg.Runner.Addr == "" {
+		if rows, ok := m.cpDnsRows(); ok {
+			m.DNS = rows
+		}
 	}
 	if v, ok := m.worldSvc["k3s"]; ok && m.cfg.Lxc.K3s.Ip == nil {
 		m.K3sLive = v
@@ -582,6 +595,24 @@ func (m *Model) applyCPWorldHealth() {
 	if v, ok := m.worldSvc["caddy"]; ok && m.cfg.Caddy.URL == "" {
 		m.CaddyLive = v
 	}
+	m.buildServices(m.cfg)
+}
+
+// cpDnsRows fills the DNS view from the console's /api/dns (the CP resolver),
+// used by a management box with no local runner. Returns whether rows exist.
+func (m *Model) cpDnsRows() ([]DnsRow, bool) {
+	if m.console == nil || m.console.client == nil {
+		return nil, false
+	}
+	v, err := m.console.client.ListDNS()
+	if err != nil || len(v.DNS) == 0 {
+		return nil, false
+	}
+	rows := make([]DnsRow, 0, len(v.DNS))
+	for _, d := range v.DNS {
+		rows = append(rows, DnsRow{Name: d.Name, IP: d.IP, Source: "CP resolver"})
+	}
+	return rows, true
 }
 
 // rebuildArgs builds the `freehold rebuild --yes` args from a completed
