@@ -581,14 +581,13 @@ func (m *Model) applyCPWorldHealth() {
 			m.DNS = rows
 		}
 	}
-	// Header domain: prefer the CP's recorded relay host (the public domain),
-	// else derive it from the resolver's explicit `relay.<domain>` record —
-	// both beat the LAN IP a management box connected to for co-located probes.
-	// The DNS-derive covers a CP console that predates serving relay_host.
+	// Header domain: prefer the CP's recorded relay host (the public domain)
+	// — set once at deploy and authoritative. Only when the console predates
+	// serving relay_host does the resolver's explicit `relay.<domain>` record
+	// derive it instead. Both beat the LAN IP a management box dialed.
 	if w.RelayHost != "" && w.RelayHost != m.cfg.RelayHost() {
 		m.Domain = w.RelayHost
-	}
-	if d := m.relayPublicHost(); d != "" && d != m.Domain {
+	} else if d := m.relayPublicHost(); d != "" && d != m.Domain {
 		m.Domain = d
 	}
 	if v, ok := m.worldSvc["k3s"]; ok && m.cfg.Lxc.K3s.Ip == nil {

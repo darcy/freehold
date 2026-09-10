@@ -175,6 +175,31 @@ func TestRelayDomainDerivesFromDNS(t *testing.T) {
 	}
 }
 
+// When the CP serves a relay_host AND the resolver carries a differing
+// relay.<domain> record, the served relay_host is authoritative — a stale
+// resolver entry must never override it (the DNS path is fallback only).
+func TestRelayDomainPrefersServerRelayHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/world":
+			w.Write([]byte(`{"cp_pubkey":"aa","relay_host":"relay.authoritative.freehold.technology","services":[{"name":"k3s","kind":"k3s","up":true}]}`))
+		case "/api/dns":
+			w.Write([]byte(`{"dns":[{"name":"relay.stale.freehold.technology","ip":"10.0.0.9","source":"stale"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa", RelayURL: "http://192.168.30.220:3000"}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	m.applyCPWorldHealth()
+	if m.Domain != "relay.authoritative.freehold.technology" {
+		t.Fatalf("served relay_host must win over the resolver, got %q", m.Domain)
+	}
+}
+
 // A box WITH local coords (a deployer) keeps its own co-located probe — the CP
 // health only fills pillars this box has no local record of.
 func TestApplyCPWorldHealthKeepsDeployerProbe(t *testing.T) {
