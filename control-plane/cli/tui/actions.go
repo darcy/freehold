@@ -581,15 +581,19 @@ func (m *Model) applyCPWorldHealth() {
 		m.worldSvc[s.Kind] = s.Up
 	}
 	// Relay liveness: the CP's /api/world is authoritative for where the relay
-	// actually lives. A management box's config relay_url is a snapshot from
-	// its login — after a world rebuild the relay LXC can move (DHCP), so adopt
-	// the CP-served URL and re-probe (beat a stale LAN IP showing red).
-	if m.cfg.RelayURL == "" || (w.RelayURL != "" && w.RelayURL != m.cfg.RelayURL) {
-		m.cfg.RelayURL = w.RelayURL
-		if w.RelayWsURL != "" {
-			m.cfg.RelayWsURL = w.RelayWsURL
+	// actually lives. A management box has no local world to converge, so its
+	// relay health is the CP's — adopt the served URL and probe it (a box's
+	// config relay_url is a login snapshot; the relay LXC can move on rebuild).
+	if m.cfg.Runner.Addr == "" {
+		if w.RelayURL != "" && w.RelayURL != m.cfg.RelayURL {
+			m.cfg.RelayURL = w.RelayURL
+			if w.RelayWsURL != "" {
+				m.cfg.RelayWsURL = w.RelayWsURL
+			}
 		}
-		m.RelayLive = config.RelayLive(m.cfg)
+		if m.cfg.RelayURL != "" {
+			m.RelayLive = config.RelayLive(m.cfg)
+		}
 	}
 	// DNS: the CP resolver is authoritative; a management box has no local
 	// runner through which to exec `control-plane dns list`, so read /api/dns.
@@ -622,7 +626,8 @@ func (m *Model) applyCPWorldHealth() {
 
 // cpDnsRows fills the DNS view from the console's /api/dns (the CP resolver),
 // used by a management box with no local runner. Returns whether rows exist.
-func (m *Model) cpDnsRows() ([]DnsRow, bool) {	if m.console == nil || m.console.client == nil {
+func (m *Model) cpDnsRows() ([]DnsRow, bool) {
+	if m.console == nil || m.console.client == nil {
 		return nil, false
 	}
 	v, err := m.console.client.ListDNS()
@@ -659,6 +664,48 @@ func hostnameHasLetters(s string) bool {
 		}
 	}
 	return false
+}
+
+// --- CP-sourced boot status (management box) --------------------------------
+
+// cpWorldSummary is the "control plane" boot step's report on a management box:
+// the CP's world facts fetched on connect. The relay/k3s/litellm/caddy/dns
+// steps read from the same snapshot, so the check reflects the CP, never stale
+// local config.
+func (m *Model) cpWorldSummary() string {
+	if m.cpWorld == nil {
+		return "healthy (world facts waiting on auto-login)"
+	}
+	return fmt.Sprintf("healthy — %d services · %d dns · %d runners · %d agents",
+		len(m.cpWorld.Services), len(m.DNS), len(m.Runners), len(m.Agents))
+}
+
+func (m *Model) cpRelayStatus() (string, bool) {
+	if m.cpWorld == nil {
+		return "awaiting CP world facts (auto-login)", true
+	}
+	if m.RelayLive {
+		return "live via CP at " + m.cfg.RelayURL, true
+	}
+	return "no answer at " + m.cfg.RelayURL + " (CP-served)", false
+}
+
+func (m *Model) cpServiceStatus(kind string) (string, bool) {
+	v, ok := m.worldSvc[kind]
+	if !ok {
+		return "awaiting CP (" + kind + ")", true
+	}
+	if v {
+		return "healthy via CP (" + kind + ")", true
+	}
+	return "down via CP (" + kind + ")", false
+}
+
+func (m *Model) cpDnsStatus() (string, bool) {
+	if m.cpWorld == nil {
+		return "awaiting CP world facts (auto-login)", true
+	}
+	return fmt.Sprintf("%d resolver records (CP)", len(m.DNS)), true
 }
 
 // rebuildArgs builds the `freehold rebuild --yes` args from a completed
