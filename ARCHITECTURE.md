@@ -194,14 +194,19 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     create/manage-only filter, now defense-in-depth). The build dogfoods
     `create_agent` to bring the CPA up. It
     also carries the CP world-action surface (`world_status` / `world_teardown`
-    / `world_migrate` / `world_build`, operator-scoped) so an operator box can
+    / `world_migrate` / `world_build` / `world_register_facts` /
+    `world_authorize_door` / `world_revoke_door`, operator-scoped) so an
+    operator box can
     "login + trigger" the world: `world_build` runs the CP's owned
     bring-up/reconcile stages (`platform/provisioning/stages`) through its
     co-located runner — the direction `freehold build` (box) slims toward
     (CP-bring-up + trigger; the CP owns relay/storage/k3s/DNS/litellm/Caddy/
     cert). `world_status` is the **single inventory read** (agents + the
     console's runners/DNS read underneath — the console's state.json on the
-    box), consumed by the TUI and `freehold world status`. `grant_agent` is
+    box — plus the deployer-side world facts (`world_register_facts`: the
+    durable-plane layout, canonical domains, and edge cert metadata the box
+    registers at the end of `freehold build`)), consumed by the TUI and
+    `freehold world status`. `grant_agent` is
     **operator-scoped and wired through the absorbed console-owner
     credential**: the server loads
     the console's own identity from its state dir (0600 durable plane) and
