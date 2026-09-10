@@ -857,7 +857,7 @@ func (s *deploySpec) worldBootK3s(mounts []planebase.MountSpec) error {
 		return err
 	}
 	s.k3sVmid = vmid
-	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", s.k3sVmid, strings.TrimSpace(stages.K3sInstallScript))
+	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", s.k3sVmid, strings.TrimSpace(strings.ReplaceAll(stages.K3sInstallScript, "__K3S_VERSION__", stages.K3sVersion)))
 	if err := s.run(cmd, 900); err != nil {
 		return fmt.Errorf("k3s install: %w", err)
 	}

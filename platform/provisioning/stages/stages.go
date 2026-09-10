@@ -54,13 +54,22 @@ func GenSecretHex() string {
 // K3sInstallScript is the in-guest k3s install script, verbatim from the Rust
 // installer (single-quote-free: it travels inside a single-quoted bash -c
 // through the runner; the unit heredoc is unquoted-safe).
+//
+// K3sVersion is PINNED (INSTALL_K3S_VERSION) so the install skips the
+// update.k3s.io channel lookup entirely: that channel redirects through
+// github.com, and a network that MITMs/blackholes it (a self-signed cert on
+// update.k3s.io) made the version resolution fail and fall back to a literal
+// `stable` tag (404). A pinned version is also deterministic — the same k3s on
+// every bring-up.
+const K3sVersion = "v1.36.4+k3s1"
+
 const K3sInstallScript = `set -euo pipefail
 export PATH=/usr/local/bin:/root/.cargo/bin:$PATH
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq
 if ! command -v kubectl >/dev/null 2>&1; then
   curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh
-  INSTALL_K3S_EXEC="server --disable traefik --disable servicelb --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
+  INSTALL_K3S_VERSION=__K3S_VERSION__ INSTALL_K3S_EXEC="server --disable traefik --disable servicelb --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
 fi
 if ! grep -q KubeletInUserNamespace /etc/systemd/system/k3s.service 2>/dev/null; then
 cat > /etc/systemd/system/k3s.service <<UNIT

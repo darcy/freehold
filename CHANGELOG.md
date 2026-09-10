@@ -25,6 +25,18 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.12] — pin the k3s version (bypasses the flaky update.k3s.io channel lookup)
+
+`world_build`'s k3s install failed on this network: the installer's version
+resolution follows `update.k3s.io` → github.com, and `update.k3s.io` presented a
+self-signed cert (a network-level MITM — github.com itself worked), so the
+channel lookup errored and the installer fell back to a literal `stable` tag
+which 404'd. `K3sInstallScript` now sets a PINNED `INSTALL_K3S_VERSION`
+(`v1.36.4+k3s1`), skipping the channel lookup entirely — deterministic (the
+same k3s on every bring-up) and immune to `update.k3s.io` being down/MITM'd.
+Verified live: a fresh install with the pinned version completes and k3s comes
+up active.
+
 ## [0.5.7] — UAT: a real teardown→rebuild→TUI→separate-box-login, and the `justfile`
 
 A full UAT against the live world (teardown → rebuild shipping the Go console →
