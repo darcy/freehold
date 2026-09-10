@@ -23,7 +23,7 @@ pct exec "$VMID" -- bash -c '
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq
   if ! command -v k3s >/dev/null 2>&1; then
     curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh
-    INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
+    INSTALL_K3S_VERSION=v1.36.4+k3s1 INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
   fi
   # the unit MUST carry the flag AFTER the subcommand (k3s rejects it before)
   if ! grep -q KubeletInUserNamespace /etc/systemd/system/k3s.service; then
