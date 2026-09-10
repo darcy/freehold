@@ -151,6 +151,39 @@ func TestApplyCPWorldHealthKeepsDeployerProbe(t *testing.T) {
 	}
 }
 
+// The manual `l` console login lands through runFlowAction -> flowMsg{ok}, which
+// the Update loop handles at app.go's flowMsg case (calling refreshLocal()). This
+// test drives THAT path — not applyCPWorldHealth() directly — to confirm a
+// management box logging in via the TUI's own prompt (not auto-login) gets its
+// world pillars filled green from the CP.
+func TestFlowMsgLoginFillsManagementBoxWorld(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/world" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"cp_pubkey":"aa","services":[` +
+				`{"name":"k3s","kind":"k3s","up":true},` +
+				`{"name":"litellm","kind":"litellm","up":true},` +
+				`{"name":"caddy","kind":"caddy","up":true}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// Management box pre-flow: console not yet live, no local coords.
+	m := &Model{cfg: &config.Config{CPURL: srv.URL, CpPubkey: "aa"}}
+
+	// Emulate runFlowAction after a successful login: it sets m.console, then
+	// Update handles the flowMsg{ok} and must fill the pillars.
+	m.console = &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}
+	_, _ = m.Update(flowMsg{ok: "console login ok — operator aa"})
+
+	if !m.K3sLive || !m.LitellmLive || !m.CaddyLive {
+		t.Fatalf("manual TUI login must fill management-box pillars green: k3s=%v litellm=%v caddy=%v",
+			m.K3sLive, m.LitellmLive, m.CaddyLive)
+	}
+}
+
 // A login-only (runnerless) box is operable once the CP console answers — an
 // unseeded/unreachable relay must NOT lock it into configure mode (the fresh-box
 // path still has relay_url empty until the deployed CP reseeds it).
