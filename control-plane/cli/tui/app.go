@@ -610,6 +610,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.console = &consoleClient{client: v.client}
 			m.consolePK = v.pubkey
 			m.refreshLocal()
+			m.applyCPWorldHealth()
 			m.Msg = "auto-logged into the CP as " + v.pubkey[:12]
 		}
 		return m, nil

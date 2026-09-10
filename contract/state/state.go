@@ -53,6 +53,23 @@ type DnsRecord struct {
 	CreatedAt uint64 `json:"created_at"`
 }
 
+// WorldService is one of the deployed world's health-monitored services
+// (k3s / litellm / caddy): coords the CP records at build and serves over
+// /api/world so any logged-in management box renders the live world (instead of
+// only the box that deployed it probing its own local coords). The CP probes
+// them co-located from its own LXC. Only public coords — no secrets.
+type WorldService struct {
+	// Kind is the service kind: "k3s", "litellm" or "caddy".
+	Kind string `json:"kind"`
+	// URL is the probe target — https://<host>:6443 (k3s), the gateway health
+	// endpoint (litellm), https://<edge-host> (caddy).
+	URL string `json:"url"`
+	// ReachHost is an optional host for a plain reachability probe (caddy
+	// https edge) independent of the URL path.
+	ReachHost string      `json:"reach_host,omitempty"`
+	CreatedAt uint64      `json:"created_at"`
+}
+
 // DnsWildcard is the resolver's wildcard apex (all subdomains of apex -> ip).
 type DnsWildcard struct {
 	Apex      string `json:"apex"`
@@ -76,6 +93,9 @@ type ControlPlaneState struct {
 	Runners          map[string]RunnerRecord `json:"runners"`
 	Secrets          map[string]SecretRecord `json:"secrets"`
 	DNS              map[string]DnsRecord    `json:"dns"`
+	// Services is the world-services health registry (k3s/litellm/caddy coords),
+	// recorded at build and served on /api/world for management boxes.
+	Services         map[string]WorldService `json:"services,omitempty"`
 	ResolverDomain   *string                 `json:"resolver_domain,omitempty"`
 	ResolverWildcard *DnsWildcard            `json:"resolver_wildcard,omitempty"`
 	Agents           map[string]AgentRecord  `json:"agents"`
@@ -118,11 +138,12 @@ func Open(dir string) (*StateStore, error) {
 
 func defaultState() ControlPlaneState {
 	return ControlPlaneState{
-		Runners: map[string]RunnerRecord{},
-		Secrets: map[string]SecretRecord{},
-		DNS:     map[string]DnsRecord{},
-		Agents:  map[string]AgentRecord{},
-		Admins:  []string{},
+		Runners:  map[string]RunnerRecord{},
+		Secrets:  map[string]SecretRecord{},
+		DNS:      map[string]DnsRecord{},
+		Services: map[string]WorldService{},
+		Agents:   map[string]AgentRecord{},
+		Admins:   []string{},
 	}
 }
 
@@ -135,6 +156,9 @@ func ensureMaps(cp *ControlPlaneState) {
 	}
 	if cp.DNS == nil {
 		cp.DNS = map[string]DnsRecord{}
+	}
+	if cp.Services == nil {
+		cp.Services = map[string]WorldService{}
 	}
 	if cp.Agents == nil {
 		cp.Agents = map[string]AgentRecord{}
@@ -233,6 +257,18 @@ func (s *StateStore) InsertDNS(name string, rec DnsRecord) { s.state.DNS[name] =
 
 // RemoveDNS deletes a DNS record.
 func (s *StateStore) RemoveDNS(name string) { delete(s.state.DNS, name) }
+
+// GetService returns a world-services record.
+func (s *StateStore) GetService(name string) (WorldService, bool) {
+	r, ok := s.state.Services[name]
+	return r, ok
+}
+
+// InsertService records a world-services record.
+func (s *StateStore) InsertService(name string, rec WorldService) { s.state.Services[name] = rec }
+
+// RemoveService deletes a world-services record.
+func (s *StateStore) RemoveService(name string) { delete(s.state.Services, name) }
 
 // ResolverDomain returns the resolver's world-domain suffix.
 func (s *StateStore) ResolverDomain() *string { return s.state.ResolverDomain }

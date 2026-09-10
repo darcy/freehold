@@ -218,6 +218,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"agent_tools_url":    snap.AgentToolsURL,
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
+		"services":           worldServiceRows(snap),
 	})
 }
 

@@ -89,6 +89,23 @@ pub struct DnsWildcard {
     pub created_at: u64,
 }
 
+/// One health-monitored world service (k3s / litellm / caddy): coords the CP
+/// records at build and serves over /api/world so any logged-in management box
+/// renders the live world, instead of only the box that deployed it. Probed
+/// co-located from the CP's own LXC. Public coords only — never secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldService {
+    /// Service kind: "k3s", "litellm" or "caddy".
+    pub kind: String,
+    /// Probe target — https://<host>:6443 (k3s), the gateway health endpoint
+    /// (litellm), https://<edge-host> (caddy).
+    pub url: String,
+    /// Optional host for a plain reachability probe (caddy https edge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach_host: Option<String>,
+    pub created_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretRecord {
     /// Runner (service) this secret belongs to — one per runner in Chunk 1.
@@ -109,6 +126,11 @@ pub struct ControlPlaneState {
     /// the CP resolver still runs, but only forwards upstream.
     #[serde(default)]
     pub dns: BTreeMap<String, DnsRecord>,
+    /// World-services health registry (k3s/litellm/caddy coords), recorded at
+    /// build and served on /api/world — a logged-in management box renders the
+    /// live world instead of only the box that deployed it. Probed co-located.
+    #[serde(default)]
+    pub services: BTreeMap<String, WorldService>,
     /// The world domain suffix the resolver joins to bare records when set
     /// (e.g. "darcydev.net") — addn-hosts then renders BOTH `<name>` and
     /// `<name>.<domain>`, so guests' search-first (ndots=1) lookups hit the

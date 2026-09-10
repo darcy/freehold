@@ -61,6 +61,23 @@ func TestNsecToSecret(t *testing.T) {
 	}
 }
 
+// TestAuthorizeDoorNeedsToolsetCoords guards the door flow's guard rails: with
+// an agent-ops identity minted but no agent-tools coords recorded (a CP that
+// predates the world toolset), AuthorizeDoor must fail cleanly and name the
+// miss rather than attempt a network call or panic.
+func TestAuthorizeDoorNeedsToolsetCoords(t *testing.T) {
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	if _, err := EnsureOpsIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	c := &config.Config{}
+	if err := AuthorizeDoor(c); err == nil {
+		t.Fatal("AuthorizeDoor with no agent-tools coords must error")
+	} else if !strings.Contains(err.Error(), "freehold-agent-tools") {
+		t.Fatalf("error should name the missing coords, got: %v", err)
+	}
+}
+
 // TestInteractiveSeedsWorldProfile drives `freehold login` end to end against a
 // mock CP: challenge -> login (Set-Cookie) -> world summary; the local desire
 // profile is seeded and the operator identity is persisted, all root-free.
