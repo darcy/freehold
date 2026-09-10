@@ -555,6 +555,35 @@ func (m *Model) refreshLocal() {
 	m.buildAgents(m.cfg)
 }
 
+// applyCPWorldHealth is the MANAGEMENT-BOX world-health hook: a box that logs
+// in as operator but holds no local coords of its own (it didn't deploy the
+// world) renders its k3s/litellm/caddy pillars from the CP-served /api/world
+// health instead of local config probes. Deployer boxes (local coords present)
+// keep their own co-located probes. Only ever turns a pillar green from a live
+// CP answer; never fabricates an "up".
+func (m *Model) applyCPWorldHealth() {
+	if m.console == nil || m.console.client == nil || m.cfg == nil {
+		return
+	}
+	w, err := m.console.client.World()
+	if err != nil || len(w.Services) == 0 {
+		return
+	}
+	m.worldSvc = make(map[string]bool, len(w.Services))
+	for _, s := range w.Services {
+		m.worldSvc[s.Kind] = s.Up
+	}
+	if v, ok := m.worldSvc["k3s"]; ok && m.cfg.Lxc.K3s.Ip == nil {
+		m.K3sLive = v
+	}
+	if v, ok := m.worldSvc["litellm"]; ok && m.cfg.Litellm.URL == "" {
+		m.LitellmLive = v
+	}
+	if v, ok := m.worldSvc["caddy"]; ok && m.cfg.Caddy.URL == "" {
+		m.CaddyLive = v
+	}
+}
+
 // rebuildArgs builds the `freehold rebuild --yes` args from a completed
 // rebuild form (shared by the flow dispatcher and the DNS pre-flow).
 func rebuildArgs(f *tuiFlow) ([]string, error) {

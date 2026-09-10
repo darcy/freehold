@@ -226,6 +226,18 @@ type WorldSummary struct {
 	OperatorPubkey   string `json:"operator_pubkey,omitempty"`
 	AgentToolsURL    string `json:"agent_tools_url,omitempty"`
 	AgentToolsPubkey string `json:"agent_tools_pubkey,omitempty"`
+	Services         []WorldService `json:"services,omitempty"`
+}
+
+// WorldService is the /api/world world-health row the CP serves: the recorded
+// coords plus the co-located live-probe result, so a logging-in management box
+// renders the live world instead of only the box that deployed it.
+type WorldService struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	URL    string `json:"url"`
+	Up     bool   `json:"up"`
+	Detail string `json:"detail"`
 }
 
 // World fetches the CP's world summary for a fresh-box login seed.

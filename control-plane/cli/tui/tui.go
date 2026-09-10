@@ -103,6 +103,11 @@ type Model struct {
 	Msg         string
 	Flow        *tuiFlow
 	console     *consoleClient
+	// worldSvc maps a service kind (k3s|litellm|caddy) to the CP-served live
+	// health (from /api/world on the console session). Populated by the
+	// management-box login hook and used to render a logged-in box's world
+	// green even when this box has no local coords of its own.
+	worldSvc map[string]bool
 	// consolePK is the operator pubkey of the live console session ("" = not
 	// logged in), shown in the footer / views.
 	consolePK string

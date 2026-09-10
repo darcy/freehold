@@ -592,6 +592,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Err = v.err.Error()
 		} else {
 			m.Msg = v.ok
+			// A flow (notably the manual `l` console login, which sets
+			// m.console) may have just granted a console session: fill a
+			// management box's world pillars from the CP. Idempotent; no-ops
+			// unless a session exists and local coords are absent.
+			m.applyCPWorldHealth()
 		}
 	case tickMsg:
 		if m.activity == nil {
@@ -610,6 +615,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.console = &consoleClient{client: v.client}
 			m.consolePK = v.pubkey
 			m.refreshLocal()
+			m.applyCPWorldHealth()
 			m.Msg = "auto-logged into the CP as " + v.pubkey[:12]
 		}
 		return m, nil

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"freehold/contract/crypto"
 	"freehold/contract/state"
@@ -43,8 +44,10 @@ func main() {
 		err = cmdRevoke(os.Args[2:])
 	case "identity":
 		err = cmdIdentity(os.Args[2:])
+	case "services":
+		err = cmdServices(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity|services)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -204,6 +207,53 @@ func cmdIdentity(args []string) error {
 		return err
 	}
 	fmt.Println(pk)
+	return nil
+}
+
+// cmdServices registers the world-services health registry (k3s/litellm/caddy
+// coords) directly into state.json — the inside-the-CP channel the build's
+// worldServices step calls, mirroring how `dns add` writes DNS records. The Go
+// console then probes them co-located and serves them on /api/world.
+func cmdServices(args []string) error {
+	fs := flag.NewFlagSet("services", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	kind := fs.String("kind", "", "service kind (k3s|litellm|caddy)")
+	url := fs.String("url", "", "probe target URL")
+	reachHost := fs.String("reach-host", "", "optional reachability host (caddy edge)")
+	clear := fs.Bool("clear", false, "drop the whole registry (teardown/bookkeeping)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *stateDir == "" {
+		return fmt.Errorf("services needs --state-dir")
+	}
+	store, err := state.Open(*stateDir)
+	if err != nil {
+		return fmt.Errorf("open state: %w", err)
+	}
+	if *clear {
+		for name := range store.Snapshot().Services {
+			store.RemoveService(name)
+		}
+		if err := store.Save(); err != nil {
+			return fmt.Errorf("clear services: %w", err)
+		}
+		fmt.Println("services registry cleared")
+		return nil
+	}
+	if *kind == "" || *url == "" {
+		return fmt.Errorf("services set needs --kind and --url")
+	}
+	if *kind != "k3s" && *kind != "litellm" && *kind != "caddy" {
+		return fmt.Errorf("unknown service kind %q (k3s|litellm|caddy)", *kind)
+	}
+	store.InsertService(*kind, state.WorldService{
+		Kind: *kind, URL: *url, ReachHost: *reachHost, CreatedAt: uint64(time.Now().Unix()),
+	})
+	if err := store.Save(); err != nil {
+		return fmt.Errorf("save services: %w", err)
+	}
+	fmt.Printf("service %s -> %s registered\n", *kind, *url)
 	return nil
 }
 

@@ -618,6 +618,34 @@ func (s *deploySpec) worldDNS() error {
 	return nil
 }
 
+// worldServices records the deployed world's health-monitored service coords
+// (k3s / litellm / caddy) into the CP's services registry, via the Go console
+// subcommand (directly into state.json, mirroring how `dns add` writes DNS).
+// The console then probes them co-located and serves them on /api/world so a
+// logging-in management box renders the live world. Idempotent upsert.
+func (s *deploySpec) worldServices() error {
+	binDir, stateDir := s.cpGuestDirs()
+	type svc struct{ kind, url string }
+	var svcs []svc
+	if s.proxyIP != "" {
+		svcs = append(svcs, svc{"k3s", fmt.Sprintf("https://%s:6443", s.proxyIP)})
+	}
+	if s.litellmIP != "" {
+		svcs = append(svcs, svc{"litellm", fmt.Sprintf("http://%s:31400/health/liveliness", s.litellmIP)})
+	}
+	if s.cpHost != "" {
+		svcs = append(svcs, svc{"caddy", fmt.Sprintf("https://%s", s.cpHost)})
+	}
+	for _, v := range svcs {
+		cmd := fmt.Sprintf("pct exec %d -- %s/freehold-console services --state-dir %s --kind %s --url %s",
+			s.cpLxc, binDir, stateDir, v.kind, v.url)
+		if err := s.run(cmd, 60); err != nil {
+			return fmt.Errorf("world-build services register %s: %w", v.kind, err)
+		}
+	}
+	return nil
+}
+
 // worldStorage re-ensures the durable volume plane CP-side (the box's
 // stagePlacement + stageStorage ensure half): resolve the backend kind
 // (recorded --plane-kind, else detect like the box's parseKind), then ensure
@@ -1223,6 +1251,14 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 				return "", fmt.Errorf("world-build cert: %w", err)
 			}
 			report = append(report, "cert issued/installed (or already present)")
+		}
+		// 7.5. Record the world-service health coords (k3s/litellm/caddy) so any
+		// management box renders the live world through /api/world.
+		if spec.cpLxc != 0 && spec.cpIP != "" {
+			if err := spec.worldServices(); err != nil {
+				return "", err
+			}
+			report = append(report, "world-service coords recorded")
 		}
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")

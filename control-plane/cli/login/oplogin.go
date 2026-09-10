@@ -20,6 +20,7 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
+	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
@@ -247,7 +248,55 @@ func Interactive() error {
 	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey, atURL, atPubkey); err != nil {
 		return err
 	}
+	// A successful admin login vets this box as a management box: present its
+	// door key to the host through the CP (world_authorize_door, DOOR_SPEC), so
+	// this box can drive CP-lifecycle work (bootstrap-cp / teardown-cp). Best-
+	// effort — login's primary outcome is the operator session + identity; a CP
+	// that predates the world toolset still allows login, with the miss surfaced.
+	if err := AuthorizeDoor(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "  (note: door not authorized — %v)\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "  door key authorized on the host (build/teardown enabled)\n")
+	}
 	fmt.Printf("logged in as %s against %s — run `freehold` to operate the world\n", pk, cpURL)
+	return nil
+}
+
+// AuthorizeDoor presents THIS box's door key to the host through the CP's world
+// toolset (world_authorize_door, DOOR_SPEC): it derives the door SSH public line
+// deterministically from the box's agent-ops identity seed (idempotent — the CP
+// grep-before-appends, so re-login is safe) and authorizes it signed as the
+// OPERATOR identity (the console-admin / toolset-roster credential), so a fresh
+// box can drive CP-lifecycle verbs (bootstrap-cp / teardown-cp). The private
+// half never leaves the box; only the public line is presented.
+func AuthorizeDoor(cfg *config.Config) error {
+	id, err := flows.LoadIdentity(OpsDir())
+	if err != nil {
+		return fmt.Errorf("no ops identity at %s: %v", OpsDir(), err)
+	}
+	seed, err := hex.DecodeString(id.NostrSecretHex)
+	if err != nil || len(seed) != 32 {
+		return fmt.Errorf("agent-ops nostr_secret is not a 32-byte seed")
+	}
+	host, _ := os.Hostname()
+	pubkey, err := crypto.SSHPublicKeyFromSeed(seed, "freehold-door-"+host)
+	if err != nil {
+		return fmt.Errorf("derive door pubkey: %v", err)
+	}
+	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
+		return fmt.Errorf("no freehold-agent-tools coords recorded (the CP predates the world toolset)")
+	}
+	auth, err := flows.AgentAuth(Dir())
+	if err != nil {
+		return fmt.Errorf("operator identity for the toolset: %v", err)
+	}
+	mc, err := client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
+	if err != nil {
+		return err
+	}
+	if _, err := mc.Call("world_authorize_door", map[string]interface{}{"pubkey": pubkey}); err != nil {
+		return fmt.Errorf("world_authorize_door: %w", err)
+	}
 	return nil
 }
 

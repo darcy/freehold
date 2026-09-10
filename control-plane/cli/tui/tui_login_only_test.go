@@ -99,6 +99,91 @@ func contains(s, sub string) bool {
 	return false
 }
 
+// A management box (admin login, NO local world coords of its own) must render
+// its k3s/litellm/caddy pillars green from the CP's /api/world health — not stay
+// red just because it didn't deploy the world. This is the "login = fully-vetted
+// management box, more than one allowed" path.
+func TestApplyCPWorldHealthManagementBoxGreen(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/world" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"cp_pubkey":"aa","services":[` +
+				`{"name":"k3s","kind":"k3s","up":true},` +
+				`{"name":"litellm","kind":"litellm","up":true},` +
+				`{"name":"caddy","kind":"caddy","up":true}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// Management box: cp_url + operator session, NO [lxc]/[litellm]/[caddy] coords.
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa"}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	m.applyCPWorldHealth()
+	if !m.K3sLive || !m.LitellmLive || !m.CaddyLive {
+		t.Fatalf("management box should render world green from CP services: k3s=%v litellm=%v caddy=%v",
+			m.K3sLive, m.LitellmLive, m.CaddyLive)
+	}
+}
+
+// A box WITH local coords (a deployer) keeps its own co-located probe — the CP
+// health only fills pillars this box has no local record of.
+func TestApplyCPWorldHealthKeepsDeployerProbe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/world" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"cp_pubkey":"aa","services":[{"name":"k3s","kind":"k3s","up":true}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// Deployer: k3s coord present locally, marked down by its own probe.
+	ip := "10.0.0.9"
+	cfg := &config.Config{CPURL: srv.URL}
+	cfg.Lxc.K3s.Ip = &ip
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}, K3sLive: false}
+	m.applyCPWorldHealth()
+	if m.K3sLive {
+		t.Fatal("a deployer box's own local probe must stay authoritative (CP fills only absent pillars)")
+	}
+}
+
+// The manual `l` console login lands through runFlowAction -> flowMsg{ok}, which
+// the Update loop handles at app.go's flowMsg case (calling refreshLocal()). This
+// test drives THAT path — not applyCPWorldHealth() directly — to confirm a
+// management box logging in via the TUI's own prompt (not auto-login) gets its
+// world pillars filled green from the CP.
+func TestFlowMsgLoginFillsManagementBoxWorld(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/world" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"cp_pubkey":"aa","services":[` +
+				`{"name":"k3s","kind":"k3s","up":true},` +
+				`{"name":"litellm","kind":"litellm","up":true},` +
+				`{"name":"caddy","kind":"caddy","up":true}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// Management box pre-flow: console not yet live, no local coords.
+	m := &Model{cfg: &config.Config{CPURL: srv.URL, CpPubkey: "aa"}}
+
+	// Emulate runFlowAction after a successful login: it sets m.console, then
+	// Update handles the flowMsg{ok} and must fill the pillars.
+	m.console = &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}
+	_, _ = m.Update(flowMsg{ok: "console login ok — operator aa"})
+
+	if !m.K3sLive || !m.LitellmLive || !m.CaddyLive {
+		t.Fatalf("manual TUI login must fill management-box pillars green: k3s=%v litellm=%v caddy=%v",
+			m.K3sLive, m.LitellmLive, m.CaddyLive)
+	}
+}
+
 // A login-only (runnerless) box is operable once the CP console answers — an
 // unseeded/unreachable relay must NOT lock it into configure mode (the fresh-box
 // path still has relay_url empty until the deployed CP reseeds it).
