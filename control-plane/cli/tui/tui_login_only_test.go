@@ -225,6 +225,49 @@ func TestAdoptsCPRelayURL(t *testing.T) {
 	}
 }
 
+// The management-box "checking the world" stage must report CP-sourced status,
+// not stale local config: after the boot's control-plane step fetches the CP,
+// the relay/k3s/litellm/caddy/dns steps read the SAME snapshot and report it.
+// (Live world was 502 mid-rebuild; this is the hermetic guarantee.)
+func TestCpSourcedBootStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/world":
+			w.Write([]byte(`{"cp_pubkey":"aa","relay_url":"http://192.168.30.243:3000","services":[` +
+				`{"name":"k3s","kind":"k3s","up":true},` +
+				`{"name":"litellm","kind":"litellm","up":true},` +
+				`{"name":"caddy","kind":"caddy","up":false}]}`))
+		case "/api/dns":
+			w.Write([]byte(`{"dns":[{"name":"relay","ip":"10.0.0.5","source":"record_lxc"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa", RelayURL: "http://192.168.30.220:3000"}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+
+	// The boot control-plane step equates to applyCPWorldHealth (fetch) +
+	// refreshLocal; the subsequent steps then report from that snapshot.
+	m.applyCPWorldHealth()
+	m.refreshLocal()
+
+	if d, ok := m.cpServiceStatus("k3s"); !ok || !contains(d, "healthy via CP") {
+		t.Fatalf("k3s boot report should be CP-truth healthy, got %q ok=%v", d, ok)
+	}
+	if d, _ := m.cpServiceStatus("caddy"); contains(d, "healthy") {
+		t.Fatalf("caddy is down via CP, should not report healthy, got %q", d)
+	}
+	if d, _ := m.cpDnsStatus(); !contains(d, "1 resolver records (CP)") {
+		t.Fatalf("dns boot report should be CP-truth count, got %q", d)
+	}
+	if d, _ := m.cpRelayStatus(); !contains(d, "CP") {
+		t.Fatalf("relay boot report should cite the CP, got %q", d)
+	}
+}
+
 // A box WITH local coords (a deployer) keeps its own co-located probe — the CP
 // health only fills pillars this box has no local record of.
 func TestApplyCPWorldHealthKeepsDeployerProbe(t *testing.T) {
