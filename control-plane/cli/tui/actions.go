@@ -580,6 +580,17 @@ func (m *Model) applyCPWorldHealth() {
 	for _, s := range w.Services {
 		m.worldSvc[s.Kind] = s.Up
 	}
+	// Relay liveness: the CP's /api/world is authoritative for where the relay
+	// actually lives. A management box's config relay_url is a snapshot from
+	// its login — after a world rebuild the relay LXC can move (DHCP), so adopt
+	// the CP-served URL and re-probe (beat a stale LAN IP showing red).
+	if m.cfg.RelayURL == "" || (w.RelayURL != "" && w.RelayURL != m.cfg.RelayURL) {
+		m.cfg.RelayURL = w.RelayURL
+		if w.RelayWsURL != "" {
+			m.cfg.RelayWsURL = w.RelayWsURL
+		}
+		m.RelayLive = config.RelayLive(m.cfg)
+	}
 	// DNS: the CP resolver is authoritative; a management box has no local
 	// runner through which to exec `control-plane dns list`, so read /api/dns.
 	if m.cfg.Runner.Addr == "" {
