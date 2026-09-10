@@ -42,6 +42,7 @@ import (
 	"freehold/contract/state"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
+	"freehold/control-plane/api/agenttools"
 	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
 	"freehold/control-plane/cli/flows"
 	"freehold/platform/provisioning/drive"
@@ -622,6 +623,12 @@ func (e *rebuildEngine) runSlim() error {
 	if err := e.recordPostWorld(); err != nil {
 		return err
 	}
+	// 14.5 register the deployer-side world facts onto the CP (plane/certs/
+	// domains) so a management/login-only box renders DATA + Certs from
+	// world_status instead of needing the deployer's local config + probes.
+	if err := e.registerWorldFacts(); err != nil {
+		return err
+	}
 
 	// 15. the CPA + created-agent reconcile (through the CP toolset, the audited
 	// create path).
@@ -886,6 +893,91 @@ func lxcIP(g config.LxcGuest) string {
 }
 
 // stageProvision runs control-plane provision; returns the fresh ssh public
+// registerWorldFacts pushes the deployer-side world facts onto the CP
+// (world_register_facts, operator-scoped): the durable-plane layout, the
+// canonical domains, and the edge cert metadata. A management/login-only box
+// then renders the DATA + Certs views from world_status instead of needing the
+// deployer's local config + host probes.
+func (e *rebuildEngine) registerWorldFacts() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil || cfg == nil {
+		return fmt.Errorf("no config at %s", e.f.configPath)
+	}
+	mc, err := e.agentToolsMcp(cfg)
+	if err != nil {
+		return err
+	}
+	facts := agenttools.WorldFacts{
+		Domains: agenttools.WorldDomains{
+			Relay: cfg.RelayHost(),
+			CP:    cfg.CPHost(),
+			Proxy: config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
+		},
+		Plane: agenttools.WorldPlane{
+			Backend:    derefStrPtr(cfg.Plane.Backend),
+			BackendKind: derefStrPtr(cfg.Plane.BackendKind),
+			ThinPool:   derefStrPtr(cfg.Plane.ThinPool),
+		},
+	}
+	// The durable tenants are all backup=1 volume mounts (the /srv/data
+	// convention) — the facts carry the layout so a management box renders it.
+	for tenant, mts := range cfg.Plane.Mounts {
+		for _, m := range mts {
+			facts.Plane.Mounts = append(facts.Plane.Mounts, agenttools.WorldPlaneMount{
+				Tenant: tenant, Source: m.Source, GuestPath: m.GuestPath, Backup: true,
+			})
+		}
+	}
+	issuer := cfg.Caddy.CertIssuer
+	if issuer == "" {
+		issuer = "lego (DNS-01)"
+	}
+	for _, slot := range []struct{ slot, host string }{
+		{"relay", cfg.RelayHost()}, {"cp", cfg.CPHost()},
+	} {
+		if slot.host == "" {
+			continue
+		}
+		facts.Certs = append(facts.Certs, agenttools.WorldCert{
+			Slot: slot.slot, Domain: slot.host, Issuer: issuer,
+			Expiry: e.certExpiry(cfg, slot.slot),
+		})
+	}
+	if _, err := callAgentToolsText(mc, "world_register_facts", map[string]interface{}{"facts": facts}); err != nil {
+		return fmt.Errorf("world-register-facts: %w", err)
+	}
+	fmt.Fprintln(e.out, "  ✓ world facts registered on the CP (plane/certs/domains)")
+	return nil
+}
+
+// certExpiry reads a slot's edge cert notAfter from the durable mirror
+// (/srv/data/k8s-volumes/caddy-edge/<slot>/fullchain.pem on the k3s node)
+// through the provisioning runner, as RFC3339 ("" when unreadable).
+func (e *rebuildEngine) certExpiry(cfg *config.Config, slot string) string {
+	k3s := derefU32(cfg.Lxc.K3s.Vmid)
+	if k3s == 0 {
+		return ""
+	}
+	ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf(
+		"pct exec %d -- bash -c 'openssl x509 -enddate -noout -in %s/fullchain.pem 2>/dev/null'",
+		k3s, stages.CaddyEdgeDurableDir(slot)), 0))
+	if !ok {
+		return ""
+	}
+	line := strings.TrimSpace(out)
+	const prefix = "notAfter="
+	i := strings.Index(line, prefix)
+	if i < 0 {
+		return ""
+	}
+	notAfter := strings.TrimSpace(line[i+len(prefix):])
+	// "Sep  8 12:00:00 2027 GMT" -> time.Parse
+	if t, err := time.Parse("Jan _2 15:04:05 2006 MST", notAfter); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return ""
+}
+
 // key line when a NEW door key was generated ("" on reuse).
 func (e *rebuildEngine) stageProvision(agentPK string) (string, error) {
 	runnerDir := filepath.Join(rbRunnerPkgs(), e.f.target)

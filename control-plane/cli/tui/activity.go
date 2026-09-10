@@ -223,9 +223,12 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		}},
 		{"world state", func() (string, bool) {
 			m.buildServices(cfg)
-			m.buildCerts(cfg)
 			m.refreshRunners(cfg)
+			// buildAgents refreshes m.Facts (the world facts) — buildCerts +
+			// refreshData must run AFTER it so the Certs/DATA views render the
+			// CURRENT facts on a manual `r` refresh (not one cycle stale).
 			m.buildAgents(cfg)
+			m.buildCerts(cfg)
 			m.refreshData(cfg)
 			return fmt.Sprintf("%d services · %d runners · %d agents",
 				len(m.Services), len(m.Runners), len(m.Agents)), true

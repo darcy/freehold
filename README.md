@@ -49,9 +49,12 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       Rust only for runner + core + console):
   api/                the unified scoped API: agent toolset (agent/, agenttools/,
                       cpstate/) + the operator-scoped world_status / world_teardown /
-                      world_migrate / world_build actions (world_status = the single
-                      inventory read: agents + the console's runners/DNS; world_build
-                      = the CP runs its world stages through the co-located runner)
+                      world_migrate / world_build / world_register_facts /
+                      world_authorize_door / world_revoke_door actions (world_status
+                      = the single inventory read: agents + the console's runners/DNS
+                      + the deployer-side world facts (plane/certs/domains)
+                      registered at build; world_build = the CP runs its world stages
+                      through the co-located runner)
                       + cmd/freehold-agent-tools (the CP's agent-management MCP
                       server; `mcp` is the stdio bridge the agent PODS fetch at boot
                       — the world actions deliberately do NOT reach the CPA's
@@ -219,7 +222,9 @@ freehold --help               # both surfaces
   **Runners**
   (the console API parity — same data as the web UI), **Data** (the live durable plane — host capacity +
   each mount's size / used / guest bind-mount liveness, read-only through the
-  signed runner channel), **DNS**, **Certs**. A one-line world strip keeps the
+  signed runner channel; a management/login-only box renders the plane LAYOUT
+  from the CP's world facts instead — live usage needs the deployer box),
+  **DNS**, **Certs**. A one-line world strip keeps the
   liveness glance.
 - **Remote-CP access**: `freehold login` (**root-free**) authorizes this
   operator against the CP by **CP address + operator nsec** (NIP-98), then
