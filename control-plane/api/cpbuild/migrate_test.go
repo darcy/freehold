@@ -1,4 +1,4 @@
-package main
+package cpbuild
 
 import (
 	"encoding/json"
@@ -46,8 +46,8 @@ func TestMigrateImportConsoleAgentsAdditiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spec := &deploySpec{stateDir: stateDir}
-	m := buildMigrator(spec, consoleDir)
+	spec := &Spec{StateDir: stateDir}
+	m := BuildMigrator(spec, consoleDir)
 	if _, err := m(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

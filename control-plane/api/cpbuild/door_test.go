@@ -1,4 +1,4 @@
-package main
+package cpbuild
 
 import (
 	"encoding/hex"
@@ -20,7 +20,7 @@ func TestDoorKeyRe(t *testing.T) {
 		t.Fatal("ssh-rsa line must pass")
 	}
 	for _, bad := range []string{
-		"ssh-ed25519 AAAA$(rm -rf /) box", // command substitution
+		"ssh-ed25519 AAAA$(rm -rf /) box",  // command substitution
 		"ssh-ed25519 AAAA`id` box",         // backticks
 		"ssh-ed25519 AAAA'; rm -rf /; box", // quote breakout
 		"ssh-ed25519 AAAA  box",            // whitespace run (double space)
