@@ -561,11 +561,10 @@ func (m *Model) refreshLocal() {
 	m.refreshData(m.cfg)
 }
 
-// applyCPWorldHealth is the MANAGEMENT-BOX world-health hook: a box that logs
-// in as operator but holds no local coords of its own (it didn't deploy the
-// world) renders its k3s/litellm/caddy pillars, Services view, DNS and header
-// domain from the CP's /api/world + /api/dns instead of local config probes.
-// Deployer boxes (local coords present) keep their own co-located probes. Only
+// applyCPWorldHealth is the SINGLE-SOURCE world hook: for any box with a console
+// session, the CP is the authority for the whole world — services, DNS, relay,
+// and the pillar/flags. There is NO "management vs owner" divergence once a CP
+// session exists; the box's own local config is only an offline fallback. Only
 // ever turns a pillar green from a live CP answer; never fabricates an "up".
 func (m *Model) applyCPWorldHealth() {
 	if m.console == nil || m.console.client == nil || m.cfg == nil {
@@ -581,43 +580,38 @@ func (m *Model) applyCPWorldHealth() {
 		m.worldSvc[s.Kind] = s.Up
 	}
 	// Relay liveness: the CP's /api/world is authoritative for where the relay
-	// actually lives. A management box has no local world to converge, so its
-	// relay health is the CP's — adopt the served URL and probe it (a box's
-	// config relay_url is a login snapshot; the relay LXC can move on rebuild).
-	if m.cfg.Runner.Addr == "" {
-		if w.RelayURL != "" && w.RelayURL != m.cfg.RelayURL {
-			m.cfg.RelayURL = w.RelayURL
-			if w.RelayWsURL != "" {
-				m.cfg.RelayWsURL = w.RelayWsURL
-			}
-		}
-		if m.cfg.RelayURL != "" {
-			m.RelayLive = config.RelayLive(m.cfg)
+	// lives. Adopt the served URL and probe it (a box's config relay_url is a
+	// login snapshot; the relay LXC can move on rebuild).
+	if w.RelayURL != "" && w.RelayURL != m.cfg.RelayURL {
+		m.cfg.RelayURL = w.RelayURL
+		if w.RelayWsURL != "" {
+			m.cfg.RelayWsURL = w.RelayWsURL
 		}
 	}
-	// DNS: the CP resolver is authoritative; a management box has no local
-	// runner through which to exec `control-plane dns list`, so read /api/dns.
-	if m.cfg.Runner.Addr == "" {
-		if rows, ok := m.cpDnsRows(); ok {
-			m.DNS = rows
-		}
+	if m.cfg.RelayURL != "" {
+		m.RelayLive = config.RelayLive(m.cfg)
+	}
+	// DNS: the CP resolver is authoritative (no local runner exec needed).
+	if rows, ok := m.cpDnsRows(); ok {
+		m.DNS = rows
 	}
 	// Header domain: prefer the CP's recorded relay host (the public domain)
 	// — set once at deploy and authoritative. Only when the console predates
 	// serving relay_host does the resolver's explicit `relay.<domain>` record
-	// derive it instead. Both beat the LAN IP a management box dialed.
+	// derive it instead. Both beat the LAN IP a box dialed.
 	if w.RelayHost != "" && w.RelayHost != m.cfg.RelayHost() {
 		m.Domain = w.RelayHost
 	} else if d := m.relayPublicHost(); d != "" && d != m.Domain {
 		m.Domain = d
 	}
-	if v, ok := m.worldSvc["k3s"]; ok && m.cfg.Lxc.K3s.Ip == nil {
+	// Pillar health: set from the CP's live answers for every box.
+	if v, ok := m.worldSvc["k3s"]; ok {
 		m.K3sLive = v
 	}
-	if v, ok := m.worldSvc["litellm"]; ok && m.cfg.Litellm.URL == "" {
+	if v, ok := m.worldSvc["litellm"]; ok {
 		m.LitellmLive = v
 	}
-	if v, ok := m.worldSvc["caddy"]; ok && m.cfg.Caddy.URL == "" {
+	if v, ok := m.worldSvc["caddy"]; ok {
 		m.CaddyLive = v
 	}
 	m.buildServices(m.cfg)
@@ -688,17 +682,6 @@ func (m *Model) cpRelayStatus() (string, bool) {
 		return "live via CP at " + m.cfg.RelayURL, true
 	}
 	return "no answer at " + m.cfg.RelayURL + " (CP-served)", false
-}
-
-func (m *Model) cpServiceStatus(kind string) (string, bool) {
-	v, ok := m.worldSvc[kind]
-	if !ok {
-		return "awaiting CP (" + kind + ")", true
-	}
-	if v {
-		return "healthy via CP (" + kind + ")", true
-	}
-	return "down via CP (" + kind + ")", false
 }
 
 func (m *Model) cpDnsStatus() (string, bool) {

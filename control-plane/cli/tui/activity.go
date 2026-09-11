@@ -141,43 +141,27 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	defs := []def{
 		{"config", func() (string, bool) {
 			return cfg.RelayHost() + " · " + m.CfgPath, true
-		}}, 		{"runner", func() (string, bool) {
-			if cfg.Runner.Addr == "" {
-				// A login-only box has no LOCAL provisioning runner — operating
-				// through the CP, so reachability is the console session's.
-				m.RunnerReach = true
-				return "no local runner (login-only — operating through the CP)", true
-			}
-			m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
-			if m.RunnerReach {
-				return cfg.Runner.Addr + " reachable", true
-			}
-			return "no answer on " + cfg.Runner.Addr, false
+		}},
+		{"runner", func() (string, bool) {
+			return m.runnerProbe(cfg)
 		}},
 		{"control plane", func() (string, bool) {
-			if cfg.Runner.Addr == "" {
-				// Management box: the CP is the SOURCE of truth for the world.
-				// Connect to it and fetch its world facts (services, DNS, relay,
-				// runners, agents) — the relay/k3s/litellm/caddy/dns steps that
-				// follow report from that, never from stale local config.
-				m.CPLive = cpConsoleLive(m, cfg)
-				if m.console != nil && m.console.client != nil {
-					m.applyCPWorldHealth()
-					m.refreshLocal()
-				}
-				if m.CPLive {
-					return m.cpWorldSummary(), true
-				}
-				return "down (no console session answer)", false
+			// Every logged-in box is the SAME once it has a CP session: the CP
+			// is the single source of truth for the world (no management-vs-
+			// owner split). Connect and fetch its world facts; the steps that
+			// follow report from that, never from local config.
+			m.CPLive = cpConsoleLive(m, cfg)
+			if m.console != nil && m.console.client != nil {
+				m.applyCPWorldHealth()
+				m.refreshLocal()
 			}
-			m.CPLive = cpLive(cfg)
 			if m.CPLive {
-				return "healthy (:8080 answered from inside its LXC)", true
+				return m.cpWorldSummary(), true
 			}
-			return "down (no :8080 answer through the runner)", false
+			return "down (no console session answer)", false
 		}},
 		{"relay", func() (string, bool) {
-			if cfg.Runner.Addr == "" {
+			if m.cpWorld != nil {
 				return m.cpRelayStatus()
 			}
 			m.RelayLive = config.RelayLive(cfg)
@@ -187,9 +171,12 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			return "no answer at " + cfg.RelayURL, false
 		}},
 		{"k3s", func() (string, bool) {
-			if cfg.Lxc.K3s.Ip == nil {
-				// Management box (no local coords): report the CP-served health.
-				return m.cpServiceStatus("k3s")
+			if v, ok := m.worldSvc["k3s"]; ok {
+				m.K3sLive = v
+				if v {
+					return "healthy via CP (k3s)", true
+				}
+				return "down via CP (k3s)", false
 			}
 			m.K3sLive = config.K3sLive(cfg)
 			if m.K3sLive {
@@ -198,8 +185,12 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			return "no API answer at " + config.StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443", false
 		}},
 		{"litellm", func() (string, bool) {
-			if cfg.Litellm.URL == "" {
-				return m.cpServiceStatus("litellm")
+			if v, ok := m.worldSvc["litellm"]; ok {
+				m.LitellmLive = v
+				if v {
+					return "healthy via CP (litellm)", true
+				}
+				return "down via CP (litellm)", false
 			}
 			m.LitellmLive = config.LitellmLive(cfg)
 			if m.LitellmLive {
@@ -208,8 +199,12 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			return "no answer at " + cfg.Litellm.URL, false
 		}},
 		{"caddy", func() (string, bool) {
-			if cfg.Caddy.URL == "" || cfg.Caddy.Host == "" {
-				return m.cpServiceStatus("caddy")
+			if v, ok := m.worldSvc["caddy"]; ok {
+				m.CaddyLive = v
+				if v {
+					return "healthy via CP (caddy)", true
+				}
+				return "down via CP (caddy)", false
 			}
 			m.CaddyLive = config.URLReachable("https://" + cfg.Caddy.Host)
 			if m.CaddyLive {
@@ -218,12 +213,11 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 			return "no TLS answer at https://" + cfg.Caddy.Host, false
 		}},
 		{"dns", func() (string, bool) {
-			if cfg.Runner.Addr == "" {
+			if m.cpWorld != nil {
 				return m.cpDnsStatus()
 			}
-			// The CP resolver is authoritative: pull the live records once
-			// per refresh, keep the old snapshot on failure (fallback to the
-			// config mirror stays in buildServices when there is no snapshot).
+			// Offline fallback: the CP resolver is authoritative; pull the live
+			// records once per refresh, keep the old snapshot on failure.
 			if live := dnsRowsLive(cfg); len(live) > 0 {
 				m.DNS = live
 				return fmt.Sprintf("%d resolver records", len(live)), true
@@ -258,6 +252,22 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	}
 	m.activity = a
 	return tea.Batch(m.runBootStep(0), a.spin.Tick)
+}
+
+// runnerProbe feeds RunnerReach, which converged() needs for the running/
+// configure decision. A box with no local provisioning runner operates through
+// the CP; one with a runner probes it for reachability. Pillar health still
+// comes from the CP, but the gate must be satisfied for ModeRunning.
+func (m *Model) runnerProbe(cfg *config.Config) (string, bool) {
+	if cfg.Runner.Addr == "" {
+		m.RunnerReach = true
+		return "no local runner (operating through the CP)", true
+	}
+	m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
+	if m.RunnerReach {
+		return cfg.Runner.Addr + " reachable", true
+	}
+	return "no answer on " + cfg.Runner.Addr, false
 }
 
 // converged settles the running/configure decision. A box WITH a local runner

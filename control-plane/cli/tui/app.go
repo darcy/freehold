@@ -125,10 +125,19 @@ func cpConsoleLive(m *Model, cfg *config.Config) bool {
 	return cfg != nil && cfg.CPURL != "" && config.URLReachable(cfg.CPURL)
 }
 
-// buildServices fills the Services view from the config's managed pieces
-// (mirrors Rust build_services, incl. the k3s row).
+// buildServices fills the Services view. With a CP session the CP is the single
+// source of truth — relay + control plane + each world service the CP monitors,
+// identically for every box. The config's `managed` pieces are only the offline
+// fallback (no CP session).
 func (m *Model) buildServices(cfg *config.Config) {
 	m.Services = nil
+	if m.cpWorld != nil && len(m.cpWorld.Services) > 0 {
+		m.buildCpServices(cfg)
+		if len(m.Services) == 0 {
+			m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
+		}
+		return
+	}
 	for _, piece := range cfg.Managed {
 		row := ServiceRow{Name: piece}
 		switch piece {
@@ -173,12 +182,6 @@ func (m *Model) buildServices(cfg *config.Config) {
 			row.Status = "—"
 		}
 		m.Services = append(m.Services, row)
-	}
-	if len(m.Services) == 0 && m.cpWorld != nil && len(m.cpWorld.Services) > 0 {
-		// A management box (no local `managed`/coords): render the world the CP
-		// serves — relay + control plane + each recorded world service — so the
-		// view mirrors what the deploying box shows from its own config.
-		m.buildCpServices(cfg)
 	}
 	if len(m.Services) == 0 {
 		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
@@ -392,29 +395,39 @@ func guestLocation(vmid *uint32, ip *string) string {
 // plane/runner keeps the last good snapshot; a probe failure degrades to
 // the notice in m.Msg.
 func (m *Model) refreshData(cfg *config.Config) {
-	// A management/login-only box has no local runner to probe the host — it
-	// renders the durable-plane LAYOUT from the CP's world facts (registered
-	// at build) with the live usage columns marked unavailable.
-	if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil || cfg.Runner.Addr == "" {
-		if m.Facts != nil && len(m.Facts.Plane.Mounts) > 0 {
+	localPlane := cfg != nil && cfg.Plane.Backend != nil && cfg.Plane.BackendKind != nil && cfg.Runner.Addr != ""
+	// The CP's world facts are the single source for the DATA view — identical
+	// for every logged-in box (the durable-plane layout registered at build).
+	if m.Facts != nil && len(m.Facts.Plane.Mounts) > 0 {
+		// When this box has its own co-located backend AND the CP facts lack
+		// live usage numbers, fall through to the live probe so an owner box
+		// doesn't regress to blank columns; otherwise both boxes render the CP.
+		hasUsage := false
+		for _, mu := range m.Facts.Plane.Mounts {
+			if mu.Size != "" {
+				hasUsage = true
+				break
+			}
+		}
+		if !localPlane || hasUsage {
 			m.DataAt = time.Now()
 			m.Storage = nil
 			for _, mu := range m.Facts.Plane.Mounts {
-				live := "—"
 				m.Storage = append(m.Storage, DataRow{
-					Role: mu.Tenant, Mount: mu.GuestPath, Size: "—", Used: "—",
-					Fill: "—", Source: mu.Source, Live: live,
+					Role: mu.Tenant, Mount: mu.GuestPath, Size: mu.Size, Used: mu.Used,
+					Fill: mu.Fill, Source: mu.Source, Live: "CP facts",
 				})
 			}
 			if len(m.Storage) == 0 {
 				m.Storage = []DataRow{{Role: "(no mounts)"}}
 			}
-			m.Msg = "data layout from the CP (live usage needs the deployer box)"
+			m.Msg = "data layout from the CP"
 			return
 		}
-		if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil {
-			return
-		}
+	}
+	// Offline fallback / owner live probe: no CP facts with usage on hand.
+	if !localPlane {
+		return
 	}
 	var kind planebase.BackendKind
 	switch *cfg.Plane.BackendKind {
