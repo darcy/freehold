@@ -251,6 +251,18 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+// stateDir returns the console's durable state dir — the explicit StateDir
+// (production) or the Store's own dir (unit tests that build a Store).
+func (s *Server) stateDir() string {
+	if s.StateDir != "" {
+		return s.StateDir
+	}
+	if s.Store != nil {
+		return s.Store.Dir()
+	}
+	return ""
+}
+
 // worldInventory opens the authoritative agent registry + world facts (the
 // toolset's durable state, readable from the co-located content plane) and
 // returns the single-inventory status the console serves on /api/world and the
@@ -289,7 +301,15 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
-	snap := s.Store.Snapshot()
+	// Read fresh from disk (state.Open) so out-of-band deploy writes to
+	// state.json are visible to a login-only box (the running Store is a
+	// startup memory snapshot and would show a stale/empty runner list).
+	fresh, err := state.Open(s.stateDir())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
+		return
+	}
+	snap := fresh.Snapshot()
 
 	type runnerOut struct {
 		Name      string      `json:"name"`
@@ -638,7 +658,17 @@ func (s *Server) dnsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
-	snap := s.Store.Snapshot()
+	// Read the authoritative state fresh from disk (state.Open, not the running
+	// s.Store's once-loaded memory snapshot): the world-build stages write
+	// state.json out-of-band (co-located runner), so the Store would serve
+	// stale/empty DNS to a login-only box. Re-reading the file is always as
+	// fresh or fresher (writes Save() through the same file).
+	fresh, err := state.Open(s.stateDir())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
+		return
+	}
+	snap := fresh.Snapshot()
 	records := make([]map[string]interface{}, 0, len(snap.DNS))
 	names := make([]string, 0, len(snap.DNS))
 	for name := range snap.DNS {
