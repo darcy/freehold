@@ -278,10 +278,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     actual CP needs no separately known pubkey. (The trust boundary for a
     wrong/hijacked `cp_url` is TLS/DNS on that URL, not this recorded anchor.)
     `freehold logout` clears this box's local ledger only. `/api/world`
-    carries the relay coords (served from `state.json` — the CP records them
-    when `serve` is started with `--relay-url`, paired or not with
-    `--relay-pubkey`) plus the `agent_tools_url`/`agent_tools_pubkey` the
-    toolset exposes. The Agents tab reads the authorized agent registry +
+    serves the relay's **public edge** (derived as `https://<relay_host>` when a
+    relay host is recorded, else the raw `state.json` `--relay-url`) plus the
+    `agent_tools_url`/`agent_tools_pubkey` the
+    toolset exposes — a client adopts the domain, not the internal LAN dial.
+    The whole Services pane — relay, control plane, and the world services a
+    box renders — comes from the CP.
+    The Agents tab reads the authorized agent registry +
     world facts folded into `/api/world` itself (served from the toolset's
     durable state via the shared `agenttools.WorldStatus` assembly — the same
     one `/mcp world_status` uses), so a logged-in box renders Agents/DATA/Certs

@@ -20,12 +20,12 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
+	"freehold/platform/services/certificates/letsencrypt"
 )
 
 type consoleClient struct {
@@ -579,17 +579,20 @@ func (m *Model) applyCPWorldHealth() {
 	for _, s := range w.Services {
 		m.worldSvc[s.Kind] = s.Up
 	}
-	// Relay liveness: the CP's /api/world is authoritative for where the relay
-	// lives. Adopt the served URL and probe it (a box's config relay_url is a
-	// login snapshot; the relay LXC can move on rebuild).
+	// Pillar flags come straight from the CP's services report — the CP probes
+	// relay/cp/k3s/litellm/caddy co-located and reports them all on /api/world,
+	// so a box turns pillars green from the CP's live answer, never a local
+	// probe of local config.
+	for consts := range m.worldSvc {
+		m.applyPillarFlag(m.worldSvc, consts)
+	}
+	// Still adopt the relay + cp coords into cfg so non-TUI consumers (exec,
+	// door, world verbs) dial the CP-named relay, not a stale login snapshot.
 	if w.RelayURL != "" && w.RelayURL != m.cfg.RelayURL {
 		m.cfg.RelayURL = w.RelayURL
 		if w.RelayWsURL != "" {
 			m.cfg.RelayWsURL = w.RelayWsURL
 		}
-	}
-	if m.cfg.RelayURL != "" {
-		m.RelayLive = config.RelayLive(m.cfg)
 	}
 	// DNS: the CP resolver is authoritative (no local runner exec needed).
 	if rows, ok := m.cpDnsRows(); ok {
@@ -604,18 +607,25 @@ func (m *Model) applyCPWorldHealth() {
 	} else if d := m.relayPublicHost(); d != "" && d != m.Domain {
 		m.Domain = d
 	}
-	// Pillar health: set from the CP's live answers for every box.
-	if v, ok := m.worldSvc["k3s"]; ok {
-		m.K3sLive = v
-	}
-	if v, ok := m.worldSvc["litellm"]; ok {
-		m.LitellmLive = v
-	}
-	if v, ok := m.worldSvc["caddy"]; ok {
-		m.CaddyLive = v
-	}
 	m.buildServices(m.cfg)
 	m.buildCerts(m.cfg)
+}
+
+// applyPillarFlag maps a CP world-service kind to its live flag, so the world
+// strip + converged() reflect the CP's truth for every pillar the CP reports.
+func (m *Model) applyPillarFlag(worldSvc map[string]bool, kind string) {
+	switch kind {
+	case "relay":
+		m.RelayLive = worldSvc[kind]
+	case "cp":
+		m.CPLive = worldSvc[kind]
+	case "k3s":
+		m.K3sLive = worldSvc[kind]
+	case "litellm":
+		m.LitellmLive = worldSvc[kind]
+	case "caddy":
+		m.CaddyLive = worldSvc[kind]
+	}
 }
 
 // cpDnsRows fills the DNS view from the console's /api/dns (the CP resolver),
