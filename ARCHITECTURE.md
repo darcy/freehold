@@ -205,7 +205,15 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     bring-up/reconcile stages (`platform/provisioning/stages`) through its
     co-located runner — the direction `freehold build` (box) slims toward
     (CP-bring-up + trigger; the CP owns relay/storage/k3s/DNS/litellm/Caddy/
-    cert). `world_exec` is the **drive-through-CP exec** surface: a THIN login
+    cert). The stages live in the shared **`cpbuild`** package, and the console
+    is the **CP build executor too**: `freehold-console serve` builds a
+    `cpbuild.Spec` (from the `--world-config` coords deploy-cp hands it, signed
+    as the console's own identity and self-granted on the co-located runner)
+    and exposes an operator-scoped **`/api/world-build`** — a thin box can
+    bring the world up through the CP WITHOUT the relay roster agent-tools
+    needs, so relay+agent-tools can live in `build` (the bootstrap/build split;
+    `roadmap/CP_OWNED_BUILD.md`). `world_exec` is the **drive-through-CP exec**
+    surface: a THIN login
     box (no local `[runner]`) runs commands on the CP's co-located runner via
     this tool — so a login box is functionally equivalent to the box that
     bootstrapped, an authorized operator client rather than a runner host.

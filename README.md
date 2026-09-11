@@ -400,12 +400,14 @@ freehold bootstrap --kind proxmox-lxc --role cp \
 #   ON THE BOX — a keypair is never shipped), adopt + self-grant the runner.
 #   --operator-pubkey seeds the console's NIP-98 admin whitelist and
 #   relaxes the loopback-only bind guard (operator authn => LAN bind).
+#   --world-config (cpbuild.Coords JSON) bounds the console as the CP build
+#   executor: it surfaces the coords so a thin box can trigger /api/world-build.
 freehold deploy-cp --target proxmox-box --lxc 102 \
   --binary target/release/control-plane --runner-binary target/release/runner \
   --runner-package ./.freehold/runner/proxmox-box-ish --bind 0.0.0.0:8080 \
   --relay-url https://<relay-domain> --operator-pubkey <your-64-hex> \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
-  --runner-pubkey <runner-nostr>
+  --runner-pubkey <runner-nostr> --world-config '{"runner_addr":"127.0.0.1:8787",...}'
 
 #   deploy-relay: docker gate -> curl+tar bundle (pinned buzz ref) -> compose
 #   .env (BUZZ_DOMAIN/RELAY_URL = the domain, RELAY_OWNER_PUBKEY = the CP

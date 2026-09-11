@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/client"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
-	"freehold/contract/client"
 )
 
 // DeployCpSpec mirrors the CP deploy spec.
@@ -29,6 +29,7 @@ type DeployCpSpec struct {
 	RunnerPackage    *string
 	AgentToolsURL    *string
 	AgentToolsPubkey *string
+	WorldConfig      *string // cpbuild.Coords JSON (bounds the console as the CP build executor)
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -164,6 +165,13 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	if spec.AgentToolsPubkey != nil && *spec.AgentToolsPubkey != "" {
 		atFlag += fmt.Sprintf(" --agent-tools-pubkey %s", *spec.AgentToolsPubkey)
 	}
+	// The world config bounds the console as the CP build executor. Base64 so
+	// the JSON (quotes/spaces) survives single-arg embedding; the console serve
+	// decodes it.
+	worldFlag := ""
+	if spec.WorldConfig != nil && *spec.WorldConfig != "" {
+		worldFlag = " --world-config " + base64.StdEncoding.EncodeToString([]byte(*spec.WorldConfig))
+	}
 	// Pin the relay host into the guest's /etc/hosts. grep -Fq (fixed string):
 	// a regex grep would let '.' match '-' and falsely match the guest's own
 	// dashed hostname (relay-librem-...-relay), skipping the pin forever.
@@ -177,8 +185,8 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	}
 
 	start := fmt.Sprintf(
-		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
-		spec.BinDir, spec.StateDir, spec.BindAddr, adminFlag, originFlag, relayFlag, atFlag, spec.StateDir, spec.StateDir)
+		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s%s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
+		spec.BinDir, spec.StateDir, spec.BindAddr, adminFlag, originFlag, relayFlag, atFlag, worldFlag, spec.StateDir, spec.StateDir)
 	out, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, start), "start control plane", 30)
 	if err != nil {
 		return nil, err
