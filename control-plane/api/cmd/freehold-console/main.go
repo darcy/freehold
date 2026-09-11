@@ -8,6 +8,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -102,6 +104,10 @@ func cmdServe(args []string) error {
 	ownerPub := fs.String("owner-pubkey", "", "operator pubkey (agent identity secret owner)")
 	litellmBase := fs.String("litellm-base", "", "litellm gateway base URL")
 	selfURL := fs.String("self-url", "", "console reachable HTTP base URL")
+	// The box hands the full world config to the console as one JSON blob
+	// (cpbuild.Coords) — the authoritative source for the CP build executor;
+	// the individual --* flags above are the manual/spelled-out equivalent.
+	worldConfig := fs.String("world-config", "", "cpbuild.Coords JSON (the world config handed to the console at deploy)")
 	fs.Parse(args)
 
 	if *stateDir == "" {
@@ -195,7 +201,22 @@ func cmdServe(args []string) error {
 	// the runner at deploy). The world coords ride here so a thin box can
 	// trigger /api/world-build without a box-one or agent-tools dependency.
 	var builder *cpbuild.Spec
-	if *runnerAddr != "" {
+	if *worldConfig != "" {
+		raw, derr := base64.StdEncoding.DecodeString(*worldConfig)
+		if derr != nil {
+			raw = []byte(*worldConfig) // a plain JSON string is also accepted
+		}
+		var c cpbuild.Coords
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fmt.Errorf("world-config not valid cpbuild coords JSON: %w", err)
+		}
+		builder = cpbuild.NewSpec(c, secret, consolePK)
+		// The Spec drives identity / migrations / world-secrets / the CP guest
+		// dirs, all relative to the CONSOLE's own state dir — the world-config
+		// producer (rebuild) doesn't know the console's run-time dir, so the
+		// serve always wins with its authoritative *stateDir.
+		builder.StateDir = *stateDir
+	} else if *runnerAddr != "" {
 		builder = &cpbuild.Spec{
 			StateDir:       *stateDir,
 			RelayURL:       *relayURL,

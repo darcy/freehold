@@ -7,19 +7,19 @@ import (
 	"strconv"
 	"strings"
 
-	"freehold/platform/provisioning/bootstrap"
-	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
-	relaydeploy "freehold/platform/services/relay/buzz"
 	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
-	"freehold/platform/services/externaldns/cloudflare"
-	"freehold/platform/provisioning/drive"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
-	"freehold/platform/provisioning/planebase"
 	"freehold/control-plane/cli/teardown"
+	"freehold/platform/provisioning/bootstrap"
+	"freehold/platform/provisioning/drive"
+	"freehold/platform/provisioning/planebase"
+	"freehold/platform/services/certificates/letsencrypt"
+	"freehold/platform/services/externaldns/cloudflare"
+	relaydeploy "freehold/platform/services/relay/buzz"
 	"github.com/spf13/cobra"
 )
 
@@ -151,6 +151,9 @@ var deployCpCmd = &cobra.Command{
 		if runnerPackage != "" {
 			spec.RunnerPackage = optOf(runnerPackage)
 		}
+		if wc, _ := cmd.Flags().GetString("world-config"); wc != "" {
+			spec.WorldConfig = optOf(wc)
+		}
 		res, err := cpdeploy.DeployCp(c, target, spec)
 		if err != nil {
 			return err
@@ -180,6 +183,7 @@ func init() {
 	deployCpCmd.Flags().String("relay-host-ip", "", "The relay LXC's LAN IP — pinned into the CP guest's /etc/hosts so the console can RESOLVE the relay domain (the operator's DNS may not reach inside the guests: tailnet etc.)")
 	deployCpCmd.Flags().String("agent-tools-url", "", "The CP's freehold-agent-tools MCP URL (http://<cp-ip>:8089) — served on /api/world for a fresh login box")
 	deployCpCmd.Flags().String("agent-tools-pubkey", "", "The agent-tools server's Nostr pubkey (the audience of its roster) — paired with --agent-tools-url")
+	deployCpCmd.Flags().String("world-config", "", "cpbuild.Coords JSON: the world coords the console needs to be the CP build executor (bound as the console's /api/world-build engine)")
 	deployCpCmd.Flags().String("lxc", "", "Deploy INTO this LXC on the target — the CP lives in its OWN guest, a different LXC than the relay's by default (omitted = the target host)")
 	deployCpCmd.Flags().String("runner-binary", "", "LOCAL path of the built freehold-runner binary (co-locates the CP's own runner: ship + systemd unit + adopt + self-grant)")
 	deployCpCmd.Flags().String("runner-package", "", "LOCAL dir of an EXISTING runner package to co-locate + adopt")

@@ -43,6 +43,7 @@ import (
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/api/cpbuild"
 	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
 	"freehold/control-plane/cli/flows"
 	"freehold/platform/provisioning/drive"
@@ -914,9 +915,9 @@ func (e *rebuildEngine) registerWorldFacts() error {
 			Proxy: config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
 		},
 		Plane: agenttools.WorldPlane{
-			Backend:    derefStrPtr(cfg.Plane.Backend),
+			Backend:     derefStrPtr(cfg.Plane.Backend),
 			BackendKind: derefStrPtr(cfg.Plane.BackendKind),
-			ThinPool:   derefStrPtr(cfg.Plane.ThinPool),
+			ThinPool:    derefStrPtr(cfg.Plane.ThinPool),
 		},
 	}
 	// The durable tenants are all backup=1 volume mounts (the /srv/data
@@ -2005,8 +2006,66 @@ func (e *rebuildEngine) stageDeployCp() error {
 	if cpRoot != "" {
 		args = append(args, "--state-dir", cpRoot+"/control-plane", "--bin-dir", cpRoot+"/bin")
 	}
+	// The world-config bounds the console as the CP build executor: it holds
+	// the coords cpbuild needs (relay/plane/k3s/litellm/runner) so a thin box's
+	// `build` can trigger /api/world-build on the console — no box-one or
+	// agent-tools dependency. Build it from the box's recorded config + flags.
+	cfg, _ := config.Load(e.f.configPath)
+	if cfg != nil {
+		if wc := e.worldConfigJSON(cfg); wc != "" {
+			args = append(args, "--world-config", wc)
+		}
+	}
 	_, err = e.selfStage("deploy-cp", args)
 	return err
+}
+
+// worldConfigJSON renders the console's build-executor coords (cpbuild.Coords)
+// from the box's recorded config + build flags, as JSON. Empty when there are
+// no runner coords to drive (the deploy then serves ops/status only).
+func (e *rebuildEngine) worldConfigJSON(cfg *config.Config) string {
+	cpIP := config.StripCIDR(derefStrPtr(cfg.Lxc.Cp.Ip))
+	if cpIP == "" || cfg.Runner.Pubkey == "" {
+		return ""
+	}
+	c := cpbuild.Coords{
+		StateDir:       "",
+		RelayURL:       cfg.RelayURL,
+		RelayAuthURL:   cfg.RelayURL,
+		RelayWS:        cfg.RelayWsURL,
+		RelayHost:      cfg.RelayHost(),
+		RelayIP:        config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip)),
+		CpHost:         cfg.CPHost(),
+		CpIP:           cpIP,
+		CpLxc:          derefU32(cfg.Lxc.Cp.Vmid),
+		ProxyIP:        config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
+		LitellmIP:      cfg.Litellm.Host,
+		PlanePool:      derefStrPtr(cfg.Plane.Backend),
+		PlaneKind:      derefStrPtr(cfg.Plane.BackendKind),
+		ThinPool:       derefStrPtr(cfg.Plane.ThinPool),
+		SizeGB:         e.f.sizeGB,
+		PoolSizeGB:     e.f.poolSizeGB,
+		RootfsGB:       e.f.rootfsGB,
+		MemoryMB:       e.f.memoryMB,
+		StorageName:    e.f.storageName,
+		RelayGW:        e.f.relayGw,
+		Bridge:         e.f.bridge,
+		RelayLxc:       derefU32(cfg.Lxc.Relay.Vmid),
+		RelayCompose:   stages.RelayComposeDir,
+		K3sVmid:        derefU32(cfg.Lxc.K3s.Vmid),
+		RunnerAddr:     cfg.Runner.Addr,
+		RunnerPK:       cfg.Runner.Pubkey,
+		RunnerTarget:   cfg.Runner.Target,
+		CpaName:        e.f.agentName,
+		OwnerPub:       e.f.operatorPubkey,
+		LitellmBaseURL: cfg.Litellm.URL,
+		SelfURL:        "http://" + cpIP + ":8080",
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // guestMounts reads the `mp=` guest paths of the LXC's pct config (Rust
