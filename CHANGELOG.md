@@ -25,6 +25,34 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.15] — a box reads the whole world from the CP (relay/cp included)
+
+Closed the last local-config leak in the box's world view. The relay + control
+plane rows of a box's Services pane were built from the box's **local config**,
+so a box whose `relay_url` held a stale IP showed the relay down against that
+IP (the "why is it using the IP instead of the domain" a remote box hit) —
+even after the CP was fixed to serve `https://<relay_host>`, only a side-channel
+adoption picked it up. A logged-in box is now CP-driven for the whole Services
+pane; local config matters only for the initial-bootstrap (no-CP-session)
+fallback.
+
+### Changed
+
+- **Console `/api/world`** reports **relay + control plane as world services**
+  (URL + a co-located health probe) alongside k3s/litellm/caddy. The relay
+  row's URL is the **public edge** (`https://<relay_host>`), never the internal
+  LAN dial the console uses for its own roster/event reads.
+- **TUI `buildCpServices`** renders every pillar straight from the CP's
+  `/api/world` services report — no explicit local-config relay/cp rows, no
+  local probe.
+- **TUI `applyCPWorldHealth`** sets the relay/cp/k3s/litellm/caddy flags from
+  the CP's services report (`applyPillarFlag`), dropping the local
+  `config.RelayLive(cfg)` probe.
+
+Tests: `TestWorldServesPublicRelayURL` (world serves the public domain, not the
+LAN dial) + `TestManagementBoxFullyPopulatedFromCP` (relay row URL must come
+from the CP report, not `cfg.RelayURL`).
+
 ## [0.5.14] — world status is served from the console's public /api/world (DRY with /mcp)
 
 Closed the last reason a remote (off-LAN) box couldn't reach parity with the
