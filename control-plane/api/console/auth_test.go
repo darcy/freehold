@@ -415,3 +415,51 @@ func TestLoopbackBindGuard(t *testing.T) {
 }
 
 var _ = hex.EncodeToString
+
+// The console is the CP build executor: /api/world-build is operator-scoped
+// (a session is required) and refuses loudly when no build engine is bound
+// (the "run bootstrap first" state) — it must not run a half-configured build.
+func TestWorldBuildGating(t *testing.T) {
+	sec := adminSecret()
+	adminPK, _ := crypto.PubkeyFromSecret(sec)
+	s, _ := testServer(t, NewAuth([]string{adminPK}))
+	// No Builder bound yet.
+	post := func(r *http.Request) int {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	// Without a session -> unauthorized.
+	if code := post(httptest.NewRequest(http.MethodPost, "/api/world-build", nil)); code != 401 {
+		t.Fatalf("world-build without a session must be 401, got %d", code)
+	}
+	// login dance -> session.
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/challenge", nil))
+	var chal struct {
+		Nonce string `json:"nonce"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
+	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+	body, _ := json.Marshal(map[string]interface{}{
+		"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+	})
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
+	var cookie string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			cookie = c.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatal("no session cookie")
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/world-build", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, r)
+	if rec.Code != 503 {
+		t.Fatalf("world-build with a session but no builder must be 503 (run bootstrap), got %d", rec.Code)
+	}
+}

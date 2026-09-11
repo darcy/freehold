@@ -19,6 +19,7 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/state"
 	"freehold/control-plane/api/console"
+	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
 )
 
@@ -70,6 +71,37 @@ func cmdServe(args []string) error {
 	// home (registry.json + facts.json), which /api/world serves as the world's
 	// single status source.
 	agentToolsStateDir := fs.String("agent-tools-state-dir", "/srv/data/cp/agent-tools", "agent-tools durable state dir (authoritative agent registry + world facts)")
+	// The CP build executor (world-build): the co-located runner + the world
+	// coordinates the console needs to bring the world up CP-side. Absent =>
+	// the console serves status/ops only (no /api/world-build).
+	runnerAddr := fs.String("runner-addr", "", "co-located runner MCP addr (world_build drives it)")
+	runnerPK := fs.String("runner-pubkey", "", "co-located runner pubkey (deploy exec audience)")
+	runnerTarget := fs.String("runner-target", "", "co-located runner target (reachable box)")
+	relayIP := fs.String("relay-ip", "", "relay LXC LAN IP (world coords)")
+	relayWS := fs.String("relay-ws", "", "relay wss:// origin (agent pods)")
+	cpHost := fs.String("cp-host", "", "control plane public host")
+	cpIP := fs.String("cp-ip", "", "cp LXC LAN IP")
+	proxyIP := fs.String("proxy-ip", "", "proxy/k3s node static IP")
+	litellmIP := fs.String("litellm-ip", "", "litellm gateway node IP")
+	cpLxc := fs.Uint("cp-lxc", 0, "cp LXC vmid (the resolver lives here)")
+	relayLxc := fs.Uint("relay-lxc", 0, "relay LXC vmid")
+	k3sVmid := fs.Uint("k3s-vmid", 0, "k3s LXC vmid")
+	planePool := fs.String("plane-pool", "", "durable-plane backend pool (VG or zpool)")
+	planeKind := fs.String("plane-kind", "", "recorded backend kind (zfs|lvmth)")
+	thinPool := fs.String("thin-pool", "", "the freehold-CREATED thin pool")
+	var sizeGB, poolSizeGB uint64
+	fs.Uint64Var(&sizeGB, "size-gb", 10, "per-tenant LV size GB")
+	fs.Uint64Var(&poolSizeGB, "pool-size-gb", 40, "thin-pool size GB")
+	rootfsGB := fs.Uint("rootfs-gb", 16, "LXC rootfs size GB")
+	memoryMB := fs.Uint("memory-mb", 2048, "LXC memory MB")
+	storageName := fs.String("storage", "local-lvm", "PVE LXC storage")
+	relayGW := fs.String("relay-gw", "192.168.30.1", "gateway for the k3s STATIC guest IP")
+	bridge := fs.String("bridge", "vmbr0", "PVE LXC bridge")
+	relayCompose := fs.String("relay-compose", "/srv/data/relay/deploy/compose", "relay compose dir")
+	cpaName := fs.String("cpa-name", "", "CPA display name")
+	ownerPub := fs.String("owner-pubkey", "", "operator pubkey (agent identity secret owner)")
+	litellmBase := fs.String("litellm-base", "", "litellm gateway base URL")
+	selfURL := fs.String("self-url", "", "console reachable HTTP base URL")
 	fs.Parse(args)
 
 	if *stateDir == "" {
@@ -158,10 +190,53 @@ func cmdServe(args []string) error {
 	if *publicOrigin != "" {
 		pubOrigin = strPtr(*publicOrigin)
 	}
+	// The CP build executor: the console drives the shared cpbuild engine
+	// through the co-located runner, signed as ITS OWN identity (now granted on
+	// the runner at deploy). The world coords ride here so a thin box can
+	// trigger /api/world-build without a box-one or agent-tools dependency.
+	var builder *cpbuild.Spec
+	if *runnerAddr != "" {
+		builder = &cpbuild.Spec{
+			StateDir:       *stateDir,
+			RelayURL:       *relayURL,
+			RelayAuthURL:   *relayURL,
+			RelayWS:        *relayWS,
+			RelayHost:      *relayHost,
+			RelayIP:        *relayIP,
+			CpHost:         *cpHost,
+			CpIP:           *cpIP,
+			CpLxc:          uint32(*cpLxc),
+			ProxyIP:        *proxyIP,
+			LitellmIP:      *litellmIP,
+			PlanePool:      *planePool,
+			PlaneKind:      *planeKind,
+			ThinPool:       *thinPool,
+			SizeGB:         sizeGB,
+			PoolSizeGB:     poolSizeGB,
+			RootfsGB:       uint32(*rootfsGB),
+			MemoryMB:       uint32(*memoryMB),
+			StorageName:    *storageName,
+			RelayGW:        *relayGW,
+			Bridge:         *bridge,
+			RelayLxc:       uint32(*relayLxc),
+			RelayCompose:   *relayCompose,
+			K3sVmid:        uint32(*k3sVmid),
+			RunnerAddr:     *runnerAddr,
+			RunnerPK:       *runnerPK,
+			RunnerTarget:   *runnerTarget,
+			CpaName:        *cpaName,
+			OwnerPub:       *ownerPub,
+			LitellmBaseURL: *litellmBase,
+			SelfURL:        strings.TrimSuffix(*selfURL, "/"),
+			Sec:            secret,
+			Audience:       consolePK,
+		}
+	}
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,
 		Auth: auth, PublicOrigin: pubOrigin, RelayHost: *relayHost,
 		StateDir: *stateDir, AgentToolsDir: *agentToolsStateDir,
+		Builder: builder,
 	}
 	log.Printf("freehold-console (Go) serving on %s (console agent %s)", *addr, consolePK)
 	return http.ListenAndServe(*addr, srv)

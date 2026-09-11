@@ -14,6 +14,7 @@ import (
 	"freehold/contract/state"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
 )
 
@@ -41,6 +42,12 @@ type Server struct {
 	// the authoritative agent registry (registry.json) + world facts (facts.json)
 	// that /api/world serves publicly so every box sees the CP's status.
 	AgentToolsDir string
+	// Builder is the CP-owned world bring-up engine (cpbuild.Spec): the console
+	// becomes the CP build executor — the operator-scoped /api/world-build route
+	// drives it through the co-located runner, so a thin login box triggers the
+	// CP to bring up the world WITHOUT depending on the relay roster (which
+	// agent-tools needs) or on box-one hosting it. nil = world_build unsupported.
+	Builder *cpbuild.Spec
 }
 
 // ServeHTTP routes /api/* (the Rust axum router equivalent).
@@ -71,6 +78,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.overview(w, r)
 	case path == "/api/world" && method == http.MethodGet:
 		s.world(w, r)
+	case path == "/api/world-build" && method == http.MethodPost:
+		s.worldBuild(w, r)
 	case path == "/api/teardown" && method == http.MethodPost:
 		s.teardown(w, r)
 	case path == "/api/provision" && method == http.MethodPost:
@@ -295,6 +304,34 @@ func (s *Server) stateDir() string {
 		return s.Store.Dir()
 	}
 	return ""
+}
+
+// worldBuild runs the CP-owned world bring-up through the co-located runner
+// (the shared cpbuild engine) — the console is the CP build executor a thin
+// login box triggers. Operator-scoped (a session-holder for /api/*), and the
+// engine is bound only when the console was deployed with the world coords +
+// its runner credential (Builder set). No relay dependency: unlike
+// agent-tools, this does NOT read the relay roster to authorize.
+func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Builder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "world-build: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold bootstrap` first)")
+		return
+	}
+	applier := cpbuild.BuildWorldApply(s.Builder)
+	report, err := applier()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-build: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report})
 }
 
 // worldInventory opens the authoritative agent registry + world facts (the
