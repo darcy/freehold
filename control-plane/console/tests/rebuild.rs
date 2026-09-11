@@ -418,6 +418,7 @@ async fn rebuild_carries_risk_label() {
     provisioner::sync_runner_channel(&src_store, &relay_url, "gamma", &cp_state).unwrap();
     let rec = src_store.get_runner("gamma").unwrap();
     let sec = src_store.get_secret("gamma").unwrap();
+    let created_at = now_secs() + 100; // NEWEST — wins the per-channel fold
     let profile = RunnerProfile {
         name: "gamma".to_string(),
         kind: sec.kind,
@@ -426,7 +427,7 @@ async fn rebuild_carries_risk_label() {
         nostr_pubkey: rec.nostr_pubkey,
         enc_pubkey: rec.enc_pubkey,
         secret: "gamma".to_string(),
-        created_at: now_secs() + 100, // NEWEST — wins the per-channel fold
+        created_at,
         rotated_at: None,
         risk: Some("risky-host".into()),
     };
@@ -473,5 +474,5 @@ async fn rebuild_carries_risk_label() {
     store.rebuild_from(runners, secrets).unwrap();
     let folded = store.get_runner("gamma").unwrap();
     assert_eq!(folded.risk_level.as_deref(), Some("risky-host"));
-    assert_eq!(folded.created_at, now_secs() + 100);
+    assert_eq!(folded.created_at, created_at);
 }
