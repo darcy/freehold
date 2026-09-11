@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,9 +13,6 @@ import (
 
 	"freehold/contract/config"
 	"freehold/control-plane/api/agenttools"
-	"freehold/control-plane/cli/flows"
-	"freehold/platform/provisioning/drive"
-	"freehold/platform/provisioning/planebase"
 )
 
 // ---- bubbletea lifecycle -------------------------------------------------
@@ -395,139 +391,42 @@ func guestLocation(vmid *uint32, ip *string) string {
 	}
 }
 
-// refreshData rebuilds the DATA view: the live durable-plane snapshot read
-// through the SAME signed runner channel the operator CLI uses (ops agent
-// identity — granted at bootstrap). Mirrors Rust plane_info: a missing
-// plane/runner keeps the last good snapshot; a probe failure degrades to
-// the notice in m.Msg.
+// refreshData rebuilds the DATA view. The CP's world facts are the single
+// source — identical for EVERY box (the durable-plane layout registered at
+// build). No local plane probe: a bootstrap box and a login box render the
+// same CP facts, so the boot check never diverges or hangs on a local exec.
 func (m *Model) refreshData(cfg *config.Config) {
-	localPlane := cfg != nil && cfg.Plane.Backend != nil && cfg.Plane.BackendKind != nil && cfg.Runner.Addr != ""
-	// The CP's world facts are the single source for the DATA view — identical
-	// for every logged-in box (the durable-plane layout registered at build).
-	if m.Facts != nil && len(m.Facts.Plane.Mounts) > 0 {
-		// When this box has its own co-located backend AND the CP facts lack
-		// live usage numbers, fall through to the live probe so an owner box
-		// doesn't regress to blank columns; otherwise both boxes render the CP.
-		hasUsage := false
-		for _, mu := range m.Facts.Plane.Mounts {
-			if mu.Size != "" {
-				hasUsage = true
-				break
-			}
-		}
-		if !localPlane || hasUsage {
-			m.DataAt = time.Now()
-			m.Storage = nil
-			for _, mu := range m.Facts.Plane.Mounts {
-				m.Storage = append(m.Storage, DataRow{
-					Role: mu.Tenant, Mount: mu.GuestPath, Size: mu.Size, Used: mu.Used,
-					Fill: mu.Fill, Source: mu.Source, Live: "CP facts",
-				})
-			}
-			if len(m.Storage) == 0 {
-				m.Storage = []DataRow{{Role: "(no mounts)"}}
-			}
-			m.Msg = "data layout from the CP"
-			return
-		}
-	}
-	// Offline fallback / owner live probe: no CP facts with usage on hand.
-	if !localPlane {
+	if m.Facts == nil || len(m.Facts.Plane.Mounts) == 0 {
+		m.DataAt = time.Now()
+		m.Storage = []DataRow{{Role: "(no plane mounts)", Source: "CP facts"}}
 		return
 	}
-	var kind planebase.BackendKind
-	switch *cfg.Plane.BackendKind {
-	case string(planebase.KindZfs):
-		kind = planebase.KindZfs
-	case string(planebase.KindLvmThin):
-		kind = planebase.KindLvmThin
-	default:
-		return
-	}
-	var mounts []drive.MountArg
-	for role, specs := range cfg.Plane.Mounts {
-		vmid := vmidForRole(cfg, role)
-		for _, s := range specs {
-			mounts = append(mounts, drive.MountArg{Role: role, Source: s.Source, Guest: s.GuestPath, VMID: vmid})
-		}
-	}
-	if len(mounts) == 0 {
-		return
-	}
-	sort.Slice(mounts, func(i, j int) bool {
-		if mounts[i].Role != mounts[j].Role {
-			return mounts[i].Role < mounts[j].Role
-		}
-		return mounts[i].Guest < mounts[j].Guest
-	})
-	c, err := flows.Connect(cfg.Runner.Addr, freeholdStateDir()+"/agent-ops", cfg.Runner.Pubkey)
-	if err != nil {
-		m.Msg = "data: runner connect failed — " + err.Error()
-		return
-	}
-	info, err := drive.ProbeStorage(c, cfg.Runner.Target, kind, *cfg.Plane.Backend, mounts)
-	if err != nil {
-		m.Msg = "data: plane probe failed — " + err.Error()
-		return
-	}
-	m.DataCap = info.Capacity
 	m.DataAt = time.Now()
 	m.Storage = nil
-	for _, mu := range info.Mounts {
-		size, used, fill := "—", "—", "—"
-		if mu.Size != nil {
-			size = drive.HumanBytes(*mu.Size)
+	for _, mu := range m.Facts.Plane.Mounts {
+		size, used, fill := mu.Size, mu.Used, mu.Fill
+		if size == "" {
+			size = "—"
 		}
-		if mu.Used != nil {
-			used = drive.HumanBytes(*mu.Used)
+		if used == "" {
+			used = "—"
 		}
-		if mu.Used != nil && mu.Size != nil && *mu.Size > 0 {
-			pct := (*mu.Used*100 + *mu.Size - 1) / (*mu.Size) // div_ceil
-			fill = fillStyle(pct).Render(fmt.Sprintf("%d%%", pct))
-		}
-		live := styleDim.Render("—")
-		if mu.GuestMounted != nil {
-			live = boolStatus(*mu.GuestMounted, "mounted", "down")
+		if fill == "" {
+			fill = "—"
 		}
 		m.Storage = append(m.Storage, DataRow{
-			Role: mu.Role, Mount: mu.Guest, Size: size, Used: used,
-			Fill: fill, Source: mu.Source, Live: live,
+			Role: mu.Tenant, Mount: mu.GuestPath, Size: size, Used: used, Fill: fill,
+			Source: mu.Source, Live: "CP facts",
 		})
 	}
 	if len(m.Storage) == 0 {
 		m.Storage = []DataRow{{Role: "(no mounts)"}}
 	}
-	m.Msg = fmt.Sprintf("data refreshed %s", time.Now().Format("15:04:05"))
+	m.Msg = "data layout from the CP"
 }
 
 // vmidForRole maps a plane mount role to its LXC vmid (mirror of Rust
 // plane_info's role match).
-func vmidForRole(cfg *config.Config, role string) *uint32 {
-	switch role {
-	case "relay":
-		return cfg.Lxc.Relay.Vmid
-	case "cp":
-		return cfg.Lxc.Cp.Vmid
-	case "k3s":
-		return cfg.Lxc.K3s.Vmid
-	default:
-		return nil
-	}
-}
-
-// fillStyle is the DATA fill-ratio traffic light (Rust fill_color):
-// green < 70%, yellow < 90%, red at/above.
-func fillStyle(pct uint64) lipgloss.Style {
-	switch {
-	case pct >= 90:
-		return styleRed
-	case pct >= 70:
-		return styleYellow
-	default:
-		return styleGreen
-	}
-}
-
 // launchWeb opens the console's portal URL in the browser (mirrors Rust
 // launch_web): needs a session (l); xdg-open absence degrades to the
 // manual-URL notice (single-use token, 60s).
