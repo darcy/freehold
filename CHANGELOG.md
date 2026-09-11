@@ -25,6 +25,33 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.17] — drive-through-CP operator surface: a thin login box is the build box
+
+Finally closed the last capability gap so ANY logged-in box (the "login box")
+is functionally equivalent to the box that bootstrapped — it can take over 100%
+of its duties. The only special case is the initial bootstrap (no CP exists →
+build one); after that every box drives the world through the CP.
+
+### Added
+
+- **`world_exec`** (operator-scoped on agent-tools): runs a command through the
+  CP's co-located runner, **validating the target** against the CP's own runner
+  (error on mismatch, so a box never silently execs on a host it didn't name).
+- **`freehold exec` on a box with no local `[runner]` routes here** — a thin box
+  has the full exec surface without hosting a runner.
+
+### Changed
+
+- **`/api/world` serves `agent_tools_url` as the public `https://<cp>/mcp`**, and
+  the Caddy CP vhost exposes `/mcp` (→ `:8089`), so a **remote** thin box can
+  drive world build/exec/migrate/door over the public edge (not the LAN dial).
+- Docs (ARCHITECTURE/README) updated for the drive-through-CP transport.
+
+Verified live: a thin box whose config has no `[runner]` ran `freehold exec
+proxmox-box 'df -h /'` through the CP (returned the PVE host's output) and drove
+`freehold world build` through the CP (full reconcile report). A mismatched
+target errors clearly.
+
 ## [0.5.16] — the boot checker settles on CP truth (relay header no longer sticks red)
 
 A login-only box whose config held a stale `relay_url` could show the relay
