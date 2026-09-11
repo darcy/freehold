@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	oplogin "freehold/control-plane/cli/login"
 	"freehold/contract/config"
 	"freehold/contract/console"
 )
@@ -265,6 +267,81 @@ func TestCpSourcedBootStatus(t *testing.T) {
 	}
 	if d, _ := m.cpRelayStatus(); !contains(d, "CP") {
 		t.Fatalf("relay boot report should cite the CP, got %q", d)
+	}
+}
+
+// Everything a fully-converged CP serves must populate a management box's
+// SIX views (Services/Runners/Agents/DATA/DNS/Certs) — all from the CP, not
+// local config. This drives the real render pipeline against mocked console +
+// agent-tools endpoints (the MCP client doesn't verify the response signature).
+func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := oplogin.Save([32]byte{7}); err != nil {
+		t.Fatalf("materialize operator identity: %v", err)
+	}
+
+	const factsText = `{"agents":[{"name":"cpa","pubkey":"ff00","created_at":0}],` +
+		`"facts":{"domains":{"relay":"relay.here.freehold.technology","cp":"cp.here.freehold.technology"},` +
+		`"plane":{"backend":"pve","backend_kind":"zfs","mounts":[{"tenant":"relay","source":"zpool/relay","guest_path":"/srv/data/relay","backup":true}]},` +
+		`"certs":[{"slot":"relay","domain":"relay.here.freehold.technology","issuer":"lego (DNS-01)"}]}}`
+	atSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/mcp") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":%q}]}}`, factsText)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer atSrv.Close()
+
+	conSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/world":
+			w.Write([]byte(`{"cp_pubkey":"aa","relay_url":"http://192.168.30.243:3000","services":[` +
+				`{"name":"k3s","kind":"k3s","up":true},{"name":"litellm","kind":"litellm","up":true},{"name":"caddy","kind":"caddy","up":true}]}`))
+		case "/api/dns":
+			w.Write([]byte(`{"dns":[{"name":"relay","ip":"10.0.0.5","source":"record_lxc"},{"name":"relay.here.freehold.technology","ip":"10.0.0.8","source":"cp_public"}]}`))
+		case "/api/overview":
+			w.Write([]byte(`{"console_pubkey":"aa","runners":[{"name":"proxmox-box","status":"active","nostr_pubkey":"bb"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer conSrv.Close()
+
+	cfg := &config.Config{
+		CPURL:            conSrv.URL,
+		CpPubkey:         "aa",
+		RelayURL:         "http://192.168.30.220:3000",
+		AgentToolsURL:    atSrv.URL,
+		AgentToolsPubkey: strings.Repeat("a", 64),
+	}
+	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(conSrv.URL, "fh_session=tok123")}}
+
+	m.applyCPWorldHealth() // Services + DNS + flags
+	m.refreshLocal()       // Runners (overview) + Agents/Facts (agent-tools)
+	m.buildCerts(m.cfg)    // Certs from Facts
+	m.refreshData(m.cfg)   // DATA from Facts.Plane
+
+	if len(m.Services) == 0 || m.Services[0].Name == "(none managed)" {
+		t.Fatalf("Services not populated: %+v", m.Services)
+	}
+	if len(m.Runners) == 0 {
+		t.Fatal("Runners not populated from console /api/overview")
+	}
+	if len(m.Agents) == 0 || !strings.Contains(m.Agents[0].Name, "cpa") {
+		t.Fatalf("Agents not populated from agent-tools world_status: %+v", m.Agents)
+	}
+	if len(m.Storage) == 0 || m.Storage[0].Role != "relay" {
+		t.Fatalf("DATA not populated from world facts: %+v", m.Storage)
+	}
+	if len(m.DNS) == 0 {
+		t.Fatal("DNS not populated from CP resolver")
+	}
+	if len(m.Certs) == 0 || !strings.Contains(m.Certs[0].Domain, "here.freehold.technology") {
+		t.Fatalf("Certs not populated from world facts: %+v", m.Certs)
 	}
 }
 
