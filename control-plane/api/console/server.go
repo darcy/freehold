@@ -2,7 +2,9 @@ package console
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"freehold/contract/relay"
 	"freehold/contract/state"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/secret-management"
 )
 
@@ -31,6 +34,13 @@ type Server struct {
 	PublicOrigin *string
 	// RelayHost is the relay community host (kind-9 reads send it explicitly).
 	RelayHost string
+	// StateDir is the console's own durable state dir (state.json), the same one
+	// freehold-agent-tools fronts. It feeds the shared world-status inventory.
+	StateDir string
+	// AgentToolsDir is the freehold-agent-tools durable state dir — the home of
+	// the authoritative agent registry (registry.json) + world facts (facts.json)
+	// that /api/world serves publicly so every box sees the CP's status.
+	AgentToolsDir string
 }
 
 // ServeHTTP routes /api/* (the Rust axum router equivalent).
@@ -213,7 +223,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 	if snap.RelayHost != nil {
 		relayHost = *snap.RelayHost
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	payload := map[string]interface{}{
 		"relay_url":          snap.RelayURL,
 		"relay_ws_url":       relayWS,
 		"relay_pubkey":       snap.RelayPubkey,
@@ -224,7 +234,40 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
 		"services":           worldServiceRows(snap),
-	})
+	}
+	// Fold the single-inventory status (agents + runners + dns + facts) served
+	// on the same route the /mcp world_status tool shares — the authoritative
+	// registry/facts, read live from the toolset's durable state. A /api/world
+	// call now returns everything a box renders, publicly. A broken inventory
+	// (malformed registry/facts) is surfaced in the log rather than silently
+	// read as "world down" — the coords/services still serve normally.
+	if inv, err := s.worldInventory(); err != nil {
+		log.Printf("world inventory unavailable on /api/world: %v", err)
+	} else {
+		for k, v := range inv {
+			payload[k] = v
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// worldInventory opens the authoritative agent registry + world facts (the
+// toolset's durable state, readable from the co-located content plane) and
+// returns the single-inventory status the console serves on /api/world and the
+// /mcp world_status tool both resolve. Absent coords => empty inventory.
+func (s *Server) worldInventory() (map[string]interface{}, error) {
+	if s.AgentToolsDir == "" || s.StateDir == "" {
+		return map[string]interface{}{}, nil
+	}
+	reg, err := agenttools.OpenRegistry(filepath.Join(s.AgentToolsDir, "registry.json"))
+	if err != nil {
+		return nil, err
+	}
+	facts, err := agenttools.OpenFacts(filepath.Join(s.AgentToolsDir, "facts.json"))
+	if err != nil {
+		return nil, err
+	}
+	return agenttools.WorldStatus(reg, facts, s.StateDir)
 }
 
 func wsOf(url string) string {
@@ -249,15 +292,15 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	snap := s.Store.Snapshot()
 
 	type runnerOut struct {
-		Name       string      `json:"name"`
-		Status     string      `json:"status"`
-		NostrPub   string      `json:"nostr_pubkey"`
-		EncPub     string      `json:"enc_pubkey"`
-		McpAddr    *string     `json:"mcp_addr"`
-		Risk       *string     `json:"risk"`
-		Secret     interface{} `json:"secret"`
-		Grants     interface{} `json:"grants"`
-		Readiness  interface{} `json:"readiness,omitempty"`
+		Name      string      `json:"name"`
+		Status    string      `json:"status"`
+		NostrPub  string      `json:"nostr_pubkey"`
+		EncPub    string      `json:"enc_pubkey"`
+		McpAddr   *string     `json:"mcp_addr"`
+		Risk      *string     `json:"risk"`
+		Secret    interface{} `json:"secret"`
+		Grants    interface{} `json:"grants"`
+		Readiness interface{} `json:"readiness,omitempty"`
 	}
 	runners := make([]runnerOut, 0, len(snap.Runners))
 	type probe struct {
@@ -609,7 +652,7 @@ func (s *Server) dnsList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"dns":              records,
+		"dns":               records,
 		"resolver_wildcard": snap.ResolverWildcard,
 		"addn_hosts":        RenderAddnHosts(snap.DNS, snap.ResolverDomain),
 	})

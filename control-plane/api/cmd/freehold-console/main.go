@@ -66,6 +66,10 @@ func cmdServe(args []string) error {
 	publicOrigin := fs.String("public-origin", "", "the console's fronted public origin (DNS-rebinding guard C3.5)")
 	agentToolsURL := fs.String("agent-tools-url", "", "agent-tools MCP server URL (served on /api/world)")
 	agentToolsPubkey := fs.String("agent-tools-pubkey", "", "agent-tools server pubkey (served on /api/world)")
+	// The default is the sibling dir the build populates: the toolset's durable
+	// home (registry.json + facts.json), which /api/world serves as the world's
+	// single status source.
+	agentToolsStateDir := fs.String("agent-tools-state-dir", "/srv/data/cp/agent-tools", "agent-tools durable state dir (authoritative agent registry + world facts)")
 	fs.Parse(args)
 
 	if *stateDir == "" {
@@ -157,6 +161,7 @@ func cmdServe(args []string) error {
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,
 		Auth: auth, PublicOrigin: pubOrigin, RelayHost: *relayHost,
+		StateDir: *stateDir, AgentToolsDir: *agentToolsStateDir,
 	}
 	log.Printf("freehold-console (Go) serving on %s (console agent %s)", *addr, consolePK)
 	return http.ListenAndServe(*addr, srv)

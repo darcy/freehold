@@ -1,15 +1,14 @@
 package tui
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	oplogin "freehold/control-plane/cli/login"
 	"freehold/contract/config"
 	"freehold/contract/console"
+	oplogin "freehold/control-plane/cli/login"
 )
 
 // A login-only profile (cp_url + cp_pubkey + operator identity, NO [runner])
@@ -285,22 +284,17 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 		`"facts":{"domains":{"relay":"relay.here.freehold.technology","cp":"cp.here.freehold.technology"},` +
 		`"plane":{"backend":"pve","backend_kind":"zfs","mounts":[{"tenant":"relay","source":"zpool/relay","guest_path":"/srv/data/relay","backup":true}]},` +
 		`"certs":[{"slot":"relay","domain":"relay.here.freehold.technology","issuer":"lego (DNS-01)"}]}}`
-	atSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/mcp") {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":%q}]}}`, factsText)
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer atSrv.Close()
 
+	// The console /api/world is now the single source: it folds the world's
+	// authoritative agents + facts (the same assembly the /mcp world_status tool
+	// shares) alongside the pillar services — no separate agent-tools MCP hop.
 	conSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/world":
 			w.Write([]byte(`{"cp_pubkey":"aa","relay_url":"http://192.168.30.243:3000","services":[` +
-				`{"name":"k3s","kind":"k3s","up":true},{"name":"litellm","kind":"litellm","up":true},{"name":"caddy","kind":"caddy","up":true}]}`))
+				`{"name":"k3s","kind":"k3s","up":true},{"name":"litellm","kind":"litellm","up":true},{"name":"caddy","kind":"caddy","up":true}],` +
+				factsText[1:]))
 		case "/api/dns":
 			w.Write([]byte(`{"dns":[{"name":"relay","ip":"10.0.0.5","source":"record_lxc"},{"name":"relay.here.freehold.technology","ip":"10.0.0.8","source":"cp_public"}]}`))
 		case "/api/overview":
@@ -312,16 +306,14 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 	defer conSrv.Close()
 
 	cfg := &config.Config{
-		CPURL:            conSrv.URL,
-		CpPubkey:         "aa",
-		RelayURL:         "http://192.168.30.220:3000",
-		AgentToolsURL:    atSrv.URL,
-		AgentToolsPubkey: strings.Repeat("a", 64),
+		CPURL:    conSrv.URL,
+		CpPubkey: "aa",
+		RelayURL: "http://192.168.30.220:3000",
 	}
 	m := &Model{cfg: cfg, console: &consoleClient{client: console.WithCookie(conSrv.URL, "fh_session=tok123")}}
 
 	m.applyCPWorldHealth() // Services + DNS + flags
-	m.refreshLocal()       // Runners (overview) + Agents/Facts (agent-tools)
+	m.refreshLocal()       // Runners (overview) + Agents/Facts (console /api/world)
 	m.buildCerts(m.cfg)    // Certs from Facts
 	m.refreshData(m.cfg)   // DATA from Facts.Plane
 
@@ -332,7 +324,7 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 		t.Fatal("Runners not populated from console /api/overview")
 	}
 	if len(m.Agents) == 0 || !strings.Contains(m.Agents[0].Name, "cpa") {
-		t.Fatalf("Agents not populated from agent-tools world_status: %+v", m.Agents)
+		t.Fatalf("Agents not populated from console /api/world: %+v", m.Agents)
 	}
 	if len(m.Storage) == 0 || m.Storage[0].Role != "relay" {
 		t.Fatalf("DATA not populated from world facts: %+v", m.Storage)

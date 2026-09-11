@@ -39,23 +39,23 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
-	"freehold/control-plane/api/agent"
-	"freehold/control-plane/api/agenttools"
-	"freehold/control-plane/api/cpstate"
-	"freehold/control-plane/cli/flows"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/delegate"
 	"freehold/contract/relay"
+	"freehold/control-plane/api/agent"
+	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/api/cpstate"
+	"freehold/control-plane/cli/flows"
 	"freehold/platform/agents"
 	"freehold/platform/migrations"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
 	"freehold/platform/provisioning/stages"
-	relaydeploy "freehold/platform/services/relay/buzz"
 	"freehold/platform/services/certificates/letsencrypt"
+	relaydeploy "freehold/platform/services/relay/buzz"
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
@@ -400,7 +400,7 @@ func cmdServe(args []string) {
 	tools.DoorAuthorize = doorAuth
 	tools.DoorRevoke = doorRevoke
 	srv := &agenttools.Server{
-		Facts: facts,
+		Facts:    facts,
 		Audience: audience,
 		Grants:   grants,
 		Tools:    tools,
@@ -1413,36 +1413,11 @@ func buildWorldDoor(spec *deploySpec) (agent.DoorAuthorizeAppend, agent.DoorRevo
 // registry agents + the console's runners/DNS read underneath (the console's
 // state.json on the box — what /api/overview + /api/dns serve).
 func buildWorldStatus(spec *deploySpec, reg *agenttools.Registry, consoleStateDir string, facts *agenttools.FactsStore) agent.WorldStatusFunc {
+	// The /mcp world_status surface shares the SAME single-inventory assembly the
+	// console's /api/world route serves (agenttools.WorldStatus) — one
+	// implementation, both surfaces, never divergent.
 	return func() (map[string]interface{}, error) {
-		agents, err := reg.Agents()
-		if err != nil {
-			return nil, err
-		}
-		cs, err := cpstate.Read(consoleStateDir)
-		if err != nil {
-			return nil, err
-		}
-		runners := []map[string]interface{}{}
-		for _, r := range cs.Runners {
-			runners = append(runners, map[string]interface{}{
-				"name": r.Name, "nostr_pubkey": r.NostrPubkey, "mcp_addr": r.McpAddr,
-			})
-		}
-		dns := []map[string]interface{}{}
-		for _, d := range cs.DNS {
-			dns = append(dns, map[string]interface{}{"name": d.Name, "ip": d.IP})
-		}
-		out := map[string]interface{}{
-			"agents":  agents,
-			"runners": runners,
-			"dns":     dns,
-		}
-		// The deployer-side facts (plane/certs/domains) registered at build —
-		// a management box renders DATA/Certs from these.
-		if facts != nil {
-			out["facts"] = facts.Facts()
-		}
-		return out, nil
+		return agenttools.WorldStatus(reg, facts, consoleStateDir)
 	}
 }
 

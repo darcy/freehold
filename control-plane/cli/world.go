@@ -1,13 +1,13 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
 	"freehold/contract/client"
 	"freehold/contract/config"
+	"freehold/contract/console"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
 )
@@ -53,6 +53,13 @@ func worldAction(action string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	// status is a READ — served by the console's public /api/world (the same
+	// single-inventory source the TUI uses), reachable by any logged-in box via
+	// the public CP URL. build/teardown/migrate are roster-gated world actions
+	// through the toolset.
+	if action == "status" {
+		return worldStatusFromConsole(cfg)
+	}
 	mc, err := worldMcp(cfg)
 	if err != nil {
 		return err
@@ -62,52 +69,51 @@ func worldAction(action string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", tool, err)
 	}
-	// world_status returns a JSON inventory; the mutating world tools return a
-	// plain report. Print the inventory readably, the report verbatim.
-	if action == "status" {
-		return printWorldStatus(text)
-	}
 	fmt.Println(text)
 	return nil
 }
 
-func printWorldStatus(text string) error {
-	var out struct {
-		CPPubkey string `json:"cp_pubkey"`
-		Agents   []struct {
-			Name    string `json:"name"`
-			Pubkey  string `json:"pubkey"`
-			Purpose string `json:"purpose"`
-		} `json:"agents"`
-		Runners []struct {
-			Name       string `json:"name"`
-			NostrPubkey string `json:"nostr_pubkey"`
-			McpAddr    string `json:"mcp_addr"`
-		} `json:"runners"`
-		DNS []struct {
-			Name string `json:"name"`
-			IP   string `json:"ip"`
-		} `json:"dns"`
+// worldStatusFromConsole renders the CP's single inventory off the public
+// /api/world console route (session authed as the operator), instead of the
+// LAN-bound agent-tools MCP server — so a remote box's `world status` works.
+func worldStatusFromConsole(cfg *config.Config) error {
+	sec, err := oplogin.SecretHex()
+	if err != nil {
+		return fmt.Errorf("no operator identity (run `freehold login`): %v", err)
 	}
-	if err := json.Unmarshal([]byte(text), &out); err != nil {
-		fmt.Println(text)
-		return nil
+	key, err := oplogin.NsecToSecret(sec)
+	if err != nil {
+		return fmt.Errorf("operator secret not valid: %v", err)
 	}
-	fmt.Printf("CP pubkey: %s\n", out.CPPubkey)
-	fmt.Printf("agents (%d):\n", len(out.Agents))
-	for _, a := range out.Agents {
+	c, err := oplogin.Login(cfg.CPURL, key)
+	if err != nil {
+		return fmt.Errorf("console login: %v", err)
+	}
+	w, err := c.World()
+	if err != nil {
+		return fmt.Errorf("world status: %v", err)
+	}
+	return printWorldSummary(w)
+}
+
+func printWorldSummary(w *console.WorldSummary) error {
+	fmt.Printf("CP pubkey: %s\n", w.CPPubkey)
+	fmt.Printf("agents (%d):\n", len(w.Agents))
+	for _, a := range w.Agents {
 		fmt.Printf("  %-20s %s", a.Name, a.Pubkey)
 		if a.Purpose != "" {
 			fmt.Printf("  (%s)", a.Purpose)
 		}
 		fmt.Println()
 	}
-	fmt.Printf("runners (%d):\n", len(out.Runners))
-	for _, r := range out.Runners {
+	runners := w.RunnersList()
+	fmt.Printf("runners (%d):\n", len(runners))
+	for _, r := range runners {
 		fmt.Printf("  %-20s %s\n", r.Name, r.NostrPubkey)
 	}
-	fmt.Printf("dns (%d):\n", len(out.DNS))
-	for _, d := range out.DNS {
+	dns := w.DNSRecords()
+	fmt.Printf("dns (%d):\n", len(dns))
+	for _, d := range dns {
 		fmt.Printf("  %s -> %s\n", d.Name, d.IP)
 	}
 	return nil
