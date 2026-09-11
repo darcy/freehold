@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"freehold/control-plane/api/agent"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
+	"freehold/control-plane/api/agent"
 	"freehold/platform/migrations"
 )
 
@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 10 {
-		t.Fatalf("expected 10 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 11 {
+		t.Fatalf("expected 11 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
+	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -230,6 +230,48 @@ func TestWorldStatusAndTeardown(t *testing.T) {
 	}
 }
 
+// TestWorldExec proves the drive-through-CP exec surface: an operator's
+// world_exec runs the command through the Tools.Exec (CP co-located runner)
+// driver and echoes its stdout.
+func TestWorldExec(t *testing.T) {
+	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	secret := make([]byte, 32)
+	secret[0] = 7
+	pk, err := crypto.PubkeyFromSecret(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotExec := ""
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{pk}, nil },
+		Tools: &agent.Tools{
+			Console: &fakeOps{},
+			Exec: func(target, cmd string, timeoutS uint64, secrets ...string) (string, error) {
+				gotExec = target + ":" + cmd
+				return "diskspace ok\n", nil
+			},
+		},
+	}
+	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"world_exec","arguments":{"target":"proxmox-box","cmd":"df -h"}}}`
+	ts := time.Now().Unix()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+	req.Header.Set(PubkeyHeader, pk)
+	req.Header.Set(SigHeader, signForTest(secret, aud, ts, raw))
+	req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotExec != "proxmox-box:df -h" {
+		t.Fatalf("world_exec did not invoke the CP exec driver, got %q", gotExec)
+	}
+	if !strings.Contains(rec.Body.String(), "diskspace ok") {
+		t.Fatalf("world_exec result missing stdout: %s", rec.Body.String())
+	}
+}
+
 // TestServerScopeAuth proves the per-channel tool-visibility split: a REGISTRY
 // agent caller (a pubkey in the registry) is denied the world_* actions while
 // an operator caller (roster member, not in the registry) can drive them — the
@@ -308,6 +350,10 @@ func TestServerScopeAuth(t *testing.T) {
 	if !denied || !strings.Contains(msg, "cannot call") {
 		t.Fatalf("registry agent must be denied world_register_facts, got denied=%v msg=%q", denied, msg)
 	}
+	msg, denied = post(agentSec, agentPK, "world_exec")
+	if !denied || !strings.Contains(msg, "cannot call") {
+		t.Fatalf("registry agent must be denied world_exec (operator-scoped exec), got denied=%v msg=%q", denied, msg)
+	}
 
 	// The operator (roster member, NOT in the registry) drives world_* freely.
 	if _, denied := post(opSec, opPK, "world_status"); denied {
@@ -344,7 +390,7 @@ func TestWorldStatusInventory(t *testing.T) {
 			Console: ops,
 			Status: func() (map[string]interface{}, error) {
 				return map[string]interface{}{
-					"agents": []console.AgentInfo{{Name: "cpa", Pubkey: pk}},
+					"agents":  []console.AgentInfo{{Name: "cpa", Pubkey: pk}},
 					"runners": []map[string]interface{}{{"name": "box", "nostr_pubkey": "R1"}},
 					"dns":     []map[string]interface{}{{"name": "relay", "ip": "192.168.30.8"}},
 				}, nil

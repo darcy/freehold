@@ -233,6 +233,14 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 	if snap.RelayHost != nil {
 		relayHost = *snap.RelayHost
 	}
+	// Serve the agent-tools MCP surface publicly too: a thin box drives the
+	// world (build/exec/migrate/door) through the CP over the public edge
+	// (https://<cp>/mcp), not the LAN dial the console uses internally.
+	agentToolsURL := snap.AgentToolsURL
+	if s.PublicOrigin != nil && *s.PublicOrigin != "" {
+		public := strings.TrimSuffix(*s.PublicOrigin, "/") + "/mcp"
+		agentToolsURL = &public
+	}
 	// The world's services report includes the relay + control plane pillars
 	// so a logged-in box renders the WHOLE world from /api/world — relay/cp
 	// health included — never from local config. The box is CP-driven; local
@@ -256,7 +264,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"relay_host":         relayHost,
 		"cp_url":             s.PublicOrigin,
 		"cp_pubkey":          s.ConsolePubkey,
-		"agent_tools_url":    snap.AgentToolsURL,
+		"agent_tools_url":    agentToolsURL,
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
 		"services":           services,

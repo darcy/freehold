@@ -90,6 +90,14 @@ var execCmd = &cobra.Command{
 		common := readCommonFlags(cmd)
 		secrets, _ := cmd.Flags().GetStringSlice("secret")
 		timeoutS, _ := cmd.Flags().GetUint64("timeout")
+		// A THIN box (no local [runner]) drives exec through the CP's co-located
+		// runner via world_exec — the drive-through-CP model, so a login box has
+		// the build box's full exec surface without hosting a runner. The CP
+		// runs the command on its runner target (the world host); the box is an
+		// authorized operator client.
+		if noLocalRunner() {
+			return worldExecThroughCP(target, cmds, secrets, timeoutS)
+		}
 		c, err := connect(common, target)
 		if err != nil {
 			return err

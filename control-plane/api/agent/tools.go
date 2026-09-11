@@ -51,10 +51,31 @@ type Tools struct {
 	// Status builds the single inventory world_status returns (agents + the
 	// console's runners/DNS read underneath). nil = agents only.
 	Status WorldStatusFunc
+	// Exec runs a command through the CP's co-located runner — the "drive
+	// through the CP" exec surface a thin login box uses instead of a local
+	// provisioning runner. nil = exec unsupported.
+	Exec ExecFn
 	// DoorAuthorize/Revoke authorize/revoke an operator box's door key on the
 	// host (DOOR_SPEC). nil = door unsupported.
 	DoorAuthorize DoorAuthorizeAppend
 	DoorRevoke    DoorRevoke
+}
+
+// ExecFn runs a command through the CP's co-located runner and returns its
+// stdout. target is the runner target the caller asked for — the CP validates
+// it against its own bound runner target (error on mismatch) so a thin box
+// never silently execs on a host it didn't name. secrets request extra
+// runner-injected secret env by name (redacted).
+type ExecFn func(target, cmd string, timeoutS uint64, secrets ...string) (string, error)
+
+// WorldExec runs a command through the CP's co-located runner (drive-through-
+// CP exec, so a thin box has the build box's full operational surface without
+// hosting a runner). Operator-scoped (dispatch gates it).
+func (t *Tools) WorldExec(target, cmd string, timeoutS uint64, secrets ...string) (string, error) {
+	if t.Exec == nil {
+		return "", fmt.Errorf("world-exec: no CP exec driver bound")
+	}
+	return t.Exec(target, cmd, timeoutS, secrets...)
 }
 
 // Migrator applies pending CP migrations and returns their verify-gated results.
