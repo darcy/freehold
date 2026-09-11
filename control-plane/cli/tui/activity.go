@@ -244,6 +244,12 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		a.bootFns = append(a.bootFns, d.fn)
 	}
 	a.bootDone = func() {
+		// A CP session may have landed WHILE the checker was running its
+		// pre-session local probes (e.g. the relay step probes a stale config
+		// IP and races applyCPWorldHealth). Re-apply CP truth so a box that
+		// logged in mid-check settles CP-driven — the header flags + pillars
+		// are never left on a pre-session local-probe answer.
+		m.applyCPWorldHealth()
 		m.Converged = converged(cfg.Runner.Addr, m.RelayLive, m.CPLive, m.RunnerReach)
 		if m.Converged {
 			m.Mode = ModeRunning
