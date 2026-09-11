@@ -142,6 +142,9 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		{"config", func() (string, bool) {
 			return cfg.RelayHost() + " · " + m.CfgPath, true
 		}},
+		{"runner", func() (string, bool) {
+			return m.runnerProbe(cfg)
+		}},
 		{"control plane", func() (string, bool) {
 			// Every logged-in box is the SAME once it has a CP session: the CP
 			// is the single source of truth for the world (no management-vs-
@@ -249,6 +252,22 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	}
 	m.activity = a
 	return tea.Batch(m.runBootStep(0), a.spin.Tick)
+}
+
+// runnerProbe feeds RunnerReach, which converged() needs for the running/
+// configure decision. A box with no local provisioning runner operates through
+// the CP; one with a runner probes it for reachability. Pillar health still
+// comes from the CP, but the gate must be satisfied for ModeRunning.
+func (m *Model) runnerProbe(cfg *config.Config) (string, bool) {
+	if cfg.Runner.Addr == "" {
+		m.RunnerReach = true
+		return "no local runner (operating through the CP)", true
+	}
+	m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
+	if m.RunnerReach {
+		return cfg.Runner.Addr + " reachable", true
+	}
+	return "no answer on " + cfg.Runner.Addr, false
 }
 
 // converged settles the running/configure decision. A box WITH a local runner

@@ -345,6 +345,34 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 	}
 }
 
+// The runner probe must satisfy RunnerReach so converged() reaches ModeRunning
+// for EVERY box: a management box is a no-op (true), an owner box sets it from
+// a reachability probe. Without it, an owner box would be stuck in Configure.
+func TestRunnerProbeSatisfiesConverged(t *testing.T) {
+	mgmt := &config.Config{} // no runner
+	m := &Model{}
+	if _, ok := m.runnerProbe(mgmt); !ok || !m.RunnerReach {
+		t.Fatal("management box runner probe must set RunnerReach true")
+	}
+	if !converged("", true, true, m.RunnerReach) {
+		t.Fatal("management box should converge to Running when the CP is up")
+	}
+
+	owner := &config.Config{}
+	owner.Runner.Addr = "127.0.0.1:1" // nothing listens
+	mo := &Model{}
+	mo.runnerProbe(owner)
+	if mo.RunnerReach {
+		t.Fatal("owner box with unreachable runner must not set RunnerReach")
+	}
+	if converged("127.0.0.1:1", true, true, false) {
+		t.Fatal("owner box with unreachable runner must not converge")
+	}
+	if !converged("127.0.0.1:1", true, true, true) {
+		t.Fatal("owner box should converge to Running when healthy+reachable")
+	}
+}
+
 // A box WITH local coords (a deployer) keeps its own co-located probe — the CP
 // health only fills pillars this box has no local record of.
 // Single source of truth: the CP is authoritative for EVERY box, including one

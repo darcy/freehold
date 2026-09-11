@@ -395,25 +395,38 @@ func guestLocation(vmid *uint32, ip *string) string {
 // plane/runner keeps the last good snapshot; a probe failure degrades to
 // the notice in m.Msg.
 func (m *Model) refreshData(cfg *config.Config) {
+	localPlane := cfg != nil && cfg.Plane.Backend != nil && cfg.Plane.BackendKind != nil && cfg.Runner.Addr != ""
 	// The CP's world facts are the single source for the DATA view — identical
-	// for every logged-in box (the durable-plane LAYOUT registered at build).
+	// for every logged-in box (the durable-plane layout registered at build).
 	if m.Facts != nil && len(m.Facts.Plane.Mounts) > 0 {
-		m.DataAt = time.Now()
-		m.Storage = nil
+		// When this box has its own co-located backend AND the CP facts lack
+		// live usage numbers, fall through to the live probe so an owner box
+		// doesn't regress to blank columns; otherwise both boxes render the CP.
+		hasUsage := false
 		for _, mu := range m.Facts.Plane.Mounts {
-			m.Storage = append(m.Storage, DataRow{
-				Role: mu.Tenant, Mount: mu.GuestPath, Size: mu.Size, Used: mu.Used,
-				Fill: mu.Fill, Source: mu.Source, Live: "CP facts",
-			})
+			if mu.Size != "" {
+				hasUsage = true
+				break
+			}
 		}
-		if len(m.Storage) == 0 {
-			m.Storage = []DataRow{{Role: "(no mounts)"}}
+		if !localPlane || hasUsage {
+			m.DataAt = time.Now()
+			m.Storage = nil
+			for _, mu := range m.Facts.Plane.Mounts {
+				m.Storage = append(m.Storage, DataRow{
+					Role: mu.Tenant, Mount: mu.GuestPath, Size: mu.Size, Used: mu.Used,
+					Fill: mu.Fill, Source: mu.Source, Live: "CP facts",
+				})
+			}
+			if len(m.Storage) == 0 {
+				m.Storage = []DataRow{{Role: "(no mounts)"}}
+			}
+			m.Msg = "data layout from the CP"
+			return
 		}
-		m.Msg = "data layout from the CP"
-		return
 	}
-	// Offline only (no CP facts): the co-located live plane probe.
-	if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil || cfg.Runner.Addr == "" {
+	// Offline fallback / owner live probe: no CP facts with usage on hand.
+	if !localPlane {
 		return
 	}
 	var kind planebase.BackendKind
