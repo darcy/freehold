@@ -42,6 +42,11 @@ type WorldPlaneMount struct {
 	Source    string `json:"source"`     // the host LV/ZFS source
 	GuestPath string `json:"guest_path"` // the guest mount point
 	Backup    bool   `json:"backup"`
+	// Live usage as registered at build (the co-located plane probe) — served
+	// by the CP so every box's DATA view renders the same durable-plane state.
+	Size string `json:"size,omitempty"` // e.g. "100G"
+	Used string `json:"used,omitempty"`
+	Fill string `json:"fill,omitempty"`
 }
 
 // WorldCert is one edge slot's certificate metadata.
