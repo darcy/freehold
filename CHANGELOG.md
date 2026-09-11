@@ -25,6 +25,35 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.14] — world status is served from the console's public /api/world (DRY with /mcp)
+
+Closed the last reason a remote (off-LAN) box couldn't reach parity with the
+deployer box: the TUI's Agents/DATA/Certs views and `freehold world status`
+dialed the agent-tools MCP server over the LAN (`:8089/mcp` → `world_status`)
+and needed `cfg.AgentToolsURL`/`AgentToolsPubkey` — a LAN-only coord seeded
+from login. A box off the subnet read an empty inventory and (mis)concluded
+the world was down. Status reads now come from the public CP.
+
+### Changed
+
+- **Console `/api/world`** (public, session-gated) now folds the authoritative
+  agent registry + world facts on top of the pillar services it already served
+  — read live from the toolset's durable `registry.json`/`facts.json`, so every
+  logged-in box (LAN or remote) renders the same CP-sourced status with **no
+  local agent-tools coords**. This corrects PR #207's intent: coords became
+  CP-sourced, but status still rode a LAN-only transport.
+- **DRY:** both the `/api/world` route and the `/mcp world_status` tool now
+  resolve the **same** `agenttools.WorldStatus` assembly — one implementation,
+  two surfaces, never divergent.
+- **`freehold world status`** reads the public `/api/world` (via the operator's
+  persisted nsec, `oplogin.NsecToSecret`); the mutating world verbs
+  (`build`/`teardown`/`migrate`) stay roster-gated on `/mcp`.
+- The console now logs a broken inventory (malformed registry/facts) instead of
+  silently serving an empty "world down" view.
+
+`contract/console`: `WorldSummary` gained `Agents`/`Runners`/`DNS`/`Facts`
+(raw, to keep contract free of control-plane types) + helpers.
+
 ## [0.5.13] — world facts: the CP carries the deployer-side inventory (DATA + Certs parity)
 
 The real asymmetry closed: a management/login-only box can now render the DATA
