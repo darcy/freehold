@@ -214,17 +214,43 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := s.Store.Snapshot()
-	var relayWS *string
-	if snap.RelayURL != nil {
-		ws := wsOf(*snap.RelayURL)
+	// Serve the relay's PUBLIC edge on /api/world, derived from the recorded
+	// relay_host, so a login box reaches the relay through Caddy (https://
+	// <domain>) instead of adopting the internal LAN dial the console uses for
+	// its own roster/event reads. relay_ws_url mirrors it (wss://<domain>).
+	var relayURL, relayWS *string
+	if snap.RelayHost != nil && *snap.RelayHost != "" && !strings.Contains(*snap.RelayHost, "://") {
+		public := "https://" + *snap.RelayHost
+		ws := "wss://" + *snap.RelayHost
+		relayURL = &public
 		relayWS = &ws
+	} else if snap.RelayURL != nil {
+		relayURL = snap.RelayURL
+		w := wsOf(*snap.RelayURL)
+		relayWS = &w
 	}
 	var relayHost string
 	if snap.RelayHost != nil {
 		relayHost = *snap.RelayHost
 	}
+	// The world's services report includes the relay + control plane pillars
+	// so a logged-in box renders the WHOLE world from /api/world — relay/cp
+	// health included — never from local config. The box is CP-driven; local
+	// config is only the offline fallback (the initial-bootstrap exception).
+	services := []WorldServiceJSON{}
+	if relayURL != nil {
+		up, detail := false, "co-located relay"
+		if snap.RelayURL != nil {
+			up, detail = answered(*snap.RelayURL, false)
+		}
+		services = append(services, WorldServiceJSON{Name: "relay", Kind: "relay", URL: *relayURL, Up: up, Detail: detail})
+	}
+	if s.PublicOrigin != nil && *s.PublicOrigin != "" {
+		services = append(services, WorldServiceJSON{Name: "control plane", Kind: "cp", URL: *s.PublicOrigin, Up: true, Detail: "console serving"})
+	}
+	services = append(services, worldServiceRows(snap)...)
 	payload := map[string]interface{}{
-		"relay_url":          snap.RelayURL,
+		"relay_url":          relayURL,
 		"relay_ws_url":       relayWS,
 		"relay_pubkey":       snap.RelayPubkey,
 		"relay_host":         relayHost,
@@ -233,7 +259,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"agent_tools_url":    snap.AgentToolsURL,
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
-		"services":           worldServiceRows(snap),
+		"services":           services,
 	}
 	// Fold the single-inventory status (agents + runners + dns + facts) served
 	// on the same route the /mcp world_status tool shares — the authoritative

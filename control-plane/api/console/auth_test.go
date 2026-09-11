@@ -165,11 +165,82 @@ func TestLoginRoundtrip(t *testing.T) {
 	}
 }
 
+// The public relay_url served on /api/world must be the DOMAIN edge
+// (https://<relay_host>), NOT the internal LAN IP a box would try to adopt and
+// fail to reach remotely. Console-internal dials keep the LAN relay_url.
+func TestWorldServesPublicRelayURL(t *testing.T) {
+	sec := adminSecret()
+	adminPK, _ := crypto.PubkeyFromSecret(sec)
+	s, store := testServer(t, NewAuth([]string{adminPK}))
+	relayHost := "relay.librem.freehold.technology"
+	relayLan := "http://192.168.30.249:3000"
+	if err := store.SetRelayHost(&relayHost); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRelayURL(&relayLan); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// login dance -> session cookie.
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/challenge", nil))
+	if rec.Code != 200 {
+		t.Fatalf("challenge: %d", rec.Code)
+	}
+	var chal struct {
+		Nonce string `json:"nonce"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
+	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+	body, _ := json.Marshal(map[string]interface{}{
+		"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+	})
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+	var cookie string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			cookie = c.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatal("no session cookie")
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/world", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("world: %d %s", rec.Code, rec.Body.String())
+	}
+	var world struct {
+		RelayURL   string `json:"relay_url"`
+		RelayWSURL string `json:"relay_ws_url"`
+		RelayHost  string `json:"relay_host"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &world)
+	if world.RelayURL != "https://"+relayHost {
+		t.Fatalf("served relay_url = %q, want https://%s (the public domain, not the LAN dial)", world.RelayURL, relayHost)
+	}
+	if world.RelayWSURL != "wss://"+relayHost {
+		t.Fatalf("served relay_ws_url = %q, want wss://%s", world.RelayWSURL, relayHost)
+	}
+	if world.RelayHost != relayHost {
+		t.Fatalf("relay_host = %q, want %q", world.RelayHost, relayHost)
+	}
+}
+
 func TestLoginRejects(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
 	s, _ := testServer(t, NewAuth([]string{adminPK}))
-
 	// A stale signature timestamp is rejected.
 	nonce := "not-consumed"
 	pk, sig, tags := signLoginEvent(t, sec, nonce, time.Now().Unix()-200)

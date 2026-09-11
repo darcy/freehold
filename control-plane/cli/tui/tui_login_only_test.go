@@ -293,6 +293,8 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/world":
 			w.Write([]byte(`{"cp_pubkey":"aa","relay_url":"http://192.168.30.243:3000","services":[` +
+				`{"name":"relay","kind":"relay","url":"https://relay.here.freehold.technology","up":true},` +
+				`{"name":"control plane","kind":"cp","url":"https://cp.here.freehold.technology","up":true},` +
 				`{"name":"k3s","kind":"k3s","up":true},{"name":"litellm","kind":"litellm","up":true},{"name":"caddy","kind":"caddy","up":true}],` +
 				factsText[1:]))
 		case "/api/dns":
@@ -319,6 +321,13 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 
 	if len(m.Services) == 0 || m.Services[0].Name == "(none managed)" {
 		t.Fatalf("Services not populated: %+v", m.Services)
+	}
+	// A login-only box reads the relay from the CP, NOT a stale local config
+	// IP (cfg.RelayURL was seeded to 192.168.30.220 but must never appear).
+	for _, s := range m.Services {
+		if s.Name == "relay" && s.URL != "https://relay.here.freehold.technology" {
+			t.Fatalf("relay row must come from the CP report, got URL %q", s.URL)
+		}
 	}
 	if len(m.Runners) == 0 {
 		t.Fatal("Runners not populated from console /api/overview")

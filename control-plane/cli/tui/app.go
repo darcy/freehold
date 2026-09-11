@@ -193,23 +193,32 @@ func (m *Model) buildServices(cfg *config.Config) {
 	}
 }
 
-// buildCpServices renders the Services view for a management box from the CP's
-// /api/world: the relay + control plane (from the box's recorded coords) plus
-// each world service the CP monitors (k3s/litellm/caddy), health included.
+// buildCpServices renders the Services view for EVERY box once it has a CP
+// session, from the CP's own /api/world services report — relay + control plane
+// + each world service (k3s/litellm/caddy), URL and health all CP-provided.
+// No local config row appears; local config is only the offline (no-session)
+// fallback. This is the "read the world from the CP" contract.
 func (m *Model) buildCpServices(cfg *config.Config) {
 	m.Services = nil
-	add := func(name, where, url, status string) {
-		m.Services = append(m.Services, ServiceRow{Name: name, Where: where, URL: url, Status: status})
-	}
-	add("relay", "CP-served", cfg.RelayURL, boolStatus(m.RelayLive, "live", "down"))
-	add("control plane", "CP-served", cfg.CPURL, boolStatus(m.CPLive, "live", "down"))
 	for _, s := range m.cpWorld.Services {
-		add(serviceRowName(s.Kind), "CP-served · "+s.Kind, s.URL, boolStatus(s.Up, "live", "down"))
+		m.Services = append(m.Services, ServiceRow{
+			Name:   serviceRowName(s.Kind),
+			Where:  "CP-served · " + s.Kind,
+			URL:    s.URL,
+			Status: boolStatus(s.Up, "live", "down"),
+		})
+	}
+	if len(m.Services) == 0 {
+		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
 	}
 }
 
 func serviceRowName(kind string) string {
 	switch kind {
+	case "relay":
+		return "relay"
+	case "cp":
+		return "control plane"
 	case "k3s":
 		return "k3s (kube)"
 	case "litellm":
