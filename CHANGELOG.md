@@ -25,6 +25,23 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.16] — the boot checker settles on CP truth (relay header no longer sticks red)
+
+A login-only box whose config held a stale `relay_url` could show the relay
+**red in the header** even after auto-login, while its Services pane showed it
+green + the CP domain. Race: the boot checker's relay step runs a **pre-session
+local probe** (`config.RelayLive` on the stale IP) when `m.cpWorld` is nil at
+the moment it starts; that probe finishes *after* `applyCPWorldHealth` sets
+`m.RelayLive` true from the CP, clobbering it back to false. Nothing re-applied
+CP truth, so the header stuck red.
+
+### Fixed
+
+- **`bootDone` re-runs `applyCPWorldHealth()`** when the world check settles, so
+  a box that logged in mid-check lands **CP-driven** — the header flags never
+  sit on a pre-session local-probe answer. No session ⇒ no-op (the local flags
+  stand, the initial-bootstrap case).
+
 ## [0.5.15] — a box reads the whole world from the CP (relay/cp included)
 
 Closed the last local-config leak in the box's world view. The relay + control
