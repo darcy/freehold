@@ -25,6 +25,32 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.18] — the boot checker is CP-driven and identical for every box
+
+The "checking the world" screen did **different work** on the build box vs a
+thin box, so one took ~10s (+ a hang) while the other flashed — a visible
+asymmetry that kept saying "not yet at parity." Root causes were local probes
+only the build box had coords to exercise. Now every box runs the SAME
+CP-driven check.
+
+### Fixed
+
+- **Boot health steps** (relay/k3s/litellm/caddy/dns) no longer fall back to
+  LOCAL probes when the CP session is pending: the control-plane step waits
+  (bounded) for auto-login, then the steps report the CP's report. The build
+  box's ~9s litellm HTTP probe + real relay/k3s probes are gone.
+- **`refreshData`** dropped the local durable-plane storage probe — the DATA
+  view is the CP facts for every box.
+- **Runner** reports the CP's runner (from `/api/overview`), uniform; no local
+  runner probe.
+- The auto-login wait only blocks when a session is actually expected (persisted
+  operator identity + CP URL) — a configured-but-never-logged-in box does NOT
+  stall.
+
+Verified: the build box and a thin box both land the dashboard in **~1s** with
+byte-identical, all-green output. Only bootstrap remains special (no CP yet →
+press `l`).
+
 ## [0.5.17] — drive-through-CP operator surface: a thin login box is the build box
 
 Finally closed the last capability gap so ANY logged-in box (the "login box")
