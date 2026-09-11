@@ -178,11 +178,13 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 				}
 				return "down via CP (k3s)", false
 			}
+			// Local fallback probes the kube-apiserver through the CP edge. A
+			// login-only box has no lxc coords — never deref a nil K3s.Ip.
 			m.K3sLive = config.K3sLive(cfg)
 			if m.K3sLive {
-				return "API healthy at " + config.StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443", true
+				return "API healthy (CP edge)", true
 			}
-			return "no API answer at " + config.StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443", false
+			return "no API answer (CP edge)", false
 		}},
 		{"litellm", func() (string, bool) {
 			if v, ok := m.worldSvc["litellm"]; ok {
