@@ -28,7 +28,7 @@ import (
 // (possibly wildcard) certs through embedded lego and presents them from the
 // durable volume, so nothing fights for 80/443 or reaches for ACME itself.
 // Indentation is SPACES (not tabs) so it embeds cleanly in the ConfigMap YAML.
-func RenderCaddyfile(relayHost, relayUpstream, cpHost, cpUpstream string) string {
+func RenderCaddyfile(relayHost, relayUpstream, cpHost, cpUpstream, cpMcpUpstream string) string {
 	return fmt.Sprintf(`{
   auto_https off
 }
@@ -40,9 +40,14 @@ func RenderCaddyfile(relayHost, relayUpstream, cpHost, cpUpstream string) string
 
 %s {
   tls /data/tls/cp/fullchain.pem /data/tls/cp/key.pem
-  reverse_proxy %s
+  handle /mcp {
+    reverse_proxy %s
+  }
+  handle {
+    reverse_proxy %s
+  }
 }
-`, relayHost, relayUpstream, cpHost, cpUpstream)
+`, relayHost, relayUpstream, cpHost, cpMcpUpstream, cpUpstream)
 }
 
 // CaddyManifest is the kube body applied inside the k3s LXC: a durable PVC for

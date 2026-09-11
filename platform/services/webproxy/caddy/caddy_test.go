@@ -6,7 +6,7 @@ import (
 )
 
 func TestRenderCaddyfile(t *testing.T) {
-	out := RenderCaddyfile("relay.example.test", "192.168.30.8:3000", "cp.example.test", "192.168.30.9:8080")
+	out := RenderCaddyfile("relay.example.test", "192.168.30.8:3000", "cp.example.test", "192.168.30.9:8080", "192.168.30.9:8089")
 	for _, want := range []string{
 		"auto_https off",
 		"relay.example.test {",
@@ -14,6 +14,8 @@ func TestRenderCaddyfile(t *testing.T) {
 		"tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem",
 		"tls /data/tls/cp/fullchain.pem /data/tls/cp/key.pem",
 		"reverse_proxy 192.168.30.8:3000",
+		"handle /mcp {",
+		"reverse_proxy 192.168.30.9:8089",
 		"reverse_proxy 192.168.30.9:8080",
 	} {
 		if !strings.Contains(out, want) {
@@ -26,7 +28,7 @@ func TestRenderCaddyfile(t *testing.T) {
 }
 
 func TestCaddyManifest(t *testing.T) {
-	out := CaddyManifest(RenderCaddyfile("d.example", "10.0.0.9:3000", "cp.d.example", "10.0.0.8:8080"))
+	out := CaddyManifest(RenderCaddyfile("d.example", "10.0.0.9:3000", "cp.d.example", "10.0.0.8:8080", "10.0.0.8:8089"))
 	for _, want := range []string{
 		"kind: PersistentVolumeClaim",
 		"name: caddy-data",

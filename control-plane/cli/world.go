@@ -119,8 +119,7 @@ func printWorldSummary(w *console.WorldSummary) error {
 	return nil
 }
 
-// worldMcp builds the agent-tools MCP client for the world verb. It signs as
-// the OPERATOR identity (the persisted nsec — a console-admin, in the toolset
+// worldMcp builds the agent-tools MCP client for the world verb. It signs as// the OPERATOR identity (the persisted nsec — a console-admin, in the toolset
 // roster), NOT the box's agent-ops identity: a fresh login-only box's
 // agent-ops is minted locally and is NOT a toolset-roster member, so signing
 // with it would get world_* denied with -32001. The operator key is the
@@ -134,6 +133,44 @@ func worldMcp(cfg *config.Config) (*client.McpClient, error) {
 		return nil, fmt.Errorf("this box has no operator identity at %s (run `freehold login` to materialize it): %v", oplogin.Dir(), err)
 	}
 	return client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
+}
+
+// noLocalRunner reports whether this box is THIN (no deployed provisioning
+// runner): such a box drives the world — including exec — through the CP.
+func noLocalRunner() bool {
+	cfg, err := config.Load(configPath())
+	return err != nil || cfg == nil || cfg.Runner.Addr == ""
+}
+
+// worldExecThroughCP runs cmd on the CP's co-located runner via the world_exec
+// tool (the drive-through-CP exec surface), so a thin login box has the build
+// box's exec capability without hosting a runner. target is passed through so
+// the CP validates the box asked for its own runner (never a silent mismatch).
+// Signed as the operator.
+func worldExecThroughCP(target, cmd string, secrets []string, timeoutS uint64) error {
+	cfg, err := config.Load(configPath())
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	mc, err := worldMcp(cfg)
+	if err != nil {
+		return err
+	}
+	args := map[string]interface{}{"target": target, "cmd": cmd}
+	if timeoutS > 0 {
+		args["timeout_s"] = timeoutS
+	}
+	if len(secrets) > 0 {
+		args["secrets"] = secrets
+	}
+	text, err := callAgentToolsText(mc, "world_exec", args)
+	if err != nil {
+		return fmt.Errorf("world_exec: %w", err)
+	}
+	if text != "" {
+		fmt.Print(text)
+	}
+	return nil
 }
 
 // configPath resolves the config path for the world verb (the CLI's default).

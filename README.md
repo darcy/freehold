@@ -198,7 +198,8 @@ freehold world teardown       # the CP unwinds what it manages (relay+k3s LXCs f
 freehold world migrate        # run the CP's verify-gated migrations
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
-freehold exec <target> "cmd"  # a subcommand → the CLI (exec, bootstrap,
+freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no
+                              #  [runner]) through the CP's runner via world_exec
 freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
 freehold deploy-relay …       #   memory, console-login, grant, storage …)
 freehold --help               # both surfaces

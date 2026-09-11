@@ -395,6 +395,7 @@ func cmdServe(args []string) {
 	tools := &agent.Tools{Console: reg, Create: buildCreateAgentFn(spec)}
 	tools.Migrate = buildMigrator(spec, *consoleStateDir)
 	tools.World = buildWorldApply(spec)
+	tools.Exec = buildWorldExec(spec)
 	tools.Status = buildWorldStatus(spec, reg, *consoleStateDir, facts)
 	doorAuth, doorRevoke := buildWorldDoor(spec)
 	tools.DoorAuthorize = doorAuth
@@ -1236,10 +1237,12 @@ func buildWorldApply(spec *deploySpec) agent.WorldApply {
 		if spec.k3sVmid != 0 && spec.relayHost != "" && spec.cpHost != "" && spec.relayIP != "" {
 			relayUpstream := fmt.Sprintf("%s:3000", spec.relayIP)
 			cpUpstream := ""
+			cpMcpUpstream := ""
 			if spec.cpIP != "" {
 				cpUpstream = fmt.Sprintf("%s:8080", spec.cpIP)
+				cpMcpUpstream = fmt.Sprintf("%s:8089", spec.cpIP)
 			}
-			caddyfile := caddydeploy.RenderCaddyfile(spec.relayHost, relayUpstream, spec.cpHost, cpUpstream)
+			caddyfile := caddydeploy.RenderCaddyfile(spec.relayHost, relayUpstream, spec.cpHost, cpUpstream, cpMcpUpstream)
 			// CaddyManifestScript is written to run ON THE PVE HOST (it wraps
 			// pct push/pct exec itself), so spec.run executes it raw — never
 			// wrapped in an outer pct exec (that would run the script inside
@@ -1412,8 +1415,24 @@ func buildWorldDoor(spec *deploySpec) (agent.DoorAuthorizeAppend, agent.DoorRevo
 // buildWorldStatus builds the single-inventory world_status payload: the
 // registry agents + the console's runners/DNS read underneath (the console's
 // state.json on the box — what /api/overview + /api/dns serve).
-func buildWorldStatus(spec *deploySpec, reg *agenttools.Registry, consoleStateDir string, facts *agenttools.FactsStore) agent.WorldStatusFunc {
-	// The /mcp world_status surface shares the SAME single-inventory assembly the
+// buildWorldExec runs a command through the CP's co-located runner — the
+// drive-through-CP exec surface a thin login box uses (world_exec), so it has
+// the build box's full operational surface without hosting a runner. Operator-
+// scoped (dispatch gates it). A target that isn't the CP's own runner target
+// is rejected, so a box never silently execs on a host it didn't name.
+func buildWorldExec(spec *deploySpec) agent.ExecFn {
+	return func(target, cmd string, timeoutS uint64, secrets ...string) (string, error) {
+		if target != "" && target != spec.runnerTarget {
+			return "", fmt.Errorf("world-exec: the CP's runner is bound to target %q, not %q — use %q (or omitting target)", spec.runnerTarget, target, spec.runnerTarget)
+		}
+		if timeoutS == 0 {
+			timeoutS = 30
+		}
+		return spec.execOut(cmd, timeoutS, secrets...)
+	}
+}
+
+func buildWorldStatus(spec *deploySpec, reg *agenttools.Registry, consoleStateDir string, facts *agenttools.FactsStore) agent.WorldStatusFunc { // The /mcp world_status surface shares the SAME single-inventory assembly the
 	// console's /api/world route serves (agenttools.WorldStatus) — one
 	// implementation, both surfaces, never divergent.
 	return func() (map[string]interface{}, error) {

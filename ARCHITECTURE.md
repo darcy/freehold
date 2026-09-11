@@ -183,25 +183,33 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **`freehold-agent-tools` is a distinct SEMANTIC surface on the CP**, not
     the runner's `exec`. Its Go methods (`control-plane/api/agent/tools.go`,
     `create_agent`/`grant_agent`/`manage_agent`) are served in-process by
-    `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
-    authorized per call against the server's own relay roster (NIP-29 channel
-    + 39002, fail-closed) **and scoped by caller class**: a pubkey in the CP's
-    agent registry is an AGENT (create/manage only — the world_* actions AND
-    `grant_agent` are denied server-side, so the CPA's "conversation + create
-    only" boundary cannot be bypassed by calling the server directly); a roster
-    member not in the registry is an OPERATOR (full toolset incl. world_* and
-    grant). Its `mcp` stdio mode is the bridge agent pods fetch at boot (same
-    create/manage-only filter, now defense-in-depth). The build dogfoods
-    `create_agent` to bring the CPA up. It
+     `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
+     authorized per call against the server's own relay roster (NIP-29 channel
+     + 39002, fail-closed) **and scoped by caller class**: a pubkey in the CP's
+     agent registry is an AGENT (create/manage only — the world_* actions AND
+     `grant_agent` are denied server-side, so the CPA's "conversation + create
+     only" boundary cannot be bypassed by calling the server directly); a roster
+     member not in the registry is an OPERATOR (full toolset incl. world_* and
+     grant). The Caddy CP vhost exposes `/mcp` publicly (→ `:8089`) and
+     `/api/world` serves `agent_tools_url` as the public `https://<cp>/mcp`, so
+     a REMOTE thin box drives the world (build/exec/migrate/door) over the edge
+     — the drive-through-CP transport. Its `mcp` stdio mode is the bridge agent
+     pods fetch at boot (same create/manage-only filter, now defense-in-depth).
+     The build dogfoods
+     `create_agent` to bring the CPA up. It
     also carries the CP world-action surface (`world_status` / `world_teardown`
-    / `world_migrate` / `world_build` / `world_register_facts` /
+    / `world_migrate` / `world_build` / `world_exec` / `world_register_facts` /
     `world_authorize_door` / `world_revoke_door`, operator-scoped) so an
     operator box can
     "login + trigger" the world: `world_build` runs the CP's owned
     bring-up/reconcile stages (`platform/provisioning/stages`) through its
     co-located runner — the direction `freehold build` (box) slims toward
     (CP-bring-up + trigger; the CP owns relay/storage/k3s/DNS/litellm/Caddy/
-    cert). `world_status` assembles the **single inventory read** (agents + the
+    cert). `world_exec` is the **drive-through-CP exec** surface: a THIN login
+    box (no local `[runner]`) runs commands on the CP's co-located runner via
+    this tool — so a login box is functionally equivalent to the box that
+    bootstrapped, an authorized operator client rather than a runner host.
+    `world_status` assembles the **single inventory read** (agents + the
     console's runners/DNS read underneath — the console's state.json on the
     box — plus the deployer-side world facts (`world_register_facts`: the
     durable-plane layout, canonical domains, and edge cert metadata the box

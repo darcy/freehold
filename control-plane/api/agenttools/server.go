@@ -150,6 +150,15 @@ func (s *Server) toolList() []map[string]interface{} {
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
 		{
+			"name": "world_exec", "description": "Run a command through the CP's co-located runner (operator-scoped drive-through-CP exec, so a thin login box has the build box's full operational surface).",
+			"inputSchema": i(map[string]interface{}{
+				"target":    map[string]interface{}{"type": "string"},
+				"cmd":       map[string]interface{}{"type": "string"},
+				"timeout_s": map[string]interface{}{"type": "integer"},
+				"secrets":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"cmd"}),
+		},
+		{
 			"name": "world_authorize_door", "description": "Append an operator box's public door key to the host door through the co-located runner (DOOR_SPEC).",
 			"inputSchema": i(map[string]interface{}{
 				"pubkey": map[string]interface{}{"type": "string"},
@@ -192,7 +201,7 @@ type manageAgentArgs struct {
 func isWorldTool(name string) bool {
 	switch name {
 	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build",
-		"world_authorize_door", "world_revoke_door", "world_register_facts":
+		"world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts":
 		return true
 	}
 	return false
@@ -285,6 +294,23 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		s.textResult(w, id, nil, string(b))
 	case "world_build":
 		out, err := s.Tools.WorldBuild()
+		if err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, out)
+	case "world_exec":
+		var a struct {
+			Target   string   `json:"target"`
+			Cmd      string   `json:"cmd"`
+			TimeoutS uint64   `json:"timeout_s"`
+			Secrets  []string `json:"secrets"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.Cmd == "" {
+			s.rpcError(w, id, -32602, "world_exec arguments: cmd required")
+			return
+		}
+		out, err := s.Tools.WorldExec(a.Target, a.Cmd, a.TimeoutS, a.Secrets...)
 		if err != nil {
 			s.textResult(w, id, err, "")
 			return
