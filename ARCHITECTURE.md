@@ -201,12 +201,15 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     bring-up/reconcile stages (`platform/provisioning/stages`) through its
     co-located runner — the direction `freehold build` (box) slims toward
     (CP-bring-up + trigger; the CP owns relay/storage/k3s/DNS/litellm/Caddy/
-    cert). `world_status` is the **single inventory read** (agents + the
+    cert). `world_status` assembles the **single inventory read** (agents + the
     console's runners/DNS read underneath — the console's state.json on the
     box — plus the deployer-side world facts (`world_register_facts`: the
     durable-plane layout, canonical domains, and edge cert metadata the box
-    registers at the end of `freehold build`)), consumed by the TUI and
-    `freehold world status`. `grant_agent` is
+    registers at the end of `freehold build`)). It is served **twice from one
+    assembly** (`agenttools.WorldStatus`): the console folds it into its public
+    `/api/world` (consumed by the TUI and `freehold world status`), and the
+    `/mcp world_status` tool shares that same assembly for direct MCP callers —
+    so the two surfaces can never diverge. `grant_agent` is
     **operator-scoped and wired through the absorbed console-owner
     credential**: the server loads
     the console's own identity from its state dir (0600 durable plane) and
@@ -278,10 +281,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     carries the relay coords (served from `state.json` — the CP records them
     when `serve` is started with `--relay-url`, paired or not with
     `--relay-pubkey`) plus the `agent_tools_url`/`agent_tools_pubkey` the
-    Agents view needs. The Agents tab reads the CP toolset registry
-    (`freehold-agent-tools manage_agent`); the Runners-CP view reads the
-    console `/api/overview`. `w` opens the web console pre-authorized via a
-    single-use portal token.
+    toolset exposes. The Agents tab reads the authorized agent registry +
+    world facts folded into `/api/world` itself (served from the toolset's
+    durable state via the shared `agenttools.WorldStatus` assembly — the same
+    one `/mcp world_status` uses), so a logged-in box renders Agents/DATA/Certs
+    with no local agent-tools coords and no separate MCP hop; the Runners-CP
+    view reads the console `/api/overview`. `w` opens the web console
+    pre-authorized via a single-use portal token.
     **A login-only box (cp_url + cp_pubkey + operator, no local `[runner]`)
     reaches Running**: the boot gate treats a runnerless profile as having its
     runner reach satisfied and sources CP liveness from the console session

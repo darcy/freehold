@@ -53,7 +53,11 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       world_authorize_door / world_revoke_door actions (world_status
                       = the single inventory read: agents + the console's runners/DNS
                       + the deployer-side world facts (plane/certs/domains)
-                      registered at build; world_build = the CP runs its world stages
+                      registered at build. One assembly (agenttools.WorldStatus)
+                      feeds BOTH the console's public /api/world — what the TUI and
+                      `freehold world status` read, no local agent-tools coords — and
+                      the /mcp world_status tool for direct MCP callers; world_build =
+                      the CP runs its world stages
                       through the co-located runner)
                       + cmd/freehold-agent-tools (the CP's agent-management MCP
                       server; `mcp` is the stdio bridge the agent PODS fetch at boot
@@ -188,7 +192,7 @@ freehold                      # no args → the interactive TUI (bubbletea); a s
 freehold login                # root-free: CP address + operator nsec (NIP-98) → authorize,
 freehold                      #   seed a local connection profile from the CP, then END — just run `freehold`
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
-freehold world status         # the CP's single inventory (agents + runners + DNS)
+freehold world status         # the CP's single inventory (read via public /api/world)
 freehold world build          # trigger the CP's world-build (co-located runner)
 freehold world teardown       # the CP unwinds what it manages (relay+k3s LXCs first)
 freehold world migrate        # run the CP's verify-gated migrations

@@ -218,16 +218,54 @@ func (c *Client) request(method, path string, body interface{}) (json.RawMessage
 // box learns where the relay is and who the relay/CP trust without anything
 // that lived only on the lost box.
 type WorldSummary struct {
-	RelayURL         string `json:"relay_url"`
-	RelayWsURL       string `json:"relay_ws_url,omitempty"`
-	RelayPubkey      string `json:"relay_pubkey,omitempty"`
-	RelayHost        string `json:"relay_host,omitempty"`
-	CPURL            string `json:"cp_url"`
-	CPPubkey         string `json:"cp_pubkey"`
-	OperatorPubkey   string `json:"operator_pubkey,omitempty"`
-	AgentToolsURL    string `json:"agent_tools_url,omitempty"`
-	AgentToolsPubkey string `json:"agent_tools_pubkey,omitempty"`
+	RelayURL         string         `json:"relay_url"`
+	RelayWsURL       string         `json:"relay_ws_url,omitempty"`
+	RelayPubkey      string         `json:"relay_pubkey,omitempty"`
+	RelayHost        string         `json:"relay_host,omitempty"`
+	CPURL            string         `json:"cp_url"`
+	CPPubkey         string         `json:"cp_pubkey"`
+	OperatorPubkey   string         `json:"operator_pubkey,omitempty"`
+	AgentToolsURL    string         `json:"agent_tools_url,omitempty"`
+	AgentToolsPubkey string         `json:"agent_tools_pubkey,omitempty"`
 	Services         []WorldService `json:"services,omitempty"`
+	// Agents holds the authoritative CP agent registry served on /api/world;
+	// Facts holds the world facts (plane/certs/domains) as the raw object a
+	// box renders for DATA/Certs. Kept as raw so contract stays free of the
+	// control-plane agenttools types.
+	Agents  []AgentInfo     `json:"agents,omitempty"`
+	Runners []StatusRunner  `json:"runners,omitempty"`
+	DNS     []StatusDNS     `json:"dns,omitempty"`
+	Facts   json.RawMessage `json:"facts,omitempty"`
+}
+
+// StatusRunner is one CP runner line in the /api/world inventory.
+type StatusRunner struct {
+	Name        string `json:"name,omitempty"`
+	NostrPubkey string `json:"nostr_pubkey,omitempty"`
+	McpAddr     string `json:"mcp_addr,omitempty"`
+}
+
+// StatusDNS is one CP DNS record in the /api/world inventory.
+type StatusDNS struct {
+	Name string `json:"name,omitempty"`
+	IP   string `json:"ip,omitempty"`
+}
+
+// RunnersList returns the runners in the world inventory (may be empty when a
+// CP hasn't folded the inventory into /api/world).
+func (w *WorldSummary) RunnersList() []StatusRunner {
+	if w == nil {
+		return nil
+	}
+	return w.Runners
+}
+
+// DNSRecords returns the DNS records in the world inventory (may be empty).
+func (w *WorldSummary) DNSRecords() []StatusDNS {
+	if w == nil {
+		return nil
+	}
+	return w.DNS
 }
 
 // WorldService is the /api/world world-health row the CP serves: the recorded

@@ -12,13 +12,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"freehold/contract/client"
 	"freehold/contract/config"
-	"freehold/contract/console"
-	"freehold/platform/provisioning/drive"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/cli/flows"
-	"freehold/control-plane/cli/login"
+	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
 )
 
@@ -600,53 +597,41 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 	}
 }
 
-// buildAgents fills the Agents view from freehold-agent-tools `manage_agent` —
-// the CP-side MCP server's durable agent registry, the source of truth for
-// agents created through create_agent after 0.4.6 (the console's /api/agents
-// is empty; the toolset keeps its own registry). Signed as the operator (the
-// persisted nsec), who is a roster grant. Not logged in or no agent-tools
-// coords = a hint row, never a blank dashboard.
+// buildAgents fills the Agents view from the CP's /api/world — the same
+// single-inventory status the /mcp world_status tool shares. The agent registry
+// + world facts are served publicly by the console from the toolset's durable
+// authoritative state, so ANY logged-in box renders them from the CP with no
+// local agent-tools coords. Not logged in = a hint row, never a blank dashboard.
 func (m *Model) buildAgents(cfg *config.Config) {
 	m.Agents = nil
-	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
-		m.Agents = []AgentRow{{Name: "(no CP toolset)", Available: styleDim.Render("converge the world (build) to deploy freehold-agent-tools")}}
-		return
-	}
-	// Gated on the live console session (like readCpRunners), NOT a disk
-	// secret check: buildAgents is called from load() BEFORE the first frame,
-	// so at startup m.console == nil and we take this free hint path. The real
-	// agent-tools fetch happens after auto-login via refreshLocal().
+	// Gated on the live console session: buildAgents is called from load()
+	// BEFORE the first frame, so at startup m.console == nil and we take this
+	// free hint path. The real /api/world fetch happens after auto-login via
+	// refreshLocal().
 	if m.console == nil || m.console.client == nil {
 		m.Agents = []AgentRow{{Name: "(not logged into a console)", Available: styleDim.Render("press l to log in to see the CP agent roster")}}
+		m.Facts = nil
 		return
 	}
-	auth, err := flows.AgentAuth(oplogin.Dir())
+	w, err := m.console.client.World()
 	if err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		m.Agents = []AgentRow{{Name: "(world fetch failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		m.Facts = nil
 		return
 	}
-	mc, err := client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
-	if err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
-		return
-	}
-	raw, err := mc.CallText("world_status", map[string]interface{}{})
-	if err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
-		return
-	}
-	var status struct {
-		Agents []console.AgentInfo  `json:"agents"`
-		Facts  *agenttools.WorldFacts `json:"facts"`
-	}
-	if err := json.Unmarshal(raw, &status); err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
-		return
-	}
-	// The world facts ride the same world_status read — the DATA + Certs views
+	// The world facts ride the same /api/world read — the DATA + Certs views
 	// render from them on a management box.
-	m.Facts = status.Facts
-	for _, a := range status.Agents {
+	m.Facts = nil
+	if len(w.Facts) > 0 {
+		var facts agenttools.WorldFacts
+		if err := json.Unmarshal(w.Facts, &facts); err != nil {
+			m.Facts = nil
+			_ = err
+		} else {
+			m.Facts = &facts
+		}
+	}
+	for _, a := range w.Agents {
 		created := "just now"
 		if a.CreatedAt > 0 {
 			created = humanize(time.Since(time.Unix(int64(a.CreatedAt), 0)))
