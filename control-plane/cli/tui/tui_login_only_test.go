@@ -11,41 +11,6 @@ import (
 	oplogin "freehold/control-plane/cli/login"
 )
 
-// A login-only profile (cp_url + cp_pubkey + operator identity, NO [runner])
-// must still reach Running: liveness is the console session / reachability,
-// not a local provisioning runner. This is the fresh-box-after-0.4.7 path —
-// `freehold login` then `freehold`.
-func TestLoginOnlyRunnerProbeSatisfied(t *testing.T) {
-	cfg := &config.Config{
-		RelayURL: "https://relay.example",
-		CPURL:    "https://cp.example",
-		CpPubkey: "aa",
-		// Runner deliberately EMPTY: a login-only box has no deployed runner.
-	}
-	m := &Model{cfg: cfg}
-
-	// The boot "runner" probe on a login-only box (the same branch
-	// startBootActivity wires).
-	runnerProbe := func() (string, bool) {
-		if cfg.Runner.Addr == "" {
-			m.RunnerReach = true
-			return "no local runner (login-only — operating through the CP)", true
-		}
-		m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
-		return "", m.RunnerReach
-	}
-	detail, ok := runnerProbe()
-	if !ok {
-		t.Fatalf("login-only runner probe must be satisfied, got %q", detail)
-	}
-	if !m.RunnerReach {
-		t.Fatal("RunnerReach must be true on a login-only box (no local runner)")
-	}
-	if !contains(detail, "login-only") {
-		t.Errorf("detail should say login-only, got %q", detail)
-	}
-}
-
 // cpConsoleLive: with no session yet, a live CP (its challenge endpoint
 // reachable) reports up; a dead one reports down.
 func TestCpConsoleLiveReachability(t *testing.T) {
@@ -346,31 +311,36 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 	}
 }
 
-// The runner probe must satisfy RunnerReach so converged() reaches ModeRunning
-// for EVERY box: a management box is a no-op (true), an owner box sets it from
-// a reachability probe. Without it, an owner box would be stuck in Configure.
+// RunnerReach is now CP-driven for EVERY box: a session that has fetched the
+// CP's runner satisfies it (so converged() reaches ModeRunning), and a box
+// with no session yet is "awaiting CP" (not falsely converged). The box never
+// probes a local runner — a bootstrap box and a login box are identical.
 func TestRunnerProbeSatisfiesConverged(t *testing.T) {
-	mgmt := &config.Config{} // no runner
+	// No session yet: awaiting CP, not converged.
 	m := &Model{}
-	if _, ok := m.runnerProbe(mgmt); !ok || !m.RunnerReach {
-		t.Fatal("management box runner probe must set RunnerReach true")
+	if _, ok := m.runnerProbe(&config.Config{}); ok || m.RunnerReach {
+		t.Fatal("runner probe without a session must report awaiting CP (not set RunnerReach)")
 	}
-	if !converged("", true, true, m.RunnerReach) {
-		t.Fatal("management box should converge to Running when the CP is up")
+	if converged("", false, false, m.RunnerReach) {
+		t.Fatal("awaiting-CP runner must not converge (no session => CP also down)")
 	}
 
-	owner := &config.Config{}
-	owner.Runner.Addr = "127.0.0.1:1" // nothing listens
-	mo := &Model{}
-	mo.runnerProbe(owner)
-	if mo.RunnerReach {
-		t.Fatal("owner box with unreachable runner must not set RunnerReach")
+	// With a CP runner on /api/overview: RunnerReach true, converges.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/overview" {
+			w.Write([]byte(`{"console_pubkey":"aa","runners":[{"name":"proxmox-box","status":"active"}]}`))
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	ms := &Model{console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	if _, ok := ms.runnerProbe(&config.Config{}); !ok || !ms.RunnerReach {
+		t.Fatal("CP runner must set RunnerReach true")
 	}
-	if converged("127.0.0.1:1", true, true, false) {
-		t.Fatal("owner box with unreachable runner must not converge")
-	}
-	if !converged("127.0.0.1:1", true, true, true) {
-		t.Fatal("owner box should converge to Running when healthy+reachable")
+	if !converged("", true, true, ms.RunnerReach) {
+		t.Fatal("box with a CP runner must converge")
 	}
 }
 

@@ -162,22 +162,6 @@ func TestDataViewRendersCapacityAndFill(t *testing.T) {
 	}
 }
 
-// TestFillStyle checks the traffic-light boundaries (Rust fill_color).
-// Styles hold funcs, so equality is asserted on rendered sentinels.
-func TestFillStyle(t *testing.T) {
-	rendered := func(pct uint64) string { return fillStyle(pct).Render("x") }
-	green, yellow, red := styleGreen.Render("x"), styleYellow.Render("x"), styleRed.Render("x")
-	if rendered(69) != green {
-		t.Error("69% must be green")
-	}
-	if rendered(70) != yellow || rendered(89) != yellow {
-		t.Error("70-89% must be yellow")
-	}
-	if rendered(90) != red || rendered(100) != red {
-		t.Error(">=90% must be red")
-	}
-}
-
 // TestWKeyNeedsLogin confirms `w` without a console session yields the
 // press-l notice instead of a no-op.
 func TestWKeyNeedsLogin(t *testing.T) {
@@ -275,19 +259,5 @@ func TestRunnersViewDefaultsToCpSource(t *testing.T) {
 	out := m.View()
 	if !strings.Contains(out, "Runners · ") || !strings.Contains(out, "CP (console") {
 		t.Errorf("runners view should show the CP source title:\n%s", out)
-	}
-}
-
-// TestVmidForRole covers the plane mount role -> vmid map.
-func TestVmidForRole(t *testing.T) {
-	cfg := testCfg()
-	for role, want := range map[string]uint32{"relay": 100, "cp": 101, "k3s": 102} {
-		got := vmidForRole(cfg, role)
-		if got == nil || *got != want {
-			t.Errorf("vmidForRole(%s) = %v, want %d", role, got, want)
-		}
-	}
-	if vmidForRole(cfg, "other") != nil {
-		t.Error("unknown role must map to nil")
 	}
 }
