@@ -877,61 +877,12 @@ func (s *Spec) worldCert() error {
 	return nil
 }
 
-// ---- litellm on the CP (the two-leg box stageLitellm, CP-side) -------------
-//
-// Leg 1 (kube workloads, no operator secret): the master key + postgres pw are
-// CP-generated (first-run-wins, the k8s Secrets are canonical across rebuilds;
-// the master is read back for lockstep on reuse). The operator's provider key
-// is NOT here — it rides the co-located runner package.
-// Leg 2 (admin call, runner-decrypted): the model-registration curl runs
-// THROUGH the co-located runner with the litellm master + provider key
-// requested BY NAME — the runner decrypts, injects env, redacts output.
-
-// runnerHasSecret reports whether the co-located runner package inside the cp
-// LXC already carries a secret by name (the box build's stageLitellm seals the
-// litellm master/postgres/provider into the proxmox-box package, and deploy-cp
-// re-ships it into the guest — the runner loads it at boot).
-func (s *Spec) runnerHasSecret(name string) bool {
-	_, stateDir := s.cpGuestDirs()
-	runnerDir := filepath.Join(stateDir, "runner", s.RunnerTarget)
-	out, err := s.runOut(fmt.Sprintf("pct exec %d -- sh -c \"grep -q '\\\"%s\\\"' %s/secrets.json 2>/dev/null && echo HAVE || echo NONE\"", s.CpLxc, name, runnerDir), 30)
-	if err != nil {
-		return false
-	}
-	return strings.Contains(out, "HAVE")
-}
-
-// worldLiteLLM brings the litellm gateway up CP-side (the box stageLitellm
-// pair, driven through the co-located runner): apply the postgres + gateway
-// kube workloads, register the model, and seed the CPA pod's litellm key —
-// each exec requests its secrets BY NAME so the runner injects (and redacts)
-// the values and the audited cmd carries only the $REF. The co-located runner
-// package carries the litellm secrets (the box build's stageLitellm seals them
-// into the proxmox-box package, which deploy-cp re-ships into the guest; the
-// runner loads its package at boot — it is NEVER restarted mid-call, which
-// would kill the very process serving this world_build). Fails loudly when a
-// required secret is absent (no prior box build).
+// worldLiteLLM seeds the CPA pod's litellm key CP-side. The kube workloads
+// (postgres + gateway manifests) and model registration are OWNED by the
+// terraform module now (worldTerraform "apply" → kube-apply.sh); this leg only
+// mints the CPA's gateway master-key Secret first-run-wins from the injected
+// env. Runs after the terraform step so the gateway is already reachable.
 func (s *Spec) worldLiteLLM() error {
-	gwURL := "http://" + s.LitellmIP + ":31400"
-	// The runner requires the target's own credential AND every requested name
-	// to exist in its package — gate on presence so the failure is actionable.
-	for _, name := range []string{"litellm", "postgres-pw", "provider-key"} {
-		if !s.runnerHasSecret(name) {
-			return fmt.Errorf("litellm needs secret %q in the co-located runner package and none is present — run `freehold build` to seed it (the box stageLitellm seals it, deploy-cp re-ships it)", name)
-		}
-	}
-	// Leg 1: kube workloads — the k8s Secrets read the injected env by name
-	// (first-run-wins; the `||` guard preserves the canonical values).
-	if err := s.runSecrets(stages.LitellmManifestScript(s.K3sVmid), 420, "litellm", "postgres-pw"); err != nil {
-		return fmt.Errorf("litellm kube apply: %w", err)
-	}
-	// Leg 2: register the model through the co-located runner (its own
-	// ciphertext: master + provider-key) against the gateway's real NodePort.
-	if err := s.runSecrets(stages.LitellmRegisterScript(gwURL, agent.CpaLiteLLMModel), 120, "litellm", "provider-key"); err != nil {
-		return fmt.Errorf("litellm model registration: %w", err)
-	}
-	// The CPA's litellm key is the gateway master (the scoped-key follow-up
-	// stands); seed the pod's Secret first-run-wins from the injected env.
 	if err := s.runSecrets(agent.AgentLiteLLMKeyScript(s.K3sVmid, s.CpaName), 60, "litellm"); err != nil {
 		return fmt.Errorf("seed CPA litellm key: %w", err)
 	}
@@ -941,11 +892,10 @@ func (s *Spec) worldLiteLLM() error {
 // BuildWorldApply returns the CP's world-build/reconcile driver: it runs the
 // shared stage commands (internal/stages) through the co-located runner, so the
 // box can "login + trigger" the CP to (re)assert the world. Each step is
-// idempotent. Slice 2: re-assert the k3s durable local-path AND bring the relay
-// compose stack up if not running — the two stateful bring-up stages the CP can
-// own without any operator-side secret (k3s plans no secret; relay reconverge is
-// plain compose in the durable deploy dir). caddy/dns/litellm/cert extend it
-// toward the full CP-driven build.
+// idempotent. Substrate (plane + cp/relay/k3s LXCs) is ensured by the Go
+// staircases, then ADOPTED + the kube workloads OWNED by the embedded terraform
+// module (worldTerraform → kube-apply.sh); the overlay (agent-tools, DNS, the
+// CPA litellm key, caddy, cert) stays scripted but ordered here.
 func BuildWorldApply(spec *Spec) agent.WorldApply {
 	return func() (string, error) {
 		var report []string
@@ -990,7 +940,19 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "k3s substrate ready")
 		}
-		// 3.5. Re-read the guests' CURRENT vmids + IPs (a fresh world whose coords
+		// 3.5. Terraform A1: drive the substrate + kube workloads through the
+		// co-located runner. The exec-first module ADOPTS the plane + LXCs the
+		// steps above just ensured (adopt-if-missing, plan-clean) and OWNS the
+		// litellm/postgres kube workloads + model registration (kube-apply.sh),
+		// which the world_build below then no longer applies in Go. Secret
+		// discipline: litellm + provider-key ride the runner by name, never argv.
+		if spec.RelayHost != "" && spec.PlanePool != "" {
+			if err := spec.worldTerraform("apply"); err != nil {
+				return "", fmt.Errorf("world-build terraform: %w", err)
+			}
+			report = append(report, "terraform substrate + litellm/postgres applied")
+		}
+		// 3.5b. Re-read the guests' CURRENT vmids + IPs (a fresh world whose coords
 		// were cleared at teardown has 0 vmids; the boot steps just picked
 		// them). The DNS/caddy/litellm steps below consume both. Best-effort.
 		spec.resolveGuestVmids()

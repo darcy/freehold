@@ -25,6 +25,52 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.19] — the substrate + kube workloads are Terraform-managed (A1)
+
+Increment 5/6 of the CP-owned build (`roadmap/CP_OWNED_BUILD.md` Phase B): the
+durable-plane LXCs and the litellm/postgres kube workloads are driven through a
+real Terraform module instead of ad-hoc `pct`/`kubectl` shells with nothing but
+the CP's own idempotence. The module is executed-first (null_resource + the
+proven pct/kubectl scripts), embedded into the `cpbuild` package, and ADOPTS the
+same resources the CP creates — so `terraform plan` runs clean against the
+live world, and `terraform destroy` tears the kube layer + substrate LXCs down
+during teardown.
+
+### Added
+
+- **`cpbuild/terraform`** — the exec-first Terraform A1 module (embedded, so it
+  ships with the console): durable plane (`plane.sh`, mirrors
+  planebase/drive LVM ensure), the cp/relay/k3s LXCs with their `backup=1`
+  mounts (`lxc.sh`, mirrors `BootstrapProxmoxLxc`), k3s bring-up
+  (`k3s-bringup.sh`, reconciled: drops the stale `.243`, no hostname `k3s`),
+  and the litellm/postgres kube workloads (`kube-apply.sh`, now secret-based +
+  idempotent registration — removes the hardcoded `llmproxy-db-pass`). The
+  module's scripts are the same idempotent shapes the Go drivers produce, so
+  they adopt the existing world plan-clean. Replaces the drifted
+  `platform/terraform` leaf copy (superseded by the embedded module).
+- **`cpbuild.stageDeployTf` + `worldTerraform`** — ship the module to the box
+  at `/srv/data/freehold-tf` (0700) and drive `terraform apply` through the
+  co-located runner; the litellm keys ride the runner by name → `TF_VAR_*`
+  (never argv). Wired into `BuildWorldApply` after the substrate steps.
+- **Terraform teardown** — `teardown.Run` runs `terraform destroy` (the kube
+  workloads first, by depends_on order) before the k3s LXC is pct-destroyed;
+  the Go LXC stops/destroys then find the guests already gone (idempotent).
+  `tf.sh` tolerates a secret-less destroy exec.
+- **`worldLiteLLM` shrinks** to the CPA litellm-key seed — the kube manifests
+  + model registration now live in terraform (`kube-apply.sh`).
+
+### Notes
+
+- Exec-first (not the bpg/proxmox provider) was elected as the least-risk A1
+  per the plan's own clause: PVE is 9.2.2 and bpg 0.66+ removed the
+  tarball-create path (no `template_file_id`) that the live substrate was born
+  from. Converting the adopt-managed resources to real provider resources
+  (or the clone-based flow) is the named follow-up; the module is structured so
+  a provider can slot in without changing the executor.
+- The substrate LXC create path in Go remains the creator; terraform adopts +
+  manages + destroys. Moving creation fully into terraform (vmid allocation)
+  is a named follow-up.
+
 ## [0.5.18] — the boot checker is CP-driven and identical for every box
 
 The "checking the world" screen did **different work** on the build box vs a

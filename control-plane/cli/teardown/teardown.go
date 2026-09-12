@@ -35,6 +35,10 @@ const (
 	ScopeTenantData
 )
 
+// tfModuleDir is where the embedded terraform module lives ON the box (ships
+// there by the CP world_build's stageDeployTf); destroy runs it from there.
+const tfModuleDir = "/srv/data/freehold-tf"
+
 // String renders the scope for operator-facing output.
 func (s Scope) String() string {
 	switch s {
@@ -110,6 +114,7 @@ type Runner interface {
 	DestroyOneLxc(role string, vmid *uint32) ([]string, error)
 	DestroyDataset(tenant, domain, pool, kind, dataset string) (bool, error)
 	DestroyPool(vg, pool string) error
+	TerraformDestroy() ([]string, error)
 }
 
 // Exec runs one command through the runner and returns (ok, output).
@@ -225,6 +230,14 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 	// 2. destroy the targeted LXC(s).
 	switch scope {
 	case ScopeWholeWorld:
+		// 2.0 terraform destroys the kube workloads FIRST (they live inside the
+		// k3s guest) + the substrate LXCs; teardown's own pct stops/destroys
+		// below then find them already-gone and no-op (idempotent, guarded).
+		lines, err := r.TerraformDestroy()
+		if err != nil {
+			return "", err
+		}
+		say(lines...)
 		for _, m := range []string{"relay", "cp", "k3s"} {
 			managed := contains(cfg.Managed, m)
 			if !managed {
@@ -380,6 +393,31 @@ func (r *ExecRunner) DestroyPool(vg, pool string) error {
 		return fmt.Errorf("thin-pool removal for %s/%s failed:\n%s", vg, pool, out)
 	}
 	return nil
+}
+
+// TerraformDestroy runs the embedded terraform module's DESTROY on the
+// provisioning box through the runner. It must run BEFORE the k3s LXC is torn
+// down (the litellm/postgres kube workloads live inside that guest; the
+// depends_on chain destroys litellm_kube first, then the LXCs). destroy uses
+// stored state for its provisioner args, so no -var/secret is needed; it only
+// runs when a managed state file exists (a world never built via terraform has
+// none) — teardown's own pct stops/destroys then re-verify idempotently as the
+// guest is already gone. The durable plane has no destroy provisioner and
+// survives by design (the --data path handles datasets separately).
+func (r *ExecRunner) TerraformDestroy() ([]string, error) {
+	var log []string
+	ok, _ := r.Exec("test -f " + tfModuleDir + "/terraform.tfstate")
+	if !ok {
+		log = append(log, "terraform: no managed state on the box — skipping terraform destroy")
+		return log, nil
+	}
+	log = append(log, "terraform destroy (substrate + litellm/postgres kube workloads)")
+	ok, out := r.Exec("cd " + tfModuleDir + " && " + tfModuleDir + "/scripts/tf.sh destroy")
+	log = append(log, strings.TrimSpace(out))
+	if !ok {
+		return log, fmt.Errorf("terraform destroy failed:\n%s", out)
+	}
+	return log, nil
 }
 
 // Cfg is the teardown-input config surface.

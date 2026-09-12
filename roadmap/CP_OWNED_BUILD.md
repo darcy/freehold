@@ -140,12 +140,41 @@ roster, and which already owns the CP.
 
 ## Phasing
 
-- **Phase A** — Part 1 + 2: the `bootstrap`/`build` split + console-as-executor
-  (relay + agent-tools move into `build`). Ship the clean boundary + any-box
-  `build`. Verify live on the PVE host.
-- **Phase B** — Part 3: Terraform A1 substrate + litellm/postgres, driven by the
-  console executor from the start. Fix provider + stale IP; wire destroy into
-  teardown.
+- **Phase A — Part 1 + 2 (DONE, v0.5.14→v0.5.18):** the `bootstrap`/`build`
+  split + console-as-executor (relay + agent-tools move into `build`). Shipped
+  the clean boundary + any-box `build`. Verified live on the PVE host.
+- **Phase B — Part 3 (DONE, v0.5.19):** Terraform A1 substrate + litellm/postgres,
+  driven by the console executor. Elected exec-first (null_resource + the proven
+  pct/kubectl scripts) over the bpg/proxmox provider as the least-risk working
+  one per Part 3 (PVE 9.2.2; bpg 0.66+ dropped the tarball-create path the live
+  substrate was born from). The module is embedded in `cpbuild`, ships to the
+  box at `/srv/data/freehold-tf` (0700), ADOPTS the plane/LXCs the CP creates
+  (`terraform plan` clean), and `terraform destroy` tears the kube layer +
+  substrate down in teardown. Kube workloads (litellm/postgres) are
+  terraform-apply'd via `kube-apply.sh`; `worldLiteLLM` retained only the CPA
+  litellm-key seed.
+
+## Landing (Phase B shipped shape)
+
+The exec-first module lives in `control-plane/api/cpbuild/terraform/` (embedded,
+so it ships with the console); the drifted `platform/terraform` leaf is gone.
+Per-command surface:
+
+```
+freehold build      → BuildWorldApply: Go substrate steps, then worldTerraform("apply")
+                      (adopts plane + cp/relay/k3s LXCs + k3s bring-up + kube
+                      workloads + model registration), then the overlay (agent-tools,
+                      DNS, CPA litellm key, caddy, cert).
+freehold teardown   → teardown.Run: terraform destroy (kube first, by depends_on)
+                      BEFORE the k3s LXC pct-destroy; the Go stops/destroys then
+                      no-op (idempotent). The durable plane survives by design.
+```
+
+Named follow-ups (kept current; see AGENTS.md "Known gaps"): the module READS +
+manages + destroys but the LXC create path still lives in Go (terraform adopts);
+vmid allocation for a genuinely fresh box is therefore a follow-up; converting
+the adopt-managed resources to a real bpg provider (clone-based flow) remains
+the provider-integration follow-up.
 
 ## Acceptance
 
