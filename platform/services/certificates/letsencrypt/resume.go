@@ -177,6 +177,15 @@ func (r *Resume) place(po *pendingOrder) error {
 		return fmt.Errorf("present challenge: %w", err)
 	}
 	info := dns01.GetChallengeInfo(r.Domain, keyAuth)
+	// Post-lego's own dns01 precheck: wait for the challenge TXT to be served at
+	// the AUTHORITATIVE zone before the caller POSTs "ready" for LE to validate.
+	// Without this, LE can read a stale/negative-cached resolver and mark the
+	// authorization invalid before the record reaches it (the exact failure this
+	// freehold world hit: relay auth invalid, record visible at the authz NS but
+	// not at this box's recursive resolver).
+	if err := waitAuthoritativePropagation(info.EffectiveFQDN, info.Value, 3*time.Minute); err != nil {
+		return fmt.Errorf("dns-01 propagation: %w", err)
+	}
 	return r.persist(po, info.EffectiveFQDN)
 }
 

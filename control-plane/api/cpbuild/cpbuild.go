@@ -760,6 +760,10 @@ func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*c
 	}
 	issued, err := resume.Resolve(po)
 	if err != nil {
+		// The pending order is terminal (e.g. Let's Encrypt marked its
+		// authorization "invalid") - discarding the resumable state ensures the
+		// NEXT run begins a FRESH order instead of resuming a doomed one forever.
+		_ = os.Remove(statePath)
 		return nil, err
 	}
 	return issued, nil
