@@ -21,6 +21,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -831,15 +832,21 @@ func (e *rebuildEngine) handoffDNS() error {
 		if err := cert.SaveCreds(local, provider, env, seal, pub, "cert-dns-"+slot); err != nil {
 			return err
 		}
+		raw, err := os.ReadFile(local)
+		_ = os.Remove(local)
+		if err != nil {
+			return err
+		}
+		b64 := base64.StdEncoding.EncodeToString(raw)
 		remote := "/srv/data/cp/control-plane/world-secrets/dns-" + slot + ".json"
 		cp := *cfg.Lxc.Cp.Vmid
-		if ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p /srv/data/cp/control-plane/world-secrets'", cp), 30)); !ok {
-			_ = os.Remove(local)
-			return fmt.Errorf("mkdir CP world-secrets failed:\n%s", out)
-		}
-		ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct push %d %s %s", cp, local, remote), 60))
-		_ = os.Remove(local)
-		if !ok {
+		// The runner executes on the PVE HOST, but the sealed temp file was
+		// written on the BOX — `pct push <hostpath>` cannot see it (fails "failed
+		// to open ... for reading"). Ship the base64 IN the command and decode it
+		// INSIDE the CP, so the box-local file never needs to reach the host.
+		cmd := fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p /srv/data/cp/control-plane/world-secrets && printf %%s %s | base64 -d > %s && chmod 600 %s'",
+			cp, b64, remote, remote)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
 			return fmt.Errorf("ship %s DNS cred to the CP failed:\n%s", slot, out)
 		}
 		fmt.Fprintf(e.out, "  ✓ %s DNS credential handed off to the CP\n", slot)
