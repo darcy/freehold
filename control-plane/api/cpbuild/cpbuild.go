@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -184,6 +185,15 @@ func (s *Spec) worldDNS() error {
 	for _, r := range stages.DnsRecords(s.RelayHost, s.RelayIP, s.CpHost, s.CpIP, s.ProxyIP, s.LitellmIP) {
 		if err := s.run(stages.DnsAddCmd(s.CpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
 			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
+		}
+	}
+	// The resolver WILDCARD: all *.searchBase -> the proxy (Caddy) edge, so the
+	// dotted public hosts (relay.<base>, cp.<base>) resolve to TLS - never to a
+	// guest LXC (dnsmasq's bare `relay`/`cp` records would otherwise leak the
+	// guest IP into the FQDN answer and make the edge unreachable from the CP).
+	if searchBase != "" && s.ProxyIP != "" {
+		if err := s.run(stages.DnsApexCmd(s.CpLxc, binDir, stateDir, searchBase, config.StripCIDR(s.ProxyIP)), 120); err != nil {
+			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
 	router := s.guestNameserver()
@@ -760,10 +770,14 @@ func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*c
 	}
 	issued, err := resume.Resolve(po)
 	if err != nil {
-		// The pending order is terminal (e.g. Let's Encrypt marked its
-		// authorization "invalid") - discarding the resumable state ensures the
-		// NEXT run begins a FRESH order instead of resuming a doomed one forever.
-		_ = os.Remove(statePath)
+		// Only the terminal "authorization invalid" state justifies discarding
+		// the pending resumable order: resuming it can never succeed. A transient
+		// failure (a polling timeout, a flaky network read) must KEEP the order so
+		// the next run resumes the same order + challenge instead of minting a new
+		// ACME order (and risking rate limits) each time.
+		if errors.Is(err, cert.ErrAuthInvalid) {
+			_ = os.Remove(statePath)
+		}
 		return nil, err
 	}
 	return issued, nil

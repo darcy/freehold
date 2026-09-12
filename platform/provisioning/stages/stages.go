@@ -102,6 +102,18 @@ func DnsAddCmd(cpLxc uint32, binDir, stateDir, name, ip, source, searchBase stri
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }
 
+// DnsApexCmd is the pct exec that runs `freehold-console dns apex --apex <base>
+// --ip <proxy>` inside the CP: it sets the resolver WILDCARD (all subdomains of
+// the apex -> the proxy/Caddy IP) so the dotted public hosts (relay.<dom>,
+// cp.<dom>) resolve to the TLS edge - never to a guest LXC (dnsmasq's bare
+// guest records would otherwise leak the LXC IP into the FQDN query and break
+// the edge's reachability from the CP).
+func DnsApexCmd(cpLxc uint32, binDir, stateDir, apex, proxyIP string) string {
+	inner := fmt.Sprintf("'%s/freehold-console' 'dns' 'apex' --state-dir '%s' --apex '%s' --ip '%s'",
+		binDir, stateDir, apex, proxyIP)
+	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
+}
+
 // DnsPointCmd builds the two commands that point ONE guest at the CP resolver:
 // the PVE-managed `pct set --nameserver` (durable across guest reboots) and the
 // immediate resolv.conf rewrite (pct only regenerates it at the NEXT boot).

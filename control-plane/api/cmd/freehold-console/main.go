@@ -377,23 +377,53 @@ func cmdDNS(args []string) error {
 	fs := flag.NewFlagSet("dns", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "CP state dir")
 	domain := fs.String("domain", "", "search base (adds <name>.<domain>)")
+	apex := fs.String("apex", "", "resolver wildcard apex (all subdomains of apex -> --ip)")
+	apexIP := fs.String("ip", "", "resolver wildcard target IP (the proxy/Caddy edge)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
-	if len(rest) < 1 || rest[0] != "add" || len(rest) < 4 {
-		return fmt.Errorf("dns add <name> <ip> <source> [--domain <base>] [--state-dir DIR]")
+	if len(rest) < 1 {
+		return fmt.Errorf("dns <add NAME IP SOURCE|apex --apex BASE --ip PROXY> [--state-dir DIR]")
 	}
-	name, ip, source := rest[1], rest[2], rest[3]
 	store, err := state.Open(*stateDir)
 	if err != nil {
 		return fmt.Errorf("open state: %w", err)
 	}
-	if _, err := console.Upsert(store, name, ip, source); err != nil {
-		return err
+	switch rest[0] {
+	case "apex":
+		if *apex == "" || *apexIP == "" {
+			return fmt.Errorf("dns apex needs --apex BASE --ip PROXY")
+		}
+		if err := store.SetResolverWildcard(&state.DnsWildcard{
+			Apex: *apex, IP: *apexIP, Source: "world-build dns apex", CreatedAt: uint64(time.Now().Unix()),
+		}); err != nil {
+			return fmt.Errorf("set resolver wildcard: %w", err)
+		}
+		return syncDNS(store, *stateDir, *domain)
+	case "add":
+		if len(rest) < 4 {
+			return fmt.Errorf("dns add <name> <ip> <source> [--domain <base>] [--state-dir DIR]")
+		}
+		name, ip, source := rest[1], rest[2], rest[3]
+		if _, err := console.Upsert(store, name, ip, source); err != nil {
+			return err
+		}
+		if err := syncDNS(store, *stateDir, *domain); err != nil {
+			return err
+		}
+		fmt.Printf("dns %s -> %s\n", name, ip)
+		return nil
+	default:
+		return fmt.Errorf("dns: unknown verb %q (add|apex)", rest[0])
 	}
+}
+
+// syncDNS writes the dnsmasq addn-hosts + conf (with the resolver wildcard when
+// set) and reloads it in-process.
+func syncDNS(store *state.StateStore, stateDir, domain string) error {
 	snap := store.Snapshot()
-	rd := *domain
+	rd := domain
 	if rd == "" && snap.ResolverDomain != nil {
 		rd = *snap.ResolverDomain
 	}
@@ -403,12 +433,8 @@ func cmdDNS(args []string) error {
 		wid = &snap.ResolverWildcard.IP
 	}
 	write := func(path, body string) error { return os.WriteFile(path, []byte(body), 0o644) }
-	reload := func() error { return console.ReloadDnsmasq(*stateDir) }
-	if err := console.SyncResolver(*stateDir, snap.DNS, &rd, apex, wid, write, reload); err != nil {
-		return err
-	}
-	fmt.Printf("dns %s -> %s\n", name, ip)
-	return nil
+	reload := func() error { return console.ReloadDnsmasq(stateDir) }
+	return console.SyncResolver(stateDir, snap.DNS, &rd, apex, wid, write, reload)
 }
 
 func cmdProvision(args []string) error {
