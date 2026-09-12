@@ -735,14 +735,24 @@ func (e *rebuildEngine) runBuild() error {
 // master is read back from the canonical k8s Secret when the k3s node is up,
 // else minted (first-run-wins, preserved in the runner package).
 func (e *rebuildEngine) slimSeedLiteLLM() error {
+	cfg, _ := config.Load(e.f.configPath)
+	k3sVmid := uint32(0)
+	if cfg != nil && cfg.Lxc.K3s.Vmid != nil {
+		k3sVmid = *cfg.Lxc.K3s.Vmid
+	}
 	masterKey := ""
-	if cfg, _ := config.Load(e.f.configPath); cfg != nil && cfg.Lxc.K3s.Vmid != nil {
-		masterKey = e.litellmMasterKey(*cfg.Lxc.K3s.Vmid)
+	if k3sVmid != 0 {
+		masterKey = e.litellmMasterKey(k3sVmid)
 	}
 	if masterKey == "" {
 		masterKey = stages.GenSecretHex()
 	}
 	postgresPw := stages.GenSecretHex()
+	if k3sVmid != 0 {
+		if pw := e.litellmPostgresPw(k3sVmid); pw != "" {
+			postgresPw = pw // reuse the canonical password (first-run-wins)
+		}
+	}
 	runnerDir := filepath.Join(rbRunnerPkgs(), e.f.target)
 	reusing := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
 	providerKey := e.f.litellmProviderKey
@@ -2245,6 +2255,21 @@ func (e *rebuildEngine) litellmMasterKey(k3sVmid uint32) string {
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
 	if !ok {
 		return "" // a read failure is treated as "no canonical master yet" — a fresh run mints one
+	}
+	return strings.TrimSpace(out)
+}
+
+// litellmPostgresPw reads back the CANONICAL postgres password from the k8s
+// litellm-pg Secret so a rebuild REUSES it (first-run-wins): Postgres initializes
+// PGDATA against the first password, so a re-mint + SSA re-apply would rotate it
+// while Postgres still authenticates with the original — silently breaking
+// litellm's DB auth on the next pod restart. Empty on a fresh world -> mint.
+func (e *rebuildEngine) litellmPostgresPw(k3sVmid uint32) string {
+	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-pg -n litellm -o jsonpath='{.data.postgres-pw}' 2>/dev/null | base64 -d`,
+		k3sVmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return ""
 	}
 	return strings.TrimSpace(out)
 }
