@@ -9,6 +9,7 @@ package cpbuild
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -470,6 +471,173 @@ func (s *Spec) worldBootK3s(mounts []planebase.MountSpec) error {
 	return nil
 }
 
+// deployAgentTools ships + seeds + launches the CP's freehold-agent-tools
+// server IN the cp guest, so the console's world_build can bring up the
+// operator toolset itself (the robin-relay comes up first; the roster seed
+// needs it). The binary is already in the guest (bootstrap's deploy-cp ships
+// it); the server mints a durable identity, seeds its roster channel with the
+// operator + this console identity, is granted on the co-located runner, and
+// serve is launched. Idempotent (reused across reconciles).
+func (s *Spec) deployAgentTools() error {
+	binDir, stateDir := s.cpGuestDirs()
+	root := filepath.Dir(s.StateDir)
+	atState := filepath.Join(root, "agent-tools")
+	bin := binDir + "/freehold-agent-tools"
+
+	if err := s.run(fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p %s && chmod 700 %s'", s.CpLxc, atState, atState), 30); err != nil {
+		return fmt.Errorf("agent-tools mkdir state: %w", err)
+	}
+	if err := s.run(fmt.Sprintf("pct exec %d -- sh -c 'p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'", s.CpLxc, atState, atState), 30); err != nil {
+		return fmt.Errorf("agent-tools stop prior: %w", err)
+	}
+	out, err := s.runOut(fmt.Sprintf("pct exec %d -- %s identity --state-dir %s", s.CpLxc, bin, atState), 30)
+	if err != nil {
+		return fmt.Errorf("agent-tools identity: %w", err)
+	}
+	pubkey := strings.TrimSpace(out)
+	if len(pubkey) != 64 {
+		return fmt.Errorf("agent-tools identity readback not 64-hex: %q", pubkey)
+	}
+	if s.RelayLxc != 0 {
+		cmdLine := fmt.Sprintf("cd %s && docker compose exec -T relay buzz-admin add-member --pubkey %s", s.RelayCompose, pubkey)
+		if err := s.run(fmt.Sprintf("pct exec %d -- sh -c '%s'", s.RelayLxc, cmdLine), 120); err != nil {
+			return fmt.Errorf("relay member agent-tools: %w", err)
+		}
+	}
+	// The relay host must DIAL via the LAN URL (http://<relayHost>:3000, pinned
+	// into the cp guest's /etc/hosts so it reaches the just-booted relay before
+	// the Caddy edge exists) while the NIP-98 signature uses the PUBLIC URL.
+	// Resolve the relay's current IP (bootstrap did not boot the relay; this
+	// world_build just did).
+	relayIP := s.RelayIP
+	if relayIP == "" && s.RelayLxc != 0 {
+		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
+			for _, t := range strings.Fields(out) {
+				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
+					relayIP = config.StripCIDR(t)
+					break
+				}
+			}
+		}
+	}
+	if relayIP != "" && s.RelayHost != "" {
+		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
+		if err := s.run(pin, 30); err != nil {
+			return fmt.Errorf("pin relay host into cp: %w", err)
+		}
+	}
+	relayDial := "http://" + s.RelayHost + ":3000"
+	// Seed the server's channel + the operator + this console into its roster
+	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s,%s --name agent-tools",
+		bin, atState, relayDial, s.OwnerPub, s.Audience)
+	if s.RelayAuthURL != "" {
+		seedFlags += " --relay-auth-url " + s.RelayAuthURL
+	} else {
+		seedFlags += " --relay-auth-url " + s.RelayURL
+	}
+	if err := s.run(fmt.Sprintf("pct exec %d -- %s", s.CpLxc, seedFlags), 60); err != nil {
+		return fmt.Errorf("seed agent-tools roster: %w", err)
+	}
+	// Grant the server on the co-located runner (it applies agent pods).
+	if s.RunnerTarget != "" {
+		grant := fmt.Sprintf("%s/freehold-console grant %s --state-dir %s --pubkey %s",
+			binDir, s.RunnerTarget, stateDir, pubkey)
+		if err := s.run(fmt.Sprintf("pct exec %d -- %s", s.CpLxc, grant), 60); err != nil {
+			return fmt.Errorf("grant agent-tools on runner: %w", err)
+		}
+	}
+	serveFlags := fmt.Sprintf(
+		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-pubkey %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
+		atState, relayDial, s.RelayPK, s.RelayLxc, s.RelayCompose, s.K3sVmid,
+		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
+	if s.RelayAuthURL != "" {
+		serveFlags += " --relay-auth-url " + s.RelayAuthURL
+	} else {
+		serveFlags += " --relay-auth-url " + s.RelayURL
+	}
+	if s.RelayWS != "" {
+		serveFlags += " --relay-ws " + s.RelayWS
+	}
+	if s.LitellmBaseURL != "" {
+		serveFlags += " --litellm-base " + s.LitellmBaseURL
+	}
+	if s.PlanePool != "" {
+		serveFlags += " --plane-pool " + s.PlanePool
+	}
+	if s.PlaneKind != "" {
+		serveFlags += " --plane-kind " + s.PlaneKind
+	}
+	if s.ThinPool != "" {
+		serveFlags += " --thin-pool " + s.ThinPool
+	}
+	if s.SizeGB != 0 {
+		serveFlags += " --size-gb " + strconv.FormatUint(s.SizeGB, 10)
+	}
+	if s.PoolSizeGB != 0 {
+		serveFlags += " --pool-size-gb " + strconv.FormatUint(s.PoolSizeGB, 10)
+	}
+	if s.RootfsGB != 0 {
+		serveFlags += " --rootfs-gb " + strconv.FormatUint(uint64(s.RootfsGB), 10)
+	}
+	if s.MemoryMB != 0 {
+		serveFlags += " --memory-mb " + strconv.FormatUint(uint64(s.MemoryMB), 10)
+	}
+	if s.StorageName != "" {
+		serveFlags += " --storage " + s.StorageName
+	}
+	if s.RelayGW != "" {
+		serveFlags += " --relay-gw " + s.RelayGW
+	}
+	if s.Bridge != "" {
+		serveFlags += " --bridge " + s.Bridge
+	}
+	if s.SelfURL != "" {
+		serveFlags += " --self-url " + s.SelfURL
+	}
+	if s.CpLxc != 0 {
+		serveFlags += " --cp-lxc " + strconv.FormatUint(uint64(s.CpLxc), 10)
+	}
+	if s.ProxyIP != "" {
+		serveFlags += " --proxy-ip " + s.ProxyIP
+	}
+	if s.LitellmIP != "" {
+		serveFlags += " --litellm-ip " + s.LitellmIP
+	}
+	if s.RelayHost != "" {
+		serveFlags += " --relay-host " + s.RelayHost
+	}
+	if s.RelayIP != "" {
+		serveFlags += " --relay-ip " + s.RelayIP
+	}
+	if s.CpHost != "" {
+		serveFlags += " --cp-host " + s.CpHost
+	}
+	if s.CpIP != "" {
+		serveFlags += " --cp-ip " + s.CpIP
+	}
+	start := fmt.Sprintf(
+		"pct exec %d -- sh -c 'setsid nohup %s serve %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid'",
+		s.CpLxc, bin, serveFlags, atState, atState)
+	if err := s.run(start, 30); err != nil {
+		return fmt.Errorf("start agent-tools: %w", err)
+	}
+	// Poll until the serve endpoint answers (any HTTP code proves the listener
+	// is up; "000" means not yet bound).
+	up := false
+	for i := 0; i < 15; i++ {
+		code, err := s.runOut(fmt.Sprintf("pct exec %d -- curl -s -m 3 -o /dev/null -w %%{http_code} http://127.0.0.1:8089/mcp", s.CpLxc), 15)
+		if err == nil && strings.TrimSpace(code) != "000" {
+			up = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !up {
+		return fmt.Errorf("agent-tools serve did not answer within the poll window — check %s/serve.log", atState)
+	}
+	return nil
+}
+
 // ---- the edge cert on the CP (the box's F3 start/await pair, CP-side) ------
 //
 // Durable-reuse gate FIRST (read-only on the node, no LE order when a valid
@@ -533,11 +701,7 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	if !cert.CredExists(path) {
 		return "", nil, fmt.Errorf("no DNS provider credential on the CP at %s — run `freehold build` to hand it off (or the durable-reuse path serves an existing cert)", path)
 	}
-	id, err := flows.LoadIdentity(s.StateDir)
-	if err != nil {
-		return "", nil, err
-	}
-	secret, err := hex.DecodeString(id.EncSecretHex)
+	secret, err := s.consoleEncSecret()
 	if err != nil {
 		return "", nil, err
 	}
@@ -545,15 +709,30 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	return cert.LoadCreds(path, open, secret)
 }
 
+// consoleEncSecret returns the CP's encryption secret — the CONSOLE identity
+// (nested at <StateDir>/console/identity.json), the executor's own keypair, to
+// which the box seals the DNS/world secrets (handoffDNS) it opens in-memory for
+// cert issuance. The console's world_build owns this path (not agent-tools).
+func (s *Spec) consoleEncSecret() ([]byte, error) {
+	file := filepath.Join(s.StateDir, "console", "identity.json")
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return nil, err
+	}
+	return hex.DecodeString(id.EncSecretHex)
+}
+
 // issueCert runs the resumable DNS-01 issuance IN-PROCESS for one slot's host
 // (lego via internal/cert; the sealed DNS cred opened in memory), so a re-run
 // after a timeout RESUMES the same order instead of re-challenging.
 func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*cert.Issued, error) {
-	id, err := flows.LoadIdentity(s.StateDir)
-	if err != nil {
-		return nil, err
-	}
-	secret, err := hex.DecodeString(id.EncSecretHex)
+	secret, err := s.consoleEncSecret()
 	if err != nil {
 		return nil, err
 	}
@@ -793,6 +972,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build relay: %w", err)
 			}
 			report = append(report, "relay booted + stack deployed")
+		}
+		// 2.5. Deploy the operator toolset (freehold-agent-tools) once the relay
+		// it seeds its roster against is up — the console's world_build brings
+		// up agent-tools itself (no box-one / deploy-cp dependency).
+		if spec.CpLxc != 0 {
+			if err := spec.deployAgentTools(); err != nil {
+				return "", fmt.Errorf("world-build agent-tools: %w", err)
+			}
+			report = append(report, "agent-tools live")
 		}
 		// 3. The k3s substrate: boot the LXC if missing, install k3s inside it,
 		// and re-assert the durable local-path.
@@ -1041,6 +1229,15 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 	return func(name, purpose string) (string, error) {
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
+		}
+		// The k3s vmid (where the pod manifests apply) may be 0 for the server
+		// deployed BEFORE k3s was booted (the console world_build booted it);
+		// resolve it by hostname so apply targets the real guest.
+		if spec.K3sVmid == 0 {
+			spec.resolveGuestVmids()
+		}
+		if spec.K3sVmid == 0 {
+			return "", fmt.Errorf("create-agent %q: no k3s vmid recorded/resolvable to apply the pod", name)
 		}
 		// A DIFFERENT name that sanitizes to the CPA's pod would delete+reapply
 		// the CPA's pod; the CPA's own name is allowed (stageCpa dogfoods

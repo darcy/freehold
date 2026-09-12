@@ -44,8 +44,8 @@ import (
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
-	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
 	"freehold/control-plane/cli/flows"
+	oplogin "freehold/control-plane/cli/login"
 	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/stages"
 	"freehold/platform/services/certificates/letsencrypt"
@@ -143,63 +143,112 @@ func init() {
 }
 
 var buildCmd = &cobra.Command{Use: "build",
-	Short: "Bring the whole world up: CP-bring-up + trigger (the CP owns relay/k3s/storage/DNS/litellm/caddy/cert through its co-located runner)",
+	Short: "Bring the whole world up through the CP: login-gated trigger of the console's /api/world-build (the CP owns relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		f := rebuildFlags{}
-		f.addr, _ = cmd.Flags().GetString("addr")
-		f.target, _ = cmd.Flags().GetString("target")
-		f.host, _ = cmd.Flags().GetString("host")
-		f.domain, _ = cmd.Flags().GetString("domain")
-		f.relayDomain, _ = cmd.Flags().GetString("relay-domain")
-		f.cpDomain, _ = cmd.Flags().GetString("cp-domain")
-		f.operatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
-		f.operatorIdentity, _ = cmd.Flags().GetString("operator-identity")
-		f.agentName, _ = cmd.Flags().GetString("agent-name")
-		f.sizeGB, _ = cmd.Flags().GetUint64("size-gb")
-		f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
-		f.thinPool, _ = cmd.Flags().GetString("thin-pool")
-		f.noK3s, _ = cmd.Flags().GetBool("no-k3s")
-		f.noLitellm, _ = cmd.Flags().GetBool("no-litellm")
-		f.litellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
-		if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
-			f.litellmProviderKey = v
-		}
-		f.rootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
-		f.memoryMB, _ = cmd.Flags().GetUint32("memory-mb")
-		f.relayGw, _ = cmd.Flags().GetString("relay-gw")
-		f.storageName, _ = cmd.Flags().GetString("storage")
-		f.bridge, _ = cmd.Flags().GetString("bridge")
-		f.proxyIP, _ = cmd.Flags().GetString("proxy-ip")
-		f.configPath, _ = cmd.Flags().GetString("config")
-		f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
-		f.yes, _ = cmd.Flags().GetBool("yes")
-		f.resetDNS, _ = cmd.Flags().GetBool("reset-dns")
-		f.manageDNS, _ = cmd.Flags().GetBool("manage-dns")
-		f.manageDNSExplicit = cmd.Flags().Changed("manage-dns")
-		// Smooth rebuild: pull any omitted value from the stored config so a
-		// rebuild is not forced to re-enter the operator key, relay/CP hosts,
-		// thin-pool, etc.
-		if err := applyConfigDefaults(&f, f.configPath); err != nil {
-			return err
-		}
-		// Forget any stored DNS provider credentials so the build re-asks for
-		// them (e.g. the stored one is stale/wrong from prior testing).
-		if f.resetDNS {
-			clearStoredDNSCreds()
-			fmt.Fprintln(cmd.OutOrStdout(), "  (cleared stored DNS provider credentials — the build will ask for them again)")
-		}
-		// The ONE static IP (the proxy/Caddy node) must be CIDR — pct create's
-		// net0=ip= wants host/prefix; relay/cp/k3s LXCs are DHCP behind it.
-		if f.proxyIP != "" && !strings.Contains(f.proxyIP, "/") {
-			return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", f.proxyIP)
-		}
-
-		eng, err := newRebuildEngine(f)
+		eng, err := setupBuild(cmd)
 		if err != nil {
 			return err
 		}
-		return eng.runSlim()
+		return eng.runBuild()
 	},
+}
+
+var bootstrapCmd = &cobra.Command{Use: "bootstrap",
+	Short: "Box one only: create the CP (door -> cp LXC + console + co-located runner + DNS creds) and STOP — then `freehold build` (from ANY box after login) brings up the world through the CP",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		eng, err := setupBuild(cmd)
+		if err != nil {
+			return err
+		}
+		return eng.runBootstrap()
+	},
+}
+
+func init() {
+	registerBuildFlags(buildCmd)
+	registerBuildFlags(bootstrapCmd)
+}
+
+func registerBuildFlags(cmd *cobra.Command) {
+	cmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
+	cmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
+	cmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
+	cmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
+	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
+	cmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — REQUIRED, never derived")
+	cmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
+	cmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
+	cmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
+	cmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
+	cmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
+	cmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
+	cmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC (defaults to the full world — relay/cp/k3s/litellm/CPA; stages reconcile idempotently and skip what is already present)")
+	cmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
+	cmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
+	cmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for the proxy's STATIC guest IP (unused with DHCP)")
+	cmd.Flags().String("storage", "local-lvm", "PVE LXC storage (relay/k3s boots)")
+	cmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge (relay/k3s boots)")
+	cmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
+	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
+	cmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24) — the ONE static address; relay/CP hosts resolve to it. Absent => DHCP")
+	cmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
+	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
+	cmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
+	cmd.Flags().Bool("reset-dns", false, "Forget any stored DNS provider credentials so the build prompts for them again")
+	cmd.Flags().Bool("manage-dns", false, "Opt-in: freehold MANAGEs the world's DNS — creates/updates relay/cp <domain> A records -> the proxy IP on your provider (currently Cloudflare only), using the same credential the Let's Encrypt cert will reuse. Interactive runs ask when omitted; --yes requires this flag")
+}
+
+func setupBuild(cmd *cobra.Command) (*rebuildEngine, error) {
+	f := rebuildFlags{}
+	f.addr, _ = cmd.Flags().GetString("addr")
+	f.target, _ = cmd.Flags().GetString("target")
+	f.host, _ = cmd.Flags().GetString("host")
+	f.domain, _ = cmd.Flags().GetString("domain")
+	f.relayDomain, _ = cmd.Flags().GetString("relay-domain")
+	f.cpDomain, _ = cmd.Flags().GetString("cp-domain")
+	f.operatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
+	f.operatorIdentity, _ = cmd.Flags().GetString("operator-identity")
+	f.agentName, _ = cmd.Flags().GetString("agent-name")
+	f.sizeGB, _ = cmd.Flags().GetUint64("size-gb")
+	f.poolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
+	f.thinPool, _ = cmd.Flags().GetString("thin-pool")
+	f.noK3s, _ = cmd.Flags().GetBool("no-k3s")
+	f.noLitellm, _ = cmd.Flags().GetBool("no-litellm")
+	f.litellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
+	if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
+		f.litellmProviderKey = v
+	}
+	f.rootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
+	f.memoryMB, _ = cmd.Flags().GetUint32("memory-mb")
+	f.relayGw, _ = cmd.Flags().GetString("relay-gw")
+	f.storageName, _ = cmd.Flags().GetString("storage")
+	f.bridge, _ = cmd.Flags().GetString("bridge")
+	f.proxyIP, _ = cmd.Flags().GetString("proxy-ip")
+	f.configPath, _ = cmd.Flags().GetString("config")
+	f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
+	f.yes, _ = cmd.Flags().GetBool("yes")
+	f.resetDNS, _ = cmd.Flags().GetBool("reset-dns")
+	f.manageDNS, _ = cmd.Flags().GetBool("manage-dns")
+	f.manageDNSExplicit = cmd.Flags().Changed("manage-dns")
+	// Smooth rebuild: pull any omitted value from the stored config so a
+	// rebuild is not forced to re-enter the operator key, relay/CP hosts,
+	// thin-pool, etc.
+	if err := applyConfigDefaults(&f, f.configPath); err != nil {
+		return nil, err
+	}
+	// Forget any stored DNS provider credentials so the build re-asks for
+	// them (e.g. the stored one is stale/wrong from prior testing).
+	if f.resetDNS {
+		clearStoredDNSCreds()
+		fmt.Fprintln(cmd.OutOrStdout(), "  (cleared stored DNS provider credentials — the build will ask for them again)")
+	}
+	// The ONE static IP (the proxy/Caddy node) must be CIDR — pct create's
+	// net0=ip= wants host/prefix; relay/cp/k3s LXCs are DHCP behind it.
+	if f.proxyIP != "" && !strings.Contains(f.proxyIP, "/") {
+		return nil, fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", f.proxyIP)
+	}
+
+	return newRebuildEngine(f)
 }
 
 // applyConfigDefaults fills any omitted rebuild flag from the stored config, so
@@ -241,35 +290,6 @@ func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
 		f.manageDNS = true
 	}
 	return nil
-}
-
-func init() {
-	buildCmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
-	buildCmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
-	buildCmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
-	buildCmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
-	buildCmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
-	buildCmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — REQUIRED, never derived")
-	buildCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — console admin + relay owner (REQUIRED)")
-	buildCmd.Flags().String("operator-identity", "", "Operator identity dir to record in the config (optional)")
-	buildCmd.Flags().String("agent-name", "freehold", "The CPA's display name in Buzz (the agent the operator names at install; default 'freehold')")
-	buildCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
-	buildCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
-	buildCmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in — the name of an EXISTING pool to reuse, or a NEW name to carve (then carved at --pool-size-gb). Absent => interactive prompt, or reuse-detected/carve-default under --yes")
-	buildCmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC (defaults to the full world — relay/cp/k3s/litellm/CPA; stages reconcile idempotently and skip what is already present)")
-	buildCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
-	buildCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
-	buildCmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for the proxy's STATIC guest IP (unused with DHCP)")
-	buildCmd.Flags().String("storage", "local-lvm", "PVE LXC storage (relay/k3s boots)")
-	buildCmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge (relay/k3s boots)")
-	buildCmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
-	buildCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
-	buildCmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24) — the ONE static address; relay/CP hosts resolve to it. Absent => DHCP")
-	buildCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
-	buildCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
-	buildCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
-	buildCmd.Flags().Bool("reset-dns", false, "Forget any stored DNS provider credentials so the build prompts for them again")
-	buildCmd.Flags().Bool("manage-dns", false, "Opt-in: freehold MANAGEs the world's DNS — creates/updates relay/cp <domain> A records -> the proxy IP on your provider (currently Cloudflare only), using the same credential the Let's Encrypt cert will reuse. Interactive runs ask when omitted; --yes requires this flag")
 }
 
 // rebuildFlags is the command's collected answers.
@@ -462,8 +482,8 @@ func rbServeLog() string   { return filepath.Join(freeholdHome(), "installer", "
 
 // ---- the pipeline ---------------------------------------------------------
 
-func (e *rebuildEngine) runSlim() error {
-	fmt.Fprintf(e.out, "building world %s (CP-bring-up + trigger — the CP owns relay/k3s/DNS/litellm/caddy/cert)\n", e.f.relayDomain)
+func (e *rebuildEngine) runBootstrap() error {
+	fmt.Fprintf(e.out, "creating the CP at %s (door -> cp LXC + console + co-located runner + DNS creds; then run `freehold build` from any box)\n", e.f.relayDomain)
 
 	// 1. the ops agent identity + the door (same as run()).
 	ensureAgentIdentity(rbOpsDir())
@@ -576,17 +596,6 @@ func (e *rebuildEngine) runSlim() error {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ cp LXC booted + recorded")
-	fmt.Fprintln(e.out, "  · booting the relay LXC (create → docker; can take minutes)…")
-	if err := e.stageBootstrap("relay"); err != nil {
-		return err
-	}
-	if _, err := e.stageRecordLxc("relay"); err != nil {
-		return err
-	}
-	if err := e.stageDeployRelay(); err != nil {
-		return err
-	}
-	fmt.Fprintf(e.out, "  ✓ relay live at https://%s\n", e.f.relayDomain)
 
 	// 10. deploy the CP + its co-located runner (the relay IP is now recorded,
 	// so the CP guest pins the domain for pre-Caddy relay ops).
@@ -595,49 +604,15 @@ func (e *rebuildEngine) runSlim() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
 
-	// 11. deploy freehold-agent-tools (the trigger surface + world_build home).
-	// Its seed/roster dial the relay DOMAIN (buzz keys the community to the
-	// Host header) — re-pin the relay LAN IP into the CP guest's /etc/hosts so
-	// that dial reaches the relay directly, pre-Caddy (a DHCP re-lease between
-	// the relay boot/record and here would otherwise leave a stale pin).
-	if err := e.pinRelayInCp(); err != nil {
-		return err
-	}
-	if err := e.stageDeployAgentTools(); err != nil {
-		return err
-	}
-
 	// 12. hand the world's secrets to the CP: the DNS provider creds sealed to
 	// the agent-tools identity (world_build's cert issue path reads them).
 	if err := e.handoffDNS(); err != nil {
 		return err
 	}
 
-	// 13. TRIGGER world_build — the CP brings up the whole world through its
-	// co-located runner.
-	if err := e.triggerWorldBuild(); err != nil {
-		return err
-	}
-
 	// 14. record the post-world coordinates (relay/k3s coords + litellm/caddy
 	// coords world_build established) so the config + TUI + teardown agree.
 	if err := e.recordPostWorld(); err != nil {
-		return err
-	}
-	// 14.5 register the deployer-side world facts onto the CP (plane/certs/
-	// domains) so a management/login-only box renders DATA + Certs from
-	// world_status instead of needing the deployer's local config + probes.
-	if err := e.registerWorldFacts(); err != nil {
-		return err
-	}
-
-	// 15. the CPA + created-agent reconcile (through the CP toolset, the audited
-	// create path).
-	if err := e.stageCpa(); err != nil {
-		return err
-	}
-	fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
-	if err := e.reconcileCreatedAgents(); err != nil {
 		return err
 	}
 
@@ -654,16 +629,102 @@ func (e *rebuildEngine) runSlim() error {
 
 	fmt.Fprintf(e.out, `
   ╭─────────────────────────────────────────────────────────╮
+  │             The control plane is up (bootstrap)          │
+  ╰─────────────────────────────────────────────────────────╯
+
+  control plane:  https://%s
+  relay domain:   %s
+  runner:         serving on %s
+  operator pk:    %s
+
+  The CP is created. Now run `+"`freehold build`"+` from ANY box after
+  `+"`freehold login`"+` — the CP brings up relay/agent-tools/k3s/DNS/litellm/
+  caddy/cert through its own co-located runner.
+`, e.f.cpDomain, e.f.relayDomain, e.f.addr, e.f.operatorPubkey)
+	return nil
+}
+
+// runBuild triggers the CP-owned world bring-up (the console's /api/world-build,
+// which runs the shared cpbuild engine through the co-located runner) and then
+// does the box-side bookkeeping — identical from box one or a fresh box two
+// after login (drive-through-CP). The relay + agent-tools + k3s + litellm +
+// caddy + cert all come up HERE, CP-side; bootstrap only created the CP.
+func (e *rebuildEngine) runBuild() error {
+	cfg, err := config.Load(e.f.configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if cfg == nil || cfg.CPURL == "" {
+		return fmt.Errorf("no CP configured — run `freehold bootstrap` first (an operator box only), then `freehold login` here")
+	}
+	secStr, err := oplogin.SecretHex()
+	if err != nil {
+		return fmt.Errorf("no operator identity — run `freehold login` first: %v", err)
+	}
+	key, err := oplogin.NsecToSecret(secStr)
+	if err != nil {
+		return fmt.Errorf("operator secret invalid: %v", err)
+	}
+	// The console is reachable at its LAN IP BEFORE the world's Caddy edge
+	// (k3s) exists — the very thing build brings up. Use the recorded cp IP
+	// when present (box one post-bootstrap / a LAN box); otherwise fall back
+	// to the public CP URL (a remote box, world already up).
+	loginURL := cfg.CPURL
+	if cfg.Lxc.Cp.Ip != nil {
+		loginURL = "http://" + config.StripCIDR(*cfg.Lxc.Cp.Ip) + ":8080"
+	}
+	client, err := oplogin.Login(loginURL, key)
+	if err != nil {
+		return fmt.Errorf("console login at %s: %v", loginURL, err)
+	}
+	fmt.Fprintf(e.out, "building world %s through the CP…\n", cfg.RelayHost())
+	report, err := client.WorldBuild()
+	if err != nil {
+		return fmt.Errorf("world_build (console /api/world-build): %v", err)
+	}
+	fmt.Fprintf(e.out, "CP world_build report:\n%s\n", report)
+
+	// Box-side bookkeeping (world coords are the same on every box) is the
+	// DRIVING box's job: it drives the runner (record LXC coords) + the CP
+	// toolset (facts/CPA/agent reconcile) as its ops identity. A THIN client
+	// box (box two — no local runner/agent-ops) just triggered the CP-owned
+	// build; the CP already holds everything, so skip with a note rather than
+	// fail the build for bookkeeping the CP owns.
+	owner := cfg.Runner.Addr != "" && cfg.Runner.Pubkey != ""
+	if owner {
+		if err := e.recordPostWorld(); err != nil {
+			return err
+		}
+		if _, err := os.Stat(filepath.Join(rbOpsDir(), "identity.json")); err == nil {
+			if err := e.registerWorldFacts(); err != nil {
+				return err
+			}
+			if err := e.stageCpa(); err != nil {
+				return err
+			}
+			fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
+			if err := e.reconcileCreatedAgents(); err != nil {
+				return err
+			}
+		}
+	} else {
+		fmt.Fprintln(e.out, "  (thin client box: the CP already owns coords + facts + CPA/agent reconcile — skipping box-side bookkeeping)")
+	}
+	if err := e.finalSave(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
+	fmt.Fprintf(e.out, `
+  ╭─────────────────────────────────────────────────────────╮
   │                    Freehold is up                      │
   ╰─────────────────────────────────────────────────────────╯
 
   relay:          https://%s
-  control plane:  https://%s
-  runner:         serving on %s
+  control plane:  %s
   operator pk:    %s
-  (the CP owns relay/k3s/storage/DNS/litellm/caddy/cert — a fresh box only
-   needs: freehold login → freehold)
-`, e.f.relayDomain, e.f.cpDomain, e.f.addr, e.f.operatorPubkey)
+  (every box drives the world through the CP; a fresh box only needs
+   `+"`freehold login`"+` then `+"`freehold build`"+`)
+`, cfg.RelayHost(), cfg.CPURL, e.f.operatorPubkey)
 	return nil
 }
 
@@ -713,39 +774,36 @@ func (e *rebuildEngine) slimSeedLiteLLM() error {
 	return nil
 }
 
-// agentToolsEncPubkey returns the agent-tools identity's ENCRYPTION pubkey —
-// read from the deployed server IN THE cp LXC via its own `identity --enc-pubkey`
-// subcommand (the private enc secret NEVER leaves the CP; only the derived
-// pubkey is returned). It is the recipient the box seals the world's secrets to
-// for the hand-off (world_build opens them with the same identity's enc secret,
-// in-process).
-func (e *rebuildEngine) agentToolsEncPubkey() ([]byte, error) {
+// handoffDNS ships the world's DNS provider creds (relay + cp slots) to the CP,
+// sealed to the agent-tools identity via the established cert.SaveCreds record,
+// under the CP's world-secrets dir (world_build's cert issue path opens them).
+func (e *rebuildEngine) consoleEncPubkey() ([]byte, error) {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
-		return nil, fmt.Errorf("no cp coords for the agent-tools hand-off")
+		return nil, fmt.Errorf("no cp coords for the console hand-off")
 	}
 	ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf(
-		"pct exec %d -- sh -c '/srv/data/cp/bin/freehold-agent-tools identity --state-dir /srv/data/cp/agent-tools --enc-pubkey'",
+		"pct exec %d -- sh -c '/srv/data/cp/bin/freehold-console identity --state-dir /srv/data/cp/control-plane --enc-pubkey'",
 		*cfg.Lxc.Cp.Vmid), 30))
 	if !ok {
-		return nil, fmt.Errorf("agent-tools enc pubkey unreadable in the cp LXC:\n%s", out)
+		return nil, fmt.Errorf("console enc pubkey unreadable in the cp LXC:\n%s", out)
 	}
 	pk := strings.TrimSpace(out)
 	if len(pk) != 64 {
-		return nil, fmt.Errorf("agent-tools enc pubkey readback not 64-hex: %q", pk)
+		return nil, fmt.Errorf("console enc pubkey readback not 64-hex: %q", pk)
 	}
 	return hex.DecodeString(pk)
 }
 
 // handoffDNS ships the world's DNS provider creds (relay + cp slots) to the CP,
-// sealed to the agent-tools identity via the established cert.SaveCreds record,
-// under the CP's world-secrets dir (world_build's cert issue path opens them).
+// sealed to the CONSOLE identity (the console is the CP build executor, whose
+// world_build cert issue path opens them) under the console's world-secrets dir.
 func (e *rebuildEngine) handoffDNS() error {
 	cfg, err := config.Load(e.f.configPath)
 	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
 		return fmt.Errorf("no cp coords for the DNS hand-off")
 	}
-	pub, err := e.agentToolsEncPubkey()
+	pub, err := e.consoleEncPubkey()
 	if err != nil {
 		return err
 	}
@@ -763,9 +821,9 @@ func (e *rebuildEngine) handoffDNS() error {
 		if err := cert.SaveCreds(local, provider, env, seal, pub, "cert-dns-"+slot); err != nil {
 			return err
 		}
-		remote := "/srv/data/cp/agent-tools/world-secrets/dns-" + slot + ".json"
+		remote := "/srv/data/cp/control-plane/world-secrets/dns-" + slot + ".json"
 		cp := *cfg.Lxc.Cp.Vmid
-		if ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p /srv/data/cp/agent-tools/world-secrets'", cp), 30)); !ok {
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p /srv/data/cp/control-plane/world-secrets'", cp), 30)); !ok {
 			_ = os.Remove(local)
 			return fmt.Errorf("mkdir CP world-secrets failed:\n%s", out)
 		}
@@ -775,27 +833,6 @@ func (e *rebuildEngine) handoffDNS() error {
 			return fmt.Errorf("ship %s DNS cred to the CP failed:\n%s", slot, out)
 		}
 		fmt.Fprintf(e.out, "  ✓ %s DNS credential handed off to the CP\n", slot)
-	}
-	return nil
-}
-
-// pinRelayInCp (re-)pins the relay LAN IP into the CP guest's /etc/hosts so
-// the agent-tools seed/roster dial `http://<relayDomain>:3000` directly,
-// pre-Caddy (buzz keys the community to the Host header — a raw IP gets
-// "no community is configured for this host"). Idempotent (grep -Fq guard);
-// a DHCP re-lease between the relay boot/record and here is corrected.
-func (e *rebuildEngine) pinRelayInCp() error {
-	cfg, err := config.Load(e.f.configPath)
-	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.Relay.Ip == nil {
-		return fmt.Errorf("no cp/relay coords to pin the relay host")
-	}
-	relayIP := config.StripCIDR(*cfg.Lxc.Relay.Ip)
-	host := cfg.RelayHost()
-	cmd := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"",
-		*cfg.Lxc.Cp.Vmid, host, relayIP, host)
-	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
-	if !ok {
-		return fmt.Errorf("pin the relay host into the cp LXC failed:\n%s", out)
 	}
 	return nil
 }
@@ -1760,7 +1797,7 @@ func parseStorageBackend(out string) string {
 // operator owns the addressing + the proxy target); absent => DHCP and the
 // real coordinate is read back + recorded after boot.
 func (e *rebuildEngine) stageBootstrap(role string) error {
-	args := []string{"bootstrap",
+	args := []string{"provision",
 		"--kind", "proxmox-lxc",
 		"--role", role,
 		"--target", e.f.target,
@@ -1984,6 +2021,7 @@ func (e *rebuildEngine) stageDeployCp() error {
 		"--runner-binary", e.bins.ReleaseRun,
 		"--runner-package", rbRunnerPkgs() + "/" + e.f.target,
 		"--operator-pubkey", e.f.operatorPubkey,
+		"--agent-tools-binary", e.bins.ReleaseAgentTools,
 	}
 	// The relay signing pubkey is the /api/world trust anchor a fresh login box
 	// seeds — read it from the relay's own compose .env (deterministic, unlike
@@ -2032,6 +2070,7 @@ func (e *rebuildEngine) worldConfigJSON(cfg *config.Config) string {
 		StateDir:       "",
 		RelayURL:       cfg.RelayURL,
 		RelayAuthURL:   cfg.RelayURL,
+		RelayPK:        derefStrPtr(cfg.RelayPubkey),
 		RelayWS:        cfg.RelayWsURL,
 		RelayHost:      cfg.RelayHost(),
 		RelayIP:        config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip)),
@@ -2599,131 +2638,6 @@ func callAgentToolsText(mc *client.McpClient, tool string, args map[string]inter
 	}
 	t, _ := env.Result.Content[0]["text"].(string)
 	return t, nil
-}
-
-// stageDeployAgentTools ships + seeds + launches the CP's freehold-agent-tools
-// MCP server (after the CP + co-located runner + relay + DNS/Caddy are up), and
-// records its coords so stageCpa/reconcile can call it. The server's roster is
-// seeded with the build/ops + operator identities, and the server is granted on
-// the CP's co-located runner so it can apply agent pods.
-func (e *rebuildEngine) stageDeployAgentTools() error {
-	cfg, err := config.Load(e.f.configPath)
-	if err != nil {
-		return err
-	}
-	if cfg == nil {
-		return fmt.Errorf("no config at %s", e.f.configPath)
-	}
-	// Fresh-build path: deploy-cp ran BEFORE agent-tools existed, so the CP
-	// serve does not yet record the toolset coords. After the deploy below we
-	// re-run deploy-cp (idempotent — stops the prior serve, re-ships, restarts
-	// WITH the new flags) so /api/world serves them for a future login box. On
-	// rebuild the coords survive in config, stageDeployCp passed them up front,
-	// and this re-deploy is skipped.
-	hadCoords := cfg.AgentToolsURL != "" && cfg.AgentToolsPubkey != ""
-	if cfg.Lxc.Cp.Vmid == nil {
-		return fmt.Errorf("need cp coords to deploy agent-tools")
-	}
-	binDir, stateDir, err := e.cpGuestDirs()
-	if err != nil {
-		return err
-	}
-	root := filepath.Dir(stateDir)
-	agentToolsState := filepath.Join(root, "agent-tools")
-
-	auth, err := flows.AgentAuth(rbOpsDir())
-	if err != nil {
-		return err
-	}
-	dclient, err := client.New(client.ConnectURL(e.f.addr), auth, cfg.Runner.Pubkey)
-	if err != nil {
-		return err
-	}
-	opsPK, err := loadRPubkey(rbOpsDir())
-	if err != nil {
-		return err
-	}
-	grantsCSV := strings.Join([]string{opsPK, cfg.OperatorPubkey}, ",")
-	litellmBase := ""
-	if cfg.Litellm.URL != "" {
-		litellmBase = strings.TrimSuffix(cfg.Litellm.URL, "/")
-	}
-	cpaName := cfg.CPAName
-	if cpaName == "" {
-		cpaName = agent.DefaultCPAName
-	}
-	cpIP := ""
-	if cfg.Lxc.Cp.Ip != nil {
-		cpIP = config.StripCIDR(*cfg.Lxc.Cp.Ip)
-	}
-	res, err := cpdeploy.DeployAgentTools(dclient, e.f.target, &cpdeploy.DeployAgentToolsSpec{
-		LXc:                cfg.Lxc.Cp.Vmid,
-		BinDir:             binDir,
-		StateDir:           stateDir,
-		AgentToolsBinary:   e.bins.ReleaseAgentTools,
-		AgentToolsStateDir: agentToolsState,
-		BindAddr:           "0.0.0.0:8089",
-		// The agent-tools serve's OWN relay ops (roster, seed, create-agent
-		// publish) use the relay's LAN-REACHABLE DOMAIN URL — the CP guest's
-		// /etc/hosts (deploy-cp pins it) maps the domain to the relay LXC IP,
-		// so it works BEFORE the Caddy edge (world_build deploys it later) AND
-		// the buzz Host header is the configured community domain (a raw-IP
-		// Host gets "no community is configured for this host"). The pods dial
-		// the PUBLIC --relay-ws (unchanged below).
-		RelayURL:     "http://" + cfg.RelayHost() + ":3000",
-		RelayAuthURL: cfg.RelayURL,
-		RelayPubkey:  derefStrPtr(cfg.RelayPubkey),
-		RelayWS:      cfg.RelayWsURL,
-		RelayHost:    cfg.RelayHost(),
-		RelayIP:      config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip)),
-		CpHost:       cfg.CPHost(),
-		CpIP:         config.StripCIDR(derefStrPtr(cfg.Lxc.Cp.Ip)),
-		RelayLxc:     cfg.Lxc.Relay.Vmid,
-		RelayCompose: stages.RelayComposeDir,
-		K3sVmid:      derefU32(cfg.Lxc.K3s.Vmid),
-		CpLxc:        cfg.Lxc.Cp.Vmid,
-		ProxyIP:      config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
-		LiteLLMIP:    cfg.Litellm.Host,
-		RunnerAddr:   "127.0.0.1:8787",
-		RunnerPubkey: cfg.Runner.Pubkey,
-		RunnerTarget: cfg.Runner.Target,
-		RunnerName:   cfg.Runner.Target,
-		CpaName:      cpaName,
-		OwnerPubkey:  cfg.OperatorPubkey,
-		LiteLLMBase:  litellmBase,
-		PlanePool:    derefStrPtr(cfg.Plane.Backend),
-		PlaneKind:    derefStrPtr(cfg.Plane.BackendKind),
-		ThinPool:     derefStrPtr(cfg.Plane.ThinPool),
-		SizeGB:       e.f.sizeGB,
-		PoolSizeGB:   e.f.poolSizeGB,
-		RootfsGB:     e.f.rootfsGB,
-		MemoryMB:     e.f.memoryMB,
-		Storage:      e.f.storageName,
-		RelayGW:      e.f.relayGw,
-		Bridge:       e.f.bridge,
-		SelfURL:      "http://" + cpIP + ":8089",
-		GrantsCSV:    grantsCSV,
-	})
-	if err != nil {
-		return fmt.Errorf("deploy agent-tools: %w", err)
-	}
-	if cpIP == "" {
-		return fmt.Errorf("no cp IP recorded to reach the agent-tools server")
-	}
-	cfg.AgentToolsURL = fmt.Sprintf("http://%s:8089", cpIP)
-	cfg.AgentToolsPubkey = res.Pubkey
-	if err := cfg.Save(e.f.configPath); err != nil {
-		return err
-	}
-	fmt.Fprintf(e.out, "  ✓ freehold-agent-tools live on the CP (audience %s)\n", res.Pubkey[:12])
-
-	if !hadCoords {
-		fmt.Fprintln(e.out, "  · re-running deploy-cp to record the agent-tools coords on the CP serve…")
-		if err := e.stageDeployCp(); err != nil {
-			return fmt.Errorf("re-deploy-cp to record agent-tools coords: %w", err)
-		}
-	}
-	return nil
 }
 
 func derefStrPtr(p *string) string {

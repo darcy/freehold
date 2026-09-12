@@ -154,6 +154,9 @@ var deployCpCmd = &cobra.Command{
 		if wc, _ := cmd.Flags().GetString("world-config"); wc != "" {
 			spec.WorldConfig = optOf(wc)
 		}
+		if ab, _ := cmd.Flags().GetString("agent-tools-binary"); ab != "" {
+			spec.AgentToolsBinary = optOf(ab)
+		}
 		res, err := cpdeploy.DeployCp(c, target, spec)
 		if err != nil {
 			return err
@@ -184,6 +187,7 @@ func init() {
 	deployCpCmd.Flags().String("agent-tools-url", "", "The CP's freehold-agent-tools MCP URL (http://<cp-ip>:8089) — served on /api/world for a fresh login box")
 	deployCpCmd.Flags().String("agent-tools-pubkey", "", "The agent-tools server's Nostr pubkey (the audience of its roster) — paired with --agent-tools-url")
 	deployCpCmd.Flags().String("world-config", "", "cpbuild.Coords JSON: the world coords the console needs to be the CP build executor (bound as the console's /api/world-build engine)")
+	deployCpCmd.Flags().String("agent-tools-binary", "", "LOCAL freehold-agent-tools binary to ship so the console's world_build can deploy it")
 	deployCpCmd.Flags().String("lxc", "", "Deploy INTO this LXC on the target — the CP lives in its OWN guest, a different LXC than the relay's by default (omitted = the target host)")
 	deployCpCmd.Flags().String("runner-binary", "", "LOCAL path of the built freehold-runner binary (co-locates the CP's own runner: ship + systemd unit + adopt + self-grant)")
 	deployCpCmd.Flags().String("runner-package", "", "LOCAL dir of an EXISTING runner package to co-locate + adopt")
@@ -193,8 +197,8 @@ func init() {
 
 // --- bootstrap ---
 
-var bootstrapCmd = &cobra.Command{
-	Use:   "bootstrap",
+var provisionCmd = &cobra.Command{
+	Use:   "provision",
 	Short: "C2/A2: bootstrap-provision a target through a provisioning runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		common := readCommonFlags(cmd)
@@ -281,29 +285,29 @@ var bootstrapCmd = &cobra.Command{
 }
 
 func init() {
-	addCommonFlags(bootstrapCmd, nil)
-	bootstrapCmd.Flags().String("target", "proxmox-box", "Target to drive provisioning through (a runner targeting the PVE host for proxmox-lxc, the vultr runner for vultr-vps)")
-	bootstrapCmd.Flags().String("role", "relay", "Role of this target: 'relay' or 'cp' — the LXC name is derived from the domain: <normalized-domain>-relay / -cp (--name is gone)")
-	bootstrapCmd.Flags().Uint32("vmid", 0, "LXC vmid (proxmox-lxc; must be >= 100 when given; omitted = the driver picks the lowest free id via `pct list`)")
-	bootstrapCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB (proxmox-lxc)")
-	bootstrapCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB (proxmox-lxc)")
-	bootstrapCmd.Flags().String("template", "", "LXC template name in storage 'local'; auto-detect when omitted")
-	bootstrapCmd.Flags().String("storage", "local-lvm", "LXC storage (proxmox-lxc)")
-	bootstrapCmd.Flags().String("bridge", "vmbr0", "LXC network bridge (proxmox-lxc)")
-	bootstrapCmd.Flags().String("lxc-ip", "", "STATIC guest IP (CIDR) + gateway for Proxmox-on-Cloud-Compute hosts")
-	bootstrapCmd.Flags().String("lxc-gw", "", "")
-	bootstrapCmd.Flags().StringArray("mount", nil, "Durable-plane dataset mount baked into `pct create` (repeatable), shape `<dataset>:<guest-path>` — the \"born on the plane\" reference")
-	bootstrapCmd.Flags().String("region", "atl", "Vultr region (vultr-vps)")
-	bootstrapCmd.Flags().String("plan", "vc2-1c-1gb", "Vultr plan (vultr-vps)")
-	bootstrapCmd.Flags().Uint32("os-id", 1743, "Vultr OS id (vultr-vps; Debian 12 = 1743)")
-	bootstrapCmd.Flags().String("location", "fsn1", "Hetzner location (hetzner-vps)")
-	bootstrapCmd.Flags().String("server-type", "cx22", "Hetzner server type (hetzner-vps)")
-	bootstrapCmd.Flags().String("image", "ubuntu-22.04", "Hetzner OS image (hetzner-vps)")
-	bootstrapCmd.Flags().Bool("destroy", false, "Destroy the VPS after verifying (vultr-vps/hetzner-vps; for tests/cleanup)")
-	bootstrapCmd.Flags().String("operator-pubkey", "", "The OPERATOR's Nostr pubkey (64-hex) — relay invite (create-new) / attach auth (attach-existing) + console admin seed (fail-closed: required at bootstrap)")
-	bootstrapCmd.Flags().String("domain", "", "The relay's identity DOMAIN (never an IP): the install BLOCKS (A4) until it resolves to the provisioned target's IP")
-	bootstrapCmd.Flags().Uint64("domain-wait-secs", 300, "Seconds to wait for the domain to resolve to the target IP (A4)")
-	bootstrapCmd.Flags().String("kind", "", "Target kind: proxmox-lxc | vultr-vps | hetzner-vps")
+	addCommonFlags(provisionCmd, nil)
+	provisionCmd.Flags().String("target", "proxmox-box", "Target to drive provisioning through (a runner targeting the PVE host for proxmox-lxc, the vultr runner for vultr-vps)")
+	provisionCmd.Flags().String("role", "relay", "Role of this target: 'relay' or 'cp' — the LXC name is derived from the domain: <normalized-domain>-relay / -cp (--name is gone)")
+	provisionCmd.Flags().Uint32("vmid", 0, "LXC vmid (proxmox-lxc; must be >= 100 when given; omitted = the driver picks the lowest free id via `pct list`)")
+	provisionCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB (proxmox-lxc)")
+	provisionCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB (proxmox-lxc)")
+	provisionCmd.Flags().String("template", "", "LXC template name in storage 'local'; auto-detect when omitted")
+	provisionCmd.Flags().String("storage", "local-lvm", "LXC storage (proxmox-lxc)")
+	provisionCmd.Flags().String("bridge", "vmbr0", "LXC network bridge (proxmox-lxc)")
+	provisionCmd.Flags().String("lxc-ip", "", "STATIC guest IP (CIDR) + gateway for Proxmox-on-Cloud-Compute hosts")
+	provisionCmd.Flags().String("lxc-gw", "", "")
+	provisionCmd.Flags().StringArray("mount", nil, "Durable-plane dataset mount baked into `pct create` (repeatable), shape `<dataset>:<guest-path>` — the \"born on the plane\" reference")
+	provisionCmd.Flags().String("region", "atl", "Vultr region (vultr-vps)")
+	provisionCmd.Flags().String("plan", "vc2-1c-1gb", "Vultr plan (vultr-vps)")
+	provisionCmd.Flags().Uint32("os-id", 1743, "Vultr OS id (vultr-vps; Debian 12 = 1743)")
+	provisionCmd.Flags().String("location", "fsn1", "Hetzner location (hetzner-vps)")
+	provisionCmd.Flags().String("server-type", "cx22", "Hetzner server type (hetzner-vps)")
+	provisionCmd.Flags().String("image", "ubuntu-22.04", "Hetzner OS image (hetzner-vps)")
+	provisionCmd.Flags().Bool("destroy", false, "Destroy the VPS after verifying (vultr-vps/hetzner-vps; for tests/cleanup)")
+	provisionCmd.Flags().String("operator-pubkey", "", "The OPERATOR's Nostr pubkey (64-hex) — relay invite (create-new) / attach auth (attach-existing) + console admin seed (fail-closed: required at bootstrap)")
+	provisionCmd.Flags().String("domain", "", "The relay's identity DOMAIN (never an IP): the install BLOCKS (A4) until it resolves to the provisioned target's IP")
+	provisionCmd.Flags().Uint64("domain-wait-secs", 300, "Seconds to wait for the domain to resolve to the target IP (A4)")
+	provisionCmd.Flags().String("kind", "", "Target kind: proxmox-lxc | vultr-vps | hetzner-vps")
 }
 
 func mustStr(cmd *cobra.Command, name string) string {

@@ -407,6 +407,25 @@ func (c *Client) PortalURL() (string, error) {
 	return c.base + "/api/auth/portal/" + v.Token, nil
 }
 
+// WorldBuild triggers the CP-owned world bring-up (/api/world-build) and
+// returns the stage report. The console drives the shared cpbuild engine
+// through its co-located runner — the drive-through-CP build a thin box uses.
+// The build runs for minutes, so this switches to a long client timeout.
+func (c *Client) WorldBuild() (string, error) {
+	c.hc = &http.Client{Timeout: 20 * time.Minute}
+	raw, err := c.request(http.MethodPost, "/api/world-build", nil)
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Report string `json:"report"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", fmt.Errorf("world-build response: %w", err)
+	}
+	return v.Report, nil
+}
+
 // DnsRecord mirrors the console's DNS record row (C0 resolver).
 type DnsRecord struct {
 	Name      string `json:"name"`

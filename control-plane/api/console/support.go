@@ -24,6 +24,34 @@ func osWriteFile(path string, body []byte) error {
 // <stateDir>/console/identity.json, minting it on first serve (the Rust
 // Console::load_or_create behavior — a keypair is NEVER shipped, it is born on
 // the box). Returns the secret + pubkey.
+// ConsoleEncPubkey returns the console identity's X25519 ENCRYPTION pubkey
+// (hex) from <stateDir>/console/identity.json — the audience the box seals the
+// DNS/world secrets to so the console's world_build (cert issuance) can open
+// them in memory. Mirrors flows.LoadIdentity's enc key but for the console's
+// own identity layout.
+func ConsoleEncPubkey(stateDir string) (string, error) {
+	file := filepath.Join(stateDir, "console", "identity.json")
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return "", err
+	}
+	sec, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return "", err
+	}
+	pub, err := crypto.X25519PublicKey(sec)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(pub), nil
+}
+
 func EnsureConsoleIdentity(stateDir string) (secret []byte, pubkey string, err error) {
 	dir := filepath.Join(stateDir, "console")
 	file := filepath.Join(dir, "identity.json")

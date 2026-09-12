@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ type DeployCpSpec struct {
 	AgentToolsURL    *string
 	AgentToolsPubkey *string
 	WorldConfig      *string // cpbuild.Coords JSON (bounds the console as the CP build executor)
+	AgentToolsBinary *string // local freehold-agent-tools binary, shipped so the console's world_build can deploy it
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -137,6 +139,21 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	if err := shipFile(clientConn, target, spec, spec.BinaryPath,
 		spec.BinDir+"/freehold-console", "console binary"); err != nil {
 		return nil, err
+	}
+	// Ship the agent-tools binary too, so the console's world_build (cpbuild
+	// deployAgentTools) can bring up the operator toolset itself in the guest.
+	if spec.AgentToolsBinary != nil && *spec.AgentToolsBinary != "" {
+		// A RUNNING agent-tools serve (the world brought it up) holds the
+		// binary — stop it first or the overwrite fails/size-mismatches.
+		atState := filepath.Join(spec.StateDir, "..", "agent-tools")
+		stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
+		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
+			return nil, err
+		}
+		if err := shipFile(clientConn, target, spec, *spec.AgentToolsBinary,
+			spec.BinDir+"/freehold-agent-tools", "agent-tools binary"); err != nil {
+			return nil, err
+		}
 	}
 
 	adminFlag := ""
