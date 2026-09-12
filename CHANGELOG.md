@@ -28,23 +28,33 @@ list is current-state and kept there rather than duplicated here.
 ## [0.5.20] — per-service Terraform + Omarchy-style script migrations
 
 The infra slice settles on single sources of truth. The kube workloads graduate
-from shell here-docs to **real `kubernetes`-provider resources** (`postgres.tf` /
-`litellm.tf` / `caddy.tf` — the deterministic static files that define each
-service), with the substrate still exec-first `null_resource` shell. Migrations
+from shell here-docs to **declarative `kubernetes_manifest` (server-side apply)
+resources** (`postgres.tf` / `litellm.tf` / `caddy.tf` — the deterministic
+static files that define each service; SSA so a `kubernetes_persistent_volume_claim`
+can't serialize-deadlock against local-path's `WaitForFirstConsumer`), with the
+substrate still exec-first `null_resource` shell. Migrations
 move from Go closures in `BuildMigrator` to **versioned script files**
 (Omarchy's `<epoch>.sh` + `<epoch>.verify.sh`), run ascending via `bash` on the
 CP against a durable ledger. Dead reconciled-duplicate stage builders
 (`K3sInstallScript`/`K3sLocalPathDurableScript`/`LitellmManifestScript`/
 `CaddyManifestScript` + manifests) are deleted; the shell (`k3s-bringup.sh`) is
 now the single owner of k3s install, and the per-service `.tf` files are the
-single owner of the service definitions.
+single owner of the service definitions. Live verification on the PVE host also
+fixed pre-existing blockers that kept the world from deploying: the relay bundle
+pins minio images Docker Hub now denies (re-pointed to quay.io), k3s disables
+traefik/servicelb so Caddy's hostNetwork can bind 80/443, the local-path
+nodePathMap uses the node wildcard, the postgres password is read back
+first-run-wins on rebuild (litellm/rebuild.go), and the world-build DNS step now
+drives a `freehold-console dns add` subcommand (the rust `control-plane` binary
+is gone).
 
 ### Added
 - **`postgres.tf` / `litellm.tf` / `caddy.tf`** — the service definitions as
-  `kubernetes` (Deployment/Service/PVC/ConfigMap/Secret) resources. Secret
-  VALUES arrive as runner-injected env → `TF_VAR_*` (never argv) and ride the
-  0600 state (option A); the k8s Secrets are first-run-wins
-  (`lifecycle { ignore_changes = [data] }`). Model registration stays an event
+  `kubernetes_manifest` (server-side apply) resources: Deployment/Service/PVC/
+  ConfigMap/Secret. Secret VALUES arrive as runner-injected env → `TF_VAR_*`
+  (never argv) and ride the 0600 state (option A); first-run-wins is enforced at
+  the Go layer (master-key + postgres-pw read back from the canonical Secret on
+  rebuild, never re-minted). Model registration stays an event
   (null_resource local-exec; the provider key rides env, never state).
 - **Two-phase apply + kubeconfig leg** — `cpbuild.tfRun` applies the substrate
   via `-target` (`TF_NO_SECRETS=1`) so k3s comes up, then `stageKubeconfig`
