@@ -45,6 +45,12 @@ resource "kubernetes_manifest" "caddy_deploy" {
     metadata   = { name = "caddy", namespace = "caddy" }
     spec = {
       replicas = 1
+      # hostNetwork binds 80/443 on the node - a RollingUpdate can never bring the
+      # new pod up while the old one holds the ports, so the rollout wedges at
+      # 0/1 available. RE-typed: delete the old pod first, then start the new.
+      strategy = {
+        type = "Recreate"
+      }
       selector = { matchLabels = { app = "caddy" } }
       template = {
         metadata = { labels = { app = "caddy" } }
