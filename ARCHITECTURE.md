@@ -348,7 +348,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     **`platform/agents/`** carries named agents — `freehold/prompt.md` (the
     CPA's purpose, embedded by the `platform/agents` Go package and shipped
     by the control plane) and the agent prompt/creation specs that grow over
-    time; **`platform/terraform/`** holds the IaC the CP executes.
+    time; the CP-owned build's IaC is the exec-first Terraform A1 module
+    embedded in **`control-plane/api/cpbuild/terraform/`** (shipped by the
+    console to the box at `/srv/data/freehold-tf`).
 
 ### `platform/agents/freehold/prompt.md` (the CPA's purpose)
 
