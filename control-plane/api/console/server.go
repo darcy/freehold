@@ -257,9 +257,13 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 	services := []WorldServiceJSON{}
 	if relayURL != nil {
 		up, detail := false, "co-located relay"
-		if snap.RelayURL != nil {
-			up, detail = answered(*snap.RelayURL, false)
-		}
+		// Probe the relay through the PUBLIC edge (the proxy/Caddy IP is static),
+		// NOT the recorded LAN dial: the relay LXC is DHCP, so its recorded LAN IP
+		// goes stale every time the lease re-issues after a rebuild, and a probe
+		// against a dead IP reports the relay down even though the relay + edge
+		// are serving (the box reaches https://<relayHost> => 200). The proxy IP is
+		// the stable host every box resolves the public relay to.
+		up, detail = answered(*relayURL, false)
 		services = append(services, WorldServiceJSON{Name: "relay", Kind: "relay", URL: *relayURL, Up: up, Detail: detail})
 	}
 	if s.PublicOrigin != nil && *s.PublicOrigin != "" {
