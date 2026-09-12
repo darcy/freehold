@@ -9,6 +9,7 @@ package cpbuild
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -483,7 +484,7 @@ func (s *Spec) deployAgentTools() error {
 	atState := filepath.Join(root, "agent-tools")
 	bin := binDir + "/freehold-agent-tools"
 
-	if err := s.run(fmt.Sprintf("pct exec %d -- mkdir -p %s && chmod 700 %s", s.CpLxc, atState, atState), 30); err != nil {
+	if err := s.run(fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p %s && chmod 700 %s'", s.CpLxc, atState, atState), 30); err != nil {
 		return fmt.Errorf("agent-tools mkdir state: %w", err)
 	}
 	if err := s.run(fmt.Sprintf("pct exec %d -- sh -c 'p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'", s.CpLxc, atState, atState), 30); err != nil {
@@ -503,12 +504,36 @@ func (s *Spec) deployAgentTools() error {
 			return fmt.Errorf("relay member agent-tools: %w", err)
 		}
 	}
+	// The relay host must DIAL via the LAN URL (http://<relayHost>:3000, pinned
+	// into the cp guest's /etc/hosts so it reaches the just-booted relay before
+	// the Caddy edge exists) while the NIP-98 signature uses the PUBLIC URL.
+	// Resolve the relay's current IP (bootstrap did not boot the relay; this
+	// world_build just did).
+	relayIP := s.RelayIP
+	if relayIP == "" && s.RelayLxc != 0 {
+		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
+			for _, t := range strings.Fields(out) {
+				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
+					relayIP = config.StripCIDR(t)
+					break
+				}
+			}
+		}
+	}
+	if relayIP != "" && s.RelayHost != "" {
+		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
+		if err := s.run(pin, 30); err != nil {
+			return fmt.Errorf("pin relay host into cp: %w", err)
+		}
+	}
+	relayDial := "http://" + s.RelayHost + ":3000"
 	// Seed the server's channel + the operator + this console into its roster
-	// (the durable seed; the roster is then the relay-signed source).
 	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s,%s --name agent-tools",
-		bin, atState, s.RelayURL, s.OwnerPub, s.Audience)
+		bin, atState, relayDial, s.OwnerPub, s.Audience)
 	if s.RelayAuthURL != "" {
 		seedFlags += " --relay-auth-url " + s.RelayAuthURL
+	} else {
+		seedFlags += " --relay-auth-url " + s.RelayURL
 	}
 	if err := s.run(fmt.Sprintf("pct exec %d -- %s", s.CpLxc, seedFlags), 60); err != nil {
 		return fmt.Errorf("seed agent-tools roster: %w", err)
@@ -522,11 +547,13 @@ func (s *Spec) deployAgentTools() error {
 		}
 	}
 	serveFlags := fmt.Sprintf(
-		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-pubkey %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s",
-		atState, s.RelayURL, s.RelayPK, s.RelayLxc, s.RelayCompose, s.K3sVmid,
-		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub)
+		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-pubkey %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
+		atState, relayDial, s.RelayPK, s.RelayLxc, s.RelayCompose, s.K3sVmid,
+		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
 	if s.RelayAuthURL != "" {
 		serveFlags += " --relay-auth-url " + s.RelayAuthURL
+	} else {
+		serveFlags += " --relay-auth-url " + s.RelayURL
 	}
 	if s.RelayWS != "" {
 		serveFlags += " --relay-ws " + s.RelayWS
@@ -589,9 +616,9 @@ func (s *Spec) deployAgentTools() error {
 		serveFlags += " --cp-ip " + s.CpIP
 	}
 	start := fmt.Sprintf(
-		"setsid nohup %s serve %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
-		bin, serveFlags, atState, atState)
-	if err := s.run(fmt.Sprintf("pct exec %d -- %s", s.CpLxc, start), 30); err != nil {
+		"pct exec %d -- sh -c 'setsid nohup %s serve %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid'",
+		s.CpLxc, bin, serveFlags, atState, atState)
+	if err := s.run(start, 30); err != nil {
 		return fmt.Errorf("start agent-tools: %w", err)
 	}
 	// Poll until the serve endpoint answers (any HTTP code proves the listener
@@ -674,11 +701,7 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	if !cert.CredExists(path) {
 		return "", nil, fmt.Errorf("no DNS provider credential on the CP at %s — run `freehold build` to hand it off (or the durable-reuse path serves an existing cert)", path)
 	}
-	id, err := flows.LoadIdentity(s.StateDir)
-	if err != nil {
-		return "", nil, err
-	}
-	secret, err := hex.DecodeString(id.EncSecretHex)
+	secret, err := s.consoleEncSecret()
 	if err != nil {
 		return "", nil, err
 	}
@@ -686,15 +709,30 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	return cert.LoadCreds(path, open, secret)
 }
 
+// consoleEncSecret returns the CP's encryption secret — the CONSOLE identity
+// (nested at <StateDir>/console/identity.json), the executor's own keypair, to
+// which the box seals the DNS/world secrets (handoffDNS) it opens in-memory for
+// cert issuance. The console's world_build owns this path (not agent-tools).
+func (s *Spec) consoleEncSecret() ([]byte, error) {
+	file := filepath.Join(s.StateDir, "console", "identity.json")
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return nil, err
+	}
+	return hex.DecodeString(id.EncSecretHex)
+}
+
 // issueCert runs the resumable DNS-01 issuance IN-PROCESS for one slot's host
 // (lego via internal/cert; the sealed DNS cred opened in memory), so a re-run
 // after a timeout RESUMES the same order instead of re-challenging.
 func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*cert.Issued, error) {
-	id, err := flows.LoadIdentity(s.StateDir)
-	if err != nil {
-		return nil, err
-	}
-	secret, err := hex.DecodeString(id.EncSecretHex)
+	secret, err := s.consoleEncSecret()
 	if err != nil {
 		return nil, err
 	}
@@ -1191,6 +1229,15 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 	return func(name, purpose string) (string, error) {
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
+		}
+		// The k3s vmid (where the pod manifests apply) may be 0 for the server
+		// deployed BEFORE k3s was booted (the console world_build booted it);
+		// resolve it by hostname so apply targets the real guest.
+		if spec.K3sVmid == 0 {
+			spec.resolveGuestVmids()
+		}
+		if spec.K3sVmid == 0 {
+			return "", fmt.Errorf("create-agent %q: no k3s vmid recorded/resolvable to apply the pod", name)
 		}
 		// A DIFFERENT name that sanitizes to the CPA's pod would delete+reapply
 		// the CPA's pod; the CPA's own name is allowed (stageCpa dogfoods

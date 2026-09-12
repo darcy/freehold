@@ -410,7 +410,9 @@ func (c *Client) PortalURL() (string, error) {
 // WorldBuild triggers the CP-owned world bring-up (/api/world-build) and
 // returns the stage report. The console drives the shared cpbuild engine
 // through its co-located runner — the drive-through-CP build a thin box uses.
+// The build runs for minutes, so this switches to a long client timeout.
 func (c *Client) WorldBuild() (string, error) {
+	c.hc = &http.Client{Timeout: 20 * time.Minute}
 	raw, err := c.request(http.MethodPost, "/api/world-build", nil)
 	if err != nil {
 		return "", err

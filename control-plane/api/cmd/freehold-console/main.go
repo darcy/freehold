@@ -299,9 +299,18 @@ func cmdRevoke(args []string) error {
 func cmdIdentity(args []string) error {
 	fs := flag.NewFlagSet("identity", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "CP state dir")
+	enc := fs.Bool("enc-pubkey", false, "print the console identity's X25519 ENCRYPTION pubkey (the DNS-handoff + cert seal audience)")
 	fs.Parse(args)
 	if *stateDir == "" {
 		return fmt.Errorf("identity needs --state-dir")
+	}
+	if *enc {
+		encPub, err := console.ConsoleEncPubkey(*stateDir)
+		if err != nil {
+			return err
+		}
+		fmt.Println(encPub)
+		return nil
 	}
 	_, pk, err := console.EnsureConsoleIdentity(*stateDir)
 	if err != nil {

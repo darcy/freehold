@@ -180,8 +180,9 @@ Then operate the world yourself (the justfile does NOT drive the world — it
 only builds + installs):
 
 ```sh
-freehold build      # bring the world up (CP-bring-up + trigger world_build)
-freehold teardown   # tear it down (compute-only: keeps coords + /srv/data)
+freehold bootstrap   # box one: create the CP only (door -> cp LXC + console + co-located runner + DNS handoff), then STOP
+freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
+freehold teardown    # tear it down (compute-only: keeps coords + /srv/data)
 freehold            # the TUI dashboard
 ```
 
@@ -200,8 +201,8 @@ freehold door authorize       # authorize this box's door key on the host (DOOR_
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no
                               #  [runner]) through the CP's runner via world_exec
-freehold bootstrap --kind …   #   deploy-relay, deploy-cp, relay-member,
-freehold deploy-relay …       #   memory, console-login, grant, storage …)
+freehold provision --kind …   #   deploy-relay, deploy-cp, relay-member,
+freehold deploy-relay …        #   memory, console-login, grant, storage …)
 freehold --help               # both surfaces
 ```
 
@@ -385,12 +386,12 @@ freehold demo --addr 127.0.0.1:8787 \
 #   then install docker+compose in the guest. No A4 DNS gate — the relay/CP
 #   hosts resolve internally behind the proxy, so install never blocks on DNS.
 #   --role relay|cp derives the LXC name from --domain.
-freehold bootstrap --kind proxmox-lxc --role relay \
+freehold provision --kind proxmox-lxc --role relay \
   --vmid 100 --lxc-ip <lan-ip>/24 --lxc-gw <lan-gw> --domain <relay-domain> \
   --operator-pubkey <your-64-hex> --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
 
-freehold bootstrap --kind proxmox-lxc --role cp \
+freehold provision --kind proxmox-lxc --role cp \
   --vmid 102 --lxc-ip <lan-ip>/24 --lxc-gw <lan-gw> --domain <relay-domain> \
   --operator-pubkey <your-64-hex> --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
@@ -454,10 +455,11 @@ cargo run -p freehold-control-plane -- rebuild --relay-url https://<relay-domain
 
 ## Bootstrap flow (from zero to a live world)
 
-`freehold build` is **CP-bring-up + trigger**: the box brings up the CP (and
-the relay LXC, which the agent-tools roster lives on), hands the world's
-secrets to the CP, and **triggers `world_build`** — the CP then builds the rest
-of the world (k3s → DNS → litellm → Caddy → cert install) through its own
+`freehold build` is **login-gated, drive-through-CP**: after `freehold
+bootstrap` (box one) creates the CP, ANY box runs `freehold build` to trigger
+the console's `/api/world-build` — the CP brings up the WHOLE world
+(relay/agent-tools/k3s → DNS → litellm → Caddy → cert → CPA) through its own
+co-located runner.
 co-located runner. A fresh box only needs `freehold login` (root-free) → then
 `freehold` to trigger. Every command routes through a **provisioning runner**
 (one `exec(cmd, target)` — the same primitive agents use), so the workstation
@@ -480,12 +482,11 @@ sequenceDiagram
     participant C as cp LXC
     participant CP as "CP (world_build)"
 
-    OP->>PVE: build (signed MCP via the runner): CP-bring-up + trigger
+    OP->>PVE: bootstrap (box one) · build (ANY box): signed MCP via the runner
     PVE->>C: create + start + verify + docker (cp LXC)
-    PVE->>R: create + start + verify + docker + compose (relay LXC)
-    PVE->>C: deploy-cp + freehold-agent-tools · hand the DNS creds to the CP
-    OP->>CP: trigger world_build (roster-gated, signed as the box)
-    CP->>PVE: (co-located runner) k3s boot + install · DNS register/point · litellm · Caddy · cert
+    OP->>C: bootstrap deploy-cp + console + co-located runner · hand the DNS creds (console identity)
+    OP->>CP: build → trigger /api/world-build (console = the CP build executor)
+    CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · DNS · litellm · Caddy · cert
     CP-->>OP: world_build report (each stage) → Freehold is up
     OP->>C: console-login — own nsec (NIP-98) / w in the TUI
     C-->>OP: live world: relay + console + CPA wired

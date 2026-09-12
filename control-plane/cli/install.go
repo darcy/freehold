@@ -28,8 +28,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/contract/crypto"
-	"freehold/platform/provisioning/drive"
 	"freehold/contract/wire"
+	"freehold/platform/provisioning/drive"
 )
 
 const installBanner = `
@@ -104,7 +104,7 @@ func runInstallWith(in io.Reader, out io.Writer, newEngine func(rebuildFlags) (*
 	}
 	// Share the ONE buffered reader — see package comment above.
 	eng.stdin = ui.in
-	return eng.runSlim()
+	return eng.runBootstrap()
 }
 
 // collectAnswers is the Rust collect() port: the world details, the
