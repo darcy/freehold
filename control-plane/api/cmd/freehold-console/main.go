@@ -49,8 +49,10 @@ func main() {
 		err = cmdIdentity(os.Args[2:])
 	case "services":
 		err = cmdServices(os.Args[2:])
+	case "dns":
+		err = cmdDNS(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity|services)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity|services|dns)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -364,6 +366,48 @@ func cmdServices(args []string) error {
 		return fmt.Errorf("save services: %w", err)
 	}
 	fmt.Printf("service %s -> %s registered\n", *kind, *url)
+	return nil
+}
+
+// cmdDNS implements `dns add <name> <ip> <source>` inside the CP — the direct
+// state-write + resolver-reload the world-build DNS step calls (the Go console's
+// `control-plane dns add` equivalent). Writes the record into state.json, renders
+// the dnsmasq addn-hosts + conf, and reloads dnsmasq in-process.
+func cmdDNS(args []string) error {
+	fs := flag.NewFlagSet("dns", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	domain := fs.String("domain", "", "search base (adds <name>.<domain>)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 1 || rest[0] != "add" || len(rest) < 4 {
+		return fmt.Errorf("dns add <name> <ip> <source> [--domain <base>] [--state-dir DIR]")
+	}
+	name, ip, source := rest[1], rest[2], rest[3]
+	store, err := state.Open(*stateDir)
+	if err != nil {
+		return fmt.Errorf("open state: %w", err)
+	}
+	if _, err := console.Upsert(store, name, ip, source); err != nil {
+		return err
+	}
+	snap := store.Snapshot()
+	rd := *domain
+	if rd == "" && snap.ResolverDomain != nil {
+		rd = *snap.ResolverDomain
+	}
+	var apex, wid *string
+	if snap.ResolverWildcard != nil {
+		apex = &snap.ResolverWildcard.Apex
+		wid = &snap.ResolverWildcard.IP
+	}
+	write := func(path, body string) error { return os.WriteFile(path, []byte(body), 0o644) }
+	reload := func() error { return console.ReloadDnsmasq(*stateDir) }
+	if err := console.SyncResolver(*stateDir, snap.DNS, &rd, apex, wid, write, reload); err != nil {
+		return err
+	}
+	fmt.Printf("dns %s -> %s\n", name, ip)
 	return nil
 }
 

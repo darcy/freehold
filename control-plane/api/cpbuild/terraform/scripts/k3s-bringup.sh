@@ -20,7 +20,7 @@ pct exec "$VMID" -- bash -c '
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq
   if ! command -v k3s >/dev/null 2>&1; then
     curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh
-    INSTALL_K3S_VERSION=v1.36.4+k3s1 INSTALL_K3S_EXEC="server --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
+    INSTALL_K3S_VERSION=v1.36.4+k3s1 INSTALL_K3S_EXEC="server --disable traefik --disable servicelb --kubelet-arg feature-gates=KubeletInUserNamespace=true" sh /tmp/k3s-install.sh
   fi
   # the unit MUST carry the flag AFTER the subcommand (k3s rejects it before)
   if ! grep -q KubeletInUserNamespace /etc/systemd/system/k3s.service; then
@@ -37,7 +37,7 @@ Type=notify
 EnvironmentFile=-/etc/default/%N
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-ExecStart=/usr/local/bin/k3s server --kubelet-arg feature-gates=KubeletInUserNamespace=true
+ExecStart=/usr/local/bin/k3s server --disable traefik --disable servicelb --kubelet-arg feature-gates=KubeletInUserNamespace=true
 KillMode=process
 Delegate=yes
 LimitNOFILE=1048576
@@ -65,7 +65,10 @@ UNIT
     $K create cm coredns -n kube-system --from-file=Corefile=/tmp/corefile --dry-run=client -o yaml | $K apply -f -
     $K rollout restart deploy/coredns -n kube-system 2>/dev/null || true
   }
-  # local-path provisioner root -> the pinned carve-out
+  # local-path provisioner root -> the pinned carve-out. The node is the k3s
+  # wildcard (DEFAULT_PATH_FOR_NON_LISTED_NODES), NOT "k3s" - the node is named
+  # by hostname, and a wrong node name makes the provisioner fail with "no node
+  # was specified" (nothing binds).
   cat > /tmp/lp.yaml <<LP
 apiVersion: v1
 kind: ConfigMap
@@ -74,7 +77,7 @@ metadata:
   namespace: kube-system
 data:
   config.json: |-
-    { "nodePathMap": [ { "node": "k3s", "paths": ["/srv/data/k8s-volumes"] } ] }
+    { "nodePathMap": [ { "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES", "paths": ["/srv/data/k8s-volumes"] } ] }
 LP
   $K apply -f /tmp/lp.yaml || true
   $K rollout restart deploy/local-path-provisioner -n kube-system 2>/dev/null || true

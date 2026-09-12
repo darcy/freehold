@@ -22,23 +22,38 @@ func readScript(t *testing.T, name string) string {
 func TestPinK3sBringup(t *testing.T) {
 	s := readScript(t, "k3s-bringup.sh")
 	for _, want := range []string{
-		"v1.36.4+k3s1",              // pinned deterministic install
-		"server --kubelet-arg",      // flag AFTER the subcommand (k3s rejects it before)
+		"v1.36.4+k3s1",                 // pinned deterministic install
+		"server --disable traefik --disable servicelb --kubelet-arg", // flag AFTER subcommand + ingress/LB disabled (caddy binds 80/443)
 		"KubeletInUserNamespace=true",
-		"/srv/data/k8s-volumes",     // durable local-path carve-out
-		"local-path-config",         // local-path provider ConfigMap
-		"get.k3s.io",                // fetches the real installer
+		"/srv/data/k8s-volumes",        // durable local-path carve-out
+		"local-path-config",            // local-path provider ConfigMap
+		"get.k3s.io",                   // fetches the real installer
+		"DEFAULT_PATH_FOR_NON_LISTED_NODES", // k3s node wildcard (NOT "k3s" - a wrong node name fails provisioning)
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("k3s-bringup.sh missing %q", want)
 		}
 	}
+	// The inner script (between the `bash -c '` opening and the trailing `'`
+	// close) must be single-quote-free: any apostrophe inside it terminates the
+	// single-quoted wrapper and becomes a shell syntax error on the box (this
+	// bit us once). Only the closing wrapper quote is allowed after the open.
+	openMarker := "bash -c '"
+	if open := strings.Index(s, openMarker); open >= 0 {
+		openPos := open + len(openMarker)
+		closePos := strings.LastIndex(s, "'")
+		if closePos > openPos {
+			if inner := s[openPos:closePos]; strings.Contains(inner, "'") {
+				t.Errorf("k3s-bringup.sh has an apostrophe inside the bash -c '...' wrapper")
+			}
+		}
+	}
 }
 
 // TestPinLitellmTf pins the deterministic service definition in litellm.tf: the
-// fireworks egress pin, NodePort 31400, first-run-wins Secret (ignore_changes),
-// and that the master key / postgres password are VARIABLES (sensitive), never
-// literals.
+// fireworks egress pin, NodePort 31400, and that the master key / postgres
+// password are VARIABLES (sensitive), never literals. Declarative via
+// kubernetes_manifest (server-side apply, no local-path PVC bound-wait deadlock).
 func TestPinLitellmTf(t *testing.T) {
 	s, err := readTf(t, "litellm.tf")
 	if err != nil {
@@ -46,11 +61,10 @@ func TestPinLitellmTf(t *testing.T) {
 	}
 	for _, want := range []string{
 		"35.207.52.96",           // fireworks egress pin
-		"node_port   = 31400",    // litellm NodePort
-		"ignore_changes = [data]", // first-run-wins Secret
-		"var.litellm_master_key",  // secret as a VARIABLE, never a literal
-		"kubernetes_secret",       // real declarative k8s resources
-		"kubernetes_deployment",
+		"nodePort   = 31400",     // litellm NodePort
+		"var.litellm_master_key", // secret as a VARIABLE, never a literal
+		"kubernetes_manifest",    // declarative k8s (SSA)
+		"docker.litellm.ai/berriai/litellm:main-stable",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("litellm.tf missing %q", want)
@@ -63,19 +77,18 @@ func TestPinLitellmTf(t *testing.T) {
 	}
 }
 
-// TestPinPostgresTf pins postgres.tf: durable local-path PVC + first-run-wins
-// password Secret (a re-apply must never rotate Postgres's initialized data).
+// TestPinPostgresTf pins postgres.tf: durable local-path PVC + postgres password
+// as a VARIABLE (never a literal), declaratively via kubernetes_manifest.
 func TestPinPostgresTf(t *testing.T) {
 	s, err := readTf(t, "postgres.tf")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`storage_class_name = "local-path"`,
-		"var.postgres_password",       // secret as a VARIABLE
-		"ignore_changes = [data]",     // first-run-wins
+		`storageClassName = "local-path"`,
+		"var.postgres_password", // secret as a VARIABLE
 		"postgres:16",
-		"kubernetes_persistent_volume_claim",
+		"kubernetes_manifest",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("postgres.tf missing %q", want)

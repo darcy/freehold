@@ -87,16 +87,17 @@ func DnsRecords(relayHost, relayIP, cpHost, cpIP, proxyIP, litellmIP string) []D
 	return recs
 }
 
-// DnsAddCmd is the pct exec that runs `control-plane dns add <name> <ip>
-// <source> [--domain <base>]` INSIDE the CP LXC (the dnsmasq resolver), the
-// same shape stageDnsRegister uses. Single-quote-wrapped at the innermost
-// level only; callers pass validated names/IPs.
+// DnsAddCmd is the pct exec that runs `freehold-console dns add <name> <ip>
+// <source> [--domain <base>]` INSIDE the CP LXC (the dnsmasq resolver) — the Go
+// console's `control-plane dns add` equivalent (the rust control-plane binary is
+// gone; freehold-console carries the dns subcommand). Single-quote-wrapped at
+// the innermost level only; callers pass validated names/IPs.
 func DnsAddCmd(cpLxc uint32, binDir, stateDir, name, ip, source, searchBase string) string {
 	rest := []string{"'add'", shellSingleQuote(name), shellSingleQuote(ip), shellSingleQuote(source)}
 	if searchBase != "" {
 		rest = append(rest, "'--domain'", shellSingleQuote(searchBase))
 	}
-	inner := fmt.Sprintf("'%s/control-plane' 'dns' --state-dir '%s' %s",
+	inner := fmt.Sprintf("'%s/freehold-console' 'dns' --state-dir '%s' %s",
 		binDir, stateDir, strings.Join(rest, " "))
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }

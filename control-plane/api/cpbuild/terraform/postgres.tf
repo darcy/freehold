@@ -1,111 +1,88 @@
-# postgres.tf — the litellm postgres database. A declarative kubernetes-provider
-# resource set (the deterministic static definition of the service), replacing
-# the kube-apply.sh YAML here-doc. The postgres password arrives as
-# TF_VAR_postgres_password (runner-injected env, never argv/tfvars) and rides
-# the 0600 state; the k8s Secret is first-run-wins (ignore_changes = [data]) so
-# a re-apply never rotates the password Postgres initialized PGDATA against.
+# postgres.tf — the litellm postgres database, declared as kubernetes_manifest
+# (server-side apply) resources. SSA is used deliberately: kubernetes_persistent_
+# volume_claim BLOCKS until the claim is Bound, but local-path uses
+# WaitForFirstConsumer — it only binds when the deployment POD (the dependent)
+# claims it, so the provider serializes PVC->Deployment into a deadlock that
+# times out. kubernetes_manifest applies without waiting on status, the pod
+# triggers provisioning, and everything converges at the k8s level.
+#
+# The postgres password arrives as TF_VAR_postgres_password (runner-injected env,
+# never argv/tfvars) and rides the 0600 state (option A); re-applying the same
+# value is a no-op (no rotation).
 
-resource "kubernetes_namespace" "litellm" {
+resource "kubernetes_manifest" "litellm_namespace" {
   depends_on = [null_resource.k3s_bringup]
-  metadata {
-    name = "litellm"
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Namespace"
+    metadata   = { name = "litellm" }
   }
 }
 
-resource "kubernetes_secret" "litellm_pg" {
-  metadata {
-    name      = "litellm-pg"
-    namespace = kubernetes_namespace.litellm.metadata[0].name
-  }
-  data = {
-    "postgres-pw" = var.postgres_password
-  }
-  # First-run-wins: the first apply's value is authoritative (postgres inits
-  # PGDATA against it); a re-apply must never re-roll it.
-  lifecycle {
-    ignore_changes = [data]
-  }
-}
-
-resource "kubernetes_persistent_volume_claim" "litellm_pg_data" {
-  metadata {
-    name      = "litellm-pg-data"
-    namespace = kubernetes_namespace.litellm.metadata[0].name
-  }
-  spec {
-    access_modes       = ["ReadWriteOnce"]
-    storage_class_name = "local-path"
-    resources {
-      requests = { storage = "10Gi" }
+resource "kubernetes_manifest" "postgres_pvc" {
+  depends_on = [kubernetes_manifest.litellm_namespace]
+  manifest = {
+    apiVersion = "v1"
+    kind       = "PersistentVolumeClaim"
+    metadata   = { name = "litellm-pg-data", namespace = "litellm" }
+    spec = {
+      accessModes      = ["ReadWriteOnce"]
+      storageClassName = "local-path"
+      resources        = { requests = { storage = "10Gi" } }
     }
   }
 }
 
-resource "kubernetes_deployment" "postgres" {
-  metadata {
-    name      = "postgres"
-    namespace = kubernetes_namespace.litellm.metadata[0].name
+resource "kubernetes_manifest" "postgres_secret" {
+  depends_on = [kubernetes_manifest.litellm_namespace]
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Secret"
+    metadata   = { name = "litellm-pg", namespace = "litellm" }
+    type       = "Opaque"
+    data       = { "postgres-pw" = base64encode(var.postgres_password) }
   }
-  spec {
-    replicas = 1
-    selector {
-      match_labels = { app = "postgres" }
-    }
-    template {
-      metadata {
-        labels = { app = "postgres" }
-      }
-      spec {
-        container {
-          name  = "postgres"
-          image = "postgres:16"
-          env {
-            name  = "POSTGRES_DB"
-            value = "litellm"
-          }
-          env {
-            name  = "POSTGRES_USER"
-            value = "llmproxy"
-          }
-          env {
-            name = "POSTGRES_PASSWORD"
-            value_from {
-              secret_key_ref {
-                name = kubernetes_secret.litellm_pg.metadata[0].name
-                key  = "postgres-pw"
-              }
-            }
-          }
-          env {
-            name  = "PGDATA"
-            value = "/var/lib/postgresql/data/pgdata"
-          }
-          volume_mount {
-            name       = "data"
-            mount_path = "/var/lib/postgresql/data"
-          }
-        }
-        volume {
-          name = "data"
-          persistent_volume_claim {
-            claim_name = kubernetes_persistent_volume_claim.litellm_pg_data.metadata[0].name
-          }
+}
+
+resource "kubernetes_manifest" "postgres_deploy" {
+  depends_on = [kubernetes_manifest.postgres_secret, kubernetes_manifest.postgres_pvc]
+  manifest = {
+    apiVersion = "apps/v1"
+    kind       = "Deployment"
+    metadata   = { name = "postgres", namespace = "litellm" }
+    spec = {
+      replicas = 1
+      selector = { matchLabels = { app = "postgres" } }
+      template = {
+        metadata = { labels = { app = "postgres" } }
+        spec = {
+          containers = [{
+            name  = "postgres"
+            image = "postgres:16"
+            env = [
+              { name = "POSTGRES_DB", value = "litellm" },
+              { name = "POSTGRES_USER", value = "llmproxy" },
+              { name = "POSTGRES_PASSWORD", valueFrom = { secretKeyRef = { name = "litellm-pg", key = "postgres-pw" } } },
+              { name = "PGDATA", value = "/var/lib/postgresql/data/pgdata" },
+            ]
+            volumeMounts = [{ name = "data", mountPath = "/var/lib/postgresql/data" }]
+          }]
+          volumes = [{ name = "data", persistentVolumeClaim = { claimName = "litellm-pg-data" } }]
         }
       }
     }
   }
 }
 
-resource "kubernetes_service" "postgres" {
-  metadata {
-    name      = "postgres"
-    namespace = kubernetes_namespace.litellm.metadata[0].name
-  }
-  spec {
-    selector = { app = "postgres" }
-    port {
-      port        = 5432
-      target_port = 5432
+resource "kubernetes_manifest" "postgres_service" {
+  depends_on = [kubernetes_manifest.postgres_deploy]
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Service"
+    metadata   = { name = "postgres", namespace = "litellm" }
+    spec = {
+      selector = { app = "postgres" }
+      ports    = [{ port = 5432, targetPort = 5432 }]
     }
   }
 }

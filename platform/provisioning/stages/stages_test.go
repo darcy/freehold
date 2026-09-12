@@ -61,7 +61,7 @@ func TestDnsAddCmd(t *testing.T) {
 	cmd := DnsAddCmd(101, "/srv/data/cp/bin", "/srv/data/cp/control-plane", "relay", "10.0.0.5", "world-build relay", "d")
 	for _, want := range []string{
 		"pct exec 101 -- sh -c",
-		"'/srv/data/cp/bin/control-plane' 'dns' --state-dir '/srv/data/cp/control-plane' 'add' 'relay' '10.0.0.5' 'world-build relay' '--domain' 'd'",
+		"'/srv/data/cp/bin/freehold-console' 'dns' --state-dir '/srv/data/cp/control-plane' 'add' 'relay' '10.0.0.5' 'world-build relay' '--domain' 'd'",
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("DnsAddCmd missing %q:\n%s", want, cmd)

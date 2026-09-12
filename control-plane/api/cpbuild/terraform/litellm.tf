@@ -1,120 +1,87 @@
-# litellm.tf — the litellm model-gateway proxy. Declarative kubernetes-provider
-# resources (the deterministic static definition of the service), replacing the
-# kube-apply.sh YAML here-doc. The gateway master key arrives as
-# TF_VAR_litellm_master_key (runner-injected env, never argv/tfvars); the k8s
-# Secret is first-run-wins (ignore_changes = [data]). Model registration is an
-# event (a curl to the gateway API), kept as a null_resource local-exec that
-# reads the runner-injected PROVIDER_KEY env directly — it never rides state.
+# litellm.tf — the litellm model-gateway proxy, declared as kubernetes_manifest
+# (server-side apply) resources for the same reason as postgres.tf (the local-path
+# PVC deadlock). The gateway master key arrives as TF_VAR_litellm_master_key
+# (runner-injected env, never argv/tfvars). Model registration is an EVENT (a
+# curl to the gateway API, idempotent on re-apply) kept as a null_resource
+# local-exec that reads the runner-injected PROVIDER_KEY directly - it never
+# rides terraform state.
 
-resource "kubernetes_secret" "litellm_keys" {
-  metadata {
-    name      = "litellm-keys"
-    namespace = kubernetes_namespace.litellm.metadata[0].name
-  }
-  data = {
-    "master-key" = var.litellm_master_key
-  }
-  # First-run-wins: the gateway's master key is the deployed truth; a re-apply
-  # must never rotate it (existing models/keys are minted against it).
-  lifecycle {
-    ignore_changes = [data]
+resource "kubernetes_manifest" "litellm_secret" {
+  depends_on = [kubernetes_manifest.litellm_namespace]
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Secret"
+    metadata   = { name = "litellm-keys", namespace = "litellm" }
+    type       = "Opaque"
+    data       = { "master-key" = base64encode(var.litellm_master_key) }
   }
 }
 
-resource "kubernetes_deployment" "litellm" {
-  depends_on = [kubernetes_deployment.postgres]
-  metadata {
-    name      = "litellm"
-    namespace = kubernetes_namespace.litellm.metadata[0].name
-  }
-  spec {
-    replicas = 1
-    selector {
-      match_labels = { app = "litellm" }
-    }
-    template {
-      metadata {
-        labels = { app = "litellm" }
-      }
-      spec {
-        # Fireworks egress pin (deterministic; the node's resolvers must reach
-        # api.fireworks.ai directly, not the LAN router).
-        host_aliases {
-          ip        = "35.207.52.96"
-          hostnames = ["api.fireworks.ai"]
-        }
-        container {
-          name  = "litellm"
-          image = "docker.litellm.ai/berriai/litellm:main-stable"
-          port {
-            container_port = 4000
-          }
-          env {
-            name = "POSTGRES_PASSWORD"
-            value_from {
-              secret_key_ref {
-                name = kubernetes_secret.litellm_pg.metadata[0].name
-                key  = "postgres-pw"
-              }
+resource "kubernetes_manifest" "litellm_deploy" {
+  depends_on = [kubernetes_manifest.litellm_secret, kubernetes_manifest.postgres_deploy]
+  manifest = {
+    apiVersion = "apps/v1"
+    kind       = "Deployment"
+    metadata   = { name = "litellm", namespace = "litellm" }
+    spec = {
+      replicas = 1
+      selector = { matchLabels = { app = "litellm" } }
+      template = {
+        metadata = { labels = { app = "litellm" } }
+        spec = {
+          hostAliases = [{
+            ip        = "35.207.52.96"
+            hostnames = ["api.fireworks.ai"]
+          }]
+          containers = [{
+            name  = "litellm"
+            image = "docker.litellm.ai/berriai/litellm:main-stable"
+            ports = [{ containerPort = 4000 }]
+            env = [
+              { name = "POSTGRES_PASSWORD", valueFrom = { secretKeyRef = { name = "litellm-pg", key = "postgres-pw" } } },
+              { name = "DATABASE_URL", value = "postgresql://llmproxy:$(POSTGRES_PASSWORD)@postgres.litellm:5432/litellm" },
+              { name = "STORE_MODEL_IN_DB", value = "True" },
+              { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-keys", key = "master-key" } } },
+            ]
+            readinessProbe = {
+              httpGet             = { path = "/health/liveliness", port = 4000 }
+              periodSeconds       = 10
+              failureThreshold    = 6
+              initialDelaySeconds = 5
             }
-          }
-          env {
-            name  = "DATABASE_URL"
-            value = "postgresql://llmproxy:$(POSTGRES_PASSWORD)@postgres.litellm:5432/litellm"
-          }
-          env {
-            name  = "STORE_MODEL_IN_DB"
-            value = "True"
-          }
-          env {
-            name = "LITELLM_MASTER_KEY"
-            value_from {
-              secret_key_ref {
-                name = kubernetes_secret.litellm_keys.metadata[0].name
-                key  = "master-key"
-              }
-            }
-          }
-          readiness_probe {
-            http_get {
-              path = "/health/liveliness"
-              port = 4000
-            }
-            period_seconds        = 10
-            failure_threshold     = 6
-            initial_delay_seconds = 5
-          }
+          }]
         }
       }
     }
   }
 }
 
-resource "kubernetes_service" "litellm" {
-  metadata {
-    name      = "litellm"
-    namespace = kubernetes_namespace.litellm.metadata[0].name
-  }
-  spec {
-    type     = "NodePort"
-    selector = { app = "litellm" }
-    port {
-      port        = 4000
-      target_port = 4000
-      node_port   = 31400
+resource "kubernetes_manifest" "litellm_service" {
+  depends_on = [kubernetes_manifest.litellm_deploy]
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Service"
+    metadata   = { name = "litellm", namespace = "litellm" }
+    spec = {
+      type     = "NodePort"
+      selector = { app = "litellm" }
+      ports = [{
+        port       = 4000
+        targetPort = 4000
+        nodePort   = 31400
+      }]
     }
   }
 }
 
-# Model registration — an EVENT, not a resource: a curl to the gateway API
-# mapping the CPA's model alias to the fireworks route. Idempotent on re-apply;
-# the provider key rides the runner-injected env (PROVIDER_KEY) directly so it
-# NEVER transits terraform state. Triggers on the deployment so a bare
-# `terraform apply` re-registers only when the gateway changes.
+# Model registration - an EVENT, not a resource: idempotent on re-apply; the
+# provider key rides the runner-injected env (PROVIDER_KEY) directly so it NEVER
+# transits terraform state. Triggers on the service so a bare apply re-registers
+# only when the gateway changes.
 resource "null_resource" "model_registration" {
-  depends_on = [kubernetes_service.litellm]
+  depends_on = [kubernetes_manifest.litellm_service]
   triggers = {
-    deployment = kubernetes_deployment.litellm.id
+    deploy = yamlencode(kubernetes_manifest.litellm_deploy.object)
   }
   provisioner "local-exec" {
     command = <<-EOT

@@ -2178,7 +2178,7 @@ func (e *rebuildEngine) stageCpExec(cpBinArgs ...string) (string, error) {
 	for i, a := range cpBinArgs {
 		quoted[i] = shellQuote(a)
 	}
-	inner := fmt.Sprintf("'%s/control-plane' %s --state-dir '%s' %s",
+	inner := fmt.Sprintf("'%s/freehold-console' %s --state-dir '%s' %s",
 		binDir, quoted[0], stateDir, strings.Join(quoted[1:], " "))
 	cmd := fmt.Sprintf("pct exec %d -- sh -c %s", vmid, shellQuote(inner))
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 120))
