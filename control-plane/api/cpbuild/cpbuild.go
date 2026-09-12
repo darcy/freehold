@@ -187,12 +187,19 @@ func (s *Spec) worldDNS() error {
 			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
 		}
 	}
-	// The resolver WILDCARD: all *.searchBase -> the proxy (Caddy) edge, so the
-	// dotted public hosts (relay.<base>, cp.<base>) resolve to TLS - never to a
+	// The resolver WILDCARD: all *.apex -> the proxy (Caddy) edge, so the
+	// dotted public hosts (relay.<apex>, cp.<apex>) resolve to TLS - never to a
 	// guest LXC (dnsmasq's bare `relay`/`cp` records would otherwise leak the
-	// guest IP into the FQDN answer and make the edge unreachable from the CP).
-	if searchBase != "" && s.ProxyIP != "" {
-		if err := s.run(stages.DnsApexCmd(s.CpLxc, binDir, stateDir, searchBase, config.StripCIDR(s.ProxyIP)), 120); err != nil {
+	// guest IP into the FQDN answer). The apex is the guest search base when
+	// present, else derived from the relay host (strip its leading label).
+	apex := searchBase
+	if apex == "" {
+		if i := strings.Index(s.RelayHost, "."); i > 0 && i < len(s.RelayHost)-1 {
+			apex = s.RelayHost[i+1:]
+		}
+	}
+	if apex != "" && s.ProxyIP != "" {
+		if err := s.run(stages.DnsApexCmd(s.CpLxc, binDir, stateDir, apex, config.StripCIDR(s.ProxyIP)), 120); err != nil {
 			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
@@ -514,7 +521,12 @@ func (s *Spec) deployAgentTools() error {
 	// Resolve the relay's current IP (bootstrap did not boot the relay; this
 	// world_build just did).
 	relayIP := s.RelayIP
-	if relayIP == "" && s.RelayLxc != 0 {
+	if s.RelayLxc != 0 {
+		// Always re-read the relay's CURRENT DHCP lease: a prior cycle's recorded
+		// IP can go stale (the relay LXC can come back on a different .30.x lease
+		// after a teardown+rebuild), and pinning the seed against a dead IP makes
+		// the agent-tools roster seed fail with "no route to host". Fall back to
+		// the recorded value only if the live read yields nothing.
 		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
 			for _, t := range strings.Fields(out) {
 				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
@@ -1023,6 +1035,28 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build cert: %w", err)
 			}
 			report = append(report, "cert issued/installed (or already present)")
+		}
+		// 7.25. Drop the CP's /etc/hosts public-host pins. The agent-tools seed
+		// pinned relay.<apex>/cp.<apex> -> the guest LXC IP so it could dial the
+		// relay's LAN events endpoint before Caddy existed. With the edge up those
+		// pins must go - they make the CP resolve the public hosts to the guest
+		// (no TLS there), so /api/world reports the relay/cp edge down. The
+		// resolver's apex wildcard now fronts them through Caddy.
+		if spec.CpLxc != 0 {
+			hosts := []string{spec.RelayHost}
+			if spec.CpHost != "" {
+				hosts = append(hosts, spec.CpHost)
+			}
+			for _, h := range hosts {
+				if h == "" {
+					continue
+				}
+				esc := strings.ReplaceAll(h, ".", `\.`)
+				if err := spec.run(fmt.Sprintf("pct exec %d -- sed -i '/%s/d' /etc/hosts", spec.CpLxc, esc), 30); err != nil {
+					return "", fmt.Errorf("world-build drop host pin %s: %w", h, err)
+				}
+			}
+			report = append(report, "edge host pins dropped (public hosts resolve to the proxy)")
 		}
 		// 7.5. Record the world-service health coords (k3s/litellm/caddy) so any
 		// management box renders the live world through /api/world.

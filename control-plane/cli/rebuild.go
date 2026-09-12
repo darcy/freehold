@@ -958,7 +958,12 @@ func (e *rebuildEngine) registerWorldFacts() error {
 	if err != nil || cfg == nil {
 		return fmt.Errorf("no config at %s", e.f.configPath)
 	}
-	mc, err := e.agentToolsMcp(cfg)
+	// world_register_facts is OPERATOR-scoped on the agent-tools server: the box
+	// must sign as the OPERATOR (console-admin, in the toolset roster), NOT the
+	// ops-agent build identity (which gets world_* denied with -32001). worldMcp
+	// signs as the operator exactly like `freehold world status`, which is
+	// granted.
+	mc, err := worldMcp(cfg)
 	if err != nil {
 		return err
 	}
