@@ -2709,7 +2709,11 @@ func (e *rebuildEngine) stageCpa() error {
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	mc, err := e.agentToolsMcp(cfg)
+	// create_agent is OPERATOR-scoped on the agent-tools server: sign as the
+	// operator (worldMcp), NOT the ops-agent build identity (which is only
+	// granted on the runner/console and gets world_* / create_agent denied
+	// with -32001). This is what actually creates the CPA in Buzz.
+	mc, err := worldMcp(cfg)
 	if err != nil {
 		return err
 	}
@@ -2744,7 +2748,7 @@ func (e *rebuildEngine) reconcileCreatedAgents() error {
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	mc, err := e.agentToolsMcp(cfg)
+	mc, err := worldMcp(cfg)
 	if err != nil {
 		return err
 	}
