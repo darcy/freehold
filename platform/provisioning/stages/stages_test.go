@@ -159,3 +159,24 @@ func TestCaddyCertInstallScript(t *testing.T) {
 		t.Errorf("the guest shell must not read ${CERT_KEY_RELAY} (pct exec does not inherit host env)")
 	}
 }
+
+// TestDnsApexCmd pins the apex command's FLAG-BEFORE-VERB order: Go's
+// flag.Parse stops at the first non-flag arg, so --state-dir/--apex/--ip must
+// precede the `apex` verb or they are silently dropped (state.Open("") fails).
+func TestDnsApexCmd(t *testing.T) {
+	cmd := DnsApexCmd(101, "/srv/data/cp/bin", "/srv/data/cp/control-plane", "librem.freehold.technology", "192.168.30.8")
+	for _, mustAfter := range []struct{ before, after string }{
+		{"--state-dir '/srv/data/cp/control-plane'", "'apex'"},
+		{"--apex 'librem.freehold.technology'", "'apex'"},
+		{"--ip '192.168.30.8'", "'apex'"},
+	} {
+		b := strings.Index(cmd, mustAfter.before)
+		a := strings.Index(cmd, mustAfter.after)
+		if b < 0 || a < 0 || b > a {
+			t.Errorf("apex flags must precede the verb: %q before %q in %s", mustAfter.before, mustAfter.after, cmd)
+		}
+	}
+	if !strings.HasPrefix(cmd, "pct exec 101 -- sh -c") {
+		t.Errorf("unexpected apex cmd shape: %s", cmd)
+	}
+}

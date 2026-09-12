@@ -685,6 +685,24 @@ func (e *rebuildEngine) runBuild() error {
 	}
 	fmt.Fprintf(e.out, "CP world_build report:\n%s\n", report)
 
+	// The agent-tools AUDIENCE the box must sign to is the server's OWN identity
+	// pubkey, which a --data rebuild mints FRESH (the durable identity is wiped
+	// with /srv/data). The config's recorded agent_tools_pubkey goes stale, so
+	// box-side agent-tools MCP calls (facts, create_agent) sign with a wrong
+	// audience and VerifyRequest fails "signature does not verify". Re-read the
+	// CP's live agent-tools identity now and adopt it into the config.
+	if cp := cfg.Lxc.Cp.Vmid; cp != nil {
+		ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- /srv/data/cp/bin/freehold-agent-tools identity --state-dir /srv/data/cp/agent-tools", *cp), 30))
+		if ok {
+			pk := strings.TrimSpace(out)
+			if isHex64(pk) && pk != cfg.AgentToolsPubkey {
+				cfg.AgentToolsPubkey = pk
+				_ = cfg.Save(e.f.configPath)
+				fmt.Fprintf(e.out, "  · adopted the CP agent-tools audience %s\n", pk)
+			}
+		}
+	}
+
 	// Box-side bookkeeping (world coords are the same on every box) is the
 	// DRIVING box's job: it drives the runner (record LXC coords) + the CP
 	// toolset (facts/CPA/agent reconcile) as its ops identity. A THIN client
@@ -697,15 +715,20 @@ func (e *rebuildEngine) runBuild() error {
 			return err
 		}
 		if _, err := os.Stat(filepath.Join(rbOpsDir(), "identity.json")); err == nil {
-			if err := e.registerWorldFacts(); err != nil {
-				return err
-			}
+			// The CPA is the system's main touchpoint - create it FIRST (it signs
+			// as the operator, which IS granted create_agent on the agent-tools
+			// server), then reconcile the other created agents. World facts are
+			// bookkeeping for the DATA/Certs views - never fatal: a facts failure
+			// must not block the CPA/agents from being created.
 			if err := e.stageCpa(); err != nil {
 				return err
 			}
 			fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
 			if err := e.reconcileCreatedAgents(); err != nil {
 				return err
+			}
+			if err := e.registerWorldFacts(); err != nil {
+				fmt.Fprintf(e.out, "  (WARN: world facts not registered on the CP — bookkeeping only, does not affect the world/agents: %v)\n", err)
 			}
 		}
 	} else {

@@ -102,14 +102,12 @@ func DnsAddCmd(cpLxc uint32, binDir, stateDir, name, ip, source, searchBase stri
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }
 
-// DnsApexCmd is the pct exec that runs `freehold-console dns apex --apex <base>
-// --ip <proxy>` inside the CP: it sets the resolver WILDCARD (all subdomains of
-// the apex -> the proxy/Caddy IP) so the dotted public hosts (relay.<dom>,
-// cp.<dom>) resolve to the TLS edge - never to a guest LXC (dnsmasq's bare
-// guest records would otherwise leak the LXC IP into the FQDN query and break
-// the edge's reachability from the CP).
+// DnsApexCmd is the pct exec that runs `freehold-console dns` with --state-dir/
+// --apex/--ip and the `apex` verb. It puts the FLAGS BEFORE the verb (Go's
+// flag.Parse stops at the first non-flag arg, so a --state-dir after the verb
+// is silently unparsed and state.Open fails on an empty path).
 func DnsApexCmd(cpLxc uint32, binDir, stateDir, apex, proxyIP string) string {
-	inner := fmt.Sprintf("'%s/freehold-console' 'dns' 'apex' --state-dir '%s' --apex '%s' --ip '%s'",
+	inner := fmt.Sprintf("'%s/freehold-console' 'dns' --state-dir '%s' --apex '%s' --ip '%s' 'apex'",
 		binDir, stateDir, apex, proxyIP)
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }
