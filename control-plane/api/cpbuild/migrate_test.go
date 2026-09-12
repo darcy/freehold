@@ -4,17 +4,17 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"freehold/control-plane/api/agenttools"
 )
 
-// TestMigrateImportConsoleAgentsAdditiveOnly proves migration 002 folds the
+// TestImportConsoleAgentsAdditiveOnly proves the 002 migration logic folds the
 // console state.json agents into the registry ADDITIVELY: an existing registry
 // row for the same name keeps its current pubkey (the registry is
-// authoritative) and only absent names are imported.
-func TestMigrateImportConsoleAgentsAdditiveOnly(t *testing.T) {
+// authoritative) and only absent names are imported. The migration SCRIPT drives
+// this same Go function (registry import-console); this test pins the logic.
+func TestImportConsoleAgentsAdditiveOnly(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	consoleDir := filepath.Join(dir, "console-state")
@@ -46,10 +46,8 @@ func TestMigrateImportConsoleAgentsAdditiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spec := &Spec{StateDir: stateDir}
-	m := BuildMigrator(spec, consoleDir)
-	if _, err := m(); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := agenttools.ImportConsoleAgents(reg, consoleDir); err != nil {
+		t.Fatalf("import: %v", err)
 	}
 
 	rows, err := agenttools.OpenRegistry(regPath)
@@ -71,13 +69,5 @@ func TestMigrateImportConsoleAgentsAdditiveOnly(t *testing.T) {
 	// bob (absent from the registry) is imported.
 	if got := byName["bob"]; got != "BOB_PK" {
 		t.Fatalf("absent console agent not imported: bob pubkey = %q", got)
-	}
-	// The ledger records the migration as done (verify passed).
-	ledger, err := os.ReadFile(filepath.Join(stateDir, "migrations.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(ledger), `"done"`) {
-		t.Fatalf("migration not recorded done: %s", ledger)
 	}
 }

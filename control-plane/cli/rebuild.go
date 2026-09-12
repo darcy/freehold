@@ -1958,18 +1958,10 @@ func parseLxcIP(out string, vmid uint32) (string, error) {
 
 // ---- the k3s stage -----------------------------------------------------------
 
-// stages.K3sLocalPathDurableScript re-points the local-path StorageClass's backing
-// store at the DURABLE plane mount (/srv/data/k8s-volumes — backup=1, survives
-// a compute teardown) instead of the default /var/lib/rancher/k3s/storage on the
-// ephemeral rootfs, so k8s PVCs (Caddy's cert, litellm postgres) survive a
-// compute teardown and a rebuild. The WHOLE ConfigMap is re-emitted (config.json
-// + helperPod/setup/teardown) so `apply` replaces the k3s-managed default
-// wholesale rather than dropping the helper-pod config. Re-asserted on every
-// reconcile: the k3s local-storage Addon can reset the ConfigMap on a k3s
-// restart. Idempotent.
-
-// See stages.K3sLocalPathDurableScript for the re-point script (shared so the
-// CP world_build executor runs the same bytes).
+// The k3s install + the durable local-path carve-out are owned by the CP's
+// terraform module (k3s-bringup.sh): it re-points the local-path StorageClass's
+// backing store at the DURABLE plane mount (/srv/data/k8s-volumes — backup=1,
+// so k8s PVCs survive a compute teardown) and installs the pinned k3s build.
 
 // stageDeployRelay deploys the Buzz relay into the relay LXC (box-side — the
 // slim build boots + deploys the relay before agent-tools, whose roster lives

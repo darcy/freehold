@@ -126,17 +126,23 @@ roster, and which already owns the CP.
   - **LXCs**: cp, relay, k3s — hostname (deterministic `DomainLXCName`), storage,
     rootfs, memory, bridge, network (k3s static IP/gw /24 from `Proxy.Ip`), and
     the durable mounts as `mount_point`.
-  - **litellm/postgres kube workloads**: the existing `manifests/*.yaml` become
-    Terraform (kube_manifest) resources — moved out of the scripted
-    `stages.LitellmManifestScript` / `kube-apply.sh` path.
+  - **litellm/postgres/caddy kube workloads**: are now real **`kubernetes`
+    provider** resources in `postgres.tf` / `litellm.tf` / `caddy.tf` — the
+    deterministic static service definitions (Deployment/Service/PVC/ConfigMap/
+    Secret). Secret VALUES ride the 0600 state as `TF_VAR_*` (option A); the
+    k8s Secrets are first-run-wins (`lifecycle { ignore_changes = [data] }`).
 - **Execution discipline (locked, carried from today):** Terraform runs ON the
   provisioning box via the co-located runner's exec (`tf.sh`); creds arrive as
-  runner-injected `TF_VAR_*` env, never tfvars/literals; state is sensitive → 0600
-  under `/srv/data/freehold-tf`.
-- **Ordering:** the console driver runs `terraform apply -target=…`/`destroy` for
-  the substrate + kube workloads, then the scripted overlay stages in order.
+  runner-injected env → `TF_VAR_*`, never tfvars/literals; state + the staged
+  k3s kubeconfig are sensitive → 0600 under `/srv/data/freehold-tf`.
+- **Two-phase apply (ordering):** phase 1 applies the SUBSTRATE via `-target`
+  (plane/LXCs/k3s bring-up — the exec-first `null_resource` shell), bringing k3s
+  up; phase 2 stages the kubeconfig (rewritten to the k3s node IP) and applies
+  the `kubernetes`-provider SERVICE resources. The scripted overlay (agent-tools,
+  DNS, CPA litellm key, cert) runs after in order; Caddy's cert/DNS issuance stays
+  the CP's event-driven overlay.
 - **Fix the stale `.243`** in the terraform k3s script + align static IPs with
-  `Proxy.Ip`. Delete dead/duplicated scripts superseded by real resources.
+  `Proxy.Ip`.
 
 ## Phasing
 
@@ -150,31 +156,34 @@ roster, and which already owns the CP.
   substrate was born from). The module is embedded in `cpbuild`, ships to the
   box at `/srv/data/freehold-tf` (0700), ADOPTS the plane/LXCs the CP creates
   (`terraform plan` clean), and `terraform destroy` tears the kube layer +
-  substrate down in teardown. Kube workloads (litellm/postgres) are
-  terraform-apply'd via `kube-apply.sh`; `worldLiteLLM` retained only the CPA
-  litellm-key seed.
+  substrate down in teardown. Litellm/postgres/caddy are declared as real
+  `kubernetes`-provider resources in `postgres.tf`/`litellm.tf`/`caddy.tf`;
+  `worldLiteLLM` retained only the CPA litellm-key seed.
 
 ## Landing (Phase B shipped shape)
 
-The exec-first module lives in `control-plane/api/cpbuild/terraform/` (embedded,
-so it ships with the console); the drifted `platform/terraform` leaf is gone.
-Per-command surface:
+The module lives in `control-plane/api/cpbuild/terraform/` (embedded, so it ships
+with the console); the drifted `platform/terraform` leaf is gone. Per-command
+surface:
 
 ```
-freehold build      → BuildWorldApply: Go substrate steps, then worldTerraform("apply")
-                      (adopts plane + cp/relay/k3s LXCs + k3s bring-up + kube
-                      workloads + model registration), then the overlay (agent-tools,
-                      DNS, CPA litellm key, caddy, cert).
+freehold build      → BuildWorldApply: Go substrate staircase (plane + LXCs), then
+                      terraform PHASE 1 (substrate -target: plane/lxc_*/k3s_bringup),
+                      refresh vmids/IPs, then terraform PHASE 2 (stage kubeconfig +
+                      apply the kubernetes-provider postgres/litellm/caddy .tf with
+                      the rendered Caddyfile), then the overlay (agent-tools, DNS,
+                      CPA litellm key, cert).
 freehold teardown   → teardown.Run: terraform destroy (kube first, by depends_on)
                       BEFORE the k3s LXC pct-destroy; the Go stops/destroys then
                       no-op (idempotent). The durable plane survives by design.
 ```
 
-Named follow-ups (kept current; see AGENTS.md "Known gaps"): the module READS +
-manages + destroys but the LXC create path still lives in Go (terraform adopts);
-vmid allocation for a genuinely fresh box is therefore a follow-up; converting
-the adopt-managed resources to a real bpg provider (clone-based flow) remains
-the provider-integration follow-up.
+Named follow-ups (kept current; see `followups.md` + AGENTS.md "Known gaps"):
+the LXC create path still lives in Go + exec script (terraform adopts via
+`null_resource`); vmid allocation for a genuinely fresh box is therefore a
+follow-up; converting the adopt-managed substrate to a real bpg provider
+(clone-based flow) remains the provider-integration follow-up; the relay Buzz
+stack (inside the relay LXC) is not yet Terraform.
 
 ## Acceptance
 

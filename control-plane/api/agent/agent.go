@@ -283,7 +283,7 @@ func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
 }
 
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
-// stages.LitellmManifestScript. agentName is the display name (sanitized into
+// the litellm workload pattern. agentName is the display name (sanitized into
 // the pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here). agentToolsURL/pubkey wires the CP toolset bridge when
 // non-empty.

@@ -232,13 +232,18 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     publishes the kind-9000 put-user to the runner's channel in-process — the
     runner re-reads its signed 39002 roster per call, so the grant lands
     without a restart (missing credential fails closed; agents are denied with
-    `-32003`, since a grant hands direct exec access to the runner). `world_migrate` runs
-    `platform/migrations` — the CP's verify-gated migration runner (durable
-    ledger at `/srv/data/cp/migrations.json`, a migration is done only when
-    its postcondition verifies), for versioned config/prompt/repair changes
-    that don't have clean desired-state semantics. The agent-registry
-    reconcile (the console state.json `agents` map folded into the
-    authoritative `registry.json`) rides that runner as migration `002`.
+     `-32003`, since a grant hands direct exec access to the runner). `world_migrate` runs
+     `platform/migrations` — the CP's verify-gated migration runner (durable
+     ledger at `/srv/data/cp/migrations.json`, a migration is done only when
+     its postcondition verifies), for versioned config/prompt/repair changes
+     that don't have clean desired-state semantics. Migrations are **versioned
+     script files** (Omarchy's `<epoch>.sh` convention — one timestamped shell
+     file per migration, embedded under `platform/migrations/files/`, run in
+     ascending order through `bash` on the CP, each with an optional
+     `<epoch>.verify.sh` postcondition gate). The agent-registry reconcile (the
+     console state.json `agents` map folded into the authoritative
+     `registry.json`) rides that runner as a script migration, driven by the
+     `freehold-agent-tools registry import-console` subcommand.
 
 *   **`control-plane/cli/rebuild.go` is the slim CP-driven build.**
     `collectAnswers` → `rebuildFlags` → `newRebuildEngine` → `runSlim`: door →
@@ -344,13 +349,19 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (the generic deploy helpers both the relay and bootstrap-cp deployers
     use).
 
-*   **`platform/migrations/`** is the verify-gated migration runner;
+*   **`platform/migrations/`** is the verify-gated migration runner over
+    versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed
+    → the CP durable plane, run ascending via `bash`);
     **`platform/agents/`** carries named agents — `freehold/prompt.md` (the
     CPA's purpose, embedded by the `platform/agents` Go package and shipped
     by the control plane) and the agent prompt/creation specs that grow over
-    time; the CP-owned build's IaC is the exec-first Terraform A1 module
-    embedded in **`control-plane/api/cpbuild/terraform/`** (shipped by the
-    console to the box at `/srv/data/freehold-tf`).
+    time; the CP-owned build's IaC is the Terraform module embedded in
+    **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
+    box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s
+    LXCs + k3s bring-up) is exec-first `null_resource` shell, while the SERVICE
+    definitions (`postgres.tf` / `litellm.tf` / `caddy.tf`) are real
+    `kubernetes`-provider resources — the deterministic static files that define
+    each service, secret values riding the 0600 state.
 
 ### `platform/agents/freehold/prompt.md` (the CPA's purpose)
 
@@ -411,7 +422,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `/api/*` (overview/agents/portal) as an operator session.
 
 *   **`control-plane/cli/bootstrap-cp/` reads `providers.json`/`secrets.json`
-    and builds a k3s `manifests.yaml`** (see `platform/terraform/` below).
+    and builds the CP + co-located runner** (the box bootstrap that exists
+    before any terraform; the CP-owned service definitions live in the
+    `cpbuild/terraform` module above).
 
 ### Runners (the bridge between the two)
 

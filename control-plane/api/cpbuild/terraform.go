@@ -85,20 +85,74 @@ func (s *Spec) tfVars() []string {
 	}
 }
 
-// worldTerraform drives the terraform module on the provisioning box through
-// the co-located runner for `action` (plan|apply|destroy). Secrets (the litellm
-// master + provider key) are requested BY NAME so the runner injects + redacts
-// them as env (LITELLM / PROVIDER_KEY) — kube-apply.sh reads them directly, so
-// nothing transits argv, -var, tfvars, or terraform state. Long timeout: apply
-// boots k3s + waits for the API + rolls out litellm, which takes minutes.
-func (s *Spec) worldTerraform(action string) error {
+// tfRun drives the terraform module on the provisioning box for `action`
+// (plan|apply|destroy), optionally restricted to specific resources via
+// `-target`. requiresSecrets toggles the tf.sh secret-gate: the SUBSTRATE phase
+// (plane/LXCs/k3s) runs before k3s is up, so it needs neither the secret values
+// nor a kubeconfig (TF_NO_SECRETS=1). The SERVICES phase requests the litellm
+// master + postgres pw + provider key BY NAME so the runner injects + redacts
+// them as env (LITELLM / POSTGRES_PW / PROVIDER_KEY); tf.sh maps the two
+// service credentials to TF_VAR_* (env, never argv). Long timeout: apply rolls
+// out litellm + waits for the API.
+func (s *Spec) tfRun(action string, targets, extraVars []string, requiresSecrets bool) error {
 	s.resolveGuestVmids()
 	if err := s.stageDeployTf(); err != nil {
 		return fmt.Errorf("tf: ship module: %w", err)
 	}
-	args := strings.Join(append([]string{action}, s.tfVars()...), " ")
-	if err := s.runSecrets(tfDir+"/scripts/tf.sh "+args, 900, "litellm", "provider-key"); err != nil {
-		return fmt.Errorf("tf %s: %w", action, err)
+	args := append([]string{action}, s.tfVars()...)
+	args = append(args, extraVars...)
+	for _, t := range targets {
+		args = append(args, "-target", t)
+	}
+	script := tfDir + "/scripts/tf.sh"
+	cmdline := script + " " + strings.Join(args, " ")
+	if requiresSecrets {
+		if err := s.runSecrets(cmdline, 900, "litellm", "postgres-pw", "provider-key"); err != nil {
+			return fmt.Errorf("tf %s: %w", action, err)
+		}
+		return nil
+	}
+	if err := s.run("TF_NO_SECRETS=1 "+cmdline, 900); err != nil {
+		return fmt.Errorf("tf %s (substrate): %w", action, err)
+	}
+	return nil
+}
+
+// stageKubeconfig fetches the k3s guest's kubeconfig, rewrites its `server` to
+// the k3s NODE IP (the guest's kubeconfig points at 127.0.0.1, unreachable from
+// the provisioning box), and writes it at <tfDir>/kubeconfig (0600) for the
+// kubernetes provider. Runs only AFTER k3s is up (k3s_bringup applied).
+func (s *Spec) stageKubeconfig() error {
+	if s.K3sVmid == 0 {
+		return fmt.Errorf("no k3s vmid to fetch the kubeconfig")
+	}
+	raw, err := s.runOut(fmt.Sprintf("pct exec %d -- cat /etc/rancher/k3s/k3s.yaml", s.K3sVmid), 60)
+	if err != nil {
+		return fmt.Errorf("fetch kubeconfig: %w", err)
+	}
+	kip := config.StripCIDR(s.ProxyIP)
+	if kip == "" || kip == "-" {
+		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.K3sVmid), 30); err == nil {
+			for _, f := range strings.Fields(out) {
+				if strings.Contains(f, "/") && !strings.Contains(f, "127.0.0.1") {
+					kip = config.StripCIDR(f)
+					break
+				}
+			}
+		}
+	}
+	if kip == "" || kip == "-" {
+		return fmt.Errorf("no k3s node IP to rewrite the kubeconfig server")
+	}
+	rewritten := strings.Replace(raw, "https://127.0.0.1:6443", "https://"+kip+":6443", 1)
+	if !strings.Contains(rewritten, "https://"+kip+":6443") {
+		return fmt.Errorf("could not rewrite the kubeconfig server to https://%s:6443", kip)
+	}
+	b64 := base64.StdEncoding.EncodeToString([]byte(rewritten))
+	cmd := fmt.Sprintf("umask 077; mkdir -p %s && printf '%%s' '%s' | base64 -d > %s/kubeconfig && chmod 600 %s/kubeconfig",
+		tfDir, b64, tfDir, tfDir)
+	if err := s.run(cmd, 30); err != nil {
+		return fmt.Errorf("stage kubeconfig: %w", err)
 	}
 	return nil
 }

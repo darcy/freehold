@@ -25,6 +25,58 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.20] — per-service Terraform + Omarchy-style script migrations
+
+The infra slice settles on single sources of truth. The kube workloads graduate
+from shell here-docs to **real `kubernetes`-provider resources** (`postgres.tf` /
+`litellm.tf` / `caddy.tf` — the deterministic static files that define each
+service), with the substrate still exec-first `null_resource` shell. Migrations
+move from Go closures in `BuildMigrator` to **versioned script files**
+(Omarchy's `<epoch>.sh` + `<epoch>.verify.sh`), run ascending via `bash` on the
+CP against a durable ledger. Dead reconciled-duplicate stage builders
+(`K3sInstallScript`/`K3sLocalPathDurableScript`/`LitellmManifestScript`/
+`CaddyManifestScript` + manifests) are deleted; the shell (`k3s-bringup.sh`) is
+now the single owner of k3s install, and the per-service `.tf` files are the
+single owner of the service definitions.
+
+### Added
+- **`postgres.tf` / `litellm.tf` / `caddy.tf`** — the service definitions as
+  `kubernetes` (Deployment/Service/PVC/ConfigMap/Secret) resources. Secret
+  VALUES arrive as runner-injected env → `TF_VAR_*` (never argv) and ride the
+  0600 state (option A); the k8s Secrets are first-run-wins
+  (`lifecycle { ignore_changes = [data] }`). Model registration stays an event
+  (null_resource local-exec; the provider key rides env, never state).
+- **Two-phase apply + kubeconfig leg** — `cpbuild.tfRun` applies the substrate
+  via `-target` (`TF_NO_SECRETS=1`) so k3s comes up, then `stageKubeconfig`
+  fetches the k3s kubeconfig, rewrites the server to the node IP, and applies
+  the services. The kubernetes provider downloads at `init` (online, like the
+  cert flow).
+- **Versioned script migrations** — `platform/migrations/files/<epoch>.sh` +
+  `<epoch>.verify.sh` (go:embed), enumerated ascending, executed via `bash` on
+  the CP with `FREEHOLD_AGENT_TOOLS`/`REGISTRY`/`CONSOLE_STATE` env; the ledger
+  marks a migration done only when its verify gate passes. Added the
+  `freehold-agent-tools registry verify|import-console` subcommand the scripts
+  drive; migrations `1799900000` (registry loadable) + `1799910000`
+  (import-console, additive) replace the old Go closures.
+- **`followups.md`** — tracks the deferred relay-stack (A) and substrate-provider
+  (B) pieces.
+
+### Changed
+- k3s install + the durable local-path carve-out are owned solely by
+  `scripts/k3s-bringup.sh` (the Go `worldBootK3s` / `stages` builders are gone);
+  Caddy's static edge is `caddy.tf`, its cert/DNS issuance stays the CP's
+  event-driven overlay.
+- Terraform runs from `tf.sh` with conditional secret requirements (destroy and
+  substrate phase need neither the secret values nor a kubeconfig).
+
+### Removed
+- Dead reconciled-duplicate substrate builders in `stages.go`
+  (`K3sInstallScript`, `K3sLocalPathDurableScript`, `LitellmManifestScript`,
+  `CaddyManifestScript`, the embedded litellm manifest consts) + their orphaned
+  tests; `shell scripts/{kube-apply.sh,kube-destroy.sh}` (superseded by the
+  provider); `worldBootK3s`; `CaddyManifest`/`yamlBlockIndent`/`splitLines` in
+  `services/webproxy/caddy` (only `RenderCaddyfile` remains).
+
 ## [0.5.19] — the substrate + kube workloads are Terraform-managed (A1)
 
 Increment 5/6 of the CP-owned build (`roadmap/CP_OWNED_BUILD.md` Phase B): the
