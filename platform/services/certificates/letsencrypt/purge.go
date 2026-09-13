@@ -146,7 +146,11 @@ func findCoveringZone(client *http.Client, base, token, apiKey, email, name stri
 }
 
 // listTXTRecordIds lists the DNS record ids of type TXT at the given name.
+// Cloudflare's `name=` filter is literal (no trailing dot — it does not match
+// "_acme-challenge.relay.x." against the record "_acme-challenge.relay.x"),
+// so the fqdn's trailing dot is trimmed here or the purge silently lists 0.
 func listTXTRecordIds(client *http.Client, base, token, apiKey, email, zoneID, name string) ([]string, error) {
+	name = strings.TrimSuffix(name, ".")
 	url := fmt.Sprintf("%s/zones/%s/dns_records?type=TXT&name=%s&per_page=100", base, zoneID, name)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {

@@ -1877,18 +1877,24 @@ func (e *rebuildEngine) stageBootstrap(role string) error {
 	return err
 }
 
-// bootstrapStaticIP returns the role's STATIC address, OR "" = DHCP. With a
-// single static proxy now, ONLY the proxy node ("k3s") is static (f.proxyIP,
-// or the recorded cfg.Proxy.Ip riding again); relay + cp are always DHCP.
+// bootstrapStaticIP returns the role's STATIC address, or "" = DHCP. k3s is
+// the proxy node (--proxy-ip, or the recorded cfg.Proxy.Ip riding again);
+// relay + cp are STATIC when --relay-ip / --cp-ip are supplied (running them
+// OFF DHCP avoids exhausting a small LAN DHCP pool), else DHCP behind the
+// proxy.
 func bootstrapStaticIP(role string, f rebuildFlags, cfg *config.Config) string {
-	if role != "k3s" {
-		return "" // relay/cp are behind the proxy
-	}
-	if f.proxyIP != "" {
-		return f.proxyIP
-	}
-	if cfg != nil && cfg.Proxy.Ip != nil {
-		return *cfg.Proxy.Ip
+	switch role {
+	case "cp":
+		return f.cpIP
+	case "relay":
+		return f.relayIP
+	case "k3s":
+		if f.proxyIP != "" {
+			return f.proxyIP
+		}
+		if cfg != nil && cfg.Proxy.Ip != nil {
+			return *cfg.Proxy.Ip
+		}
 	}
 	return ""
 }

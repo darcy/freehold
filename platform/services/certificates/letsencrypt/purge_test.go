@@ -48,3 +48,34 @@ func TestPurgeChallengeRecords(t *testing.T) {
 		t.Fatalf("non-cloudflare purge: n=%d err=%v, want 0,nil", n, err)
 	}
 }
+
+func TestPurgeChallengeRecords_NameFilterNoTrailingDot(t *testing.T) {
+	var gotName string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/zones":
+			_, _ = w.Write([]byte(`{"success":true,"result_info":{"page":1,"total_pages":1},"result":[{"id":"z-fh","name":"freehold.technology"}]}`))
+		case r.URL.Path == "/zones/z-fh/dns_records":
+			gotName = r.URL.Query().Get("name")
+			if r.URL.Query().Get("type") != "TXT" {
+				t.Errorf("expected type=TXT, got %q", r.URL.Query().Get("type"))
+			}
+			_, _ = w.Write([]byte(`{"success":true,"result":[]}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"success":true,"result":{}}`))
+		}
+	}))
+	defer srv.Close()
+
+	_, err := purgeChallengeRecords("relay.migrate.freehold.technology", "cloudflare", map[string]string{
+		"CLOUDFLARE_DNS_API_TOKEN": "t",
+		"CLOUDFLARE_BASE_URL":      srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if gotName != "_acme-challenge.relay.migrate.freehold.technology" {
+		t.Fatalf("name filter = %q, want no trailing dot", gotName)
+	}
+}
