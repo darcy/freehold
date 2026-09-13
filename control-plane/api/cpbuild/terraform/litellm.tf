@@ -87,9 +87,10 @@ resource "kubernetes_manifest" "litellm_service" {
 # it (LITELLM_MODEL_ALIAS_MAP above), not a separate registration. The gateway is
 # reached at the k3s NODE IP (k3s_ip), NOT 127.0.0.1 - terraform drives this via
 # local-exec on the provisioning box, a DIFFERENT LXC from where litellm runs. A
-# non-zero curl exit (e.g. connection refused) now FAILS the apply instead of
-# being swallowed, so a lost registration surfaces instead of silently leaving
-# the CPA with no model.
+# non-zero curl exit (e.g. connection refused / gateway not yet ready) now FAILS
+# the apply instead of being swallowed, so a lost registration surfaces instead
+# of silently leaving the CPA with no model. The litellm Deployment gates only on
+# readiness; model_registration waits for /health/liveliness before registering.
 resource "null_resource" "model_registration" {
   depends_on = [kubernetes_manifest.litellm_service]
   triggers = {
@@ -98,6 +99,12 @@ resource "null_resource" "model_registration" {
   provisioner "local-exec" {
     command = <<-EOT
       set -euo pipefail
+      # Wait for the freshly-rolled gateway to listen (its pod is created just
+      # now; a Service apply does not imply the NodePort answers yet).
+      for i in $(seq 1 30); do
+        curl -fsS -m 5 "http://${var.k3s_ip}:31400/health/liveliness" >/dev/null 2>&1 && break
+        sleep 2
+      done
       BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
       curl -fsS -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://${var.k3s_ip}:31400/model/new"
       echo
