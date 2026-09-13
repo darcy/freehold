@@ -755,21 +755,23 @@ func (s *Spec) consoleEncSecret() ([]byte, error) {
 	return hex.DecodeString(id.EncSecretHex)
 }
 
-// issueCert runs the resumable DNS-01 issuance IN-PROCESS for one slot's host
-// (lego via internal/cert; the sealed DNS cred opened in memory), so a re-run
-// after a timeout RESUMES the same order instead of re-challenging.
-func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*cert.Issued, error) {
+// openCertOrder opens (reusing or freshly placing) one slot's resumable DNS-01
+// order, PLACING its challenge TXT but NOT waiting for propagation — it returns
+// once the record is on the wire. worldCert opens EVERY slot's order this way
+// first, so the usually-slow DNS-01 propagation of all hosts progresses in
+// parallel, then waits + resolves them all.
+func (s *Spec) openCertOrder(slot, host, provider string, env map[string]string) (*cert.Resume, *cert.PendingOrder, string, error) {
 	secret, err := s.consoleEncSecret()
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 	pub, err := crypto.X25519PublicKey(secret)
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 	dp, err := cert.NewDNSProvider(provider, env)
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 	statePath := filepath.Join(s.StateDir, "world-secrets", "cert-pending-"+slot+".json")
 	resume := &cert.Resume{
@@ -783,7 +785,7 @@ func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*c
 	}
 	po, ok, err := resume.TryLoad()
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 	if !ok {
 		// No resumable order: we're about to create a NEW ACME order + place a
@@ -793,33 +795,16 @@ func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*c
 		// every issuance, which is the redundant-record → ACME order/rate-limit
 		// bloat surfaced on librem / relay.migrate.
 		if n, perr := cert.PurgeChallengeRecords(host, provider, env); perr != nil {
-			return nil, fmt.Errorf("cert %s purge challenge: %w", slot, perr)
+			return nil, nil, "", fmt.Errorf("cert %s purge challenge: %w", slot, perr)
 		} else if n > 0 {
 			fmt.Fprintf(os.Stderr, "cert %s: purged %d stale challenge record(s) before issue\n", slot, n)
 		}
 		po, err = resume.Begin()
 		if err != nil {
-			return nil, err
+			return nil, nil, "", err
 		}
 	}
-	issued, err := resume.Resolve(po)
-	if err != nil {
-		// Only the terminal "authorization invalid" state justifies discarding
-		// the pending resumable order: resuming it can never succeed. A transient
-		// failure (a polling timeout, a flaky network read) must KEEP the order so
-		// the next run resumes the same order + challenge instead of minting a new
-		// ACME order (and risking rate limits) each time.
-		if errors.Is(err, cert.ErrAuthInvalid) {
-			_ = os.Remove(statePath)
-		}
-		return nil, err
-	}
-	// Issue succeeded: clean up the placed challenge TXT so it doesn't linger in
-	// the zone (lego's Present never removes it; Resume only discards state).
-	if n, perr := cert.PurgeChallengeRecords(host, provider, env); perr == nil && n > 0 {
-		fmt.Fprintf(os.Stderr, "cert %s: cleaned %d challenge record(s) after issue\n", slot, n)
-	}
-	return issued, nil
+	return resume, po, statePath, nil
 }
 
 // installCaddyCertFile writes a slot's FRESH issued fullchain + key into the
@@ -891,9 +876,24 @@ rm -f /tmp/fh-fc-%s.pem /tmp/fh-key-%s.pem
 
 // worldCert resolves each edge slot's cert CP-side: the durable-reuse gate
 // (valid mirror => seed the PVC, no LE order) else an in-process resumable
-// DNS-01 issue, then install the FRESH pair through the co-located runner with
-// the key file-transited (never a stale runner-package key).
+// DNS-01 issue. It PLACES every slot's challenge FIRST (record on the wire,
+// no wait), then waits for all of them to propagate, then resolves + installs
+// each — so a slow DNS-01 propagation for a fresh apex overlaps across hosts
+// instead of serializing (relay then cp), and a relay propagation stall no
+// longer prevents cp's challenge from even being created.
 func (s *Spec) worldCert() error {
+	type pendSlot struct {
+		slot     string
+		host     string
+		resume   *cert.Resume
+		po       *cert.PendingOrder
+		path     string
+		provider string
+		env      map[string]string
+	}
+	var pending []pendSlot
+
+	// Phase A — durable-reuse seed, or open + PLACE each slot's order (no pause).
 	for _, sl := range []struct{ slot, host string }{
 		{"relay", s.RelayHost}, {"cp", s.CpHost},
 	} {
@@ -917,12 +917,44 @@ func (s *Spec) worldCert() error {
 		if err != nil {
 			return fmt.Errorf("cert %s: %w", sl.slot, err)
 		}
-		issued, err := s.issueCert(sl.slot, sl.host, provider, env)
+		resume, po, statePath, err := s.openCertOrder(sl.slot, sl.host, provider, env)
 		if err != nil {
 			return fmt.Errorf("cert %s issue: %w", sl.slot, err)
 		}
-		if err := s.installCaddyCertFile(s.K3sVmid, sl.slot, issued.Fullchain, issued.Key); err != nil {
-			return fmt.Errorf("cert %s install: %w", sl.slot, err)
+		pending = append(pending, pendSlot{slot: sl.slot, host: sl.host, resume: resume, po: po, path: statePath, provider: provider, env: env})
+	}
+
+	// Phase B — wait for every placed challenge to be served at the authoritative
+	// zone (all records are already on the wire, so their propagation overlaps).
+	for _, p := range pending {
+		if err := p.resume.PropagationWait(p.po); err != nil {
+			// A propagation timeout is transient: KEEP the order so the next run
+			// resumes the same order + challenge instead of minting a new one.
+			return fmt.Errorf("cert %s issue: %w", p.slot, err)
+		}
+	}
+
+	// Phase C — accept + finalize + download each, install through the runner,
+	// and clean up the placed challenge TXT from the zone.
+	for _, p := range pending {
+		issued, err := p.resume.Resolve(p.po)
+		if err != nil {
+			// Only the terminal "authorization invalid" state justifies discarding
+			// the pending resumable order: resuming it can never succeed. A
+			// transient failure (a polling timeout, a flaky network read) must
+			// KEEP the order so the next run resumes instead of re-challenging.
+			if errors.Is(err, cert.ErrAuthInvalid) {
+				_ = os.Remove(p.path)
+			}
+			return fmt.Errorf("cert %s issue: %w", p.slot, err)
+		}
+		if err := s.installCaddyCertFile(s.K3sVmid, p.slot, issued.Fullchain, issued.Key); err != nil {
+			return fmt.Errorf("cert %s install: %w", p.slot, err)
+		}
+		// Issue succeeded: clean up the placed challenge TXT so it doesn't linger
+		// in the zone (lego's Present never removes it; Resume only discards state).
+		if n, perr := cert.PurgeChallengeRecords(p.host, p.provider, p.env); perr == nil && n > 0 {
+			fmt.Fprintf(os.Stderr, "cert %s: cleaned %d challenge record(s) after issue\n", p.slot, n)
 		}
 	}
 	return nil
