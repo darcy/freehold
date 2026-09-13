@@ -122,3 +122,8 @@ func runShell(cmd string) (string, error) {
 	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
 	return string(out), err
 }
+
+// ReloadDnsmasq is the exported resolver reload (the freehold-console `dns add`
+// subcommand calls it — the worldDNS build step writes records + reloads the
+// CP's dnsmasq in process).
+func ReloadDnsmasq(stateDir string) error { return reloadDnsmasq(stateDir) }

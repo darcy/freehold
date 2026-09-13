@@ -32,6 +32,14 @@ import (
 // its exported acme/api.Core, which we reconstruct from the persisted key+kid.
 const ResumeUserAgent = "freehold-resume"
 
+// ErrAuthInvalid is the terminal per-order ACME failure: Let's Encrypt validated
+// the challenge and marked this order's authorization INVALID. Resuming it can
+// never succeed, so it is the ONLY Resolve failure that justifies discarding
+// the pending resumable state; every other error (a polling timeout, a transient
+// network error) should keep the order so the next run RESUMES it (and its
+// already-placed challenge), not start a fresh one.
+var ErrAuthInvalid = errors.New("acme: authorization invalid")
+
 // pendingResume is the persisted on-disk order state (sealed acct key).
 type pendingResume struct {
 	Domain        string `json:"domain"`
@@ -177,6 +185,15 @@ func (r *Resume) place(po *pendingOrder) error {
 		return fmt.Errorf("present challenge: %w", err)
 	}
 	info := dns01.GetChallengeInfo(r.Domain, keyAuth)
+	// Post-lego's own dns01 precheck: wait for the challenge TXT to be served at
+	// the AUTHORITATIVE zone before the caller POSTs "ready" for LE to validate.
+	// Without this, LE can read a stale/negative-cached resolver and mark the
+	// authorization invalid before the record reaches it (the exact failure this
+	// freehold world hit: relay auth invalid, record visible at the authz NS but
+	// not at this box's recursive resolver).
+	if err := waitAuthoritativePropagation(info.EffectiveFQDN, info.Value, 3*time.Minute); err != nil {
+		return fmt.Errorf("dns-01 propagation: %w", err)
+	}
 	return r.persist(po, info.EffectiveFQDN)
 }
 
@@ -356,7 +373,7 @@ func (r *Resume) authorizationValid(core *acmeapi.Core, order acme.ExtendedOrder
 			case acme.StatusValid:
 				continue
 			case acme.StatusInvalid:
-				return false, fmt.Errorf("authorization %s invalid", url)
+				return false, fmt.Errorf("%w: %s", ErrAuthInvalid, url)
 			default:
 				return false, nil
 			}

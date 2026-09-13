@@ -4,17 +4,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"freehold/control-plane/api/agenttools"
+	"freehold/platform/migrations"
 )
 
-// TestMigrateImportConsoleAgentsAdditiveOnly proves migration 002 folds the
+// TestImportConsoleAgentsAdditiveOnly proves the 002 migration logic folds the
 // console state.json agents into the registry ADDITIVELY: an existing registry
 // row for the same name keeps its current pubkey (the registry is
-// authoritative) and only absent names are imported.
-func TestMigrateImportConsoleAgentsAdditiveOnly(t *testing.T) {
+// authoritative) and only absent names are imported. The migration SCRIPT drives
+// this same Go function (registry import-console); this test pins the logic.
+func TestImportConsoleAgentsAdditiveOnly(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	consoleDir := filepath.Join(dir, "console-state")
@@ -46,10 +47,8 @@ func TestMigrateImportConsoleAgentsAdditiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spec := &Spec{StateDir: stateDir}
-	m := BuildMigrator(spec, consoleDir)
-	if _, err := m(); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := agenttools.ImportConsoleAgents(reg, consoleDir); err != nil {
+		t.Fatalf("import: %v", err)
 	}
 
 	rows, err := agenttools.OpenRegistry(regPath)
@@ -72,12 +71,73 @@ func TestMigrateImportConsoleAgentsAdditiveOnly(t *testing.T) {
 	if got := byName["bob"]; got != "BOB_PK" {
 		t.Fatalf("absent console agent not imported: bob pubkey = %q", got)
 	}
-	// The ledger records the migration as done (verify passed).
-	ledger, err := os.ReadFile(filepath.Join(stateDir, "migrations.json"))
+}
+
+// TestBuildMigratorRunsScriptsToConvergence exercises the PRODUCTION wiring of
+// BuildMigrator (the gap the previous direct-logic test no longer covers):
+// embedded migration scripts are written to <StateDir>/migrations/files/<epoch>.sh
+// and executed via `exec.Command("bash", path)` with FREEHOLD_AGENT_TOOLS /
+// REGISTRY / CONSOLE_STATE env. A stub `freehold-agent-tools` asserts those env
+// vars are populated (proving cpGuestDirs + path resolution) and exits 0, so
+// both migrations converge and the ledger durably records them "done".
+func TestBuildMigratorRunsScriptsToConvergence(t *testing.T) {
+	dir := t.TempDir()
+	// cpGuestDirs derives binDir from filepath.Dir(StateDir), so the stub under
+	// test must sit at <dir>/bin/freehold-agent-tools.
+	stateDir := filepath.Join(dir, "state")
+	consoleDir := filepath.Join(dir, "console-state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(consoleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(binDir, "freehold-agent-tools")
+	stubSrc := `#!/bin/sh
+set -eu
+[ -n "${FREEHOLD_AGENT_TOOLS:-}" ] || { echo "no FREEHOLD_AGENT_TOOLS"; exit 1; }
+[ -n "${REGISTRY:-}" ] || { echo "no REGISTRY"; exit 1; }
+[ -n "${CONSOLE_STATE:-}" ] || { echo "no CONSOLE_STATE"; exit 1; }
+exit 0
+`
+	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &Spec{StateDir: stateDir}
+	m := BuildMigrator(spec, consoleDir)
+	results, err := m()
+	if err != nil {
+		t.Fatalf("BuildMigrator: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected both migrations to run, got %d: %+v", len(results), results)
+	}
+	for _, r := range results {
+		if !r.OK {
+			t.Errorf("migration %q not converged: %s", r.Name, r.Err)
+		}
+	}
+
+	// The ledger durably records both migrations "done".
+	raw, err := os.ReadFile(filepath.Join(stateDir, "migrations.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(ledger), `"done"`) {
-		t.Fatalf("migration not recorded done: %s", ledger)
+	var entries map[string]migrations.Entry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 ledger entries, got %d", len(entries))
+	}
+	for name, e := range entries {
+		if e.Status != "done" {
+			t.Errorf("migration %q not 'done': %s", name, e.Status)
+		}
 	}
 }

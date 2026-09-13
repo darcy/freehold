@@ -10,8 +10,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -25,7 +27,6 @@ import (
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
-	"freehold/control-plane/api/cpstate"
 	"freehold/control-plane/cli/flows"
 	"freehold/platform/agents"
 	"freehold/platform/migrations"
@@ -184,6 +185,22 @@ func (s *Spec) worldDNS() error {
 	for _, r := range stages.DnsRecords(s.RelayHost, s.RelayIP, s.CpHost, s.CpIP, s.ProxyIP, s.LitellmIP) {
 		if err := s.run(stages.DnsAddCmd(s.CpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
 			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
+		}
+	}
+	// The resolver WILDCARD: all *.apex -> the proxy (Caddy) edge, so the
+	// dotted public hosts (relay.<apex>, cp.<apex>) resolve to TLS - never to a
+	// guest LXC (dnsmasq's bare `relay`/`cp` records would otherwise leak the
+	// guest IP into the FQDN answer). The apex is the guest search base when
+	// present, else derived from the relay host (strip its leading label).
+	apex := searchBase
+	if apex == "" {
+		if i := strings.Index(s.RelayHost, "."); i > 0 && i < len(s.RelayHost)-1 {
+			apex = s.RelayHost[i+1:]
+		}
+	}
+	if apex != "" && s.ProxyIP != "" {
+		if err := s.run(stages.DnsApexCmd(s.CpLxc, binDir, stateDir, apex, config.StripCIDR(s.ProxyIP)), 120); err != nil {
+			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
 	router := s.guestNameserver()
@@ -452,22 +469,16 @@ func (s *Spec) worldBootRelay(mounts []planebase.MountSpec) error {
 }
 
 // worldBootK3s boots the k3s LXC (if missing — the driver picks a free vmid on
-// a fresh world), installs k3s inside it (the shared in-guest install script),
-// and re-asserts the durable local-path.
+// a fresh world) so spec.K3sVmid is recorded BEFORE the terraform substrate
+// phase ADOPTS the LXC (lxc.sh is adopt-if-missing; a 0 vmid would `pct create
+// 0` and fail). The k3s INSTALL + the durable local-path carve-out are OWNED by
+// the terraform module's k3s-bringup.sh.
 func (s *Spec) worldBootK3s(mounts []planebase.MountSpec) error {
 	vmid, err := s.bootLxc("k3s", s.K3sVmid, mounts)
 	if err != nil {
 		return err
 	}
 	s.K3sVmid = vmid
-	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", s.K3sVmid, strings.TrimSpace(strings.ReplaceAll(stages.K3sInstallScript, "__K3S_VERSION__", stages.K3sVersion)))
-	if err := s.run(cmd, 900); err != nil {
-		return fmt.Errorf("k3s install: %w", err)
-	}
-	cmd = fmt.Sprintf("pct exec %d -- bash -c '%s'", s.K3sVmid, strings.TrimSpace(stages.K3sLocalPathDurableScript))
-	if err := s.run(cmd, 180); err != nil {
-		return fmt.Errorf("k3s local-path: %w", err)
-	}
 	return nil
 }
 
@@ -510,7 +521,12 @@ func (s *Spec) deployAgentTools() error {
 	// Resolve the relay's current IP (bootstrap did not boot the relay; this
 	// world_build just did).
 	relayIP := s.RelayIP
-	if relayIP == "" && s.RelayLxc != 0 {
+	if s.RelayLxc != 0 {
+		// Always re-read the relay's CURRENT DHCP lease: a prior cycle's recorded
+		// IP can go stale (the relay LXC can come back on a different .30.x lease
+		// after a teardown+rebuild), and pinning the seed against a dead IP makes
+		// the agent-tools roster seed fail with "no route to host". Fall back to
+		// the recorded value only if the live read yields nothing.
 		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
 			for _, t := range strings.Fields(out) {
 				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
@@ -766,6 +782,14 @@ func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*c
 	}
 	issued, err := resume.Resolve(po)
 	if err != nil {
+		// Only the terminal "authorization invalid" state justifies discarding
+		// the pending resumable order: resuming it can never succeed. A transient
+		// failure (a polling timeout, a flaky network read) must KEEP the order so
+		// the next run resumes the same order + challenge instead of minting a new
+		// ACME order (and risking rate limits) each time.
+		if errors.Is(err, cert.ErrAuthInvalid) {
+			_ = os.Remove(statePath)
+		}
 		return nil, err
 	}
 	return issued, nil
@@ -932,31 +956,58 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "agent-tools live")
 		}
-		// 3. The k3s substrate: boot the LXC if missing, install k3s inside it,
-		// and re-assert the durable local-path.
-		if spec.RelayHost != "" {
-			if err := spec.worldBootK3s(mounts[planebase.TenantK3sVolumes]); err != nil {
-				return "", fmt.Errorf("world-build k3s: %w", err)
-			}
-			report = append(report, "k3s substrate ready")
-		}
-		// 3.5. Terraform A1: drive the substrate + kube workloads through the
-		// co-located runner. The exec-first module ADOPTS the plane + LXCs the
-		// steps above just ensured (adopt-if-missing, plan-clean) and OWNS the
-		// litellm/postgres kube workloads + model registration (kube-apply.sh),
-		// which the world_build below then no longer applies in Go. Secret
-		// discipline: litellm + provider-key ride the runner by name, never argv.
+		// 3. Terraform PHASE 1 — the SUBSTRATE (plane + cp/relay/k3s LXCs + k3s
+		// bring-up), restricted via -target. This BRINGS UP k3s so the
+		// kubernetes-provider resources in phase 2 have an API to connect to: a
+		// full plan now would fail, because the kubeconfig doesn't exist yet.
 		if spec.RelayHost != "" && spec.PlanePool != "" {
-			if err := spec.worldTerraform("apply"); err != nil {
-				return "", fmt.Errorf("world-build terraform: %w", err)
+			// Boot the k3s LXC in Go first so its vmid is allocated + recorded
+			// (bootLxc picks a free vmid on a fresh world); terraform ADOPTS it.
+			if err := spec.worldBootK3s(mounts[planebase.TenantK3sVolumes]); err != nil {
+				return "", fmt.Errorf("world-build k3s boot: %w", err)
 			}
-			report = append(report, "terraform substrate + litellm/postgres applied")
+			substrate := []string{
+				"null_resource.plane",
+				"null_resource.lxc_cp",
+				"null_resource.lxc_relay",
+				"null_resource.lxc_k3s",
+				"null_resource.k3s_bringup",
+			}
+			if err := spec.tfRun("apply", substrate, nil, false); err != nil {
+				return "", fmt.Errorf("world-build terraform substrate: %w", err)
+			}
+			report = append(report, "terraform substrate applied (plane + LXCs + k3s)")
 		}
-		// 3.5b. Re-read the guests' CURRENT vmids + IPs (a fresh world whose coords
+		// 3.5. Re-read the guests' CURRENT vmids + IPs (a fresh world whose coords
 		// were cleared at teardown has 0 vmids; the boot steps just picked
-		// them). The DNS/caddy/litellm steps below consume both. Best-effort.
+		// them). Consumed by DNS/caddy/litellm/cert below.
 		spec.resolveGuestVmids()
 		spec.refreshGuestIPs()
+		// 3.5b. Terraform PHASE 2 — the SERVICE definitions (postgres.tf /
+		// litellm.tf / caddy.tf) as kubernetes-provider resources. The kubeconfig
+		// is staged from the now-up k3s (server rewritten to the node IP) and the
+		// rendered Caddyfile rides -var caddyfile_b64 (plain, not secret).
+		if spec.K3sVmid != 0 && spec.RelayHost != "" && spec.PlanePool != "" {
+			if err := spec.stageKubeconfig(); err != nil {
+				return "", fmt.Errorf("world-build tf kubeconfig: %w", err)
+			}
+			var extra []string
+			if spec.CpHost != "" && spec.RelayIP != "" {
+				relayUpstream := fmt.Sprintf("%s:3000", spec.RelayIP)
+				cpUpstream, cpMcpUpstream := "", ""
+				if spec.CpIP != "" {
+					cpUpstream = fmt.Sprintf("%s:8080", spec.CpIP)
+					cpMcpUpstream = fmt.Sprintf("%s:8089", spec.CpIP)
+				}
+				caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
+				extra = append(extra, "-var",
+					"caddyfile_b64="+base64.StdEncoding.EncodeToString([]byte(caddyfile)))
+			}
+			if err := spec.tfRun("apply", nil, extra, true); err != nil {
+				return "", fmt.Errorf("world-build terraform services: %w", err)
+			}
+			report = append(report, "terraform services applied (postgres/litellm/caddy)")
+		}
 		// 4. The CP-owned resolver: register the split-horizon names (bare
 		// guests + the dotted public hosts via the proxy) and point every guest
 		// at the CP as its nameserver, then verify the resolver actually ANSWERS
@@ -967,35 +1018,14 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "dns register/point applied")
 		}
-		// 5. The litellm gateway (kube workloads + model registration through the
-		// co-located runner) — CP-owned; the operator's provider key rides the
-		// CP (hand-off) or the co-located runner package, never argv.
+		// 5. The litellm gateway — the CPA pod's litellm key seed (the kube
+		// workloads + model registration are owned by the terraform services
+		// phase above); the operator's provider key rides the runner, never argv.
 		if spec.K3sVmid != 0 && spec.LitellmIP != "" {
 			if err := spec.worldLiteLLM(); err != nil {
 				return "", fmt.Errorf("world-build litellm: %w", err)
 			}
 			report = append(report, "litellm gateway live")
-		}
-		// 6. Caddy TLS edge re-apply (the relay + CP vhost fronts) when the edge
-		// coords are recorded. No secrets (the Caddyfile is plain); cert
-		// issuance/install remain a separate stage.
-		if spec.K3sVmid != 0 && spec.RelayHost != "" && spec.CpHost != "" && spec.RelayIP != "" {
-			relayUpstream := fmt.Sprintf("%s:3000", spec.RelayIP)
-			cpUpstream := ""
-			cpMcpUpstream := ""
-			if spec.CpIP != "" {
-				cpUpstream = fmt.Sprintf("%s:8080", spec.CpIP)
-				cpMcpUpstream = fmt.Sprintf("%s:8089", spec.CpIP)
-			}
-			caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
-			// CaddyManifestScript is written to run ON THE PVE HOST (it wraps
-			// pct push/pct exec itself), so spec.run executes it raw — never
-			// wrapped in an outer pct exec (that would run the script inside
-			// the guest, where pct doesn't exist).
-			if err := spec.run(stages.CaddyManifestScript(spec.K3sVmid, caddydeploy.CaddyManifest(caddyfile)), 180); err != nil {
-				return "", fmt.Errorf("world-build caddy edge: %w", err)
-			}
-			report = append(report, "caddy TLS edge re-applied")
 		}
 		// 7. The edge certs: durable-reuse gate (no LE order when the durable
 		// mirror has a valid cert) else an in-process resumable DNS-01 issue,
@@ -1005,6 +1035,28 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build cert: %w", err)
 			}
 			report = append(report, "cert issued/installed (or already present)")
+		}
+		// 7.25. Drop the CP's /etc/hosts public-host pins. The agent-tools seed
+		// pinned relay.<apex>/cp.<apex> -> the guest LXC IP so it could dial the
+		// relay's LAN events endpoint before Caddy existed. With the edge up those
+		// pins must go - they make the CP resolve the public hosts to the guest
+		// (no TLS there), so /api/world reports the relay/cp edge down. The
+		// resolver's apex wildcard now fronts them through Caddy.
+		if spec.CpLxc != 0 {
+			hosts := []string{spec.RelayHost}
+			if spec.CpHost != "" {
+				hosts = append(hosts, spec.CpHost)
+			}
+			for _, h := range hosts {
+				if h == "" {
+					continue
+				}
+				esc := strings.ReplaceAll(h, ".", `\.`)
+				if err := spec.run(fmt.Sprintf("pct exec %d -- sed -i '/%s/d' /etc/hosts", spec.CpLxc, esc), 30); err != nil {
+					return "", fmt.Errorf("world-build drop host pin %s: %w", h, err)
+				}
+			}
+			report = append(report, "edge host pins dropped (public hosts resolve to the proxy)")
 		}
 		// 7.5. Record the world-service health coords (k3s/litellm/caddy) so any
 		// management box renders the live world through /api/world.
@@ -1026,91 +1078,50 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 // through the co-located runner, and hand the minted pubkey to Tools.CreateAgent
 // BuildMigrator wires the CP's verify-gated migration runner (Step 7): a
 // durable ledger at <stateDir>/migrations.json (backed up with the CP plane),
-// running pending idempotent migrations gated on their postcondition (🟢/🔴).
-// First registered migration: the agent-tools durable registry must be a valid,
-// loadable store. The CPA-prompt/config migrations land with the live-world
-// build/upgrade, reusing this same runner.
+// running the versioned migration SCRIPTS (platform/migrations/files/<epoch>.sh
+// + <epoch>.verify.sh, OMARCY-style: one timestamped .sh per migration).
+// Each pending migration runs in ascending epoch order through bash on the CP
+// (where the data it operates on lives); done only when its verify gate passes.
+// The scripts receive the durable-plane paths + the freehold-agent-tools binary
+// via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE) — never argv, so no
+// credential crosses the audit.
 func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 	return func() ([]migrations.Result, error) {
 		st, err := migrations.Open(filepath.Join(spec.StateDir, "migrations.json"))
 		if err != nil {
 			return nil, err
 		}
-		registryPath := filepath.Join(spec.StateDir, "registry.json")
-		all := []migrations.Migration{{
-			Name: "001-agent-tools-registry-loadable",
-			Apply: func() error {
-				_, err := agenttools.OpenRegistry(registryPath)
+		scripts, err := migrations.Scripts()
+		if err != nil {
+			return nil, fmt.Errorf("enumerate migration scripts: %w", err)
+		}
+		binDir, _ := spec.cpGuestDirs()
+		runEnv := append(os.Environ(),
+			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
+			"REGISTRY="+filepath.Join(spec.StateDir, "registry.json"),
+			"CONSOLE_STATE="+consoleStateDir,
+		)
+		run := func(epoch, body string) error {
+			dir := filepath.Join(spec.StateDir, "migrations", "files")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
 				return err
-			},
-			Verify: func() error {
-				_, err := agenttools.OpenRegistry(registryPath)
+			}
+			path := filepath.Join(dir, epoch+".sh")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				return err
-			},
-		}, {
-			// One-time fold of the console state.json agents map into the
-			// authoritative registry.json (the two-registry divergence from the
-			// 0.4.x console-era). ADDITIVE-ONLY: a name already in the registry
-			// keeps its current row (the registry is authoritative — a stale
-			// console pubkey must never clobber a current one). Postcondition:
-			// every console agent is present; skipped-existing rows verify.
-			Name: "002-import-console-agents",
-			Apply: func() error {
-				st, err := cpstate.Read(consoleStateDir)
-				if err != nil {
-					return err
-				}
-				reg, err := agenttools.OpenRegistry(registryPath)
-				if err != nil {
-					return err
-				}
-				rows, err := reg.Agents()
-				if err != nil {
-					return err
-				}
-				byName := map[string]bool{}
-				for _, r := range rows {
-					byName[r.Name] = true
-				}
-				for _, a := range st.Agents {
-					if a.Pubkey == "" || byName[a.Name] {
-						continue
-					}
-					ch := a.Name
-					if a.Channel != nil && *a.Channel != "" {
-						ch = *a.Channel
-					}
-					if _, err := reg.RegisterAgent(a.Name, a.Pubkey, ch); err != nil {
-						return err
-					}
-				}
-				return nil
-			},
-			Verify: func() error {
-				st, err := cpstate.Read(consoleStateDir)
-				if err != nil {
-					return err
-				}
-				reg, err := agenttools.OpenRegistry(registryPath)
-				if err != nil {
-					return err
-				}
-				rows, err := reg.Agents()
-				if err != nil {
-					return err
-				}
-				have := map[string]bool{}
-				for _, r := range rows {
-					have[r.Pubkey] = true
-				}
-				for _, a := range st.Agents {
-					if a.Pubkey != "" && !have[a.Pubkey] {
-						return fmt.Errorf("console agent %q (%s) missing from the registry", a.Name, a.Pubkey)
-					}
-				}
-				return nil
-			},
-		}}
+			}
+			cmd := exec.Command("bash", path)
+			cmd.Env = runEnv
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%s: %w: %s", path, err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		}
+		all := make([]migrations.Migration, 0, len(scripts))
+		for _, s := range scripts {
+			all = append(all, s.Migration(func(body string) error { return run(s.Epoch, body) }))
+		}
 		return st.Run(all)
 	}
 }

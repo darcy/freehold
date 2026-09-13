@@ -49,8 +49,10 @@ func main() {
 		err = cmdIdentity(os.Args[2:])
 	case "services":
 		err = cmdServices(os.Args[2:])
+	case "dns":
+		err = cmdDNS(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity|services)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity|services|dns)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -365,6 +367,74 @@ func cmdServices(args []string) error {
 	}
 	fmt.Printf("service %s -> %s registered\n", *kind, *url)
 	return nil
+}
+
+// cmdDNS implements `dns add <name> <ip> <source>` inside the CP — the direct
+// state-write + resolver-reload the world-build DNS step calls (the Go console's
+// `control-plane dns add` equivalent). Writes the record into state.json, renders
+// the dnsmasq addn-hosts + conf, and reloads dnsmasq in-process.
+func cmdDNS(args []string) error {
+	fs := flag.NewFlagSet("dns", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	domain := fs.String("domain", "", "search base (adds <name>.<domain>)")
+	apex := fs.String("apex", "", "resolver wildcard apex (all subdomains of apex -> --ip)")
+	apexIP := fs.String("ip", "", "resolver wildcard target IP (the proxy/Caddy edge)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("dns <add NAME IP SOURCE|apex --apex BASE --ip PROXY> [--state-dir DIR]")
+	}
+	store, err := state.Open(*stateDir)
+	if err != nil {
+		return fmt.Errorf("open state: %w", err)
+	}
+	switch rest[0] {
+	case "apex":
+		if *apex == "" || *apexIP == "" {
+			return fmt.Errorf("dns apex needs --apex BASE --ip PROXY")
+		}
+		if err := store.SetResolverWildcard(&state.DnsWildcard{
+			Apex: *apex, IP: *apexIP, Source: "world-build dns apex", CreatedAt: uint64(time.Now().Unix()),
+		}); err != nil {
+			return fmt.Errorf("set resolver wildcard: %w", err)
+		}
+		return syncDNS(store, *stateDir, *domain)
+	case "add":
+		if len(rest) < 4 {
+			return fmt.Errorf("dns add <name> <ip> <source> [--domain <base>] [--state-dir DIR]")
+		}
+		name, ip, source := rest[1], rest[2], rest[3]
+		if _, err := console.Upsert(store, name, ip, source); err != nil {
+			return err
+		}
+		if err := syncDNS(store, *stateDir, *domain); err != nil {
+			return err
+		}
+		fmt.Printf("dns %s -> %s\n", name, ip)
+		return nil
+	default:
+		return fmt.Errorf("dns: unknown verb %q (add|apex)", rest[0])
+	}
+}
+
+// syncDNS writes the dnsmasq addn-hosts + conf (with the resolver wildcard when
+// set) and reloads it in-process.
+func syncDNS(store *state.StateStore, stateDir, domain string) error {
+	snap := store.Snapshot()
+	rd := domain
+	if rd == "" && snap.ResolverDomain != nil {
+		rd = *snap.ResolverDomain
+	}
+	var apex, wid *string
+	if snap.ResolverWildcard != nil {
+		apex = &snap.ResolverWildcard.Apex
+		wid = &snap.ResolverWildcard.IP
+	}
+	write := func(path, body string) error { return os.WriteFile(path, []byte(body), 0o644) }
+	reload := func() error { return console.ReloadDnsmasq(stateDir) }
+	return console.SyncResolver(stateDir, snap.DNS, &rd, apex, wid, write, reload)
 }
 
 func cmdProvision(args []string) error {

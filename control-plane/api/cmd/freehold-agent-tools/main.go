@@ -20,6 +20,8 @@
 //	serve    ...                  MCP JSON-RPC over HTTP on the CP
 //	mcp      ...                  stdio MCP facade the CPA pod's harness spawns,
 //	                               forwarding to serve with the agent's signed auth
+//	registry <verb> ...           verify/import-console-managed registry ops the
+//	                               versioned migration scripts drive
 package main
 
 import (
@@ -72,6 +74,8 @@ func main() {
 		cmdMCP(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
+	case "registry":
+		cmdRegistry(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -87,6 +91,9 @@ usage:
                                                           create the server's private channel + member the granted
                                                           bootstrap identities into its roster (one-time bootstrap seed)
   freehold-agent-tools serve FLAGS                       serve create/grant/manage-agent over MCP (signed-header auth)
+  freehold-agent-tools registry verify --registry PATH   migration 001: registry is a loadable store
+  freehold-agent-tools registry import-console --registry PATH --console-state DIR
+                                                          migration 002: fold console agents into the registry additively
 
 serve FLAGS:
   --state-dir       DIR          durable identity + created-agent identity dirs (/srv/data/cp on the CP)
@@ -215,8 +222,49 @@ func cmdSeed(args []string) {
 	fmt.Println(pk)
 }
 
-func cmdServe(args []string) {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+// cmdRegistry exposes the versioned-migration registry ops the migration
+// scripts drive: `verify` (the registry is a loadable store) and
+// `import-console` (fold the console state.json agents in additively). The
+// script passes paths via argv (they are non-secret durable-plane paths); this
+// keeps the Omarchy `<epoch>.sh` migration content deterministic and Go-tested.
+func cmdRegistry(args []string) {
+	if len(args) < 1 {
+		log.Fatal("registry needs a verb: verify|import-console")
+	}
+	switch args[0] {
+	case "verify":
+		fs := flag.NewFlagSet("registry verify", flag.ExitOnError)
+		path := fs.String("registry", "", "path to registry.json")
+		fs.Parse(args[1:])
+		if *path == "" {
+			log.Fatal("registry verify needs --registry")
+		}
+		if err := agenttools.CheckRegistry(*path); err != nil {
+			log.Fatalf("registry verify: %v", err)
+		}
+		fmt.Println("registry verified")
+	case "import-console":
+		fs := flag.NewFlagSet("registry import-console", flag.ExitOnError)
+		path := fs.String("registry", "", "path to registry.json (authoritative)")
+		console := fs.String("console-state", "", "console state dir (its state.json agents)")
+		fs.Parse(args[1:])
+		if *path == "" || *console == "" {
+			log.Fatal("registry import-console needs --registry --console-state")
+		}
+		reg, err := agenttools.OpenRegistry(*path)
+		if err != nil {
+			log.Fatalf("registry open: %v", err)
+		}
+		if err := agenttools.ImportConsoleAgents(reg, *console); err != nil {
+			log.Fatalf("registry import-console: %v", err)
+		}
+		fmt.Println("registry import-console converged")
+	default:
+		log.Fatalf("registry: unknown verb %q (verify|import-console)", args[0])
+	}
+}
+
+func cmdServe(args []string) {	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "durable state dir")
 	consoleStateDir := fs.String("console-state-dir", "/srv/data/cp/control-plane", "the CONSOLE's durable state dir (its state.json + console identity — the roster owner this server fronts)")
 	addr := fs.String("addr", "127.0.0.1:8089", "HTTP MCP bind address")

@@ -21,6 +21,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -684,6 +685,24 @@ func (e *rebuildEngine) runBuild() error {
 	}
 	fmt.Fprintf(e.out, "CP world_build report:\n%s\n", report)
 
+	// The agent-tools AUDIENCE the box must sign to is the server's OWN identity
+	// pubkey, which a --data rebuild mints FRESH (the durable identity is wiped
+	// with /srv/data). The config's recorded agent_tools_pubkey goes stale, so
+	// box-side agent-tools MCP calls (facts, create_agent) sign with a wrong
+	// audience and VerifyRequest fails "signature does not verify". Re-read the
+	// CP's live agent-tools identity now and adopt it into the config.
+	if cp := cfg.Lxc.Cp.Vmid; cp != nil {
+		ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- /srv/data/cp/bin/freehold-agent-tools identity --state-dir /srv/data/cp/agent-tools", *cp), 30))
+		if ok {
+			pk := strings.TrimSpace(out)
+			if isHex64(pk) && pk != cfg.AgentToolsPubkey {
+				cfg.AgentToolsPubkey = pk
+				_ = cfg.Save(e.f.configPath)
+				fmt.Fprintf(e.out, "  · adopted the CP agent-tools audience %s\n", pk)
+			}
+		}
+	}
+
 	// Box-side bookkeeping (world coords are the same on every box) is the
 	// DRIVING box's job: it drives the runner (record LXC coords) + the CP
 	// toolset (facts/CPA/agent reconcile) as its ops identity. A THIN client
@@ -696,15 +715,20 @@ func (e *rebuildEngine) runBuild() error {
 			return err
 		}
 		if _, err := os.Stat(filepath.Join(rbOpsDir(), "identity.json")); err == nil {
-			if err := e.registerWorldFacts(); err != nil {
-				return err
-			}
+			// The CPA is the system's main touchpoint - create it FIRST (it signs
+			// as the operator, which IS granted create_agent on the agent-tools
+			// server), then reconcile the other created agents. World facts are
+			// bookkeeping for the DATA/Certs views - never fatal: a facts failure
+			// must not block the CPA/agents from being created.
 			if err := e.stageCpa(); err != nil {
 				return err
 			}
 			fmt.Fprintln(e.out, "  ✓ CPA live in Buzz ("+e.f.agentName+")")
 			if err := e.reconcileCreatedAgents(); err != nil {
 				return err
+			}
+			if err := e.registerWorldFacts(); err != nil {
+				fmt.Fprintf(e.out, "  (WARN: world facts not registered on the CP — bookkeeping only, does not affect the world/agents: %v)\n", err)
 			}
 		}
 	} else {
@@ -735,14 +759,24 @@ func (e *rebuildEngine) runBuild() error {
 // master is read back from the canonical k8s Secret when the k3s node is up,
 // else minted (first-run-wins, preserved in the runner package).
 func (e *rebuildEngine) slimSeedLiteLLM() error {
+	cfg, _ := config.Load(e.f.configPath)
+	k3sVmid := uint32(0)
+	if cfg != nil && cfg.Lxc.K3s.Vmid != nil {
+		k3sVmid = *cfg.Lxc.K3s.Vmid
+	}
 	masterKey := ""
-	if cfg, _ := config.Load(e.f.configPath); cfg != nil && cfg.Lxc.K3s.Vmid != nil {
-		masterKey = e.litellmMasterKey(*cfg.Lxc.K3s.Vmid)
+	if k3sVmid != 0 {
+		masterKey = e.litellmMasterKey(k3sVmid)
 	}
 	if masterKey == "" {
 		masterKey = stages.GenSecretHex()
 	}
 	postgresPw := stages.GenSecretHex()
+	if k3sVmid != 0 {
+		if pw := e.litellmPostgresPw(k3sVmid); pw != "" {
+			postgresPw = pw // reuse the canonical password (first-run-wins)
+		}
+	}
 	runnerDir := filepath.Join(rbRunnerPkgs(), e.f.target)
 	reusing := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
 	providerKey := e.f.litellmProviderKey
@@ -821,15 +855,21 @@ func (e *rebuildEngine) handoffDNS() error {
 		if err := cert.SaveCreds(local, provider, env, seal, pub, "cert-dns-"+slot); err != nil {
 			return err
 		}
+		raw, err := os.ReadFile(local)
+		_ = os.Remove(local)
+		if err != nil {
+			return err
+		}
+		b64 := base64.StdEncoding.EncodeToString(raw)
 		remote := "/srv/data/cp/control-plane/world-secrets/dns-" + slot + ".json"
 		cp := *cfg.Lxc.Cp.Vmid
-		if ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p /srv/data/cp/control-plane/world-secrets'", cp), 30)); !ok {
-			_ = os.Remove(local)
-			return fmt.Errorf("mkdir CP world-secrets failed:\n%s", out)
-		}
-		ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct push %d %s %s", cp, local, remote), 60))
-		_ = os.Remove(local)
-		if !ok {
+		// The runner executes on the PVE HOST, but the sealed temp file was
+		// written on the BOX — `pct push <hostpath>` cannot see it (fails "failed
+		// to open ... for reading"). Ship the base64 IN the command and decode it
+		// INSIDE the CP, so the box-local file never needs to reach the host.
+		cmd := fmt.Sprintf("pct exec %d -- sh -c 'mkdir -p /srv/data/cp/control-plane/world-secrets && printf %%s %s | base64 -d > %s && chmod 600 %s'",
+			cp, b64, remote, remote)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
 			return fmt.Errorf("ship %s DNS cred to the CP failed:\n%s", slot, out)
 		}
 		fmt.Fprintf(e.out, "  ✓ %s DNS credential handed off to the CP\n", slot)
@@ -941,7 +981,12 @@ func (e *rebuildEngine) registerWorldFacts() error {
 	if err != nil || cfg == nil {
 		return fmt.Errorf("no config at %s", e.f.configPath)
 	}
-	mc, err := e.agentToolsMcp(cfg)
+	// world_register_facts is OPERATOR-scoped on the agent-tools server: the box
+	// must sign as the OPERATOR (console-admin, in the toolset roster), NOT the
+	// ops-agent build identity (which gets world_* denied with -32001). worldMcp
+	// signs as the operator exactly like `freehold world status`, which is
+	// granted.
+	mc, err := worldMcp(cfg)
 	if err != nil {
 		return err
 	}
@@ -1958,18 +2003,10 @@ func parseLxcIP(out string, vmid uint32) (string, error) {
 
 // ---- the k3s stage -----------------------------------------------------------
 
-// stages.K3sLocalPathDurableScript re-points the local-path StorageClass's backing
-// store at the DURABLE plane mount (/srv/data/k8s-volumes — backup=1, survives
-// a compute teardown) instead of the default /var/lib/rancher/k3s/storage on the
-// ephemeral rootfs, so k8s PVCs (Caddy's cert, litellm postgres) survive a
-// compute teardown and a rebuild. The WHOLE ConfigMap is re-emitted (config.json
-// + helperPod/setup/teardown) so `apply` replaces the k3s-managed default
-// wholesale rather than dropping the helper-pod config. Re-asserted on every
-// reconcile: the k3s local-storage Addon can reset the ConfigMap on a k3s
-// restart. Idempotent.
-
-// See stages.K3sLocalPathDurableScript for the re-point script (shared so the
-// CP world_build executor runs the same bytes).
+// The k3s install + the durable local-path carve-out are owned by the CP's
+// terraform module (k3s-bringup.sh): it re-points the local-path StorageClass's
+// backing store at the DURABLE plane mount (/srv/data/k8s-volumes — backup=1,
+// so k8s PVCs survive a compute teardown) and installs the pinned k3s build.
 
 // stageDeployRelay deploys the Buzz relay into the relay LXC (box-side — the
 // slim build boots + deploys the relay before agent-tools, whose roster lives
@@ -2186,7 +2223,7 @@ func (e *rebuildEngine) stageCpExec(cpBinArgs ...string) (string, error) {
 	for i, a := range cpBinArgs {
 		quoted[i] = shellQuote(a)
 	}
-	inner := fmt.Sprintf("'%s/control-plane' %s --state-dir '%s' %s",
+	inner := fmt.Sprintf("'%s/freehold-console' %s --state-dir '%s' %s",
 		binDir, quoted[0], stateDir, strings.Join(quoted[1:], " "))
 	cmd := fmt.Sprintf("pct exec %d -- sh -c %s", vmid, shellQuote(inner))
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 120))
@@ -2253,6 +2290,21 @@ func (e *rebuildEngine) litellmMasterKey(k3sVmid uint32) string {
 	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
 	if !ok {
 		return "" // a read failure is treated as "no canonical master yet" — a fresh run mints one
+	}
+	return strings.TrimSpace(out)
+}
+
+// litellmPostgresPw reads back the CANONICAL postgres password from the k8s
+// litellm-pg Secret so a rebuild REUSES it (first-run-wins): Postgres initializes
+// PGDATA against the first password, so a re-mint + SSA re-apply would rotate it
+// while Postgres still authenticates with the original — silently breaking
+// litellm's DB auth on the next pod restart. Empty on a fresh world -> mint.
+func (e *rebuildEngine) litellmPostgresPw(k3sVmid uint32) string {
+	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-pg -n litellm -o jsonpath='{.data.postgres-pw}' 2>/dev/null | base64 -d`,
+		k3sVmid)
+	ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 30))
+	if !ok {
+		return ""
 	}
 	return strings.TrimSpace(out)
 }
@@ -2680,7 +2732,11 @@ func (e *rebuildEngine) stageCpa() error {
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	mc, err := e.agentToolsMcp(cfg)
+	// create_agent is OPERATOR-scoped on the agent-tools server: sign as the
+	// operator (worldMcp), NOT the ops-agent build identity (which is only
+	// granted on the runner/console and gets world_* / create_agent denied
+	// with -32001). This is what actually creates the CPA in Buzz.
+	mc, err := worldMcp(cfg)
 	if err != nil {
 		return err
 	}
@@ -2715,7 +2771,7 @@ func (e *rebuildEngine) reconcileCreatedAgents() error {
 	if cpaName == "" {
 		cpaName = agent.DefaultCPAName
 	}
-	mc, err := e.agentToolsMcp(cfg)
+	mc, err := worldMcp(cfg)
 	if err != nil {
 		return err
 	}
