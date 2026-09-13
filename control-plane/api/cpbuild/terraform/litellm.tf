@@ -41,6 +41,11 @@ resource "kubernetes_manifest" "litellm_deploy" {
               { name = "POSTGRES_PASSWORD", valueFrom = { secretKeyRef = { name = "litellm-pg", key = "postgres-pw" } } },
               { name = "DATABASE_URL", value = "postgresql://llmproxy:$(POSTGRES_PASSWORD)@postgres.litellm:5432/litellm" },
               { name = "STORE_MODEL_IN_DB", value = "True" },
+              # ControlPlaneAgent is an ALIAS (the name the CPA harness requests),
+              # not a registered model - litellm rewrites it to deepseek-v4-flash
+              # at request time, so the registered model and its upstream stay the
+              # single source of truth (see model_registration below).
+              { name = "LITELLM_MODEL_ALIAS_MAP", value = "{\"ControlPlaneAgent\":\"deepseek-v4-flash\"}" },
               { name = "LITELLM_MASTER_KEY", valueFrom = { secretKeyRef = { name = "litellm-keys", key = "master-key" } } },
             ]
             readinessProbe = {
@@ -77,7 +82,14 @@ resource "kubernetes_manifest" "litellm_service" {
 # Model registration - an EVENT, not a resource: idempotent on re-apply; the
 # provider key rides the runner-injected env (PROVIDER_KEY) directly so it NEVER
 # transits terraform state. Triggers on the service so a bare apply re-registers
-# only when the gateway changes.
+# only when the gateway changes. This registers the REAL model (deepseek-v4-flash,
+# its upstream + api key); the CPA's ControlPlaneAgent is a server-level alias to
+# it (LITELLM_MODEL_ALIAS_MAP above), not a separate registration. The gateway is
+# reached at the k3s NODE IP (k3s_ip), NOT 127.0.0.1 - terraform drives this via
+# local-exec on the provisioning box, a DIFFERENT LXC from where litellm runs. A
+# non-zero curl exit (e.g. connection refused) now FAILS the apply instead of
+# being swallowed, so a lost registration surfaces instead of silently leaving
+# the CPA with no model.
 resource "null_resource" "model_registration" {
   depends_on = [kubernetes_manifest.litellm_service]
   triggers = {
@@ -87,7 +99,7 @@ resource "null_resource" "model_registration" {
     command = <<-EOT
       set -euo pipefail
       BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
-      curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" http://127.0.0.1:31400/model/new || true
+      curl -fsS -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://${var.k3s_ip}:31400/model/new"
       echo
     EOT
   }
