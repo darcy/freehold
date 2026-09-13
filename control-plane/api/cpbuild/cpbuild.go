@@ -775,6 +775,17 @@ func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*c
 		return nil, err
 	}
 	if !ok {
+		// No resumable order: we're about to create a NEW ACME order + place a
+		// fresh challenge TXT. Purge any leftover _acme-challenge records for
+		// this host first (API-based, so it works even if the record hasn't
+		// propagated yet) — otherwise we STACK another value onto the same name
+		// every issuance, which is the redundant-record → ACME order/rate-limit
+		// bloat surfaced on librem / relay.migrate.
+		if n, perr := cert.PurgeChallengeRecords(host, provider, env); perr != nil {
+			return nil, fmt.Errorf("cert %s purge challenge: %w", slot, perr)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "cert %s: purged %d stale challenge record(s) before issue\n", slot, n)
+		}
 		po, err = resume.Begin()
 		if err != nil {
 			return nil, err
@@ -791,6 +802,11 @@ func (s *Spec) issueCert(slot, host, provider string, env map[string]string) (*c
 			_ = os.Remove(statePath)
 		}
 		return nil, err
+	}
+	// Issue succeeded: clean up the placed challenge TXT so it doesn't linger in
+	// the zone (lego's Present never removes it; Resume only discards state).
+	if n, perr := cert.PurgeChallengeRecords(host, provider, env); perr == nil && n > 0 {
+		fmt.Fprintf(os.Stderr, "cert %s: cleaned %d challenge record(s) after issue\n", slot, n)
 	}
 	return issued, nil
 }
