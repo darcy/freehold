@@ -77,7 +77,14 @@ resource "kubernetes_manifest" "litellm_service" {
 # Model registration - an EVENT, not a resource: idempotent on re-apply; the
 # provider key rides the runner-injected env (PROVIDER_KEY) directly so it NEVER
 # transits terraform state. Triggers on the service so a bare apply re-registers
-# only when the gateway changes.
+# only when the gateway changes. This registers the model by the EXACT name the
+# CPA requests (CpaLiteLLMModel, no provider-name alias). The gateway is reached
+# at the k3s NODE IP (k3s_ip), NOT 127.0.0.1 - terraform drives this via
+# local-exec on the provisioning box, a DIFFERENT LXC from where litellm runs. A
+# non-zero curl exit (e.g. connection refused / gateway not yet ready) now FAILS
+# the apply instead of being swallowed, so a lost registration surfaces instead
+# of silently leaving the CPA with no model. The litellm Deployment gates only on
+# readiness; model_registration waits for /health/liveliness before registering.
 resource "null_resource" "model_registration" {
   depends_on = [kubernetes_manifest.litellm_service]
   triggers = {
@@ -86,8 +93,15 @@ resource "null_resource" "model_registration" {
   provisioner "local-exec" {
     command = <<-EOT
       set -euo pipefail
+      # Wait for the freshly-rolled gateway to listen (its pod is created just
+      # now; a Service apply does not imply the NodePort answers yet, and the
+      # first boot pulls the litellm image + runs DB migration - up to minutes).
+      for i in $(seq 1 100); do
+        curl -fsS -m 5 "http://${var.k3s_ip}:31400/health/liveliness" >/dev/null 2>&1 && break
+        sleep 3
+      done
       BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
-      curl -s -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" http://127.0.0.1:31400/model/new || true
+      curl -fsS -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://${var.k3s_ip}:31400/model/new"
       echo
     EOT
   }

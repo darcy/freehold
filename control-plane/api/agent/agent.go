@@ -92,9 +92,10 @@ const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
 // reasoning model (D1 wiring) routes here.
 const LiteLLMServiceURL = "http://litellm.litellm:4000/v1"
 
-// CpaLiteLLMModel is the litellm model alias the CPA talks to; it maps behind
-// the scenes to the deepseek route registered at deploy time.
-const CpaLiteLLMModel = "ControlPlaneAgent"
+// CpaLiteLLMModel is the litellm model name the CPA talks to. It must equal the
+// model registered at deploy time (litellm.tf model_registration) — no alias:
+// the CPA either routes or it 400s.
+const CpaLiteLLMModel = "deepseek-v4-flash"
 
 // AgentLiteLLMKeySecretKey is the k8s Secret literal that carries the pod's
 // minted litellm key (referenced by secretKeyRef, never in the manifest).

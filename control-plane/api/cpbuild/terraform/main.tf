@@ -119,16 +119,22 @@ resource "null_resource" "plane" {
   # no destroy: the durable plane survives teardown by design (--data path).
 }
 
-# ---- substrate LXCs (cp/relay/k3s) — adopt-if-missing pct create ----------
+# ---- substrate LXCs (cp/relay/k3s) — ADOPT-only pct create ----------
+# IMPORTANT: these carry NO destroy provisioner. lxc.sh apply is create-if-missing
+# (an existing LXC is adopted, never touched). A destroy-time `pct destroy` here
+# is catastrophic: the substrate runs ON the CP LXC (lxc_cp, this very process),
+# and a trigger drift between the targeted substrate apply and the later full
+# services apply makes terraform RECREATE the null_resource → its destroy
+# provisioner `pct destroy`s the CP (plus relay/k3s) mid-build, killing the
+# console before it can return the error (the caller sees EOF, the world rolls
+# back with no diagnostic). Recreation is therefore a no-op adopt; `freehold
+# teardown` removes LXCs through its own engine (pct stop/destroy + dataset
+# handling), not via this module.
 resource "null_resource" "lxc_cp" {
   depends_on = [null_resource.plane]
   triggers   = { vmid = var.vmid_cp, template = var.template, host = var.host_cp, mem = var.memory_mb, root = var.rootfs_gb }
   provisioner "local-exec" {
     command = "${path.module}/scripts/lxc.sh ${var.vmid_cp} ${var.template} ${var.node_name} ${var.host_cp} ${var.memory_mb} ${var.rootfs_gb} - - '${local.mount_cp}' apply"
-  }
-  provisioner "local-exec" {
-    when    = destroy
-    command = "${path.module}/scripts/lxc.sh ${self.triggers.vmid} ${self.triggers.template} ${self.triggers.host} ${self.triggers.host} ${self.triggers.mem} ${self.triggers.root} - - '-' destroy"
   }
 }
 
@@ -138,21 +144,13 @@ resource "null_resource" "lxc_relay" {
   provisioner "local-exec" {
     command = "${path.module}/scripts/lxc.sh ${var.vmid_relay} ${var.template} ${var.node_name} ${var.host_relay} ${var.memory_mb} ${var.rootfs_gb} - - '${local.mount_relay}' apply"
   }
-  provisioner "local-exec" {
-    when    = destroy
-    command = "${path.module}/scripts/lxc.sh ${self.triggers.vmid} ${self.triggers.template} ${self.triggers.host} ${self.triggers.host} ${self.triggers.mem} ${self.triggers.root} - - '-' destroy"
-  }
 }
 
 resource "null_resource" "lxc_k3s" {
   depends_on = [null_resource.plane]
-  triggers   = { vmid = var.vmid_k3s, template = var.template, host = var.host_k3s, ip = local.k3s_cidr, gw = var.k3s_gw, mem = var.memory_mb, root = var.rootfs_gb }
+  triggers   = { vmid = var.vmid_k3s, template = var.template, host = var.host_k3s, mem = var.memory_mb, root = var.rootfs_gb }
   provisioner "local-exec" {
     command = "${path.module}/scripts/lxc.sh ${var.vmid_k3s} ${var.template} ${var.node_name} ${var.host_k3s} ${var.memory_mb} ${var.rootfs_gb} ${local.k3s_cidr} ${var.k3s_gw} '${local.mount_k3s}' apply"
-  }
-  provisioner "local-exec" {
-    when    = destroy
-    command = "${path.module}/scripts/lxc.sh ${self.triggers.vmid} ${self.triggers.template} ${self.triggers.host} ${self.triggers.host} ${self.triggers.mem} ${self.triggers.root} ${self.triggers.ip} ${self.triggers.gw} '-' destroy"
   }
 }
 

@@ -15,6 +15,12 @@ sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null || true
 pct exec "$VMID" -- bash -c '
   set -euo pipefail
   export PATH=/usr/local/bin:/root/.cargo/bin:$PATH
+  # The fresh guest resolv.conf points at the LAN router (DHCP/PVE default),
+  # which on home labs does not resolve — apt/curl then die with "Temporary
+  # failure resolving". Pin public resolvers before fetching (worldDNS
+  # reconfigures the guest to the CP resolver after bring-up).
+  echo nameserver 1.1.1.1 > /etc/resolv.conf
+  echo nameserver 8.8.8.8 >> /etc/resolv.conf
   K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq

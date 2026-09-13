@@ -192,6 +192,8 @@ func registerBuildFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway (kube workloads + runner + model registration). Defaults on with k3s (the CPA needs it to reason); requires k3s")
 	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model (supplied at FIRST provision only, then sealed in the runner and reused; read from --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	cmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24) — the ONE static address; relay/CP hosts resolve to it. Absent => DHCP")
+	cmd.Flags().String("relay-ip", "", "STATIC relay LXC IP (CIDR). Assign this AND --cp-ip so relay/CP run OFF DHCP (a small LAN DHCP pool exhausts across repeated teardown/build cycles otherwise); absent => relay uses DHCP")
+	cmd.Flags().String("cp-ip", "", "STATIC CP LXC IP (CIDR). Assign this AND --relay-ip so the control plane + relay run OFF DHCP (avoids small-pool DHCP exhaustion); absent => CP uses DHCP")
 	cmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	cmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
@@ -225,6 +227,8 @@ func setupBuild(cmd *cobra.Command) (*rebuildEngine, error) {
 	f.storageName, _ = cmd.Flags().GetString("storage")
 	f.bridge, _ = cmd.Flags().GetString("bridge")
 	f.proxyIP, _ = cmd.Flags().GetString("proxy-ip")
+	f.relayIP, _ = cmd.Flags().GetString("relay-ip")
+	f.cpIP, _ = cmd.Flags().GetString("cp-ip")
 	f.configPath, _ = cmd.Flags().GetString("config")
 	f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 	f.yes, _ = cmd.Flags().GetBool("yes")
@@ -302,6 +306,8 @@ type rebuildFlags struct {
 	relayDomain        string
 	cpDomain           string
 	proxyIP            string
+	relayIP            string
+	cpIP               string
 	operatorPubkey     string
 	operatorIdentity   string
 	agentName          string
@@ -1871,18 +1877,24 @@ func (e *rebuildEngine) stageBootstrap(role string) error {
 	return err
 }
 
-// bootstrapStaticIP returns the role's STATIC address, OR "" = DHCP. With a
-// single static proxy now, ONLY the proxy node ("k3s") is static (f.proxyIP,
-// or the recorded cfg.Proxy.Ip riding again); relay + cp are always DHCP.
+// bootstrapStaticIP returns the role's STATIC address, or "" = DHCP. k3s is
+// the proxy node (--proxy-ip, or the recorded cfg.Proxy.Ip riding again);
+// relay + cp are STATIC when --relay-ip / --cp-ip are supplied (running them
+// OFF DHCP avoids exhausting a small LAN DHCP pool), else DHCP behind the
+// proxy.
 func bootstrapStaticIP(role string, f rebuildFlags, cfg *config.Config) string {
-	if role != "k3s" {
-		return "" // relay/cp are behind the proxy
-	}
-	if f.proxyIP != "" {
-		return f.proxyIP
-	}
-	if cfg != nil && cfg.Proxy.Ip != nil {
-		return *cfg.Proxy.Ip
+	switch role {
+	case "cp":
+		return f.cpIP
+	case "relay":
+		return f.relayIP
+	case "k3s":
+		if f.proxyIP != "" {
+			return f.proxyIP
+		}
+		if cfg != nil && cfg.Proxy.Ip != nil {
+			return *cfg.Proxy.Ip
+		}
 	}
 	return ""
 }
@@ -2100,8 +2112,17 @@ func (e *rebuildEngine) stageDeployCp() error {
 // no runner coords to drive (the deploy then serves ops/status only).
 func (e *rebuildEngine) worldConfigJSON(cfg *config.Config) string {
 	cpIP := config.StripCIDR(derefStrPtr(cfg.Lxc.Cp.Ip))
+	if cpIP == "" {
+		// A freshly-assigned static CP IP (--cp-ip) isn't in the config yet on
+		// the first bootstrap; prefer it so bootLxc bakes it into the create.
+		cpIP = config.StripCIDR(e.f.cpIP)
+	}
 	if cpIP == "" || cfg.Runner.Pubkey == "" {
 		return ""
+	}
+	relayIP := config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip))
+	if relayIP == "" {
+		relayIP = config.StripCIDR(e.f.relayIP)
 	}
 	c := cpbuild.Coords{
 		StateDir:       "",
@@ -2110,7 +2131,7 @@ func (e *rebuildEngine) worldConfigJSON(cfg *config.Config) string {
 		RelayPK:        derefStrPtr(cfg.RelayPubkey),
 		RelayWS:        cfg.RelayWsURL,
 		RelayHost:      cfg.RelayHost(),
-		RelayIP:        config.StripCIDR(derefStrPtr(cfg.Lxc.Relay.Ip)),
+		RelayIP:        relayIP,
 		CpHost:         cfg.CPHost(),
 		CpIP:           cpIP,
 		CpLxc:          derefU32(cfg.Lxc.Cp.Vmid),
