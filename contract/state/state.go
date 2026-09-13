@@ -180,6 +180,27 @@ func (s *StateStore) Save() error {
 // Snapshot returns the current state (deep-ish copy).
 func (s *StateStore) Snapshot() ControlPlaneState { return s.state }
 
+// Reload re-reads state.json from disk into the store. The build's world
+// DNS/services/facts land via SEPARATE `freehold-console <dns|services>`
+// processes writing state.json (not the running serve's in-memory state), so a
+// long-lived console serve would otherwise serve a STALE snapshot (missing
+// services/facts) on /api/world. Call before serving a snapshot.
+func (s *StateStore) Reload() error {
+	raw, err := os.ReadFile(filepath.Join(s.dir, StateFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var st ControlPlaneState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return fmt.Errorf("malformed state json: %w", err)
+	}
+	s.state = st
+	return nil
+}
+
 // GetRunner returns a runner record.
 func (s *StateStore) GetRunner(name string) (RunnerRecord, bool) {
 	r, ok := s.state.Runners[name]

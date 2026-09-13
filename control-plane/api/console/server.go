@@ -222,6 +222,9 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
+	// Re-read state.json so the separate `dns`/`services` process writes the
+	// build landed are reflected (the in-memory snapshot is stale otherwise).
+	_ = s.Store.Reload()
 	snap := s.Store.Snapshot()
 	// Serve the relay's PUBLIC edge on /api/world, derived from the recorded
 	// relay_host, so a login box reaches the relay through Caddy (https://
@@ -482,6 +485,7 @@ func (s *Server) teardown(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
+	_ = s.Store.Reload()
 	snap := s.Store.Snapshot()
 	var runners, agents, dns []string
 	for name := range snap.Runners {
