@@ -332,11 +332,22 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if vmid != 0 {
 		spec.VMID = &vmid
 	}
-	if role == "k3s" && s.ProxyIP != "" {
-		// pct net0 wants CIDR (host/prefix); the serve flag carries the bare
-		// proxy IP (the DNS/caddy consumers expect bare), so rebuild the CIDR
-		// — the recorded proxy world is a /24 home LAN (default relay-gw).
-		ip := s.ProxyIP
+	roleIP := ""
+	switch role {
+	case "k3s":
+		roleIP = s.ProxyIP
+	case "relay":
+		roleIP = s.RelayIP
+	case "cp":
+		roleIP = s.CpIP
+	}
+	if roleIP != "" {
+		// pct net0 wants CIDR (host/prefix); the serve/recorded values carry the
+		// bare IP (the DNS/caddy consumers expect bare), so rebuild the CIDR —
+		// the LAN defaults to /24 home-labs. Assigning relay/CP static addresses
+		// (via --relay-ip/--cp-ip) runs them OFF DHCP, which avoids exhausting a
+		// small LAN DHCP pool across repeated teardown/build cycles.
+		ip := roleIP
 		if !strings.Contains(ip, "/") {
 			ip += "/24"
 		}
