@@ -25,6 +25,35 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.21] — multi-tenant profiles (no implicit default)
+
+The box-side CLI grows real multi-tenancy. Previously there was exactly ONE
+connection profile living at `~/.config/freehold/config.toml` with state at
+`~/.freehold`; `freehold login` overwrote it. Now a **profile** is one logged-in
+tenant with its own config file (`~/.config/freehold/profiles/<name>/config.toml`)
+and its own scoped state dir (`~/.freehold/profiles/<name>/`, or under
+`FREEHOLD_HOME`), and the filesystem is the registry. There is **no implicit
+"default" profile and no legacy single-config layout** — every tenant is a named
+profile, and a pre-profiles box isn't auto-adopted (re-run `freehold login`).
+
+- `freehold login` adds (or refreshes) a NAMED profile — prompts the CP address,
+  defaults the profile name to the CP-host slug, seeds the world summary into
+  that profile's config, and refuses to duplicate a CP under a *different*
+  profile name. Re-login into the same profile preserves `[runner]`.
+- `freehold profiles` lists the registered tenants (name + config path + CP).
+- `build` / `bootstrap` / `install` / `world` negotiate the tenant via an
+  interactive picker; with **zero** profiles they fail closed:
+  "no tenant profiles — run `freehold login` first."
+- `teardown` picks the tenant (its state, `WorldHome`, DNS creds, identities are
+  all scoped) and passes `--config` to its child `freehold exec` subprocess so the
+  runner resolves from the right profile.
+- `exec` stays scripted/deterministic: an explicit `--config` wins, a single
+  profile is used implicitly, multiple profiles without `--config` fail closed
+  naming them.
+- All state-path helpers (`freeholdHome`, the operator/agent-ops ledger,
+  runner-pubkey + agent-dir resolution) read the negotiated profile's scoped
+  paths instead of the hardcoded `~/.config/freehold` / `~/.freehold`.
+
 ## [0.5.20] — per-service Terraform + Omarchy-style script migrations
 
 The infra slice settles on single sources of truth. The kube workloads graduate

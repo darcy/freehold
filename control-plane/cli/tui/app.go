@@ -43,12 +43,10 @@ func envOr(k, def string) string {
 	return def
 }
 
-// freeholdStateDir mirrors installer::state_dir (FREEHOLD_HOME override).
+// freeholdStateDir mirrors installer::state_dir, scoped to the active profile
+// (FREEHOLD_HOME override for the legacy/no-profile layout).
 func freeholdStateDir() string {
-	if h := os.Getenv("FREEHOLD_HOME"); h != "" {
-		return h + "/control-plane"
-	}
-	return envOr("HOME", "/root") + "/.freehold/control-plane"
+	return config.StateDir() + "/control-plane"
 }
 
 // load is the FAST half of startup: it reads the config (local file only —
@@ -671,8 +669,8 @@ func (m *Model) View() string {
 		b.WriteString(styleRed.Render("! "+m.Err) + "\n\n")
 	}
 	if m.Mode == ModeBootstrap {
-		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")
-		b.WriteString("run " + styleYellow.Render("freehold build") + " to bring up the world (bootstraps then reconciles)\n")
+		b.WriteString(styleYellow.Render("no tenant profile — world not started") + "\n\n")
+		b.WriteString("run " + styleYellow.Render("freehold login") + " to add a tenant profile, then " + styleYellow.Render("freehold build") + " to bring the world up\n")
 	} else if m.Mode == ModeConfigure {
 		b.WriteString(styleYellow.Render("config present, world NOT converged") + "\n")
 		b.WriteString(renderProbes(m) + "\n\n")

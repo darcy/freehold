@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"freehold/contract/client"
+	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/control-plane/cli/flows"
 	"github.com/spf13/cobra"
@@ -86,6 +87,12 @@ var execCmd = &cobra.Command{
 		if len(args) != 2 {
 			return fmt.Errorf("exec needs <TARGET> <CMD>")
 		}
+		// Tenant context (no implicit default): an explicit --config, else the
+		// single registered profile; multiple profiles without --config is
+		// ambiguous and fails closed (exec is a scripted primitive).
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		target, cmds := args[0], args[1]
 		common := readCommonFlags(cmd)
 		secrets, _ := cmd.Flags().GetStringSlice("secret")
@@ -127,8 +134,31 @@ var execCmd = &cobra.Command{
 	},
 }
 
+// resolveExecProfile pins the tenant context for exec: an explicit --config
+// wins; otherwise the single registered profile is used implicitly; multiple
+// profiles without --config is ambiguous and fails closed.
+func resolveExecProfile(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("config") {
+		p, _ := cmd.Flags().GetString("config")
+		config.SetCurrent(&config.Profile{ConfigPath: p, StateDir: config.DefaultStateHome()})
+		return nil
+	}
+	if l := config.List(); len(l) == 1 {
+		config.SetCurrent(l[0])
+		return nil
+	} else if len(l) > 1 {
+		names := make([]string, 0, len(l))
+		for _, p := range l {
+			names = append(names, p.Name)
+		}
+		return fmt.Errorf("multiple tenant profiles (%s) — pass --config <profile config> to pick one", strings.Join(names, ", "))
+	}
+	return nil
+}
+
 func init() {
 	addCommonFlags(execCmd, nil)
+	execCmd.Flags().String("config", defaultConfigPath(), "Tenant config path to resolve the runner from")
 	execCmd.Flags().StringSliceP("secret", "s", nil, "Secret names to request (must be the target's own credential; defaults to the target name — the provision convention)")
 	execCmd.Flags().Uint64("timeout", 60, "Runner-side watchdog in seconds (client deadline sits above it)")
 }

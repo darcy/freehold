@@ -101,6 +101,10 @@ type ExecRunner struct {
 	AgentDir        string // ops identity dir
 	Runner          string // runner target name
 	Domain          string // the world's domain — the destroy-side name guard derives the expected guest name from it
+	// ConfigPath pins the tenant profile's config for the child exec so it
+	// resolves the right runner/config (no implicit default; required under
+	// multi-profile). Empty = rely on the child's own default.
+	ConfigPath string
 
 	// execFn overrides the subprocess shell-out for hermetic tests
 	// (nil = the real `freehold exec`).
@@ -122,7 +126,11 @@ func (r *ExecRunner) Exec(cmd string) (bool, string) {
 	if r.execFn != nil {
 		return r.execFn(cmd)
 	}
-	args := []string{"exec", "--addr", r.Addr, "--agent-dir", r.AgentDir, r.Runner, cmd}
+	args := []string{"exec"}
+	if r.ConfigPath != "" {
+		args = append(args, "--config", r.ConfigPath)
+	}
+	args = append(args, "--addr", r.Addr, "--agent-dir", r.AgentDir, r.Runner, cmd)
 	out, err := exec.Command(r.OrchestratorBin, args...).CombinedOutput()
 	if err != nil {
 		return false, string(out)
