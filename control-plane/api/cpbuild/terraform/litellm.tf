@@ -100,10 +100,11 @@ resource "null_resource" "model_registration" {
     command = <<-EOT
       set -euo pipefail
       # Wait for the freshly-rolled gateway to listen (its pod is created just
-      # now; a Service apply does not imply the NodePort answers yet).
-      for i in $(seq 1 30); do
+      # now; a Service apply does not imply the NodePort answers yet, and the
+      # first boot pulls the litellm image + runs DB migration - up to minutes).
+      for i in $(seq 1 100); do
         curl -fsS -m 5 "http://${var.k3s_ip}:31400/health/liveliness" >/dev/null 2>&1 && break
-        sleep 2
+        sleep 3
       done
       BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
       curl -fsS -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://${var.k3s_ip}:31400/model/new"
