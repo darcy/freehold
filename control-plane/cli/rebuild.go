@@ -564,30 +564,6 @@ func (e *rebuildEngine) runBootstrap() error {
 	}
 	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
-	// 6.4/6.6. DNS-manage opt-in + the DNS provider creds (captured IN MEMORY,
-	// sealed for the hand-off; promptDNSCred reuses the sealed box copies).
-	if e.worldHasEdge() {
-		manage := e.f.manageDNS
-		if !manage && !e.f.yes {
-			ans, err := e.prompt("manage the domain's DNS? freehold can point relay/cp A records at the proxy on Cloudflare. (y/n)")
-			if err != nil {
-				return err
-			}
-			manage = strings.EqualFold(strings.TrimSpace(ans), "y")
-		}
-		if manage {
-			if err := e.manageDomainDNS(); err != nil {
-				return err
-			}
-		}
-		if _, _, err := e.promptDNSCred("relay", e.f.relayDomain, ""); err != nil {
-			return fmt.Errorf("relay DNS provider credential: %w", err)
-		}
-		if _, _, err := e.promptDNSCred("cp", e.f.cpDomain, "relay"); err != nil {
-			return fmt.Errorf("control-plane DNS provider credential: %w", err)
-		}
-	}
-
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
 	// relay/k3s datasets are re-ensured by world_build, idempotently).
 	placement, err := e.stagePlacement()
@@ -598,13 +574,6 @@ func (e *rebuildEngine) runBootstrap() error {
 		return err
 	}
 	fmt.Fprintln(e.out, "  ✓ durable volume plane ready")
-
-	// 8. Seal the litellm secrets into the box runner package BEFORE deploy-cp
-	// ships it as the CP's co-located runner (world_build's litellm step then
-	// applies + registers by name).
-	if err := e.slimSeedLiteLLM(); err != nil {
-		return err
-	}
 
 	// 9. boot the CP LXC + record its coordinates, then boot + deploy the RELAY
 	// (its IP must be recorded BEFORE deploy-cp so the CP guest's /etc/hosts
@@ -624,12 +593,6 @@ func (e *rebuildEngine) runBootstrap() error {
 		return err
 	}
 	fmt.Fprintf(e.out, "  ✓ control plane live at https://%s\n", e.f.cpDomain)
-
-	// 12. hand the world's secrets to the CP: the DNS provider creds sealed to
-	// the agent-tools identity (world_build's cert issue path reads them).
-	if err := e.handoffDNS(); err != nil {
-		return err
-	}
 
 	// 14. record the post-world coordinates (relay/k3s coords + litellm/caddy
 	// coords world_build established) so the config + TUI + teardown agree.
@@ -698,6 +661,31 @@ func (e *rebuildEngine) runBuild() error {
 	if err != nil {
 		return fmt.Errorf("console login at %s: %v", loginURL, err)
 	}
+
+	// Seed the CP-owned secrets (DNS creds + litellm) idempotently: ask the
+	// operator only for what the CP doesn't already hold, then the world-build
+	// uses the CP as the durable secret owner (bootstrap collects none).
+	if err := e.ensureCpSecrets(client, cfg); err != nil {
+		return err
+	}
+	// The DNS-manage opt-in + public A records (relay/cp <domain> -> proxy) is
+	// a world bring-up concern, so it lives here now, not at bootstrap.
+	if e.worldHasEdge() {
+		manage := e.f.manageDNS || (cfg.Dns.Manager != nil && cfg.Dns.Manager.Managed)
+		if !manage && !e.f.yes {
+			ans, err := e.prompt("manage the domain's DNS? freehold can point relay/cp A records at the proxy on Cloudflare. (y/n)")
+			if err != nil {
+				return err
+			}
+			manage = strings.EqualFold(strings.TrimSpace(ans), "y")
+		}
+		if manage {
+			if err := e.manageDomainDNS(); err != nil {
+				return err
+			}
+		}
+	}
+
 	fmt.Fprintf(e.out, "building world %s through the CP…\n", cfg.RelayHost())
 	report, err := client.WorldBuild()
 	if err != nil {
@@ -772,14 +760,13 @@ func (e *rebuildEngine) runBuild() error {
 	return nil
 }
 
-// slimSeedLiteLLM seals the litellm master + postgres pw + provider key into
-// the PROXMOX-BOX runner package, which deploy-cp re-ships as the CP's
-// co-located runner — world_build's litellm step then applies the kube
-// workloads + registers the model with the secrets requested BY NAME. The
-// master is read back from the canonical k8s Secret when the k3s node is up,
-// else minted (first-run-wins, preserved in the runner package).
-func (e *rebuildEngine) slimSeedLiteLLM() error {
-	cfg, _ := config.Load(e.f.configPath)
+// litellmSecretMaterial returns the litellm master key, postgres password, and
+// provider key (minting/reusing the canonical first-run-wins values), prompting
+// for the provider key on first provision. The CP is now the durable owner: the
+// caller seeds these to the CP (ensureCpSecrets); world_build re-seeds the
+// co-located runner from the CP store so the existing $LITELLM/$PROVIDER_KEY
+// injection path is unchanged.
+func (e *rebuildEngine) litellmSecretMaterial(cfg *config.Config) (string, string, string, error) {
 	k3sVmid := uint32(0)
 	if cfg != nil && cfg.Lxc.K3s.Vmid != nil {
 		k3sVmid = *cfg.Lxc.K3s.Vmid
@@ -797,35 +784,136 @@ func (e *rebuildEngine) slimSeedLiteLLM() error {
 			postgresPw = pw // reuse the canonical password (first-run-wins)
 		}
 	}
-	runnerDir := filepath.Join(rbRunnerPkgs(), e.f.target)
-	reusing := e.f.litellmProviderKey == "" && litellmHasProviderKey(runnerDir)
 	providerKey := e.f.litellmProviderKey
-	if !reusing && providerKey == "" {
+	if providerKey == "" {
 		if e.f.yes {
-			return fmt.Errorf("litellm needs the provider key and none is sealed: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --yes)")
+			return "", "", "", fmt.Errorf("litellm needs the provider key: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --yes)")
 		}
 		answer, err := e.prompt("litellm first provision: the provider (fireworks) API key")
 		if err != nil {
-			return err
+			return "", "", "", err
 		}
 		providerKey = strings.TrimSpace(answer)
 		if providerKey == "" {
-			return fmt.Errorf("no litellm provider key supplied")
+			return "", "", "", fmt.Errorf("no litellm provider key supplied")
 		}
 	}
-	// Seal into the box runner package (shipped to the co-located runner).
-	if err := e.sealRunnerSecret("litellm", "FREEHOLD_LITELLM_MASTER", masterKey); err != nil {
+	return masterKey, postgresPw, providerKey, nil
+}
+
+// ensureCpSecrets asks the operator ONLY for the CP secrets the CP does not
+// already hold (DNS creds + litellm), seeding each as the CP's durable owner via
+// the console /api/secrets. Idempotent: a secret already present on the CP is
+// never re-asked. The box also keeps its own sealed DNS copy (promptDNSCred
+// reuses it), which the DNS-record management step reads.
+func (e *rebuildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config) error {
+	if !e.worldHasEdge() {
+		return nil // no TLS edge => no DNS creds or litellm needed
+	}
+	present, err := client.SecretNames()
+	if err != nil {
+		return fmt.Errorf("read CP secret inventory: %w", err)
+	}
+	have := map[string]bool{}
+	for _, n := range present {
+		have[n] = true
+	}
+	pub, err := e.consoleEncPubkey()
+	if err != nil {
 		return err
 	}
-	if err := e.sealRunnerSecret("postgres-pw", "FREEHOLD_LITELLM_PG", postgresPw); err != nil {
-		return err
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+
+	for _, slot := range []string{"relay", "cp"} {
+		name := "dns-" + slot
+		if have[name] {
+			continue
+		}
+		host := e.f.relayDomain
+		if slot == "cp" {
+			host = e.f.cpDomain
+		}
+		provider, env, err := e.promptDNSCred(slot, host, "")
+		if err != nil {
+			return fmt.Errorf("%s DNS provider credential: %w", slot, err)
+		}
+		blob, err := cpSecretBlob(name, provider, env, seal, pub)
+		if err != nil {
+			return err
+		}
+		if err := client.PutSecret(name, blob); err != nil {
+			return fmt.Errorf("seed %s on CP: %w", name, err)
+		}
+		fmt.Fprintf(e.out, "  · %s DNS credential stored on the CP\n", slot)
 	}
-	if !reusing && providerKey != "" {
-		if err := e.sealRunnerSecret("provider-key", "FREEHOLD_LITELLM_PROVIDER", providerKey); err != nil {
+
+	if !have["litellm"] {
+		master, pg, providerKey, err := e.litellmSecretMaterial(cfg)
+		if err != nil {
+			return err
+		}
+		blob, err := cpSecretBlob("litellm", "litellm", map[string]string{
+			"master": master, "pg": pg, "provider": providerKey,
+		}, seal, pub)
+		if err != nil {
+			return err
+		}
+		if err := client.PutSecret("litellm", blob); err != nil {
+			return fmt.Errorf("seed litellm on CP: %w", err)
+		}
+		fmt.Fprintln(e.out, "  · litellm secrets stored on the CP")
+		// The co-located runner holds its keyring in memory from boot, so it must
+		// be re-seeded + restarted to serve $LITELLM/$POSTGRES_PW/$PROVIDER_KEY to
+		// the world-build's litellm/model steps. Seed its package + restart it.
+		if err := e.seedCpRunnerSecrets(cfg, master, pg, providerKey); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// seedCpRunnerSecrets writes the litellm master / postgres pw / provider key
+// into the CP's co-located runner package (freehold-console add-secret on the
+// CP) and restarts the freehold-runner unit so the live runner loads them. This
+// is what lets the existing $LITELLM/$PROVIDER_KEY injection path serve the
+// CP-owned litellm store the world-build reads.
+func (e *rebuildEngine) seedCpRunnerSecrets(cfg *config.Config, master, pg, providerKey string) error {
+	if cfg == nil || cfg.Lxc.Cp.Vmid == nil {
+		return fmt.Errorf("no cp coords to seed the co-located runner")
+	}
+	cp := *cfg.Lxc.Cp.Vmid
+	target := e.f.target
+	for _, s := range []struct{ n, ev, val string }{
+		{"litellm", "LITELLM", master},
+		{"postgres-pw", "POSTGRES_PW", pg},
+		{"provider-key", "PROVIDER_KEY", providerKey},
+	} {
+		cmd := fmt.Sprintf("pct exec %d -- sh -c 'export %s=%s; /srv/data/cp/bin/freehold-console add-secret %s %s --state-dir /srv/data/cp/control-plane/runner/%s --secret-env %s; true'",
+			cp, s.ev, s.val, target, s.n, target, s.ev)
+		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
+			return fmt.Errorf("seed co-located runner %s: %w", s.n, fmt.Errorf("%s", strings.TrimSpace(out)))
+		}
+	}
+	if ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- systemctl restart freehold-runner", cp), 60)); !ok {
+		return fmt.Errorf("restart co-located runner: %s", strings.TrimSpace(out))
+	}
+	fmt.Fprintln(e.out, "  · co-located runner re-seeded with litellm secrets")
+	return nil
+}
+
+// cpSecretBlob renders a cert.SaveCreds-style sealed record ({provider,sealed,
+// aad}) as raw JSON, for upload to the CP via /api/secrets.
+func cpSecretBlob(name, provider string, env map[string]string, seal cert.Sealer, pub []byte) (json.RawMessage, error) {
+	p := filepath.Join(os.TempDir(), "fh-cp-"+name+".json")
+	if err := cert.SaveCreds(p, provider, env, seal, pub, name); err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(p)
+	_ = os.Remove(p)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // handoffDNS ships the world's DNS provider creds (relay + cp slots) to the CP,
