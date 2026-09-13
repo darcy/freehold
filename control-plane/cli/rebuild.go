@@ -38,6 +38,7 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/config"
+	"freehold/contract/relay"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
 	"freehold/contract/state"
@@ -2797,7 +2798,53 @@ func (e *rebuildEngine) reconcileCreatedAgents() error {
 		}
 		fmt.Fprintf(e.out, "  · reconciled agent %s (pubkey %s)\n", a.Name, firstHex(text))
 	}
+	// Prune the agent-tools server's roster channel to the actors that SHOULD be
+	// members (the server itself + the operator + every agent the registry
+	// holds). Seeding only ADDS members (kind-9000 put-user), so across
+	// rebuild/re-bootstrap cycles a rotated identity (a re-minted server or CPA
+	// pubkey) leaves the OLD key as a lingering member — the "N agents in the
+	// room" accumulation. Remove any roster member not in the desired set; as a
+	// side effect the operated agents (incl. the CPA) keep their seat.
+	if cfg.AgentToolsPubkey != "" {
+		var agentPKs []string
+		for _, a := range agents {
+			if a.Pubkey != "" {
+				agentPKs = append(agentPKs, a.Pubkey)
+			}
+		}
+		rpk, _ := e.relayPubkeyNip11()
+		if key, kerr := e.operatorSecret(); kerr == nil {
+			if cur, rerr := relay.QueryChannelRoster(cfg.RelayURL, rpk, cfg.AgentToolsPubkey, key); rerr == nil {
+				for _, member := range staleRosterMembers(cur, cfg.AgentToolsPubkey, cfg.OperatorPubkey, agentPKs) {
+					if rmErr := relay.RemoveUser(cfg.RelayURL, key, cfg.AgentToolsPubkey, member); rmErr == nil {
+						fmt.Fprintf(e.out, "  · pruned stale roster member %s\n", member)
+					}
+				}
+			}
+		}
+	}
 	return nil
+}
+
+// staleRosterMembers returns the roster channel members that are NOT in the
+// desired set (the server itself + the operator + every agent the registry
+// holds). Seeding only adds members, so rotated stamping identities (a re-minted
+// server or CPA pubkey across rebuild/re-bootstrap) linger as members and pile
+// up — this is the "N agents in the room" accumulation. Pure, for testability.
+func staleRosterMembers(current []string, serverPK, operatorPK string, agentPubkeys []string) []string {
+	desired := map[string]bool{serverPK: true, operatorPK: true}
+	for _, pk := range agentPubkeys {
+		if pk != "" {
+			desired[pk] = true
+		}
+	}
+	var stale []string
+	for _, m := range current {
+		if !desired[m] {
+			stale = append(stale, m)
+		}
+	}
+	return stale
 }
 
 func firstHex(s string) string {
@@ -2806,6 +2853,20 @@ func firstHex(s string) string {
 		return s[:64]
 	}
 	return s
+}
+
+// operatorSecret returns the operator's live secret key (the box-side ops
+// identity), used to authorize NIP-98 / relay membership commands.
+func (e *rebuildEngine) operatorSecret() ([]byte, error) {
+	secStr, err := oplogin.SecretHex()
+	if err != nil {
+		return nil, err
+	}
+	secret, err := oplogin.NsecToSecret(secStr)
+	if err != nil {
+		return nil, err
+	}
+	return secret[:], nil
 }
 
 // recordCpa writes the CPA's identity + name into the config (managed) so the
