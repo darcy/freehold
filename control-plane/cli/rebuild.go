@@ -888,10 +888,14 @@ func (e *rebuildEngine) seedCpRunnerSecrets(cfg *config.Config, master, pg, prov
 		{"postgres-pw", "POSTGRES_PW", pg},
 		{"provider-key", "PROVIDER_KEY", providerKey},
 	} {
-		cmd := fmt.Sprintf("pct exec %d -- sh -c 'export %s=%s; /srv/data/cp/bin/freehold-console add-secret %s %s --state-dir /srv/data/cp/control-plane/runner/%s --secret-env %s; true'",
-			cp, s.ev, s.val, target, s.n, target, s.ev)
+		// base64 the value so it can never break the sh -c quoting (injection
+		// safe — base64 is [A-Za-z0-9+/=] with no shell metacharacters); decode
+		// inside the CP into the env, then add-secret reads --secret-env.
+		b64 := base64.StdEncoding.EncodeToString([]byte(s.val))
+		cmd := fmt.Sprintf("pct exec %d -- sh -c 'export %s=$(printf %%s %s | base64 -d); /srv/data/cp/bin/freehold-console add-secret %s %s --state-dir /srv/data/cp/control-plane/runner/%s --secret-env %s; true'",
+			cp, s.ev, b64, target, s.n, target, s.ev)
 		if ok, out := e.runBin(e.bins.Self, e.execArgs(cmd, 60)); !ok {
-			return fmt.Errorf("seed co-located runner %s: %w", s.n, fmt.Errorf("%s", strings.TrimSpace(out)))
+			return fmt.Errorf("seed co-located runner %s: %s", s.n, strings.TrimSpace(out))
 		}
 	}
 	if ok, out := e.runBin(e.bins.Self, e.execArgs(fmt.Sprintf("pct exec %d -- systemctl restart freehold-runner", cp), 60)); !ok {
