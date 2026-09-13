@@ -53,6 +53,13 @@ var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Bring up the appliance end to end, interactively: a few questions with defaults, then the full rebuild pipeline (the freehold-install port)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		ok, err := negotiateProfile(cmd, "install")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
+		}
 		return runInstall(os.Stdin, os.Stdout)
 	},
 }

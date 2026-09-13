@@ -206,17 +206,21 @@ freehold deploy-relay …        #   memory, console-login, grant, storage …)
 freehold --help               # both surfaces
 ```
 
-**TUI modes** (auto-detected from `~/.config/freehold/config.toml`):
+**Tenants (profiles)** — every box can hold several tenants, one per **profile**.
+Each profile is its own config file (`~/.config/freehold/profiles/<name>/config.toml`)
+plus its own scoped state dir (`~/.freehold/profiles/<name>/`). The filesystem is
+the registry; `freehold profiles` lists them. `freehold login` **adds** a named
+profile (default name = the CP host), and the TUI plus `build` / `bootstrap` /
+`teardown` / `world` pick which profile (tenant) to operate when more than one is
+registered (a picker), failing closed with "run `freehold login` first" when none
+are. There is no implicit "default" profile.
 
-- **bootstrap** — no config: a form collects host/runner/domain/rootfs/memory,
-  OPTIONAL static LXC IPs (filled = STATIC + gateway; empty = DHCP with a bold
-  on-screen warning that your DNS/proxy must point at whatever DHCP assigns —
-  the real addresses are recorded in the config right after each boot), and
-  your operator key (paste npub, mint one, or paste YOUR nsec — it is
-  validated against the pubkey and persisted 0600 so every launch
-  auto-logs in), then runs the bring-up stages
+**TUI modes** (auto-detected from the selected profile's config):
+
+- **bootstrap** — no tenant profile selected: `freehold login` adds one, then
+  `freehold build` runs the bring-up stages
   (provision → install the SSH door → grant → serve → verify the door with a
-  real exec) and writes the config.
+  real exec) and writes the profile's config.
 - **configure** — config present, world not converged: an idempotent
   check-then-run pipeline (relay/cp LXCs, deploy relay + cp). Failed stages
   show their tail; `r` retries.
@@ -232,13 +236,14 @@ freehold --help               # both surfaces
   from the CP's world facts instead — live usage needs the deployer box),
   **DNS**, **Certs**. A one-line world strip keeps the
   liveness glance.
-- **Remote-CP access**: `freehold login` (**root-free**) authorizes this
-  operator against the CP by **CP address + operator nsec** (NIP-98), then
-  **ends** — afterwards just run `freehold`. It pulls the CP's
-  `/api/world` summary and seeds a local connection/desire profile (relay + CP
-  coords, the CP's own identity, the operator pubkey derived from the nsec), so
-  a fresh box recovers with nothing that lived only on a lost one. The operator
-  nsec persists 0600 under `~/.freehold/control-plane/operator` (excluded from
+- **Remote-CP access**: `freehold login` (**root-free**) **adds a tenant profile** —
+  authorize this operator against the CP by **CP address + operator nsec**
+  (NIP-98), then **ends** — afterwards just run `freehold` and pick the profile.
+  It pulls the CP's `/api/world` summary and seeds that profile's connection/
+  desire config (relay + CP coords, the CP's own identity, the operator pubkey
+  derived from the nsec), so a fresh box recovers with nothing that lived only
+  on a lost one. The operator nsec persists 0600 under the profile's
+  `control-plane/operator` dir (excluded from
   any off-box backup/sync — it is a box-local, user-held key). The operator key
   **is** the credential: the console only admits NIP-98 operators whose pubkey
   was minted into its admin whitelist at deploy, so logging in as yourself from
@@ -247,12 +252,13 @@ freehold --help               # both surfaces
   legitimate login to the actual CP needs no separately-known pubkey, and the
   trust boundary for a wrong/hijacked `cp_url` is TLS/DNS on that URL, not this
   recorded anchor). `login` also materializes the box's
-  **own** provisioning identity (`~/.freehold/control-plane/agent-ops`,
+  **own** provisioning identity (the profile's `control-plane/agent-ops`,
   first-run-wins — the identity `freehold build`/`teardown` sign with), so the
   box is a durable, self-owned actor; it does **not** fabricate a `[runner]`
   block (that is the deployed runner's own identity, authored by `build`). In
   the TUI, `l` re-logs into the CP console with that persisted nsec, and
-  `freehold logout` clears the local ledger only (CP/world untouched, box
+  `freehold logout` clears the chosen profile's local ledger only (CP/world
+  untouched, box
   identity kept). `w` then opens the web console in your browser already
   authenticated (single-use portal token — no `console-login`). Keys are scoped
   to the active view.
@@ -265,10 +271,12 @@ duplicated logic. Re-runs are safe: an
 existing runner package is reused, the door is re-verified, and a matching LXC
 is reused (a foreign container on the vmid is refused).
 
-#### The config (`~/.config/freehold/config.toml`)
+#### The config (`~/.config/freehold/profiles/<name>/config.toml`)
 
-The world lives under `~/.freehold` (override: `FREEHOLD_HOME`); nothing about
-it is configured. The config is the CONNECTION/DESIRE profile:
+Each tenant profile's config lives at `profiles/<name>/config.toml` with its
+state under `~/.freehold/profiles/<name>/` (overridden by `FREEHOLD_HOME`);
+nothing about it is configured. The config is that tenant's CONNECTION/DESIRE
+profile:
 
 ```toml
 domain = "freehold-test.darcydev.net"

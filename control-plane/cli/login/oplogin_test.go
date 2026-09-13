@@ -80,10 +80,11 @@ func TestAuthorizeDoorNeedsToolsetCoords(t *testing.T) {
 
 // TestInteractiveSeedsWorldProfile drives `freehold login` end to end against a
 // mock CP: challenge -> login (Set-Cookie) -> world summary; the local desire
-// profile is seeded and the operator identity is persisted, all root-free.
+// profile is seeded under a NAMED profile (no legacy/default) and the operator
+// identity is persisted, all root-free.
 func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	t.Setenv("FREEHOLD_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // config.DefaultPath() under here
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	const nsecHex = "b9100ce43b1deac5c5189f48bc6d97b287e122211d5f271488c0bcae2b350ad6"
 	wantOpPK, err := crypto.PubkeyFromSecret(mustHex(t, nsecHex))
@@ -95,27 +96,23 @@ func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	srv := mockCP(t, cpPubkey)
 	defer srv.Close()
 
-	// Pre-write the CP address+pubkey; relay/operator fields are absent (a
-	// fresh-box recovery seed must fill them from login, not from a lost box).
-	pre := &config.Config{}
-	pre.CPURL = srv.URL
-	pre.CpPubkey = cpPubkey
-	if err := pre.Save(config.DefaultPath()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Feed the nsec over piped stdin (no terminal, no l / c).
-	pipeR, pipeW, _ := os.Pipe()
-	oldStdin := os.Stdin
-	os.Stdin = pipeR
-	go func() { pipeW.WriteString(nsecHex + "\n"); pipeW.Close() }()
-	defer func() { os.Stdin = oldStdin }()
+	// Feed: CP address, then a blank profile name (accept the default = host
+	// slug), then the nsec — all over piped stdin (no terminal, no l / c).
+	feedStdin(t, srv.URL, "", nsecHex)
 
 	if err := Interactive(); err != nil {
 		t.Fatalf("login failed: %v", err)
 	}
 
-	got, err := config.Load(config.DefaultPath())
+	// One named profile was created; there is NO legacy/default profile.
+	profiles := config.List()
+	if len(profiles) != 1 {
+		t.Fatalf("login must create exactly one profile, got %d", len(profiles))
+	}
+	if profiles[0].Name == "default" {
+		t.Fatal("no implicit default profile under option B")
+	}
+	got, err := config.Load(profiles[0].ConfigPath)
 	if err != nil || got == nil {
 		t.Fatalf("seeded config: %v", err)
 	}
@@ -153,16 +150,19 @@ func TestInteractiveSeedsWorldProfile(t *testing.T) {
 	if got.Runner.Pubkey != "" {
 		t.Errorf("login must not fabricate a runner pubkey (no deployed runner yet): %s", got.Runner.Pubkey)
 	}
-	// Operator identity ledger persisted.
+	// Operator identity ledger persisted, scoped to the profile's state dir.
 	if gotSec, err := SecretHex(); err != nil || gotSec != nsecHex {
 		t.Errorf("operator identity not persisted: %q err=%v", gotSec, err)
+	}
+	if !strings.HasPrefix(identityHome(), profiles[0].StateDir) {
+		t.Errorf("operator identity must be scoped to the profile state dir, got %s", identityHome())
 	}
 }
 
 // TestInteractivePreservesSurvivingRunner guards the reviewer-flagged clobber:
-// on an already-built box, a re-login must NOT overwrite [runner] with the
-// box's agent-ops (caller) identity — [runner].pubkey is the DEPLOYED runner's
-// own identity, the audience of every signed call.
+// on an already-built box, a re-login into the SAME named profile must NOT
+// overwrite [runner] with the box's agent-ops (caller) identity — [runner].pubkey
+// is the DEPLOYED runner's own identity, the audience of every signed call.
 func TestInteractivePreservesSurvivingRunner(t *testing.T) {
 	t.Setenv("FREEHOLD_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -171,26 +171,24 @@ func TestInteractivePreservesSurvivingRunner(t *testing.T) {
 	defer srv.Close()
 
 	// A world that was already `build`-deployed, with the runner's OWN identity
-	// recorded (distinct from the box's agent-ops caller identity).
+	// recorded (distinct from the box's agent-ops caller identity) under a NAMED
+	// profile.
 	deployedPub := "9999999999999999999999999999999999999999999999999999999999999999"
 	pre := &config.Config{}
 	pre.CPURL = srv.URL
 	pre.CpPubkey = "00aa11bb22cc33dd44ee55ff6677889900112233445566778899aabbccddeeff"
 	pre.Runner = config.RunnerRef{Addr: "127.0.0.1:8787", Pubkey: deployedPub, Target: "proxmox-box"}
-	if err := pre.Save(config.DefaultPath()); err != nil {
+	if err := pre.Save(config.NewProfilePath("demo")); err != nil {
 		t.Fatal(err)
 	}
 
-	pipeR, pipeW, _ := os.Pipe()
-	oldStdin := os.Stdin
-	os.Stdin = pipeR
-	go func() { pipeW.WriteString(nsecHex + "\n"); pipeW.Close() }()
-	defer func() { os.Stdin = oldStdin }()
+	// Re-login into that same profile: CP address, profile name "demo", nsec.
+	feedStdin(t, srv.URL, "demo", nsecHex)
 
 	if err := Interactive(); err != nil {
 		t.Fatalf("login failed: %v", err)
 	}
-	got, err := config.Load(config.DefaultPath())
+	got, err := config.Load(config.NewProfilePath("demo"))
 	if err != nil || got == nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -199,6 +197,9 @@ func TestInteractivePreservesSurvivingRunner(t *testing.T) {
 	}
 	if got.Runner.Target != "proxmox-box" {
 		t.Errorf("re-login clobbered runner target: %q", got.Runner.Target)
+	}
+	if config.Resolve("demo") == nil {
+		t.Fatal("profile demo must exist after re-login")
 	}
 }
 
@@ -273,25 +274,23 @@ func TestInteractiveAdoptsCPReportOverStaleCpPubkey(t *testing.T) {
 	defer srv.Close()
 
 	// A stale/wrong anchor from an earlier UI iteration (e.g. the operator's own
-	// key pasted into a "CP pubkey" prompt). A fresh login must adopt the CP's
-	// real report instead of either trusting this stale value or dying on it.
+	// key pasted into a "CP pubkey" prompt). A fresh login into the SAME named
+	// profile must adopt the CP's real report instead of either trusting this
+	// stale value or dying on it.
 	pre := &config.Config{}
 	pre.CPURL = srv.URL
 	pre.CpPubkey = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-	if err := pre.Save(config.DefaultPath()); err != nil {
+	if err := pre.Save(config.NewProfilePath("demo")); err != nil {
 		t.Fatal(err)
 	}
 
-	pipeR, pipeW, _ := os.Pipe()
-	oldStdin := os.Stdin
-	os.Stdin = pipeR
-	go func() { pipeW.WriteString(nsecHex + "\n"); pipeW.Close() }()
-	defer func() { os.Stdin = oldStdin }()
+	// Re-login into "demo": CP address, profile name, nsec.
+	feedStdin(t, srv.URL, "demo", nsecHex)
 
 	if err := Interactive(); err != nil {
 		t.Fatalf("login with a stale cp_pubkey must succeed and adopt the CP report: %v", err)
 	}
-	got, err := config.Load(config.DefaultPath())
+	got, err := config.Load(config.NewProfilePath("demo"))
 	if err != nil || got == nil {
 		t.Fatalf("seeded config: %v", err)
 	}
@@ -366,4 +365,20 @@ func mustHex(t *testing.T, s string) []byte {
 		t.Fatalf("bad hex %q: %v", s, err)
 	}
 	return b
+}
+
+// feedStdin feeds one line per interactive prompt over piped stdin (no
+// terminal), restoring the original stdin after the test.
+func feedStdin(t *testing.T, lines ...string) {
+	t.Helper()
+	oldStdin := os.Stdin
+	pipeR, pipeW, _ := os.Pipe()
+	os.Stdin = pipeR
+	go func() {
+		for _, l := range lines {
+			pipeW.WriteString(l + "\n")
+		}
+		pipeW.Close()
+	}()
+	t.Cleanup(func() { os.Stdin = oldStdin })
 }

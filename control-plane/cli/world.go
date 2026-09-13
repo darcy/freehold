@@ -31,6 +31,13 @@ var worldCmd = &cobra.Command{
 		if len(args) == 0 {
 			return fmt.Errorf("world needs a subcommand: status|build|teardown|migrate")
 		}
+		ok, err := negotiateProfile(cmd, "world "+args[0])
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
+		}
 		return worldAction(args[0])
 	},
 }
@@ -173,7 +180,8 @@ func worldExecThroughCP(target, cmd string, secrets []string, timeoutS uint64) e
 	return nil
 }
 
-// configPath resolves the config path for the world verb (the CLI's default).
+// configPath resolves the config path for the world verb: the negotiated
+// profile's config when one is active, else the CLI's default.
 func configPath() string {
-	return config.DefaultPath()
+	return config.ConfigPath()
 }

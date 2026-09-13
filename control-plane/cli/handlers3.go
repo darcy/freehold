@@ -677,7 +677,14 @@ var teardownCmd = &cobra.Command{
 	Use:   "teardown",
 	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (recorded LXC coordinates are cleared so the next build re-creates them), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT so a cheap rebuild re-uses the DNS creds + identity)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		configPath, _ := cmd.Flags().GetString("config")
+		ok, err := negotiateProfile(cmd, "teardown")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
+		}
+		configPath := profileConfigPath(cmd)
 		yes, _ := cmd.Flags().GetBool("yes")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		data, _ := cmd.Flags().GetBool("data")
@@ -706,6 +713,7 @@ var teardownCmd = &cobra.Command{
 			AgentDir:        agentDir,
 			Runner:          cfg.Runner.Target,
 			Domain:          cfg.TenantSlug(),
+			ConfigPath:      configPath,
 		}
 
 		// The door must work before anything remote: a signed exec probe.
@@ -864,23 +872,14 @@ func removeManagedDNS(cfg *config.Config) error {
 }
 
 func defaultConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".config", "freehold", "config.toml")
+	return config.ConfigPath()
 }
 
-// freeholdHome mirrors installer::freehold_home (FREEHOLD_HOME override).
+// freeholdHome mirrors installer::freehold_home — the active profile's scoped
+// state dir, or the legacy ~/.freehold (FREEHOLD_HOME override) when no profile
+// is negotiated.
 func freeholdHome() string {
-	if h := os.Getenv("FREEHOLD_HOME"); h != "" {
-		return h
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/root"
-	}
-	return filepath.Join(home, ".freehold")
+	return config.StateDir()
 }
 
 func init() {

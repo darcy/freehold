@@ -146,6 +146,13 @@ func init() {
 var buildCmd = &cobra.Command{Use: "build",
 	Short: "Bring the whole world up through the CP: login-gated trigger of the console's /api/world-build (the CP owns relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		ok, err := negotiateProfile(cmd, "build")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
+		}
 		eng, err := setupBuild(cmd)
 		if err != nil {
 			return err
@@ -157,6 +164,13 @@ var buildCmd = &cobra.Command{Use: "build",
 var bootstrapCmd = &cobra.Command{Use: "bootstrap",
 	Short: "Box one only: create the CP (door -> cp LXC + console + co-located runner + DNS creds) and STOP — then `freehold build` (from ANY box after login) brings up the world through the CP",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		ok, err := negotiateProfile(cmd, "bootstrap")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
+		}
 		eng, err := setupBuild(cmd)
 		if err != nil {
 			return err
@@ -229,7 +243,7 @@ func setupBuild(cmd *cobra.Command) (*rebuildEngine, error) {
 	f.proxyIP, _ = cmd.Flags().GetString("proxy-ip")
 	f.relayIP, _ = cmd.Flags().GetString("relay-ip")
 	f.cpIP, _ = cmd.Flags().GetString("cp-ip")
-	f.configPath, _ = cmd.Flags().GetString("config")
+	f.configPath = profileConfigPath(cmd)
 	f.confirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 	f.yes, _ = cmd.Flags().GetBool("yes")
 	f.resetDNS, _ = cmd.Flags().GetBool("reset-dns")

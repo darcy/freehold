@@ -27,19 +27,23 @@ TUI (no args) — a STATUS dashboard for operating a deployed world:
     build / teardown are NOT run from here — use the CLI commands below.
 
 Modes (auto-detected):
-    bootstrap   no config at ~/.config/freehold/config.toml
+    bootstrap   no config for the chosen tenant at ~/.config/freehold/
     configure   config present, world not converged
     running     config present, everything reachable
 
 CLI:
-    freehold login     authorize this operator against a CP (CP address + pubkey +
-                       nsec) and end — root-free. Afterwards just run freehold.
-                       Seeds a local connection profile from the CP's world summary.
-    freehold logout    clear the local login ledger on this box (CP/world untouched)
-    freehold build     bring the world up (fresh bootstrap OR rebuild — the same
-                       reconciling pipeline; reads the recorded config, asks only
-                       what's missing, picks the DNS provider from lego's list)
-    freehold teardown  destroy the managed world (confirm first)
+    freehold login     add a TENANT profile (CP address + pubkey + nsec) and end —
+                       root-free. Prompts a profile name (default: the CP host; an
+                       existing box auto-resolves to the legacy "default" profile).
+                       Afterwards just run freehold and pick the profile.
+    freehold profiles  list the registered tenant profiles (each has its own login
+                       + config file + scoped state dir)
+    freehold logout    clear the login ledger for the chosen profile/local box
+                       (CP/world untouched)
+    freehold build     bring the world up for the chosen profile (fresh bootstrap
+                       OR rebuild — the same reconciling pipeline; a profile
+                       picker runs when more than one is registered)
+    freehold teardown  destroy the managed world for the chosen profile (confirm first)
     freehold exec <target> "<cmd>"   run a command through the runner
     ... (see `+"`freehold <subcommand> --help`"+`)`)
 }
@@ -47,7 +51,7 @@ CLI:
 func main() {
 	args := os.Args[1:]
 	if len(args) == 0 {
-		runTUI(config.DefaultPath())
+		runTUI("")
 		return
 	}
 	switch args[0] {
@@ -68,6 +72,12 @@ func main() {
 		}
 		return
 	case "logout", "--logout":
+		if len(config.List()) > 0 {
+			if _, err := oplogin.SelectProfile("log out"); err != nil {
+				fmt.Fprintln(os.Stderr, "logout:", err)
+				os.Exit(1)
+			}
+		}
 		if err := oplogin.Logout(); err != nil {
 			fmt.Fprintln(os.Stderr, "logout:", err)
 			os.Exit(1)

@@ -286,12 +286,21 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `docs/DOOR_SPEC.md` — lets a fresh logged-in box authorize its own door key
     on the host.)
 
-*   **Remote-CP access.** `freehold login` (root-free) authorizes this operator
-    against the CP by **CP address + operator nsec** (NIP-98), then ends;
-    `control-plane/cli/login` persists the nsec 0600 under the operator dir
-    and seeds a local connection/desire profile from the CP's `/api/world`
-    summary, so every launch auto-logs in and a fresh box recovers with
-    nothing from a lost one. The operator key **is** the credential — the
+*   **Remote-CP access.** `freehold login` (root-free) — instead of one box-wide
+    connection profile — **adds a named tenant profile** to the box: a profile is
+    a single logged-in tenant with its own config file
+    (`~/.config/freehold/profiles/<name>/config.toml`) and its own scoped state
+    dir (`<FREEHOLD_HOME|~/.freehold>/profiles/<name>/`), the filesystem being the
+    registry. `login` authorizes this operator against the CP by **CP address +
+    operator nsec** (NIP-98), then ends;
+    `control-plane/cli/login` persists the nsec 0600 under the profile's operator
+    dir and seeds that profile's connection/desire config from the CP's
+    `/api/world` summary, so every launch auto-logs in and a fresh box recovers
+    with nothing from a lost one. The TUI and `build`/`bootstrap`/`teardown`/
+    `world` pick which profile (tenant) to operate via an interactive picker
+    (`freehold profiles` lists them), and fail closed with "run `freehold login`
+    first" when none are registered. There is no implicit "default" profile or
+    legacy single-config layout. The operator key **is** the credential — the
     console only admits NIP-98 operators whose pubkey was minted into its
     admin whitelist at deploy, so logging in as yourself from any box unlocks
     the world. The recorded `cp_pubkey` is the CP's *own* identity, adopted
@@ -299,7 +308,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     64-hex) and informational — never typed, since a legitimate login to the
     actual CP needs no separately known pubkey. (The trust boundary for a
     wrong/hijacked `cp_url` is TLS/DNS on that URL, not this recorded anchor.)
-    `freehold logout` clears this box's local ledger only. `/api/world`
+    `freehold logout` clears the chosen profile's local ledger only. `/api/world`
     serves the relay's **public edge** (derived as `https://<relay_host>` when a
     relay host is recorded, else the raw `state.json` `--relay-url`) plus the
     `agent_tools_url`/`agent_tools_pubkey` the

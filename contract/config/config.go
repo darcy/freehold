@@ -95,6 +95,10 @@ func slugFromHost(host, role string) string {
 	return s
 }
 
+// SlugHost lowercases/consolidates an arbitrary host into a stable profile
+// dir / LXC-safe slug (the exported form of slugFromHost).
+func SlugHost(host string) string { return slugFromHost(host, "") }
+
 // PlaneSpec is the durable volume plane (Phase 0.12).
 type PlaneSpec struct {
 	Backend     *string `toml:"backend,omitempty"`

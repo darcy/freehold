@@ -8,8 +8,6 @@
 package tui
 
 import (
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -17,6 +15,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/cli/login"
 )
 
 var (
@@ -186,10 +185,17 @@ type DataRow struct {
 }
 
 // New builds the model from the config path (mirrors app.rs::run).
+//
+// An empty cfgPath means "the default" and triggers tenant negotiation: when
+// the box has registered profiles, the operator picks one (its config + state
+// become this session's), otherwise the legacy default is used. An explicit
+// cfgPath (--config) bypasses negotiation.
 func New(cfgPath string) (*Model, error) {
-	m := &Model{Mode: ModeBootstrap, LastRef: time.Now(), CfgPath: cfgPath}
-	if m.CfgPath == "" {
-		m.CfgPath = defaultTuiConfigPath()
+	m := &Model{Mode: ModeBootstrap, LastRef: time.Now()}
+	if cfgPath != "" {
+		m.CfgPath = cfgPath
+	} else {
+		m.CfgPath = selectTuiProfile()
 	}
 	if err := m.load(m.CfgPath); err != nil {
 		return nil, err
@@ -197,14 +203,19 @@ func New(cfgPath string) (*Model, error) {
 	return m, nil
 }
 
-// defaultTuiConfigPath mirrors config.DefaultPath (~/.config/freehold/config.toml).
+// selectTuiProfile returns the config path for this TUI session: the picked
+// profile's when one is registered, else the legacy default path.
+func selectTuiProfile() string {
+	if len(config.List()) > 0 {
+		if p, err := oplogin.SelectProfile("operate"); err == nil && p != nil {
+			return p.ConfigPath
+		}
+	}
+	return config.ConfigPath()
+}
+
+// defaultTuiConfigPath mirrors config.ConfigPath (the negotiated profile's
+// config, or the legacy ~/.config/freehold/config.toml).
 func defaultTuiConfigPath() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "freehold", "config.toml")
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/root"
-	}
-	return filepath.Join(home, ".config", "freehold", "config.toml")
+	return config.ConfigPath()
 }
