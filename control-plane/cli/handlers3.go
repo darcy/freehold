@@ -677,8 +677,12 @@ var teardownCmd = &cobra.Command{
 	Use:   "teardown",
 	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (recorded LXC coordinates are cleared so the next build re-creates them), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT so a cheap rebuild re-uses the DNS creds + identity)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if _, err := negotiateProfile(cmd, "teardown"); err != nil {
+		ok, err := negotiateProfile(cmd, "teardown")
+		if err != nil {
 			return err
+		}
+		if !ok {
+			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
 		}
 		configPath := profileConfigPath(cmd)
 		yes, _ := cmd.Flags().GetBool("yes")

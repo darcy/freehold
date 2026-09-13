@@ -52,3 +52,22 @@ func TestProfiles(t *testing.T) {
 		}
 	}
 }
+
+// TestProfilesDirAlwaysAbsolute guards the fallback bug: with both HOME and
+// XDG_CONFIG_HOME unset, ProfilesDir must still return an absolute /root-rooted
+// path (never a CWD-relative "freehold/profiles" that scatters the registry
+// across working directories).
+func TestProfilesDirAlwaysAbsolute(t *testing.T) {
+	for _, set := range []bool{true, false} {
+		if set {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		} else {
+			os.Unsetenv("XDG_CONFIG_HOME")
+		}
+		os.Setenv("HOME", "")
+		dir := ProfilesDir()
+		if !filepath.IsAbs(dir) {
+			t.Fatalf("ProfilesDir must be absolute, got %q", dir)
+		}
+	}
+}

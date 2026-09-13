@@ -55,16 +55,19 @@ func ConfigPath() string {
 	return DefaultPath()
 }
 
-// ProfilesDir is where named profiles live (~/.config/freehold/profiles).
+// ProfilesDir is where named profiles live (~/.config/freehold/profiles). Always
+// returns an absolute path — mirroring DefaultPath/DefaultStateHome, HOME falls
+// back to /root when unset so the registry never scatters CWD-relative.
 func ProfilesDir() string {
 	xdg := os.Getenv("XDG_CONFIG_HOME")
-	if xdg == "" {
-		home := os.Getenv("HOME")
-		if home != "" {
-			return filepath.Join(home, ".config", "freehold", "profiles")
-		}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/root"
 	}
-	return filepath.Join(xdg, "freehold", "profiles")
+	if xdg != "" {
+		return filepath.Join(xdg, "freehold", "profiles")
+	}
+	return filepath.Join(home, ".config", "freehold", "profiles")
 }
 
 // DefaultStateHome is the freehold state root that all profiles sit under

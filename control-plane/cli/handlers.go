@@ -95,6 +95,13 @@ var execCmd = &cobra.Command{
 		}
 		target, cmds := args[0], args[1]
 		common := readCommonFlags(cmd)
+		// The signing identity dir (--agent-dir) must follow the NEGOTIATED
+		// profile, not the flag's init-time default (which was captured before
+		// config.Current was set). Recompute it from the profile's scoped state
+		// dir unless the operator pinned --agent-dir explicitly.
+		if !cmd.Flags().Changed("agent-dir") {
+			common.AgentDir = defaultAgentDir()
+		}
 		secrets, _ := cmd.Flags().GetStringSlice("secret")
 		timeoutS, _ := cmd.Flags().GetUint64("timeout")
 		// A THIN box (no local [runner]) drives exec through the CP's co-located
