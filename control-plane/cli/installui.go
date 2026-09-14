@@ -270,6 +270,7 @@ func runInstallUI(newEngine func(rebuildFlags) (*rebuildEngine, error), in io.Re
 	if !ok || !im.done {
 		return fmt.Errorf("install aborted")
 	}
+	applyInstallDefaults(&im.f)
 	eng, err := newEngine(im.f)
 	if err != nil {
 		return err

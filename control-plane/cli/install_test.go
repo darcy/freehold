@@ -303,6 +303,8 @@ func TestRunInstallHandsCollectedFlagsToEngine(t *testing.T) {
 		memoryMB:         2048,
 		relayGw:          "192.168.30.1",
 		bridge:           "vmbr0",
+		storageName:      "local-lvm",
+		agentName:        "freehold",
 		noK3s:            false,
 		noLitellm:        false,
 		confirmStorage:   true,

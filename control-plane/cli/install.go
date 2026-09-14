@@ -84,6 +84,7 @@ func runInstallWith(in io.Reader, out io.Writer, newEngine func(rebuildFlags) (*
 	if err != nil {
 		return err
 	}
+	applyInstallDefaults(&f)
 
 	consent := "no"
 	if f.confirmStorage {

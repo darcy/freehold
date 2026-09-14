@@ -38,10 +38,14 @@ chain of runtime bugs the hermetic gate couldn't see; all are fixed here.
   loopback. Box-side `build`/`bootstrap` honor the profile's recorded
   `Runner.Addr` unless `--addr` is explicit, so a multi-world box routes to
   this world's runner, not a foreign one.
-- **`bridge=vmbr0` in the world coords**: the install wizard never collected
-  the PVE bridge, so the shipped coords booted the relay LXC with an empty
-  `net0` bridge and `pct create` failed "invalid format - missing key". Both
-  install paths now default `bridge` to `vmbr0` (matching `--bridge`).
+- **install applies the flag-layer defaults**: the install path builds its
+  flags from the wizard / prompts directly, never through `setupBuild`, so it
+  never got the `registerBuildFlags` defaults. Empty `bridge` booted the relay
+  LXC with a malformed `net0` ("invalid format - missing key"); empty `storage`
+  failed the relay rootfs ("unable to parse volume ID ':16'"); empty
+  `agent-name` shipped a nameless CPA. `applyInstallDefaults` now fills
+  `bridge=vmbr0`, `storage=local-lvm`, and `agent-name=freehold` on both the
+  wizard and sequential install paths.
 - **exec profile on the ops + storage commands**: `readiness`, `storage
   resolve/ensure/destroy/destroy-pool/info`, `provision`, `deploy-relay`, and
   `deploy-cp` now resolve the active tenant profile (like `exec`), so a

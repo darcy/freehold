@@ -320,6 +320,25 @@ func applyConfigDefaults(f *rebuildFlags, cfgPath string) error {
 	return nil
 }
 
+// applyInstallDefaults fills the static defaults the flag layer supplies for
+// `build`/`bootstrap` (registerBuildFlags) but that `install` bypasses: it
+// builds rebuildFlags from the wizard / sequential prompts directly, never
+// through setupBuild. An empty storage/bridge/agent-name here ships empty
+// coords to the console and boot fails ("unable to parse volume ID ':16'",
+// malformed net0). Deliberately does NOT read the config — install owns the
+// answers, and ConfigPath() falls back to the legacy path with no profile.
+func applyInstallDefaults(f *rebuildFlags) {
+	if f.storageName == "" {
+		f.storageName = "local-lvm"
+	}
+	if f.bridge == "" {
+		f.bridge = "vmbr0"
+	}
+	if f.agentName == "" {
+		f.agentName = "freehold"
+	}
+}
+
 // rebuildFlags is the command's collected answers.
 type rebuildFlags struct {
 	addr               string
