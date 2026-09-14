@@ -77,7 +77,13 @@ type GroupMeta struct {
 // QueryGroups returns the relay's published channels (kind 39000), newest name
 // per channel id. Read-only; any relay member identity can query.
 func QueryGroups(relayURL string, authSecret []byte) ([]GroupMeta, error) {
-	events, err := QueryEvents(relayURL, authSecret, []interface{}{map[string]interface{}{
+	return QueryGroupsAuth(relayURL, relayURL, authSecret)
+}
+
+// QueryGroupsAuth is QueryGroups with a separate NIP-98 auth URL (the
+// pre-Caddy LAN-dial case: dial http://<host>:3000, sign the canonical https).
+func QueryGroupsAuth(dialURL, authURL string, authSecret []byte) ([]GroupMeta, error) {
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
 		"kinds": []interface{}{wire.GroupMeta},
 		"limit": 1000,
 	}})
@@ -113,8 +119,13 @@ func QueryGroups(relayURL string, authSecret []byte) ([]GroupMeta, error) {
 // FindChannel resolves a channel by display name (leading '#' ignored,
 // case-insensitive). The first match wins.
 func FindChannel(relayURL string, authSecret []byte, name string) (id, displayName string, ok bool, err error) {
+	return FindChannelAuth(relayURL, relayURL, authSecret, name)
+}
+
+// FindChannelAuth is FindChannel with a separate NIP-98 auth URL.
+func FindChannelAuth(dialURL, authURL string, authSecret []byte, name string) (id, displayName string, ok bool, err error) {
 	want := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "#"))
-	groups, err := QueryGroups(relayURL, authSecret)
+	groups, err := QueryGroupsAuth(dialURL, authURL, authSecret)
 	if err != nil {
 		return "", "", false, err
 	}

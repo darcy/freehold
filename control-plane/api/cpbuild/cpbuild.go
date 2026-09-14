@@ -1396,7 +1396,7 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string) (id, displayName 
 	name := "#" + strings.TrimPrefix(strings.TrimSpace(channel), "#")
 	// A relay read error must NOT be mistaken for "absent" (that would create a
 	// duplicate of an existing channel) — fail the create instead.
-	existingID, existingName, ok, err := relay.FindChannel(s.RelayURL, s.Sec, channel)
+	existingID, existingName, ok, err := relay.FindChannelAuth(s.RelayURL, authURL, s.Sec, channel)
 	if err != nil {
 		return "", "", fmt.Errorf("look up channel %q: %w", channel, err)
 	}
