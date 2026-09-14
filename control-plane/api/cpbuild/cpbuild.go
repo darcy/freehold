@@ -574,9 +574,17 @@ func (s *Spec) deployAgentTools() error {
 		}
 	}
 	serveFlags := fmt.Sprintf(
-		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-pubkey %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
-		atState, relayDial, s.RelayPK, s.RelayLxc, s.RelayCompose, s.K3sVmid,
+		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
+		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
 		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
+	// relay-pubkey is the roster trust anchor, learned only after the relay is
+	// up (empty at install, when the coords are baked). Emit it ONLY when
+	// present: a bare `--relay-pubkey` before the next flag makes Go's parser
+	// swallow that next flag as its value and stop, silently dropping
+	// --runner-pubkey/--runner-target ("serve needs --runner-pubkey ...").
+	if s.RelayPK != "" {
+		serveFlags += " --relay-pubkey " + s.RelayPK
+	}
 	if s.RelayAuthURL != "" {
 		serveFlags += " --relay-auth-url " + s.RelayAuthURL
 	} else {
