@@ -225,8 +225,11 @@ func cmdSeed(args []string) {
 		if g == "" {
 			continue
 		}
+		// Best-effort: a world where the identity was never membered (a fresh
+		// build) may have a relay that errors on removing a non-member. Never
+		// abort the seed over cleanup — the roster just keeps a stale member.
 		if err := relay.RemoveUserAuth(*relayURL, authURL, sec, pk, g); err != nil {
-			log.Fatalf("seed revoke %s: %v", g, err)
+			log.Printf("seed revoke %s: %v (continuing)", g, err)
 		}
 	}
 	fmt.Println(pk)
