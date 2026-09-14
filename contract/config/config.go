@@ -356,6 +356,34 @@ func StripCIDR(ip string) string {
 	return ip
 }
 
+// LxcIP returns the bare IP (CIDR stripped) recorded for a guest, or "" when
+// none is recorded yet.
+func LxcIP(g LxcGuest) string {
+	if g.Ip == nil {
+		return ""
+	}
+	return StripCIDR(*g.Ip)
+}
+
+// ResolveTarget returns the bare LAN IP an install/build/teardown step should
+// connect to for a service BEFORE the world's public DNS resolves (or the
+// Caddy edge exists). role is one of "relay", "cp", "proxy". "" = no recorded
+// IP — the caller falls back to the hostname/URL.
+func (c *Config) ResolveTarget(role string) string {
+	switch role {
+	case "relay":
+		return LxcIP(c.Lxc.Relay)
+	case "cp":
+		return LxcIP(c.Lxc.Cp)
+	case "proxy":
+		if c.Proxy.Ip == nil {
+			return ""
+		}
+		return StripCIDR(*c.Proxy.Ip)
+	}
+	return ""
+}
+
 // K3sLive: any HTTP answer from the kube-apiserver on the PROXY static ip
 // (the k3s node = Proxy.Ip; auth-gated 401 counts). Mirrors Rust k3s_live: the
 // recorded ip is CIDR — stripping the prefix keeps the URL from parsing as

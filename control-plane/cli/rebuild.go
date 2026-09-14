@@ -654,8 +654,8 @@ func (e *rebuildEngine) runBuild() error {
 	// when present (box one post-bootstrap / a LAN box); otherwise fall back
 	// to the public CP URL (a remote box, world already up).
 	loginURL := cfg.CPURL
-	if cfg.Lxc.Cp.Ip != nil {
-		loginURL = "http://" + config.StripCIDR(*cfg.Lxc.Cp.Ip) + ":8080"
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		loginURL = "http://" + ip + ":8080"
 	}
 	client, err := oplogin.Login(loginURL, key)
 	if err != nil {
@@ -1049,8 +1049,8 @@ func (e *rebuildEngine) recordPostWorld() error {
 	// cp LXC is dhcp unless pinned) would otherwise leave it pointing at a dead
 	// IP — breaking `world status` and the fresh-box Agents view until manually
 	// corrected. The agent-tools pubkey is durable and unchanged.
-	if cfg.Lxc.Cp.Ip != nil {
-		cfg.AgentToolsURL = "http://" + config.StripCIDR(*cfg.Lxc.Cp.Ip) + ":8089"
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		cfg.AgentToolsURL = "http://" + ip + ":8089"
 	}
 	proxyIP := config.StripCIDR(e.f.proxyIP)
 	cfg.Litellm = config.LitellmSpec{URL: "http://" + proxyIP + ":31400", Host: proxyIP}
@@ -1075,12 +1075,7 @@ func (e *rebuildEngine) recordPostWorld() error {
 	return cfg.Save(e.f.configPath)
 }
 
-func lxcIP(g config.LxcGuest) string {
-	if g.Ip == nil {
-		return ""
-	}
-	return config.StripCIDR(*g.Ip)
-}
+func lxcIP(g config.LxcGuest) string { return config.LxcIP(g) }
 
 // stageProvision runs control-plane provision; returns the fresh ssh public
 // registerWorldFacts pushes the deployer-side world facts onto the CP

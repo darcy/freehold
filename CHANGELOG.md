@@ -25,6 +25,19 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.22] — install wizard + pre-DNS IP fallback
+
+Workstream B (in-place): `freehold install` on an interactive terminal is now a
+bubbletea wizard that collects every answer — including the relay/CP domains
+and the proxy IP, which `runBootstrap` would otherwise re-prompt at runtime —
+up front, then hands the engine the collected `rebuildFlags`. Non-TTY input
+(tests, piped runs) keeps the sequential prompts. Pre-DNS steps now connect to
+the recorded guest IPs (`config.LxcIP` / `config.ResolveTarget`) until the
+public domain resolves, replacing the two inline IP-fallbacks (console login
+URL + agent-tools URL) with the shared helper. The shared provider-picker stays
+in `package cli` (both consumers — the dashboard TUI and the wizard — live in
+the same module) rather than adding bubbletea to the lean `contract` leaf.
+
 ## [0.5.21] — multi-tenant profiles (no implicit default)
 
 The box-side CLI grows real multi-tenancy. Previously there was exactly ONE

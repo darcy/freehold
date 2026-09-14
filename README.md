@@ -267,7 +267,10 @@ The same session flows bootstrap → configure → running as the world converge
 
 The TUI's bring-up flows and the `freehold install` command drive the SAME
 rebuild engine (`control-plane/cli/rebuild.go`) — one pipeline, no
-duplicated logic. Re-runs are safe: an
+duplicated logic. `freehold install` on an interactive terminal collects every
+answer (relay/CP domains + the proxy IP) up front in a bubbletea wizard, then
+hands the engine the collected flags; non-TTY input keeps the sequential
+prompts. Re-runs are safe: an
 existing runner package is reused, the door is re-verified, and a matching LXC
 is reused (a foreign container on the vmid is refused).
 

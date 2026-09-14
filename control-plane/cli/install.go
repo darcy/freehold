@@ -65,6 +65,12 @@ var installCmd = &cobra.Command{
 }
 
 func runInstall(in io.Reader, out io.Writer) error {
+	// Interactive terminal: the bubbletea wizard collects every answer (incl.
+	// relay/CP domains + the proxy IP) and hands the engine the collected flags.
+	// Non-TTY input (tests, piped runs) keeps the sequential prompt path.
+	if f, ok := in.(*os.File); ok && term.IsTerminal(f.Fd()) {
+		return runInstallUI(newRebuildEngine, in, out)
+	}
 	return runInstallWith(in, out, newRebuildEngine)
 }
 
