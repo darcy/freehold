@@ -28,9 +28,9 @@ type Registry struct {
 	// (its channel-owner key, loaded from the console state dir — 0600 durable,
 	// in-process only), and ConsoleStateDir resolves runner names → their
 	// nostr pubkeys. Empty RelayURL/ConsoleSecret = grants stay unwired.
-	RelayURL         string
-	ConsoleSecret    []byte
-	ConsoleStateDir  string
+	RelayURL        string
+	ConsoleSecret   []byte
+	ConsoleStateDir string
 }
 
 // OpenRegistry loads (creating if needed) the registry at path.
@@ -65,7 +65,7 @@ func (r *Registry) save() error {
 func (r *Registry) RegisterAgent(name, pubkey, channel string) (json.RawMessage, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.rows[name] = console.AgentInfo{Name: name, Pubkey: pubkey, CreatedAt: uint64(time.Now().Unix())}
+	r.rows[name] = console.AgentInfo{Name: name, Pubkey: pubkey, CreatedAt: uint64(time.Now().Unix()), Channel: channel}
 	if err := r.save(); err != nil {
 		return nil, err
 	}

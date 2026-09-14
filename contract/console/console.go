@@ -60,6 +60,10 @@ type AgentInfo struct {
 	// prompt verbatim. The console API does not carry it; the local registry row
 	// does. omitempty keeps it out of console-client serializations upstream.
 	Purpose string `json:"purpose,omitempty"`
+	// Channel is the channel NAME the agent was created into (empty = the
+	// default freehold channel), preserved by freehold-agent-tools' local
+	// registry so a rebuild reconciler rejoins the same channel.
+	Channel string `json:"channel,omitempty"`
 }
 
 // ProvisionReq mirrors console-client ProvisionReq.

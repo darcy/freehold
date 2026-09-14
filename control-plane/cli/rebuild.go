@@ -2965,7 +2965,7 @@ func (e *rebuildEngine) reconcileCreatedAgents() error {
 		// re-creating reseats the pod with the same pubkey across a rebuild.
 		// Thread the registry's preserved purpose through so the agent's
 		// system-prompt purpose line survives, not just its identity.
-		text, cerr := callAgentToolsText(mc, "create_agent", map[string]interface{}{"name": a.Name, "purpose": a.Purpose})
+		text, cerr := callAgentToolsText(mc, "create_agent", map[string]interface{}{"name": a.Name, "purpose": a.Purpose, "channel": a.Channel})
 		if cerr != nil {
 			return fmt.Errorf("reconcile created agent %s: %w", a.Name, cerr)
 		}

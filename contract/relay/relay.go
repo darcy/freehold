@@ -57,6 +57,75 @@ func RunnerChannelID(runnerNostrPubkey string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hexs[0:8], hexs[8:12], hexs[12:16], hexs[16:20], hexs[20:32])
 }
 
+// ChannelIDFromName derives a stable dashed-UUID channel id for a
+// freehold-CREATED channel named `name`, so a re-run targets the same channel
+// (the relay's own channels use random ids; this is only for ones we create).
+// Leading '#' and case are ignored.
+func ChannelIDFromName(name string) string {
+	n := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "#"))
+	h := sha256.Sum256([]byte("freehold-channel:" + n))
+	hexs := hex.EncodeToString(h[:16])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hexs[0:8], hexs[8:12], hexs[12:16], hexs[16:20], hexs[20:32])
+}
+
+// GroupMeta is a NIP-29 channel's id + display name (kind 39000 group meta).
+type GroupMeta struct {
+	ID   string
+	Name string
+}
+
+// QueryGroups returns the relay's published channels (kind 39000), newest name
+// per channel id. Read-only; any relay member identity can query.
+func QueryGroups(relayURL string, authSecret []byte) ([]GroupMeta, error) {
+	events, err := QueryEvents(relayURL, authSecret, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.GroupMeta},
+		"limit": 1000,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	newest := map[string]int64{}
+	name := map[string]string{}
+	var order []string
+	for _, ev := range events {
+		tags, _ := parseTags(ev)
+		id := tagValue(tags, "d")
+		if id == "" {
+			continue
+		}
+		if _, seen := name[id]; !seen {
+			order = append(order, id)
+		}
+		ca := intOr(ev["created_at"])
+		if prev, ok := newest[id]; ok && prev >= ca {
+			continue
+		}
+		newest[id] = ca
+		name[id] = tagValue(tags, "name")
+	}
+	out := make([]GroupMeta, 0, len(order))
+	for _, id := range order {
+		out = append(out, GroupMeta{ID: id, Name: name[id]})
+	}
+	return out, nil
+}
+
+// FindChannel resolves a channel by display name (leading '#' ignored,
+// case-insensitive). The first match wins.
+func FindChannel(relayURL string, authSecret []byte, name string) (id, displayName string, ok bool, err error) {
+	want := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "#"))
+	groups, err := QueryGroups(relayURL, authSecret)
+	if err != nil {
+		return "", "", false, err
+	}
+	for _, g := range groups {
+		if strings.ToLower(strings.TrimPrefix(g.Name, "#")) == want {
+			return g.ID, g.Name, true, nil
+		}
+	}
+	return "", "", false, nil
+}
+
 // ParseProfileContent parses a stored runner-metadata content string.
 func ParseProfileContent(content string) (*RunnerProfile, error) {
 	var p RunnerProfile

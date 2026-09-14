@@ -1377,10 +1377,43 @@ func BuildWorldStatus(spec *Spec, reg *agenttools.Registry, consoleStateDir stri
 	}
 }
 
+// ensureAgentChannel resolves the named channel (kind 39000 group meta, by
+// display name) or creates it — owned by the creating agent — when absent,
+// returning its id + display name. An empty name is the default freehold
+// channel, which is ENSURED because the first agent to be created may be the
+// one that brings it into existence.
+func (s *Spec) ensureAgentChannel(nSec []byte, channel string) (id, displayName string, err error) {
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	if strings.TrimSpace(channel) == "" {
+		if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+			return "", "", fmt.Errorf("ensure #freehold channel: %w", err)
+		}
+		return relayFreeholdChannel, "#freehold", nil
+	}
+	name := "#" + strings.TrimPrefix(strings.TrimSpace(channel), "#")
+	// A relay read error must NOT be mistaken for "absent" (that would create a
+	// duplicate of an existing channel) — fail the create instead.
+	existingID, existingName, ok, err := relay.FindChannel(s.RelayURL, s.Sec, channel)
+	if err != nil {
+		return "", "", fmt.Errorf("look up channel %q: %w", channel, err)
+	}
+	if ok {
+		return existingID, existingName, nil
+	}
+	id = relay.ChannelIDFromName(channel)
+	if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, id, name); err != nil {
+		return "", "", fmt.Errorf("create channel %s: %w", name, err)
+	}
+	return id, name, nil
+}
+
 // (which registers the registry row). Branches to the CPA manifest/prompt when
 // the name is the CPA's, so stageCpa's dogfooded create_agent produces the CPA.
 func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
-	return func(name, purpose string) (string, error) {
+	return func(name, purpose, channel string) (string, error) {
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
 		}
@@ -1426,7 +1459,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			return "", fmt.Errorf("add relay member %s: %w", pub, err)
 		}
 
-		// Profile + #freehold channel + join, signed by the agent (NIP-98 against the
+		// Profile + the target channel, signed by the agent (NIP-98 against the
 		// CANONICAL relay URL; the dial may be the LAN form pre-Caddy).
 		nSec, err := hex.DecodeString(id.NostrSecretHex)
 		if err != nil {
@@ -1439,11 +1472,20 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if err := relay.PublishProfileAuth(spec.RelayURL, authURL, nSec, name, "freehold agent"); err != nil {
 			return "", fmt.Errorf("publish %s profile: %w", name, err)
 		}
-		if err := delegate.EnsureChannelAuth(spec.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
-			return "", fmt.Errorf("ensure #freehold channel: %w", err)
+		// Resolve the target channel by name, creating it (owned by this agent)
+		// when absent. Empty channel = the default freehold channel.
+		channelID, channelName, err := spec.ensureAgentChannel(nSec, channel)
+		if err != nil {
+			return "", err
 		}
-		if err := relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, relayFreeholdChannel); err != nil {
-			return "", fmt.Errorf("join #freehold channel: %w", err)
+		if err := relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID); err != nil {
+			return "", fmt.Errorf("join %s: %w", channelName, err)
+		}
+		// Add the operator (the requester) to the channel. Best-effort: the agent
+		// owns a channel it just created, but a pre-existing channel may not grant
+		// it rights (the operator is already a member of their own channels).
+		if spec.OwnerPub != "" {
+			_ = relay.PutUserAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
 		}
 
 		if err := spec.run(agent.AgentIdentityScript(spec.K3sVmid, id.NostrSecretHex, spec.OwnerPub, name), 120); err != nil {

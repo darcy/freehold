@@ -72,6 +72,27 @@ func TestRunnerChannelIDDeterministic(t *testing.T) {
 	}
 }
 
+func TestChannelIDFromName(t *testing.T) {
+	id := ChannelIDFromName("ops")
+	if len(id) != 36 {
+		t.Fatalf("channel id should be a 36-char UUID, got %q (%d)", id, len(id))
+	}
+	// Deterministic, and '#'/case are ignored (so a re-run targets the same id).
+	if ChannelIDFromName("ops") != id || ChannelIDFromName("#OPS") != id || ChannelIDFromName(" ops ") != id {
+		t.Fatal("channel id must be deterministic and normalize '#'/case/space")
+	}
+	if ChannelIDFromName("ops") == ChannelIDFromName("other") {
+		t.Fatal("distinct names must yield distinct channel ids")
+	}
+	if ChannelIDFromName("freehold") == relayFreeholdChannelForTest() {
+		t.Fatal("a derived id must not collide with the fixed freehold channel")
+	}
+}
+
+// relayFreeholdChannelForTest mirrors cpbuild's fixed freehold channel id (the
+// derived ids must never collide with it).
+func relayFreeholdChannelForTest() string { return "00000000-0000-4000-8000-00000000f0ef" }
+
 func TestMemoryDTag(t *testing.T) {
 	d := MemoryDTag(strRepeat("a", 64), "key")
 	if len(d) != 64 {
