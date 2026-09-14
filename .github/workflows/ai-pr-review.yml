@@ -1,4 +1,4 @@
-name: DeepSeek AI PR Review
+name: Bot Review
 
 on:
   pull_request:
@@ -10,10 +10,9 @@ permissions:
   checks: read
 
 jobs:
-  deepseek-review:
+  bot-review:
     runs-on: ubuntu-latest
-    if: ${{ false }}
-    # if: github.event.pull_request.user.login != 'dependabot[bot]'
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,22 +31,23 @@ jobs:
       - name: Run AI review
         working-directory: .github/scripts/ai-review
         env:
-          # Comments author as this token's account. GITHUB_TOKEN posts as
-          # 'github-actions[bot]'; swap to secrets.DEEPSEEK_BOT_TOKEN (a PAT from
-          # a GitHub account/bot named 'DeepSeek', repo write + checks read) when
-          # one exists so reviews author as that name.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Token for comments + review-thread resolution. GITHUB_TOKEN is
+          # forbidden from resolveReviewThread ("Resource not accessible by
+          # integration"); use a PAT (classic `repo` scope, or fine-grained
+          # "Pull requests: read/write" + "Issues: read/write") from a bot
+          # account named 'Bot Review'. Reviews also author as that account.
+          GITHUB_TOKEN: ${{ secrets.AI_REVIEW_BOT_TOKEN }}
 
           # ---- provider config: this is the only provider-specific part ----
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
           LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
-          LLM_MODEL: "accounts/fireworks/models/deepseek-v4-flash-0731"
+          LLM_MODEL: "accounts/fireworks/models/deepseek-v4p1-flash"
           # --------------------------------------------------------------------
 
           PROMPT_FILE: "review-prompt.md"
           CONTEXT_FILES: "AGENTS.md,README.md,ARCHITECTURE.md"
-          EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,*.md,**/*.md,**/dist/**,**/vendor/**"
-          MAX_DIFF_CHARS: "2560000"
-          MAX_CONTEXT_FILE_CHARS: "80000"
+          EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,**/dist/**,**/vendor/**"
+          MAX_DIFF_CHARS: "7500000"
+          MAX_CONTEXT_FILE_CHARS: "240000"
           FAIL_ON_OVERSIZED_DIFF: "true"
         run: node review.mjs
