@@ -25,6 +25,64 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.23] — install/build runtime fixes from live verification
+
+Bringing a fresh world up end-to-end through the install wizard surfaced a
+chain of runtime bugs the hermetic gate couldn't see; all are fixed here.
+
+- **Co-located runner loopback**: the console runs INSIDE the CP LXC guest but
+  was shipped the box-side host runner address (`cfg.Runner.Addr`, e.g.
+  `127.0.0.1:8788`), a different netns, so `/api/world-build` died
+  "connection refused". The world coords + the bootstrap-cp `adopt` now use
+  `config.CoLocatedRunnerMCPAddr` (`127.0.0.1:8787`), the runner's own guest
+  loopback. Box-side `build`/`bootstrap` honor the profile's recorded
+  `Runner.Addr` unless `--addr` is explicit, so a multi-world box routes to
+  this world's runner, not a foreign one.
+- **install applies the flag-layer defaults**: the install path builds its
+  flags from the wizard / prompts directly, never through `setupBuild`, so it
+  never got the `registerBuildFlags` defaults. Empty `bridge` booted the relay
+  LXC with a malformed `net0` ("invalid format - missing key"); empty `storage`
+  failed the relay rootfs ("unable to parse volume ID ':16'"); empty
+  `agent-name` shipped a nameless CPA. `applyInstallDefaults` now fills
+  `bridge=vmbr0`, `storage=local-lvm`, and `agent-name=freehold` on both the
+  wizard and sequential install paths.
+- **exec profile on the ops + storage commands**: `readiness`, `storage
+  resolve/ensure/destroy/destroy-pool/info`, `provision`, `deploy-relay`, and
+  `deploy-cp` now resolve the active tenant profile (like `exec`), so a
+  multi-world box signs for the right runner audience instead of the legacy
+  default.
+- **initial-config ordering**: bootstrap writes the config BEFORE the
+  grant/serve/verify exec stages (they resolve the runner from it) and merges
+  the recorded relay/CP hosts when this run supplied none, so an early write
+  never clobbers a prior world's domains with a bare scheme.
+- **`--relay-pubkey` flag-shift**: the world-build's agent-tools serve emitted
+  a bare `--relay-pubkey` (empty — the relay's signing key is learned only
+  after the relay boots), which makes Go's flag parser swallow the NEXT flag as
+  its value and stop, silently dropping `--runner-pubkey`/`--runner-target`
+  ("serve needs --runner-pubkey ..."). Emit it only when non-empty.
+- **co-located runner secrets survive a re-deploy**: `deploy-cp` re-ships the
+  box runner package's `secrets.json` on every install, wiping the litellm
+  secrets the build added to the CP's co-located runner (and the box can't
+  re-derive them — the CP is the durable owner). The re-ship now MERGES: the
+  box wins on its own target credential, while the CP's extra names (litellm /
+  postgres-pw / provider-key) and the console's grants survive. `world_build`
+  also re-provisions the co-located runner from the CP's own durable litellm
+  store whenever it finds them missing (re-seal → restart → wait for the port),
+  so an older package heals on the next build.
+
+## [0.5.22] — install wizard + pre-DNS IP fallback
+
+Workstream B (in-place): `freehold install` on an interactive terminal is now a
+bubbletea wizard that collects every answer — including the relay/CP domains
+and the proxy IP, which `runBootstrap` would otherwise re-prompt at runtime —
+up front, then hands the engine the collected `rebuildFlags`. Non-TTY input
+(tests, piped runs) keeps the sequential prompts. Pre-DNS steps now connect to
+the recorded guest IPs (`config.LxcIP` / `config.ResolveTarget`) until the
+public domain resolves, replacing the two inline IP-fallbacks (console login
+URL + agent-tools URL) with the shared helper. The shared provider-picker stays
+in `package cli` (both consumers — the dashboard TUI and the wizard — live in
+the same module) rather than adding bubbletea to the lean `contract` leaf.
+
 ## [0.5.21] — multi-tenant profiles (no implicit default)
 
 The box-side CLI grows real multi-tenancy. Previously there was exactly ONE

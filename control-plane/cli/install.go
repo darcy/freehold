@@ -65,6 +65,12 @@ var installCmd = &cobra.Command{
 }
 
 func runInstall(in io.Reader, out io.Writer) error {
+	// Interactive terminal: the bubbletea wizard collects every answer (incl.
+	// relay/CP domains + the proxy IP) and hands the engine the collected flags.
+	// Non-TTY input (tests, piped runs) keeps the sequential prompt path.
+	if f, ok := in.(*os.File); ok && term.IsTerminal(f.Fd()) {
+		return runInstallUI(newRebuildEngine, in, out)
+	}
 	return runInstallWith(in, out, newRebuildEngine)
 }
 
@@ -78,6 +84,7 @@ func runInstallWith(in io.Reader, out io.Writer, newEngine func(rebuildFlags) (*
 	if err != nil {
 		return err
 	}
+	applyInstallDefaults(&f)
 
 	consent := "no"
 	if f.confirmStorage {
@@ -178,6 +185,7 @@ func collectAnswers(ui *installerUI) (rebuildFlags, error) {
 		rootfsGB:           rootfs,
 		memoryMB:           memory,
 		relayGw:            "192.168.30.1",
+		bridge:             "vmbr0",
 		litellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
 		configPath:         defaultConfigPath(),
 		confirmStorage:     consent,

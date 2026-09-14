@@ -176,6 +176,9 @@ var readinessCmd = &cobra.Command{
 	Use:   "readiness",
 	Short: "Readiness table from a running runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		if target == "" {

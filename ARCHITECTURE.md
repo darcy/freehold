@@ -246,17 +246,22 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
      `freehold-agent-tools registry import-console` subcommand.
 
 *   **`control-plane/cli/rebuild.go` is the slim CP-driven build.**
-    `collectAnswers` → `rebuildFlags` → `newRebuildEngine` → `runSlim`: door →
-    runner → durable plane → seed the litellm secrets into the box runner
-     (bootstrap-cp ships it as the co-located runner) → boot the CP LXC →
-     `bootstrap` (box one) = bootstrap-cp only (the console + co-located runner +
-     DNS handoff) → **`build`** (any box, login-gated) triggers the console's
-     `/api/world-build` — the CP brings up relay/agent-tools/k3s/storage/DNS/
-     litellm/Caddy/cert through its co-located runner. DNS creds are sealed to
-     the **console** identity (the executor's cert path), litellm secrets
-     sealed into the runner →
+    `collectAnswers`/the install wizard → `rebuildFlags` → `newRebuildEngine` →
+    `runBootstrap`/`runBuild`:
+    door → runner → durable plane → boot the CP LXC → **`bootstrap`** (box one)
+    = the CP only (console + co-located runner) — no secrets are collected.
+    **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS
+    creds + litellm; sealed to the **console** identity in `world-secrets/`,
+    asked only when missing), points the public A records (`manageDomainDNS`),
+    then triggers the console's `/api/world-build` — the CP brings up relay/
+    agent-tools/k3s/storage/litellm/Caddy/cert through its co-located runner,
+    re-seeding litellm into the runner from the CP store →
     record the post-world coords → CPA + reconcile. `install` hands the same
-    engine the TUI's answers. Teardown keeps the config (compute-only) unless
+    engine the TUI's answers; on an interactive terminal it collects every
+    answer (incl. relay/CP domains + the proxy IP) up front in a bubbletea
+    wizard so `runBootstrap` never re-prompts them. Pre-DNS steps connect to the
+    recorded guest IPs (`config.ResolveTarget`) until the public domain
+    resolves. Teardown keeps the config (compute-only) unless
     `--data` erases the tenant datasets.
 
 *   **`control-plane/cli/teardown/` is the box's teardown-cp** (its own door);

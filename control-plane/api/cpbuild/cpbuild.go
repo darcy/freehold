@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,9 +26,12 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/delegate"
 	"freehold/contract/relay"
+	"freehold/contract/state"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/cli/flows"
+	"freehold/control-plane/secret-management"
 	"freehold/platform/agents"
 	"freehold/platform/migrations"
 	"freehold/platform/provisioning/bootstrap"
@@ -574,9 +578,17 @@ func (s *Spec) deployAgentTools() error {
 		}
 	}
 	serveFlags := fmt.Sprintf(
-		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-pubkey %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
-		atState, relayDial, s.RelayPK, s.RelayLxc, s.RelayCompose, s.K3sVmid,
+		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
+		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
 		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
+	// relay-pubkey is the roster trust anchor, learned only after the relay is
+	// up (empty at install, when the coords are baked). Emit it ONLY when
+	// present: a bare `--relay-pubkey` before the next flag makes Go's parser
+	// swallow that next flag as its value and stop, silently dropping
+	// --runner-pubkey/--runner-target ("serve needs --runner-pubkey ...").
+	if s.RelayPK != "" {
+		serveFlags += " --relay-pubkey " + s.RelayPK
+	}
 	if s.RelayAuthURL != "" {
 		serveFlags += " --relay-auth-url " + s.RelayAuthURL
 	} else {
@@ -734,6 +746,92 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	}
 	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
 	return cert.LoadCreds(path, open, secret)
+}
+
+// runnerLitellmSecrets maps the CP store's litellm env keys to the secret NAMES
+// the world-build requests from the co-located runner.
+var runnerLitellmSecrets = []struct{ name, env string }{
+	{"litellm", "master"},
+	{"postgres-pw", "pg"},
+	{"provider-key", "provider"},
+}
+
+// reseedCoLocatedRunner re-provisions the CP's co-located runner from the CP's
+// own durable litellm store. deploy-cp re-ships the box runner package on every
+// install, so a package created before the litellm secrets (or wiped by a prior
+// deploy) lacks them; the box cannot re-derive them (the CP is the durable
+// owner) and the runner reads its package only at boot. Re-seal from the store
+// and restart. A no-op when the runner already holds every name, or when the
+// store has no litellm secret yet (the first build seeds store + runner
+// together, box-side).
+func (s *Spec) reseedCoLocatedRunner() error {
+	store, err := state.Open(s.StateDir)
+	if err != nil {
+		return fmt.Errorf("open CP state: %w", err)
+	}
+	rec, ok := store.GetRunner(s.RunnerTarget)
+	if !ok {
+		return fmt.Errorf("co-located runner %q is not adopted", s.RunnerTarget)
+	}
+	pkg, err := wire.Load(rec.PackageDir)
+	if err != nil {
+		return fmt.Errorf("load runner package: %w", err)
+	}
+	need := false
+	for _, m := range runnerLitellmSecrets {
+		if _, ok := pkg.Secrets[m.name]; !ok {
+			need = true
+		}
+	}
+	if !need {
+		return nil
+	}
+	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	if !cert.CredExists(path) {
+		return nil // first build: the box seeds the store + runner together
+	}
+	secret, err := s.consoleEncSecret()
+	if err != nil {
+		return err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return fmt.Errorf("open CP litellm store: %w", err)
+	}
+	for _, m := range runnerLitellmSecrets {
+		v := env[m.env]
+		if v == "" {
+			return fmt.Errorf("CP litellm store is missing the %q value", m.env)
+		}
+		if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, []byte(v)); err != nil {
+			return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
+		}
+	}
+	// The runner loads its package at boot (in-memory keyring), so restart it.
+	// systemctl is LOCAL to the console's own CP guest — the runner cannot
+	// restart itself through the exec channel it is serving.
+	if out, err := exec.Command("systemctl", "restart", "freehold-runner").CombinedOutput(); err != nil {
+		return fmt.Errorf("restart co-located runner: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	// `systemctl restart` returns before the runner has re-bound its port; wait
+	// so the next exec doesn't race a refused connection.
+	addr := s.RunnerAddr
+	if addr == "" {
+		addr = config.CoLocatedRunnerMCPAddr
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		c, derr := net.DialTimeout("tcp", addr, 2*time.Second)
+		if derr == nil {
+			_ = c.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("co-located runner did not re-listen on %s after restart: %v", addr, derr)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // consoleEncSecret returns the CP's encryption secret — the CONSOLE identity
@@ -1042,6 +1140,12 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// them). Consumed by DNS/caddy/litellm/cert below.
 		spec.resolveGuestVmids()
 		spec.refreshGuestIPs()
+		// 3.5a. Re-provision the CP's co-located runner from the CP's own
+		// durable litellm store if a re-deploy wiped its package — the services
+		// phase below requests these BY NAME. No-op when it already holds them.
+		if err := spec.reseedCoLocatedRunner(); err != nil {
+			return "", fmt.Errorf("world-build reseed co-located runner: %w", err)
+		}
 		// 3.5b. Terraform PHASE 2 — the SERVICE definitions (postgres.tf /
 		// litellm.tf / caddy.tf) as kubernetes-provider resources. The kubeconfig
 		// is staged from the now-up k3s (server rewritten to the node IP) and the

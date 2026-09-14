@@ -23,10 +23,10 @@ import (
 // single static proxy IP (Proxy.Ip — the Caddy edge on the k3s node), which
 // both hosts resolve to. Relay/CP LXCs are DHCP, behind the proxy.
 type Config struct {
-	RelayURL         string      `toml:"relay_url"`
-	RelayWsURL       string      `toml:"relay_ws_url,omitempty"`
-	RelayPubkey      *string     `toml:"relay_pubkey,omitempty"`
-	CPURL            string      `toml:"cp_url"`
+	RelayURL    string  `toml:"relay_url"`
+	RelayWsURL  string  `toml:"relay_ws_url,omitempty"`
+	RelayPubkey *string `toml:"relay_pubkey,omitempty"`
+	CPURL       string  `toml:"cp_url"`
 	// CpPubkey is the control plane's own Nostr pubkey — the box's trust anchor
 	// for a CP it has never met. Recorded by `freehold login` (adopted from the
 	// CP's own `/api/world` report — the operator never supplies it) and by build
@@ -116,6 +116,14 @@ type PlaneMount struct {
 	Source    string `toml:"source"`
 	GuestPath string `toml:"guest_path"`
 }
+
+// CoLocatedRunnerMCPAddr is the loopback MCP address the CP deploy (bootstrap-cp)
+// boots its co-located runner on INSIDE the CP LXC guest, and the address the
+// console's world-build must dial from that same guest netns. The deploy adopts
+// the runner with --mcp-addr 127.0.0.1:8787 and the runner (no explicit serve
+// --addr) defaults to the same loopback; box-side runners ride a different host
+// loopback, so the console must target THIS guest address, not cfg.Runner.Addr.
+const CoLocatedRunnerMCPAddr = "127.0.0.1:8787"
 
 // RunnerRef identifies the provisioning runner.
 type RunnerRef struct {
@@ -354,6 +362,34 @@ func StripCIDR(ip string) string {
 		return ip[:i]
 	}
 	return ip
+}
+
+// LxcIP returns the bare IP (CIDR stripped) recorded for a guest, or "" when
+// none is recorded yet.
+func LxcIP(g LxcGuest) string {
+	if g.Ip == nil {
+		return ""
+	}
+	return StripCIDR(*g.Ip)
+}
+
+// ResolveTarget returns the bare LAN IP an install/build/teardown step should
+// connect to for a service BEFORE the world's public DNS resolves (or the
+// Caddy edge exists). role is one of "relay", "cp", "proxy". "" = no recorded
+// IP — the caller falls back to the hostname/URL.
+func (c *Config) ResolveTarget(role string) string {
+	switch role {
+	case "relay":
+		return LxcIP(c.Lxc.Relay)
+	case "cp":
+		return LxcIP(c.Lxc.Cp)
+	case "proxy":
+		if c.Proxy.Ip == nil {
+			return ""
+		}
+		return StripCIDR(*c.Proxy.Ip)
+	}
+	return ""
 }
 
 // K3sLive: any HTTP answer from the kube-apiserver on the PROXY static ip

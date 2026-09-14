@@ -407,6 +407,33 @@ func (c *Client) PortalURL() (string, error) {
 	return c.base + "/api/auth/portal/" + v.Token, nil
 }
 
+// SecretNames returns the names of CP-owned secrets present (dns-relay, dns-cp,
+// litellm) — the idempotent inventory `build` uses to ask the operator only for
+// the missing ones ("ask if not there, don't ask if there").
+func (c *Client) SecretNames() ([]string, error) {
+	raw, err := c.request(http.MethodGet, "/api/secrets", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Secrets []string `json:"secrets"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out.Secrets, nil
+}
+
+// PutSecret uploads a sealed secret record (sealed to the console identity) so
+// the CP becomes its durable owner. name must be in {dns-relay, dns-cp,
+// litellm}; file is the cert.SaveCreds-style record ({provider,sealed,aad}).
+func (c *Client) PutSecret(name string, file json.RawMessage) error {
+	_, err := c.request(http.MethodPost, "/api/secrets", map[string]interface{}{
+		"name": name, "file": file,
+	})
+	return err
+}
+
 // WorldBuild triggers the CP-owned world bring-up (/api/world-build) and
 // returns the stage report. The console drives the shared cpbuild engine
 // through its co-located runner — the drive-through-CP build a thin box uses.

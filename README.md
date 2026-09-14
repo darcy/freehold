@@ -180,7 +180,7 @@ Then operate the world yourself (the justfile does NOT drive the world — it
 only builds + installs):
 
 ```sh
-freehold bootstrap   # box one: create the CP only (door -> cp LXC + console + co-located runner + DNS handoff), then STOP
+freehold bootstrap   # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # tear it down (compute-only: keeps coords + /srv/data)
 freehold            # the TUI dashboard
@@ -267,7 +267,10 @@ The same session flows bootstrap → configure → running as the world converge
 
 The TUI's bring-up flows and the `freehold install` command drive the SAME
 rebuild engine (`control-plane/cli/rebuild.go`) — one pipeline, no
-duplicated logic. Re-runs are safe: an
+duplicated logic. `freehold install` on an interactive terminal collects every
+answer (relay/CP domains + the proxy IP) up front in a bubbletea wizard, then
+hands the engine the collected flags; non-TTY input keeps the sequential
+prompts. Re-runs are safe: an
 existing runner package is reused, the door is re-verified, and a matching LXC
 is reused (a foreign container on the vmid is refused).
 
@@ -492,9 +495,9 @@ sequenceDiagram
 
     OP->>PVE: bootstrap (box one) · build (ANY box): signed MCP via the runner
     PVE->>C: create + start + verify + docker (cp LXC)
-    OP->>C: bootstrap deploy-cp + console + co-located runner · hand the DNS creds (console identity)
-    OP->>CP: build → trigger /api/world-build (console = the CP build executor)
-    CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · DNS · litellm · Caddy · cert
+    OP->>C: bootstrap deploy-cp + console + co-located runner
+    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records · trigger /api/world-build (console = the CP build executor)
+    CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · litellm · Caddy · cert
     CP-->>OP: world_build report (each stage) → Freehold is up
     OP->>C: console-login — own nsec (NIP-98) / w in the TUI
     C-->>OP: live world: relay + console + CPA wired

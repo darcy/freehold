@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -109,6 +110,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.agentsRegister(w, r)
 	case strings.HasPrefix(path, "/api/agents/") && method == http.MethodDelete:
 		s.agentsRemove(w, r, strings.TrimPrefix(path, "/api/agents/"))
+	case path == "/api/secrets" && method == http.MethodGet:
+		s.secretsList(w, r)
+	case path == "/api/secrets" && method == http.MethodPost:
+		s.secretsWrite(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "no such route: "+method+" "+path)
 	}
@@ -358,6 +363,74 @@ func (s *Server) worldInventory() (map[string]interface{}, error) {
 		return nil, err
 	}
 	return agenttools.WorldStatus(reg, facts, s.StateDir)
+}
+
+// stdSecrets are the CP-owned secret names the build ensures idempotently.
+var stdSecrets = []string{"dns-relay", "dns-cp", "litellm"}
+
+// secretsList reports which CP-owned secrets are present on disk (the idempotent
+// inventory `build` uses to ask the operator only for what's missing).
+func (s *Server) secretsList(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSessionPubkey(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	dir := filepath.Join(s.stateDir(), "world-secrets")
+	var present []string
+	for _, name := range stdSecrets {
+		if _, err := os.Stat(filepath.Join(dir, name+".json")); err == nil {
+			present = append(present, name)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"secrets": present})
+}
+
+// secretsWrite stores a sealed secret record (sealed to the console identity by
+// the operator box) so the CP is its durable owner. Only allowlisted names are
+// writable; the blob is written verbatim (never opened here — the cert /
+// litellm steps open it in memory at build).
+func (s *Server) secretsWrite(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSessionPubkey(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	var req struct {
+		Name string          `json:"name"`
+		File json.RawMessage `json:"file"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad secret body: "+err.Error())
+		return
+	}
+	allowed := false
+	for _, n := range stdSecrets {
+		if req.Name == n {
+			allowed = true
+			break
+		}
+	}
+	if !allowed || req.Name == "" || len(req.File) == 0 {
+		writeErr(w, http.StatusBadRequest, "refusing secret name "+req.Name)
+		return
+	}
+	dir := filepath.Join(s.stateDir(), "world-secrets")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		writeErr(w, http.StatusInternalServerError, "secret dir: "+err.Error())
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, req.Name+".json"), req.File, 0o600); err != nil {
+		writeErr(w, http.StatusInternalServerError, "write secret: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "name": req.Name})
 }
 
 func wsOf(url string) string {
