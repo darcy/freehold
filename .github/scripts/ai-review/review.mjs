@@ -311,7 +311,7 @@ const PROGRESS_ITEMS = [
 // and get checked as the review progresses (like claude's parent).
 function progressBody(doneCount, extra) {
   const checklist = PROGRESS_ITEMS.map((p, i) => `${i < doneCount ? '- [x]' : '- [ ]'} ${p}`);
-  const parts = [TRACKING_MARKER, '### DeepSeek AI Review', ...checklist];
+  const parts = [TRACKING_MARKER, '### Bot Review', ...checklist];
   if (extra) parts.push(extra);
   return parts.join('\n');
 }
@@ -335,7 +335,7 @@ async function main() {
 
     const body = [
       TRACKING_MARKER,
-      `### DeepSeek AI Review — skipped`,
+      `### Bot Review — skipped`,
       `**Reason:** ${isOversizedFile ? 'oversized file(s)' : 'diff too large'} ` +
         `(~${diffResult.totalChars.toLocaleString()} chars across ${diffResult.fileCount} file(s), limit ${MAX_DIFF_CHARS.toLocaleString()} chars).`,
       `${isOversizedFile ? 'Offending file(s)' : 'Largest files'}:\n${diffResult.offenders.map(f => `- ${f}`).join('\n')}`,
@@ -358,11 +358,8 @@ async function main() {
   // Read the previous round's notes BEFORE creating a NEW parent comment for
   // this commit, then create it with all checkboxes unchecked (the review shows
   // progress as boxes get checked on that comment while the check is running).
-  const [ciStatus, previousRound] = await Promise.all([
-    getCiStatus(headSha),
-    getPreviousRoundNotes(),
-  ]);
-  await createParentComment(progressBody(0, `**CI:** ${ciStatus}`));
+  const previousRound = await getPreviousRoundNotes();
+  await createParentComment(progressBody(0));
 
   const template = readFileSync(PROMPT_FILE, 'utf8');
   // Use function replacements: String.replace interprets $&, $', $$ etc. in the
@@ -428,7 +425,7 @@ async function main() {
   const resolvedCount = await resolveFixedThreads(fixedComments);
 
   // Progress: context/read/CI/review done.
-  await updateParentComment(progressBody(4, `**CI:** ${ciStatus}`));
+  await updateParentComment(progressBody(4));
 
   // Post each NEW finding as its own review comment (thread) so every finding
   // shows up as a separate inline comment and a single bad/hallucinated line
@@ -450,7 +447,7 @@ async function main() {
   }
 
   // Progress: inline comments posted.
-  await updateParentComment(progressBody(5, `**CI:** ${ciStatus}`));
+  await updateParentComment(progressBody(5));
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
   const loc = (c) => `\`${c.path}${typeof c.line === 'number' ? `:${c.line}` : ''}\``;
@@ -463,8 +460,7 @@ async function main() {
     }),
   ];
   const summaryText = [
-    `### DeepSeek AI Review — round update`,
-    `**CI:** ${ciStatus}`,
+    `### Bot Review — round update`,
     result.summary || '',
     result.readme_note ? `**README:** ${result.readme_note}` : '',
     result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
@@ -479,7 +475,7 @@ async function main() {
   const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
   const finalBody = [
     TRACKING_MARKER,
-    `**DeepSeek finished @${pr.user.login}'s task in ${elapsed}s** — [View job](${runUrl})`,
+    `**Bot Review finished @${pr.user.login}'s task in ${elapsed}s** — [View job](${runUrl})`,
     `---`,
     `### Review complete`,
     ...PROGRESS_ITEMS.map(p => `- [x] ${p}`),

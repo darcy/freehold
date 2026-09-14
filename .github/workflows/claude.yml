@@ -4,8 +4,8 @@ on:
 
 jobs:
   review:
-    # Running alongside the DeepSeek bot for the comparison window.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    # Disabled — Bot Review (ai-pr-review.yml) is the reviewer.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
