@@ -29,6 +29,9 @@ var deployRelayCmd = &cobra.Command{
 	Use:   "deploy-relay",
 	Short: "C2/B: deploy the Buzz relay onto the target through a provisioning runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		name, _ := cmd.Flags().GetString("name")
@@ -94,6 +97,9 @@ var deployCpCmd = &cobra.Command{
 	Use:   "deploy-cp",
 	Short: "C1: deploy the control plane onto the target box (OPERATE mode)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		stateDir, _ := cmd.Flags().GetString("state-dir")
@@ -201,6 +207,9 @@ var provisionCmd = &cobra.Command{
 	Use:   "provision",
 	Short: "C2/A2: bootstrap-provision a target through a provisioning runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		kind, _ := cmd.Flags().GetString("kind")
 		target, _ := cmd.Flags().GetString("target")
@@ -341,6 +350,12 @@ var storageResolveCmd = &cobra.Command{
 	Use:   "resolve",
 	Short: "Resolve the durable backend (ZFS → LVM-thin → bail for the Proxmox branch); with consent, create the backend",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Tenant context, like exec: resolve the ACTIVE profile so the runner
+		// pubkey resolves from the profile's state dir (not the legacy default),
+		// else a multi-world box signs for the wrong runner audience.
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		device, _ := cmd.Flags().GetString("device")
@@ -441,6 +456,9 @@ var storageEnsureCmd = &cobra.Command{
 	Use:   "ensure",
 	Short: "Ensure a tenant's dataset/volume exists (idempotent) + is guest-writable",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		tenant, _ := cmd.Flags().GetString("tenant")
@@ -505,6 +523,9 @@ var storageDestroyCmd = &cobra.Command{
 	Use:   "destroy",
 	Short: "Destroy a tenant's dataset subtree (data+compute teardown half)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		tenant, _ := cmd.Flags().GetString("tenant")
@@ -549,6 +570,9 @@ var storageDestroyPoolCmd = &cobra.Command{
 	Use:   "destroy-pool",
 	Short: "Remove a freehold-CREATED thin pool from its VG (full teardown --data half)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		pool, _ := cmd.Flags().GetString("pool")
@@ -575,6 +599,9 @@ var storageInfoCmd = &cobra.Command{
 	Use:   "info",
 	Short: "Report the live durable-plane snapshot: host capacity + per-mount size/used + guest bind-mount liveness (read-only, DATA-tab source)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		pool, _ := cmd.Flags().GetString("pool")

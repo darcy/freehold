@@ -184,6 +184,7 @@ func collectAnswers(ui *installerUI) (rebuildFlags, error) {
 		rootfsGB:           rootfs,
 		memoryMB:           memory,
 		relayGw:            "192.168.30.1",
+		bridge:             "vmbr0",
 		litellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
 		configPath:         defaultConfigPath(),
 		confirmStorage:     consent,

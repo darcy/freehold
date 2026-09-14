@@ -25,6 +25,33 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.5.23] — install/build runtime fixes from live verification
+
+Bringing a fresh world up end-to-end through the install wizard surfaced a
+chain of runtime bugs the hermetic gate couldn't see; all are fixed here.
+
+- **Co-located runner loopback**: the console runs INSIDE the CP LXC guest but
+  was shipped the box-side host runner address (`cfg.Runner.Addr`, e.g.
+  `127.0.0.1:8788`), a different netns, so `/api/world-build` died
+  "connection refused". The world coords + the bootstrap-cp `adopt` now use
+  `config.CoLocatedRunnerMCPAddr` (`127.0.0.1:8787`), the runner's own guest
+  loopback. Box-side `build`/`bootstrap` honor the profile's recorded
+  `Runner.Addr` unless `--addr` is explicit, so a multi-world box routes to
+  this world's runner, not a foreign one.
+- **`bridge=vmbr0` in the world coords**: the install wizard never collected
+  the PVE bridge, so the shipped coords booted the relay LXC with an empty
+  `net0` bridge and `pct create` failed "invalid format - missing key". Both
+  install paths now default `bridge` to `vmbr0` (matching `--bridge`).
+- **exec profile on the ops + storage commands**: `readiness`, `storage
+  resolve/ensure/destroy/destroy-pool/info`, `provision`, `deploy-relay`, and
+  `deploy-cp` now resolve the active tenant profile (like `exec`), so a
+  multi-world box signs for the right runner audience instead of the legacy
+  default.
+- **initial-config ordering**: bootstrap writes the config BEFORE the
+  grant/serve/verify exec stages (they resolve the runner from it) and merges
+  the recorded relay/CP hosts when this run supplied none, so an early write
+  never clobbers a prior world's domains with a bare scheme.
+
 ## [0.5.22] — install wizard + pre-DNS IP fallback
 
 Workstream B (in-place): `freehold install` on an interactive terminal is now a

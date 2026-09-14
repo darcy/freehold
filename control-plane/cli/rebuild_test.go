@@ -435,6 +435,33 @@ func TestFromAnswersRelayWsURLInternal(t *testing.T) {
 		t.Errorf("CPURL = %q, want the supplied cp host", cfg.CPURL)
 	}
 }
+
+// TestFromAnswersEmptyDomainIsBlankAndPreservesPrev: the early
+// writeInitialConfig runs before bootstrap's interactive domain prompt, so an
+// empty answer must yield a blank host and merge MUST keep the recorded one
+// rather than clobber it with a bare "https://".
+func TestFromAnswersEmptyDomainIsBlankAndPreservesPrev(t *testing.T) {
+	e := &rebuildEngine{f: rebuildFlags{}}
+	ans := e.fromAnswers()
+	if ans.RelayURL != "" || ans.RelayWsURL != "" || ans.CPURL != "" {
+		t.Fatalf("empty domains must build no host, got relay=%q ws=%q cp=%q", ans.RelayURL, ans.RelayWsURL, ans.CPURL)
+	}
+	prev := &config.Config{
+		RelayURL:   "https://relay.prev.test",
+		RelayWsURL: "wss://relay.prev.test",
+		CPURL:      "https://cp.prev.test",
+	}
+	got := mergeFromAnswers(ans, prev)
+	if got.RelayURL != prev.RelayURL || got.RelayWsURL != prev.RelayWsURL || got.CPURL != prev.CPURL {
+		t.Errorf("empty answers must preserve prev hosts, got relay=%q ws=%q cp=%q", got.RelayURL, got.RelayWsURL, got.CPURL)
+	}
+	// A supplied domain still wins over prev.
+	e.f.relayDomain, e.f.cpDomain = "relay.new.test", "cp.new.test"
+	got = mergeFromAnswers(e.fromAnswers(), prev)
+	if got.RelayURL != "https://relay.new.test" || got.CPURL != "https://cp.new.test" {
+		t.Errorf("answers must win when present, got relay=%q cp=%q", got.RelayURL, got.CPURL)
+	}
+}
 func sptr(v string) *string { return &v }
 
 // ---- door + NIP-11 parsing ----------------------------------------------------

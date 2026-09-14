@@ -302,6 +302,7 @@ func TestRunInstallHandsCollectedFlagsToEngine(t *testing.T) {
 		rootfsGB:         16,
 		memoryMB:         2048,
 		relayGw:          "192.168.30.1",
+		bridge:           "vmbr0",
 		noK3s:            false,
 		noLitellm:        false,
 		confirmStorage:   true,

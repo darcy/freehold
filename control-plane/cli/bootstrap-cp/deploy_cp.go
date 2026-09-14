@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"freehold/contract/client"
+	"freehold/contract/config"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
 )
@@ -285,8 +286,8 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 			k, a := firstTargetKA(string(raw))
 			kind, address = k, a
 		}
-		adopt := fmt.Sprintf("%s/freehold-console adopt %s --kind %s --address %s --package-dir %s --state-dir %s --mcp-addr 127.0.0.1:8787",
-			spec.BinDir, runnerName, kind, address, runnerDir, spec.StateDir)
+		adopt := fmt.Sprintf("%s/freehold-console adopt %s --kind %s --address %s --package-dir %s --state-dir %s --mcp-addr %s",
+			spec.BinDir, runnerName, kind, address, runnerDir, spec.StateDir, config.CoLocatedRunnerMCPAddr)
 		if _, err := execTolerantAlreadyExists(clientConn, target, deploy.LxcCmd(spec.LXc, adopt), "adopt co-located runner", 60); err != nil {
 			return nil, err
 		}

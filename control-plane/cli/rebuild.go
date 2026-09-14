@@ -266,6 +266,15 @@ func setupBuild(cmd *cobra.Command) (*rebuildEngine, error) {
 	if f.proxyIP != "" && !strings.Contains(f.proxyIP, "/") {
 		return nil, fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", f.proxyIP)
 	}
+	// The default --addr (127.0.0.1:8787) is the box-side runner; a multi-world
+	// box's profile may pin its OWN runner addr in the config (e.g. 8788 for a
+	// second tenant). Honor the recorded addr unless --addr was explicit, so
+	// `build`/`bootstrap` route to THIS world's runner instead of a foreign one.
+	if !cmd.Flags().Changed("addr") {
+		if cfg2, _ := config.Load(f.configPath); cfg2 != nil && cfg2.Runner.Addr != "" {
+			f.addr = cfg2.Runner.Addr
+		}
+	}
 
 	return newRebuildEngine(f)
 }
@@ -521,6 +530,14 @@ func (e *rebuildEngine) runBootstrap() error {
 			return err
 		}
 	}
+	// 6. initial config so the plane mapping + the exec stages (grant/serve/
+	// verify) have the runner coords to resolve: written BEFORE they run, else
+	// the exec subprocess negotiates the (empty) profile and falls into the CP
+	// driven path (no freehold-agent-tools coords).
+	if err := e.writeInitialConfig(); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 	if err := e.stageGrant(); err != nil {
 		return err
 	}
@@ -557,12 +574,6 @@ func (e *rebuildEngine) runBootstrap() error {
 	if !strings.Contains(e.f.proxyIP, "/") {
 		return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", e.f.proxyIP)
 	}
-
-	// 6. initial config so the plane mapping has somewhere to record.
-	if err := e.writeInitialConfig(); err != nil {
-		return err
-	}
-	fmt.Fprintf(e.out, "  ✓ wrote config %s\n", e.f.configPath)
 
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
 	// relay/k3s datasets are re-ensured by world_build, idempotently).
@@ -1534,11 +1545,11 @@ func (e *rebuildEngine) fromAnswers() *config.Config {
 	relayDomain := e.f.relayDomain
 	cpDomain := e.f.cpDomain
 	// RelayWsURL is the CPA pod's relay origin: wss://<relayDomain> — the
-	// public, TLS-fronted form the edge serves.
+	// public, TLS-fronted form the edge serves. A host is built ONLY from a
+	// supplied domain: the early writeInitialConfig lands before bootstrap's
+	// interactive prompt on the sequential path, and an empty host must merge
+	// prev's recorded value, not clobber it with the bare scheme.
 	cfg := &config.Config{
-		RelayURL:       "https://" + relayDomain,
-		RelayWsURL:     "wss://" + relayDomain,
-		CPURL:          "https://" + cpDomain,
 		OperatorPubkey: e.f.operatorPubkey,
 		Runner: config.RunnerRef{
 			Addr:   e.f.addr,
@@ -1547,6 +1558,13 @@ func (e *rebuildEngine) fromAnswers() *config.Config {
 		},
 		Managed: []string{"relay", "cp"},
 		CPAName: e.f.agentName,
+	}
+	if relayDomain != "" {
+		cfg.RelayURL = "https://" + relayDomain
+		cfg.RelayWsURL = "wss://" + relayDomain
+	}
+	if cpDomain != "" {
+		cfg.CPURL = "https://" + cpDomain
 	}
 	if e.f.proxyIP != "" {
 		p := e.f.proxyIP
@@ -1596,6 +1614,17 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	if cfg.RelayPubkey == nil {
 		cfg.RelayPubkey = prev.RelayPubkey
+	}
+	// Hosts survive when this run supplied none (the early write before the
+	// sequential path prompts its domains); answers still win when present.
+	if cfg.RelayURL == "" {
+		cfg.RelayURL = prev.RelayURL
+	}
+	if cfg.RelayWsURL == "" {
+		cfg.RelayWsURL = prev.RelayWsURL
+	}
+	if cfg.CPURL == "" {
+		cfg.CPURL = prev.CPURL
 	}
 	if cfg.OperatorIdentity == nil {
 		cfg.OperatorIdentity = prev.OperatorIdentity
@@ -2251,7 +2280,7 @@ func (e *rebuildEngine) worldConfigJSON(cfg *config.Config) string {
 		RelayLxc:       derefU32(cfg.Lxc.Relay.Vmid),
 		RelayCompose:   stages.RelayComposeDir,
 		K3sVmid:        derefU32(cfg.Lxc.K3s.Vmid),
-		RunnerAddr:     cfg.Runner.Addr,
+		RunnerAddr:     config.CoLocatedRunnerMCPAddr,
 		RunnerPK:       cfg.Runner.Pubkey,
 		RunnerTarget:   cfg.Runner.Target,
 		CpaName:        e.f.agentName,

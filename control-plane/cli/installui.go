@@ -53,11 +53,11 @@ var installSteps = []installStep{
 }
 
 type installModel struct {
-	step   int
-	field  textinput.Model
-	vals   []string
-	err    string
-	done   bool
+	step  int
+	field textinput.Model
+	vals  []string
+	err   string
+	done  bool
 	// collected rebuildFlags, filled on confirm.
 	f        rebuildFlags
 	identity string // operator identity dir ("" = not persisted)
@@ -164,25 +164,26 @@ func (m *installModel) finish() error {
 	consent := strings.EqualFold(strings.TrimSpace(m.vals[11]), "y")
 
 	m.f = rebuildFlags{
-		addr:             addr,
-		target:           runner,
-		host:             host,
-		domain:           relayDomain,
-		relayDomain:      relayDomain,
-		cpDomain:         cpDomain,
-		proxyIP:          proxyIP,
-		operatorPubkey:   pk,
-		operatorIdentity: opDir,
-		sizeGB:           drive.TenantLVSizeGB,
-		poolSizeGB:       drive.FreshPoolSizeGB,
-		noK3s:            false,
-		noLitellm:        false,
-		rootfsGB:         uint32(rootfsN),
-		memoryMB:         uint32(memN),
-		relayGw:          "192.168.30.1",
+		addr:               addr,
+		target:             runner,
+		host:               host,
+		domain:             relayDomain,
+		relayDomain:        relayDomain,
+		cpDomain:           cpDomain,
+		proxyIP:            proxyIP,
+		operatorPubkey:     pk,
+		operatorIdentity:   opDir,
+		sizeGB:             drive.TenantLVSizeGB,
+		poolSizeGB:         drive.FreshPoolSizeGB,
+		noK3s:              false,
+		noLitellm:          false,
+		rootfsGB:           uint32(rootfsN),
+		memoryMB:           uint32(memN),
+		relayGw:            "192.168.30.1",
+		bridge:             "vmbr0",
 		litellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
-		configPath:       defaultConfigPath(),
-		confirmStorage:   consent,
+		configPath:         defaultConfigPath(),
+		confirmStorage:     consent,
 	}
 	return nil
 }
@@ -245,7 +246,7 @@ func (m *installModel) View() string {
 	var b strings.Builder
 	b.WriteString(installBanner)
 	if m.err != "" {
-		b.WriteString(styleRed.Render("! " + m.err) + "\n")
+		b.WriteString(styleRed.Render("! "+m.err) + "\n")
 	}
 	if m.step < len(installSteps) {
 		b.WriteString("\n  " + styleYellow.Render(installSteps[m.step].label) + "\n")
@@ -275,7 +276,9 @@ func runInstallUI(newEngine func(rebuildFlags) (*rebuildEngine, error), in io.Re
 	}
 	eng.out = out
 	eng.stdin = bufio.NewReader(in)
-	eng.f.yes = true // the wizard collected every answer; no runtime re-prompts
+	// The wizard filled relay/CP domains + proxy IP, so runBootstrap's promptDomains
+	// and proxy prompts skip; the door gate stays interactive (a NEW door key must
+	// be authorized + ENTER-resumed, not a silent --yes bail).
 	return eng.runBootstrap()
 }
 
