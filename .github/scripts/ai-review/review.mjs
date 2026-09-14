@@ -371,7 +371,6 @@ async function main() {
   const prompt = template
     .replace('{{REPO}}', () => `${owner}/${repo}`)
     .replace('{{PR_NUMBER}}', () => String(pull_number))
-    .replace('{{CI_STATUS}}', () => ciStatus)
     .replace('{{PREVIOUS_ROUND}}', () => previousRound)
     .replace('{{CONTEXT_FILES}}', () => readContextFiles())
     .replace('{{DIFF}}', () => diff);

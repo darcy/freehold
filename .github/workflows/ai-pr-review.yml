@@ -12,8 +12,7 @@ permissions:
 jobs:
   deepseek-review:
     runs-on: ubuntu-latest
-    if: ${{ false }}
-    # if: github.event.pull_request.user.login != 'dependabot[bot]'
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,7 +46,7 @@ jobs:
 
           PROMPT_FILE: "review-prompt.md"
           CONTEXT_FILES: "AGENTS.md,README.md,ARCHITECTURE.md"
-          EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,*.md,**/*.md,**/dist/**,**/vendor/**"
+          EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,**/dist/**,**/vendor/**"
           MAX_DIFF_CHARS: "2560000"
           MAX_CONTEXT_FILE_CHARS: "80000"
           FAIL_ON_OVERSIZED_DIFF: "true"
