@@ -45,6 +45,14 @@ import (
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 
+// AgentToolsPort is the CP's freehold-agent-tools MCP bind port. Any URL the
+// CPA pod bootstraps its stdio bridge from (the agent-tools `--self-url`, and
+// the CPA/agent manifests' bridge URL) MUST use this port — the pod curls
+// <url>/freehold-agent-tools-binary off the agent-tools server itself, so
+// pointing it at the console's port makes the fetch 404 and silently falls
+// back to plain buzz-dev-mcp (no create_agent).
+const AgentToolsPort = "8089"
+
 type Spec struct {
 	StateDir       string
 	RelayURL       string
@@ -558,9 +566,13 @@ func (s *Spec) deployAgentTools() error {
 		}
 	}
 	relayDial := "http://" + s.RelayHost + ":3000"
-	// Seed the server's channel + the operator + this console into its roster
-	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s,%s --name agent-tools",
-		bin, atState, relayDial, s.OwnerPub, s.Audience)
+	// Seed the server's channel + the operator into its roster. The console's
+	// driving identity (s.Audience) is deliberately NOT seeded: the console
+	// never calls this MCP (it reads the registry/facts files directly), so
+	// membering it only put an un-nameable identity in the roster. The CPA is
+	// membered separately, by this server's own identity (BuildCreateAgentFn).
+	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
+		bin, atState, relayDial, s.OwnerPub)
 	if s.RelayAuthURL != "" {
 		seedFlags += " --relay-auth-url " + s.RelayAuthURL
 	} else {
@@ -578,7 +590,7 @@ func (s *Spec) deployAgentTools() error {
 		}
 	}
 	serveFlags := fmt.Sprintf(
-		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
+		"--state-dir %s --addr 0.0.0.0:"+AgentToolsPort+" --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
 		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
 		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
 	// relay-pubkey is the roster trust anchor, learned only after the relay is
@@ -664,7 +676,7 @@ func (s *Spec) deployAgentTools() error {
 	// is up; "000" means not yet bound).
 	up := false
 	for i := 0; i < 15; i++ {
-		code, err := s.runOut(fmt.Sprintf("pct exec %d -- curl -s -m 3 -o /dev/null -w %%{http_code} http://127.0.0.1:8089/mcp", s.CpLxc), 15)
+		code, err := s.runOut(fmt.Sprintf("pct exec %d -- curl -s -m 3 -o /dev/null -w %%{http_code} http://127.0.0.1:"+AgentToolsPort+"/mcp", s.CpLxc), 15)
 		if err == nil && strings.TrimSpace(code) != "000" {
 			up = true
 			break
