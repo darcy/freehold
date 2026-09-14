@@ -11,6 +11,7 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/config"
+	"freehold/contract/wire"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
 )
@@ -100,6 +101,87 @@ func shipSmallFile(clientConn *client.McpClient, target string, spec *DeployCpSp
 		parent, b64, remoteFinal, remoteFinal)
 	_, err = bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, cmd), step, 60)
 	return err
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// readGuestFile returns a file's bytes from inside the LXC, or nil when absent
+// (the path is trusted: built from a fixed runner dir, no shell metacharacters).
+func readGuestFile(clientConn *client.McpClient, target string, spec *DeployCpSpec, path string) []byte {
+	out, err := bootstrap.ExecToOK(clientConn, target,
+		deploy.LxcCmd(spec.LXc, "cat "+path+" 2>/dev/null || true"), "read "+path, 30)
+	if err != nil {
+		return nil
+	}
+	return []byte(out.Stdout)
+}
+
+// shipMergedRunnerSecrets ships the box package's secrets.json into the CP
+// runner package, preserving secret NAMES already present on the CP that the
+// box package doesn't carry (the build-added litellm trio); the box wins on a
+// name overlap.
+func shipMergedRunnerSecrets(clientConn *client.McpClient, target string, spec *DeployCpSpec, localPath, remoteFinal string) error {
+	boxRaw, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	merged, err := mergeRunnerSecrets(boxRaw, readGuestFile(clientConn, target, spec, remoteFinal))
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("", "fh-runner-secrets-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(merged); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return shipSmallFile(clientConn, target, spec, tmp.Name(), remoteFinal, "runner secrets.json")
+}
+
+// mergeRunnerSecrets unions a runner SecretPackage's secrets/targets maps
+// (box entries win on conflict) and keeps the CP's grants. Uses the wire type
+// so the per-target `secret` link and serde-compatible JSON survive; a
+// corrupt/missing remote file just loses its extras rather than failing.
+func mergeRunnerSecrets(boxRaw, cpRaw []byte) ([]byte, error) {
+	box := &wire.SecretPackage{}
+	if err := json.Unmarshal(boxRaw, box); err != nil {
+		return nil, fmt.Errorf("parse box runner secrets: %w", err)
+	}
+	cp := &wire.SecretPackage{}
+	if len(cpRaw) > 0 {
+		_ = json.Unmarshal(cpRaw, cp)
+	}
+	if box.Secrets == nil {
+		box.Secrets = map[string]string{}
+	}
+	for k, v := range cp.Secrets {
+		if _, ok := box.Secrets[k]; !ok {
+			box.Secrets[k] = v
+		}
+	}
+	if box.Targets == nil {
+		box.Targets = map[string]wire.TargetMeta{}
+	}
+	for k, v := range cp.Targets {
+		if _, ok := box.Targets[k]; !ok {
+			box.Targets[k] = v
+		}
+	}
+	// The CP runner's grants are the CONSOLE's (self-granted at deploy) plus
+	// any added since; the box package's grants belong to the BOX runner.
+	// Preserve the CP's set — overwriting would strip the console's own call.
+	if len(cp.Grants) > 0 {
+		box.Grants = cp.Grants
+	}
+	return json.Marshal(box)
 }
 
 // DeployCp reproduces the CP deploy driver (OPERATE mode).
@@ -267,12 +349,26 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 			spec.BinDir+"/freehold-runner", "runner binary"); err != nil {
 			return nil, err
 		}
-		for _, f := range []string{"identity.json", "secrets.json", "known_hosts.json"} {
+		for _, f := range []string{"identity.json", "known_hosts.json"} {
 			lp := *spec.RunnerPackage + "/" + f
 			if _, err := os.Stat(lp); err == nil {
 				if err := shipSmallFile(clientConn, target, spec, lp, runnerDir+"/"+f, "runner "+f); err != nil {
 					return nil, err
 				}
+			}
+		}
+		// secrets.json MERGES instead of overwriting: the box package carries
+		// only its OWN target credential (proxmox-box), but the CP's co-located
+		// runner also holds the litellm/postgres-pw/provider-key secrets the
+		// build added (freehold-console add-secret). Overwriting wipes them, and
+		// the box cannot re-derive them (the CP is the durable owner), so a
+		// rebuild would never get them back — the world-build's litellm stage
+		// then dies "requested secret \"litellm\" is not in this runner's
+		// package". Keep CP-only names; the box wins on overlap (a refreshed SSH
+		// credential).
+		if lp := *spec.RunnerPackage + "/secrets.json"; fileExists(lp) {
+			if err := shipMergedRunnerSecrets(clientConn, target, spec, lp, runnerDir+"/secrets.json"); err != nil {
+				return nil, err
 			}
 		}
 		startRunner := fmt.Sprintf(

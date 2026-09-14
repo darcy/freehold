@@ -55,6 +55,20 @@ chain of runtime bugs the hermetic gate couldn't see; all are fixed here.
   grant/serve/verify exec stages (they resolve the runner from it) and merges
   the recorded relay/CP hosts when this run supplied none, so an early write
   never clobbers a prior world's domains with a bare scheme.
+- **`--relay-pubkey` flag-shift**: the world-build's agent-tools serve emitted
+  a bare `--relay-pubkey` (empty — the relay's signing key is learned only
+  after the relay boots), which makes Go's flag parser swallow the NEXT flag as
+  its value and stop, silently dropping `--runner-pubkey`/`--runner-target`
+  ("serve needs --runner-pubkey ..."). Emit it only when non-empty.
+- **co-located runner secrets survive a re-deploy**: `deploy-cp` re-ships the
+  box runner package's `secrets.json` on every install, wiping the litellm
+  secrets the build added to the CP's co-located runner (and the box can't
+  re-derive them — the CP is the durable owner). The re-ship now MERGES: the
+  box wins on its own target credential, while the CP's extra names (litellm /
+  postgres-pw / provider-key) and the console's grants survive. `world_build`
+  also re-provisions the co-located runner from the CP's own durable litellm
+  store whenever it finds them missing (re-seal → restart → wait for the port),
+  so an older package heals on the next build.
 
 ## [0.5.22] — install wizard + pre-DNS IP fallback
 
