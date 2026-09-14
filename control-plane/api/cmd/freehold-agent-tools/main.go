@@ -190,6 +190,7 @@ func cmdSeed(args []string) {
 	relayURL := fs.String("relay-url", "", "relay HTTP origin (dial URL; LAN http://<domain>:3000 pre-Caddy)")
 	relayAuthURL := fs.String("relay-auth-url", "", "relay CANONICAL URL for NIP-98 signing (public https://<domain>); defaults to relay-url")
 	granted := fs.String("granted", "", "comma-separated bootstrap grant pubkeys to member")
+	revoke := fs.String("revoke", "", "comma-separated pubkeys to REMOVE from the roster (idempotent cleanup)")
 	name := fs.String("name", "agent-tools", "channel/identity display name")
 	fs.Parse(args)
 	if *stateDir == "" || *relayURL == "" {
@@ -217,6 +218,15 @@ func cmdSeed(args []string) {
 		}
 		if err := relay.PutUserAuth(*relayURL, authURL, sec, pk, g); err != nil {
 			log.Fatalf("seed member %s: %v", g, err)
+		}
+	}
+	for _, g := range strings.Split(*revoke, ",") {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		if err := relay.RemoveUserAuth(*relayURL, authURL, sec, pk, g); err != nil {
+			log.Fatalf("seed revoke %s: %v", g, err)
 		}
 	}
 	fmt.Println(pk)
@@ -264,7 +274,8 @@ func cmdRegistry(args []string) {
 	}
 }
 
-func cmdServe(args []string) {	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+func cmdServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "durable state dir")
 	consoleStateDir := fs.String("console-state-dir", "/srv/data/cp/control-plane", "the CONSOLE's durable state dir (its state.json + console identity — the roster owner this server fronts)")
 	addr := fs.String("addr", "127.0.0.1:8089", "HTTP MCP bind address")

@@ -219,6 +219,11 @@ func RemoveUser(relayURL string, consoleSecret []byte, runnerNostrPubkey, member
 	return membershipCommand(relayURL, consoleSecret, wire.RemoveUser, runnerNostrPubkey, memberPubkey)
 }
 
+// RemoveUserAuth is RemoveUser with a separate NIP-98 auth URL.
+func RemoveUserAuth(dialURL, authURL string, consoleSecret []byte, runnerNostrPubkey, memberPubkey string) error {
+	return membershipCommandAuth(dialURL, authURL, consoleSecret, wire.RemoveUser, runnerNostrPubkey, memberPubkey)
+}
+
 func membershipCommand(relayURL string, consoleSecret []byte, kind uint32, runnerNostrPubkey, memberPubkey string) error {
 	return membershipCommandAuth(relayURL, relayURL, consoleSecret, kind, runnerNostrPubkey, memberPubkey)
 }

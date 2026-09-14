@@ -573,6 +573,12 @@ func (s *Spec) deployAgentTools() error {
 	// membered separately, by this server's own identity (BuildCreateAgentFn).
 	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
 		bin, atState, relayDial, s.OwnerPub)
+	// Revoke the console's driving identity if a PRIOR seed membered it: put-user
+	// is additive, so dropping it from --granted alone doesn't heal a world that
+	// already has it. The console never calls this MCP.
+	if s.Audience != "" {
+		seedFlags += " --revoke " + s.Audience
+	}
 	if s.RelayAuthURL != "" {
 		seedFlags += " --relay-auth-url " + s.RelayAuthURL
 	} else {
