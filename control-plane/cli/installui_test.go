@@ -84,20 +84,31 @@ func TestInstallWizardDefaultsBlankToDefault(t *testing.T) {
 	m := newInstallModel(func(rebuildFlags) (*rebuildEngine, error) {
 		return nil, errors.New("engine-handoff")
 	}, &bytes.Buffer{})
-	for i := 0; i < len(installSteps); i++ {
-		// Blank everything; defaults apply (host/runner/addr/rootfs/memory), cp
-		// domain derives from relay, identity=generate (choice default "1" is
-		// overridden to "2" here so no key is pasted).
-		if installSteps[i].label == "Operator identity: 1) have a Nostr key already  2) generate one for me" {
-			wizardType(m, "2")
-		}
-		wizardAdvance(m)
+// Blank the defaults-bearing fields (host/runner/addr/rootfs/memory) and
+// the cp domain (derives from relay); provide a non-blank relay domain so
+// finish() reaches the cp-domain default-cascade. Identity = generate.
+for i := 0; i < len(installSteps); i++ {
+	switch {
+	case installSteps[i].label == "Relay domain (its Buzz origin — REQUIRED)":
+		wizardType(m, "world.test")
+	case installSteps[i].label == "proxy static IP (CIDR, e.g. 192.168.30.8/24) — REQUIRED, the one address relay/CP resolve to":
+		wizardType(m, "192.168.30.8/24")
+	case installSteps[i].label == "Operator identity: 1) have a Nostr key already  2) generate one for me":
+		wizardType(m, "2")
 	}
-	if m.f.relayDomain != "" {
-		t.Errorf("relay domain blank must stay blank (required), got %q", m.f.relayDomain)
+	wizardAdvance(m)
+}
+	if m.f.host != "root@192.168.30.224" || m.f.target != "proxmox-box" || m.f.addr != "127.0.0.1:8787" {
+		t.Errorf("blank world-details must take their defaults: host=%q target=%q addr=%q", m.f.host, m.f.target, m.f.addr)
 	}
-	if m.f.cpDomain != "" {
-		t.Errorf("cp domain must default to relay (blank), got %q", m.f.cpDomain)
+	if m.f.rootfsGB != 16 || m.f.memoryMB != 2048 {
+		t.Errorf("blank size defaults lost: rootfs=%d memory=%d", m.f.rootfsGB, m.f.memoryMB)
+	}
+	if m.f.cpDomain != "world.test" {
+		t.Errorf("blank cp domain must default to the relay domain, got %q", m.f.cpDomain)
+	}
+	if m.f.relayDomain != "world.test" {
+		t.Errorf("relay domain = %q, want world.test", m.f.relayDomain)
 	}
 }
 
