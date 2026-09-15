@@ -36,9 +36,7 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 
 ```
 Cargo.toml            workspace: control-plane/core, control-plane/runner,
-                      control-plane/console, control-plane/console-client,
-                      control-plane/testkit, control-plane/acceptance,
-                      control-plane/core/harness/oracle
+                      control-plane/testkit, control-plane/core/harness/oracle
 contract/             freehold/contract — the shared wire/trust leaf BOTH the
                       control plane and the platform import: crypto/ (Go repro of
                       the Rust core, byte-exact cross-verified by the harness),
@@ -46,7 +44,7 @@ contract/             freehold/contract — the shared wire/trust leaf BOTH the
                       relay/, state/, delegate/. Its own Go module so the edge is
                       platform → contract ← control-plane (no module cycle).
 control-plane/        freehold/control-plane — the stable mechanism (Go logic,
-                      Rust only for runner + core + console):
+                      Rust only for runner + core):
   api/                the unified scoped API: agent toolset (agent/, agenttools/,
                       cpstate/) + the operator-scoped world_status / world_teardown /
                       world_migrate / world_build / world_register_facts /
@@ -72,7 +70,10 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
   secret-management/  provision/rotate/revoke/grant (the provisioner)
   core/               (Rust) the byte-exact contract oracle + harness/ (the
                       Go↔Rust byte-gate, test-only)
-  runner/  console/  console-client/  testkit/  acceptance/   (Rust crates)
+  runner/  testkit/   (Rust) the privileged exec endpoint + its hermetic fixtures
+  acceptance/         the Chunk-1/2 acceptance gate (Go: provisioner lifecycle,
+                      console HTTP surface, relay-channel fold; drives the real
+                      `runner` binary as a subprocess)
 platform/             freehold/platform — the evolving world the mechanism
                       installs/evolves: services/<capability>/<impl>/ (relay/buzz,
                       webproxy/caddy, externaldns/cloudflare, certificates/letsencrypt,
@@ -114,22 +115,14 @@ control-plane/api/console/  the Go console server (web.rs ported at parity): the
                       cookies, single-use portal, DNS-rebinding Origin guard,
                       loopback-until-authn bind). cmd/freehold-console serves it and carries the
                       box-side CP CLI verbs (provision/grant/adopt/add-secret/
-                      identity); the deploy ships it end to end. The Rust console
-                      crate remains only as the acceptance harness's fixture.
-control-plane/console/ (Rust, until the deploy switch) freehold-control-plane —
-                      src/state.rs (runners + secrets store, atomic 0600, pubkeys +
-                      ciphertext only), src/provisioner.rs (provision/rotate/revoke/
-                      grant), src/web.rs (the loopback web console the Go
-                      control-plane/api/console replaces), src/main.rs (serve + the
-                      provision CLI)
-control-plane/console-client/  freehold-console-client — ONE console API contract, two clients:
-                      the web page and the TUI's Runners view;
-                      NIP-98 login + overview/actions + the single-use web-launch portal
-control-plane/testkit/  freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
-                      an in-process russh sshd (shared by the connector tests)
-control-plane/acceptance/  freehold-acceptance — the Chunk-1 acceptance script (G): 9 checks,
-                      G1 happy path + G2 three connectors via the runner + G3 security
-                      invariants; `cargo run -p freehold-acceptance`
+                      identity); the deploy ships it end to end.
+control-plane/testkit/  (Rust) freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
+                      an in-process russh sshd (shared by the runner's connector tests)
+control-plane/acceptance/  the Chunk-1/2 acceptance gate in Go (`go test ./acceptance/…`):
+                      the CP provisioner lifecycle, the console HTTP surface, and the
+                      relay-channel fold against a hermetic fake relay; it drives the
+                      real `runner` binary (a subprocess) for the live-readiness leg.
+                      The connector/relay behavior the runner owns stays in its Rust tests.
 ```
 
 ## Security model (no master key)
@@ -167,12 +160,12 @@ just build
 just install
 
 # run the full gate: cargo fmt/build/test + Go build/vet/test across the three
-# modules + the harness byte-gate + Chunk-1 acceptance (hermetic):
+# modules + the harness byte-gate + the hermetic Chunk-1/2 acceptance gate:
 just test
 
 # the manual equivalents, if you don't use just:
-cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,console,console-client,testkit,acceptance}
-for m in contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the four Go modules + the byte-exact harness gate
+cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,testkit,core/harness/oracle} + `cargo build --bin runner` for the acceptance gate
+for m in contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the four Go modules + the byte-exact harness gate + the Go acceptance gate
 cargo fmt --all --check          # CI gate
 ```
 
@@ -324,11 +317,11 @@ revoke lands without a restart.
 ### The console: provision a service, watch it go green (the F flow)
 
 ```sh
-cargo run -p freehold-control-plane -- serve --state-dir ./.freehold/control-plane
+freehold-console serve --state-dir /srv/data/cp/control-plane
 # open http://127.0.0.1:8080 — admin/ops only (chat is Buzz's job, Chunk 2)
 ```
 
-Paste a credential into the provision form (or `curl` the API). The console ships the
+Paste a credential into the provision form (or `POST /api/provision`). The console ships the
 runner package, registers the runner's MCP address, and the overview shows the runner's OWN
 self-check per target — 🟢/🟡/🔴 — probed through the same signed MCP channel an agent
 uses. Manage: rotate, revoke, grant/revoke-grant, set MCP addr.
@@ -336,31 +329,29 @@ uses. Manage: rotate, revoke, grant/revoke-grant, set MCP addr.
 ### Control plane CLI: provision a service (B1 happy path)
 
 ```sh
-cargo run -p freehold-control-plane -- agent-create my-agent --state-dir ./.freehold/control-plane   # the agent identity (0600)
+freehold-console provision vultr \
+  --kind vultr --address api.vultr.com --secret-env VULTR_KEY --state-dir /srv/data/cp/control-plane
 
-echo -n 'vultr-api-key-9876' | cargo run -p freehold-control-plane -- provision vultr \
-  --kind vultr --address api.vultr.com --state-dir ./.freehold/control-plane
-
-# grant the agent, then it may call the runner (everything else fails closed):
-cargo run -p freehold-control-plane -- grant vultr <agent-pubkey> --state-dir ./.freehold/control-plane
+# grant the console/ops identity (or an agent) so it may call the runner
+# (everything else fails closed); omit --pubkey for the state dir's own identity:
+freehold-console grant vultr --state-dir /srv/data/cp/control-plane
 ```
 
 What just happened (verify it yourself):
 
-- `.freehold/runner/vultr/identity.json` — the runner's injected private keys (0600)
-- `.freehold/runner/vultr/secrets.json` — the API key as sealed ciphertext only
-- `.freehold/control-plane/state.json` — pubkeys + ciphertext only; grep for the API key
+- `/srv/data/cp/control-plane/runner/vultr/identity.json` — the runner's injected private
+  keys (0600); `--runner-dir` overrides the location
+- `/srv/data/cp/control-plane/runner/vultr/secrets.json` — the API key as sealed ciphertext only
+- `/srv/data/cp/control-plane/state.json` — pubkeys + ciphertext only; grep for the API key
   and for `nostr_secret`/`enc_secret`: **zero matches** (the no-master-key proof)
 
 ```sh
-# rotate the credential (reads the NEW value from stdin; re-seals to the same runner key)
-echo -n 'vultr-api-key-5544' | cargo run -p freehold-control-plane -- rotate-secret vultr --state-dir ./.freehold/control-plane
+# rotate the credential (web/API-only: POST /api/rotate — re-seals to the same runner key)
 
 # revoke a runner: blocks provision/rotate, deletes the shipped secrets.json
-cargo run -p freehold-control-plane -- revoke vultr --state-dir ./.freehold/control-plane
+freehold-console revoke vultr --state-dir /srv/data/cp/control-plane
 
-# service-at-a-glance (no plaintext in output, ever)
-cargo run -p freehold-control-plane -- list --state-dir ./.freehold/control-plane
+# service-at-a-glance: GET /api/overview (no plaintext in output, ever)
 ```
 
 Provision refuses to clobber: a name that exists, or a `--runner-dir` that already holds a
@@ -415,7 +406,7 @@ freehold provision --kind proxmox-lxc --role cp \
 #   --world-config (cpbuild.Coords JSON) bounds the console as the CP build
 #   executor: it surfaces the coords so a thin box can trigger /api/world-build.
 freehold deploy-cp --target proxmox-box --lxc 102 \
-  --binary target/release/control-plane --runner-binary target/release/runner \
+  --binary target/release/freehold-console --runner-binary target/release/runner \
   --runner-package ./.freehold/runner/proxmox-box-ish --bind 0.0.0.0:8080 \
   --relay-url https://<relay-domain> --operator-pubkey <your-64-hex> \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
@@ -446,22 +437,22 @@ freehold relay-member --target proxmox-box --lxc 100 \
 freehold console-login \
   --url https://cp-<relay-domain> --nsec nsec1...
 
-#   grants (Chunk 2.6.1): grants ARE channel membership. With FREEHOLD_RELAY_URL
-#   set, grant/revoke-grant publish put-user / remove-user to the runner's
-#   channel; the runner re-reads its relay-signed roster per call.
-FREEHOLD_RELAY_URL=https://<relay-domain> cargo run -p freehold-control-plane -- grant my-runner <agent-pk> --state-dir ./.freehold/control-plane
-FREEHOLD_RELAY_URL=https://<relay-domain> cargo run -p freehold-control-plane -- revoke-grant my-runner <agent-pk> --state-dir ./.freehold/control-plane
+#   grants (Chunk 2.6.1): grants ARE channel membership. With --relay-url,
+#   grant publishes a put-user to the runner's channel; the runner re-reads
+#   its relay-signed roster per call. (revoke-grant is the /api/revoke-grant
+#   web action.)
+freehold-console grant my-runner --pubkey <agent-pk> --relay-url https://<relay-domain> --state-dir /srv/data/cp/control-plane
 
 #   a relay-configured runner (whitelist = its own channel roster, verified
 #   against the relay's pubkey):
 cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner \
   --relay-url https://<relay-domain> --relay-pubkey <relay-signing-pubkey>
 
-#   rebuild (disposable CP): fold a respawned CP from the relay's
+#   rebuild (disposable CP): the fold primitives (relay.QueryRunnerMetas +
+#   StateStore.RebuildFrom) reconstruct a respawned CP from the relay's
 #   runner-profile channel messages (kind 9, t=fh-profile) — deterministic +
 #   idempotent, author-gated (a fresh console reads nothing until re-admitted).
-cargo run -p freehold-control-plane -- rebuild --relay-url https://<relay-domain> \
-  --state-dir /tmp/fresh-cp
+#   Coverage lives in the Go acceptance gate (`go test ./acceptance/…`).
 ```
 
 ## Bootstrap flow (from zero to a live world)
@@ -503,9 +494,10 @@ sequenceDiagram
     C-->>OP: live world: relay + console + CPA wired
 ```
 
-The reload path (`freehold rebuild --relay-url`) folds a respawned/rebuild CP from the
-relay's runner-profile channel messages (kind 9, `t=fh-profile`) — deterministic,
-idempotent, and author-gated.
+The reload path folds a respawned/rebuild CP from the relay's runner-profile channel
+messages (kind 9, `t=fh-profile`) — deterministic, idempotent, and author-gated. The fold
+primitives are `relay.QueryRunnerMetas` + `StateStore.RebuildFrom`, exercised by the Go
+acceptance gate.
 
 ## Runner setup + grant (from credential to first exec)
 

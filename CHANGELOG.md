@@ -48,6 +48,39 @@ out of `control-plane/cli` into a top-level `install/` Go module producing the
   provider seam (Proxmox only today) is the next step, with the Vultr/Hetzner drivers
   already in `platform/provisioning/bootstrap`.
 
+## [0.5.24] — Phase 3 complete: the Rust console is gone (Rust is runner + core)
+
+The REFACTOR-PLAN's final Phase-3 step. The Rust `control-plane/console` and
+`console-client` crates are deleted from the tree and the Cargo workspace, and
+the Chunk-1/2 acceptance gate is Go — so "Rust only where it earns its keep"
+now holds for real: the privileged `runner` and the byte-exact `core` oracle,
+plus `testkit` (the runner's hermetic fixtures).
+
+### Changed
+
+- **Deleted the Rust `control-plane/console` + `console-client` crates** and
+  dropped them (and the Rust `acceptance` crate) from the Cargo workspace. The
+  Go console has been the shipped runtime since 0.5.5, and `console-client`'s
+  only consumer was a Rust test in `web.rs`; the Go `contract/console` client
+  replaced it. `testkit` stays — the staying runner tests depend on it.
+- **The Chunk-1/2 acceptance gate is Go** (`control-plane/acceptance/`): it
+  ports the provisioner lifecycle, the console HTTP surface, and the
+  relay-channel fold against a hermetic fake relay (real NIP-98 auth + NIP-01
+  filters + relay-signed rosters), and drives the real `runner` binary as a
+  subprocess for the live-readiness leg. Connector/relay behavior the runner
+  owns stays in its Rust tests. `just test` drops `cargo run -p freehold-acceptance`;
+  the Go test gate (`go test ./...` in the control-plane module) covers it.
+- **Docs state the current tree** — ARCHITECTURE.md, README.md, AGENTS.md no
+  longer describe the Rust console as an acceptance fixture, and `REFACTOR-PLAN.md`
+  is deleted (the plan is complete).
+
+### Notes
+
+- The Rust console's non-HTTP CLI verbs that the Go console never carried
+  (`rotate-secret`, `revoke-grant`, `list`, `dns rm/list/sync`, and the
+  relay-fold `rebuild`) remain reachable through the web/API, or are tracked
+  follow-ups — see `followups.md`.
+
 ## [0.5.23] — install/build runtime fixes from live verification
 
 Bringing a fresh world up end-to-end through the install wizard surfaced a

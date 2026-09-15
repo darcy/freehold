@@ -49,6 +49,30 @@ script. If a script-file form is wanted later, the script can be shipped via the
 migrations/overlay mechanism and still executed by the CP on demand.
 **Status:** aligns with the "events are migrations/overlay, not tf" rule.
 
+## E — Go console: residual port gaps from the Rust console
+
+The Rust console (deleted in 0.5.24) carried a few CLI/behavior surfaces the Go
+console never picked up. None is on a live path; all are reachable via the
+web/API or were intentionally superseded.
+
+- **No `freehold-console rebuild` verb.** The relay-fold primitives
+  (`relay.QueryRunnerMetas` + `state.StateStore.RebuildFrom`) exist and are
+  covered by the Go acceptance gate, but nothing in the runtime calls
+  `RebuildFrom` — a disposable-CP field rebuild has no CLI entrypoint.
+- **CLI verbs the Go console lacks:** `rotate-secret`, `revoke-grant`, `list`
+  (all web/API: `/api/rotate`, `/api/revoke-grant`, `/api/overview`), and
+  `dns rm`/`dns list`/`dns sync` (web `DELETE`/`GET /api/dns`; `dns add`+`dns
+  apex` exist).
+- **Agent-presence reads don't send the community host.** `probeAgentPresence`
+  calls `relay.QueryEvents(snap.RelayURL, …)`; on a LAN-IP dial the community
+  host isn't presented (the dual-URL `QueryEventsAuth` form exists but isn't
+  used here).
+- **No 256 KiB request-body cap** on the Go console (the Rust `web.rs` had one).
+- **`serve` flag defaults dropped env-var bindings** (`FREEHOLD_CP_ADDR`,
+  `FREEHOLD_RELAY_URL`, …) — the Go flags are literals.
+
+**Status:** deferred; not on any live path.
+
 ## D — Migrations: consolidate migrated worlds under epoch names
 
 The two migrations now carry epoch names (`1799900000`, `1799910000`) instead of

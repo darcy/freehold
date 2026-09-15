@@ -52,8 +52,10 @@ check-siblings:
     @test -x target/release/freehold-agent-tools && echo "ok  target/release/freehold-agent-tools" || (echo "MISSING target/release/freehold-agent-tools (run: just build)"; exit 1)
     @echo "✓ all siblings present"
 
-# Run the full gate: cargo fmt/build/test + Go build/vet/test across the three
-# modules + the harness byte-gate.
+# Run the full gate: cargo fmt/build/test (runner + core) + Go build/vet/test
+# across the three modules (incl. the hermetic Chunk-1 acceptance gate, which
+# is `go test ./acceptance/…` in the control-plane module) + the harness
+# byte-gate.
 test:
     @echo "→ cargo fmt / build / test"
     @mise exec rust@1.98.0 -- cargo fmt --all --check
@@ -64,6 +66,4 @@ test:
     @cd platform && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @cd install && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @cd control-plane && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
-    @echo "→ Chunk-1 acceptance (hermetic)"
-    @mise exec rust@1.98.0 -- cargo run -p freehold-acceptance
     @echo "✓ all gates green"
