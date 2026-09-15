@@ -147,9 +147,7 @@ changelog.
   state + the shipped package on disk; a re-run hits `RunnerExists`/`PackageDirInUse` and
   needs manual cleanup.
 - **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
-  unzeroized body bytes before a `Zeroizing` wrapper takes ownership (loopback, TLS-free —
-  same exposure class as the CLI's stdin path); the console's signing key is re-derived on
-  every readiness probe rather than cached once.
+  unzeroized body bytes (loopback, TLS-free — same exposure class as the CLI's stdin path).
 - **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP
   surface on the CP (`freehold-agent-tools`), not chat.** The Go methods
   (`control-plane/api/agent/tools.go`) are served by a dedicated CP-side binary
@@ -179,10 +177,11 @@ changelog.
 
 ## Build / test
 
-- Rust (`control-plane/core/`, `control-plane/runner/`, `control-plane/console/`,
-  `control-plane/console-client/`, `control-plane/testkit/`, `control-plane/acceptance/`):
+- Rust (`control-plane/core/`, `control-plane/runner/`, `control-plane/testkit/`,
+  `control-plane/core/harness/oracle/`) — the runner + core, plus their hermetic test fixtures:
   `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
-  declares `rust-version = "1.94"`).
+  declares `rust-version = "1.94"`). Rust is used for the privileged exec endpoint, the
+  byte-exact contract oracle, and the runner's own fixtures — nothing else.
 - Go — three modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
   - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
@@ -211,7 +210,11 @@ changelog.
 - No formatter/linter config beyond rustfmt + clippy defaults.
 - `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
-  `freehold-acceptance` reproduces Chunk 1's acceptance criteria hermetically on loopback.
+  The Chunk-1/2 acceptance gate is Go now (`control-plane/acceptance/`, run by
+  `go test ./...`): the CP provisioner lifecycle, the console HTTP surface, and the
+  relay-channel fold against a hermetic fake relay — the connector/relay behaviors the
+  runner owns stay in its Rust tests. It drives the real `runner` binary (a subprocess),
+  so the box's `cargo build --bin runner` must have run first.
 
 ### Testing the TUI (`freehold`, `control-plane/cli/cmd/freehold` → bubbletea dashboard)
 

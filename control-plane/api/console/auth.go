@@ -1,6 +1,6 @@
-// Package console is the Go port of the CP's loopback admin/ops web console
-// (control-plane/console/src/web.rs) — the "console underneath" the unified
-// api/ front reads. It serves the same /api/* surface (auth, overview, world,
+// Package console is the CP's loopback admin/ops web console — the "console
+// underneath" the unified api/ front reads. It serves the /api/* surface
+// (auth, overview, world,
 // provision/rotate/revoke/grant, DNS, agents, portal) with the SAME security
 // guards: NIP-98 operator login, HttpOnly+SameSite=Strict session cookies,
 // single-use portal tokens, login freshness windows, and the DNS-rebinding
