@@ -5,7 +5,7 @@ on:
 jobs:
   review:
     # Disabled — Bot Review (ai-pr-review.yml) is the reviewer.
-    if: ${{ false }}
+    # if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
