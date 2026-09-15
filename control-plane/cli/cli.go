@@ -57,9 +57,6 @@ func init() {
 		execCmd,
 		readinessCmd,
 		demoCmd,
-		provisionCmd,
-		deployRelayCmd,
-		deployCpCmd,
 		consoleLoginCmd,
 		relayMemberCmd,
 		memoryCmd,
@@ -69,11 +66,8 @@ func init() {
 		teardownCmd,
 		relayJoinCmd,
 		relaySetupCmd,
-		storageCmd,
-		bootstrapCmd,
 		buildCmd,
 		dnsCredCmd,
-		installCmd,
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.Version = "0.1.0"

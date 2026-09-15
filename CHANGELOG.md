@@ -25,6 +25,29 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.0] — bootstrap split out to a top-level `install/` module
+
+`freehold build` (world via the CP) and the CP *bootstrap* are now two CLIs. The
+bootstrap/install path — getting a control plane up in an environment + a door — moved
+out of `control-plane/cli` into a top-level `install/` Go module producing the
+`freehold-install` binary (`install` / `bootstrap` / and the self-staged
+`exec`/`provision`/`storage`/`deploy-cp` subcommands). After bootstrap, world bring-up is
+`freehold build` from any box via the CP, regardless of environment; the environment
+(Proxmox now; Vultr/Hetzner providers later) only shapes install.
+
+- The CP deploy package moved `control-plane/cli/bootstrap-cp` → `install/cpdeploy`.
+- The shared provisioning engine (LXC boot, storage plane, deploy-cp, the CP bootstrap
+  `Engine`) extracted to `platform/provisioning/box`, imported by both CLIs (control-plane
+  and install); the contract owns `config.Coords` + `AgentToolsPort` so `install` never
+  imports control-plane.
+- `freehold` (operator) keeps `build`/`world`/`teardown`/`login`/TUI; `install`/`bootstrap`/
+  `provision`/`storage`/`deploy-cp` are no longer `freehold` verbs.
+- Introduced `freehold/install` as the fourth Go module (CI + `justfile` updated);
+  before-and-after gates stay green (cargo + 4 Go modules + harness + acceptance).
+- Named follow-up: `freehold-install`'s `install` still prompts collectively; a proper
+  provider seam (Proxmox only today) is the next step, with the Vultr/Hetzner drivers
+  already in `platform/provisioning/bootstrap`.
+
 ## [0.5.24] — Phase 3 complete: the Rust console is gone (Rust is runner + core)
 
 The REFACTOR-PLAN's final Phase-3 step. The Rust `control-plane/console` and

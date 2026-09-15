@@ -10,7 +10,6 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
-	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
 	"freehold/control-plane/cli/teardown"
@@ -93,113 +92,7 @@ func init() {
 
 // --- deploy-cp ---
 
-var deployCpCmd = &cobra.Command{
-	Use:   "deploy-cp",
-	Short: "C1: deploy the control plane onto the target box (OPERATE mode)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := resolveExecProfile(cmd); err != nil {
-			return err
-		}
-		common := readCommonFlags(cmd)
-		target, _ := cmd.Flags().GetString("target")
-		stateDir, _ := cmd.Flags().GetString("state-dir")
-		binDir, _ := cmd.Flags().GetString("bin-dir")
-		bind, _ := cmd.Flags().GetString("bind")
-		binary, _ := cmd.Flags().GetString("binary")
-		relayURL, _ := cmd.Flags().GetString("relay-url")
-		relayPubkey, _ := cmd.Flags().GetString("relay-pubkey")
-		relayHostIP, _ := cmd.Flags().GetString("relay-host-ip")
-		lxcStr, _ := cmd.Flags().GetString("lxc")
-		runnerBinary, _ := cmd.Flags().GetString("runner-binary")
-		runnerPackage, _ := cmd.Flags().GetString("runner-package")
-		operatorPub, _ := cmd.Flags().GetString("operator-pubkey")
-		publicOrigin, _ := cmd.Flags().GetString("public-origin")
-		if binary == "" || relayURL == "" {
-			return fmt.Errorf("deploy-cp needs --binary --relay-url")
-		}
-		authn := operatorPub != ""
-		bindAddr := cpdeploy.ResolveCpBind(optOf(bind), authn)
-		var adminKeys []string
-		if operatorPub != "" {
-			adminKeys = []string{operatorPub}
-		}
-		c, err := connect(common, target)
-		if err != nil {
-			return err
-		}
-		spec := &cpdeploy.DeployCpSpec{
-			StateDir: stateDir, BinDir: binDir, BindAddr: bindAddr,
-			BinaryPath: binary, RelayURL: relayURL, AdminPubkeys: adminKeys,
-		}
-		if relayPubkey != "" {
-			spec.RelayPubkey = optOf(relayPubkey)
-		}
-		if relayHostIP != "" {
-			spec.RelayHostIP = optOf(relayHostIP)
-		}
-		if atURL, _ := cmd.Flags().GetString("agent-tools-url"); atURL != "" {
-			spec.AgentToolsURL = optOf(atURL)
-		}
-		if atPK, _ := cmd.Flags().GetString("agent-tools-pubkey"); atPK != "" {
-			spec.AgentToolsPubkey = optOf(atPK)
-		}
-		if publicOrigin != "" {
-			spec.PublicOrigin = optOf(publicOrigin)
-		}
-		if lxcStr != "" {
-			var v uint32
-			fmt.Sscanf(lxcStr, "%d", &v)
-			spec.LXc = &v
-		}
-		if runnerBinary != "" {
-			spec.RunnerBinary = optOf(runnerBinary)
-		}
-		if runnerPackage != "" {
-			spec.RunnerPackage = optOf(runnerPackage)
-		}
-		if wc, _ := cmd.Flags().GetString("world-config"); wc != "" {
-			spec.WorldConfig = optOf(wc)
-		}
-		if ab, _ := cmd.Flags().GetString("agent-tools-binary"); ab != "" {
-			spec.AgentToolsBinary = optOf(ab)
-		}
-		res, err := cpdeploy.DeployCp(c, target, spec)
-		if err != nil {
-			return err
-		}
-		fmt.Println(res.Detail)
-		fmt.Println("console pubkey:", res.Pubkey)
-		return nil
-	},
-}
 
-func optOf(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
-func init() {
-	addCommonFlags(deployCpCmd, nil)
-	deployCpCmd.Flags().String("target", "proxmox-box", "Target runner (the box where the relay lives)")
-	deployCpCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "Remote state dir on the box (also holds the seeded console identity)")
-	deployCpCmd.Flags().String("bin-dir", cpdeploy.DefaultCPBinDir(), "Remote dir for the shipped binary")
-	deployCpCmd.Flags().String("bind", "", "Loopback bind for the console (C3: non-loopback is refused). An EXPLICIT value is always honored. (Option so the default flip under --operator-pubkey can't swallow a deliberate --bind 127.0.0.1:8080.)")
-	deployCpCmd.Flags().String("binary", "", "LOCAL path of the built freehold-console binary")
-	deployCpCmd.Flags().String("relay-url", "", "The relay this CP helps serve (the ONE scope; C4 posture record)")
-	deployCpCmd.Flags().String("relay-pubkey", "", "The RELAY's signing pubkey (the 39002 roster trust anchor). When omitted, the deploy tries NIP-11 discovery (best-effort — Buzz often advertises none; pass it when known)")
-	deployCpCmd.Flags().String("relay-host-ip", "", "The relay LXC's LAN IP — pinned into the CP guest's /etc/hosts so the console can RESOLVE the relay domain (the operator's DNS may not reach inside the guests: tailnet etc.)")
-	deployCpCmd.Flags().String("agent-tools-url", "", "The CP's freehold-agent-tools MCP URL (http://<cp-ip>:8089) — served on /api/world for a fresh login box")
-	deployCpCmd.Flags().String("agent-tools-pubkey", "", "The agent-tools server's Nostr pubkey (the audience of its roster) — paired with --agent-tools-url")
-	deployCpCmd.Flags().String("world-config", "", "cpbuild.Coords JSON: the world coords the console needs to be the CP build executor (bound as the console's /api/world-build engine)")
-	deployCpCmd.Flags().String("agent-tools-binary", "", "LOCAL freehold-agent-tools binary to ship so the console's world_build can deploy it")
-	deployCpCmd.Flags().String("lxc", "", "Deploy INTO this LXC on the target — the CP lives in its OWN guest, a different LXC than the relay's by default (omitted = the target host)")
-	deployCpCmd.Flags().String("runner-binary", "", "LOCAL path of the built freehold-runner binary (co-locates the CP's own runner: ship + systemd unit + adopt + self-grant)")
-	deployCpCmd.Flags().String("runner-package", "", "LOCAL dir of an EXISTING runner package to co-locate + adopt")
-	deployCpCmd.Flags().String("operator-pubkey", "", "The OPERATOR's Nostr pubkey (64-hex) — seeds the console's NIP-98 admin whitelist (C3.5) and relaxes the loopback-only bind guard")
-	deployCpCmd.Flags().String("public-origin", "", "The console's PUBLIC origin behind the operator's proxy")
-}
 
 // --- bootstrap ---
 

@@ -51,6 +51,10 @@ repo, not the history.
 
 - `VISION.md` — narrative, single source of truth for the "why".
 - `ARCHITECTURE.md` — system design, locked decisions, build plan.
+- `install/` — the `freehold-install` bootstrap CLI (top-level Go module): get a control
+  plane up in an environment (Proxmox today; Vultr/Hetzner providers come later) and a door
+  to it; the shared provisioning engine lives in `platform/provisioning/box`. World bring-up
+  after bootstrap is `freehold build` from any box via the CP.
 - `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
@@ -182,12 +186,17 @@ changelog.
   `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
   declares `rust-version = "1.94"`). Rust is used for the privileged exec endpoint, the
   byte-exact contract oracle, and the runner's own fixtures — nothing else.
-- Go — three modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
+- Go — four modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
   - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
-    console/relay/state): `cd contract && go build ./... && go vet ./... && go test ./...`
+    console/relay/state/coords): `cd contract && go build ./... && go vet ./... && go test ./...`
   - `platform/` (`freehold/platform` — the evolving world: services/provisioning/agents/
-    migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`
+    migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`;
+    `provisioning/box` holds the SHARED provisioning engine (LXC boot, storage plane,
+    deploy-cp, the CP bootstrap `Engine`) — imported by BOTH the install CLI and the
+    operator CLI, so it stays control-plane-free.
+  - `install/` (`freehold/install` — the CP bootstrap CLI): `cd install && go build ./... &&
+    go vet ./... && go test ./...`
   - `control-plane/` (`freehold/control-plane` — the mechanism: api/cli/secret-management;
     the `freehold` binary, the TUI, and the `harness/` release
     gate): `cd control-plane && go build ./... && go vet ./... && go test ./...`;
@@ -197,15 +206,17 @@ changelog.
   -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools`): the CP server ships
   its own binary to agent pods, which run Alpine/musl — a glibc-dynamic build "silently not
   found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
-- **The full binary set a `rebuild`/`teardown` box needs** (`resolveRebuildBins` fails the
-  pipeline until every sibling is present, and prints the exact build one-liner):
+- **The full binary set a `rebuild`/`teardown`/`install` box needs** (`box.ResolveBins` fails
+  the pipeline until every sibling is present, and prints the exact build one-liner):
   - `target/debug/freehold` (the CLI+TUI) — `go build -C control-plane -o target/debug/freehold ./cli/cmd/freehold`
+  - `target/debug/freehold-install` (the CP bootstrap CLI) — `go build -C install -o target/debug/freehold-install ./cmd/freehold-install`
   - `target/debug/freehold-console` **and** `target/release/freehold-console` (the Go CP CLI
     the box-side provision/grant/adopt/add-secret/revoke stages call, and what `deploy-cp`
     ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
   - `target/{debug,release}/runner` (Rust) — `cargo build --bin runner && cargo build --release --bin runner`
   - `target/release/freehold-agent-tools` (static, above)
-  This is the same set `freehold build`/`freehold teardown` resolve as siblings of the running
+  This is the same set `freehold build`/`freehold teardown`/`freehold-install bootstrap`
+  resolve as siblings of the running
   binary — a box doing world bring-up needs all five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
 - `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and

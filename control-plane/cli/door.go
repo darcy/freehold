@@ -10,6 +10,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/control-plane/cli/flows"
+	"freehold/platform/provisioning/box"
 )
 
 // doorCmd is the box's DOOR_SPEC surface: authorize/revoke its OWN public door
@@ -44,9 +45,9 @@ func init() {
 // calls (DOOR_SPEC §3), so the box's door is the box's signing identity. The
 // private half never leaves the box; only the public line is presented.
 func doorPubkey() (string, error) {
-	id, err := flows.LoadIdentity(rbOpsDir())
+	id, err := flows.LoadIdentity(box.OpsDir())
 	if err != nil {
-		return "", fmt.Errorf("this box has no ops identity at %s (run `freehold login` to materialize it): %v", rbOpsDir(), err)
+		return "", fmt.Errorf("this box has no ops identity at %s (run `freehold login` to materialize it): %v", box.OpsDir(), err)
 	}
 	seed, err := hex.DecodeString(id.NostrSecretHex)
 	if err != nil || len(seed) != 32 {

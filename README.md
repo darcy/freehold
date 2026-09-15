@@ -65,8 +65,8 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       world_* + grant_agent; grant_agent publishes the runner-roster
                       change with the console's own channel-owner identity)
   cli/                the operator interface: tui/ (bubbletea dashboard), login/
-                      (freehold login/logout), flows/, teardown/, bootstrap-cp/
-                      (the day-0 mechanism install), cmd/ (the freehold binary)
+                      (freehold login/logout), flows/, teardown/, cmd/ (the freehold
+                      binary — CP bootstrap lives in `install/`)
   secret-management/  provision/rotate/revoke/grant (the provisioner)
   core/               (Rust) the byte-exact contract oracle + harness/ (the
                       Go↔Rust byte-gate, test-only)
@@ -142,7 +142,7 @@ control-plane/acceptance/  the Chunk-1/2 acceptance gate in Go (`go test ./accep
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(three modules: `contract/`, `control-plane/`, `platform/`) + `mise`
+(four modules: `contract/`, `platform/`, `install/`, `control-plane/`) + `mise`
 (the justfile recipes run `go`/`rust` through `mise exec` so the right
 toolchain versions are guaranteed — `curl https://mise.run | sh` or `brew
 install mise`) + `just` ([just](https://github.com/casey/just) — `cargo
@@ -165,7 +165,7 @@ just test
 
 # the manual equivalents, if you don't use just:
 cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,testkit,core/harness/oracle} + `cargo build --bin runner` for the acceptance gate
-for m in contract platform control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the three Go modules + the byte-exact harness gate + the Go acceptance gate
+for m in contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the four Go modules + the byte-exact harness gate + the Go acceptance gate
 cargo fmt --all --check          # CI gate
 ```
 

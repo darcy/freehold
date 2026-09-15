@@ -166,8 +166,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **The mechanism is one Go module** (go 1.25): `api/` (the unified scoped
     API — agent toolset + world actions), `cli/` (the operator interface:
-    `tui/`, `login/`, `flows/`, `teardown/`, `bootstrap-cp/`, `cmd/` for the
-    `freehold` binary), `secret-management/`
+    `tui/`, `login/`, `flows/`, `teardown/`, `cmd/` for the
+    `freehold` binary — the CP bootstrap lives in the `install/` module), `secret-management/`
     (provision/rotate/revoke/grant), and the Rust crates `core/` (the
     byte-exact contract oracle + the `harness/` Go byte-gate), `runner/`, and
     `testkit/` (the runner's hermetic fixtures). The Chunk-1/2 acceptance gate
@@ -245,9 +245,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
      `registry.json`) rides that runner as a script migration, driven by the
      `freehold-agent-tools registry import-console` subcommand.
 
-*   **`control-plane/cli/rebuild.go` is the slim CP-driven build.**
-    `collectAnswers`/the install wizard → `rebuildFlags` → `newRebuildEngine` →
-    `runBootstrap`/`runBuild`:
+*   **`platform/provisioning/box` is the shared provisioning engine.**
+    `install`'s wizard → `box.Flags` → `box.NewEngine` → `box.RunBootstrap`
+    (CP bootstrap); `freehold build` runs the world through the CP:
     door → runner → durable plane → boot the CP LXC → **`bootstrap`** (box one)
     = the CP only (console + co-located runner) — no secrets are collected.
     **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS
@@ -550,11 +550,12 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     host, no state dir).
 
 3.  **Chunk 3 — Rust→Go refactor + the three-module tree:** the operator
-    surface is Go across three modules — `contract/` (`freehold/contract`, the
-    shared wire/trust leaf), `control-plane/` (`freehold/control-plane`, the
-    stable mechanism), and `platform/` (`freehold/platform`, the evolving
-    world) — with the Rust `core`/`runner` kept as a byte-exact reference
-    oracle; `install` becomes a thin front-end to the rebuild engine
+    surface is Go across four modules — `contract/` (`freehold/contract`, the
+    shared wire/trust leaf), `platform/` (`freehold/platform`, the evolving world),
+    `install/` (`freehold/install`, the CP bootstrap CLI), and `control-plane/`
+    (`freehold/control-plane`, the stable mechanism) — with the Rust
+    `core`/`runner` kept as a byte-exact reference oracle; `freehold-install`
+    drives the shared box engine directly
     (`eng.stdin = ui.in`); teardown keeps the config intact (`PruneLxcCoords`
     is never written to disk); the plane stage is never skipped
     (`TestManagedForFlags`, `TestWorldManaged`, `TestParsePctGateway`,
@@ -567,7 +568,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     `roadmap/POC_CHUNK4.md`), with the CP's `freehold-agent-tools` toolset
     and the durable-plane identity/memory guarantees; `freehold-teardown`
     destroys LXCs but keeps the **recorded coordinates**; `freehold-install`
-    is a thin front-end to the same engine.
+    drives the shared box engine for CP bootstrap.
 
 5.  **Chunk 5 — Agent workspaces + git/GitHub:** one workspace at
     `/srv/data/<agent>/` (`.freehold/config.json` + `SKILL.md`);
