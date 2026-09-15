@@ -3,6 +3,7 @@ package acceptance
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +82,30 @@ func TestChannelSyncAndQueryMetaRoundtrip(t *testing.T) {
 	}
 	if !containsStr(roster, consolePub) {
 		t.Fatal("the console owner is a member of the channel it created")
+	}
+}
+
+func TestRosterReadRequiresMembership(t *testing.T) {
+	base := t.TempDir()
+	cpDir := filepath.Join(base, "cp")
+	store := openStore(t, cpDir)
+	ensureConsoleIdentity(t, cpDir)
+	relayURL, _ := spawnRelay(t)
+
+	insertRunner(t, store, "relaybox", state.RunnerActive)
+	if err := provisioner.SyncRunnerChannel(store, relayURL, "relaybox", cpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller who is not a member (and not the owner) must be refused.
+	outsider := make([]byte, 32)
+	for i := range outsider {
+		outsider[i] = 0x7f
+	}
+	if _, err := relay.QueryChannelRoster(relayURL, RelayPubkey(), hex64('r'), outsider); err == nil {
+		t.Fatal("non-member roster read must fail closed")
+	} else if !strings.Contains(err.Error(), "403") && !strings.Contains(err.Error(), "membership") {
+		t.Fatalf("expected a membership refusal, got %v", err)
 	}
 }
 
