@@ -1382,34 +1382,36 @@ func BuildWorldStatus(spec *Spec, reg *agenttools.Registry, consoleStateDir stri
 // returning its id + display name. An empty name is the default freehold
 // channel, which is ENSURED because the first agent to be created may be the
 // one that brings it into existence.
-func (s *Spec) ensureAgentChannel(nSec []byte, channel string) (id, displayName string, err error) {
+func (s *Spec) ensureAgentChannel(nSec []byte, channel string) (id, displayName string, created bool, err error) {
 	authURL := s.RelayAuthURL
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
 	if strings.TrimSpace(channel) == "" {
 		if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
-			return "", "", fmt.Errorf("ensure #freehold channel: %w", err)
+			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
 		}
-		return relayFreeholdChannel, "#freehold", nil
+		return relayFreeholdChannel, "#freehold", false, nil
 	}
 	name := "#" + strings.TrimPrefix(strings.TrimSpace(channel), "#")
 	// A relay read error must NOT be mistaken for "absent" (that would create a
 	// duplicate of an existing channel) — fail the create instead.
 	existingID, existingName, ok, err := relay.FindChannelAuth(s.RelayURL, authURL, s.Sec, channel)
 	if err != nil {
-		return "", "", fmt.Errorf("look up channel %q: %w", channel, err)
+		return "", "", false, fmt.Errorf("look up channel %q: %w", channel, err)
 	}
 	if ok {
-		return existingID, existingName, nil
+		return existingID, existingName, false, nil
 	}
 	id = relay.ChannelIDFromName(channel)
 	if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, id, name); err != nil {
-		return "", "", fmt.Errorf("create channel %s: %w", name, err)
+		return "", "", false, fmt.Errorf("create channel %s: %w", name, err)
 	}
-	return id, name, nil
+	return id, name, true, nil
 }
 
+// reconcileChannel force-publishes a channel's discovery/roster events on the
+// relay (kind 39000/39001/39002) via buzz-admin, so roster changes are accepted.
 // (which registers the registry row). Branches to the CPA manifest/prompt when
 // the name is the CPA's, so stageCpa's dogfooded create_agent produces the CPA.
 func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
@@ -1474,18 +1476,28 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		// Resolve the target channel by name, creating it (owned by this agent)
 		// when absent. Empty channel = the default freehold channel.
-		channelID, channelName, err := spec.ensureAgentChannel(nSec, channel)
+		channelID, channelName, created, err := spec.ensureAgentChannel(nSec, channel)
 		if err != nil {
 			return "", err
 		}
-		if err := relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID); err != nil {
-			return "", fmt.Errorf("join %s: %w", channelName, err)
-		}
-		// Add the operator (the requester) to the channel. Best-effort: the agent
-		// owns a channel it just created, but a pre-existing channel may not grant
-		// it rights (the operator is already a member of their own channels).
-		if spec.OwnerPub != "" {
-			_ = relay.PutUserAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
+		if created {
+			// A newly created channel: the agent is its owner (already a member),
+			// so JOIN it, then ADD the operator explicitly (member ops on an
+			// explicit channel id — NOT a pubkey-derived one).
+			_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			if spec.OwnerPub != "" {
+				if perr := relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub); perr != nil {
+					return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
+				}
+			}
+		} else {
+			// Pre-existing channel: join it (open channels allow free joins; a
+			// private one may refuse — best-effort) and try to add the operator
+			// (the agent may not own a channel it didn't create).
+			_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			if spec.OwnerPub != "" {
+				_ = relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
+			}
 		}
 
 		if err := spec.run(agent.AgentIdentityScript(spec.K3sVmid, id.NostrSecretHex, spec.OwnerPub, name), 120); err != nil {

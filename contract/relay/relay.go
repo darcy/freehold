@@ -299,6 +299,20 @@ func RemoveUser(relayURL string, consoleSecret []byte, runnerNostrPubkey, member
 	return membershipCommand(relayURL, consoleSecret, wire.RemoveUser, runnerNostrPubkey, memberPubkey)
 }
 
+// PutUserChannelAuth adds a member to an EXPLICIT channel id (the h tag is the
+// id itself), for channels not keyed by a runner pubkey — unlike PutUserAuth,
+// which derives the channel id from the runner pubkey.
+func PutUserChannelAuth(dialURL, authURL string, secret []byte, channelID, memberPubkey string) error {
+	tags := [][]string{{"h", channelID}, {"p", memberPubkey}}
+	return publishEventAuth(dialURL, authURL, secret, wire.PutUser, tags, "")
+}
+
+// RemoveUserChannelAuth removes a member from an EXPLICIT channel id.
+func RemoveUserChannelAuth(dialURL, authURL string, secret []byte, channelID, memberPubkey string) error {
+	tags := [][]string{{"h", channelID}, {"p", memberPubkey}}
+	return publishEventAuth(dialURL, authURL, secret, wire.RemoveUser, tags, "")
+}
+
 // RemoveUserAuth is RemoveUser with a separate NIP-98 auth URL.
 func RemoveUserAuth(dialURL, authURL string, consoleSecret []byte, runnerNostrPubkey, memberPubkey string) error {
 	return membershipCommandAuth(dialURL, authURL, consoleSecret, wire.RemoveUser, runnerNostrPubkey, memberPubkey)
