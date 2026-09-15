@@ -1,4 +1,4 @@
-package cli
+package box
 
 import (
 	"bytes"
@@ -54,14 +54,14 @@ func TestParseGB(t *testing.T) {
 // placementEngine builds a stagePlacement-ready engine: the runBin seam
 // answers the `storage resolve` call with the given contract lines; in/out
 // are the operator's terminal.
-func placementEngine(resolveOut, input string, flags rebuildFlags) *rebuildEngine {
-	e := &rebuildEngine{
-		f:    flags,
-		bins: rebuildBins{Self: "self"},
-		out:  &bytes.Buffer{},
-		in:   strings.NewReader(input),
+func placementEngine(resolveOut, input string, flags Flags) *Engine {
+	e := &Engine{
+		F:    flags,
+		Bins: Bins{Self: "self"},
+		Out:  &bytes.Buffer{},
+		In:   strings.NewReader(input),
 	}
-	e.runBin = func(bin string, args []string) (bool, string) {
+	e.RunBin = func(bin string, args []string) (bool, string) {
 		if len(args) >= 2 && args[0] == "storage" && args[1] == "resolve" {
 			return true, resolveOut
 		}
@@ -74,7 +74,7 @@ const resolveLvmDetected = "STORAGE-POOL: pve\nSTORAGE-THINPOOL: data\n"
 const resolveLvmNone = "STORAGE-POOL: pve\nSTORAGE-THINPOOL: -\n"
 
 func TestStagePlacementFlagReuse(t *testing.T) {
-	e := placementEngine(resolveLvmDetected, "", rebuildFlags{thinPool: "data"})
+	e := placementEngine(resolveLvmDetected, "", Flags{ThinPool: "data"})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestStagePlacementFlagReuse(t *testing.T) {
 }
 
 func TestStagePlacementFlagCarve(t *testing.T) {
-	e := placementEngine(resolveLvmDetected, "", rebuildFlags{thinPool: "fh-new", poolSizeGB: 30})
+	e := placementEngine(resolveLvmDetected, "", Flags{ThinPool: "fh-new", PoolSizeGB: 30})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestStagePlacementFlagCarve(t *testing.T) {
 func TestStagePlacementNoFlagNoPoolCarvesDefault(t *testing.T) {
 	// The wiped-box case: the VG has no thin pool, no flag — carve the
 	// default pool name (never reuse "-").
-	e := placementEngine(resolveLvmNone, "", rebuildFlags{})
+	e := placementEngine(resolveLvmNone, "", Flags{})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestStagePlacementNoFlagNoPoolCarvesDefault(t *testing.T) {
 }
 
 func TestStagePlacementYesReusesDetected(t *testing.T) {
-	e := placementEngine(resolveLvmDetected, "", rebuildFlags{yes: true})
+	e := placementEngine(resolveLvmDetected, "", Flags{Yes: true})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +120,7 @@ func TestStagePlacementYesReusesDetected(t *testing.T) {
 }
 
 func TestStagePlacementInteractiveReuse(t *testing.T) {
-	e := placementEngine(resolveLvmDetected, "r\n", rebuildFlags{})
+	e := placementEngine(resolveLvmDetected, "r\n", Flags{})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestStagePlacementInteractiveReuse(t *testing.T) {
 }
 
 func TestStagePlacementInteractiveBlankReuse(t *testing.T) {
-	e := placementEngine(resolveLvmDetected, "\n", rebuildFlags{})
+	e := placementEngine(resolveLvmDetected, "\n", Flags{})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestStagePlacementInteractiveBlankReuse(t *testing.T) {
 func TestStagePlacementInteractiveCarveAtSize(t *testing.T) {
 	// A name answer takes a SECOND prompt: the carve size. "30" must land
 	// in poolSizeGB (the earlier bug parsed the NAME as a GB).
-	e := placementEngine(resolveLvmDetected, "fh-new\n30\n", rebuildFlags{poolSizeGB: 40})
+	e := placementEngine(resolveLvmDetected, "fh-new\n30\n", Flags{PoolSizeGB: 40})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -152,26 +152,26 @@ func TestStagePlacementInteractiveCarveAtSize(t *testing.T) {
 	if got.thinPool != "fh-new" || !got.created {
 		t.Errorf("named pool answer => carve, got %+v", got)
 	}
-	if e.f.poolSizeGB != 30 {
-		t.Errorf("carve size must come from the second prompt, got %d", e.f.poolSizeGB)
+	if e.F.PoolSizeGB != 30 {
+		t.Errorf("carve size must come from the second prompt, got %d", e.F.PoolSizeGB)
 	}
 }
 
 func TestStagePlacementInteractiveCarveBlankSizeKeepsDefault(t *testing.T) {
-	e := placementEngine(resolveLvmDetected, "fh-new\n\n", rebuildFlags{poolSizeGB: 40})
+	e := placementEngine(resolveLvmDetected, "fh-new\n\n", Flags{PoolSizeGB: 40})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.created || e.f.poolSizeGB != 40 {
-		t.Errorf("blank size => default 40 kept, got %+v / %d", got, e.f.poolSizeGB)
+	if !got.created || e.F.PoolSizeGB != 40 {
+		t.Errorf("blank size => default 40 kept, got %+v / %d", got, e.F.PoolSizeGB)
 	}
 }
 
 func TestStagePlacementInteractiveTypeDetectedNameAdopts(t *testing.T) {
 	// Typing the detected pool's name verbatim is a no-op carve request:
 	// it must ADOPT (created=false), not re-carve beside it.
-	e := placementEngine(resolveLvmDetected, "data\n", rebuildFlags{})
+	e := placementEngine(resolveLvmDetected, "data\n", Flags{})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +191,7 @@ func TestStagePlacementInteractiveTypeDetectedNameAdopts(t *testing.T) {
 const resolveLvmTwoPools = "STORAGE-POOL: pve\nSTORAGE-THINPOOL: data,other\n"
 
 func TestStagePlacementFlagAdoptsSecondPoolInTwoPoolVG(t *testing.T) {
-	e := placementEngine(resolveLvmTwoPools, "", rebuildFlags{thinPool: "other"})
+	e := placementEngine(resolveLvmTwoPools, "", Flags{ThinPool: "other"})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestStagePlacementFlagAdoptsSecondPoolInTwoPoolVG(t *testing.T) {
 }
 
 func TestStagePlacementFlagCarvesUnknownNameInTwoPoolVG(t *testing.T) {
-	e := placementEngine(resolveLvmTwoPools, "", rebuildFlags{thinPool: "fh-new", poolSizeGB: 30})
+	e := placementEngine(resolveLvmTwoPools, "", Flags{ThinPool: "fh-new", PoolSizeGB: 30})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestStagePlacementFlagCarvesUnknownNameInTwoPoolVG(t *testing.T) {
 func TestStagePlacementYesStillReusesFirstPool(t *testing.T) {
 	// The --yes default path is untouched by the membership change: it
 	// reuses the FIRST detected pool and never claims it created.
-	e := placementEngine(resolveLvmTwoPools, "", rebuildFlags{yes: true})
+	e := placementEngine(resolveLvmTwoPools, "", Flags{Yes: true})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +228,7 @@ func TestStagePlacementYesStillReusesFirstPool(t *testing.T) {
 func TestStagePlacementInteractiveTypeSecondPoolNameAdopts(t *testing.T) {
 	// Typing an EXISTING pool's name (even the non-first one) must adopt,
 	// not ask for a carve size.
-	e := placementEngine(resolveLvmTwoPools, "other\n", rebuildFlags{})
+	e := placementEngine(resolveLvmTwoPools, "other\n", Flags{})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -239,8 +239,8 @@ func TestStagePlacementInteractiveTypeSecondPoolNameAdopts(t *testing.T) {
 }
 
 func TestStagePlacementResolveFailure(t *testing.T) {
-	e := placementEngine("", "", rebuildFlags{})
-	e.runBin = func(string, []string) (bool, string) { return false, "boom" }
+	e := placementEngine("", "", Flags{})
+	e.RunBin = func(string, []string) (bool, string) { return false, "boom" }
 	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "storage resolution failed") {
 		t.Errorf("resolve failure must abort, got %v", err)
 	}
@@ -249,7 +249,7 @@ func TestStagePlacementResolveFailure(t *testing.T) {
 func TestStagePlacementZfsSkipsGate(t *testing.T) {
 	// ZFS resolve emits no STORAGE-THINPOOL line: the gate must NOT carve
 	// (datasets carve themselves) and must NOT claim a created pool.
-	e := placementEngine("STORAGE-POOL: rpool\n", "", rebuildFlags{yes: true})
+	e := placementEngine("STORAGE-POOL: rpool\n", "", Flags{Yes: true})
 	got, err := e.stagePlacement()
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestStagePlacementZfsSkipsGate(t *testing.T) {
 }
 
 func TestStagePlacementZfsRejectsThinPoolFlag(t *testing.T) {
-	e := placementEngine("STORAGE-POOL: rpool\n", "", rebuildFlags{thinPool: "x"})
+	e := placementEngine("STORAGE-POOL: rpool\n", "", Flags{ThinPool: "x"})
 	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "LVM-thin") {
 		t.Errorf("--thin-pool on ZFS must be an actionable error, got %v", err)
 	}
@@ -273,10 +273,10 @@ func TestStagePlacementZfsRejectsThinPoolFlag(t *testing.T) {
 
 // repointEngine builds a stageLocalLvmRepoint-ready engine over a fake
 // storage.cfg whose local-lvm block starts at `data`.
-func repointEngine(initial string) (*rebuildEngine, *string) {
+func repointEngine(initial string) (*Engine, *string) {
 	cfg := initial
-	e := &rebuildEngine{bins: rebuildBins{Self: "self"}, out: &bytes.Buffer{}}
-	e.runBin = func(bin string, args []string) (bool, string) {
+	e := &Engine{Bins: Bins{Self: "self"}, Out: &bytes.Buffer{}}
+	e.RunBin = func(bin string, args []string) (bool, string) {
 		if len(args) < 2 || args[0] != "exec" {
 			return false, "unexpected call: " + strings.Join(args, " ")
 		}

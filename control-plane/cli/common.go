@@ -129,3 +129,11 @@ func ensureAgentIdentity(dir string) {
 	}
 	_ = mintAgentIdentity(dir)
 }
+
+// optOf returns a pointer to s, or nil when empty (optional flag helper).
+func optOf(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}

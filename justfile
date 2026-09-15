@@ -6,10 +6,13 @@
 
 set shell := ["bash", "-c"]
 
-# Build every binary a rebuild/teardown box needs (freehold + 4 siblings).
+# Build every binary a rebuild/teardown/install box needs (freehold +
+# freehold-install + 4 siblings).
 build:
     @echo "→ freehold (CLI + TUI)"
     @cd control-plane && mise exec go@1.25.0 -- go build -o ../target/debug/freehold ./cli/cmd/freehold
+    @echo "→ freehold-install (CP bootstrap CLI)"
+    @cd install && mise exec go@1.25.0 -- go build -o ../target/debug/freehold-install ./cmd/freehold-install
     @echo "→ freehold-console (debug + release — the Go CP CLI the box stages call, and what deploy-cp ships)"
     @cd control-plane && mise exec go@1.25.0 -- go build -o ../target/debug/freehold-console ./api/cmd/freehold-console
     @cd control-plane && mise exec go@1.25.0 -- go build -o ../target/release/freehold-console ./api/cmd/freehold-console
@@ -20,27 +23,28 @@ build:
     @cd control-plane && mise exec go@1.25.0 -- sh -c 'CGO_ENABLED=0 go build -o ../target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools'
     @echo "✓ all binaries built"
 
-# Install the freehold CLI + ALL its siblings onto PATH (~/.cargo/bin) so the
-# installed `freehold build`/`teardown` resolve the sibling binaries
-# (resolveRebuildBins looks for them relative to the running executable:
-# ~/.cargo/bin/{freehold-console,runner} + ~/.cargo/release/{freehold-console,
-# runner,freehold-agent-tools}). The operator then runs `freehold build` to
-# bring the world up.
+# Install the freehold + freehold-install CLIs + ALL their siblings onto PATH
+# (~/.cargo/bin) so the installed binaries resolve the sibling binaries
+# (ResolveBins looks for them relative to the running executable). The operator
+# runs `freehold build` for world bring-up; `freehold-install bootstrap` for CP
+# creation (box one).
 install: build
     mkdir -p ~/.cargo/bin ~/.cargo/release
-    # install (temp+rename, not cp) so a RUNNING sibling (e.g. the
-    # provisioning runner) is replaced atomically instead of "Text file busy".
+    # install (temp+rename, not cp) so a RUNNING sibling is replaced atomically
+    # instead of "Text file busy".
     install -m 755 target/debug/freehold ~/.cargo/bin/freehold
+    install -m 755 target/debug/freehold-install ~/.cargo/bin/freehold-install
     install -m 755 target/debug/freehold-console ~/.cargo/bin/freehold-console
     install -m 755 target/debug/runner ~/.cargo/bin/runner
     install -m 755 target/release/freehold-console ~/.cargo/release/freehold-console
     install -m 755 target/release/runner ~/.cargo/release/runner
     install -m 755 target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
-    @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release)"
+    @echo "✓ freehold + freehold-install + siblings installed (~/.cargo/bin + ~/.cargo/release)"
 
-# Verify every sibling `freehold build`/`teardown` resolves is present.
+# Verify every sibling the CLIs resolve is present.
 check-siblings:
     @test -x target/debug/freehold && echo "ok  target/debug/freehold" || (echo "MISSING target/debug/freehold (run: just build)"; exit 1)
+    @test -x target/debug/freehold-install && echo "ok  target/debug/freehold-install" || (echo "MISSING target/debug/freehold-install (run: just build)"; exit 1)
     @test -x target/debug/freehold-console && echo "ok  target/debug/freehold-console" || (echo "MISSING target/debug/freehold-console (run: just build)"; exit 1)
     @test -x target/release/freehold-console && echo "ok  target/release/freehold-console" || (echo "MISSING target/release/freehold-console (run: just build)"; exit 1)
     @test -x target/debug/runner && echo "ok  target/debug/runner" || (echo "MISSING target/debug/runner (run: just build)"; exit 1)
@@ -55,9 +59,10 @@ test:
     @mise exec rust@1.98.0 -- cargo fmt --all --check
     @mise exec rust@1.98.0 -- cargo build --workspace
     @mise exec rust@1.98.0 -- cargo test --workspace
-    @echo "→ Go build / vet / test (contract, platform, control-plane)"
+    @echo "→ Go build / vet / test (contract, platform, install, control-plane)"
     @cd contract && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @cd platform && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
+    @cd install && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @cd control-plane && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @echo "→ Chunk-1 acceptance (hermetic)"
     @mise exec rust@1.98.0 -- cargo run -p freehold-acceptance

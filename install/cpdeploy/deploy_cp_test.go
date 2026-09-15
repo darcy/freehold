@@ -1,4 +1,4 @@
-package deploy
+package cpdeploy
 
 import (
 	"encoding/json"

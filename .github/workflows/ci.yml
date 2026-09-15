@@ -43,6 +43,10 @@ jobs:
         working-directory: platform
         run: go build ./...
 
+      - name: Go build (install)
+        working-directory: install
+        run: go build ./...
+
       - name: Go build (control-plane)
         working-directory: control-plane
         run: go build ./...
@@ -53,6 +57,10 @@ jobs:
 
       - name: Go vet (platform)
         working-directory: platform
+        run: go vet ./...
+
+      - name: Go vet (install)
+        working-directory: install
         run: go vet ./...
 
       - name: Go vet (control-plane)
@@ -66,6 +74,10 @@ jobs:
       - name: Go test (platform)
         working-directory: platform
         run: go test ./...
+
+      - name: Go test (install)
+        working-directory: install
+        run: go test ./...  
 
       - name: Go test (control-plane)
         working-directory: control-plane

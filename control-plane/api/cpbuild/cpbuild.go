@@ -51,7 +51,7 @@ const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 // <url>/freehold-agent-tools-binary off the agent-tools server itself, so
 // pointing it at the console's port makes the fetch 404 and silently falls
 // back to plain buzz-dev-mcp (no create_agent).
-const AgentToolsPort = "8089"
+const AgentToolsPort = config.AgentToolsPort
 
 type Spec struct {
 	StateDir       string

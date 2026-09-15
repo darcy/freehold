@@ -1,11 +1,10 @@
-package cli
+package box
 
 import "reflect"
 
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,7 +12,6 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
-	"freehold/control-plane/api/cpbuild"
 )
 
 // ---- storage-line parsing (stage_storage contract lines) -------------------
@@ -214,16 +212,16 @@ func TestRecordPostWorld(t *testing.T) {
 	}
 	relayName := lxcName(domain, "relay")
 	k3sName := lxcName(domain, "k3s")
-	e := &rebuildEngine{
-		f: rebuildFlags{
-			configPath:     cfgPath,
-			relayDomain:    domain,
-			proxyIP:        "192.168.30.8/24",
-			operatorPubkey: strings.Repeat("ab", 32),
+	e := &Engine{
+		F: Flags{
+			ConfigPath:     cfgPath,
+			RelayDomain:    domain,
+			ProxyIP:        "192.168.30.8/24",
+			OperatorPubkey: strings.Repeat("ab", 32),
 		},
-		bins: rebuildBins{Self: "freehold"},
-		out:  &bytes.Buffer{},
-		runBin: func(bin string, args []string) (bool, string) {
+		Bins: Bins{Self: "freehold"},
+		Out:  &bytes.Buffer{},
+		RunBin: func(bin string, args []string) (bool, string) {
 			joined := strings.Join(args, " ")
 			switch {
 			case strings.Contains(joined, "pct list"):
@@ -238,7 +236,7 @@ func TestRecordPostWorld(t *testing.T) {
 			return false, "unexpected: " + joined
 		},
 	}
-	if err := e.recordPostWorld(); err != nil {
+	if err := e.RecordPostWorld(); err != nil {
 		t.Fatal(err)
 	}
 	got, err := config.Load(cfgPath)
@@ -320,7 +318,7 @@ func TestRecordLxcFreshLoadClobber(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := &rebuildEngine{f: rebuildFlags{configPath: path, domain: "world.test"}}
+	e := &Engine{F: Flags{ConfigPath: path, Domain: "world.test"}}
 	got, err := e.recordLxcWith("cp", func(role string) (uint32, string, error) {
 		return 101, "10.0.0.9/24", nil
 	})
@@ -350,7 +348,7 @@ func TestRecordLxcFreshLoadClobber(t *testing.T) {
 // TestRecordLxcBailsWithoutConfig: recording with no config on disk must
 // fail actionably, not silently drop the coordinates.
 func TestRecordLxcBailsWithoutConfig(t *testing.T) {
-	e := &rebuildEngine{f: rebuildFlags{configPath: filepath.Join(t.TempDir(), "nope.toml")}}
+	e := &Engine{F: Flags{ConfigPath: filepath.Join(t.TempDir(), "nope.toml")}}
 	_, err := e.recordLxcWith("relay", func(string) (uint32, string, error) {
 		return 100, "10.0.0.8/24", nil
 	})
@@ -421,10 +419,10 @@ func u32(v uint32) *uint32 { return &v }
 // derived: each is exactly what the operator supplies, and the CPA origin
 // follows the relay's own host. There is no world/base domain anymore.
 func TestFromAnswersRelayWsURLInternal(t *testing.T) {
-	e := &rebuildEngine{f: rebuildFlags{
-		relayDomain: "relay.freehold-test.darcydev.net",
-		cpDomain:    "cp.freehold-test.darcydev.net",
-		agentName:   "cpa",
+	e := &Engine{F: Flags{
+		RelayDomain: "relay.freehold-test.darcydev.net",
+		CpDomain:    "cp.freehold-test.darcydev.net",
+		AgentName:   "cpa",
 	}}
 	cfg := e.fromAnswers()
 	if cfg.RelayURL != "https://relay.freehold-test.darcydev.net" {
@@ -443,7 +441,7 @@ func TestFromAnswersRelayWsURLInternal(t *testing.T) {
 // empty answer must yield a blank host and merge MUST keep the recorded one
 // rather than clobber it with a bare "https://".
 func TestFromAnswersEmptyDomainIsBlankAndPreservesPrev(t *testing.T) {
-	e := &rebuildEngine{f: rebuildFlags{}}
+	e := &Engine{F: Flags{}}
 	ans := e.fromAnswers()
 	if ans.RelayURL != "" || ans.RelayWsURL != "" || ans.CPURL != "" {
 		t.Fatalf("empty domains must build no host, got relay=%q ws=%q cp=%q", ans.RelayURL, ans.RelayWsURL, ans.CPURL)
@@ -458,7 +456,7 @@ func TestFromAnswersEmptyDomainIsBlankAndPreservesPrev(t *testing.T) {
 		t.Errorf("empty answers must preserve prev hosts, got relay=%q ws=%q cp=%q", got.RelayURL, got.RelayWsURL, got.CPURL)
 	}
 	// A supplied domain still wins over prev.
-	e.f.relayDomain, e.f.cpDomain = "relay.new.test", "cp.new.test"
+	e.F.RelayDomain, e.F.CpDomain = "relay.new.test", "cp.new.test"
 	got = mergeFromAnswers(e.fromAnswers(), prev)
 	if got.RelayURL != "https://relay.new.test" || got.CPURL != "https://cp.new.test" {
 		t.Errorf("answers must win when present, got relay=%q cp=%q", got.RelayURL, got.CPURL)
@@ -479,15 +477,15 @@ func TestWorldConfigSelfURLPointsAtAgentTools(t *testing.T) {
 	}
 	cfg.Lxc.Cp.Ip = &cpIP
 
-	raw := (&rebuildEngine{}).worldConfigJSON(cfg)
+	raw := (&Engine{}).worldConfigJSON(cfg)
 	if raw == "" {
 		t.Fatal("worldConfigJSON returned empty")
 	}
-	var c cpbuild.Coords
+	var c config.Coords
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
 		t.Fatalf("unmarshal coords: %v", err)
 	}
-	want := "http://" + cpIP + ":" + cpbuild.AgentToolsPort
+	want := "http://" + cpIP + ":" + config.AgentToolsPort
 	if c.SelfURL != want {
 		t.Errorf("SelfURL = %q, want the agent-tools URL %q", c.SelfURL, want)
 	}
@@ -639,13 +637,13 @@ func TestStageVerifyReSurfacesDoorKey(t *testing.T) {
 	want := sealedRunnerPackage(t, dir, "proxmox-box")
 
 	authFail := "tool error: ssh error: authentication failed (remaining methods: MethodSet([PublicKey, Password]))"
-	e := &rebuildEngine{
-		f:    rebuildFlags{yes: true, target: "proxmox-box", host: "root@192.168.30.224", addr: "127.0.0.1:8787"},
-		bins: rebuildBins{Self: "self"},
-		out:  &bytes.Buffer{},
-		in:   strings.NewReader(""),
+	e := &Engine{
+		F:    Flags{Yes: true, Target: "proxmox-box", Host: "root@192.168.30.224", Addr: "127.0.0.1:8787"},
+		Bins: Bins{Self: "self"},
+		Out:  &bytes.Buffer{},
+		In:   strings.NewReader(""),
 	}
-	e.runBin = func(bin string, args []string) (bool, string) {
+	e.RunBin = func(bin string, args []string) (bool, string) {
 		return false, authFail
 	}
 	err := e.stageVerify()
@@ -660,7 +658,7 @@ func TestStageVerifyReSurfacesDoorKey(t *testing.T) {
 	}
 
 	// A NON-auth exec failure keeps the plain bail (no key re-surface).
-	e.runBin = func(bin string, args []string) (bool, string) {
+	e.RunBin = func(bin string, args []string) (bool, string) {
 		return false, "tool error: ssh error: connection refused"
 	}
 	err = e.stageVerify()
@@ -674,13 +672,13 @@ func TestStageVerifyReSurfacesDoorKey(t *testing.T) {
 func TestStageVerifyUnrecoverable(t *testing.T) {
 	home := t.TempDir() // world home with NO runner package at all
 	t.Setenv("FREEHOLD_HOME", home)
-	e := &rebuildEngine{
-		f:    rebuildFlags{yes: true, target: "proxmox-box", host: "root@h", addr: "127.0.0.1:8787"},
-		bins: rebuildBins{Self: "self"},
-		out:  &bytes.Buffer{},
-		in:   strings.NewReader(""),
+	e := &Engine{
+		F:    Flags{Yes: true, Target: "proxmox-box", Host: "root@h", Addr: "127.0.0.1:8787"},
+		Bins: Bins{Self: "self"},
+		Out:  &bytes.Buffer{},
+		In:   strings.NewReader(""),
 	}
-	e.runBin = func(bin string, args []string) (bool, string) {
+	e.RunBin = func(bin string, args []string) (bool, string) {
 		return false, "tool error: ssh error: authentication failed (remaining methods: MethodSet([PublicKey]))"
 	}
 	err := e.stageVerify()
@@ -695,24 +693,24 @@ func TestStageVerifyUnrecoverable(t *testing.T) {
 // ---- static IP resolution (Rust Answers::from_config parity) --------------
 
 func TestBootstrapStaticIPProxyOnly(t *testing.T) {
-	// Only the proxy node ("k3s") can be static; its value is f.proxyIP first,
+	// Only the proxy node ("k3s") can be static; its value is f.ProxyIP first,
 	// else the recorded cfg.Proxy.Ip, else DHCP.
-	if got := bootstrapStaticIP("k3s", rebuildFlags{proxyIP: "192.168.30.7/24"}, &config.Config{}); got != "192.168.30.7/24" {
+	if got := bootstrapStaticIP("k3s", Flags{ProxyIP: "192.168.30.7/24"}, &config.Config{}); got != "192.168.30.7/24" {
 		t.Errorf("proxy flag should win, got %q", got)
 	}
 	ip := "192.168.30.7/24"
 	cfg := &config.Config{Proxy: config.ProxySpec{Ip: &ip}}
-	if got := bootstrapStaticIP("k3s", rebuildFlags{}, cfg); got != "192.168.30.7/24" {
+	if got := bootstrapStaticIP("k3s", Flags{}, cfg); got != "192.168.30.7/24" {
 		t.Errorf("recorded proxy ip should ride again, got %q", got)
 	}
-	if got := bootstrapStaticIP("k3s", rebuildFlags{}, &config.Config{}); got != "" {
+	if got := bootstrapStaticIP("k3s", Flags{}, &config.Config{}); got != "" {
 		t.Errorf("absent proxy ip should be DHCP, got %q", got)
 	}
 	// relay/cp are ALWAYS DHCP behind the proxy, even with a recorded LXC ip.
-	if got := bootstrapStaticIP("relay", rebuildFlags{proxyIP: "x"}, cfg); got != "" {
+	if got := bootstrapStaticIP("relay", Flags{ProxyIP: "x"}, cfg); got != "" {
 		t.Errorf("relay must stay DHCP, got %q", got)
 	}
-	if got := bootstrapStaticIP("cp", rebuildFlags{}, cfg); got != "" {
+	if got := bootstrapStaticIP("cp", Flags{}, cfg); got != "" {
 		t.Errorf("cp must stay DHCP, got %q", got)
 	}
 }
@@ -726,63 +724,11 @@ func countStr(list []string, s string) int {
 	return n
 }
 
-func TestLitellmHasProviderKey(t *testing.T) {
-	dir := t.TempDir()
-	write := func(s string) {
-		if err := os.WriteFile(filepath.Join(dir, "secrets.json"), []byte(s), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// provider-key present -> reuse.
-	write(`{"secrets":{"litellm":"abc","provider-key":"def"},"targets":["litellm"],"grants":[]}`)
-	if !litellmHasProviderKey(dir) {
-		t.Error("expected provider-key detected as present")
-	}
-	// missing -> require a fresh supply.
-	write(`{"secrets":{"litellm":"abc"},"targets":["litellm"],"grants":[]}`)
-	if litellmHasProviderKey(dir) {
-		t.Error("expected no provider-key")
-	}
-	// corrupted / absent file -> conservative (treat as absent).
-	write(`{not json`)
-	if litellmHasProviderKey(dir) {
-		t.Error("expected corrupt package to read as no provider-key")
-	}
-	if err := os.Remove(filepath.Join(dir, "secrets.json")); err != nil {
-		t.Fatal(err)
-	}
-	if litellmHasProviderKey(dir) {
-		t.Error("expected missing package to read as no provider-key")
-	}
-}
 
 // TestLitellmRunArgs: the litellm admin leg must exec the dedicated litellm
 // runner (loopback 8788, target "litellm") with the named secrets — NOT the
 // main proxmox-box runner via a nested "exec --target …" prefix (which bash
 // swallows and never injects the secrets).
-func TestLitellmRunArgs(t *testing.T) {
-	var got [][]string
-	eng := &rebuildEngine{}
-	eng.bins.Self = "/bin/true"
-	eng.runEnv = func(_ string, _ []string, args []string) (bool, string) {
-		got = append(got, args)
-		return true, ""
-	}
-	eng.litellmRun("echo hi", 60, "litellm", "provider-key")
-	if len(got) != 1 {
-		t.Fatalf("litellmRun ran %d execs, want 1", len(got))
-	}
-	args := got[0]
-	joined := strings.Join(args, " ")
-	for _, want := range []string{"exec", "--addr", "127.0.0.1:8788", "--secret", "litellm", "--secret", "provider-key", "litellm"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("litellmRun args %q missing %q", joined, want)
-		}
-	}
-	if strings.Contains(joined, "exec --target litellm") {
-		t.Errorf("litellmRun must not use the nested exec --target form: %q", joined)
-	}
-}
 
 // TestApplyConfigDefaults: `freehold rebuild` with no flags must pull the
 // recorded operator key, relay/CP hosts, thin-pool, agent name, and proxy IP
@@ -805,23 +751,23 @@ func TestApplyConfigDefaults(t *testing.T) {
 	}).Save(cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	f := &rebuildFlags{}
-	if err := applyConfigDefaults(f, cfgPath); err != nil {
+	f := &Flags{}
+	if err := ApplyConfigDefaults(f, cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	if f.operatorPubkey != op || f.relayDomain != "relay.world.test" || f.cpDomain != "cp.world.test" {
-		t.Errorf("defaults = %q / %q / %q", f.operatorPubkey, f.relayDomain, f.cpDomain)
+	if f.OperatorPubkey != op || f.RelayDomain != "relay.world.test" || f.CpDomain != "cp.world.test" {
+		t.Errorf("defaults = %q / %q / %q", f.OperatorPubkey, f.RelayDomain, f.CpDomain)
 	}
-	if f.thinPool != "fh-thin" || f.agentName != "waldo" || f.proxyIP != proxy {
-		t.Errorf("defaults = tp:%q agent:%q proxy:%q", f.thinPool, f.agentName, f.proxyIP)
+	if f.ThinPool != "fh-thin" || f.AgentName != "waldo" || f.ProxyIP != proxy {
+		t.Errorf("defaults = tp:%q agent:%q proxy:%q", f.ThinPool, f.AgentName, f.ProxyIP)
 	}
 	// explicit flags win
-	f2 := &rebuildFlags{operatorPubkey: "y", relayDomain: "z", cpDomain: "w"}
-	if err := applyConfigDefaults(f2, cfgPath); err != nil {
+	f2 := &Flags{OperatorPubkey: "y", RelayDomain: "z", CpDomain: "w"}
+	if err := ApplyConfigDefaults(f2, cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	if f2.operatorPubkey != "y" || f2.relayDomain != "z" {
-		t.Errorf("explicit flags must win: %q/%q", f2.operatorPubkey, f2.relayDomain)
+	if f2.OperatorPubkey != "y" || f2.RelayDomain != "z" {
+		t.Errorf("explicit flags must win: %q/%q", f2.OperatorPubkey, f2.RelayDomain)
 	}
 	// a recorded [dns.manager] managed=true seeds --manage-dns so a rebuild of
 	// an already-DNS-managed world skips the y/n prompt.
@@ -834,20 +780,22 @@ func TestApplyConfigDefaults(t *testing.T) {
 	}).Save(cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	f3 := &rebuildFlags{}
-	if err := applyConfigDefaults(f3, cfgPath); err != nil {
+	f3 := &Flags{}
+	if err := ApplyConfigDefaults(f3, cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	if !f3.manageDNS {
+	if !f3.ManageDNS {
 		t.Error("recorded dns.manager.managed=true must seed manageDNS=true (no re-prompt)")
 	}
 	// an EXPLICIT --manage-dns=false still opts out (the config only fills the
 	// omitted case — e.g. after teardown --remove-dns).
-	f4 := &rebuildFlags{manageDNS: false, manageDNSExplicit: true}
-	if err := applyConfigDefaults(f4, cfgPath); err != nil {
+	f4 := &Flags{ManageDNS: false, ManageDNSExplicit: true}
+	if err := ApplyConfigDefaults(f4, cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	if f4.manageDNS {
+	if f4.ManageDNS {
 		t.Error("explicit --manage-dns=false must NOT be overridden by the config seed")
 	}
 }
+
+
