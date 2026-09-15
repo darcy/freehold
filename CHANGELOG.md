@@ -25,6 +25,26 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.1] — agent definitions move to a top-level `agents/` module
+
+Agent definitions are a core piece of the puzzle and will grow (named agents,
+their skills), so `platform/agents/` is pulled up to the repo top level as its
+own Go module, `freehold/agents`.
+
+- **`agents/` is now a fifth Go module** (`freehold/agents`, no
+  dependencies). It carries `freehold/prompt.md` (the CPA — the `freehold`
+  named agent) plus a `freehold/skills/` placeholder, and `custom/prompt.md`
+  (the template for agents the CPA creates on the fly, previously a hardcoded
+  Go string). A Go package cannot `//go:embed` outside its own module, so
+  `control-plane` imports the embedded bytes (`replace freehold/agents => ../agents`)
+  rather than re-embedding them.
+- `AgentSystemPrompt(name, purpose)` now renders `custom/prompt.md` through
+  stdlib `text/template`; same signature, so callers are unchanged. The CPA's
+  `CPASystemPrompt` value is unchanged.
+- `platform/` no longer carries `agents/`; `ci.yml` and `just test` build/vet/test
+  the new module alongside the other four. Skill *shipping* to pods is still
+  Chunk 5 (no Go consumer yet).
+
 ## [0.6.0] — bootstrap split out to a top-level `install/` module
 
 `freehold build` (world via the CP) and the CP *bootstrap* are now two CLIs. The

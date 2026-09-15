@@ -92,7 +92,7 @@ repo, not the history.
   relay outage. No relay fork or patch.
 - **The CPA is a real, LLM-backed reasoning agent — the system's main user touchpoint.**
   It runs on the same buzz-acp/goose-class harness as the expert agents it creates, gets its
-  purpose from `platform/agents/freehold/prompt.md` (embedded by the `platform/agents` Go
+  purpose from `agents/freehold/prompt.md` (embedded by the `freehold/agents` Go
   package and shipped by the control plane,
   mounted into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
   `/srv/freehold/CPA_SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
@@ -186,11 +186,14 @@ changelog.
   `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
   declares `rust-version = "1.94"`). Rust is used for the privileged exec endpoint, the
   byte-exact contract oracle, and the runner's own fixtures — nothing else.
-- Go — four modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
+- Go — five modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
+  - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
+    the CPA prompt + skills, `custom/` the template for agents the CPA creates; embeds its
+    Markdown as Go values): `cd agents && go build ./... && go vet ./... && go test ./...`
   - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
     console/relay/state/coords): `cd contract && go build ./... && go vet ./... && go test ./...`
-  - `platform/` (`freehold/platform` — the evolving world: services/provisioning/agents/
+  - `platform/` (`freehold/platform` — the evolving world: services/provisioning/
     migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`;
     `provisioning/box` holds the SHARED provisioning engine (LXC boot, storage plane,
     deploy-cp, the CP bootstrap `Engine`) — imported by BOTH the install CLI and the

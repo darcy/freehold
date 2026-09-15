@@ -37,6 +37,11 @@ See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (c
 ```
 Cargo.toml            workspace: control-plane/core, control-plane/runner,
                       control-plane/testkit, control-plane/core/harness/oracle
+agents/               freehold/agents — the top-level home for agent definitions:
+                      freehold/ (the CPA prompt + skills), custom/ (the template
+                      for agents the CPA creates on the fly), named agents as they
+                      land. Its own Go module so it embeds its Markdown; the control
+                      plane imports the bytes.
 contract/             freehold/contract — the shared wire/trust leaf BOTH the
                       control plane and the platform import: crypto/ (Go repro of
                       the Rust core, byte-exact cross-verified by the harness),
@@ -78,10 +83,9 @@ platform/             freehold/platform — the evolving world the mechanism
                       installs/evolves: services/<capability>/<impl>/ (relay/buzz,
                       webproxy/caddy, externaldns/cloudflare, certificates/letsencrypt,
                       …), provisioning/ (bootstrap, planebase, drive, stages, deploy),
-                      migrations/ (verify-gated), agents/ (freehold/prompt.md — the
-                      CPA's purpose, embedded by the platform/agents Go package),
-                      terraform/ (the IaC the CP executes). Adding a service or agent
-                      touches only this module — never control-plane/.
+                      migrations/ (verify-gated), terraform/ (the IaC the CP
+                      executes). Adding a service touches only this module —
+                      never control-plane/.
 AGENTS.md             agent guidance: locked model, conventions, known gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -142,7 +146,7 @@ control-plane/acceptance/  the Chunk-1/2 acceptance gate in Go (`go test ./accep
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(four modules: `contract/`, `platform/`, `install/`, `control-plane/`) + `mise`
+(five modules: `agents/`, `contract/`, `platform/`, `install/`, `control-plane/`) + `mise`
 (the justfile recipes run `go`/`rust` through `mise exec` so the right
 toolchain versions are guaranteed — `curl https://mise.run | sh` or `brew
 install mise`) + `just` ([just](https://github.com/casey/just) — `cargo
@@ -159,13 +163,13 @@ just build
 # relative to the running executable:
 just install
 
-# run the full gate: cargo fmt/build/test + Go build/vet/test across the three
+# run the full gate: cargo fmt/build/test + Go build/vet/test across the five
 # modules + the harness byte-gate + the hermetic Chunk-1/2 acceptance gate:
 just test
 
 # the manual equivalents, if you don't use just:
 cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,testkit,core/harness/oracle} + `cargo build --bin runner` for the acceptance gate
-for m in contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the four Go modules + the byte-exact harness gate + the Go acceptance gate
+for m in agents contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the five Go modules + the byte-exact harness gate + the Go acceptance gate
 cargo fmt --all --check          # CI gate
 ```
 
