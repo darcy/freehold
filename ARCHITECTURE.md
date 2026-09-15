@@ -71,7 +71,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **CPA + experts live in Buzz:** the CPA is a real reasoning agent (the
     system's main user touchpoint); experts are deterministic or
-    reasoning-class. The CPA gets its purpose from `platform/agents/freehold/prompt.md`.
+    reasoning-class. The CPA gets its purpose from `agents/freehold/prompt.md`.
 
 *   **Host-flexible:** Proxmox is the lead/default; VPS/cloud are first-class
     (the business path). The k8s layer (Chunks 6–7) and everything above the
@@ -366,10 +366,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **`platform/migrations/`** is the verify-gated migration runner over
     versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed
     → the CP durable plane, run ascending via `bash`);
-    **`platform/agents/`** carries named agents — `freehold/prompt.md` (the
-    CPA's purpose, embedded by the `platform/agents` Go package and shipped
-    by the control plane) and the agent prompt/creation specs that grow over
-    time; the CP-owned build's IaC is the Terraform module embedded in
+    **`agents/`** is the top-level home for agent definitions — `freehold/`
+    (the CPA's purpose + skills), `custom/` (the template for agents the CPA
+    creates), and named agents that grow over time — embedded by the
+    `freehold/agents` Go package and shipped by the control plane; the CP-owned
+    build's IaC is the Terraform module embedded in
     **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
     box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s
     LXCs + k3s bring-up) is exec-first `null_resource` shell, while the SERVICE
@@ -377,14 +378,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `kubernetes`-provider resources — the deterministic static files that define
     each service, secret values riding the 0600 state.
 
-### `platform/agents/freehold/prompt.md` (the CPA's purpose)
+### `agents/freehold/prompt.md` (the CPA's purpose)
 
-*   **`platform/agents/freehold/prompt.md`** is embedded into the
-    `platform/agents` Go package (`//go:embed freehold/prompt.md` — a Go
-    package cannot embed outside its own module, so `control-plane` imports
-    the value, never re-embeds) and mounted into every agent pod as the
-    `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
-    re-read fresh on every spawn. `freehold-agent-tools` ships it verbatim for
+*   **`agents/freehold/prompt.md`** is embedded into the `freehold/agents` Go
+    package (`//go:embed freehold/prompt.md`) and mounted into every agent pod
+    as the `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
+    re-read fresh on every spawn. The package has its own `go.mod` (a Go
+    package cannot embed outside its own module), so `control-plane` imports
+    the value, never re-embeds. `freehold-agent-tools` ships it verbatim for
     the CPA when the build creates it.
 
 *   The CPA is a **reasoning agent that lives in Buzz** and is the system's

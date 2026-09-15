@@ -53,7 +53,7 @@ check-siblings:
     @echo "✓ all siblings present"
 
 # Run the full gate: cargo fmt/build/test (runner + core) + Go build/vet/test
-# across the three modules (incl. the hermetic Chunk-1 acceptance gate, which
+# across the five modules (incl. the hermetic Chunk-1 acceptance gate, which
 # is `go test ./acceptance/…` in the control-plane module) + the harness
 # byte-gate.
 test:
@@ -61,7 +61,8 @@ test:
     @mise exec rust@1.98.0 -- cargo fmt --all --check
     @mise exec rust@1.98.0 -- cargo build --workspace
     @mise exec rust@1.98.0 -- cargo test --workspace
-    @echo "→ Go build / vet / test (contract, platform, install, control-plane)"
+    @echo "→ Go build / vet / test (agents, contract, platform, install, control-plane)"
+    @cd agents && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @cd contract && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @cd platform && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...
     @cd install && mise exec go@1.25.0 -- go build ./... && mise exec go@1.25.0 -- go vet ./... && mise exec go@1.25.0 -- go test ./...

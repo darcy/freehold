@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"freehold/agents"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
@@ -32,7 +33,6 @@ import (
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/secret-management"
-	"freehold/platform/agents"
 	"freehold/platform/migrations"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/drive"

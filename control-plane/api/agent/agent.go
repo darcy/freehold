@@ -81,8 +81,8 @@ func KeySecretFor(agentName string) string {
 func PodName(agentName string) string { return sanitizePodName(agentName) }
 
 // CPASystemPromptPath is where the CPA pod reads its purpose from: the
-// <pod>-prompt ConfigMap mounts the embedded prompts/CPA_SYSTEM_PROMPT.md
-// (embedded via the platform/agents package) read-only into the pod,
+// <pod>-prompt ConfigMap mounts the embedded agents/freehold/prompt.md
+// (embedded via the freehold/agents package) read-only into the pod,
 // and the agent re-reads it on every spawn — never cached.
 const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
 
@@ -108,7 +108,7 @@ const AgentLiteLLMKeySecretKey = "key"
 // Never` honors I5 — an intentional clean exit stays terminal; the kubelet
 // must not resurrect a pod that stopped on purpose.
 //
-// systemPrompt is the FULL text of prompts/CPA_SYSTEM_PROMPT.md (stageCpa
+// systemPrompt is the FULL text of agents/freehold/prompt.md (stageCpa
 // passes the file contents, not a path): it embeds as the <pod>-prompt
 // ConfigMap's content (indented four spaces per line so the `|` block scalar
 // is valid YAML) and the pod mounts that ConfigMap read-only at
@@ -152,7 +152,7 @@ func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string) string {
 // Never` honors I5 — an intentional clean exit stays terminal; the kubelet
 // must not resurrect a pod that stopped on purpose.
 //
-// systemPrompt is the FULL text of prompts/CPA_SYSTEM_PROMPT.md (stageCpa
+// systemPrompt is the FULL text of agents/freehold/prompt.md (stageCpa
 // passes the file contents, not a path): it embeds as the <pod>-prompt
 // ConfigMap's content (indented four spaces per line so the `|` block scalar
 // is valid YAML) and the pod mounts that ConfigMap read-only at
