@@ -37,7 +37,11 @@ var bootstrapCmd = &cobra.Command{
 		f := flagsFromCmd(cmd)
 		applyInstallDefaults(&f)
 		f.ConfigPath = installConfigPath()
-		eng, err := box.NewEngine(f, defaultBins())
+		bins, err := defaultBins()
+		if err != nil {
+			return err
+		}
+		eng, err := box.NewEngine(f, bins)
 		if err != nil {
 			return err
 		}
@@ -86,7 +90,11 @@ func runInstall(in io.Reader, out io.Writer) error {
 		fmt.Fprintln(out, "aborted.")
 		return nil
 	}
-	eng, err := box.NewEngine(f, defaultBins())
+	bins, err := defaultBins()
+	if err != nil {
+		return err
+	}
+	eng, err := box.NewEngine(f, bins)
 	if err != nil {
 		return err
 	}
@@ -209,17 +217,16 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	return f
 }
 
-// defaultBins resolves the sibling binaries freehold-install execs (the
-// freehold-console/runner/agent-tools its stages ship + this binary itself for
-// the provision/storage/deploy-cp sub-stages).
-func defaultBins() box.Bins {
+// defaultBins resolves the sibling binaries freehold-install execs; ResolveBins
+// returns the fully-populated Bins alongside its error, and we propagate that
+// error so a missing sibling surfaces ResolveBins' actionable "build them once"
+// message instead of a silent empty-path exec failure.
+func defaultBins() (box.Bins, error) {
 	b, err := box.ResolveBins()
 	if err != nil {
-		// self at least; stages that need siblings will resolve + report.
-		self, _ := os.Executable()
-		return box.Bins{Self: self}
+		return b, err
 	}
-	return b
+	return b, nil
 }
 
 func init() {
@@ -246,8 +253,10 @@ func init() {
 
 // ---- operator identity + storage (shared helpers install needs) -------------
 
-// operatorDir is where a minted/persisted operator identity lands.
-func operatorDir() string { return filepath.Join(box.StateDir(), "control-plane", "operator") }
+// operatorDir is where a minted/persisted operator identity lands. box.StateDir()
+// already ends in "control-plane", so the canonical dir is <state>/control-plane/
+// operator — the same path oplogin + the TUI read (installer operator_dir).
+func operatorDir() string { return filepath.Join(box.StateDir(), "operator") }
 
 func collectOperatorIdentity(ui *installerUI) (pubkey, opDir string, err error) {
 	fmt.Fprintln(ui.out, "  Operator identity:")
