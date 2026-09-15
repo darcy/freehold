@@ -44,6 +44,7 @@ var worldCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(worldCmd)
+	worldCmd.Flags().String("config", config.ConfigPath(), "Tenant config path to drive the world against")
 }
 
 // worldAction issues one world_* tool call to the CP's agent-tools server,
