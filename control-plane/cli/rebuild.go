@@ -148,6 +148,13 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 		clearStoredDNSCreds()
 		fmt.Fprintln(cmd.OutOrStdout(), "  (cleared stored DNS provider credentials — the build will ask for them again)")
 	}
+	// The --target default (proxmox-box) must not override a recorded runner: a
+	// rebuild of an already-provisioned world drives ITS runner.
+	if !cmd.Flags().Changed("target") {
+		if cfg2, _ := config.Load(f.ConfigPath); cfg2 != nil && cfg2.Runner.Target != "" {
+			f.Target = cfg2.Runner.Target
+		}
+	}
 	return newBuildEngine(f)
 }
 

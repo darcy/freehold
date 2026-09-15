@@ -17,6 +17,9 @@ func ApplyConfigDefaults(f *Flags, cfgPath string) error {
 	if f.OperatorPubkey == "" {
 		f.OperatorPubkey = cfg.OperatorPubkey
 	}
+	if f.Target == "" && cfg.Runner.Target != "" {
+		f.Target = cfg.Runner.Target
+	}
 	if f.RelayDomain == "" {
 		f.RelayDomain = cfg.RelayHost()
 	}

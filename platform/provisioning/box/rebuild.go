@@ -798,6 +798,9 @@ func isSshAuthFailure(out string) bool {
 // execArgs builds `exec --addr --agent-dir [--timeout] <target> <cmd>`.
 func (e *Engine) ExecArgs(cmd string, timeoutS int) []string {
 	args := []string{"exec", "--addr", e.F.Addr, "--agent-dir", OpsDir()}
+	if e.F.ConfigPath != "" {
+		args = append(args, "--config", e.F.ConfigPath)
+	}
 	if timeoutS > 0 {
 		args = append(args, "--timeout", strconv.Itoa(timeoutS))
 	}

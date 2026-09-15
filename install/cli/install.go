@@ -200,6 +200,8 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.ThinPool, _ = cmd.Flags().GetString("thin-pool")
 	f.ConfirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 	f.Yes, _ = cmd.Flags().GetBool("yes")
+	f.SizeGB, _ = cmd.Flags().GetUint64("size-gb")
+	f.PoolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 	f.LitellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
 	if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
 		f.LitellmProviderKey = v
@@ -235,6 +237,8 @@ func init() {
 	bootstrapCmd.Flags().String("storage", "local-lvm", "PVE LXC storage")
 	bootstrapCmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge")
 	bootstrapCmd.Flags().String("thin-pool", "", "Plane placement: existing pool to reuse, or a new name to carve")
+	bootstrapCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
+	bootstrapCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	bootstrapCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key (or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	bootstrapCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	bootstrapCmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the pipeline would prompt")

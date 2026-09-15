@@ -395,6 +395,7 @@ func optOf(s string) *string {
 
 func init() {
 	registerSelfFlags(execCmd)
+	execCmd.Flags().String("config", config.ConfigPath(), "Tenant config path (scope; honored for symmetry)")
 	execCmd.Flags().StringSliceP("secret", "s", nil, "Secret names to request")
 	execCmd.Flags().Uint64("timeout", 60, "Runner-side watchdog in seconds")
 
@@ -411,6 +412,7 @@ func init() {
 	provisionCmd.Flags().String("lxc-gw", "", "gateway for static IP")
 	provisionCmd.Flags().String("vmid", "", "VMID (auto when empty)")
 	provisionCmd.Flags().StringArray("mount", nil, "durable mount <source>:<guest>")
+	provisionCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (accepted for symmetry; unused by proxmox-lxc)")
 
 	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd)
 	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd} {
