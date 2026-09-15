@@ -344,9 +344,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 ### `platform/` (`freehold/platform` — the evolving world)
 
 *   **The evolving world the mechanism installs and evolves** — services,
-    agents, migrations, provisioning, terraform, data conventions. Adding a
-    security agent or a new service means adding a `platform/` entry — never
-    touching `control-plane/`. It is its own Go module (imports `contract`,
+    migrations, provisioning, terraform, data conventions. Adding a new service
+    means adding a `platform/` entry — never touching `control-plane/` (adding a
+    named agent means an `agents/<name>/` entry instead, see below). It is its
+    own Go module (imports `contract`,
     never `control-plane`), so `control-plane → platform → contract` is a
     one-way edge.
 
@@ -365,11 +366,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`platform/migrations/`** is the verify-gated migration runner over
     versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed
-    → the CP durable plane, run ascending via `bash`);
-    **`agents/`** is the top-level home for agent definitions — `freehold/`
-    (the CPA's purpose + skills), `custom/` (the template for agents the CPA
-    creates), and named agents that grow over time — embedded by the
-    `freehold/agents` Go package and shipped by the control plane; the CP-owned
+    → the CP durable plane, run ascending via `bash`); the CP-owned
     build's IaC is the Terraform module embedded in
     **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
     box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s
@@ -377,6 +374,15 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     definitions (`postgres.tf` / `litellm.tf` / `caddy.tf`) are real
     `kubernetes`-provider resources — the deterministic static files that define
     each service, secret values riding the 0600 state.
+
+### `agents/` (`freehold/agents` — the top-level home for agent definitions)
+
+*   **`agents/`** is its own Go module — `freehold/` (the freehold named agent:
+    the CPA's purpose + skills), `custom/` (the template for agents the CPA
+    creates on the fly), and named agents that grow over time. It is embedded by
+    the `freehold/agents` Go package and shipped by the control plane; the module
+    carries its own `go.mod` because a Go package cannot `//go:embed` outside its
+    own module.
 
 ### `agents/freehold/prompt.md` (the CPA's purpose)
 
@@ -550,10 +556,11 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     `resolve` → `ensure` → `run_call` → `Run` → `runReconstruct` (fresh
     host, no state dir).
 
-3.  **Chunk 3 — Rust→Go refactor + the three-module tree:** the operator
-    surface is Go across four modules — `contract/` (`freehold/contract`, the
+3.  **Chunk 3 — Rust→Go refactor + the modular Go tree:** the operator
+    surface is Go across modules — `contract/` (`freehold/contract`, the
     shared wire/trust leaf), `platform/` (`freehold/platform`, the evolving world),
-    `install/` (`freehold/install`, the CP bootstrap CLI), and `control-plane/`
+    `agents/` (`freehold/agents`, the agent definitions), `install/`
+    (`freehold/install`, the CP bootstrap CLI), and `control-plane/`
     (`freehold/control-plane`, the stable mechanism) — with the Rust
     `core`/`runner` kept as a byte-exact reference oracle; `freehold-install`
     drives the shared box engine directly

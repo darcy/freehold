@@ -163,13 +163,13 @@ just build
 # relative to the running executable:
 just install
 
-# run the full gate: cargo fmt/build/test + Go build/vet/test across the three
+# run the full gate: cargo fmt/build/test + Go build/vet/test across the five
 # modules + the harness byte-gate + the hermetic Chunk-1/2 acceptance gate:
 just test
 
 # the manual equivalents, if you don't use just:
 cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,testkit,core/harness/oracle} + `cargo build --bin runner` for the acceptance gate
-for m in contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the four Go modules + the byte-exact harness gate + the Go acceptance gate
+for m in agents contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the five Go modules + the byte-exact harness gate + the Go acceptance gate
 cargo fmt --all --check          # CI gate
 ```
 
