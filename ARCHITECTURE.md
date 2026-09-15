@@ -169,9 +169,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `tui/`, `login/`, `flows/`, `teardown/`, `bootstrap-cp/`, `cmd/` for the
     `freehold` binary), `secret-management/`
     (provision/rotate/revoke/grant), and the Rust crates `core/` (the
-    byte-exact contract oracle + the `harness/` Go byte-gate), `runner/`,
-    `console/` (the CP console + secret provisioner), `console-client/`,
-    `testkit/`, and `acceptance/`.
+    byte-exact contract oracle + the `harness/` Go byte-gate), `runner/`, and
+    `testkit/` (the runner's hermetic fixtures). The Chunk-1/2 acceptance gate
+    is Go under `acceptance/`, driving the real `runner` binary as a subprocess.
 
 *   **The privileged `exec` funnel lives in the RUST runner, not the CP.**
     The CLI is the operator's interface: it drives a running runner over its
@@ -408,8 +408,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 ### The console (Go; the loopback admin/ops web surface)
 
 *   **The control plane console is a Go server + CP CLI** (`control-plane/api/console/`
-    + `control-plane/api/cmd/freehold-console`), ported from the Rust console
-    crate at parity: the same `/api/*` routes (auth/overview/world/teardown/
+    + `control-plane/api/cmd/freehold-console`): the `/api/*` routes (auth/overview/world/teardown/
     provision/rotate/revoke/grant/DNS/agents/portal) with the SAME security
     guards — NIP-98 operator login (challenge/session), `HttpOnly;
     SameSite=Strict` session cookies, single-use portal tokens, login
@@ -420,9 +419,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     is the CP's own identity (0600, minted on the box at first serve — never
     shipped) that signs readiness probes against each runner — no side door,
     the runner still fails closed. `contract/console` is the Go client that
-    talks to it. The Rust console crate is still in the tree only as the
-    `acceptance` harness's hermetic fixture (the deletion waits on porting that
-    gate to Go).
+    talks to it.
 
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`
@@ -587,8 +584,9 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 
 7.  **Chunk 7 — Remaining connectors (Vultr, Backblaze, Terraform) + the
     North Star:** portable `TargetId`, single `exec`, and the durable-path
-    conventions from this file; `freehold-acceptance` reproduces
-    **Chunk 1**'s acceptance criteria hermetically on loopback.
+    conventions from this file; the Go acceptance gate
+    (`control-plane/acceptance/`) reproduces **Chunk 1**'s acceptance criteria
+    hermetically on loopback.
 
 ## Locked decisions
 

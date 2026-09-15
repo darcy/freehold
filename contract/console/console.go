@@ -1,4 +1,4 @@
-// Package console reproduces the console-client port (console-client/src/
+// Package console reproduces the the console client port (the console client/src/
 // lib.rs) — a NIP-98-login HTTP client for the control-plane web console.
 package console
 
@@ -20,13 +20,13 @@ const SESSION_COOKIE = "fh_session"
 // KindAuth is NIP-98 HTTP auth kind.
 const kindAuth = 27235
 
-// Overview mirrors console-client Overview.
+// Overview mirrors the console client Overview.
 type Overview struct {
 	ConsolePubkey string   `json:"console_pubkey"`
 	Runners       []Runner `json:"runners"`
 }
 
-// Runner mirrors console-client Runner.
+// Runner mirrors the console client Runner.
 type Runner struct {
 	Name        string      `json:"name"`
 	Status      string      `json:"status"`
@@ -39,7 +39,7 @@ type Runner struct {
 	Readiness   interface{} `json:"readiness,omitempty"`
 }
 
-// SecretInfo mirrors console-client SecretInfo.
+// SecretInfo mirrors the console client SecretInfo.
 type SecretInfo struct {
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
@@ -48,7 +48,7 @@ type SecretInfo struct {
 	CreatedAt *int64 `json:"created_at,omitempty"`
 }
 
-// AgentInfo mirrors console-client AgentInfo.
+// AgentInfo mirrors the console client AgentInfo.
 type AgentInfo struct {
 	Name      string  `json:"name"`
 	Pubkey    string  `json:"pubkey"`
@@ -58,7 +58,7 @@ type AgentInfo struct {
 	// Purpose is the agent's one-line purpose, preserved by freehold-agent-tools'
 	// local registry so a rebuild reconciler can recreate the agent's system
 	// prompt verbatim. The console API does not carry it; the local registry row
-	// does. omitempty keeps it out of console-client serializations upstream.
+	// does. omitempty keeps it out of the console client serializations upstream.
 	Purpose string `json:"purpose,omitempty"`
 	// Channel is the channel NAME the agent was created into (empty = the
 	// default freehold channel), preserved by freehold-agent-tools' local
@@ -66,7 +66,7 @@ type AgentInfo struct {
 	Channel string `json:"channel,omitempty"`
 }
 
-// ProvisionReq mirrors console-client ProvisionReq.
+// ProvisionReq mirrors the console client ProvisionReq.
 type ProvisionReq struct {
 	Name      string  `json:"name"`
 	Kind      string  `json:"kind"`
@@ -76,13 +76,13 @@ type ProvisionReq struct {
 	Risk      *string `json:"risk,omitempty"`
 }
 
-// SecretReq mirrors console-client SecretReq.
+// SecretReq mirrors the console client SecretReq.
 type SecretReq struct {
 	Name   string `json:"name"`
 	Secret string `json:"secret"`
 }
 
-// GrantReq mirrors console-client GrantReq.
+// GrantReq mirrors the console client GrantReq.
 type GrantReq struct {
 	Name   string `json:"name"`
 	Pubkey string `json:"pubkey"`

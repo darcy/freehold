@@ -1,15 +1,15 @@
-# Login-authorized door — security spec (REFACTOR-PLAN §7/§9 design gate)
+# Login-authorized door — security spec
 
 The CP cannot bootstrap or tear down itself. The box's CLI holds its own door
 (an SSH key authorized on the host) for CP-lifecycle jobs — `bootstrap-cp` and
-`teardown-cp`. Today that door is authored once by the first `freehold build`
-(the box that deploys the world keeps the key). REFACTOR-PLAN §7 proposes the
-**login-authorized door**: a *fresh* box that logs into the CP gets its own
+`teardown-cp`. That door is authored once by the first `freehold build`
+(the box that deploys the world keeps the key). The **login-authorized door**
+lets a *fresh* box that logs into the CP get its own
 door, so any logged-in operator box can perform CP-lifecycle work, not just the
 box that built the world.
 
-This is a new elevated path — the CP appends keys to the host door it manages.
-§9 deliberately left it as a design gate: "which keys the CP will authorize,
+This is an elevated path — the CP appends keys to the host door it manages.
+The design gate was: "which keys the CP will authorize,
 how it proves the box is a logged-in operator (not a rogue), whether the append
 is scoped/removable, and how a revoked operator's key is removed from the host
 door." This document is that spec.

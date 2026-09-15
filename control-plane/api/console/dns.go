@@ -11,7 +11,7 @@ import (
 	"freehold/contract/state"
 )
 
-// ---- internal resolver (port of control-plane/console/src/dns.rs) ----
+// ---- internal resolver ----
 // The CP runs dnsmasq inside ITS OWN LXC: explicit name→IP records render into
 // addn-hosts, everything else forwards upstream. Explicit records only.
 

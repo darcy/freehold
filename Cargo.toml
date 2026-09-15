@@ -1,8 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["control-plane/core", "control-plane/runner",
-    "control-plane/console-client", "control-plane/testkit",
-    "control-plane/console", "control-plane/acceptance",
+    "control-plane/testkit",
     "control-plane/core/harness/oracle"]
 
 [workspace.package]
