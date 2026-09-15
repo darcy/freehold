@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"freehold/control-plane/api/agenttools"
 	"freehold/contract/crypto"
+	"freehold/control-plane/api/agenttools"
 )
 
 // freeholdToolDefs are the create/grant/manage tool schemas merged into
@@ -35,10 +35,11 @@ func freeholdToolDefs() []map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	return []map[string]interface{}{
-		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose). Returns the new agent's pubkey.",
+		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel to add it to; the channel is created if it doesn't exist, and the operator is added). Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
 				"name":    map[string]interface{}{"type": "string"},
 				"purpose": map[string]interface{}{"type": "string"},
+				"channel": map[string]interface{}{"type": "string"},
 			}, []string{"name"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},

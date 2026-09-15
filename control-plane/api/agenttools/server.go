@@ -114,10 +114,11 @@ func (s *Server) toolList() []map[string]interface{} {
 	}
 	return []map[string]interface{}{
 		{
-			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose). Returns the new agent's pubkey.",
+			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel to add it to; the channel is created if it doesn't exist, and the operator is added). Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
 				"name":    map[string]interface{}{"type": "string"},
 				"purpose": map[string]interface{}{"type": "string"},
+				"channel": map[string]interface{}{"type": "string"},
 			}, []string{"name"}),
 		},
 		{
@@ -182,6 +183,7 @@ func (s *Server) toolList() []map[string]interface{} {
 type createAgentArgs struct {
 	Name    string `json:"name"`
 	Purpose string `json:"purpose"`
+	Channel string `json:"channel"`
 }
 type grantAgentArgs struct {
 	Runner  string   `json:"runner"`
@@ -237,7 +239,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			s.rpcError(w, id, -32602, "create_agent arguments: "+err.Error())
 			return
 		}
-		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose)
+		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose, a.Channel)
 		// Persist the purpose on the created agent's registry row so a rebuild
 		// reconciler can recreate its system prompt verbatim (E3 without
 		// silently dropping the agent's reason to exist).

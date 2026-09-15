@@ -21,9 +21,10 @@ type ConsoleOps interface {
 }
 
 // CreateAgentFn deploys a named agent's sprig pod + mints its identity and
-// returns the new agent's pubkey. Supplied by the caller (the harness runtime
-// wired to the runner); the tool invokes it and records the registry row.
-type CreateAgentFn func(name, purpose string) (pubkey string, err error)
+// returns the new agent's pubkey. `channel` is the channel NAME to add it to
+// (empty = the default freehold channel). Supplied by the caller (the harness
+// runtime wired to the runner); the tool invokes it and records the registry row.
+type CreateAgentFn func(name, purpose, channel string) (pubkey string, err error)
 
 // Tools is the CPA's dedicated agent-management toolset (A4): create-agent,
 // grant-agent, manage-agent. These are what the CPA's reasoning calls (via its
@@ -132,19 +133,20 @@ func (t *Tools) WorldBuild() (string, error) {
 
 // CreateAgent stands up a new named agent: deploys its sprig pod via Create,
 // then registers the registry row with the minted pubkey. Returns the pubkey.
-func (t *Tools) CreateAgent(name, purpose string) (string, error) {
+func (t *Tools) CreateAgent(name, purpose, channel string) (string, error) {
 	if t.Console == nil {
 		return "", fmt.Errorf("create-agent: no console client bound")
 	}
 	if t.Create == nil {
 		return "", fmt.Errorf("create-agent: no deploy path bound")
 	}
-	pubkey, err := t.Create(name, purpose)
+	pubkey, err := t.Create(name, purpose, channel)
 	if err != nil {
 		return "", fmt.Errorf("create-agent deploy %s: %w", name, err)
 	}
-	// The presence channel is the agent's own name (kind-9 mention channel).
-	if _, err := t.Console.RegisterAgent(name, pubkey, name); err != nil {
+	// The registry row carries the target channel (reconcile rejoins it); the
+	// agent's own presence channel is its name (kind-9 mention channel).
+	if _, err := t.Console.RegisterAgent(name, pubkey, channel); err != nil {
 		return "", fmt.Errorf("create-agent register: %w", err)
 	}
 	return pubkey, nil

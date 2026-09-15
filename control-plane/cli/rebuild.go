@@ -1080,7 +1080,7 @@ func (e *rebuildEngine) recordPostWorld() error {
 	// IP — breaking `world status` and the fresh-box Agents view until manually
 	// corrected. The agent-tools pubkey is durable and unchanged.
 	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		cfg.AgentToolsURL = "http://" + ip + ":8089"
+		cfg.AgentToolsURL = "http://" + ip + ":" + cpbuild.AgentToolsPort
 	}
 	proxyIP := config.StripCIDR(e.f.proxyIP)
 	cfg.Litellm = config.LitellmSpec{URL: "http://" + proxyIP + ":31400", Host: proxyIP}
@@ -2305,7 +2305,11 @@ func (e *rebuildEngine) worldConfigJSON(cfg *config.Config) string {
 		CpaName:        e.f.agentName,
 		OwnerPub:       e.f.operatorPubkey,
 		LitellmBaseURL: cfg.Litellm.URL,
-		SelfURL:        "http://" + cpIP + ":8080",
+		// The agent-tools server's reachable URL, NOT the console's: this is the
+		// `--self-url` the server reports AND the URL the CPA pod curls its
+		// stdio bridge binary from (cpbuild.AgentToolsPort). The console's own
+		// URL is not needed in the coords.
+		SelfURL: "http://" + cpIP + ":" + cpbuild.AgentToolsPort,
 	}
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -2961,7 +2965,7 @@ func (e *rebuildEngine) reconcileCreatedAgents() error {
 		// re-creating reseats the pod with the same pubkey across a rebuild.
 		// Thread the registry's preserved purpose through so the agent's
 		// system-prompt purpose line survives, not just its identity.
-		text, cerr := callAgentToolsText(mc, "create_agent", map[string]interface{}{"name": a.Name, "purpose": a.Purpose})
+		text, cerr := callAgentToolsText(mc, "create_agent", map[string]interface{}{"name": a.Name, "purpose": a.Purpose, "channel": a.Channel})
 		if cerr != nil {
 			return fmt.Errorf("reconcile created agent %s: %w", a.Name, cerr)
 		}

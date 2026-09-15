@@ -45,6 +45,14 @@ import (
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 
+// AgentToolsPort is the CP's freehold-agent-tools MCP bind port. Any URL the
+// CPA pod bootstraps its stdio bridge from (the agent-tools `--self-url`, and
+// the CPA/agent manifests' bridge URL) MUST use this port — the pod curls
+// <url>/freehold-agent-tools-binary off the agent-tools server itself, so
+// pointing it at the console's port makes the fetch 404 and silently falls
+// back to plain buzz-dev-mcp (no create_agent).
+const AgentToolsPort = "8089"
+
 type Spec struct {
 	StateDir       string
 	RelayURL       string
@@ -558,9 +566,19 @@ func (s *Spec) deployAgentTools() error {
 		}
 	}
 	relayDial := "http://" + s.RelayHost + ":3000"
-	// Seed the server's channel + the operator + this console into its roster
-	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s,%s --name agent-tools",
-		bin, atState, relayDial, s.OwnerPub, s.Audience)
+	// Seed the server's channel + the operator into its roster. The console's
+	// driving identity (s.Audience) is deliberately NOT seeded: the console
+	// never calls this MCP (it reads the registry/facts files directly), so
+	// membering it only put an un-nameable identity in the roster. The CPA is
+	// membered separately, by this server's own identity (BuildCreateAgentFn).
+	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
+		bin, atState, relayDial, s.OwnerPub)
+	// Revoke the console's driving identity if a PRIOR seed membered it: put-user
+	// is additive, so dropping it from --granted alone doesn't heal a world that
+	// already has it. The console never calls this MCP.
+	if s.Audience != "" {
+		seedFlags += " --revoke " + s.Audience
+	}
 	if s.RelayAuthURL != "" {
 		seedFlags += " --relay-auth-url " + s.RelayAuthURL
 	} else {
@@ -578,7 +596,7 @@ func (s *Spec) deployAgentTools() error {
 		}
 	}
 	serveFlags := fmt.Sprintf(
-		"--state-dir %s --addr 0.0.0.0:8089 --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
+		"--state-dir %s --addr 0.0.0.0:"+AgentToolsPort+" --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
 		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
 		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
 	// relay-pubkey is the roster trust anchor, learned only after the relay is
@@ -664,7 +682,7 @@ func (s *Spec) deployAgentTools() error {
 	// is up; "000" means not yet bound).
 	up := false
 	for i := 0; i < 15; i++ {
-		code, err := s.runOut(fmt.Sprintf("pct exec %d -- curl -s -m 3 -o /dev/null -w %%{http_code} http://127.0.0.1:8089/mcp", s.CpLxc), 15)
+		code, err := s.runOut(fmt.Sprintf("pct exec %d -- curl -s -m 3 -o /dev/null -w %%{http_code} http://127.0.0.1:"+AgentToolsPort+"/mcp", s.CpLxc), 15)
 		if err == nil && strings.TrimSpace(code) != "000" {
 			up = true
 			break
@@ -1359,10 +1377,45 @@ func BuildWorldStatus(spec *Spec, reg *agenttools.Registry, consoleStateDir stri
 	}
 }
 
+// ensureAgentChannel resolves the named channel (kind 39000 group meta, by
+// display name) or creates it — owned by the creating agent — when absent,
+// returning its id + display name. An empty name is the default freehold
+// channel, which is ENSURED because the first agent to be created may be the
+// one that brings it into existence.
+func (s *Spec) ensureAgentChannel(nSec []byte, channel string) (id, displayName string, created bool, err error) {
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	if strings.TrimSpace(channel) == "" {
+		if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
+		}
+		return relayFreeholdChannel, "#freehold", false, nil
+	}
+	name := "#" + strings.TrimPrefix(strings.TrimSpace(channel), "#")
+	// A relay read error must NOT be mistaken for "absent" (that would create a
+	// duplicate of an existing channel) — fail the create instead.
+	existingID, existingName, ok, err := relay.FindChannelAuth(s.RelayURL, authURL, s.Sec, channel)
+	if err != nil {
+		return "", "", false, fmt.Errorf("look up channel %q: %w", channel, err)
+	}
+	if ok {
+		return existingID, existingName, false, nil
+	}
+	id = relay.ChannelIDFromName(channel)
+	if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, id, name); err != nil {
+		return "", "", false, fmt.Errorf("create channel %s: %w", name, err)
+	}
+	return id, name, true, nil
+}
+
+// reconcileChannel force-publishes a channel's discovery/roster events on the
+// relay (kind 39000/39001/39002) via buzz-admin, so roster changes are accepted.
 // (which registers the registry row). Branches to the CPA manifest/prompt when
 // the name is the CPA's, so stageCpa's dogfooded create_agent produces the CPA.
 func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
-	return func(name, purpose string) (string, error) {
+	return func(name, purpose, channel string) (string, error) {
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
 		}
@@ -1408,7 +1461,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			return "", fmt.Errorf("add relay member %s: %w", pub, err)
 		}
 
-		// Profile + #freehold channel + join, signed by the agent (NIP-98 against the
+		// Profile + the target channel, signed by the agent (NIP-98 against the
 		// CANONICAL relay URL; the dial may be the LAN form pre-Caddy).
 		nSec, err := hex.DecodeString(id.NostrSecretHex)
 		if err != nil {
@@ -1421,11 +1474,30 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if err := relay.PublishProfileAuth(spec.RelayURL, authURL, nSec, name, "freehold agent"); err != nil {
 			return "", fmt.Errorf("publish %s profile: %w", name, err)
 		}
-		if err := delegate.EnsureChannelAuth(spec.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
-			return "", fmt.Errorf("ensure #freehold channel: %w", err)
+		// Resolve the target channel by name, creating it (owned by this agent)
+		// when absent. Empty channel = the default freehold channel.
+		channelID, channelName, created, err := spec.ensureAgentChannel(nSec, channel)
+		if err != nil {
+			return "", err
 		}
-		if err := relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, relayFreeholdChannel); err != nil {
-			return "", fmt.Errorf("join #freehold channel: %w", err)
+		if created {
+			// A newly created channel: the agent is its owner (already a member),
+			// so JOIN it, then ADD the operator explicitly (member ops on an
+			// explicit channel id — NOT a pubkey-derived one).
+			_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			if spec.OwnerPub != "" {
+				if perr := relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub); perr != nil {
+					return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
+				}
+			}
+		} else {
+			// Pre-existing channel: join it (open channels allow free joins; a
+			// private one may refuse — best-effort) and try to add the operator
+			// (the agent may not own a channel it didn't create).
+			_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			if spec.OwnerPub != "" {
+				_ = relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
+			}
 		}
 
 		if err := spec.run(agent.AgentIdentityScript(spec.K3sVmid, id.NostrSecretHex, spec.OwnerPub, name), 120); err != nil {

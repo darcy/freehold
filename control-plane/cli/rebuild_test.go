@@ -4,6 +4,7 @@ import "reflect"
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/cpbuild"
 )
 
 // ---- storage-line parsing (stage_storage contract lines) -------------------
@@ -463,6 +465,33 @@ func TestFromAnswersEmptyDomainIsBlankAndPreservesPrev(t *testing.T) {
 	}
 }
 func sptr(v string) *string { return &v }
+
+// TestWorldConfigSelfURLPointsAtAgentTools guards the CPA-bridge regression: the
+// world coords' SelfURL is the AGENT-TOOLS server's URL (the CPA pod curls its
+// stdio bridge binary from <SelfURL>/freehold-agent-tools-binary), never the
+// console's :8080 — a wrong port makes the fetch 404 and the pod silently falls
+// back to plain buzz-dev-mcp, losing create_agent.
+func TestWorldConfigSelfURLPointsAtAgentTools(t *testing.T) {
+	cpIP := "192.168.30.5"
+	cfg := &config.Config{
+		RelayURL: "https://relay.test",
+		Runner:   config.RunnerRef{Pubkey: strings.Repeat("a", 64)},
+	}
+	cfg.Lxc.Cp.Ip = &cpIP
+
+	raw := (&rebuildEngine{}).worldConfigJSON(cfg)
+	if raw == "" {
+		t.Fatal("worldConfigJSON returned empty")
+	}
+	var c cpbuild.Coords
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatalf("unmarshal coords: %v", err)
+	}
+	want := "http://" + cpIP + ":" + cpbuild.AgentToolsPort
+	if c.SelfURL != want {
+		t.Errorf("SelfURL = %q, want the agent-tools URL %q", c.SelfURL, want)
+	}
+}
 
 // ---- door + NIP-11 parsing ----------------------------------------------------
 
