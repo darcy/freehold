@@ -31,14 +31,32 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # The control-plane Go tests drive the Rust binaries built above
-      # (target/debug/runner, target/debug/freehold-harness-oracle), so they run
-      # here rather than in the independent Go matrix.
+  # The control-plane Go tests drive the Rust binaries (control-plane/acceptance
+  # runs target/debug/runner; control-plane/core/harness runs
+  # target/debug/freehold-harness-oracle), so this job builds just those two
+  # before the Go checks. Keeping it separate lets the Rust and plain-Go jobs
+  # stay independent and parallel.
+  control-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build runner + harness oracle
+        run: cargo build -p freehold-runner -p freehold-harness-oracle
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: "control-plane/go.mod"
-          # A key unique to this job (control-plane isn't in the Go matrix), so
-          # its deps cache without racing the matrix legs.
+          # setup-go defaults to a repo-root go.mod, which this multi-module repo
+          # doesn't have — without this it silently skips caching and recompiles
+          # the dependency tree every run.
           cache-dependency-path: control-plane/go.mod
 
       - name: Go build (control-plane)
@@ -65,11 +83,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: "control-plane/go.mod"
-          # setup-go defaults to a repo-root go.mod, which this multi-module repo
-          # doesn't have — without this it silently skips caching and recompiles
-          # platform's dependency tree (lego + cloud DNS SDKs) every run. Key per
-          # module: a shared '**/go.sum' key races across matrix legs and the
-          # first finisher wins, leaving the big legs uncached.
+          # Key per module: a shared '**/go.sum' key races across matrix legs and
+          # the first finisher wins, leaving the big legs (platform: lego + cloud
+          # DNS SDKs) uncached.
           cache-dependency-path: ${{ matrix.module }}/go.mod
 
       - name: Go build (${{ matrix.module }})
@@ -89,12 +105,14 @@ jobs:
   # passing, so this must fail loudly when a needed job does not succeed.
   check:
     if: always()
-    needs: [rust, go]
+    needs: [rust, control-plane, go]
     runs-on: ubuntu-latest
     steps:
-      - name: Require rust and go to pass
+      - name: Require rust, control-plane, and go to pass
         run: |
           echo "rust: ${{ needs.rust.result }}"
+          echo "control-plane: ${{ needs['control-plane'].result }}"
           echo "go: ${{ needs.go.result }}"
           test "${{ needs.rust.result }}" = "success"
+          test "${{ needs['control-plane'].result }}" = "success"
           test "${{ needs.go.result }}" = "success"
