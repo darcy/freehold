@@ -179,7 +179,8 @@ only builds + installs):
 ```sh
 freehold bootstrap   # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
-freehold teardown    # tear it down (compute-only: keeps coords + /srv/data)
+freehold teardown    # tear it down (compute-only: keeps coords + /srv/data);
+                     #  a login-only box runs it through the CP
 freehold            # the TUI dashboard
 ```
 
@@ -192,7 +193,7 @@ freehold                      #   seed a local connection profile from the CP, t
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
 freehold world status         # the CP's single inventory (read via public /api/world)
 freehold world build          # trigger the CP's world-build (co-located runner)
-freehold world teardown       # the CP unwinds what it manages (relay+k3s LXCs first)
+freehold world teardown       # the CP clears its managed agent registry
 freehold world migrate        # run the CP's verify-gated migrations
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door

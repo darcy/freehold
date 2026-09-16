@@ -457,6 +457,35 @@ func (c *Client) WorldBuild() (string, error) {
 	return v.Report, nil
 }
 
+// WorldTeardownResult is what the CP-owned world-teardown did: the stage report
+// plus the CP-managed state it cleared.
+type WorldTeardownResult struct {
+	Report         string `json:"report"`
+	RunnersRemoved int    `json:"runners_removed"`
+	AgentsRemoved  int    `json:"agents_removed"`
+	DnsRemoved     int    `json:"dns_removed"`
+}
+
+// WorldTeardown triggers the CP-owned world teardown (/api/world-teardown) and
+// returns the stage report + the CP state it cleared. The console drives the
+// shared teardown engine through its co-located runner — the WorldBuild mirror
+// a thin (login-only) box uses. The CP LXC is destroyed last (detached), so this
+// returns before the console's own container goes. Long client timeout: each
+// runner command carries its own multi-minute budget, so the whole request can
+// exceed 20 minutes.
+func (c *Client) WorldTeardown() (*WorldTeardownResult, error) {
+	c.hc = &http.Client{Timeout: 45 * time.Minute}
+	raw, err := c.request(http.MethodPost, "/api/world-teardown", nil)
+	if err != nil {
+		return nil, err
+	}
+	var v WorldTeardownResult
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("world-teardown response: %w", err)
+	}
+	return &v, nil
+}
+
 // DnsRecord mirrors the console's DNS record row (C0 resolver).
 type DnsRecord struct {
 	Name      string `json:"name"`

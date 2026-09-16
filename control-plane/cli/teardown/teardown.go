@@ -106,10 +106,17 @@ type ExecRunner struct {
 	// multi-profile). Empty = rely on the child's own default.
 	ConfigPath string
 
-	// execFn overrides the subprocess shell-out for hermetic tests
-	// (nil = the real `freehold exec`).
+	// execFn overrides the low-level command driver (nil = the real
+	// `freehold exec` subprocess). Hermetic tests inject a fake; the CP-owned
+	// teardown injects spec.execOut so every pct/terraform command rides the
+	// co-located runner instead of a local runner.
 	execFn func(cmd string) (bool, string)
 }
+
+// SetExec overrides the low-level command driver. Used by the CP-owned
+// teardown (the mirror of world-build for a thin login box) to route commands
+// through the CP's co-located runner.
+func (r *ExecRunner) SetExec(fn func(cmd string) (bool, string)) { r.execFn = fn }
 
 // Runner is the remote-side surface Run drives. ExecRunner is the real
 // subprocess driver; the hermetic tests fake it.
