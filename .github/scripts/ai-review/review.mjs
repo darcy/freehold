@@ -490,12 +490,22 @@ async function main() {
 
   core.info(`Posted ${newInline.length} inline comment(s). Verdict: ${result.verdict}`);
 
-  // Fail the check (red) when the review reports blocking/important findings —
-  // green only on MERGE-READY. Comments are already posted above.
-  if (inline.length > 0 || /NEEDS WORK/i.test(result.verdict || '')) {
-    core.setFailed(`Review found ${inline.length} blocking/important finding(s) (${newInline.length} new, ${reflagged.length} re-flagged) — see the parent comment.`);
-  } else {
-    core.info('Review passed — MERGE-READY.');
+  // Reflect the verdict as a real PR review state rather than a red check:
+  // APPROVE when clean, REQUEST_CHANGES when blocking/important findings
+  // remain. A later round's review supersedes the previous one, so a fixed PR
+  // flips from REQUEST_CHANGES to APPROVE. The PAT authors the review as the
+  // bot account — GITHUB_TOKEN cannot approve/request changes on a PR it did
+  // not open, and a PR author can't review their own PR.
+  const clean = inline.length === 0 && !/NEEDS WORK/i.test(result.verdict || '');
+  try {
+    await octokit.rest.pulls.createReview({
+      owner, repo, pull_number,
+      event: clean ? 'APPROVE' : 'REQUEST_CHANGES',
+      body: summaryText,
+    });
+    core.info(`Submitted ${clean ? 'APPROVE' : 'REQUEST_CHANGES'} review.`);
+  } catch (e) {
+    core.warning(`Could not submit ${clean ? 'APPROVE' : 'REQUEST_CHANGES'} review: ${e.message}`);
   }
 }
 
