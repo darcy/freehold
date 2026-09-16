@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -316,18 +317,12 @@ func classifyDisk(d *planebase.DeviceInfo, disk lsblkNode, env *deviceState) {
 			walk(ch)
 		}
 	}
-	// Walk the children only: the disk node itself carries no fs/mount for a
-	// partitioned disk, and a bare `disk` with a filesystem has no children.
-	for _, ch := range disk.Children {
-		walk(ch)
-	}
-	if disk.FSType != "" && len(disk.Children) == 0 {
-		if disk.FSType == "zfs_member" {
-			reasons = append(reasons, "it already has a storage pool or filesystem on it")
-		} else {
-			reasons = append(reasons, "it already has data on it ("+disk.FSType+")")
-		}
-	}
+	// Walk the disk itself (a whole-disk PV / zpool member / filesystem) and
+	// every child partition. A partitioned disk's own node carries no fs, so
+	// this only adds a reason when the disk genuinely holds something — and a
+	// whole-disk zpool member gets the same importable/freehold signal as a
+	// partition would.
+	walk(disk)
 	if len(disk.Children) > 0 && len(reasons) == 0 {
 		reasons = append(reasons, "it already has partitions on it")
 	}
@@ -335,24 +330,43 @@ func classifyDisk(d *planebase.DeviceInfo, disk lsblkNode, env *deviceState) {
 	d.Clean = len(reasons) == 0 && d.Importable == ""
 }
 
-// importablePools associates an available-to-import zpool with each device that
-// carries it, from `zpool import` output: pool names on `pool:` lines, devices
-// in the config section. Best-effort; a missing `zpool` yields no imports.
+// importablePools associates an available-to-import zpool with each DEVICE that
+// carries it, from `zpool import` output. Only the `config:` section is
+// scanned, the root vdev line is skipped (a pool can be named like a disk), and
+// only real device-name shapes match — so the pool-name/id/action lines never
+// masquerade as a device.
 func importablePools(text string) map[string]string {
 	out := map[string]string{}
 	pool := ""
+	inConfig := false
+	firstConfigLine := true
 	for _, line := range strings.Split(text, "\n") {
 		t := strings.TrimSpace(line)
 		if name, ok := strings.CutPrefix(t, "pool:"); ok {
 			pool = strings.TrimSpace(name)
+			inConfig = false
 			continue
 		}
-		if pool == "" {
+		if t == "config:" {
+			inConfig = true
+			firstConfigLine = true
+			continue
+		}
+		if pool == "" || !inConfig {
+			continue
+		}
+		if t == "" {
+			// The tree's blank separator line does not end the section; only
+			// the next `pool:` line does.
+			continue
+		}
+		if firstConfigLine {
+			// The root vdev line — often the pool name itself.
+			firstConfigLine = false
 			continue
 		}
 		for _, f := range strings.Fields(t) {
-			if strings.HasPrefix(f, "sd") || strings.HasPrefix(f, "nvme") || strings.HasPrefix(f, "vd") {
-				base := strings.TrimPrefix(f, "/dev/")
+			if base, ok := deviceLeafBase(f); ok {
 				if _, seen := out[base]; !seen {
 					out[base] = pool
 				}
@@ -361,6 +375,17 @@ func importablePools(text string) map[string]string {
 	}
 	return out
 }
+
+// deviceLeafBase returns a kernel device-leaf name for a token, or ok=false.
+func deviceLeafBase(f string) (string, bool) {
+	name := strings.TrimPrefix(f, "/dev/")
+	if deviceNameRe.MatchString(name) {
+		return name, true
+	}
+	return "", false
+}
+
+var deviceNameRe = regexp.MustCompile(`^(sd[a-z]+[0-9]*|nvme[0-9]+n[0-9]+(p[0-9]+)?|vd[a-z]+[0-9]*|hd[a-z]+[0-9]*|md[0-9]+|dm-[0-9]+|loop[0-9]+)$`)
 
 // ---- small parsers ----------------------------------------------------------
 

@@ -60,7 +60,11 @@ func (e *Engine) chooseBackend(opts []planebase.Option) (planebase.Option, error
 
 	usable := usableOptions(opts)
 	if len(usable) == 0 {
-		return planebase.Option{}, fmt.Errorf("no usable storage found on this host — freehold never erases a disk that carries data:\n%s", describeOptions(opts))
+		msg := "no usable storage found on this host — freehold never erases a disk that carries data"
+		if len(deferredOptions(opts)) > 0 {
+			msg += " (preparing a new disk is a later phase)"
+		}
+		return planebase.Option{}, fmt.Errorf("%s:\n%s", msg, describeOptions(opts))
 	}
 	if len(usable) == 1 {
 		opt := usable[0]
@@ -99,6 +103,12 @@ func (e *Engine) promptBackend(opts, usable []planebase.Option) (planebase.Optio
 			fmt.Fprintf(e.Out, "   - %s: %s\n", o.Title, o.Reason)
 		}
 	}
+	if deferred := deferredOptions(opts); len(deferred) > 0 {
+		fmt.Fprint(e.Out, "\n  Seen, but freehold cannot prepare new disks yet:\n")
+		for _, o := range deferred {
+			fmt.Fprintf(e.Out, "   - %s\n", o.Title)
+		}
+	}
 	fmt.Fprint(e.Out, "\n   x) stop — make no changes\n\n")
 	hint := ""
 	if def > 0 {
@@ -124,8 +134,8 @@ func (e *Engine) promptBackend(opts, usable []planebase.Option) (planebase.Optio
 }
 
 // choosePool resolves the thin pool within a VG: the --thin-pool flag
-// (adopt-if-present, else carve), --yes (reuse the first detected pool), or the
-// interactive reuse/carve prompt.
+// (adopt-if-present, else carve), --yes (reuse the pool freehold's data lives
+// in, else the first detected pool), or the interactive reuse/carve prompt.
 func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 	pools := planebase.PoolNames(opt)
 	has := func(name string) bool {
@@ -138,6 +148,9 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 	}
 
 	if e.F.ThinPool != "" {
+		if !planebase.ValidStorageName(e.F.ThinPool) {
+			return nil, fmt.Errorf("thin-pool name %q is not allowed (use letters, digits, '.', '_', '-')", e.F.ThinPool)
+		}
 		if has(e.F.ThinPool) {
 			if err := e.confirmPoolShare(opt, e.F.ThinPool); err != nil {
 				return nil, err
@@ -150,14 +163,28 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 		// The VG has no thin pool yet: carve the default.
 		return &placement{pool: opt.Backend, thinPool: drive.FreshThinPool, created: true}, nil
 	}
-	if e.F.Yes {
-		if err := e.confirmPoolShare(opt, pools[0]); err != nil {
-			return nil, err
+
+	// On a freehold reconnect, prefer the pool that actually carries the
+	// freehold data — pools are unordered, and picking the wrong one would
+	// orphan the previous plane.
+	first, fhPool, fhAmbiguous := firstPool(opt)
+	if opt.Freehold.Freehold && fhAmbiguous {
+		if e.F.Yes {
+			return nil, fmt.Errorf("several pools under “%s” carry freehold data; --yes will not guess — pass --thin-pool", opt.Backend)
 		}
-		return &placement{pool: opt.Backend, thinPool: pools[0], created: false}, nil
+		first = fhPool
 	}
 
-	first := pools[0]
+	if e.F.Yes {
+		if opt.Freehold.Freehold && !has(first) {
+			return nil, fmt.Errorf("could not identify the pool holding freehold data under “%s” — pass --thin-pool", opt.Backend)
+		}
+		if err := e.confirmPoolShare(opt, first); err != nil {
+			return nil, err
+		}
+		return &placement{pool: opt.Backend, thinPool: first, created: false}, nil
+	}
+
 	fmt.Fprintf(e.Out, "\n  Storage “%s” already holds: %s\n", opt.Backend, poolSummary(opt.Pools))
 	fmt.Fprintf(e.Out, "    r      reuse %q\n", first)
 	fmt.Fprintf(e.Out, "    <name> create a NEW pool of that name (%d GB)\n", e.F.PoolSizeGB)
@@ -178,6 +205,9 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 		}
 		return &placement{pool: opt.Backend, thinPool: answer, created: false}, nil
 	}
+	if !planebase.ValidStorageName(answer) {
+		return nil, fmt.Errorf("thin-pool name %q is not allowed (use letters, digits, '.', '_', '-')", answer)
+	}
 	sizeAnswer, err := e.Prompt(fmt.Sprintf("new pool %q size GB (blank = %d)", answer, e.F.PoolSizeGB))
 	if err != nil {
 		return nil, err
@@ -190,12 +220,38 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 	return &placement{pool: opt.Backend, thinPool: answer, created: true}, nil
 }
 
+// firstPool returns the pool to reuse by default: the one carrying freehold
+// data when known, else the first pool. fhPool/fhAmbiguous report the
+// freehold-data pool and whether more than one pool carries freehold data.
+func firstPool(opt planebase.Option) (first, fhPool string, fhAmbiguous bool) {
+	var holders []string
+	for _, p := range opt.Pools {
+		if p.Freehold.Freehold {
+			holders = append(holders, p.Name)
+		}
+	}
+	if len(opt.Pools) > 0 {
+		first = opt.Pools[0].Name
+	}
+	if len(holders) == 1 {
+		first = holders[0]
+		fhPool = holders[0]
+	}
+	return first, fhPool, len(holders) > 1
+}
+
 // resolveFreeholdData handles a backend that carries freehold's own previous
 // data: keep and reconnect (requires the SAME relay domain, since volume names
 // are domain-derived), or erase it (destroying only freehold-namespaced
 // entries) and start fresh.
 func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 	domains := opt.Freehold.Domains
+	// A pool can be recognized as freehold's from its NAME alone (an empty or
+	// dedicated pool with no tenant entries yet): there is nothing to
+	// reconnect to or erase, so there is no decision to make.
+	if len(domains) == 0 {
+		return nil
+	}
 	want, _ := planebase.NormalizeDomain(e.F.RelayDomain)
 	matched := ""
 	for _, d := range domains {
@@ -264,13 +320,14 @@ func (e *Engine) requireShare(title, impact string) error {
 	return fmt.Errorf("stopped — no changes made")
 }
 
-// confirmPoolShare requires `share` when the chosen thin pool already has
-// riders (live guest disks sharing its capacity).
+// confirmPoolShare requires `share` when the chosen thin pool already holds
+// OTHER volumes (live guest disks sharing its capacity). Freehold's own LVs
+// riding the pool are not "sharing" — reconnecting to them is the point.
 func (e *Engine) confirmPoolShare(opt planebase.Option, pool string) error {
 	riders := 0
 	for _, p := range opt.Pools {
 		if p.Name == pool {
-			riders = len(p.Riders)
+			riders = guestRiders(p)
 		}
 	}
 	if riders == 0 {
@@ -280,6 +337,18 @@ func (e *Engine) confirmPoolShare(opt planebase.Option, pool string) error {
 		fmt.Sprintf("“%s” storage already holds %d of your existing volumes", pool, riders),
 		"Freehold would share this space with them, and they could run out of room.",
 	)
+}
+
+// guestRiders counts a pool's riders that are NOT freehold-namespaced (its own
+// volumes do not count as a capacity conflict to confirm).
+func guestRiders(p planebase.PoolInfo) int {
+	n := 0
+	for _, r := range p.Riders {
+		if _, fh := planebase.FreeholdLV(r); !fh {
+			n++
+		}
+	}
+	return n
 }
 
 // confirmYes is the one-keystroke confirm for the common safe single-answer
@@ -302,10 +371,13 @@ func (e *Engine) confirmYes(what, impact string) error {
 
 // ---- small render helpers ---------------------------------------------------
 
+// usableOptions are the backends this phase can actually drive: reuse of an
+// existing zpool or VG. Device-create options are DEFERRED (returned by
+// deferredOptions for display only), so they never appear as selectable.
 func usableOptions(opts []planebase.Option) []planebase.Option {
 	var out []planebase.Option
 	for _, o := range opts {
-		if o.Kind != planebase.KindBlocked {
+		if o.Kind == planebase.KindReuseZpool || o.Kind == planebase.KindReuseVG {
 			out = append(out, o)
 		}
 	}
@@ -316,6 +388,19 @@ func blockedOptions(opts []planebase.Option) []planebase.Option {
 	var out []planebase.Option
 	for _, o := range opts {
 		if o.Kind == planebase.KindBlocked {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// deferredOptions are recognized but not yet actionable (preparing a new
+// backend on a clean disk is a later phase) — shown so the operator knows the
+// disk was seen and why it cannot be used yet.
+func deferredOptions(opts []planebase.Option) []planebase.Option {
+	var out []planebase.Option
+	for _, o := range opts {
+		if o.Kind == planebase.KindCreateDevice {
 			out = append(out, o)
 		}
 	}
@@ -333,6 +418,10 @@ func describeOptions(opts []planebase.Option) string {
 			fmt.Fprintf(&b, "  - %s: cannot be used — %s\n", o.Title, o.Reason)
 			continue
 		}
+		if o.Kind == planebase.KindCreateDevice {
+			fmt.Fprintf(&b, "  - %s: preparing a new disk is a later phase\n", o.Title)
+			continue
+		}
 		fmt.Fprintf(&b, "  - %s\n", o.Title)
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -342,8 +431,8 @@ func poolSummary(pools []planebase.PoolInfo) string {
 	var parts []string
 	for _, p := range pools {
 		s := fmt.Sprintf("%q (%.0f%% used", p.Name, p.DataPercent)
-		if len(p.Riders) > 0 {
-			s += fmt.Sprintf(", %d volumes", len(p.Riders))
+		if n := guestRiders(p); n > 0 {
+			s += fmt.Sprintf(", %d volumes", n)
 		}
 		parts = append(parts, s+")")
 	}

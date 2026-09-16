@@ -23,8 +23,24 @@ func TestImportablePoolsAssociatesDevice(t *testing.T) {
 	}
 }
 
+func TestImportablePoolsIgnoresNonDevices(t *testing.T) {
+	// Pool named like a disk: its root vdev line must not register as a device.
+	// The `id:` line is outside config; a by-id leaf is not a kernel name.
+	out := "   pool: sdb\n     id: 12345678901234567890\n  state: ONLINE\n config:\n\n        sdb         ONLINE\n          sdc1      ONLINE\n        ata-WDC-XYZ  ONLINE\n"
+	got := importablePools(out)
+	if _, ok := got["sdb"]; ok {
+		t.Errorf("root vdev/pool name sdb must not be a device: %v", got)
+	}
+	if got["sdc1"] != "sdb" {
+		t.Errorf("sdc1 => %q, want sdb (got %v)", got["sdc1"], got)
+	}
+	if _, ok := got["ata-WDC-XYZ"]; ok {
+		t.Errorf("by-id name must not register: %v", got)
+	}
+}
+
 func TestClassifyDiskFailClosed(t *testing.T) {
-	env := &deviceState{pvs: map[string]bool{"/dev/sdc1": true}, swaps: map[string]bool{"/dev/sdd1": true}, imports: map[string]string{"sdb1": "freehold-thin"}}
+	env := &deviceState{pvs: map[string]bool{"/dev/sdc1": true}, swaps: map[string]bool{"/dev/sdd1": true}, imports: map[string]string{"sdb1": "freehold-thin", "sdz": "freehold-whole"}}
 	cases := []struct {
 		name       string
 		disk       lsblkNode
@@ -34,6 +50,7 @@ func TestClassifyDiskFailClosed(t *testing.T) {
 	}{
 		{"clean", lsblkNode{Name: "sda", Size: "1.8T", Type: "disk"}, true, "", false},
 		{"zfs member importable freehold", lsblkNode{Name: "sdb", Type: "disk", Children: []lsblkNode{{Name: "sdb1", FSType: "zfs_member"}}}, false, "freehold-thin", true},
+		{"whole-disk zfs member importable", lsblkNode{Name: "sdz", Type: "disk", FSType: "zfs_member"}, false, "freehold-whole", false},
 		{"mounted os disk", lsblkNode{Name: "nvme0", Type: "disk", Children: []lsblkNode{{Name: "nvme0p3", FSType: "LVM2_member"}}}, false, "", false},
 		{"pv child", lsblkNode{Name: "sdc", Type: "disk", Children: []lsblkNode{{Name: "sdc1", FSType: "LVM2_member"}}}, false, "", false},
 		{"swap child", lsblkNode{Name: "sdd", Type: "disk", Children: []lsblkNode{{Name: "sdd1", FSType: "swap"}}}, false, "", false},

@@ -1,6 +1,9 @@
 package planebase
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFreeholdLVRecognizesOwnNamesOnly(t *testing.T) {
 	cases := []struct {
@@ -123,5 +126,37 @@ func TestInventoryEmpty(t *testing.T) {
 	}
 	if (Inventory{Devices: []DeviceInfo{{Path: "/dev/sda"}}}).Empty() {
 		t.Error("a device must not read as Empty")
+	}
+}
+
+func TestFailingZpoolIsBlockedAndNotRecommended(t *testing.T) {
+	inv := Inventory{Zpools: []ZpoolInfo{
+		{Name: "bad", FreeGB: 100, Health: "DEGRADED"},
+		{Name: "good", FreeGB: 100, Health: "ONLINE"},
+	}}
+	opts := BuildOptions(inv)
+	bad, _ := FindOption(opts, "bad")
+	if bad.Kind != KindBlocked || bad.Safety != Blocked || !strings.Contains(bad.Reason, "DEGRADED") {
+		t.Errorf("failing pool must be Blocked with a reason, got %+v", bad)
+	}
+	good, _ := FindOption(opts, "good")
+	if good.Kind != KindReuseZpool {
+		t.Errorf("healthy pool usable, got %+v", good)
+	}
+	if i := Recommend(opts); i < 0 || opts[i].Backend != "good" {
+		t.Errorf("recommend must skip the failing pool, got %d", i)
+	}
+}
+
+func TestValidStorageName(t *testing.T) {
+	for _, ok := range []string{"freehold-thin", "fh.prod_1", "data"} {
+		if !ValidStorageName(ok) {
+			t.Errorf("%q must be valid", ok)
+		}
+	}
+	for _, bad := range []string{"", "has space", "x;rm -rf /", "a'b", "a/b", strings.Repeat("x", 65)} {
+		if ValidStorageName(bad) {
+			t.Errorf("%q must be rejected", bad)
+		}
 	}
 }

@@ -514,6 +514,32 @@ func TestSelectPlacementFreeholdDomainMismatchFails(t *testing.T) {
 	}
 }
 
+func TestSelectPlacementCleanDeviceOnlyDefers(t *testing.T) {
+	inv := planebase.Inventory{Devices: []planebase.DeviceInfo{{Path: "/dev/sdb", SizeGB: 1800, Clean: true}}}
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d"})
+	_, err := e.stagePlacement()
+	if err == nil || !strings.Contains(err.Error(), "later phase") {
+		t.Errorf("a clean-disk-only host must defer with a clear message, got %v", err)
+	}
+}
+
+func TestSelectPlacementYesReconnectPicksFreeholdPool(t *testing.T) {
+	// The freehold pool is NOT first: a headless reconnect must pick it, not
+	// pools[0], or it would orphan the previous plane.
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{Name: "pve", FreeGB: 100, Pools: []planebase.PoolInfo{
+		{Name: "data", DataPercent: 10},
+		{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}},
+	}}}}
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d", Yes: true})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "freehold-thin" {
+		t.Errorf("--yes reconnect must pick the freehold pool, got %+v", got)
+	}
+}
+
 func TestSelectPlacementErasesFreeholdData(t *testing.T) {
 	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
 		Name: "pve", FreeGB: 100,

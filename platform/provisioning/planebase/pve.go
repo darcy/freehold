@@ -34,6 +34,9 @@ const LocalLvmRidersScript = "pool=$(grep -A2 '^lvmthin: local-lvm$' /etc/pve/st
 // storage.cfg is known to carry one). `run` executes one script on the target
 // and returns its stdout.
 func RepointLocalLvm(run func(script string, timeoutS uint64) (string, error), pool string) error {
+	if !ValidStorageName(pool) {
+		return fmt.Errorf("refusing to re-point local-lvm at an unsafe pool name %q (allowed: [A-Za-z0-9._-])", pool)
+	}
 	current, err := run(LocalLvmProbeScript, 30)
 	if err != nil {
 		return fmt.Errorf("local-lvm probe failed: %w", err)

@@ -318,10 +318,13 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 		if s.PlanePool == "" {
 			s.PlanePool = chosen.Backend
 		}
-		if chosen.Kind == planebase.KindReuseZpool {
+		switch chosen.Kind {
+		case planebase.KindReuseZpool:
 			kind = planebase.KindZfs
-		} else {
+		case planebase.KindReuseVG:
 			kind = planebase.KindLvmThin
+		default:
+			return nil, fmt.Errorf("recorded plane option %q is not a ready backend (creating one is a later phase)", s.PlanePool)
 		}
 	}
 	mounts := map[planebase.Tenant][]planebase.MountSpec{}

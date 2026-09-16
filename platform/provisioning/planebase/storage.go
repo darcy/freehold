@@ -167,6 +167,17 @@ func BuildOptions(inv Inventory) []Option {
 
 	for _, z := range inv.Zpools {
 		opt := Option{Kind: KindReuseZpool, Safety: Safe, Backend: z.Name, Freehold: z.Freehold}
+		// A pool the kernel reports as anything but ONLINE is a failing pool:
+		// never write the plane onto it. Unknown ("") is treated as usable so
+		// an older/partial probe does not spuriously block a healthy pool.
+		if z.Health != "" && z.Health != "ONLINE" {
+			opt.Kind = KindBlocked
+			opt.Safety = Blocked
+			opt.Title = fmt.Sprintf("disk group “%s”", z.Name)
+			opt.Reason = fmt.Sprintf("its health is %s — freehold will not store data on a failing pool", z.Health)
+			blocked = append(blocked, opt)
+			continue
+		}
 		if z.Freehold.Freehold {
 			opt.Title = fmt.Sprintf("Reconnect to your previous freehold data in “%s”", z.Name)
 			opt.Impact = "Freehold adds its own folders here and reconnects to the data it already owns. Nothing else on this pool is changed."
@@ -360,4 +371,21 @@ func FreeholdPoolName(name string) bool {
 		return true
 	}
 	return strings.HasPrefix(name, "freehold-") && strings.HasSuffix(name, "-thin")
+}
+
+// ValidStorageName reports whether a name is safe to use as a thin-pool / VG
+// name AND to interpolate into a shell command (the PVE storage.cfg re-point
+// awk). It is the same conservative alphabet the backend drivers use:
+// [A-Za-z0-9._-], non-empty, bounded.
+func ValidStorageName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, c := range name {
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
