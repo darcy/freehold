@@ -79,10 +79,13 @@ function readContextFiles() {
 }
 
 async function getPreviousRoundNotes() {
-  const { data: comments } = await octokit.rest.issues.listComments({ owner, repo, issue_number: pull_number, per_page: 50 });
-  // Each round creates a NEW parent comment, so take the most recent one.
+  // Paginate: a busy PR exceeds one page, and missing the prior tracking
+  // comment would drop the re-review guidance entirely.
+  const comments = await octokit.paginate(octokit.rest.issues.listComments, { owner, repo, issue_number: pull_number, per_page: 100 });
+  // Each round creates a NEW parent comment, so take the most recent one that
+  // is NOT this round's (defensive — normally we run before creating ours).
   const tracking = comments
-    .filter(c => c.body?.includes(TRACKING_MARKER))
+    .filter(c => c.body?.includes(TRACKING_MARKER) && c.id !== parentCommentId)
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
   return tracking ? tracking.body.replace(TRACKING_MARKER, '').trim() : '(first review round)';
 }
@@ -178,7 +181,7 @@ async function callLlmOnce(prompt) {
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
-      max_tokens: 16000,
+      max_tokens: 64000,
       stream: true,
       ...(LLM_REASONING_EFFORT ? { reasoning_effort: LLM_REASONING_EFFORT } : {}),
       messages: [{ role: 'user', content: prompt }],
@@ -316,6 +319,13 @@ async function main() {
   const headSha = pr.head.sha;
   const startedAt = Date.now();
 
+  // Read the PRIOR round's notes BEFORE creating this round's tracking comment:
+  // getPreviousRoundNotes takes the most recent TRACKING_MARKER comment, so
+  // creating ours first would make it read the fresh, empty one and drop the
+  // re-review guidance ("don't re-find marginal issues") — which makes every
+  // round reason like a first look (slow + prone to prose/non-JSON).
+  const previousRound = await getPreviousRoundNotes();
+
   // Create the progress comment up front so the checkboxes light up as work
   // happens, rather than appearing fully-formed at the end.
   await createParentComment(progressBody(0));
@@ -355,7 +365,6 @@ async function main() {
   const diff = diffResult.diff;
   await progress(1, `Read the diff — ${diffResult.fileCount} file(s), ~${diffResult.totalChars.toLocaleString()} chars`);
 
-  const previousRound = await getPreviousRoundNotes();
   const ctx = readContextFiles();
   await progress(2, ctx.names.length ? `Read context — ${ctx.names.join(', ')}` : 'No context files found');
 
