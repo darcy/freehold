@@ -165,6 +165,12 @@ const REVIEW_TOOL = {
   },
 };
 
+// Bound the reasoning budget: the flash reasoning model otherwise thinks for
+// tens of thousands of tokens on a dense diff (~9 min/call). Capping
+// `max_tokens` alone only truncates that thinking before it answers (prose,
+// non-JSON); `reasoning_effort` makes it think less, so the JSON arrives fast.
+const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT ?? 'low';
+
 async function callLlmOnce(prompt) {
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
@@ -172,8 +178,9 @@ async function callLlmOnce(prompt) {
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
-      max_tokens: 12000,
+      max_tokens: 16000,
       stream: true,
+      ...(LLM_REASONING_EFFORT ? { reasoning_effort: LLM_REASONING_EFFORT } : {}),
       messages: [{ role: 'user', content: prompt }],
       tools: [REVIEW_TOOL],
       tool_choice: { type: 'function', function: { name: 'review' } },
