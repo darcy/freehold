@@ -42,10 +42,7 @@ jobs:
           # ---- provider config: this is the only provider-specific part ----
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
           LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
-          LLM_MODEL: "accounts/fireworks/models/deepseek-v4p1-flash"
-          # Bound the reasoning model's thinking (low|medium|high) so a large
-          # diff does not spawn tens of thousands of reasoning tokens per call.
-          LLM_REASONING_EFFORT: "low"
+          LLM_MODEL: "accounts/fireworks/models/deepseek-v4-flash-0731"
           # --------------------------------------------------------------------
 
           PROMPT_FILE: "review-prompt.md"
