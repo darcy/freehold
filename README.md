@@ -179,7 +179,8 @@ only builds + installs):
 ```sh
 freehold bootstrap   # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
-freehold teardown    # tear it down (compute-only: keeps coords + /srv/data)
+freehold teardown    # tear it down (compute-only: keeps coords + /srv/data);
+                     #  a login-only box runs it through the CP
 freehold            # the TUI dashboard
 ```
 
@@ -192,7 +193,7 @@ freehold                      #   seed a local connection profile from the CP, t
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
 freehold world status         # the CP's single inventory (read via public /api/world)
 freehold world build          # trigger the CP's world-build (co-located runner)
-freehold world teardown       # the CP unwinds what it manages (relay+k3s LXCs first)
+freehold world teardown       # the CP clears its managed agent registry
 freehold world migrate        # run the CP's verify-gated migrations
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
@@ -608,12 +609,14 @@ Every PR runs two gates:
 
 - **CI** (`ci.yml`): `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on the
   workspace (toolchain pinned to the declared `rust-version`). Green/red, no exceptions.
-- **AI review** (`claude.yml`): reviews for real problems only. Findings are tiered in the
-  top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER (named
-  follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
+- **AI review** (`ai-pr-review.yml`, "Bot Review"): reviews for real problems only. Findings
+  are tiered in the top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER
+  (named follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
   BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
-  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`. The reviewer cites
-  the CI status rather than re-running cargo.
+  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`, and submits that as a
+  PR review state — `APPROVE` when clean, `REQUEST_CHANGES` with findings — so branch
+  protection gates a merge rather than a red check. The operator overrides a `REQUEST_CHANGES`
+  by dismissing the review.
 - **README / ARCHITECTURE drift**: when a PR changes something those docs document (or drifts
   from a locked decision in `ARCHITECTURE.md`), the reviewer adds one `README:` /
   `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a

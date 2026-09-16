@@ -620,6 +620,14 @@ var teardownCmd = &cobra.Command{
 			return nil
 		}
 
+		// A THIN box (no local provisioning runner) drives the whole-world
+		// teardown through the CP — the mirror of `freehold build`: the CP's
+		// co-located runner runs the shared teardown engine, the CP LXC going
+		// last. Per-tenant + --data still need the build box.
+		if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
+			return teardownViaCP(cfg, scope, data, removeDNS, yes)
+		}
+
 		// The teardown engine shells `freehold exec` — resolve the
 		// CLI binary as OURSELF (we are it).
 		self, err := os.Executable()
@@ -830,6 +838,73 @@ func init() {
 	storageInfoCmd.Flags().StringArray("mount", nil, "Mount ref <role>:<source>:<guest>:<vmid|-> (repeatable; vmid '-' skips the guest probe)")
 	storageResolveCmd.Flags().String("device", "", "Physical device for a NEW zpool (e.g. /dev/sdb) — required only on the consent-gated create path, when no existing backend is detected")
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a backend (zpool OR LVM-thin) when none is detected. Absent + no backend = actionable bail")
+}
+
+// teardownViaCP tears a world down from a THIN login box: there is no local
+// provisioning runner, so the CP's co-located runner runs the shared teardown
+// engine (console /api/world-teardown) — the mirror of how `freehold build`
+// triggers /api/world-build. Compute-only, whole-world: per-tenant + --data
+// still need the build box (the cp dataset is mounted until the CP is gone).
+func teardownViaCP(cfg *config.Config, scope teardown.Scope, data, removeDNS, yes bool) error {
+	if scope != teardown.ScopeWholeWorld {
+		return fmt.Errorf("per-tenant teardown needs a local provisioning runner — run it from the box that built the world")
+	}
+	if data {
+		return fmt.Errorf("--data from a login-only box is not supported yet — run it from the box that built the world")
+	}
+	if !yes {
+		fmt.Println("teardown scope: whole-world (CP-owned — this box has no local runner)")
+		fmt.Println("keeps: config · world home · door key · plane locations · DNS creds")
+		fmt.Printf("proceed? [type yes] ")
+		var answer string
+		if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
+			return fmt.Errorf("teardown aborted (not confirmed)")
+		}
+	}
+	// DNS records, best-effort, BEFORE the CP goes: the sealed credential lives
+	// on the build box, so a thin box can only try (same caveat the box path's
+	// removeManagedDNS already surfaces).
+	if removeDNS {
+		if err := removeManagedDNS(cfg); err != nil {
+			fmt.Printf("  (warning: DNS removal skipped — %v)\n", err)
+		}
+	}
+	secretHex, err := oplogin.SecretHex()
+	if err != nil {
+		return fmt.Errorf("no operator session on this box (%v) — run `freehold login` first", err)
+	}
+	secret, err := oplogin.NsecToSecret(secretHex)
+	if err != nil {
+		return err
+	}
+	c, err := oplogin.Login(cfg.CPURL, secret)
+	if err != nil {
+		return fmt.Errorf("login to %s failed: %w", cfg.CPURL, err)
+	}
+	// The CP-owned teardown runs the whole thing through the CP's own runner and
+	// clears the CP's managed state AFTER its runner-driven work (in the
+	// console), so the co-located runner is never removed out from under it —
+	// hence no separate CP-first hand-off here (the CP dies with the world).
+	fmt.Printf("tearing down world %s through the CP…\n", cfg.TenantSlug())
+	res, err := c.WorldTeardown()
+	if err != nil {
+		return fmt.Errorf("world-teardown (console /api/world-teardown): %w", err)
+	}
+	if res.Report != "" {
+		fmt.Println(res.Report)
+	}
+	fmt.Printf("  CP teardown: removed %d runner(s)/secrets, %d agent(s), %d DNS record(s)\n",
+		res.RunnersRemoved, res.AgentsRemoved, res.DnsRemoved)
+	// Forget the recorded LXC coords so the next build re-creates the guests (a
+	// thin box usually has none — same contract as the local path).
+	cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
+	cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
+	cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
+	if err := cfg.Save(config.ConfigPath()); err != nil {
+		return err
+	}
+	fmt.Println("cleared recorded LXC coordinates (vmid + ip) — the next build re-creates them")
+	return nil
 }
 
 // cpFirstTeardown is the CP-first teardown hand-off: the BOX logs into the CP
