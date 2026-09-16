@@ -103,3 +103,55 @@ func TestApplyFailureStopsPendingsAndKeepsPending(t *testing.T) {
 		t.Fatalf("ledger not persisted: %v", err)
 	}
 }
+
+// TestScriptsEnumeratesAscending verifies the versioned script enumeration:
+// <epoch>.sh (apply) is grouped with its optional <epoch>.verify.sh (gate), in
+// ascending epoch order, exactly the two shipped migrations appearing first.
+func TestScriptsEnumeratesAscending(t *testing.T) {
+	scripts, err := Scripts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scripts) != 2 {
+		t.Fatalf("expected the 2 shipped migrations, got %d: %+v", len(scripts), scripts)
+	}
+	// Ascending order.
+	if !(scripts[0].Epoch < scripts[1].Epoch) {
+		t.Fatal("migrations must enumerate in ascending epoch order")
+	}
+	for _, s := range scripts {
+		if s.Body == "" {
+			t.Errorf("migration %s has no apply body", s.Epoch)
+		}
+		if s.Verify == "" {
+			t.Errorf("migration %s should carry a verify gate", s.Epoch)
+		}
+	}
+}
+
+// TestScriptMigrationVerifyGating adapts a Script into a verify-gated Migration
+// and proves a failing verify gate keeps it pending (retried, never "done").
+func TestScriptMigrationVerifyGating(t *testing.T) {
+	run := func(body string) error {
+		if body == "apply" {
+			return nil // apply succeeds
+		}
+		return fmt.Errorf("gate %s not converged", body) // verify fails
+	}
+	s := Script{Epoch: "1799999999", Body: "apply", Verify: "verify"}
+	m := s.Migration(run)
+	if m.Name != "1799999999" {
+		t.Fatalf("migration name must be the epoch, got %q", m.Name)
+	}
+	res, err := (&State{path: filepath.Join(t.TempDir(), "x.json"),
+		entries: map[string]Entry{}}).Run([]Migration{m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res[0].Applied {
+		t.Fatal("apply should have run")
+	}
+	if res[0].OK {
+		t.Fatal("a failing verify gate must not mark the migration OK")
+	}
+}

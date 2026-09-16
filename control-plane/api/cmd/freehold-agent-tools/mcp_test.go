@@ -203,7 +203,7 @@ func TestMergeToolsListPreservesEnvelope(t *testing.T) {
 			nameSet[mm["name"].(string)] = true
 		}
 	}
-	for _, want := range []string{"buzz_send", "create_agent", "grant_agent", "manage_agent"} {
+	for _, want := range []string{"buzz_send", "create_agent", "manage_agent"} {
 		if !nameSet[want] {
 			t.Fatalf("merged tools/list missing %q:\n%s", want, merged)
 		}

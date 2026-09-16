@@ -14,6 +14,7 @@ type fakeRunner struct {
 	lxcRoles []string
 	pools    []string // "vg/pool" entries DestroyPool saw
 	failExec string   // substring => Exec returns false
+	order    []string // ordered action log (terraform / lxc-<role>)
 }
 
 func (f *fakeRunner) Exec(cmd string) (bool, string) {
@@ -25,6 +26,7 @@ func (f *fakeRunner) Exec(cmd string) (bool, string) {
 }
 
 func (f *fakeRunner) DestroyOneLxc(role string, vmid *uint32) ([]string, error) {
+	f.order = append(f.order, "lxc-"+role)
 	f.lxcRoles = append(f.lxcRoles, role)
 	if vmid == nil {
 		return []string{fmt.Sprintf("%s LXC: never created (no vmid recorded)", role)}, nil
@@ -39,6 +41,12 @@ func (f *fakeRunner) DestroyDataset(tenant, domain, pool, kind, dataset string) 
 func (f *fakeRunner) DestroyPool(vg, pool string) error {
 	f.pools = append(f.pools, vg+"/"+pool)
 	return nil
+}
+
+func (f *fakeRunner) TerraformDestroy() ([]string, error) {
+	f.order = append(f.order, "terraform")
+	f.execs = append(f.execs, "TF_DESTROY")
+	return []string{"terraform destroy"}, nil
 }
 
 func testCfg(t *testing.T, data bool) (*Cfg, *fakeRunner) {
@@ -114,6 +122,31 @@ func TestWholeWorldKeepsConfigAndDoor(t *testing.T) {
 	}
 	if len(r.lxcRoles) != 2 {
 		t.Errorf("both managed LXCs must be destroyed, got %v", r.lxcRoles)
+	}
+}
+
+// The whole point of Inc 6: terraform must destroy the kube workloads (which
+// live INSIDE the k3s guest) BEFORE any LXC pct-destroy — a regression that
+// reorders them would hand the kube layer to the k3s LXC's death silently.
+func TestWholeWorldTerraformDestroyPrecedesLxc(t *testing.T) {
+	cfg, r := testCfg(t, false)
+	if _, err := Run(r, cfg, ScopeWholeWorld, true); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(r.order) == 0 {
+		t.Fatal("expected an ordered action log")
+	}
+	if r.order[0] != "terraform" {
+		t.Errorf("terraform destroy must run FIRST, got order %v", r.order)
+	}
+	var seenLxc bool
+	for _, a := range r.order {
+		if a == "lxc-relay" || a == "lxc-cp" || a == "lxc-k3s" {
+			seenLxc = true
+		}
+		if a == "terraform" && seenLxc {
+			t.Errorf("terraform destroy appeared AFTER an LXC destroy: %v", r.order)
+		}
 	}
 }
 

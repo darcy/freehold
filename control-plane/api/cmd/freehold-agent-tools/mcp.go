@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"freehold/control-plane/api/agenttools"
 	"freehold/contract/crypto"
+	"freehold/control-plane/api/agenttools"
 )
 
 // freeholdToolDefs are the create/grant/manage tool schemas merged into
@@ -35,16 +35,12 @@ func freeholdToolDefs() []map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	return []map[string]interface{}{
-		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose). Returns the new agent's pubkey.",
+		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel to add it to; the channel is created if it doesn't exist, and the operator is added). Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
 				"name":    map[string]interface{}{"type": "string"},
 				"purpose": map[string]interface{}{"type": "string"},
+				"channel": map[string]interface{}{"type": "string"},
 			}, []string{"name"})},
-		{"name": "grant_agent", "description": "Bind agent pubkeys to a runner's whitelist.",
-			"inputSchema": i(map[string]interface{}{
-				"runner":  map[string]interface{}{"type": "string"},
-				"pubkeys": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-			}, []string{"runner", "pubkeys"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},
 	}
@@ -52,7 +48,10 @@ func freeholdToolDefs() []map[string]interface{} {
 
 func isFreeholdTool(name string) bool {
 	switch name {
-	case "create_agent", "grant_agent", "manage_agent":
+	// grant_agent is deliberately absent: it is operator-scoped (a grant hands
+	// direct exec access to a runner), so the CPA's conversation+create-only
+	// harness must not advertise or call it.
+	case "create_agent", "manage_agent":
 		return true
 	}
 	return false

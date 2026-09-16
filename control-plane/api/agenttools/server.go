@@ -28,6 +28,19 @@ type Server struct {
 	// Tools holds the bound agent-management actions (Console + the deploy
 	// path). create_agent / grant_agent / manage_agent dispatch here.
 	Tools *agent.Tools
+
+	// Facts is the durable world-facts store (plane/certs/domains registered at
+	// build). nil = the world-facts surface is unregistered.
+	Facts *FactsStore
+
+	// IsAgent reports whether a caller pubkey is a REGISTRY agent (a row in
+	// the CP's agent registry). Scope rule: registry agents get the
+	// create/grant/manage toolset only; operator callers (roster members NOT
+	// in the registry — the admin/seed grants minted at bootstrap) get the
+	// full toolset including the world_* actions. Keyed on the registry, read
+	// fresh per call, so a revoked registry row loses world access on the
+	// next request. nil = everyone is an operator (no registry filtering).
+	IsAgent func(callerPubkey string) bool
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -84,11 +97,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rpcError(w, req.ID, -32001, aerr.Error())
 		return
 	}
-	_ = caller // audit use later
 
 	switch req.Method {
 	case "tools/call":
-		s.dispatch(w, req.ID, req.Params)
+		s.dispatch(w, req.ID, req.Params, caller)
 	default:
 		s.rpcError(w, req.ID, -32601, "method not found: "+req.Method)
 	}
@@ -102,10 +114,11 @@ func (s *Server) toolList() []map[string]interface{} {
 	}
 	return []map[string]interface{}{
 		{
-			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose). Returns the new agent's pubkey.",
+			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel to add it to; the channel is created if it doesn't exist, and the operator is added). Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
 				"name":    map[string]interface{}{"type": "string"},
 				"purpose": map[string]interface{}{"type": "string"},
+				"channel": map[string]interface{}{"type": "string"},
 			}, []string{"name"}),
 		},
 		{
@@ -137,12 +150,40 @@ func (s *Server) toolList() []map[string]interface{} {
 			"name": "world_build", "description": "Run the CP-owned world-build/reconcile stages through the CP's co-located runner (the box's login + trigger).",
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
+		{
+			"name": "world_exec", "description": "Run a command through the CP's co-located runner (operator-scoped drive-through-CP exec, so a thin login box has the build box's full operational surface).",
+			"inputSchema": i(map[string]interface{}{
+				"target":    map[string]interface{}{"type": "string"},
+				"cmd":       map[string]interface{}{"type": "string"},
+				"timeout_s": map[string]interface{}{"type": "integer"},
+				"secrets":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"cmd"}),
+		},
+		{
+			"name": "world_authorize_door", "description": "Append an operator box's public door key to the host door through the co-located runner (DOOR_SPEC).",
+			"inputSchema": i(map[string]interface{}{
+				"pubkey": map[string]interface{}{"type": "string"},
+			}, []string{"pubkey"}),
+		},
+		{
+			"name": "world_revoke_door", "description": "Remove an operator box's public door key from the host door.",
+			"inputSchema": i(map[string]interface{}{
+				"pubkey": map[string]interface{}{"type": "string"},
+			}, []string{"pubkey"}),
+		},
+		{
+			"name": "world_register_facts", "description": "Register the deployer-side world facts (plane/storage layout, canonical domains, cert metadata) so a management box renders DATA/Certs from the CP.",
+			"inputSchema": i(map[string]interface{}{
+				"facts": map[string]interface{}{"type": "object"},
+			}, []string{"facts"}),
+		},
 	}
 }
 
 type createAgentArgs struct {
 	Name    string `json:"name"`
 	Purpose string `json:"purpose"`
+	Channel string `json:"channel"`
 }
 type grantAgentArgs struct {
 	Runner  string   `json:"runner"`
@@ -152,7 +193,23 @@ type manageAgentArgs struct {
 	Remove string `json:"remove"`
 }
 
-func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json.RawMessage) {
+// isWorldTool reports whether a tool is an operator-scoped action: granting an
+// agent onto a runner's whitelist, the world_* actions, and the door
+// authorize/revoke all mutate what the operator owns. grant_agent is
+// operator-only because a grant hands direct exec access to a runner's MCP
+// surface — letting a prompt-reachable agent (e.g. the CPA) bind an arbitrary
+// pubkey onto an arbitrary runner (incl. the CP's own co-located runner) would
+// bypass this very boundary. The CPA's agent toolset is create + manage only.
+func isWorldTool(name string) bool {
+	switch name {
+	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build",
+		"world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts":
+		return true
+	}
+	return false
+}
+
+func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json.RawMessage, caller string) {
 	if s.Tools == nil {
 		s.rpcError(w, id, -32002, "freehold-agent-tools not bound (no agent actions)")
 		return
@@ -165,6 +222,16 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		s.rpcError(w, id, -32602, "tools/call requires name")
 		return
 	}
+	// Scope auth (per-channel tool visibility): the world_* actions and
+	// grant_agent mutate what the operator owns — registry AGENTS are excluded
+	// from them (conversation + create/manage only); only OPERATOR callers
+	// (roster members not in the registry) drive them. The CPA's stdio bridge
+	// already filters to create/manage; this is the same boundary enforced
+	// server-side so it cannot be bypassed by calling the server directly.
+	if isWorldTool(call.Name) && s.IsAgent != nil && s.IsAgent(caller) {
+		s.rpcError(w, id, -32003, "unauthorized: registry agents cannot call "+call.Name+" (operator-scoped)")
+		return
+	}
 	switch call.Name {
 	case "create_agent":
 		var a createAgentArgs
@@ -172,7 +239,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			s.rpcError(w, id, -32602, "create_agent arguments: "+err.Error())
 			return
 		}
-		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose)
+		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose, a.Channel)
 		// Persist the purpose on the created agent's registry row so a rebuild
 		// reconciler can recreate its system prompt verbatim (E3 without
 		// silently dropping the agent's reason to exist).
@@ -204,12 +271,12 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		b, _ := json.Marshal(agents)
 		s.textResult(w, id, nil, string(b))
 	case "world_status":
-		agents, err := s.Tools.WorldStatus()
+		out, err := s.Tools.WorldStatus()
 		if err != nil {
 			s.textResult(w, id, err, "")
 			return
 		}
-		out := map[string]interface{}{"cp_pubkey": s.Audience, "agents": agents}
+		out["cp_pubkey"] = s.Audience
 		b, _ := json.Marshal(out)
 		s.textResult(w, id, nil, string(b))
 	case "world_teardown":
@@ -234,6 +301,71 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		s.textResult(w, id, nil, out)
+	case "world_exec":
+		var a struct {
+			Target   string   `json:"target"`
+			Cmd      string   `json:"cmd"`
+			TimeoutS uint64   `json:"timeout_s"`
+			Secrets  []string `json:"secrets"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.Cmd == "" {
+			s.rpcError(w, id, -32602, "world_exec arguments: cmd required")
+			return
+		}
+		out, err := s.Tools.WorldExec(a.Target, a.Cmd, a.TimeoutS, a.Secrets...)
+		if err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, out)
+	case "world_authorize_door":
+		var a struct {
+			Pubkey string `json:"pubkey"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.Pubkey == "" {
+			s.rpcError(w, id, -32602, "world_authorize_door arguments: pubkey required")
+			return
+		}
+		if err := s.Tools.AuthorizeDoor(a.Pubkey); err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, "door key authorized")
+	case "world_revoke_door":
+		var a struct {
+			Pubkey string `json:"pubkey"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.Pubkey == "" {
+			s.rpcError(w, id, -32602, "world_revoke_door arguments: pubkey required")
+			return
+		}
+		if err := s.Tools.RevokeDoor(a.Pubkey); err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, "door key revoked")
+	case "world_register_facts":
+		var a struct {
+			Facts json.RawMessage `json:"facts"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || len(a.Facts) == 0 {
+			s.rpcError(w, id, -32602, "world_register_facts arguments: facts required")
+			return
+		}
+		if s.Facts == nil {
+			s.textResult(w, id, fmt.Errorf("world-register-facts: no facts store bound"), "")
+			return
+		}
+		var facts WorldFacts
+		if err := json.Unmarshal(a.Facts, &facts); err != nil {
+			s.textResult(w, id, fmt.Errorf("world-register-facts: bad facts: %w", err), "")
+			return
+		}
+		if err := s.Facts.Register(facts); err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		s.textResult(w, id, nil, "world facts registered")
 	default:
 		s.rpcError(w, id, -32601, "unknown tool: "+call.Name)
 	}

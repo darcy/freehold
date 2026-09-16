@@ -28,7 +28,7 @@ func TestResumeStateRoundTrip(t *testing.T) {
 		kid:      "https://acme.example/acct/1",
 		orderURL: "https://acme.example/order/1",
 	}
-	if err := r.persist(po, "_acme-challenge.relay.librem.freehold.technology"); err != nil {
+	if err := r.persist(po, "_acme-challenge.relay.librem.freehold.technology", "challenge-value-XYZ"); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
 	got, ok, err := r.TryLoad()

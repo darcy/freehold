@@ -81,8 +81,8 @@ func KeySecretFor(agentName string) string {
 func PodName(agentName string) string { return sanitizePodName(agentName) }
 
 // CPASystemPromptPath is where the CPA pod reads its purpose from: the
-// <pod>-prompt ConfigMap mounts the embedded prompts/CPA_SYSTEM_PROMPT.md
-// (embedded via the platform/agents package) read-only into the pod,
+// <pod>-prompt ConfigMap mounts the embedded agents/freehold/prompt.md
+// (embedded via the freehold/agents package) read-only into the pod,
 // and the agent re-reads it on every spawn — never cached.
 const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
 
@@ -92,9 +92,10 @@ const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
 // reasoning model (D1 wiring) routes here.
 const LiteLLMServiceURL = "http://litellm.litellm:4000/v1"
 
-// CpaLiteLLMModel is the litellm model alias the CPA talks to; it maps behind
-// the scenes to the deepseek route registered at deploy time.
-const CpaLiteLLMModel = "ControlPlaneAgent"
+// CpaLiteLLMModel is the litellm model name the CPA talks to. It must equal the
+// model registered at deploy time (litellm.tf model_registration) — no alias:
+// the CPA either routes or it 400s.
+const CpaLiteLLMModel = "deepseek-v4-flash"
 
 // AgentLiteLLMKeySecretKey is the k8s Secret literal that carries the pod's
 // minted litellm key (referenced by secretKeyRef, never in the manifest).
@@ -107,7 +108,7 @@ const AgentLiteLLMKeySecretKey = "key"
 // Never` honors I5 — an intentional clean exit stays terminal; the kubelet
 // must not resurrect a pod that stopped on purpose.
 //
-// systemPrompt is the FULL text of prompts/CPA_SYSTEM_PROMPT.md (stageCpa
+// systemPrompt is the FULL text of agents/freehold/prompt.md (stageCpa
 // passes the file contents, not a path): it embeds as the <pod>-prompt
 // ConfigMap's content (indented four spaces per line so the `|` block scalar
 // is valid YAML) and the pod mounts that ConfigMap read-only at
@@ -151,7 +152,7 @@ func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string) string {
 // Never` honors I5 — an intentional clean exit stays terminal; the kubelet
 // must not resurrect a pod that stopped on purpose.
 //
-// systemPrompt is the FULL text of prompts/CPA_SYSTEM_PROMPT.md (stageCpa
+// systemPrompt is the FULL text of agents/freehold/prompt.md (stageCpa
 // passes the file contents, not a path): it embeds as the <pod>-prompt
 // ConfigMap's content (indented four spaces per line so the `|` block scalar
 // is valid YAML) and the pod mounts that ConfigMap read-only at
@@ -283,7 +284,7 @@ func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
 }
 
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
-// stages.LitellmManifestScript. agentName is the display name (sanitized into
+// the litellm workload pattern. agentName is the display name (sanitized into
 // the pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here). agentToolsURL/pubkey wires the CP toolset bridge when
 // non-empty.

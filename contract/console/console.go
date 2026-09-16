@@ -1,4 +1,4 @@
-// Package console reproduces the console-client port (console-client/src/
+// Package console reproduces the the console client port (the console client/src/
 // lib.rs) — a NIP-98-login HTTP client for the control-plane web console.
 package console
 
@@ -20,13 +20,13 @@ const SESSION_COOKIE = "fh_session"
 // KindAuth is NIP-98 HTTP auth kind.
 const kindAuth = 27235
 
-// Overview mirrors console-client Overview.
+// Overview mirrors the console client Overview.
 type Overview struct {
 	ConsolePubkey string   `json:"console_pubkey"`
 	Runners       []Runner `json:"runners"`
 }
 
-// Runner mirrors console-client Runner.
+// Runner mirrors the console client Runner.
 type Runner struct {
 	Name        string      `json:"name"`
 	Status      string      `json:"status"`
@@ -39,7 +39,7 @@ type Runner struct {
 	Readiness   interface{} `json:"readiness,omitempty"`
 }
 
-// SecretInfo mirrors console-client SecretInfo.
+// SecretInfo mirrors the console client SecretInfo.
 type SecretInfo struct {
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
@@ -48,7 +48,7 @@ type SecretInfo struct {
 	CreatedAt *int64 `json:"created_at,omitempty"`
 }
 
-// AgentInfo mirrors console-client AgentInfo.
+// AgentInfo mirrors the console client AgentInfo.
 type AgentInfo struct {
 	Name      string  `json:"name"`
 	Pubkey    string  `json:"pubkey"`
@@ -58,11 +58,15 @@ type AgentInfo struct {
 	// Purpose is the agent's one-line purpose, preserved by freehold-agent-tools'
 	// local registry so a rebuild reconciler can recreate the agent's system
 	// prompt verbatim. The console API does not carry it; the local registry row
-	// does. omitempty keeps it out of console-client serializations upstream.
+	// does. omitempty keeps it out of the console client serializations upstream.
 	Purpose string `json:"purpose,omitempty"`
+	// Channel is the channel NAME the agent was created into (empty = the
+	// default freehold channel), preserved by freehold-agent-tools' local
+	// registry so a rebuild reconciler rejoins the same channel.
+	Channel string `json:"channel,omitempty"`
 }
 
-// ProvisionReq mirrors console-client ProvisionReq.
+// ProvisionReq mirrors the console client ProvisionReq.
 type ProvisionReq struct {
 	Name      string  `json:"name"`
 	Kind      string  `json:"kind"`
@@ -72,13 +76,13 @@ type ProvisionReq struct {
 	Risk      *string `json:"risk,omitempty"`
 }
 
-// SecretReq mirrors console-client SecretReq.
+// SecretReq mirrors the console client SecretReq.
 type SecretReq struct {
 	Name   string `json:"name"`
 	Secret string `json:"secret"`
 }
 
-// GrantReq mirrors console-client GrantReq.
+// GrantReq mirrors the console client GrantReq.
 type GrantReq struct {
 	Name   string `json:"name"`
 	Pubkey string `json:"pubkey"`
@@ -218,14 +222,65 @@ func (c *Client) request(method, path string, body interface{}) (json.RawMessage
 // box learns where the relay is and who the relay/CP trust without anything
 // that lived only on the lost box.
 type WorldSummary struct {
-	RelayURL         string `json:"relay_url"`
-	RelayWsURL       string `json:"relay_ws_url,omitempty"`
-	RelayPubkey      string `json:"relay_pubkey,omitempty"`
-	CPURL            string `json:"cp_url"`
-	CPPubkey         string `json:"cp_pubkey"`
-	OperatorPubkey   string `json:"operator_pubkey,omitempty"`
-	AgentToolsURL    string `json:"agent_tools_url,omitempty"`
-	AgentToolsPubkey string `json:"agent_tools_pubkey,omitempty"`
+	RelayURL         string         `json:"relay_url"`
+	RelayWsURL       string         `json:"relay_ws_url,omitempty"`
+	RelayPubkey      string         `json:"relay_pubkey,omitempty"`
+	RelayHost        string         `json:"relay_host,omitempty"`
+	CPURL            string         `json:"cp_url"`
+	CPPubkey         string         `json:"cp_pubkey"`
+	OperatorPubkey   string         `json:"operator_pubkey,omitempty"`
+	AgentToolsURL    string         `json:"agent_tools_url,omitempty"`
+	AgentToolsPubkey string         `json:"agent_tools_pubkey,omitempty"`
+	Services         []WorldService `json:"services,omitempty"`
+	// Agents holds the authoritative CP agent registry served on /api/world;
+	// Facts holds the world facts (plane/certs/domains) as the raw object a
+	// box renders for DATA/Certs. Kept as raw so contract stays free of the
+	// control-plane agenttools types.
+	Agents  []AgentInfo     `json:"agents,omitempty"`
+	Runners []StatusRunner  `json:"runners,omitempty"`
+	DNS     []StatusDNS     `json:"dns,omitempty"`
+	Facts   json.RawMessage `json:"facts,omitempty"`
+}
+
+// StatusRunner is one CP runner line in the /api/world inventory.
+type StatusRunner struct {
+	Name        string `json:"name,omitempty"`
+	NostrPubkey string `json:"nostr_pubkey,omitempty"`
+	McpAddr     string `json:"mcp_addr,omitempty"`
+}
+
+// StatusDNS is one CP DNS record in the /api/world inventory.
+type StatusDNS struct {
+	Name string `json:"name,omitempty"`
+	IP   string `json:"ip,omitempty"`
+}
+
+// RunnersList returns the runners in the world inventory (may be empty when a
+// CP hasn't folded the inventory into /api/world).
+func (w *WorldSummary) RunnersList() []StatusRunner {
+	if w == nil {
+		return nil
+	}
+	return w.Runners
+}
+
+// DNSRecords returns the DNS records in the world inventory (may be empty).
+func (w *WorldSummary) DNSRecords() []StatusDNS {
+	if w == nil {
+		return nil
+	}
+	return w.DNS
+}
+
+// WorldService is the /api/world world-health row the CP serves: the recorded
+// coords plus the co-located live-probe result, so a logging-in management box
+// renders the live world instead of only the box that deployed it.
+type WorldService struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	URL    string `json:"url"`
+	Up     bool   `json:"up"`
+	Detail string `json:"detail"`
 }
 
 // World fetches the CP's world summary for a fresh-box login seed.
@@ -354,6 +409,81 @@ func (c *Client) PortalURL() (string, error) {
 		return "", fmt.Errorf("portal response missing token")
 	}
 	return c.base + "/api/auth/portal/" + v.Token, nil
+}
+
+// SecretNames returns the names of CP-owned secrets present (dns-relay, dns-cp,
+// litellm) — the idempotent inventory `build` uses to ask the operator only for
+// the missing ones ("ask if not there, don't ask if there").
+func (c *Client) SecretNames() ([]string, error) {
+	raw, err := c.request(http.MethodGet, "/api/secrets", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Secrets []string `json:"secrets"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out.Secrets, nil
+}
+
+// PutSecret uploads a sealed secret record (sealed to the console identity) so
+// the CP becomes its durable owner. name must be in {dns-relay, dns-cp,
+// litellm}; file is the cert.SaveCreds-style record ({provider,sealed,aad}).
+func (c *Client) PutSecret(name string, file json.RawMessage) error {
+	_, err := c.request(http.MethodPost, "/api/secrets", map[string]interface{}{
+		"name": name, "file": file,
+	})
+	return err
+}
+
+// WorldBuild triggers the CP-owned world bring-up (/api/world-build) and
+// returns the stage report. The console drives the shared cpbuild engine
+// through its co-located runner — the drive-through-CP build a thin box uses.
+// The build runs for minutes, so this switches to a long client timeout.
+func (c *Client) WorldBuild() (string, error) {
+	c.hc = &http.Client{Timeout: 20 * time.Minute}
+	raw, err := c.request(http.MethodPost, "/api/world-build", nil)
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Report string `json:"report"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", fmt.Errorf("world-build response: %w", err)
+	}
+	return v.Report, nil
+}
+
+// WorldTeardownResult is what the CP-owned world-teardown did: the stage report
+// plus the CP-managed state it cleared.
+type WorldTeardownResult struct {
+	Report         string `json:"report"`
+	RunnersRemoved int    `json:"runners_removed"`
+	AgentsRemoved  int    `json:"agents_removed"`
+	DnsRemoved     int    `json:"dns_removed"`
+}
+
+// WorldTeardown triggers the CP-owned world teardown (/api/world-teardown) and
+// returns the stage report + the CP state it cleared. The console drives the
+// shared teardown engine through its co-located runner — the WorldBuild mirror
+// a thin (login-only) box uses. The CP LXC is destroyed last (detached), so this
+// returns before the console's own container goes. Long client timeout: each
+// runner command carries its own multi-minute budget, so the whole request can
+// exceed 20 minutes.
+func (c *Client) WorldTeardown() (*WorldTeardownResult, error) {
+	c.hc = &http.Client{Timeout: 45 * time.Minute}
+	raw, err := c.request(http.MethodPost, "/api/world-teardown", nil)
+	if err != nil {
+		return nil, err
+	}
+	var v WorldTeardownResult
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("world-teardown response: %w", err)
+	}
+	return &v, nil
 }
 
 // DnsRecord mirrors the console's DNS record row (C0 resolver).

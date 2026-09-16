@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"freehold/contract/client"
+	"freehold/contract/config"
 	"freehold/control-plane/cli/flows"
 )
 
@@ -18,13 +19,10 @@ type CommonArgs struct {
 	RunnerPubkey string
 }
 
-// defaultAgentDir is the freehold home's ops identity (installer default).
+// defaultAgentDir is the freehold home's ops identity (installer default),
+// scoped to the active profile.
 func defaultAgentDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".freehold", "control-plane", "agent-ops")
-	}
-	return filepath.Join(home, ".freehold", "control-plane", "agent-ops")
+	return filepath.Join(config.StateDir(), "control-plane", "agent-ops")
 }
 
 // identityJSON is the runner/agent identity file layout.
@@ -60,8 +58,7 @@ func resolveRunnerPubkey(target, explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
-	home, _ := os.UserHomeDir()
-	homePkg := filepath.Join(home, ".freehold", "runner", target)
+	homePkg := filepath.Join(config.StateDir(), "runner", target)
 	legacyPkg := filepath.Join(".", ".freehold", "runner", target)
 	for _, pkg := range []string{homePkg, legacyPkg} {
 		if _, err := os.Stat(filepath.Join(pkg, "identity.json")); err == nil {
@@ -79,14 +76,9 @@ func resolveRunnerPubkey(target, explicit string) (string, error) {
 	return "", fmt.Errorf("runner '%s' not found and no config-recorded pubkey — provision it first", target)
 }
 
-// configRecordedPubkey reads ~/.config/freehold/config.toml's runner pubkey.
+// configRecordedPubkey reads the active profile's config runner pubkey.
 func configRecordedPubkey(target string) (string, bool) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false
-	}
-	path := filepath.Join(home, ".config", "freehold", "config.toml")
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(config.ConfigPath())
 	if err != nil {
 		return "", false
 	}
@@ -136,4 +128,12 @@ func ensureAgentIdentity(dir string) {
 		return
 	}
 	_ = mintAgentIdentity(dir)
+}
+
+// optOf returns a pointer to s, or nil when empty (optional flag helper).
+func optOf(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

@@ -35,6 +35,10 @@ jobs:
         with:
           go-version-file: "control-plane/go.mod"
 
+      - name: Go build (agents)
+        working-directory: agents
+        run: go build ./...
+
       - name: Go build (contract)
         working-directory: contract
         run: go build ./...
@@ -43,9 +47,17 @@ jobs:
         working-directory: platform
         run: go build ./...
 
+      - name: Go build (install)
+        working-directory: install
+        run: go build ./...
+
       - name: Go build (control-plane)
         working-directory: control-plane
         run: go build ./...
+
+      - name: Go vet (agents)
+        working-directory: agents
+        run: go vet ./...
 
       - name: Go vet (contract)
         working-directory: contract
@@ -55,9 +67,17 @@ jobs:
         working-directory: platform
         run: go vet ./...
 
+      - name: Go vet (install)
+        working-directory: install
+        run: go vet ./...
+
       - name: Go vet (control-plane)
         working-directory: control-plane
         run: go vet ./...
+
+      - name: Go test (agents)
+        working-directory: agents
+        run: go test ./...
 
       - name: Go test (contract)
         working-directory: contract
@@ -66,6 +86,10 @@ jobs:
       - name: Go test (platform)
         working-directory: platform
         run: go test ./...
+
+      - name: Go test (install)
+        working-directory: install
+        run: go test ./...  
 
       - name: Go test (control-plane)
         working-directory: control-plane

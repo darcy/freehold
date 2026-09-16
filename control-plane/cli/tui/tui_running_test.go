@@ -162,22 +162,6 @@ func TestDataViewRendersCapacityAndFill(t *testing.T) {
 	}
 }
 
-// TestFillStyle checks the traffic-light boundaries (Rust fill_color).
-// Styles hold funcs, so equality is asserted on rendered sentinels.
-func TestFillStyle(t *testing.T) {
-	rendered := func(pct uint64) string { return fillStyle(pct).Render("x") }
-	green, yellow, red := styleGreen.Render("x"), styleYellow.Render("x"), styleRed.Render("x")
-	if rendered(69) != green {
-		t.Error("69% must be green")
-	}
-	if rendered(70) != yellow || rendered(89) != yellow {
-		t.Error("70-89% must be yellow")
-	}
-	if rendered(90) != red || rendered(100) != red {
-		t.Error(">=90% must be red")
-	}
-}
-
 // TestWKeyNeedsLogin confirms `w` without a console session yields the
 // press-l notice instead of a no-op.
 func TestWKeyNeedsLogin(t *testing.T) {
@@ -256,64 +240,24 @@ relay 192.168.30.8
 	}
 }
 
-// TestRunnerSourceDefaultsToCpAndToggles covers the Runners view source:
-// new models default to the CP (console) source, and `s` toggles to local
-// and back, re-filling the view each time.
-func TestRunnerSourceDefaultsToCpAndToggles(t *testing.T) {
+// TestRunnersViewDefaultsToCpSource covers the Runners view: it reads the CP
+// console overview (there is no local loopback toggle — the box-local
+// state.json mirror is deleted), and a not-logged-in box gets the login hint.
+func TestRunnersViewDefaultsToCpSource(t *testing.T) {
 	cfg := testCfg()
 	if cfg == nil {
 		t.Fatal("testCfg returned nil")
 	}
 	m := &Model{Mode: ModeRunning, cfg: cfg}
-	if m.RunnerSource == "" {
-		m.RunnerSource = RunnerSourceCP
-	}
 	m.refreshRunners(cfg)
-	if m.RunnerSource != RunnerSourceCP {
-		t.Fatalf("default source = %q, want cp", m.RunnerSource)
-	}
 	// not logged into a console -> the CP source shows the login hint row.
 	if len(m.Runners) == 0 || !strings.Contains(m.Runners[0].Name, "not logged") {
 		t.Fatalf("cp source without login should hint, got %+v", m.Runners)
 	}
-	// toggle to local via the same switch the `s` key drives.
-	toggle := func() {
-		if m.RunnerSource == RunnerSourceLocal {
-			m.RunnerSource = RunnerSourceCP
-		} else {
-			m.RunnerSource = RunnerSourceLocal
-		}
-		m.refreshRunners(cfg)
-	}
-	toggle()
-	if m.RunnerSource != RunnerSourceLocal {
-		t.Fatalf("after toggle source = %q, want local", m.RunnerSource)
-	}
-	if got := m.runnerSourceLabel(); !strings.Contains(got, "loopback") {
-		t.Errorf("local label = %q", got)
-	}
-	toggle()
-	if m.RunnerSource != RunnerSourceCP {
-		t.Fatalf("second toggle source = %q, want cp", m.RunnerSource)
-	}
-	// the Runners view title carries the source label + toggle hint.
+	// the Runners view title names the CP source.
 	m.ActiveView = ViewRunners
 	out := m.View()
-	if !strings.Contains(out, "Runners · ") || !strings.Contains(out, "s toggles") {
-		t.Errorf("runners view should show the source toggle hint:\n%s", out)
-	}
-}
-
-// TestVmidForRole covers the plane mount role -> vmid map.
-func TestVmidForRole(t *testing.T) {
-	cfg := testCfg()
-	for role, want := range map[string]uint32{"relay": 100, "cp": 101, "k3s": 102} {
-		got := vmidForRole(cfg, role)
-		if got == nil || *got != want {
-			t.Errorf("vmidForRole(%s) = %v, want %d", role, got, want)
-		}
-	}
-	if vmidForRole(cfg, "other") != nil {
-		t.Error("unknown role must map to nil")
+	if !strings.Contains(out, "Runners · ") || !strings.Contains(out, "CP (console") {
+		t.Errorf("runners view should show the CP source title:\n%s", out)
 	}
 }

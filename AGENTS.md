@@ -51,6 +51,10 @@ repo, not the history.
 
 - `VISION.md` — narrative, single source of truth for the "why".
 - `ARCHITECTURE.md` — system design, locked decisions, build plan.
+- `install/` — the `freehold-install` bootstrap CLI (top-level Go module): get a control
+  plane up in an environment (Proxmox today; Vultr/Hetzner providers come later) and a door
+  to it; the shared provisioning engine lives in `platform/provisioning/box`. World bring-up
+  after bootstrap is `freehold build` from any box via the CP.
 - `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
@@ -88,7 +92,7 @@ repo, not the history.
   relay outage. No relay fork or patch.
 - **The CPA is a real, LLM-backed reasoning agent — the system's main user touchpoint.**
   It runs on the same buzz-acp/goose-class harness as the expert agents it creates, gets its
-  purpose from `platform/agents/freehold/prompt.md` (embedded by the `platform/agents` Go
+  purpose from `agents/freehold/prompt.md` (embedded by the `freehold/agents` Go
   package and shipped by the control plane,
   mounted into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
   `/srv/freehold/CPA_SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
@@ -147,9 +151,7 @@ changelog.
   state + the shipped package on disk; a re-run hits `RunnerExists`/`PackageDirInUse` and
   needs manual cleanup.
 - **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
-  unzeroized body bytes before a `Zeroizing` wrapper takes ownership (loopback, TLS-free —
-  same exposure class as the CLI's stdin path); the console's signing key is re-derived on
-  every readiness probe rather than cached once.
+  unzeroized body bytes (loopback, TLS-free — same exposure class as the CLI's stdin path).
 - **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP
   surface on the CP (`freehold-agent-tools`), not chat.** The Go methods
   (`control-plane/api/agent/tools.go`) are served by a dedicated CP-side binary
@@ -159,32 +161,54 @@ changelog.
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
   the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
   via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
-  aggregates buzz-dev-mcp's message tools with create/grant/manage, signed as the agent and
-  authorized by the server's roster. **`grant_agent` on the toolset is not wired yet**: binding an agent to a runner's whitelist is a relay roster change owned by the
-  console (the runner's channel owner), and the server does not hold that credential — it
-  fails loudly ("not wired") rather than silently succeeding; operators grant via the console
-  today.
+  aggregates buzz-dev-mcp's message tools with create/manage, signed as the agent and
+  authorized by the server's roster. **`grant_agent` is wired through the absorbed
+  console-owner credential and is OPERATOR-scoped** (not reachable by the CPA's
+  conversation+create-only harness): the server loads the console's own identity from the
+  console's state dir (`/srv/data/cp/control-plane/console`, 0600 durable plane) and
+  publishes the kind-9000 put-user to the runner's channel in-process — the runner
+  re-reads its signed 39002 roster per call, so the grant lands without a restart. A
+  missing console credential fails closed ("no relay/console-owner wiring") rather than
+  silently succeeding. An agent granting onto an arbitrary runner would hand direct exec
+  access to that runner's MCP surface, so grants are the operator's call (server-enforced,
+  `-32003` for agents).
 - **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
   the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
   bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and
   any Phase E-created agent reusing `AgentLiteLLMKeyScript` — can register/remove any model and
   mint keys until scoped keys are wired. Minting a bootstrap virtual key and switching agent
   pods to scoped per-agent keys is the named follow-up.
+- **Thin-box `freehold teardown` is compute-only (whole-world).** A login-only box (no local
+  `[runner]`) drives teardown through the CP's co-located runner (`/api/world-teardown`), so
+  `--tenant` and `--data` are refused there: the cp dataset stays mounted by the still-running
+  cp LXC until the final detached step, and the thin box has no local runner/plane coords.
+  Those need the build box until the data path is sequenced into the detached last step.
+  It also requires a CP running a current console (the route postdates the worlds that
+  predate it).
 
 ## Build / test
 
-- Rust (`control-plane/core/`, `control-plane/runner/`, `control-plane/console/`,
-  `control-plane/console-client/`, `control-plane/testkit/`, `control-plane/acceptance/`):
+- Rust (`control-plane/core/`, `control-plane/runner/`, `control-plane/testkit/`,
+  `control-plane/core/harness/oracle/`) — the runner + core, plus their hermetic test fixtures:
   `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
-  declares `rust-version = "1.94"`).
-- Go — three modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
+  declares `rust-version = "1.94"`). Rust is used for the privileged exec endpoint, the
+  byte-exact contract oracle, and the runner's own fixtures — nothing else.
+- Go — five modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
+  - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
+    the CPA prompt + skills, `custom/` the template for agents the CPA creates; embeds its
+    Markdown as Go values): `cd agents && go build ./... && go vet ./... && go test ./...`
   - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
-    console/relay/state): `cd contract && go build ./... && go vet ./... && go test ./...`
-  - `platform/` (`freehold/platform` — the evolving world: services/provisioning/agents/
-    migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`
+    console/relay/state/coords): `cd contract && go build ./... && go vet ./... && go test ./...`
+  - `platform/` (`freehold/platform` — the evolving world: services/provisioning/
+    migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`;
+    `provisioning/box` holds the SHARED provisioning engine (LXC boot, storage plane,
+    deploy-cp, the CP bootstrap `Engine`) — imported by BOTH the install CLI and the
+    operator CLI, so it stays control-plane-free.
+  - `install/` (`freehold/install` — the CP bootstrap CLI): `cd install && go build ./... &&
+    go vet ./... && go test ./...`
   - `control-plane/` (`freehold/control-plane` — the mechanism: api/cli/secret-management;
-    the `freehold` and `freehold-orchestrator` binaries, the TUI, and the `harness/` release
+    the `freehold` binary, the TUI, and the `harness/` release
     gate): `cd control-plane && go build ./... && go vet ./... && go test ./...`;
     `go test ./core/harness/` drives `target/debug/freehold-harness-oracle` and gates every
     crypto primitive against the Rust `core` byte-for-byte.
@@ -192,10 +216,26 @@ changelog.
   -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools`): the CP server ships
   its own binary to agent pods, which run Alpine/musl — a glibc-dynamic build "silently not
   found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
+- **The full binary set a `rebuild`/`teardown`/`install` box needs** (`box.ResolveBins` fails
+  the pipeline until every sibling is present, and prints the exact build one-liner):
+  - `target/debug/freehold` (the CLI+TUI) — `go build -C control-plane -o target/debug/freehold ./cli/cmd/freehold`
+  - `target/debug/freehold-install` (the CP bootstrap CLI) — `go build -C install -o target/debug/freehold-install ./cmd/freehold-install`
+  - `target/debug/freehold-console` **and** `target/release/freehold-console` (the Go CP CLI
+    the box-side provision/grant/adopt/add-secret/revoke stages call, and what `deploy-cp`
+    ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
+  - `target/{debug,release}/runner` (Rust) — `cargo build --bin runner && cargo build --release --bin runner`
+  - `target/release/freehold-agent-tools` (static, above)
+  This is the same set `freehold build`/`freehold teardown`/`freehold-install bootstrap`
+  resolve as siblings of the running
+  binary — a box doing world bring-up needs all five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
 - `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
-  `freehold-acceptance` reproduces Chunk 1's acceptance criteria hermetically on loopback.
+  The Chunk-1/2 acceptance gate is Go now (`control-plane/acceptance/`, run by
+  `go test ./...`): the CP provisioner lifecycle, the console HTTP surface, and the
+  relay-channel fold against a hermetic fake relay — the connector/relay behaviors the
+  runner owns stay in its Rust tests. It drives the real `runner` binary (a subprocess),
+  so the box's `cargo build --bin runner` must have run first.
 
 ### Testing the TUI (`freehold`, `control-plane/cli/cmd/freehold` → bubbletea dashboard)
 

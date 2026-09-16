@@ -20,12 +20,12 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
+	"freehold/platform/services/certificates/letsencrypt"
 )
 
 type consoleClient struct {
@@ -394,7 +394,6 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			m.console = &consoleClient{client: c}
 			m.consolePK = pk
-			m.RunnerSource = RunnerSourceCP
 			return flowMsg{ok: fmt.Sprintf("console login ok — operator %.12s", pk)}
 		}
 
@@ -554,6 +553,152 @@ func doorKeyWaiting(out string) string {
 func (m *Model) refreshLocal() {
 	m.refreshRunners(m.cfg)
 	m.buildAgents(m.cfg)
+	// buildAgents fetched the world facts (plane/certs/domains) — re-run the
+	// Certs + DATA views so a management/login-only box renders them from the
+	// CP (the boot check runs before auto-login, when the facts aren't loaded
+	// yet). On the deployer box refreshData still does the live plane probe.
+	m.buildCerts(m.cfg)
+	m.refreshData(m.cfg)
+}
+
+// applyCPWorldHealth is the SINGLE-SOURCE world hook: for any box with a console
+// session, the CP is the authority for the whole world — services, DNS, relay,
+// and the pillar/flags. There is NO "management vs owner" divergence once a CP
+// session exists; the box's own local config is only an offline fallback. Only
+// ever turns a pillar green from a live CP answer; never fabricates an "up".
+func (m *Model) applyCPWorldHealth() {
+	if m.console == nil || m.console.client == nil || m.cfg == nil {
+		return
+	}
+	w, err := m.console.client.World()
+	if err != nil {
+		return
+	}
+	m.cpWorld = w
+	m.worldSvc = make(map[string]bool, len(w.Services))
+	for _, s := range w.Services {
+		m.worldSvc[s.Kind] = s.Up
+	}
+	// Pillar flags come straight from the CP's services report — the CP probes
+	// relay/cp/k3s/litellm/caddy co-located and reports them all on /api/world,
+	// so a box turns pillars green from the CP's live answer, never a local
+	// probe of local config.
+	for consts := range m.worldSvc {
+		m.applyPillarFlag(m.worldSvc, consts)
+	}
+	// Still adopt the relay + cp coords into cfg so non-TUI consumers (exec,
+	// door, world verbs) dial the CP-named relay, not a stale login snapshot.
+	if w.RelayURL != "" && w.RelayURL != m.cfg.RelayURL {
+		m.cfg.RelayURL = w.RelayURL
+		if w.RelayWsURL != "" {
+			m.cfg.RelayWsURL = w.RelayWsURL
+		}
+	}
+	// DNS: the CP resolver is authoritative (no local runner exec needed).
+	if rows, ok := m.cpDnsRows(); ok {
+		m.DNS = rows
+	}
+	// Header domain: prefer the CP's recorded relay host (the public domain)
+	// — set once at deploy and authoritative. Only when the console predates
+	// serving relay_host does the resolver's explicit `relay.<domain>` record
+	// derive it instead. Both beat the LAN IP a box dialed.
+	if w.RelayHost != "" && w.RelayHost != m.cfg.RelayHost() {
+		m.Domain = w.RelayHost
+	} else if d := m.relayPublicHost(); d != "" && d != m.Domain {
+		m.Domain = d
+	}
+	m.buildServices(m.cfg)
+	m.buildCerts(m.cfg)
+}
+
+// applyPillarFlag maps a CP world-service kind to its live flag, so the world
+// strip + converged() reflect the CP's truth for every pillar the CP reports.
+func (m *Model) applyPillarFlag(worldSvc map[string]bool, kind string) {
+	switch kind {
+	case "relay":
+		m.RelayLive = worldSvc[kind]
+	case "cp":
+		m.CPLive = worldSvc[kind]
+	case "k3s":
+		m.K3sLive = worldSvc[kind]
+	case "litellm":
+		m.LitellmLive = worldSvc[kind]
+	case "caddy":
+		m.CaddyLive = worldSvc[kind]
+	}
+}
+
+// cpDnsRows fills the DNS view from the console's /api/dns (the CP resolver),
+// used by a management box with no local runner. Returns whether rows exist.
+func (m *Model) cpDnsRows() ([]DnsRow, bool) {
+	if m.console == nil || m.console.client == nil {
+		return nil, false
+	}
+	v, err := m.console.client.ListDNS()
+	if err != nil || len(v.DNS) == 0 {
+		return nil, false
+	}
+	rows := make([]DnsRow, 0, len(v.DNS))
+	for _, d := range v.DNS {
+		rows = append(rows, DnsRow{Name: d.Name, IP: d.IP, Source: "CP resolver"})
+	}
+	return rows, true
+}
+
+// relayPublicHost derives the relay's public hostname from the resolver's
+// explicit `relay.<domain>` A record (the CP DNS the management box just read).
+// A bare `relay` record or an IP-only name is skipped; a dotted hostname with
+// letters is the public relay host — the domain a deployer box shows from its
+// own relay_url, recovered on a management box without needing a CP console
+// that serves relay_host.
+func (m *Model) relayPublicHost() string {
+	for _, d := range m.DNS {
+		if !strings.HasPrefix(d.Name, "relay.") || !hostnameHasLetters(d.Name) {
+			continue
+		}
+		return d.Name
+	}
+	return ""
+}
+
+func hostnameHasLetters(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+// --- CP-sourced boot status (management box) --------------------------------
+
+// cpWorldSummary is the "control plane" boot step's report on a management box:
+// the CP's world facts fetched on connect. The relay/k3s/litellm/caddy/dns
+// steps read from the same snapshot, so the check reflects the CP, never stale
+// local config.
+func (m *Model) cpWorldSummary() string {
+	if m.cpWorld == nil {
+		return "healthy (world facts waiting on auto-login)"
+	}
+	return fmt.Sprintf("healthy — %d services · %d dns · %d runners · %d agents",
+		len(m.cpWorld.Services), len(m.DNS), len(m.Runners), len(m.Agents))
+}
+
+func (m *Model) cpRelayStatus() (string, bool) {
+	if m.cpWorld == nil {
+		return "awaiting CP world facts (auto-login)", true
+	}
+	if m.RelayLive {
+		return "live via CP at " + m.cfg.RelayURL, true
+	}
+	return "no answer at " + m.cfg.RelayURL + " (CP-served)", false
+}
+
+func (m *Model) cpDnsStatus() (string, bool) {
+	if m.cpWorld == nil {
+		return "awaiting CP world facts (auto-login)", true
+	}
+	return fmt.Sprintf("%d resolver records (CP)", len(m.DNS)), true
 }
 
 // rebuildArgs builds the `freehold rebuild --yes` args from a completed

@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>freehold · control plane</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+         background: #0d1117; color: #c9d1d9; padding: 24px; }
+  h1 { font-size: 18px; letter-spacing: 2px; color: #e6edf3; }
+  h1 span { color: #58a6ff; }
+  .muted { color: #8b949e; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d;
+           vertical-align: top; font-size: 13px; }
+  th { color: #8b949e; font-weight: 600; text-transform: uppercase; font-size: 11px; }
+  input, textarea, select { background: #161b22; border: 1px solid #30363d; color: #c9d1d9;
+         border-radius: 6px; padding: 6px 8px; font: inherit; width: 100%; }
+  button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+         border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  button:hover { background: #30363d; }
+  button.danger { background: #3d1d1d; border-color: #6b2a2a; color: #ffa198; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+          border: 1px solid #30363d; }
+  .green  { background: #0e4429; color: #7ee787; }
+  .yellow { background: #5d4b0f; color: #f2cc60; }
+  .red    { background: #521c1c; color: #ff7b72; }
+  .gray   { background: #30363d; color: #8b949e; }
+  .card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 16px;
+          margin-top: 16px; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr 2fr 1fr; gap: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .small { font-size: 11px; color: #8b949e; }
+  #err { color: #ff7b72; }
+</style>
+</head>
+<body>
+<h1>freehold <span>·</span> control plane</h1>
+<div class="muted" id="console-line">console agent: loading…</div>
+
+<div class="card">
+  <form id="provision-form" class="form-grid">
+    <input name="name" placeholder="runner/service name" required>
+    <input name="kind" placeholder="kind (ssh|vultr|b2|github|websearch|hetzner|litellm)" required>
+    <input name="risk" placeholder="risk (safe|risky-install|risky-host) — optional">
+    <input name="address" placeholder="address" required>
+    <button type="submit">provision</button>
+    <input name="secret" placeholder="credential (pasted once, sealed, never stored)" required
+           style="grid-column: 1 / -1">
+  </form>
+</div>
+
+<table>
+<thead><tr><th>runner</th><th>status</th><th>risk</th><th>secret</th><th>readiness</th><th>grants</th><th></th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+
+<div id="err" class="muted"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+
+// BLOCKING-fix: EVERY interpolated string passes through esc() — runner
+// names, pubkeys, readiness text (remote-derived via connector errors) and
+// mcp addrs are all attacker-influenced input. Never concatenate raw.
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function chip(state) {
+  let cls = "gray";
+  if (typeof state === "string") {
+    if (state.startsWith("green")) cls = "green";
+    else if (state.startsWith("yellow")) cls = "yellow";
+    else if (state.startsWith("red")) cls = "red";
+  }
+  return '<span class="chip ' + cls + '">' + esc(state) + "</span>";
+}
+
+async function refresh() {
+  const o = await api("/api/overview");
+  $("#console-line").textContent = "console agent: " + o.console_pubkey;
+  const rows = o.runners.map((r) => {
+    const rd = r.readiness;
+    const readiness = rd && Object.keys(rd).length
+      ? Object.entries(rd).map(([t, s]) =>
+          (t === "error" || t === "note")
+            ? '<span class="chip gray">' + esc(t + ": " + s) + "</span>"
+            : esc(t) + " " + chip(s)).join(" ")
+      : '<span class="muted">—</span>';
+    // grants null = package UNREADABLE (a real anomaly), distinct from an
+    // honest empty list. r.grants[i] comes from the API only after validate
+    // (64-hex or console) — still escaped.
+    const grants = r.grants === null
+      ? (r.status === "revoked"
+          ? '<span class="muted">revoked — secrets.json removed (B3)</span>'
+          : '<span class="chip red">package unreadable — check the runner dir</span>')
+      : r.grants.length
+        ? r.grants.map((g) => '<div class="muted">' + esc(g) + "</div>").join("")
+        : '<span class="muted">nobody (fail closed)</span>';
+    const secret = r.secret
+      ? esc(r.secret.name) + " · " + esc(r.secret.kind) + " · " + esc(r.secret.address) +
+        (r.secret.rotated_at ? " · rotated" : "")
+      : '<span class="muted">—</span>';
+    return `<tr>
+      <td><b>${esc(r.name)}</b><div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
+      <td>${r.status === "revoked" ? chip("red(revoked)") : chip("green(active)")}</td>
+      <td>${r.risk ? chip(esc(r.risk)) : '<span class="muted">?</span>'}</td>
+      <td>${secret}</td>
+      <td>${readiness}</td>
+      <td>${grants}</td>
+      <td>
+        <div class="row">
+          <input class="mcp" placeholder="mcp addr" value="${esc(r.mcp_addr)}" data-name="${esc(r.name)}">
+          <button data-act="addr" data-name="${esc(r.name)}" data-nostr="${esc(r.nostr_pubkey)}">set addr</button>
+          <button data-act="rotate" data-name="${esc(r.name)}">rotate</button>
+          <button data-act="grant" data-name="${esc(r.name)}">grant</button>
+          <button data-act="ungrant" data-name="${esc(r.name)}">ungrant</button>
+          ${r.status === "revoked" ? "" : '<button class="danger" data-act="revoke" data-name="' + esc(r.name) + '">revoke</button>'}
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+  $("#rows").innerHTML = rows || '<tr><td colspan="7" class="muted">no runners yet — provision one above</td></tr>';
+  bindActions();
+}
+
+async function act(kind, payload) {
+  const path = { rotate: "/api/rotate", grant: "/api/grant", ungrant: "/api/revoke-grant",
+                 revoke: "/api/revoke", addr: "/api/runner-addr" }[kind];
+  await api(path, payload);
+  await refresh();
+}
+
+function bindActions() {
+  $("#rows").querySelectorAll("button").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const name = b.dataset.name;
+        if (b.dataset.act === "revoke" && !confirm("revoke " + name + "? removes its credential capability")) return;
+        if (b.dataset.act === "grant") {
+          const pk = prompt("agent pubkey to grant (64 hex)");
+          if (!pk) return;
+          await act("grant", { name, pubkey: pk });
+        } else if (b.dataset.act === "ungrant") {
+          const pk = prompt("agent pubkey to remove from grants (64 hex)");
+          if (!pk) return;
+          await act("ungrant", { name, pubkey: pk });
+        } else if (b.dataset.act === "rotate") {
+          const secret = prompt("NEW credential for " + name);
+          if (!secret) return;
+          await act("rotate", { name, secret });
+        } else if (b.dataset.act === "addr") {
+          const inp = b.parentElement.querySelector(".mcp");
+          await act("addr", { name, addr: inp.value.trim() });
+        }
+      } catch (e) { $("#err").textContent = "error: " + e.message; }
+    };
+  });
+}
+
+$("#provision-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  try {
+    await api("/api/provision", {
+      name: f.get("name"), kind: f.get("kind"), address: f.get("address"), secret: f.get("secret"),
+      risk: f.get("risk") || undefined,
+    });
+    ev.target.reset();
+    await refresh();
+  } catch (e) { $("#err").textContent = "error: " + e.message; }
+};
+
+refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
+</script>
+<div id="login-overlay" style="display:none;position:fixed;inset:0;z-index:9;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
+  <div style="max-width:36rem;padding:2rem">
+    <h2>operator login required</h2>
+    <p class="muted">This console is authenticated (NIP-98). Log in with your own key — the nsec never touches this box:</p>
+    <pre id="login-cmd"></pre>
+    <p class="muted">…then paste the full printed cookie line below:</p>
+    <input id="login-cookie" placeholder="fh_session=…; Path=/; HttpOnly; SameSite=Strict" style="width:100%;box-sizing:border-box">
+    <button id="login-submit" style="margin-top:.6rem">log in</button>
+    <div id="login-err" class="muted"></div>
+  </div>
+</div>
+<script>
+(async function () {
+  try {
+    await api("/api/overview");
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (msg.includes("401") || msg.includes("unauthenticated")) {
+      document.getElementById("login-overlay").style.display = "flex";
+      document.getElementById("login-overlay").style["align-items"] = "center";
+      document.getElementById("login-overlay").style["justify-content"] = "center";
+      document.getElementById("login-cmd").textContent =
+        "freehold console-login --url " + location.origin + " --nsec <nsec1… or 64-hex>";
+      document.getElementById("login-submit").onclick = () => {
+        const v = document.getElementById("login-cookie").value.trim();
+        const token = v.startsWith("fh_session=")
+          ? v.slice("fh_session=".length).split(";")[0].trim()
+          : v;
+        if (!token) { document.getElementById("login-err").textContent = "paste the cookie first"; return; }
+        document.cookie = "fh_session=" + token + "; Path=/; SameSite=Strict";
+        location.reload();
+      };
+    }
+  }
+})();
+</script>
+</body>
+</html>

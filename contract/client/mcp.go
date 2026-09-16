@@ -58,6 +58,10 @@ type ExecOutcome struct {
 	TimedOut bool   `json:"timed_out"`
 }
 
+// SetHTTPClient overrides the client's http.Client (a caller that needs a
+// distinct timeout — e.g. the console's 4s readiness probe — injects its own).
+func (c *McpClient) SetHTTPClient(hc *http.Client) { c.client = hc }
+
 // New builds an McpClient, validating the runner pubkey (the signature
 // audience) is 64 hex.
 func New(url string, auth *AgentAuth, runnerPubkey string) (*McpClient, error) {

@@ -71,7 +71,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **CPA + experts live in Buzz:** the CPA is a real reasoning agent (the
     system's main user touchpoint); experts are deterministic or
-    reasoning-class. The CPA gets its purpose from `platform/agents/freehold/prompt.md`.
+    reasoning-class. The CPA gets its purpose from `agents/freehold/prompt.md`.
 
 *   **Host-flexible:** Proxmox is the lead/default; VPS/cloud are first-class
     (the business path). The k8s layer (Chunks 6–7) and everything above the
@@ -166,12 +166,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **The mechanism is one Go module** (go 1.25): `api/` (the unified scoped
     API — agent toolset + world actions), `cli/` (the operator interface:
-    `tui/`, `login/`, `flows/`, `teardown/`, `bootstrap-cp/`, `cmd/` for the
-    `freehold` and `freehold-orchestrator` binaries), `secret-management/`
+    `tui/`, `login/`, `flows/`, `teardown/`, `cmd/` for the
+    `freehold` binary — the CP bootstrap lives in the `install/` module), `secret-management/`
     (provision/rotate/revoke/grant), and the Rust crates `core/` (the
-    byte-exact contract oracle + the `harness/` Go byte-gate), `runner/`,
-    `console/` (the CP console + secret provisioner), `console-client/`,
-    `testkit/`, and `acceptance/`.
+    byte-exact contract oracle + the `harness/` Go byte-gate), `runner/`, and
+    `testkit/` (the runner's hermetic fixtures). The Chunk-1/2 acceptance gate
+    is Go under `acceptance/`, driving the real `runner` binary as a subprocess.
 
 *   **The privileged `exec` funnel lives in the RUST runner, not the CP.**
     The CLI is the operator's interface: it drives a running runner over its
@@ -183,37 +183,93 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **`freehold-agent-tools` is a distinct SEMANTIC surface on the CP**, not
     the runner's `exec`. Its Go methods (`control-plane/api/agent/tools.go`,
     `create_agent`/`grant_agent`/`manage_agent`) are served in-process by
-    `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
-    authorized per call against the server's own relay roster (NIP-29 channel
-    + 39002, fail-closed); its `mcp` stdio mode is the bridge agent pods
-    fetch at boot. The build dogfoods `create_agent` to bring the CPA up. It
+     `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
+     authorized per call against the server's own relay roster (NIP-29 channel
+     + 39002, fail-closed) **and scoped by caller class**: a pubkey in the CP's
+     agent registry is an AGENT (create/manage only — the world_* actions AND
+     `grant_agent` are denied server-side, so the CPA's "conversation + create
+     only" boundary cannot be bypassed by calling the server directly); a roster
+     member not in the registry is an OPERATOR (full toolset incl. world_* and
+     grant). The Caddy CP vhost exposes `/mcp` publicly (→ `:8089`) and
+     `/api/world` serves `agent_tools_url` as the public `https://<cp>/mcp`, so
+     a REMOTE thin box drives the world (build/exec/migrate/door) over the edge
+     — the drive-through-CP transport. Its `mcp` stdio mode is the bridge agent
+     pods fetch at boot (same create/manage-only filter, now defense-in-depth).
+     The build dogfoods
+     `create_agent` to bring the CPA up. It
     also carries the CP world-action surface (`world_status` / `world_teardown`
-    / `world_migrate` / `world_build`, roster-gated) so an operator box can
+    / `world_migrate` / `world_build` / `world_exec` / `world_register_facts` /
+    `world_authorize_door` / `world_revoke_door`, operator-scoped) so an
+    operator box can
     "login + trigger" the world: `world_build` runs the CP's owned
     bring-up/reconcile stages (`platform/provisioning/stages`) through its
     co-located runner — the direction `freehold build` (box) slims toward
     (CP-bring-up + trigger; the CP owns relay/storage/k3s/DNS/litellm/Caddy/
-    cert). `world_migrate` runs `platform/migrations` — the CP's verify-gated
-    migration runner (durable ledger at `/srv/data/cp/migrations.json`, a
-    migration is done only when its postcondition verifies), for versioned
-    config/prompt/repair changes that don't have clean desired-state
-    semantics.
+    cert). The stages live in the shared **`cpbuild`** package, and the console
+    is the **CP build executor too**: `freehold-console serve` builds a
+    `cpbuild.Spec` (from the `--world-config` coords deploy-cp hands it, signed
+    as the console's own identity and self-granted on the co-located runner)
+    and exposes an operator-scoped **`/api/world-build`** — a thin box can
+    bring the world up through the CP WITHOUT the relay roster agent-tools
+    needs, so relay+agent-tools can live in `build` (the bootstrap/build split;
+    `roadmap/CP_OWNED_BUILD.md`). Its **`/api/world-teardown`** mirror runs the
+    shared teardown engine through the co-located runner — the CP LXC destroyed
+    last and detached, since the console + runner live inside it — so a
+    login-only box can also tear the world down. `world_exec` is the **drive-through-CP exec**
+    surface: a THIN login
+    box (no local `[runner]`) runs commands on the CP's co-located runner via
+    this tool — so a login box is functionally equivalent to the box that
+    bootstrapped, an authorized operator client rather than a runner host.
+    `world_status` assembles the **single inventory read** (agents + the
+    console's runners/DNS read underneath — the console's state.json on the
+    box — plus the deployer-side world facts (`world_register_facts`: the
+    durable-plane layout, canonical domains, and edge cert metadata the box
+    registers at the end of `freehold build`)). It is served **twice from one
+    assembly** (`agenttools.WorldStatus`): the console folds it into its public
+    `/api/world` (consumed by the TUI and `freehold world status`), and the
+    `/mcp world_status` tool shares that same assembly for direct MCP callers —
+    so the two surfaces can never diverge. `grant_agent` is
+    **operator-scoped and wired through the absorbed console-owner
+    credential**: the server loads
+    the console's own identity from its state dir (0600 durable plane) and
+    publishes the kind-9000 put-user to the runner's channel in-process — the
+    runner re-reads its signed 39002 roster per call, so the grant lands
+    without a restart (missing credential fails closed; agents are denied with
+     `-32003`, since a grant hands direct exec access to the runner). `world_migrate` runs
+     `platform/migrations` — the CP's verify-gated migration runner (durable
+     ledger at `/srv/data/cp/migrations.json`, a migration is done only when
+     its postcondition verifies), for versioned config/prompt/repair changes
+     that don't have clean desired-state semantics. Migrations are **versioned
+     script files** (Omarchy's `<epoch>.sh` convention — one timestamped shell
+     file per migration, embedded under `platform/migrations/files/`, run in
+     ascending order through `bash` on the CP, each with an optional
+     `<epoch>.verify.sh` postcondition gate). The agent-registry reconcile (the
+     console state.json `agents` map folded into the authoritative
+     `registry.json`) rides that runner as a script migration, driven by the
+     `freehold-agent-tools registry import-console` subcommand.
 
-*   **`control-plane/cli/rebuild.go` is the slim CP-driven build.**
-    `collectAnswers` → `rebuildFlags` → `newRebuildEngine` → `runSlim`: door →
-    runner → durable plane → seed the litellm secrets into the box runner
-    (bootstrap-cp ships it as the co-located runner) → boot the CP LXC → boot
-    + deploy the relay stack (the agent-tools roster lives on it) →
-    bootstrap-cp → deploy `freehold-agent-tools` → hand the world's secrets
-    to the CP (DNS creds sealed to the agent-tools identity, litellm secrets
-    sealed into the runner) → **trigger `world_build`** (the CP brings up
-    k3s/storage/DNS/litellm/Caddy/cert through its co-located runner) →
+*   **`platform/provisioning/box` is the shared provisioning engine.**
+    `install`'s wizard → `box.Flags` → `box.NewEngine` → `box.RunBootstrap`
+    (CP bootstrap); `freehold build` runs the world through the CP:
+    door → runner → durable plane → boot the CP LXC → **`bootstrap`** (box one)
+    = the CP only (console + co-located runner) — no secrets are collected.
+    **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS
+    creds + litellm; sealed to the **console** identity in `world-secrets/`,
+    asked only when missing), points the public A records (`manageDomainDNS`),
+    then triggers the console's `/api/world-build` — the CP brings up relay/
+    agent-tools/k3s/storage/litellm/Caddy/cert through its co-located runner,
+    re-seeding litellm into the runner from the CP store →
     record the post-world coords → CPA + reconcile. `install` hands the same
-    engine the TUI's answers. Teardown keeps the config (compute-only) unless
+    engine the TUI's answers; on an interactive terminal it collects every
+    answer (incl. relay/CP domains + the proxy IP) up front in a bubbletea
+    wizard so `runBootstrap` never re-prompts them. Pre-DNS steps connect to the
+    recorded guest IPs (`config.ResolveTarget`) until the public domain
+    resolves. Teardown keeps the config (compute-only) unless
     `--data` erases the tenant datasets.
 
 *   **`control-plane/cli/teardown/` is the box's teardown-cp** (its own door);
-    the CP's `world_teardown` unwinds what the CP manages. Both honor the
+    a login-only box (no local `[runner]`) drives it through the CP's
+    `/api/world-teardown` instead. Both honor the
     compute/data split (compute keeps the recorded coords + `/srv/data` LVs;
     `--data` erases them).
 
@@ -230,16 +286,30 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
     Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
-    recheck the world, `s` toggle the Runners source (CP console ⇄ local
-    state), `w` open the web console, `l` log in with the operator nsec,
+    recheck the world, `w` open the web console, `l` log in with the operator nsec,
     `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
+    (The `s` Runners-source toggle is gone: the box-local `state.json` mirror
+    is deleted — the Runners view reads the console `/api/overview` only. The
+    CP-lifecycle door model — implemented as `world_authorize_door` /
+    `world_revoke_door` + `freehold door authorize|revoke`, spec'd in
+    `docs/DOOR_SPEC.md` — lets a fresh logged-in box authorize its own door key
+    on the host.)
 
-*   **Remote-CP access.** `freehold login` (root-free) authorizes this operator
-    against the CP by **CP address + operator nsec** (NIP-98), then ends;
-    `control-plane/cli/login` persists the nsec 0600 under the operator dir
-    and seeds a local connection/desire profile from the CP's `/api/world`
-    summary, so every launch auto-logs in and a fresh box recovers with
-    nothing from a lost one. The operator key **is** the credential — the
+*   **Remote-CP access.** `freehold login` (root-free) — instead of one box-wide
+    connection profile — **adds a named tenant profile** to the box: a profile is
+    a single logged-in tenant with its own config file
+    (`~/.config/freehold/profiles/<name>/config.toml`) and its own scoped state
+    dir (`<FREEHOLD_HOME|~/.freehold>/profiles/<name>/`), the filesystem being the
+    registry. `login` authorizes this operator against the CP by **CP address +
+    operator nsec** (NIP-98), then ends;
+    `control-plane/cli/login` persists the nsec 0600 under the profile's operator
+    dir and seeds that profile's connection/desire config from the CP's
+    `/api/world` summary, so every launch auto-logs in and a fresh box recovers
+    with nothing from a lost one. The TUI and `build`/`bootstrap`/`teardown`/
+    `world` pick which profile (tenant) to operate via an interactive picker
+    (`freehold profiles` lists them), and fail closed with "run `freehold login`
+    first" when none are registered. There is no implicit "default" profile or
+    legacy single-config layout. The operator key **is** the credential — the
     console only admits NIP-98 operators whose pubkey was minted into its
     admin whitelist at deploy, so logging in as yourself from any box unlocks
     the world. The recorded `cp_pubkey` is the CP's *own* identity, adopted
@@ -247,14 +317,20 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     64-hex) and informational — never typed, since a legitimate login to the
     actual CP needs no separately known pubkey. (The trust boundary for a
     wrong/hijacked `cp_url` is TLS/DNS on that URL, not this recorded anchor.)
-    `freehold logout` clears this box's local ledger only. `/api/world`
-    carries the relay coords (served from `state.json` — the CP records them
-    when `serve` is started with `--relay-url`, paired or not with
-    `--relay-pubkey`) plus the `agent_tools_url`/`agent_tools_pubkey` the
-    Agents view needs. The Agents tab reads the CP toolset registry
-    (`freehold-agent-tools manage_agent`); the Runners-CP view reads the
-    console `/api/overview`. `w` opens the web console pre-authorized via a
-    single-use portal token.
+    `freehold logout` clears the chosen profile's local ledger only. `/api/world`
+    serves the relay's **public edge** (derived as `https://<relay_host>` when a
+    relay host is recorded, else the raw `state.json` `--relay-url`) plus the
+    `agent_tools_url`/`agent_tools_pubkey` the
+    toolset exposes — a client adopts the domain, not the internal LAN dial.
+    The whole Services pane — relay, control plane, and the world services a
+    box renders — comes from the CP.
+    The Agents tab reads the authorized agent registry +
+    world facts folded into `/api/world` itself (served from the toolset's
+    durable state via the shared `agenttools.WorldStatus` assembly — the same
+    one `/mcp world_status` uses), so a logged-in box renders Agents/DATA/Certs
+    with no local agent-tools coords and no separate MCP hop; the Runners-CP
+    view reads the console `/api/overview`. `w` opens the web console
+    pre-authorized via a single-use portal token.
     **A login-only box (cp_url + cp_pubkey + operator, no local `[runner]`)
     reaches Running**: the boot gate treats a runnerless profile as having its
     runner reach satisfied and sources CP liveness from the console session
@@ -272,9 +348,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 ### `platform/` (`freehold/platform` — the evolving world)
 
 *   **The evolving world the mechanism installs and evolves** — services,
-    agents, migrations, provisioning, terraform, data conventions. Adding a
-    security agent or a new service means adding a `platform/` entry — never
-    touching `control-plane/`. It is its own Go module (imports `contract`,
+    migrations, provisioning, terraform, data conventions. Adding a new service
+    means adding a `platform/` entry — never touching `control-plane/` (adding a
+    named agent means an `agents/<name>/` entry instead, see below). It is its
+    own Go module (imports `contract`,
     never `control-plane`), so `control-plane → platform → contract` is a
     one-way edge.
 
@@ -291,20 +368,34 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (the generic deploy helpers both the relay and bootstrap-cp deployers
     use).
 
-*   **`platform/migrations/`** is the verify-gated migration runner;
-    **`platform/agents/`** carries named agents — `freehold/prompt.md` (the
-    CPA's purpose, embedded by the `platform/agents` Go package and shipped
-    by the control plane) and the agent prompt/creation specs that grow over
-    time; **`platform/terraform/`** holds the IaC the CP executes.
+*   **`platform/migrations/`** is the verify-gated migration runner over
+    versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed
+    → the CP durable plane, run ascending via `bash`); the CP-owned
+    build's IaC is the Terraform module embedded in
+    **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
+    box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s
+    LXCs + k3s bring-up) is exec-first `null_resource` shell, while the SERVICE
+    definitions (`postgres.tf` / `litellm.tf` / `caddy.tf`) are real
+    `kubernetes`-provider resources — the deterministic static files that define
+    each service, secret values riding the 0600 state.
 
-### `platform/agents/freehold/prompt.md` (the CPA's purpose)
+### `agents/` (`freehold/agents` — the top-level home for agent definitions)
 
-*   **`platform/agents/freehold/prompt.md`** is embedded into the
-    `platform/agents` Go package (`//go:embed freehold/prompt.md` — a Go
-    package cannot embed outside its own module, so `control-plane` imports
-    the value, never re-embeds) and mounted into every agent pod as the
-    `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
-    re-read fresh on every spawn. `freehold-agent-tools` ships it verbatim for
+*   **`agents/`** is its own Go module — `freehold/` (the freehold named agent:
+    the CPA's purpose + skills), `custom/` (the template for agents the CPA
+    creates on the fly), and named agents that grow over time. It is embedded by
+    the `freehold/agents` Go package and shipped by the control plane; the module
+    carries its own `go.mod` because a Go package cannot `//go:embed` outside its
+    own module.
+
+### `agents/freehold/prompt.md` (the CPA's purpose)
+
+*   **`agents/freehold/prompt.md`** is embedded into the `freehold/agents` Go
+    package (`//go:embed freehold/prompt.md`) and mounted into every agent pod
+    as the `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
+    re-read fresh on every spawn. The package has its own `go.mod` (a Go
+    package cannot embed outside its own module), so `control-plane` imports
+    the value, never re-embeds. `freehold-agent-tools` ships it verbatim for
     the CPA when the build creates it.
 
 *   The CPA is a **reasoning agent that lives in Buzz** and is the system's
@@ -325,30 +416,37 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     tools the harness lacks; it reports tool errors plainly rather than
     inventing results.
 
-### `control-plane/console/` (Rust; the console + provisioner)
+### The console (Go; the loopback admin/ops web surface)
 
-*   **The control plane console + secret provisioner is a Rust crate**
-    (`control-plane/console/`: `src/state.rs`, `src/provisioner.rs`,
-    `src/web.rs` — the loopback admin/ops web console with NIP-98 operator
-    login — `src/console.rs`, `src/main.rs`). The console is the CP's own
-    identity (0600) that signs readiness probes against each runner — no side
-    door, the runner still fails closed. The Rust console is the mechanism's
-    surface until its routes are ported into the Go `api/` (the REFACTOR-PLAN
-    Phase 3 parity work); `contract/console` is the Go client that mirrors it.
+*   **The control plane console is a Go server + CP CLI** (`control-plane/api/console/`
+    + `control-plane/api/cmd/freehold-console`): the `/api/*` routes (auth/overview/world/teardown/
+    provision/rotate/revoke/grant/DNS/agents/portal) with the SAME security
+    guards — NIP-98 operator login (challenge/session), `HttpOnly;
+    SameSite=Strict` session cookies, single-use portal tokens, login
+    freshness windows, the DNS-rebinding `Origin` guard, and the
+    loopback-only-until-authn bind guard. It also carries the box-side CP CLI
+    verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`), so the deploy
+    and the rebuild engine ship + drive a Go console end to end. The console
+    is the CP's own identity (0600, minted on the box at first serve — never
+    shipped) that signs readiness probes against each runner — no side door,
+    the runner still fails closed. `contract/console` is the Go client that
+    talks to it.
 
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`
     per connector the system never parses.
 
 *   **The Go toolchain mirrors the surfaces it drives:**
-    `control-plane/secret-management/` (`ProvisionRunner`) reproduces
-    provision for onboarding existing services; `contract/client/mcp.go` is
-    the signed MCP client that drives a runner (`exec`/`status`/`upload`);
-    `contract/console` talks to the CP console's `/api/*`
-    (overview/agents/portal) as an operator session.
+    `control-plane/secret-management/` reproduces the full provisioner
+    (provision/rotate/revoke/grant/adopt/add-secret + the relay channel sync);
+    `contract/client/mcp.go` is the signed MCP client that drives a runner
+    (`exec`/`status`/`upload`); `contract/console` talks to the console's
+    `/api/*` (overview/agents/portal) as an operator session.
 
 *   **`control-plane/cli/bootstrap-cp/` reads `providers.json`/`secrets.json`
-    and builds a k3s `manifests.yaml`** (see `platform/terraform/` below).
+    and builds the CP + co-located runner** (the box bootstrap that exists
+    before any terraform; the CP-owned service definitions live in the
+    `cpbuild/terraform` module above).
 
 ### Runners (the bridge between the two)
 
@@ -462,12 +560,14 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     `resolve` → `ensure` → `run_call` → `Run` → `runReconstruct` (fresh
     host, no state dir).
 
-3.  **Chunk 3 — Rust→Go refactor + the three-module tree:** the operator
-    surface is Go across three modules — `contract/` (`freehold/contract`, the
-    shared wire/trust leaf), `control-plane/` (`freehold/control-plane`, the
-    stable mechanism), and `platform/` (`freehold/platform`, the evolving
-    world) — with the Rust `core`/`runner` kept as a byte-exact reference
-    oracle; `install` becomes a thin front-end to the rebuild engine
+3.  **Chunk 3 — Rust→Go refactor + the modular Go tree:** the operator
+    surface is Go across modules — `contract/` (`freehold/contract`, the
+    shared wire/trust leaf), `platform/` (`freehold/platform`, the evolving world),
+    `agents/` (`freehold/agents`, the agent definitions), `install/`
+    (`freehold/install`, the CP bootstrap CLI), and `control-plane/`
+    (`freehold/control-plane`, the stable mechanism) — with the Rust
+    `core`/`runner` kept as a byte-exact reference oracle; `freehold-install`
+    drives the shared box engine directly
     (`eng.stdin = ui.in`); teardown keeps the config intact (`PruneLxcCoords`
     is never written to disk); the plane stage is never skipped
     (`TestManagedForFlags`, `TestWorldManaged`, `TestParsePctGateway`,
@@ -480,7 +580,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     `roadmap/POC_CHUNK4.md`), with the CP's `freehold-agent-tools` toolset
     and the durable-plane identity/memory guarantees; `freehold-teardown`
     destroys LXCs but keeps the **recorded coordinates**; `freehold-install`
-    is a thin front-end to the same engine.
+    drives the shared box engine for CP bootstrap.
 
 5.  **Chunk 5 — Agent workspaces + git/GitHub:** one workspace at
     `/srv/data/<agent>/` (`.freehold/config.json` + `SKILL.md`);
@@ -497,8 +597,9 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 
 7.  **Chunk 7 — Remaining connectors (Vultr, Backblaze, Terraform) + the
     North Star:** portable `TargetId`, single `exec`, and the durable-path
-    conventions from this file; `freehold-acceptance` reproduces
-    **Chunk 1**'s acceptance criteria hermetically on loopback.
+    conventions from this file; the Go acceptance gate
+    (`control-plane/acceptance/`) reproduces **Chunk 1**'s acceptance criteria
+    hermetically on loopback.
 
 ## Locked decisions
 

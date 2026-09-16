@@ -5,21 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"freehold/contract/client"
 	"freehold/contract/config"
-	"freehold/contract/console"
-	"freehold/platform/provisioning/drive"
-	"freehold/control-plane/cli/flows"
-	"freehold/control-plane/cli/login"
-	"freehold/platform/provisioning/planebase"
-	"freehold/contract/state"
+	"freehold/control-plane/api/agenttools"
 )
 
 // ---- bubbletea lifecycle -------------------------------------------------
@@ -50,12 +43,10 @@ func envOr(k, def string) string {
 	return def
 }
 
-// freeholdStateDir mirrors installer::state_dir (FREEHOLD_HOME override).
+// freeholdStateDir mirrors installer::state_dir, scoped to the active profile
+// (FREEHOLD_HOME override for the legacy/no-profile layout).
 func freeholdStateDir() string {
-	if h := os.Getenv("FREEHOLD_HOME"); h != "" {
-		return h + "/control-plane"
-	}
-	return envOr("HOME", "/root") + "/.freehold/control-plane"
+	return config.StateDir() + "/control-plane"
 }
 
 // load is the FAST half of startup: it reads the config (local file only —
@@ -82,9 +73,6 @@ func (m *Model) load(cfgPath string) error {
 	m.buildServices(cfg)
 	m.buildCerts(cfg)
 	m.cfg = cfg
-	if m.RunnerSource == "" {
-		m.RunnerSource = RunnerSourceCP
-	}
 	m.refreshRunners(cfg)
 	m.buildAgents(cfg)
 	return nil
@@ -128,10 +116,19 @@ func cpConsoleLive(m *Model, cfg *config.Config) bool {
 	return cfg != nil && cfg.CPURL != "" && config.URLReachable(cfg.CPURL)
 }
 
-// buildServices fills the Services view from the config's managed pieces
-// (mirrors Rust build_services, incl. the k3s row).
+// buildServices fills the Services view. With a CP session the CP is the single
+// source of truth — relay + control plane + each world service the CP monitors,
+// identically for every box. The config's `managed` pieces are only the offline
+// fallback (no CP session).
 func (m *Model) buildServices(cfg *config.Config) {
 	m.Services = nil
+	if m.cpWorld != nil && len(m.cpWorld.Services) > 0 {
+		m.buildCpServices(cfg)
+		if len(m.Services) == 0 {
+			m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
+		}
+		return
+	}
 	for _, piece := range cfg.Managed {
 		row := ServiceRow{Name: piece}
 		switch piece {
@@ -190,11 +187,90 @@ func (m *Model) buildServices(cfg *config.Config) {
 	}
 }
 
+// buildCpServices renders the Services view for EVERY box once it has a CP
+// session, from the CP's own /api/world services report — relay + control plane
+// + each world service (k3s/litellm/caddy), URL and health all CP-provided.
+// No local config row appears; local config is only the offline (no-session)
+// fallback. This is the "read the world from the CP" contract.
+func (m *Model) buildCpServices(cfg *config.Config) {
+	m.Services = nil
+	for _, s := range m.cpWorld.Services {
+		m.Services = append(m.Services, ServiceRow{
+			Name:   serviceRowName(s.Kind),
+			Where:  "CP-served · " + s.Kind,
+			URL:    s.URL,
+			Status: boolStatus(s.Up, "live", "down"),
+		})
+	}
+	if len(m.Services) == 0 {
+		m.Services = []ServiceRow{{Name: "(none managed)", Status: styleDim.Render("add `managed` entries to config")}}
+	}
+}
+
+func serviceRowName(kind string) string {
+	switch kind {
+	case "relay":
+		return "relay"
+	case "cp":
+		return "control plane"
+	case "k3s":
+		return "k3s (kube)"
+	case "litellm":
+		return "litellm (gateway)"
+	case "caddy":
+		return "caddy (TLS edge)"
+	default:
+		return kind
+	}
+}
+
 // buildCerts fills the Certs view from the config's recorded per-host edge certs
 // (written by the F3 stage on rebuild). Pure — no exec. Two rows (relay, cp),
 // each deriving its status from that slot's expiry.
+// relaySlotHost is the Certs view's relay host: the box's resolved public relay
+// domain (m.Domain — CP/DNS-derived on a management box, config-derived on a
+// deployer), or the config host when m.Domain isn't populated.
+func relaySlotHost(m *Model, cfg *config.Config) string {
+	if m.Domain != "" {
+		return m.Domain
+	}
+	return cfg.RelayHost()
+}
+
 func (m *Model) buildCerts(cfg *config.Config) {
 	m.Certs = nil
+	// The CP's world facts carry the edge cert metadata (registered at build),
+	// so a management/login-only box renders the Certs view from the CP.
+	if m.Facts != nil && len(m.Facts.Certs) > 0 {
+		for _, c := range m.Facts.Certs {
+			status, expiry := "no expiry on record", "—"
+			if c.Expiry != "" {
+				expiry = c.Expiry
+				if t, err := time.Parse(time.RFC3339, c.Expiry); err == nil {
+					switch {
+					case t.Before(time.Now()):
+						status = styleRed.Render("EXPIRED")
+					case t.Before(time.Now().Add(30 * 24 * time.Hour)):
+						status = styleYellow.Render("expiring <30d")
+					default:
+						status = styleGreen.Render("valid")
+					}
+				}
+			}
+			m.Certs = append(m.Certs, CertRow{
+				Domain: c.Domain,
+				URL:    "https://" + c.Domain,
+				Expiry: expiry,
+				Issuer: c.Issuer,
+				Status: status,
+			})
+		}
+		if len(m.Certs) == 0 {
+			m.Certs = []CertRow{{Domain: "(no cert on record)", Status: styleDim.Render("rebuild stages the wildcard cert for the edge")}}
+		}
+		return
+	}
+	// Fallback: the deployer's local config (pre-facts or offline).
 	issuer := cfg.Caddy.CertIssuer
 	if issuer == "" {
 		issuer = "lego (DNS-01)"
@@ -202,7 +278,11 @@ func (m *Model) buildCerts(cfg *config.Config) {
 	slots := []struct {
 		name, host, expiry string
 	}{
-		{"relay", cfg.RelayHost(), cfg.Caddy.RelayCert},
+		// relay host: m.Domain is the public relay host (config-derived on a
+		// deployer box; CP-relay_host- or DNS-derived on a management box),
+		// falling back to the config host — so a management box shows the
+		// domain, not the LAN IP it connected to.
+		{"relay", relaySlotHost(m, cfg), cfg.Caddy.RelayCert},
 		{"control plane", cfg.CPHost(), cfg.Caddy.CPCert},
 	}
 	for _, s := range slots {
@@ -222,7 +302,7 @@ func (m *Model) buildCerts(cfg *config.Config) {
 		}
 		m.Certs = append(m.Certs, CertRow{
 			Domain: s.host,
-			URL:    caddyURL(cfg, s.name),
+			URL:    caddyURL(m, cfg, s.name),
 			Expiry: expiry,
 			Issuer: issuer,
 			Status: status,
@@ -231,8 +311,10 @@ func (m *Model) buildCerts(cfg *config.Config) {
 }
 
 // caddyURL returns the edge URL for a service (relay -> the Caddy URL / relay
-// host; control plane -> the cp host), falling back to the bare host.
-func caddyURL(cfg *config.Config, name string) string {
+// host; control plane -> the cp host), falling back to the bare host. The relay
+// fallback uses the resolved public relay domain (m.Domain — CP/DNS-derived on
+// a management box), not the LAN IP the box connected to.
+func caddyURL(m *Model, cfg *config.Config, name string) string {
 	if name == "control plane" {
 		if cfg.CPURL != "" {
 			return cfg.CPURL
@@ -242,7 +324,7 @@ func caddyURL(cfg *config.Config, name string) string {
 	if cfg.Caddy.URL != "" {
 		return cfg.Caddy.URL
 	}
-	return "https://" + cfg.RelayHost()
+	return "https://" + relaySlotHost(m, cfg)
 }
 
 // dnsRowsLive execs `control-plane dns list` inside the cp LXC through the
@@ -307,108 +389,42 @@ func guestLocation(vmid *uint32, ip *string) string {
 	}
 }
 
-// refreshData rebuilds the DATA view: the live durable-plane snapshot read
-// through the SAME signed runner channel the operator CLI uses (ops agent
-// identity — granted at bootstrap). Mirrors Rust plane_info: a missing
-// plane/runner keeps the last good snapshot; a probe failure degrades to
-// the notice in m.Msg.
+// refreshData rebuilds the DATA view. The CP's world facts are the single
+// source — identical for EVERY box (the durable-plane layout registered at
+// build). No local plane probe: a bootstrap box and a login box render the
+// same CP facts, so the boot check never diverges or hangs on a local exec.
 func (m *Model) refreshData(cfg *config.Config) {
-	if cfg == nil || cfg.Plane.Backend == nil || cfg.Plane.BackendKind == nil {
+	if m.Facts == nil || len(m.Facts.Plane.Mounts) == 0 {
+		m.DataAt = time.Now()
+		m.Storage = []DataRow{{Role: "(no plane mounts)", Source: "CP facts"}}
 		return
 	}
-	var kind planebase.BackendKind
-	switch *cfg.Plane.BackendKind {
-	case string(planebase.KindZfs):
-		kind = planebase.KindZfs
-	case string(planebase.KindLvmThin):
-		kind = planebase.KindLvmThin
-	default:
-		return
-	}
-	var mounts []drive.MountArg
-	for role, specs := range cfg.Plane.Mounts {
-		vmid := vmidForRole(cfg, role)
-		for _, s := range specs {
-			mounts = append(mounts, drive.MountArg{Role: role, Source: s.Source, Guest: s.GuestPath, VMID: vmid})
-		}
-	}
-	if len(mounts) == 0 {
-		return
-	}
-	sort.Slice(mounts, func(i, j int) bool {
-		if mounts[i].Role != mounts[j].Role {
-			return mounts[i].Role < mounts[j].Role
-		}
-		return mounts[i].Guest < mounts[j].Guest
-	})
-	c, err := flows.Connect(cfg.Runner.Addr, freeholdStateDir()+"/agent-ops", cfg.Runner.Pubkey)
-	if err != nil {
-		m.Msg = "data: runner connect failed — " + err.Error()
-		return
-	}
-	info, err := drive.ProbeStorage(c, cfg.Runner.Target, kind, *cfg.Plane.Backend, mounts)
-	if err != nil {
-		m.Msg = "data: plane probe failed — " + err.Error()
-		return
-	}
-	m.DataCap = info.Capacity
 	m.DataAt = time.Now()
 	m.Storage = nil
-	for _, mu := range info.Mounts {
-		size, used, fill := "—", "—", "—"
-		if mu.Size != nil {
-			size = drive.HumanBytes(*mu.Size)
+	for _, mu := range m.Facts.Plane.Mounts {
+		size, used, fill := mu.Size, mu.Used, mu.Fill
+		if size == "" {
+			size = "—"
 		}
-		if mu.Used != nil {
-			used = drive.HumanBytes(*mu.Used)
+		if used == "" {
+			used = "—"
 		}
-		if mu.Used != nil && mu.Size != nil && *mu.Size > 0 {
-			pct := (*mu.Used*100 + *mu.Size - 1) / (*mu.Size) // div_ceil
-			fill = fillStyle(pct).Render(fmt.Sprintf("%d%%", pct))
-		}
-		live := styleDim.Render("—")
-		if mu.GuestMounted != nil {
-			live = boolStatus(*mu.GuestMounted, "mounted", "down")
+		if fill == "" {
+			fill = "—"
 		}
 		m.Storage = append(m.Storage, DataRow{
-			Role: mu.Role, Mount: mu.Guest, Size: size, Used: used,
-			Fill: fill, Source: mu.Source, Live: live,
+			Role: mu.Tenant, Mount: mu.GuestPath, Size: size, Used: used, Fill: fill,
+			Source: mu.Source, Live: "CP facts",
 		})
 	}
 	if len(m.Storage) == 0 {
 		m.Storage = []DataRow{{Role: "(no mounts)"}}
 	}
-	m.Msg = fmt.Sprintf("data refreshed %s", time.Now().Format("15:04:05"))
+	m.Msg = "data layout from the CP"
 }
 
 // vmidForRole maps a plane mount role to its LXC vmid (mirror of Rust
 // plane_info's role match).
-func vmidForRole(cfg *config.Config, role string) *uint32 {
-	switch role {
-	case "relay":
-		return cfg.Lxc.Relay.Vmid
-	case "cp":
-		return cfg.Lxc.Cp.Vmid
-	case "k3s":
-		return cfg.Lxc.K3s.Vmid
-	default:
-		return nil
-	}
-}
-
-// fillStyle is the DATA fill-ratio traffic light (Rust fill_color):
-// green < 70%, yellow < 90%, red at/above.
-func fillStyle(pct uint64) lipgloss.Style {
-	switch {
-	case pct >= 90:
-		return styleRed
-	case pct >= 70:
-		return styleYellow
-	default:
-		return styleGreen
-	}
-}
-
 // launchWeb opens the console's portal URL in the browser (mirrors Rust
 // launch_web): needs a session (l); xdg-open absence degrades to the
 // manual-URL notice (single-use token, 60s).
@@ -430,40 +446,11 @@ func (m *Model) launchWeb() {
 	m.Msg = "web opened: " + url
 }
 
-// readLocalRunners fills the Runners view from the local CP state.json (the
-// loopback authn path — mirror of running.rs::read_local).
-func (m *Model) readLocalRunners(cfg *config.Config) {
-	st, err := state.Open(freeholdStateDir())
-	if err != nil {
-		m.Runners = nil
-		return
-	}
-	m.Runners = nil
-	for name, rec := range st.Snapshot().Runners {
-		addr := "—"
-		if rec.McpAddr != nil {
-			addr = *rec.McpAddr
-		} else if cfg != nil {
-			addr = cfg.Runner.Addr
-		}
-		m.Runners = append(m.Runners, RunnerRow{
-			Name: name, Status: string(rec.Status), Pubkey: rec.NostrPubkey,
-			Addr: addr, Readiness: "—",
-		})
-	}
-	if len(m.Runners) == 0 {
-		m.Runners = []RunnerRow{{Name: "(no runners)", Status: styleDim.Render("provision one in the CLI")}}
-	}
-}
-
-// refreshRunners fills the Runners view from the ACTIVE source: the console
-// API (CP — default) or the local loopback state.json.
+// refreshRunners fills the Runners view from the console /api/overview (the
+// CP's authoritative runner list). There is no local loopback toggle: the
+// box-local state.json mirror is deleted (Phase 2) — world ops read the CP.
 func (m *Model) refreshRunners(cfg *config.Config) {
 	if cfg == nil {
-		return
-	}
-	if m.RunnerSource == RunnerSourceLocal {
-		m.readLocalRunners(cfg)
 		return
 	}
 	m.readCpRunners(cfg)
@@ -476,7 +463,7 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 	if m.console == nil || m.console.client == nil {
 		m.Runners = []RunnerRow{{
 			Name:   "(not logged into a console)",
-			Status: styleDim.Render("press l to log in — s switches to the local list"),
+			Status: styleDim.Render("press l to log in to see the CP runner list"),
 			Addr:   cfg.Runner.Addr,
 		}}
 		return
@@ -516,47 +503,41 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 	}
 }
 
-// buildAgents fills the Agents view from freehold-agent-tools `manage_agent` —
-// the CP-side MCP server's durable agent registry, the source of truth for
-// agents created through create_agent after 0.4.6 (the console's /api/agents
-// is empty; the toolset keeps its own registry). Signed as the operator (the
-// persisted nsec), who is a roster grant. Not logged in or no agent-tools
-// coords = a hint row, not the stale local loopback state.
+// buildAgents fills the Agents view from the CP's /api/world — the same
+// single-inventory status the /mcp world_status tool shares. The agent registry
+// + world facts are served publicly by the console from the toolset's durable
+// authoritative state, so ANY logged-in box renders them from the CP with no
+// local agent-tools coords. Not logged in = a hint row, never a blank dashboard.
 func (m *Model) buildAgents(cfg *config.Config) {
 	m.Agents = nil
-	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
-		m.Agents = []AgentRow{{Name: "(no CP toolset)", Available: styleDim.Render("converge the world (build) to deploy freehold-agent-tools")}}
-		return
-	}
-	// Gated on the live console session (like readCpRunners), NOT a disk
-	// secret check: buildAgents is called from load() BEFORE the first frame,
-	// so at startup m.console == nil and we take this free hint path. The real
-	// agent-tools fetch happens after auto-login via refreshLocal().
+	// Gated on the live console session: buildAgents is called from load()
+	// BEFORE the first frame, so at startup m.console == nil and we take this
+	// free hint path. The real /api/world fetch happens after auto-login via
+	// refreshLocal().
 	if m.console == nil || m.console.client == nil {
 		m.Agents = []AgentRow{{Name: "(not logged into a console)", Available: styleDim.Render("press l to log in to see the CP agent roster")}}
+		m.Facts = nil
 		return
 	}
-	auth, err := flows.AgentAuth(oplogin.Dir())
+	w, err := m.console.client.World()
 	if err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		m.Agents = []AgentRow{{Name: "(world fetch failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
+		m.Facts = nil
 		return
 	}
-	mc, err := client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
-	if err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
-		return
+	// The world facts ride the same /api/world read — the DATA + Certs views
+	// render from them on a management box.
+	m.Facts = nil
+	if len(w.Facts) > 0 {
+		var facts agenttools.WorldFacts
+		if err := json.Unmarshal(w.Facts, &facts); err != nil {
+			m.Facts = nil
+			_ = err
+		} else {
+			m.Facts = &facts
+		}
 	}
-	raw, err := mc.CallText("manage_agent", map[string]interface{}{})
-	if err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
-		return
-	}
-	var agents []console.AgentInfo
-	if err := json.Unmarshal(raw, &agents); err != nil {
-		m.Agents = []AgentRow{{Name: "(agent roster failed)", Available: styleRed.Render(clip(err.Error(), 48))}}
-		return
-	}
-	for _, a := range agents {
+	for _, a := range w.Agents {
 		created := "just now"
 		if a.CreatedAt > 0 {
 			created = humanize(time.Since(time.Unix(int64(a.CreatedAt), 0)))
@@ -592,16 +573,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Mode == ModeRunning {
 				return m, m.startBootActivity("checking the world")
 			}
-		case "s":
-			if m.Mode == ModeRunning {
-				if m.RunnerSource == RunnerSourceLocal {
-					m.RunnerSource = RunnerSourceCP
-				} else {
-					m.RunnerSource = RunnerSourceLocal
-				}
-				m.refreshRunners(m.cfg)
-				m.Msg = "runners: " + m.runnerSourceLabel()
-			}
 		case "w":
 			if m.Mode == ModeRunning {
 				m.launchWeb()
@@ -633,6 +604,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Err = v.err.Error()
 		} else {
 			m.Msg = v.ok
+			// A flow (notably the manual `l` console login, which sets
+			// m.console) may have just granted a console session: fill a
+			// management box's world pillars from the CP. Idempotent; no-ops
+			// unless a session exists and local coords are absent.
+			m.applyCPWorldHealth()
 		}
 	case tickMsg:
 		if m.activity == nil {
@@ -650,8 +626,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.auth && v.client != nil {
 			m.console = &consoleClient{client: v.client}
 			m.consolePK = v.pubkey
-			m.RunnerSource = RunnerSourceCP
 			m.refreshLocal()
+			m.applyCPWorldHealth()
 			m.Msg = "auto-logged into the CP as " + v.pubkey[:12]
 		}
 		return m, nil
@@ -693,8 +669,8 @@ func (m *Model) View() string {
 		b.WriteString(styleRed.Render("! "+m.Err) + "\n\n")
 	}
 	if m.Mode == ModeBootstrap {
-		b.WriteString(styleYellow.Render("no config — world not bootstrapped") + "\n\n")
-		b.WriteString("run " + styleYellow.Render("freehold build") + " to bring up the world (bootstraps then reconciles)\n")
+		b.WriteString(styleYellow.Render("no tenant profile — world not started") + "\n\n")
+		b.WriteString("run " + styleYellow.Render("freehold login") + " to add a tenant profile, then " + styleYellow.Render("freehold build") + " to bring the world up\n")
 	} else if m.Mode == ModeConfigure {
 		b.WriteString(styleYellow.Render("config present, world NOT converged") + "\n")
 		b.WriteString(renderProbes(m) + "\n\n")
@@ -708,14 +684,6 @@ func (m *Model) View() string {
 	}
 	b.WriteString("\n" + m.footer())
 	return lipgloss.NewStyle().Render(b.String())
-}
-
-// runnerSourceLabel names the active Runners view source.
-func (m *Model) runnerSourceLabel() string {
-	if m.RunnerSource == RunnerSourceLocal {
-		return "local (loopback state.json)"
-	}
-	return "CP (console /api/overview)"
 }
 
 func renderProbes(m *Model) string {
@@ -738,7 +706,7 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s%s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second), op)) +
-			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · s runners:"+m.runnerSourceLabel()+" · w web · build/teardown run from the shell")
+			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
 	case ModeBootstrap, ModeConfigure:
@@ -785,7 +753,7 @@ func renderViews(m *Model) string {
 			rows = append(rows, []string{a.Name, clip(a.Pubkey, 16), a.Available, a.Created})
 		}
 	case ViewRunners:
-		title = "Runners · " + m.runnerSourceLabel() + " · s toggles"
+		title = "Runners · CP (console /api/overview)"
 		headers = []string{"name", "status", "pubkey", "addr", "grants", "readiness"}
 		for _, r := range m.Runners {
 			rows = append(rows, []string{r.Name, r.Status, clip(r.Pubkey, 16), r.Addr, r.Grants, r.Readiness})

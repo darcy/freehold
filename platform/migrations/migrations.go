@@ -13,13 +13,105 @@
 package migrations
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
+
+// files embeds the versioned migration SCRIPTS — the Omarchy convention of one
+// `.sh` file per migration. A file is named `<epoch>.sh` (the apply) with an
+// optional `<epoch>.verify.sh` (the postcondition gate). Executing is the
+// caller's job (through the CP's runner); this package only enumerates + tracks.
+//
+//go:embed files/*.sh
+var files embed.FS
+
+// Script is one embedded migration: Epoch is BOTH the version and the ledger
+// name (the Omarchy timestamped-file identity). Body carries the apply steps;
+// Verify carries the optional postcondition gate script.
+type Script struct {
+	Epoch  string
+	Body   string
+	Verify string
+}
+
+// Scripts returns the embedded migration scripts in ascending epoch order,
+// grouping `<epoch>.sh` (apply) with its optional `<epoch>.verify.sh` (gate).
+func Scripts() ([]Script, error) {
+	matches, err := fs.Glob(files, "files/*.sh")
+	if err != nil {
+		return nil, err
+	}
+	byEpoch := map[string]*Script{}
+	for _, m := range matches {
+		base := strings.TrimSuffix(filepath.Base(m), ".sh")
+		body, err := files.ReadFile(m)
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasSuffix(base, ".verify") {
+			ep := strings.TrimSuffix(base, ".verify")
+			s, ok := byEpoch[ep]
+			if !ok {
+				s = &Script{Epoch: ep}
+				byEpoch[ep] = s
+			}
+			s.Verify = string(body)
+			continue
+		}
+		if !epochOnly(base) {
+			continue
+		}
+		byEpoch[base] = &Script{Epoch: base, Body: string(body)}
+	}
+	out := make([]Script, 0, len(byEpoch))
+	for _, s := range byEpoch {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Epoch < out[j].Epoch })
+	return out, nil
+}
+
+// epochOnly reports whether a bare filename base is a pure decimal epoch (a
+// migration, not a helper `<something>.sh` we should ignore).
+func epochOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Migration adapts a Script into the verify-gated Migration the runner
+// executes. run executes a script BODY (the caller decides how: locally, or
+// through the CP's runner). A missing Verify script means apply-success implies
+// converged (nil gate).
+func (s Script) Migration(run func(string) error) Migration {
+	v := s.Verify
+	return Migration{
+		Name: s.Epoch,
+		Apply: func() error {
+			return run(s.Body)
+		},
+		Verify: func() error {
+			if v == "" {
+				return nil
+			}
+			return run(v)
+		},
+	}
+}
 
 // Migration is one versioned, idempotent change with a verify gate.
 type Migration struct {
