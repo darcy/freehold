@@ -29,11 +29,11 @@ repo, not the history.
 ## Pull requests (locked) — every unit of work ships through a PR
 
 - Every chunk/phase lands as a branch → PR → `main`. Create the PR as soon as the
-  branch has commits; the `claude.yml` workflow posts its review on the PR, so the
-  PR body is where review findings get worked.
+  branch has commits; the Bot Review (`ai-pr-review.yml`) posts its review on the PR, so
+  the PR body is where review findings get worked.
 - **Wait for the review to settle BEFORE working its comments.** After pushing,
   poll until both checks finish — `gh pr checks <n>` (CI `check` and the
-  `claude.yml` `review` workflow) — and only then open the findings:
+  `bot-review` check) — and only then open the findings:
   `gh pr view <n> --json comments` (or `gh api repos/<owner>/<repo>/pulls/<n>/comments`)
   with a timestamp cursor, and fix what's real. Addressing comments mid-review wastes
   a round and risks editing files the review hasn't seen yet; `DEFER` items belong

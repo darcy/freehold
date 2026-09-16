@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  check:
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -31,66 +31,88 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # The control-plane Go tests drive the Rust binaries (control-plane/acceptance
+  # runs target/debug/runner; control-plane/core/harness runs
+  # target/debug/freehold-harness-oracle), so this job builds just those two
+  # before the Go checks. Keeping it separate lets the Rust and plain-Go jobs
+  # stay independent and parallel.
+  control-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build runner + harness oracle
+        run: cargo build -p freehold-runner -p freehold-harness-oracle
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: "control-plane/go.mod"
-
-      - name: Go build (agents)
-        working-directory: agents
-        run: go build ./...
-
-      - name: Go build (contract)
-        working-directory: contract
-        run: go build ./...
-
-      - name: Go build (platform)
-        working-directory: platform
-        run: go build ./...
-
-      - name: Go build (install)
-        working-directory: install
-        run: go build ./...
+          # setup-go defaults to a repo-root go.mod, which this multi-module repo
+          # doesn't have — without this it silently skips caching and recompiles
+          # the dependency tree every run.
+          cache-dependency-path: control-plane/go.mod
 
       - name: Go build (control-plane)
         working-directory: control-plane
         run: go build ./...
 
-      - name: Go vet (agents)
-        working-directory: agents
-        run: go vet ./...
-
-      - name: Go vet (contract)
-        working-directory: contract
-        run: go vet ./...
-
-      - name: Go vet (platform)
-        working-directory: platform
-        run: go vet ./...
-
-      - name: Go vet (install)
-        working-directory: install
-        run: go vet ./...
-
       - name: Go vet (control-plane)
         working-directory: control-plane
         run: go vet ./...
 
-      - name: Go test (agents)
-        working-directory: agents
-        run: go test ./...
-
-      - name: Go test (contract)
-        working-directory: contract
-        run: go test ./...
-
-      - name: Go test (platform)
-        working-directory: platform
-        run: go test ./...
-
-      - name: Go test (install)
-        working-directory: install
-        run: go test ./...  
-
       - name: Go test (control-plane)
         working-directory: control-plane
         run: go test ./...
+
+  go:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [agents, contract, platform, install]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: "control-plane/go.mod"
+          # Key per module: a shared '**/go.sum' key races across matrix legs and
+          # the first finisher wins, leaving the big legs (platform: lego + cloud
+          # DNS SDKs) uncached.
+          cache-dependency-path: ${{ matrix.module }}/go.mod
+
+      - name: Go build (${{ matrix.module }})
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+
+      - name: Go vet (${{ matrix.module }})
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+      - name: Go test (${{ matrix.module }})
+        working-directory: ${{ matrix.module }}
+        run: go test ./...
+
+  # Fan-in so the required status check keeps its stable name (`check`) now that
+  # the work is split across parallel jobs. A skipped required check counts as
+  # passing, so this must fail loudly when a needed job does not succeed.
+  check:
+    if: always()
+    needs: [rust, control-plane, go]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require rust, control-plane, and go to pass
+        run: |
+          echo "rust: ${{ needs.rust.result }}"
+          echo "control-plane: ${{ needs['control-plane'].result }}"
+          echo "go: ${{ needs.go.result }}"
+          test "${{ needs.rust.result }}" = "success"
+          test "${{ needs['control-plane'].result }}" = "success"
+          test "${{ needs.go.result }}" = "success"
