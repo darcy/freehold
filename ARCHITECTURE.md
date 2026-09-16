@@ -268,7 +268,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `--data` erases the tenant datasets.
 
 *   **`control-plane/cli/teardown/` is the box's teardown-cp** (its own door);
-    the CP's `world_teardown` unwinds what the CP manages. Both honor the
+    a login-only box (no local `[runner]`) drives it through the CP's
+    `/api/world-teardown` instead. Both honor the
     compute/data split (compute keeps the recorded coords + `/srv/data` LVs;
     `--data` erases them).
 
