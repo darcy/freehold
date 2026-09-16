@@ -25,6 +25,43 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.3] — storage selection is a data-safety decision, not a guess
+
+Freehold resolved the durable-plane backend by taking the host's first VG
+(`vgs[0]`) and first thin pool. On a Proxmox box with several volume groups and
+live guests that could land the plane on a busy pool — and, when it carved a new
+pool, re-point PVE's `local-lvm` out from under every running VM's rootfs
+(observed stranding a world's disks).
+
+- **A read-only inventory is the decision input.** `storage resolve` now emits
+  every zpool, VG/thin-pool (with riders and the `local-lvm` pointer), and whole
+  disk, each CLASSIFIED by the data it carries. The rebuild engine consumes it and
+  makes the placement a plain-language choice: a single safe backend is a
+  one-keystroke confirm, several require an explicit pick, and `--yes` refuses to
+  guess (it names `--plane-pool` instead).
+- **freehold never erases a device that carries data.** A disk with any
+  filesystem/PV/zpool/mount/OS/swap signature is listed with its reason and cannot
+  be chosen. `EnsureZpool` now enforces the same clean-device precondition, so a
+  `zpool create` can never run blind. Creating a new backend (LVM VG / zpool) on a
+  clean device is a later phase.
+- **Reconnect to freehold's own previous plane.** Entries matching freehold's
+  exact naming (`freehold-<domain>-<tenant>` LVs, `<pool>/freehold/<domain>/…`
+  datasets, `freehold-*` pools) are recognized as freehold's: a fresh install can
+  keep and reconnect to them (requires the SAME relay domain — names are
+  domain-derived) or erase them (only freehold-namespaced entries; a new
+  `storage destroy` stage in the install module). Foreign data stays untouchable.
+- **The `local-lvm` re-point is guarded.** It happens only when the pointer
+  already targets the pool freehold carved, or its current pool holds no riders —
+  so a coexisting world's guest disks are never stranded.
+- **Non-expert wording.** Menus state consequences ("your VMs could run out of
+  room") rather than mechanisms; risky sharing needs the typed word `share`; the
+  install's up-front consent prompt is now accurate ("If this host has no usable
+  storage…", freehold never erases existing data).
+- **Fix: `freehold storage` was unregistered.** The CP-bootstrap module split left
+  the operator `storage` command tree out of the control-plane root, so
+  `freehold teardown --data` shelled a `storage destroy` that did not exist. It is
+  registered again.
+
 ## [0.6.2] — thin-box teardown: any logged-in box can tear the world down
 
 `freehold build` could be driven from any logged-in box (the CP-owned

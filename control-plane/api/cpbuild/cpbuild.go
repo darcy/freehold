@@ -293,14 +293,32 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 	}
 	kind := planebase.BackendKind(s.PlaneKind)
 	if kind == "" {
-		action, err := bootstrap.ResolveProxmox(mc, s.RunnerTarget, false, nil)
+		// No recorded kind: classify the host's storage read-only and take
+		// the recommended SAFE backend (or the recorded PlanePool). This
+		// replaces the old blind `vgs[0]` guess, which on a multi-VG host
+		// could land the plane on a busy pool.
+		inv, err := bootstrap.StorageInventory(mc, s.RunnerTarget)
 		if err != nil {
-			return nil, fmt.Errorf("storage resolve: %w", err)
+			return nil, fmt.Errorf("storage inventory: %w", err)
 		}
-		if action.Kind != "Reuse" {
-			return nil, fmt.Errorf("no storage backend to ensure onto: %s", action.Message)
+		opts := planebase.BuildOptions(inv)
+		var chosen planebase.Option
+		ok := false
+		if s.PlanePool != "" {
+			chosen, ok = planebase.FindOption(opts, s.PlanePool)
+			if !ok || chosen.Kind == planebase.KindBlocked {
+				return nil, fmt.Errorf("recorded plane pool %q on %s is not usable — clear it or pick another", s.PlanePool, s.RunnerTarget)
+			}
+		} else if i := planebase.Recommend(opts); i >= 0 {
+			chosen, ok = opts[i], true
 		}
-		if *action.Detected == planebase.ExistingZfs {
+		if !ok {
+			return nil, fmt.Errorf("no safe storage backend found on %s — record a plane pool explicitly", s.RunnerTarget)
+		}
+		if s.PlanePool == "" {
+			s.PlanePool = chosen.Backend
+		}
+		if chosen.Kind == planebase.KindReuseZpool {
 			kind = planebase.KindZfs
 		} else {
 			kind = planebase.KindLvmThin

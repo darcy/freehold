@@ -195,12 +195,16 @@ deliverables actually shipped are the pre-C0 items:
     mapping) so reattach-by-reference works.
 
 *   **Nothing lives only on disposable compute.** The durable volume plane (Phase 0.12)
-    runs as a stage in the converge pipeline before relay/CP boot: Proxmox-LXC resolves
-    `ZFS → LVM-thin → bail` and VPS resolves `block volume → downgraded local dir →
-    bail`; per-tenant datasets sit under `<pool>/freehold/<domain>/<tenant>` (VPS labels
-    flatten to `fh-<domain-dashes>-<tenant>`), the relay keeps TWO children (docker-root
-    plus the compose deploy dir holding `BUZZ_RELAY_PRIVATE_KEY`), and compute-only
-    teardown reattaches by reference — a new `pct create` born with its `mp=` mounts.
+    runs as a stage in the converge pipeline before relay/CP boot: Proxmox-LXC takes a
+    read-only INVENTORY of every zpool/VG/thin-pool and whole disk (classified by the
+    data each carries — freehold's own, safe-to-share, or ruled out), recommends the
+    safest backend, and lets the operator choose; freehold reuses an existing backend
+    and never erases a device that carries data. VPS resolves `block volume →
+    downgraded local dir → bail`; per-tenant datasets sit under
+    `<pool>/freehold/<domain>/<tenant>` (VPS labels flatten to
+    `fh-<domain-dashes>-<tenant>`), the relay keeps TWO children (docker-root plus the
+    compose deploy dir holding `BUZZ_RELAY_PRIVATE_KEY`), and compute-only teardown
+    reattaches by reference — a new `pct create` born with its `mp=` mounts.
 
 ### Chunk 3 acceptance
 

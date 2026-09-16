@@ -149,7 +149,7 @@ func collectAnswers(ui *installerUI) (box.Flags, error) {
 	if err != nil {
 		return box.Flags{}, err
 	}
-	consent, err := ui.confirm("No existing storage backend — create one (ZFS/LVM-thin)? this carves/relabels host storage", false)
+	consent, err := ui.confirm("If this host has no usable storage, may freehold create a new one? (freehold never erases existing data)", false)
 	if err != nil {
 		return box.Flags{}, err
 	}
@@ -206,6 +206,9 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.StorageName, _ = cmd.Flags().GetString("storage")
 	f.Bridge, _ = cmd.Flags().GetString("bridge")
 	f.ThinPool, _ = cmd.Flags().GetString("thin-pool")
+	f.PlanePool, _ = cmd.Flags().GetString("plane-pool")
+	f.ConfirmSharedPool, _ = cmd.Flags().GetBool("confirm-shared-pool")
+	f.EraseFreehold, _ = cmd.Flags().GetBool("erase-freehold")
 	f.ConfirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 	f.Yes, _ = cmd.Flags().GetBool("yes")
 	f.SizeGB, _ = cmd.Flags().GetUint64("size-gb")
@@ -244,6 +247,9 @@ func init() {
 	bootstrapCmd.Flags().String("storage", "local-lvm", "PVE LXC storage")
 	bootstrapCmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge")
 	bootstrapCmd.Flags().String("thin-pool", "", "Plane placement: existing pool to reuse, or a new name to carve")
+	bootstrapCmd.Flags().String("plane-pool", "", "Select the storage backend to use by name (VG or zpool)")
+	bootstrapCmd.Flags().Bool("confirm-shared-pool", false, "Consent to share a thin pool that already holds live volumes")
+	bootstrapCmd.Flags().Bool("erase-freehold", false, "Erase a detected previous freehold data plane on the chosen backend and start fresh")
 	bootstrapCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	bootstrapCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	bootstrapCmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key (or FREEHOLD_LITELLM_PROVIDER_KEY)")

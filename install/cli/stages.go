@@ -194,29 +194,44 @@ var storageResolveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// One read-only pass enumerates every backend + its data. The engine
+		// consumes the JSON inventory line and drives the (plain-language)
+		// selection; direct CLI use also prints the recommended backend.
+		inv, err := bootstrap.StorageInventory(c, target)
+		if err != nil {
+			return err
+		}
+		if line := planebase.EncodeInventory(inv); line != "" {
+			fmt.Println(line)
+		}
+		opts := planebase.BuildOptions(inv)
+		if sel := mustStr(cmd, "plane-pool"); sel != "" {
+			opt, ok := planebase.FindOption(opts, sel)
+			if !ok {
+				return fmt.Errorf("no storage backend named %q found on this host", sel)
+			}
+			if opt.Kind == planebase.KindBlocked {
+				return fmt.Errorf("storage %q cannot be used: %s", sel, opt.Reason)
+			}
+			printStorageSelection(opt)
+			return nil
+		}
+		if !inv.Empty() {
+			if i := planebase.Recommend(opts); i >= 0 {
+				printStorageSelection(opts[i])
+			}
+			// A real choice / cautions / blocked-only: emit nothing selected;
+			// the engine prompts from the inventory.
+			return nil
+		}
+		// A truly bare host: the legacy create/bail branch.
 		action, err := bootstrap.ResolveProxmox(c, target, confirm, optOf(mustStr(cmd, "device")))
 		if err != nil {
 			return err
 		}
 		switch action.Kind {
 		case "Reuse":
-			label := "ZFS zpool"
-			if *action.Detected == planebase.ExistingLvmThin {
-				label = "LVM VG/thin-pool"
-			}
-			fmt.Printf("STORAGE: reusing existing backend (%s %s) — nothing created\n", label, action.Pool)
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
-			if *action.Detected == planebase.ExistingLvmThin {
-				pools, err := bootstrap.ThinPools(c, target, action.Pool)
-				if err != nil {
-					return err
-				}
-				thin := "-"
-				if len(pools) > 0 {
-					thin = strings.Join(pools, ",")
-				}
-				fmt.Printf("STORAGE-THINPOOL: %s\n", thin)
-			}
 		case "Create":
 			fmt.Printf("STORAGE: creating new backend (pool %s) with consent…\n", action.Pool)
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
@@ -232,6 +247,27 @@ var storageResolveCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// printStorageSelection emits the legacy selection contract lines for a chosen
+// option, so `storage ensure` and direct CLI users see the same backend the
+// engine selected.
+func printStorageSelection(opt planebase.Option) {
+	switch opt.Kind {
+	case planebase.KindReuseZpool:
+		fmt.Printf("STORAGE: reusing existing backend (ZFS zpool %s) — nothing created\n", opt.Backend)
+		fmt.Printf("STORAGE-POOL: %s\n", opt.Backend)
+		fmt.Printf("STORAGE-BACKEND: zfs %s\n", opt.Backend)
+	case planebase.KindReuseVG:
+		fmt.Printf("STORAGE: reusing existing backend (LVM VG %s) — nothing created\n", opt.Backend)
+		fmt.Printf("STORAGE-POOL: %s\n", opt.Backend)
+		thin := "-"
+		if names := planebase.PoolNames(opt); len(names) > 0 {
+			thin = strings.Join(names, ",")
+		}
+		fmt.Printf("STORAGE-THINPOOL: %s\n", thin)
+		fmt.Printf("STORAGE-BACKEND: lvmth %s\n", opt.Backend)
+	}
 }
 
 var storageEnsureCmd = &cobra.Command{
@@ -283,6 +319,50 @@ var storageEnsureCmd = &cobra.Command{
 		for _, m := range mounts {
 			fmt.Printf("STORAGE-MOUNT %s:%s\n", m.Source, m.GuestPath)
 		}
+		return nil
+	},
+}
+
+// storageDestroyCmd destroys a tenant's dataset subtree on the selected
+// backend — the erase half of reconnecting to (or replacing) a previous
+// freehold plane. Only freehold-namespaced entries are touched.
+var storageDestroyCmd = &cobra.Command{
+	Use:   "destroy",
+	Short: "Destroy a tenant's dataset subtree (erase a previous freehold plane)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		addr, _ := cmd.Flags().GetString("addr")
+		agentDir, _ := cmd.Flags().GetString("agent-dir")
+		target := mustStr(cmd, "target")
+		tenant := mustStr(cmd, "tenant")
+		domain := mustStr(cmd, "domain")
+		pool := mustStr(cmd, "pool")
+		kindStr := mustStr(cmd, "kind")
+		if tenant == "" || domain == "" || pool == "" {
+			return fmt.Errorf("storage destroy needs --tenant --domain --pool")
+		}
+		c, err := installConnect(addr, agentDir, target)
+		if err != nil {
+			return err
+		}
+		t, err := tenantFor(tenant)
+		if err != nil {
+			return err
+		}
+		kind, action, err := parseKind(c, target, kindStr)
+		if err != nil {
+			return err
+		}
+		if action != nil {
+			// No backend to destroy on => nothing was ever created: a
+			// tolerated no-op, not a hard error.
+			fmt.Println("STORAGE-DESTROYED: false")
+			return nil
+		}
+		destroyed, err := drive.DestroyTenantBackend(c, target, kind, pool, domain, t)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("STORAGE-DESTROYED: %v\n", destroyed)
 		return nil
 	},
 }
@@ -414,12 +494,13 @@ func init() {
 	provisionCmd.Flags().StringArray("mount", nil, "durable mount <source>:<guest>")
 	provisionCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (accepted for symmetry; unused by proxmox-lxc)")
 
-	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd)
-	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd} {
+	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd, storageDestroyCmd)
+	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd, storageDestroyCmd} {
 		registerSelfFlags(sc)
 	}
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "consent to CREATE a backend")
 	storageResolveCmd.Flags().String("device", "", "physical device for a NEW zpool")
+	storageResolveCmd.Flags().String("plane-pool", "", "select the backend to use by name (VG or zpool)")
 	storageEnsureCmd.Flags().String("tenant", "", "relay|cp|k3s-volumes")
 	storageEnsureCmd.Flags().String("domain", "", "relay identity domain")
 	storageEnsureCmd.Flags().String("pool", "", "storage pool")
@@ -427,6 +508,10 @@ func init() {
 	storageEnsureCmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "per-tenant LV size GiB")
 	storageEnsureCmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "thin pool size GiB")
 	storageEnsureCmd.Flags().String("thin-pool", "", "thin pool name")
+	storageDestroyCmd.Flags().String("tenant", "", "relay|cp|k3s-volumes")
+	storageDestroyCmd.Flags().String("domain", "", "relay identity domain")
+	storageDestroyCmd.Flags().String("pool", "", "storage pool")
+	storageDestroyCmd.Flags().String("kind", "", "backend kind (zfs|lvmth)")
 
 	registerSelfFlags(deployCpCmd)
 	deployCpCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "remote state dir")

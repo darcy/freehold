@@ -1,0 +1,351 @@
+package box
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"freehold/platform/provisioning/drive"
+	"freehold/platform/provisioning/planebase"
+)
+
+// This file is the plane-placement CHOICE: it turns the read-only storage
+// inventory into a plain-language selection for a non-expert operator, rules
+// out anything freehold must not touch, requires an explicit confirmation for
+// risky choices, and reconnects to (or erases) freehold's own previous data.
+
+// selectPlacement drives the choice from an inventory and returns the backend
+// + thin pool the tenant LVs land in.
+func (e *Engine) selectPlacement(inv planebase.Inventory) (*placement, error) {
+	opts := planebase.BuildOptions(inv)
+	chosen, err := e.chooseBackend(opts)
+	if err != nil {
+		return nil, err
+	}
+	if chosen.Freehold.Freehold {
+		if err := e.resolveFreeholdData(chosen); err != nil {
+			return nil, err
+		}
+	}
+	switch chosen.Kind {
+	case planebase.KindReuseZpool:
+		return &placement{pool: chosen.Backend, kind: planebase.KindZfs}, nil
+	case planebase.KindReuseVG:
+		p, err := e.choosePool(chosen)
+		if err != nil {
+			return nil, err
+		}
+		p.kind = planebase.KindLvmThin
+		return p, nil
+	default:
+		return nil, fmt.Errorf("creating a new storage backend is a later phase — choose an existing backend, or clean a spare disk and re-run")
+	}
+}
+
+// chooseBackend picks a backend from the classified options: an explicit
+// --plane-pool, the single usable option (with a one-keystroke confirm), or an
+// interactive menu. It NEVER guesses when several are usable — --yes refuses
+// and names --plane-pool.
+func (e *Engine) chooseBackend(opts []planebase.Option) (planebase.Option, error) {
+	if e.F.PlanePool != "" {
+		opt, ok := planebase.FindOption(opts, e.F.PlanePool)
+		if !ok {
+			return planebase.Option{}, fmt.Errorf("no storage backend named %q on this host:\n%s", e.F.PlanePool, describeOptions(opts))
+		}
+		if opt.Kind == planebase.KindBlocked {
+			return planebase.Option{}, fmt.Errorf("storage %q cannot be used: %s", e.F.PlanePool, opt.Reason)
+		}
+		return opt, nil
+	}
+
+	usable := usableOptions(opts)
+	if len(usable) == 0 {
+		return planebase.Option{}, fmt.Errorf("no usable storage found on this host — freehold never erases a disk that carries data:\n%s", describeOptions(opts))
+	}
+	if len(usable) == 1 {
+		opt := usable[0]
+		// The one-keystroke confirm for the common safe case; freehold's own
+		// data is confirmed by the keep/erase step instead.
+		if !opt.Freehold.Freehold && opt.Safety == planebase.Safe {
+			if err := e.confirmYes("Freehold will store its data in "+opt.Title, opt.Impact); err != nil {
+				return planebase.Option{}, err
+			}
+		}
+		return opt, nil
+	}
+	if e.F.Yes {
+		return planebase.Option{}, fmt.Errorf("several storage backends found; --yes will not guess — pick one with --plane-pool:\n%s", describeOptions(opts))
+	}
+	return e.promptBackend(opts, usable)
+}
+
+// promptBackend renders the plain-language menu. Ruled-out backends are shown
+// with their reason so the operator understands why, but cannot be chosen.
+func (e *Engine) promptBackend(opts, usable []planebase.Option) (planebase.Option, error) {
+	rec := planebase.Recommend(opts)
+	fmt.Fprint(e.Out, "\n  How should freehold store your data?\n\n")
+	def := 0
+	for i, o := range usable {
+		mark := ""
+		if rec >= 0 && sameOption(o, opts[rec]) {
+			mark = "   ← recommended"
+			def = i + 1
+		}
+		fmt.Fprintf(e.Out, "   %d) %s%s\n      %s\n", i+1, o.Title, mark, o.Impact)
+	}
+	if blocked := blockedOptions(opts); len(blocked) > 0 {
+		fmt.Fprint(e.Out, "\n  Freehold will NOT touch:\n")
+		for _, o := range blocked {
+			fmt.Fprintf(e.Out, "   - %s: %s\n", o.Title, o.Reason)
+		}
+	}
+	fmt.Fprint(e.Out, "\n   x) stop — make no changes\n\n")
+	hint := ""
+	if def > 0 {
+		hint = fmt.Sprintf(", default %d", def)
+	}
+	answer, err := e.Prompt(fmt.Sprintf("choose [1-%d%s / x]", len(usable), hint))
+	if err != nil {
+		return planebase.Option{}, err
+	}
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer == "x" || answer == "q" || answer == "stop" {
+		return planebase.Option{}, fmt.Errorf("stopped — no changes made")
+	}
+	if answer == "" && def > 0 {
+		answer = strconv.Itoa(def)
+	}
+	n, err := strconv.Atoi(answer)
+	if err != nil || n < 1 || n > len(usable) {
+		return planebase.Option{}, fmt.Errorf("please choose a number between 1 and %d (or x to stop)", len(usable))
+	}
+	chosen := usable[n-1]
+	return chosen, nil
+}
+
+// choosePool resolves the thin pool within a VG: the --thin-pool flag
+// (adopt-if-present, else carve), --yes (reuse the first detected pool), or the
+// interactive reuse/carve prompt.
+func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
+	pools := planebase.PoolNames(opt)
+	has := func(name string) bool {
+		for _, p := range pools {
+			if p == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if e.F.ThinPool != "" {
+		if has(e.F.ThinPool) {
+			if err := e.confirmPoolShare(opt, e.F.ThinPool); err != nil {
+				return nil, err
+			}
+			return &placement{pool: opt.Backend, thinPool: e.F.ThinPool, created: false}, nil
+		}
+		return &placement{pool: opt.Backend, thinPool: e.F.ThinPool, created: true}, nil
+	}
+	if len(pools) == 0 {
+		// The VG has no thin pool yet: carve the default.
+		return &placement{pool: opt.Backend, thinPool: drive.FreshThinPool, created: true}, nil
+	}
+	if e.F.Yes {
+		if err := e.confirmPoolShare(opt, pools[0]); err != nil {
+			return nil, err
+		}
+		return &placement{pool: opt.Backend, thinPool: pools[0], created: false}, nil
+	}
+
+	first := pools[0]
+	fmt.Fprintf(e.Out, "\n  Storage “%s” already holds: %s\n", opt.Backend, poolSummary(opt.Pools))
+	fmt.Fprintf(e.Out, "    r      reuse %q\n", first)
+	fmt.Fprintf(e.Out, "    <name> create a NEW pool of that name (%d GB)\n", e.F.PoolSizeGB)
+	answer, err := e.Prompt("pool choice [r = reuse / type a new pool name]")
+	if err != nil {
+		return nil, err
+	}
+	answer = strings.TrimSpace(answer)
+	if answer == "" || answer == "r" || answer == "R" || answer == first {
+		if err := e.confirmPoolShare(opt, first); err != nil {
+			return nil, err
+		}
+		return &placement{pool: opt.Backend, thinPool: first, created: false}, nil
+	}
+	if has(answer) {
+		if err := e.confirmPoolShare(opt, answer); err != nil {
+			return nil, err
+		}
+		return &placement{pool: opt.Backend, thinPool: answer, created: false}, nil
+	}
+	sizeAnswer, err := e.Prompt(fmt.Sprintf("new pool %q size GB (blank = %d)", answer, e.F.PoolSizeGB))
+	if err != nil {
+		return nil, err
+	}
+	size, err := parseGB(sizeAnswer, e.F.PoolSizeGB, "new thin-pool size GB")
+	if err != nil {
+		return nil, err
+	}
+	e.F.PoolSizeGB = size
+	return &placement{pool: opt.Backend, thinPool: answer, created: true}, nil
+}
+
+// resolveFreeholdData handles a backend that carries freehold's own previous
+// data: keep and reconnect (requires the SAME relay domain, since volume names
+// are domain-derived), or erase it (destroying only freehold-namespaced
+// entries) and start fresh.
+func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
+	domains := opt.Freehold.Domains
+	want, _ := planebase.NormalizeDomain(e.F.RelayDomain)
+	matched := ""
+	for _, d := range domains {
+		if d == want {
+			matched = d
+		}
+	}
+
+	erase := e.F.EraseFreehold
+	if !erase && !e.F.Yes {
+		fmt.Fprintf(e.Out, "\n  We found your previous freehold data (for %q) on %s.\n", strings.Join(domains, ", "), opt.Backend)
+		fmt.Fprint(e.Out, "    k) keep it and reconnect\n    e) erase it and start fresh\n")
+		answer, err := e.Prompt("choose [k]")
+		if err != nil {
+			return err
+		}
+		a := strings.TrimSpace(strings.ToLower(answer))
+		erase = a == "e" || a == "erase"
+	}
+
+	if !erase {
+		if matched == "" {
+			return fmt.Errorf("previous freehold data here was created for %q, but this world's domain is %q — volume names are derived from the domain, so freehold cannot reconnect. Use --relay-domain %s to reconnect, or choose erase to start fresh", strings.Join(domains, ", "), want, domains[0])
+		}
+		fmt.Fprintf(e.Out, "  reconnecting to your previous freehold data for %q\n", matched)
+		return nil
+	}
+
+	kind := "lvmth"
+	if opt.Kind == planebase.KindReuseZpool {
+		kind = "zfs"
+	}
+	for _, dom := range domains {
+		for _, tenant := range []string{"relay", "cp", "k3s-volumes"} {
+			ok, out := e.RunBin(e.Bins.Self, []string{
+				"storage", "destroy",
+				"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
+				"--tenant", tenant, "--domain", dom, "--pool", opt.Backend, "--kind", kind,
+			})
+			if !ok {
+				return fmt.Errorf("erasing previous freehold data (%s/%s) failed:\n%s", dom, tenant, out)
+			}
+		}
+	}
+	fmt.Fprintf(e.Out, "  erased previous freehold data for %s\n", strings.Join(domains, ", "))
+	return nil
+}
+
+// requireShare is the share-word gate: used when a choice would share storage
+// with data already in use. Safe options never reach it.
+func (e *Engine) requireShare(title, impact string) error {
+	if e.F.ConfirmSharedPool {
+		return nil
+	}
+	if e.F.Yes {
+		return fmt.Errorf("%s\n  this shares storage with data already in use — re-run with --confirm-shared-pool if you are sure", impact)
+	}
+	fmt.Fprintf(e.Out, "\n  %s\n  %s\n", title, impact)
+	answer, err := e.Prompt(`type "share" to proceed (anything else stops)`)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(answer), "share") {
+		return nil
+	}
+	return fmt.Errorf("stopped — no changes made")
+}
+
+// confirmPoolShare requires `share` when the chosen thin pool already has
+// riders (live guest disks sharing its capacity).
+func (e *Engine) confirmPoolShare(opt planebase.Option, pool string) error {
+	riders := 0
+	for _, p := range opt.Pools {
+		if p.Name == pool {
+			riders = len(p.Riders)
+		}
+	}
+	if riders == 0 {
+		return nil
+	}
+	return e.requireShare(
+		fmt.Sprintf("“%s” storage already holds %d of your existing volumes", pool, riders),
+		"Freehold would share this space with them, and they could run out of room.",
+	)
+}
+
+// confirmYes is the one-keystroke confirm for the common safe single-answer
+// case; --yes skips it.
+func (e *Engine) confirmYes(what, impact string) error {
+	if e.F.Yes {
+		return nil
+	}
+	fmt.Fprintf(e.Out, "\n  %s\n  %s\n", what, impact)
+	answer, err := e.Prompt("continue? [Y/n]")
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "", "y", "yes":
+		return nil
+	}
+	return fmt.Errorf("stopped — no changes made")
+}
+
+// ---- small render helpers ---------------------------------------------------
+
+func usableOptions(opts []planebase.Option) []planebase.Option {
+	var out []planebase.Option
+	for _, o := range opts {
+		if o.Kind != planebase.KindBlocked {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func blockedOptions(opts []planebase.Option) []planebase.Option {
+	var out []planebase.Option
+	for _, o := range opts {
+		if o.Kind == planebase.KindBlocked {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func sameOption(a, b planebase.Option) bool {
+	return a.Backend == b.Backend && a.Device == b.Device
+}
+
+func describeOptions(opts []planebase.Option) string {
+	var b strings.Builder
+	for _, o := range opts {
+		if o.Kind == planebase.KindBlocked {
+			fmt.Fprintf(&b, "  - %s: cannot be used — %s\n", o.Title, o.Reason)
+			continue
+		}
+		fmt.Fprintf(&b, "  - %s\n", o.Title)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func poolSummary(pools []planebase.PoolInfo) string {
+	var parts []string
+	for _, p := range pools {
+		s := fmt.Sprintf("%q (%.0f%% used", p.Name, p.DataPercent)
+		if len(p.Riders) > 0 {
+			s += fmt.Sprintf(", %d volumes", len(p.Riders))
+		}
+		parts = append(parts, s+")")
+	}
+	return strings.Join(parts, ", ")
+}
