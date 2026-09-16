@@ -609,12 +609,14 @@ Every PR runs two gates:
 
 - **CI** (`ci.yml`): `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on the
   workspace (toolchain pinned to the declared `rust-version`). Green/red, no exceptions.
-- **AI review** (`claude.yml`): reviews for real problems only. Findings are tiered in the
-  top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER (named
-  follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
+- **AI review** (`ai-pr-review.yml`, "Bot Review"): reviews for real problems only. Findings
+  are tiered in the top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER
+  (named follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
   BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
-  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`. The reviewer cites
-  the CI status rather than re-running cargo.
+  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`, and submits that as a
+  PR review state — `APPROVE` when clean, `REQUEST_CHANGES` with findings — so branch
+  protection gates a merge rather than a red check. The operator overrides a `REQUEST_CHANGES`
+  by dismissing the review.
 - **README / ARCHITECTURE drift**: when a PR changes something those docs document (or drifts
   from a locked decision in `ARCHITECTURE.md`), the reviewer adds one `README:` /
   `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a
