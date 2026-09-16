@@ -25,6 +25,27 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.2] — thin-box teardown: any logged-in box can tear the world down
+
+`freehold build` could be driven from any logged-in box (the CP-owned
+`/api/world-build`), but `freehold teardown` still hard-required a locally
+deployed provisioning runner and a `[runner]` block — which `freehold login`
+deliberately never writes — so a login-only box could not tear down a world it
+owned, even though login had authorized its host door.
+
+- **The console gained an operator-scoped `/api/world-teardown`** (the mirror of
+  `/api/world-build`): `cpbuild.BuildWorldTeardownApply` runs the shared teardown
+  engine through the co-located runner — terraform destroy (the kube layer), then
+  `pct` stop/destroy of relay + k3s. The CP LXC is destroyed **last and detached**
+  (`setsid` + a short sleep), because the console and co-located runner live
+  INSIDE it, so the endpoint returns before its own container goes.
+- **`freehold teardown` routes through the CP when there is no local `[runner]`** —
+  the thin-box branch `build` already had: confirmation → best-effort DNS → the
+  CP-first hand-off → `/api/world-teardown` → local coordinate cleanup.
+- **Compute-only from a thin box.** `--tenant` and `--data` still need the build
+  box (the cp dataset stays mounted by the still-running cp LXC until that final
+  step) — a named follow-up, see AGENTS.md "Known gaps".
+
 ## [0.6.1] — agent definitions move to a top-level `agents/` module
 
 Agent definitions are a core piece of the puzzle and will grow (named agents,

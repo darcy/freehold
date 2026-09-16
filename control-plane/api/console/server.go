@@ -81,6 +81,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.world(w, r)
 	case path == "/api/world-build" && method == http.MethodPost:
 		s.worldBuild(w, r)
+	case path == "/api/world-teardown" && method == http.MethodPost:
+		s.worldTeardown(w, r)
 	case path == "/api/teardown" && method == http.MethodPost:
 		s.teardown(w, r)
 	case path == "/api/provision" && method == http.MethodPost:
@@ -341,6 +343,32 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 	report, err := applier()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "world-build: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report})
+}
+
+// worldTeardown runs the CP-owned world teardown through the co-located runner
+// (cpbuild) — the mirror of worldBuild for a thin login box. The CP LXC is
+// destroyed last (detached), so this response lands before the console's own
+// container goes. Compute-only.
+func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Builder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "world-teardown: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold bootstrap` first)")
+		return
+	}
+	applier := cpbuild.BuildWorldTeardownApply(s.Builder)
+	report, err := applier()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-teardown: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report})

@@ -212,7 +212,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     and exposes an operator-scoped **`/api/world-build`** — a thin box can
     bring the world up through the CP WITHOUT the relay roster agent-tools
     needs, so relay+agent-tools can live in `build` (the bootstrap/build split;
-    `roadmap/CP_OWNED_BUILD.md`). `world_exec` is the **drive-through-CP exec**
+    `roadmap/CP_OWNED_BUILD.md`). Its **`/api/world-teardown`** mirror runs the
+    shared teardown engine through the co-located runner — the CP LXC destroyed
+    last and detached, since the console + runner live inside it — so a
+    login-only box can also tear the world down. `world_exec` is the **drive-through-CP exec**
     surface: a THIN login
     box (no local `[runner]`) runs commands on the CP's co-located runner via
     this tool — so a login box is functionally equivalent to the box that

@@ -32,6 +32,7 @@ import (
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/cli/flows"
+	"freehold/control-plane/cli/teardown"
 	"freehold/control-plane/secret-management"
 	"freehold/platform/migrations"
 	"freehold/platform/provisioning/bootstrap"
@@ -1252,6 +1253,111 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		}
 		return strings.Join(report, "\n"), nil
 	}
+}
+
+// vmidPtr returns a pointer to a recorded vmid, or nil when the role was never
+// created (0 = unrecorded — the teardown treats nil as "already gone").
+func vmidPtr(v uint32) *uint32 {
+	if v == 0 {
+		return nil
+	}
+	return &v
+}
+
+// cpTeardownRunner drives teardown.Run through the CP's co-located runner: the
+// low-level pct/terraform commands ride the runner (the embedded ExecRunner
+// with an injected exec), while the durable-plane destroys reuse the shared
+// drive helpers against the same runner client.
+type cpTeardownRunner struct {
+	*teardown.ExecRunner
+	c      *client.McpClient
+	target string
+}
+
+func (r *cpTeardownRunner) DestroyDataset(tenant, domain, pool, kind, dataset string) (bool, error) {
+	t, err := tenantFromName(tenant)
+	if err != nil {
+		return false, err
+	}
+	return drive.DestroyTenantBackend(r.c, r.target, planebase.BackendKind(kind), pool, domain, t)
+}
+
+func (r *cpTeardownRunner) DestroyPool(vg, pool string) error {
+	return drive.RemoveThinPool(r.c, r.target, vg, pool)
+}
+
+func tenantFromName(name string) (planebase.Tenant, error) {
+	switch name {
+	case "relay":
+		return planebase.TenantRelay, nil
+	case "cp":
+		return planebase.TenantCp, nil
+	case "k3s-volumes":
+		return planebase.TenantK3sVolumes, nil
+	}
+	return 0, fmt.Errorf("unknown tenant %q", name)
+}
+
+// BuildWorldTeardownApply returns the CP-owned world-teardown driver — the
+// BuildWorldApply mirror for a THIN login box (no local provisioning runner).
+// It runs the shared teardown engine through the co-located runner: terraform
+// destroy (the kube layer — the LXCs carry no destroy provisioner), then pct
+// stop/destroy of relay + k3s. The CP LXC goes LAST: the console + co-located
+// runner live INSIDE it, so its destroy is dispatched detached and the endpoint
+// can return first. Compute-only (--data from a thin box is a named follow-up:
+// the cp dataset stays mounted by the still-running cp LXC until that last step).
+func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
+	return func() (string, error) {
+		if spec.RunnerTarget == "" {
+			return "", fmt.Errorf("world-teardown: no runner target recorded")
+		}
+		mc, err := spec.client()
+		if err != nil {
+			return "", err
+		}
+		er := &teardown.ExecRunner{}
+		er.SetExec(func(cmd string) (bool, string) {
+			out, err := spec.execOut(cmd, 600)
+			if err != nil {
+				return false, out
+			}
+			return true, out
+		})
+		runner := &cpTeardownRunner{ExecRunner: er, c: mc, target: spec.RunnerTarget}
+		cfg := &teardown.Cfg{
+			Domain:      spec.RelayHost,
+			RunNTarget:  spec.RunnerTarget,
+			Managed:     []string{"relay", "k3s"}, // cp is destroyed LAST (below) — the runner lives in it
+			Pool:        spec.PlanePool,
+			BackendKind: spec.PlaneKind,
+			Vmid: map[string]*uint32{
+				"relay": vmidPtr(spec.RelayLxc),
+				"cp":    vmidPtr(spec.CpLxc),
+				"k3s":   vmidPtr(spec.K3sVmid),
+			},
+		}
+		report, err := teardown.Run(runner, cfg, teardown.ScopeWholeWorld, true)
+		if err != nil {
+			return "", err
+		}
+		if spec.CpLxc != 0 {
+			// The CP LXC (which hosts the console + this runner) is destroyed
+			// LAST and detached, so the runner's exec returns before its own
+			// container goes away.
+			if err := spec.run(cpDestroyDetached(spec.CpLxc), 30); err != nil {
+				return report, fmt.Errorf("CP LXC %d destroy dispatch: %w", spec.CpLxc, err)
+			}
+			report += fmt.Sprintf("\nCP LXC %d destroy dispatched last (the console + runner live in it)", spec.CpLxc)
+		}
+		return report, nil
+	}
+}
+
+// cpDestroyDetached is the host command that stops + destroys the CP LXC
+// without killing its own caller: setsid + a short sleep so the runner's exec
+// returns before the container (which hosts the runner) goes away.
+func cpDestroyDetached(vmid uint32) string {
+	return fmt.Sprintf("setsid sh -c 'sleep 5; pct stop %d --skiplock; pct destroy %d' >/dev/null 2>&1 </dev/null &", vmid, vmid)
 }
 
 // BuildCreateAgentFn returns the create-agent deploy: mint a durable identity
