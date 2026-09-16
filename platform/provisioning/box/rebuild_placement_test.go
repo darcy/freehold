@@ -540,6 +540,27 @@ func TestSelectPlacementYesReconnectPicksFreeholdPool(t *testing.T) {
 	}
 }
 
+func TestSelectPlacementAmbiguousFreeholdPoolsRequireName(t *testing.T) {
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{Name: "pve", FreeGB: 100, Pools: []planebase.PoolInfo{
+		{Name: "fh-a", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 2}},
+		{Name: "fh-b", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 2}},
+	}}}}
+	// --yes must refuse rather than default to an empty pool name.
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d", Yes: true})
+	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "--thin-pool") {
+		t.Errorf("--yes with two freehold pools must refuse, got %v", err)
+	}
+	// Interactive: the operator names the pool; k keeps the data.
+	e2 := invEngine(inv, "k\nfh-b\n", Flags{RelayDomain: "t.d"})
+	got, err := e2.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "fh-b" {
+		t.Errorf("ambiguous freehold pools must accept the typed pool, got %+v", got)
+	}
+}
+
 func TestSelectPlacementErasesFreeholdData(t *testing.T) {
 	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
 		Name: "pve", FreeGB: 100,

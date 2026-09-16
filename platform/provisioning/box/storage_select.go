@@ -166,19 +166,29 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 
 	// On a freehold reconnect, prefer the pool that actually carries the
 	// freehold data — pools are unordered, and picking the wrong one would
-	// orphan the previous plane.
-	first, fhPool, fhAmbiguous := firstPool(opt)
-	if opt.Freehold.Freehold && fhAmbiguous {
+	// orphan the previous plane. Several holders is ambiguous: name them and
+	// require an explicit choice (never default to an empty name).
+	first, fhHolders := firstPool(opt)
+	if opt.Freehold.Freehold && len(fhHolders) > 1 {
 		if e.F.Yes {
-			return nil, fmt.Errorf("several pools under “%s” carry freehold data; --yes will not guess — pass --thin-pool", opt.Backend)
+			return nil, fmt.Errorf("several pools under “%s” hold freehold data (%s); --yes will not guess — pass --thin-pool", opt.Backend, strings.Join(fhHolders, ", "))
 		}
-		first = fhPool
+		fmt.Fprintf(e.Out, "\n  Several storage pools under “%s” hold freehold data: %s\n", opt.Backend, strings.Join(fhHolders, ", "))
+		answer, err := e.Prompt("type the pool to reconnect to")
+		if err != nil {
+			return nil, err
+		}
+		answer = strings.TrimSpace(answer)
+		if !has(answer) {
+			return nil, fmt.Errorf("%q is not one of this storage's pools (%s)", answer, strings.Join(pools, ", "))
+		}
+		if err := e.confirmPoolShare(opt, answer); err != nil {
+			return nil, err
+		}
+		return &placement{pool: opt.Backend, thinPool: answer, created: false}, nil
 	}
 
 	if e.F.Yes {
-		if opt.Freehold.Freehold && !has(first) {
-			return nil, fmt.Errorf("could not identify the pool holding freehold data under “%s” — pass --thin-pool", opt.Backend)
-		}
 		if err := e.confirmPoolShare(opt, first); err != nil {
 			return nil, err
 		}
@@ -220,24 +230,22 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 	return &placement{pool: opt.Backend, thinPool: answer, created: true}, nil
 }
 
-// firstPool returns the pool to reuse by default: the one carrying freehold
-// data when known, else the first pool. fhPool/fhAmbiguous report the
-// freehold-data pool and whether more than one pool carries freehold data.
-func firstPool(opt planebase.Option) (first, fhPool string, fhAmbiguous bool) {
-	var holders []string
+// firstPool returns the pool to reuse by default (the sole pool carrying
+// freehold data when there is exactly one, else the first pool) and the list of
+// pools that carry freehold data.
+func firstPool(opt planebase.Option) (first string, fhHolders []string) {
 	for _, p := range opt.Pools {
 		if p.Freehold.Freehold {
-			holders = append(holders, p.Name)
+			fhHolders = append(fhHolders, p.Name)
 		}
 	}
 	if len(opt.Pools) > 0 {
 		first = opt.Pools[0].Name
 	}
-	if len(holders) == 1 {
-		first = holders[0]
-		fhPool = holders[0]
+	if len(fhHolders) == 1 {
+		first = fhHolders[0]
 	}
-	return first, fhPool, len(holders) > 1
+	return first, fhHolders
 }
 
 // resolveFreeholdData handles a backend that carries freehold's own previous
