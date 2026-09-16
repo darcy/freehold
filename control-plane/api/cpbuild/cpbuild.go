@@ -1311,6 +1311,18 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 		if spec.RunnerTarget == "" {
 			return "", fmt.Errorf("world-teardown: no runner target recorded")
 		}
+		// The CP LXC holds the console serving this request, so it must exist.
+		// The recorded vmid is the fast path; discover it by the deterministic
+		// guest name when the coords are missing rather than silently skipping
+		// the destroy (which would leave the world half torn down).
+		cpVmid := spec.CpLxc
+		if cpVmid == 0 {
+			v, err := spec.discoverCpVmid()
+			if err != nil {
+				return "", err
+			}
+			cpVmid = v
+		}
 		mc, err := spec.client()
 		if err != nil {
 			return "", err
@@ -1332,32 +1344,55 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 			BackendKind: spec.PlaneKind,
 			Vmid: map[string]*uint32{
 				"relay": vmidPtr(spec.RelayLxc),
-				"cp":    vmidPtr(spec.CpLxc),
+				"cp":    &cpVmid,
 				"k3s":   vmidPtr(spec.K3sVmid),
 			},
 		}
-		report, err := teardown.Run(runner, cfg, teardown.ScopeWholeWorld, true)
+		// Compute-only: cfg.Data stays false, so no dataset destroys run (the cp
+		// dataset is still mounted by the running cp LXC until the last step).
+		// The 4th arg is CONFIRM (Run's signature), not data.
+		report, err := teardown.Run(runner, cfg, teardown.ScopeWholeWorld, true /* confirm */)
 		if err != nil {
 			return "", err
 		}
-		if spec.CpLxc != 0 {
-			// The CP LXC (which hosts the console + this runner) is destroyed
-			// LAST and detached, so the runner's exec returns before its own
-			// container goes away.
-			if err := spec.run(cpDestroyDetached(spec.CpLxc), 30); err != nil {
-				return report, fmt.Errorf("CP LXC %d destroy dispatch: %w", spec.CpLxc, err)
-			}
-			report += fmt.Sprintf("\nCP LXC %d destroy dispatched last (the console + runner live in it)", spec.CpLxc)
+		// The CP LXC (which hosts the console + this runner) is destroyed LAST
+		// and detached, so the runner's exec returns before its own container
+		// goes away.
+		if err := spec.run(cpDestroyDetached(cpVmid), 30); err != nil {
+			return report, fmt.Errorf("CP LXC %d destroy dispatch: %w", cpVmid, err)
 		}
+		report += fmt.Sprintf("\nCP LXC %d destroy dispatched last (the console + runner live in it)", cpVmid)
 		return report, nil
 	}
+}
+
+// discoverCpVmid finds the CP LXC's vmid on the host by its deterministic guest
+// name (the console serving this request lives in it, so it exists). Used only
+// when the recorded coords lack it.
+func (s *Spec) discoverCpVmid() (uint32, error) {
+	if s.RelayHost == "" {
+		return 0, fmt.Errorf("world-teardown: no recorded CP LXC vmid and no relay host to derive the guest name")
+	}
+	name, err := bootstrap.DomainLXCName(s.RelayHost, "cp")
+	if err != nil {
+		return 0, err
+	}
+	out, err := s.execOut(fmt.Sprintf("pct list | awk '$NF == %q {print $1; exit}'", name), 30)
+	if err != nil {
+		return 0, err
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("world-teardown: cannot determine the CP LXC vmid (guest %q not found in `pct list`)", name)
+	}
+	return uint32(v), nil
 }
 
 // cpDestroyDetached is the host command that stops + destroys the CP LXC
 // without killing its own caller: setsid + a short sleep so the runner's exec
 // returns before the container (which hosts the runner) goes away.
 func cpDestroyDetached(vmid uint32) string {
-	return fmt.Sprintf("setsid sh -c 'sleep 5; pct stop %d --skiplock; pct destroy %d' >/dev/null 2>&1 </dev/null &", vmid, vmid)
+	return fmt.Sprintf("setsid sh -c 'sleep 5; pct stop %d --skiplock; pct destroy %d --skiplock' >/dev/null 2>&1 </dev/null &", vmid, vmid)
 }
 
 // BuildCreateAgentFn returns the create-agent deploy: mint a durable identity

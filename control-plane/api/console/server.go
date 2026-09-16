@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -351,7 +352,11 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 // worldTeardown runs the CP-owned world teardown through the co-located runner
 // (cpbuild) — the mirror of worldBuild for a thin login box. The CP LXC is
 // destroyed last (detached), so this response lands before the console's own
-// container goes. Compute-only.
+// container goes. The CP's managed state (runners + secrets, agent registry,
+// DNS store) is cleared AFTER the runner-driven teardown — clearing it first
+// would remove the very co-located runner this runs through. Operator-scoped:
+// requireSession only admits a pubkey from the console's admin whitelist
+// (server.go login's isAdmin gate), i.e. an operator. Compute-only.
 func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.requireSession(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -371,7 +376,17 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "world-teardown: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report})
+	// All runner-driven work is done (the CP LXC destroy is detached); now it is
+	// safe to clear the CP's managed state before the container goes.
+	res, err := s.clearManagedState()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-teardown: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "report": report,
+		"runners_removed": res.Runners, "agents_removed": res.Agents, "dns_removed": res.DNS,
+	})
 }
 
 // worldInventory opens the authoritative agent registry + world facts (the
@@ -586,29 +601,45 @@ func (s *Server) teardown(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
+	res, err := s.clearManagedState()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"runners_removed": res.Runners, "agents_removed": res.Agents, "dns_removed": res.DNS,
+	})
+}
+
+// managedStateRemoved is what clearManagedState took out of the CP's store.
+type managedStateRemoved struct{ Runners, Agents, DNS int }
+
+// clearManagedState removes what the CP manages — runners + their secrets, the
+// agent registry, DNS records — from its durable store. Shared by /api/teardown
+// (the CP-first hand-off a box drives before destroying the CP) and the
+// CP-owned world-teardown (which clears it AFTER its runner-driven teardown, so
+// the co-located runner it drives is never removed out from under it).
+func (s *Server) clearManagedState() (managedStateRemoved, error) {
+	var res managedStateRemoved
 	_ = s.Store.Reload()
 	snap := s.Store.Snapshot()
-	var runners, agents, dns []string
 	for name := range snap.Runners {
-		runners = append(runners, name)
+		res.Runners++
 		s.Store.RemoveRunner(name)
 		s.Store.RemoveSecret(name)
 	}
 	for name := range snap.Agents {
-		agents = append(agents, name)
+		res.Agents++
 		s.Store.RemoveAgent(name)
 	}
 	for name := range snap.DNS {
-		dns = append(dns, name)
+		res.DNS++
 		s.Store.RemoveDNS(name)
 	}
 	if err := s.Store.Save(); err != nil {
-		writeErr(w, http.StatusInternalServerError, "teardown failed to persist CP state")
-		return
+		return res, fmt.Errorf("teardown failed to persist CP state")
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"runners_removed": len(runners), "agents_removed": len(agents), "dns_removed": len(dns),
-	})
+	return res, nil
 }
 
 // ---- provision / rotate / revoke / grant / revoke-grant / runner-addr ----

@@ -869,12 +869,6 @@ func teardownViaCP(cfg *config.Config, scope teardown.Scope, data, removeDNS, ye
 			fmt.Printf("  (warning: DNS removal skipped — %v)\n", err)
 		}
 	}
-	// CP-first: clear what the CP manages (runners + secrets, agent registry,
-	// DNS store) before it goes. Best-effort — the local destroy must not be
-	// blocked by a CP that is already down.
-	if err := cpFirstTeardown(cfg); err != nil {
-		fmt.Printf("  (warning: CP teardown hand-off not performed — destroying anyway: %v)\n", err)
-	}
 	secretHex, err := oplogin.SecretHex()
 	if err != nil {
 		return fmt.Errorf("no operator session on this box (%v) — run `freehold login` first", err)
@@ -887,14 +881,20 @@ func teardownViaCP(cfg *config.Config, scope teardown.Scope, data, removeDNS, ye
 	if err != nil {
 		return fmt.Errorf("login to %s failed: %w", cfg.CPURL, err)
 	}
+	// The CP-owned teardown runs the whole thing through the CP's own runner and
+	// clears the CP's managed state AFTER its runner-driven work (in the
+	// console), so the co-located runner is never removed out from under it —
+	// hence no separate CP-first hand-off here (the CP dies with the world).
 	fmt.Printf("tearing down world %s through the CP…\n", cfg.TenantSlug())
-	report, err := c.WorldTeardown()
+	res, err := c.WorldTeardown()
 	if err != nil {
 		return fmt.Errorf("world-teardown (console /api/world-teardown): %w", err)
 	}
-	if report != "" {
-		fmt.Println(report)
+	if res.Report != "" {
+		fmt.Println(res.Report)
 	}
+	fmt.Printf("  CP teardown: removed %d runner(s)/secrets, %d agent(s), %d DNS record(s)\n",
+		res.RunnersRemoved, res.AgentsRemoved, res.DnsRemoved)
 	// Forget the recorded LXC coords so the next build re-creates the guests (a
 	// thin box usually has none — same contract as the local path).
 	cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil

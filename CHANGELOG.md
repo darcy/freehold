@@ -38,10 +38,13 @@ owned, even though login had authorized its host door.
   engine through the co-located runner — terraform destroy (the kube layer), then
   `pct` stop/destroy of relay + k3s. The CP LXC is destroyed **last and detached**
   (`setsid` + a short sleep), because the console and co-located runner live
-  INSIDE it, so the endpoint returns before its own container goes.
+  INSIDE it, so the endpoint returns before its own container goes. The CP's
+  managed state (runners + secrets, agent registry, DNS store) is cleared AFTER
+  the runner-driven work, so the very runner the teardown runs through is never
+  removed out from under it.
 - **`freehold teardown` routes through the CP when there is no local `[runner]`** —
-  the thin-box branch `build` already had: confirmation → best-effort DNS → the
-  CP-first hand-off → `/api/world-teardown` → local coordinate cleanup.
+  the thin-box branch `build` already had: confirmation → best-effort DNS →
+  `/api/world-teardown` → local coordinate cleanup.
 - **Compute-only from a thin box.** `--tenant` and `--data` still need the build
   box (the cp dataset stays mounted by the still-running cp LXC until that final
   step) — a named follow-up, see AGENTS.md "Known gaps".

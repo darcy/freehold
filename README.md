@@ -180,7 +180,7 @@ only builds + installs):
 freehold bootstrap   # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # tear it down (compute-only: keeps coords + /srv/data);
-                     #  a login-only box runs it through the CP (see below)
+                     #  a login-only box runs it through the CP
 freehold            # the TUI dashboard
 ```
 
