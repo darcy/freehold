@@ -49,7 +49,7 @@ func init() {
 func negotiateProfile(cmd *cobra.Command, what string) (bool, error) {
 	if cmd.Flags().Changed("config") {
 		p, _ := cmd.Flags().GetString("config")
-		config.SetCurrent(&config.Profile{ConfigPath: p, StateDir: config.DefaultStateHome()})
+		config.SetCurrent(config.ProfileForConfigPath(p))
 		return true, nil
 	}
 	if len(config.List()) == 0 {

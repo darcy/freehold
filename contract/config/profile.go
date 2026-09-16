@@ -110,6 +110,24 @@ func List() []*Profile {
 	return out
 }
 
+// ProfileForConfigPath maps a config path to the registered profile that owns
+// it, or returns a synthetic profile at the freehold state base for a custom
+// (unregistered) path. World verbs that carry an explicit --config must scope
+// state to the owning profile: a stale base-layout runner package at
+// <base>/runner/<target> otherwise wins the runner-pubkey lookup and signs
+// against the wrong audience.
+func ProfileForConfigPath(path string) *Profile {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	for _, p := range List() {
+		if p.ConfigPath == path {
+			return p
+		}
+	}
+	return &Profile{ConfigPath: path, StateDir: DefaultStateHome()}
+}
+
 // Resolve returns the named profile, or nil.
 func Resolve(name string) *Profile {
 	for _, p := range List() {
