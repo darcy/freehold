@@ -61,44 +61,21 @@ function annotatePatch(patch) {
   return out.join('\n');
 }
 
-async function getCiStatus(headSha) {
-  try {
-    const { data } = await octokit.rest.checks.listForRef({ owner, repo, ref: headSha, per_page: 50 });
-    if (data.total_count === 0) return 'No checks reported yet.';
-    // Exclude this job's own check run — it's in_progress (no conclusion) while
-    // this code runs, so it always lands in the `pending` bucket and would make
-    // every round report "PENDING: AI PR Review" even when real CI is green.
-    // Match by job id AND workflow name, since a check run's `name` may be
-    // either; this job has no `name:` override so c.name === job id.
-    const ownJob = github.context.job;
-    const ownWorkflow = process.env.GITHUB_WORKFLOW;
-    const runs = data.check_runs.filter(c => c.name !== ownJob && c.name !== ownWorkflow);
-    if (runs.length === 0) return 'No checks reported yet.';
-    const failing = runs.filter(c => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
-    const pending = runs.filter(c => !c.conclusion);
-    if (failing.length) return `FAILING: ${failing.map(c => c.name).join(', ')}`;
-    if (pending.length) return `PENDING: ${pending.map(c => c.name).join(', ')}`;
-    return 'All checks green.';
-  } catch (e) {
-    return `Could not read CI status: ${e.message}`;
-  }
-}
-
 function readContextFiles() {
   // Context files are repo-root files (AGENTS.md etc.), but the job runs with
   // working-directory set to this script's dir — resolve them against the
   // workspace root, not cwd.
   const root = process.env.GITHUB_WORKSPACE || process.cwd();
-  return CONTEXT_FILES
+  const files = CONTEXT_FILES
     .filter(f => existsSync(`${root}/${f}`))
     .map(f => {
       let content = readFileSync(`${root}/${f}`, 'utf8');
       if (content.length > MAX_CONTEXT_FILE_CHARS) {
         content = content.slice(0, MAX_CONTEXT_FILE_CHARS) + '\n...[truncated]';
       }
-      return `--- ${f} ---\n${content}`;
-    })
-    .join('\n\n');
+      return { name: f, text: `--- ${f} ---\n${content}` };
+    });
+  return { text: files.map(f => f.text).join('\n\n'), names: files.map(f => f.name) };
 }
 
 async function getPreviousRoundNotes() {
@@ -150,7 +127,7 @@ async function buildDiff() {
     };
   }
 
-  return { ok: true, diff: annotatedFiles.map(f => f.text).join('\n\n') };
+  return { ok: true, diff: annotatedFiles.map(f => f.text).join('\n\n'), fileCount: annotatedFiles.length, totalChars };
 }
 
 // flash-class models ignore response_format and answer in prose, but they
@@ -303,27 +280,37 @@ async function resolveFixedThreads(fixedComments) {
 }
 
 const PROGRESS_ITEMS = [
-  'Gather context (AGENTS.md, README.md, ARCHITECTURE.md, CI status)',
-  'Read changed files',
-  'Check CI status',
+  'Read the diff',
+  'Gather context (AGENTS.md, README.md, ARCHITECTURE.md)',
   'Review for BLOCKING/IMPORTANT issues',
   'Post inline comments',
   'Post final summary with verdict',
 ];
 
 // The parent comment is a fresh comment per commit; checkboxes start unchecked
-// and get checked as the review progresses (like claude's parent).
-function progressBody(doneCount, extra) {
+// and get checked as the review progresses, with a running "Notes" list of what
+// each step found (the diff size, the context read, the verdict, …).
+function progressBody(doneCount, notes = []) {
   const checklist = PROGRESS_ITEMS.map((p, i) => `${i < doneCount ? '- [x]' : '- [ ]'} ${p}`);
   const parts = [TRACKING_MARKER, '### Bot Review', ...checklist];
-  if (extra) parts.push(extra);
+  if (notes.length) parts.push('', '**Notes**', ...notes.map(n => `- ${n}`));
   return parts.join('\n');
+}
+
+const notes = [];
+async function progress(doneCount, note) {
+  if (note) notes.push(note);
+  await updateParentComment(progressBody(doneCount, notes));
 }
 
 async function main() {
   const pr = github.context.payload.pull_request;
   const headSha = pr.head.sha;
   const startedAt = Date.now();
+
+  // Create the progress comment up front so the checkboxes light up as work
+  // happens, rather than appearing fully-formed at the end.
+  await createParentComment(progressBody(0));
 
   const diffResult = await buildDiff();
 
@@ -346,7 +333,7 @@ async function main() {
       guidance,
     ].join('\n\n');
 
-    await createParentComment(body);
+    await updateParentComment(body);
 
     const message = `Diff too large to review reliably (${diffResult.reason}, ~${diffResult.totalChars} chars > ${MAX_DIFF_CHARS} limit).`;
     if (FAIL_ON_OVERSIZED_DIFF) {
@@ -358,12 +345,11 @@ async function main() {
   }
 
   const diff = diffResult.diff;
+  await progress(1, `Read the diff — ${diffResult.fileCount} file(s), ~${diffResult.totalChars.toLocaleString()} chars`);
 
-  // Read the previous round's notes BEFORE creating a NEW parent comment for
-  // this commit, then create it with all checkboxes unchecked (the review shows
-  // progress as boxes get checked on that comment while the check is running).
   const previousRound = await getPreviousRoundNotes();
-  await createParentComment(progressBody(0));
+  const ctx = readContextFiles();
+  await progress(2, ctx.names.length ? `Read context — ${ctx.names.join(', ')}` : 'No context files found');
 
   const template = readFileSync(PROMPT_FILE, 'utf8');
   // Use function replacements: String.replace interprets $&, $', $$ etc. in the
@@ -373,7 +359,7 @@ async function main() {
     .replace('{{REPO}}', () => `${owner}/${repo}`)
     .replace('{{PR_NUMBER}}', () => String(pull_number))
     .replace('{{PREVIOUS_ROUND}}', () => previousRound)
-    .replace('{{CONTEXT_FILES}}', () => readContextFiles())
+    .replace('{{CONTEXT_FILES}}', () => ctx.text)
     .replace('{{DIFF}}', () => diff);
 
   const result = await callLlm(prompt);
@@ -398,6 +384,7 @@ async function main() {
     merged.push(...added);
   }
   const inline = merged;
+  await progress(3, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
 
   // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
   // findings (already commented in a prior round — don't re-post inline, just
@@ -428,9 +415,6 @@ async function main() {
   );
   const resolvedCount = await resolveFixedThreads(fixedComments);
 
-  // Progress: context/read/CI/review done.
-  await updateParentComment(progressBody(4));
-
   // Post each NEW finding as its own review comment (thread) so every finding
   // shows up as a separate inline comment and a single bad/hallucinated line
   // 422s only that one, not the whole batch. Track how many actually posted.
@@ -450,8 +434,7 @@ async function main() {
     }
   }
 
-  // Progress: inline comments posted.
-  await updateParentComment(progressBody(5));
+  await progress(4, `Posted ${postedInline} inline comment(s)` + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
   const loc = (c) => `\`${c.path}${typeof c.line === 'number' ? `:${c.line}` : ''}\``;
@@ -492,20 +475,33 @@ async function main() {
 
   // Reflect the verdict as a real PR review state rather than a red check:
   // APPROVE when clean, REQUEST_CHANGES when blocking/important findings
-  // remain. A later round's review supersedes the previous one, so a fixed PR
-  // flips from REQUEST_CHANGES to APPROVE. The PAT authors the review as the
-  // bot account — GITHUB_TOKEN cannot approve/request changes on a PR it did
-  // not open, and a PR author can't review their own PR.
-  const clean = inline.length === 0 && !/NEEDS WORK/i.test(result.verdict || '');
+  // remain. A later round's review supersedes the previous one (so a fixed PR
+  // flips to APPROVE); the operator's override is dismissing the review.
+  // Require a positive MERGE-READY signal — "not NEEDS WORK" would fail open on
+  // an unexpected verdict.
+  const clean = inline.length === 0 && /^MERGE-READY\b/i.test(result.verdict || '');
+  // A PR author can't approve/request changes on their own PR; fall back to
+  // COMMENT so the verdict still lands on PRs opened by the bot account.
+  let event = clean ? 'APPROVE' : 'REQUEST_CHANGES';
+  try {
+    const { data: me } = await octokit.rest.users.getAuthenticated();
+    if (me.login === pr.user.login) event = 'COMMENT';
+  } catch { /* best-effort; createReview still guards */ }
+
   try {
     await octokit.rest.pulls.createReview({
       owner, repo, pull_number,
-      event: clean ? 'APPROVE' : 'REQUEST_CHANGES',
-      body: summaryText,
+      event,
+      // Empty body is allowed for APPROVE; REQUEST_CHANGES/COMMENT require a
+      // non-empty one — send just the one-line verdict, since the detail already
+      // lives in the parent comment and the inline findings.
+      body: event === 'APPROVE' ? undefined : (result.verdict || 'NEEDS WORK: see the findings above'),
     });
-    core.info(`Submitted ${clean ? 'APPROVE' : 'REQUEST_CHANGES'} review.`);
+    core.info(`Submitted ${event} review.`);
   } catch (e) {
-    core.warning(`Could not submit ${clean ? 'APPROVE' : 'REQUEST_CHANGES'} review: ${e.message}`);
+    // The review state is the whole point of this block; a silent warning would
+    // leave a stale REQUEST_CHANGES (or no state at all) behind a green check.
+    core.setFailed(`Could not submit ${event} review: ${e.message}`);
   }
 }
 
