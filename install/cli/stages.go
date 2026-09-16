@@ -213,6 +213,9 @@ var storageResolveCmd = &cobra.Command{
 			if opt.Kind == planebase.KindBlocked {
 				return fmt.Errorf("storage %q cannot be used: %s", sel, opt.Reason)
 			}
+			if opt.Kind == planebase.KindCreateDevice {
+				return fmt.Errorf("preparing a new storage backend on %s is a later phase — choose an existing backend", opt.Device)
+			}
 			printStorageSelection(opt)
 			return nil
 		}

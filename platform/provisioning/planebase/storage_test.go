@@ -148,6 +148,21 @@ func TestFailingZpoolIsBlockedAndNotRecommended(t *testing.T) {
 	}
 }
 
+func TestProvenanceDomainMatches(t *testing.T) {
+	p := Provenance{Freehold: true, Domains: []string{"relay-example-com"}, Volumes: 4}
+	if m, h := p.DomainMatches("relay.example.com"); !m || !h {
+		t.Errorf("dotted domain must match the flattened provenance: m=%v h=%v", m, h)
+	}
+	if m, h := p.DomainMatches("other.example.com"); m || !h {
+		t.Errorf("different domain must not match: m=%v h=%v", m, h)
+	}
+	// A name-only freehold pool (no domains) reports no domains, not a match.
+	empty := Provenance{Freehold: true}
+	if m, h := empty.DomainMatches("anything"); m || h {
+		t.Errorf("domainless provenance: m=%v h=%v", m, h)
+	}
+}
+
 func TestValidStorageName(t *testing.T) {
 	for _, ok := range []string{"freehold-thin", "fh.prod_1", "data"} {
 		if !ValidStorageName(ok) {

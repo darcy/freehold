@@ -77,6 +77,24 @@ func (p *Provenance) Merge(o Provenance) {
 	}
 }
 
+// DomainMatches reports whether any provenance domain equals the given
+// (un-normalized) relay domain, and whether the provenance carries any domains
+// at all (a name-only freehold pool has none). Names are domain-derived, so a
+// mismatch means freehold cannot reconnect to the data.
+func (p Provenance) DomainMatches(domain string) (matched, hasDomains bool) {
+	want, err := NormalizeDomain(domain)
+	if err != nil {
+		want = domain
+	}
+	hasDomains = len(p.Domains) > 0
+	for _, d := range p.Domains {
+		if d == want {
+			return true, true
+		}
+	}
+	return false, hasDomains
+}
+
 // PoolInfo is one thin pool inside a VG.
 type PoolInfo struct {
 	Name        string
