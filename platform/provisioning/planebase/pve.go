@@ -26,7 +26,7 @@ func LocalLvmRepointScript(pool string) string {
 // LocalLvmRidersScript prints the LV names riding the pool local-lvm currently
 // points at, one per line (empty when there is no pointer or no riders). Used
 // to decide whether re-pointing local-lvm would strand live guest disks.
-const LocalLvmRidersScript = "pool=$(grep -A2 '^lvmthin: local-lvm$' /etc/pve/storage.cfg | awk '/^[[:space:]]*thinpool[[:space:]]/{print $2; exit}'); if [ -n \"$pool\" ]; then lvs --noheadings -o pool_lv,lv_name 2>/dev/null | awk -v p=\"$pool\" '$1==p{print $2}'; fi"
+const LocalLvmRidersScript = "pool=$(grep -A2 '^lvmthin: local-lvm$' /etc/pve/storage.cfg | awk '/^[[:space:]]*thinpool[[:space:]]/{print $2; exit}'); if [ -n \"$pool\" ]; then lvs --noheadings -o pool_lv,lv_name 2>/dev/null | awk -v p=\"$pool\" '$1==p && $2 !~ /_(t|c)data$/ && $2 !~ /_(t|c)meta$/ && $2 !~ /_pmspare$/ {print $2}'; fi"
 
 // RepointLocalLvm points PVE's stock local-lvm storage at `pool`: probe the
 // current pointer, skip when already correct, scoped awk edit, then READ BACK.

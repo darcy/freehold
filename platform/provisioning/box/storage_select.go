@@ -154,6 +154,14 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 		if !planebase.ValidStorageName(e.F.ThinPool) {
 			return nil, fmt.Errorf("thin-pool name %q is not allowed (use letters, digits, '.', '_', '-')", e.F.ThinPool)
 		}
+		// A reconnect was promised (resolveFreeholdData kept the data): an
+		// explicit --thin-pool must not quietly place this world in a DIFFERENT
+		// pool and orphan the previous plane.
+		if opt.Freehold.Freehold {
+			if _, holders := firstPool(opt); len(holders) > 0 && !strIn(holders, e.F.ThinPool) {
+				return nil, fmt.Errorf("previous freehold data lives in pool %q — refusing to place this world in %q and orphan it; pass --thin-pool %s, or erase the previous data first (--erase-freehold)", strings.Join(holders, ", "), e.F.ThinPool, holders[0])
+			}
+		}
 		if has(e.F.ThinPool) {
 			if err := e.confirmPoolShare(opt, e.F.ThinPool); err != nil {
 				return nil, err
@@ -420,6 +428,15 @@ func deferredOptions(opts []planebase.Option) []planebase.Option {
 
 func sameOption(a, b planebase.Option) bool {
 	return a.Backend == b.Backend && a.Device == b.Device
+}
+
+func strIn(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func describeOptions(opts []planebase.Option) string {

@@ -566,6 +566,28 @@ func TestSelectPlacementAmbiguousFreeholdPoolsRequireName(t *testing.T) {
 	}
 }
 
+func TestSelectPlacementThinPoolCannotOrphanFreeholdData(t *testing.T) {
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{Name: "pve", FreeGB: 100, Pools: []planebase.PoolInfo{
+		{Name: "data", DataPercent: 10},
+		{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}},
+	}}}}
+	// Keep the data, but point --thin-pool at a DIFFERENT pool: refuse rather
+	// than report a reconnect and place the world elsewhere.
+	e := invEngine(inv, "k\n", Flags{RelayDomain: "t.d", ThinPool: "data"})
+	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "orphan") {
+		t.Errorf("--thin-pool away from the freehold pool must refuse, got %v", err)
+	}
+	// Naming the freehold pool is fine.
+	e2 := invEngine(inv, "k\n", Flags{RelayDomain: "t.d", ThinPool: "freehold-thin"})
+	got, err := e2.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "freehold-thin" {
+		t.Errorf("reconnect to the freehold pool via --thin-pool, got %+v", got)
+	}
+}
+
 func TestSelectPlacementErasesFreeholdData(t *testing.T) {
 	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
 		Name: "pve", FreeGB: 100,

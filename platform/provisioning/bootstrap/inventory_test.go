@@ -72,7 +72,19 @@ func TestClassifyDiskFailClosed(t *testing.T) {
 	}
 }
 
-// deviceInfoFor mirrors deviceInfos' construction for classifyDisk tests.
+func TestInternalLV(t *testing.T) {
+	for _, n := range []string{"data_tdata", "data_tmeta", "cache_cdata", "cache_cmeta", "lvol0_pmspare"} {
+		if !internalLV(n) {
+			t.Errorf("%q must be internal", n)
+		}
+	}
+	for _, n := range []string{"data", "freehold-t-d-cp", "vm-100-disk-0"} {
+		if internalLV(n) {
+			t.Errorf("%q is user data, not internal", n)
+		}
+	}
+}
+
 func deviceInfoFor(disk lsblkNode) *planebase.DeviceInfo {
 	return &planebase.DeviceInfo{Path: "/dev/" + disk.Name, SizeGB: parseHumanGB(disk.Size)}
 }

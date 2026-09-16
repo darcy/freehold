@@ -154,8 +154,11 @@ func PoolInfos(c *client.McpClient, target, vg, localPool string) ([]planebase.P
 			}
 			continue
 		}
-		// A thin volume: lv_name lv_size pool_lv data_percent.
-		if len(fields) >= 3 {
+		// A thin volume: lv_name lv_size pool_lv data_percent. Skip a pool's
+		// OWN internal volumes (`_tdata`/`_tmeta`/`_cdata`/`_cmeta`/
+		// `_pmspare`): they are not data anyone could lose, and counting them
+		// would make even an empty pool look shared.
+		if len(fields) >= 3 && !internalLV(lv) {
 			if p, ok := byName[fields[2]]; ok {
 				p.Riders = append(p.Riders, lv)
 				if dom, fh := planebase.FreeholdLV(lv); fh {
@@ -169,6 +172,17 @@ func PoolInfos(c *client.McpClient, target, vg, localPool string) ([]planebase.P
 		pools = append(pools, *p)
 	}
 	return pools, nil
+}
+
+// internalLV reports whether an LV is an LVM thin pool's own bookkeeping
+// volume (data/meta cache/pool-metadata spare) rather than user data.
+func internalLV(name string) bool {
+	for _, suffix := range []string{"_tdata", "_tmeta", "_cdata", "_cmeta", "_pmspare"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // localLvmPool returns the thin pool PVE's stock local-lvm storage points at

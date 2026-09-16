@@ -435,6 +435,14 @@ func lvsRiders(c *client.McpClient, target, vg, pool string) ([]string, error) {
 	for _, line := range strings.Split(out.Stdout, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == pool {
+			// Skip the pool's own bookkeeping LVs (hidden without `-a`, but
+			// defensive): they are not data that blocks removal.
+			switch {
+			case strings.HasSuffix(fields[1], "_tdata"), strings.HasSuffix(fields[1], "_tmeta"),
+				strings.HasSuffix(fields[1], "_cdata"), strings.HasSuffix(fields[1], "_cmeta"),
+				strings.HasSuffix(fields[1], "_pmspare"):
+				continue
+			}
 			riders = append(riders, fields[1])
 		}
 	}
