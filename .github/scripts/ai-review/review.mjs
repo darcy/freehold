@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { readFileSync, existsSync } from 'fs';
+import { reassembleStream } from './sse.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const LLM_BASE_URL = process.env.LLM_BASE_URL;
@@ -195,15 +196,18 @@ async function callLlmOnce(prompt) {
       model: LLM_MODEL,
       temperature: 0.1,
       max_tokens: 64000,
+      stream: true,
       messages: [{ role: 'user', content: prompt }],
       tools: [REVIEW_TOOL],
       tool_choice: { type: 'function', function: { name: 'review' } },
     }),
   });
   if (!res.ok) throw new Error(`LLM API error ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  const msg = data.choices?.[0]?.message;
-  if (!msg) throw new Error(`LLM returned no message: ${JSON.stringify(data).slice(0, 200)}`);
+  // Streamed: headers arrive immediately, so a multi-minute reasoning call no
+  // longer trips undici's 5-minute headers timeout (which surfaced as
+  // "fetch failed" and retried until the job looked hung).
+  const msg = reassembleStream(await res.text());
+  if (!msg) throw new Error('LLM returned no message');
 
   // Function calling puts the JSON in tool_calls[].function.arguments; fall
   // back to content (string / array) and then reasoning_content for providers
