@@ -172,7 +172,7 @@ async function callLlmOnce(prompt) {
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
-      max_tokens: 64000,
+      max_tokens: 12000,
       stream: true,
       messages: [{ role: 'user', content: prompt }],
       tools: [REVIEW_TOOL],
@@ -212,15 +212,16 @@ async function callLlmOnce(prompt) {
 }
 
 // The flash model intermittently drifts into prose instead of the JSON tool
-// call, so retry a few times before failing the run.
+// call, so retry once before failing the run. Retries are expensive on a large
+// diff (a full reasoning call each), so keep the count low.
 async function callLlm(prompt) {
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       return await callLlmOnce(prompt);
     } catch (e) {
       lastErr = e;
-      core.warning(`LLM attempt ${attempt}/3 failed: ${e.message}`);
+      core.warning(`LLM attempt ${attempt}/2 failed: ${e.message}`);
     }
   }
   throw lastErr;
@@ -364,12 +365,13 @@ async function main() {
 
   const result = await callLlm(prompt);
 
-  // The weak flash model commonly stops after the first finding. Iterate:
-  // while findings exist, ask again for ADDITIONAL distinct findings until the
-  // model reports none new (capped) — so a review doesn't stop at one issue.
+  // The weak flash model commonly stops after the first finding. Iterate ONCE:
+  // ask again for ADDITIONAL distinct findings. Each pass is a full reasoning
+  // call over the whole diff (minutes on a large PR), so the loop is capped at
+  // one follow-up; first-round exhaustiveness is the model's job.
   const merged = (Array.isArray(result.inline) ? result.inline : []).slice();
   const already = () => new Set(merged.map(f => `${f.path}:${f.line}`));
-  for (let pass = 1; pass <= 3 && merged.length > 0; pass++) {
+  for (let pass = 1; pass <= 1 && merged.length > 0; pass++) {
     const foundText = merged.map(f => `- [${f.severity}] ${f.path}${typeof f.line === 'number' ? `:${f.line}` : ''}`).join('\n');
     const followUp = `PR ${owner}/${repo} #${pull_number}\n\nThese blocking/important findings are ALREADY reported:\n${foundText}\n\nReview the diff again. Report ONLY ADDITIONAL distinct blocking/important findings you have NOT already covered above — one per file:line. If there are no more, return an empty "inline" array and verdict "MERGE-READY".\n\nDo not repeat findings already listed.\n\nDIFF:\n${diff}`;
     let more;
