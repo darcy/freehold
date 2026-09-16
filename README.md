@@ -622,17 +622,6 @@ Every PR runs two gates:
   `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a
   blocker, never nitpicked.
 
-Known quirk: **any PR whose tree changes a workflow file — adding *or* editing, including
-`claude.yml` itself — skips the AI review.** The review GitHub App refuses to issue a token
-for workflows that don't match the default branch (the error may surface as
-`workflow_not_found_on_default_branch`), and the action converts the refusal into a
-graceful green no-op. The check reporting green means "nothing reviewed", not "review
-passed". This is by design (a PR can't be AI-reviewed under a workflow definition it
-defines itself) and it is self-resolving: merge the workflow change and it applies to the
-default branch, after which normal PRs review again. Workflow-changing PRs are carried by
-CI + a human read. Note: workflow content was only loosely enforced early on, so some early
-workflow-editing PRs did get reviewed — that window is closed.
-
 Read `AGENTS.md` before changing code: the locked model (relay-as-scope, generic exec, no
 master key, host flexibility) is not open for reinterpretation. Never commit secrets,
 private keys, or plaintext credentials.

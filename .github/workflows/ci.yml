@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  check:
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -31,66 +31,68 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The control-plane Go tests drive the Rust binaries built above
+      # (target/debug/runner, target/debug/freehold-harness-oracle), so they run
+      # here rather than in the independent Go matrix.
       - uses: actions/setup-go@v6
         with:
           go-version-file: "control-plane/go.mod"
-
-      - name: Go build (agents)
-        working-directory: agents
-        run: go build ./...
-
-      - name: Go build (contract)
-        working-directory: contract
-        run: go build ./...
-
-      - name: Go build (platform)
-        working-directory: platform
-        run: go build ./...
-
-      - name: Go build (install)
-        working-directory: install
-        run: go build ./...
+          # The Go matrix owns the shared cache; caching here too would race it
+          # on the same key for no gain (control-plane isn't in that matrix).
+          cache: false
 
       - name: Go build (control-plane)
         working-directory: control-plane
         run: go build ./...
 
-      - name: Go vet (agents)
-        working-directory: agents
-        run: go vet ./...
-
-      - name: Go vet (contract)
-        working-directory: contract
-        run: go vet ./...
-
-      - name: Go vet (platform)
-        working-directory: platform
-        run: go vet ./...
-
-      - name: Go vet (install)
-        working-directory: install
-        run: go vet ./...
-
       - name: Go vet (control-plane)
         working-directory: control-plane
         run: go vet ./...
 
-      - name: Go test (agents)
-        working-directory: agents
-        run: go test ./...
-
-      - name: Go test (contract)
-        working-directory: contract
-        run: go test ./...
-
-      - name: Go test (platform)
-        working-directory: platform
-        run: go test ./...
-
-      - name: Go test (install)
-        working-directory: install
-        run: go test ./...  
-
       - name: Go test (control-plane)
         working-directory: control-plane
         run: go test ./...
+
+  go:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [agents, contract, platform, install]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: "control-plane/go.mod"
+          # setup-go defaults to a repo-root go.mod, which this multi-module repo
+          # doesn't have — without this it silently skips caching and recompiles
+          # platform's dependency tree (lego + cloud DNS SDKs) every run.
+          cache-dependency-path: "**/go.sum"
+
+      - name: Go build (${{ matrix.module }})
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+
+      - name: Go vet (${{ matrix.module }})
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+      - name: Go test (${{ matrix.module }})
+        working-directory: ${{ matrix.module }}
+        run: go test ./...
+
+  # Fan-in so the required status check keeps its stable name (`check`) now that
+  # the work is split across parallel jobs. A skipped required check counts as
+  # passing, so this must fail loudly when a needed job does not succeed.
+  check:
+    if: always()
+    needs: [rust, go]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require rust and go to pass
+        run: |
+          echo "rust: ${{ needs.rust.result }}"
+          echo "go: ${{ needs.go.result }}"
+          test "${{ needs.rust.result }}" = "success"
+          test "${{ needs.go.result }}" = "success"
