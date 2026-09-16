@@ -521,6 +521,11 @@ func TestSelectPlacementCleanDeviceOnlyDefers(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "later phase") {
 		t.Errorf("a clean-disk-only host must defer with a clear message, got %v", err)
 	}
+	// Explicitly naming the clean device must fail with the same clarity.
+	e2 := invEngine(inv, "", Flags{RelayDomain: "t.d", PlanePool: "/dev/sdb"})
+	if _, err := e2.stagePlacement(); err == nil || !strings.Contains(err.Error(), "later phase") {
+		t.Errorf("--plane-pool naming a clean device must defer, got %v", err)
+	}
 }
 
 func TestSelectPlacementYesReconnectPicksFreeholdPool(t *testing.T) {

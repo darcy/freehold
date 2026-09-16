@@ -55,6 +55,9 @@ func (e *Engine) chooseBackend(opts []planebase.Option) (planebase.Option, error
 		if opt.Kind == planebase.KindBlocked {
 			return planebase.Option{}, fmt.Errorf("storage %q cannot be used: %s", e.F.PlanePool, opt.Reason)
 		}
+		if opt.Kind == planebase.KindCreateDevice {
+			return planebase.Option{}, fmt.Errorf("preparing a new storage backend on %s is a later phase — choose an existing backend", opt.Device)
+		}
 		return opt, nil
 	}
 
