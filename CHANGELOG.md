@@ -25,6 +25,761 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.2] — thin-box teardown: any logged-in box can tear the world down
+
+`freehold build` could be driven from any logged-in box (the CP-owned
+`/api/world-build`), but `freehold teardown` still hard-required a locally
+deployed provisioning runner and a `[runner]` block — which `freehold login`
+deliberately never writes — so a login-only box could not tear down a world it
+owned, even though login had authorized its host door.
+
+- **The console gained an operator-scoped `/api/world-teardown`** (the mirror of
+  `/api/world-build`): `cpbuild.BuildWorldTeardownApply` runs the shared teardown
+  engine through the co-located runner — terraform destroy (the kube layer), then
+  `pct` stop/destroy of relay + k3s. The CP LXC is destroyed **last and detached**
+  (`setsid` + a short sleep), because the console and co-located runner live
+  INSIDE it, so the endpoint returns before its own container goes. The CP's
+  managed state (runners + secrets, agent registry, DNS store) is cleared AFTER
+  the runner-driven work, so the very runner the teardown runs through is never
+  removed out from under it.
+- **`freehold teardown` routes through the CP when there is no local `[runner]`** —
+  the thin-box branch `build` already had: confirmation → best-effort DNS →
+  `/api/world-teardown` → local coordinate cleanup.
+- **Compute-only from a thin box.** `--tenant` and `--data` still need the build
+  box (the cp dataset stays mounted by the still-running cp LXC until that final
+  step) — a named follow-up, see AGENTS.md "Known gaps".
+
+## [0.6.1] — agent definitions move to a top-level `agents/` module
+
+Agent definitions are a core piece of the puzzle and will grow (named agents,
+their skills), so `platform/agents/` is pulled up to the repo top level as its
+own Go module, `freehold/agents`.
+
+- **`agents/` is now a fifth Go module** (`freehold/agents`, no
+  dependencies). It carries `freehold/prompt.md` (the CPA — the `freehold`
+  named agent) plus a `freehold/skills/` placeholder, and `custom/prompt.md`
+  (the template for agents the CPA creates on the fly, previously a hardcoded
+  Go string). A Go package cannot `//go:embed` outside its own module, so
+  `control-plane` imports the embedded bytes (`replace freehold/agents => ../agents`)
+  rather than re-embedding them.
+- `AgentSystemPrompt(name, purpose)` now renders `custom/prompt.md` through
+  stdlib `text/template`; same signature, so callers are unchanged. The CPA's
+  `CPASystemPrompt` value is unchanged.
+- `platform/` no longer carries `agents/`; `ci.yml` and `just test` build/vet/test
+  the new module alongside the other four. Skill *shipping* to pods is still
+  Chunk 5 (no Go consumer yet).
+
+## [0.6.0] — bootstrap split out to a top-level `install/` module
+
+`freehold build` (world via the CP) and the CP *bootstrap* are now two CLIs. The
+bootstrap/install path — getting a control plane up in an environment + a door — moved
+out of `control-plane/cli` into a top-level `install/` Go module producing the
+`freehold-install` binary (`install` / `bootstrap` / and the self-staged
+`exec`/`provision`/`storage`/`deploy-cp` subcommands). After bootstrap, world bring-up is
+`freehold build` from any box via the CP, regardless of environment; the environment
+(Proxmox now; Vultr/Hetzner providers later) only shapes install.
+
+- The CP deploy package moved `control-plane/cli/bootstrap-cp` → `install/cpdeploy`.
+- The shared provisioning engine (LXC boot, storage plane, deploy-cp, the CP bootstrap
+  `Engine`) extracted to `platform/provisioning/box`, imported by both CLIs (control-plane
+  and install); the contract owns `config.Coords` + `AgentToolsPort` so `install` never
+  imports control-plane.
+- `freehold` (operator) keeps `build`/`world`/`teardown`/`login`/TUI; `install`/`bootstrap`/
+  `provision`/`storage`/`deploy-cp` are no longer `freehold` verbs.
+- Introduced `freehold/install` as the fourth Go module (CI + `justfile` updated);
+  before-and-after gates stay green (cargo + 4 Go modules + harness + acceptance).
+- Named follow-up: `freehold-install`'s `install` still prompts collectively; a proper
+  provider seam (Proxmox only today) is the next step, with the Vultr/Hetzner drivers
+  already in `platform/provisioning/bootstrap`.
+
+## [0.5.24] — Phase 3 complete: the Rust console is gone (Rust is runner + core)
+
+The REFACTOR-PLAN's final Phase-3 step. The Rust `control-plane/console` and
+`console-client` crates are deleted from the tree and the Cargo workspace, and
+the Chunk-1/2 acceptance gate is Go — so "Rust only where it earns its keep"
+now holds for real: the privileged `runner` and the byte-exact `core` oracle,
+plus `testkit` (the runner's hermetic fixtures).
+
+### Changed
+
+- **Deleted the Rust `control-plane/console` + `console-client` crates** and
+  dropped them (and the Rust `acceptance` crate) from the Cargo workspace. The
+  Go console has been the shipped runtime since 0.5.5, and `console-client`'s
+  only consumer was a Rust test in `web.rs`; the Go `contract/console` client
+  replaced it. `testkit` stays — the staying runner tests depend on it.
+- **The Chunk-1/2 acceptance gate is Go** (`control-plane/acceptance/`): it
+  ports the provisioner lifecycle, the console HTTP surface, and the
+  relay-channel fold against a hermetic fake relay (real NIP-98 auth + NIP-01
+  filters + relay-signed rosters), and drives the real `runner` binary as a
+  subprocess for the live-readiness leg. Connector/relay behavior the runner
+  owns stays in its Rust tests. `just test` drops `cargo run -p freehold-acceptance`;
+  the Go test gate (`go test ./...` in the control-plane module) covers it.
+- **Docs state the current tree** — ARCHITECTURE.md, README.md, AGENTS.md no
+  longer describe the Rust console as an acceptance fixture, and `REFACTOR-PLAN.md`
+  is deleted (the plan is complete).
+
+### Notes
+
+- The Rust console's non-HTTP CLI verbs that the Go console never carried
+  (`rotate-secret`, `revoke-grant`, `list`, `dns rm/list/sync`, and the
+  relay-fold `rebuild`) remain reachable through the web/API, or are tracked
+  follow-ups — see `followups.md`.
+
+## [0.5.23] — install/build runtime fixes from live verification
+
+Bringing a fresh world up end-to-end through the install wizard surfaced a
+chain of runtime bugs the hermetic gate couldn't see; all are fixed here.
+
+- **Co-located runner loopback**: the console runs INSIDE the CP LXC guest but
+  was shipped the box-side host runner address (`cfg.Runner.Addr`, e.g.
+  `127.0.0.1:8788`), a different netns, so `/api/world-build` died
+  "connection refused". The world coords + the bootstrap-cp `adopt` now use
+  `config.CoLocatedRunnerMCPAddr` (`127.0.0.1:8787`), the runner's own guest
+  loopback. Box-side `build`/`bootstrap` honor the profile's recorded
+  `Runner.Addr` unless `--addr` is explicit, so a multi-world box routes to
+  this world's runner, not a foreign one.
+- **install applies the flag-layer defaults**: the install path builds its
+  flags from the wizard / prompts directly, never through `setupBuild`, so it
+  never got the `registerBuildFlags` defaults. Empty `bridge` booted the relay
+  LXC with a malformed `net0` ("invalid format - missing key"); empty `storage`
+  failed the relay rootfs ("unable to parse volume ID ':16'"); empty
+  `agent-name` shipped a nameless CPA. `applyInstallDefaults` now fills
+  `bridge=vmbr0`, `storage=local-lvm`, and `agent-name=freehold` on both the
+  wizard and sequential install paths.
+- **exec profile on the ops + storage commands**: `readiness`, `storage
+  resolve/ensure/destroy/destroy-pool/info`, `provision`, `deploy-relay`, and
+  `deploy-cp` now resolve the active tenant profile (like `exec`), so a
+  multi-world box signs for the right runner audience instead of the legacy
+  default.
+- **initial-config ordering**: bootstrap writes the config BEFORE the
+  grant/serve/verify exec stages (they resolve the runner from it) and merges
+  the recorded relay/CP hosts when this run supplied none, so an early write
+  never clobbers a prior world's domains with a bare scheme.
+- **`--relay-pubkey` flag-shift**: the world-build's agent-tools serve emitted
+  a bare `--relay-pubkey` (empty — the relay's signing key is learned only
+  after the relay boots), which makes Go's flag parser swallow the NEXT flag as
+  its value and stop, silently dropping `--runner-pubkey`/`--runner-target`
+  ("serve needs --runner-pubkey ..."). Emit it only when non-empty.
+- **co-located runner secrets survive a re-deploy**: `deploy-cp` re-ships the
+  box runner package's `secrets.json` on every install, wiping the litellm
+  secrets the build added to the CP's co-located runner (and the box can't
+  re-derive them — the CP is the durable owner). The re-ship now MERGES: the
+  box wins on its own target credential, while the CP's extra names (litellm /
+  postgres-pw / provider-key) and the console's grants survive. `world_build`
+  also re-provisions the co-located runner from the CP's own durable litellm
+  store whenever it finds them missing (re-seal → restart → wait for the port),
+  so an older package heals on the next build.
+
+## [0.5.22] — install wizard + pre-DNS IP fallback
+
+Workstream B (in-place): `freehold install` on an interactive terminal is now a
+bubbletea wizard that collects every answer — including the relay/CP domains
+and the proxy IP, which `runBootstrap` would otherwise re-prompt at runtime —
+up front, then hands the engine the collected `rebuildFlags`. Non-TTY input
+(tests, piped runs) keeps the sequential prompts. Pre-DNS steps now connect to
+the recorded guest IPs (`config.LxcIP` / `config.ResolveTarget`) until the
+public domain resolves, replacing the two inline IP-fallbacks (console login
+URL + agent-tools URL) with the shared helper. The shared provider-picker stays
+in `package cli` (both consumers — the dashboard TUI and the wizard — live in
+the same module) rather than adding bubbletea to the lean `contract` leaf.
+
+## [0.5.21] — multi-tenant profiles (no implicit default)
+
+The box-side CLI grows real multi-tenancy. Previously there was exactly ONE
+connection profile living at `~/.config/freehold/config.toml` with state at
+`~/.freehold`; `freehold login` overwrote it. Now a **profile** is one logged-in
+tenant with its own config file (`~/.config/freehold/profiles/<name>/config.toml`)
+and its own scoped state dir (`~/.freehold/profiles/<name>/`, or under
+`FREEHOLD_HOME`), and the filesystem is the registry. There is **no implicit
+"default" profile and no legacy single-config layout** — every tenant is a named
+profile, and a pre-profiles box isn't auto-adopted (re-run `freehold login`).
+
+- `freehold login` adds (or refreshes) a NAMED profile — prompts the CP address,
+  defaults the profile name to the CP-host slug, seeds the world summary into
+  that profile's config, and refuses to duplicate a CP under a *different*
+  profile name. Re-login into the same profile preserves `[runner]`.
+- `freehold profiles` lists the registered tenants (name + config path + CP).
+- `build` / `bootstrap` / `install` / `world` negotiate the tenant via an
+  interactive picker; with **zero** profiles they fail closed:
+  "no tenant profiles — run `freehold login` first."
+- `teardown` picks the tenant (its state, `WorldHome`, DNS creds, identities are
+  all scoped) and passes `--config` to its child `freehold exec` subprocess so the
+  runner resolves from the right profile.
+- `exec` stays scripted/deterministic: an explicit `--config` wins, a single
+  profile is used implicitly, multiple profiles without `--config` fail closed
+  naming them.
+- All state-path helpers (`freeholdHome`, the operator/agent-ops ledger,
+  runner-pubkey + agent-dir resolution) read the negotiated profile's scoped
+  paths instead of the hardcoded `~/.config/freehold` / `~/.freehold`.
+
+## [0.5.20] — per-service Terraform + Omarchy-style script migrations
+
+The infra slice settles on single sources of truth. The kube workloads graduate
+from shell here-docs to **declarative `kubernetes_manifest` (server-side apply)
+resources** (`postgres.tf` / `litellm.tf` / `caddy.tf` — the deterministic
+static files that define each service; SSA so a `kubernetes_persistent_volume_claim`
+can't serialize-deadlock against local-path's `WaitForFirstConsumer`), with the
+substrate still exec-first `null_resource` shell. Migrations
+move from Go closures in `BuildMigrator` to **versioned script files**
+(Omarchy's `<epoch>.sh` + `<epoch>.verify.sh`), run ascending via `bash` on the
+CP against a durable ledger. Dead reconciled-duplicate stage builders
+(`K3sInstallScript`/`K3sLocalPathDurableScript`/`LitellmManifestScript`/
+`CaddyManifestScript` + manifests) are deleted; the shell (`k3s-bringup.sh`) is
+now the single owner of k3s install, and the per-service `.tf` files are the
+single owner of the service definitions. Live verification on the PVE host also
+fixed pre-existing blockers that kept the world from deploying: the relay bundle
+pins minio images Docker Hub now denies (re-pointed to quay.io), k3s disables
+traefik/servicelb so Caddy's hostNetwork can bind 80/443, the local-path
+nodePathMap uses the node wildcard, the postgres password is read back
+first-run-wins on rebuild (litellm/rebuild.go), and the world-build DNS step now
+drives a `freehold-console dns add` subcommand (the rust `control-plane` binary
+is gone).
+
+### Added
+- **`postgres.tf` / `litellm.tf` / `caddy.tf`** — the service definitions as
+  `kubernetes_manifest` (server-side apply) resources: Deployment/Service/PVC/
+  ConfigMap/Secret. Secret VALUES arrive as runner-injected env → `TF_VAR_*`
+  (never argv) and ride the 0600 state (option A); first-run-wins is enforced at
+  the Go layer (master-key + postgres-pw read back from the canonical Secret on
+  rebuild, never re-minted). Model registration stays an event
+  (null_resource local-exec; the provider key rides env, never state).
+- **Two-phase apply + kubeconfig leg** — `cpbuild.tfRun` applies the substrate
+  via `-target` (`TF_NO_SECRETS=1`) so k3s comes up, then `stageKubeconfig`
+  fetches the k3s kubeconfig, rewrites the server to the node IP, and applies
+  the services. The kubernetes provider downloads at `init` (online, like the
+  cert flow).
+- **Versioned script migrations** — `platform/migrations/files/<epoch>.sh` +
+  `<epoch>.verify.sh` (go:embed), enumerated ascending, executed via `bash` on
+  the CP with `FREEHOLD_AGENT_TOOLS`/`REGISTRY`/`CONSOLE_STATE` env; the ledger
+  marks a migration done only when its verify gate passes. Added the
+  `freehold-agent-tools registry verify|import-console` subcommand the scripts
+  drive; migrations `1799900000` (registry loadable) + `1799910000`
+  (import-console, additive) replace the old Go closures.
+- **`followups.md`** — tracks the deferred relay-stack (A) and substrate-provider
+  (B) pieces.
+
+### Changed
+- k3s install + the durable local-path carve-out are owned solely by
+  `scripts/k3s-bringup.sh` (the Go `worldBootK3s` / `stages` builders are gone);
+  Caddy's static edge is `caddy.tf`, its cert/DNS issuance stays the CP's
+  event-driven overlay.
+- Terraform runs from `tf.sh` with conditional secret requirements (destroy and
+  substrate phase need neither the secret values nor a kubeconfig).
+
+### Removed
+- Dead reconciled-duplicate substrate builders in `stages.go`
+  (`K3sInstallScript`, `K3sLocalPathDurableScript`, `LitellmManifestScript`,
+  `CaddyManifestScript`, the embedded litellm manifest consts) + their orphaned
+  tests; `shell scripts/{kube-apply.sh,kube-destroy.sh}` (superseded by the
+  provider); `worldBootK3s`; `CaddyManifest`/`yamlBlockIndent`/`splitLines` in
+  `services/webproxy/caddy` (only `RenderCaddyfile` remains).
+
+## [0.5.19] — the substrate + kube workloads are Terraform-managed (A1)
+
+Increment 5/6 of the CP-owned build (`roadmap/CP_OWNED_BUILD.md` Phase B): the
+durable-plane LXCs and the litellm/postgres kube workloads are driven through a
+real Terraform module instead of ad-hoc `pct`/`kubectl` shells with nothing but
+the CP's own idempotence. The module is executed-first (null_resource + the
+proven pct/kubectl scripts), embedded into the `cpbuild` package, and ADOPTS the
+same resources the CP creates — so `terraform plan` runs clean against the
+live world, and `terraform destroy` tears the kube layer + substrate LXCs down
+during teardown.
+
+### Added
+
+- **`cpbuild/terraform`** — the exec-first Terraform A1 module (embedded, so it
+  ships with the console): durable plane (`plane.sh`, mirrors
+  planebase/drive LVM ensure), the cp/relay/k3s LXCs with their `backup=1`
+  mounts (`lxc.sh`, mirrors `BootstrapProxmoxLxc`), k3s bring-up
+  (`k3s-bringup.sh`, reconciled: drops the stale `.243`, no hostname `k3s`),
+  and the litellm/postgres kube workloads (`kube-apply.sh`, now secret-based +
+  idempotent registration — removes the hardcoded `llmproxy-db-pass`). The
+  module's scripts are the same idempotent shapes the Go drivers produce, so
+  they adopt the existing world plan-clean. Replaces the drifted
+  `platform/terraform` leaf copy (superseded by the embedded module).
+- **`cpbuild.stageDeployTf` + `worldTerraform`** — ship the module to the box
+  at `/srv/data/freehold-tf` (0700) and drive `terraform apply` through the
+  co-located runner; the litellm keys ride the runner by name → `TF_VAR_*`
+  (never argv). Wired into `BuildWorldApply` after the substrate steps.
+- **Terraform teardown** — `teardown.Run` runs `terraform destroy` (the kube
+  workloads first, by depends_on order) before the k3s LXC is pct-destroyed;
+  the Go LXC stops/destroys then find the guests already gone (idempotent).
+  `tf.sh` tolerates a secret-less destroy exec.
+- **`worldLiteLLM` shrinks** to the CPA litellm-key seed — the kube manifests
+  + model registration now live in terraform (`kube-apply.sh`).
+
+### Notes
+
+- Exec-first (not the bpg/proxmox provider) was elected as the least-risk A1
+  per the plan's own clause: PVE is 9.2.2 and bpg 0.66+ removed the
+  tarball-create path (no `template_file_id`) that the live substrate was born
+  from. Converting the adopt-managed resources to real provider resources
+  (or the clone-based flow) is the named follow-up; the module is structured so
+  a provider can slot in without changing the executor.
+- The substrate LXC create path in Go remains the creator; terraform adopts +
+  manages + destroys. Moving creation fully into terraform (vmid allocation)
+  is a named follow-up.
+
+## [0.5.18] — the boot checker is CP-driven and identical for every box
+
+The "checking the world" screen did **different work** on the build box vs a
+thin box, so one took ~10s (+ a hang) while the other flashed — a visible
+asymmetry that kept saying "not yet at parity." Root causes were local probes
+only the build box had coords to exercise. Now every box runs the SAME
+CP-driven check.
+
+### Fixed
+
+- **Boot health steps** (relay/k3s/litellm/caddy/dns) no longer fall back to
+  LOCAL probes when the CP session is pending: the control-plane step waits
+  (bounded) for auto-login, then the steps report the CP's report. The build
+  box's ~9s litellm HTTP probe + real relay/k3s probes are gone.
+- **`refreshData`** dropped the local durable-plane storage probe — the DATA
+  view is the CP facts for every box.
+- **Runner** reports the CP's runner (from `/api/overview`), uniform; no local
+  runner probe.
+- The auto-login wait only blocks when a session is actually expected (persisted
+  operator identity + CP URL) — a configured-but-never-logged-in box does NOT
+  stall.
+
+Verified: the build box and a thin box both land the dashboard in **~1s** with
+byte-identical, all-green output. Only bootstrap remains special (no CP yet →
+press `l`).
+
+## [0.5.17] — drive-through-CP operator surface: a thin login box is the build box
+
+Finally closed the last capability gap so ANY logged-in box (the "login box")
+is functionally equivalent to the box that bootstrapped — it can take over 100%
+of its duties. The only special case is the initial bootstrap (no CP exists →
+build one); after that every box drives the world through the CP.
+
+### Added
+
+- **`world_exec`** (operator-scoped on agent-tools): runs a command through the
+  CP's co-located runner, **validating the target** against the CP's own runner
+  (error on mismatch, so a box never silently execs on a host it didn't name).
+- **`freehold exec` on a box with no local `[runner]` routes here** — a thin box
+  has the full exec surface without hosting a runner.
+
+### Changed
+
+- **`/api/world` serves `agent_tools_url` as the public `https://<cp>/mcp`**, and
+  the Caddy CP vhost exposes `/mcp` (→ `:8089`), so a **remote** thin box can
+  drive world build/exec/migrate/door over the public edge (not the LAN dial).
+- Docs (ARCHITECTURE/README) updated for the drive-through-CP transport.
+
+Verified live: a thin box whose config has no `[runner]` ran `freehold exec
+proxmox-box 'df -h /'` through the CP (returned the PVE host's output) and drove
+`freehold world build` through the CP (full reconcile report). A mismatched
+target errors clearly.
+
+## [0.5.16] — the boot checker settles on CP truth (relay header no longer sticks red)
+
+A login-only box whose config held a stale `relay_url` could show the relay
+**red in the header** even after auto-login, while its Services pane showed it
+green + the CP domain. Race: the boot checker's relay step runs a **pre-session
+local probe** (`config.RelayLive` on the stale IP) when `m.cpWorld` is nil at
+the moment it starts; that probe finishes *after* `applyCPWorldHealth` sets
+`m.RelayLive` true from the CP, clobbering it back to false. Nothing re-applied
+CP truth, so the header stuck red.
+
+### Fixed
+
+- **`bootDone` re-runs `applyCPWorldHealth()`** when the world check settles, so
+  a box that logged in mid-check lands **CP-driven** — the header flags never
+  sit on a pre-session local-probe answer. No session ⇒ no-op (the local flags
+  stand, the initial-bootstrap case).
+
+## [0.5.15] — a box reads the whole world from the CP (relay/cp included)
+
+Closed the last local-config leak in the box's world view. The relay + control
+plane rows of a box's Services pane were built from the box's **local config**,
+so a box whose `relay_url` held a stale IP showed the relay down against that
+IP (the "why is it using the IP instead of the domain" a remote box hit) —
+even after the CP was fixed to serve `https://<relay_host>`, only a side-channel
+adoption picked it up. A logged-in box is now CP-driven for the whole Services
+pane; local config matters only for the initial-bootstrap (no-CP-session)
+fallback.
+
+### Changed
+
+- **Console `/api/world`** reports **relay + control plane as world services**
+  (URL + a co-located health probe) alongside k3s/litellm/caddy. The relay
+  row's URL is the **public edge** (`https://<relay_host>`), never the internal
+  LAN dial the console uses for its own roster/event reads.
+- **TUI `buildCpServices`** renders every pillar straight from the CP's
+  `/api/world` services report — no explicit local-config relay/cp rows, no
+  local probe.
+- **TUI `applyCPWorldHealth`** sets the relay/cp/k3s/litellm/caddy flags from
+  the CP's services report (`applyPillarFlag`), dropping the local
+  `config.RelayLive(cfg)` probe.
+
+Tests: `TestWorldServesPublicRelayURL` (world serves the public domain, not the
+LAN dial) + `TestManagementBoxFullyPopulatedFromCP` (relay row URL must come
+from the CP report, not `cfg.RelayURL`).
+
+## [0.5.14] — world status is served from the console's public /api/world (DRY with /mcp)
+
+Closed the last reason a remote (off-LAN) box couldn't reach parity with the
+deployer box: the TUI's Agents/DATA/Certs views and `freehold world status`
+dialed the agent-tools MCP server over the LAN (`:8089/mcp` → `world_status`)
+and needed `cfg.AgentToolsURL`/`AgentToolsPubkey` — a LAN-only coord seeded
+from login. A box off the subnet read an empty inventory and (mis)concluded
+the world was down. Status reads now come from the public CP.
+
+### Changed
+
+- **Console `/api/world`** (public, session-gated) now folds the authoritative
+  agent registry + world facts on top of the pillar services it already served
+  — read live from the toolset's durable `registry.json`/`facts.json`, so every
+  logged-in box (LAN or remote) renders the same CP-sourced status with **no
+  local agent-tools coords**. This corrects PR #207's intent: coords became
+  CP-sourced, but status still rode a LAN-only transport.
+- **DRY:** both the `/api/world` route and the `/mcp world_status` tool now
+  resolve the **same** `agenttools.WorldStatus` assembly — one implementation,
+  two surfaces, never divergent.
+- **`freehold world status`** reads the public `/api/world` (via the operator's
+  persisted nsec, `oplogin.NsecToSecret`); the mutating world verbs
+  (`build`/`teardown`/`migrate`) stay roster-gated on `/mcp`.
+- The console now logs a broken inventory (malformed registry/facts) instead of
+  silently serving an empty "world down" view.
+
+`contract/console`: `WorldSummary` gained `Agents`/`Runners`/`DNS`/`Facts`
+(raw, to keep contract free of control-plane types) + helpers.
+
+## [0.5.13] — world facts: the CP carries the deployer-side inventory (DATA + Certs parity)
+
+The real asymmetry closed: a management/login-only box can now render the DATA
+and Certs views from the CP, instead of needing the deployer box's local config
++ host probes.
+
+### Added
+
+- **`world_register_facts`** (operator-scoped tool on the agent-tools server) —
+  the box registers the deployer-side world facts at the end of `freehold
+  build` (the "register-at-build" mechanism): the durable-plane layout
+  (backend/kind/pool + the `/srv/data` tenant mounts with their `backup` flags),
+  the canonical domains (relay/cp/proxy), and the edge cert metadata. Stored
+  durably under the agent-tools state dir (`facts.json` — survives compute-only
+  teardown, like the registry).
+- **`world_status` now carries `facts`** — the single-inventory read serves the
+  plane/certs/domains a management box needs.
+- **The build reads each edge cert's `notAfter` from the durable mirror**
+  (`/srv/data/k8s-volumes/caddy-edge/<slot>/fullchain.pem` via `openssl x509
+  -enddate`) and registers it — the Certs view finally shows a REAL expiry
+  (the config fields were never populated before).
+- **The TUI DATA + Certs views render from the facts** on a box without a local
+  runner: `refreshLocal` (post-auto-login) re-runs `buildCerts` + `refreshData`,
+  so a login-only box shows the plane layout (live usage marked "—" — the live
+  probe needs the deployer box) and the cert domains/expiry/issuer.
+
+### Verified live
+
+A rebuild registered the facts on the CP; a login-only box (fresh config, no
+`[runner]`) auto-logged in and rendered DATA (the 4 durable mounts) and Certs
+(relay + cp with real 2026 expiry) from `world_status` — full parity with the
+deployer box's views.
+
+## [0.5.12] — pin the k3s version (bypasses the flaky update.k3s.io channel lookup)
+
+`world_build`'s k3s install failed on this network: the installer's version
+resolution follows `update.k3s.io` → github.com, and `update.k3s.io` presented a
+self-signed cert (a network-level MITM — github.com itself worked), so the
+channel lookup errored and the installer fell back to a literal `stable` tag
+which 404'd. `K3sInstallScript` now sets a PINNED `INSTALL_K3S_VERSION`
+(`v1.36.4+k3s1`), skipping the channel lookup entirely — deterministic (the
+same k3s on every bring-up) and immune to `update.k3s.io` being down/MITM'd.
+Verified live: a fresh install with the pinned version completes and k3s comes
+up active.
+
+## [0.5.7] — UAT: a real teardown→rebuild→TUI→separate-box-login, and the `justfile`
+
+A full UAT against the live world (teardown → rebuild shipping the Go console →
+TUI on the operator box → login + operate from a separate box) surfaced two
+real bugs and added the build ergonomics. Both bugs are fixed.
+
+### Added
+
+- **`justfile`** — one-command build ergonomics for a UAT/rebuild box: `just
+  build` (all five sibling binaries a `rebuild`/`teardown` resolves),
+  `just install`, `just check-siblings`, `just test`, `just teardown`, and
+  `just build-world`. `build`/`teardown` run `./target/debug/freehold` — the
+  COLOCATED binary — because `resolveRebuildBins` finds siblings relative to
+  the running executable, so a copy installed elsewhere (e.g.
+  `~/.cargo/bin/freehold`) has no siblings and `build` bails "sibling binaries
+  missing". AGENTS.md documents the exact binary set + one-liners.
+
+### Fixed (UAT-surfaced)
+
+- **`agent_tools_url` froze at the deploy-time IP (a DHCP-lease change
+  mid-build left it pointing at a dead IP).** `stageDeployAgentTools` records
+  `cfg.AgentToolsURL` from the cp IP at that moment, and `recordPostWorld`
+  updated the cp LXC coords but not `agent_tools_url` — so after a rebuild
+  where the DHCP-assigned cp IP changed, `world status` and a fresh box's
+  Agents view hit a dead `192.168.30.x`. `recordPostWorld` now records the cp
+  coords too and reconciles `cfg.AgentToolsURL` to the CURRENT cp IP (the
+  pubkey is durable/unchanged).
+- **The `world`/`door` CLI verbs signed as the box's `agent-ops` identity,
+  which a fresh login-only box's locally-minted agent-ops is NOT a toolset
+  roster member of — `world status` got `-32001` denied on a fresh box.** The
+  TUI already signs as the OPERATOR identity (a console admin, in the roster).
+  `worldMcp` now signs as the operator identity too, so a fresh login-only box
+  can operate the world (verified: fresh-box `world status` returns the full
+  inventory).
+
+### Notes
+
+- The console's `/api/overview` reads its in-memory state, loaded at serve —
+  a runner adopted into state.json AFTER serve (the co-located runner during
+  `deploy-cp`) is stale until the console restarts (the Runners view shows
+  "(no runners on the console)"). This matches the Rust console's behavior
+  (pre-existing, not a regression); a `deploy-cp` re-run restarts the console
+  and it reloads the adopted runner (verified: `proxmox-box` appears).
+
+## [0.5.6] — Phase 2 part 2: the login-authorized door (DOOR_SPEC implemented)
+
+The §9-gated door mechanism from `docs/DOOR_SPEC.md` is implemented. A fresh
+box that logs into the CP can now authorize its own door key on the host and
+perform CP-lifecycle work — not just the box that first built the world.
+
+### Added
+
+- **`world_authorize_door` / `world_revoke_door`** (operator-scoped tools on
+  the agent-tools server). The CP appends/removes the caller-presented public
+  door key on the host door **through its co-located runner** (the same runner
+  that already holds the host door and drives `world_build`). Both are
+  operator-only (denied to registry agents with `-32003`, like the world_* and
+  grant tools).
+- **The DOOR_SPEC §2.5 shell-injection gate** is enforced at the API boundary:
+  the pubkey must match the strict `authorized_keys`-line regex (key type +
+  base64 body + optional safe comment, no whitespace runs / quotes / backticks /
+  `$` / `(` / `;` / `&` / `|` / newlines) BEFORE it is ever single-quoted into
+  the append/remove shell command. `TestDoorKeyRe` pins the rejects.
+- **`freehold door authorize|revoke`** — the box derives its door key
+  **deterministically** from its agent-ops identity `nostr_secret` seed — the
+  SAME key that signs its world API calls (DOOR_SPEC §3) —
+  (`crypto.SSHPublicKeyFromSeed`: the private half never leaves the box, only
+  the public line is presented, and the key is stable across re-logins so a
+  revoke actually removes it) and calls the world tool signed as its ops
+  identity. Revoke is exact-line removal with a real error on a real failure
+  (no masked `|| true` — a false "revoked" for the lost/compromised-box lever
+  would be a silent security lie).
+
+### Notes
+
+- The append is idempotent (grep-before-append) and scoped to the caller's
+  presented pubkey; revocation is exact-line removal. Only operators (NIP-98 →
+  admin whitelist → roster) can authorize a door.
+
+## [0.5.5] — Phase 3: the deploy ships the Go console (runtime is Go end to end)
+
+The REFACTOR-PLAN's "Rust only where it earns its keep" now holds for the
+mechanism's runtime: the CP console that `deploy-cp` ships and the box-side CP
+CLI verbs are Go. The Rust console crate survives only as the `acceptance`
+harness's hermetic fixture (the crate deletion is the final Phase-3 step, tied
+to porting that gate to Go).
+
+### Changed
+
+- **`deploy-cp` ships `freehold-console` (Go) instead of the Rust
+  `control-plane` binary.** `DeployCp` serves it with the Go flag shape
+  (`--admin-pubkeys`, `--public-origin`, `--relay-*`, `--agent-tools-*`),
+  reads the console identity back via `freehold-console identity`, and
+  adopts/grants the co-located runner via `freehold-console adopt`/`grant`.
+- **The box's own CP CLI verbs are Go.** `freehold-console` now carries
+  `provision` (incl. the ssh-door keypair generation that prints the public
+  line for `authorized_keys`), `grant` (defaulting to the console identity —
+  the first-run grant needs no argument), `adopt`, `add-secret`, `identity`,
+  and `serve`. `resolveRebuildBins` resolves `freehold-console` (was the Rust
+  `control-plane`) as the console sibling; `stageProvision`/`stageGrant`/
+  `sealRunnerSecret`/`deploy_agent_tools` use it.
+- **`contract/crypto.GenerateSSHKeypair`** is exported (the byte-exact
+  openssh-key-v1 generator) for the ssh-door provision path.
+- The interspersed-flags parser (`provision <name> --flag …`) matches the box's
+  call shape (Go's `flag` stops at the first positional).
+
+### Notes
+
+- The Rust `control-plane/console` + `console-client` crates are still in the
+  tree as the `acceptance` gate's dependency; the deploy no longer ships them.
+  Deleting them requires porting `freehold-acceptance`'s console-dependent
+  checks to the Go provisioner/console — the tracked final Phase-3 step.
+
+## [0.5.4] — Phase 3 core: the Go console server (web.rs ported at parity)
+
+The big Phase 3 piece: the Rust console's loopback admin/ops web surface
+(`control-plane/console/src/web.rs`, ~2.1k lines) is ported to Go with the
+SAME routes and the SAME security guards. The Rust console crate still ships
+until the deploy switch (the next PR); this PR lands the Go replacement,
+hermetically tested.
+
+### Added
+
+- **`control-plane/api/console/`** — the Go console server:
+  - `auth.go` — the NIP-98 operator auth (challenge/session/portal) with the
+    web.rs guard constants (60s freshness, 120s challenge, 24h sliding session,
+    60s single-use portal), `HttpOnly; SameSite=Strict` cookies, the
+    DNS-rebinding `Origin` guard (loopback + the configured public origin
+    only), and the loopback-until-authn bind guard.
+  - `server.go` — every `/api/*` route at parity: auth challenge/login/portal,
+    overview (with the console-signed LIVE readiness probe — the runner still
+    fails closed; a `-32001` denial reads as "console not granted"),
+    world (the fresh-box seed), teardown, provision/rotate/revoke/grant/
+    revoke-grant/runner-addr (each re-syncing the runner's relay channel when a
+    relay scope is set), DNS list/upsert/remove (with the dnsmasq addn-hosts
+    render + reload), the runner channel view (relay roster/profile/messages),
+    and agents list/register/remove (with kind-9 presence probes).
+  - `dns.go` — the internal resolver renderer (port of dns.rs): validate_name/
+    ip, render_addn_hosts, upsert/remove, dnsmasq conf + sync + the
+    dnsmasq-readable permissions sweep.
+  - `index.html` — the single self-contained admin page, extracted verbatim
+    from the Rust source.
+- **`control-plane/api/cmd/freehold-console`** — the Go serve binary (port of
+  the Rust `serve`): the bind guard (loopback-only until an admin whitelist is
+  seeded), the admin/relay/agent-tools scope flags persisted to state.json, and
+  first-serve console identity minting (a keypair is NEVER shipped — it is
+  born on the box, 0600).
+- **`contract/state`** extended to full `ControlPlaneState` parity: `dns`,
+  `resolver_domain`, `resolver_wildcard`, `agent_tools_url/pubkey` + accessors.
+- **`secret-management` extended to full provisioner parity** (port of
+  provisioner.rs): `RotateSecret` (B2), `RevokeRunner` (B3), `GrantAgent`/
+  `RevokeGrant` (D2 shipped-package), `AdoptRunner`, `AddSecret`, and the
+  relay channel sync (`SyncRunnerChannel`, `PutUserMembership`,
+  `RemoveUserMembership`, `RevokeRunnerChannel`) through the absorbed
+  console-owner credential (`cpstate.ConsoleSecret`).
+
+### Tests
+
+`TestAuthChallengeSessionPortal`, `TestCheckOrigin`, `TestLoginRoundtrip`
+(+ rejects: stale timestamp, non-admin), `TestPortalSingleUse`,
+`TestWorldRequiresAuthWhenConfigured`, `TestOverviewListsRunners`,
+`TestLoopbackBindGuard` — the security-guard core is pinned hermetically.
+
+### Notes
+
+- The Rust console crate is NOT deleted yet: the deploy switch (ship
+  `freehold-console` instead of the Rust `control-plane` binary, switch
+  `resolveRebuildBins`, delete the crate + `console-client`) is the next PR —
+  the Go console lands tested first, so the live bring-up swaps to a proven
+  surface.
+
+## [0.5.3] — Phase 3 (part 1): `freehold-orchestrator` folds into `freehold`
+
+REFACTOR-PLAN §3.5/§8 Phase 3's binary fold. The `freehold-orchestrator`
+binary was vestigial: the `freehold` binary already routes every subcommand to
+the same cobra tree (`cli.Run`), and the rebuild/teardown engines re-exec the
+CURRENT binary (`os.Executable()` — `OrchestratorBin: self`), never
+`freehold-orchestrator` by name. `resolveRebuildBins` resolves the
+runner/control-plane/agent-tools siblings, not this binary.
+
+### Removed
+
+- **`control-plane/cli/cmd/freehold-orchestrator/` (the binary).** One binary,
+  two surfaces: `freehold` with no args = the TUI, `freehold <subcmd>` = the
+  CLI. The sibling-resolution contract is preserved (teardown re-execs the
+  running binary). The cobra root's `Use` is now `freehold` (was
+  `freehold-orchestrator`).
+
+### Notes
+
+- The Rust console port + `console-client` deletion remain Phase 3's core
+  work; this PR ships the fold so the build/docs stop promising a second
+  binary.
+
+## [0.5.2] — Phase 2 (part 1): the CLI is an API client — the box-local mirror is gone
+
+REFACTOR-PLAN Phase 2's first slice: the box stops holding a second, local
+picture of the world. The TUI's Runners view read either the console
+`/api/overview` (CP) or the box-local `~/.freehold/control-plane/state.json`
+mirror, toggled with `s`. The mirror is a stale parallel reality the plan
+deletes.
+
+### Removed
+
+- **The `s` Runners-source toggle + the box-local `state.json` mirror.** The
+  Runners view now reads the console `/api/overview` only (the CP's
+  authoritative runner list); `readLocalRunners`, `RunnerSourceLocal`,
+  `runnerSourceLabel`, and the `s` keybinding are deleted. The `contract/state`
+  import is gone from the TUI. World ops are API calls; the box holds no local
+  world-state mirror.
+
+### Added
+
+- **`docs/DOOR_SPEC.md` — the login-authorized door security spec** (the §9
+  design gate that gates Phase 2's door work). The spec names what the CP
+  authorizes (the box's own agent-ops public key), how it proves the box is a
+  logged-in operator (NIP-98 session → admin whitelist, appended through the
+  CP's co-located runner), scoping (idempotent, caller-presented pubkey only),
+  and revocation (`world_revoke_door` removes the exact line). The door
+  mechanism is not implemented yet — the spec is the reviewable gate.
+
+### Notes
+
+- The CP-lifecycle side of Phase 2 (`bootstrap-cp`/`teardown-cp` on the box's
+  door, the slim build) stays behind the §9 gate until the door spec is
+  reviewed; this PR ships the mirror deletion + the spec.
+
+## [0.5.1] — Phase 1: the unified scoped API (the one inventory, scope-gated, grant wired)
+
+The REFACTOR-PLAN's Phase 1 behavior change lands on the 0.5.0 tree: the
+agent-tools server becomes the unified api/ front — scope-gated by caller
+class, with `world_status` as the single inventory read, the agent-registry
+reconcile, and `grant_agent` finally wired through the console-owner
+credential.
+
+### Added
+
+- **Server-side scope auth (per-channel tool visibility).** `agenttools.Server`
+  now classifies each caller: a pubkey in the CP's agent registry is an AGENT
+  (create/manage only), a roster member not in the registry is an
+  OPERATOR (full toolset incl. world_* and `grant_agent`). The world_* actions
+  AND `grant_agent` are denied to agents with a distinct `-32003` — so the CPA's
+  "conversation + create only" boundary, previously only enforced by its stdio
+  bridge's client-side filter, is now enforced on the server and cannot be
+  bypassed by calling the server directly. `grant_agent` is operator-scoped
+  because a grant hands direct exec access to a runner's MCP surface (a
+  prompt-reachable agent binding an arbitrary pubkey onto the CP's own
+  co-located runner would bypass this very boundary). `TestServerScopeAuth`
+  pins it.
+- **`world_status` is the single inventory read.** It now returns agents + the
+  console's runners/DNS read underneath (the console's state.json on the box —
+  what `/api/overview` + `/api/dns` serve), via the new `control-plane/api/cpstate`
+  package. The TUI's Agents view and the new `freehold world status` verb
+  consume it. `TestWorldStatusInventory` pins the shape.
+- **`freehold world <status|build|teardown|migrate>` CLI verb.** The box's
+  post-login world surface: every world op goes through the CP's api/ over MCP,
+  signed as the box's ops identity — no local runner/door needed (world ops are
+  API calls; the CP drives the world through its co-located runner).
+- **`grant_agent` is wired.** The AGENTS.md known-gap entry is closed: the
+  server loads the console's own identity (its channel-owner credential) from
+  the console's state dir (`/srv/data/cp/control-plane/console`, 0600 durable)
+  and publishes the kind-9000 put-user to the runner's channel in-process — the
+  runner re-reads its signed 39002 roster per call, so the grant lands without
+  a restart. Missing wiring fails closed, never silently succeeds
+  (`TestRegistryGrantFailClosed`).
+- **Agent-registry reconcile.** Migration `002-import-console-agents` folds the
+  console state.json `agents` map into the authoritative `registry.json`,
+  ADDITIVE-ONLY (a name already in the registry keeps its current row — a stale
+  console pubkey never clobbers a current one), verify-gated (postcondition:
+  every console agent is in the registry) — the two-registry divergence from the
+  console era converges on one source. `TestMigrateImportConsoleAgentsAdditiveOnly`
+  proves an existing row survives.
+
+### Changed
+
+- The toolset's `serve` takes `--console-state-dir` (default
+  `/srv/data/cp/control-plane`) so it can front the console's store + identity.
+- The TUI Agents view reads `world_status` (the single inventory) instead of
+  `manage_agent` directly.
+
+### Notes
+
+- The Rust console is NOT folded here — it stays the `/api/*` surface this
+  phase (the api/ server reads its store, it does not serve its routes); the
+  full port + crate deletion is Phase 3.
+- Docs updated to current state (AGENTS.md known-gap entry closed,
+  ARCHITECTURE.md toolset section).
+
 ## [0.5.0] — the three-module tree (REFACTOR-PLAN Phase 0: contract / control-plane / platform)
 
 The REFACTOR-PLAN's Phase 0 lands: the repo is restructured around what the

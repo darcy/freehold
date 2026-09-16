@@ -30,6 +30,8 @@ import (
 	"strings"
 	"time"
 
+	oplogin "freehold/control-plane/cli/login"
+
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -141,91 +143,87 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	defs := []def{
 		{"config", func() (string, bool) {
 			return cfg.RelayHost() + " · " + m.CfgPath, true
-		}}, {"runner", func() (string, bool) {
-			if cfg.Runner.Addr == "" {
-				// A login-only box has no LOCAL provisioning runner — operating
-				// through the CP, so reachability is the console session's.
-				m.RunnerReach = true
-				return "no local runner (login-only — operating through the CP)", true
-			}
-			m.RunnerReach = config.URLReachable("http://" + cfg.Runner.Addr)
-			if m.RunnerReach {
-				return cfg.Runner.Addr + " reachable", true
-			}
-			return "no answer on " + cfg.Runner.Addr, false
-		}},
-		{"relay", func() (string, bool) {
-			m.RelayLive = config.RelayLive(cfg)
-			if m.RelayLive {
-				return "live (/_liveness ok)", true
-			}
-			return "no answer at " + cfg.RelayURL, false
 		}},
 		{"control plane", func() (string, bool) {
-			if cfg.Runner.Addr == "" {
-				// Login-only: the CP's liveness is its own console session —
-				// /api/overview answers through the NIP-98 session, not the
-				// (absent) local runner.
-				m.CPLive = cpConsoleLive(m, cfg)
-				if m.CPLive {
-					return "healthy (console session answered /api/overview)", true
+			// A box operating through the CP needs its session for the whole
+			// check: wait (bounded) for auto-login to land, then drive every
+			// following step from the CP report — NO local probes, the SAME
+			// for every box (a bootstrap box and a login box check identically).
+			// Only wait when a session is actually expected: auto-login is
+			// scheduled only when the box has a persisted operator identity AND
+			// a CP URL. A configured-but-never-logged-in box must NOT stall.
+			canAutoLogin := m.cfg != nil && m.cfg.CPURL != "" &&
+				(func() bool { _, err := oplogin.SecretHex(); return err == nil })()
+			deadline := time.Now().Add(3 * time.Second)
+			for (m.console == nil || m.console.client == nil) && canAutoLogin {
+				if time.Now().After(deadline) {
+					break
 				}
-				return "down (no console session answer)", false
+				time.Sleep(100 * time.Millisecond)
 			}
-			m.CPLive = cpLive(cfg)
-			if m.CPLive {
-				return "healthy (:8080 answered from inside its LXC)", true
+			m.CPLive = cpConsoleLive(m, cfg)
+			if m.console != nil && m.console.client != nil {
+				m.applyCPWorldHealth()
+				m.refreshLocal()
+				return m.cpWorldSummary(), m.CPLive
 			}
-			return "down (no :8080 answer through the runner)", false
+			return "no CP session yet — press l to log in", false
+		}},
+		{"runner", func() (string, bool) {
+			// Runs AFTER the control-plane step so a session exists: reads the
+			// CP's runner uniformly for every box (never a local probe).
+			return m.runnerProbe(cfg)
+		}},
+		{"relay", func() (string, bool) {
+			if m.cpWorld != nil {
+				return m.cpRelayStatus()
+			}
+			return "awaiting CP (relay)", false
 		}},
 		{"k3s", func() (string, bool) {
-			if cfg.Lxc.K3s.Ip == nil {
-				m.K3sLive = false
-				return "not on record — skipped", true
+			if v, ok := m.worldSvc["k3s"]; ok {
+				m.K3sLive = v
+				if v {
+					return "healthy via CP (k3s)", true
+				}
+				return "down via CP (k3s)", false
 			}
-			m.K3sLive = config.K3sLive(cfg)
-			if m.K3sLive {
-				return "API healthy at " + config.StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443", true
-			}
-			return "no API answer at " + config.StripCIDR(*cfg.Lxc.K3s.Ip) + ":6443", false
+			return "awaiting CP (k3s)", false
 		}},
 		{"litellm", func() (string, bool) {
-			if cfg.Litellm.URL == "" {
-				m.LitellmLive = false
-				return "not deployed (no gateway coords)", true
+			if v, ok := m.worldSvc["litellm"]; ok {
+				m.LitellmLive = v
+				if v {
+					return "healthy via CP (litellm)", true
+				}
+				return "down via CP (litellm)", false
 			}
-			m.LitellmLive = config.LitellmLive(cfg)
-			if m.LitellmLive {
-				return "gateway healthy at " + cfg.Litellm.URL, true
-			}
-			return "no answer at " + cfg.Litellm.URL, false
+			return "awaiting CP (litellm)", false
 		}},
 		{"caddy", func() (string, bool) {
-			if cfg.Caddy.URL == "" || cfg.Caddy.Host == "" {
-				m.CaddyLive = false
-				return "not deployed (no TLS edge coords)", true
+			if v, ok := m.worldSvc["caddy"]; ok {
+				m.CaddyLive = v
+				if v {
+					return "healthy via CP (caddy)", true
+				}
+				return "down via CP (caddy)", false
 			}
-			m.CaddyLive = config.URLReachable("https://" + cfg.Caddy.Host)
-			if m.CaddyLive {
-				return "edge reachable at https://" + cfg.Caddy.Host, true
-			}
-			return "no TLS answer at https://" + cfg.Caddy.Host, false
+			return "awaiting CP (caddy)", false
 		}},
 		{"dns", func() (string, bool) {
-			// The CP resolver is authoritative: pull the live records once
-			// per refresh, keep the old snapshot on failure (fallback to the
-			// config mirror stays in buildServices when there is no snapshot).
-			if live := dnsRowsLive(cfg); len(live) > 0 {
-				m.DNS = live
-				return fmt.Sprintf("%d resolver records", len(live)), true
+			if m.cpWorld != nil {
+				return m.cpDnsStatus()
 			}
-			return "resolver unreachable (mirror fallback)", len(m.DNS) > 0
+			return "awaiting CP (dns)", false
 		}},
 		{"world state", func() (string, bool) {
 			m.buildServices(cfg)
-			m.buildCerts(cfg)
 			m.refreshRunners(cfg)
+			// buildAgents refreshes m.Facts (the world facts) — buildCerts +
+			// refreshData must run AFTER it so the Certs/DATA views render the
+			// CURRENT facts on a manual `r` refresh (not one cycle stale).
 			m.buildAgents(cfg)
+			m.buildCerts(cfg)
 			m.refreshData(cfg)
 			return fmt.Sprintf("%d services · %d runners · %d agents",
 				len(m.Services), len(m.Runners), len(m.Agents)), true
@@ -236,6 +234,12 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 		a.bootFns = append(a.bootFns, d.fn)
 	}
 	a.bootDone = func() {
+		// A CP session may have landed WHILE the checker was running. Re-apply
+		// CP truth (pillars + flags) AND the CP runner so a box that logged in
+		// mid-check settles CP-driven and RunnerReach is correct — the header
+		// flags never sit on a pre-session local probe.
+		m.applyCPWorldHealth()
+		m.runnerProbe(m.cfg)
 		m.Converged = converged(cfg.Runner.Addr, m.RelayLive, m.CPLive, m.RunnerReach)
 		if m.Converged {
 			m.Mode = ModeRunning
@@ -246,6 +250,24 @@ func (m *Model) startBootActivity(title string) tea.Cmd {
 	}
 	m.activity = a
 	return tea.Batch(m.runBootStep(0), a.spin.Tick)
+}
+
+// runnerProbe feeds RunnerReach, which converged() needs for the running/
+// configure decision. For EVERY box the runner is the CP's runner (reported on
+// /api/overview) — the box no longer probes a local runner, so a bootstrap box
+// and a login box report identically.
+func (m *Model) runnerProbe(cfg *config.Config) (string, bool) {
+	if m.console == nil || m.console.client == nil {
+		m.RunnerReach = false
+		return "awaiting CP (runner)", false
+	}
+	m.refreshRunners(cfg) // the CP's runner from /api/overview
+	if len(m.Runners) > 0 && m.Runners[0].Name != "" {
+		m.RunnerReach = true
+		return "CP runner: " + m.Runners[0].Name + " (active)", true
+	}
+	m.RunnerReach = true
+	return "operating through the CP (no runner on record)", true
 }
 
 // converged settles the running/configure decision. A box WITH a local runner
@@ -271,6 +293,7 @@ func isSkipDetail(detail string) bool {
 		"no gateway coords", "no TLS edge coords", "no :8080 answer",
 		"resolver unreachable", "unreachable (mirror", "not recorded",
 		"live probe failed", "no live snapshot",
+		"awaiting CP", "waiting on auto-login",
 	} {
 		if strings.Contains(detail, p) {
 			return true

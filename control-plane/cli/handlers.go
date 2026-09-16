@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"freehold/contract/client"
+	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/control-plane/cli/flows"
 	"github.com/spf13/cobra"
@@ -86,10 +87,31 @@ var execCmd = &cobra.Command{
 		if len(args) != 2 {
 			return fmt.Errorf("exec needs <TARGET> <CMD>")
 		}
+		// Tenant context (no implicit default): an explicit --config, else the
+		// single registered profile; multiple profiles without --config is
+		// ambiguous and fails closed (exec is a scripted primitive).
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		target, cmds := args[0], args[1]
 		common := readCommonFlags(cmd)
+		// The signing identity dir (--agent-dir) must follow the NEGOTIATED
+		// profile, not the flag's init-time default (which was captured before
+		// config.Current was set). Recompute it from the profile's scoped state
+		// dir unless the operator pinned --agent-dir explicitly.
+		if !cmd.Flags().Changed("agent-dir") {
+			common.AgentDir = defaultAgentDir()
+		}
 		secrets, _ := cmd.Flags().GetStringSlice("secret")
 		timeoutS, _ := cmd.Flags().GetUint64("timeout")
+		// A THIN box (no local [runner]) drives exec through the CP's co-located
+		// runner via world_exec — the drive-through-CP model, so a login box has
+		// the build box's full exec surface without hosting a runner. The CP
+		// runs the command on its runner target (the world host); the box is an
+		// authorized operator client.
+		if noLocalRunner() {
+			return worldExecThroughCP(target, cmds, secrets, timeoutS)
+		}
 		c, err := connect(common, target)
 		if err != nil {
 			return err
@@ -119,8 +141,31 @@ var execCmd = &cobra.Command{
 	},
 }
 
+// resolveExecProfile pins the tenant context for exec: an explicit --config
+// wins; otherwise the single registered profile is used implicitly; multiple
+// profiles without --config is ambiguous and fails closed.
+func resolveExecProfile(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("config") {
+		p, _ := cmd.Flags().GetString("config")
+		config.SetCurrent(&config.Profile{ConfigPath: p, StateDir: config.DefaultStateHome()})
+		return nil
+	}
+	if l := config.List(); len(l) == 1 {
+		config.SetCurrent(l[0])
+		return nil
+	} else if len(l) > 1 {
+		names := make([]string, 0, len(l))
+		for _, p := range l {
+			names = append(names, p.Name)
+		}
+		return fmt.Errorf("multiple tenant profiles (%s) — pass --config <profile config> to pick one", strings.Join(names, ", "))
+	}
+	return nil
+}
+
 func init() {
 	addCommonFlags(execCmd, nil)
+	execCmd.Flags().String("config", defaultConfigPath(), "Tenant config path to resolve the runner from")
 	execCmd.Flags().StringSliceP("secret", "s", nil, "Secret names to request (must be the target's own credential; defaults to the target name — the provision convention)")
 	execCmd.Flags().Uint64("timeout", 60, "Runner-side watchdog in seconds (client deadline sits above it)")
 }
@@ -131,6 +176,9 @@ var readinessCmd = &cobra.Command{
 	Use:   "readiness",
 	Short: "Readiness table from a running runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		if target == "" {

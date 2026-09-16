@@ -110,6 +110,13 @@ func InstallCmd(spec *RelayDeploySpec) string {
 			"fi; done && "+
 			"(grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in "+
 			"%s/deploy/compose/.env\" >&2 && exit 1 || true) && "+
+			// minio moved its images OFF Docker Hub (Docker Hub now denies
+			// `minio/minio`); the pinned buzz bundle still references it, so
+			// re-point the minio service + minio-init images at quay.io (the
+			// same tags, the official publish home). Double-quoted inside the
+			// single-quoted sh -c wrapper (LxcCmd); # delimits so the image
+			// tags' / don't split the pattern.
+			"(sed -i \"s#image: minio/#image: quay.io/minio/#g\" compose.yml) && "+
 			"%s && ./run.sh start",
 		dir, port, port, owner, owner, host, host, rws, rws, rhttp, rhttp, host, host,
 		dir, gitDataChownCmd())

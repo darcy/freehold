@@ -3,6 +3,7 @@ module freehold/control-plane
 go 1.25.0
 
 require (
+	freehold/agents v0.0.0
 	freehold/contract v0.0.0
 	freehold/platform v0.0.0
 	github.com/charmbracelet/bubbles v1.0.0
@@ -252,6 +253,7 @@ require (
 )
 
 replace (
+	freehold/agents => ../agents
 	freehold/contract => ../contract
 	freehold/platform => ../platform
 )

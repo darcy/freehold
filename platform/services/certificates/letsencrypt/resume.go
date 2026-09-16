@@ -32,15 +32,24 @@ import (
 // its exported acme/api.Core, which we reconstruct from the persisted key+kid.
 const ResumeUserAgent = "freehold-resume"
 
+// ErrAuthInvalid is the terminal per-order ACME failure: Let's Encrypt validated
+// the challenge and marked this order's authorization INVALID. Resuming it can
+// never succeed, so it is the ONLY Resolve failure that justifies discarding
+// the pending resumable state; every other error (a polling timeout, a transient
+// network error) should keep the order so the next run RESUMES it (and its
+// already-placed challenge), not start a fresh one.
+var ErrAuthInvalid = errors.New("acme: authorization invalid")
+
 // pendingResume is the persisted on-disk order state (sealed acct key).
 type pendingResume struct {
-	Domain        string `json:"domain"`
-	Wildcard      bool   `json:"wildcard"`
-	AcctKeySealed string `json:"acct_key_sealed"` // hex ciphertext (sealed to ops identity)
-	Kid           string `json:"kid"`
-	OrderURL      string `json:"order_url"`
-	ChallengeName string `json:"challenge_name"`
-	CreatedAt     string `json:"created_at"` // RFC3339; orders expire — resume only while fresh
+	Domain          string `json:"domain"`
+	Wildcard        bool   `json:"wildcard"`
+	AcctKeySealed   string `json:"acct_key_sealed"` // hex ciphertext (sealed to ops identity)
+	Kid             string `json:"kid"`
+	OrderURL        string `json:"order_url"`
+	ChallengeName   string `json:"challenge_name"`
+	ChallengeValue  string `json:"challenge_value"`  // the expected TXT content (propagation wait)
+	CreatedAt       string `json:"created_at"`       // RFC3339; orders expire — resume only while fresh
 }
 
 // Resume is a resumable issuance controller for one cert-domain.
@@ -155,7 +164,10 @@ func (r *Resume) Begin() (*pendingOrder, error) {
 }
 
 // place presents the DNS-01 challenge for a pending order and persists the
-// resumable state.
+// resumable state. It does NOT wait for propagation — the caller (worldCert)
+// places EVERY slot's challenge first, then waits for all of them, so challenge
+// records for multiple hosts propagate in parallel instead of serializing a
+// (often slow) DNS-01 propagation per slot. The wait is PropagationWait.
 func (r *Resume) place(po *pendingOrder) error {
 	core, err := r.newCore(po.acctKey, po.kid)
 	if err != nil {
@@ -177,7 +189,7 @@ func (r *Resume) place(po *pendingOrder) error {
 		return fmt.Errorf("present challenge: %w", err)
 	}
 	info := dns01.GetChallengeInfo(r.Domain, keyAuth)
-	return r.persist(po, info.EffectiveFQDN)
+	return r.persist(po, info.EffectiveFQDN, info.Value)
 }
 
 // findDNSChallenge returns the dns-01 challenge from the order's (first)
@@ -228,20 +240,21 @@ func (r *Resume) acceptChallenges(core *acmeapi.Core, order acme.ExtendedOrder) 
 }
 
 // persist writes the sealed acct key + order identity to the state file.
-func (r *Resume) persist(po *pendingOrder, challengeName string) error {
+func (r *Resume) persist(po *pendingOrder, challengeName, challengeValue string) error {
 	acctKeyPEM := certcrypto.PEMEncode(po.acctKey)
 	blob, err := r.Seal(r.SealPub, []byte(r.Path), acctKeyPEM)
 	if err != nil {
 		return fmt.Errorf("seal resume acct key: %w", err)
 	}
 	st := pendingResume{
-		Domain:        r.Domain,
-		Wildcard:      r.Wildcard,
-		AcctKeySealed: hex.EncodeToString(blob),
-		Kid:           po.kid,
-		OrderURL:      po.orderURL,
-		ChallengeName: strings.TrimSuffix(challengeName, "."),
-		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Domain:         r.Domain,
+		Wildcard:       r.Wildcard,
+		AcctKeySealed:  hex.EncodeToString(blob),
+		Kid:            po.kid,
+		OrderURL:       po.orderURL,
+		ChallengeName:  strings.TrimSuffix(challengeName, "."),
+		ChallengeValue: challengeValue,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 	raw, err := json.Marshal(st)
 	if err != nil {
@@ -251,6 +264,28 @@ func (r *Resume) persist(po *pendingOrder, challengeName string) error {
 		return err
 	}
 	return os.WriteFile(r.Path, raw, 0o600)
+}
+
+// PropagationWait waits for a PLACED challenge's TXT to be served at the
+// authoritative zone, so LM is guaranteed to see the record before the caller
+// POSTs "ready". Called AFTER every slot's challenge is placed (worldCert), so
+// the slow DNS-01 propagation of many hosts overlaps instead of serializing.
+func (r *Resume) PropagationWait(po *pendingOrder) error {
+	raw, err := os.ReadFile(r.Path)
+	if err != nil {
+		return fmt.Errorf("resume propagation state: %w", err)
+	}
+	var st pendingResume
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return fmt.Errorf("resume propagation parse: %w", err)
+	}
+	if st.ChallengeName == "" || st.ChallengeValue == "" {
+		return fmt.Errorf("resume propagation: order %s has no placed challenge recorded", po.orderURL)
+	}
+	if err := waitAuthoritativePropagation(st.ChallengeName+".", st.ChallengeValue, 3*time.Minute); err != nil {
+		return fmt.Errorf("dns-01 propagation: %w", err)
+	}
+	return nil
 }
 
 // Resolve completes a pending order (freshly begun OR resumed): accepts the
@@ -356,7 +391,7 @@ func (r *Resume) authorizationValid(core *acmeapi.Core, order acme.ExtendedOrder
 			case acme.StatusValid:
 				continue
 			case acme.StatusInvalid:
-				return false, fmt.Errorf("authorization %s invalid", url)
+				return false, fmt.Errorf("%w: %s", ErrAuthInvalid, url)
 			default:
 				return false, nil
 			}

@@ -25,6 +25,9 @@ const (
 	httpTimeoutSec    = 30
 )
 
+// ProfileMessageTag is the runner-profile kind-9 message tag (t=fh-profile).
+func ProfileMessageTag() string { return profileMessageTag }
+
 // RunnerProfile mirrors core::relay_http::RunnerProfile.
 type RunnerProfile struct {
 	Name        string  `json:"name"`
@@ -52,6 +55,86 @@ func RunnerChannelID(runnerNostrPubkey string) string {
 	h := sha256.Sum256([]byte(runnerNostrPubkey))
 	hexs := hex.EncodeToString(h[:16])
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hexs[0:8], hexs[8:12], hexs[12:16], hexs[16:20], hexs[20:32])
+}
+
+// ChannelIDFromName derives a stable dashed-UUID channel id for a
+// freehold-CREATED channel named `name`, so a re-run targets the same channel
+// (the relay's own channels use random ids; this is only for ones we create).
+// Leading '#' and case are ignored.
+func ChannelIDFromName(name string) string {
+	n := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "#"))
+	h := sha256.Sum256([]byte("freehold-channel:" + n))
+	hexs := hex.EncodeToString(h[:16])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hexs[0:8], hexs[8:12], hexs[12:16], hexs[16:20], hexs[20:32])
+}
+
+// GroupMeta is a NIP-29 channel's id + display name (kind 39000 group meta).
+type GroupMeta struct {
+	ID   string
+	Name string
+}
+
+// QueryGroups returns the relay's published channels (kind 39000), newest name
+// per channel id. Read-only; any relay member identity can query.
+func QueryGroups(relayURL string, authSecret []byte) ([]GroupMeta, error) {
+	return QueryGroupsAuth(relayURL, relayURL, authSecret)
+}
+
+// QueryGroupsAuth is QueryGroups with a separate NIP-98 auth URL (the
+// pre-Caddy LAN-dial case: dial http://<host>:3000, sign the canonical https).
+func QueryGroupsAuth(dialURL, authURL string, authSecret []byte) ([]GroupMeta, error) {
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.GroupMeta},
+		"limit": 1000,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	newest := map[string]int64{}
+	name := map[string]string{}
+	var order []string
+	for _, ev := range events {
+		tags, _ := parseTags(ev)
+		id := tagValue(tags, "d")
+		if id == "" {
+			continue
+		}
+		if _, seen := name[id]; !seen {
+			order = append(order, id)
+		}
+		ca := intOr(ev["created_at"])
+		if prev, ok := newest[id]; ok && prev >= ca {
+			continue
+		}
+		newest[id] = ca
+		name[id] = tagValue(tags, "name")
+	}
+	out := make([]GroupMeta, 0, len(order))
+	for _, id := range order {
+		out = append(out, GroupMeta{ID: id, Name: name[id]})
+	}
+	return out, nil
+}
+
+// FindChannel resolves a channel by display name (leading '#' ignored,
+// case-insensitive). The first match wins.
+func FindChannel(relayURL string, authSecret []byte, name string) (id, displayName string, ok bool, err error) {
+	return FindChannelAuth(relayURL, relayURL, authSecret, name)
+}
+
+// FindChannelAuth is FindChannel with a separate NIP-98 auth URL.
+func FindChannelAuth(dialURL, authURL string, authSecret []byte, name string) (id, displayName string, ok bool, err error) {
+	want := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "#"))
+	groups, err := QueryGroupsAuth(dialURL, authURL, authSecret)
+	if err != nil {
+		return "", "", false, err
+	}
+	for _, g := range groups {
+		if strings.ToLower(strings.TrimPrefix(g.Name, "#")) == want {
+			return g.ID, g.Name, true, nil
+		}
+	}
+	return "", "", false, nil
 }
 
 // ParseProfileContent parses a stored runner-metadata content string.
@@ -214,6 +297,25 @@ func PutUserAuth(dialURL, authURL string, consoleSecret []byte, runnerNostrPubke
 // RemoveUser removes a member from a runner channel (kind 9001 remove-user).
 func RemoveUser(relayURL string, consoleSecret []byte, runnerNostrPubkey, memberPubkey string) error {
 	return membershipCommand(relayURL, consoleSecret, wire.RemoveUser, runnerNostrPubkey, memberPubkey)
+}
+
+// PutUserChannelAuth adds a member to an EXPLICIT channel id (the h tag is the
+// id itself), for channels not keyed by a runner pubkey — unlike PutUserAuth,
+// which derives the channel id from the runner pubkey.
+func PutUserChannelAuth(dialURL, authURL string, secret []byte, channelID, memberPubkey string) error {
+	tags := [][]string{{"h", channelID}, {"p", memberPubkey}}
+	return publishEventAuth(dialURL, authURL, secret, wire.PutUser, tags, "")
+}
+
+// RemoveUserChannelAuth removes a member from an EXPLICIT channel id.
+func RemoveUserChannelAuth(dialURL, authURL string, secret []byte, channelID, memberPubkey string) error {
+	tags := [][]string{{"h", channelID}, {"p", memberPubkey}}
+	return publishEventAuth(dialURL, authURL, secret, wire.RemoveUser, tags, "")
+}
+
+// RemoveUserAuth is RemoveUser with a separate NIP-98 auth URL.
+func RemoveUserAuth(dialURL, authURL string, consoleSecret []byte, runnerNostrPubkey, memberPubkey string) error {
+	return membershipCommandAuth(dialURL, authURL, consoleSecret, wire.RemoveUser, runnerNostrPubkey, memberPubkey)
 }
 
 func membershipCommand(relayURL string, consoleSecret []byte, kind uint32, runnerNostrPubkey, memberPubkey string) error {

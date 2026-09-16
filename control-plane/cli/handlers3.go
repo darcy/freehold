@@ -7,19 +7,18 @@ import (
 	"strconv"
 	"strings"
 
-	"freehold/platform/provisioning/bootstrap"
-	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
-	relaydeploy "freehold/platform/services/relay/buzz"
-	cpdeploy "freehold/control-plane/cli/bootstrap-cp"
-	"freehold/platform/services/externaldns/cloudflare"
-	"freehold/platform/provisioning/drive"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/login"
-	"freehold/platform/provisioning/planebase"
 	"freehold/control-plane/cli/teardown"
+	"freehold/platform/provisioning/bootstrap"
+	"freehold/platform/provisioning/drive"
+	"freehold/platform/provisioning/planebase"
+	"freehold/platform/services/certificates/letsencrypt"
+	"freehold/platform/services/externaldns/cloudflare"
+	relaydeploy "freehold/platform/services/relay/buzz"
 	"github.com/spf13/cobra"
 )
 
@@ -29,6 +28,9 @@ var deployRelayCmd = &cobra.Command{
 	Use:   "deploy-relay",
 	Short: "C2/B: deploy the Buzz relay onto the target through a provisioning runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		name, _ := cmd.Flags().GetString("name")
@@ -90,109 +92,17 @@ func init() {
 
 // --- deploy-cp ---
 
-var deployCpCmd = &cobra.Command{
-	Use:   "deploy-cp",
-	Short: "C1: deploy the control plane onto the target box (OPERATE mode)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		common := readCommonFlags(cmd)
-		target, _ := cmd.Flags().GetString("target")
-		stateDir, _ := cmd.Flags().GetString("state-dir")
-		binDir, _ := cmd.Flags().GetString("bin-dir")
-		bind, _ := cmd.Flags().GetString("bind")
-		binary, _ := cmd.Flags().GetString("binary")
-		relayURL, _ := cmd.Flags().GetString("relay-url")
-		relayPubkey, _ := cmd.Flags().GetString("relay-pubkey")
-		relayHostIP, _ := cmd.Flags().GetString("relay-host-ip")
-		lxcStr, _ := cmd.Flags().GetString("lxc")
-		runnerBinary, _ := cmd.Flags().GetString("runner-binary")
-		runnerPackage, _ := cmd.Flags().GetString("runner-package")
-		operatorPub, _ := cmd.Flags().GetString("operator-pubkey")
-		publicOrigin, _ := cmd.Flags().GetString("public-origin")
-		if binary == "" || relayURL == "" {
-			return fmt.Errorf("deploy-cp needs --binary --relay-url")
-		}
-		authn := operatorPub != ""
-		bindAddr := cpdeploy.ResolveCpBind(optOf(bind), authn)
-		var adminKeys []string
-		if operatorPub != "" {
-			adminKeys = []string{operatorPub}
-		}
-		c, err := connect(common, target)
-		if err != nil {
-			return err
-		}
-		spec := &cpdeploy.DeployCpSpec{
-			StateDir: stateDir, BinDir: binDir, BindAddr: bindAddr,
-			BinaryPath: binary, RelayURL: relayURL, AdminPubkeys: adminKeys,
-		}
-		if relayPubkey != "" {
-			spec.RelayPubkey = optOf(relayPubkey)
-		}
-		if relayHostIP != "" {
-			spec.RelayHostIP = optOf(relayHostIP)
-		}
-		if atURL, _ := cmd.Flags().GetString("agent-tools-url"); atURL != "" {
-			spec.AgentToolsURL = optOf(atURL)
-		}
-		if atPK, _ := cmd.Flags().GetString("agent-tools-pubkey"); atPK != "" {
-			spec.AgentToolsPubkey = optOf(atPK)
-		}
-		if publicOrigin != "" {
-			spec.PublicOrigin = optOf(publicOrigin)
-		}
-		if lxcStr != "" {
-			var v uint32
-			fmt.Sscanf(lxcStr, "%d", &v)
-			spec.LXc = &v
-		}
-		if runnerBinary != "" {
-			spec.RunnerBinary = optOf(runnerBinary)
-		}
-		if runnerPackage != "" {
-			spec.RunnerPackage = optOf(runnerPackage)
-		}
-		res, err := cpdeploy.DeployCp(c, target, spec)
-		if err != nil {
-			return err
-		}
-		fmt.Println(res.Detail)
-		fmt.Println("console pubkey:", res.Pubkey)
-		return nil
-	},
-}
 
-func optOf(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
-func init() {
-	addCommonFlags(deployCpCmd, nil)
-	deployCpCmd.Flags().String("target", "proxmox-box", "Target runner (the box where the relay lives)")
-	deployCpCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "Remote state dir on the box (also holds the seeded console identity)")
-	deployCpCmd.Flags().String("bin-dir", cpdeploy.DefaultCPBinDir(), "Remote dir for the shipped binary")
-	deployCpCmd.Flags().String("bind", "", "Loopback bind for the console (C3: non-loopback is refused). An EXPLICIT value is always honored. (Option so the default flip under --operator-pubkey can't swallow a deliberate --bind 127.0.0.1:8080.)")
-	deployCpCmd.Flags().String("binary", "", "LOCAL path of the built control-plane binary")
-	deployCpCmd.Flags().String("relay-url", "", "The relay this CP helps serve (the ONE scope; C4 posture record)")
-	deployCpCmd.Flags().String("relay-pubkey", "", "The RELAY's signing pubkey (the 39002 roster trust anchor). When omitted, the deploy tries NIP-11 discovery (best-effort — Buzz often advertises none; pass it when known)")
-	deployCpCmd.Flags().String("relay-host-ip", "", "The relay LXC's LAN IP — pinned into the CP guest's /etc/hosts so the console can RESOLVE the relay domain (the operator's DNS may not reach inside the guests: tailnet etc.)")
-	deployCpCmd.Flags().String("agent-tools-url", "", "The CP's freehold-agent-tools MCP URL (http://<cp-ip>:8089) — served on /api/world for a fresh login box")
-	deployCpCmd.Flags().String("agent-tools-pubkey", "", "The agent-tools server's Nostr pubkey (the audience of its roster) — paired with --agent-tools-url")
-	deployCpCmd.Flags().String("lxc", "", "Deploy INTO this LXC on the target — the CP lives in its OWN guest, a different LXC than the relay's by default (omitted = the target host)")
-	deployCpCmd.Flags().String("runner-binary", "", "LOCAL path of the built freehold-runner binary (co-locates the CP's own runner: ship + systemd unit + adopt + self-grant)")
-	deployCpCmd.Flags().String("runner-package", "", "LOCAL dir of an EXISTING runner package to co-locate + adopt")
-	deployCpCmd.Flags().String("operator-pubkey", "", "The OPERATOR's Nostr pubkey (64-hex) — seeds the console's NIP-98 admin whitelist (C3.5) and relaxes the loopback-only bind guard")
-	deployCpCmd.Flags().String("public-origin", "", "The console's PUBLIC origin behind the operator's proxy")
-}
 
 // --- bootstrap ---
 
-var bootstrapCmd = &cobra.Command{
-	Use:   "bootstrap",
+var provisionCmd = &cobra.Command{
+	Use:   "provision",
 	Short: "C2/A2: bootstrap-provision a target through a provisioning runner",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		kind, _ := cmd.Flags().GetString("kind")
 		target, _ := cmd.Flags().GetString("target")
@@ -277,29 +187,29 @@ var bootstrapCmd = &cobra.Command{
 }
 
 func init() {
-	addCommonFlags(bootstrapCmd, nil)
-	bootstrapCmd.Flags().String("target", "proxmox-box", "Target to drive provisioning through (a runner targeting the PVE host for proxmox-lxc, the vultr runner for vultr-vps)")
-	bootstrapCmd.Flags().String("role", "relay", "Role of this target: 'relay' or 'cp' — the LXC name is derived from the domain: <normalized-domain>-relay / -cp (--name is gone)")
-	bootstrapCmd.Flags().Uint32("vmid", 0, "LXC vmid (proxmox-lxc; must be >= 100 when given; omitted = the driver picks the lowest free id via `pct list`)")
-	bootstrapCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB (proxmox-lxc)")
-	bootstrapCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB (proxmox-lxc)")
-	bootstrapCmd.Flags().String("template", "", "LXC template name in storage 'local'; auto-detect when omitted")
-	bootstrapCmd.Flags().String("storage", "local-lvm", "LXC storage (proxmox-lxc)")
-	bootstrapCmd.Flags().String("bridge", "vmbr0", "LXC network bridge (proxmox-lxc)")
-	bootstrapCmd.Flags().String("lxc-ip", "", "STATIC guest IP (CIDR) + gateway for Proxmox-on-Cloud-Compute hosts")
-	bootstrapCmd.Flags().String("lxc-gw", "", "")
-	bootstrapCmd.Flags().StringArray("mount", nil, "Durable-plane dataset mount baked into `pct create` (repeatable), shape `<dataset>:<guest-path>` — the \"born on the plane\" reference")
-	bootstrapCmd.Flags().String("region", "atl", "Vultr region (vultr-vps)")
-	bootstrapCmd.Flags().String("plan", "vc2-1c-1gb", "Vultr plan (vultr-vps)")
-	bootstrapCmd.Flags().Uint32("os-id", 1743, "Vultr OS id (vultr-vps; Debian 12 = 1743)")
-	bootstrapCmd.Flags().String("location", "fsn1", "Hetzner location (hetzner-vps)")
-	bootstrapCmd.Flags().String("server-type", "cx22", "Hetzner server type (hetzner-vps)")
-	bootstrapCmd.Flags().String("image", "ubuntu-22.04", "Hetzner OS image (hetzner-vps)")
-	bootstrapCmd.Flags().Bool("destroy", false, "Destroy the VPS after verifying (vultr-vps/hetzner-vps; for tests/cleanup)")
-	bootstrapCmd.Flags().String("operator-pubkey", "", "The OPERATOR's Nostr pubkey (64-hex) — relay invite (create-new) / attach auth (attach-existing) + console admin seed (fail-closed: required at bootstrap)")
-	bootstrapCmd.Flags().String("domain", "", "The relay's identity DOMAIN (never an IP): the install BLOCKS (A4) until it resolves to the provisioned target's IP")
-	bootstrapCmd.Flags().Uint64("domain-wait-secs", 300, "Seconds to wait for the domain to resolve to the target IP (A4)")
-	bootstrapCmd.Flags().String("kind", "", "Target kind: proxmox-lxc | vultr-vps | hetzner-vps")
+	addCommonFlags(provisionCmd, nil)
+	provisionCmd.Flags().String("target", "proxmox-box", "Target to drive provisioning through (a runner targeting the PVE host for proxmox-lxc, the vultr runner for vultr-vps)")
+	provisionCmd.Flags().String("role", "relay", "Role of this target: 'relay' or 'cp' — the LXC name is derived from the domain: <normalized-domain>-relay / -cp (--name is gone)")
+	provisionCmd.Flags().Uint32("vmid", 0, "LXC vmid (proxmox-lxc; must be >= 100 when given; omitted = the driver picks the lowest free id via `pct list`)")
+	provisionCmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB (proxmox-lxc)")
+	provisionCmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB (proxmox-lxc)")
+	provisionCmd.Flags().String("template", "", "LXC template name in storage 'local'; auto-detect when omitted")
+	provisionCmd.Flags().String("storage", "local-lvm", "LXC storage (proxmox-lxc)")
+	provisionCmd.Flags().String("bridge", "vmbr0", "LXC network bridge (proxmox-lxc)")
+	provisionCmd.Flags().String("lxc-ip", "", "STATIC guest IP (CIDR) + gateway for Proxmox-on-Cloud-Compute hosts")
+	provisionCmd.Flags().String("lxc-gw", "", "")
+	provisionCmd.Flags().StringArray("mount", nil, "Durable-plane dataset mount baked into `pct create` (repeatable), shape `<dataset>:<guest-path>` — the \"born on the plane\" reference")
+	provisionCmd.Flags().String("region", "atl", "Vultr region (vultr-vps)")
+	provisionCmd.Flags().String("plan", "vc2-1c-1gb", "Vultr plan (vultr-vps)")
+	provisionCmd.Flags().Uint32("os-id", 1743, "Vultr OS id (vultr-vps; Debian 12 = 1743)")
+	provisionCmd.Flags().String("location", "fsn1", "Hetzner location (hetzner-vps)")
+	provisionCmd.Flags().String("server-type", "cx22", "Hetzner server type (hetzner-vps)")
+	provisionCmd.Flags().String("image", "ubuntu-22.04", "Hetzner OS image (hetzner-vps)")
+	provisionCmd.Flags().Bool("destroy", false, "Destroy the VPS after verifying (vultr-vps/hetzner-vps; for tests/cleanup)")
+	provisionCmd.Flags().String("operator-pubkey", "", "The OPERATOR's Nostr pubkey (64-hex) — relay invite (create-new) / attach auth (attach-existing) + console admin seed (fail-closed: required at bootstrap)")
+	provisionCmd.Flags().String("domain", "", "The relay's identity DOMAIN (never an IP): the install BLOCKS (A4) until it resolves to the provisioned target's IP")
+	provisionCmd.Flags().Uint64("domain-wait-secs", 300, "Seconds to wait for the domain to resolve to the target IP (A4)")
+	provisionCmd.Flags().String("kind", "", "Target kind: proxmox-lxc | vultr-vps | hetzner-vps")
 }
 
 func mustStr(cmd *cobra.Command, name string) string {
@@ -333,6 +243,12 @@ var storageResolveCmd = &cobra.Command{
 	Use:   "resolve",
 	Short: "Resolve the durable backend (ZFS → LVM-thin → bail for the Proxmox branch); with consent, create the backend",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Tenant context, like exec: resolve the ACTIVE profile so the runner
+		// pubkey resolves from the profile's state dir (not the legacy default),
+		// else a multi-world box signs for the wrong runner audience.
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		device, _ := cmd.Flags().GetString("device")
@@ -433,6 +349,9 @@ var storageEnsureCmd = &cobra.Command{
 	Use:   "ensure",
 	Short: "Ensure a tenant's dataset/volume exists (idempotent) + is guest-writable",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		tenant, _ := cmd.Flags().GetString("tenant")
@@ -497,6 +416,9 @@ var storageDestroyCmd = &cobra.Command{
 	Use:   "destroy",
 	Short: "Destroy a tenant's dataset subtree (data+compute teardown half)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		tenant, _ := cmd.Flags().GetString("tenant")
@@ -541,6 +463,9 @@ var storageDestroyPoolCmd = &cobra.Command{
 	Use:   "destroy-pool",
 	Short: "Remove a freehold-CREATED thin pool from its VG (full teardown --data half)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		pool, _ := cmd.Flags().GetString("pool")
@@ -567,6 +492,9 @@ var storageInfoCmd = &cobra.Command{
 	Use:   "info",
 	Short: "Report the live durable-plane snapshot: host capacity + per-mount size/used + guest bind-mount liveness (read-only, DATA-tab source)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := resolveExecProfile(cmd); err != nil {
+			return err
+		}
 		common := readCommonFlags(cmd)
 		target, _ := cmd.Flags().GetString("target")
 		pool, _ := cmd.Flags().GetString("pool")
@@ -669,7 +597,14 @@ var teardownCmd = &cobra.Command{
 	Use:   "teardown",
 	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (recorded LXC coordinates are cleared so the next build re-creates them), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT so a cheap rebuild re-uses the DNS creds + identity)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		configPath, _ := cmd.Flags().GetString("config")
+		ok, err := negotiateProfile(cmd, "teardown")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
+		}
+		configPath := profileConfigPath(cmd)
 		yes, _ := cmd.Flags().GetBool("yes")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		data, _ := cmd.Flags().GetBool("data")
@@ -685,6 +620,14 @@ var teardownCmd = &cobra.Command{
 			return nil
 		}
 
+		// A THIN box (no local provisioning runner) drives the whole-world
+		// teardown through the CP — the mirror of `freehold build`: the CP's
+		// co-located runner runs the shared teardown engine, the CP LXC going
+		// last. Per-tenant + --data still need the build box.
+		if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
+			return teardownViaCP(cfg, scope, data, removeDNS, yes)
+		}
+
 		// The teardown engine shells `freehold exec` — resolve the
 		// CLI binary as OURSELF (we are it).
 		self, err := os.Executable()
@@ -698,6 +641,7 @@ var teardownCmd = &cobra.Command{
 			AgentDir:        agentDir,
 			Runner:          cfg.Runner.Target,
 			Domain:          cfg.TenantSlug(),
+			ConfigPath:      configPath,
 		}
 
 		// The door must work before anything remote: a signed exec probe.
@@ -856,23 +800,14 @@ func removeManagedDNS(cfg *config.Config) error {
 }
 
 func defaultConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".config", "freehold", "config.toml")
+	return config.ConfigPath()
 }
 
-// freeholdHome mirrors installer::freehold_home (FREEHOLD_HOME override).
+// freeholdHome mirrors installer::freehold_home — the active profile's scoped
+// state dir, or the legacy ~/.freehold (FREEHOLD_HOME override) when no profile
+// is negotiated.
 func freeholdHome() string {
-	if h := os.Getenv("FREEHOLD_HOME"); h != "" {
-		return h
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/root"
-	}
-	return filepath.Join(home, ".freehold")
+	return config.StateDir()
 }
 
 func init() {
@@ -903,6 +838,73 @@ func init() {
 	storageInfoCmd.Flags().StringArray("mount", nil, "Mount ref <role>:<source>:<guest>:<vmid|-> (repeatable; vmid '-' skips the guest probe)")
 	storageResolveCmd.Flags().String("device", "", "Physical device for a NEW zpool (e.g. /dev/sdb) — required only on the consent-gated create path, when no existing backend is detected")
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a backend (zpool OR LVM-thin) when none is detected. Absent + no backend = actionable bail")
+}
+
+// teardownViaCP tears a world down from a THIN login box: there is no local
+// provisioning runner, so the CP's co-located runner runs the shared teardown
+// engine (console /api/world-teardown) — the mirror of how `freehold build`
+// triggers /api/world-build. Compute-only, whole-world: per-tenant + --data
+// still need the build box (the cp dataset is mounted until the CP is gone).
+func teardownViaCP(cfg *config.Config, scope teardown.Scope, data, removeDNS, yes bool) error {
+	if scope != teardown.ScopeWholeWorld {
+		return fmt.Errorf("per-tenant teardown needs a local provisioning runner — run it from the box that built the world")
+	}
+	if data {
+		return fmt.Errorf("--data from a login-only box is not supported yet — run it from the box that built the world")
+	}
+	if !yes {
+		fmt.Println("teardown scope: whole-world (CP-owned — this box has no local runner)")
+		fmt.Println("keeps: config · world home · door key · plane locations · DNS creds")
+		fmt.Printf("proceed? [type yes] ")
+		var answer string
+		if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
+			return fmt.Errorf("teardown aborted (not confirmed)")
+		}
+	}
+	// DNS records, best-effort, BEFORE the CP goes: the sealed credential lives
+	// on the build box, so a thin box can only try (same caveat the box path's
+	// removeManagedDNS already surfaces).
+	if removeDNS {
+		if err := removeManagedDNS(cfg); err != nil {
+			fmt.Printf("  (warning: DNS removal skipped — %v)\n", err)
+		}
+	}
+	secretHex, err := oplogin.SecretHex()
+	if err != nil {
+		return fmt.Errorf("no operator session on this box (%v) — run `freehold login` first", err)
+	}
+	secret, err := oplogin.NsecToSecret(secretHex)
+	if err != nil {
+		return err
+	}
+	c, err := oplogin.Login(cfg.CPURL, secret)
+	if err != nil {
+		return fmt.Errorf("login to %s failed: %w", cfg.CPURL, err)
+	}
+	// The CP-owned teardown runs the whole thing through the CP's own runner and
+	// clears the CP's managed state AFTER its runner-driven work (in the
+	// console), so the co-located runner is never removed out from under it —
+	// hence no separate CP-first hand-off here (the CP dies with the world).
+	fmt.Printf("tearing down world %s through the CP…\n", cfg.TenantSlug())
+	res, err := c.WorldTeardown()
+	if err != nil {
+		return fmt.Errorf("world-teardown (console /api/world-teardown): %w", err)
+	}
+	if res.Report != "" {
+		fmt.Println(res.Report)
+	}
+	fmt.Printf("  CP teardown: removed %d runner(s)/secrets, %d agent(s), %d DNS record(s)\n",
+		res.RunnersRemoved, res.AgentsRemoved, res.DnsRemoved)
+	// Forget the recorded LXC coords so the next build re-creates the guests (a
+	// thin box usually has none — same contract as the local path).
+	cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
+	cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
+	cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
+	if err := cfg.Save(config.ConfigPath()); err != nil {
+		return err
+	}
+	fmt.Println("cleared recorded LXC coordinates (vmid + ip) — the next build re-creates them")
+	return nil
 }
 
 // cpFirstTeardown is the CP-first teardown hand-off: the BOX logs into the CP

@@ -15,11 +15,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/x/term"
 
+	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
@@ -30,27 +32,23 @@ import (
 // OpsDir is where the BOX's own provisioning identity lives — the same
 // `agent-ops` identity `freehold build` / `teardown` sign with (rbOpsDir,
 // internal/cli). Login materializes it so a fresh box is a durable, self-owned
-// actor; it is box-local and excluded from any off-box backup.
+// actor; it is box-local and excluded from any off-box backup. Scoped to the
+// active profile's state dir when one is negotiated.
 func OpsDir() string {
 	return filepath.Join(controlPlaneDir(), "agent-ops")
 }
 
-// controlPlaneDir is the box's local control-plane state area (FREEHOLD_HOME's
-// `control-plane`, the parent of both the operator ledger and agent-ops).
+// controlPlaneDir is the box's local control-plane state area (the profile
+// state dir's `control-plane`, the parent of both the operator ledger and
+// agent-ops).
 func controlPlaneDir() string {
 	return filepath.Join(identityHome(), "control-plane")
 }
 
-// identityHome is the box's freehold state root (FREEHOLD_HOME or ~/.freehold).
+// identityHome is the box's freehold state root — the active profile's scoped
+// state dir, or the legacy ~/.freehold (FREEHOLD_HOME override) when none.
 func identityHome() string {
-	if home := os.Getenv("FREEHOLD_HOME"); home != "" {
-		return home
-	}
-	home := "~/.freehold"
-	if h := os.Getenv("HOME"); h != "" {
-		home = h + "/.freehold"
-	}
-	return home
+	return config.StateDir()
 }
 
 // EnsureOpsIdentity mints the box's own provisioning identity if missing
@@ -162,23 +160,54 @@ func Login(base string, secret [32]byte) (*console.Client, error) {
 // for a wrong-or-hijacked cp_url is TLS/DNS on that URL, not this recorded
 // anchor, so the operator never needs to type or know the CP pubkey here.
 func Interactive() error {
-	cfg, err := config.Load(config.DefaultPath())
+	// ONE buffered reader over stdin (AGENTS.md discipline): a fresh reader per
+	// prompt reads ahead past the first newline and breaks back-to-back prompts.
+	stdin := bufio.NewReader(os.Stdin)
+
+	// login adds (or refreshes) a NAMED tenant profile. The name defaults to the
+	// CP host slug; reusing an existing profile's recorded CP is a refresh that
+	// preserves `[runner]`.
+	cpURL := strings.TrimSpace(promptLine(stdin, "CP address (https://cp-<domain>): "))
+	if cpURL == "" {
+		return fmt.Errorf("no CP address provided — where is the control plane?")
+	}
+	def := config.SlugHost(configSplitHost(cpURL))
+	name := strings.TrimSpace(promptLine(stdin, fmt.Sprintf("profile name (default: %s): ", def)))
+	if name == "" {
+		name = def
+	}
+	for !config.ValidProfileName(name) {
+		name = strings.TrimSpace(promptLine(stdin, fmt.Sprintf("profile name (default: %s): ", def)))
+		if name == "" {
+			name = def
+		}
+		if !config.ValidProfileName(name) {
+			fmt.Fprintf(os.Stderr, "  (use letters, digits, dashes, underscores)\n")
+			name = ""
+		}
+	}
+	// A DIFFERENT profile already owner this CP — refuse to duplicate a tenant.
+	// Re-login into the profile that owns it is a refresh, not a duplicate.
+	if owner := profileForCP(cpURL); owner != "" && owner != name {
+		return fmt.Errorf("profile %s already registers %s — login into %s instead of creating a duplicate", owner, cpURL, owner)
+	}
+	// Scoped to this profile: its own config + state dir.
+	if p := config.Resolve(name); p != nil {
+		config.SetCurrent(p)
+	} else {
+		config.SetCurrent(&config.Profile{
+			Name:       name,
+			ConfigPath: config.NewProfilePath(name),
+			StateDir:   config.NewProfileState(name),
+		})
+	}
+
+	cfg, err := config.Load(config.ConfigPath())
 	if err != nil {
 		return err
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
-	}
-	// ONE buffered reader over stdin (AGENTS.md discipline): a fresh reader per
-	// prompt reads ahead past the first newline and breaks back-to-back prompts.
-	stdin := bufio.NewReader(os.Stdin)
-
-	cpURL := cfg.CPURL
-	if cpURL == "" {
-		cpURL = strings.TrimSpace(promptLine(stdin, "CP address (https://cp-<domain>): "))
-	}
-	if cpURL == "" {
-		return fmt.Errorf("no CP address provided — where is the control plane?")
 	}
 
 	secret := [32]byte{}
@@ -213,7 +242,8 @@ func Interactive() error {
 		return fmt.Errorf("login to %s failed: %w", cpURL, err)
 	}
 	// Only a successful login is persisted as "the operator" — a mistyped key
-	// never poisons the auto-login ledger.
+	// never poisons the auto-login ledger. Saved into the profile's scoped state
+	// dir (Dir() resolves through config.Current).
 	if !have {
 		if _, err := Save(secret); err != nil {
 			return err
@@ -247,7 +277,113 @@ func Interactive() error {
 	if err := seed(cfg, cpURL, anchor, pk, relayURL, relayWS, relayPubkey, atURL, atPubkey); err != nil {
 		return err
 	}
-	fmt.Printf("logged in as %s against %s — run `freehold` to operate the world\n", pk, cpURL)
+	// A successful admin login vets this box as a management box: present its
+	// door key to the host through the CP (world_authorize_door, DOOR_SPEC), so
+	// this box can drive CP-lifecycle work (bootstrap-cp / teardown-cp). Best-
+	// effort — login's primary outcome is the operator session + identity; a CP
+	// that predates the world toolset still allows login, with the miss surfaced.
+	if err := AuthorizeDoor(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "  (note: door not authorized — %v)\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "  door key authorized on the host (build/teardown enabled)\n")
+	}
+	fmt.Printf("logged in as %s against %s (profile %s) — run `freehold` to operate the world\n", pk, cpURL, name)
+	return nil
+}
+
+// profileForCP returns the name of the (existing) profile whose config records
+// cpURL, or "" when none does — a duplicate-CP guard for login.
+func profileForCP(cpURL string) string {
+	for _, p := range config.List() {
+		cfg, err := config.Load(p.ConfigPath)
+		if err != nil || cfg == nil {
+			continue
+		}
+		if cfg.CPURL == cpURL {
+			return p.Name
+		}
+	}
+	return ""
+}
+
+// configSplitHost returns the bare host of a CP URL (e.g.
+// "https://cp-demo.example" -> "cp-demo.example").
+func configSplitHost(u string) string {
+	host, _ := config.SplitURL(u)
+	return host
+}
+
+// SelectProfile interactively picks a profile from the registry (returns nil
+// when none exist). Used by the TUI and by build/teardown when the operator
+// must target a tenant. "default" is offered when a legacy config exists.
+func SelectProfile(what string) (*config.Profile, error) {
+	list := config.List()
+	if len(list) == 0 {
+		return nil, nil
+	}
+	stdin := bufio.NewReader(os.Stdin)
+	fmt.Fprintf(os.Stderr, "profiles (pick one to %s):\n", what)
+	for i, p := range list {
+		desc := ""
+		if cfg, err := config.Load(p.ConfigPath); err == nil && cfg != nil {
+			if cfg.CPURL != "" {
+				desc = " (" + cfg.CPURL + ")"
+			} else {
+				desc = " (not logged in)"
+			}
+		}
+		fmt.Fprintf(os.Stderr, "  %d) %s%s\n", i+1, p.Name, desc)
+	}
+	for {
+		in := strings.TrimSpace(promptLine(stdin, "select profile [1] : "))
+		if in == "" {
+			in = "1"
+		}
+		n, err := strconv.Atoi(in)
+		if err == nil && n >= 1 && n <= len(list) {
+			p := list[n-1]
+			config.SetCurrent(p)
+			return p, nil
+		}
+		fmt.Fprintf(os.Stderr, "  (1-%d)\n", len(list))
+	}
+}
+
+// AuthorizeDoor presents THIS box's door key to the host through the CP's world
+// toolset (world_authorize_door, DOOR_SPEC): it derives the door SSH public line
+// deterministically from the box's agent-ops identity seed (idempotent — the CP
+// grep-before-appends, so re-login is safe) and authorizes it signed as the
+// OPERATOR identity (the console-admin / toolset-roster credential), so a fresh
+// box can drive CP-lifecycle verbs (bootstrap-cp / teardown-cp). The private
+// half never leaves the box; only the public line is presented.
+func AuthorizeDoor(cfg *config.Config) error {
+	id, err := flows.LoadIdentity(OpsDir())
+	if err != nil {
+		return fmt.Errorf("no ops identity at %s: %v", OpsDir(), err)
+	}
+	seed, err := hex.DecodeString(id.NostrSecretHex)
+	if err != nil || len(seed) != 32 {
+		return fmt.Errorf("agent-ops nostr_secret is not a 32-byte seed")
+	}
+	host, _ := os.Hostname()
+	pubkey, err := crypto.SSHPublicKeyFromSeed(seed, "freehold-door-"+host)
+	if err != nil {
+		return fmt.Errorf("derive door pubkey: %v", err)
+	}
+	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
+		return fmt.Errorf("no freehold-agent-tools coords recorded (the CP predates the world toolset)")
+	}
+	auth, err := flows.AgentAuth(Dir())
+	if err != nil {
+		return fmt.Errorf("operator identity for the toolset: %v", err)
+	}
+	mc, err := client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
+	if err != nil {
+		return err
+	}
+	if _, err := mc.Call("world_authorize_door", map[string]interface{}{"pubkey": pubkey}); err != nil {
+		return fmt.Errorf("world_authorize_door: %w", err)
+	}
 	return nil
 }
 
@@ -304,7 +440,7 @@ func seed(cfg *config.Config, cpURL, cpPubkey, operatorPK, relayURL, relayWS, re
 	// fabricating one here would clobber a surviving local fact. The box's own
 	// agent-ops identity is materialized on disk only (EnsureOpsIdentity);
 	// opsPK is the box's caller identity, never the runner's.
-	return cfg.Save(config.DefaultPath())
+	return cfg.Save(config.ConfigPath())
 }
 
 // Logout drops the local login ledger (the operator identity the box kept from a

@@ -6,7 +6,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"freehold/platform/agents"
+	"freehold/agents"
 )
 
 // systemPrompt is the real multi-line prompt exactly as production ships it:

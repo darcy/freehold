@@ -46,6 +46,38 @@ type AgentRecord struct {
 	Channel   *string `json:"channel,omitempty"`
 }
 
+// DnsRecord is one explicit DNS record the CP resolver serves (name -> record).
+type DnsRecord struct {
+	IP        string `json:"ip"`
+	Source    string `json:"source"`
+	CreatedAt uint64 `json:"created_at"`
+}
+
+// WorldService is one of the deployed world's health-monitored services
+// (k3s / litellm / caddy): coords the CP records at build and serves over
+// /api/world so any logged-in management box renders the live world (instead of
+// only the box that deployed it probing its own local coords). The CP probes
+// them co-located from its own LXC. Only public coords — no secrets.
+type WorldService struct {
+	// Kind is the service kind: "k3s", "litellm" or "caddy".
+	Kind string `json:"kind"`
+	// URL is the probe target — https://<host>:6443 (k3s), the gateway health
+	// endpoint (litellm), https://<edge-host> (caddy).
+	URL string `json:"url"`
+	// ReachHost is an optional host for a plain reachability probe (caddy
+	// https edge) independent of the URL path.
+	ReachHost string      `json:"reach_host,omitempty"`
+	CreatedAt uint64      `json:"created_at"`
+}
+
+// DnsWildcard is the resolver's wildcard apex (all subdomains of apex -> ip).
+type DnsWildcard struct {
+	Apex      string `json:"apex"`
+	IP        string `json:"ip"`
+	Source    string `json:"source"`
+	CreatedAt uint64 `json:"created_at"`
+}
+
 // SecretRecord is a runner's secret (ciphertext only).
 type SecretRecord struct {
 	Runner        string  `json:"runner"`
@@ -58,13 +90,21 @@ type SecretRecord struct {
 
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
 type ControlPlaneState struct {
-	Runners     map[string]RunnerRecord `json:"runners"`
-	Secrets     map[string]SecretRecord `json:"secrets"`
-	Agents      map[string]AgentRecord  `json:"agents"`
-	RelayHost   *string                 `json:"relay_host,omitempty"`
-	Admins      []string                `json:"admins"`
-	RelayURL    *string                 `json:"relay_url,omitempty"`
-	RelayPubkey *string                 `json:"relay_pubkey,omitempty"`
+	Runners          map[string]RunnerRecord `json:"runners"`
+	Secrets          map[string]SecretRecord `json:"secrets"`
+	DNS              map[string]DnsRecord    `json:"dns"`
+	// Services is the world-services health registry (k3s/litellm/caddy coords),
+	// recorded at build and served on /api/world for management boxes.
+	Services         map[string]WorldService `json:"services,omitempty"`
+	ResolverDomain   *string                 `json:"resolver_domain,omitempty"`
+	ResolverWildcard *DnsWildcard            `json:"resolver_wildcard,omitempty"`
+	Agents           map[string]AgentRecord  `json:"agents"`
+	RelayHost        *string                 `json:"relay_host,omitempty"`
+	Admins           []string                `json:"admins"`
+	RelayURL         *string                 `json:"relay_url,omitempty"`
+	RelayPubkey      *string                 `json:"relay_pubkey,omitempty"`
+	AgentToolsURL    *string                 `json:"agent_tools_url,omitempty"`
+	AgentToolsPubkey *string                 `json:"agent_tools_pubkey,omitempty"`
 }
 
 // StateStore wraps the in-memory control-plane state with atomic-0600 save.
@@ -98,10 +138,12 @@ func Open(dir string) (*StateStore, error) {
 
 func defaultState() ControlPlaneState {
 	return ControlPlaneState{
-		Runners: map[string]RunnerRecord{},
-		Secrets: map[string]SecretRecord{},
-		Agents:  map[string]AgentRecord{},
-		Admins:  []string{},
+		Runners:  map[string]RunnerRecord{},
+		Secrets:  map[string]SecretRecord{},
+		DNS:      map[string]DnsRecord{},
+		Services: map[string]WorldService{},
+		Agents:   map[string]AgentRecord{},
+		Admins:   []string{},
 	}
 }
 
@@ -111,6 +153,12 @@ func ensureMaps(cp *ControlPlaneState) {
 	}
 	if cp.Secrets == nil {
 		cp.Secrets = map[string]SecretRecord{}
+	}
+	if cp.DNS == nil {
+		cp.DNS = map[string]DnsRecord{}
+	}
+	if cp.Services == nil {
+		cp.Services = map[string]WorldService{}
 	}
 	if cp.Agents == nil {
 		cp.Agents = map[string]AgentRecord{}
@@ -131,6 +179,27 @@ func (s *StateStore) Save() error {
 
 // Snapshot returns the current state (deep-ish copy).
 func (s *StateStore) Snapshot() ControlPlaneState { return s.state }
+
+// Reload re-reads state.json from disk into the store. The build's world
+// DNS/services/facts land via SEPARATE `freehold-console <dns|services>`
+// processes writing state.json (not the running serve's in-memory state), so a
+// long-lived console serve would otherwise serve a STALE snapshot (missing
+// services/facts) on /api/world. Call before serving a snapshot.
+func (s *StateStore) Reload() error {
+	raw, err := os.ReadFile(filepath.Join(s.dir, StateFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var st ControlPlaneState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return fmt.Errorf("malformed state json: %w", err)
+	}
+	s.state = st
+	return nil
+}
 
 // GetRunner returns a runner record.
 func (s *StateStore) GetRunner(name string) (RunnerRecord, bool) {
@@ -195,6 +264,66 @@ func (s *StateStore) SetRelayURL(u *string) error {
 // SetRelayPubkey sets the relay pubkey + saves.
 func (s *StateStore) SetRelayPubkey(p *string) error {
 	s.state.RelayPubkey = p
+	return s.Save()
+}
+
+// GetDNS returns a DNS record.
+func (s *StateStore) GetDNS(name string) (DnsRecord, bool) {
+	r, ok := s.state.DNS[name]
+	return r, ok
+}
+
+// InsertDNS records a DNS record.
+func (s *StateStore) InsertDNS(name string, rec DnsRecord) { s.state.DNS[name] = rec }
+
+// RemoveDNS deletes a DNS record.
+func (s *StateStore) RemoveDNS(name string) { delete(s.state.DNS, name) }
+
+// GetService returns a world-services record.
+func (s *StateStore) GetService(name string) (WorldService, bool) {
+	r, ok := s.state.Services[name]
+	return r, ok
+}
+
+// InsertService records a world-services record.
+func (s *StateStore) InsertService(name string, rec WorldService) { s.state.Services[name] = rec }
+
+// RemoveService deletes a world-services record.
+func (s *StateStore) RemoveService(name string) { delete(s.state.Services, name) }
+
+// ResolverDomain returns the resolver's world-domain suffix.
+func (s *StateStore) ResolverDomain() *string { return s.state.ResolverDomain }
+
+// SetResolverDomain sets the resolver domain + saves.
+func (s *StateStore) SetResolverDomain(d *string) error {
+	s.state.ResolverDomain = d
+	return s.Save()
+}
+
+// ResolverWildcard returns the resolver wildcard apex.
+func (s *StateStore) ResolverWildcard() *DnsWildcard { return s.state.ResolverWildcard }
+
+// SetResolverWildcard sets the resolver wildcard + saves.
+func (s *StateStore) SetResolverWildcard(w *DnsWildcard) error {
+	s.state.ResolverWildcard = w
+	return s.Save()
+}
+
+// AgentToolsURL returns the recorded agent-tools URL.
+func (s *StateStore) AgentToolsURL() *string { return s.state.AgentToolsURL }
+
+// SetAgentToolsURL sets the agent-tools URL + saves.
+func (s *StateStore) SetAgentToolsURL(u *string) error {
+	s.state.AgentToolsURL = u
+	return s.Save()
+}
+
+// AgentToolsPubkey returns the recorded agent-tools pubkey.
+func (s *StateStore) AgentToolsPubkey() *string { return s.state.AgentToolsPubkey }
+
+// SetAgentToolsPubkey sets the agent-tools pubkey + saves.
+func (s *StateStore) SetAgentToolsPubkey(p *string) error {
+	s.state.AgentToolsPubkey = p
 	return s.Save()
 }
 

@@ -486,6 +486,11 @@ func EnsureGuestDocker(c *client.McpClient, target string, vmid uint32) error {
 	// Retried 3x because pct start may succeed before the guest has a DHCP
 	// lease — apt against no network fails on the first attempt.
 	install := `pct exec ` + vid + ` -- sh -c 'export DEBIAN_FRONTEND=noninteractive; ` +
+		// The fresh guest's resolv.conf points at the LAN router (DHCP/PVE
+		// default), which on home labs does NOT resolve — apt/curl then die
+		// with "Temporary failure resolving". Pin public resolvers for the
+		// install (worldDNS reconfigures the guest to the CP resolver later).
+		`echo nameserver 1.1.1.1 > /etc/resolv.conf; echo nameserver 8.8.8.8 >> /etc/resolv.conf; ` +
 		`if ! docker compose version >/dev/null 2>&1; then ` +
 		`apt-get update >/dev/null 2>&1; ` +
 		`if ! apt-get install -y docker.io docker-compose-v2 >/dev/null; then ` +
