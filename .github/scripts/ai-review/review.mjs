@@ -168,11 +168,42 @@ const REVIEW_TOOL = {
   },
 };
 
-// Bound the reasoning budget: the flash reasoning model otherwise thinks for
-// tens of thousands of tokens on a dense diff (~9 min/call). Capping
-// `max_tokens` alone only truncates that thinking before it answers (prose,
-// non-JSON); `reasoning_effort` makes it think less, so the JSON arrives fast.
+// Bound the reasoning budget. NOTE: `deepseek-v4p1-flash` ignores
+// `reasoning_effort` (measured: identical output length with/without it), and
+// `max_tokens` alone only truncates the thinking before it answers. The
+// reliable path is to demand JSON via `response_format` and to extract a JSON
+// object from prose if the model drifts.
 const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT ?? 'low';
+
+// extractJsonObject returns the first brace-balanced `{...}` substring that
+// contains a "verdict" key — the safety net when the model wraps its JSON in
+// prose. String/escape aware so braces inside comments don't break the scan.
+function extractJsonObject(s) {
+  const start = s.indexOf('{');
+  if (start < 0) return '';
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        const cand = s.slice(start, i + 1);
+        if (cand.includes('"verdict"')) return cand;
+      }
+    }
+  }
+  return '';
+}
 
 async function callLlmOnce(prompt) {
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
@@ -184,9 +215,8 @@ async function callLlmOnce(prompt) {
       max_tokens: 64000,
       stream: true,
       ...(LLM_REASONING_EFFORT ? { reasoning_effort: LLM_REASONING_EFFORT } : {}),
+      response_format: { type: 'json_object' },
       messages: [{ role: 'user', content: prompt }],
-      tools: [REVIEW_TOOL],
-      tool_choice: { type: 'function', function: { name: 'review' } },
     }),
   });
   if (!res.ok) throw new Error(`LLM API error ${res.status}: ${await res.text()}`);
@@ -196,27 +226,35 @@ async function callLlmOnce(prompt) {
   const msg = reassembleStream(await res.text());
   if (!msg) throw new Error('LLM returned no message');
 
-  // Function calling puts the JSON in tool_calls[].function.arguments; fall
-  // back to content (string / array) and then reasoning_content for providers
-  // that answer another way. Log the raw output for diagnosis.
+  // JSON normally lands in content; fall back to tool-call args / reasoning
+  // for providers that answer another way. Log head + tail so a drift into
+  // prose is diagnosable from the run log.
   let content = msg.tool_calls?.[0]?.function?.arguments?.trim() || '';
   if (!content.trim()) {
     if (typeof msg.content === 'string') content = msg.content;
     else if (Array.isArray(msg.content)) content = msg.content.map(p => p?.text || '').join('');
   }
   if (!content.trim() && typeof msg.reasoning_content === 'string') content = msg.reasoning_content;
-  core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 240)}`);
+  core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 200)}`);
+  core.info(`LLM raw tail: ${content.trim().slice(-300)}`);
 
   const raw = content.trim() || '{}';
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-  let parsed;
+  let parsed = null;
   try {
     parsed = JSON.parse(cleaned);
-  } catch (e) {
-    throw new Error(`LLM returned non-JSON: ${e.message} (raw starts: ${raw.slice(0, 60)})`);
+  } catch {
+    const cand = extractJsonObject(cleaned);
+    if (cand) {
+      try {
+        parsed = JSON.parse(cand);
+      } catch {
+        parsed = null;
+      }
+    }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.verdict) {
-    throw new Error(`LLM response missing verdict (raw: ${raw.slice(0, 120)}). Check the model/prompt.`);
+    throw new Error(`LLM response missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`);
   }
   return parsed;
 }
