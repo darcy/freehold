@@ -66,6 +66,7 @@ func init() {
 		teardownCmd,
 		relayJoinCmd,
 		relaySetupCmd,
+		storageCmd,
 		buildCmd,
 		dnsCredCmd,
 	)

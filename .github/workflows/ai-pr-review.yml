@@ -12,7 +12,7 @@ permissions:
 jobs:
   bot-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     if: github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@v6
@@ -42,13 +42,13 @@ jobs:
           # ---- provider config: this is the only provider-specific part ----
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
           LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
-          LLM_MODEL: "accounts/fireworks/models/deepseek-v4p1-flash"
+          LLM_MODEL: "accounts/fireworks/models/deepseek-v4-flash-0731"
           # --------------------------------------------------------------------
 
           PROMPT_FILE: "review-prompt.md"
           CONTEXT_FILES: "AGENTS.md,README.md,ARCHITECTURE.md"
           EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,**/dist/**,**/vendor/**"
-          MAX_DIFF_CHARS: "7500000"
+          MAX_DIFF_CHARS: "500000"
           MAX_CONTEXT_FILE_CHARS: "240000"
           FAIL_ON_OVERSIZED_DIFF: "true"
         run: node review.mjs

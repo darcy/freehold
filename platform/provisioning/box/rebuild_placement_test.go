@@ -2,8 +2,11 @@ package box
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
+
+	"freehold/platform/provisioning/planebase"
 )
 
 // ---- storage-thinpool contract-line parsing ----------------------------------
@@ -274,6 +277,12 @@ func TestStagePlacementZfsRejectsThinPoolFlag(t *testing.T) {
 // repointEngine builds a stageLocalLvmRepoint-ready engine over a fake
 // storage.cfg whose local-lvm block starts at `data`.
 func repointEngine(initial string) (*Engine, *string) {
+	return repointEngineRiders(initial, "")
+}
+
+// repointEngineRiders additionally models the LVs riding local-lvm's current
+// pool (the rider guard's probe): non-empty => the re-point must be skipped.
+func repointEngineRiders(initial, riders string) (*Engine, *string) {
 	cfg := initial
 	e := &Engine{Bins: Bins{Self: "self"}, Out: &bytes.Buffer{}}
 	e.RunBin = func(bin string, args []string) (bool, string) {
@@ -282,6 +291,9 @@ func repointEngine(initial string) (*Engine, *string) {
 		}
 		script := args[len(args)-1]
 		switch {
+		case strings.Contains(script, "pool_lv,lv_name"):
+			// The rider guard: LVs riding local-lvm's current pool.
+			return true, riders
 		case strings.Contains(script, "grep -A2"):
 			for _, l := range strings.Split(cfg, "\n") {
 				t := strings.TrimSpace(l)
@@ -345,5 +357,255 @@ func TestStageLocalLvmRepointNoBlock(t *testing.T) {
 	err := e.stageLocalLvmRepoint(&placement{pool: "pve", thinPool: "freehold-thin", created: true})
 	if err == nil || !strings.Contains(err.Error(), "no `lvmthin: local-lvm`") {
 		t.Errorf("missing local-lvm block must be a hard error, got %v", err)
+	}
+}
+
+func TestStageLocalLvmRepointSkipsWhenCurrentPoolHasRiders(t *testing.T) {
+	// local-lvm points at `data`, which still holds live guest disks: the
+	// re-point to freehold's carved pool must be SKIPPED, not performed.
+	e, cfg := repointEngineRiders("lvmthin: local-lvm\n\tthinpool data\n\tvgname pve\n", "vm-100-disk-0\nvm-116-disk-0\n")
+	if err := e.stageLocalLvmRepoint(&placement{pool: "pve", thinPool: "freehold-thin", created: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(*cfg, "thinpool data") || strings.Contains(*cfg, "freehold-thin") {
+		t.Errorf("local-lvm with live riders must be left untouched:\n%s", *cfg)
+	}
+}
+
+// ---- inventory-driven selection ---------------------------------------------
+//
+// stagePlacement consumes the JSON inventory line `storage resolve` emits and
+// drives a plain-language choice: a single safe backend is a one-keystroke
+// confirm; several usable backends must be chosen explicitly (--yes refuses);
+// blocked devices are never selectable; freehold's own data offers
+// reconnect-or-erase.
+
+// invEngine builds a stagePlacement-ready engine whose resolve emits the given
+// inventory.
+func invEngine(inv planebase.Inventory, input string, flags Flags) *Engine {
+	e := placementEngine("", input, flags)
+	resolve := planebase.EncodeInventory(inv)
+	e.RunBin = func(bin string, args []string) (bool, string) {
+		switch {
+		case len(args) >= 2 && args[0] == "storage" && args[1] == "resolve":
+			return true, resolve
+		case len(args) >= 2 && args[0] == "storage" && args[1] == "destroy":
+			return true, "STORAGE-DESTROYED: true\n"
+		}
+		return false, "unexpected call: " + strings.Join(args, " ")
+	}
+	return e
+}
+
+func TestSelectPlacementSingleSafeZpoolShortcut(t *testing.T) {
+	inv := planebase.Inventory{Zpools: []planebase.ZpoolInfo{{Name: "rpool", FreeGB: 1700, Health: "ONLINE"}}}
+	e := invEngine(inv, "y\n", Flags{RelayDomain: "t.d"})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.pool != "rpool" || got.thinPool != "" {
+		t.Errorf("single safe zpool => rpool, got %+v", got)
+	}
+}
+
+func TestSelectPlacementMenusSeveralBackends(t *testing.T) {
+	inv := planebase.Inventory{
+		Zpools: []planebase.ZpoolInfo{{Name: "rpool", FreeGB: 1700}},
+		VGs:    VGInfoForTest("pve", "data", 2),
+	}
+	// recommended is the freehold-less safe zpool (option 1); pick the VG,
+	// reuse its only pool, and accept the share (it holds guest LVs).
+	e := invEngine(inv, "2\nr\nshare\n", Flags{RelayDomain: "t.d"})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.pool != "pve" || got.thinPool != "data" || got.created {
+		t.Errorf("choose VG pve reuse data, got %+v", got)
+	}
+}
+
+// VGInfoForTest builds a VG with one pool holding `riders` guest LVs.
+func VGInfoForTest(name, pool string, riders int) []planebase.VGInfo {
+	var rl []string
+	for i := 0; i < riders; i++ {
+		rl = append(rl, fmt.Sprintf("vm-%d-disk-0", 100+i))
+	}
+	return []planebase.VGInfo{{Name: name, FreeGB: 100, Pools: []planebase.PoolInfo{{Name: pool, DataPercent: 37, Riders: rl}}}}
+}
+
+func TestSelectPlacementYesRefusesMultiple(t *testing.T) {
+	inv := planebase.Inventory{
+		Zpools: []planebase.ZpoolInfo{{Name: "rpool", FreeGB: 1700}},
+		VGs:    VGInfoForTest("pve", "data", 2),
+	}
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d", Yes: true})
+	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "--plane-pool") {
+		t.Errorf("--yes with several backends must refuse and name --plane-pool, got %v", err)
+	}
+}
+
+func TestSelectPlacementPlanePoolPicksNonFirst(t *testing.T) {
+	inv := planebase.Inventory{
+		VGs: append(
+			VGInfoForTest("pve", "data", 2),
+			planebase.VGInfo{Name: "pve-fast", FreeGB: 95, Pools: []planebase.PoolInfo{{Name: "data", DataPercent: 11}}},
+		),
+	}
+	// PlanePool selects pve-fast; the pool prompt reuses its only pool.
+	e := invEngine(inv, "r\n", Flags{RelayDomain: "t.d", PlanePool: "pve-fast"})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.pool != "pve-fast" || got.thinPool != "data" {
+		t.Errorf("--plane-pool pve-fast, got %+v", got)
+	}
+}
+
+func TestSelectPlacementBlockedDevicesOnlyFails(t *testing.T) {
+	inv := planebase.Inventory{Devices: []planebase.DeviceInfo{{Path: "/dev/sda", SizeGB: 1800, Clean: false, Content: "it already has data on it (zfs_member)"}}}
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d"})
+	_, err := e.stagePlacement()
+	if err == nil || !strings.Contains(err.Error(), "no usable storage") {
+		t.Errorf("blocked-only inventory must fail actionably, got %v", err)
+	}
+}
+
+func TestSelectPlacementSharedPoolNeedsShare(t *testing.T) {
+	inv := planebase.Inventory{VGs: VGInfoForTest("pve", "data", 3)}
+	// choosePool asks reuse/carve first (r), THEN the share confirmation.
+	e := invEngine(inv, "r\nnope\n", Flags{RelayDomain: "t.d"})
+	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Errorf("a shared pool without the share word must stop, got %v", err)
+	}
+	// With the share word it proceeds.
+	e2 := invEngine(inv, "r\nshare\n", Flags{RelayDomain: "t.d"})
+	got, err := e2.stagePlacement()
+	if err != nil || got.pool != "pve" {
+		t.Errorf("share => reuse pve, got %+v %v", got, err)
+	}
+}
+
+func TestSelectPlacementReconnectsMatchingFreeholdDomain(t *testing.T) {
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
+		Name: "pve", FreeGB: 100,
+		Pools: []planebase.PoolInfo{{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}}},
+	}}}
+	e := invEngine(inv, "k\nr\n", Flags{RelayDomain: "t.d"})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.pool != "pve" || got.thinPool != "freehold-thin" {
+		t.Errorf("reconnect to freehold plane, got %+v", got)
+	}
+}
+
+func TestSelectPlacementFreeholdDomainMismatchFails(t *testing.T) {
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
+		Name: "pve", FreeGB: 100,
+		Pools: []planebase.PoolInfo{{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"old-domain"}, Volumes: 4}}},
+	}}}
+	e := invEngine(inv, "k\n", Flags{RelayDomain: "new.domain"})
+	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "old-domain") {
+		t.Errorf("domain mismatch on keep must explain, got %v", err)
+	}
+}
+
+func TestSelectPlacementCleanDeviceOnlyDefers(t *testing.T) {
+	inv := planebase.Inventory{Devices: []planebase.DeviceInfo{{Path: "/dev/sdb", SizeGB: 1800, Clean: true}}}
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d"})
+	_, err := e.stagePlacement()
+	if err == nil || !strings.Contains(err.Error(), "later phase") {
+		t.Errorf("a clean-disk-only host must defer with a clear message, got %v", err)
+	}
+	// Explicitly naming the clean device must fail with the same clarity.
+	e2 := invEngine(inv, "", Flags{RelayDomain: "t.d", PlanePool: "/dev/sdb"})
+	if _, err := e2.stagePlacement(); err == nil || !strings.Contains(err.Error(), "later phase") {
+		t.Errorf("--plane-pool naming a clean device must defer, got %v", err)
+	}
+}
+
+func TestSelectPlacementYesReconnectPicksFreeholdPool(t *testing.T) {
+	// The freehold pool is NOT first: a headless reconnect must pick it, not
+	// pools[0], or it would orphan the previous plane.
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{Name: "pve", FreeGB: 100, Pools: []planebase.PoolInfo{
+		{Name: "data", DataPercent: 10},
+		{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}},
+	}}}}
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d", Yes: true})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "freehold-thin" {
+		t.Errorf("--yes reconnect must pick the freehold pool, got %+v", got)
+	}
+}
+
+func TestSelectPlacementAmbiguousFreeholdPoolsRequireName(t *testing.T) {
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{Name: "pve", FreeGB: 100, Pools: []planebase.PoolInfo{
+		{Name: "fh-a", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 2}},
+		{Name: "fh-b", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 2}},
+	}}}}
+	// --yes must refuse rather than default to an empty pool name.
+	e := invEngine(inv, "", Flags{RelayDomain: "t.d", Yes: true})
+	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "--thin-pool") {
+		t.Errorf("--yes with two freehold pools must refuse, got %v", err)
+	}
+	// Interactive: the operator names the pool; k keeps the data.
+	e2 := invEngine(inv, "k\nfh-b\n", Flags{RelayDomain: "t.d"})
+	got, err := e2.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "fh-b" {
+		t.Errorf("ambiguous freehold pools must accept the typed pool, got %+v", got)
+	}
+}
+
+func TestSelectPlacementThinPoolCannotOrphanFreeholdData(t *testing.T) {
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{Name: "pve", FreeGB: 100, Pools: []planebase.PoolInfo{
+		{Name: "data", DataPercent: 10},
+		{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}},
+	}}}}
+	// Keep the data, but point --thin-pool at a DIFFERENT pool: refuse rather
+	// than report a reconnect and place the world elsewhere.
+	e := invEngine(inv, "k\n", Flags{RelayDomain: "t.d", ThinPool: "data"})
+	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "orphan") {
+		t.Errorf("--thin-pool away from the freehold pool must refuse, got %v", err)
+	}
+	// Naming the freehold pool is fine.
+	e2 := invEngine(inv, "k\n", Flags{RelayDomain: "t.d", ThinPool: "freehold-thin"})
+	got, err := e2.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.thinPool != "freehold-thin" {
+		t.Errorf("reconnect to the freehold pool via --thin-pool, got %+v", got)
+	}
+}
+
+func TestSelectPlacementErasesFreeholdData(t *testing.T) {
+	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
+		Name: "pve", FreeGB: 100,
+		Pools: []planebase.PoolInfo{{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}}},
+	}}}
+	destroyed := 0
+	e := invEngine(inv, "e\nr\n", Flags{RelayDomain: "t.d"})
+	base := e.RunBin
+	e.RunBin = func(bin string, args []string) (bool, string) {
+		if len(args) >= 2 && args[0] == "storage" && args[1] == "destroy" {
+			destroyed++
+		}
+		return base(bin, args)
+	}
+	if _, err := e.stagePlacement(); err != nil {
+		t.Fatal(err)
+	}
+	if destroyed != 3 {
+		t.Errorf("erase must destroy all three tenants, got %d", destroyed)
 	}
 }

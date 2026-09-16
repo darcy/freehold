@@ -37,6 +37,7 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning/drive"
+	"freehold/platform/provisioning/planebase"
 	"freehold/platform/provisioning/stages"
 )
 
@@ -57,6 +58,9 @@ type Flags struct {
 	SizeGB             uint64
 	PoolSizeGB         uint64
 	ThinPool           string
+	PlanePool          string // select a detected backend by name (VG or zpool)
+	ConfirmSharedPool  bool   // headless consent to share a pool with live guests
+	EraseFreehold      bool   // headless consent to erase a detected freehold plane
 	NoK3s              bool
 	NoLitellm          bool
 	LitellmProviderKey string
@@ -1034,6 +1038,19 @@ func (e *Engine) stagePlacement() (*placement, error) {
 	if !ok {
 		return nil, fmt.Errorf("storage resolution failed:\n%s", out)
 	}
+	// The resolve stage emits a read-only INVENTORY (every backend + every
+	// whole disk, classified by the data it carries). Drive the choice from
+	// it; an older sibling (no inventory line) falls back to the legacy parse.
+	inv, haveInv := planebase.DecodeInventory(out)
+	if !haveInv || inv.Empty() {
+		return e.legacyPlacement(out)
+	}
+	return e.selectPlacement(inv)
+}
+
+// legacyPlacement is the pre-inventory resolve parse: a single detected pool
+// + its thin pools, or the bare-host create/bail branch.
+func (e *Engine) legacyPlacement(out string) (*placement, error) {
 	pool := parseStoragePool(out)
 	detected, isLvm := parseStorageThinPools(out)
 
@@ -1044,7 +1061,7 @@ func (e *Engine) stagePlacement() (*placement, error) {
 		if e.F.ThinPool != "" {
 			return nil, fmt.Errorf("--thin-pool applies only to the LVM-thin backend; this host resolved %q (ZFS)", pool)
 		}
-		return &placement{pool: pool}, nil
+		return &placement{pool: pool, kind: planebase.KindZfs}, nil
 	}
 	has := func(name string) bool {
 		for _, d := range detected {
@@ -1066,10 +1083,10 @@ func (e *Engine) stagePlacement() (*placement, error) {
 		if name == "" {
 			name = drive.FreshThinPool
 		}
-		return &placement{pool: pool, thinPool: name, created: !has(name)}, nil
+		return &placement{pool: pool, thinPool: name, created: !has(name), kind: planebase.KindLvmThin}, nil
 	}
 	if e.F.Yes {
-		return &placement{pool: pool, thinPool: detected[0], created: false}, nil
+		return &placement{pool: pool, thinPool: detected[0], created: false, kind: planebase.KindLvmThin}, nil
 	}
 
 	first := detected[0]
@@ -1087,12 +1104,12 @@ func (e *Engine) stagePlacement() (*placement, error) {
 	}
 	answer = strings.TrimSpace(answer)
 	if answer == "" || answer == "r" || answer == "R" || answer == first {
-		return &placement{pool: pool, thinPool: first, created: false}, nil
+		return &placement{pool: pool, thinPool: first, created: false, kind: planebase.KindLvmThin}, nil
 	}
 	// A name the operator types is an ADOPT if it already exists in the VG
 	// (membership probe), a CARVE otherwise — same rule as the flag path.
 	if has(answer) {
-		return &placement{pool: pool, thinPool: answer, created: false}, nil
+		return &placement{pool: pool, thinPool: answer, created: false, kind: planebase.KindLvmThin}, nil
 	}
 	sizeAnswer, err := e.Prompt(fmt.Sprintf("new pool %q size GB (blank = %d)", answer, e.F.PoolSizeGB))
 	if err != nil {
@@ -1103,7 +1120,7 @@ func (e *Engine) stagePlacement() (*placement, error) {
 		return nil, err
 	}
 	e.F.PoolSizeGB = size
-	return &placement{pool: pool, thinPool: answer, created: true}, nil
+	return &placement{pool: pool, thinPool: answer, created: true, kind: planebase.KindLvmThin}, nil
 }
 
 // stageStorage ensures each tenant's dataset onto the placement gate's
@@ -1134,10 +1151,13 @@ func (e *Engine) stageStorage(placement *placement) error {
 			"--size-gb", strconv.FormatUint(e.F.SizeGB, 10),
 			"--pool-size-gb", strconv.FormatUint(e.F.PoolSizeGB, 10),
 		}
-		// Honor the RECORDED backend kind: on a host with BOTH a zpool and a
-		// VG, re-detection would always pick ZFS and drive an LVM-backed
-		// tenant the wrong way.
-		if cfg.Plane.BackendKind != nil && *cfg.Plane.BackendKind != "" {
+		// Honor the placement's chosen kind first, then the RECORDED kind: on
+		// a host with BOTH a zpool and a VG, re-detection would always pick
+		// ZFS (or `vgs[0]`) and drive the tenant the wrong way.
+		switch {
+		case placement.kind != "":
+			ensureArgs = append(ensureArgs, "--kind", string(placement.kind))
+		case cfg.Plane.BackendKind != nil && *cfg.Plane.BackendKind != "":
 			ensureArgs = append(ensureArgs, "--kind", *cfg.Plane.BackendKind)
 		}
 		if placement.thinPool != "" {
@@ -1194,14 +1214,45 @@ func (e *Engine) stageLocalLvmRepoint(placement *placement) error {
 		}
 		return out, nil
 	}
-	return drive.RepointLocalLvm(run, placement.thinPool)
+	// SAFETY: never re-point PVE's local-lvm away from a pool that still
+	// holds live guest disks — that strands them (their rootfs disks stay on
+	// the old pool while storage.cfg points elsewhere). Re-point only when
+	// the pointer is already the pool freehold carved, or its current pool is
+	// empty. On a host with other workloads this keeps their storage intact.
+	riders, err := run(planebase.LocalLvmRidersScript, 30)
+	if err != nil {
+		return err
+	}
+	if n := countLines(riders); n > 0 {
+		current, err := run(planebase.LocalLvmProbeScript, 30)
+		if err != nil {
+			return err
+		}
+		if got := strings.TrimSpace(current); got != placement.thinPool {
+			fmt.Fprintf(e.Out, "  · leaving PVE local-lvm on %q — it holds %d live volume(s); freehold will not re-point it\n", got, n)
+			return nil
+		}
+	}
+	return planebase.RepointLocalLvm(run, placement.thinPool)
+}
+
+// countLines counts non-blank lines (a small readback helper).
+func countLines(s string) int {
+	n := 0
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // placement is the plane-placement gate's resolved answer.
 type placement struct {
-	pool     string // the backend name (LVM: the VG)
-	thinPool string // the thin pool the tenant LVs land in ("" on ZFS)
-	created  bool   // true => freehold carves it (recorded for teardown --data)
+	pool     string                // the backend name (LVM: the VG; ZFS: the zpool)
+	thinPool string                // the thin pool the tenant LVs land in ("" on ZFS)
+	created  bool                  // true => freehold carves it (recorded for teardown --data)
+	kind     planebase.BackendKind // "" => let the ensure stage detect
 }
 
 // parseStoragePool reads `STORAGE-POOL: <name>` (default rpool).
@@ -1645,7 +1696,6 @@ func shellQuote(s string) string {
 // must be able to reopen the sealed DNS token (the DNS-cred collection + the
 // hand-off seal the relay/cp creds to it).
 
-
 // litellmPostgresPw reads back the CANONICAL postgres password from the k8s
 // litellm-pg Secret so a rebuild REUSES it (first-run-wins): Postgres initializes
 // PGDATA against the first password, so a re-mint + SSA re-apply would rotate it
@@ -1665,7 +1715,6 @@ func shellQuote(s string) string {
 // identity — same as deploy-cp grants).
 
 // Secret minting (master / postgres) lives in stages.GenSecretHex.
-
 
 // clearStoredDNSCreds removes the stored DNS provider credentials (per-slot +
 // the legacy single-file copy) so the build prompts for them again. Used by
@@ -1796,7 +1845,6 @@ func derefU32(p *uint32) uint32 {
 // created through create_agent), so a rebuild resurrects them idempotently with
 // the same durable pubkeys (E3). The CPA name itself is created by stageCpa.
 
-
 // recordCpa writes the CPA's identity + name into the config (managed) so the
 // Services row + teardown + console see the agent, and registers it in the
 // control-plane agent registry (A5) so it shows up like any named agent. The
@@ -1890,6 +1938,3 @@ func printTail(text string, n int) string {
 	}
 	return b.String()
 }
-
-
-

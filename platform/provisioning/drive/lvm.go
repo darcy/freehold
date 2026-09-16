@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"freehold/platform/provisioning/bootstrap"
 	"freehold/contract/client"
+	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/planebase"
 )
 
@@ -395,7 +395,7 @@ func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
 		}
 		return out.Stdout, nil
 	}
-	current, err := run(LocalLvmProbeScript, 30)
+	current, err := run(planebase.LocalLvmProbeScript, 30)
 	if err != nil {
 		return fmt.Errorf("local-lvm probe failed on %s: %w", target, err)
 	}
@@ -405,7 +405,7 @@ func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
 			return err
 		}
 		if found {
-			if err := RepointLocalLvm(run, other); err != nil {
+			if err := planebase.RepointLocalLvm(run, other); err != nil {
 				return fmt.Errorf("re-pointing local-lvm off the doomed pool %s/%s: %w", vg, pool, err)
 			}
 		}
@@ -435,55 +435,19 @@ func lvsRiders(c *client.McpClient, target, vg, pool string) ([]string, error) {
 	for _, line := range strings.Split(out.Stdout, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == pool {
+			// Skip the pool's own bookkeeping LVs (hidden without `-a`, but
+			// defensive): they are not data that blocks removal.
+			switch {
+			case strings.HasSuffix(fields[1], "_tdata"), strings.HasSuffix(fields[1], "_tmeta"),
+				strings.HasSuffix(fields[1], "_cdata"), strings.HasSuffix(fields[1], "_cmeta"),
+				strings.HasSuffix(fields[1], "_pmspare"):
+				continue
+			}
 			riders = append(riders, fields[1])
 		}
 	}
 	return riders, nil
 }
 
-// LocalLvmProbeScript prints the pool PVE's stock local-lvm storage
-// currently points at — storage.cfg's lvmthin block is WHITESPACE-formatted
-// (`\tthinpool data`, `vgname pve` — no colons), so the probe awks the BARE
-// pool name out of the local-lvm block. Empty output = no local-lvm block
-// (or no thinpool line). Live-verified on the box.
-const LocalLvmProbeScript = "grep -A2 '^lvmthin: local-lvm$' /etc/pve/storage.cfg | awk '/^[[:space:]]*thinpool[[:space:]]/{print $2; exit}'"
-
-// LocalLvmRepointScript rewrites ONLY the thinpool line inside the
-// local-lvm block of /etc/pve/storage.cfg (scoped awk: the in-block flag
-// sets on the header, clears on a blank line), replacing the file through
-// a tmp copy. This is PVE's sanctioned manual repair: `pvesm set local-lvm
-// --thinpool` is not supported ("Unknown option: thinpool" — live-verified).
-func LocalLvmRepointScript(pool string) string {
-	return fmt.Sprintf(`awk -v tp=%s '/^lvmthin: local-lvm$/{inb=1; print; next} /^[[:space:]]*$/{inb=0} inb && /^[[:space:]]*thinpool[[:space:]]/{print "\tthinpool " tp; next} {print}' /etc/pve/storage.cfg > /tmp/fh-storage.cfg && cat /tmp/fh-storage.cfg > /etc/pve/storage.cfg && rm -f /tmp/fh-storage.cfg`, pool)
-}
-
-// RepointLocalLvm points PVE's stock local-lvm storage at `pool`: probe
-// the current pointer, skip when already correct, scoped awk edit, then
-// READ BACK. Idempotent; a missing local-lvm block is an error (both
-// callers run only where storage.cfg is known to carry one). `run`
-// executes one script on the target and returns its stdout — RemoveThinPool
-// passes the runner's MCP exec; the rebuild pipeline passes its subprocess
-// transport (the discipline lives here ONCE, the transport differs).
-func RepointLocalLvm(run func(script string, timeoutS uint64) (string, error), pool string) error {
-	current, err := run(LocalLvmProbeScript, 30)
-	if err != nil {
-		return fmt.Errorf("local-lvm probe failed: %w", err)
-	}
-	if current = strings.TrimSpace(current); current == "" {
-		return fmt.Errorf("no `lvmthin: local-lvm` storage block in /etc/pve/storage.cfg — cannot re-point it at %s", pool)
-	}
-	if current == pool {
-		return nil // already pointing there
-	}
-	if _, err := run(LocalLvmRepointScript(pool), 60); err != nil {
-		return fmt.Errorf("re-pointing PVE local-lvm to %s: %w", pool, err)
-	}
-	rb, err := run(LocalLvmProbeScript, 30)
-	if err != nil {
-		return fmt.Errorf("local-lvm readback failed: %w", err)
-	}
-	if got := strings.TrimSpace(rb); got != pool {
-		return fmt.Errorf("local-lvm still points at %q after the edit (want %q)", got, pool)
-	}
-	return nil
-}
+// The local-lvm storage.cfg probe/repoint scripts + RepointLocalLvm live in
+// planebase (shared by this driver and the detector, avoiding an import cycle).

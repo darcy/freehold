@@ -79,10 +79,13 @@ function readContextFiles() {
 }
 
 async function getPreviousRoundNotes() {
-  const { data: comments } = await octokit.rest.issues.listComments({ owner, repo, issue_number: pull_number, per_page: 50 });
-  // Each round creates a NEW parent comment, so take the most recent one.
+  // Paginate: a busy PR exceeds one page, and missing the prior tracking
+  // comment would drop the re-review guidance entirely.
+  const comments = await octokit.paginate(octokit.rest.issues.listComments, { owner, repo, issue_number: pull_number, per_page: 100 });
+  // Each round creates a NEW parent comment, so take the most recent one that
+  // is NOT this round's (defensive — normally we run before creating ours).
   const tracking = comments
-    .filter(c => c.body?.includes(TRACKING_MARKER))
+    .filter(c => c.body?.includes(TRACKING_MARKER) && c.id !== parentCommentId)
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
   return tracking ? tracking.body.replace(TRACKING_MARKER, '').trim() : '(first review round)';
 }
@@ -165,6 +168,45 @@ const REVIEW_TOOL = {
   },
 };
 
+// deepseek-v4p1-flash ignored BOTH `reasoning_effort` and `response_format` and
+// narrated its review in prose (no JSON) on a dense diff, so the reviewer uses
+// deepseek-v4-flash-0731, which honors function calling. Keep `reasoning_effort`
+// off by default (0731 does not need it); set LLM_REASONING_EFFORT to override.
+const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT ?? '';
+
+// extractJsonObject returns the first brace-balanced `{...}` substring that
+// contains a "verdict" key — the safety net when the model wraps its JSON in
+// prose. It tries EVERY `{` (not just the first) so a prose brace like
+// "{1: ...}" before the real JSON does not hide it. String/escape aware so
+// braces inside strings don't break the scan.
+function extractJsonObject(s) {
+  for (let start = s.indexOf('{'); start >= 0; start = s.indexOf('{', start + 1)) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          const cand = s.slice(start, i + 1);
+          if (cand.includes('"verdict"')) return cand;
+          break; // this start did not yield the verdict object; try the next
+        }
+      }
+    }
+  }
+  return '';
+}
+
 async function callLlmOnce(prompt) {
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
@@ -174,6 +216,7 @@ async function callLlmOnce(prompt) {
       temperature: 0.1,
       max_tokens: 64000,
       stream: true,
+      ...(LLM_REASONING_EFFORT ? { reasoning_effort: LLM_REASONING_EFFORT } : {}),
       messages: [{ role: 'user', content: prompt }],
       tools: [REVIEW_TOOL],
       tool_choice: { type: 'function', function: { name: 'review' } },
@@ -186,27 +229,35 @@ async function callLlmOnce(prompt) {
   const msg = reassembleStream(await res.text());
   if (!msg) throw new Error('LLM returned no message');
 
-  // Function calling puts the JSON in tool_calls[].function.arguments; fall
-  // back to content (string / array) and then reasoning_content for providers
-  // that answer another way. Log the raw output for diagnosis.
+  // JSON normally lands in content; fall back to tool-call args / reasoning
+  // for providers that answer another way. Log head + tail so a drift into
+  // prose is diagnosable from the run log.
   let content = msg.tool_calls?.[0]?.function?.arguments?.trim() || '';
   if (!content.trim()) {
     if (typeof msg.content === 'string') content = msg.content;
     else if (Array.isArray(msg.content)) content = msg.content.map(p => p?.text || '').join('');
   }
   if (!content.trim() && typeof msg.reasoning_content === 'string') content = msg.reasoning_content;
-  core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 240)}`);
+  core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 200)}`);
+  core.info(`LLM raw tail: ${content.trim().slice(-300)}`);
 
   const raw = content.trim() || '{}';
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-  let parsed;
+  let parsed = null;
   try {
     parsed = JSON.parse(cleaned);
-  } catch (e) {
-    throw new Error(`LLM returned non-JSON: ${e.message} (raw starts: ${raw.slice(0, 60)})`);
+  } catch {
+    const cand = extractJsonObject(cleaned);
+    if (cand) {
+      try {
+        parsed = JSON.parse(cand);
+      } catch {
+        parsed = null;
+      }
+    }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.verdict) {
-    throw new Error(`LLM response missing verdict (raw: ${raw.slice(0, 120)}). Check the model/prompt.`);
+    throw new Error(`LLM response missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`);
   }
   return parsed;
 }
@@ -308,6 +359,13 @@ async function main() {
   const headSha = pr.head.sha;
   const startedAt = Date.now();
 
+  // Read the PRIOR round's notes BEFORE creating this round's tracking comment:
+  // getPreviousRoundNotes takes the most recent TRACKING_MARKER comment, so
+  // creating ours first would make it read the fresh, empty one and drop the
+  // re-review guidance ("don't re-find marginal issues") — which makes every
+  // round reason like a first look (slow + prone to prose/non-JSON).
+  const previousRound = await getPreviousRoundNotes();
+
   // Create the progress comment up front so the checkboxes light up as work
   // happens, rather than appearing fully-formed at the end.
   await createParentComment(progressBody(0));
@@ -347,7 +405,6 @@ async function main() {
   const diff = diffResult.diff;
   await progress(1, `Read the diff — ${diffResult.fileCount} file(s), ~${diffResult.totalChars.toLocaleString()} chars`);
 
-  const previousRound = await getPreviousRoundNotes();
   const ctx = readContextFiles();
   await progress(2, ctx.names.length ? `Read context — ${ctx.names.join(', ')}` : 'No context files found');
 

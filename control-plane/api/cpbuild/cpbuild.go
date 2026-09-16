@@ -293,17 +293,55 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 	}
 	kind := planebase.BackendKind(s.PlaneKind)
 	if kind == "" {
-		action, err := bootstrap.ResolveProxmox(mc, s.RunnerTarget, false, nil)
+		// No recorded kind: classify the host's storage read-only and take
+		// the recommended SAFE backend (or the recorded PlanePool). This
+		// replaces the old blind `vgs[0]` guess, which on a multi-VG host
+		// could land the plane on a busy pool.
+		inv, err := bootstrap.StorageInventory(mc, s.RunnerTarget)
 		if err != nil {
-			return nil, fmt.Errorf("storage resolve: %w", err)
+			return nil, fmt.Errorf("storage inventory: %w", err)
 		}
-		if action.Kind != "Reuse" {
-			return nil, fmt.Errorf("no storage backend to ensure onto: %s", action.Message)
+		opts := planebase.BuildOptions(inv)
+		var chosen planebase.Option
+		ok := false
+		if s.PlanePool != "" {
+			chosen, ok = planebase.FindOption(opts, s.PlanePool)
+			if !ok || chosen.Kind == planebase.KindBlocked {
+				return nil, fmt.Errorf("recorded plane pool %q on %s is not usable — clear it or pick another", s.PlanePool, s.RunnerTarget)
+			}
+		} else if i := planebase.Recommend(opts); i >= 0 {
+			chosen, ok = opts[i], true
 		}
-		if *action.Detected == planebase.ExistingZfs {
+		if !ok {
+			return nil, fmt.Errorf("no safe storage backend found on %s — record a plane pool explicitly", s.RunnerTarget)
+		}
+		// Freehold-namespaced names are domain-derived: reconnecting to a
+		// previous freehold plane under a DIFFERENT relay domain would orphan
+		// the old data. Fail closed, like the box-side engine — this path is
+		// the only selection on a thin login box.
+		// s.RelayHost is the relay's own host (the value drive.DatasetPath /
+		// DomainLXCName use as the naming domain), so it is the correct field
+		// to match DOMAIN-derived provenance against; DomainMatches flattens
+		// both sides the same way the box engine does.
+		if matched, hasDomains := chosen.Freehold.DomainMatches(s.RelayHost); hasDomains && !matched {
+			return nil, fmt.Errorf("previous freehold data on %s was created for %q, but this world's domain is %q — the volume names would not reconnect; use the same relay domain or clear that data first", s.RunnerTarget, strings.Join(chosen.Freehold.Domains, ", "), s.RelayHost)
+		}
+		// This non-interactive path cannot collect the typed share consent the
+		// box-side engine requires, so it refuses a shared (Caution) backend
+		// rather than silently selecting one.
+		if chosen.Safety == planebase.Caution {
+			return nil, fmt.Errorf("storage %q on %s already shares capacity with live volumes — this automatic path will not select it; record the plane pool explicitly after confirming", chosen.Backend, s.RunnerTarget)
+		}
+		if s.PlanePool == "" {
+			s.PlanePool = chosen.Backend
+		}
+		switch chosen.Kind {
+		case planebase.KindReuseZpool:
 			kind = planebase.KindZfs
-		} else {
+		case planebase.KindReuseVG:
 			kind = planebase.KindLvmThin
+		default:
+			return nil, fmt.Errorf("recorded plane option %q is not a ready backend (creating one is a later phase)", s.PlanePool)
 		}
 	}
 	mounts := map[planebase.Tenant][]planebase.MountSpec{}

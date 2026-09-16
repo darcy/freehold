@@ -314,6 +314,16 @@ func EnsureZpool(clientConn *client.McpClient, target, pool string, device *stri
 	if device == nil || *device == "" {
 		return fmt.Errorf("creating a zpool needs a physical device — pass --device (e.g. /dev/sdb); or use an existing zpool/LVM backend")
 	}
+	// Fail-closed: never `zpool create` a device that carries ANY data. The
+	// operator cleans a spare disk out-of-band first; re-running then sees it
+	// clean and proceeds.
+	probe, err := ProbeDevice(clientConn, target, *device)
+	if err != nil {
+		return err
+	}
+	if !probe.Clean {
+		return fmt.Errorf("refusing to create a zpool on %s — it is not empty: %s. Freehold never erases a device that carries data; clean it yourself (after confirming it holds nothing you need) and re-run", *device, probe.Content)
+	}
 	_, err = ExecToOK(clientConn, target, "zpool create "+pool+" "+*device, "zpool create", 300)
 	return err
 }
