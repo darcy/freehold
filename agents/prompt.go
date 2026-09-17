@@ -11,6 +11,7 @@ package agents
 
 import (
 	_ "embed"
+	"sort"
 	"strings"
 	"text/template"
 )
@@ -32,6 +33,54 @@ var CPASystemPrompt string
 var customSystemPrompt string
 
 var customPromptTmpl = template.Must(template.New("custom").Parse(customSystemPrompt))
+
+// Department prompts: the five departments the CPA delegates to (see AGENTS.md
+// "Locked model"). Each is an agent definition like freehold/ and custom/,
+// embedded from <department>/prompt.md. Deployment is lazy/on-demand, so a
+// prompt can exist before any department pod does.
+//
+//go:embed gatekeeper/prompt.md
+var gatekeeperPrompt string
+
+//go:embed vault/prompt.md
+var vaultPrompt string
+
+//go:embed provisioner/prompt.md
+var provisionerPrompt string
+
+//go:embed agent-ops/prompt.md
+var agentOpsPrompt string
+
+//go:embed services/prompt.md
+var servicesPrompt string
+
+// departmentPrompts maps a reserved department identity name to its embedded
+// system prompt. The names are reserved: a create_agent naming one of them
+// selects that department's prompt rather than the custom template.
+var departmentPrompts = map[string]string{
+	"gatekeeper":  gatekeeperPrompt,
+	"vault":       vaultPrompt,
+	"provisioner": provisionerPrompt,
+	"agent-ops":   agentOpsPrompt,
+	"services":    servicesPrompt,
+}
+
+// DepartmentNames returns the reserved department identity names, sorted.
+func DepartmentNames() []string {
+	names := make([]string, 0, len(departmentPrompts))
+	for n := range departmentPrompts {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// DepartmentPrompt returns the embedded system prompt for a reserved department
+// identity name, and whether name is a department.
+func DepartmentPrompt(name string) (string, bool) {
+	p, ok := departmentPrompts[name]
+	return p, ok
+}
 
 // AgentSystemPrompt renders the created-agent prompt for a given name and
 // purpose. An empty purpose omits the purpose paragraph entirely.

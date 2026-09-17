@@ -103,6 +103,20 @@ repo, not the history.
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.
+- **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user
+  touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**
+  (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS) are
+  its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —
+  the operator and any agent may converse with any department or agent directly; what is
+  bounded is *capability execution*. A capability a department owns (external proxy, backup,
+  compute/LXC, model registration) is executed by that department's identity, and the raw
+  grant for it attaches to department identities, never to a custom agent that would then
+  self-serve a second, ungoverned path to the exact capability the department exists to own
+  and audit. Deployment shape is not locked (departments are not necessarily five
+  permanently-running processes); only the identity/grant separation is. A custom agent that
+  self-serves a department-owned capability is a containment failure even if a grant would
+  technically allow it — the department's prompt is the first line of defense, the grant the
+  second.
 - **Host-flexible — not locked to Proxmox.** Proxmox is the lead/default; VPS/cloud are
   first-class (the business path). The k8s layer and everything above the host driver run
   identically regardless of substrate. Installer/runner must target a VPS as easily as
@@ -135,6 +149,16 @@ changelog.
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
+- **The five departments are defined but not yet deployed.** Each department's prompt lives
+  at `agents/<department>/prompt.md` and is embedded by the `freehold/agents` package, but
+  nothing spawns a department pod yet: deployment is lazy/on-demand, and the capability
+  tooling they broker (external proxy, backup, compute, model registration) is not in this
+  phase. Enforcement of "capability work goes through the owning department" is therefore the
+  existing grant model, not new code — raw capability grants sit with department identities
+  once Chunk 5 begins issuing grants, and custom agents never receive them.
+- **The Vault/Gatekeeper "check in on a new service" question has no trigger yet.** The hook
+  fires when an agent requests a service/compute through the CPA's provision path; that path
+  is Chunk 5/6. Until then there is no provisioning request to raise the question on.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
@@ -200,8 +224,10 @@ changelog.
 - Go — five modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
   - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
-    the CPA prompt + skills, `custom/` the template for agents the CPA creates; embeds its
-    Markdown as Go values): `cd agents && go build ./... && go vet ./... && go test ./...`
+    the CPA prompt + skills, `custom/` the template for agents the CPA creates, and the five
+    department definitions (`gatekeeper/`, `vault/`, `provisioner/`, `agent-ops/`,
+    `services/`); embeds its Markdown as Go values):
+    `cd agents && go build ./... && go vet ./... && go test ./...`
   - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
     console/relay/state/coords): `cd contract && go build ./... && go vet ./... && go test ./...`
   - `platform/` (`freehold/platform` — the evolving world: services/provisioning/
