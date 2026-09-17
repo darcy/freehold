@@ -26,12 +26,22 @@ runners, and memory are scoped to a single relay.
     the command the agent writes verbatim. NO semantic tools — one generic `exec(cmd, target)`.  
     Runner streams output for long-running/live commands and signs a Nostr audit event per command.
     
-*   **The master/control agent (CPA) is a real, LLM-backed reasoning agent — the system's**
-    **main user touchpoint.** It runs on a real-agent harness (buzz-acp/goose-class), gets
-    its purpose from a versioned system-prompt file in the repo, and delegates to the
-    per-service expert agents it creates rather than doing expert-level work itself. The
-    deterministic runner/CP layer underneath (provisioning, grants, secrets, teardown/
+*   **The master/control agent (CPA) is a real, LLM-backed reasoning agent — the system's**  
+    **main user touchpoint.** It runs on a real-agent harness (buzz-acp/goose-class), gets  
+    its purpose from a versioned system-prompt file in the repo, and delegates to the  
+    per-service expert agents it creates rather than doing expert-level work itself. The  
+    deterministic runner/CP layer underneath (provisioning, grants, secrets, teardown/  
     rebuild) stays as-is — reasoning decides what to do, the same auditable machinery does it.
+    
+*   **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user  
+    touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**  
+    (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS) are  
+    its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —  
+    the operator and any agent may converse with any department directly; what is bounded is  
+    capability execution: a department-owned capability (proxy, backup, compute, model  
+    registration) is executed by that department's identity, and its raw grant attaches  
+    there, never to a custom agent that would self-serve a second, ungoverned path.  
+    Deployment is lazy/on-demand; only the identity/grant separation is locked.
     
 *   **Runner identity = Nostr membership + separate encryption keypair (env-injected).**  
     CP is a **secret PROVISIONER** (encrypt-to-runner-key + ship + rotate + membership), not a  

@@ -25,6 +25,17 @@ it once there's a real agent workflow worth generalizing to it (see Chunk 5 belo
 *   **Grants coarse, not 1:1** — agent ↔ runner; dedicated runner per service = default;  
     sharing via grants (whitelist Nostr pubkeys).
     
+*   **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user  
+    touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**  
+    (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS) are  
+    its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted  
+    (the operator and any agent may converse with any department directly); capability  
+    execution is bounded — a department-owned capability is executed by that department's  
+    identity, and its raw grant attaches there, never to a custom agent. Deployment is  
+    lazy/on-demand; only the identity/grant separation is locked. Departments are defined  
+    now (`agents/<department>/prompt.md`); they deploy as the capabilities they broker  
+    arrive (Chunk 5/6).
+    
 
 ## POC goal
 
@@ -290,6 +301,10 @@ it to make and ship a real change — to Buzz's own git and/or GitHub.
     
 *   Proof point: an agent deploys a service to an LXC using what it committed.
     
+*   **The first department capability gets teeth: Provisioner.** Compute requests routed
+    through the CPA land on the Provisioner identity, which holds the raw compute grant;
+    custom agents never receive it. This is where "capability work goes through the owning
+    department" stops being documentation and becomes the grant layout.
 
 ### Chunk 5 acceptance
 
@@ -331,6 +346,12 @@ kube target.
     
 *   Sleep/wake for ad-hoc agents is built here (idle auto-reap on pods), using the resource
     numbers gathered in Chunk 3.
+    
+*   **The department check-in hook lands here.** When an agent requests a service/compute
+    through the CPA's provision path, Vault asks "back this up?" and Gatekeeper asks
+    "reachable outside your network?" — a visible choice, with "no" as a valid final answer.
+    Department status reuses the same postcondition-gated 🟢/🟡/🔴 language as runner/service
+    readiness.
     
 
 ### Chunk 6 acceptance

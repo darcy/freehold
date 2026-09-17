@@ -30,3 +30,33 @@ func TestAgentSystemPromptOmitsEmptyPurpose(t *testing.T) {
 		t.Errorf("empty purpose must omit the purpose paragraph: %q", got)
 	}
 }
+
+func TestDepartmentPromptsEmbeddedWithBoundary(t *testing.T) {
+	want := []string{"agent-ops", "gatekeeper", "provisioner", "services", "vault"}
+	got := DepartmentNames()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("DepartmentNames = %v, want %v", got, want)
+	}
+	for _, name := range want {
+		p, ok := DepartmentPrompt(name)
+		if !ok {
+			t.Errorf("DepartmentPrompt(%q) not found", name)
+			continue
+		}
+		if strings.TrimSpace(p) == "" {
+			t.Errorf("department %q prompt is empty", name)
+		}
+		if !strings.Contains(p, "Ownership boundary") {
+			t.Errorf("department %q prompt does not state an ownership boundary", name)
+		}
+		if !strings.Contains(p, "relay-audited") {
+			t.Errorf("department %q prompt is missing the audit discipline", name)
+		}
+	}
+}
+
+func TestDepartmentPromptUnknownName(t *testing.T) {
+	if _, ok := DepartmentPrompt("waldo"); ok {
+		t.Fatalf("DepartmentPrompt(\"waldo\") must not resolve to a department")
+	}
+}

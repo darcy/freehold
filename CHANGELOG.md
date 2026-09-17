@@ -25,6 +25,37 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.6] — the agent org is two tiers: the CPA and five departments
+
+The agent model so far was the CPA plus ad-hoc agents it creates, with no fixed roster. That
+left the blast-radius question unanswered at the capability layer: a custom agent that could
+self-serve a public proxy or a backup is a second, ungoverned path to the exact capability
+something should own and audit.
+
+- **A fixed second tier.** **Gatekeeper** (access/security), **Vault** (data plane),
+  **Provisioner** (compute), **Agent Ops** (models/providers/agents), and **Services**
+  (installed OSS) are the CPA's direct reports, each a distinct identity scoped to one domain.
+  The CPA remains the sole user touchpoint.
+- **Talk unrestricted; capability execution bounded.** The operator and any agent may converse
+  with any department or agent directly. What is bounded is *capability execution*: a
+  department-owned capability is executed by that department's identity, and its raw grant
+  attaches there — never to a custom agent. A custom agent that self-serves a department-owned
+  capability is a containment failure even if a grant would allow it (prompt first, grant
+  second).
+- **Deployment shape is not locked.** Departments are lazily/on-demand deployed (tools
+  provisioned mise-style, only for configured capabilities); only the identity/grant
+  separation is locked. Status language is uniform runner → service → department:
+  🟢/🟡/🔴.
+- **Definitions land now; enforcement is the existing grant model.** The five prompts live at
+  `agents/<department>/prompt.md` and are embedded by the `freehold/agents` package. Nothing
+  spawns a department yet, and there is no raw capability grant to restrict until Chunk 5
+  issues one — so enforcement today is that custom agents hold no such grants and only the
+  operator-scoped `grant_agent` issues them.
+- **Check-in hooked to the provision path, not built.** Vault ("back this up?") and
+  Gatekeeper ("reachable outside your network?") ask when a service/compute is requested
+  through the CPA's provision path (Chunk 5/6); "no" is a valid, final answer. Until that path
+  exists there is no request to check in on.
+
 ## [0.6.5] — installs are named profiles; new LXCs are `<name>-<role>`
 
 `freehold-install` wrote the single base config/state (`~/.config/freehold`,
