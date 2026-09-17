@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"freehold/control-plane/api/agent"
 )
@@ -114,11 +115,13 @@ func (s *Server) toolList() []map[string]interface{} {
 	}
 	return []map[string]interface{}{
 		{
-			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel to add it to; the channel is created if it doesn't exist, and the operator is added). Returns the new agent's pubkey.",
+			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
-				"name":    map[string]interface{}{"type": "string"},
-				"purpose": map[string]interface{}{"type": "string"},
-				"channel": map[string]interface{}{"type": "string"},
+				"name":     map[string]interface{}{"type": "string"},
+				"purpose":  map[string]interface{}{"type": "string"},
+				"channel":  map[string]interface{}{"type": "string"},
+				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"private":  map[string]interface{}{"type": "boolean"},
 			}, []string{"name"}),
 		},
 		{
@@ -183,7 +186,14 @@ func (s *Server) toolList() []map[string]interface{} {
 type createAgentArgs struct {
 	Name    string `json:"name"`
 	Purpose string `json:"purpose"`
-	Channel string `json:"channel"`
+	// Channel is the single-channel form (the CPA's toolset); Channels is the
+	// multi-channel form (a department joins #freehold + its own #<name>). Both
+	// are accepted; Channel is prepended to Channels when both are present.
+	Channel  string   `json:"channel"`
+	Channels []string `json:"channels"`
+	// Private makes an explicitly created channel visibility=private (the
+	// per-department channels). The default freehold channel is always open.
+	Private bool `json:"private"`
 }
 type grantAgentArgs struct {
 	Runner  string   `json:"runner"`
@@ -245,7 +255,11 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			s.rpcError(w, id, -32602, "create_agent arguments: "+err.Error())
 			return
 		}
-		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose, a.Channel)
+		channels := append([]string(nil), a.Channels...)
+		if strings.TrimSpace(a.Channel) != "" {
+			channels = append([]string{a.Channel}, channels...)
+		}
+		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose, channels, a.Private)
 		// Persist the purpose on the created agent's registry row so a rebuild
 		// reconciler can recreate its system prompt verbatim (E3 without
 		// silently dropping the agent's reason to exist).

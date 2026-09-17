@@ -31,10 +31,11 @@ it once there's a real agent workflow worth generalizing to it (see Chunk 5 belo
     its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted  
     (the operator and any agent may converse with any department directly); capability  
     execution is bounded — a department-owned capability is executed by that department's  
-    identity, and its raw grant attaches there, never to a custom agent. Deployment is  
-    lazy/on-demand; only the identity/grant separation is locked. Departments are defined  
-    now (`agents/<department>/prompt.md`); they deploy as the capabilities they broker  
-    arrive (Chunk 5/6).
+    identity, and its raw grant attaches there, never to a custom agent. The five are  
+    installed as part of the core build (`freehold build`): each in `#freehold` plus its  
+    own private `#<department>` channel, with the CPA a member of all. Only the  
+    identity/grant separation is locked; capability tooling/secrets arrive per department  
+    later (Chunk 5/6).
     
 
 ## POC goal

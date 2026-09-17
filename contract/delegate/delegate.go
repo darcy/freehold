@@ -63,10 +63,22 @@ func EnsureChannel(relayURL string, secret []byte, channelID, name string) error
 // EnsureChannelAuth is EnsureChannel with a separate NIP-98 auth URL (the
 // pre-Caddy LAN-dial case in agent-tools).
 func EnsureChannelAuth(dialURL, authURL string, secret []byte, channelID, name string) error {
+	return ensureChannel(dialURL, authURL, secret, channelID, name, "open")
+}
+
+// EnsurePrivateChannelAuth creates (idempotently) a PRIVATE channel (kind 9007,
+// h/name/visibility=private): only members the owner adds can see it. Used for
+// the per-department channels, which the department owns and into which it adds
+// the CPA and the operator.
+func EnsurePrivateChannelAuth(dialURL, authURL string, secret []byte, channelID, name string) error {
+	return ensureChannel(dialURL, authURL, secret, channelID, name, "private")
+}
+
+func ensureChannel(dialURL, authURL string, secret []byte, channelID, name, visibility string) error {
 	return publishSignedAuth(dialURL, authURL, secret, ChannelCreateKind, [][]string{
 		{"h", channelID},
 		{"name", name},
-		{"visibility", "open"},
+		{"visibility", visibility},
 	}, "")
 }
 

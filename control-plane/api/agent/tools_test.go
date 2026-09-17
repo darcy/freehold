@@ -99,11 +99,11 @@ func TestToolsSet(t *testing.T) {
 	srv, read := fakeConsole(t)
 	defer srv.Close()
 	c := console.WithCookie(srv.URL, "abc")
-	tools := &Tools{Console: c, Create: func(name, purpose, channel string) (string, error) {
+	tools := &Tools{Console: c, Create: func(name, purpose string, channels []string, private bool) (string, error) {
 		return strings.Repeat("b", 64), nil
 	}}
 
-	pub, err := tools.CreateAgent("helper", "help with installs", "ops")
+	pub, err := tools.CreateAgent("helper", "help with installs", []string{"ops"}, false)
 	if err != nil {
 		t.Fatalf("create-agent: %v", err)
 	}
@@ -133,10 +133,28 @@ func TestToolsSet(t *testing.T) {
 	}
 }
 
+// TestPrimaryChannel: the registry row records the first non-empty channel, or
+// "" (the default freehold channel) when the list is empty.
+func TestPrimaryChannel(t *testing.T) {
+	for _, tc := range []struct {
+		in   []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"", "  "}, ""},
+		{[]string{"", "#freehold"}, "#freehold"},
+		{[]string{"#vault", "#other"}, "#vault"},
+	} {
+		if got := primaryChannel(tc.in); got != tc.want {
+			t.Errorf("primaryChannel(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestToolsNilGuards: the toolset refuses cleanly when the console isn't bound.
 func TestToolsNilGuards(t *testing.T) {
 	var tools Tools
-	if _, err := tools.CreateAgent("x", "", ""); err == nil {
+	if _, err := tools.CreateAgent("x", "", nil, false); err == nil {
 		t.Error("create-agent with nil console must fail")
 	}
 	if err := tools.GrantAgent("r", []string{strings.Repeat("a", 64)}); err == nil {
