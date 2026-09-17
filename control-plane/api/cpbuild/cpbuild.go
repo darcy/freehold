@@ -1589,8 +1589,11 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 		return relayFreeholdChannel, "#freehold", false, nil
 	}
 	// A relay read error must NOT be mistaken for "absent" (that would create a
-	// duplicate of an existing channel) — fail the create instead.
-	existingID, existingName, ok, err := relay.FindChannelAuth(s.RelayURL, authURL, s.Sec, channel)
+	// duplicate of an existing channel) — fail the create instead. The lookup
+	// signs as the CREATING agent (nSec), the identity that owns/joins the
+	// channel: a private channel the console identity is not a member of must
+	// still be found, or a rebuild would create a duplicate.
+	existingID, existingName, ok, err := relay.FindChannelAuth(s.RelayURL, authURL, nSec, channel)
 	if err != nil {
 		return "", "", false, fmt.Errorf("look up channel %q: %w", channel, err)
 	}

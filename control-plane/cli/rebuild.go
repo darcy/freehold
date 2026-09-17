@@ -1074,10 +1074,20 @@ func (e *buildEngine) stageDepartments() error {
 	if err != nil {
 		return err
 	}
-	// Same substrate preconditions as the CPA: a world without relay/k3s/litellm
-	// has no agent pods to put them in.
-	if cfg == nil || cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.K3s.Vmid == nil || cfg.RelayURL == "" || cfg.Litellm.URL == "" {
-		return nil
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.F.ConfigPath)
+	}
+	// Fail loudly, never silently skip: stageCpa runs first and already requires
+	// these (so a partial world would have failed there), but a silent nil here
+	// would let a build look successful with the departments missing.
+	if cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("no cp/k3s coords recorded — the department pods need the k3s substrate")
+	}
+	if cfg.RelayURL == "" {
+		return fmt.Errorf("no relay URL in config — departments must join the community relay")
+	}
+	if cfg.Litellm.URL == "" {
+		return fmt.Errorf("no litellm gateway recorded — departments need a reasoning model")
 	}
 	mc, err := worldMcp(cfg)
 	if err != nil {
