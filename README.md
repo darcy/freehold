@@ -177,17 +177,23 @@ Then operate the world yourself (the justfile does NOT drive the world — it
 only builds + installs):
 
 ```sh
-freehold-install bootstrap --name <world>   # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
+freehold-install install --yes --name <world> --host root@<box> \
+                     --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr>  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # tear it down (compute-only: keeps coords + /srv/data);
                      #  a login-only box runs it through the CP
 freehold            # the TUI dashboard
 ```
 
-`freehold-install install` (interactive) or `bootstrap` requires `--name`: the
-world/profile name scopes the config + state to `profiles/<name>/` and prefixes
-the guest LXCs `<name>-<role>`. Re-running an existing name is refused —
-reconcile a live world with `freehold build`.
+`freehold-install install` (guided) or `install --yes` (headless) requires
+`--name` + `--host`: the profile name scopes the config + state to
+`profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; the host is
+recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
+needs the relay/CP domains + proxy IP (the guided flow prompts for them). An
+existing name whose CP is absent is re-adopted (the plane keeps the runner
+identity); a **live** CP is refused — reconcile the world with `freehold build`,
+drop it with `teardown`/`uninstall`, or join it with `freehold login`. The old
+`bootstrap` command remains as a hidden alias for `install --yes`.
 
 ### The appliance (`freehold` — one binary, two surfaces)
 

@@ -479,6 +479,25 @@ func TestFromAnswersEmptyDomainIsBlankAndPreservesPrev(t *testing.T) {
 }
 func sptr(v string) *string { return &v }
 
+// TestFromAnswersRecordsHostAndAccessMode: the install host + access mode land
+// in the profile config, a run that supplies neither keeps the recorded pair,
+// and explicit answers still win.
+func TestFromAnswersRecordsHostAndAccessMode(t *testing.T) {
+	e := &Engine{F: Flags{Host: "root@192.168.30.224", AccessMode: "ssh-root-proxmox"}}
+	cfg := e.fromAnswers()
+	if cfg.Host != "root@192.168.30.224" || cfg.AccessMode != "ssh-root-proxmox" {
+		t.Fatalf("host/access_mode not recorded: %q %q", cfg.Host, cfg.AccessMode)
+	}
+	got := mergeFromAnswers(&config.Config{}, cfg)
+	if got.Host != cfg.Host || got.AccessMode != cfg.AccessMode {
+		t.Fatalf("merge dropped host/access_mode: %q %q", got.Host, got.AccessMode)
+	}
+	got = mergeFromAnswers(&config.Config{Host: "root@new", AccessMode: "api-vultr"}, cfg)
+	if got.Host != "root@new" || got.AccessMode != "api-vultr" {
+		t.Fatalf("answers must win: %q %q", got.Host, got.AccessMode)
+	}
+}
+
 // TestWorldConfigSelfURLPointsAtAgentTools guards the CPA-bridge regression: the
 // world coords' SelfURL is the AGENT-TOOLS server's URL (the CPA pod curls its
 // stdio bridge binary from <SelfURL>/freehold-agent-tools-binary), never the

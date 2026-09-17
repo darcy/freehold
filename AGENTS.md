@@ -54,11 +54,16 @@ repo, not the history.
 - `install/` — the `freehold-install` bootstrap CLI (top-level Go module): get a control
   plane up in an environment (Proxmox today; Vultr/Hetzner providers come later) and a door
   to it; the shared provisioning engine lives in `platform/provisioning/box`. World bring-up
-  after bootstrap is `freehold build` from any box via the CP. `install` and `bootstrap`
-  **require `--name`**: the profile name scopes config + state to
-  `profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; a name that already has a
-  profile is refused (reconcile with `freehold build`). A world with no recorded name keeps
-  the domain-derived LXC names, and durable-plane names stay domain-keyed.
+  after install is `freehold build` from any box via the CP. `install` **requires `--name`
+  + `--host`**: the profile name scopes config + state to `profiles/<name>/` and prefixes
+  the guest LXCs `<name>-<role>`; the host is recorded in the profile (so a later
+  `uninstall --name` resolves it without the flag). A fresh plane also needs the relay/CP
+  domains + the proxy IP (the guided flow prompts). Re-running an existing name whose CP is
+  **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
+  Nostr/enc key), while a **live** CP is refused (reconcile with `freehold build`, drop it
+  with `teardown`/`uninstall`, or join it with `freehold login`). `bootstrap` is a hidden
+  alias for `install --yes`. A world with no recorded name keeps the domain-derived LXC
+  names, and durable-plane names stay domain-keyed.
 - `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.

@@ -25,6 +25,31 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.8] — one install surface, a life-cycle gate, and identity-preserving re-adopt
+
+`freehold-install bootstrap` and `install` were two commands over one pipeline, and any
+existing profile name was refused outright — so a re-install after a teardown could not
+re-adopt a world whose plane still held its runner. Install is now one command with a
+life-cycle gate.
+
+- **One install surface.** `freehold-install install` is guided, `install --yes` is headless
+  (the old `bootstrap` flag set); `bootstrap` remains a hidden alias for `install --yes`.
+  `--name` + `--host` are required, and the host + access mode are recorded in
+  `profiles/<name>/config.toml` so a later `uninstall --name` resolves the host without the
+  flag.
+- **Life-cycle gate.** No profile mints. An existing profile whose recorded CP answers
+  `/healthz` is REFUSED with the four exits (`build` / `teardown` / `uninstall` / `login`).
+  An existing profile whose CP is absent RE-ADOPTS: the fresh-plane inputs (relay/CP hosts,
+  proxy IP, operator identity) resolve from the surviving profile. The authoritative
+  host-side check — a profile-less box pointed at a live world — arrives with the transient
+  Access seam.
+- **deploy-cp adopts, never overwrites, the plane's runner.** When the plane already carries
+  `/srv/data/cp/control-plane/runner/<target>/identity.json`, the box ships only the binary +
+  `known_hosts` and leaves the plane's identity and its sealed secrets alone. The runner's
+  Nostr/enc identity is the grant + relay-roster anchor, so a re-install no longer orphans
+  grants; and because the box's secrets are sealed to a different encryption key, skipping
+  the merge also avoids shipping the plane an unopenable package.
+
 ## [0.6.7] — departments selectable at create, a shared system orientation, role-neutral prompt slot
 
 0.6.6 defined the departments but gave nothing a way to use them: a create always rendered the

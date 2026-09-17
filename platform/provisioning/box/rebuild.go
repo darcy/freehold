@@ -44,6 +44,10 @@ import (
 
 // Flags is a command's collected install/bootstrap answers.
 type Flags struct {
+	// AccessMode names the install access strategy that reaches Host
+	// ("ssh-root-proxmox" today, provider-API modes later) and is recorded in
+	// the profile config beside the host.
+	AccessMode         string
 	Name               string
 	Addr               string
 	Target             string
@@ -857,6 +861,8 @@ func (e *Engine) fromAnswers() *config.Config {
 	// prev's recorded value, not clobber it with the bare scheme.
 	cfg := &config.Config{
 		Name:           e.F.Name,
+		Host:           e.F.Host,
+		AccessMode:     e.F.AccessMode,
 		OperatorPubkey: e.F.OperatorPubkey,
 		Runner: config.RunnerRef{
 			Addr:   e.F.Addr,
@@ -935,6 +941,14 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	if cfg.OperatorIdentity == nil {
 		cfg.OperatorIdentity = prev.OperatorIdentity
+	}
+	// The substrate host + access mode are install inputs; a run that supplied
+	// none keeps the recorded ones (so `uninstall --name` still resolves).
+	if cfg.Host == "" {
+		cfg.Host = prev.Host
+	}
+	if cfg.AccessMode == "" {
+		cfg.AccessMode = prev.AccessMode
 	}
 	// answers win (a fresh boot's coords); prev fills the Nones.
 	for _, pair := range [][2]*config.LxcGuest{

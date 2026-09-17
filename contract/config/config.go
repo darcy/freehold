@@ -31,6 +31,15 @@ type Config struct {
 	// profile dir name. It prefixes LXC hostnames (<name>-<role>) for worlds
 	// installed with one; empty falls back to the domain-derived names.
 	Name string `toml:"name,omitempty"`
+	// Host is the environment address install reached the substrate at (e.g.
+	// root@192.168.30.224). Persisted so `uninstall --name` resolves the host
+	// without a --host flag, and so a re-install after a local wipe can name
+	// the substrate it cannot read without host access.
+	Host string `toml:"host,omitempty"`
+	// AccessMode is the install access strategy that reached Host —
+	// "ssh-root-proxmox" today; provider-API modes (api-vultr) later. The
+	// installers differ only here; they all end at the same normalized CP.
+	AccessMode string `toml:"access_mode,omitempty"`
 	// CpPubkey is the control plane's own Nostr pubkey — the box's trust anchor
 	// for a CP it has never met. Recorded by `freehold login` (adopted from the
 	// CP's own `/api/world` report — the operator never supplies it) and by build
