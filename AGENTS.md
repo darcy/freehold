@@ -54,7 +54,11 @@ repo, not the history.
 - `install/` — the `freehold-install` bootstrap CLI (top-level Go module): get a control
   plane up in an environment (Proxmox today; Vultr/Hetzner providers come later) and a door
   to it; the shared provisioning engine lives in `platform/provisioning/box`. World bring-up
-  after bootstrap is `freehold build` from any box via the CP.
+  after bootstrap is `freehold build` from any box via the CP. `install` and `bootstrap`
+  **require `--name`**: the profile name scopes config + state to
+  `profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; a name that already has a
+  profile is refused (reconcile with `freehold build`). A world with no recorded name keeps
+  the domain-derived LXC names, and durable-plane names stay domain-keyed.
 - `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.

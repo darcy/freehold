@@ -14,6 +14,9 @@ func ApplyConfigDefaults(f *Flags, cfgPath string) error {
 	if cfg == nil {
 		return nil
 	}
+	if f.Name == "" {
+		f.Name = cfg.Name
+	}
 	if f.OperatorPubkey == "" {
 		f.OperatorPubkey = cfg.OperatorPubkey
 	}

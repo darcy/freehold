@@ -350,6 +350,20 @@ func DomainLXCName(domain, suffix string) (string, error) {
 	return fmt.Sprintf("%s-%s", dom, suffix), nil
 }
 
+// LXCName resolves a managed guest's hostname: `<name>-<suffix>` for a world
+// installed with a profile name, falling back to the domain-derived
+// `<normalized-domain>-<suffix>` when name is empty so worlds that pre-date
+// profile names keep reconciling. name must be LXC-name safe.
+func LXCName(name, domain, suffix string) (string, error) {
+	if name == "" {
+		return DomainLXCName(domain, suffix)
+	}
+	if !planebase.ValidStorageName(name) {
+		return "", fmt.Errorf("world name %q is not a valid LXC-name prefix", name)
+	}
+	return fmt.Sprintf("%s-%s", name, suffix), nil
+}
+
 // IsHex64 reports whether s is 64 lowercase/uppercase hex.
 func IsHex64(s string) bool {
 	if len(s) != 64 {

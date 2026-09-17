@@ -55,6 +55,7 @@ const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 const AgentToolsPort = config.AgentToolsPort
 
 type Spec struct {
+	Name           string
 	StateDir       string
 	RelayURL       string
 	RelayAuthURL   string
@@ -359,7 +360,7 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 // role's static address (k3s = the proxy IP; relay/cp are DHCP behind the
 // proxy) rides the spec.
 func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (uint32, error) {
-	hostname, err := bootstrap.DomainLXCName(s.RelayHost, role)
+	hostname, err := bootstrap.LXCName(s.Name, s.RelayHost, role)
 	if err != nil {
 		return 0, err
 	}
@@ -430,7 +431,7 @@ func (s *Spec) resolveGuestVmids() {
 		if *r.vmid != 0 {
 			continue
 		}
-		name, err := bootstrap.DomainLXCName(s.RelayHost, r.role)
+		name, err := bootstrap.LXCName(s.Name, s.RelayHost, r.role)
 		if err != nil {
 			continue
 		}
@@ -1402,7 +1403,7 @@ func (s *Spec) discoverCpVmid() (uint32, error) {
 	if s.RelayHost == "" {
 		return 0, fmt.Errorf("world-teardown: no recorded CP LXC vmid and no relay host to derive the guest name")
 	}
-	name, err := bootstrap.DomainLXCName(s.RelayHost, "cp")
+	name, err := bootstrap.LXCName(s.Name, s.RelayHost, "cp")
 	if err != nil {
 		return 0, err
 	}

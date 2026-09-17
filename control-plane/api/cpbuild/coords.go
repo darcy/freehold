@@ -12,6 +12,7 @@ type Coords = config.Coords
 // runner at deploy). sec must be 32 bytes.
 func NewSpec(c Coords, sec []byte, audience string) *Spec {
 	return &Spec{
+		Name:           c.Name,
 		StateDir:       c.StateDir,
 		RelayURL:       c.RelayURL,
 		RelayAuthURL:   c.RelayAuthURL,
@@ -52,6 +53,7 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 // Coords returns the Spec's non-secret world coords (the inverse of NewSpec).
 func (s *Spec) Coords() Coords {
 	return Coords{
+		Name:     s.Name,
 		StateDir: s.StateDir, RelayURL: s.RelayURL, RelayAuthURL: s.RelayAuthURL,
 		RelayWS: s.RelayWS, RelayPK: s.RelayPK, RelayHost: s.RelayHost, RelayIP: s.RelayIP,
 		CpHost: s.CpHost, CpIP: s.CpIP, CpLxc: s.CpLxc, ProxyIP: s.ProxyIP, LitellmIP: s.LitellmIP,

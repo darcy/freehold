@@ -117,8 +117,13 @@ mptmp: something
 }
 
 func TestLxcName(t *testing.T) {
-	if got := lxcName("freehold-test.darcydev.net", "relay"); got != "freehold-test-darcydev-net-relay" {
-		t.Errorf("lxcName = %q", got)
+	// No profile name: domain-derived, for worlds that pre-date names.
+	if got := lxcName("", "freehold-test.darcydev.net", "relay"); got != "freehold-test-darcydev-net-relay" {
+		t.Errorf("domain fallback lxcName = %q", got)
+	}
+	// A named world prefixes the LXC with the profile name.
+	if got := lxcName("librem2", "freehold-test.darcydev.net", "cp"); got != "librem2-cp" {
+		t.Errorf("named lxcName = %q", got)
 	}
 }
 
@@ -210,8 +215,8 @@ func TestRecordPostWorld(t *testing.T) {
 	if err := cfg.Save(cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	relayName := lxcName(domain, "relay")
-	k3sName := lxcName(domain, "k3s")
+	relayName := lxcName("", domain, "relay")
+	k3sName := lxcName("", domain, "k3s")
 	e := &Engine{
 		F: Flags{
 			ConfigPath:     cfgPath,
@@ -724,7 +729,6 @@ func countStr(list []string, s string) int {
 	return n
 }
 
-
 // TestLitellmRunArgs: the litellm admin leg must exec the dedicated litellm
 // runner (loopback 8788, target "litellm") with the named secrets — NOT the
 // main proxmox-box runner via a nested "exec --target …" prefix (which bash
@@ -797,5 +801,3 @@ func TestApplyConfigDefaults(t *testing.T) {
 		t.Error("explicit --manage-dns=false must NOT be overridden by the config seed")
 	}
 }
-
-

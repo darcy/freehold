@@ -58,18 +58,33 @@ func agentAuth(dir string) (*client.AgentAuth, error) {
 
 // installConnect builds an McpClient to the provisioning runner at addr, using
 // the identity in agentDir, authenticating to the runner's pubkey read from
-// the local runner package.
+// the local runner package. The profile state ROOT is derived from agentDir
+// (OpsDir lives at <state-root>/control-plane/agent-ops): a self-staged child
+// is a fresh process with no in-process config.Current, so this is how it finds
+// the profile-scoped runner package the parent wrote. A non-conventional
+// agent-dir falls back to the default state root.
 func installConnect(addr, agentDir, target string) (*client.McpClient, error) {
 	auth, err := agentAuth(agentDir)
 	if err != nil {
 		return nil, err
 	}
-	runnerPK, err := box.LoadPubkey(filepath.Join(config.StateDir(), "runner", target))
+	runnerDir := filepath.Join(stateRootFor(agentDir), "runner", target)
+	runnerPK, err := box.LoadPubkey(runnerDir)
 	if err != nil {
 		return nil, fmt.Errorf("runner %q not found at %s (provision it first): %v",
-			target, filepath.Join(config.StateDir(), "runner", target), err)
+			target, runnerDir, err)
 	}
 	return client.New(client.ConnectURL(addr), auth, runnerPK)
+}
+
+// stateRootFor derives the profile state root from a conventional
+// <root>/control-plane/agent-ops agent-dir; anything else uses the default
+// state root (config.StateDir()).
+func stateRootFor(agentDir string) string {
+	if filepath.Base(agentDir) == "agent-ops" && filepath.Base(filepath.Dir(agentDir)) == "control-plane" {
+		return filepath.Dir(filepath.Dir(agentDir))
+	}
+	return config.StateDir()
 }
 
 var execCmd = &cobra.Command{

@@ -32,7 +32,7 @@ func (s *Spec) dashedDomain() string {
 
 // tfLxcName resolves a guest's deterministic LXC hostname for a role.
 func (s *Spec) tfLxcName(role string) string {
-	name, _ := bootstrap.DomainLXCName(s.RelayHost, role)
+	name, _ := bootstrap.LXCName(s.Name, s.RelayHost, role)
 	return name
 }
 

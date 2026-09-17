@@ -10,6 +10,7 @@ import (
 // silently lose a coordinate the CP build engine needs.
 func TestCoordsSpecRoundTrip(t *testing.T) {
 	c := Coords{
+		Name:     "librem2",
 		StateDir: "/srv/data/cp/control-plane", RelayURL: "https://relay.example", RelayAuthURL: "https://relay.example",
 		RelayWS: "wss://relay.example", RelayHost: "relay.example", RelayIP: "192.168.30.10",
 		CpHost: "cp.example", CpIP: "192.168.30.11", CpLxc: 100, ProxyIP: "192.168.30.8",

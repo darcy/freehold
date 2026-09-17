@@ -36,6 +36,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
 	"freehold/platform/provisioning/stages"
@@ -43,6 +44,7 @@ import (
 
 // Flags is a command's collected install/bootstrap answers.
 type Flags struct {
+	Name               string
 	Addr               string
 	Target             string
 	Host               string
@@ -227,7 +229,8 @@ func curlGetDefault(url string) (string, bool) {
 
 // ---- freehold home paths (mirror installer::lib.rs) ----------------------
 
-func StateDir() string   { return filepath.Join(config.StateDir(), "control-plane") }
+func StateDir() string   { return filepath.Join(StateRoot(), "control-plane") }
+func StateRoot() string  { return config.StateDir() }
 func OpsDir() string     { return filepath.Join(StateDir(), "agent-ops") }
 func RunnerPkgs() string { return filepath.Join(config.StateDir(), "runner") }
 func ServeLog() string   { return filepath.Join(config.StateDir(), "installer", "serve.log") }
@@ -853,6 +856,7 @@ func (e *Engine) fromAnswers() *config.Config {
 	// interactive prompt on the sequential path, and an empty host must merge
 	// prev's recorded value, not clobber it with the bare scheme.
 	cfg := &config.Config{
+		Name:           e.F.Name,
 		OperatorPubkey: e.F.OperatorPubkey,
 		Runner: config.RunnerRef{
 			Addr:   e.F.Addr,
@@ -1332,6 +1336,7 @@ func (e *Engine) stageBootstrap(role string) error {
 	args := []string{"provision",
 		"--kind", "proxmox-lxc",
 		"--role", role,
+		"--hostname", lxcName(e.F.Name, e.F.RelayDomain, role),
 		"--target", e.F.Target,
 		"--domain", e.F.RelayDomain,
 		"--rootfs-gb", strconv.FormatUint(uint64(e.F.RootfsGB), 10),
@@ -1437,16 +1442,18 @@ func applyLxcCoords(cfg *config.Config, role string, vmid uint32, ip string) {
 	}
 }
 
-// lxcName is the guest's FULL name: <domain-with-dashes>-<role>.
-func lxcName(domain, role string) string {
-	return strings.ReplaceAll(domain, ".", "-") + "-" + role
+// lxcName is the guest's FULL name: <name>-<role> when the world has a profile
+// name, else the domain-derived <domain-with-dashes>-<role>.
+func lxcName(name, domain, role string) string {
+	n, _ := bootstrap.LXCName(name, domain, role)
+	return n
 }
 
 // findLxcVmidExact finds the role's vmid by FULL name match on `pct list`
 // (a suffix-only match can hit ANOTHER world's container on a multi-world
 // host).
 func (e *Engine) findLxcVmidExact(role string) (uint32, error) {
-	exact := lxcName(e.F.RelayDomain, role)
+	exact := lxcName(e.F.Name, e.F.RelayDomain, role)
 	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs("pct list", 0))
 	if !ok {
 		return 0, fmt.Errorf("pct list unreadable through the runner:\n%s", out)
@@ -1580,6 +1587,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		relayIP = config.StripCIDR(e.F.RelayIP)
 	}
 	c := config.Coords{
+		Name:           cfg.Name,
 		StateDir:       "",
 		RelayURL:       cfg.RelayURL,
 		RelayAuthURL:   cfg.RelayURL,

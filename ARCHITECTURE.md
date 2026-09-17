@@ -253,6 +253,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (CP bootstrap); `freehold build` runs the world through the CP:
     door → runner → durable plane → boot the CP LXC → **`bootstrap`** (box one)
     = the CP only (console + co-located runner) — no secrets are collected.
+    `freehold-install install|bootstrap` requires **`--name`**: it creates (or
+    refuses an existing) profile `profiles/<name>/` and scopes the config +
+    state there instead of the base home, and names the guest LXCs
+    `<name>-<relay|cp|k3s>`. A world with no recorded name (installed before
+    names) keeps the domain-derived `<domain-dashed>-<role>` names, so it still
+    reconciles; durable-plane names stay domain-keyed either way.
     **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS
     creds + litellm; sealed to the **console** identity in `world-secrets/`,
     asked only when missing), points the public A records (`manageDomainDNS`),
