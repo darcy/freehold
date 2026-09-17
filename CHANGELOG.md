@@ -25,6 +25,40 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.7] — departments selectable at create, a shared system orientation, role-neutral prompt slot
+
+0.6.6 defined the departments but gave nothing a way to use them: a create always rendered the
+custom template, and the pod's prompt ConfigMap slot was named `CPA_SYSTEM_PROMPT.md` even for
+a non-CPA agent.
+
+- **`agents.SystemPrompt(name, purpose, repoURL)` is the single create-side selection point.**
+  A reserved department name selects that department's embedded prompt; any other name renders
+  the custom template. `BuildCreateAgentFn` calls it, so a create naming `gatekeeper` /
+  `vault` / `provisioner` / `agent-ops` / `services` deploys that department's identity. The
+  names are therefore reserved.
+- **Every non-custom agent gets a shared system orientation** (`agents/common/orientation.md`):
+  the source repo URL, read-it-on-boot + keep a memory + re-check periodically because the repo
+  is active, and the "be loud" rule — surface problems and missing access to freehold and the
+  operator, never silently. It is composed onto the CPA and the five departments; custom agents
+  are exempt (and stay a single self-contained prompt). The repo URL is configurable
+  (`FREEHOLD_REPO_URL` / `serve --repo-url`), defaulting to upstream `github.com/darcy/freehold`.
+- **The department prompts carry real domain knowledge.** Services is the aggregate
+  registry/monitor (knows every service including department-built tooling; a dedicated
+  per-service agent is fine; manages one directly only when none exists). Agent Ops manages
+  LiteLLM directly and may build its own tooling but tells Services to monitor it. Vault
+  verifies each service is correctly set up to be backed up, knowing `/srv/data` (`backup=1`),
+  `/srv/nobackup` (`backup=0`), the LVM-thin/ZFS plane and the PBS/TrueNAS/Backblaze chain.
+  Gatekeeper knows internal (CP-LXC dnsmasq) and external (records/Caddy edge/cert) DNS. Vault
+  and Gatekeeper are explicitly told to be loud.
+- **The prompt slot is role-neutral:** the ConfigMap key and mount are now
+  `SYSTEM_PROMPT.md` / `/srv/freehold/SYSTEM_PROMPT.md` (`agent.SystemPromptFile` /
+  `agent.SystemPromptPath`), carrying the CPA's or a department's prompt in the same slot.
+  `BUZZ_ACP_SYSTEM_PROMPT_FILE` is unchanged; a rebuild recreates the pod with the new mount.
+- **Hook points recorded, not built.** The two-tier enforcement point is the operator-scoped
+  `grant_agent` / `isWorldTool` gate (documented at the site); the Vault/Gatekeeper check-in
+  and the agents' repo read-on-boot/periodic-recheck both land with the Chunk 5/6 provision and
+  workspace/git paths.
+
 ## [0.6.6] — the agent org is two tiers: the CPA and five departments
 
 The agent model so far was the CPA plus ad-hoc agents it creates, with no fixed roster. That

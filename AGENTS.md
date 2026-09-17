@@ -99,14 +99,15 @@ repo, not the history.
   purpose from `agents/freehold/prompt.md` (embedded by the `freehold/agents` Go
   package and shipped by the control plane,
   mounted into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
-  `/srv/freehold/CPA_SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
+  `/srv/freehold/SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.
 - **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user
   touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**
-  (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS) are
-  its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —
+  (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS — the
+  aggregate registry/monitor; manages one directly when no dedicated per-service agent does)
+  are its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —
   the operator and any agent may converse with any department or agent directly; what is
   bounded is *capability execution*. A capability a department owns (external proxy, backup,
   compute/LXC, model registration) is executed by that department's identity, and the raw
@@ -150,15 +151,22 @@ changelog.
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
 - **The five departments are defined but not yet deployed.** Each department's prompt lives
-  at `agents/<department>/prompt.md` and is embedded by the `freehold/agents` package, but
-  nothing spawns a department pod yet: deployment is lazy/on-demand, and the capability
-  tooling they broker (external proxy, backup, compute, model registration) is not in this
-  phase. Enforcement of "capability work goes through the owning department" is therefore the
+  at `agents/<department>/prompt.md` and is embedded by the `freehold/agents` package, and a
+  create naming a department resolves it (`agents.SystemPrompt` — the names
+  `gatekeeper`/`vault`/`provisioner`/`agent-ops`/`services` are reserved). But nothing spawns
+  a department pod on its own yet: deployment is lazy/on-demand, and the capability tooling
+  they broker (external proxy, backup, compute, model registration) is not in this phase.
+  Enforcement of "capability work goes through the owning department" is therefore the
   existing grant model, not new code — raw capability grants sit with department identities
   once Chunk 5 begins issuing grants, and custom agents never receive them.
 - **The Vault/Gatekeeper "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
+- **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
+  not wired.** Every non-custom prompt (CPA + departments) carries a shared orientation block
+  naming the repo and the read-on-boot/periodic-recheck discipline, and is honest that access
+  is not available yet. The git/GitHub grant + the read/schedule path land with Chunk 5's
+  workspace/git work.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
@@ -224,7 +232,8 @@ changelog.
 - Go — five modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
   - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
-    the CPA prompt + skills, `custom/` the template for agents the CPA creates, and the five
+    the CPA prompt + skills, `custom/` the template for agents the CPA creates,
+    `common/orientation.md` the shared system-orientation block, and the five
     department definitions (`gatekeeper/`, `vault/`, `provisioner/`, `agent-ops/`,
     `services/`); embeds its Markdown as Go values):
     `cd agents && go build ./... && go vet ./... && go test ./...`

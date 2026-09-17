@@ -389,9 +389,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`agents/`** is its own Go module — `freehold/` (the freehold named agent:
     the CPA's purpose + skills), `custom/` (the template for agents the CPA
-    creates on the fly), the five **department definitions** (`gatekeeper/`,
-    `vault/`, `provisioner/`, `agent-ops/`, `services/` — each a distinct
-    identity scoped to one domain), and named agents that grow over time. It is
+    creates on the fly), `common/orientation.md` (the shared system-orientation
+    block composed onto every non-custom prompt), the five **department
+    definitions** (`gatekeeper/`, `vault/`, `provisioner/`, `agent-ops/`,
+    `services/` — each a distinct identity scoped to one domain), and named
+    agents that grow over time. It is
     embedded by the `freehold/agents` Go package and shipped by the control
     plane; the module carries its own `go.mod` because a Go package cannot
     `//go:embed` outside its own module.
@@ -407,7 +409,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     | **Vault** | Data plane: backup/off-site, DR planning, scheduling, restore verification |
     | **Provisioner** | Compute: Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning |
     | **Agent Ops** | LiteLLM/provider setup & aliases, local AI config, agent optimization, prompt/skill management, agent debugging |
-    | **Services** | Installed OSS services (Pi-hole, Nextcloud, Immich, TrueNAS) — ad hoc, no vetting |
+    | **Services** | Installed OSS services (Pi-hole, Nextcloud, Immich, TrueNAS) — the aggregate registry/monitor; manages one directly when no dedicated per-service agent does. Ad hoc, no vetting |
 
 *   **Communication is unrestricted.** The operator and any agent may converse
     with any department or agent directly — talk is not gated.
@@ -435,11 +437,18 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     "reachable outside your network?"). A "no" is final — the point is that the
     gap is a visible choice, not a silent one.
 
+*   **Every non-custom agent is oriented the same way.** The CPA and the five
+    departments are prefixed with a shared system-orientation block: the source
+    repo URL (configurable; upstream default), read-it-on-boot + keep a memory +
+    re-check periodically because the repo is active, and the "be loud" rule —
+    surface problems and missing access to freehold and the operator, never
+    silently. Custom agents (those the CPA creates on the fly) are exempt.
+
 ### `agents/freehold/prompt.md` (the CPA's purpose)
 
 *   **`agents/freehold/prompt.md`** is embedded into the `freehold/agents` Go
     package (`//go:embed freehold/prompt.md`) and mounted into every agent pod
-    as the `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
+    as the `<pod>-prompt` ConfigMap at `/srv/freehold/SYSTEM_PROMPT.md`,
     re-read fresh on every spawn. The package has its own `go.mod` (a Go
     package cannot embed outside its own module), so `control-plane` imports
     the value, never re-embeds. `freehold-agent-tools` ships it verbatim for
