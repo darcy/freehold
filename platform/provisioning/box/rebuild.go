@@ -1030,7 +1030,8 @@ func (e *Engine) FinalSave() error {
 // reuse-detected / carve-default path.
 func (e *Engine) stagePlacement() (*placement, error) {
 	resolveArgs := []string{"storage", "resolve",
-		"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target}
+		"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
+		"--relay-domain", e.F.RelayDomain}
 	if e.F.ConfirmStorage {
 		resolveArgs = append(resolveArgs, "--confirm-storage")
 	}

@@ -17,12 +17,12 @@ import (
 // selectPlacement drives the choice from an inventory and returns the backend
 // + thin pool the tenant LVs land in.
 func (e *Engine) selectPlacement(inv planebase.Inventory) (*placement, error) {
-	opts := planebase.BuildOptions(inv)
+	opts := planebase.BuildOptions(inv, e.F.RelayDomain)
 	chosen, err := e.chooseBackend(opts)
 	if err != nil {
 		return nil, err
 	}
-	if chosen.Freehold.Freehold {
+	if e.mine(chosen) {
 		if err := e.resolveFreeholdData(chosen); err != nil {
 			return nil, err
 		}
@@ -40,6 +40,14 @@ func (e *Engine) selectPlacement(inv planebase.Inventory) (*placement, error) {
 	default:
 		return nil, fmt.Errorf("creating a new storage backend is a later phase — choose an existing backend, or clean a spare disk and re-run")
 	}
+}
+
+// mine reports whether an option carries THIS world's freehold plane (its
+// provenance domain matches e.F.RelayDomain). Another world's data — or a
+// name-only pool — is ordinary reuse, never a reconnect.
+func (e *Engine) mine(opt planebase.Option) bool {
+	matched, hasDomains := opt.Freehold.DomainMatches(e.F.RelayDomain)
+	return matched && hasDomains
 }
 
 // chooseBackend picks a backend from the classified options: an explicit
@@ -71,9 +79,9 @@ func (e *Engine) chooseBackend(opts []planebase.Option) (planebase.Option, error
 	}
 	if len(usable) == 1 {
 		opt := usable[0]
-		// The one-keystroke confirm for the common safe case; freehold's own
+		// The one-keystroke confirm for the common safe case; THIS world's own
 		// data is confirmed by the keep/erase step instead.
-		if !opt.Freehold.Freehold && opt.Safety == planebase.Safe {
+		if !e.mine(opt) && opt.Safety == planebase.Safe {
 			if err := e.confirmYes("Freehold will store its data in "+opt.Title, opt.Impact); err != nil {
 				return planebase.Option{}, err
 			}
@@ -157,8 +165,8 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 		// A reconnect was promised (resolveFreeholdData kept the data): an
 		// explicit --thin-pool must not quietly place this world in a DIFFERENT
 		// pool and orphan the previous plane.
-		if opt.Freehold.Freehold {
-			if _, holders := firstPool(opt); len(holders) > 0 && !strIn(holders, e.F.ThinPool) {
+		if e.mine(opt) {
+			if _, holders := firstPool(opt, e.F.RelayDomain); len(holders) > 0 && !strIn(holders, e.F.ThinPool) {
 				return nil, fmt.Errorf("previous freehold data lives in pool %q — refusing to place this world in %q and orphan it; pass --thin-pool %s, or erase the previous data first (--erase-freehold)", strings.Join(holders, ", "), e.F.ThinPool, holders[0])
 			}
 		}
@@ -179,8 +187,8 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 	// freehold data — pools are unordered, and picking the wrong one would
 	// orphan the previous plane. Several holders is ambiguous: name them and
 	// require an explicit choice (never default to an empty name).
-	first, fhHolders := firstPool(opt)
-	if opt.Freehold.Freehold && len(fhHolders) > 1 {
+	first, fhHolders := firstPool(opt, e.F.RelayDomain)
+	if e.mine(opt) && len(fhHolders) > 1 {
 		if e.F.Yes {
 			return nil, fmt.Errorf("several pools under “%s” hold freehold data (%s); --yes will not guess — pass --thin-pool", opt.Backend, strings.Join(fhHolders, ", "))
 		}
@@ -242,11 +250,12 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 }
 
 // firstPool returns the pool to reuse by default (the sole pool carrying
-// freehold data when there is exactly one, else the first pool) and the list of
-// pools that carry freehold data.
-func firstPool(opt planebase.Option) (first string, fhHolders []string) {
+// THIS world's freehold data when there is exactly one, else the first pool)
+// and the list of pools that carry this world's freehold data. Another world's
+// freehold pools are not holders — they are ordinary reuse.
+func firstPool(opt planebase.Option, domain string) (first string, fhHolders []string) {
 	for _, p := range opt.Pools {
-		if p.Freehold.Freehold {
+		if matched, has := p.Freehold.DomainMatches(domain); matched && has {
 			fhHolders = append(fhHolders, p.Name)
 		}
 	}
@@ -259,10 +268,11 @@ func firstPool(opt planebase.Option) (first string, fhHolders []string) {
 	return first, fhHolders
 }
 
-// resolveFreeholdData handles a backend that carries freehold's own previous
+// resolveFreeholdData handles a backend that carries THIS world's previous
 // data: keep and reconnect (requires the SAME relay domain, since volume names
-// are domain-derived), or erase it (destroying only freehold-namespaced
-// entries) and start fresh.
+// are domain-derived), or erase it (destroying ONLY this world's entries —
+// another world's freehold data on the same backend is never touched) and
+// start fresh.
 func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 	domains := opt.Freehold.Domains
 	// A pool can be recognized as freehold's from its NAME alone (an empty or
@@ -278,10 +288,24 @@ func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 			matched = d
 		}
 	}
+	// Defensive: selectPlacement routes only this world's plane here, so a
+	// match is expected. A foreign-only backend is ordinary reuse, not ours.
+	if matched == "" {
+		return nil
+	}
+	var foreign []string
+	for _, d := range domains {
+		if d != matched {
+			foreign = append(foreign, d)
+		}
+	}
 
 	erase := e.F.EraseFreehold
 	if !erase && !e.F.Yes {
-		fmt.Fprintf(e.Out, "\n  We found your previous freehold data (for %q) on %s.\n", strings.Join(domains, ", "), opt.Backend)
+		fmt.Fprintf(e.Out, "\n  We found your previous freehold data (for %q) on %s.\n", matched, opt.Backend)
+		if len(foreign) > 0 {
+			fmt.Fprintf(e.Out, "  %s also holds freehold data for another world (%s) — freehold will not touch it.\n", opt.Backend, strings.Join(foreign, ", "))
+		}
 		fmt.Fprint(e.Out, "    k) keep it and reconnect\n    e) erase it and start fresh\n")
 		answer, err := e.Prompt("choose [k]")
 		if err != nil {
@@ -292,9 +316,6 @@ func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 	}
 
 	if !erase {
-		if matched == "" {
-			return fmt.Errorf("previous freehold data here was created for %q, but this world's domain is %q — volume names are derived from the domain, so freehold cannot reconnect. Use --relay-domain %s to reconnect, or choose erase to start fresh", strings.Join(domains, ", "), want, domains[0])
-		}
 		fmt.Fprintf(e.Out, "  reconnecting to your previous freehold data for %q\n", matched)
 		return nil
 	}
@@ -303,19 +324,18 @@ func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 	if opt.Kind == planebase.KindReuseZpool {
 		kind = "zfs"
 	}
-	for _, dom := range domains {
-		for _, tenant := range []string{"relay", "cp", "k3s-volumes"} {
-			ok, out := e.RunBin(e.Bins.Self, []string{
-				"storage", "destroy",
-				"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
-				"--tenant", tenant, "--domain", dom, "--pool", opt.Backend, "--kind", kind,
-			})
-			if !ok {
-				return fmt.Errorf("erasing previous freehold data (%s/%s) failed:\n%s", dom, tenant, out)
-			}
+	// Erase ONLY this world's domain. Other worlds on this backend keep theirs.
+	for _, tenant := range []string{"relay", "cp", "k3s-volumes"} {
+		ok, out := e.RunBin(e.Bins.Self, []string{
+			"storage", "destroy",
+			"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
+			"--tenant", tenant, "--domain", matched, "--pool", opt.Backend, "--kind", kind,
+		})
+		if !ok {
+			return fmt.Errorf("erasing previous freehold data (%s/%s) failed:\n%s", matched, tenant, out)
 		}
 	}
-	fmt.Fprintf(e.Out, "  erased previous freehold data for %s\n", strings.Join(domains, ", "))
+	fmt.Fprintf(e.Out, "  erased previous freehold data for %s\n", matched)
 	return nil
 }
 
@@ -340,13 +360,14 @@ func (e *Engine) requireShare(title, impact string) error {
 }
 
 // confirmPoolShare requires `share` when the chosen thin pool already holds
-// OTHER volumes (live guest disks sharing its capacity). Freehold's own LVs
-// riding the pool are not "sharing" — reconnecting to them is the point.
+// OTHER volumes (live guest disks or another world's freehold LVs sharing its
+// capacity). THIS world's own LVs riding the pool are not "sharing" —
+// reconnecting to them is the point.
 func (e *Engine) confirmPoolShare(opt planebase.Option, pool string) error {
 	riders := 0
 	for _, p := range opt.Pools {
 		if p.Name == pool {
-			riders = guestRiders(p)
+			riders = p.OtherVolumes
 		}
 	}
 	if riders == 0 {
@@ -356,18 +377,6 @@ func (e *Engine) confirmPoolShare(opt planebase.Option, pool string) error {
 		fmt.Sprintf("“%s” storage already holds %d of your existing volumes", pool, riders),
 		"Freehold would share this space with them, and they could run out of room.",
 	)
-}
-
-// guestRiders counts a pool's riders that are NOT freehold-namespaced (its own
-// volumes do not count as a capacity conflict to confirm).
-func guestRiders(p planebase.PoolInfo) int {
-	n := 0
-	for _, r := range p.Riders {
-		if _, fh := planebase.FreeholdLV(r); !fh {
-			n++
-		}
-	}
-	return n
 }
 
 // confirmYes is the one-keystroke confirm for the common safe single-answer
@@ -459,7 +468,7 @@ func poolSummary(pools []planebase.PoolInfo) string {
 	var parts []string
 	for _, p := range pools {
 		s := fmt.Sprintf("%q (%.0f%% used", p.Name, p.DataPercent)
-		if n := guestRiders(p); n > 0 {
+		if n := p.OtherVolumes; n > 0 {
 			s += fmt.Sprintf(", %d volumes", n)
 		}
 		parts = append(parts, s+")")

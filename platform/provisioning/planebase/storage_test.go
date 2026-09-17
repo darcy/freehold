@@ -71,7 +71,7 @@ func TestBuildOptionsClassifiesSafely(t *testing.T) {
 			{Path: "/dev/sdc", SizeGB: 1800, Importable: "tank", Freehold: Provenance{Freehold: true, Domains: []string{"t-d"}}},
 		},
 	}
-	opts := BuildOptions(inv)
+	opts := BuildOptions(inv, "t.d")
 	byBackend := map[string]Option{}
 	for _, o := range opts {
 		byBackend[o.Backend] = o
@@ -88,8 +88,8 @@ func TestBuildOptionsClassifiesSafely(t *testing.T) {
 	if o := byBackend["empty-vg"]; o.Safety != Safe {
 		t.Errorf("empty vg must be Safe, got %+v", o)
 	}
-	if o := byBackend["fh-vg"]; !o.Freehold.Freehold || o.Safety != Safe {
-		t.Errorf("freehold vg must carry provenance + Safe, got %+v", o)
+	if o := byBackend["fh-vg"]; !o.Freehold.Freehold || o.Safety != Safe || !strings.Contains(o.Title, "Reconnect") {
+		t.Errorf("this world's freehold vg must carry provenance + Safe + reconnect, got %+v", o)
 	}
 	if o := byBackend["/dev/sda"]; o.Kind != KindBlocked || o.Safety != Blocked {
 		t.Errorf("signed disk must be Blocked, got %+v", o)
@@ -107,14 +107,14 @@ func TestRecommendPrefersFreeholdThenSafe(t *testing.T) {
 		Zpools: []ZpoolInfo{{Name: "rpool", FreeGB: 100}},
 		VGs:    []VGInfo{{Name: "fh-vg", Freehold: Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}}},
 	}
-	opts := BuildOptions(inv)
+	opts := BuildOptions(inv, "t.d")
 	i := Recommend(opts)
 	if i < 0 || !opts[i].Freehold.Freehold {
 		t.Fatalf("recommend must prefer the freehold plane, got %d %+v", i, opts)
 	}
 
 	// No safe option at all => no recommendation (-1): the CLI must not guess.
-	onlyBusy := BuildOptions(Inventory{VGs: []VGInfo{{Name: "pve", Pools: []PoolInfo{{Name: "data", Riders: []string{"vm-1"}}}}}})
+	onlyBusy := BuildOptions(Inventory{VGs: []VGInfo{{Name: "pve", Pools: []PoolInfo{{Name: "data", Riders: []string{"vm-1"}}}}}}, "")
 	if Recommend(onlyBusy) != -1 {
 		t.Errorf("all-caution inventory must recommend nothing, got %d", Recommend(onlyBusy))
 	}
@@ -134,7 +134,7 @@ func TestFailingZpoolIsBlockedAndNotRecommended(t *testing.T) {
 		{Name: "bad", FreeGB: 100, Health: "DEGRADED"},
 		{Name: "good", FreeGB: 100, Health: "ONLINE"},
 	}}
-	opts := BuildOptions(inv)
+	opts := BuildOptions(inv, "")
 	bad, _ := FindOption(opts, "bad")
 	if bad.Kind != KindBlocked || bad.Safety != Blocked || !strings.Contains(bad.Reason, "DEGRADED") {
 		t.Errorf("failing pool must be Blocked with a reason, got %+v", bad)
@@ -160,6 +160,67 @@ func TestProvenanceDomainMatches(t *testing.T) {
 	empty := Provenance{Freehold: true}
 	if m, h := empty.DomainMatches("anything"); m || h {
 		t.Errorf("domainless provenance: m=%v h=%v", m, h)
+	}
+}
+
+func TestBuildOptionsDomainScoped(t *testing.T) {
+	// A shared box: one VG carries THIS world's freehold LVs AND another
+	// world's, plus a live guest disk.
+	inv := Inventory{VGs: []VGInfo{{
+		Name: "shared", SizeGB: 500, FreeGB: 200,
+		Freehold: Provenance{Freehold: true, Domains: []string{"mine-com", "other-com"}, Volumes: 6},
+		Pools: []PoolInfo{{Name: "freehold-thin", Riders: []string{
+			"freehold-mine-com-relay", "freehold-mine-com-cp",
+			"freehold-other-com-relay", "vm-100-disk-0",
+		}}},
+	}}}
+
+	byBackend := func(domain string) Option {
+		t.Helper()
+		o, ok := FindOption(BuildOptions(inv, domain), "shared")
+		if !ok {
+			t.Fatalf("no option for shared (domain %q)", domain)
+		}
+		return o
+	}
+
+	// The matching domain reconnects, and only foreign entries count as sharing.
+	if o := byBackend("mine.com"); o.Safety != Safe || !strings.Contains(o.Title, "Reconnect") {
+		t.Errorf("matching domain must reconnect, got %+v", o)
+	} else if o.Pools[0].OtherVolumes != 2 {
+		t.Errorf("OtherVolumes = %d, want 2 (other world's LV + guest)", o.Pools[0].OtherVolumes)
+	}
+	// A different world's domain reconnects FROM ITS OWN point of view.
+	if o := byBackend("other.com"); !strings.Contains(o.Title, "Reconnect") {
+		t.Errorf("other world's own domain must reconnect to it, got %+v", o)
+	} else if o.Pools[0].OtherVolumes != 3 {
+		t.Errorf("OtherVolumes = %d, want 3", o.Pools[0].OtherVolumes)
+	}
+	// Installing a NEW domain on a shared box is Caution + ordinary reuse, never
+	// a reconnect — and erasing would only ever touch this world's (absent) data.
+	if o := byBackend("third.com"); o.Safety != Caution || strings.Contains(o.Title, "Reconnect") {
+		t.Errorf("new domain on a shared box must be Caution reuse, got %+v", o)
+	} else if o.Pools[0].OtherVolumes != 4 {
+		t.Errorf("OtherVolumes = %d, want 4 (nothing is ours)", o.Pools[0].OtherVolumes)
+	}
+}
+
+func TestBuildOptionsNameOnlyFreeholdPoolIsOrdinaryReuse(t *testing.T) {
+	// A pool recognized as freehold's by NAME alone (no domains yet) has nothing
+	// to reconnect to or erase: it is a safe reuse, not a reconnect.
+	inv := Inventory{
+		VGs: []VGInfo{{Name: "pve", SizeGB: 500, FreeGB: 500, Pools: []PoolInfo{
+			{Name: "freehold-thin", Freehold: Provenance{Freehold: true}},
+		}}},
+		Zpools: []ZpoolInfo{{Name: "rpool", FreeGB: 100, Health: "ONLINE",
+			Freehold: Provenance{Freehold: true, Domains: []string{"other-com"}}}},
+	}
+	opts := BuildOptions(inv, "mine.com")
+	if o, _ := FindOption(opts, "pve"); o.Safety != Safe || strings.Contains(o.Title, "Reconnect") {
+		t.Errorf("name-only freehold pool must be ordinary Safe reuse, got %+v", o)
+	}
+	if o, _ := FindOption(opts, "rpool"); o.Safety != Safe || strings.Contains(o.Title, "Reconnect") {
+		t.Errorf("another world's zpool datasets are Safe reuse, got %+v", o)
 	}
 }
 

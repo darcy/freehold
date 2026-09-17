@@ -189,6 +189,7 @@ var storageResolveCmd = &cobra.Command{
 		addr, _ := cmd.Flags().GetString("addr")
 		agentDir, _ := cmd.Flags().GetString("agent-dir")
 		target := mustStr(cmd, "target")
+		relayDomain := mustStr(cmd, "relay-domain")
 		confirm := mustBool(cmd, "confirm-storage")
 		c, err := installConnect(addr, agentDir, target)
 		if err != nil {
@@ -196,7 +197,9 @@ var storageResolveCmd = &cobra.Command{
 		}
 		// One read-only pass enumerates every backend + its data. The engine
 		// consumes the JSON inventory line and drives the (plain-language)
-		// selection; direct CLI use also prints the recommended backend.
+		// selection; direct CLI use also prints the recommended backend. The
+		// domain scopes "this world's plane" so another world's freehold data
+		// is ordinary reuse, never a reconnect.
 		inv, err := bootstrap.StorageInventory(c, target)
 		if err != nil {
 			return err
@@ -204,7 +207,7 @@ var storageResolveCmd = &cobra.Command{
 		if line := planebase.EncodeInventory(inv); line != "" {
 			fmt.Println(line)
 		}
-		opts := planebase.BuildOptions(inv)
+		opts := planebase.BuildOptions(inv, relayDomain)
 		if sel := mustStr(cmd, "plane-pool"); sel != "" {
 			opt, ok := planebase.FindOption(opts, sel)
 			if !ok {
@@ -504,6 +507,7 @@ func init() {
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "consent to CREATE a backend")
 	storageResolveCmd.Flags().String("device", "", "physical device for a NEW zpool")
 	storageResolveCmd.Flags().String("plane-pool", "", "select the backend to use by name (VG or zpool)")
+	storageResolveCmd.Flags().String("relay-domain", "", "this world's relay domain (scopes reconnect vs. ordinary reuse)")
 	storageEnsureCmd.Flags().String("tenant", "", "relay|cp|k3s-volumes")
 	storageEnsureCmd.Flags().String("domain", "", "relay identity domain")
 	storageEnsureCmd.Flags().String("pool", "", "storage pool")

@@ -301,7 +301,7 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 		if err != nil {
 			return nil, fmt.Errorf("storage inventory: %w", err)
 		}
-		opts := planebase.BuildOptions(inv)
+		opts := planebase.BuildOptions(inv, s.RelayHost)
 		var chosen planebase.Option
 		ok := false
 		if s.PlanePool != "" {
@@ -315,20 +315,11 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 		if !ok {
 			return nil, fmt.Errorf("no safe storage backend found on %s — record a plane pool explicitly", s.RunnerTarget)
 		}
-		// Freehold-namespaced names are domain-derived: reconnecting to a
-		// previous freehold plane under a DIFFERENT relay domain would orphan
-		// the old data. Fail closed, like the box-side engine — this path is
-		// the only selection on a thin login box.
-		// s.RelayHost is the relay's own host (the value drive.DatasetPath /
-		// DomainLXCName use as the naming domain), so it is the correct field
-		// to match DOMAIN-derived provenance against; DomainMatches flattens
-		// both sides the same way the box engine does.
-		if matched, hasDomains := chosen.Freehold.DomainMatches(s.RelayHost); hasDomains && !matched {
-			return nil, fmt.Errorf("previous freehold data on %s was created for %q, but this world's domain is %q — the volume names would not reconnect; use the same relay domain or clear that data first", s.RunnerTarget, strings.Join(chosen.Freehold.Domains, ", "), s.RelayHost)
-		}
 		// This non-interactive path cannot collect the typed share consent the
 		// box-side engine requires, so it refuses a shared (Caution) backend
-		// rather than silently selecting one.
+		// rather than silently selecting one. BuildOptions is domain-scoped, so
+		// another world's freehold data is ordinary reuse (Caution when it
+		// shares a thin pool), never a mis-detected reconnect.
 		if chosen.Safety == planebase.Caution {
 			return nil, fmt.Errorf("storage %q on %s already shares capacity with live volumes — this automatic path will not select it; record the plane pool explicitly after confirming", chosen.Backend, s.RunnerTarget)
 		}
