@@ -439,7 +439,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`agents/freehold/prompt.md`** is embedded into the `freehold/agents` Go
     package (`//go:embed freehold/prompt.md`) and mounted into every agent pod
-    as the `<pod>-prompt` ConfigMap at `/srv/freehold/CPA_SYSTEM_PROMPT.md`,
+    as the `<pod>-prompt` ConfigMap at `/srv/freehold/SYSTEM_PROMPT.md`,
     re-read fresh on every spawn. The package has its own `go.mod` (a Go
     package cannot embed outside its own module), so `control-plane` imports
     the value, never re-embeds. `freehold-agent-tools` ships it verbatim for

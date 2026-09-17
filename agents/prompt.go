@@ -19,7 +19,7 @@ import (
 // CPASystemPrompt is the freehold named agent's purpose, embedded from
 // freehold/prompt.md. create_agent ships it verbatim into the CPA pod's
 // <pod>-prompt ConfigMap; the pod re-reads its mounted copy at
-// /srv/freehold/CPA_SYSTEM_PROMPT.md on every spawn — never cached.
+// /srv/freehold/SYSTEM_PROMPT.md on every spawn — never cached.
 //
 //go:embed freehold/prompt.md
 var CPASystemPrompt string
@@ -80,6 +80,17 @@ func DepartmentNames() []string {
 func DepartmentPrompt(name string) (string, bool) {
 	p, ok := departmentPrompts[name]
 	return p, ok
+}
+
+// SystemPrompt returns the system prompt to ship for a create: a reserved
+// department name selects that department's embedded prompt, any other name
+// renders the custom template with the purpose supplied at create time. This is
+// the single selection point for which definition a create uses.
+func SystemPrompt(name, purpose string) string {
+	if p, ok := DepartmentPrompt(name); ok {
+		return p
+	}
+	return AgentSystemPrompt(name, purpose)
 }
 
 // AgentSystemPrompt renders the created-agent prompt for a given name and

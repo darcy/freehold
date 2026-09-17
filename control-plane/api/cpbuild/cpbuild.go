@@ -1689,7 +1689,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name == spec.CpaName {
 			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt, name, spec.LitellmBaseURL, "", spec.SelfURL, spec.Audience)
 		} else {
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.AgentSystemPrompt(name, purpose), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience)
+			// A reserved department name selects that department's embedded
+			// prompt; any other name renders the custom template (agents.SystemPrompt).
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)

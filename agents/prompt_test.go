@@ -60,3 +60,21 @@ func TestDepartmentPromptUnknownName(t *testing.T) {
 		t.Fatalf("DepartmentPrompt(\"waldo\") must not resolve to a department")
 	}
 }
+
+func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
+	got := SystemPrompt("gatekeeper", "look after the garden")
+	want, _ := DepartmentPrompt("gatekeeper")
+	if got != want {
+		t.Errorf("SystemPrompt(gatekeeper) must select the department prompt")
+	}
+	if strings.Contains(got, "look after the garden") {
+		t.Errorf("a department prompt must not embed the create-time purpose")
+	}
+}
+
+func TestSystemPromptFallsBackToCustomTemplate(t *testing.T) {
+	got := SystemPrompt("waldo", "look after the garden")
+	if !strings.Contains(got, "You are waldo") || !strings.Contains(got, "look after the garden") {
+		t.Errorf("a non-department name must render the custom template: %q", got)
+	}
+}

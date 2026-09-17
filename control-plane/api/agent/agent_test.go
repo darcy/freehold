@@ -30,7 +30,7 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		"BUZZ_RELAY_URL",
 		`value: "wss://relay.test"`,
 		"BUZZ_ACP_SYSTEM_PROMPT_FILE",
-		CPASystemPromptPath,
+		SystemPromptPath,
 		// D1: the CPA reaches its reasoning model through the litellm gateway
 		// as an OpenAI-compatible endpoint (alias ControlPlaneAgent).
 		"BUZZ_AGENT_PROVIDER",
@@ -67,7 +67,7 @@ func TestCPAPodManifestBasics(t *testing.T) {
 	if cm.Kind != "ConfigMap" {
 		t.Fatalf("first doc is %q, want ConfigMap", cm.Kind)
 	}
-	if got := cm.Data["CPA_SYSTEM_PROMPT.md"]; got != strings.TrimRight(sp, "\n") {
+	if got := cm.Data[SystemPromptFile]; got != strings.TrimRight(sp, "\n") {
 		t.Errorf("ConfigMap content differs from the prompt file")
 	}
 	// The nsec must NEVER be embedded in the manifest (it rides the Secret).

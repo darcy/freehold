@@ -99,7 +99,7 @@ repo, not the history.
   purpose from `agents/freehold/prompt.md` (embedded by the `freehold/agents` Go
   package and shipped by the control plane,
   mounted into the pod as the `<pod>-prompt` ConfigMap, re-read fresh on every spawn at
-  `/srv/freehold/CPA_SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
+  `/srv/freehold/SYSTEM_PROMPT.md`), and delegates to the agents it spawns rather than
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.
@@ -150,10 +150,12 @@ changelog.
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
 - **The five departments are defined but not yet deployed.** Each department's prompt lives
-  at `agents/<department>/prompt.md` and is embedded by the `freehold/agents` package, but
-  nothing spawns a department pod yet: deployment is lazy/on-demand, and the capability
-  tooling they broker (external proxy, backup, compute, model registration) is not in this
-  phase. Enforcement of "capability work goes through the owning department" is therefore the
+  at `agents/<department>/prompt.md` and is embedded by the `freehold/agents` package, and a
+  create naming a department resolves it (`agents.SystemPrompt` — the names
+  `gatekeeper`/`vault`/`provisioner`/`agent-ops`/`services` are reserved). But nothing spawns
+  a department pod on its own yet: deployment is lazy/on-demand, and the capability tooling
+  they broker (external proxy, backup, compute, model registration) is not in this phase.
+  Enforcement of "capability work goes through the owning department" is therefore the
   existing grant model, not new code — raw capability grants sit with department identities
   once Chunk 5 begins issuing grants, and custom agents never receive them.
 - **The Vault/Gatekeeper "check in on a new service" question has no trigger yet.** The hook

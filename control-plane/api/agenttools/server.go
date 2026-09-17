@@ -200,6 +200,12 @@ type manageAgentArgs struct {
 // surface — letting a prompt-reachable agent (e.g. the CPA) bind an arbitrary
 // pubkey onto an arbitrary runner (incl. the CP's own co-located runner) would
 // bypass this very boundary. The CPA's agent toolset is create + manage only.
+//
+// This is also the enforcement point for the two-tier agent org: a raw
+// capability grant (proxy/backup/compute/model) attaches to the department
+// identity that owns it, never to a custom agent. Since only an operator can
+// grant, and a registry agent is denied here (-32003), a custom agent cannot
+// self-serve a second, ungoverned path to a department-owned capability.
 func isWorldTool(name string) bool {
 	switch name {
 	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build",

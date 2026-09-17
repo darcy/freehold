@@ -25,6 +25,25 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.7] — departments are selectable at create; the pod prompt slot is role-neutral
+
+0.6.6 defined the departments but gave nothing a way to use them: a create always rendered the
+custom template, and the pod's prompt ConfigMap slot was named `CPA_SYSTEM_PROMPT.md` even for
+a non-CPA agent.
+
+- **`agents.SystemPrompt(name, purpose)` is the single create-side selection point.** A
+  reserved department name selects that department's embedded prompt; any other name renders
+  the custom template. `BuildCreateAgentFn` calls it, so a create naming `gatekeeper` /
+  `vault` / `provisioner` / `agent-ops` / `services` deploys that department's identity. The
+  names are therefore reserved.
+- **The prompt slot is role-neutral:** the ConfigMap key and mount are now
+  `SYSTEM_PROMPT.md` / `/srv/freehold/SYSTEM_PROMPT.md` (`agent.SystemPromptFile` /
+  `agent.SystemPromptPath`), carrying the CPA's or a department's prompt in the same slot.
+  `BUZZ_ACP_SYSTEM_PROMPT_FILE` is unchanged; a rebuild recreates the pod with the new mount.
+- **Hook points recorded, not built.** The two-tier enforcement point is the operator-scoped
+  `grant_agent` / `isWorldTool` gate (documented at the site); the Vault/Gatekeeper check-in
+  still lands with the Chunk 5/6 provision path.
+
 ## [0.6.6] — the agent org is two tiers: the CPA and five departments
 
 The agent model so far was the CPA plus ad-hoc agents it creates, with no fixed roster. That

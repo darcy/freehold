@@ -80,11 +80,17 @@ func KeySecretFor(agentName string) string {
 // names that would collide with the CPA or another pce agent.
 func PodName(agentName string) string { return sanitizePodName(agentName) }
 
-// CPASystemPromptPath is where the CPA pod reads its purpose from: the
-// <pod>-prompt ConfigMap mounts the embedded agents/freehold/prompt.md
-// (embedded via the freehold/agents package) read-only into the pod,
-// and the agent re-reads it on every spawn — never cached.
-const CPASystemPromptPath = "/srv/freehold/CPA_SYSTEM_PROMPT.md"
+// SystemPromptFile is the ConfigMap data key (and the mounted subPath) that
+// carries every agent pod's system prompt. The name is role-neutral because the
+// same slot carries the CPA's prompt or a department's, selected at create time.
+const SystemPromptFile = "SYSTEM_PROMPT.md"
+
+// SystemPromptPath is where an agent pod reads its purpose from: the
+// <pod>-prompt ConfigMap mounts the agent's embedded system prompt
+// (agents/freehold/prompt.md for the CPA, agents/<department>/prompt.md for a
+// department — both embedded via the freehold/agents package) read-only into
+// the pod, and the agent re-reads it on every spawn — never cached.
+const SystemPromptPath = "/srv/freehold/SYSTEM_PROMPT.md"
 
 // LiteLLMServiceURL is the in-kube OpenAI-compatible endpoint the agent
 // harness reaches the litellm gateway at (ClusterIP Service litellm.litellm
@@ -108,13 +114,14 @@ const AgentLiteLLMKeySecretKey = "key"
 // Never` honors I5 — an intentional clean exit stays terminal; the kubelet
 // must not resurrect a pod that stopped on purpose.
 //
-// systemPrompt is the FULL text of agents/freehold/prompt.md (stageCpa
-// passes the file contents, not a path): it embeds as the <pod>-prompt
-// ConfigMap's content (indented four spaces per line so the `|` block scalar
-// is valid YAML) and the pod mounts that ConfigMap read-only at
-// CPAbsolutePromptPath; the pod re-reads the mounted file on every spawn —
-// never cached. Editing the prompt and redeploying is the only way the
-// agent's behavior changes.
+// systemPrompt is the FULL text of the agent's embedded prompt (the CPA's
+// agents/freehold/prompt.md, or a department's agents/<department>/prompt.md;
+// the caller passes the file contents, not a path): it embeds as the
+// <pod>-prompt ConfigMap's content (indented four spaces per line so the `|`
+// block scalar is valid YAML) and the pod mounts that ConfigMap read-only at
+// SystemPromptPath; the pod re-reads the mounted file on every spawn — never
+// cached. Editing the prompt and redeploying is the only way the agent's
+// behavior changes.
 //
 // The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
 // points the buzz-agent harness at litellmBaseURL with litellmModel and an API
@@ -152,13 +159,14 @@ func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string) string {
 // Never` honors I5 — an intentional clean exit stays terminal; the kubelet
 // must not resurrect a pod that stopped on purpose.
 //
-// systemPrompt is the FULL text of agents/freehold/prompt.md (stageCpa
-// passes the file contents, not a path): it embeds as the <pod>-prompt
-// ConfigMap's content (indented four spaces per line so the `|` block scalar
-// is valid YAML) and the pod mounts that ConfigMap read-only at
-// CPAbsolutePromptPath; the pod re-reads the mounted file on every spawn —
-// never cached. Editing the prompt and redeploying is the only way the
-// agent's behavior changes.
+// systemPrompt is the FULL text of the agent's embedded prompt (the CPA's
+// agents/freehold/prompt.md, or a department's agents/<department>/prompt.md;
+// the caller passes the file contents, not a path): it embeds as the
+// <pod>-prompt ConfigMap's content (indented four spaces per line so the `|`
+// block scalar is valid YAML) and the pod mounts that ConfigMap read-only at
+// SystemPromptPath; the pod re-reads the mounted file on every spawn — never
+// cached. Editing the prompt and redeploying is the only way the agent's
+// behavior changes.
 //
 // The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
 // points the buzz-agent harness at litellmBaseURL with litellmModel and an API
@@ -189,7 +197,7 @@ metadata:
   name: %s
   namespace: agents
 data:
-  CPA_SYSTEM_PROMPT.md: |
+  %s: |
 %s
 ---
 apiVersion: v1
@@ -242,7 +250,7 @@ spec:
       valueFrom:
         secretKeyRef: {name: %s, key: owner}
     volumeMounts:
-    - {name: prompt, mountPath: %s, readOnly: true, subPath: CPA_SYSTEM_PROMPT.md}
+    - {name: prompt, mountPath: %s, readOnly: true, subPath: %s}
   volumes:
   - name: prompt
     configMap: {name: %s}
@@ -257,16 +265,16 @@ spec:
   ports:
   - {port: 443}
 `,
-		promptCm, indentSystemPrompt(systemPrompt),
-		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, CPASystemPromptPath,
+		promptCm, SystemPromptFile, indentSystemPrompt(systemPrompt),
+		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
 		agentToolsURL, agentToolsPubkey,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
-		secret, secret, secret, CPASystemPromptPath, promptCm, pod, pod)
+		secret, secret, secret, SystemPromptPath, SystemPromptFile, promptCm, pod, pod)
 }
 
 // indentSystemPrompt indents every prompt line by four spaces so it embeds as
-// a valid k8s ConfigMap block scalar (the `data:` key `  CPA_SYSTEM_PROMPT.md:
+// a valid k8s ConfigMap block scalar (the `data:` key `  SYSTEM_PROMPT.md:
 // |` is at 2 spaces, so the content must sit at 4 to parse as one scalar).
 func indentSystemPrompt(prompt string) string {
 	lines := strings.Split(strings.TrimRight(prompt, "\n"), "\n")
