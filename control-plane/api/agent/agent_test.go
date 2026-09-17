@@ -10,11 +10,11 @@ import (
 )
 
 // systemPrompt is the real multi-line prompt exactly as production ships it:
-// stageCpa passes agents.CPASystemPrompt into AgentManifestScript, so the
-// test uses that same embedded value — the old tests passed a path string,
+// stageCpa passes agents.CPASystemPrompt("") into AgentManifestScript, so the
+// test uses that same composed value — the old tests passed a path string,
 // which is why the block-scalar bug compiled.
 func systemPrompt() string {
-	return agents.CPASystemPrompt
+	return agents.CPASystemPrompt("")
 }
 
 func TestCPAPodManifestBasics(t *testing.T) {

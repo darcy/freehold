@@ -305,6 +305,11 @@ it to make and ship a real change — to Buzz's own git and/or GitHub.
     through the CPA land on the Provisioner identity, which holds the raw compute grant;
     custom agents never receive it. This is where "capability work goes through the owning
     department" stops being documentation and becomes the grant layout.
+    
+*   **Agents can read the repo.** The shared orientation block tells every non-custom agent
+    to read the source repo on first boot, keep a memory of it, and re-check periodically
+    because it is active; this chunk wires the git/GitHub grant and the read/schedule path
+    that makes that instruction real.
 
 ### Chunk 5 acceptance
 

@@ -105,8 +105,9 @@ repo, not the history.
   still does it auditably.
 - **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user
   touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**
-  (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS) are
-  its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —
+  (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS — the
+  aggregate registry/monitor; manages one directly when no dedicated per-service agent does)
+  are its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —
   the operator and any agent may converse with any department or agent directly; what is
   bounded is *capability execution*. A capability a department owns (external proxy, backup,
   compute/LXC, model registration) is executed by that department's identity, and the raw
@@ -161,6 +162,11 @@ changelog.
 - **The Vault/Gatekeeper "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
+- **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
+  not wired.** Every non-custom prompt (CPA + departments) carries a shared orientation block
+  naming the repo and the read-on-boot/periodic-recheck discipline, and is honest that access
+  is not available yet. The git/GitHub grant + the read/schedule path land with Chunk 5's
+  workspace/git work.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
@@ -226,7 +232,8 @@ changelog.
 - Go — five modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
   - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
-    the CPA prompt + skills, `custom/` the template for agents the CPA creates, and the five
+    the CPA prompt + skills, `custom/` the template for agents the CPA creates,
+    `common/orientation.md` the shared system-orientation block, and the five
     department definitions (`gatekeeper/`, `vault/`, `provisioner/`, `agent-ops/`,
     `services/`); embeds its Markdown as Go values):
     `cd agents && go build ./... && go vet ./... && go test ./...`

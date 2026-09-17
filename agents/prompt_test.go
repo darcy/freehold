@@ -6,8 +6,45 @@ import (
 )
 
 func TestCPASystemPromptEmbedded(t *testing.T) {
-	if !strings.Contains(CPASystemPrompt, "Control Plane Agent") {
+	if !strings.Contains(CPASystemPrompt(""), "Control Plane Agent") {
 		t.Fatalf("CPASystemPrompt does not look like the CPA prompt")
+	}
+}
+
+// TestOrientationOnlyOnNonCustomPrompts: the CPA and every department carry the
+// shared system orientation; the custom template (agents the CPA creates) does
+// not — it is exempt from the repo/escalation block.
+func TestOrientationOnlyOnNonCustomPrompts(t *testing.T) {
+	const sentinel = "System orientation"
+	if got := CPASystemPrompt(""); !strings.Contains(got, sentinel) {
+		t.Errorf("CPA prompt is missing the shared orientation block")
+	}
+	for _, name := range DepartmentNames() {
+		if got := SystemPrompt(name, "", ""); !strings.Contains(got, sentinel) {
+			t.Errorf("department %q prompt is missing the shared orientation block", name)
+		}
+	}
+	if got := SystemPrompt("waldo", "look after the garden", ""); strings.Contains(got, sentinel) {
+		t.Errorf("custom agent prompt must NOT carry the system orientation block")
+	}
+	if got := AgentSystemPrompt("waldo", ""); strings.Contains(got, sentinel) {
+		t.Errorf("AgentSystemPrompt (custom) must NOT carry the system orientation block")
+	}
+}
+
+func TestOrientationRepoURLOverride(t *testing.T) {
+	const repo = "https://github.com/example/fork"
+	if got := CPASystemPrompt(repo); !strings.Contains(got, repo) {
+		t.Errorf("CPA prompt must render the supplied repo URL")
+	}
+	if got := CPASystemPrompt(""); !strings.Contains(got, UpstreamRepoURL) {
+		t.Errorf("CPA prompt must fall back to the upstream repo URL")
+	}
+	if got := SystemPrompt("vault", "", repo); !strings.Contains(got, repo) {
+		t.Errorf("department prompt must render the supplied repo URL")
+	}
+	if got := SystemPrompt("vault", "", ""); !strings.Contains(got, UpstreamRepoURL) {
+		t.Errorf("department prompt must fall back to the upstream repo URL")
 	}
 }
 
@@ -62,9 +99,9 @@ func TestDepartmentPromptUnknownName(t *testing.T) {
 }
 
 func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
-	got := SystemPrompt("gatekeeper", "look after the garden")
-	want, _ := DepartmentPrompt("gatekeeper")
-	if got != want {
+	got := SystemPrompt("gatekeeper", "look after the garden", "")
+	dept, _ := DepartmentPrompt("gatekeeper")
+	if !strings.Contains(got, strings.TrimRight(dept, "\n")) {
 		t.Errorf("SystemPrompt(gatekeeper) must select the department prompt")
 	}
 	if strings.Contains(got, "look after the garden") {
@@ -73,7 +110,7 @@ func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
 }
 
 func TestSystemPromptFallsBackToCustomTemplate(t *testing.T) {
-	got := SystemPrompt("waldo", "look after the garden")
+	got := SystemPrompt("waldo", "look after the garden", "")
 	if !strings.Contains(got, "You are waldo") || !strings.Contains(got, "look after the garden") {
 		t.Errorf("a non-department name must render the custom template: %q", got)
 	}

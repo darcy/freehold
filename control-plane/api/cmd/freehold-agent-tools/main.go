@@ -37,6 +37,7 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
+	"freehold/agents"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/relay"
@@ -317,6 +318,7 @@ func cmdServe(args []string) {
 	ownerPub := fs.String("owner-pubkey", "", "operator pubkey (agent identity secret owner)")
 	litellmBase := fs.String("litellm-base", "", "litellm gateway base URL for agent pods")
 	selfURL := fs.String("self-url", "", "this server's reachable HTTP base URL (e.g. http://<cpIP>:8089) the CPA pod bootstraps its mcp bridge from")
+	repoURL := fs.String("repo-url", envOr("FREEHOLD_REPO_URL", agents.UpstreamRepoURL), "source repository the shared agent system-orientation block points at (fork/mirror override)")
 	fs.Parse(args)
 
 	if *stateDir == "" || *relayURL == "" {
@@ -399,6 +401,7 @@ func cmdServe(args []string) {
 		Sec:            secBytes,
 		Audience:       audience,
 		SelfURL:        strings.TrimSuffix(*selfURL, "/"),
+		RepoURL:        strings.TrimSpace(*repoURL),
 	}
 
 	// Roster-fresh whitelist, fail-closed: a relay read error yields empty

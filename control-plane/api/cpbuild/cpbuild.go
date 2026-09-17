@@ -90,6 +90,9 @@ type Spec struct {
 	Sec            []byte
 	Audience       string
 	SelfURL        string
+	// RepoURL is the source repository the shared system-orientation block
+	// points agents at. Empty = the agents package's upstream default.
+	RepoURL string
 }
 
 func (s *Spec) client() (*client.McpClient, error) {
@@ -684,6 +687,9 @@ func (s *Spec) deployAgentTools() error {
 	}
 	if s.SelfURL != "" {
 		serveFlags += " --self-url " + s.SelfURL
+	}
+	if s.RepoURL != "" {
+		serveFlags += " --repo-url " + s.RepoURL
 	}
 	if s.CpLxc != 0 {
 		serveFlags += " --cp-lxc " + strconv.FormatUint(uint64(s.CpLxc), 10)
@@ -1687,11 +1693,11 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		var manifest string
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt, name, spec.LitellmBaseURL, "", spec.SelfURL, spec.Audience)
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, spec.Audience)
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
