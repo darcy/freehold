@@ -25,6 +25,32 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.4] — storage provenance is scoped to this world
+
+The 0.6.3 selection treated ANY freehold data on a backend as *this world's*
+previous plane — so on a shared box it offered a "reconnect" to another world's
+data, and its erase path destroyed EVERY freehold domain it found on the
+backend. Both are wrong on a box that hosts more than one world.
+
+- **Domain-scoped classification.** `planebase.BuildOptions` now takes the
+  current relay domain. A backend is this world's plane only when its provenance
+  carries a domain EQUAL to it; another world's freehold data (or a name-only
+  `freehold-*` pool with no domains) is ordinary reuse. `storage resolve` gains
+  `--relay-domain`; the box engine and the CP's `worldStorage` pass their own.
+- **Cross-world sharing is visible.** A thin pool's `OtherVolumes` counts riders
+  that are not this world's own freehold entries — another world's freehold LVs
+  now count as capacity being shared (they previously slipped through the
+  `guest` rider filter). Reconnecting to your own pool still needs no share
+  consent; sharing with another world does.
+- **Erase is scoped and only ever removes this world's domain.** The keep/erase
+  prompt names this world and says plainly that another world's data on the same
+  backend will not be touched; the destroy loop runs for the matching domain
+  only. A backend carrying only another world's data offers no erase at all.
+- **The CP-side reconnect guard is gone.** `worldStorage` no longer needs its
+  bolt-on `DomainMatches` check — classification is now the single owner of the
+  rule — and a foreign freehold zpool is ordinary safe reuse (its datasets live
+  in their own namespace).
+
 ## [0.6.3] — storage selection is a data-safety decision, not a guess
 
 Freehold resolved the durable-plane backend by taking the host's first VG

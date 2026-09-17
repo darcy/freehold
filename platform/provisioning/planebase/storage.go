@@ -95,6 +95,29 @@ func (p Provenance) DomainMatches(domain string) (matched, hasDomains bool) {
 	return false, hasDomains
 }
 
+// isMine reports whether a provenance describes THIS world's plane: it must
+// carry at least one domain AND that domain must equal the current domain. A
+// name-only freehold pool (no domains) or another world's data is not mine.
+func isMine(p Provenance, domain string) bool {
+	matched, hasDomains := p.DomainMatches(domain)
+	return matched && hasDomains
+}
+
+// otherVolumes counts a pool's riders that are not this world's own freehold
+// entries: another world's freehold LVs count (they share the pool's capacity).
+// want is the normalized current domain; internal pool bookkeeping LVs never
+// reach Riders (bootstrap filters them).
+func otherVolumes(p PoolInfo, want string) int {
+	n := 0
+	for _, r := range p.Riders {
+		if dom, fh := FreeholdLV(r); fh && dom == want {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // PoolInfo is one thin pool inside a VG.
 type PoolInfo struct {
 	Name        string
@@ -103,6 +126,12 @@ type PoolInfo struct {
 	Riders      []string // LV names riding the pool (guest disks + freehold LVs)
 	LocalLvm    bool     // PVE's `local-lvm` storage currently points here
 	Freehold    Provenance
+	// OtherVolumes is the count of riders that are NOT this world's own
+	// freehold entries (another world's freehold LVs count here; internal
+	// pool bookkeeping LVs are already excluded upstream). Populated by
+	// BuildOptions, which is the only layer that knows the current domain.
+	// > 0 means reusing the pool shares capacity with someone else's data.
+	OtherVolumes int
 }
 
 // VGInfo is one LVM volume group.
@@ -177,11 +206,18 @@ type Option struct {
 }
 
 // BuildOptions flattens an inventory into classified candidates in
-// recommendation-friendly order: freehold's own plane first (the reconnect
+// recommendation-friendly order: THIS world's own plane first (the reconnect
 // case), then safe reuse, then cautions, then clean-device creates, then the
 // blocked entries (always shown, never selectable).
-func BuildOptions(inv Inventory) []Option {
+//
+// domain is the current world's relay domain. A backend is "this world's
+// plane" only when its provenance carries a domain EQUAL to it — freehold data
+// belonging to another world (or a name-only pool with no domains) is ordinary
+// reuse, never a reconnect. Storage is shared: another world's freehold LVs
+// riding a thin pool count as capacity shared with someone else.
+func BuildOptions(inv Inventory, domain string) []Option {
 	var freeholdPlane, safe, caution, create, blocked []Option
+	want, _ := NormalizeDomain(domain)
 
 	for _, z := range inv.Zpools {
 		opt := Option{Kind: KindReuseZpool, Safety: Safe, Backend: z.Name, Freehold: z.Freehold}
@@ -196,12 +232,14 @@ func BuildOptions(inv Inventory) []Option {
 			blocked = append(blocked, opt)
 			continue
 		}
-		if z.Freehold.Freehold {
+		if isMine(z.Freehold, domain) {
 			opt.Title = fmt.Sprintf("Reconnect to your previous freehold data in “%s”", z.Name)
 			opt.Impact = "Freehold adds its own folders here and reconnects to the data it already owns. Nothing else on this pool is changed."
 			freeholdPlane = append(freeholdPlane, opt)
 			continue
 		}
+		// Foreign-domain or name-only freehold datasets live in their own
+		// `<pool>/freehold/<domain>` namespace, so this is ordinary safe reuse.
 		opt.Title = fmt.Sprintf("Use the spare disk group “%s”", z.Name)
 		opt.Impact = fmt.Sprintf("Freehold adds its own folders to this pool (%s free). It changes nothing else.", humanGB(z.FreeGB))
 		safe = append(safe, opt)
@@ -215,10 +253,17 @@ func BuildOptions(inv Inventory) []Option {
 		for _, p := range vg.Pools {
 			prov.Merge(p.Freehold)
 		}
-		opt := Option{Kind: KindReuseVG, Backend: vg.Name, Pools: vg.Pools, Freehold: prov}
+		// Copy the pools so we can annotate OtherVolumes without mutating the
+		// caller's inventory.
+		pools := make([]PoolInfo, len(vg.Pools))
+		copy(pools, vg.Pools)
+		for i := range pools {
+			pools[i].OtherVolumes = otherVolumes(pools[i], want)
+		}
+		opt := Option{Kind: KindReuseVG, Backend: vg.Name, Pools: pools, Freehold: prov}
 		riders, local := vgRiders(vg)
 		switch {
-		case prov.Freehold:
+		case isMine(prov, domain):
 			opt.Safety = Safe
 			opt.Title = fmt.Sprintf("Reconnect to your previous freehold data in “%s”", vg.Name)
 			opt.Impact = "Freehold reconnects to the data it already owns here. Nothing else is changed."

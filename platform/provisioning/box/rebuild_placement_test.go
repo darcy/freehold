@@ -503,14 +503,20 @@ func TestSelectPlacementReconnectsMatchingFreeholdDomain(t *testing.T) {
 	}
 }
 
-func TestSelectPlacementFreeholdDomainMismatchFails(t *testing.T) {
+func TestSelectPlacementForeignFreeholdIsOrdinaryReuse(t *testing.T) {
 	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
 		Name: "pve", FreeGB: 100,
 		Pools: []planebase.PoolInfo{{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"old-domain"}, Volumes: 4}}},
 	}}}
-	e := invEngine(inv, "k\n", Flags{RelayDomain: "new.domain"})
-	if _, err := e.stagePlacement(); err == nil || !strings.Contains(err.Error(), "old-domain") {
-		t.Errorf("domain mismatch on keep must explain, got %v", err)
+	// A backend carrying ONLY another world's freehold data is not this world's
+	// plane: no reconnect prompt, no erase — ordinary reuse.
+	e := invEngine(inv, "", Flags{RelayDomain: "new.domain", Yes: true, ThinPool: "freehold-thin"})
+	got, err := e.stagePlacement()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.pool != "pve" || got.thinPool != "freehold-thin" {
+		t.Errorf("foreign freehold must be ordinary reuse, got %+v", got)
 	}
 }
 
@@ -588,24 +594,36 @@ func TestSelectPlacementThinPoolCannotOrphanFreeholdData(t *testing.T) {
 	}
 }
 
-func TestSelectPlacementErasesFreeholdData(t *testing.T) {
+func TestSelectPlacementEraseOnlyThisWorldsDomain(t *testing.T) {
+	// The backend carries THIS world's freehold data AND another world's. An
+	// erase may only ever remove this world's domain.
 	inv := planebase.Inventory{VGs: []planebase.VGInfo{{
 		Name: "pve", FreeGB: 100,
-		Pools: []planebase.PoolInfo{{Name: "freehold-thin", Freehold: planebase.Provenance{Freehold: true, Domains: []string{"t-d"}, Volumes: 4}}},
+		Pools: []planebase.PoolInfo{{Name: "freehold-thin", Freehold: planebase.Provenance{
+			Freehold: true, Domains: []string{"t-d", "other-world"}, Volumes: 8}}},
 	}}}
-	destroyed := 0
+	var domains []string
 	e := invEngine(inv, "e\nr\n", Flags{RelayDomain: "t.d"})
 	base := e.RunBin
 	e.RunBin = func(bin string, args []string) (bool, string) {
 		if len(args) >= 2 && args[0] == "storage" && args[1] == "destroy" {
-			destroyed++
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--domain" {
+					domains = append(domains, args[i+1])
+				}
+			}
 		}
 		return base(bin, args)
 	}
 	if _, err := e.stagePlacement(); err != nil {
 		t.Fatal(err)
 	}
-	if destroyed != 3 {
-		t.Errorf("erase must destroy all three tenants, got %d", destroyed)
+	if len(domains) != 3 {
+		t.Fatalf("erase must destroy the 3 tenants of THIS world only, got %v", domains)
+	}
+	for _, d := range domains {
+		if d != "t-d" {
+			t.Errorf("erase touched %q — only this world's domain may be erased", d)
+		}
 	}
 }
