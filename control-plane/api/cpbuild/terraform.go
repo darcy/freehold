@@ -30,10 +30,11 @@ func (s *Spec) dashedDomain() string {
 	return strings.ReplaceAll(s.RelayHost, ".", "-")
 }
 
-// tfLxcName resolves a guest's deterministic LXC hostname for a role.
-func (s *Spec) tfLxcName(role string) string {
-	name, _ := bootstrap.LXCName(s.Name, s.RelayHost, role)
-	return name
+// tfLxcName resolves a guest's deterministic LXC hostname for a role. An
+// invalid world name fails loudly rather than flowing an empty hostname into
+// the terraform plan.
+func (s *Spec) tfLxcName(role string) (string, error) {
+	return bootstrap.LXCName(s.Name, s.RelayHost, role)
 }
 
 // stageDeployTf ships the embedded module onto the provisioning box at
@@ -70,19 +71,31 @@ func (s *Spec) stageDeployTf() error {
 // tfVars renders the non-secret -var arguments the CP driver passes tf.sh
 // (vmids/hostnames/IPs/plane base). Callers resolve vmids FIRST so terraform
 // ADOPTS the real guests (adopt-if-missing no-ops when present).
-func (s *Spec) tfVars() []string {
+func (s *Spec) tfVars() ([]string, error) {
+	hostCp, err := s.tfLxcName("cp")
+	if err != nil {
+		return nil, err
+	}
+	hostRelay, err := s.tfLxcName("relay")
+	if err != nil {
+		return nil, err
+	}
+	hostK3s, err := s.tfLxcName("k3s")
+	if err != nil {
+		return nil, err
+	}
 	return []string{
 		"-var", "domain_dash=" + s.dashedDomain(),
 		"-var", "vmid_cp=" + strconv.FormatUint(uint64(s.CpLxc), 10),
 		"-var", "vmid_relay=" + strconv.FormatUint(uint64(s.RelayLxc), 10),
 		"-var", "vmid_k3s=" + strconv.FormatUint(uint64(s.K3sVmid), 10),
-		"-var", "host_cp=" + s.tfLxcName("cp"),
-		"-var", "host_relay=" + s.tfLxcName("relay"),
-		"-var", "host_k3s=" + s.tfLxcName("k3s"),
+		"-var", "host_cp=" + hostCp,
+		"-var", "host_relay=" + hostRelay,
+		"-var", "host_k3s=" + hostK3s,
 		"-var", "k3s_ip=" + config.StripCIDR(s.ProxyIP),
 		"-var", "k3s_gw=" + s.RelayGW,
 		"-var", "thin_pool=" + s.ThinPool,
-	}
+	}, nil
 }
 
 // tfRun drives the terraform module on the provisioning box for `action`
@@ -95,11 +108,17 @@ func (s *Spec) tfVars() []string {
 // service credentials to TF_VAR_* (env, never argv). Long timeout: apply rolls
 // out litellm + waits for the API.
 func (s *Spec) tfRun(action string, targets, extraVars []string, requiresSecrets bool) error {
-	s.resolveGuestVmids()
+	if err := s.resolveGuestVmids(); err != nil {
+		return fmt.Errorf("tf %s: %w", action, err)
+	}
 	if err := s.stageDeployTf(); err != nil {
 		return fmt.Errorf("tf: ship module: %w", err)
 	}
-	args := append([]string{action}, s.tfVars()...)
+	vars, err := s.tfVars()
+	if err != nil {
+		return fmt.Errorf("tf %s: %w", action, err)
+	}
+	args := append([]string{action}, vars...)
 	args = append(args, extraVars...)
 	for _, t := range targets {
 		args = append(args, "-target", t)

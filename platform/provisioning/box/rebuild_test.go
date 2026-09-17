@@ -118,12 +118,16 @@ mptmp: something
 
 func TestLxcName(t *testing.T) {
 	// No profile name: domain-derived, for worlds that pre-date names.
-	if got := lxcName("", "freehold-test.darcydev.net", "relay"); got != "freehold-test-darcydev-net-relay" {
-		t.Errorf("domain fallback lxcName = %q", got)
+	if got, err := lxcName("", "freehold-test.darcydev.net", "relay"); err != nil || got != "freehold-test-darcydev-net-relay" {
+		t.Errorf("domain fallback lxcName = %q, %v", got, err)
 	}
 	// A named world prefixes the LXC with the profile name.
-	if got := lxcName("librem2", "freehold-test.darcydev.net", "cp"); got != "librem2-cp" {
-		t.Errorf("named lxcName = %q", got)
+	if got, err := lxcName("librem2", "freehold-test.darcydev.net", "cp"); err != nil || got != "librem2-cp" {
+		t.Errorf("named lxcName = %q, %v", got, err)
+	}
+	// An invalid name must fail closed, never yield an empty prefix.
+	if got, err := lxcName("bad name", "freehold-test.darcydev.net", "cp"); err == nil || got != "" {
+		t.Errorf("invalid name must error, got %q, %v", got, err)
 	}
 }
 
@@ -215,8 +219,14 @@ func TestRecordPostWorld(t *testing.T) {
 	if err := cfg.Save(cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	relayName := lxcName("", domain, "relay")
-	k3sName := lxcName("", domain, "k3s")
+	relayName, err := lxcName("", domain, "relay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k3sName, err := lxcName("", domain, "k3s")
+	if err != nil {
+		t.Fatal(err)
+	}
 	e := &Engine{
 		F: Flags{
 			ConfigPath:     cfgPath,

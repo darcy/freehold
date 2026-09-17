@@ -1333,10 +1333,14 @@ func parseStorageBackend(out string) string {
 // operator owns the addressing + the proxy target); absent => DHCP and the
 // real coordinate is read back + recorded after boot.
 func (e *Engine) stageBootstrap(role string) error {
+	hostname, err := lxcName(e.F.Name, e.F.RelayDomain, role)
+	if err != nil {
+		return err
+	}
 	args := []string{"provision",
 		"--kind", "proxmox-lxc",
 		"--role", role,
-		"--hostname", lxcName(e.F.Name, e.F.RelayDomain, role),
+		"--hostname", hostname,
 		"--target", e.F.Target,
 		"--domain", e.F.RelayDomain,
 		"--rootfs-gb", strconv.FormatUint(uint64(e.F.RootfsGB), 10),
@@ -1359,7 +1363,7 @@ func (e *Engine) stageBootstrap(role string) error {
 			args = append(args, "--mount", m.Source+":"+m.GuestPath)
 		}
 	}
-	_, err := e.selfStage("booting the "+role+" LXC", args)
+	_, err = e.selfStage("booting the "+role+" LXC", args)
 	return err
 }
 
@@ -1444,16 +1448,18 @@ func applyLxcCoords(cfg *config.Config, role string, vmid uint32, ip string) {
 
 // lxcName is the guest's FULL name: <name>-<role> when the world has a profile
 // name, else the domain-derived <domain-with-dashes>-<role>.
-func lxcName(name, domain, role string) string {
-	n, _ := bootstrap.LXCName(name, domain, role)
-	return n
+func lxcName(name, domain, role string) (string, error) {
+	return bootstrap.LXCName(name, domain, role)
 }
 
 // findLxcVmidExact finds the role's vmid by FULL name match on `pct list`
 // (a suffix-only match can hit ANOTHER world's container on a multi-world
 // host).
 func (e *Engine) findLxcVmidExact(role string) (uint32, error) {
-	exact := lxcName(e.F.Name, e.F.RelayDomain, role)
+	exact, err := lxcName(e.F.Name, e.F.RelayDomain, role)
+	if err != nil {
+		return 0, err
+	}
 	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs("pct list", 0))
 	if !ok {
 		return 0, fmt.Errorf("pct list unreadable through the runner:\n%s", out)
