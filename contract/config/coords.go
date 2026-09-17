@@ -14,6 +14,7 @@ const AgentToolsPort = "8089"
 // renders these coords at deploy-cp) and the CP console (it consumes them), so
 // it lives in the contract, not in either module.
 type Coords struct {
+	Name           string `json:"name,omitempty"`
 	StateDir       string `json:"state_dir,omitempty"`
 	RelayURL       string `json:"relay_url,omitempty"`
 	RelayAuthURL   string `json:"relay_auth_url,omitempty"`

@@ -25,6 +25,33 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.5] — installs are named profiles; new LXCs are `<name>-<role>`
+
+`freehold-install` wrote the single base config/state (`~/.config/freehold`,
+`~/.freehold`), so a second install on a box that already hosted a world would
+have collided with the first. And guest LXCs were named from the relay domain
+(`<domain-dashed>-<role>`), which cannot distinguish two worlds on one host.
+
+- **`install`/`bootstrap` require `--name`.** The profile name scopes the config
+  (`profiles/<name>/config.toml`) and state (`<FREEHOLD_HOME>/profiles/<name>/`)
+  — the profile registry `freehold profiles` already reads. A name that already
+  has a profile is refused ("use `freehold build` to reconcile"), so a fresh
+  install can never clobber a live world. Interactive `install` prompts for it.
+- **Self-staged children stay in the profile.** A child `exec`/`storage`/
+  `provision` process has no in-process profile, so `installConnect` derives the
+  state root from the `--agent-dir` it is handed
+  (`<root>/control-plane/agent-ops`) — no new flag, and it cannot be forgotten
+  when a stage is added.
+- **`config.Config.Name` records the world name**, set at install and preserved
+  across rebuilds.
+- **New guest LXCs are `<name>-<relay|cp|k3s>`.** `bootstrap.LXCName` prefers
+  the profile name and falls back to the domain-derived name when none is
+  recorded, so worlds installed before this (librem2 included) keep reconciling.
+  The name threads through the box engine, `cpbuild` (boot/reconcile/terraform),
+  and the console's `--world-config` (`config.Coords.Name ⇄ cpbuild.Spec.Name`).
+  Durable-plane names remain domain-keyed — the name-as-data-prefix change is a
+  deliberate follow-up.
+
 ## [0.6.4] — storage provenance is scoped to this world
 
 The 0.6.3 selection treated ANY freehold data on a backend as *this world's*

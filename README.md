@@ -177,12 +177,17 @@ Then operate the world yourself (the justfile does NOT drive the world — it
 only builds + installs):
 
 ```sh
-freehold bootstrap   # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
+freehold-install bootstrap --name <world>   # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # tear it down (compute-only: keeps coords + /srv/data);
                      #  a login-only box runs it through the CP
 freehold            # the TUI dashboard
 ```
+
+`freehold-install install` (interactive) or `bootstrap` requires `--name`: the
+world/profile name scopes the config + state to `profiles/<name>/` and prefixes
+the guest LXCs `<name>-<role>`. Re-running an existing name is refused —
+reconcile a live world with `freehold build`.
 
 ### The appliance (`freehold` — one binary, two surfaces)
 
@@ -263,10 +268,10 @@ are. There is no implicit "default" profile.
 
 The same session flows bootstrap → configure → running as the world converges.
 
-The TUI's bring-up flows and the `freehold install` command drive the SAME
-rebuild engine (`control-plane/cli/rebuild.go`) — one pipeline, no
-duplicated logic. `freehold install` on an interactive terminal collects every
-answer (relay/CP domains + the proxy IP) up front in a bubbletea wizard, then
+The TUI's bring-up flows and the `freehold-install install` command drive the shared
+provisioning engine — one pipeline, no
+duplicated logic. `freehold-install install` on an interactive terminal collects every
+answer (world name, relay/CP domains + the proxy IP) up front in a bubbletea wizard, then
 hands the engine the collected flags; non-TTY input keeps the sequential
 prompts. Re-runs are safe: an
 existing runner package is reused, the door is re-verified, and a matching LXC

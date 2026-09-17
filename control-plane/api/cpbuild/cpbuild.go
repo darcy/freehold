@@ -55,6 +55,7 @@ const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 const AgentToolsPort = config.AgentToolsPort
 
 type Spec struct {
+	Name           string
 	StateDir       string
 	RelayURL       string
 	RelayAuthURL   string
@@ -359,7 +360,7 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 // role's static address (k3s = the proxy IP; relay/cp are DHCP behind the
 // proxy) rides the spec.
 func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (uint32, error) {
-	hostname, err := bootstrap.DomainLXCName(s.RelayHost, role)
+	hostname, err := bootstrap.LXCName(s.Name, s.RelayHost, role)
 	if err != nil {
 		return 0, err
 	}
@@ -418,9 +419,11 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 
 // resolveGuestVmids fills any UNKNOWN guest vmid (0 — a fresh world whose
 // coords were cleared at teardown) by looking up the deterministic hostname
-// (DomainLXCName) on the host, so the DNS/caddy/litellm/cert steps address the
-// REAL vmids world_build just booted.
-func (s *Spec) resolveGuestVmids() {
+// (LXCName) on the host, so the DNS/caddy/litellm/cert steps address the REAL
+// vmids world_build just booted. An invalid world name is a config error and
+// fails the build; a transient `pct list` failure stays best-effort (the
+// recorded vmid, if any, is used).
+func (s *Spec) resolveGuestVmids() error {
 	for _, r := range []struct {
 		role string
 		vmid *uint32
@@ -430,9 +433,9 @@ func (s *Spec) resolveGuestVmids() {
 		if *r.vmid != 0 {
 			continue
 		}
-		name, err := bootstrap.DomainLXCName(s.RelayHost, r.role)
+		name, err := bootstrap.LXCName(s.Name, s.RelayHost, r.role)
 		if err != nil {
-			continue
+			return err
 		}
 		out, err := s.runOut("pct list", 30)
 		if err != nil {
@@ -448,6 +451,7 @@ func (s *Spec) resolveGuestVmids() {
 			}
 		}
 	}
+	return nil
 }
 
 // refreshGuestIPs re-reads the relay/cp/k3s guests' CURRENT IPv4 after a boot
@@ -1145,7 +1149,9 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// Resolve any EXISTING guest vmids by hostname FIRST so a boot reuses
 		// an already-created LXC (a fresh/partial world with 0 recorded vmids;
 		// PickFreeVMID refuses a name that already exists).
-		spec.resolveGuestVmids()
+		if err := spec.resolveGuestVmids(); err != nil {
+			return "", fmt.Errorf("world-build resolve guests: %w", err)
+		}
 		if spec.RelayHost != "" {
 			if err := spec.worldBootRelay(mounts[planebase.TenantRelay]); err != nil {
 				return "", fmt.Errorf("world-build relay: %w", err)
@@ -1186,7 +1192,9 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// 3.5. Re-read the guests' CURRENT vmids + IPs (a fresh world whose coords
 		// were cleared at teardown has 0 vmids; the boot steps just picked
 		// them). Consumed by DNS/caddy/litellm/cert below.
-		spec.resolveGuestVmids()
+		if err := spec.resolveGuestVmids(); err != nil {
+			return "", fmt.Errorf("world-build resolve guests: %w", err)
+		}
 		spec.refreshGuestIPs()
 		// 3.5a. Re-provision the CP's co-located runner from the CP's own
 		// durable litellm store if a re-deploy wiped its package — the services
@@ -1402,7 +1410,7 @@ func (s *Spec) discoverCpVmid() (uint32, error) {
 	if s.RelayHost == "" {
 		return 0, fmt.Errorf("world-teardown: no recorded CP LXC vmid and no relay host to derive the guest name")
 	}
-	name, err := bootstrap.DomainLXCName(s.RelayHost, "cp")
+	name, err := bootstrap.LXCName(s.Name, s.RelayHost, "cp")
 	if err != nil {
 		return 0, err
 	}
@@ -1593,7 +1601,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// deployed BEFORE k3s was booted (the console world_build booted it);
 		// resolve it by hostname so apply targets the real guest.
 		if spec.K3sVmid == 0 {
-			spec.resolveGuestVmids()
+			if err := spec.resolveGuestVmids(); err != nil {
+				return "", fmt.Errorf("create-agent %q: %w", name, err)
+			}
 		}
 		if spec.K3sVmid == 0 {
 			return "", fmt.Errorf("create-agent %q: no k3s vmid recorded/resolvable to apply the pod", name)
@@ -1622,7 +1632,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// relay vmid may be unknown (fresh world) — resolve it by hostname.
 		relayLxc := spec.RelayLxc
 		if relayLxc == 0 {
-			spec.resolveGuestVmids()
+			if err := spec.resolveGuestVmids(); err != nil {
+				return "", fmt.Errorf("add relay member %s: %w", pub, err)
+			}
 			relayLxc = spec.RelayLxc
 		}
 		cmdLine := fmt.Sprintf("cd %s && docker compose exec -T relay buzz-admin add-member --pubkey %s", spec.RelayCompose, pub)

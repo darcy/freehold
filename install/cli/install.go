@@ -26,14 +26,43 @@ import (
 	"freehold/platform/provisioning/drive"
 )
 
-// installConfigPath is the config path the install writes (default freehold
-// home). A profile-aware box can pin --config.
+// installConfigPath is the config path the install writes: the selected
+// profile's config (profiles/<name>/config.toml) once selectProfile has pinned
+// it, else the default config path.
 func installConfigPath() string { return config.ConfigPath() }
+
+// selectProfile validates a world/profile name and pins the process to it,
+// creating the profile on first install. It MUST run before any path helper
+// (installConfigPath, operatorDir, box.StateDir) so the config, state, and
+// operator identity all land under profiles/<name>/. Fail closed when the
+// profile already exists: reconciling an existing world is `freehold build`'s
+// job, not a fresh install's.
+func selectProfile(name string) error {
+	if !config.ValidProfileName(name) {
+		return fmt.Errorf("invalid --name %q (letters, digits, dash, underscore; no leading/trailing dash or underscore)", name)
+	}
+	if p := config.Resolve(name); p != nil {
+		return fmt.Errorf("profile %q already exists (%s) — use `freehold build` to reconcile it, or pick another --name", name, p.ConfigPath)
+	}
+	config.SetCurrent(&config.Profile{
+		Name:       name,
+		ConfigPath: config.NewProfilePath(name),
+		StateDir:   config.NewProfileState(name),
+	})
+	return nil
+}
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
 	Short: "Bring up ONLY a control plane in an environment + the box's door — then `freehold build` brings up the world via the CP",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		name, _ := cmd.Flags().GetString("name")
+		if name == "" {
+			return fmt.Errorf("bootstrap needs --name (the world/profile name — isolates this world's config and state)")
+		}
+		if err := selectProfile(name); err != nil {
+			return err
+		}
 		f := flagsFromCmd(cmd)
 		applyInstallDefaults(&f)
 		f.ConfigPath = installConfigPath()
@@ -54,7 +83,8 @@ var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Bring up a control plane interactively (asks a few questions, then the bootstrap pipeline)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runInstall(os.Stdin, cmd.OutOrStdout())
+		name, _ := cmd.Flags().GetString("name")
+		return runInstall(os.Stdin, cmd.OutOrStdout(), name)
 	},
 }
 
@@ -69,13 +99,24 @@ var installBanner = `
   ╰──────────────────────────────────────────────────────────────╯
 `
 
-func runInstall(in io.Reader, out io.Writer) error {
+func runInstall(in io.Reader, out io.Writer, name string) error {
 	ui := &installerUI{out: out, raw: in, in: bufio.NewReader(in)}
 	fmt.Fprint(out, installBanner)
+	if name == "" {
+		var err error
+		name, err = ui.ask("World name (profile — isolates this world's config + state)", "")
+		if err != nil {
+			return err
+		}
+	}
+	if err := selectProfile(name); err != nil {
+		return err
+	}
 	f, err := collectAnswers(ui)
 	if err != nil {
 		return err
 	}
+	f.Name = name
 	applyInstallDefaults(&f)
 	consent := "no"
 	if f.ConfirmStorage {
@@ -192,6 +233,7 @@ func applyInstallDefaults(f *box.Flags) {
 // flagsFromCmd maps the bootstrap command's flags into box.Flags.
 func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f := box.Flags{}
+	f.Name, _ = cmd.Flags().GetString("name")
 	f.Addr, _ = cmd.Flags().GetString("addr")
 	f.Target, _ = cmd.Flags().GetString("target")
 	f.Host, _ = cmd.Flags().GetString("host")
@@ -233,6 +275,8 @@ func defaultBins() (box.Bins, error) {
 }
 
 func init() {
+	bootstrapCmd.Flags().String("name", "", "World/profile name (REQUIRED — isolates config + state under profiles/<name>)")
+	installCmd.Flags().String("name", "", "World/profile name (prompted if omitted)")
 	bootstrapCmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
 	bootstrapCmd.Flags().String("target", "proxmox-box", "Runner name")
 	bootstrapCmd.Flags().String("host", "root@192.168.30.224", "Host address the runner SSH's into")
