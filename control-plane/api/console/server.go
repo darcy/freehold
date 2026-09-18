@@ -625,11 +625,23 @@ func (s *Server) clearWorldDNS() (managedStateRemoved, error) {
 	_ = s.Store.Reload()
 	snap := s.Store.Snapshot()
 	for name := range snap.DNS {
+		// The CP survives teardown: keep its own bare resolver entry (`cp` ->
+		// the CP IP) so the control plane still resolves itself. The WORLD's
+		// records (relay/k3s/litellm/proxy + the dotted relay host) go; the
+		// dotted cp host points at the proxy, which is torn down with k3s.
+		if name == "cp" {
+			continue
+		}
 		res.DNS++
 		s.Store.RemoveDNS(name)
 	}
 	if err := s.Store.Save(); err != nil {
 		return res, fmt.Errorf("world-teardown failed to persist CP state")
+	}
+	// Reflect the removals in the live dnsmasq resolver, not just the store
+	// mirror (otherwise the guests' records keep answering until a rebuild).
+	if err := s.syncResolver(); err != nil {
+		return res, fmt.Errorf("world-teardown sync resolver: %w", err)
 	}
 	return res, nil
 }

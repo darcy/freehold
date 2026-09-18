@@ -63,7 +63,7 @@ var uninstallCmd = &cobra.Command{
 				extra = " + the durable plane (--remove-data)"
 			}
 			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %d + the world + this box's door + the runner key%s\n  keeps:   nothing local (config + state are wiped)\nproceed? [type yes] ",
-				cfg.Name, host, *cfg.Lxc.Cp.Vmid, extra)
+				cfg.Name, displayHost(host, cfg.Runner.Target), *cfg.Lxc.Cp.Vmid, extra)
 			var a string
 			if _, err := fmt.Scanln(&a); err != nil || a != "yes" {
 				return fmt.Errorf("uninstall aborted (not confirmed)")
@@ -83,22 +83,21 @@ func init() {
 	addCommonFlags(uninstallCmd, nil)
 	uninstallCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/profile config)")
 	uninstallCmd.Flags().String("name", "", "Profile name (resolves --host from profiles/<name>/config.toml when --host is omitted)")
-	uninstallCmd.Flags().String("host", "", "The environment address freehold reached (defaults to the profile's recorded host)")
+	uninstallCmd.Flags().String("host", "", "The environment address freehold reached (defaults to the profile's recorded host; informational in this path — the remote work rides the local runner)")
 	uninstallCmd.Flags().Bool("remove-data", false, "ALSO remove the durable plane (datasets + the freehold-created thin pool). Without it the plane survives so a later install re-adopts the runner identity")
 	uninstallCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
 }
 
-// resolveUninstall checks the preconditions and resolves the host (--host wins,
-// else the profile's recorded host). A thin box — no local provisioning runner
-// — is refused until the transient Access seam lands (PR3), and a profile with
-// no recorded CP vmid cannot dispatch the CP destroy.
+// resolveUninstall checks the preconditions and resolves the host for DISPLAY
+// (--host wins, else the profile's recorded host; both optional — the remote
+// work goes through the local runner, so the host is informational until the
+// transient Access seam routes by it). A thin box — no local provisioning
+// runner — is refused until that seam lands (PR3), and a profile with no
+// recorded CP vmid cannot dispatch the CP destroy.
 func resolveUninstall(cfg *config.Config, hostFlag string) (string, error) {
 	host := cfg.Host
 	if hostFlag != "" {
 		host = hostFlag
-	}
-	if host == "" {
-		return "", fmt.Errorf("uninstall needs --host (the profile records no host) — re-run with `--host root@<box>`")
 	}
 	if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
 		return "", fmt.Errorf("uninstall needs a local provisioning runner — run it from the box that built the world (the thin-box path lands with the transient Access seam)")
@@ -116,7 +115,7 @@ func resolveUninstall(cfg *config.Config, hostFlag string) (string, error) {
 // then drop safely, the CP's mount gone). The box's operator door is revoked
 // through the CP first (best-effort — the CP goes in this pass).
 func runUninstall(cfg *config.Config, configPath, host string, removeData bool) error {
-	fmt.Printf("uninstalling %q (host %s)…\n", cfg.Name, host)
+	fmt.Printf("uninstalling %q (host %s)…\n", cfg.Name, displayHost(host, cfg.Runner.Target))
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -208,6 +207,15 @@ func removeRunnerDoor(runner *teardown.ExecRunner, comment string) error {
 	}
 	fmt.Println("runner substrate key removed from the host (verified)")
 	return nil
+}
+
+// displayHost is the host shown in uninstall output: the resolved --host /
+// recorded host, else the runner target the remote work actually rides.
+func displayHost(host, runnerTarget string) string {
+	if host != "" {
+		return host
+	}
+	return runnerTarget
 }
 
 // wipeLocalProfile removes the box's profile config dir + scoped state dir.

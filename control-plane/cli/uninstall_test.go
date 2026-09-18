@@ -23,10 +23,11 @@ func TestResolveUninstall(t *testing.T) {
 	if h, err := resolveUninstall(base, ""); err != nil || h != "root@host.recorded" {
 		t.Fatalf("recorded host must be used: h=%q err=%v", h, err)
 	}
+	// Host is optional (informational): a recorded runner + CP vmid suffice.
 	noHost := *base
 	noHost.Host = ""
-	if _, err := resolveUninstall(&noHost, ""); err == nil {
-		t.Fatal("a missing host must refuse")
+	if h, err := resolveUninstall(&noHost, ""); err != nil || h != "" {
+		t.Fatalf("host is optional: h=%q err=%v", h, err)
 	}
 	thin := *base
 	thin.Runner = config.RunnerRef{}
