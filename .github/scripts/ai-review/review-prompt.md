@@ -60,8 +60,19 @@ blocking/important items are actually closed, and on genuine regressions from
 the fix. Do not keep finding marginal new issues once the real problems are
 resolved.
 
+Author replies (see AUTHOR REPLIES below, if present): judge each reply on the
+merits. If it fixes the problem or convincingly shows the finding was not real,
+DROP that finding from `inline` — its thread is then resolved for you, so do not
+mention it again. If the reply does not actually resolve the finding, keep the
+finding in `inline` and write its `comment` as a direct in-thread response to
+the author (it is posted as a reply on that thread, not as a new comment).
+Never re-flag a finding whose reply you accept.
+
 PREVIOUS ROUND NOTES:
 {{PREVIOUS_ROUND}}
+
+AUTHOR REPLIES TO YOUR PRIOR INLINE FINDINGS:
+{{REVIEW_REPLIES}}
 
 REPO CONTEXT FILES:
 {{CONTEXT_FILES}}
