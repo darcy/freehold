@@ -25,14 +25,16 @@ it once there's a real agent workflow worth generalizing to it (see Chunk 5 belo
 *   **Grants coarse, not 1:1** — agent ↔ runner; dedicated runner per service = default;  
     sharing via grants (whitelist Nostr pubkeys).
     
-*   **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user  
-    touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**  
-    (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS) are  
+*   **The agent org is two tiers: the CPA and four departments.** The CPA is the sole user  
+    touchpoint; **Security** (access/exposure), **Vault** (data plane), **Compute** (the box  
+    itself — CPU/RAM/disk, LXC/kube and remote provisioning, plus its monitoring tooling),  
+    and **Agent Ops** (models/providers/agents, plus AI hardware) are  
     its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted  
     (the operator and any agent may converse with any department directly); capability  
     execution is bounded — a department-owned capability is executed by that department's  
-    identity, and its raw grant attaches there, never to a custom agent. The five are  
-    installed as part of the core build (`freehold build`): each in `#freehold` plus its  
+    identity, and its raw grant attaches there, never to a custom agent. Service lifecycle is  
+    not a department: whichever agent created a service owns it, ad hoc and unvetted. The four  
+    are installed as part of the core build (`freehold build`): each in `#freehold` plus its  
     own private `#<department>` channel, with the CPA a member of all. Only the  
     identity/grant separation is locked; capability tooling/secrets arrive per department  
     later (Chunk 5/6).
@@ -302,8 +304,8 @@ it to make and ship a real change — to Buzz's own git and/or GitHub.
     
 *   Proof point: an agent deploys a service to an LXC using what it committed.
     
-*   **The first department capability gets teeth: Provisioner.** Compute requests routed
-    through the CPA land on the Provisioner identity, which holds the raw compute grant;
+*   **The first department capability gets teeth: Compute.** Compute requests routed
+    through the CPA land on the Compute identity, which holds the raw compute grant;
     custom agents never receive it. This is where "capability work goes through the owning
     department" stops being documentation and becomes the grant layout.
     
@@ -354,7 +356,7 @@ kube target.
     numbers gathered in Chunk 3.
     
 *   **The department check-in hook lands here.** When an agent requests a service/compute
-    through the CPA's provision path, Vault asks "back this up?" and Gatekeeper asks
+    through the CPA's provision path, Vault asks "back this up?" and Security asks
     "reachable outside your network?" — a visible choice, with "no" as a valid final answer.
     Department status reuses the same postcondition-gated 🟢/🟡/🔴 language as runner/service
     readiness.

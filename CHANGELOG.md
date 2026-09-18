@@ -25,6 +25,27 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## Unreleased — the department model collapses five → four
+
+The org had five departments, one of which bundled two unrelated jobs; the names were
+also not plain. The four that remain are each a single, bounded ownership area.
+
+- **Services is dropped as a department.** Service lifecycle and config stay owned by
+  whichever agent created the service — a freehold-delegate or a custom agent — ad hoc and
+  unvetted as before. No department aggregates or monitors installed OSS.
+- **Provisioner is renamed Compute, and its scope narrows to the box itself:** CPU/RAM/disk,
+  Proxmox LXC/kube provisioning, remote (Vultr-type) provisioning, and the monitoring tooling
+  it needs (uptime dashboards, resource alerts). It no longer manages what runs on top.
+- **Gatekeeper is renamed Security** (same scope: external/public proxy, Tailscale, internal
+  proxy, exposure verification) — a plainer name, no behavior change.
+- **Vault is unchanged.** **Agent Ops** keeps its name and gains an explicit AI-hardware
+  scope: local-AI accelerators (an RTX 3090, a DGX Spark) are provisioned and tuned by Agent
+  Ops, separate from Compute's general resources.
+- Concretely: reserved identities are now `security` / `vault` / `compute` / `agent-ops`,
+  each installed at build with `#freehold` plus its private `#<department>` channel. A rebuild
+  of a world built before the rename leaves the retired agents behind — see AGENTS.md
+  "Known gaps".
+
 ## [0.6.10] — teardown keeps the control plane; uninstall removes it
 
 `teardown` destroyed the control plane too, and `--data` removed the plane. Those are two
