@@ -2,11 +2,15 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { readFileSync, existsSync } from 'fs';
 import { reassembleStream } from './sse.mjs';
+import { buildReviewReplies, buildThreadIndex } from './threads.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const LLM_BASE_URL = process.env.LLM_BASE_URL;
 const LLM_API_KEY = process.env.LLM_API_KEY;
 const LLM_MODEL = process.env.LLM_MODEL;
+// Cap a single LLM request (headers + body). A stalled stream otherwise hangs
+// until the job's 60-minute timeout; aborting lets callLlm retry instead.
+const LLM_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '600000', 10);
 const PROMPT_FILE = process.env.PROMPT_FILE || 'review-prompt.md';
 const CONTEXT_FILES = (process.env.CONTEXT_FILES || '').split(',').map(s => s.trim()).filter(Boolean);
 const EXCLUDE_PATTERNS = (process.env.EXCLUDE_PATTERNS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -88,6 +92,16 @@ async function getPreviousRoundNotes() {
     .filter(c => c.body?.includes(TRACKING_MARKER) && c.id !== parentCommentId)
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
   return tracking ? tracking.body.replace(TRACKING_MARKER, '').trim() : '(first review round)';
+}
+
+// The bot's own login, fetched once. Used to tell the bot's comments apart from
+// the author's replies and to filter review_requested events aimed elsewhere.
+let botLogin = null;
+async function getBotLogin() {
+  if (botLogin !== null) return botLogin;
+  try { botLogin = (await octokit.rest.users.getAuthenticated()).data.login; }
+  catch { botLogin = ''; }
+  return botLogin;
 }
 
 // Builds the diff and fails closed (rather than silently truncating) if it's
@@ -211,6 +225,7 @@ async function callLlmOnce(prompt) {
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+    signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
@@ -359,12 +374,32 @@ async function main() {
   const headSha = pr.head.sha;
   const startedAt = Date.now();
 
+  // Re-review is triggered by re-requesting a review. `review_requested` also
+  // fires for human reviewers, so skip when the request is aimed at someone
+  // other than the bot (the bot's own review does not emit this event).
+  if (github.context.payload.action === 'review_requested') {
+    const me = await getBotLogin();
+    const requested = github.context.payload.requested_reviewer?.login;
+    if (me && requested && requested !== me) {
+      core.info(`Review requested from ${requested}, not the bot (${me}); skipping.`);
+      return;
+    }
+  }
+
   // Read the PRIOR round's notes BEFORE creating this round's tracking comment:
   // getPreviousRoundNotes takes the most recent TRACKING_MARKER comment, so
   // creating ours first would make it read the fresh, empty one and drop the
   // re-review guidance ("don't re-find marginal issues") — which makes every
   // round reason like a first look (slow + prone to prose/non-JSON).
   const previousRound = await getPreviousRoundNotes();
+
+  // Fetch the PR's review comments once: the author's replies feed the prompt,
+  // the thread index lets a re-flagged finding be answered in-thread, and the
+  // re-flag/fixed/resolve logic below reuses the same list.
+  const bot = await getBotLogin();
+  const existingComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number, per_page: 100 });
+  const reviewReplies = buildReviewReplies(existingComments, { bot, author: pr.user.login });
+  const threadIndex = buildThreadIndex(existingComments, { bot, author: pr.user.login });
 
   // Create the progress comment up front so the checkboxes light up as work
   // happens, rather than appearing fully-formed at the end.
@@ -416,6 +451,7 @@ async function main() {
     .replace('{{REPO}}', () => `${owner}/${repo}`)
     .replace('{{PR_NUMBER}}', () => String(pull_number))
     .replace('{{PREVIOUS_ROUND}}', () => previousRound)
+    .replace('{{REVIEW_REPLIES}}', () => reviewReplies)
     .replace('{{CONTEXT_FILES}}', () => ctx.text)
     .replace('{{DIFF}}', () => diff);
 
@@ -444,16 +480,21 @@ async function main() {
   await progress(3, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
 
   // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
-  // findings (already commented in a prior round — don't re-post inline, just
-  // re-capture the high-level in the parent). GitHub rewrites a prior comment's
-  // `commit_id` to the current head when its line persists, so matching on
-  // `commit_id === headSha` reliably detects prior-round re-flags.
-  const existingComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number, per_page: 100 });
-  const seen = new Set(existingComments.filter(c => c.commit_id === headSha).map(c => `${c.path}:${c.line}`));
+  // findings (already commented in a prior round). GitHub rewrites a prior
+  // comment's `commit_id` to the current head when its line persists, so
+  // matching on `commit_id === headSha` reliably detects prior-round re-flags.
+  // Key on both `line` and `original_line` (like buildThreadIndex) so a finding
+  // whose line shifted is still recognised as a re-flag, not posted anew.
+  // Thread roots only — replies share path:line and would confuse the match.
+  const roots = existingComments.filter(c => !c.in_reply_to_id);
+  const locKeys = (c) => [c.line, c.original_line]
+    .filter(line => typeof line === 'number')
+    .map(line => `${c.path}:${line}`);
+  const seen = new Set(roots.filter(c => c.commit_id === headSha).flatMap(locKeys));
   const priorSeverity = new Map();
-  for (const c of existingComments) {
+  for (const c of roots) {
     const m = c.body?.match(/\[(blocking|important)\]/) || [];
-    if (m[1]) priorSeverity.set(`${c.path}:${c.line}`, m[1]);
+    if (m[1]) for (const k of locKeys(c)) priorSeverity.set(k, m[1]);
   }
   const newInline = [];
   const reflagged = [];
@@ -463,12 +504,15 @@ async function main() {
   }
 
   // Prior blocking/important comments whose finding is no longer flagged this
-  // round are treated as fixed — resolve their threads (GraphQL-only).
+  // round are treated as fixed — resolve their threads (GraphQL-only). Only the
+  // bot's own threads are resolved (never a human reviewer's), and this is what
+  // resolves a thread when the author's reply clarified the finding away and
+  // the model dropped it.
   const currentFindings = new Set(inline.map(c => `${c.path}:${c.line}`));
-  const fixedComments = existingComments.filter(c =>
-    !c.in_reply_to_id &&
+  const fixedComments = roots.filter(c =>
+    bot && c.user?.login === bot &&
     /\[(blocking|important)\]/.test(c.body || '') &&
-    !currentFindings.has(`${c.path}:${c.line}`)
+    !locKeys(c).some(k => currentFindings.has(k))
   );
   const resolvedCount = await resolveFixedThreads(fixedComments);
 
@@ -491,7 +535,29 @@ async function main() {
     }
   }
 
-  await progress(4, `Posted ${postedInline} inline comment(s)` + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
+  // A re-flagged finding whose thread the author replied to is answered
+  // in-thread (the finding's `comment` is written as a direct response). With
+  // no author reply there is nothing to answer, so it is only re-captured in
+  // the parent summary — no self-reply.
+  const repliedKeys = new Set();
+  for (const c of reflagged) {
+    const target = threadIndex.get(`${c.path}:${c.line}`);
+    // Unknown bot identity → never reply on a thread we can't prove is ours.
+    if (!bot || !target?.hasAuthorReply) continue;
+    try {
+      await octokit.rest.pulls.createReplyForReviewComment({
+        owner, repo, pull_number,
+        comment_id: target.rootId,
+        body: `**[${c.severity}]** ${c.comment}`,
+      });
+      repliedKeys.add(`${c.path}:${c.line}`);
+    } catch (e) {
+      core.warning(`Thread reply on ${c.path}:${c.line} failed: ${e.message}`);
+    }
+  }
+  const postedReplies = repliedKeys.size;
+
+  await progress(4, `Posted ${postedInline} inline comment(s)` + (postedReplies ? ` · replied in ${postedReplies} thread(s)` : '') + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
   const loc = (c) => `\`${c.path}${typeof c.line === 'number' ? `:${c.line}` : ''}\``;
@@ -500,7 +566,10 @@ async function main() {
     ...reflagged.map(c => {
       const prior = priorSeverity.get(`${c.path}:${c.line}`);
       const drift = prior && prior !== c.severity ? ` (prior round: ${prior})` : '';
-      return `- [prior round] **${c.severity}**${drift} — ${loc(c)} — ${c.comment} — re-flagged from a prior round; not re-posted inline`;
+      const how = repliedKeys.has(`${c.path}:${c.line}`)
+        ? 'replied in-thread to the author'
+        : 're-flagged from a prior round; not re-posted inline';
+      return `- [prior round] **${c.severity}**${drift} — ${loc(c)} — ${c.comment} — ${how}`;
     }),
   ];
   const summaryText = [
@@ -540,10 +609,7 @@ async function main() {
   // A PR author can't approve/request changes on their own PR; fall back to
   // COMMENT so the verdict still lands on PRs opened by the bot account.
   let event = clean ? 'APPROVE' : 'REQUEST_CHANGES';
-  try {
-    const { data: me } = await octokit.rest.users.getAuthenticated();
-    if (me.login === pr.user.login) event = 'COMMENT';
-  } catch { /* best-effort; createReview still guards */ }
+  if (bot && bot === pr.user.login) event = 'COMMENT';
 
   try {
     await octokit.rest.pulls.createReview({
