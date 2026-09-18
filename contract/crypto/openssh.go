@@ -115,6 +115,19 @@ func SSHPublicKeyFromSeed(seed []byte, comment string) (string, error) {
 	return pubLine, err
 }
 
+// SSHPrivateKeyPEMFromSeed derives the openssh-key-v1 PRIVATE key from a fixed
+// 32-byte ed25519 seed. This is the transient-access half of DOOR_SPEC: the
+// install/teardown box derives its own deterministic door key from its
+// agent-ops identity seed so it can reach the host directly, before any runner
+// is serving. The caller writes it to a 0600 temp file and deletes it.
+func SSHPrivateKeyPEMFromSeed(seed []byte, comment string) ([]byte, error) {
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("seed must be 32 bytes, got %d", len(seed))
+	}
+	pem, _, err := encodeED25519OpenSSH(seed, comment)
+	return pem, err
+}
+
 // ExtractED25519PublicKeyLine derives the authorized_keys public line from
 // an openssh-key-v1 private-key PEM (ed25519 only — the only kind the
 // provisioner generates). This is the door-key RECOVERY path: a reused
