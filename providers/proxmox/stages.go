@@ -16,15 +16,15 @@ import (
 // DnsAddCmd is the pct exec that runs `freehold-console dns add <name> <ip>
 // <source> [--domain <base>]` INSIDE the CP LXC (the dnsmasq resolver) — the Go
 // console's `control-plane dns add` equivalent (the rust control-plane binary is
-// gone; freehold-console carries the dns subcommand). Single-quote-wrapped at
-// the innermost level only; callers pass validated names/IPs.
+// gone; freehold-console carries the dns subcommand). The payload is
+// single-quote-free (values ride double quotes) and wrapped in sh -c exactly
+// once; callers pass validated names/IPs.
 func DnsAddCmd(cpLxc uint32, binDir, stateDir, name, ip, source, searchBase string) string {
-	rest := []string{"'add'", shellSingleQuote(name), shellSingleQuote(ip), shellSingleQuote(source)}
+	inner := fmt.Sprintf("%s dns --state-dir %s add %s %s %s",
+		dq(binDir+"/freehold-console"), dq(stateDir), dq(name), dq(ip), dq(source))
 	if searchBase != "" {
-		rest = append(rest, "'--domain'", shellSingleQuote(searchBase))
+		inner += " --domain " + dq(searchBase)
 	}
-	inner := fmt.Sprintf("'%s/freehold-console' 'dns' --state-dir '%s' %s",
-		binDir, stateDir, strings.Join(rest, " "))
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }
 
@@ -33,8 +33,8 @@ func DnsAddCmd(cpLxc uint32, binDir, stateDir, name, ip, source, searchBase stri
 // flag.Parse stops at the first non-flag arg, so a --state-dir after the verb
 // is silently unparsed and state.Open fails on an empty path).
 func DnsApexCmd(cpLxc uint32, binDir, stateDir, apex, proxyIP string) string {
-	inner := fmt.Sprintf("'%s/freehold-console' 'dns' --state-dir '%s' --apex '%s' --ip '%s' 'apex'",
-		binDir, stateDir, apex, proxyIP)
+	inner := fmt.Sprintf("%s dns --state-dir %s --apex %s --ip %s apex",
+		dq(binDir+"/freehold-console"), dq(stateDir), dq(apex), dq(proxyIP))
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }
 
@@ -131,3 +131,7 @@ rm -f /tmp/fh-key.pem /tmp/fh-fc.pem
 }
 
 func shellSingleQuote(s string) string { return "'" + s + "'" }
+
+// dq double-quotes a value for use INSIDE a single-quoted sh -c payload
+// (the payload must stay single-quote-free).
+func dq(s string) string { return `"` + s + `"` }

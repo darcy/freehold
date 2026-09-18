@@ -48,9 +48,9 @@ func TestCaddyCertInstallScript(t *testing.T) {
 func TestDnsApexCmd(t *testing.T) {
 	cmd := DnsApexCmd(101, "/srv/data/cp/bin", "/srv/data/cp/control-plane", "librem.freehold.technology", "192.168.30.8")
 	for _, mustAfter := range []struct{ before, after string }{
-		{"--state-dir '/srv/data/cp/control-plane'", "'apex'"},
-		{"--apex 'librem.freehold.technology'", "'apex'"},
-		{"--ip '192.168.30.8'", "'apex'"},
+		{`--state-dir "/srv/data/cp/control-plane"`, " apex'"},
+		{`--apex "librem.freehold.technology"`, " apex'"},
+		{`--ip "192.168.30.8"`, " apex'"},
 	} {
 		b := strings.Index(cmd, mustAfter.before)
 		a := strings.Index(cmd, mustAfter.after)
@@ -58,23 +58,32 @@ func TestDnsApexCmd(t *testing.T) {
 			t.Errorf("apex flags must precede the verb: %q before %q in %s", mustAfter.before, mustAfter.after, cmd)
 		}
 	}
-	if !strings.HasPrefix(cmd, "pct exec 101 -- sh -c") {
+	if !strings.HasPrefix(cmd, "pct exec 101 -- sh -c ") {
 		t.Errorf("unexpected apex cmd shape: %s", cmd)
+	}
+	// The sh -c payload must be a SINGLE-quoted argument: exactly one pair of
+	// single quotes. Interpolated values ride double quotes so they cannot
+	// terminate the wrapper early.
+	if n := strings.Count(cmd, "'"); n != 2 {
+		t.Errorf("sh -c payload must be single-quoted exactly once (got %d quotes): %s", n, cmd)
 	}
 }
 
-// TestDnsAddCmd pins the register command shape: the inner control-plane
-// invocation is single-quoted once (the values are validated names/IPs), and a
-// search base rides --domain when supplied.
+// TestDnsAddCmd pins the register command shape: the sh -c payload is
+// single-quoted exactly once (values ride double quotes, so a spaced source
+// survives), and a search base rides --domain when supplied.
 func TestDnsAddCmd(t *testing.T) {
 	cmd := DnsAddCmd(101, "/srv/data/cp/bin", "/srv/data/cp/control-plane", "relay", "10.0.0.5", "world-build relay", "d")
 	for _, want := range []string{
-		"pct exec 101 -- sh -c",
-		"'/srv/data/cp/bin/freehold-console' 'dns' --state-dir '/srv/data/cp/control-plane' 'add' 'relay' '10.0.0.5' 'world-build relay' '--domain' 'd'",
+		"pct exec 101 -- sh -c ",
+		`"/srv/data/cp/bin/freehold-console" dns --state-dir "/srv/data/cp/control-plane" add "relay" "10.0.0.5" "world-build relay" --domain "d"`,
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("DnsAddCmd missing %q:\n%s", want, cmd)
 		}
+	}
+	if n := strings.Count(cmd, "'"); n != 2 {
+		t.Errorf("sh -c payload must be single-quoted exactly once (got %d quotes): %s", n, cmd)
 	}
 	noBase := DnsAddCmd(101, "/srv/data/cp/bin", "/srv/data/cp/control-plane", "cp", "10.0.0.6", "world-build cp", "")
 	if strings.Contains(noBase, "--domain") {
