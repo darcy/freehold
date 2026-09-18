@@ -14,7 +14,7 @@ import (
 const GuestUID = 100000
 
 // FreshThinPool is the thin pool ensure carves in a VG that has none.
-const FreshThinPool = "freehold-thin"
+const FreshThinPool = planebase.FreshThinPool
 
 // TenantLVSizeGB / FreshPoolSizeGB are the DEFAULTS — callers (CLI
 // --size-gb / --pool-size-gb, TUI prompts) override. 10 is the halved value
@@ -33,7 +33,7 @@ const (
 // the fstab pin. Mirrors Rust drive::ensure_lvm_lv byte-for-byte.
 func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSizeGB, poolSizeGB uint64, thinPool string) error {
 	dev := "/dev/" + vg + "/" + lvName
-	exists, err := bootstrap.ThinLVExists(c, target, vg, lvName)
+	exists, err := ThinLVExists(c, target, vg, lvName)
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSiz
 		// when the VG truly has none.
 		pool := thinPool
 		if pool == "" {
-			p, hasPool, err := bootstrap.ThinPoolName(c, target, vg)
+			p, hasPool, err := ThinPoolName(c, target, vg)
 			if err != nil {
 				return err
 			}
@@ -54,7 +54,7 @@ func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSiz
 				pool = FreshThinPool
 			}
 		}
-		if poolExists, err := bootstrap.ThinPoolExists(c, target, vg, pool); err != nil {
+		if poolExists, err := ThinPoolExists(c, target, vg, pool); err != nil {
 			return err
 		} else if !poolExists {
 			if _, err := bootstrap.ExecToOK(c, target,
@@ -234,7 +234,7 @@ func ResolveTenantMounts(c *client.McpClient, target, pool, domain string, tenan
 	}
 	var mounts []planebase.MountSpec
 	for _, e := range entries {
-		if err := bootstrap.EnsureDataset(c, target, e.ds); err != nil {
+		if err := EnsureDataset(c, target, e.ds); err != nil {
 			return nil, err
 		}
 		host, err := MountpointOf(c, target, e.ds)
@@ -274,7 +274,7 @@ func DestroyLvmTenant(c *client.McpClient, target, vg, domain string, tenant pla
 	}
 	destroyed := false
 	for _, lv := range lvs {
-		exists, err := bootstrap.ThinLVExists(c, target, vg, lv)
+		exists, err := ThinLVExists(c, target, vg, lv)
 		if err != nil {
 			return false, err
 		}
@@ -364,7 +364,7 @@ func DestroyTenantBackend(c *client.McpClient, target string, kind planebase.Bac
 // left alone and the next rebuild's storage stage re-points it once the
 // new pool is carved.
 func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
-	exists, err := bootstrap.ThinPoolExists(c, target, vg, pool)
+	exists, err := ThinPoolExists(c, target, vg, pool)
 	if err != nil {
 		return err
 	}
@@ -395,17 +395,17 @@ func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
 		}
 		return out.Stdout, nil
 	}
-	current, err := run(planebase.LocalLvmProbeScript, 30)
+	current, err := run(LocalLvmProbeScript, 30)
 	if err != nil {
 		return fmt.Errorf("local-lvm probe failed on %s: %w", target, err)
 	}
 	if strings.TrimSpace(current) == pool {
-		other, found, err := bootstrap.ThinPoolNameOther(c, target, vg, pool)
+		other, found, err := ThinPoolNameOther(c, target, vg, pool)
 		if err != nil {
 			return err
 		}
 		if found {
-			if err := planebase.RepointLocalLvm(run, other); err != nil {
+			if err := RepointLocalLvm(run, other); err != nil {
 				return fmt.Errorf("re-pointing local-lvm off the doomed pool %s/%s: %w", vg, pool, err)
 			}
 		}

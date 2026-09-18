@@ -243,7 +243,7 @@ changelog.
   `mise exec rust@1.98.0 -- cargo build --workspace` + `cargo test --workspace` (`Cargo.toml`
   declares `rust-version = "1.94"`). Rust is used for the privileged exec endpoint, the
   byte-exact contract oracle, and the runner's own fixtures — nothing else.
-- Go — five modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
+- Go — six modules. Run Go through mise (`mise exec go@1.25.0 -- go …`; each `go.mod` pins
   `go 1.25.0`):
   - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
     the CPA prompt + skills, `custom/` the template for agents the CPA creates,
@@ -257,7 +257,14 @@ changelog.
     migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`;
     `provisioning/box` holds the SHARED provisioning engine (LXC boot, storage plane,
     deploy-cp, the CP bootstrap `Engine`) — imported by BOTH the install CLI and the
-    operator CLI, so it stays control-plane-free.
+    operator CLI, so it stays control-plane-free. **`platform/` is provider-independent**:
+    substrate commands live behind the `Provider` seam in `platform/provisioning` and are
+    injected by the composition roots; nothing here imports `providers/` or names a `pct`
+    command (a guard test enforces both).
+  - `providers/` (`freehold/providers` — the substrate providers; `providers/proxmox/`
+    holds guest create/exec/list, LVM/ZFS/thin-pool storage, and the pct stage/DNS
+    builders): `cd providers && go build ./... && go vet ./... && go test ./...`. Imports
+    `platform/` + `contract/`; never the reverse.
   - `install/` (`freehold/install` — the CP bootstrap CLI): `cd install && go build ./... &&
     go vet ./... && go test ./...`
   - `control-plane/` (`freehold/control-plane` — the mechanism: api/cli/secret-management;

@@ -9,9 +9,13 @@ import (
 	"strings"
 	"testing"
 
+	"errors"
+
+	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/platform/provisioning"
 )
 
 // ---- storage-line parsing (stage_storage contract lines) -------------------
@@ -59,60 +63,6 @@ func TestParseStorageBackend(t *testing.T) {
 	// it reads as absent.
 	if got := parseStorageBackend("STORAGE-BACKEND: \n"); got != "" {
 		t.Errorf("empty value = %q, want empty", got)
-	}
-}
-
-// ---- pct output parsing ------------------------------------------------------
-
-func TestFindVmidInList(t *testing.T) {
-	out := `VMID       Status     Lock         Name
-100        running                 freehold-test-darcydev-net-relay
-101        running                 freehold-test-darcydev-net-cp
-200        stopped                 other-darcydev-net-relay
-`
-	vmid, err := findVmidInList(out, "freehold-test-darcydev-net-cp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if vmid != 101 {
-		t.Errorf("vmid = %d, want 101", vmid)
-	}
-	// suffix-only names must NOT match a different world's container.
-	if _, err := findVmidInList(out, "darcydev-net-relay"); err == nil {
-		t.Error("a non-exact name should not match")
-	}
-	if _, err := findVmidInList(out, "missing-relay"); err == nil {
-		t.Error("absent name should error")
-	}
-}
-
-func TestParseLxcIP(t *testing.T) {
-	ip, err := parseLxcIP("2: eth0    inet 192.168.30.8/24 brd 192.168.30.255 scope global eth0", 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ip != "192.168.30.8/24" {
-		t.Errorf("ip = %q", ip)
-	}
-	// loopback alone => error.
-	if _, err := parseLxcIP("1: lo    inet 127.0.0.1/8 scope host lo", 100); err == nil {
-		t.Error("loopback-only should error")
-	}
-}
-
-func TestParsePctMounts(t *testing.T) {
-	out := `arch: amd64
-mp0: pve:freehold-test-darcydev-net/relay,mp=/var/lib/docker
-mp1: pve:freehold-test-darcydev-net/deploy,mp=/srv/data/relay
-net0: name=eth0,bridge=vmbr0,ip=dhcp
-mptmp: something
-`
-	mounts := parsePctMounts(out)
-	if len(mounts) != 2 {
-		t.Fatalf("got %d mounts, want 2: %v", len(mounts), mounts)
-	}
-	if mounts[0] != "/var/lib/docker" || mounts[1] != "/srv/data/relay" {
-		t.Errorf("mounts = %v", mounts)
 	}
 }
 
@@ -234,21 +184,13 @@ func TestRecordPostWorld(t *testing.T) {
 			ProxyIP:        "192.168.30.8/24",
 			OperatorPubkey: strings.Repeat("ab", 32),
 		},
-		Bins: Bins{Self: "freehold"},
-		Out:  &bytes.Buffer{},
-		RunBin: func(bin string, args []string) (bool, string) {
-			joined := strings.Join(args, " ")
-			switch {
-			case strings.Contains(joined, "pct list"):
-				return true, "VMID Status Name\n100 running " + relayName + "\n102 running " + k3sName + "\n"
-			case strings.Contains(joined, "pct exec 100 -- ip -4 -o addr show eth0"):
-				return true, "2: eth0    inet 192.168.30.220/24 brd 192.168.30.255 scope global eth0"
-			case strings.Contains(joined, "pct exec 102 -- ip -4 -o addr show eth0"):
-				return true, "2: eth0    inet 192.168.30.8/24 brd 192.168.30.255 scope global eth0"
-			case strings.Contains(joined, "relayPubkeyNip11") || strings.Contains(joined, "curl"):
-				return true, ""
-			}
-			return false, "unexpected: " + joined
+		Out: &bytes.Buffer{},
+		Provider: &fakeProvider{
+			guests: []provisioning.Guest{{ID: "100", Name: relayName}, {ID: "102", Name: k3sName}},
+			ips: map[string]string{
+				"100": "192.168.30.220/24",
+				"102": "192.168.30.8/24",
+			},
 		},
 	}
 	if err := e.RecordPostWorld(); err != nil {
@@ -830,3 +772,36 @@ func TestApplyConfigDefaults(t *testing.T) {
 		t.Error("explicit --manage-dns=false must NOT be overridden by the config seed")
 	}
 }
+
+// fakeProvider is the test substrate: canned guest list/ip/mounts so the box
+// engine's provider seam is exercised without a real host.
+type fakeProvider struct {
+	guests    []provisioning.Guest
+	ips       map[string]string
+	mounts    map[string][]string
+	pool      string
+	riders    int
+	repointed string
+}
+
+func (f *fakeProvider) GuestExec(guest, cmd string, timeoutS uint64) (*client.ExecOutcome, error) {
+	return &client.ExecOutcome{}, nil
+}
+
+func (f *fakeProvider) ListGuests() ([]provisioning.Guest, error) { return f.guests, nil }
+
+func (f *fakeProvider) GuestIPv4(guest string) (string, error) {
+	ip, ok := f.ips[guest]
+	if !ok {
+		return "", errNotFound
+	}
+	return ip, nil
+}
+
+func (f *fakeProvider) GuestMounts(guest string) ([]string, error) { return f.mounts[guest], nil }
+
+func (f *fakeProvider) LocalLvmStatus() (string, int, error) { return f.pool, f.riders, nil }
+
+func (f *fakeProvider) RepointLocalLvm(pool string) error { f.repointed = pool; return nil }
+
+var errNotFound = errors.New("not found")

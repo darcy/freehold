@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
 )
 
@@ -180,7 +179,7 @@ func (e *Engine) choosePool(opt planebase.Option) (*placement, error) {
 	}
 	if len(pools) == 0 {
 		// The VG has no thin pool yet: carve the default.
-		return &placement{pool: opt.Backend, thinPool: drive.FreshThinPool, created: true}, nil
+		return &placement{pool: opt.Backend, thinPool: planebase.FreshThinPool, created: true}, nil
 	}
 
 	// On a freehold reconnect, prefer the pool that actually carries the
@@ -400,7 +399,7 @@ func (e *Engine) confirmYes(what, impact string) error {
 // ---- small render helpers ---------------------------------------------------
 
 // usableOptions are the backends this phase can actually drive: reuse of an
-// existing zpool or VG. Device-create options are DEFERRED (returned by
+// existing ZFS pool or VG. Device-create options are DEFERRED (returned by
 // deferredOptions for display only), so they never appear as selectable.
 func usableOptions(opts []planebase.Option) []planebase.Option {
 	var out []planebase.Option

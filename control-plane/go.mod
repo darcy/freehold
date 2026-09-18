@@ -6,6 +6,7 @@ require (
 	freehold/agents v0.0.0
 	freehold/contract v0.0.0
 	freehold/platform v0.0.0
+	freehold/providers v0.0.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -256,4 +257,5 @@ replace (
 	freehold/agents => ../agents
 	freehold/contract => ../contract
 	freehold/platform => ../platform
+	freehold/providers => ../providers
 )

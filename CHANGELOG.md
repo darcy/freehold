@@ -25,6 +25,26 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.11] — provider seam: `platform/` is provider-independent
+
+Substrate commands lived scattered through `platform/` (Proxmox `pct`/LVM/ZFS in
+`bootstrap`, `drive`, `stages`, `deploy`, and call sites in the CLI). The platform is now
+a provider-independent provisioning engine over an injected `Provider`, and every
+substrate-specific command lives in a new top-level `providers/` module.
+
+- **New module `providers/`** (`freehold/providers`) with `providers/proxmox/`: guest
+  create/exec/list, storage (LVM/ZFS/thin pools/PVE local-lvm), and the pct stage/DNS
+  builders. It imports `platform/` + `contract/`, never the reverse.
+- **`Provider` seam in `platform/provisioning`** — low-level substrate ops (guest exec,
+  guest list/IP/mounts, local-lvm repoint) whose transport is injected (`ExecFunc`), so
+  platform engines never name a provider or a `pct` command. Composition roots (`install/`,
+  `control-plane/`) construct the concrete Proxmox provider and inject it.
+- **Behavior-preserving:** same commands, same order; the install/build/teardown pipelines
+  are unchanged. Existing tests pass with packages moved.
+- **Guards:** a test asserts nothing under `platform/` imports `freehold/providers`, and a
+  non-test token grep fails if `pct`/`pvesm`/`zfs`/`zpool`/`lvs`/`/etc/pve` reappear in
+  `platform/`.
+
 ## [0.6.10] — teardown keeps the control plane; uninstall removes it
 
 `teardown` destroyed the control plane too, and `--data` removed the plane. Those are two

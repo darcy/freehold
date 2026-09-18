@@ -76,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [agents, contract, platform, install]
+        module: [agents, contract, platform, providers, install]
     steps:
       - uses: actions/checkout@v6
 

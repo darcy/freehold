@@ -19,8 +19,9 @@ import (
 	"freehold/install/cpdeploy"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
-	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
+	"freehold/providers/proxmox"
+	"freehold/providers/proxmox/drive"
 )
 
 func mustStr(cmd *cobra.Command, name string) string { v, _ := cmd.Flags().GetString(name); return v }
@@ -179,13 +180,13 @@ func provisionProxmoxLxc(c *client.McpClient, cmd *cobra.Command, target string)
 		}
 		mounts = append(mounts, ms)
 	}
-	spec := &bootstrap.ProxmoxLxcSpec{
+	spec := &proxmox.ProxmoxLxcSpec{
 		Hostname: hostname, VMID: vmid,
 		Storage: mustStr(cmd, "storage"), RootfsGB: mustU32(cmd, "rootfs-gb"),
 		MemoryMB: mustU32(cmd, "memory-mb"), Bridge: mustStr(cmd, "bridge"),
 		NetIP: ip, NetGW: gw, Mounts: mounts,
 	}
-	res, err := bootstrap.BootstrapProxmoxLxc(c, target, spec)
+	res, err := proxmox.BootstrapProxmoxLxc(c, target, spec)
 	if err != nil {
 		return err
 	}
@@ -215,7 +216,7 @@ var storageResolveCmd = &cobra.Command{
 		// selection; direct CLI use also prints the recommended backend. The
 		// domain scopes "this world's plane" so another world's freehold data
 		// is ordinary reuse, never a reconnect.
-		inv, err := bootstrap.StorageInventory(c, target)
+		inv, err := proxmox.StorageInventory(c, target)
 		if err != nil {
 			return err
 		}
@@ -246,7 +247,7 @@ var storageResolveCmd = &cobra.Command{
 			return nil
 		}
 		// A truly bare host: the legacy create/bail branch.
-		action, err := bootstrap.ResolveProxmox(c, target, confirm, optOf(mustStr(cmd, "device")))
+		action, err := drive.ResolveProxmox(c, target, confirm, optOf(mustStr(cmd, "device")))
 		if err != nil {
 			return err
 		}
@@ -257,7 +258,7 @@ var storageResolveCmd = &cobra.Command{
 			fmt.Printf("STORAGE: creating new backend (pool %s) with consent…\n", action.Pool)
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
 			if *action.Backend == planebase.BackendZfs {
-				if err := bootstrap.EnsureZpool(c, target, action.Pool, optOf(mustStr(cmd, "device"))); err != nil {
+				if err := proxmox.EnsureZpool(c, target, action.Pool, optOf(mustStr(cmd, "device"))); err != nil {
 					return err
 				}
 			} else {
@@ -400,7 +401,7 @@ func tenantFor(tenant string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q (relay|cp|k3s-volumes)", tenant)
 }
 
-func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendKind, *bootstrap.ResolveAction, error) {
+func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendKind, *drive.ResolveAction, error) {
 	switch kindFlag {
 	case "":
 	case "zfs":
@@ -410,7 +411,7 @@ func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendK
 	default:
 		return "", nil, fmt.Errorf("unknown storage backend kind: %s (expected zfs|lvmth)", kindFlag)
 	}
-	action, err := bootstrap.ResolveProxmox(c, target, false, nil)
+	action, err := drive.ResolveProxmox(c, target, false, nil)
 	if err != nil {
 		return "", nil, err
 	}

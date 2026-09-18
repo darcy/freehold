@@ -19,21 +19,22 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"freehold/agents"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
-	"freehold/contract/state"
-	"freehold/agents"
 	"freehold/contract/crypto"
+	"freehold/contract/state"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/cli/flows"
 	oplogin "freehold/control-plane/cli/login"
 	"freehold/platform/provisioning/box"
-	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/stages"
 	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/platform/services/externaldns/cloudflare"
+	"freehold/providers/proxmox"
+	"freehold/providers/proxmox/drive"
 )
 
 // buildEngine wraps the shared provisioning engine with the build-side
@@ -52,6 +53,7 @@ func newBuildEngine(f box.Flags) (*buildEngine, error) {
 	if err != nil {
 		return nil, err
 	}
+	eng.Provider = proxmox.New(eng.HostExecFunc())
 	return &buildEngine{eng}, nil
 }
 
@@ -158,7 +160,6 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	}
 	return newBuildEngine(f)
 }
-
 
 func applyConfigDefaults(f *box.Flags, cfgPath string) error {
 	cfg, err := config.Load(cfgPath)
@@ -367,7 +368,6 @@ func (e *buildEngine) consoleEncPubkey() ([]byte, error) {
 	return hex.DecodeString(pk)
 }
 
-
 func cpSecretBlob(name, provider string, env map[string]string, seal cert.Sealer, pub []byte) (json.RawMessage, error) {
 	p := filepath.Join(os.TempDir(), "fh-cp-"+name+".json")
 	if err := cert.SaveCreds(p, provider, env, seal, pub, name); err != nil {
@@ -455,7 +455,6 @@ func firstHex(s string) string {
 	return s
 }
 
-
 func litellmHasProviderKey(runnerDir string) bool {
 	b, err := os.ReadFile(filepath.Join(runnerDir, "secrets.json"))
 	if err != nil {
@@ -490,7 +489,6 @@ func (e *buildEngine) litellmPostgresPw(k3sVmid uint32) string {
 	}
 	return strings.TrimSpace(out)
 }
-
 
 func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string, string, error) {
 	k3sVmid := uint32(0)
@@ -993,7 +991,6 @@ func (e *buildEngine) runBuild() error {
 	return nil
 }
 
-
 func (e *buildEngine) seedCpRunnerSecrets(cfg *config.Config, master, pg, providerKey string) error {
 	if cfg == nil || cfg.Lxc.Cp.Vmid == nil {
 		return fmt.Errorf("no cp coords to seed the co-located runner")
@@ -1021,7 +1018,6 @@ func (e *buildEngine) seedCpRunnerSecrets(cfg *config.Config, master, pg, provid
 	fmt.Fprintln(e.Out, "  · co-located runner re-seeded with litellm secrets")
 	return nil
 }
-
 
 func (e *buildEngine) stageCpa() error {
 	cfg, err := config.Load(e.F.ConfigPath)
@@ -1115,11 +1111,6 @@ func (e *buildEngine) stageDepartments() error {
 	return nil
 }
 
-
-
-
-
-
 func containsStr(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {
@@ -1129,5 +1120,15 @@ func containsStr(list []string, s string) bool {
 	return false
 }
 
-func derefStrPtr(p *string) string { if p == nil { return "" }; return *p }
-func derefU32(p *uint32) uint32 { if p == nil { return 0 }; return *p }
+func derefStrPtr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+func derefU32(p *uint32) uint32 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}

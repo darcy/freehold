@@ -14,11 +14,12 @@ import (
 	"freehold/control-plane/cli/login"
 	"freehold/control-plane/cli/teardown"
 	"freehold/platform/provisioning/bootstrap"
-	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
 	"freehold/platform/services/certificates/letsencrypt"
 	"freehold/platform/services/externaldns/cloudflare"
 	relaydeploy "freehold/platform/services/relay/buzz"
+	"freehold/providers/proxmox"
+	"freehold/providers/proxmox/drive"
 	"github.com/spf13/cobra"
 )
 
@@ -66,7 +67,7 @@ var deployRelayCmd = &cobra.Command{
 			fmt.Sscanf(lxcStr, "%d", &v)
 			spec.LXc = &v
 		}
-		res, err := relaydeploy.DeployRelay(c, target, spec)
+		res, err := relaydeploy.DeployRelay(proxmox.GuestExecFunc(c, target), spec)
 		if err != nil {
 			return err
 		}
@@ -123,10 +124,10 @@ var provisionCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		var res *bootstrap.BootstrapResult
+		var res *proxmox.BootstrapResult
 		switch kind {
 		case "proxmox-lxc":
-			spec := &bootstrap.ProxmoxLxcSpec{
+			spec := &proxmox.ProxmoxLxcSpec{
 				Hostname: hostname,
 				Storage:  mustStr(cmd, "storage"),
 				RootfsGB: mustU32(cmd, "rootfs-gb"),
@@ -150,9 +151,9 @@ var provisionCmd = &cobra.Command{
 				}
 				spec.Mounts = append(spec.Mounts, ms)
 			}
-			res, err = bootstrap.BootstrapProxmoxLxc(c, target, spec)
+			res, err = proxmox.BootstrapProxmoxLxc(c, target, spec)
 		case "vultr-vps":
-			res, err = bootstrap.BootstrapVultrVps(c, target, &bootstrap.VultrVpsSpec{
+			res, err = proxmox.BootstrapVultrVps(c, target, &proxmox.VultrVpsSpec{
 				Label:        hostname,
 				Region:       mustStr(cmd, "region"),
 				Plan:         mustStr(cmd, "plan"),
@@ -160,7 +161,7 @@ var provisionCmd = &cobra.Command{
 				DestroyAfter: mustBool(cmd, "destroy"),
 			})
 		case "hetzner-vps":
-			res, err = bootstrap.BootstrapHetznerVps(c, target, &bootstrap.HetznerVpsSpec{
+			res, err = proxmox.BootstrapHetznerVps(c, target, &proxmox.HetznerVpsSpec{
 				Label:        hostname,
 				Location:     mustStr(cmd, "location"),
 				ServerType:   mustStr(cmd, "server-type"),
@@ -255,7 +256,7 @@ var storageResolveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		action, err := bootstrap.ResolveProxmox(c, target, confirm, optOf(device))
+		action, err := drive.ResolveProxmox(c, target, confirm, optOf(device))
 		if err != nil {
 			return err
 		}
@@ -276,7 +277,7 @@ var storageResolveCmd = &cobra.Command{
 				// a NAMED pool (--thin-pool): a two-pool VG where the named
 				// pool is the SECOND one must adopt it (created=false), and
 				// a name that matches none must carve (created=true).
-				pools, err := bootstrap.ThinPools(c, target, action.Pool)
+				pools, err := drive.ThinPools(c, target, action.Pool)
 				if err != nil {
 					return err
 				}
@@ -294,7 +295,7 @@ var storageResolveCmd = &cobra.Command{
 			fmt.Printf("STORAGE: creating new backend (%s, pool %s) with consent…\n", label, action.Pool)
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
 			if *action.Backend == planebase.BackendZfs {
-				if err := bootstrap.EnsureZpool(c, target, action.Pool, optOf(device)); err != nil {
+				if err := proxmox.EnsureZpool(c, target, action.Pool, optOf(device)); err != nil {
 					return err
 				}
 			} else {
@@ -318,7 +319,7 @@ var storageResolveCmd = &cobra.Command{
 // with a zpool drives ZFS; a host with only an LVM VG (stock PVE: VG `pve`,
 // no zpool) drives LVM-thin. A non-nil action in the return means "no
 // existing backend" — the caller decides its tolerated-no-op shape.
-func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendKind, *bootstrap.ResolveAction, error) {
+func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendKind, *drive.ResolveAction, error) {
 	switch kindFlag {
 	case "":
 	case "zfs":
@@ -328,7 +329,7 @@ func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendK
 	default:
 		return "", nil, fmt.Errorf("unknown storage backend kind: %s (expected zfs|lvmth)", kindFlag)
 	}
-	action, err := bootstrap.ResolveProxmox(c, target, false, nil)
+	action, err := drive.ResolveProxmox(c, target, false, nil)
 	if err != nil {
 		return "", nil, err
 	}

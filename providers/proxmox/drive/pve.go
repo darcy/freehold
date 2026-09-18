@@ -1,8 +1,10 @@
-package planebase
+package drive
 
 import (
 	"fmt"
 	"strings"
+
+	"freehold/platform/provisioning/planebase"
 )
 
 // PVE `storage.cfg` facts shared by the detector (bootstrap) and the driver
@@ -34,7 +36,7 @@ const LocalLvmRidersScript = "pool=$(grep -A2 '^lvmthin: local-lvm$' /etc/pve/st
 // storage.cfg is known to carry one). `run` executes one script on the target
 // and returns its stdout.
 func RepointLocalLvm(run func(script string, timeoutS uint64) (string, error), pool string) error {
-	if !ValidStorageName(pool) {
+	if !planebase.ValidStorageName(pool) {
 		return fmt.Errorf("refusing to re-point local-lvm at an unsafe pool name %q (allowed: [A-Za-z0-9._-])", pool)
 	}
 	current, err := run(LocalLvmProbeScript, 30)

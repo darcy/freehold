@@ -17,7 +17,7 @@ const (
 )
 
 // MountSpec is one reference MOUNT of a durable dataset into a guest, born at
-// LXC create (the locked "born on the plane, never `pct set` post-hoc" rule).
+// LXC create (the locked "born on the plane, never set post-hoc" rule).
 type MountSpec struct {
 	Source    string // the dataset/volume to bind
 	GuestPath string // the guest mount point

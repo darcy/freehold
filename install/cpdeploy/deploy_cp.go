@@ -14,6 +14,7 @@ import (
 	"freehold/contract/wire"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
+	"freehold/providers/proxmox"
 )
 
 // DeployCpSpec mirrors the CP deploy spec.
@@ -70,10 +71,10 @@ func shipFile(clientConn *client.McpClient, target string, spec *DeployCpSpec, l
 	if _, err := bootstrap.ExecToOK(clientConn, target, place, "place "+step, 120); err != nil {
 		return err
 	}
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, "chmod 755 "+remoteFinal), "chmod "+step, 30); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, "chmod 755 "+remoteFinal), "chmod "+step, 30); err != nil {
 		return err
 	}
-	out, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, "wc -c < "+remoteFinal), "verify "+step, 30)
+	out, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, "wc -c < "+remoteFinal), "verify "+step, 30)
 	if err != nil {
 		return err
 	}
@@ -99,7 +100,7 @@ func shipSmallFile(clientConn *client.McpClient, target string, spec *DeployCpSp
 	}
 	cmd := fmt.Sprintf("mkdir -p %s && printf %%s \"%s\" | base64 -d > %s && chmod 600 %s",
 		parent, b64, remoteFinal, remoteFinal)
-	_, err = bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, cmd), step, 60)
+	_, err = bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, cmd), step, 60)
 	return err
 }
 
@@ -112,7 +113,7 @@ func fileExists(path string) bool {
 // (the path is trusted: built from a fixed runner dir, no shell metacharacters).
 func readGuestFile(clientConn *client.McpClient, target string, spec *DeployCpSpec, path string) []byte {
 	out, err := bootstrap.ExecToOK(clientConn, target,
-		deploy.LxcCmd(spec.LXc, "cat "+path+" 2>/dev/null || true"), "read "+path, 30)
+		proxmox.LxcCmd(spec.LXc, "cat "+path+" 2>/dev/null || true"), "read "+path, 30)
 	if err != nil {
 		return nil
 	}
@@ -137,7 +138,7 @@ func runnerShipPlan(adopt bool) (files []string, mergeSecrets bool) {
 // grant/roster anchor and must never be overwritten by the box's.
 func guestHasRunnerIdentity(clientConn *client.McpClient, target string, spec *DeployCpSpec, runnerDir string) bool {
 	out, err := bootstrap.ExecToOK(clientConn, target,
-		deploy.LxcCmd(spec.LXc, "test -f "+runnerDir+"/identity.json && echo yes"), "probe runner identity", 30)
+		proxmox.LxcCmd(spec.LXc, "test -f "+runnerDir+"/identity.json && echo yes"), "probe runner identity", 30)
 	return err == nil && strings.TrimSpace(out.Stdout) == "yes"
 }
 
@@ -229,14 +230,14 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 
 	mkdir := fmt.Sprintf("mkdir -p %s/console && mkdir -p %s && rm -f %s/freehold-console.b64",
 		spec.StateDir, spec.BinDir, spec.BinDir)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, mkdir), "mkdir deploy dirs", 30); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, mkdir), "mkdir deploy dirs", 30); err != nil {
 		return nil, err
 	}
 
 	// Stop any PRIOR serve instance before writing over the binary.
 	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
 		spec.StateDir, spec.StateDir)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, stop), "stop prior control plane", 30); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, stop), "stop prior control plane", 30); err != nil {
 		return nil, err
 	}
 
@@ -252,7 +253,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		// binary — stop it first or the overwrite fails/size-mismatches.
 		atState := filepath.Join(spec.StateDir, "..", "agent-tools")
 		stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
-		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
+		if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
 			return nil, err
 		}
 		if err := shipFile(clientConn, target, spec, *spec.AgentToolsBinary,
@@ -301,7 +302,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		host := strings.TrimSuffix(domain, "/")
 		host = strings.Split(host, ":")[0]
 		hostsCmd := fmt.Sprintf("grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts", host, *spec.RelayHostIP, host)
-		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, hostsCmd), "pin relay host", 30); err != nil {
+		if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, hostsCmd), "pin relay host", 30); err != nil {
 			return nil, err
 		}
 	}
@@ -309,7 +310,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	start := fmt.Sprintf(
 		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s%s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
 		spec.BinDir, spec.StateDir, spec.BindAddr, adminFlag, originFlag, relayFlag, atFlag, worldFlag, spec.StateDir, spec.StateDir)
-	out, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, start), "start control plane", 30)
+	out, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, start), "start control plane", 30)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +325,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	var lastErr error
 	for i := 0; i < 15; i++ {
 		probe := fmt.Sprintf("curl -fsS -m 3 http://%s/healthz", spec.BindAddr)
-		_, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, probe), "cp healthz", 20)
+		_, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, probe), "cp healthz", 20)
 		if err == nil {
 			healthy = true
 			break
@@ -337,13 +338,13 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 			spec.BindAddr, lastErr)
 	}
 	alive := fmt.Sprintf("kill -0 %d >/dev/null 2>&1", pid)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, alive), "control plane still alive", 10); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, alive), "control plane still alive", 10); err != nil {
 		return nil, fmt.Errorf("control plane answered /healthz but the started process (pid %d) is gone — check %s/serve.log (e.g. address already in use)",
 			pid, spec.StateDir)
 	}
 
 	// Read back the box's console identity pubkey.
-	out, err = bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc,
+	out, err = bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc,
 		spec.BinDir+"/freehold-console identity --state-dir "+spec.StateDir), "console identity pubkey", 30)
 	if err != nil {
 		return nil, err
@@ -363,7 +364,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		// stale bytes and deploy-cp fails on the surviving binary). deploy-cp
 		// restarts it below. Tolerated when it isn't running.
 		if _, err := bootstrap.ExecToOK(clientConn, target,
-			deploy.LxcCmd(spec.LXc, "systemctl stop freehold-runner 2>/dev/null; true"),
+			proxmox.LxcCmd(spec.LXc, "systemctl stop freehold-runner 2>/dev/null; true"),
 			"stop co-located runner", 30); err != nil {
 			return nil, err
 		}
@@ -410,7 +411,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		startRunner := fmt.Sprintf(
 			"systemctl reset-failed freehold-runner 2>/dev/null; systemd-run --unit=freehold-runner --collect %s/freehold-runner serve --state-dir %s >/dev/null 2>&1; sleep 2; systemctl is-active freehold-runner",
 			spec.BinDir, runnerDir)
-		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, startRunner), "start co-located runner", 60); err != nil {
+		if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, startRunner), "start co-located runner", 60); err != nil {
 			return nil, err
 		}
 		kind, address := "ssh", ""
@@ -420,12 +421,12 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		}
 		adopt := fmt.Sprintf("%s/freehold-console adopt %s --kind %s --address %s --package-dir %s --state-dir %s --mcp-addr %s",
 			spec.BinDir, runnerName, kind, address, runnerDir, spec.StateDir, config.CoLocatedRunnerMCPAddr)
-		if _, err := execTolerantAlreadyExists(clientConn, target, deploy.LxcCmd(spec.LXc, adopt), "adopt co-located runner", 60); err != nil {
+		if _, err := execTolerantAlreadyExists(clientConn, target, proxmox.LxcCmd(spec.LXc, adopt), "adopt co-located runner", 60); err != nil {
 			return nil, err
 		}
 		grant := fmt.Sprintf("%s/freehold-console grant %s --state-dir %s --pubkey %s",
 			spec.BinDir, runnerName, spec.StateDir, pubkey)
-		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, grant), "self-grant console to co-located runner", 60); err != nil {
+		if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, grant), "self-grant console to co-located runner", 60); err != nil {
 			return nil, err
 		}
 	}

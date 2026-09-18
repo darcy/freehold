@@ -156,7 +156,7 @@ type ZpoolInfo struct {
 // DeviceInfo is one whole-disk candidate for creating a new backend. Content is
 // a PLAIN-LANGUAGE description of what is on the disk ("" = nothing detected);
 // Clean is the fail-closed verdict that no signature/PV/zpool/mount/OS/swap
-// rides it. Importable names an exported zpool recoverable from the device.
+// rides it. Importable names an exported ZFS pool recoverable from the device.
 type DeviceInfo struct {
 	Path       string
 	SizeGB     uint64
@@ -196,7 +196,7 @@ const (
 type Option struct {
 	Kind     Kind
 	Safety   Safety
-	Backend  string // VG or zpool name ("" for a device create)
+	Backend  string // VG or ZFS pool name ("" for a device create)
 	Pools    []PoolInfo
 	Device   string
 	Freehold Provenance
@@ -426,7 +426,7 @@ func FreeholdDataset(path string) (domain string, ok bool) {
 	return "", false
 }
 
-// FreeholdPoolName reports whether a thin-pool / zpool name follows freehold's
+// FreeholdPoolName reports whether a thin-pool / ZFS pool name follows freehold's
 // own pool conventions (`freehold`, `freehold-thin`, `freehold-<x>-thin`). The
 // recorded config's `plane.thin_pool` is a stronger signal where available.
 func FreeholdPoolName(name string) bool {
@@ -452,3 +452,8 @@ func ValidStorageName(name string) bool {
 	}
 	return true
 }
+
+// FreshThinPool is the thin pool the storage ensure carves in a VG that has
+// none — a pure naming convention shared by the provider driver and the box
+// engine's placement logic.
+const FreshThinPool = "freehold-thin"
