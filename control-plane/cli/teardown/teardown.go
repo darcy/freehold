@@ -322,7 +322,9 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 	//    and skips the door gate. Per-tenant KEEPS everything too.
 	switch {
 	case scope == ScopeWholeWorld && cfg.Data:
-		keyRemoval := fmt.Sprintf("sed -i '/ssh-ed25519 [A-Za-z0-9+/=]* %s$/d' /root/.ssh/authorized_keys", cfg.RunnerComment)
+		// '|' as the sed delimiter: the comment can contain '/' (base64), which
+		// would terminate a '/'-delimited pattern early.
+		keyRemoval := fmt.Sprintf("sed -i '\\|ssh-ed25519 [A-Za-z0-9+/=]* %s$|d' /root/.ssh/authorized_keys", cfg.RunnerComment)
 		if ok, _ := r.Exec(keyRemoval); !ok {
 			return "", fmt.Errorf("door removal command failed on %s", cfg.RunNTarget)
 		}

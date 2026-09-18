@@ -14,7 +14,7 @@ import (
 func TestRunWholeWorldTeardownBailsWithoutSession(t *testing.T) {
 	t.Setenv("FREEHOLD_HOME", t.TempDir())
 	cfg := &config.Config{CPURL: "https://cp.example"}
-	err := runWholeWorldTeardown(cfg, false, true)
+	err := runWholeWorldTeardown(cfg, "/tmp/cfg.toml", false, true)
 	if err == nil {
 		t.Fatal("runWholeWorldTeardown must fail without an operator session")
 	}

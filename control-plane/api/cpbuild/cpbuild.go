@@ -1413,28 +1413,6 @@ func (s *Spec) stopAgentTools() error {
 	return nil
 }
 
-// discoverCpVmid finds the CP LXC's vmid on the host by its deterministic guest
-// name (the console serving this request lives in it, so it exists). Used only
-// when the recorded coords lack it.
-func (s *Spec) discoverCpVmid() (uint32, error) {
-	if s.RelayHost == "" {
-		return 0, fmt.Errorf("world-teardown: no recorded CP LXC vmid and no relay host to derive the guest name")
-	}
-	name, err := bootstrap.LXCName(s.Name, s.RelayHost, "cp")
-	if err != nil {
-		return 0, err
-	}
-	out, err := s.execOut(fmt.Sprintf("pct list | awk '$NF == %q {print $1; exit}'", name), 30)
-	if err != nil {
-		return 0, err
-	}
-	v, err := strconv.Atoi(strings.TrimSpace(out))
-	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("world-teardown: cannot determine the CP LXC vmid (guest %q not found in `pct list`)", name)
-	}
-	return uint32(v), nil
-}
-
 // cpDestroyDetached is the host command that stops + destroys the CP LXC
 // without killing its own caller: setsid + a short sleep so the runner's exec
 // returns before the container (which hosts the runner) goes away.

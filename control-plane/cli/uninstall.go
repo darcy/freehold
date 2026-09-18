@@ -163,12 +163,14 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 		Domain:        cfg.TenantSlug(),
 		RunNTarget:    cfg.Runner.Target,
 		RunnerComment: cfg.Runner.Pubkey,
-		Managed:       cfg.Managed,
-		WorldHome:     freeholdHome(),
-		ConfigPath:    configPath,
-		Pool:          pool,
-		BackendKind:   kind,
-		Data:          removeData,
+		// The FULL world is removed here (not cfg.Managed, which can omit k3s
+		// and litellm in a partial world) — uninstall drops the CP + every guest.
+		Managed:     []string{"relay", "cp", "k3s"},
+		WorldHome:   freeholdHome(),
+		ConfigPath:  configPath,
+		Pool:        pool,
+		BackendKind: kind,
+		Data:        removeData,
 		Vmid: map[string]*uint32{
 			"relay": cfg.Lxc.Relay.Vmid,
 			"cp":    cfg.Lxc.Cp.Vmid,
@@ -191,7 +193,9 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 // removeRunnerDoor deletes the runner's authorized_keys line on the host (the
 // runner substrate key), verified. The comment is the runner's pubkey.
 func removeRunnerDoor(runner *teardown.ExecRunner, comment string) error {
-	sed := fmt.Sprintf("sed -i '/ssh-ed25519 [A-Za-z0-9+/=]* %s$/d' /root/.ssh/authorized_keys", comment)
+	// '|' as the sed delimiter: the comment can contain '/' (base64), which
+	// would terminate a '/'-delimited pattern early.
+	sed := fmt.Sprintf("sed -i '\\|ssh-ed25519 [A-Za-z0-9+/=]* %s$|d' /root/.ssh/authorized_keys", comment)
 	if ok, out := runner.Exec(sed); !ok {
 		return fmt.Errorf("runner key removal failed on the host: %s", out)
 	}

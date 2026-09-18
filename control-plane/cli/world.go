@@ -69,10 +69,10 @@ func worldAction(action string) error {
 		return worldStatusFromConsole(cfg)
 	}
 	if action == "teardown" {
-		// Pure alias of `freehold teardown`: the same CP-preserving whole-world
-		// teardown (no extra prompt — typing the destructive subcommand is the
-		// confirmation, as for `world build`/`migrate`).
-		return runWholeWorldTeardown(cfg, false, true)
+		// Pure alias of `freehold teardown`, INCLUDING its confirmation gate:
+		// the whole-world teardown is destructive, so it prompts (there is no
+		// silent path here) — scripts use `freehold teardown --yes`.
+		return runWholeWorldTeardown(cfg, configPath(), false, false)
 	}
 	mc, err := worldMcp(cfg)
 	if err != nil {
