@@ -4,7 +4,7 @@ Status: **ready to execute** (PRs 1–3). `install --restore` is explicitly out 
 for now (see "Deferred"), but the identity model below is designed so that grants
 survive a restore when it lands.
 
-Baseline: `main` after `0.6.7` (PRs #243/#244/#246 merged). CHANGELOG top is `0.6.7`.
+Baseline: `main` after `0.6.8` (PRs #243/#244/#246/#248 merged). CHANGELOG top is `0.6.8`.
 
 The storage-scope work that preceded this (domain-scoped provenance + named
 profiles + `<name>-<role>` LXCs, PRs #243/#244) is already merged; this plan is the
@@ -154,7 +154,7 @@ is a pure alias** of the CP-preserving `teardown`.
 
 ## 5. PR plan
 
-### PR 1 — one install surface + fail-if-live + identity-preserving adopt (`0.6.8`)
+### PR 1 — one install surface + fail-if-live + identity-preserving adopt (`0.6.9`)
 
 - Fold `bootstrap` into `install --yes`; remove/alias the old command.
 - `install` requires `--name` + `--host` (+ the fresh-plane domains/proxy IP);
@@ -187,7 +187,7 @@ is a pure alias** of the CP-preserving `teardown`.
 - **Tests:** gate matrix (mint/re-adopt/fail-live); re-adopt keeps the runner pubkey
   and does not overwrite `identity.json`; host persisted and read back.
 
-### PR 2 — teardown/uninstall split (`0.6.9`)
+### PR 2 — teardown/uninstall split (`0.6.10`)
 
 - `teardown` → CP-preserving inverse of `build`: stop/remove the relay LXC/stack,
   k3s + workloads; **stop** the CP-side `freehold-agent-tools` process (its durable
@@ -209,7 +209,7 @@ is a pure alias** of the CP-preserving `teardown`.
   wiped; invoking door + runner substrate key removed, other doors untouched;
   thin-box `--remove-data` refused.
 
-### PR 3 — transient access refactor + door rotation (`0.6.10`)
+### PR 3 — transient access refactor + door rotation (`0.6.11`)
 
 - New `Access` seam in `platform/provisioning/bootstrap`: yields exec + provider
   create/destroy. Refactor `BootstrapProxmoxLxc`/`Vultr`/`Hetzner` to take an exec

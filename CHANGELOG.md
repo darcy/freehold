@@ -25,7 +25,7 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
-## [0.6.8] — one install surface, a life-cycle gate, and identity-preserving re-adopt
+## [0.6.9] — one install surface, a life-cycle gate, and identity-preserving re-adopt
 
 `freehold-install bootstrap` and `install` were two commands over one pipeline, and any
 existing profile name was refused outright — so a re-install after a teardown could not
@@ -49,6 +49,29 @@ life-cycle gate.
   Nostr/enc identity is the grant + relay-roster anchor, so a re-install no longer orphans
   grants; and because the box's secrets are sealed to a different encryption key, skipping
   the merge also avoids shipping the plane an unopenable package.
+
+## [0.6.8] — the five departments are installed as part of the core build
+
+0.6.6/0.6.7 defined the departments and made them selectable, but nothing ever
+created them: only the CPA was seeded at build. The agent org was documentation.
+
+- **`freehold build` installs the five departments** (`stageDepartments`, after
+  `stageCpa`, before the registry reconcile). Each is created through the same audited
+  `create_agent` the CPA itself uses, with its reserved prompt and its channels. `create_agent`
+  is idempotent, so a rebuild reseats each department with the same durable pubkey, and
+  `reconcileCreatedAgents` also picks them up from the CP registry.
+- **Channels: `#freehold` + a private `#<department>`.** `create_agent` now accepts a channel
+  **list** (`channels`, alongside the single `channel` the CPA uses) plus `private`; an
+  explicitly created channel is `visibility=private` (`delegate.EnsurePrivateChannelAuth`),
+  while the default `#freehold` channel stays open. The **CPA is added to every channel**, so
+  the touchpoint sees all departments. The operator is added as before.
+- **Reserved metadata:** `agents.DepartmentPurpose(name)` (the one-line registry purpose) and
+  `agents.DepartmentChannels(name)` (`#freehold` + `#<name>`); a reserved name re-derives its
+  channels on reconcile rather than trusting the single stored channel.
+- **Still no capability access.** Departments carry no runner grants/secrets and no exec tool
+  in this phase — they are conversation + orientation only. Wiring each department to its
+  capability (exec surface + per-capability runners/secrets/targets) is the next unit; the
+  install-time grant/secrets work is not in this change.
 
 ## [0.6.7] — departments selectable at create, a shared system orientation, role-neutral prompt slot
 

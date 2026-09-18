@@ -47,3 +47,34 @@ func TestRegistrySetPurposeBeforeRegister(t *testing.T) {
 		t.Fatal("SetPurpose on an unnamed row should error")
 	}
 }
+
+// TestRegistryChannelsSurvive: a multi-channel/private create persists its full
+// channel list + private flag on the registry row and survives a re-open, so a
+// rebuild rejoins every channel (not just the primary) with the right visibility.
+func TestRegistryChannelsSurvive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	r, err := OpenRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RegisterAgent("helper", "aa55", "#ops"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetChannels("helper", []string{"#ops", "#extra"}, true); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := OpenRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents, err := r2.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || len(agents[0].Channels) != 2 || !agents[0].Private {
+		t.Fatalf("channels/private not preserved across re-open: %+v", agents)
+	}
+	if err := r2.SetChannels("ghost", nil, false); err == nil {
+		t.Fatal("SetChannels on an unnamed row should error")
+	}
+}

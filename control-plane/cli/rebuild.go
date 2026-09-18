@@ -23,6 +23,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/state"
+	"freehold/agents"
 	"freehold/contract/crypto"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
@@ -746,19 +747,32 @@ func (e *buildEngine) reconcileCreatedAgents() error {
 	if err != nil {
 		return fmt.Errorf("list agents over agent-tools: %w", err)
 	}
-	var agents []console.AgentInfo
-	if err := json.Unmarshal([]byte(listText), &agents); err != nil {
+	var list []console.AgentInfo
+	if err := json.Unmarshal([]byte(listText), &list); err != nil {
 		return fmt.Errorf("parse agent list: %w: %s", err, listText)
 	}
-	for _, a := range agents {
+	for _, a := range list {
 		if a.Name == "" || a.Name == cpaName {
 			continue
+		}
+		// A reserved department name re-derives its fixed channels (#freehold +
+		// its private #<name>); any other agent rejoins the full list the registry
+		// preserved (falling back to the single recorded channel for rows written
+		// before Channels was persisted).
+		channels := agents.DepartmentChannels(a.Name)
+		private := channels != nil
+		if !private {
+			channels = a.Channels
+			private = a.Private
+			if len(channels) == 0 && strings.TrimSpace(a.Channel) != "" {
+				channels = []string{a.Channel}
+			}
 		}
 		// create_agent is idempotent (the CP-durable identity is reused), so
 		// re-creating reseats the pod with the same pubkey across a rebuild.
 		// Thread the registry's preserved purpose through so the agent's
 		// system-prompt purpose line survives, not just its identity.
-		text, cerr := callAgentToolsText(mc, "create_agent", map[string]interface{}{"name": a.Name, "purpose": a.Purpose, "channel": a.Channel})
+		text, cerr := callAgentToolsText(mc, "create_agent", map[string]interface{}{"name": a.Name, "purpose": a.Purpose, "channels": channels, "private": private})
 		if cerr != nil {
 			return fmt.Errorf("reconcile created agent %s: %w", a.Name, cerr)
 		}
@@ -948,6 +962,9 @@ func (e *buildEngine) runBuild() error {
 				return err
 			}
 			fmt.Fprintln(e.Out, "  ✓ CPA live in Buzz ("+e.F.AgentName+")")
+			if err := e.stageDepartments(); err != nil {
+				return err
+			}
 			if err := e.reconcileCreatedAgents(); err != nil {
 				return err
 			}
@@ -1045,6 +1062,57 @@ func (e *buildEngine) stageCpa() error {
 	}
 	fmt.Fprintf(e.Out, "  · CPA live in Buzz (%s)\n", cpaName)
 	return e.recordCpa(cpaPub, cpaName)
+}
+
+// stageDepartments installs the five fixed departments as part of the core
+// build — the CPA's direct reports (see AGENTS.md "Locked model"). Each is
+// created through the SAME audited create_agent the CPA itself uses, with its
+// reserved prompt (selected by name in the server) and its channels: the shared
+// #freehold channel plus its own PRIVATE #<department> channel, with the CPA
+// added to every channel. Runs after stageCpa (the CPA must exist before it can
+// be added to the channels); create_agent is idempotent, so a rebuild reseats
+// each department with the same durable pubkey, and reconcileCreatedAgents also
+// picks them up from the registry. Departments carry no capability tooling in
+// this phase (conversation + orientation only).
+func (e *buildEngine) stageDepartments() error {
+	cfg, err := config.Load(e.F.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.F.ConfigPath)
+	}
+	// Fail loudly, never silently skip: stageCpa runs first and already requires
+	// these (so a partial world would have failed there), but a silent nil here
+	// would let a build look successful with the departments missing.
+	if cfg.Lxc.Cp.Vmid == nil || cfg.Lxc.K3s.Vmid == nil {
+		return fmt.Errorf("no cp/k3s coords recorded — the department pods need the k3s substrate")
+	}
+	if cfg.RelayURL == "" {
+		return fmt.Errorf("no relay URL in config — departments must join the community relay")
+	}
+	if cfg.Litellm.URL == "" {
+		return fmt.Errorf("no litellm gateway recorded — departments need a reasoning model")
+	}
+	mc, err := worldMcp(cfg)
+	if err != nil {
+		return err
+	}
+	for _, name := range agents.DepartmentNames() {
+		purpose, _ := agents.DepartmentPurpose(name)
+		args := map[string]interface{}{
+			"name":     name,
+			"purpose":  purpose,
+			"channels": agents.DepartmentChannels(name),
+			"private":  true,
+		}
+		text, cerr := callAgentToolsText(mc, "create_agent", args)
+		if cerr != nil {
+			return fmt.Errorf("create department %s: %w", name, cerr)
+		}
+		fmt.Fprintf(e.Out, "  · department %s live in Buzz (pubkey %s)\n", name, firstHex(text))
+	}
+	return nil
 }
 
 

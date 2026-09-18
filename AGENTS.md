@@ -118,11 +118,12 @@ repo, not the history.
   compute/LXC, model registration) is executed by that department's identity, and the raw
   grant for it attaches to department identities, never to a custom agent that would then
   self-serve a second, ungoverned path to the exact capability the department exists to own
-  and audit. Deployment shape is not locked (departments are not necessarily five
-  permanently-running processes); only the identity/grant separation is. A custom agent that
-  self-serves a department-owned capability is a containment failure even if a grant would
-  technically allow it — the department's prompt is the first line of defense, the grant the
-  second.
+  and audit. The five departments are **installed as part of the core build** (each a pod on
+  the same harness as the CPA): in `#freehold` plus its own private `#<department>` channel,
+  with the CPA a member of all. Only the identity/grant separation is locked; capability
+  tooling/secrets arrive per department later (Chunk 5/6). A custom agent that self-serves a
+  department-owned capability is a containment failure even if a grant would technically allow
+  it — the department's prompt is the first line of defense, the grant the second.
 - **Host-flexible — not locked to Proxmox.** Proxmox is the lead/default; VPS/cloud are
   first-class (the business path). The k8s layer and everything above the host driver run
   identically regardless of substrate. Installer/runner must target a VPS as easily as
@@ -155,15 +156,17 @@ changelog.
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
-- **The five departments are defined but not yet deployed.** Each department's prompt lives
-  at `agents/<department>/prompt.md` and is embedded by the `freehold/agents` package, and a
-  create naming a department resolves it (`agents.SystemPrompt` — the names
-  `gatekeeper`/`vault`/`provisioner`/`agent-ops`/`services` are reserved). But nothing spawns
-  a department pod on its own yet: deployment is lazy/on-demand, and the capability tooling
-  they broker (external proxy, backup, compute, model registration) is not in this phase.
-  Enforcement of "capability work goes through the owning department" is therefore the
-  existing grant model, not new code — raw capability grants sit with department identities
-  once Chunk 5 begins issuing grants, and custom agents never receive them.
+- **The five departments are installed, but have no capability tools yet.** `freehold build`
+  creates each reserved department (`gatekeeper`/`vault`/`provisioner`/`agent-ops`/`services`)
+  through the same audited `create_agent`: its embedded prompt, `#freehold` plus its own
+  private `#<department>` channel, and the CPA added to each channel — five pods, reconciled
+  across a rebuild like any registry agent. The capability tooling they broker (external
+  proxy, backup, compute, model registration) and the runner grants/secrets that back it are
+  **not** in this phase: no agent can reach a runner's exec yet (the pod's MCP bridge exposes
+  only messages + create/manage), so enforcement of "capability work goes through the owning
+  department" is still just the grant model — raw capability grants sit with department
+  identities once Chunk 5 wires the agent↔runner exec surface, and custom agents never receive
+  them.
 - **The Vault/Gatekeeper "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.

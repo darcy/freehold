@@ -429,11 +429,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     Today's enforcement is the existing grant model: custom agents hold no raw
     capability grants, and only the operator-scoped `grant_agent` issues them.
 
-*   **Deployment shape is not locked** (departments are not necessarily five
-    permanently-running processes); only the identity/grant separation is. Tools
-    are provisioned lazily, mise-style — a department carries tooling only for
-    capabilities actually configured. Status language is uniform, runner →
-    service → department: 🟢 all checked / 🟡 some checks missing / 🔴 none.
+*   **The five departments are installed as part of the core build** — each a
+    pod on the same harness as the CPA, created through the same audited
+    `create_agent`. Each joins `#freehold` plus its own **private**
+    `#<department>` channel, and the CPA is added to every channel. Tools are
+    provisioned lazily, mise-style — a department carries no capability tooling
+    until its capability is configured (none in this phase). Status language is
+    uniform, runner → service → department: 🟢 all checked / 🟡 some checks
+    missing / 🔴 none.
 
 *   **Departments check in rather than wait to be asked.** When a new
     service/compute is requested through the CPA's provision path, the relevant
@@ -674,16 +677,17 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     injected key; an agent uses, never reads).
 
 *   **Agent placement:** every agent (CPA and created alike) runs on the
-    `buzz-acp` harness as a bare k3s pod. Departments are agents on the same
-    harness class, deployed lazily/on-demand.
+    `buzz-acp` harness as a bare k3s pod. The five departments are agents on the
+    same harness class, installed as part of the core build.
 
 *   **The agent org is two tiers: the CPA and five departments.** The CPA is the
     sole user touchpoint; Gatekeeper / Vault / Provisioner / Agent Ops /
     Services are its direct reports, each a distinct identity scoped to one
     domain. Communication is unrestricted; capability execution is bounded — a
     department-owned capability is executed by that department's identity and
-    its raw grant attaches there, never to a custom agent. Deployment shape is
-    not locked; the identity/grant separation is.
+    its raw grant attaches there, never to a custom agent. The five are installed
+    at build, in `#freehold` plus a private `#<department>` channel with the CPA
+    in all; only the identity/grant separation is locked.
 
 *   **Buzz required; the management relay is created by the install; one
     relay per control plane.**

@@ -35,11 +35,13 @@ func freeholdToolDefs() []map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	return []map[string]interface{}{
-		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel to add it to; the channel is created if it doesn't exist, and the operator is added). Returns the new agent's pubkey.",
+		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
-				"name":    map[string]interface{}{"type": "string"},
-				"purpose": map[string]interface{}{"type": "string"},
-				"channel": map[string]interface{}{"type": "string"},
+				"name":     map[string]interface{}{"type": "string"},
+				"purpose":  map[string]interface{}{"type": "string"},
+				"channel":  map[string]interface{}{"type": "string"},
+				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"private":  map[string]interface{}{"type": "boolean"},
 			}, []string{"name"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},

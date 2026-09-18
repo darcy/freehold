@@ -431,3 +431,53 @@ func TestRegistryGrantFailClosed(t *testing.T) {
 		t.Fatal("grant for an unprovisioned runner must refuse")
 	}
 }
+
+// TestCreateAgentChannelsAndPrivate: the multi-channel create form reaches the
+// deploy path with channels + private, and the single `channel` form is
+// prepended to `channels`.
+func TestCreateAgentChannelsAndPrivate(t *testing.T) {
+	aud := strings.Repeat("ab", 32)
+	secret := make([]byte, 32)
+	secret[0] = 9
+	pk, err := crypto.PubkeyFromSecret(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotChannels []string
+	var gotPrivate bool
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{pk}, nil },
+		Tools: &agent.Tools{Console: &fakeOps{}, Create: func(name, purpose string, channels []string, private bool) (string, error) {
+			gotChannels, gotPrivate = channels, private
+			return strings.Repeat("c", 64), nil
+		}},
+	}
+	post := func(raw string) {
+		t.Helper()
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, pk)
+		req.Header.Set(SigHeader, signForTest(secret, aud, ts, raw))
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != 200 || strings.Contains(rec.Body.String(), `"error"`) {
+			t.Fatalf("create_agent failed: %s", rec.Body.String())
+		}
+	}
+	post(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"vault","channels":["#freehold","#vault"],"private":true}}}`)
+	if strings.Join(gotChannels, ",") != "#freehold,#vault" {
+		t.Errorf("channels not passed through: %v", gotChannels)
+	}
+	if !gotPrivate {
+		t.Errorf("private not passed through")
+	}
+	post(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"helper","channel":"ops","channels":["#freehold"]}}}`)
+	if strings.Join(gotChannels, ",") != "ops,#freehold" {
+		t.Errorf("single channel must prepend the list: %v", gotChannels)
+	}
+	if gotPrivate {
+		t.Errorf("private must default false")
+	}
+}

@@ -98,6 +98,24 @@ func TestDepartmentPromptUnknownName(t *testing.T) {
 	}
 }
 
+func TestDepartmentPurposeAndChannelsCoverEveryDepartment(t *testing.T) {
+	for _, name := range DepartmentNames() {
+		if p, ok := DepartmentPurpose(name); !ok || strings.TrimSpace(p) == "" {
+			t.Errorf("department %q has no purpose", name)
+		}
+		want := []string{"#freehold", "#" + name}
+		if got := DepartmentChannels(name); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("DepartmentChannels(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if _, ok := DepartmentPurpose("waldo"); ok {
+		t.Errorf("DepartmentPurpose(\"waldo\") must not resolve")
+	}
+	if got := DepartmentChannels("waldo"); got != nil {
+		t.Errorf("DepartmentChannels(\"waldo\") must be nil, got %v", got)
+	}
+}
+
 func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
 	got := SystemPrompt("gatekeeper", "look after the garden", "")
 	dept, _ := DepartmentPrompt("gatekeeper")
