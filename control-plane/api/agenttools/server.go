@@ -142,7 +142,7 @@ func (s *Server) toolList() []map[string]interface{} {
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
 		{
-			"name": "world_teardown", "description": "Clear the CP's managed agent registry (roster-gated world teardown).",
+			"name": "world_teardown", "description": "Run the CP-owned world teardown (the inverse of build: relay/k3s + agent-tools process + internal DNS; the CP, its runner, and the agent registry survive).",
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
 		{
@@ -302,12 +302,12 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		b, _ := json.Marshal(out)
 		s.textResult(w, id, nil, string(b))
 	case "world_teardown":
-		n, err := s.Tools.WorldTeardown()
+		report, err := s.Tools.WorldTeardown()
 		if err != nil {
 			s.textResult(w, id, err, "")
 			return
 		}
-		s.textResult(w, id, nil, fmt.Sprintf("removed %d agent(s)", n))
+		s.textResult(w, id, nil, report)
 	case "world_migrate":
 		res, err := s.Tools.WorldMigrate()
 		if err != nil {

@@ -194,14 +194,16 @@ func TestWorldStatusAndTeardown(t *testing.T) {
 		t.Fatalf("world_status missing agents: %s", status)
 	}
 
-	// world_teardown clears them.
+	// world_teardown runs the bound CP-owned teardown driver; the durable
+	// agent registry is NOT cleared (the CP + identities survive).
+	srv.Tools.WorldTeardownFn = func() (string, error) { return "world-teardown ok", nil }
 	td := call(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"world_teardown","arguments":{}}}`)
-	if !strings.Contains(td, "removed 2") {
+	if !strings.Contains(td, "world-teardown ok") {
 		t.Fatalf("world_teardown unexpected: %s", td)
 	}
 	left, _ := ops.Agents()
-	if got := len(left); got != 0 {
-		t.Fatalf("world_teardown left %d agents", got)
+	if got := len(left); got != 2 {
+		t.Fatalf("world_teardown must keep the durable registry, left %d agents", got)
 	}
 
 	// world_migrate runs the bound verify-gated migration runner.

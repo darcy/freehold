@@ -1342,29 +1342,18 @@ func tenantFromName(name string) (planebase.Tenant, error) {
 }
 
 // BuildWorldTeardownApply returns the CP-owned world-teardown driver — the
-// BuildWorldApply mirror for a THIN login box (no local provisioning runner).
-// It runs the shared teardown engine through the co-located runner: terraform
-// destroy (the kube layer — the LXCs carry no destroy provisioner), then pct
-// stop/destroy of relay + k3s. The CP LXC goes LAST: the console + co-located
-// runner live INSIDE it, so its destroy is dispatched detached and the endpoint
-// can return first. Compute-only (--data from a thin box is a named follow-up:
-// the cp dataset stays mounted by the still-running cp LXC until that last step).
+// BuildWorldApply mirror. It runs the shared teardown engine through the
+// co-located runner: terraform destroy (the kube layer — the LXCs carry no
+// destroy provisioner), then pct stop/destroy of relay + k3s, and stops the
+// CP-side freehold-agent-tools process. The CP and its co-located runner
+// SURVIVE — `teardown` is the inverse of `build`, not of `uninstall`. The
+// agent-tools durable state (identity, roster seed, runner grant) stays on the
+// CP plane; build step 2.5 re-launches it. The internal DNS records are cleared
+// by the console AFTER the runner-driven work (clearWorldDNS). Compute-only.
 func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 	return func() (string, error) {
 		if spec.RunnerTarget == "" {
 			return "", fmt.Errorf("world-teardown: no runner target recorded")
-		}
-		// The CP LXC holds the console serving this request, so it must exist.
-		// The recorded vmid is the fast path; discover it by the deterministic
-		// guest name when the coords are missing rather than silently skipping
-		// the destroy (which would leave the world half torn down).
-		cpVmid := spec.CpLxc
-		if cpVmid == 0 {
-			v, err := spec.discoverCpVmid()
-			if err != nil {
-				return "", err
-			}
-			cpVmid = v
 		}
 		mc, err := spec.client()
 		if err != nil {
@@ -1382,31 +1371,46 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 		cfg := &teardown.Cfg{
 			Domain:      spec.RelayHost,
 			RunNTarget:  spec.RunnerTarget,
-			Managed:     []string{"relay", "k3s"}, // cp is destroyed LAST (below) — the runner lives in it
+			Managed:     []string{"relay", "k3s"}, // the CP + its co-located runner stay
 			Pool:        spec.PlanePool,
 			BackendKind: spec.PlaneKind,
 			Vmid: map[string]*uint32{
 				"relay": vmidPtr(spec.RelayLxc),
-				"cp":    &cpVmid,
 				"k3s":   vmidPtr(spec.K3sVmid),
 			},
 		}
-		// Compute-only: cfg.Data stays false, so no dataset destroys run (the cp
-		// dataset is still mounted by the running cp LXC until the last step).
+		// Compute-only: cfg.Data stays false, so no dataset destroys run (the
+		// plane survives teardown; `uninstall --remove-data` drops it).
 		// The 4th arg is CONFIRM (Run's signature), not data.
 		report, err := teardown.Run(runner, cfg, teardown.ScopeWholeWorld, true /* confirm */)
 		if err != nil {
 			return "", err
 		}
-		// The CP LXC (which hosts the console + this runner) is destroyed LAST
-		// and detached, so the runner's exec returns before its own container
-		// goes away.
-		if err := spec.run(cpDestroyDetached(cpVmid), 30); err != nil {
-			return report, fmt.Errorf("CP LXC %d destroy dispatch: %w", cpVmid, err)
+		// Stop the CP-side agent-tools process: its world work (dialing the
+		// relay, seeding membership) is dead with the relay, but its durable
+		// state stays so build step 2.5 re-launches the same identity.
+		if err := spec.stopAgentTools(); err != nil {
+			return report, err
 		}
-		report += fmt.Sprintf("\nCP LXC %d destroy dispatched last (the console + runner live in it)", cpVmid)
+		report += "\nCP + co-located runner preserved (uninstall drops them)"
 		return report, nil
 	}
+}
+
+// stopAgentTools stops the CP-side freehold-agent-tools serve process in the cp
+// guest. Its durable state dir stays on the CP plane; build step 2.5 re-launches
+// it (killing any prior serve first) with the same identity.
+func (s *Spec) stopAgentTools() error {
+	if s.CpLxc == 0 {
+		return nil
+	}
+	atState := filepath.Join(filepath.Dir(s.StateDir), "agent-tools")
+	cmd := fmt.Sprintf("pct exec %d -- sh -c 'p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'",
+		s.CpLxc, atState, atState)
+	if err := s.run(cmd, 30); err != nil {
+		return fmt.Errorf("world-teardown stop agent-tools: %w", err)
+	}
+	return nil
 }
 
 // discoverCpVmid finds the CP LXC's vmid on the host by its deterministic guest
