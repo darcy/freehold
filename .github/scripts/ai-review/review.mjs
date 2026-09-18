@@ -8,6 +8,9 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const LLM_BASE_URL = process.env.LLM_BASE_URL;
 const LLM_API_KEY = process.env.LLM_API_KEY;
 const LLM_MODEL = process.env.LLM_MODEL;
+// Cap a single LLM request (headers + body). A stalled stream otherwise hangs
+// until the job's 60-minute timeout; aborting lets callLlm retry instead.
+const LLM_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '600000', 10);
 const PROMPT_FILE = process.env.PROMPT_FILE || 'review-prompt.md';
 const CONTEXT_FILES = (process.env.CONTEXT_FILES || '').split(',').map(s => s.trim()).filter(Boolean);
 const EXCLUDE_PATTERNS = (process.env.EXCLUDE_PATTERNS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -222,6 +225,7 @@ async function callLlmOnce(prompt) {
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
+    signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0.1,
