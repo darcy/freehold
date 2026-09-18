@@ -2,11 +2,12 @@ name: Bot Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    types: [opened, synchronize, ready_for_review, reopened, review_requested]
 
 permissions:
   contents: read
   pull-requests: write
+  issues: write
   checks: read
 
 jobs:
@@ -43,6 +44,9 @@ jobs:
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
           LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
           LLM_MODEL: "accounts/fireworks/models/deepseek-v4-flash-0731"
+          # Abort a single stalled LLM request after 10 min so callLlm retries
+          # instead of hanging to the job's 60-minute cap.
+          LLM_TIMEOUT_MS: "600000"
           # --------------------------------------------------------------------
 
           PROMPT_FILE: "review-prompt.md"

@@ -418,9 +418,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **`agents/`** is its own Go module — `freehold/` (the freehold named agent:
     the CPA's purpose + skills), `custom/` (the template for agents the CPA
     creates on the fly), `common/orientation.md` (the shared system-orientation
-    block composed onto every non-custom prompt), the five **department
-    definitions** (`gatekeeper/`, `vault/`, `provisioner/`, `agent-ops/`,
-    `services/` — each a distinct identity scoped to one domain), and named
+    block composed onto every non-custom prompt), the four **department
+    definitions** (`security/`, `vault/`, `compute/`, `agent-ops/` — each a
+    distinct identity scoped to one domain), and named
     agents that grow over time. It is
     embedded by the `freehold/agents` Go package and shipped by the control
     plane; the module carries its own `go.mod` because a Go package cannot
@@ -428,23 +428,27 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 ### The agent org (two tiers)
 
-*   **The org is two tiers: the CPA and five departments.** The CPA is the sole
+*   **The org is two tiers: the CPA and four departments.** The CPA is the sole
     user touchpoint; the departments are its direct reports:
 
     | Department | Domain |
     | --- | --- |
-    | **Gatekeeper** | Access & security: external/public proxy, Tailscale, internal proxy, exposure verification |
+    | **Security** | Access & exposure: external/public proxy, Tailscale, internal proxy, exposure verification |
     | **Vault** | Data plane: backup/off-site, DR planning, scheduling, restore verification |
-    | **Provisioner** | Compute: Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning |
-    | **Agent Ops** | LiteLLM/provider setup & aliases, local AI config, agent optimization, prompt/skill management, agent debugging |
-    | **Services** | Installed OSS services (Pi-hole, Nextcloud, Immich, TrueNAS) — the aggregate registry/monitor; manages one directly when no dedicated per-service agent does. Ad hoc, no vetting |
+    | **Compute** | The box itself: CPU/RAM/disk, Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning, plus the monitoring tooling it needs. Not what runs on top |
+    | **Agent Ops** | LiteLLM/provider setup & aliases, local AI config, **AI hardware** (local-AI accelerators like an RTX 3090 or DGX Spark — provisioned and tuned by Agent Ops, separate from Compute's general resources), agent optimization, prompt/skill management, agent debugging |
+
+*   **Service lifecycle is not a department.** Whichever agent created a service
+    — a freehold-delegate or a custom agent — owns its install/config/operation,
+    ad hoc and unvetted as before. No dedicated department aggregates or monitors
+    installed OSS.
 
 *   **Communication is unrestricted.** The operator and any agent may converse
     with any department or agent directly — talk is not gated.
 
 *   **Capability execution is bounded.** A capability a department owns (external
-    proxy, backup, compute/LXC, model registration) is executed by that
-    department's identity; the raw grant for it attaches to department
+    proxy, backup, compute/LXC, model registration, AI hardware) is executed by
+    that department's identity; the raw grant for it attaches to department
     identities, never to a custom agent that would then self-serve a second,
     ungoverned path to the exact capability the department exists to own and
     audit. A custom agent that self-serves a department-owned capability is a
@@ -453,7 +457,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     Today's enforcement is the existing grant model: custom agents hold no raw
     capability grants, and only the operator-scoped `grant_agent` issues them.
 
-*   **The five departments are installed as part of the core build** — each a
+*   **The four departments are installed as part of the core build** — each a
     pod on the same harness as the CPA, created through the same audited
     `create_agent`. Each joins `#freehold` plus its own **private**
     `#<department>` channel, and the CPA is added to every channel. Tools are
@@ -464,11 +468,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **Departments check in rather than wait to be asked.** When a new
     service/compute is requested through the CPA's provision path, the relevant
-    department raises the question itself (Vault: "back this up?"; Gatekeeper:
+    department raises the question itself (Vault: "back this up?"; Security:
     "reachable outside your network?"). A "no" is final — the point is that the
     gap is a visible choice, not a silent one.
 
-*   **Every non-custom agent is oriented the same way.** The CPA and the five
+*   **Every non-custom agent is oriented the same way.** The CPA and the four
     departments are prefixed with a shared system-orientation block: the source
     repo URL (configurable; upstream default), read-it-on-boot + keep a memory +
     re-check periodically because the repo is active, and the "be loud" rule —
@@ -489,7 +493,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     **main user touchpoint** and **sole first-contact surface**; it runs on the
     same `buzz-acp` harness (`buzz-agent`) as the agents it creates.
 
-*   It **delegates to the five departments** (see "The agent org" above) rather
+*   It **delegates to the four departments** (see "The agent org" above) rather
     than doing expert-level work itself: a capability request is routed to the
     department that owns that domain, whose identity executes it. The
     departments are reachable by anyone; what the CPA routes is capability work,
@@ -701,15 +705,16 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     injected key; an agent uses, never reads).
 
 *   **Agent placement:** every agent (CPA and created alike) runs on the
-    `buzz-acp` harness as a bare k3s pod. The five departments are agents on the
+    `buzz-acp` harness as a bare k3s pod. The four departments are agents on the
     same harness class, installed as part of the core build.
 
-*   **The agent org is two tiers: the CPA and five departments.** The CPA is the
-    sole user touchpoint; Gatekeeper / Vault / Provisioner / Agent Ops /
-    Services are its direct reports, each a distinct identity scoped to one
+*   **The agent org is two tiers: the CPA and four departments.** The CPA is the
+    sole user touchpoint; Security / Vault / Compute / Agent Ops
+    are its direct reports, each a distinct identity scoped to one
     domain. Communication is unrestricted; capability execution is bounded — a
     department-owned capability is executed by that department's identity and
-    its raw grant attaches there, never to a custom agent. The five are installed
+    its raw grant attaches there, never to a custom agent. Service lifecycle is
+    not a department — the agent that created a service owns it. The four are installed
     at build, in `#freehold` plus a private `#<department>` channel with the CPA
     in all; only the identity/grant separation is locked.
 

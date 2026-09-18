@@ -108,22 +108,26 @@ repo, not the history.
   doing expert-level work itself. The deterministic runner/CP layer underneath (grants,
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.
-- **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user
-  touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**
-  (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS — the
-  aggregate registry/monitor; manages one directly when no dedicated per-service agent does)
-  are its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —
-  the operator and any agent may converse with any department or agent directly; what is
-  bounded is *capability execution*. A capability a department owns (external proxy, backup,
-  compute/LXC, model registration) is executed by that department's identity, and the raw
-  grant for it attaches to department identities, never to a custom agent that would then
-  self-serve a second, ungoverned path to the exact capability the department exists to own
-  and audit. The five departments are **installed as part of the core build** (each a pod on
-  the same harness as the CPA): in `#freehold` plus its own private `#<department>` channel,
-  with the CPA a member of all. Only the identity/grant separation is locked; capability
-  tooling/secrets arrive per department later (Chunk 5/6). A custom agent that self-serves a
-  department-owned capability is a containment failure even if a grant would technically allow
-  it — the department's prompt is the first line of defense, the grant the second.
+- **The agent org is two tiers: the CPA and four departments.** The CPA is the sole user
+  touchpoint; **Security** (access/exposure), **Vault** (data plane), **Compute** (the box
+  itself — CPU/RAM/disk, Proxmox LXC/kube and remote provisioning, plus the monitoring tooling
+  it needs), and **Agent Ops** (models/providers/agents, plus AI hardware — local-AI
+  accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by Agent Ops, separate
+  from Compute's general resources) are its direct reports, each a distinct identity scoped to
+  one domain. Talk is unrestricted — the operator and any agent may converse with any
+  department or agent directly; what is bounded is *capability execution*. A capability a
+  department owns (external proxy, backup, compute/LXC, model registration, AI hardware) is
+  executed by that department's identity, and the raw grant for it attaches to department
+  identities, never to a custom agent that would then self-serve a second, ungoverned path to
+  the exact capability the department exists to own and audit. Service lifecycle is **not** a
+  department: whichever agent created a service — a freehold-delegate or a custom agent — owns
+  its install/config/operation, ad hoc and unvetted as before. The four departments are
+  **installed as part of the core build** (each a pod on the same harness as the CPA): in
+  `#freehold` plus its own private `#<department>` channel, with the CPA a member of all. Only
+  the identity/grant separation is locked; capability tooling/secrets arrive per department
+  later (Chunk 5/6). A custom agent that self-serves a department-owned capability is a
+  containment failure even if a grant would technically allow it — the department's prompt is
+  the first line of defense, the grant the second.
 - **Host-flexible — not locked to Proxmox.** Proxmox is the lead/default; VPS/cloud are
   first-class (the business path). The k8s layer and everything above the host driver run
   identically regardless of substrate. Installer/runner must target a VPS as easily as
@@ -156,18 +160,23 @@ changelog.
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
-- **The five departments are installed, but have no capability tools yet.** `freehold build`
-  creates each reserved department (`gatekeeper`/`vault`/`provisioner`/`agent-ops`/`services`)
+- **The four departments are installed, but have no capability tools yet.** `freehold build`
+  creates each reserved department (`security`/`vault`/`compute`/`agent-ops`)
   through the same audited `create_agent`: its embedded prompt, `#freehold` plus its own
-  private `#<department>` channel, and the CPA added to each channel — five pods, reconciled
+  private `#<department>` channel, and the CPA added to each channel — four pods, reconciled
   across a rebuild like any registry agent. The capability tooling they broker (external
-  proxy, backup, compute, model registration) and the runner grants/secrets that back it are
-  **not** in this phase: no agent can reach a runner's exec yet (the pod's MCP bridge exposes
-  only messages + create/manage), so enforcement of "capability work goes through the owning
-  department" is still just the grant model — raw capability grants sit with department
-  identities once Chunk 5 wires the agent↔runner exec surface, and custom agents never receive
-  them.
-- **The Vault/Gatekeeper "check in on a new service" question has no trigger yet.** The hook
+  proxy, backup, compute, model registration, AI hardware) and the runner grants/secrets that
+  back it are **not** in this phase: no agent can reach a runner's exec yet (the pod's MCP
+  bridge exposes only messages + create/manage), so enforcement of "capability work goes
+  through the owning department" is still just the grant model — raw capability grants sit with
+  department identities once Chunk 5 wires the agent↔runner exec surface, and custom agents
+  never receive them.
+- **A rebuild of a world built before the four-department rename leaves stale agents.** The
+  retired reserved names `gatekeeper`/`provisioner`/`services` are no longer reserved, so on a
+  rebuild `reconcileCreatedAgents` re-creates any surviving registry rows as custom-template
+  agents in their old `#gatekeeper`/`#provisioner`/`#services` channels; nothing removes them.
+  Fresh builds are clean. A retired-name cleanup on reconcile is a named follow-up.
+- **The Vault/Security "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
 - **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
@@ -247,9 +256,9 @@ changelog.
   `go 1.25.0`):
   - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
     the CPA prompt + skills, `custom/` the template for agents the CPA creates,
-    `common/orientation.md` the shared system-orientation block, and the five
-    department definitions (`gatekeeper/`, `vault/`, `provisioner/`, `agent-ops/`,
-    `services/`); embeds its Markdown as Go values):
+    `common/orientation.md` the shared system-orientation block, and the four
+    department definitions (`security/`, `vault/`, `compute/`, `agent-ops/`);
+    embeds its Markdown as Go values):
     `cd agents && go build ./... && go vet ./... && go test ./...`
   - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
     console/relay/state/coords): `cd contract && go build ./... && go vet ./... && go test ./...`
