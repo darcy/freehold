@@ -64,6 +64,7 @@ func init() {
 		delegatePeerCmd,
 		relayProfileCmd,
 		teardownCmd,
+		uninstallCmd,
 		relayJoinCmd,
 		relaySetupCmd,
 		storageCmd,

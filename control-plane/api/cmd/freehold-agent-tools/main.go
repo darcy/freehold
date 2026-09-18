@@ -443,7 +443,11 @@ func cmdServe(args []string) {
 		log.Fatalf("open world facts: %v", err)
 	}
 
-	tools := &agent.Tools{Console: reg, Create: cpbuild.BuildCreateAgentFn(spec)}
+	tools := &agent.Tools{
+		Console:         reg,
+		Create:          cpbuild.BuildCreateAgentFn(spec),
+		WorldTeardownFn: cpbuild.BuildWorldTeardownApply(spec),
+	}
 	tools.Migrate = cpbuild.BuildMigrator(spec, *consoleStateDir)
 	tools.World = cpbuild.BuildWorldApply(spec)
 	tools.Exec = cpbuild.BuildWorldExec(spec)

@@ -52,6 +52,9 @@ type Tools struct {
 	// World drives the CP's world-build/reconcile stages through its co-located
 	// runner (the "box = login + trigger" entry point). nil = unsupported.
 	World WorldApply
+	// WorldTeardownFn runs the CP-owned world teardown (the physical inverse of
+	// build; the CP + runner survive). nil = unsupported.
+	WorldTeardownFn func() (string, error)
 	// Status builds the single inventory world_status returns (agents + the
 	// console's runners/DNS read underneath). nil = agents only.
 	Status WorldStatusFunc
@@ -220,22 +223,13 @@ func (t *Tools) WorldStatus() (map[string]interface{}, error) {
 	return map[string]interface{}{"agents": agents}, nil
 }
 
-// WorldTeardown clears the CP's managed agent registry (the world-action pair to
-// the console's /api/teardown, roster-gated here). Returns how many were removed.
-func (t *Tools) WorldTeardown() (int, error) {
-	if t.Console == nil {
-		return 0, fmt.Errorf("world-teardown: no console client bound")
+// WorldTeardown runs the CP-owned world teardown — the physical inverse of
+// build (relay/k3s + the CP-side agent-tools process; internal DNS cleared by
+// the console). The CP + its co-located runner, and the durable agent registry,
+// SURVIVE. Injected by the caller (the console's cpbuild apply).
+func (t *Tools) WorldTeardown() (string, error) {
+	if t.WorldTeardownFn == nil {
+		return "", fmt.Errorf("world-teardown: no teardown driver bound")
 	}
-	agents, err := t.Console.Agents()
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, a := range agents {
-		if _, err := t.Console.UnregisterAgent(a.Name); err != nil {
-			return n, fmt.Errorf("world-teardown remove %s: %w", a.Name, err)
-		}
-		n++
-	}
-	return n, nil
+	return t.WorldTeardownFn()
 }

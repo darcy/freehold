@@ -213,8 +213,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     bring the world up through the CP WITHOUT the relay roster agent-tools
     needs, so relay+agent-tools can live in `build` (the bootstrap/build split;
     `roadmap/CP_OWNED_BUILD.md`). Its **`/api/world-teardown`** mirror runs the
-    shared teardown engine through the co-located runner — the CP LXC destroyed
-    last and detached, since the console + runner live inside it — so a
+    shared teardown engine through the co-located runner — relay/k3s removed and
+    the CP-side agent-tools process stopped, while the CP + its runner survive
+    (`teardown` is the inverse of `build`; `uninstall` removes the CP) — so a
     login-only box can also tear the world down. `world_exec` is the **drive-through-CP exec**
     surface: a THIN login
     box (no local `[runner]`) runs commands on the CP's co-located runner via
@@ -274,14 +275,15 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     answer (incl. relay/CP domains + the proxy IP) up front in a bubbletea
     wizard so `runBootstrap` never re-prompts them. Pre-DNS steps connect to the
     recorded guest IPs (`config.ResolveTarget`) until the public domain
-    resolves. Teardown keeps the config (compute-only) unless
-    `--data` erases the tenant datasets.
+    resolves. Teardown keeps the config, the coords, and the data.
 
-*   **`control-plane/cli/teardown/` is the box's teardown-cp** (its own door);
-    a login-only box (no local `[runner]`) drives it through the CP's
-    `/api/world-teardown` instead. Both honor the
-    compute/data split (compute keeps the recorded coords + `/srv/data` LVs;
-    `--data` erases them).
+*   **`control-plane/cli/teardown/` is the world-removal engine** (shared by
+    `teardown` and `uninstall`). Whole-world `teardown` is CP-driven and
+    CP-preserving (`/api/world-teardown`); `uninstall` additionally removes the
+    CP + this box's doors + the local profile, and `--remove-data` erases the
+    datasets + the freehold-created thin pool. The CP-alive `uninstall` path
+    needs a local `[runner]` (the transient-access path lands with the Access
+    seam).
 
 *   **`control-plane/secret-management/` is the provisioner** (`ProvisionRunner`
     reproduces provision for onboarding existing services; `contract/client`

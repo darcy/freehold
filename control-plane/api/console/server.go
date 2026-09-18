@@ -376,9 +376,11 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "world-teardown: "+err.Error())
 		return
 	}
-	// All runner-driven work is done (the CP LXC destroy is detached); now it is
-	// safe to clear the CP's managed state before the container goes.
-	res, err := s.clearManagedState()
+	// All runner-driven work is done. The CP + its co-located runner SURVIVE
+	// (teardown is the inverse of build, not of uninstall), so only the world's
+	// internal DNS records are cleared — runners/secrets and the agent registry
+	// are durable CP state that the next build re-uses (identity stability).
+	res, err := s.clearWorldDNS()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "world-teardown: "+err.Error())
 		return
@@ -613,6 +615,36 @@ func (s *Server) teardown(w http.ResponseWriter, r *http.Request) {
 
 // managedStateRemoved is what clearManagedState took out of the CP's store.
 type managedStateRemoved struct{ Runners, Agents, DNS int }
+
+// clearWorldDNS removes the CP's internal resolver records (the world's DNS
+// mirror) while KEEPING runners/secrets and the agent registry — the
+// CP-preserving teardown: the durable identities survive so the next build
+// re-uses them.
+func (s *Server) clearWorldDNS() (managedStateRemoved, error) {
+	var res managedStateRemoved
+	_ = s.Store.Reload()
+	snap := s.Store.Snapshot()
+	for name := range snap.DNS {
+		// The CP survives teardown: keep its own bare resolver entry (`cp` ->
+		// the CP IP) so the control plane still resolves itself. The WORLD's
+		// records (relay/k3s/litellm/proxy + the dotted relay host) go; the
+		// dotted cp host points at the proxy, which is torn down with k3s.
+		if name == "cp" {
+			continue
+		}
+		res.DNS++
+		s.Store.RemoveDNS(name)
+	}
+	if err := s.Store.Save(); err != nil {
+		return res, fmt.Errorf("world-teardown failed to persist CP state")
+	}
+	// Reflect the removals in the live dnsmasq resolver, not just the store
+	// mirror (otherwise the guests' records keep answering until a rebuild).
+	if err := s.syncResolver(); err != nil {
+		return res, fmt.Errorf("world-teardown sync resolver: %w", err)
+	}
+	return res, nil
+}
 
 // clearManagedState removes what the CP manages — runners + their secrets, the
 // agent registry, DNS records — from its durable store. Shared by /api/teardown

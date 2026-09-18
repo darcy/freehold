@@ -25,6 +25,33 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.10] — teardown keeps the control plane; uninstall removes it
+
+`teardown` destroyed the control plane too, and `--data` removed the plane. Those are two
+different jobs, now two verbs.
+
+- **`teardown` is CP-preserving** (the inverse of `build`). The CP's co-located runner
+  removes relay/k3s, stops the CP-side `freehold-agent-tools` process (its durable state
+  stays on the CP plane; build step 2.5 re-launches it), and the console clears the
+  world's internal DNS records. The control plane, its co-located runner, the durable
+  plane, the cert mirror, and the Cloudflare records all stay. Whole-world teardown works
+  from any box through the CP — no local runner needed. The detached CP-destroy step is
+  gone from this path, and the durable agent registry is no longer cleared (identity
+  stability across a rebuild).
+- **`world teardown` is a pure alias** of the CP-preserving `teardown`.
+- **`freehold uninstall [--remove-data]`** (new) removes the control plane itself: it
+  revokes this box's operator door, removes the world, deletes the runner substrate key
+  from the host, destroys the CP LXC last (its runner executes the uninstall), and wipes
+  the local profile config + state. Data is kept by default — the durable plane survives,
+  so a later install re-adopts the runner identity; `--remove-data` also drops the
+  datasets and the freehold-created thin pool.
+- **Data removal moved to uninstall.** `teardown --data` is refused for whole-world and
+  points at `uninstall --remove-data`; `teardown --tenant --data` is unchanged. The TUI
+  teardown form routes "also remove the plane" to `uninstall --remove-data`.
+- **Scope:** uninstall runs from a box with a local provisioning runner (the host side is
+  reached through it). The thin-box / dead-CP path needs the transient Access seam and
+  lands next.
+
 ## [0.6.9] — one install surface, a life-cycle gate, and identity-preserving re-adopt
 
 `freehold-install bootstrap` and `install` were two commands over one pipeline, and any

@@ -180,8 +180,12 @@ only builds + installs):
 freehold-install install --yes --name <world> --host root@<box> \
                      --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr>  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
-freehold teardown    # tear it down (compute-only: keeps coords + /srv/data);
-                     #  a login-only box runs it through the CP
+freehold teardown    # drop the WORLD (the inverse of build): relay/k3s + the CP-side
+                     #  agent-tools process go, internal DNS clears — the CP, its runner,
+                     #  the durable plane, and the certs all STAY; data is kept
+freehold uninstall [--remove-data]  # drop the CP too (this box's doors + local state go;
+                     #  --remove-data also drops the durable plane). The CP-alive path runs
+                     #  from a box with a local runner
 freehold            # the TUI dashboard
 ```
 
@@ -204,8 +208,10 @@ freehold                      #   seed a local connection profile from the CP, t
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
 freehold world status         # the CP's single inventory (read via public /api/world)
 freehold world build          # trigger the CP's world-build (co-located runner)
-freehold world teardown       # the CP clears its managed agent registry
+freehold world teardown       # alias of `freehold teardown` (CP-preserving world teardown)
 freehold world migrate        # run the CP's verify-gated migrations
+freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
+                              #  --remove-data drops the durable plane) — needs a local runner
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no

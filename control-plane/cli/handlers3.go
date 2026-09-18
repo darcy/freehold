@@ -92,8 +92,6 @@ func init() {
 
 // --- deploy-cp ---
 
-
-
 // --- bootstrap ---
 
 var provisionCmd = &cobra.Command{
@@ -595,7 +593,7 @@ func parseInfoMount(s string) (drive.MountArg, error) {
 
 var teardownCmd = &cobra.Command{
 	Use:   "teardown",
-	Short: "Tear the managed world down: destroy the LXCs (compute). Default KEEPS the config (recorded LXC coordinates are cleared so the next build re-creates them), the world home, and the door key; --data also destroys the datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT so a cheap rebuild re-uses the DNS creds + identity)",
+	Short: "Tear the WORLD down (the inverse of `build`), CP-preserving: relay/k3s LXCs + the CP-side agent-tools process go, and the internal DNS records clear. The control plane, its co-located runner, the durable plane, the cert mirror, and Cloudflare records all STAY; your data is kept. `uninstall` drops the control plane itself; `uninstall --remove-data` drops the plane",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ok, err := negotiateProfile(cmd, "teardown")
 		if err != nil {
@@ -620,13 +618,21 @@ var teardownCmd = &cobra.Command{
 			return nil
 		}
 
-		// A THIN box (no local provisioning runner) drives the whole-world
-		// teardown through the CP — the mirror of `freehold build`: the CP's
-		// co-located runner runs the shared teardown engine, the CP LXC going
-		// last. Per-tenant + --data still need the build box.
-		if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
-			return teardownViaCP(cfg, scope, data, removeDNS, yes)
+		// Whole-world teardown is CP-PRESERVING and CP-DRIVEN (the inverse of
+		// build): the CP's co-located runner removes relay/k3s and stops the
+		// CP-side agent-tools process, and the console clears the world's
+		// internal DNS. The CP, its runner, the durable plane, and the cert
+		// mirror all stay. Data removal is `uninstall --remove-data`'s job.
+		if tenant == "" {
+			if data {
+				return fmt.Errorf("teardown keeps your data (and the control plane):\n  `freehold uninstall --remove-data` also drops the durable plane")
+			}
+			return runWholeWorldTeardown(cfg, configPath, removeDNS, yes)
 		}
+
+		// Per-tenant teardown still needs the box that built the world (a local
+		// provisioning runner + the door); the CP-driven path above has no
+		// tenant scope.
 
 		// The teardown engine shells `freehold exec` — resolve the
 		// CLI binary as OURSELF (we are it).
@@ -688,13 +694,9 @@ var teardownCmd = &cobra.Command{
 		// Confirmation gate: --yes skips the prompt (scripting/CI).
 		if !yes {
 			fmt.Printf("teardown scope: %s (config %s)\n", scope, configPath)
-			if scope == teardown.ScopeWholeWorld && !data {
-				fmt.Println("keeps: config (LXC coords cleared so build re-creates them) · world home · door key · plane locations · DNS creds")
-			}
-			fmt.Printf("proceed? [type yes] ")
-			var answer string
-			if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
-				return fmt.Errorf("teardown aborted (not confirmed)")
+			fmt.Println("keeps: config · world home · door key · plane locations · DNS creds")
+			if err := confirmDestructive("teardown"); err != nil {
+				return err
 			}
 		}
 		// --remove-dns: delete the world's freehold-managed A records; default
@@ -704,17 +706,6 @@ var teardownCmd = &cobra.Command{
 		if removeDNS {
 			if err := removeManagedDNS(cfg); err != nil {
 				return err
-			}
-		}
-		// CP-FIRST teardown (whole-world): ask the CP to remove what IT manages
-		// (runners + secrets, agent registry, DNS records) BEFORE the box
-		// destroys the CP itself, so the world unwinds gracefully instead of the
-		// substrate dying under managed state. Best-effort: the CP may be down
-		// or this box may lack the operator session — the local teardown still
-		// runs, with a clear warning, since it is the last resource standing.
-		if scope == teardown.ScopeWholeWorld {
-			if err := cpFirstTeardown(cfg); err != nil {
-				fmt.Printf("  (warning: CP teardown hand-off not performed — destroying anyway: %v)\n", err)
 			}
 		}
 		// Stream every line as it lands (--yes runs have no operator to
@@ -732,19 +723,8 @@ var teardownCmd = &cobra.Command{
 		} else {
 			fmt.Println(report)
 		}
-		// Forget the recorded container ids + discovered ips so the NEXT build
-		// re-creates the guests from scratch (ids are NOT guaranteed to be
-		// reused). Keeps everything else (domains, runner, plane, DNS creds,
-		// door) intact.
-		if scope == teardown.ScopeWholeWorld {
-			cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
-			cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
-			cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
-			if err := cfg.Save(configPath); err != nil {
-				return err
-			}
-			fmt.Println("cleared recorded LXC coordinates (vmid + ip) — the next build re-creates them")
-		}
+		// Per-tenant teardown keeps the recorded coords + dataset mapping for
+		// reattach; the whole-world path cleared them in runWholeWorldTeardown.
 		return nil
 	},
 }
@@ -754,14 +734,16 @@ func init() {
 	teardownCmd.Flags().String("config", defaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	teardownCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
 	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown")
-	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy the tenant's dataset (data+compute). Without --tenant: the FULL teardown — all datasets + the freehold-created thin pool, then removes the door key (world home + config are KEPT — the rebuild re-uses the DNS creds + identity). Without it the door key, world home, and config are all kept for a cheap rebuild")
-	teardownCmd.Flags().Bool("remove-dns", false, "ALSO delete the freehold-managed relay/cp A records on the DNS provider recorded in config (Dns.Manager, created by `build --manage-dns`). Default leaves them")
+	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy that tenant's dataset (data+compute). Without --tenant: REFUSED — teardown keeps your data; `freehold uninstall --remove-data` drops the durable plane")
+	teardownCmd.Flags().Bool("remove-dns", false, "ALSO delete the freehold-managed RELAY A record on the DNS provider recorded in config (Dns.Manager, created by `build --manage-dns`). The CP's record is kept (the CP survives teardown). Default leaves them")
 }
 
-// removeManagedDNS deletes the world's freehold-managed relay/cp A records on
-// the provider recorded in config.Dns.Manager (teardown --remove-dns). Resolves
-// the sealed relay-slot credential (the same one --manage-dns used for the
-// records + the LE cert) to drive the manager.
+// removeManagedDNS deletes the world's freehold-managed RELAY A record on the
+// provider recorded in config.Dns.Manager (teardown --remove-dns). The CP's
+// record is deliberately KEPT: teardown is CP-preserving, so deleting it would
+// break the surviving control plane's public DNS. Resolves the sealed
+// relay-slot credential (the same one --manage-dns used for the records + the
+// LE cert) to drive the manager.
 func removeManagedDNS(cfg *config.Config) error {
 	m := cfg.Dns.Manager
 	if m == nil || !m.Managed {
@@ -788,10 +770,9 @@ func removeManagedDNS(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	for _, h := range []string{cfg.RelayHost(), cfg.CPHost()} {
-		if h == "" {
-			continue
-		}
+	// Only the relay record goes: the CP survives teardown, so its A record
+	// must stay for the control plane to remain reachable.
+	if h := cfg.RelayHost(); h != "" {
 		if err := man.DeleteA(h); err != nil {
 			return fmt.Errorf("remove DNS record %s: %w", h, err)
 		}
@@ -840,30 +821,21 @@ func init() {
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a backend (zpool OR LVM-thin) when none is detected. Absent + no backend = actionable bail")
 }
 
-// teardownViaCP tears a world down from a THIN login box: there is no local
-// provisioning runner, so the CP's co-located runner runs the shared teardown
-// engine (console /api/world-teardown) — the mirror of how `freehold build`
-// triggers /api/world-build. Compute-only, whole-world: per-tenant + --data
-// still need the build box (the cp dataset is mounted until the CP is gone).
-func teardownViaCP(cfg *config.Config, scope teardown.Scope, data, removeDNS, yes bool) error {
-	if scope != teardown.ScopeWholeWorld {
-		return fmt.Errorf("per-tenant teardown needs a local provisioning runner — run it from the box that built the world")
-	}
-	if data {
-		return fmt.Errorf("--data from a login-only box is not supported yet — run it from the box that built the world")
-	}
+// runWholeWorldTeardown is the CP-preserving whole-world teardown: it asks the
+// CP (console /api/world-teardown) to remove the WORLD — relay/k3s, the
+// CP-side freehold-agent-tools process, and the internal DNS records — through
+// its co-located runner. The CP, its runner, the durable plane, and the cert
+// mirror all stay, so the next build (or a re-install after a wipe) re-uses
+// them. Works from any box (a thin one has no local runner).
+func runWholeWorldTeardown(cfg *config.Config, configPath string, removeDNS, yes bool) error {
 	if !yes {
-		fmt.Println("teardown scope: whole-world (CP-owned — this box has no local runner)")
-		fmt.Println("keeps: config · world home · door key · plane locations · DNS creds")
-		fmt.Printf("proceed? [type yes] ")
-		var answer string
-		if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
-			return fmt.Errorf("teardown aborted (not confirmed)")
+		fmt.Println("teardown scope: whole-world (CP-preserving — the CP, its runner, and the plane stay)")
+		fmt.Println("keeps: control plane · co-located runner · durable plane · cert mirror · Cloudflare records")
+		if err := confirmDestructive("teardown"); err != nil {
+			return err
 		}
 	}
-	// DNS records, best-effort, BEFORE the CP goes: the sealed credential lives
-	// on the build box, so a thin box can only try (same caveat the box path's
-	// removeManagedDNS already surfaces).
+	// Optional Cloudflare A-record removal; default keeps them (build upserts).
 	if removeDNS {
 		if err := removeManagedDNS(cfg); err != nil {
 			fmt.Printf("  (warning: DNS removal skipped — %v)\n", err)
@@ -881,11 +853,7 @@ func teardownViaCP(cfg *config.Config, scope teardown.Scope, data, removeDNS, ye
 	if err != nil {
 		return fmt.Errorf("login to %s failed: %w", cfg.CPURL, err)
 	}
-	// The CP-owned teardown runs the whole thing through the CP's own runner and
-	// clears the CP's managed state AFTER its runner-driven work (in the
-	// console), so the co-located runner is never removed out from under it —
-	// hence no separate CP-first hand-off here (the CP dies with the world).
-	fmt.Printf("tearing down world %s through the CP…\n", cfg.TenantSlug())
+	fmt.Printf("tearing down world %s through the CP (the CP + runner are preserved)…\n", cfg.TenantSlug())
 	res, err := c.WorldTeardown()
 	if err != nil {
 		return fmt.Errorf("world-teardown (console /api/world-teardown): %w", err)
@@ -893,47 +861,16 @@ func teardownViaCP(cfg *config.Config, scope teardown.Scope, data, removeDNS, ye
 	if res.Report != "" {
 		fmt.Println(res.Report)
 	}
-	fmt.Printf("  CP teardown: removed %d runner(s)/secrets, %d agent(s), %d DNS record(s)\n",
-		res.RunnersRemoved, res.AgentsRemoved, res.DnsRemoved)
-	// Forget the recorded LXC coords so the next build re-creates the guests (a
-	// thin box usually has none — same contract as the local path).
+	fmt.Printf("  world teardown: %d internal DNS record(s) cleared; the CP + runner are preserved\n", res.DnsRemoved)
+	// Forget the WORLD's recorded coords so the next build re-creates relay/k3s.
+	// The CP's coords are KEPT — the CP LXC survives and its recorded IP is what
+	// the console/agent-tools URLs resolve against.
 	cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
-	cfg.Lxc.Cp.Vmid, cfg.Lxc.Cp.Ip = nil, nil
 	cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
-	if err := cfg.Save(config.ConfigPath()); err != nil {
+	if err := cfg.Save(configPath); err != nil {
 		return err
 	}
-	fmt.Println("cleared recorded LXC coordinates (vmid + ip) — the next build re-creates them")
-	return nil
-}
-
-// cpFirstTeardown is the CP-first teardown hand-off: the BOX logs into the CP
-// console as the operator and asks it to remove what it manages (runners +
-// secrets, agent registry, DNS records). Best-effort — any failure is returned
-// for the caller to warn on and continue, because teardown of the last resource
-// standing must not be blocked by a CP that is already down.
-func cpFirstTeardown(cfg *config.Config) error {
-	if cfg == nil || cfg.CPURL == "" {
-		return fmt.Errorf("no CP URL in config")
-	}
-	hexStr, err := oplogin.SecretHex()
-	if err != nil {
-		return fmt.Errorf("no operator session on this box (%v) — log in with `freehold login` to enable the CP hand-off", err)
-	}
-	secret, err := oplogin.NsecToSecret(hexStr)
-	if err != nil {
-		return err
-	}
-	c, err := oplogin.Login(cfg.CPURL, secret)
-	if err != nil {
-		return err
-	}
-	res, err := c.Teardown()
-	if err != nil {
-		return err
-	}
-	fmt.Printf("  CP teardown: removed %d runner(s)/secrets, %d agent(s), %d DNS record(s)\n",
-		res.RunnersRemoved, res.AgentsRemoved, res.DnsRemoved)
+	fmt.Println("cleared recorded relay/k3s coordinates (vmid + ip) — the next build re-creates them")
 	return nil
 }
 

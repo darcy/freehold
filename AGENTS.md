@@ -222,13 +222,13 @@ changelog.
   any Phase E-created agent reusing `AgentLiteLLMKeyScript` — can register/remove any model and
   mint keys until scoped keys are wired. Minting a bootstrap virtual key and switching agent
   pods to scoped per-agent keys is the named follow-up.
-- **Thin-box `freehold teardown` is compute-only (whole-world).** A login-only box (no local
-  `[runner]`) drives teardown through the CP's co-located runner (`/api/world-teardown`), so
-  `--tenant` and `--data` are refused there: the cp dataset stays mounted by the still-running
-  cp LXC until the final detached step, and the thin box has no local runner/plane coords.
-  Those need the build box until the data path is sequenced into the detached last step.
-  It also requires a CP running a current console (the route postdates the worlds that
-  predate it).
+- **`uninstall` needs a box with a local provisioning runner.** The whole-world `teardown`
+  works from any box (it is CP-driven and CP-preserving), but `uninstall` reaches the host
+  side — the runner substrate key, the CP LXC destroy — through a LOCAL runner. A thin
+  login-only box cannot uninstall until the transient Access seam lands. `teardown --tenant`
+  likewise needs the build box.
+- **Whole-world `teardown --data` is refused** — data removal is `uninstall --remove-data`.
+  Per-tenant `teardown --tenant --data` still works (needs the build box).
 - **`install`'s live-CP refusal is profile-based.** It probes only a profile's recorded
   `cp_url` (`/healthz`); a **profile-less** box pointed at a host that already runs a live
   `<name>-cp` falls to `mint` and does an un-requested re-deploy over the live world. The
