@@ -146,7 +146,7 @@ control-plane/acceptance/  the Chunk-1/2 acceptance gate in Go (`go test ./accep
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(five modules: `agents/`, `contract/`, `platform/`, `install/`, `control-plane/`) + `mise`
+(six modules: `agents/`, `contract/`, `platform/`, `providers/`, `install/`, `control-plane/`) + `mise`
 (the justfile recipes run `go`/`rust` through `mise exec` so the right
 toolchain versions are guaranteed — `curl https://mise.run | sh` or `brew
 install mise`) + `just` ([just](https://github.com/casey/just) — `cargo
@@ -169,7 +169,7 @@ just test
 
 # the manual equivalents, if you don't use just:
 cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,testkit,core/harness/oracle} + `cargo build --bin runner` for the acceptance gate
-for m in agents contract platform install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the five Go modules + the byte-exact harness gate + the Go acceptance gate
+for m in agents contract platform providers install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the six Go modules + the byte-exact harness gate + the Go acceptance gate
 cargo fmt --all --check          # CI gate
 ```
 

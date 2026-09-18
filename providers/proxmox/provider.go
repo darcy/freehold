@@ -53,7 +53,7 @@ func (p *Provider) ListGuests() ([]provisioning.Guest, error) {
 }
 
 func (p *Provider) GuestIPv4(guest string) (string, error) {
-	out, err := p.exec(fmt.Sprintf("pct exec %s -- ip -4 -o addr show eth0", guest), 0)
+	out, err := p.exec(fmt.Sprintf("pct exec %s -- ip -4 -o addr show eth0", guest), 30)
 	if err != nil {
 		return "", fmt.Errorf("ip readback failed on LXC %s: %w", guest, err)
 	}

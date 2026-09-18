@@ -506,7 +506,7 @@ func (e *Engine) CertExpiry(cfg *config.Config, slot string) string {
 		return ""
 	}
 	out, err := e.Provider.GuestExec(strconv.FormatUint(uint64(k3s), 10), fmt.Sprintf(
-		"bash -c 'openssl x509 -enddate -noout -in %s/fullchain.pem 2>/dev/null'",
+		"openssl x509 -enddate -noout -in %s/fullchain.pem 2>/dev/null",
 		stages.CaddyEdgeDurableDir(slot)), 0)
 	if err != nil || out == nil || out.ExitCode == nil || *out.ExitCode != 0 {
 		return ""
@@ -1871,7 +1871,7 @@ func (e *Engine) relaySigningPubkey() string {
 	if cfg, err := config.Load(e.F.ConfigPath); err == nil && cfg != nil && cfg.Lxc.Relay.Vmid != nil && e.Provider != nil {
 		guest := strconv.FormatUint(uint64(*cfg.Lxc.Relay.Vmid), 10)
 		out, err := e.Provider.GuestExec(guest, fmt.Sprintf(
-			"sed -n 's/^BUZZ_RELAY_PRIVATE_KEY=//p' %s/.env 2>/dev/null", stages.RelayComposeDir), 30)
+			`sed -n "s/^BUZZ_RELAY_PRIVATE_KEY=//p" %s/.env 2>/dev/null`, stages.RelayComposeDir), 30)
 		if err == nil && out != nil && out.ExitCode != nil && *out.ExitCode == 0 {
 			secret := strings.TrimSpace(out.Stdout)
 			if _, err := hex.DecodeString(secret); err == nil && len(secret) == 64 {

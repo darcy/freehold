@@ -301,7 +301,7 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 	if spec.RelayHostIP != nil {
 		host := strings.TrimSuffix(domain, "/")
 		host = strings.Split(host, ":")[0]
-		hostsCmd := fmt.Sprintf("grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts", host, *spec.RelayHostIP, host)
+		hostsCmd := fmt.Sprintf("grep -Fq \"%s\" /etc/hosts 2>/dev/null || echo \"%s %s\" >> /etc/hosts", host, *spec.RelayHostIP, host)
 		if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, hostsCmd), "pin relay host", 30); err != nil {
 			return nil, err
 		}

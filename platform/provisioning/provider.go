@@ -18,7 +18,9 @@ type Guest struct {
 // owns the guest command wrapping.
 type ExecFunc func(cmd string, timeoutS uint64) (*client.ExecOutcome, error)
 
-// GuestExecFunc runs a command inside a guest ("" = the substrate host).
+// GuestExecFunc runs a command inside a guest ("" = the substrate host). The
+// provider wraps the command in a single-quoted `sh -c` shell, so cmd must be
+// single-quote-free.
 type GuestExecFunc func(guest string, cmd string, timeoutS uint64) (*client.ExecOutcome, error)
 
 // Provider is the substrate ops seam. It is deliberately low-level: there is

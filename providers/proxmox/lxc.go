@@ -18,7 +18,9 @@ func LxcCmd(lxc *uint32, cmd string) string {
 	return LxcExec(strconv.FormatUint(uint64(*lxc), 10), cmd)
 }
 
-// LxcExec is LxcCmd for a string guest handle ("" = host).
+// LxcExec is LxcCmd for a string guest handle ("" = host). The payload rides a
+// single-quoted `sh -c` wrapper, so callers must pass single-quote-free
+// commands (the repo-wide convention in platform/stages).
 func LxcExec(guest, cmd string) string {
 	if guest == "" {
 		return cmd
