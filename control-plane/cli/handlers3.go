@@ -695,10 +695,8 @@ var teardownCmd = &cobra.Command{
 		if !yes {
 			fmt.Printf("teardown scope: %s (config %s)\n", scope, configPath)
 			fmt.Println("keeps: config · world home · door key · plane locations · DNS creds")
-			fmt.Printf("proceed? [type yes] ")
-			var answer string
-			if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
-				return fmt.Errorf("teardown aborted (not confirmed)")
+			if err := confirmDestructive("teardown"); err != nil {
+				return err
 			}
 		}
 		// --remove-dns: delete the world's freehold-managed A records; default
@@ -833,10 +831,8 @@ func runWholeWorldTeardown(cfg *config.Config, configPath string, removeDNS, yes
 	if !yes {
 		fmt.Println("teardown scope: whole-world (CP-preserving — the CP, its runner, and the plane stay)")
 		fmt.Println("keeps: control plane · co-located runner · durable plane · cert mirror · Cloudflare records")
-		fmt.Printf("proceed? [type yes] ")
-		var answer string
-		if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
-			return fmt.Errorf("teardown aborted (not confirmed)")
+		if err := confirmDestructive("teardown"); err != nil {
+			return err
 		}
 	}
 	// Optional Cloudflare A-record removal; default keeps them (build upserts).

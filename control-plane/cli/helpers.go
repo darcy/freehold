@@ -14,6 +14,19 @@ import (
 
 func hexDecode(s string) ([]byte, error) { return hex.DecodeString(s) }
 
+// confirmDestructive prompts for an explicit "yes" and returns an explicit
+// abort error otherwise — never nil on a non-yes answer (or EOF), so a
+// mistyped/blank answer can never fall through to a destructive action. Shared
+// by every destructive gate (world/tenant teardown, uninstall).
+func confirmDestructive(what string) error {
+	var answer string
+	fmt.Printf("proceed? [type yes] ")
+	if _, err := fmt.Scanln(&answer); err != nil || answer != "yes" {
+		return fmt.Errorf("%s aborted (not confirmed)", what)
+	}
+	return nil
+}
+
 func pubkeyOf(secret []byte) (string, error) {
 	return crypto.PubkeyFromSecret(secret)
 }

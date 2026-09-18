@@ -62,11 +62,10 @@ var uninstallCmd = &cobra.Command{
 			if removeData {
 				extra = " + the durable plane (--remove-data)"
 			}
-			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %d + the world + this box's door + the runner key%s\n  keeps:   nothing local (config + state are wiped)\nproceed? [type yes] ",
+			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %d + the world + this box's door + the runner key%s\n  keeps:   nothing local (config + state are wiped)\n",
 				cfg.Name, displayHost(host, cfg.Runner.Target), *cfg.Lxc.Cp.Vmid, extra)
-			var a string
-			if _, err := fmt.Scanln(&a); err != nil || a != "yes" {
-				return fmt.Errorf("uninstall aborted (not confirmed)")
+			if err := confirmDestructive("uninstall"); err != nil {
+				return err
 			}
 		}
 		if err := runUninstall(cfg, configPath, host, removeData); err != nil {
