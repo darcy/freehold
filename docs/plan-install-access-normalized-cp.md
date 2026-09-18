@@ -1,14 +1,20 @@
 # Plan — install access modes → normalized CP lifecycle
 
-Status: **ready to execute** (PRs 1–3). `install --restore` is explicitly out of scope
-for now (see "Deferred"), but the identity model below is designed so that grants
-survive a restore when it lands.
+Status: PRs 1–2 are **merged** (`0.6.9` #249, `0.6.10` #250). Remaining: **PR 3**
+(provider seam + extraction), **PR 4** (transient access + door rotation), **PR 5**
+(`vultr`). `install --restore` is out of scope for now (see "Deferred"), but the
+identity model below guarantees grants survive a restore when it lands.
 
-Baseline: `main` after `0.6.8` (PRs #243/#244/#246/#248 merged). CHANGELOG top is `0.6.8`.
+Baseline: `main` after `0.6.10`. CHANGELOG top is `0.6.10`.
 
-The storage-scope work that preceded this (domain-scoped provenance + named
-profiles + `<name>-<role>` LXCs, PRs #243/#244) is already merged; this plan is the
-command/lifecycle follow-on.
+The storage-scope work (#243/#244) and this plan's own PR1/PR2 are merged; the
+remaining work is **provider independence** + the transient-access handoff.
+
+**For the implementing agent:** this plan states the goal, the locked decisions, and
+the guardrails; it deliberately leaves internal structure, package layout, and naming
+to you. Where a detail is unspecified, pick the smallest change that satisfies the
+guardrails + acceptance criteria and record the choice in the PR. If something would
+contradict a locked decision, surface it rather than working around it.
 
 ---
 
@@ -22,6 +28,11 @@ box talks to the CP over signed HTTPS; installers differ only in **access mode**
 Key property: the CP runner's **Nostr + encryption identity is permanent**. Grants,
 relay channel/roster, and sealed secrets survive every re-install. Only the
 **substrate SSH credential (the door) rotates**.
+
+Second property: **`platform/` is provider-independent.** Every substrate-specific
+command (Proxmox `pct`/LVM/ZFS, later Vultr/Hetzner APIs) lives behind a `Provider`
+in a top-level `providers/` module; `install`/`uninstall`/`build`/`teardown` are
+orchestrators over it. See §5.
 
 ## 2. Locked decisions
 
@@ -53,47 +64,40 @@ relay channel/roster, and sealed secrets survive every re-install. Only the
    `uninstall` drops the CP.
 10. **Thin-box `uninstall --remove-data` is refused** until the data path is
     sequenced (same known gap as `teardown --data`).
-11. **The install box is thin after handoff.** PR3 removes the box's transient
+11. **The install box is thin after handoff.** PR4 removes the box's transient
     world-home runner package once the CP owns the identity and the doors are in
     place; box-side `exec` already rides the CP's `world_exec`
     (`noLocalRunner()`, `control-plane/cli/handlers.go:112`). Keeping the package
     is a harmless fallback, not the target state.
 
-## 3. Current state (what exists, with refs)
+## 3. Current state (post PR1/PR2; the extraction targets)
 
-- **Install pipeline** (`platform/provisioning/box/rebuild.go`): `RunBootstrap`
-  provisions a runner over SSH (`stageProvision`, ~505), serves it on loopback
-  (`stageServe`, 708), writes config, grants, then boots + deploys the CP
-  (`stageBootstrap` ~1335, `stageDeployCp` 1523). Every stage shells the runner.
-- **deploy-cp copies the box runner package** into the CP LXC and merges secrets
-  (`install/cpdeploy/deploy_cp.go:334-394`) — it ships `identity.json`
-  (`:352-358`), so today a re-install overwrites the plane's runner identity and
-  orphans its grants. Fixed in **PR 1** by mint-or-adopt (below).
-- **Bootstrap drivers take `McpClient`+target**: `BootstrapProxmoxLxc`,
-  `BootstrapVultrVps`, `BootstrapHetznerVps`
-  (`platform/provisioning/bootstrap/drivers.go:277,590,719`).
+- **Provider-specific code is still scattered through `platform/`** — the PR3
+  extraction targets: `bootstrap/drivers.go` (`ProxmoxLxcSpec`/`VultrVpsSpec`/
+  `HetznerVpsSpec` + the three `Bootstrap*` funcs, `:277,590,719`);
+  `deploy/deploy.go:23` hardcodes `pct exec` (`LxcCmd`, used by `install/cpdeploy`
+  and `cpbuild`); `drive/` is LVM/ZFS/`pvesm`; `stages/` carries pct orchestration;
+  `switch kind` sites in `handlers3.go`, `install/cli/stages.go`, `cpbuild.go`,
+  `tui/actions.go`. All drivers take `McpClient`+target.
+- **The install pipeline still provisions + serves a box runner** and shells it
+  (`box.RunBootstrap`; `stageProvision`/`stageServe`/`stageDeployCp`). PR4 replaces
+  this with the direct transport and makes the box thin after handoff.
 - **RotateSecret is identity-preserving** and preserves targets+grants
-  (`control-plane/secret-management/provisioner2.go:18-74`) — reuse for the door.
-  It **hardcodes `Address: before.Address`** (`:52`), so it cannot repoint a
-  target host — see "Deferred".
-- **ProvisionRunner refuses same-name/PackageDirInUse**
-  (`provisioner.go:99-113`) — we avoid it by not re-minting identity.
-- **CP-side secret re-seal source exists**: `reseedCoLocatedRunner`
-  (`control-plane/api/cpbuild/cpbuild.go:819-862`) re-seals runner secrets from the
-  CP's durable `world-secrets/litellm.json`.
-- **ensureCpSecrets skips present secrets** (`control-plane/cli/rebuild.go:383-422`).
-- **Cert durable-reuse gate** (`cpbuild.go:1053`): valid mirror (≥30d) → reseed, no LE.
-- **DNS upsert**: `manageDomainDNS` calls `m.UpsertA` (`rebuild.go:548-549`);
-  Manager contract creates/updates/removes (`platform/services/externaldns/cloudflare/dnsman.go:12-27`).
-- **selectProfile refuses an existing profile** (`install/cli/install.go`) — must
-  become life-cycle aware (mint vs re-adopt vs fail-if-live).
-- **Config has no host field** (`contract/config/config.go`).
-- **`teardown` currently destroys the CP last**, with a detached `setsid` step
-  (`cpbuild.go:1423`) because it runs through the CP runner. Making teardown
-  CP-preserving removes that hack; CP-destroy moves to `uninstall`.
+  (`control-plane/secret-management/provisioner2.go:18-74`) — reuse for door
+  rotation. It **hardcodes `Address: before.Address`** (`:52`), so it cannot repoint
+  a target host — see "Deferred".
+- **CP-side secret re-seal exists**: `reseedCoLocatedRunner` (`cpbuild.go:819-862`)
+  re-seals runner secrets from the CP's `world-secrets`. `ensureCpSecrets` skips
+  present secrets (`rebuild.go:383-422`); `worldCert` has a durable-reuse gate
+  (`cpbuild.go:1053`); `manageDomainDNS` upserts via `m.UpsertA`
+  (`rebuild.go:548-549`).
+- **Thin-box `uninstall --remove-data` is refused** (`resolveUninstall`) until PR4's
+  transient path; the same applies to `teardown --data`/`--tenant` (AGENTS "Known gaps").
 - **`world_migrate` is CP schema migrations**, unrelated to data restore — do not
   conflate naming.
-- **Known gap**: thin-box `teardown --data`/`--tenant` refused (AGENTS "Known gaps").
+- Already landed (do not redo): one install surface + life-cycle gate + adopt (PR1);
+  teardown CP-preserving + `world teardown` alias + `uninstall` + the single
+  `confirmDestructive` gate (PR2).
 
 ## 4. Target command surface
 
@@ -118,11 +122,11 @@ is a pure alias** of the CP-preserving `teardown`.
 - **install (re-adopt):** relay/CP hosts, proxy IP, and mounts **resolve from the
   surviving CP state/plane**, so those flags become optional; only `--name` +
   `--host` remain required (the host cannot be read without host access). If the
-  CP guest is **live on the host** (`pct list` — works with or without a profile)
-  → fail with guidance (`build` to bring up the world, `teardown` to drop the
-  world, `uninstall` to drop the CP; a fresh box means `login`). Otherwise boot the CP
-  and `deploy-cp`, which **adopts the plane's existing runner** when present (never
-  overwriting `identity.json`), else mints.
+  CP guest is **live on the host** (the provider's guest list — works with or without
+  a profile) → fail with guidance (`build` to bring up the world, `teardown` to drop
+  the world, `uninstall` to drop the CP; a fresh box means `login`). Otherwise boot
+  the CP and `deploy-cp`, which **adopts the plane's existing runner** when present
+  (never overwriting `identity.json`), else mints.
 - **doors:** install authorizes the box's existing deterministic **DOOR_SPEC**
   operator door (not a new keypair) and ensures the **runner substrate** key is
   present.
@@ -152,9 +156,56 @@ is a pure alias** of the CP-preserving `teardown`.
 - **first access after uninstall:** out-of-band — Proxmox: PVE console/root SSH (or
   another still-authorized door); Vultr: the provider API.
 
-## 5. PR plan
+## 5. Provider boundary (architecture)
 
-### PR 1 — one install surface + fail-if-live + identity-preserving adopt (`0.6.9`)
+**Goal:** `platform/` is provider-independent; every substrate-specific command lives
+behind a `Provider`; `install`/`uninstall`/`build`/`teardown` orchestrate it.
+
+Module graph (a DAG — no cycles):
+
+```
+contract/     wire/trust leaf (crypto, wire, client, config, console, relay, state)
+   ↑          UNCHANGED; do not move it under platform/
+platform/     Provider interface + box engine + planebase (pure) + generic helpers
+   ↑          MUST NOT import providers/
+providers/    top-level module: concrete providers (compute + storage together)
+   ↑          imports platform + contract
+install/  control-plane/   composition roots: pick the provider from the access mode,
+                           inject it into the engine, call specific ops
+```
+
+- **The `Provider` interface lives in `platform/`** (`platform/provisioning`). It is a
+  provisioning-domain abstraction whose value types (`GuestSpec`, `Mount`, `planebase`
+  types) also live there. `contract/` is the wire/trust leaf and sits *below* platform
+  today (`platform → contract`); it is **not** the provider contract and stays put.
+- **A provider is substrate ops, not a lifecycle.** There is no `provider.Install()`.
+  Methods are low-level: host exec, guest exec, create/destroy/list guest, and storage
+  ops. `install`/`uninstall`/`build`/`teardown` decide the sequence.
+- **Compute + storage come together under one provider.** `platform/provisioning/drive`
+  (LVM/ZFS/`pvesm`) moves to `providers/proxmox/`, as do the provider-command helpers
+  (`deploy.LxcCmd` = `pct exec`, the pct stage scripts). The generic half of
+  `bootstrap/` (`Exec`, `ExpectOK`, `PlainPath`, `ParseMount`) stays in `platform`.
+- **Future shape (design for it, do not build it now).** A provider may later expose
+  sub-options behind one config — e.g. `providers/aws/provider.go` with ebs (storage) +
+  ecs/eks (compute). Keep the interface small and the provider constructor open to
+  options; don't add option machinery until a second option exists.
+- **Naming.** "provider" now means the **compute/storage substrate**. Qualify the two
+  existing senses so they don't collide: the **DNS provider** (cloudflare, `dnsman`)
+  and the **service/secret kind** (`provisioner.go:50`). Rename identifiers only where
+  it removes real ambiguity.
+- **No registry/init magic.** The composition root constructs the concrete provider and
+  injects it. This is what keeps `platform` free of provider imports.
+
+**Guardrails (must hold every step):**
+- Nothing under `platform/` imports `freehold/providers` (add a test/CI grep guard).
+- No provider-specific type or string (`pct`, `pvesm`, `zfs`, cloud API structs) in a
+  `platform` interface signature.
+- The extraction PR is **behavior-preserving**: same commands, same order, existing
+  tests pass unchanged apart from moved packages.
+
+## 6. PR plan
+
+### PR 1 — one install surface + fail-if-live + identity-preserving adopt (`0.6.9`, **merged**)
 
 - Fold `bootstrap` into `install --yes`; remove/alias the old command.
 - `install` requires `--name` + `--host` (+ the fresh-plane domains/proxy IP);
@@ -165,10 +216,10 @@ is a pure alias** of the CP-preserving `teardown`.
   - profile exists + CP absent + plane recorded → proceed; **re-adopt**.
   - no profile / empty plane → mint.
   PR1 can only probe a **known** CP (a profile's URL). The authoritative
-  **host-side** check — `pct list` for the `<name>-cp` guest
+  **host-side** check — the provider's guest list for the `<name>-cp` guest
   (`bootstrap.LXCName(name, domain, "cp")`), which also covers a **profile-less**
   box pointed at a live world (→ fail, it means `freehold login`) — needs the
-  transient `Access` seam and lands in **PR3**.
+  transient transport and lands in **PR4**.
 - **Identity-preserving adopt in `deploy-cp`** (must land with the gate — the gate
   must not enable re-adopt without it): if the plane already carries a runner
   package (`/srv/data/cp/control-plane/runner/<target>/identity.json` — the CP
@@ -187,7 +238,7 @@ is a pure alias** of the CP-preserving `teardown`.
 - **Tests:** gate matrix (mint/re-adopt/fail-live); re-adopt keeps the runner pubkey
   and does not overwrite `identity.json`; host persisted and read back.
 
-### PR 2 — teardown/uninstall split (`0.6.10`)
+### PR 2 — teardown/uninstall split (`0.6.10`, **merged**)
 
 - `teardown` → CP-preserving inverse of `build`: stop/remove the relay LXC/stack,
   k3s + workloads; **stop** the CP-side `freehold-agent-tools` process (its durable
@@ -201,66 +252,95 @@ is a pure alias** of the CP-preserving `teardown`.
   `--remove-data` is refused** until the data path is sequenced.
   - PR2 handles the **CP-alive** case by reusing the existing CP-driven teardown for
     the remote work (revoke the operator door via `world_revoke_door`, then destroy
-    the CP last); PR3 adds the **transient-access** path (dead CP / from a thin box)
-    via the `Access` seam.
+    the CP last); PR4 adds the **transient-access** path (dead CP / from a thin box)
+    via the provider's direct transport.
 - `uninstall --name` resolves `--host` from the profile config.
 - **Tests:** teardown leaves CP + runner + certs + Cloudflare, clears internal
   DNS/workloads/agent-tools; uninstall keep-data vs `--remove-data`; config/state
   wiped; invoking door + runner substrate key removed, other doors untouched;
   thin-box `--remove-data` refused.
 
-### PR 3 — transient access refactor + door rotation (`0.6.11`)
+### PR 3 — provider seam + extraction, **no behavior change** (`0.6.11`)
 
-- New `Access` seam in `platform/provisioning/bootstrap`: yields exec + provider
-  create/destroy. Refactor `BootstrapProxmoxLxc`/`Vultr`/`Hetzner` to take an exec
-  function instead of `McpClient`+target. Update callers in `box.Engine` and
-  `install`.
-- Implement `ssh-root-proxmox` (direct SSH root + `pct`); `api-vultr` next (stub
-  acceptable if scoped).
-- Install rotates the CP runner's substrate SSH door via the `Access` seam
-  (generate → authorize → `RotateSecret` → restart → remove old). **Same-host only**
-  (see Deferred for the target-repoint gap).
-- `install` authorizes the deterministic DOOR_SPEC operator door + ensures the
-  runner substrate door; after a successful handoff **remove the box's world-home
-  runner package** (decision 11 — the box is thin thereafter; box-side `exec`
-  rides the CP's `world_exec`).
-- `uninstall` gains the **transient-access** path (remove a CP that is already down,
-  or from a thin box) via the seam — the CP-alive path landed in PR2.
-- **Guard:** assert every runner secret is CP-recoverable OR re-mintable (SSH is the
-  only re-mintable one) — a test that fails if a runner-only secret appears.
-- **Tests:** door rotation preserves runner pubkey + grants; old key removed; drivers
-  work through the exec seam.
+The structural refactor: make `platform/` provider-independent by moving every
+substrate-specific command behind a `Provider` and into a top-level `providers/`
+module. **Structure only** — same commands, same order; the proxmox provider wraps
+today's `McpClient`+`pct` path so the diff is mechanical and reviewable.
 
-## 6. Docs
+- Stand up `providers/` (`freehold/providers`) with `providers/proxmox/`.
+- Define the `Provider` interface in `platform/provisioning`: host exec, guest exec,
+  create/destroy/list guest, storage ops. Generic/`planebase` types only — no `pct`,
+  no cloud structs.
+- Move `platform/provisioning/drive/` (LVM/ZFS/`pvesm`) and the provider-command
+  helpers (`deploy.LxcCmd`, pct stage scripts) into `providers/proxmox/`. Split the
+  generic half of `bootstrap/` (`Exec`, `ExpectOK`, `PlainPath`, `ParseMount`) from
+  the driver half (`ProxmoxLxcSpec`, `BootstrapProxmoxLxc`, the vultr/hetzner stubs).
+- Flip `box`, `install`, `cpbuild`, `teardown`, `handlers3` to take an **injected**
+  `Provider` instead of hardcoding `pct`/`drive`.
+- **Tests/guard:** existing tests pass with packages moved (no behavioral diff); add
+  the "platform does not import providers" guard.
+- **Acceptance:** `grep` finds no `pct`/provider strings under `platform/`; the
+  install/build/teardown pipelines behave identically.
+
+### PR 4 — transient access + door rotation (`0.6.12`)
+
+The behavior change the original plan called PR3, now riding a clean provider boundary.
+
+- Add the **direct `ssh-root-proxmox` transport** (an executor the proxmox provider
+  accepts) so install no longer needs a local served runner for bootstrap.
+- **Door rotation on every install, including re-adopt:** generate the substrate SSH
+  keypair → authorize via transient access → `RotateSecret` → restart → remove the old
+  key. This is what makes `uninstall` → `install` whole again (uninstall removes the
+  substrate key). **Same-host only** (see Deferred for target-repoint).
+- Install authorizes the deterministic DOOR_SPEC operator door; after handoff,
+  **remove the box's world-home runner package** (decision 11).
+- `uninstall` gains the **transient-access path** (dead CP / thin box), and the
+  **other-boxes-door warning** (decision 5).
+- Add the **host-side fail-if-live** check (the provider's guest list for
+  `<name>-cp`), closing the profile-less case.
+- **Guard:** every runner secret is CP-recoverable OR re-mintable (SSH is the only
+  re-mintable one) — a test that fails on a runner-only secret.
+- **Tests:** rotation preserves the runner pubkey + grants and runs on re-adopt; old
+  key removed; transient uninstall removes a dead CP; other boxes' doors untouched.
+
+### PR 5 — `vultr` provider (`0.6.13`)
+
+- `providers/vultr/` (provider API + SSH) implementing `Provider`; an `api-vultr`
+  access mode. Same orchestration, different provider. `hetzner` later.
+
+## 7. Docs
 
 - `AGENTS.md`: command model (`install`/`build`/`teardown`/`uninstall`), `--host`,
   gate semantics. Keep docs current-state only — the `--remove-data` future default
   flip is a comment at the flag definition, not doc narration.
-- `ARCHITECTURE.md`: access modes, transient access, CP runner identity + door
-  rotation, teardown/uninstall scopes.
-- `README.md`: update the CLI examples (replace `freehold-install bootstrap`).
+- `ARCHITECTURE.md`: the provider boundary (§5 here) — module graph, "platform is
+  provider-independent", the `Provider` interface home, what moved under `providers/`;
+  access modes, transient access, CP runner identity + door rotation,
+  teardown/uninstall scopes.
+- `README.md`: update the CLI examples (replace `freehold-install bootstrap`; note the
+  provider/access-mode model).
 - `CHANGELOG.md`: one entry per PR; `roadmap/ROADMAP.md`/`POC.md` where relevant.
 
-## 7. Deferred / out of scope
+## 8. Deferred / out of scope
 
 - **`install --restore`** (whole-plane restore → re-adopt + door rotation). The
   identity model guarantees grants survive by construction: the runner Nostr/enc
   identity is restored with the plane, so grants/roster stay intact. **Open piece:**
   `RotateSecret` hardcodes the target `Address` (`provisioner2.go:52`), so a restore
-  to a **new host** needs a **target-repoint** step on top of door rotation — PR 3's
+  to a **new host** needs a **target-repoint** step on top of door rotation — PR 4's
   rotation is **same-host only**. Do not implement now, but don't preclude it.
 - **Provider breadth** beyond `ssh-root-proxmox` (Vultr/Hetzner API) — build the
   seam, implement Proxmox first.
 - **`--remove-data` becomes the default** — later; comment at the flag, not docs.
 
-## 8. Risks
+## 9. Risks
 
 - **Secret provenance**: the substrate SSH credential is the only runner secret with
   no CP-side source; it is re-minted by design. Any *new* runner-only secret would
   be lost on re-adopt — the guard test covers this.
 - **Fail-if-live detection** must be reliable (CP LXC present or console answer);
   a false negative would re-bootstrap over a live CP. PR1 covers the console
-  answer when a profile exists; PR3 adds the host-side `pct list` check, which
+  answer when a profile exists; PR4 adds the host-side guest-list check, which
   also closes the profile-less case.
 - **Host resolution after a wipe**: by design — install takes `--host`; host access
   is the one thing that cannot be resolved from the plane.
