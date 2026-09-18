@@ -452,20 +452,19 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			}
 			return activityStartMsg{kind: "deploy", title: "deploying the control plane", args: args}
 		case flowTeardown:
-			// The whole-world teardown destroys LXCs (+ datasets with yes);
-			// with --data it wipes door key + local home + config. The
-			// SECOND step is the world-destroy confirm: anything but an
-			// explicit "yes" aborts — t+Enter must not tear down the world
-			// by accident (the CLI's own --yes silent path is not
-			// reachable).
+			// Whole-world: `teardown` is CP-preserving; wanting the durable
+			// plane gone too is `uninstall --remove-data` (the CP + this box's
+			// doors + local state go with it). The SECOND step is the
+			// destroy confirm: anything but an explicit "yes" aborts — t+Enter
+			// must not tear down the world by accident (the CLI's own --yes
+			// silent path is not reachable).
 			if !strings.EqualFold(strings.TrimSpace(f.Inputs[1]), "yes") {
 				return flowMsg{err: fmt.Errorf("teardown cancelled: type yes to confirm destroying the whole world")}
 			}
-			args := []string{"teardown", "--yes"}
 			if strings.EqualFold(f.Inputs[0], "yes") {
-				args = append(args, "--data")
+				return activityStartMsg{kind: "uninstall", title: "uninstalling (removing the CP + plane)", args: []string{"uninstall", "--remove-data", "--yes"}}
 			}
-			return activityStartMsg{kind: "teardown", title: "tearing down the world", args: args}
+			return activityStartMsg{kind: "teardown", title: "tearing down the world (CP preserved)", args: []string{"teardown", "--yes"}}
 		case flowRebuild:
 			args, err := rebuildArgs(f)
 			if err != nil {
