@@ -394,8 +394,8 @@ async function main() {
   // re-flag/fixed/resolve logic below reuses the same list.
   const bot = await getBotLogin();
   const existingComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number, per_page: 100 });
-  const reviewReplies = buildReviewReplies(existingComments, bot);
-  const threadIndex = buildThreadIndex(existingComments, bot);
+  const reviewReplies = buildReviewReplies(existingComments, { bot, author: pr.user.login });
+  const threadIndex = buildThreadIndex(existingComments, { bot, author: pr.user.login });
 
   // Create the progress comment up front so the checkboxes light up as work
   // happens, rather than appearing fully-formed at the end.
@@ -479,13 +479,18 @@ async function main() {
   // findings (already commented in a prior round). GitHub rewrites a prior
   // comment's `commit_id` to the current head when its line persists, so
   // matching on `commit_id === headSha` reliably detects prior-round re-flags.
+  // Key on both `line` and `original_line` (like buildThreadIndex) so a finding
+  // whose line shifted is still recognised as a re-flag, not posted anew.
   // Thread roots only — replies share path:line and would confuse the match.
   const roots = existingComments.filter(c => !c.in_reply_to_id);
-  const seen = new Set(roots.filter(c => c.commit_id === headSha).map(c => `${c.path}:${c.line}`));
+  const locKeys = (c) => [c.line, c.original_line]
+    .filter(line => typeof line === 'number')
+    .map(line => `${c.path}:${line}`);
+  const seen = new Set(roots.filter(c => c.commit_id === headSha).flatMap(locKeys));
   const priorSeverity = new Map();
   for (const c of roots) {
     const m = c.body?.match(/\[(blocking|important)\]/) || [];
-    if (m[1]) priorSeverity.set(`${c.path}:${c.line}`, m[1]);
+    if (m[1]) for (const k of locKeys(c)) priorSeverity.set(k, m[1]);
   }
   const newInline = [];
   const reflagged = [];
@@ -495,13 +500,15 @@ async function main() {
   }
 
   // Prior blocking/important comments whose finding is no longer flagged this
-  // round are treated as fixed — resolve their threads (GraphQL-only). This is
-  // what resolves a thread when the author's reply clarified the finding away
-  // and the model dropped it.
+  // round are treated as fixed — resolve their threads (GraphQL-only). Only the
+  // bot's own threads are resolved (never a human reviewer's), and this is what
+  // resolves a thread when the author's reply clarified the finding away and
+  // the model dropped it.
   const currentFindings = new Set(inline.map(c => `${c.path}:${c.line}`));
   const fixedComments = roots.filter(c =>
+    bot && c.user?.login === bot &&
     /\[(blocking|important)\]/.test(c.body || '') &&
-    !currentFindings.has(`${c.path}:${c.line}`)
+    !locKeys(c).some(k => currentFindings.has(k))
   );
   const resolvedCount = await resolveFixedThreads(fixedComments);
 

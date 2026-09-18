@@ -1,4 +1,4 @@
-// Pure helpers for reading the author's replies to the bot's prior inline
+// Pure helpers for reading the PR author's replies to the bot's prior inline
 // review comments and mapping a finding back to its thread root.
 
 export function truncate(s, n) {
@@ -8,14 +8,14 @@ export function truncate(s, n) {
 
 const MAX_REPLY_CHARS = 2000;
 
-// Author replies to the bot's prior inline findings (review comments with
-// `in_reply_to_id` set), rendered for the prompt. A dropped finding's thread is
-// then resolved by the caller (fixedComments).
-export function buildReviewReplies(comments, bot) {
+// The PR author's replies to the bot's prior inline findings (review comments
+// with `in_reply_to_id` set), rendered for the prompt. A dropped finding's
+// thread is then resolved by the caller (fixedComments).
+export function buildReviewReplies(comments, { bot, author } = {}) {
   const repliesByRoot = new Map();
   for (const c of comments) {
     if (!c.in_reply_to_id) continue;
-    if (bot && c.user?.login === bot) continue; // the bot's own replies
+    if (!author || c.user?.login !== author) continue; // only the PR author
     if (!repliesByRoot.has(c.in_reply_to_id)) repliesByRoot.set(c.in_reply_to_id, []);
     repliesByRoot.get(c.in_reply_to_id).push(c);
   }
@@ -35,9 +35,10 @@ export function buildReviewReplies(comments, bot) {
 }
 
 // Map a finding's path:line back to the bot's open thread root, plus whether
-// that thread has a non-bot reply. A re-flagged finding with a reply is posted
-// in-thread (createReplyForReviewComment) instead of as a new comment.
-export function buildThreadIndex(comments, bot) {
+// that thread has a reply from the PR author. A re-flagged finding with an
+// author reply is posted in-thread (createReplyForReviewComment) instead of as
+// a new comment.
+export function buildThreadIndex(comments, { bot, author } = {}) {
   const index = new Map(); // 'path:line' -> { rootId, hasAuthorReply }
   const keysByRoot = new Map();
   for (const c of comments) {
@@ -54,7 +55,7 @@ export function buildThreadIndex(comments, bot) {
   }
   for (const c of comments) {
     if (!c.in_reply_to_id) continue;
-    if (bot && c.user?.login === bot) continue;
+    if (!author || c.user?.login !== author) continue; // only the PR author
     const keys = keysByRoot.get(c.in_reply_to_id);
     if (!keys) continue;
     for (const k of keys) {
