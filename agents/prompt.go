@@ -32,7 +32,7 @@ var cpaPrompt string
 
 // orientationTmplSrc is the shared system-orientation block (repo knowledge,
 // read-on-boot + periodic re-check, the be-loud escalation discipline) prepended
-// to every non-custom prompt: the CPA and the five departments. Custom agents
+// to every non-custom prompt: the CPA and the four departments. Custom agents
 // (agents the CPA creates on the fly) do NOT get it.
 //
 //go:embed common/orientation.md
@@ -74,35 +74,32 @@ func CPASystemPrompt(repoURL string) string {
 	return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(cpaPrompt, "\n")
 }
 
-// Department prompts: the five departments the CPA delegates to (see AGENTS.md
+// Department prompts: the four departments the CPA delegates to (see AGENTS.md
 // "Locked model"). Each is an agent definition like freehold/ and custom/,
 // embedded from <department>/prompt.md. Deployment is lazy/on-demand, so a
-// prompt can exist before any department pod does.
+// prompt can exist before any department pod does. Service lifecycle is not a
+// department: whichever agent created a service owns it, ad hoc and unvetted.
 //
-//go:embed gatekeeper/prompt.md
-var gatekeeperPrompt string
+//go:embed security/prompt.md
+var securityPrompt string
 
 //go:embed vault/prompt.md
 var vaultPrompt string
 
-//go:embed provisioner/prompt.md
-var provisionerPrompt string
+//go:embed compute/prompt.md
+var computePrompt string
 
 //go:embed agent-ops/prompt.md
 var agentOpsPrompt string
-
-//go:embed services/prompt.md
-var servicesPrompt string
 
 // departmentPrompts maps a reserved department identity name to its embedded
 // system prompt. The names are reserved: a create_agent naming one of them
 // selects that department's prompt rather than the custom template.
 var departmentPrompts = map[string]string{
-	"gatekeeper":  gatekeeperPrompt,
-	"vault":       vaultPrompt,
-	"provisioner": provisionerPrompt,
-	"agent-ops":   agentOpsPrompt,
-	"services":    servicesPrompt,
+	"security":  securityPrompt,
+	"vault":     vaultPrompt,
+	"compute":   computePrompt,
+	"agent-ops": agentOpsPrompt,
 }
 
 // DepartmentNames returns the reserved department identity names, sorted.
@@ -126,11 +123,10 @@ func DepartmentPrompt(name string) (string, bool) {
 // registry row (and threaded through reconcile). The prompt is the department's
 // real definition; this is metadata for the agent inventory.
 var departmentPurposes = map[string]string{
-	"gatekeeper":  "access and security — external/internal exposure, DNS, and continuous verification",
-	"vault":       "the data plane — backup, DR, and restore verification",
-	"provisioner": "compute — LXC/kube and remote provisioning",
-	"agent-ops":   "models, providers, and the agents themselves",
-	"services":    "installed OSS services — aggregate registry and monitoring",
+	"security":  "access and exposure — external/internal exposure, DNS, and continuous verification",
+	"vault":     "the data plane — backup, DR, and restore verification",
+	"compute":   "the box itself — CPU/RAM/disk, LXC/kube and remote provisioning, and its monitoring",
+	"agent-ops": "models, providers, AI hardware, and the agents themselves",
 }
 
 // DepartmentPurpose returns the one-line purpose for a reserved department name.

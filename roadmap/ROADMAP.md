@@ -33,17 +33,19 @@ runners, and memory are scoped to a single relay.
     deterministic runner/CP layer underneath (provisioning, grants, secrets, teardown/  
     rebuild) stays as-is — reasoning decides what to do, the same auditable machinery does it.
     
-*   **The agent org is two tiers: the CPA and five departments.** The CPA is the sole user  
-    touchpoint; **Gatekeeper** (access/security), **Vault** (data plane), **Provisioner**  
-    (compute), **Agent Ops** (models/providers/agents), and **Services** (installed OSS) are  
+*   **The agent org is two tiers: the CPA and four departments.** The CPA is the sole user  
+    touchpoint; **Security** (access/exposure), **Vault** (data plane), **Compute** (the box  
+    itself — CPU/RAM/disk, LXC/kube and remote provisioning, plus its monitoring tooling),  
+    and **Agent Ops** (models/providers/agents, plus AI hardware) are  
     its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —  
     the operator and any agent may converse with any department directly; what is bounded is  
     capability execution: a department-owned capability (proxy, backup, compute, model  
-    registration) is executed by that department's identity, and its raw grant attaches  
-    there, never to a custom agent that would self-serve a second, ungoverned path.  
-    The five are installed as part of the core build — each in `#freehold` plus its own  
-    private `#<department>` channel, with the CPA a member of all; only the identity/grant  
-    separation is locked (capability tooling arrives per department later).
+    registration, AI hardware) is executed by that department's identity, and its raw grant  
+    attaches there, never to a custom agent that would self-serve a second, ungoverned path.  
+    Service lifecycle is not a department — whichever agent created a service owns it, ad hoc  
+    and unvetted. The four are installed as part of the core build — each in `#freehold` plus  
+    its own private `#<department>` channel, with the CPA a member of all; only the  
+    identity/grant separation is locked (capability tooling arrives per department later).
     
 *   **Runner identity = Nostr membership + separate encryption keypair (env-injected).**  
     CP is a **secret PROVISIONER** (encrypt-to-runner-key + ship + rotate + membership), not a  

@@ -69,7 +69,7 @@ func TestAgentSystemPromptOmitsEmptyPurpose(t *testing.T) {
 }
 
 func TestDepartmentPromptsEmbeddedWithBoundary(t *testing.T) {
-	want := []string{"agent-ops", "gatekeeper", "provisioner", "services", "vault"}
+	want := []string{"agent-ops", "compute", "security", "vault"}
 	got := DepartmentNames()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("DepartmentNames = %v, want %v", got, want)
@@ -117,10 +117,10 @@ func TestDepartmentPurposeAndChannelsCoverEveryDepartment(t *testing.T) {
 }
 
 func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
-	got := SystemPrompt("gatekeeper", "look after the garden", "")
-	dept, _ := DepartmentPrompt("gatekeeper")
+	got := SystemPrompt("security", "look after the garden", "")
+	dept, _ := DepartmentPrompt("security")
 	if !strings.Contains(got, strings.TrimRight(dept, "\n")) {
-		t.Errorf("SystemPrompt(gatekeeper) must select the department prompt")
+		t.Errorf("SystemPrompt(security) must select the department prompt")
 	}
 	if strings.Contains(got, "look after the garden") {
 		t.Errorf("a department prompt must not embed the create-time purpose")

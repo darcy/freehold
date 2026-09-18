@@ -1064,8 +1064,10 @@ func (e *buildEngine) stageCpa() error {
 	return e.recordCpa(cpaPub, cpaName)
 }
 
-// stageDepartments installs the five fixed departments as part of the core
-// build — the CPA's direct reports (see AGENTS.md "Locked model"). Each is
+// stageDepartments installs the four fixed departments as part of the core
+// build — the CPA's direct reports (see AGENTS.md "Locked model"). Service
+// lifecycle is not a department: whichever agent created a service owns it.
+// Each is
 // created through the SAME audited create_agent the CPA itself uses, with its
 // reserved prompt (selected by name in the server) and its channels: the shared
 // #freehold channel plus its own PRIVATE #<department> channel, with the CPA
