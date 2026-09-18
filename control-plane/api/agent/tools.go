@@ -147,12 +147,10 @@ func (t *Tools) CreateAgent(name, purpose string, channels []string, private boo
 	if err != nil {
 		return "", fmt.Errorf("create-agent deploy %s: %w", name, err)
 	}
-	// The registry row carries only the primary channel. Reconcile re-derives a
-	// reserved department's full channel list (agents.DepartmentChannels) but
-	// rejoins only this one for any other agent, so a multi-channel CUSTOM agent
-	// would lose its extra channels across a rebuild — departments are the only
-	// multi-channel caller today; persisting a custom agent's full list is a
-	// named follow-up. The agent's own presence channel is its name (kind-9).
+	// RegisterAgent records only the primary channel (the ConsoleOps contract);
+	// the full channel list + private flag are persisted separately as
+	// Registry.SetChannels by the create_agent dispatch, so reconcile rejoins
+	// every channel. The agent's own presence channel is its name (kind-9).
 	if _, err := t.Console.RegisterAgent(name, pubkey, primaryChannel(channels)); err != nil {
 		return "", fmt.Errorf("create-agent register: %w", err)
 	}

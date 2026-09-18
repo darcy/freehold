@@ -756,12 +756,17 @@ func (e *buildEngine) reconcileCreatedAgents() error {
 			continue
 		}
 		// A reserved department name re-derives its fixed channels (#freehold +
-		// its private #<name>) rather than trusting the single registry channel;
-		// any other agent rejoins its recorded channel.
+		// its private #<name>); any other agent rejoins the full list the registry
+		// preserved (falling back to the single recorded channel for rows written
+		// before Channels was persisted).
 		channels := agents.DepartmentChannels(a.Name)
 		private := channels != nil
-		if !private && strings.TrimSpace(a.Channel) != "" {
-			channels = []string{a.Channel}
+		if !private {
+			channels = a.Channels
+			private = a.Private
+			if len(channels) == 0 && strings.TrimSpace(a.Channel) != "" {
+				channels = []string{a.Channel}
+			}
 		}
 		// create_agent is idempotent (the CP-durable identity is reused), so
 		// re-creating reseats the pod with the same pubkey across a rebuild.

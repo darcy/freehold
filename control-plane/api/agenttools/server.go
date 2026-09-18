@@ -260,12 +260,14 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			channels = append([]string{a.Channel}, channels...)
 		}
 		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose, channels, a.Private)
-		// Persist the purpose on the created agent's registry row so a rebuild
-		// reconciler can recreate its system prompt verbatim (E3 without
-		// silently dropping the agent's reason to exist).
+		// Persist the purpose + the full channel list/private flag on the created
+		// agent's registry row so a rebuild reconciler recreates its system prompt
+		// verbatim and rejoins every channel (not just the primary) with the
+		// right visibility. Registry-only (the console client has no such row).
 		if err == nil {
 			if reg, ok := s.Tools.Console.(*Registry); ok {
 				_ = reg.SetPurpose(a.Name, a.Purpose)
+				_ = reg.SetChannels(a.Name, channels, a.Private)
 			}
 		}
 		s.textResult(w, id, err, pub)
