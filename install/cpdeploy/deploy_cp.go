@@ -119,6 +119,28 @@ func readGuestFile(clientConn *client.McpClient, target string, spec *DeployCpSp
 	return []byte(out.Stdout)
 }
 
+// runnerShipPlan is the adopt-vs-mint ship decision: which box-package files
+// go into the co-located runner dir, and whether the box's secrets.json merges.
+// On ADOPT the plane already holds the runner identity AND secrets sealed to
+// its own encryption key — skip identity.json and the merge (the box's
+// ciphertext would be unopenable). On MINT the box is the identity source.
+func runnerShipPlan(adopt bool) (files []string, mergeSecrets bool) {
+	if adopt {
+		return []string{"known_hosts.json"}, false
+	}
+	return []string{"identity.json", "known_hosts.json"}, true
+}
+
+// guestHasRunnerIdentity reports whether the plane already carries the
+// co-located runner's identity (the re-adopt signal, checked through the box
+// runner before anything is shipped). A present identity is the durable
+// grant/roster anchor and must never be overwritten by the box's.
+func guestHasRunnerIdentity(clientConn *client.McpClient, target string, spec *DeployCpSpec, runnerDir string) bool {
+	out, err := bootstrap.ExecToOK(clientConn, target,
+		deploy.LxcCmd(spec.LXc, "test -f "+runnerDir+"/identity.json && echo yes"), "probe runner identity", 30)
+	return err == nil && strings.TrimSpace(out.Stdout) == "yes"
+}
+
 // shipMergedRunnerSecrets ships the box package's secrets.json into the CP
 // runner package, preserving secret NAMES already present on the CP that the
 // box package doesn't carry (the build-added litellm trio); the box wins on a
@@ -349,7 +371,19 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 			spec.BinDir+"/freehold-runner", "runner binary"); err != nil {
 			return nil, err
 		}
-		for _, f := range []string{"identity.json", "known_hosts.json"} {
+		// ADOPT, never overwrite: when the plane already carries the runner
+		// package, THAT identity is the durable one (grants + relay roster bind
+		// to it). Ship only the binary + trusted hosts; never the box's
+		// identity.json, and never merge the box's secrets.json — its
+		// ciphertext is sealed to the BOX runner's encryption key and would be
+		// unopenable by the plane runner. The plane's own sealed substrate
+		// credential (still on the host door) keeps serving.
+		adoptedFromPlane := guestHasRunnerIdentity(clientConn, target, spec, runnerDir)
+		if adoptedFromPlane {
+			fmt.Fprintf(os.Stderr, "  co-located runner identity adopted from the plane (%s/identity.json) — box identity + secrets NOT shipped\n", runnerDir)
+		}
+		shipFiles, mergeSecrets := runnerShipPlan(adoptedFromPlane)
+		for _, f := range shipFiles {
 			lp := *spec.RunnerPackage + "/" + f
 			if _, err := os.Stat(lp); err == nil {
 				if err := shipSmallFile(clientConn, target, spec, lp, runnerDir+"/"+f, "runner "+f); err != nil {
@@ -366,9 +400,11 @@ func DeployCp(clientConn *client.McpClient, target string, spec *DeployCpSpec) (
 		// then dies "requested secret \"litellm\" is not in this runner's
 		// package". Keep CP-only names; the box wins on overlap (a refreshed SSH
 		// credential).
-		if lp := *spec.RunnerPackage + "/secrets.json"; fileExists(lp) {
-			if err := shipMergedRunnerSecrets(clientConn, target, spec, lp, runnerDir+"/secrets.json"); err != nil {
-				return nil, err
+		if mergeSecrets {
+			if lp := *spec.RunnerPackage + "/secrets.json"; fileExists(lp) {
+				if err := shipMergedRunnerSecrets(clientConn, target, spec, lp, runnerDir+"/secrets.json"); err != nil {
+					return nil, err
+				}
 			}
 		}
 		startRunner := fmt.Sprintf(

@@ -670,7 +670,10 @@ func (m *Model) View() string {
 	}
 	if m.Mode == ModeBootstrap {
 		b.WriteString(styleYellow.Render("no tenant profile — world not started") + "\n\n")
-		b.WriteString("run " + styleYellow.Render("freehold login") + " to add a tenant profile, then " + styleYellow.Render("freehold build") + " to bring the world up\n")
+		b.WriteString("box one:  " + styleYellow.Render("freehold-install install") + " " +
+			styleDim.Render("(guided; needs --name + --host)") + " — bring up the control plane, then\n")
+		b.WriteString("any box:  " + styleYellow.Render("freehold login") + " to add a tenant profile, then " +
+			styleYellow.Render("freehold build") + " to bring the world up\n")
 	} else if m.Mode == ModeConfigure {
 		b.WriteString(styleYellow.Render("config present, world NOT converged") + "\n")
 		b.WriteString(renderProbes(m) + "\n\n")

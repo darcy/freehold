@@ -251,12 +251,16 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **`platform/provisioning/box` is the shared provisioning engine.**
     `install`'s wizard → `box.Flags` → `box.NewEngine` → `box.RunBootstrap`
     (CP bootstrap); `freehold build` runs the world through the CP:
-    door → runner → durable plane → boot the CP LXC → **`bootstrap`** (box one)
+    door → runner → durable plane → boot the CP LXC → **`install`** (box one)
     = the CP only (console + co-located runner) — no secrets are collected.
-    `freehold-install install|bootstrap` requires **`--name`**: it creates (or
-    refuses an existing) profile `profiles/<name>/` and scopes the config +
-    state there instead of the base home, and names the guest LXCs
-    `<name>-<relay|cp|k3s>`. A world with no recorded name (installed before
+    `freehold-install install` requires **`--name` + `--host`**: it scopes the
+    config + state to `profiles/<name>/` instead of the base home, records the
+    host + access mode in that profile, and names the guest LXCs
+    `<name>-<relay|cp|k3s>`. A life-cycle gate **mints** when no profile exists,
+    **re-adopts** an existing profile whose CP is absent (the durable plane keeps
+    the runner identity; deploy-cp never overwrites it), and **refuses a live
+    CP** (`build`/`teardown`/`uninstall`/`login`); `bootstrap` is a hidden alias
+    for `install --yes`. A world with no recorded name (installed before
     names) keeps the domain-derived `<domain-dashed>-<role>` names, so it still
     reconciles; durable-plane names stay domain-keyed either way.
     **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS
@@ -311,7 +315,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `control-plane/cli/login` persists the nsec 0600 under the profile's operator
     dir and seeds that profile's connection/desire config from the CP's
     `/api/world` summary, so every launch auto-logs in and a fresh box recovers
-    with nothing from a lost one. The TUI and `build`/`bootstrap`/`teardown`/
+    with nothing from a lost one. The TUI and `build`/`install`/`teardown`/
     `world` pick which profile (tenant) to operate via an interactive picker
     (`freehold profiles` lists them), and fail closed with "run `freehold login`
     first" when none are registered. There is no implicit "default" profile or

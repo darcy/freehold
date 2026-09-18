@@ -1,6 +1,26 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
+
+// TestHostAccessModeRoundTrip: the install host + access mode persist through
+// the TOML profile config, so `uninstall --name` can resolve the host.
+func TestHostAccessModeRoundTrip(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	c := &Config{Host: "root@192.168.30.224", AccessMode: "ssh-root-proxmox"}
+	if err := c.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil || got == nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Host != c.Host || got.AccessMode != c.AccessMode {
+		t.Fatalf("round-trip lost host/access_mode: %q %q", got.Host, got.AccessMode)
+	}
+}
 
 // TestStripCIDR covers the recorded-ip CIDR strip (the config records ips
 // as "1.2.3.4/24"; every URL built from them must drop the prefix).

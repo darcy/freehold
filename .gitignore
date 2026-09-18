@@ -2,6 +2,7 @@
 control-plane/target/
 contract/target/
 platform/target/
+install/target/
 # a local `go build -o ../target/...` mishap can drop a binary directly under a
 # module dir — never commit it
 control-plane/freehold-agent-tools

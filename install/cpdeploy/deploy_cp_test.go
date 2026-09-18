@@ -7,6 +7,31 @@ import (
 	"freehold/contract/wire"
 )
 
+// TestRunnerShipPlanAdoptKeepsIdentity guards the PR1 adopt invariant: on a
+// re-adopt the box must NOT ship identity.json and must NOT merge its
+// (differently sealed) secrets.json; on a mint it ships the identity and merges.
+func TestRunnerShipPlanAdoptKeepsIdentity(t *testing.T) {
+	files, merge := runnerShipPlan(true)
+	for _, f := range files {
+		if f == "identity.json" {
+			t.Fatal("adopt must never ship identity.json over the plane's")
+		}
+	}
+	if merge {
+		t.Fatal("adopt must not merge the box's differently-sealed secrets.json")
+	}
+	files, merge = runnerShipPlan(false)
+	hasIdentity := false
+	for _, f := range files {
+		if f == "identity.json" {
+			hasIdentity = true
+		}
+	}
+	if !hasIdentity || !merge {
+		t.Fatalf("mint must ship the identity and merge secrets (files=%v merge=%v)", files, merge)
+	}
+}
+
 // TestMergeRunnerSecrets verifies the re-ship merge keeps the CP-only secrets
 // the build added (litellm trio) and the console's grants, while letting the
 // box package's own target + its per-target `secret` link win.
