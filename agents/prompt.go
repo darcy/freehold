@@ -122,6 +122,34 @@ func DepartmentPrompt(name string) (string, bool) {
 	return p, ok
 }
 
+// departmentPurposes is the one-line purpose recorded on each department's
+// registry row (and threaded through reconcile). The prompt is the department's
+// real definition; this is metadata for the agent inventory.
+var departmentPurposes = map[string]string{
+	"gatekeeper":  "access and security — external/internal exposure, DNS, and continuous verification",
+	"vault":       "the data plane — backup, DR, and restore verification",
+	"provisioner": "compute — LXC/kube and remote provisioning",
+	"agent-ops":   "models, providers, and the agents themselves",
+	"services":    "installed OSS services — aggregate registry and monitoring",
+}
+
+// DepartmentPurpose returns the one-line purpose for a reserved department name.
+func DepartmentPurpose(name string) (string, bool) {
+	p, ok := departmentPurposes[name]
+	return p, ok
+}
+
+// DepartmentChannels returns the channels a department identity joins: the
+// shared freehold channel plus its own per-department channel. Nil for a
+// non-department name. create_agent resolves each by name (creating it, owned by
+// the department, when absent) and adds the CPA to every channel.
+func DepartmentChannels(name string) []string {
+	if _, ok := departmentPrompts[name]; !ok {
+		return nil
+	}
+	return []string{"#freehold", "#" + name}
+}
+
 // SystemPrompt returns the system prompt to ship for a create: a reserved
 // department name selects that department's embedded prompt, prefixed with the
 // shared system orientation; any other name renders the custom template with the

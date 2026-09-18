@@ -41,7 +41,9 @@ runners, and memory are scoped to a single relay.
     capability execution: a department-owned capability (proxy, backup, compute, model  
     registration) is executed by that department's identity, and its raw grant attaches  
     there, never to a custom agent that would self-serve a second, ungoverned path.  
-    Deployment is lazy/on-demand; only the identity/grant separation is locked.
+    The five are installed as part of the core build — each in `#freehold` plus its own  
+    private `#<department>` channel, with the CPA a member of all; only the identity/grant  
+    separation is locked (capability tooling arrives per department later).
     
 *   **Runner identity = Nostr membership + separate encryption keypair (env-injected).**  
     CP is a **secret PROVISIONER** (encrypt-to-runner-key + ship + rotate + membership), not a  

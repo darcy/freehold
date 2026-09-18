@@ -88,6 +88,23 @@ func (r *Registry) SetPurpose(name, purpose string) error {
 	return r.save()
 }
 
+// SetChannels records the full channel list + private flag on an agent's
+// registry row, so a rebuild rejoins every channel (not just the primary) and
+// recreates the agent's own channel private. Returns an error when the row is
+// absent (register before setting).
+func (r *Registry) SetChannels(name string, channels []string, private bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	row, ok := r.rows[name]
+	if !ok {
+		return fmt.Errorf("register %s before setting its channels", name)
+	}
+	row.Channels = append([]string(nil), channels...)
+	row.Private = private
+	r.rows[name] = row
+	return r.save()
+}
+
 // UnregisterAgent drops a registry row.
 func (r *Registry) UnregisterAgent(name string) (json.RawMessage, error) {
 	r.mu.Lock()

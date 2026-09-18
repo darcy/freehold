@@ -64,6 +64,16 @@ type AgentInfo struct {
 	// default freehold channel), preserved by freehold-agent-tools' local
 	// registry so a rebuild reconciler rejoins the same channel.
 	Channel string `json:"channel,omitempty"`
+	// Channels is the FULL channel list the agent was created into (a
+	// multi-channel create, e.g. a department's #freehold + its own private
+	// #<name>), preserved by the local registry so a rebuild rejoins every
+	// channel, not just the primary. Empty for rows written before this carried
+	// it (reconcile then falls back to Channel). The console API does not carry
+	// it.
+	Channels []string `json:"channels,omitempty"`
+	// Private records that the agent's own channel(s) were created
+	// visibility=private, so a rebuild recreates them private rather than open.
+	Private bool `json:"private,omitempty"`
 }
 
 // ProvisionReq mirrors the console client ProvisionReq.

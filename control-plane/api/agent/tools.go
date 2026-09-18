@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"freehold/contract/console"
 	"freehold/platform/migrations"
@@ -21,10 +22,12 @@ type ConsoleOps interface {
 }
 
 // CreateAgentFn deploys a named agent's sprig pod + mints its identity and
-// returns the new agent's pubkey. `channel` is the channel NAME to add it to
-// (empty = the default freehold channel). Supplied by the caller (the harness
-// runtime wired to the runner); the tool invokes it and records the registry row.
-type CreateAgentFn func(name, purpose, channel string) (pubkey string, err error)
+// returns the new agent's pubkey. `channels` are the channel NAMES to add it to
+// (empty = the default freehold channel); the CPA is added to each. An explicit
+// channel created with private set gets visibility=private. Supplied by the
+// caller (the harness runtime wired to the runner); the tool invokes it and
+// records the registry row.
+type CreateAgentFn func(name, purpose string, channels []string, private bool) (pubkey string, err error)
 
 // Tools is the CPA's dedicated agent-management toolset (A4): create-agent,
 // grant-agent, manage-agent. These are what the CPA's reasoning calls (via its
@@ -133,23 +136,36 @@ func (t *Tools) WorldBuild() (string, error) {
 
 // CreateAgent stands up a new named agent: deploys its sprig pod via Create,
 // then registers the registry row with the minted pubkey. Returns the pubkey.
-func (t *Tools) CreateAgent(name, purpose, channel string) (string, error) {
+func (t *Tools) CreateAgent(name, purpose string, channels []string, private bool) (string, error) {
 	if t.Console == nil {
 		return "", fmt.Errorf("create-agent: no console client bound")
 	}
 	if t.Create == nil {
 		return "", fmt.Errorf("create-agent: no deploy path bound")
 	}
-	pubkey, err := t.Create(name, purpose, channel)
+	pubkey, err := t.Create(name, purpose, channels, private)
 	if err != nil {
 		return "", fmt.Errorf("create-agent deploy %s: %w", name, err)
 	}
-	// The registry row carries the target channel (reconcile rejoins it); the
-	// agent's own presence channel is its name (kind-9 mention channel).
-	if _, err := t.Console.RegisterAgent(name, pubkey, channel); err != nil {
+	// RegisterAgent records only the primary channel (the ConsoleOps contract);
+	// the full channel list + private flag are persisted separately as
+	// Registry.SetChannels by the create_agent dispatch, so reconcile rejoins
+	// every channel. The agent's own presence channel is its name (kind-9).
+	if _, err := t.Console.RegisterAgent(name, pubkey, primaryChannel(channels)); err != nil {
 		return "", fmt.Errorf("create-agent register: %w", err)
 	}
 	return pubkey, nil
+}
+
+// primaryChannel returns the first non-empty channel name, or "" (the default
+// freehold channel) when the list is empty.
+func primaryChannel(channels []string) string {
+	for _, c := range channels {
+		if strings.TrimSpace(c) != "" {
+			return c
+		}
+	}
+	return ""
 }
 
 // GrantAgent binds agent pubkeys to a runner's whitelist (agent ↔ runner grant,
