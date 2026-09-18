@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"freehold/platform/provisioning/bootstrap"
 	"freehold/contract/client"
+	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/planebase"
 )
 

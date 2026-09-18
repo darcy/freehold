@@ -9,18 +9,8 @@ import (
 	"fmt"
 	"strings"
 
-	"freehold/contract/client"
 	"freehold/platform/provisioning/bootstrap"
 )
-
-// LxcCmd wraps a target command for execution inside an LXC via the host
-// runner (single-quote-free payload).
-func LxcCmd(lxc *uint32, cmd string) string {
-	if lxc != nil {
-		return fmt.Sprintf("pct exec %d -- sh -c '%s'", *lxc, cmd)
-	}
-	return cmd
-}
 
 // SafeDeployDir validates a deploy dir: absolute, no '..', >= 2 components.
 func SafeDeployDir(s string) error {
@@ -45,12 +35,4 @@ func SafeDeployDir(s string) error {
 		return fmt.Errorf("deploy dir must be at least two components deep (got %q)", s)
 	}
 	return nil
-}
-
-// CheckDocker passes the B1 gate: docker + compose must exist on the target
-// (or inside its LXC).
-func CheckDocker(clientConn *client.McpClient, target string, lxc *uint32) error {
-	cmd := LxcCmd(lxc, "command -v docker && docker compose version")
-	_, err := bootstrap.ExecToOK(clientConn, target, cmd, "docker gate", 60)
-	return err
 }

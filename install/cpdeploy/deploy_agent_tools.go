@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"freehold/platform/provisioning/bootstrap"
-	"freehold/platform/provisioning/deploy"
 	"freehold/contract/client"
+	"freehold/platform/provisioning/bootstrap"
+	"freehold/providers/proxmox"
 )
 
 // DeployAgentToolsSpec wires the freehold-agent-tools MCP server onto the CP:
@@ -87,12 +87,12 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 
 	// Ensure the durable state dir exists inside the cp guest.
 	mkdir := fmt.Sprintf("mkdir -p %s && chmod 700 %s", spec.AgentToolsStateDir, spec.AgentToolsStateDir)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, mkdir), "mkdir agent-tools state", 30); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, mkdir), "mkdir agent-tools state", 30); err != nil {
 		return nil, err
 	}
 	// Stop a PRIOR serve instance before writing over the binary.
 	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", spec.AgentToolsStateDir, spec.AgentToolsStateDir)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
 		return nil, err
 	}
 
@@ -103,7 +103,7 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	}
 
 	// Mint the server's durable identity (reused across rebuilds).
-	pkOut, err := execOut(clientConn, target, deploy.LxcCmd(spec.LXc,
+	pkOut, err := execOut(clientConn, target, proxmox.LxcCmd(spec.LXc,
 		agentToolsBin+" identity --state-dir "+spec.AgentToolsStateDir), "agent-tools identity", 30)
 	if err != nil {
 		return nil, err
@@ -130,7 +130,7 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	if spec.RelayAuthURL != "" {
 		seedFlags += " --relay-auth-url " + spec.RelayAuthURL
 	}
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, seedFlags), "seed agent-tools roster", 60); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, seedFlags), "seed agent-tools roster", 60); err != nil {
 		return nil, fmt.Errorf("seed agent-tools roster: %w", err)
 	}
 
@@ -138,7 +138,7 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	if spec.RunnerName != "" {
 		grant := fmt.Sprintf("%s/freehold-console grant %s --state-dir %s --pubkey %s",
 			spec.BinDir, spec.RunnerName, spec.StateDir, pubkey)
-		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, grant), "grant agent-tools on runner", 60); err != nil {
+		if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, grant), "grant agent-tools on runner", 60); err != nil {
 			return nil, fmt.Errorf("grant agent-tools on the co-located runner: %w", err)
 		}
 	}
@@ -214,7 +214,7 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	start := fmt.Sprintf(
 		"setsid nohup %s serve %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
 		agentToolsBin, serveFlags, spec.AgentToolsStateDir, spec.AgentToolsStateDir)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, start), "start agent-tools", 30); err != nil {
+	if _, err := bootstrap.ExecToOK(clientConn, target, proxmox.LxcCmd(spec.LXc, start), "start agent-tools", 30); err != nil {
 		return nil, err
 	}
 
@@ -223,7 +223,7 @@ func DeployAgentTools(clientConn *client.McpClient, target string, spec *DeployA
 	up := false
 	for i := 0; i < 15; i++ {
 		probe := fmt.Sprintf("curl -s -m 3 -o /dev/null -w %%{http_code} http://%s/mcp", loopbackOf(spec.BindAddr))
-		code, err := execOut(clientConn, target, deploy.LxcCmd(spec.LXc, probe), "agent-tools up", 15)
+		code, err := execOut(clientConn, target, proxmox.LxcCmd(spec.LXc, probe), "agent-tools up", 15)
 		if err == nil && strings.TrimSpace(code) != "000" {
 			up = true
 			break

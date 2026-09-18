@@ -272,103 +272,31 @@ func TestStagePlacementZfsRejectsThinPoolFlag(t *testing.T) {
 	}
 }
 
-// ---- stageLocalLvmRepoint: storage.cfg re-point, not pvesm -----------------
+// ---- stageLocalLvmRepoint: the stranding guard ------------------------------
 
-// repointEngine builds a stageLocalLvmRepoint-ready engine over a fake
-// storage.cfg whose local-lvm block starts at `data`.
-func repointEngine(initial string) (*Engine, *string) {
-	return repointEngineRiders(initial, "")
-}
-
-// repointEngineRiders additionally models the LVs riding local-lvm's current
-// pool (the rider guard's probe): non-empty => the re-point must be skipped.
-func repointEngineRiders(initial, riders string) (*Engine, *string) {
-	cfg := initial
-	e := &Engine{Bins: Bins{Self: "self"}, Out: &bytes.Buffer{}}
-	e.RunBin = func(bin string, args []string) (bool, string) {
-		if len(args) < 2 || args[0] != "exec" {
-			return false, "unexpected call: " + strings.Join(args, " ")
-		}
-		script := args[len(args)-1]
-		switch {
-		case strings.Contains(script, "pool_lv,lv_name"):
-			// The rider guard: LVs riding local-lvm's current pool.
-			return true, riders
-		case strings.Contains(script, "grep -A2"):
-			for _, l := range strings.Split(cfg, "\n") {
-				t := strings.TrimSpace(l)
-				if strings.HasPrefix(t, "thinpool ") {
-					return true, strings.TrimPrefix(t, "thinpool ") + "\n"
-				}
-			}
-			return true, "\n"
-		case strings.Contains(script, "awk -v tp="):
-			var out []string
-			inb := false
-			for _, l := range strings.Split(cfg, "\n") {
-				if strings.HasPrefix(l, "lvmthin: local-lvm") {
-					inb = true
-					out = append(out, l)
-					continue
-				}
-				if strings.TrimSpace(l) == "" {
-					inb = false
-				}
-				if inb && strings.HasPrefix(strings.TrimSpace(l), "thinpool ") {
-					out = append(out, "\tthinpool freehold-thin")
-					continue
-				}
-				out = append(out, l)
-			}
-			cfg = strings.Join(out, "\n")
-			return true, ""
-		}
-		return false, "unexpected script: " + script
-	}
-	return e, &cfg
-}
-
-func TestStageLocalLvmRepointCarves(t *testing.T) {
-	e, cfg := repointEngine("dir: local\n\tpath /var/lib/vz\n\nlvmthin: local-lvm\n\tthinpool data\n\tvgname pve\n")
-	err := e.stageLocalLvmRepoint(&placement{pool: "pve", thinPool: "freehold-thin", created: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(*cfg, "thinpool freehold-thin") || strings.Contains(*cfg, "thinpool data") {
-		t.Errorf("the local-lvm block must now point at freehold-thin:\n%s", *cfg)
-	}
-	if !strings.Contains(*cfg, "dir: local") || !strings.Contains(*cfg, "vgname pve") {
-		t.Errorf("the edit must be SCOPED — other lines untouched:\n%s", *cfg)
-	}
-}
-
-func TestStageLocalLvmRepointAlreadyCorrect(t *testing.T) {
-	e, cfg := repointEngine("lvmthin: local-lvm\n\tthinpool freehold-thin\n\tvgname pve\n")
+// TestStageLocalLvmRepointCallsProvider: an empty local-lvm is re-pointed at
+// the pool freehold just carved.
+func TestStageLocalLvmRepointCallsProvider(t *testing.T) {
+	p := &fakeProvider{pool: "data", riders: 0}
+	e := &Engine{Out: &bytes.Buffer{}, Provider: p}
 	if err := e.stageLocalLvmRepoint(&placement{pool: "pve", thinPool: "freehold-thin", created: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(*cfg, "thinpool freehold-thin") {
-		t.Errorf("an already-correct pointer must be skipped untouched:\n%s", *cfg)
+	if p.repointed != "freehold-thin" {
+		t.Errorf("repoint = %q, want freehold-thin", p.repointed)
 	}
 }
 
-func TestStageLocalLvmRepointNoBlock(t *testing.T) {
-	e, _ := repointEngine("dir: local\n\tpath /var/lib/vz\n")
-	err := e.stageLocalLvmRepoint(&placement{pool: "pve", thinPool: "freehold-thin", created: true})
-	if err == nil || !strings.Contains(err.Error(), "no `lvmthin: local-lvm`") {
-		t.Errorf("missing local-lvm block must be a hard error, got %v", err)
-	}
-}
-
+// TestStageLocalLvmRepointSkipsWhenCurrentPoolHasRiders: local-lvm points at a
+// pool that still holds live guest disks — the re-point must be SKIPPED.
 func TestStageLocalLvmRepointSkipsWhenCurrentPoolHasRiders(t *testing.T) {
-	// local-lvm points at `data`, which still holds live guest disks: the
-	// re-point to freehold's carved pool must be SKIPPED, not performed.
-	e, cfg := repointEngineRiders("lvmthin: local-lvm\n\tthinpool data\n\tvgname pve\n", "vm-100-disk-0\nvm-116-disk-0\n")
+	p := &fakeProvider{pool: "data", riders: 2}
+	e := &Engine{Out: &bytes.Buffer{}, Provider: p}
 	if err := e.stageLocalLvmRepoint(&placement{pool: "pve", thinPool: "freehold-thin", created: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(*cfg, "thinpool data") || strings.Contains(*cfg, "freehold-thin") {
-		t.Errorf("local-lvm with live riders must be left untouched:\n%s", *cfg)
+	if p.repointed != "" {
+		t.Errorf("a pool with live riders must not be re-pointed (got %q)", p.repointed)
 	}
 }
 

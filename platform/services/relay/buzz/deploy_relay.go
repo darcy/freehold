@@ -3,10 +3,11 @@ package deploy
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
-	"freehold/contract/client"
+	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
 )
@@ -16,10 +17,12 @@ const DefaultBufRef = "f956e6fe06a76e50cbd8fba1a162482e752e7f1a"
 
 // checkDocker passes the B1 gate: docker + compose must exist on the target
 // (or inside its LXC).
-func checkDocker(clientConn *client.McpClient, target string, lxc *uint32) error {
-	cmd := deploy.LxcCmd(lxc, "command -v docker && docker compose version")
-	_, err := bootstrap.ExecToOK(clientConn, target, cmd, "docker gate", 60)
-	return err
+func checkDocker(exec provisioning.GuestExecFunc, guest string) error {
+	out, err := exec(guest, "command -v docker && docker compose version", 60)
+	if err != nil {
+		return err
+	}
+	return bootstrap.ExpectOK(out, "docker gate")
 }
 
 // RelayDeploySpec mirrors the relay deploy spec.
@@ -123,7 +126,18 @@ func InstallCmd(spec *RelayDeploySpec) string {
 }
 
 // DeployRelay reproduces the relay deploy driver.
-func DeployRelay(clientConn *client.McpClient, target string, spec *RelayDeploySpec) (*RelayDeployResult, error) {
+func DeployRelay(exec provisioning.GuestExecFunc, spec *RelayDeploySpec) (*RelayDeployResult, error) {
+	guest := ""
+	if spec.LXc != nil {
+		guest = strconv.FormatUint(uint64(*spec.LXc), 10)
+	}
+	runToOK := func(step, cmd string, timeoutS uint64) error {
+		out, err := exec(guest, cmd, timeoutS)
+		if err != nil {
+			return err
+		}
+		return bootstrap.ExpectOK(out, step)
+	}
 	if err := bootstrap.Plain(spec.RelayName); err != nil {
 		return nil, err
 	}
@@ -151,21 +165,21 @@ func DeployRelay(clientConn *client.McpClient, target string, spec *RelayDeployS
 		}
 	}
 
-	if err := checkDocker(clientConn, target, spec.LXc); err != nil {
+	if err := checkDocker(exec, guest); err != nil {
 		return nil, err
 	}
 
 	dl := fmt.Sprintf("set -e; mkdir -p %s && ok=0; for i in 1 2 3; do if curl -fsSL --retry 2 https://github.com/block/buzz/archive/%s.tar.gz -o %s/buzz.tar.gz; then ok=1; break; fi; sleep 3; done; [ \"$ok\" = 1 ]",
 		spec.DeployDir, spec.BuzzRef, spec.DeployDir)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, dl), "download bundle", 600); err != nil {
+	if err := runToOK("download bundle", dl, 600); err != nil {
 		return nil, err
 	}
 	extract := fmt.Sprintf("tar -xzf %s/buzz.tar.gz -C %s --strip-components=1", spec.DeployDir, spec.DeployDir)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, extract), "extract bundle", 180); err != nil {
+	if err := runToOK("extract bundle", extract, 180); err != nil {
 		return nil, err
 	}
 	install := InstallCmd(spec)
-	if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, install), "run.sh start", 600); err != nil {
+	if err := runToOK("run.sh start", install, 600); err != nil {
 		return nil, err
 	}
 
@@ -194,7 +208,7 @@ func DeployRelay(clientConn *client.McpClient, target string, spec *RelayDeployS
 				"docker compose up -d >/dev/null 2>&1 && "+
 				"echo TLS-LOCAL-CA-%s",
 			compose, d, d, d, d, d, d, d, d, d, d, d, d, d, d)
-		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, tls), "tls local CA", 120); err != nil {
+		if err := runToOK("tls local CA", tls, 120); err != nil {
 			return nil, err
 		}
 	}
@@ -204,7 +218,7 @@ func DeployRelay(clientConn *client.McpClient, target string, spec *RelayDeployS
 	var lastErr error
 	for i := 0; i < 30; i++ {
 		probe := fmt.Sprintf("curl -fsS http://127.0.0.1:%d/_liveness", spec.HTTPPort)
-		_, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, probe), "relay liveness", 30)
+		err := runToOK("relay liveness", probe, 30)
 		if err == nil {
 			healthy = true
 			break
@@ -222,7 +236,7 @@ func DeployRelay(clientConn *client.McpClient, target string, spec *RelayDeployS
 	if err := bootstrap.Plain(operator); err == nil {
 		inviteDir := spec.DeployDir + "/deploy/compose"
 		invite := addMemberCmd(inviteDir, operator, nil)
-		if _, err := bootstrap.ExecToOK(clientConn, target, deploy.LxcCmd(spec.LXc, invite), "invite operator", 120); err != nil {
+		if err := runToOK("invite operator", invite, 120); err != nil {
 			// Surfaced warning; deploy stands.
 			fmt.Fprintln(os.Stderr, "WARN: installer invite failed — the relay is up and the deploy stands:", err)
 		}

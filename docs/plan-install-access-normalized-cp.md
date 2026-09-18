@@ -282,6 +282,40 @@ today's `McpClient`+`pct` path so the diff is mechanical and reviewable.
 - **Acceptance:** `grep` finds no `pct`/provider strings under `platform/`; the
   install/build/teardown pipelines behave identically.
 
+**PR3 boundary cases (decided).** Two leaks exist beyond the obvious driver files;
+the strict guardrail requires closing both.
+
+- **Service deployers.** `platform/services/relay/buzz/deploy_relay.go` (7 sites)
+  and `platform/provisioning/deploy/deploy.go` (`CheckDocker`) call `deploy.LxcCmd`
+  (`pct exec`). They use a **generic guest-exec seam on the `Provider`** instead.
+  Prefer `GuestExec(guest, cmd, timeout) (Outcome, error)` (the provider owns both
+  the wrapping and the transport) over returning a command string, so platform code
+  stays transport-agnostic for PR4. `install/cpdeploy/*` may import `providers/`
+  directly (it is a composition-root-adjacent module).
+- **`planebase/pve.go` scripts** (`LocalLvmProbeScript`/`LocalLvmRepointScript`/
+  `LocalLvmRidersScript`) and the pct builders in
+  `platform/provisioning/stages/stages.go` (`DnsAddCmd`/`DnsApexCmd`/`DnsPointCmd`/
+  `DnsVerifyCmd`/`ParsePctGateway`/`CaddyCertInstallScript`) move to
+  `providers/proxmox/`; their generic structs/constants stay. **Hidden cost:**
+  `box.stageLocalLvmRepoint` (platform) calls those scripts, so the `Provider` needs
+  a **storage op** for the local-lvm repoint (probe/riders/repoint) — or
+  `stageLocalLvmRepoint` itself moves into the proxmox provider. That is `box`'s
+  only direct storage dependency (tenant ensure/destroy already shell
+  `storage ensure|destroy` from `install`).
+- **Keep the pure name derivations in `planebase`** (`DatasetPath`/`RelayChildDataset`/
+  `LvmLVName`/`LvmRelayChildLVName`) — pure, and paired with the classifier that
+  parses the same convention. `VpsVolumeLabel` is the only cloud-flavored one; leave
+  it or move it later.
+- **Guard implementation (avoid false positives):** (1) an **import guard** — assert
+  nothing under `platform/` imports `freehold/providers`, via the import graph
+  (`go list -deps`), as a test; (2) a **curated token grep** over non-test
+  `platform/` files for provider commands (`pct`, `pvesm`, `vzdump`, `qm `,
+  `/etc/pve`, `zfs `, `zpool `, `lvs `). Do **not** grep the word "provider" — the
+  DNS providers would false-positive.
+- **Seam:** one generic guest-exec method on `Provider`; the constructor takes a
+  minimal **`Executor`** (the existing `McpClient`+target adapter implements it) so
+  PR4's direct-SSH transport stays provider-internal. No options machinery yet.
+
 ### PR 4 — transient access + door rotation (`0.6.12`)
 
 The behavior change the original plan called PR3, now riding a clean provider boundary.

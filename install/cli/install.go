@@ -23,7 +23,8 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning/box"
-	"freehold/platform/provisioning/drive"
+	"freehold/providers/proxmox"
+	"freehold/providers/proxmox/drive"
 )
 
 // installConfigPath is the config path the install writes: the selected
@@ -197,6 +198,7 @@ func runInstallCmd(cmd *cobra.Command, forceYes bool) error {
 	if err != nil {
 		return err
 	}
+	eng.Provider = proxmox.New(eng.HostExecFunc())
 	eng.Out = out
 	eng.Stdin = bufio.NewReader(cmd.InOrStdin())
 	return eng.RunBootstrap()
@@ -264,6 +266,7 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 	if err != nil {
 		return err
 	}
+	eng.Provider = proxmox.New(eng.HostExecFunc())
 	eng.Out = out
 	eng.Stdin = ui.in
 	return eng.RunBootstrap()

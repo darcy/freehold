@@ -3,7 +3,7 @@
 // hetzner-vps curl drivers, and the A4 domain gate. Commands are executed
 // through the runner's ONE exec primitive; operator values are Plain/
 // PlainPath-guarded before interpolation.
-package bootstrap
+package proxmox
 
 import (
 	"encoding/json"
@@ -98,21 +98,6 @@ func LxcMpArgs(specs []planebase.MountSpec) []string {
 		out = append(out, fmt.Sprintf("--mp%d=%s,mp=%s,backup=%d", i, m.Source, m.GuestPath, planebase.BackupFlag(m.GuestPath)))
 	}
 	return out
-}
-
-// ParseMount parses a `<dataset>:<guest-path>` mount reference.
-func ParseMount(s string) (planebase.MountSpec, error) {
-	src, guest, ok := strings.Cut(s, ":")
-	if !ok || src == "" || guest == "" {
-		return planebase.MountSpec{}, fmt.Errorf("mount %q must be <dataset>:<guest-path>", s)
-	}
-	if err := PlainPath(src); err != nil {
-		return planebase.MountSpec{}, err
-	}
-	if err := PlainPath(guest); err != nil {
-		return planebase.MountSpec{}, err
-	}
-	return planebase.MountSpec{Source: src, GuestPath: guest}, nil
 }
 
 // HostArch maps the host arch to the template arch suffix. `uname -m` on

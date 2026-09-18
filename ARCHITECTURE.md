@@ -374,11 +374,33 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `externaldns/cloudflare/` (`dnsman`), `certificates/letsencrypt/` (`cert`,
     lego provider registry).
 
-*   **`platform/provisioning/`** carries the compute+storage bring-up:
-    `bootstrap/` (LXC/VPS drivers), `planebase/` + `drive/` (the durable
-    plane), `stages/` (the shared bring-up stage builders), and `deploy/`
-    (the generic deploy helpers both the relay and bootstrap-cp deployers
-    use).
+*   **`platform/` is provider-independent.** Substrate-specific commands
+    (Proxmox `pct`, LVM/ZFS, later Vultr/Hetzner APIs) live behind the
+    `Provider` seam in `platform/provisioning` and in the top-level
+    `providers/` module; `install`/`uninstall`/`build`/`teardown` are
+    orchestrators that inject the concrete provider. `platform/` imports
+    `contract`, never `providers/` or `control-plane/`, so
+    `control-plane → platform → contract` is a one-way edge. A guard test
+    enforces both the import direction and the absence of provider command
+    strings in `platform/`.
+
+*   **`platform/provisioning/`** carries the provider-independent
+    compute+storage orchestration: `bootstrap/` (the generic exec/naming
+    helpers), `planebase/` (the pure plane math + storage classifier),
+    `stages/` (the generic manifest/coordinate builders), `deploy/` (generic
+    deploy helpers), and the `Provider` interface + engine wrappers. The
+    concrete Proxmox driver (guest create/exec/list, storage, pct stage/DNS
+    builders) lives in `providers/proxmox/`.
+
+### `providers/` (`freehold/providers` — the substrate providers)
+
+*   Its own Go module; imports `platform/` + `contract/`, never the reverse.
+    `providers/proxmox/` is the Proxmox VE substrate: guest create/exec/list,
+    LVM/ZFS/thin-pool storage, the PVE `local-lvm` pointer discipline, and the
+    pct stage/DNS command builders (`providers/proxmox/drive/` holds the
+    storage driver). A provider is substrate ops, not a lifecycle — there is no
+    `provider.Install()`; the composition roots (`install/`, `control-plane/`)
+    decide the sequence and inject the provider.
 
 *   **`platform/migrations/`** is the verify-gated migration runner over
     versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed

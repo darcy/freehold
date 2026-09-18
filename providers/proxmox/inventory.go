@@ -1,4 +1,4 @@
-package bootstrap
+package proxmox
 
 import (
 	"encoding/json"
@@ -9,6 +9,7 @@ import (
 
 	"freehold/contract/client"
 	"freehold/platform/provisioning/planebase"
+	"freehold/providers/proxmox/drive"
 )
 
 // This file is the READ-ONLY storage inventory: it enumerates every zpool, LVM
@@ -117,7 +118,7 @@ func vgInfos(c *client.McpClient, target string) ([]planebase.VGInfo, error) {
 // (the guest disks + freehold volumes sharing its capacity), freehold
 // provenance, and whether PVE's local-lvm points at it.
 func PoolInfos(c *client.McpClient, target, vg, localPool string) ([]planebase.PoolInfo, error) {
-	names, err := ThinPools(c, target, vg)
+	names, err := drive.ThinPools(c, target, vg)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +189,7 @@ func internalLV(name string) bool {
 // localLvmPool returns the thin pool PVE's stock local-lvm storage points at
 // ("" when there is no block/pointer). Read-only.
 func localLvmPool(c *client.McpClient, target string) (string, error) {
-	out, err := Exec(c, target, planebase.LocalLvmProbeScript+" 2>/dev/null || true", 30)
+	out, err := Exec(c, target, drive.LocalLvmProbeScript+" 2>/dev/null || true", 30)
 	if err != nil {
 		return "", err
 	}

@@ -36,12 +36,13 @@ import (
 	"freehold/control-plane/secret-management"
 	"freehold/platform/migrations"
 	"freehold/platform/provisioning/bootstrap"
-	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
 	"freehold/platform/provisioning/stages"
 	"freehold/platform/services/certificates/letsencrypt"
 	relaydeploy "freehold/platform/services/relay/buzz"
 	caddydeploy "freehold/platform/services/webproxy/caddy"
+	"freehold/providers/proxmox"
+	"freehold/providers/proxmox/drive"
 )
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
@@ -171,7 +172,7 @@ func (s *Spec) guestSearchBase() string {
 // then the resolv.conf nameserver that isn't the resolver's own IP.
 func (s *Spec) guestNameserver() string {
 	if out, err := s.runOut(fmt.Sprintf("pct config %d", s.CpLxc), 30); err == nil {
-		if gw := stages.ParsePctGateway(out); gw != "" {
+		if gw := proxmox.ParsePctGateway(out); gw != "" {
 			return gw
 		}
 	}
@@ -200,7 +201,7 @@ func (s *Spec) worldDNS() error {
 	binDir, stateDir := s.cpGuestDirs()
 	searchBase := s.guestSearchBase()
 	for _, r := range stages.DnsRecords(s.RelayHost, s.RelayIP, s.CpHost, s.CpIP, s.ProxyIP, s.LitellmIP) {
-		if err := s.run(stages.DnsAddCmd(s.CpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
+		if err := s.run(proxmox.DnsAddCmd(s.CpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
 			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
 		}
 	}
@@ -216,7 +217,7 @@ func (s *Spec) worldDNS() error {
 		}
 	}
 	if apex != "" && s.ProxyIP != "" {
-		if err := s.run(stages.DnsApexCmd(s.CpLxc, binDir, stateDir, apex, config.StripCIDR(s.ProxyIP)), 120); err != nil {
+		if err := s.run(proxmox.DnsApexCmd(s.CpLxc, binDir, stateDir, apex, config.StripCIDR(s.ProxyIP)), 120); err != nil {
 			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
@@ -234,7 +235,7 @@ func (s *Spec) worldDNS() error {
 		if role.name == "cp" {
 			r = router
 		}
-		pctSet, resolvConf := stages.DnsPointCmd(role.vmid, s.CpIP, r, searchBase)
+		pctSet, resolvConf := proxmox.DnsPointCmd(role.vmid, s.CpIP, r, searchBase)
 		if err := s.run(pctSet, 60); err != nil {
 			return fmt.Errorf("world-build dns point %s: %w", role.name, err)
 		}
@@ -248,7 +249,7 @@ func (s *Spec) worldDNS() error {
 		if q.want == "" {
 			continue
 		}
-		if err := s.run(stages.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
+		if err := s.run(proxmox.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
 			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
 		}
 	}
@@ -301,7 +302,7 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 		// the recommended SAFE backend (or the recorded PlanePool). This
 		// replaces the old blind `vgs[0]` guess, which on a multi-VG host
 		// could land the plane on a busy pool.
-		inv, err := bootstrap.StorageInventory(mc, s.RunnerTarget)
+		inv, err := proxmox.StorageInventory(mc, s.RunnerTarget)
 		if err != nil {
 			return nil, fmt.Errorf("storage inventory: %w", err)
 		}
@@ -367,7 +368,7 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if err != nil {
 		return 0, err
 	}
-	spec := &bootstrap.ProxmoxLxcSpec{
+	spec := &proxmox.ProxmoxLxcSpec{
 		Hostname: hostname,
 		Storage:  s.StorageName,
 		RootfsGB: s.RootfsGB,
@@ -405,7 +406,7 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if err != nil {
 		return 0, err
 	}
-	res, err := bootstrap.BootstrapProxmoxLxc(mc, s.RunnerTarget, spec)
+	res, err := proxmox.BootstrapProxmoxLxc(mc, s.RunnerTarget, spec)
 	if err != nil {
 		return 0, fmt.Errorf("boot %s LXC: %w", role, err)
 	}
@@ -512,7 +513,7 @@ func (s *Spec) worldBootRelay(mounts []planebase.MountSpec) error {
 	}
 	host := s.RelayHost
 	relayURL := "https://" + host
-	if _, err := relaydeploy.DeployRelay(mc, s.RunnerTarget, &relaydeploy.RelayDeploySpec{
+	if _, err := relaydeploy.DeployRelay(proxmox.GuestExecFunc(mc, s.RunnerTarget), &relaydeploy.RelayDeploySpec{
 		RelayName:      "relay",
 		DeployDir:      deployDir,
 		HTTPPort:       3000,

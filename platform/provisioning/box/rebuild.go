@@ -33,11 +33,12 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/bootstrap"
-	"freehold/platform/provisioning/drive"
 	"freehold/platform/provisioning/planebase"
 	"freehold/platform/provisioning/stages"
 )
@@ -160,6 +161,24 @@ type Engine struct {
 	RunSh    func(script string) (string, error)
 	PortOpen func(addr string) bool
 	CurlGet  func(url string) (string, bool)
+
+	// Provider is the substrate ops seam (guest list/ip/mounts + storage
+	// repoint). Composition roots inject the concrete provider; nil means the
+	// pct-dependent stages fail with a clear error.
+	Provider provisioning.Provider
+}
+
+// HostExecFunc adapts the engine's self-exec transport into the provider's
+// host-command seam (used by the composition root to build the provider).
+func (e *Engine) HostExecFunc() provisioning.ExecFunc {
+	return func(cmd string, timeoutS uint64) (*client.ExecOutcome, error) {
+		ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(cmd, int(timeoutS)))
+		code := 0
+		if !ok {
+			code = 1
+		}
+		return &client.ExecOutcome{Stdout: out, ExitCode: &code}, nil
+	}
 }
 
 // NewEngine builds the provisioning engine from flags + resolved sibling
@@ -483,16 +502,16 @@ func lxcIP(g config.LxcGuest) string { return config.LxcIP(g) }
 // through the provisioning runner, as RFC3339 ("" when unreadable).
 func (e *Engine) CertExpiry(cfg *config.Config, slot string) string {
 	k3s := derefU32(cfg.Lxc.K3s.Vmid)
-	if k3s == 0 {
+	if k3s == 0 || e.Provider == nil {
 		return ""
 	}
-	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(fmt.Sprintf(
-		"pct exec %d -- bash -c 'openssl x509 -enddate -noout -in %s/fullchain.pem 2>/dev/null'",
-		k3s, stages.CaddyEdgeDurableDir(slot)), 0))
-	if !ok {
+	out, err := e.Provider.GuestExec(strconv.FormatUint(uint64(k3s), 10), fmt.Sprintf(
+		"openssl x509 -enddate -noout -in %s/fullchain.pem 2>/dev/null",
+		stages.CaddyEdgeDurableDir(slot)), 0)
+	if err != nil || out == nil || out.ExitCode == nil || *out.ExitCode != 0 {
 		return ""
 	}
-	line := strings.TrimSpace(out)
+	line := strings.TrimSpace(out.Stdout)
 	const prefix = "notAfter="
 	i := strings.Index(line, prefix)
 	if i < 0 {
@@ -1100,7 +1119,7 @@ func (e *Engine) legacyPlacement(out string) (*placement, error) {
 	if e.F.ThinPool != "" || len(detected) == 0 {
 		name := e.F.ThinPool
 		if name == "" {
-			name = drive.FreshThinPool
+			name = planebase.FreshThinPool
 		}
 		return &placement{pool: pool, thinPool: name, created: !has(name), kind: planebase.KindLvmThin}, nil
 	}
@@ -1171,7 +1190,7 @@ func (e *Engine) stageStorage(placement *placement) error {
 			"--pool-size-gb", strconv.FormatUint(e.F.PoolSizeGB, 10),
 		}
 		// Honor the placement's chosen kind first, then the RECORDED kind: on
-		// a host with BOTH a zpool and a VG, re-detection would always pick
+		// a host with BOTH a ZFS pool and a VG, re-detection would always pick
 		// ZFS (or `vgs[0]`) and drive the tenant the wrong way.
 		switch {
 		case placement.kind != "":
@@ -1218,52 +1237,24 @@ func (e *Engine) stageStorage(placement *placement) error {
 }
 
 // stageLocalLvmRepoint keeps PVE's stock local-lvm storage pointed at the
-// pool freehold just carved. `pct create --rootfs local-lvm:…` (both LXC
-// boots) resolves through storage.cfg — after the operator wiped the VG's
-// only thin pool the carve leaves local-lvm dangling unless we re-point
-// it here. The probe/edit/readback discipline lives ONCE in
-// drive.RepointLocalLvm (shared with teardown's RemoveThinPool); this
-// method only supplies the subprocess transport. Idempotent: the probe
-// skips an already-correct pointer.
+// pool freehold just carved. An LXC rootfs on `local-lvm` resolves through
+// storage.cfg — after the operator wiped the VG's only thin pool the carve
+// leaves local-lvm dangling unless we re-point it here. The probe/edit
+// discipline lives in the provider; this method adds the stranding guard and
+// the operator notice. Idempotent.
 func (e *Engine) stageLocalLvmRepoint(placement *placement) error {
-	run := func(script string, timeoutS uint64) (string, error) {
-		ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(script, int(timeoutS)))
-		if !ok {
-			return out, fmt.Errorf("local-lvm storage.cfg step failed on %s:\n%s", e.F.Host, out)
-		}
-		return out, nil
+	if e.Provider == nil {
+		return fmt.Errorf("no provisioning provider wired — cannot re-point PVE local-lvm")
 	}
-	// SAFETY: never re-point PVE's local-lvm away from a pool that still
-	// holds live guest disks — that strands them (their rootfs disks stay on
-	// the old pool while storage.cfg points elsewhere). Re-point only when
-	// the pointer is already the pool freehold carved, or its current pool is
-	// empty. On a host with other workloads this keeps their storage intact.
-	riders, err := run(planebase.LocalLvmRidersScript, 30)
+	current, riders, err := e.Provider.LocalLvmStatus()
 	if err != nil {
 		return err
 	}
-	if n := countLines(riders); n > 0 {
-		current, err := run(planebase.LocalLvmProbeScript, 30)
-		if err != nil {
-			return err
-		}
-		if got := strings.TrimSpace(current); got != placement.thinPool {
-			fmt.Fprintf(e.Out, "  · leaving PVE local-lvm on %q — it holds %d live volume(s); freehold will not re-point it\n", got, n)
-			return nil
-		}
+	if riders > 0 && current != placement.thinPool {
+		fmt.Fprintf(e.Out, "  · leaving PVE local-lvm on %q — it holds %d live volume(s); freehold will not re-point it\n", current, riders)
+		return nil
 	}
-	return planebase.RepointLocalLvm(run, placement.thinPool)
-}
-
-// countLines counts non-blank lines (a small readback helper).
-func countLines(s string) int {
-	n := 0
-	for _, l := range strings.Split(s, "\n") {
-		if strings.TrimSpace(l) != "" {
-			n++
-		}
-	}
-	return n
+	return e.Provider.RepointLocalLvm(placement.thinPool)
 }
 
 // placement is the plane-placement gate's resolved answer.
@@ -1466,7 +1457,7 @@ func lxcName(name, domain, role string) (string, error) {
 	return bootstrap.LXCName(name, domain, role)
 }
 
-// findLxcVmidExact finds the role's vmid by FULL name match on `pct list`
+// findLxcVmidExact finds the role's vmid by FULL name match on the guest list
 // (a suffix-only match can hit ANOTHER world's container on a multi-world
 // host).
 func (e *Engine) findLxcVmidExact(role string) (uint32, error) {
@@ -1474,51 +1465,32 @@ func (e *Engine) findLxcVmidExact(role string) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs("pct list", 0))
-	if !ok {
-		return 0, fmt.Errorf("pct list unreadable through the runner:\n%s", out)
+	if e.Provider == nil {
+		return 0, fmt.Errorf("no provisioning provider wired — cannot list guests")
 	}
-	return findVmidInList(out, exact)
-}
-
-// findVmidInList parses a `pct list` dump for an exact-name row.
-func findVmidInList(out, exact string) (uint32, error) {
-	lines := strings.Split(out, "\n")
-	for _, line := range lines[1:] {
-		cols := strings.Fields(line)
-		if len(cols) < 2 || cols[len(cols)-1] != exact {
+	guests, err := e.Provider.ListGuests()
+	if err != nil {
+		return 0, fmt.Errorf("guest list unreadable through the runner: %w", err)
+	}
+	for _, g := range guests {
+		if g.Name != exact {
 			continue
 		}
-		vmid, err := strconv.ParseUint(cols[0], 10, 32)
+		vmid, err := strconv.ParseUint(g.ID, 10, 32)
 		if err != nil {
-			return 0, fmt.Errorf("unparseable vmid %q in %q", cols[0], line)
+			return 0, fmt.Errorf("unparseable vmid %q for guest %q", g.ID, g.Name)
 		}
 		return uint32(vmid), nil
 	}
-	return 0, fmt.Errorf("no container named %s found on the host:\n%s", exact, out)
+	return 0, fmt.Errorf("no container named %s found on the host", exact)
 }
 
 // readLxcIP reads the guest's current IPv4 (CIDR) off eth0.
 func (e *Engine) readLxcIP(vmid uint32) (string, error) {
-	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", vmid), 0))
-	if !ok {
-		return "", fmt.Errorf("ip readback failed on LXC %d:\n%s", vmid, out)
+	if e.Provider == nil {
+		return "", fmt.Errorf("no provisioning provider wired — cannot read guest ip")
 	}
-	return parseLxcIP(out, vmid)
-}
-
-// parseLxcIP extracts the first `/`-token, refusing loopback (Rust
-// read_lxc_ip).
-func parseLxcIP(out string, vmid uint32) (string, error) {
-	for _, t := range strings.Fields(out) {
-		if strings.Contains(t, "/") {
-			if t == "127.0.0.1/8" {
-				break
-			}
-			return t, nil
-		}
-	}
-	return "", fmt.Errorf("no ipv4 on LXC %d eth0:\n%s", vmid, out)
+	return e.Provider.GuestIPv4(strconv.FormatUint(uint64(vmid), 10))
 }
 
 // ---- the k3s stage -----------------------------------------------------------
@@ -1652,45 +1624,15 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 	return string(b)
 }
 
-// guestMounts reads the `mp=` guest paths of the LXC's pct config (Rust
+// guestMounts reads the `mp=` guest paths of the LXC config (Rust
 // guest_mounts) — ground truth for where PVE binds the durable dataset.
 func (e *Engine) guestMounts(vmid uint32) []string {
-	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(fmt.Sprintf("pct config %d", vmid), 0))
-	if !ok {
+	if e.Provider == nil {
 		return nil
 	}
-	return parsePctMounts(out)
-}
-
-// parsePctMounts extracts the `mp=` guest paths of `mp<digits>:` lines, in
-// order (a loose `mp` prefix would catch unrelated keys).
-func parsePctMounts(out string) []string {
-	var mounts []string
-	for _, l := range strings.Split(out, "\n") {
-		rest, ok := strings.CutPrefix(l, "mp")
-		if !ok {
-			continue
-		}
-		idx, rest, ok := strings.Cut(rest, ":")
-		if !ok || idx == "" {
-			continue
-		}
-		digits := true
-		for _, c := range idx {
-			if c < '0' || c > '9' {
-				digits = false
-				break
-			}
-		}
-		if !digits {
-			continue
-		}
-		for _, kv := range strings.Split(rest, ",") {
-			if v, ok := strings.CutPrefix(strings.TrimSpace(kv), "mp="); ok {
-				mounts = append(mounts, v)
-				break
-			}
-		}
+	mounts, err := e.Provider.GuestMounts(strconv.FormatUint(uint64(vmid), 10))
+	if err != nil {
+		return nil
 	}
 	return mounts
 }
@@ -1700,7 +1642,7 @@ func parsePctMounts(out string) []string {
 // root, bin/ + control-plane/ live under it.
 
 // stageCpExec runs a command via the DEPLOYED CP binary inside its LXC
-// (through the runner's pct exec): `pct exec <cp> -- <bin>/control-plane ARGS
+// (through the runner's guest exec): `exec <cp> -- <bin>/control-plane ARGS
 // --state-dir <state>`. The pattern deploy-cp already uses for adopt/grant.
 
 // escapeSingle makes a value safe inside a single-quoted shell fragment
@@ -1926,12 +1868,12 @@ func extractNip11Pubkey(text string) (string, bool) {
 // then to the recorded config value. Returns "" when unreadable (the serve
 // relay-url/pubkey coupling is relaxed, so a missing pubkey no longer blocks).
 func (e *Engine) relaySigningPubkey() string {
-	if cfg, err := config.Load(e.F.ConfigPath); err == nil && cfg != nil && cfg.Lxc.Relay.Vmid != nil {
-		ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(fmt.Sprintf(
-			"pct exec %d -- sh -c \"sed -n 's/^BUZZ_RELAY_PRIVATE_KEY=//p' %s/.env 2>/dev/null\"",
-			*cfg.Lxc.Relay.Vmid, stages.RelayComposeDir), 30))
-		if ok {
-			secret := strings.TrimSpace(out)
+	if cfg, err := config.Load(e.F.ConfigPath); err == nil && cfg != nil && cfg.Lxc.Relay.Vmid != nil && e.Provider != nil {
+		guest := strconv.FormatUint(uint64(*cfg.Lxc.Relay.Vmid), 10)
+		out, err := e.Provider.GuestExec(guest, fmt.Sprintf(
+			`sed -n "s/^BUZZ_RELAY_PRIVATE_KEY=//p" %s/.env 2>/dev/null`, stages.RelayComposeDir), 30)
+		if err == nil && out != nil && out.ExitCode != nil && *out.ExitCode == 0 {
+			secret := strings.TrimSpace(out.Stdout)
 			if _, err := hex.DecodeString(secret); err == nil && len(secret) == 64 {
 				if raw, err := hex.DecodeString(secret); err == nil {
 					if pk, err := crypto.PubkeyFromSecret(raw); err == nil && len(pk) == 64 {
