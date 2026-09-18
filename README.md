@@ -219,7 +219,7 @@ freehold --help               # both surfaces
 Each profile is its own config file (`~/.config/freehold/profiles/<name>/config.toml`)
 plus its own scoped state dir (`~/.freehold/profiles/<name>/`). The filesystem is
 the registry; `freehold profiles` lists them. `freehold login` **adds** a named
-profile (default name = the CP host), and the TUI plus `build` / `bootstrap` /
+profile (default name = the CP host), and the TUI plus `build` / `install` /
 `teardown` / `world` pick which profile (tenant) to operate when more than one is
 registered (a picker), failing closed with "run `freehold login` first" when none
 are. There is no implicit "default" profile.
@@ -473,8 +473,8 @@ cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner \
 
 ## Bootstrap flow (from zero to a live world)
 
-`freehold build` is **login-gated, drive-through-CP**: after `freehold
-bootstrap` (box one) creates the CP, ANY box runs `freehold build` to trigger
+`freehold build` is **login-gated, drive-through-CP**: after
+`freehold-install install` (box one) creates the CP, ANY box runs `freehold build` to trigger
 the console's `/api/world-build` — the CP brings up the WHOLE world
 (relay/agent-tools/k3s → DNS → litellm → Caddy → cert → CPA) through its own
 co-located runner.

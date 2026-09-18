@@ -226,6 +226,12 @@ changelog.
   Those need the build box until the data path is sequenced into the detached last step.
   It also requires a CP running a current console (the route postdates the worlds that
   predate it).
+- **`install`'s live-CP refusal is profile-based.** It probes only a profile's recorded
+  `cp_url` (`/healthz`); a **profile-less** box pointed at a host that already runs a live
+  `<name>-cp` falls to `mint` and does an un-requested re-deploy over the live world. The
+  authoritative host-side check (`pct list` for the `<name>-cp` guest) needs the transient
+  Access seam and lands with it. Re-adopt is already identity-preserving, so the exposure
+  is the un-requested re-deploy, not orphaned grants.
 
 ## Build / test
 
@@ -269,7 +275,7 @@ changelog.
     ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
   - `target/{debug,release}/runner` (Rust) — `cargo build --bin runner && cargo build --release --bin runner`
   - `target/release/freehold-agent-tools` (static, above)
-  This is the same set `freehold build`/`freehold teardown`/`freehold-install bootstrap`
+  This is the same set `freehold build`/`freehold teardown`/`freehold-install install`
   resolve as siblings of the running
   binary — a box doing world bring-up needs all five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
