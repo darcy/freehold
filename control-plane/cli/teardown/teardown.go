@@ -322,19 +322,10 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 	//    and skips the door gate. Per-tenant KEEPS everything too.
 	switch {
 	case scope == ScopeWholeWorld && cfg.Data:
-		// '|' as the sed delimiter: the comment can contain '/' (base64), which
-		// would terminate a '/'-delimited pattern early.
-		keyRemoval := fmt.Sprintf("sed -i '\\|ssh-ed25519 [A-Za-z0-9+/=]* %s$|d' /root/.ssh/authorized_keys", cfg.RunnerComment)
-		if ok, _ := r.Exec(keyRemoval); !ok {
-			return "", fmt.Errorf("door removal command failed on %s", cfg.RunNTarget)
+		if err := RemoveRunnerSubstrate(r, cfg.RunnerKeyRefs, cfg.RunNTarget); err != nil {
+			return "", err
 		}
-		_, check := r.Exec(fmt.Sprintf("grep -c 'ssh-ed25519 .* %s' /root/.ssh/authorized_keys || true", cfg.RunnerComment))
-		still := 0
-		fmt.Sscanf(strings.TrimSpace(check), "%d", &still)
-		if still != 0 {
-			return "", fmt.Errorf("the runner's key is STILL in authorized_keys (%d line(s))", still)
-		}
-		say(fmt.Sprintf("door removed from %s (%s — verified)", cfg.RunnerComment, cfg.RunNTarget))
+		say(fmt.Sprintf("door removed from %s (verified)", cfg.RunNTarget))
 
 		// freehold's operator-side state is KEPT even on a full --data
 		// teardown: the config (recorded coords), the world home (runner
@@ -440,8 +431,8 @@ func (r *ExecRunner) TerraformDestroy() ([]string, error) {
 // Cfg is the teardown-input config surface.
 type Cfg struct {
 	Domain        string
-	RunNTarget    string // the runner target name
-	RunnerComment string // the runner's authorized_keys comment
+	RunNTarget    string   // the runner target name
+	RunnerKeyRefs []string // exact substrate-key lines to remove (matched by body); the target comment is swept as a fallback
 	Managed       []string
 	WorldHome     string
 	ConfigPath    string
@@ -477,4 +468,151 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// authorizedKeyBody returns the base64 body of a full authorized_keys line, or
+// "" when ref is a bare comment/name.
+func authorizedKeyBody(ref string) string {
+	f := strings.Fields(ref)
+	if len(f) >= 2 && strings.HasPrefix(f[0], "ssh-") {
+		return f[1]
+	}
+	return ""
+}
+
+// execIface is the remote exec surface the key helpers need.
+type execIface interface {
+	Exec(cmd string) (bool, string)
+}
+
+// probeBody returns how many authorized_keys lines contain a key body.
+func probeBody(r execIface, body string) (int, error) {
+	ok, out := r.Exec(fmt.Sprintf("grep -cF '%s' /root/.ssh/authorized_keys 2>/dev/null || true", body))
+	if !ok {
+		return 0, fmt.Errorf("authorized_keys probe failed: %s", out)
+	}
+	return atoi(strings.TrimSpace(out)), nil
+}
+
+// probeComment returns how many authorized_keys lines END with the exact comment.
+func probeComment(r execIface, comment string) (int, error) {
+	ok, out := r.Exec(fmt.Sprintf("awk '$NF==\"%s\"' /root/.ssh/authorized_keys 2>/dev/null | wc -l", comment))
+	if !ok {
+		return 0, fmt.Errorf("authorized_keys probe failed: %s", out)
+	}
+	return atoi(strings.TrimSpace(out)), nil
+}
+
+func removeBody(r execIface, body string) error {
+	cmd := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && grep -vF '%s' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", body)
+	if ok, out := r.Exec(cmd); !ok {
+		return fmt.Errorf("key removal failed: %s", out)
+	}
+	return nil
+}
+
+func removeComment(r execIface, comment string) error {
+	cmd := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && awk '$NF!=\"%s\"' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", comment)
+	if ok, out := r.Exec(cmd); !ok {
+		return fmt.Errorf("key removal failed: %s", out)
+	}
+	return nil
+}
+
+func atoi(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return n
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// RemoveRunnerSubstrate removes the runner substrate key(s) safely:
+//  1. best-effort remove each derived exact body (a stale one is skipped, never
+//     aborts the teardown);
+//  2. sweep any residual line whose LAST FIELD is the runner target (the
+//     provision comment) — covers a rotated/unknown key;
+//  3. verify: no derived body and no target-comment line remains, else error.
+//
+// It is idempotent (already-absent => nil) and never reports a false success.
+// The comment sweep can touch another world that shares the target name on this
+// host (the default `proxmox-box`); it runs only for residual lines.
+func RemoveRunnerSubstrate(r execIface, bodyRefs []string, target string) error {
+	seen := map[string]bool{}
+	for _, ref := range bodyRefs {
+		body := authorizedKeyBody(ref)
+		if body == "" || seen[body] {
+			continue
+		}
+		seen[body] = true
+		if n, err := probeBody(r, body); err != nil {
+			return err
+		} else if n > 0 {
+			if err := removeBody(r, body); err != nil {
+				return err
+			}
+		}
+	}
+	if target != "" {
+		if n, err := probeComment(r, target); err != nil {
+			return err
+		} else if n > 0 {
+			if err := removeComment(r, target); err != nil {
+				return err
+			}
+		}
+	}
+	for body := range seen {
+		if n, err := probeBody(r, body); err != nil {
+			return err
+		} else if n > 0 {
+			return fmt.Errorf("the runner substrate key is STILL in authorized_keys (%d line(s))", n)
+		}
+	}
+	if target != "" {
+		if n, err := probeComment(r, target); err != nil {
+			return err
+		} else if n > 0 {
+			return fmt.Errorf("the runner substrate key is STILL in authorized_keys (%d line(s) with comment %q)", n, target)
+		}
+	}
+	return nil
+}
+
+// RemoveAuthorizedKey removes ONE specific line (by exact body or exact
+// comment) and fails loudly when it matches nothing. Used for the box's own
+// operator door, which is unique per box.
+func RemoveAuthorizedKey(r execIface, ref string) error {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fmt.Errorf("no key reference to remove")
+	}
+	body := authorizedKeyBody(ref)
+	probe, remove := probeComment, removeComment
+	what := ref
+	if body != "" {
+		probe = func(rr execIface, _ string) (int, error) { return probeBody(rr, body) }
+		remove = func(rr execIface, _ string) error { return removeBody(rr, body) }
+		what = body
+	}
+	n, err := probe(r, ref)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("no authorized_keys line matches %q — refusing a silent no-op", ref)
+	}
+	if err := remove(r, ref); err != nil {
+		return err
+	}
+	if n, err := probe(r, ref); err != nil {
+		return err
+	} else if n != 0 {
+		return fmt.Errorf("the key is STILL in authorized_keys (%d line(s))", n)
+	}
+	_ = what
+	return nil
 }

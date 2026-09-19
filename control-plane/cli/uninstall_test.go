@@ -78,16 +78,12 @@ func TestWipeLocalProfile(t *testing.T) {
 	}
 }
 
-// TestKeyBody: a full authorized_keys line yields the base64 body (safe to
-// grep -F), a bare name yields "" so removeHostKey falls back to the comment.
-func TestKeyBody(t *testing.T) {
-	if got := keyBody("ssh-ed25519 AAAAC3Nza freehold-door-host"); got != "AAAAC3Nza" {
-		t.Errorf("keyBody(full line) = %q, want the base64 body", got)
-	}
-	if got := keyBody("proxmox-box"); got != "" {
-		t.Errorf("keyBody(bare name) = %q, want empty", got)
-	}
-	if got := keyBody(""); got != "" {
-		t.Errorf("keyBody(empty) = %q, want empty", got)
+// TestRunnerKeyRefsNoPackage: with no readable package (thin box) there are no
+// exact body refs — the caller's target-comment sweep removes the key. Never the
+// Nostr pubkey.
+func TestRunnerKeyRefsNoPackage(t *testing.T) {
+	cfg := &config.Config{Runner: config.RunnerRef{Target: "proxmox-box", Pubkey: "deadbeef"}}
+	if refs := runnerKeyRefs(cfg, nil); len(refs) != 0 {
+		t.Errorf("refs = %v, want none (target sweep handles it)", refs)
 	}
 }
