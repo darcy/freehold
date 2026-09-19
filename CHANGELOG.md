@@ -35,8 +35,11 @@ cross-imports**, enforced by an import-graph guard test in each module:
   surface: the `freehold` CLI + TUI, `login/`, `flows/`, and the install surface
   (`install/` + `cpdeploy/`). The former `install/` module dissolves into it, and
   `freehold-install` folds into `freehold install` (the hidden `bootstrap` alias
-  stays as `install --yes`); the operator `exec` is shared, the box self-staged
-  `provision`/`storage`/`deploy-cp` register on the same `freehold` root.
+  stays as `install --yes`); the operator `exec` is shared, and the box
+  self-staged `provision`/`storage`/`deploy-cp` are consolidated into one
+  `freehold-cli/internal/stages/` home (the once-duplicated CLI/install
+  definitions are now a single implementation) and registered on the same
+  `freehold` root.
 - **`control-plane/`** — the server + engines only (`api/cpbuild`, `api/console`,
   `api/agenttools`, `secret-management`, `state`, `core`). It never imports
   `freehold-cli/`; the local CLI never imports it — it drives the server through

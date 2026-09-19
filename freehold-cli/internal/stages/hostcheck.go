@@ -1,4 +1,4 @@
-package cli
+package stages
 
 import (
 	"fmt"
@@ -12,7 +12,7 @@ import (
 	"freehold/providers/proxmox"
 )
 
-// hostSideLiveCheck is the authoritative, profile-independent fail-if-live
+// HostSideLiveCheck is the authoritative, profile-independent fail-if-live
 // probe: using this box's deterministic DOOR_SPEC key, SSH directly to the
 // host and look for `<name>-cp`. It runs BEFORE provisioning so a mint never
 // re-deploys over a live world.
@@ -20,7 +20,7 @@ import (
 // It only has teeth when this box already holds an ops identity whose door is
 // authorized (a prior login); a fresh box has no identity or no authorized
 // key, so the probe degrades to a no-op rather than blocking the install.
-func hostSideLiveCheck(name, host string) error {
+func HostSideLiveCheck(name, host string) error {
 	if name == "" || host == "" {
 		return nil
 	}
@@ -92,10 +92,10 @@ func stageExec(addr, agentDir, target, host string, transient bool) (proxmox.Exe
 	return proxmox.ClientExec(c, target), func() {}, nil
 }
 
-// transientFactory builds the direct-SSH provider once the runner package's
+// TransientFactory builds the direct-SSH provider once the runner package's
 // substrate key exists (after stageProvision + the door gate): box swaps to it
 // and runs host ops without a served runner. The caller must invoke cleanup.
-func transientFactory(eng *box.Engine) func() (provisioning.Provider, func(), error) {
+func TransientFactory(eng *box.Engine) func() (provisioning.Provider, func(), error) {
 	return func() (provisioning.Provider, func(), error) {
 		runnerDir := filepath.Join(box.RunnerPkgs(), eng.F.Target)
 		pem, err := box.SubstrateKeyPEM(runnerDir, eng.F.Target)

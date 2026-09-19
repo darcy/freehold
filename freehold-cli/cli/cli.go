@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	installcli "freehold/freehold-cli/install"
+	"freehold/freehold-cli/internal/stages"
 )
 
 var rootCmd = &cobra.Command{
@@ -75,9 +76,9 @@ func init() {
 		// (provision/storage/deploy-cp). The operator `exec` above is shared.
 		installcli.InstallCommand(),
 		installcli.BootstrapCommand(),
-		installcli.ProvisionCommand(),
-		installcli.StorageCommand(),
-		installcli.DeployCpCommand(),
+		stages.ProvisionCommand(),
+		stages.StorageCommand(),
+		stages.DeployCpCommand(),
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.Version = "0.1.0"

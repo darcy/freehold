@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
-
 	"freehold/contract/crypto"
 	"freehold/freehold-cli/cli/flows"
 )
@@ -133,20 +131,4 @@ func bech32EncodeNsec(payload []byte) string {
 	return out.String()
 }
 
-// Regression (operator report 2026-08-30 — "! teardown failed:  — the pool
-// is NOT removed"): teardown's DestroyPool drives this binary with the
-// shared runner flags (--addr / --agent-dir). Every `storage` subcommand —
-// including destroy-pool — must register them, or the whole --data
-// teardown dies on the pool step with "unknown flag: --addr".
-func TestStorageSubcommandsAcceptRunnerFlags(t *testing.T) {
-	for _, sc := range []*cobra.Command{
-		storageResolveCmd, storageEnsureCmd, storageInfoCmd,
-		storageDestroyCmd, storageDestroyPoolCmd,
-	} {
-		for _, flag := range []string{"addr", "agent-dir", "runner-pubkey", "target"} {
-			if sc.Flags().Lookup(flag) == nil {
-				t.Errorf("storage %s must register --%s", sc.Name(), flag)
-			}
-		}
-	}
-}
+

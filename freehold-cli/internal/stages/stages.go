@@ -2,13 +2,14 @@
 // ITSELF for the low-level stage commands (exec / provision / storage /
 // deploy-cp) exactly as the shared engine selfStages them. Each talks to the
 // host/siblings through a provisioning runner.
-package cli
+package stages
 
 import (
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -395,6 +396,115 @@ var storageDestroyCmd = &cobra.Command{
 	},
 }
 
+// storageDestroyPoolCmd is driven by the teardown engine (whole-world --data):
+// remove a freehold-CREATED thin pool after its tenant LVs are gone.
+var storageDestroyPoolCmd = &cobra.Command{
+	Use:   "destroy-pool",
+	Short: "Remove a freehold-CREATED thin pool from its VG (full teardown --data half)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		addr, _ := cmd.Flags().GetString("addr")
+		agentDir, _ := cmd.Flags().GetString("agent-dir")
+		target := mustStr(cmd, "target")
+		pool := mustStr(cmd, "pool")
+		thinPool := mustStr(cmd, "thin-pool")
+		if pool == "" || thinPool == "" {
+			return fmt.Errorf("storage destroy-pool needs --pool (the VG) and --thin-pool")
+		}
+		exec, cleanup, err := stageExec(addr, agentDir, target, mustStr(cmd, "host"), mustBool(cmd, "transient"))
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		if err := drive.RemoveThinPool(exec, pool, thinPool); err != nil {
+			return err
+		}
+		fmt.Println("STORAGE-POOL-DESTROYED: true")
+		return nil
+	},
+}
+
+// storageInfoCmd reports the live durable-plane snapshot (read-only; the DATA
+// tab's source).
+var storageInfoCmd = &cobra.Command{
+	Use:   "info",
+	Short: "Report the live durable-plane snapshot: host capacity + per-mount size/used + guest bind-mount liveness",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		addr, _ := cmd.Flags().GetString("addr")
+		agentDir, _ := cmd.Flags().GetString("agent-dir")
+		target := mustStr(cmd, "target")
+		pool := mustStr(cmd, "pool")
+		kindStr := mustStr(cmd, "kind")
+		mountSpecs := mustArr(cmd, "mount")
+		if pool == "" {
+			return fmt.Errorf("storage info needs --pool")
+		}
+		exec, cleanup, err := stageExec(addr, agentDir, target, mustStr(cmd, "host"), mustBool(cmd, "transient"))
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		kind, action, err := parseKind(exec, kindStr)
+		if err != nil {
+			return err
+		}
+		if action != nil {
+			fmt.Println("STORAGE-CAPACITY: -")
+			return nil
+		}
+		var mounts []drive.MountArg
+		for _, m := range mountSpecs {
+			ma, err := parseInfoMount(m)
+			if err != nil {
+				return err
+			}
+			mounts = append(mounts, ma)
+		}
+		info, err := drive.ProbeStorage(exec, kind, pool, mounts)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("STORAGE-CAPACITY: %s\n", info.Capacity)
+		for _, m := range info.Mounts {
+			mounted := "-"
+			if m.GuestMounted != nil {
+				if *m.GuestMounted {
+					mounted = "mounted"
+				} else {
+					mounted = "absent"
+				}
+			}
+			size, used := "-", "-"
+			if m.Size != nil {
+				size = strconv.FormatUint(*m.Size, 10)
+			}
+			if m.Used != nil {
+				used = strconv.FormatUint(*m.Used, 10)
+			}
+			fmt.Printf("STORAGE-INFO %s:%s:%s:%s:%s:%s\n", m.Role, m.Source, m.Guest, size, used, mounted)
+		}
+		return nil
+	},
+}
+
+// parseInfoMount parses a `storage info --mount` spec:
+// `<role>:<source>:<guest>:<vmid|->`.
+func parseInfoMount(s string) (drive.MountArg, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 4 || parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
+		return drive.MountArg{}, fmt.Errorf("--mount must be <role>:<source>:<guest>:<vmid|-> (got %q)", s)
+	}
+	var vmid *uint32
+	if parts[3] != "-" {
+		n, err := strconv.ParseUint(parts[3], 10, 32)
+		if err != nil {
+			return drive.MountArg{}, fmt.Errorf("vmid must be a number or '-' (got %q)", s)
+		}
+		v := uint32(n)
+		vmid = &v
+	}
+	return drive.MountArg{Role: parts[0], Source: parts[1], Guest: parts[2], VMID: vmid}, nil
+}
+
 func tenantFor(tenant string) (planebase.Tenant, error) {
 	switch tenant {
 	case "relay":
@@ -535,8 +645,8 @@ func init() {
 	provisionCmd.Flags().StringArray("mount", nil, "durable mount <source>:<guest>")
 	provisionCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (accepted for symmetry; unused by proxmox-lxc)")
 
-	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd, storageDestroyCmd)
-	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd, storageDestroyCmd} {
+	storageCmd.AddCommand(storageResolveCmd, storageEnsureCmd, storageDestroyCmd, storageDestroyPoolCmd, storageInfoCmd)
+	for _, sc := range []*cobra.Command{storageResolveCmd, storageEnsureCmd, storageDestroyCmd, storageDestroyPoolCmd, storageInfoCmd} {
 		registerSelfFlags(sc)
 	}
 	storageResolveCmd.Flags().Bool("confirm-storage", false, "consent to CREATE a backend")
@@ -554,6 +664,11 @@ func init() {
 	storageDestroyCmd.Flags().String("domain", "", "relay identity domain")
 	storageDestroyCmd.Flags().String("pool", "", "storage pool")
 	storageDestroyCmd.Flags().String("kind", "", "backend kind (zfs|lvmth)")
+	storageDestroyPoolCmd.Flags().String("pool", "", "the VG the thin pool lives in")
+	storageDestroyPoolCmd.Flags().String("thin-pool", "", "the thin pool to remove (freehold-created only)")
+	storageInfoCmd.Flags().String("pool", "", "storage pool")
+	storageInfoCmd.Flags().String("kind", "", "backend kind (zfs|lvmth)")
+	storageInfoCmd.Flags().StringArray("mount", nil, "mount ref <role>:<source>:<guest>:<vmid|-> (repeatable)")
 
 	registerSelfFlags(deployCpCmd)
 	deployCpCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "remote state dir")

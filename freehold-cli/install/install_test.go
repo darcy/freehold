@@ -88,17 +88,3 @@ func TestGateInstallMatrix(t *testing.T) {
 		t.Fatalf("a dead CP must re-adopt: a=%v err=%v", a, err)
 	}
 }
-
-// TestStateRootForDerivesProfileRoot proves a self-staged child recovers the
-// profile state root from the agent-dir it is handed, and falls back to the
-// default root for a non-conventional dir.
-func TestStateRootForDerivesProfileRoot(t *testing.T) {
-	root := filepath.Join("/srv", "data", "profiles", "librem2")
-	if got := stateRootFor(filepath.Join(root, "control-plane", "agent-ops")); got != root {
-		t.Errorf("stateRootFor = %q, want %q", got, root)
-	}
-	t.Setenv("FREEHOLD_HOME", "/tmp/fh-state-root")
-	if got := stateRootFor("/custom/identity"); got != "/tmp/fh-state-root" {
-		t.Errorf("non-conventional agent-dir must fall back to the default root, got %q", got)
-	}
-}

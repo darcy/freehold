@@ -22,6 +22,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/freehold-cli/internal/stages"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 	"freehold/providers/proxmox/drive"
@@ -190,7 +191,7 @@ func runInstallCmd(cmd *cobra.Command, forceYes bool) error {
 	}
 	applyInstallDefaults(&f)
 	f.ConfigPath = installConfigPath()
-	if err := hostSideLiveCheck(name, f.Host); err != nil {
+	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
 	}
 	bins, err := defaultBins()
@@ -202,7 +203,7 @@ func runInstallCmd(cmd *cobra.Command, forceYes bool) error {
 		return err
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
-	eng.ProviderFactory = transientFactory(eng)
+	eng.ProviderFactory = stages.TransientFactory(eng)
 	eng.Out = out
 	eng.Stdin = bufio.NewReader(cmd.InOrStdin())
 	return eng.RunBootstrap()
@@ -249,7 +250,7 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 	}
 	f.Name = name
 	applyInstallDefaults(&f)
-	if err := hostSideLiveCheck(name, f.Host); err != nil {
+	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
 	}
 	consent := "no"
@@ -274,7 +275,7 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 		return err
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
-	eng.ProviderFactory = transientFactory(eng)
+	eng.ProviderFactory = stages.TransientFactory(eng)
 	eng.Out = out
 	eng.Stdin = ui.in
 	return eng.RunBootstrap()
