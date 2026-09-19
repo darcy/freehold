@@ -32,7 +32,7 @@ func cliRoot(t *testing.T) string {
 // guard lives in control-plane (control-plane/isolation_test.go).
 func TestCLIDoesNotImportControlPlane(t *testing.T) {
 	root := cliRoot(t)
-	cmd := exec.Command("go", "list", "-deps", "./...")
+	cmd := exec.Command("go", "list", "-deps", "-test", "./...")
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {

@@ -37,14 +37,12 @@ install: build
     install -m 755 target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
     @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release)"
 
-# Verify every sibling the CLIs resolve is present.
+# Verify every sibling `box.ResolveBins` requires is present (AGENTS.md's full
+# binary set). One list, so the gate can't silently lag the ResolveBins set.
 check-siblings:
-    @test -x target/debug/freehold && echo "ok  target/debug/freehold" || (echo "MISSING target/debug/freehold (run: just build)"; exit 1)
-    @test -x target/debug/freehold-console && echo "ok  target/debug/freehold-console" || (echo "MISSING target/debug/freehold-console (run: just build)"; exit 1)
-    @test -x target/release/freehold-console && echo "ok  target/release/freehold-console" || (echo "MISSING target/release/freehold-console (run: just build)"; exit 1)
-    @test -x target/debug/runner && echo "ok  target/debug/runner" || (echo "MISSING target/debug/runner (run: just build)"; exit 1)
-    @test -x target/release/runner && echo "ok  target/release/runner" || (echo "MISSING target/release/runner (run: just build)"; exit 1)
-    @test -x target/release/freehold-agent-tools && echo "ok  target/release/freehold-agent-tools" || (echo "MISSING target/release/freehold-agent-tools (run: just build)"; exit 1)
+    @for f in target/debug/freehold target/debug/freehold-console target/release/freehold-console target/debug/runner target/release/runner target/release/freehold-agent-tools; do \
+      if test -x "$f"; then echo "ok  $f"; else echo "MISSING $f (run: just build)"; exit 1; fi; \
+    done
     @echo "✓ all siblings present"
 
 # Run the full gate: cargo fmt/build/test (runner + core) + Go build/vet/test

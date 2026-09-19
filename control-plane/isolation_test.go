@@ -33,7 +33,7 @@ func controlPlaneRoot(t *testing.T) string {
 // in the freehold-cli module (freehold-cli/isolation_test.go).
 func TestControlPlaneDoesNotImportCLI(t *testing.T) {
 	root := controlPlaneRoot(t)
-	cmd := exec.Command("go", "list", "-deps", "./...")
+	cmd := exec.Command("go", "list", "-deps", "-test", "./...")
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
