@@ -25,6 +25,28 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.14] — uninstall/teardown match the runner substrate key correctly
+
+The runner substrate key's `authorized_keys` comment is the **runner target**
+(`provision <name>` → `GenerateSSHKeypair(name)`), but the build-box `uninstall`
+and whole-world `teardown --data` paths matched and verified by
+`RunnerRef.Pubkey` — the runner's **Nostr** pubkey. That string never appears in
+`authorized_keys`, so the check found zero lines and reported a false "removed
+(verified)" while the substrate key stayed authorized.
+
+- **One removal implementation** (`teardown.RemoveAuthorizedKey`): a full line is
+  matched on its base64 **body**; a bare name is matched on the line's last field
+  **exactly** (no substring sweep); and a ref that matches **nothing** is now a
+  hard error rather than a silent no-op.
+- **Correct refs**: `runnerKeyRefs` removes the box package's exact line and the
+  plane runner's rotated line (read from the CP's `identity.json`/`secrets.json`
+  when reachable), falling back to the bare runner target only when neither
+  package is readable.
+- The transient path shares the same helper (via an adapter); the build-box path
+  now also warns about other boxes' remaining doors, matching the transient path.
+- Uses `mktemp` (no predictable `/tmp` path) and never builds a `sed` address
+  from the ref.
+
 ## [0.6.13] — re-adopt rotates the runner substrate key
 
 Re-adopt preserved the runner identity but kept its (possibly stale) host credential, so a

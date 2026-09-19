@@ -9,10 +9,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/contract/config"
-	"freehold/contract/crypto"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/teardown"
-	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
@@ -181,7 +179,7 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 	tcfg := &teardown.Cfg{
 		Domain:        cfg.TenantSlug(),
 		RunNTarget:    cfg.Runner.Target,
-		RunnerComment: cfg.Runner.Pubkey,
+		RunnerKeyRefs: runnerKeyRefs(cfg, runner),
 		// The FULL world is removed here (not cfg.Managed, which can omit k3s
 		// and litellm in a partial world) — uninstall drops the CP + every guest.
 		Managed:     []string{"relay", "cp", "k3s"},
@@ -202,30 +200,27 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 		return err
 	}
 	if !removeData {
-		if err := removeRunnerDoor(runner, cfg.Runner.Pubkey); err != nil {
+		if err := removeRunnerKeys(runner, cfg); err != nil {
 			return err
 		}
 	}
+	warnOtherDoors(runner)
 	return nil
 }
 
-// removeRunnerDoor deletes the runner's authorized_keys line on the host (the
-// runner substrate key), verified. The comment is the runner's pubkey.
-func removeRunnerDoor(runner *teardown.ExecRunner, comment string) error {
-	// '|' as the sed delimiter: the comment can contain '/' (base64), which
-	// would terminate a '/'-delimited pattern early.
-	sed := fmt.Sprintf("sed -i '\\|ssh-ed25519 [A-Za-z0-9+/=]* %s$|d' /root/.ssh/authorized_keys", comment)
-	if ok, out := runner.Exec(sed); !ok {
-		return fmt.Errorf("runner key removal failed on the host: %s", out)
+// removeRunnerKeys removes every substrate-key line this box knows about: the
+// box package's exact line and the plane runner's rotated line (when readable),
+// else the bare target. Fails loudly when nothing matches.
+func removeRunnerKeys(runner *teardown.ExecRunner, cfg *config.Config) error {
+	refs := runnerKeyRefs(cfg, runner)
+	if len(refs) == 0 {
+		return fmt.Errorf("no runner substrate key reference — cannot remove the host key")
 	}
-	ok, out := runner.Exec(fmt.Sprintf("grep -c 'ssh-ed25519 .* %s' /root/.ssh/authorized_keys || true", comment))
-	if !ok {
-		return fmt.Errorf("runner key verification failed: %s", out)
+	for _, ref := range refs {
+		if err := teardown.RemoveAuthorizedKey(runner, ref); err != nil {
+			return err
+		}
 	}
-	if strings.TrimSpace(out) != "0" {
-		return fmt.Errorf("the runner's key is STILL in authorized_keys (%s line(s))", strings.TrimSpace(out))
-	}
-	fmt.Println("runner substrate key removed from the host (verified)")
 	return nil
 }
 
@@ -300,100 +295,27 @@ func runUninstallTransient(cfg *config.Config, host string, removeData bool) err
 		}
 		fmt.Printf("  ✓ destroyed %s (%s)\n", role, name)
 	}
-	// Remove the runner substrate key: prefer the exact key line (from the
-	// local package's sealed credential), else match by the runner NAME —
-	// provision sets the authorized_keys comment to the secret name, not the
-	// Nostr pubkey.
-	runnerRef := substratePubLine(cfg)
-	if runnerRef == "" {
-		runnerRef = cfg.Runner.Target
-	}
-	removeHostKey(prov, runnerRef, "runner substrate key")
-	// This box's operator door.
-	if door, derr := doorPubkey(); derr == nil {
-		removeHostKey(prov, door, "this box's operator door")
-	}
-	warnOtherDoors(prov)
-	return nil
-}
-
-// removeHostKey deletes an authorized_keys entry, matching on the key BODY
-// when `ref` is a full ssh line (base64 — shell/regex safe), else on the
-// trailing COMMENT when it is a bare name (the provisioned substrate key's
-// comment is the runner name). It verifies the removal and never reports
-// success it cannot prove.
-func removeHostKey(prov provisioning.Provider, ref, label string) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		fmt.Printf("  (warning: no %s reference — cannot remove it)\n", label)
-		return
-	}
-	body := keyBody(ref)
-	token := body
-	if token == "" {
-		token = ref // a bare comment/name
-	}
-	rm := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && grep -vF '%s' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", token)
-	if _, err := prov.GuestExec("", rm, 60); err != nil {
-		fmt.Printf("  (warning: %s removal failed: %v)\n", label, err)
-		return
-	}
-	// Verify: no line still carries the token.
-	out, err := prov.GuestExec("", fmt.Sprintf("grep -cF '%s' /root/.ssh/authorized_keys 2>/dev/null || true", token), 30)
-	left := ""
-	if out != nil {
-		left = strings.TrimSpace(out.Stdout)
-	}
-	if err != nil || left != "0" {
-		fmt.Printf("  (warning: %s may still be authorized on the host — %s line(s) carry it)\n", label, left)
-		return
-	}
-	fmt.Printf("  ✓ removed %s from the host\n", label)
-}
-
-// keyBody returns the base64 body (second field) of an authorized_keys line,
-// or "" when ref is a bare token rather than a full line.
-func keyBody(line string) string {
-	f := strings.Fields(line)
-	if len(f) >= 2 && strings.HasPrefix(f[0], "ssh-") {
-		return f[1]
-	}
-	return ""
-}
-
-// substratePubLine derives the substrate key's authorized_keys line from this
-// box's runner package when it is local; "" when there is no package (thin box)
-// so the caller falls back to matching the runner name.
-func substratePubLine(cfg *config.Config) string {
-	if cfg.Runner.Target == "" {
-		return ""
-	}
-	runnerDir := filepath.Join(box.RunnerPkgs(), cfg.Runner.Target)
-	pem, err := box.SubstrateKeyPEM(runnerDir, cfg.Runner.Target)
-	if err != nil {
-		return ""
-	}
-	line, err := crypto.ExtractED25519PublicKeyLine(pem)
-	if err != nil {
-		return ""
-	}
-	return line
-}
-
-// warnOtherDoors lists other freehold boxes' door keys still authorized on the
-// host, so the operator knows uninstall only removed THIS box's door.
-func warnOtherDoors(prov provisioning.Provider) {
-	out, err := prov.GuestExec("", "grep -o 'freehold-door-[^ ]*' /root/.ssh/authorized_keys 2>/dev/null || true", 30)
-	if err != nil || out == nil {
-		return
-	}
-	var others []string
-	for _, l := range strings.Split(out.Stdout, "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			others = append(others, l)
+	// Remove the runner substrate key(s), then this box's operator door — one
+	// shared implementation (teardown.RemoveAuthorizedKey): exact body match,
+	// else exact trailing-comment match, with a fail-loud no-match guard.
+	adapter := guestExecAdapter{exec: func(cmd string, timeoutS uint64) (bool, string) {
+		out, err := prov.GuestExec("", cmd, timeoutS)
+		if err != nil || out == nil {
+			return false, ""
+		}
+		ok := out.ExitCode == nil || *out.ExitCode == 0
+		return ok, out.Stdout
+	}}
+	for _, ref := range runnerKeyRefs(cfg, adapter) {
+		if err := teardown.RemoveAuthorizedKey(adapter, ref); err != nil {
+			return err
 		}
 	}
-	if len(others) > 0 {
-		fmt.Printf("  ! other freehold boxes' doors remain on the host: %s\n    (uninstall removes only THIS box's door — revoke the others with `freehold door revoke` from each)\n", strings.Join(others, ", "))
+	if door, derr := doorPubkey(); derr == nil {
+		if err := teardown.RemoveAuthorizedKey(adapter, door); err != nil {
+			return err
+		}
 	}
+	warnOtherDoors(adapter)
+	return nil
 }

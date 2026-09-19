@@ -15,6 +15,7 @@ type fakeRunner struct {
 	pools    []string // "vg/pool" entries DestroyPool saw
 	failExec string   // substring => Exec returns false
 	order    []string // ordered action log (terraform / lxc-<role>)
+	authKeys []string // modeled /root/.ssh/authorized_keys lines
 }
 
 func (f *fakeRunner) Exec(cmd string) (bool, string) {
@@ -22,7 +23,79 @@ func (f *fakeRunner) Exec(cmd string) (bool, string) {
 	if f.failExec != "" && strings.Contains(cmd, f.failExec) {
 		return false, ""
 	}
+	// Model the authorized_keys probe/removal commands so RemoveAuthorizedKey
+	// can be exercised hermetically.
+	if strings.Contains(cmd, "authorized_keys") {
+		switch {
+		case strings.Contains(cmd, "wc -l"): // awk name probe
+			name := between(cmd, `$NF=="`, `"`)
+			return true, fmt.Sprintf("%d", f.countName(name))
+		case strings.Contains(cmd, "grep -cF"): // body probe
+			body := between(cmd, "grep -cF '", "'")
+			return true, fmt.Sprintf("%d", f.countBody(body))
+		case strings.Contains(cmd, "awk") && strings.Contains(cmd, "$ak"): // name removal
+			name := between(cmd, `$NF!="`, `"`)
+			f.removeName(name)
+			return true, ""
+		case strings.Contains(cmd, "grep -vF") && strings.Contains(cmd, "$ak"): // body removal
+			body := between(cmd, "grep -vF '", "'")
+			f.removeBody(body)
+			return true, ""
+		}
+	}
 	return true, "0"
+}
+
+func between(s, pre, post string) string {
+	i := strings.Index(s, pre)
+	if i < 0 {
+		return ""
+	}
+	s = s[i+len(pre):]
+	j := strings.Index(s, post)
+	if j < 0 {
+		return s
+	}
+	return s[:j]
+}
+
+func (f *fakeRunner) countName(name string) int {
+	n := 0
+	for _, k := range f.authKeys {
+		if fields := strings.Fields(k); len(fields) > 0 && fields[len(fields)-1] == name {
+			n++
+		}
+	}
+	return n
+}
+func (f *fakeRunner) countBody(body string) int {
+	n := 0
+	for _, k := range f.authKeys {
+		if strings.Contains(k, body) {
+			n++
+		}
+	}
+	return n
+}
+func (f *fakeRunner) removeName(name string) {
+	var keep []string
+	for _, k := range f.authKeys {
+		if fields := strings.Fields(k); len(fields) > 0 && fields[len(fields)-1] == name {
+			continue
+		}
+		keep = append(keep, k)
+	}
+	f.authKeys = keep
+}
+func (f *fakeRunner) removeBody(body string) {
+	var keep []string
+	for _, k := range f.authKeys {
+		if strings.Contains(k, body) {
+			continue
+		}
+		keep = append(keep, k)
+	}
+	f.authKeys = keep
 }
 
 func (f *fakeRunner) DestroyOneLxc(role string, vmid *uint32) ([]string, error) {
@@ -64,7 +137,7 @@ func testCfg(t *testing.T, data bool) (*Cfg, *fakeRunner) {
 		WorldHome:     home,
 		ConfigPath:    conf,
 		RunNTarget:    "proxmox-box",
-		RunnerComment: "freehold-world-1234",
+		RunnerKeyRefs: []string{"proxmox-box"},
 		Domain:        "world.test",
 		Pool:          "pve",
 		Managed:       []string{"relay", "cp"},
@@ -74,7 +147,7 @@ func testCfg(t *testing.T, data bool) (*Cfg, *fakeRunner) {
 		},
 		ThinPool: "fh-thin",
 		Data:     data,
-	}, &fakeRunner{}
+	}, &fakeRunner{authKeys: []string{"ssh-ed25519 AAAABBBBCCCC proxmox-box"}}
 }
 
 func ptr32(v uint32) *uint32 { return &v }
@@ -163,14 +236,17 @@ func TestWholeWorldDataRemovesEverything(t *testing.T) {
 	if len(r.pools) != 1 || r.pools[0] != "pve/fh-thin" {
 		t.Errorf("--data must remove the created pool exactly once, got %v", r.pools)
 	}
-	var sawSed bool
+	var sawRemoval bool
 	for _, cmd := range r.execs {
-		if strings.Contains(cmd, "sed -i") && strings.Contains(cmd, "authorized_keys") {
-			sawSed = true
+		if strings.Contains(cmd, "authorized_keys") && (strings.Contains(cmd, "awk") || strings.Contains(cmd, "grep -vF")) {
+			sawRemoval = true
 		}
 	}
-	if !sawSed {
+	if !sawRemoval {
 		t.Errorf("--data must remove the door key: %v", r.execs)
+	}
+	if len(r.authKeys) != 0 {
+		t.Errorf("--data must have removed the door key line: %v", r.authKeys)
 	}
 	// freehold's operator-side state (world home = runner + ops identity +
 	// DNS creds; config = recorded coords) is KEPT even on --data, so a
@@ -425,5 +501,41 @@ func TestExecRunnerNilVmidNoop(t *testing.T) {
 		if strings.HasPrefix(cmd, "pct destroy") {
 			t.Errorf("no destroy may run without a recorded vmid, got: %q", cmd)
 		}
+	}
+}
+
+// TestRemoveAuthorizedKeyFailsLoudOnNoMatch: a ref that matches nothing (e.g.
+// the runner's Nostr pubkey, the old bug) must ERROR, not silently "succeed".
+func TestRemoveAuthorizedKeyFailsLoudOnNoMatch(t *testing.T) {
+	r := &fakeRunner{authKeys: []string{"ssh-ed25519 AAAABBBBCCCC proxmox-box"}}
+	if err := RemoveAuthorizedKey(r, "deadbeefdeadbeefdeadbeefdeadbeef"); err == nil {
+		t.Fatal("a ref matching nothing must error, not report success")
+	}
+	if len(r.authKeys) != 1 {
+		t.Errorf("no line should be removed, got %v", r.authKeys)
+	}
+}
+
+// TestRemoveAuthorizedKeyNameExactMatch: a bare comment removes only lines
+// whose LAST FIELD is exactly that name (no substring sweep).
+func TestRemoveAuthorizedKeyNameExactMatch(t *testing.T) {
+	r := &fakeRunner{authKeys: []string{"ssh-ed25519 AAAABBBBCCCC proxmox-box", "ssh-ed25519 DDDDEEEEFFFF proxmox-box-old"}}
+	if err := RemoveAuthorizedKey(r, "proxmox-box"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.authKeys) != 1 || !strings.Contains(r.authKeys[0], "proxmox-box-old") {
+		t.Errorf("exact name match must leave the other line: %v", r.authKeys)
+	}
+}
+
+// TestRemoveAuthorizedKeyBodyRemovesOne: a full line removes only that exact
+// key body (the rotated-duplicate case: same comment, different bodies).
+func TestRemoveAuthorizedKeyBodyRemovesOne(t *testing.T) {
+	r := &fakeRunner{authKeys: []string{"ssh-ed25519 AAAABBBBCCCC proxmox-box", "ssh-ed25519 DDDDEEEEFFFF proxmox-box"}}
+	if err := RemoveAuthorizedKey(r, "ssh-ed25519 AAAABBBBCCCC proxmox-box"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.authKeys) != 1 || !strings.Contains(r.authKeys[0], "DDDDEEEEFFFF") {
+		t.Errorf("body match must remove only the exact key: %v", r.authKeys)
 	}
 }

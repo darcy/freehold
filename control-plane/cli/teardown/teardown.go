@@ -322,19 +322,12 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 	//    and skips the door gate. Per-tenant KEEPS everything too.
 	switch {
 	case scope == ScopeWholeWorld && cfg.Data:
-		// '|' as the sed delimiter: the comment can contain '/' (base64), which
-		// would terminate a '/'-delimited pattern early.
-		keyRemoval := fmt.Sprintf("sed -i '\\|ssh-ed25519 [A-Za-z0-9+/=]* %s$|d' /root/.ssh/authorized_keys", cfg.RunnerComment)
-		if ok, _ := r.Exec(keyRemoval); !ok {
-			return "", fmt.Errorf("door removal command failed on %s", cfg.RunNTarget)
+		for _, ref := range cfg.RunnerKeyRefs {
+			if err := RemoveAuthorizedKey(r, ref); err != nil {
+				return "", err
+			}
 		}
-		_, check := r.Exec(fmt.Sprintf("grep -c 'ssh-ed25519 .* %s' /root/.ssh/authorized_keys || true", cfg.RunnerComment))
-		still := 0
-		fmt.Sscanf(strings.TrimSpace(check), "%d", &still)
-		if still != 0 {
-			return "", fmt.Errorf("the runner's key is STILL in authorized_keys (%d line(s))", still)
-		}
-		say(fmt.Sprintf("door removed from %s (%s — verified)", cfg.RunnerComment, cfg.RunNTarget))
+		say(fmt.Sprintf("door removed from %s (verified)", cfg.RunNTarget))
 
 		// freehold's operator-side state is KEPT even on a full --data
 		// teardown: the config (recorded coords), the world home (runner
@@ -440,8 +433,8 @@ func (r *ExecRunner) TerraformDestroy() ([]string, error) {
 // Cfg is the teardown-input config surface.
 type Cfg struct {
 	Domain        string
-	RunNTarget    string // the runner target name
-	RunnerComment string // the runner's authorized_keys comment
+	RunNTarget    string   // the runner target name
+	RunnerKeyRefs []string // substrate-key refs to remove: a full authorized_keys line (matched by body) or a bare comment/name (matched exactly on the last field)
 	Managed       []string
 	WorldHome     string
 	ConfigPath    string
@@ -477,4 +470,56 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// authorizedKeyBody returns the base64 body of a full authorized_keys line, or
+// "" when ref is a bare comment/name.
+func authorizedKeyBody(ref string) string {
+	f := strings.Fields(ref)
+	if len(f) >= 2 && strings.HasPrefix(f[0], "ssh-") {
+		return f[1]
+	}
+	return ""
+}
+
+// RemoveAuthorizedKey removes the root authorized_keys entry named by ref from
+// the target host. ref is either a full `ssh-ed25519 <b64> [comment]` line
+// (matched on the base64 BODY) or a bare comment/name (matched on the line's
+// last field EXACTLY — no substring sweep, so a shared target name cannot
+// delete another key). It fails loudly when ref matches NOTHING: a silent
+// no-op was the bug this replaces. Uses mktemp (no predictable /tmp path) and
+// never builds a sed address from the ref.
+func RemoveAuthorizedKey(r interface {
+	Exec(cmd string) (bool, string)
+}, ref string) error {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fmt.Errorf("no key reference to remove")
+	}
+	var probe string
+	if body := authorizedKeyBody(ref); body != "" {
+		probe = fmt.Sprintf("grep -cF '%s' /root/.ssh/authorized_keys 2>/dev/null || true", body)
+	} else {
+		probe = fmt.Sprintf("awk '$NF==\"%s\"' /root/.ssh/authorized_keys 2>/dev/null | wc -l", ref)
+	}
+	if ok, out := r.Exec(probe); !ok {
+		return fmt.Errorf("authorized_keys probe failed: %s", out)
+	} else if n := strings.TrimSpace(out); n == "" || n == "0" {
+		return fmt.Errorf("no authorized_keys line matches %q — refusing a silent no-op", ref)
+	}
+	var rm string
+	if body := authorizedKeyBody(ref); body != "" {
+		rm = fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && grep -vF '%s' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", body)
+	} else {
+		rm = fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && awk '$NF!=\"%s\"' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", ref)
+	}
+	if ok, out := r.Exec(rm); !ok {
+		return fmt.Errorf("key removal failed on the host: %s", out)
+	}
+	if ok, out := r.Exec(probe); !ok {
+		return fmt.Errorf("key verification failed: %s", out)
+	} else if n := strings.TrimSpace(out); n != "0" {
+		return fmt.Errorf("the key is STILL in authorized_keys (%s line(s))", n)
+	}
+	return nil
 }

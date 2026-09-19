@@ -673,7 +673,7 @@ var teardownCmd = &cobra.Command{
 		tcfg := &teardown.Cfg{
 			Domain:        cfg.TenantSlug(),
 			RunNTarget:    cfg.Runner.Target,
-			RunnerComment: cfg.Runner.Pubkey,
+			RunnerKeyRefs: runnerKeyRefs(cfg, runner),
 			Managed:       cfg.Managed,
 			WorldHome:     freeholdHome(),
 			ConfigPath:    configPath,
