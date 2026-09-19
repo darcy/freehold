@@ -35,7 +35,7 @@ install: build
     install -m 755 target/release/freehold-console ~/.cargo/release/freehold-console
     install -m 755 target/release/runner ~/.cargo/release/runner
     install -m 755 target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
-    @echo "✓ freehold + freehold-install + siblings installed (~/.cargo/bin + ~/.cargo/release)"
+    @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release)"
 
 # Verify every sibling the CLIs resolve is present.
 check-siblings:
@@ -48,7 +48,7 @@ check-siblings:
     @echo "✓ all siblings present"
 
 # Run the full gate: cargo fmt/build/test (runner + core) + Go build/vet/test
-# across the five modules (incl. the hermetic Chunk-1 acceptance gate, which
+# across the six modules (incl. the hermetic Chunk-1 acceptance gate, which
 # is `go test ./acceptance/…` in the control-plane module) + the harness
 # byte-gate.
 test:

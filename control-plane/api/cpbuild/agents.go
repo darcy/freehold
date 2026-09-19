@@ -308,7 +308,9 @@ func (s *Spec) manageDomainDNS() error {
 		return nil
 	}
 	if provider != "cloudflare" {
-		return fmt.Errorf("freehold manages DNS on Cloudflare only right now, but the relay credential uses %q", provider)
+		// A non-Cloudflare credential is valid for cert DNS-01; A-record
+		// management is Cloudflare-only, so skip it rather than fail the build.
+		return nil
 	}
 	m, err := dnsman.For(provider, env)
 	if err != nil {
