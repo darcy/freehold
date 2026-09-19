@@ -78,12 +78,12 @@ func TestWipeLocalProfile(t *testing.T) {
 	}
 }
 
-// TestRunnerKeyRefsFallback: with no readable package (thin box) the ref is
-// the runner TARGET (the provision comment), never the Nostr pubkey.
-func TestRunnerKeyRefsFallback(t *testing.T) {
+// TestRunnerKeyRefsNoPackage: with no readable package (thin box) there are no
+// exact body refs — the caller's target-comment sweep removes the key. Never the
+// Nostr pubkey.
+func TestRunnerKeyRefsNoPackage(t *testing.T) {
 	cfg := &config.Config{Runner: config.RunnerRef{Target: "proxmox-box", Pubkey: "deadbeef"}}
-	refs := runnerKeyRefs(cfg, nil)
-	if len(refs) != 1 || refs[0] != "proxmox-box" {
-		t.Errorf("refs = %v, want [proxmox-box]", refs)
+	if refs := runnerKeyRefs(cfg, nil); len(refs) != 0 {
+		t.Errorf("refs = %v, want none (target sweep handles it)", refs)
 	}
 }

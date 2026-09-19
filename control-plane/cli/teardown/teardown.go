@@ -322,10 +322,8 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 	//    and skips the door gate. Per-tenant KEEPS everything too.
 	switch {
 	case scope == ScopeWholeWorld && cfg.Data:
-		for _, ref := range cfg.RunnerKeyRefs {
-			if err := RemoveAuthorizedKey(r, ref); err != nil {
-				return "", err
-			}
+		if err := RemoveRunnerSubstrate(r, cfg.RunnerKeyRefs, cfg.RunNTarget); err != nil {
+			return "", err
 		}
 		say(fmt.Sprintf("door removed from %s (verified)", cfg.RunNTarget))
 
@@ -434,7 +432,7 @@ func (r *ExecRunner) TerraformDestroy() ([]string, error) {
 type Cfg struct {
 	Domain        string
 	RunNTarget    string   // the runner target name
-	RunnerKeyRefs []string // substrate-key refs to remove: a full authorized_keys line (matched by body) or a bare comment/name (matched exactly on the last field)
+	RunnerKeyRefs []string // exact substrate-key lines to remove (matched by body); the target comment is swept as a fallback
 	Managed       []string
 	WorldHome     string
 	ConfigPath    string
@@ -482,44 +480,139 @@ func authorizedKeyBody(ref string) string {
 	return ""
 }
 
-// RemoveAuthorizedKey removes the root authorized_keys entry named by ref from
-// the target host. ref is either a full `ssh-ed25519 <b64> [comment]` line
-// (matched on the base64 BODY) or a bare comment/name (matched on the line's
-// last field EXACTLY — no substring sweep, so a shared target name cannot
-// delete another key). It fails loudly when ref matches NOTHING: a silent
-// no-op was the bug this replaces. Uses mktemp (no predictable /tmp path) and
-// never builds a sed address from the ref.
-func RemoveAuthorizedKey(r interface {
+// execIface is the remote exec surface the key helpers need.
+type execIface interface {
 	Exec(cmd string) (bool, string)
-}, ref string) error {
+}
+
+// probeBody returns how many authorized_keys lines contain a key body.
+func probeBody(r execIface, body string) (int, error) {
+	ok, out := r.Exec(fmt.Sprintf("grep -cF '%s' /root/.ssh/authorized_keys 2>/dev/null || true", body))
+	if !ok {
+		return 0, fmt.Errorf("authorized_keys probe failed: %s", out)
+	}
+	return atoi(strings.TrimSpace(out)), nil
+}
+
+// probeComment returns how many authorized_keys lines END with the exact comment.
+func probeComment(r execIface, comment string) (int, error) {
+	ok, out := r.Exec(fmt.Sprintf("awk '$NF==\"%s\"' /root/.ssh/authorized_keys 2>/dev/null | wc -l", comment))
+	if !ok {
+		return 0, fmt.Errorf("authorized_keys probe failed: %s", out)
+	}
+	return atoi(strings.TrimSpace(out)), nil
+}
+
+func removeBody(r execIface, body string) error {
+	cmd := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && grep -vF '%s' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", body)
+	if ok, out := r.Exec(cmd); !ok {
+		return fmt.Errorf("key removal failed: %s", out)
+	}
+	return nil
+}
+
+func removeComment(r execIface, comment string) error {
+	cmd := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && awk '$NF!=\"%s\"' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", comment)
+	if ok, out := r.Exec(cmd); !ok {
+		return fmt.Errorf("key removal failed: %s", out)
+	}
+	return nil
+}
+
+func atoi(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return n
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// RemoveRunnerSubstrate removes the runner substrate key(s) safely:
+//  1. best-effort remove each derived exact body (a stale one is skipped, never
+//     aborts the teardown);
+//  2. sweep any residual line whose LAST FIELD is the runner target (the
+//     provision comment) — covers a rotated/unknown key;
+//  3. verify: no derived body and no target-comment line remains, else error.
+//
+// It is idempotent (already-absent => nil) and never reports a false success.
+// The comment sweep can touch another world that shares the target name on this
+// host (the default `proxmox-box`); it runs only for residual lines.
+func RemoveRunnerSubstrate(r execIface, bodyRefs []string, target string) error {
+	seen := map[string]bool{}
+	for _, ref := range bodyRefs {
+		body := authorizedKeyBody(ref)
+		if body == "" || seen[body] {
+			continue
+		}
+		seen[body] = true
+		if n, err := probeBody(r, body); err != nil {
+			return err
+		} else if n > 0 {
+			if err := removeBody(r, body); err != nil {
+				return err
+			}
+		}
+	}
+	if target != "" {
+		if n, err := probeComment(r, target); err != nil {
+			return err
+		} else if n > 0 {
+			if err := removeComment(r, target); err != nil {
+				return err
+			}
+		}
+	}
+	for body := range seen {
+		if n, err := probeBody(r, body); err != nil {
+			return err
+		} else if n > 0 {
+			return fmt.Errorf("the runner substrate key is STILL in authorized_keys (%d line(s))", n)
+		}
+	}
+	if target != "" {
+		if n, err := probeComment(r, target); err != nil {
+			return err
+		} else if n > 0 {
+			return fmt.Errorf("the runner substrate key is STILL in authorized_keys (%d line(s) with comment %q)", n, target)
+		}
+	}
+	return nil
+}
+
+// RemoveAuthorizedKey removes ONE specific line (by exact body or exact
+// comment) and fails loudly when it matches nothing. Used for the box's own
+// operator door, which is unique per box.
+func RemoveAuthorizedKey(r execIface, ref string) error {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return fmt.Errorf("no key reference to remove")
 	}
-	var probe string
-	if body := authorizedKeyBody(ref); body != "" {
-		probe = fmt.Sprintf("grep -cF '%s' /root/.ssh/authorized_keys 2>/dev/null || true", body)
-	} else {
-		probe = fmt.Sprintf("awk '$NF==\"%s\"' /root/.ssh/authorized_keys 2>/dev/null | wc -l", ref)
+	body := authorizedKeyBody(ref)
+	probe, remove := probeComment, removeComment
+	what := ref
+	if body != "" {
+		probe = func(rr execIface, _ string) (int, error) { return probeBody(rr, body) }
+		remove = func(rr execIface, _ string) error { return removeBody(rr, body) }
+		what = body
 	}
-	if ok, out := r.Exec(probe); !ok {
-		return fmt.Errorf("authorized_keys probe failed: %s", out)
-	} else if n := strings.TrimSpace(out); n == "" || n == "0" {
+	n, err := probe(r, ref)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return fmt.Errorf("no authorized_keys line matches %q — refusing a silent no-op", ref)
 	}
-	var rm string
-	if body := authorizedKeyBody(ref); body != "" {
-		rm = fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && grep -vF '%s' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", body)
-	} else {
-		rm = fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && awk '$NF!=\"%s\"' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", ref)
+	if err := remove(r, ref); err != nil {
+		return err
 	}
-	if ok, out := r.Exec(rm); !ok {
-		return fmt.Errorf("key removal failed on the host: %s", out)
+	if n, err := probe(r, ref); err != nil {
+		return err
+	} else if n != 0 {
+		return fmt.Errorf("the key is STILL in authorized_keys (%d line(s))", n)
 	}
-	if ok, out := r.Exec(probe); !ok {
-		return fmt.Errorf("key verification failed: %s", out)
-	} else if n := strings.TrimSpace(out); n != "0" {
-		return fmt.Errorf("the key is STILL in authorized_keys (%s line(s))", n)
-	}
+	_ = what
 	return nil
 }

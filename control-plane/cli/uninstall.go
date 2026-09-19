@@ -212,16 +212,7 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 // box package's exact line and the plane runner's rotated line (when readable),
 // else the bare target. Fails loudly when nothing matches.
 func removeRunnerKeys(runner *teardown.ExecRunner, cfg *config.Config) error {
-	refs := runnerKeyRefs(cfg, runner)
-	if len(refs) == 0 {
-		return fmt.Errorf("no runner substrate key reference — cannot remove the host key")
-	}
-	for _, ref := range refs {
-		if err := teardown.RemoveAuthorizedKey(runner, ref); err != nil {
-			return err
-		}
-	}
-	return nil
+	return teardown.RemoveRunnerSubstrate(runner, runnerKeyRefs(cfg, runner), cfg.Runner.Target)
 }
 
 // displayHost is the host shown in uninstall output: the resolved --host /
@@ -306,10 +297,8 @@ func runUninstallTransient(cfg *config.Config, host string, removeData bool) err
 		ok := out.ExitCode == nil || *out.ExitCode == 0
 		return ok, out.Stdout
 	}}
-	for _, ref := range runnerKeyRefs(cfg, adapter) {
-		if err := teardown.RemoveAuthorizedKey(adapter, ref); err != nil {
-			return err
-		}
+	if err := teardown.RemoveRunnerSubstrate(adapter, runnerKeyRefs(cfg, adapter), cfg.Runner.Target); err != nil {
+		return err
 	}
 	if door, derr := doorPubkey(); derr == nil {
 		if err := teardown.RemoveAuthorizedKey(adapter, door); err != nil {

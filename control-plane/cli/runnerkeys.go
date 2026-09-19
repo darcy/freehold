@@ -18,13 +18,10 @@ type hostExec interface {
 	Exec(cmd string) (bool, string)
 }
 
-// runnerKeyRefs returns the substrate-key references to remove on uninstall:
-// the box's own package line (exact body), the plane runner's rotated line
-// (exact body, when the CP is reachable), and — only when neither package is
-// readable — the bare runner TARGET (matched exactly on the last field).
-// A target-name fallback can touch a line shared by another world with the same
-// target on this host (the default `proxmox-box` is shared); it is used only
-// when no exact body can be derived.
+// runnerKeyRefs returns the exact substrate-key lines to remove: the box's own
+// package line and the plane runner's rotated line (when the CP is reachable).
+// The bare runner target is handled by the caller's comment sweep, so a stale
+// line here never wedges removal.
 func runnerKeyRefs(cfg *config.Config, r hostExec) []string {
 	var refs []string
 	seen := map[string]bool{}
@@ -36,9 +33,6 @@ func runnerKeyRefs(cfg *config.Config, r hostExec) []string {
 	}
 	add(substratePubLine(cfg))
 	add(planeSubstratePubLine(cfg, r))
-	if len(refs) == 0 {
-		add(cfg.Runner.Target)
-	}
 	return refs
 }
 

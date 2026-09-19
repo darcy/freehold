@@ -34,14 +34,15 @@ and whole-world `teardown --data` paths matched and verified by
 `authorized_keys`, so the check found zero lines and reported a false "removed
 (verified)" while the substrate key stayed authorized.
 
-- **One removal implementation** (`teardown.RemoveAuthorizedKey`): a full line is
-  matched on its base64 **body**; a bare name is matched on the line's last field
-  **exactly** (no substring sweep); and a ref that matches **nothing** is now a
-  hard error rather than a silent no-op.
-- **Correct refs**: `runnerKeyRefs` removes the box package's exact line and the
+- **One removal implementation** (`teardown.RemoveRunnerSubstrate`): exact body
+  refs are removed best-effort (a stale one is skipped, never aborts), any
+  residual line whose last field is the runner target is swept, and the END
+  STATE is verified — if a substrate line remains, it is a hard error rather
+  than a silent no-op. The box's own operator door uses the fail-loud
+  single-ref `RemoveAuthorizedKey`.
+- **Correct refs**: `runnerKeyRefs` derives the box package's exact line and the
   plane runner's rotated line (read from the CP's `identity.json`/`secrets.json`
-  when reachable), falling back to the bare runner target only when neither
-  package is readable.
+  when reachable); the bare runner target is the fallback sweep.
 - The transient path shares the same helper (via an adapter); the build-box path
   now also warns about other boxes' remaining doors, matching the transient path.
 - Uses `mktemp` (no predictable `/tmp` path) and never builds a `sed` address

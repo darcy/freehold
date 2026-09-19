@@ -539,3 +539,36 @@ func TestRemoveAuthorizedKeyBodyRemovesOne(t *testing.T) {
 		t.Errorf("body match must remove only the exact key: %v", r.authKeys)
 	}
 }
+
+// TestRemoveRunnerSubstrateStaleBodyStillSweeps: a stale derived body (rotated
+// away) must not abort removal — the target-comment sweep clears the present key.
+func TestRemoveRunnerSubstrateStaleBodyStillSweeps(t *testing.T) {
+	r := &fakeRunner{authKeys: []string{"ssh-ed25519 NEWBODY proxmox-box"}}
+	// OLDSTALE is no longer present; the sweep must still remove the real line.
+	if err := RemoveRunnerSubstrate(r, []string{"ssh-ed25519 OLDSTALE proxmox-box"}, "proxmox-box"); err != nil {
+		t.Fatalf("a stale body ref must not abort: %v", err)
+	}
+	if len(r.authKeys) != 0 {
+		t.Errorf("the present key must be swept: %v", r.authKeys)
+	}
+}
+
+// TestRemoveRunnerSubstrateIdempotent: no matching line => nil (repeated uninstall).
+func TestRemoveRunnerSubstrateIdempotent(t *testing.T) {
+	r := &fakeRunner{authKeys: []string{"ssh-ed25519 OTHER other-box"}}
+	if err := RemoveRunnerSubstrate(r, []string{"ssh-ed25519 GONE proxmox-box"}, "proxmox-box"); err != nil {
+		t.Fatalf("already-absent must be a no-op: %v", err)
+	}
+	if len(r.authKeys) != 1 {
+		t.Errorf("an unrelated line must survive: %v", r.authKeys)
+	}
+}
+
+// TestRemoveRunnerSubstrateResidualErrors: if the key cannot be removed, error
+// (no false success).
+func TestRemoveRunnerSubstrateResidualErrors(t *testing.T) {
+	r := &fakeRunner{authKeys: []string{"ssh-ed25519 NEWBODY proxmox-box"}, failExec: "awk"}
+	if err := RemoveRunnerSubstrate(r, nil, "proxmox-box"); err == nil {
+		t.Fatal("a residual key must error, not report success")
+	}
+}
