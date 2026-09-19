@@ -130,13 +130,15 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 ### `contract/` (`freehold/contract` — the shared wire/trust leaf)
 
 * **Purpose:** the language-agnostic trust, crypto, and wire contract that
-  BOTH the control plane and the platform import — the leaf everything builds
-  on. It is its own Go module so the edge is `platform → contract ←
-  control-plane`, never `platform → control-plane` (no module cycle). It
-  carries `crypto/` (the Go repro of the Rust `core`), `wire/` (envelopes),
-  `client/` (the signed MCP client), `config/`, `console/` (the console
-  client), `relay/` (the relay HTTP client), `state/` (the store model), and
-  `delegate/` (the kind-9 delegation envelopes).
+  BOTH the control plane and the local CLI + platform import — the leaf
+  everything builds on. It is its own Go module so the edge is `platform →
+  contract ← control-plane` and `platform → contract ← freehold-cli`, never
+  `platform → control-plane` (no module cycle). It carries `crypto/` (the Go
+  repro of the Rust `core`), `wire/` (envelopes), `client/` (the signed MCP
+  client), `config/`, `console/` (the console client), `relay/` (the relay HTTP
+  client), `delegate/` (the kind-9 delegation envelopes), `identity/` (the
+  identity.json format loader), and `worldfacts/` (the world-inventory wire
+  shape). The CP's `state/` store lives in `control-plane/` (server-only).
 
 * **Contents:** NIP-44 v2 encryption (chacha20poly1305, bech32, hkdf-sha256,
   sha256, hex) and the signer (`CryptoProvider` over `CryptoDyn` —
@@ -165,13 +167,27 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 ### `control-plane/` (`freehold/control-plane` — the stable mechanism)
 
 *   **The mechanism is one Go module** (go 1.25): `api/` (the unified scoped
-    API — agent toolset + world actions), `cli/` (the operator interface:
-    `tui/`, `login/`, `flows/`, `teardown/`, `cmd/` for the
-    `freehold` binary — the CP bootstrap lives in the `install/` module), `secret-management/`
-    (provision/rotate/revoke/grant), and the Rust crates `core/` (the
-    byte-exact contract oracle + the `harness/` Go byte-gate), `runner/`, and
-    `testkit/` (the runner's hermetic fixtures). The Chunk-1/2 acceptance gate
-    is Go under `acceptance/`, driving the real `runner` binary as a subprocess.
+    API — agent toolset + world actions + `cpbuild`), `secret-management/`
+    (provision/rotate/revoke/grant), `state/` (the CP store), and the Rust
+    crates `core/` (the byte-exact contract oracle + the `harness/` Go
+    byte-gate), `runner/`, and `testkit/` (the runner's hermetic fixtures). The
+    Chunk-1/2 acceptance gate is Go under `acceptance/`, driving the real
+    `runner` binary as a subprocess. The local operator interface (`freehold`
+    CLI + TUI, `login/`, `flows/`, install) lives in the sibling
+    `freehold-cli/` module; the server never imports it.
+
+*   **Two apps, zero cross-imports (local/server split).** The server
+    (`control-plane/`) and the local operator surface (`freehold-cli/`) are
+    separate Go modules. `control-plane/` never imports `freehold-cli/`;
+    `freehold-cli/` never imports `control-plane/` — the local side drives the
+    server through the CP API (console HTTP / agent-tools MCP) or by invoking
+    its binaries, never by linking its packages. An import-graph guard test in
+    each module enforces both directions. Anything both sides genuinely need
+    (crypto/wire/client/config/console, the relay + delegation protocol
+    clients, the identity loader, the world-facts shape) lives in the
+    `contract/` leaf. The build engine (world bring-up/teardown) is server-side
+    (`api/cpbuild`); local `build`/`teardown` are thin CP triggers, and CP
+    creation is `freehold install` (in `freehold-cli/`).
 
 *   **The privileged `exec` funnel lives in the RUST runner, not the CP.**
     The CLI is the operator's interface: it drives a running runner over its
@@ -254,7 +270,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (CP bootstrap); `freehold build` runs the world through the CP:
     door → runner → durable plane → boot the CP LXC → **`install`** (box one)
     = the CP only (console + co-located runner) — no secrets are collected.
-    `freehold-install install` requires **`--name` + `--host`**: it scopes the
+    `freehold install` requires **`--name` + `--host`**: it scopes the
     config + state to `profiles/<name>/` instead of the base home, records the
     host + access mode in that profile, and names the guest LXCs
     `<name>-<relay|cp|k3s>`. A life-cycle gate **mints** when no profile exists,
@@ -277,7 +293,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     recorded guest IPs (`config.ResolveTarget`) until the public domain
     resolves. Teardown keeps the config, the coords, and the data.
 
-*   **`control-plane/cli/teardown/` is the world-removal engine** (shared by
+*   **`providers/proxmox/teardown/` is the world-removal engine** (shared by
     `teardown` and `uninstall`). Whole-world `teardown` is CP-driven and
     CP-preserving (`/api/world-teardown`); `uninstall` additionally removes the
     CP + this box's doors + the local profile, and `--remove-data` erases the
@@ -292,7 +308,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 ### `freehold` TUI (bubbletea; the operator's console)
 
-*   **It is bubbletea, not HTML.** `control-plane/cli/tui/tui.go` is full-screen
+*   **It is bubbletea, not HTML.** `freehold-cli/cli/tui/tui.go` is full-screen
     alt-screen (`tea.NewProgram(m, WithAltScreen(), …)`); `freehold` with no
     args enters it, a subcommand routes to the CLI.
 
@@ -314,7 +330,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     dir (`<FREEHOLD_HOME|~/.freehold>/profiles/<name>/`), the filesystem being the
     registry. `login` authorizes this operator against the CP by **CP address +
     operator nsec** (NIP-98), then ends;
-    `control-plane/cli/login` persists the nsec 0600 under the profile's operator
+    `freehold-cli/cli/login` persists the nsec 0600 under the profile's operator
     dir and seeds that profile's connection/desire config from the CP's
     `/api/world` summary, so every launch auto-logs in and a fresh box recovers
     with nothing from a lost one. The TUI and `build`/`install`/`teardown`/
@@ -348,13 +364,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     runner reach satisfied and sources CP liveness from the console session
     (`/api/overview`), not the `pct exec` probe a box with a local runner uses.
 
-*   **One activity surface for long ops.** `control-plane/cli/tui/activity.go`
+*   **One activity surface for long ops.** `freehold-cli/cli/tui/activity.go`
     streams the boot probe rows and the subprocess windows, `ctrl+c` aborts;
     the dashboard never scrolls under an open activity. The world-mutation
     forms re-exec `freehold` as a subprocess (the same CLI drivers).
 
 *   **Testing the TUI means the BUILT binary** — `go test` under
-    `control-plane/cli/tui/` verifies form logic, not the running app (see
+    `freehold-cli/cli/tui/` verifies form logic, not the running app (see
     AGENTS.md for the rebuild+tmux/herdr discipline).
 
 ### `platform/` (`freehold/platform` — the evolving world)
@@ -399,8 +415,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     LVM/ZFS/thin-pool storage, the PVE `local-lvm` pointer discipline, and the
     pct stage/DNS command builders (`providers/proxmox/drive/` holds the
     storage driver). A provider is substrate ops, not a lifecycle — there is no
-    `provider.Install()`; the composition roots (`install/`, `control-plane/`)
-    decide the sequence and inject the provider.
+    `provider.Install()`; the composition roots (`freehold-cli/`,
+    `control-plane/`) decide the sequence and inject the provider.
 
 *   **`platform/migrations/`** is the verify-gated migration runner over
     versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed
@@ -540,7 +556,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (`exec`/`status`/`upload`); `contract/console` talks to the console's
     `/api/*` (overview/agents/portal) as an operator session.
 
-*   **`control-plane/cli/bootstrap-cp/` reads `providers.json`/`secrets.json`
+*   **`freehold-cli/install/` reads `providers.json`/`secrets.json`
     and builds the CP + co-located runner** (the box bootstrap that exists
     before any terraform; the CP-owned service definitions live in the
     `cpbuild/terraform` module above).
@@ -672,10 +688,11 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 3.  **Chunk 3 — Rust→Go refactor + the modular Go tree:** the operator
     surface is Go across modules — `contract/` (`freehold/contract`, the
     shared wire/trust leaf), `platform/` (`freehold/platform`, the evolving world),
-    `agents/` (`freehold/agents`, the agent definitions), `install/`
-    (`freehold/install`, the CP bootstrap CLI), and `control-plane/`
+    `agents/` (`freehold/agents`, the agent definitions),
+    `freehold-cli/` (`freehold/freehold-cli`, the local operator CLI + install),
+    and `control-plane/`
     (`freehold/control-plane`, the stable mechanism) — with the Rust
-    `core`/`runner` kept as a byte-exact reference oracle; `freehold-install`
+    `core`/`runner` kept as a byte-exact reference oracle; the local CLI
     drives the shared box engine directly
     (`eng.stdin = ui.in`); teardown keeps the config intact (`PruneLxcCoords`
     is never written to disk); the plane stage is never skipped
@@ -688,7 +705,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     the CPA runs on the `buzz-acp`/`goose-class` harness as a k3s pod (see
     `roadmap/POC_CHUNK4.md`), with the CP's `freehold-agent-tools` toolset
     and the durable-plane identity/memory guarantees; `freehold-teardown`
-    destroys LXCs but keeps the **recorded coordinates**; `freehold-install`
+    destroys LXCs but keeps the **recorded coordinates**; `freehold install`
     drives the shared box engine for CP bootstrap.
 
 5.  **Chunk 5 — Agent workspaces + git/GitHub:** one workspace at
@@ -753,7 +770,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 *   **Nothing in the POC needs a cluster**; POC = a CPA that **lives in
     Buzz** + skills.
 
-*   **The `/srv/data` convention** (durable state) and `control-plane/cli/tui`'s
+*   **The `/srv/data` convention** (durable state) and `freehold-cli/cli/tui`'s
     single activity view (**ALWAYS** the top line).
 
 *   **`<n>` is a chunk number and `<module>/<pkg>`** is the module path for

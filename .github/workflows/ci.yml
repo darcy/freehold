@@ -76,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [agents, contract, platform, providers, install]
+        module: [agents, contract, platform, providers, freehold-cli]
     steps:
       - uses: actions/checkout@v6
 

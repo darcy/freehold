@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"freehold/contract/state"
+	"freehold/control-plane/state"
 )
 
 // ---- internal resolver ----

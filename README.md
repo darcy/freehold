@@ -69,16 +69,17 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       registry agents get create/manage only, operators get
                       world_* + grant_agent; grant_agent publishes the runner-roster
                       change with the console's own channel-owner identity)
-  cli/                the operator interface: tui/ (bubbletea dashboard), login/
-                      (freehold login/logout), flows/, teardown/, cmd/ (the freehold
-                      binary — CP bootstrap lives in `install/`)
-  secret-management/  provision/rotate/revoke/grant (the provisioner)
+   secret-management/  provision/rotate/revoke/grant (the provisioner)
   core/               (Rust) the byte-exact contract oracle + harness/ (the
                       Go↔Rust byte-gate, test-only)
   runner/  testkit/   (Rust) the privileged exec endpoint + its hermetic fixtures
-  acceptance/         the Chunk-1/2 acceptance gate (Go: provisioner lifecycle,
-                      console HTTP surface, relay-channel fold; drives the real
-                      `runner` binary as a subprocess)
+   acceptance/         the Chunk-1/2 acceptance gate (Go: provisioner lifecycle,
+                       console HTTP surface, relay-channel fold; drives the real
+                       `runner` binary as a subprocess)
+freehold-cli/         freehold/freehold-cli — the LOCAL operator surface (never
+                       imported by control-plane/): cli/ (the freehold CLI + TUI,
+                       login/, flows/, tui/), install/ (the guided/headless CP
+                       bootstrap + the box self-staged stages), cpdeploy/
 platform/             freehold/platform — the evolving world the mechanism
                       installs/evolves: services/<capability>/<impl>/ (relay/buzz,
                       webproxy/caddy, externaldns/cloudflare, certificates/letsencrypt,
@@ -146,7 +147,7 @@ control-plane/acceptance/  the Chunk-1/2 acceptance gate in Go (`go test ./accep
 ## Getting started (current Chunk-1 state)
 
 Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(six modules: `agents/`, `contract/`, `platform/`, `providers/`, `install/`, `control-plane/`) + `mise`
+(six modules: `agents/`, `contract/`, `platform/`, `providers/`, `freehold-cli/`, `control-plane/`) + `mise`
 (the justfile recipes run `go`/`rust` through `mise exec` so the right
 toolchain versions are guaranteed — `curl https://mise.run | sh` or `brew
 install mise`) + `just` ([just](https://github.com/casey/just) — `cargo
@@ -169,7 +170,7 @@ just test
 
 # the manual equivalents, if you don't use just:
 cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,testkit,core/harness/oracle} + `cargo build --bin runner` for the acceptance gate
-for m in agents contract platform providers install control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the six Go modules + the byte-exact harness gate + the Go acceptance gate
+for m in agents contract platform providers freehold-cli control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the six Go modules + the byte-exact harness gate + the Go acceptance gate
 cargo fmt --all --check          # CI gate
 ```
 
@@ -177,7 +178,7 @@ Then operate the world yourself (the justfile does NOT drive the world — it
 only builds + installs):
 
 ```sh
-freehold-install install --yes --name <world> --host root@<box> \
+freehold install --yes --name <world> --host root@<box> \
                      --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr>  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # drop the WORLD (the inverse of build): relay/k3s + the CP-side
@@ -190,7 +191,7 @@ freehold uninstall [--remove-data]  # drop the CP too (this box's doors + local 
 freehold            # the TUI dashboard
 ```
 
-`freehold-install install` (guided) or `install --yes` (headless) requires
+`freehold install` (guided) or `install --yes` (headless) requires
 `--name` + `--host`: the profile name scopes the config + state to
 `profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; the host is
 recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
@@ -282,9 +283,9 @@ are. There is no implicit "default" profile.
 
 The same session flows bootstrap → configure → running as the world converges.
 
-The TUI's bring-up flows and the `freehold-install install` command drive the shared
+The TUI's bring-up flows and the `freehold install` command drive the shared
 provisioning engine — one pipeline, no
-duplicated logic. `freehold-install install` on an interactive terminal collects every
+duplicated logic. `freehold install` on an interactive terminal collects every
 answer (world name, relay/CP domains + the proxy IP) up front in a bubbletea wizard, then
 hands the engine the collected flags; non-TTY input keeps the sequential
 prompts. Re-runs are safe: an
@@ -383,20 +384,15 @@ package, errors instead of destroying a runner's key.
 
 ### freehold: the CLI (the scripted CPA stand-in)
 
-The CLI binary is `freehold`, built from the `control-plane/` Go module
+The CLI binary is `freehold`, built from the `freehold-cli/` Go module
 (the `freehold-orchestrator` binary folded into it — one binary, two surfaces):
 
 ```sh
-go build -C control-plane -o ../target/debug/freehold ./cli/cmd/freehold
+go build -C freehold-cli -o ../target/debug/freehold ./cli/cmd/freehold
 freehold --help
 ```
 
 ```sh
-# onboard an existing service: provision -> ship -> self-check (hard-fails unless green) -> grant -> report
-echo -n 'vultr-api-key-9876' | freehold onboard blog \
-  --kind vultr --address api.vultr.com --agent-dir ./.freehold/control-plane/agent-my-agent \
-  --cp-state-dir ./.freehold/control-plane
-
 # drive a RUNNING runner with signed calls:
 freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"' \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
@@ -482,7 +478,7 @@ cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner \
 ## Bootstrap flow (from zero to a live world)
 
 `freehold build` is **login-gated, drive-through-CP**: after
-`freehold-install install` (box one) creates the CP, ANY box runs `freehold build` to trigger
+`freehold install` (box one) creates the CP, ANY box runs `freehold build` to trigger
 the console's `/api/world-build` — the CP brings up the WHOLE world
 (relay/agent-tools/k3s → DNS → litellm → Caddy → cert → CPA) through its own
 co-located runner.

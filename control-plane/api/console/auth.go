@@ -8,10 +8,10 @@
 package console
 
 import (
-	"fmt"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"

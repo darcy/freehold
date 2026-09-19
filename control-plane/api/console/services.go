@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"freehold/contract/state"
+	"freehold/control-plane/state"
 )
 
 // WorldServiceJSON is the /api/world services row: the recorded coords plus the

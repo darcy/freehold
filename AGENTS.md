@@ -51,10 +51,12 @@ repo, not the history.
 
 - `VISION.md` — narrative, single source of truth for the "why".
 - `ARCHITECTURE.md` — system design, locked decisions, build plan.
-- `install/` — the `freehold-install` bootstrap CLI (top-level Go module): get a control
-  plane up in an environment (Proxmox today; Vultr/Hetzner providers come later) and a door
-  to it; the shared provisioning engine lives in `platform/provisioning/box`. World bring-up
-  after install is `freehold build` from any box via the CP. `install` **requires `--name`
+- `freehold-cli/` — the local operator surface (top-level Go module): the `freehold` CLI
+  + TUI, `login`/profiles, and the `install` surface. It gets a control plane up in an
+  environment (Proxmox today; Vultr/Hetzner providers come later) and a door to it; the
+  shared provisioning engine lives in `platform/provisioning/box`. It drives the server
+  only through the CP API or sibling binaries — it never links `control-plane/`. World
+  bring-up after install is `freehold build` from any box via the CP. `install` **requires `--name`
   + `--host`**: the profile name scopes config + state to `profiles/<name>/` and prefixes
   the guest LXCs `<name>-<role>`; the host is recorded in the profile (so a later
   `uninstall --name` resolves it without the flag). A fresh plane also needs the relay/CP
@@ -265,8 +267,8 @@ changelog.
     department definitions (`security/`, `vault/`, `compute/`, `agent-ops/`);
     embeds its Markdown as Go values):
     `cd agents && go build ./... && go vet ./... && go test ./...`
-  - `contract/` (`freehold/contract` — the shared wire/trust leaf: crypto/wire/client/config/
-    console/relay/state/coords): `cd contract && go build ./... && go vet ./... && go test ./...`
+  - `contract/` (`freehold/contract` — the shared wire/trust/protocol leaf: crypto/wire/client/
+    config/console/relay/delegate/identity/worldfacts): `cd contract && go build ./... && go vet ./... && go test ./...`
   - `platform/` (`freehold/platform` — the evolving world: services/provisioning/
     migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`;
     `provisioning/box` holds the SHARED provisioning engine (LXC boot, storage plane,
@@ -276,32 +278,36 @@ changelog.
     injected by the composition roots; nothing here imports `providers/` or names a `pct`
     command (a guard test enforces both).
   - `providers/` (`freehold/providers` — the substrate providers; `providers/proxmox/`
-    holds guest create/exec/list, LVM/ZFS/thin-pool storage, and the pct stage/DNS
-    builders): `cd providers && go build ./... && go vet ./... && go test ./...`. Imports
-    `platform/` + `contract/`; never the reverse.
-  - `install/` (`freehold/install` — the CP bootstrap CLI): `cd install && go build ./... &&
-    go vet ./... && go test ./...`
-  - `control-plane/` (`freehold/control-plane` — the mechanism: api/cli/secret-management;
-    the `freehold` binary, the TUI, and the `harness/` release
-    gate): `cd control-plane && go build ./... && go vet ./... && go test ./...`;
+    holds guest create/exec/list, LVM/ZFS/thin-pool storage, the pct stage/DNS builders,
+    and the `proxmox/teardown` world-destroy engine): `cd providers && go build ./... &&
+    go vet ./... && go test ./...`. Imports `platform/` + `contract/`; never the reverse.
+  - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
+    CLI + TUI, `cli/` + `cli/login` + `cli/flows` + `cli/tui`, and the `install/` +
+    `cpdeploy/` install surface; the `freehold` binary's main is `cli/cmd/freehold`):
+    `cd freehold-cli && go build ./... && go vet ./... && go test ./...`. **It never
+    imports `control-plane/`** (an import-graph guard enforces it).
+  - `control-plane/` (`freehold/control-plane` — the server + engines: api/cpbuild (build),
+    api/console, api/agenttools, secret-management, state, core; the `freehold-console` +
+    `freehold-agent-tools` binaries, and the `harness/` release gate):
+    `cd control-plane && go build ./... && go vet ./... && go test ./...`;
     `go test ./core/harness/` drives `target/debug/freehold-harness-oracle` and gates every
-    crypto primitive against the Rust `core` byte-for-byte.
+    crypto primitive against the Rust `core` byte-for-byte. **It never imports
+    `freehold-cli/`** (an import-graph guard enforces it).
 - **`freehold-agent-tools` must be built statically** (`CGO_ENABLED=0 go build -C control-plane
   -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools`): the CP server ships
   its own binary to agent pods, which run Alpine/musl — a glibc-dynamic build "silently not
   found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
 - **The full binary set a `rebuild`/`teardown`/`install` box needs** (`box.ResolveBins` fails
   the pipeline until every sibling is present, and prints the exact build one-liner):
-  - `target/debug/freehold` (the CLI+TUI) — `go build -C control-plane -o target/debug/freehold ./cli/cmd/freehold`
-  - `target/debug/freehold-install` (the CP bootstrap CLI) — `go build -C install -o target/debug/freehold-install ./cmd/freehold-install`
+  - `target/debug/freehold` (the CLI+TUI+install) — `go build -C freehold-cli -o target/debug/freehold ./cli/cmd/freehold`
   - `target/debug/freehold-console` **and** `target/release/freehold-console` (the Go CP CLI
     the box-side provision/grant/adopt/add-secret/revoke stages call, and what `deploy-cp`
     ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
   - `target/{debug,release}/runner` (Rust) — `cargo build --bin runner && cargo build --release --bin runner`
   - `target/release/freehold-agent-tools` (static, above)
-  This is the same set `freehold build`/`freehold teardown`/`freehold-install install`
-  resolve as siblings of the running
-  binary — a box doing world bring-up needs all five present.
+  This is the same set `freehold build`/`freehold teardown`/`freehold install`
+  resolve as siblings of the running binary — a box doing world bring-up needs all
+  five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
 - `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
   `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
@@ -311,9 +317,9 @@ changelog.
   runner owns stay in its Rust tests. It drives the real `runner` binary (a subprocess),
   so the box's `cargo build --bin runner` must have run first.
 
-### Testing the TUI (`freehold`, `control-plane/cli/cmd/freehold` → bubbletea dashboard)
+### Testing the TUI (`freehold`, `freehold-cli/cli/cmd/freehold` → bubbletea dashboard)
 
-`go test` under `control-plane/cli/tui/` verifies form logic, but it does NOT prove the running TUI.
+`go test` under `freehold-cli/cli/tui/` verifies form logic, but it does NOT prove the running TUI.
 **Always test the BUILT binary** — never reason from `go test` + a stale `~/.cargo/bin/freehold`.
 The test step below rebuilds it FIRST, so there is nothing to remember: if you change a TUI flow
 (forms, keybindings, dispatch, pre-flow chaining like the rebuild→DNS ask), rebuild + test the
@@ -321,7 +327,7 @@ installed binary in one go:
 
 ```bash
 # 0. rebuild + place the binary FIRST (a passing go test does not re-place it):
-cd control-plane && go build -o target/debug/freehold ./cli/cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
+cd freehold-cli && go build -o target/debug/freehold ./cli/cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
 
 # 1. isolate state so the flow is deterministic (e.g. no DNS cred already stored):
 cat > /tmp/fh-tui-config.toml <<'EOF'

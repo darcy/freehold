@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"freehold/contract/crypto"
-	"freehold/contract/state"
 	"freehold/control-plane/api/console"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
+	"freehold/control-plane/state"
 )
 
 func main() {
@@ -254,6 +254,13 @@ func cmdServe(args []string) error {
 			Sec:            secret,
 			Audience:       consolePK,
 		}
+	}
+	// Mint/reconcile agent identities into the agent-tools durable state dir
+	// (the same root the agent-tools server uses), never the console's own dir —
+	// otherwise a CP-side reconcile would mint a fresh keypair and orphan every
+	// grant on the surviving identity.
+	if builder != nil {
+		builder.AgentIdentityDir = *agentToolsStateDir
 	}
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,

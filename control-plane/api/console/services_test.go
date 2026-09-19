@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"freehold/contract/state"
+	"freehold/control-plane/state"
 )
 
 // TestWorldServiceRows registers live local probes for each service kind and

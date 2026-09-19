@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"freehold/contract/state"
+	"freehold/control-plane/state"
 )
 
 // RegisterAgent records the CPA in the control-plane agent registry (A5) so it

@@ -10,9 +10,9 @@ import (
 
 	"freehold/contract/crypto"
 	"freehold/contract/relay"
-	"freehold/contract/state"
 	"freehold/contract/wire"
 	provisioner "freehold/control-plane/secret-management"
+	"freehold/control-plane/state"
 )
 
 // provision is the shared B1 happy-path helper.
