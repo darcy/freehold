@@ -55,8 +55,11 @@ cross-imports**, enforced by an import-graph guard test in each module:
 - **The agent org and world facts are CP-owned now.** A new `cpbuild` step
   creates the CPA + the four departments + reconciles every registered agent and
   registers world facts in-process; local `build` is a uniform thin trigger (the
-  old owner-vs-thin-client branch and the `--data` agent-tools-audience
-  adoption hack are gone). The local `onboard` command is removed.
+  old owner-vs-thin-client branch and the box-side `--data` audience-adoption
+  step are gone). The box no longer carries that hack because `worldMcp` now
+  refreshes its agent-tools URL + audience from the CP's `/api/world` before
+  signing, so `door`/`world`/thin-box `exec` stay valid after a `--data` rebuild
+  without a re-login. The local `onboard` command is removed.
 
 `AGENTS.md`, `ARCHITECTURE.md`, and `README.md` describe the new module graph;
 the `justfile` and CI build/test `freehold-cli/` in place of `install/`.

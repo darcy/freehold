@@ -133,12 +133,19 @@ func printWorldSummary(w *console.WorldSummary) error {
 	return nil
 }
 
-// worldMcp builds the agent-tools MCP client for the world verb. It signs as// the OPERATOR identity (the persisted nsec — a console-admin, in the toolset
+// worldMcp builds the agent-tools MCP client for the world verb. It signs as
+// the OPERATOR identity (the persisted nsec — a console-admin, in the toolset
 // roster), NOT the box's agent-ops identity: a fresh login-only box's
 // agent-ops is minted locally and is NOT a toolset-roster member, so signing
 // with it would get world_* denied with -32001. The operator key is the
 // credential (0.4.9) — the same identity the TUI's Agents view uses.
+//
+// It refreshes the recorded agent-tools coords from the console FIRST: a
+// `--data` rebuild mints a fresh agent-tools identity, so the recorded audience
+// goes stale and every signed call fails "signature does not verify" until a
+// re-login. This keeps door/world signing current without one.
 func worldMcp(cfg *config.Config) (*client.McpClient, error) {
+	refreshAgentToolsCoords(cfg)
 	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
 		return nil, fmt.Errorf("no freehold-agent-tools coords recorded (run `freehold login` against the CP)")
 	}
@@ -147,6 +154,56 @@ func worldMcp(cfg *config.Config) (*client.McpClient, error) {
 		return nil, fmt.Errorf("this box has no operator identity at %s (run `freehold login` to materialize it): %v", oplogin.Dir(), err)
 	}
 	return client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
+}
+
+// refreshAgentToolsCoords re-reads the CP's live agent-tools URL + pubkey from
+// the console's public /api/world and adopts them into cfg, so a `--data`
+// rebuild (which mints a fresh agent-tools identity, wiping the durable
+// /srv/data copy) does not leave the box signing with a stale audience. Best
+// effort: an unreachable console or an absent operator session leaves the
+// recorded values in place (the pre-existing behavior).
+func refreshAgentToolsCoords(cfg *config.Config) {
+	if cfg == nil || cfg.CPURL == "" {
+		return
+	}
+	sec, err := oplogin.SecretHex()
+	if err != nil {
+		return
+	}
+	key, err := oplogin.NsecToSecret(sec)
+	if err != nil {
+		return
+	}
+	c, err := oplogin.Login(cfg.CPURL, key)
+	if err != nil {
+		return
+	}
+	w, err := c.World()
+	if err != nil {
+		return
+	}
+	if adoptAgentToolsCoords(cfg, w) {
+		_ = cfg.Save(configPath())
+	}
+}
+
+// adoptAgentToolsCoords copies the CP-reported agent-tools URL + pubkey into
+// cfg and reports whether anything changed (a non-empty pubkey is required —
+// a CP that predates /api/world's agent_tools fields reports neither).
+func adoptAgentToolsCoords(cfg *config.Config, w *console.WorldSummary) bool {
+	if cfg == nil || w == nil || w.AgentToolsPubkey == "" {
+		return false
+	}
+	changed := false
+	if w.AgentToolsPubkey != cfg.AgentToolsPubkey {
+		cfg.AgentToolsPubkey = w.AgentToolsPubkey
+		changed = true
+	}
+	if w.AgentToolsURL != "" && w.AgentToolsURL != cfg.AgentToolsURL {
+		cfg.AgentToolsURL = w.AgentToolsURL
+		changed = true
+	}
+	return changed
 }
 
 // noLocalRunner reports whether this box is THIN (no deployed provisioning
