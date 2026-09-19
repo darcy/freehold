@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"freehold/contract/crypto"
-	"freehold/contract/state"
 	"freehold/contract/wire"
+	"freehold/control-plane/state"
 )
 
 // signLoginEvent signs a NIP-98 kind-27235 login event (content = nonce).

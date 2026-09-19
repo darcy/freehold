@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"freehold/control-plane/cli/flows"
+	"freehold/contract/identity"
 )
 
 // AgentPod is the deploy spec for a created agent (E1's create-agent, made
@@ -41,7 +41,7 @@ func (p *AgentPod) Prepare() (pubkey string, identityScript, manifestScript stri
 	if err := ensureIdentity(dir); err != nil {
 		return "", "", "", err
 	}
-	id, err := flows.LoadIdentity(dir)
+	id, err := identity.Load(dir)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -79,7 +79,7 @@ func mintIdentityIn(dir string) error {
 	if _, err := rand.Read(enc); err != nil {
 		return fmt.Errorf("mint identity: %w", err)
 	}
-	id := flows.Identity{
+	id := identity.Identity{
 		NostrSecretHex: hex.EncodeToString(secret),
 		EncSecretHex:   hex.EncodeToString(enc),
 	}
@@ -97,7 +97,7 @@ func EnsureIdentity(dir string) (string, error) {
 	if err := ensureIdentity(dir); err != nil {
 		return "", err
 	}
-	id, err := flows.LoadIdentity(dir)
+	id, err := identity.Load(dir)
 	if err != nil {
 		return "", err
 	}
@@ -106,7 +106,7 @@ func EnsureIdentity(dir string) (string, error) {
 
 // ensureIdentity mints a runner-style identity in dir if absent, returns nil.
 func ensureIdentity(dir string) error {
-	if _, err := flows.LoadIdentity(dir); err == nil {
+	if _, err := identity.Load(dir); err == nil {
 		return nil
 	}
 	// Mint on demand (same shape as min identity in the rebuild engine's

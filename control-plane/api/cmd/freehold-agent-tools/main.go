@@ -40,12 +40,12 @@ import (
 	"freehold/agents"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/identity"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/api/cpstate"
-	"freehold/control-plane/cli/flows"
 )
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
@@ -165,11 +165,11 @@ func cmdIdentity(args []string) {
 }
 
 // serverIdentity loads the durable identity in dir, minting it on first use.
-func serverIdentity(dir string) (*flows.Identity, string, error) {
+func serverIdentity(dir string) (*identity.Identity, string, error) {
 	if _, err := agent.EnsureIdentity(dir); err != nil {
 		return nil, "", err
 	}
-	id, err := flows.LoadIdentity(dir)
+	id, err := identity.Load(dir)
 	if err != nil {
 		return nil, "", err
 	}
@@ -442,6 +442,11 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatalf("open world facts: %v", err)
 	}
+	// When world_build runs in THIS process, the agent org + facts reconcile
+	// writes these in-process stores directly rather than opening a second
+	// file handle and restarting the serve process.
+	spec.AgentRegistry = reg
+	spec.FactsStore = facts
 
 	tools := &agent.Tools{
 		Console:         reg,

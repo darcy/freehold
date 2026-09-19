@@ -25,6 +25,45 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.15] — local/server split (two modules, zero cross-imports)
+
+The local operator surface lived inside the `control-plane/` module and the two
+sides linked each other. This splits the tree into two apps with **zero
+cross-imports**, enforced by an import-graph guard test in each module:
+
+- **`freehold-cli/`** — the new top-level module holding the local operator
+  surface: the `freehold` CLI + TUI, `login/`, `flows/`, and the install surface
+  (`install/` + `cpdeploy/`). The former `install/` module dissolves into it, and
+  `freehold-install` folds into `freehold install` (the hidden `bootstrap` alias
+  stays as `install --yes`); the operator `exec` is shared, and the box
+  self-staged `provision`/`storage`/`deploy-cp` are consolidated into one
+  `freehold-cli/internal/stages/` home (the once-duplicated CLI/install
+  definitions are now a single implementation) and registered on the same
+  `freehold` root.
+- **`control-plane/`** — the server + engines only (`api/cpbuild`, `api/console`,
+  `api/agenttools`, `secret-management`, `state`, `core`). It never imports
+  `freehold-cli/`; the local CLI never imports it — it drives the server through
+  the CP API or sibling binaries.
+- **`contract/`** keeps the shared protocol leaf (crypto/wire/client/config/
+  console, plus the `relay`/`delegate` protocol clients, the `identity` loader,
+  and a `worldfacts` wire shape); the CP's `state` store moved into
+  `control-plane/`. The `contract/` → `shared/` rename was considered and
+  dropped — the functional goal is met by the moves alone.
+- **The world teardown engine** (`providers/proxmox/teardown/`) moved with the
+  Proxmox substrate (it shells `pct`), so both the CP build and the local
+  transient uninstall can use it without a cross-module edge.
+- **The agent org and world facts are CP-owned now.** A new `cpbuild` step
+  creates the CPA + the four departments + reconciles every registered agent and
+  registers world facts in-process; local `build` is a uniform thin trigger (the
+  old owner-vs-thin-client branch and the box-side `--data` audience-adoption
+  step are gone). The box no longer carries that hack because `worldMcp` now
+  refreshes its agent-tools URL + audience from the CP's `/api/world` before
+  signing, so `door`/`world`/thin-box `exec` stay valid after a `--data` rebuild
+  without a re-login. The local `onboard` command is removed.
+
+`AGENTS.md`, `ARCHITECTURE.md`, and `README.md` describe the new module graph;
+the `justfile` and CI build/test `freehold-cli/` in place of `install/`.
+
 ## [0.6.14] — uninstall/teardown match the runner substrate key correctly
 
 The runner substrate key's `authorized_keys` comment is the **runner target**

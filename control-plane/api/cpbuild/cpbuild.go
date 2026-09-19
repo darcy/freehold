@@ -26,14 +26,13 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/delegate"
+	"freehold/contract/identity"
 	"freehold/contract/relay"
-	"freehold/contract/state"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
-	"freehold/control-plane/cli/flows"
-	"freehold/control-plane/cli/teardown"
 	"freehold/control-plane/secret-management"
+	"freehold/control-plane/state"
 	"freehold/platform/migrations"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/planebase"
@@ -43,6 +42,7 @@ import (
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 	"freehold/providers/proxmox"
 	"freehold/providers/proxmox/drive"
+	"freehold/providers/proxmox/teardown"
 )
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
@@ -94,6 +94,29 @@ type Spec struct {
 	// RepoURL is the source repository the shared system-orientation block
 	// points agents at. Empty = the agents package's upstream default.
 	RepoURL string
+
+	// AgentRegistry/FactsStore are the running agent-tools server's in-process
+	// durable stores, set only when the build runs INSIDE that server (its own
+	// world_build tool). nil for the console executor, which opens its own copy
+	// of each and restarts the serve process to reload them.
+	AgentRegistry *agenttools.Registry
+	FactsStore    *agenttools.FactsStore
+
+	// AgentIdentityDir is where agent identity dirs live (the durable
+	// agent-tools state dir, `<root>/agent-tools`), so the console executor and
+	// the agent-tools server mint into the SAME dir and NEVER re-mint a
+	// surviving identity. Empty = StateDir (the agent-tools server sets both to
+	// its own state dir).
+	AgentIdentityDir string
+}
+
+// agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
+// unset, StateDir).
+func (s *Spec) agentIdentityDir() string {
+	if s.AgentIdentityDir != "" {
+		return s.AgentIdentityDir
+	}
+	return s.StateDir
 }
 
 func (s *Spec) client() (*client.McpClient, error) {
@@ -633,107 +656,7 @@ func (s *Spec) deployAgentTools() error {
 			return fmt.Errorf("grant agent-tools on runner: %w", err)
 		}
 	}
-	serveFlags := fmt.Sprintf(
-		"--state-dir %s --addr 0.0.0.0:"+AgentToolsPort+" --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
-		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
-		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
-	// relay-pubkey is the roster trust anchor, learned only after the relay is
-	// up (empty at install, when the coords are baked). Emit it ONLY when
-	// present: a bare `--relay-pubkey` before the next flag makes Go's parser
-	// swallow that next flag as its value and stop, silently dropping
-	// --runner-pubkey/--runner-target ("serve needs --runner-pubkey ...").
-	if s.RelayPK != "" {
-		serveFlags += " --relay-pubkey " + s.RelayPK
-	}
-	if s.RelayAuthURL != "" {
-		serveFlags += " --relay-auth-url " + s.RelayAuthURL
-	} else {
-		serveFlags += " --relay-auth-url " + s.RelayURL
-	}
-	if s.RelayWS != "" {
-		serveFlags += " --relay-ws " + s.RelayWS
-	}
-	if s.LitellmBaseURL != "" {
-		serveFlags += " --litellm-base " + s.LitellmBaseURL
-	}
-	if s.PlanePool != "" {
-		serveFlags += " --plane-pool " + s.PlanePool
-	}
-	if s.PlaneKind != "" {
-		serveFlags += " --plane-kind " + s.PlaneKind
-	}
-	if s.ThinPool != "" {
-		serveFlags += " --thin-pool " + s.ThinPool
-	}
-	if s.SizeGB != 0 {
-		serveFlags += " --size-gb " + strconv.FormatUint(s.SizeGB, 10)
-	}
-	if s.PoolSizeGB != 0 {
-		serveFlags += " --pool-size-gb " + strconv.FormatUint(s.PoolSizeGB, 10)
-	}
-	if s.RootfsGB != 0 {
-		serveFlags += " --rootfs-gb " + strconv.FormatUint(uint64(s.RootfsGB), 10)
-	}
-	if s.MemoryMB != 0 {
-		serveFlags += " --memory-mb " + strconv.FormatUint(uint64(s.MemoryMB), 10)
-	}
-	if s.StorageName != "" {
-		serveFlags += " --storage " + s.StorageName
-	}
-	if s.RelayGW != "" {
-		serveFlags += " --relay-gw " + s.RelayGW
-	}
-	if s.Bridge != "" {
-		serveFlags += " --bridge " + s.Bridge
-	}
-	if s.SelfURL != "" {
-		serveFlags += " --self-url " + s.SelfURL
-	}
-	if s.RepoURL != "" {
-		serveFlags += " --repo-url " + s.RepoURL
-	}
-	if s.CpLxc != 0 {
-		serveFlags += " --cp-lxc " + strconv.FormatUint(uint64(s.CpLxc), 10)
-	}
-	if s.ProxyIP != "" {
-		serveFlags += " --proxy-ip " + s.ProxyIP
-	}
-	if s.LitellmIP != "" {
-		serveFlags += " --litellm-ip " + s.LitellmIP
-	}
-	if s.RelayHost != "" {
-		serveFlags += " --relay-host " + s.RelayHost
-	}
-	if s.RelayIP != "" {
-		serveFlags += " --relay-ip " + s.RelayIP
-	}
-	if s.CpHost != "" {
-		serveFlags += " --cp-host " + s.CpHost
-	}
-	if s.CpIP != "" {
-		serveFlags += " --cp-ip " + s.CpIP
-	}
-	start := fmt.Sprintf(
-		"pct exec %d -- sh -c 'setsid nohup %s serve %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid'",
-		s.CpLxc, bin, serveFlags, atState, atState)
-	if err := s.run(start, 30); err != nil {
-		return fmt.Errorf("start agent-tools: %w", err)
-	}
-	// Poll until the serve endpoint answers (any HTTP code proves the listener
-	// is up; "000" means not yet bound).
-	up := false
-	for i := 0; i < 15; i++ {
-		code, err := s.runOut(fmt.Sprintf("pct exec %d -- curl -s -m 3 -o /dev/null -w %%{http_code} http://127.0.0.1:"+AgentToolsPort+"/mcp", s.CpLxc), 15)
-		if err == nil && strings.TrimSpace(code) != "000" {
-			up = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-	if !up {
-		return fmt.Errorf("agent-tools serve did not answer within the poll window — check %s/serve.log", atState)
-	}
-	return nil
+	return s.startAgentTools()
 }
 
 // ---- the edge cert on the CP (the box's F3 start/await pair, CP-side) ------
@@ -1139,6 +1062,13 @@ func (s *Spec) worldLiteLLM() error {
 func BuildWorldApply(spec *Spec) agent.WorldApply {
 	return func() (string, error) {
 		var report []string
+		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
+		// credential. The CP owns the cred and does DNS-01, so record
+		// management joins the CP build (it was box-side pre-split). No-op
+		// without an edge/proxy or a stored credential.
+		if err := spec.manageDomainDNS(); err != nil {
+			return "", fmt.Errorf("world-build manage DNS: %w", err)
+		}
 		// 1. The durable volume plane: re-ensure each tenant's dataset/LV onto
 		// the recorded pool (idempotent, guest-writable) and capture the
 		// born-at-create mounts. Runs FIRST — the LXC boots bake the mounts.
@@ -1291,6 +1221,43 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", err
 			}
 			report = append(report, "world-service coords recorded")
+		}
+		// 8. The agent org + world facts are CP-owned now: create the CPA +
+		// departments, reconcile every registered agent, and register the world
+		// facts in-process, then restart agent-tools so its in-memory registry/
+		// facts reload from what we just wrote. A thin login box no longer needs
+		// a local runner or operator identity for any of it.
+		if spec.K3sVmid != 0 {
+			if spec.AgentRegistry != nil {
+				// Running inside the agent-tools server: write its OWN in-process
+				// stores directly (no second file handle, no restart).
+				if err := spec.reconcileAgentsInto(spec.AgentRegistry); err != nil {
+					return "", fmt.Errorf("world-build agents: %w", err)
+				}
+				report = append(report, "CPA + departments + agents reconciled")
+				if spec.FactsStore != nil {
+					if err := spec.registerWorldFactsInto(spec.FactsStore, mounts); err != nil {
+						report = append(report, "WARN: world facts not registered: "+err.Error())
+					} else {
+						report = append(report, "world facts registered")
+					}
+				}
+			} else {
+				// Console executor: write the files, then reload the serve process.
+				if err := spec.reconcileAgents(); err != nil {
+					return "", fmt.Errorf("world-build agents: %w", err)
+				}
+				report = append(report, "CPA + departments + agents reconciled")
+				if err := spec.registerWorldFactsServer(mounts); err != nil {
+					// Bookkeeping only — never fatal (mirrors the old box-side warn).
+					report = append(report, "WARN: world facts not registered: "+err.Error())
+				} else {
+					report = append(report, "world facts registered")
+				}
+				if err := spec.startAgentTools(); err != nil {
+					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
+				}
+			}
 		}
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")
@@ -1620,11 +1587,11 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name != spec.CpaName && agent.PodName(name) == agent.PodName(spec.CpaName) {
 			return "", fmt.Errorf("create-agent %q: the sanitized pod name collides with the control plane agent", name)
 		}
-		dir := filepath.Join(spec.StateDir, "agents", sanitizeDir(name))
+		dir := filepath.Join(spec.agentIdentityDir(), "agents", sanitizeDir(name))
 		if _, err := agent.EnsureIdentity(dir); err != nil {
 			return "", fmt.Errorf("mint %s identity: %w", name, err)
 		}
-		id, err := flows.LoadIdentity(dir)
+		id, err := identity.Load(dir)
 		if err != nil {
 			return "", fmt.Errorf("%s identity unreadable: %w", name, err)
 		}
@@ -1756,7 +1723,7 @@ func (s *Spec) cpaPubkey() string {
 	if name == "" {
 		name = agent.DefaultCPAName
 	}
-	id, err := flows.LoadIdentity(filepath.Join(s.StateDir, "agents", sanitizeDir(name)))
+	id, err := identity.Load(filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name)))
 	if err != nil {
 		return ""
 	}

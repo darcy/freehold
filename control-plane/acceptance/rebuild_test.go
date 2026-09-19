@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"freehold/contract/relay"
-	"freehold/contract/state"
 	"freehold/contract/wire"
 	provisioner "freehold/control-plane/secret-management"
+	"freehold/control-plane/state"
 )
 
 // insertRunner seeds a deterministic runner + secret record (per-name d-tag).

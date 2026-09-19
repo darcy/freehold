@@ -13,11 +13,11 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/relay"
-	"freehold/contract/state"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
+	"freehold/control-plane/state"
 )
 
 // Server is the Go console: the loopback admin/ops web surface (web.rs port).

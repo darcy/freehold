@@ -71,12 +71,15 @@ jobs:
         working-directory: control-plane
         run: go test ./...
 
+  # The control-plane module is NOT in this matrix — it has its own job above
+  # (it must build the Rust runner + harness oracle first). Its `go test ./...`
+  # there runs the new no-cross-import guard (control-plane/isolation_test.go).
   go:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        module: [agents, contract, platform, providers, install]
+        module: [agents, contract, platform, providers, freehold-cli]
     steps:
       - uses: actions/checkout@v6
 

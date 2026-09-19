@@ -1,14 +1,21 @@
 # Plan — install access modes → normalized CP lifecycle
 
-Status: PRs 1–2 are **merged** (`0.6.9` #249, `0.6.10` #250). Remaining: **PR 3**
-(provider seam + extraction), **PR 4** (transient access + door rotation), **PR 5**
-(`vultr`). `install --restore` is out of scope for now (see "Deferred"), but the
-identity model below guarantees grants survive a restore when it lands.
+Status: the provider/transient work is **merged** — PR1 install surface (`0.6.9`),
+PR2 teardown/uninstall (`0.6.10`), PR3 provider seam (`0.6.11`), PR4 transient
+access (`0.6.12`), plus re-adopt substrate-key rotation (`0.6.13`) and the
+substrate-key match fix (`0.6.14`). **PR 5 (the local/server split, `0.6.15`) is
+implemented and bot-approved on PR #258** (branch `feat/local-server-split`):
+5a/5b/5c landed, and 5d's command consolidation into `freehold-cli/internal/stages/`
+landed. Still open on PR 5: the per-verb package reorg (5d remainder) and the
+live integration gate — see §11. Then `vultr` (PR 6). `install --restore` is out
+of scope for now (see "Deferred"), but the identity model below guarantees grants
+survive a restore when it lands.
 
-Baseline: `main` after `0.6.10`. CHANGELOG top is `0.6.10`.
+Baseline: `main` after `0.6.14`; PR 5 branches from it.
 
-The storage-scope work (#243/#244) and this plan's own PR1/PR2 are merged; the
-remaining work is **provider independence** + the transient-access handoff.
+The storage-scope work (#243/#244) and the provider/transient phases are merged;
+the remaining work is the **local/server split** (implemented, pending merge) and
+provider breadth.
 
 **For the implementing agent:** this plan states the goal, the locked decisions, and
 the guardrails; it deliberately leaves internal structure, package layout, and naming
@@ -70,48 +77,44 @@ orchestrators over it. See §5.
     (`noLocalRunner()`, `control-plane/cli/handlers.go:112`). Keeping the package
     is a harmless fallback, not the target state.
 
-## 3. Current state (post PR1/PR2; the extraction targets)
+## 3. Current state (post PR4 + fixes)
 
-- **Provider-specific code is still scattered through `platform/`** — the PR3
-  extraction targets: `bootstrap/drivers.go` (`ProxmoxLxcSpec`/`VultrVpsSpec`/
-  `HetznerVpsSpec` + the three `Bootstrap*` funcs, `:277,590,719`);
-  `deploy/deploy.go:23` hardcodes `pct exec` (`LxcCmd`, used by `install/cpdeploy`
-  and `cpbuild`); `drive/` is LVM/ZFS/`pvesm`; `stages/` carries pct orchestration;
-  `switch kind` sites in `handlers3.go`, `install/cli/stages.go`, `cpbuild.go`,
-  `tui/actions.go`. All drivers take `McpClient`+target.
-- **The install pipeline still provisions + serves a box runner** and shells it
-  (`box.RunBootstrap`; `stageProvision`/`stageServe`/`stageDeployCp`). PR4 replaces
-  this with the direct transport and makes the box thin after handoff.
-- **RotateSecret is identity-preserving** and preserves targets+grants
-  (`control-plane/secret-management/provisioner2.go:18-74`) — reuse for door
-  rotation. It **hardcodes `Address: before.Address`** (`:52`), so it cannot repoint
-  a target host — see "Deferred".
-- **CP-side secret re-seal exists**: `reseedCoLocatedRunner` (`cpbuild.go:819-862`)
-  re-seals runner secrets from the CP's `world-secrets`. `ensureCpSecrets` skips
-  present secrets (`rebuild.go:383-422`); `worldCert` has a durable-reuse gate
-  (`cpbuild.go:1053`); `manageDomainDNS` upserts via `m.UpsertA`
-  (`rebuild.go:548-549`).
-- **Thin-box `uninstall --remove-data` is refused** (`resolveUninstall`) until PR4's
-  transient path; the same applies to `teardown --data`/`--tenant` (AGENTS "Known gaps").
-- **`world_migrate` is CP schema migrations**, unrelated to data restore — do not
-  conflate naming.
-- Already landed (do not redo): one install surface + life-cycle gate + adopt (PR1);
-  teardown CP-preserving + `world teardown` alias + `uninstall` + the single
-  `confirmDestructive` gate (PR2).
+Landed: one install surface + life-cycle gate + identity-preserving adopt (PR1);
+teardown CP-preserving + `world teardown` alias + `uninstall` + the single
+`confirmDestructive` gate (PR2); `platform/` provider-independent with a top-level
+`providers/` module and the two guards (PR3); direct root-SSH transient access +
+host-side fail-if-live + transient uninstall + the secret-provenance guard (PR4);
+re-adopt substrate-key rotation (`0.6.13`) and the substrate-key match fix
+(`0.6.14`).
+
+**Local/server split: implemented on `feat/local-server-split` (PR #258), awaiting a
+live gate before merge — see §11.** For reference, on `main` the CLI tree still lives
+inside `control-plane/` and the two sides import each other in a handful of places:
+
+- **server → local:** `api/agent/agentpod.go`, `api/cmd/freehold-agent-tools/main.go`,
+  and `api/cpbuild/cpbuild.go` import `cli/flows`; `cpbuild` also imports `cli/teardown`.
+- **local → server:** `cli/flows` + `cli/helpers3.go` → `secret-management`;
+  `cli/rebuild.go` → `api/agent` + `api/agenttools`; `cli/tui/*` → `api/agenttools`.
+
+PR 5 (below) cuts these; §11 records the final homes and deviations.
+
+No other module imports `control-plane/cli`.
 
 ## 4. Target command surface
 
 ```
-freehold-install install [--name] [--host] [--yes]     # fail if a live CP exists
-                        [--relay-domain] [--cp-domain] [--proxy-ip]   # fresh plane only
-freehold build                                          # world bring-up via CP (unchanged)
-freehold teardown                                        # inverse of build; CP stays
-freehold uninstall [--remove-data]                       # CP + doors removed; data kept by default
-freehold login | world | exec | profiles | …             # unchanged
+freehold install [--name] [--host] [--yes]     # fail if a live CP exists
+                 [--relay-domain] [--cp-domain] [--proxy-ip]   # fresh plane only
+freehold build                                  # world bring-up via CP (unchanged)
+freehold teardown                                # inverse of build; CP stays
+freehold uninstall [--remove-data]               # CP + doors removed; data kept by default
+freehold login | world | exec | profiles | …     # unchanged
 ```
 
-Drop `freehold-install bootstrap` (fold into `install --yes`). **`world teardown`
-is a pure alias** of the CP-preserving `teardown`.
+Until **PR 5**, install lives on the separate `freehold-install` binary; PR 5 folds
+it into `freehold install` and drops the binary (the hidden `bootstrap` alias stays
+as `install --yes`). **`world teardown` is a pure alias** of the CP-preserving
+`teardown`.
 
 ### Semantics
 
@@ -203,7 +206,86 @@ install/  control-plane/   composition roots: pick the provider from the access 
 - The extraction PR is **behavior-preserving**: same commands, same order, existing
   tests pass unchanged apart from moved packages.
 
-## 6. PR plan
+## 6. Local/server split (architecture) — implemented on PR #258 (§11)
+
+**Goal:** two apps with **zero cross-imports**. `control-plane/` is the server + the
+engines that run against the CP; `freehold-cli/` is the local operator surface; the
+shared layer is a **thin protocol/format leaf** both may import.
+
+Rule (locked):
+- `control-plane/` **must never import** `freehold-cli/`.
+- `freehold-cli/` **must never import** `control-plane/` — local drives the server
+  through the CP API (console HTTP / agent-tools MCP) or by invoking its binaries,
+  never by linking its packages.
+- Anything both sides genuinely need moves **down** into the shared leaf
+  (`contract/`).
+
+Module graph (no edge between `control-plane/` and `freehold-cli/`):
+
+```
+contract/        THIN leaf: crypto, wire, client, config, console + the protocol
+   ↑             clients relay/delegate + identity + worldfacts
+platform/ providers/            (as in §5); teardown lives at providers/proxmox/teardown/
+   ↑
+control-plane/   SERVER + engines: api/cpbuild (build, agents, DNS) + api/*,
+                 secret-management, state/
+freehold-cli/    LOCAL: login/profiles/TUI, install/uninstall (transient provider),
+                 thin build/teardown triggers → CP, world/exec → CP MCP
+```
+
+Decisions:
+
+- **`teardown` lives in `providers/proxmox/teardown/`.** It shells `pct`, so it can't
+  sit in `platform/` (the provider guard rejects it), and both the CP build and
+  `freehold-cli`'s transient uninstall need it — a provider-owned package importable
+  by both with no cross-module edge. Local `build`/`teardown` become **thin CP
+  triggers** (`/api/world-build`, `/api/world-teardown`).
+- **`flows` dissolves:** the identity loader → `contract/` (`identity`); the operator
+  helpers (`demo`/`readiness`/`exec`) → `freehold-cli`; the server uses the contract
+  loader.
+- **`onboard` is removed.** Service-runner provisioning is a CP operation
+  (`freehold-console provision` + grants); `onboard` ran the CP provisioner
+  in-process on the local box. It is **not** in the DNS/cert path — Cloudflare creds
+  flow `dns-cred` (local, sealed) → CP `world-secrets` → the CP's `worldCert` /
+  `manageDomainDNS` (now CP-side and automatic) — so removing it is a no-op for DNS.
+- **Shrink `contract/`.** Only the server-only `state` store moves into
+  `control-plane/`. `relay`/`delegate` are protocol clients used by **both** sides, so
+  they stay in the leaf (moving them would create the very local→server edges the rule
+  forbids); `identity` + `worldfacts` are shared wire helpers and also stay. The
+  `contract/` → `shared/` rename was dropped.
+- **`install/` dissolves into `freehold-cli/`** (`cpdeploy` comes with it; it is
+  already server-free); `freehold-install` folds into `freehold install` (drop the
+  binary, or keep a one-release shim).
+
+**Build/teardown split (precise)** — the split's one behavior change. Today `runBuild`
+(`control-plane/cli/rebuild.go:864`) does pre-work and owner-only bookkeeping around
+`client.WorldBuild()` (line 918):
+
+- **Move CP-side (into `cpbuild`'s `BuildWorldApply`):** CPA creation (`stageCpa`),
+  departments (`stageDepartments`), agent reconcile (`reconcileCreatedAgents`), world
+  facts (`registerWorldFacts`) — currently run from the driving box signed as the
+  **operator**; server-side they use the CP's own identity (`BuildCreateAgentFn`,
+  `cpbuild.go:1424`). Also `manageDomainDNS` (Cloudflare A-record upsert): the CP
+  already owns the DNS cred and does DNS-01, so record management joins it. The `--data`
+  audience-adoption hack (`rebuild.go:929`) is deleted.
+- **Stay local (inherently the operator box):** console login (NIP-98) and
+  `ensureCpSecrets` (it *collects secrets from the operator* and hands them to the CP
+  sealed to the console identity — a headless CP cannot collect them); `certIdent`; and
+  the local config-cache writes (`RecordPostWorld`/`FinalSave`), or drop
+  `RecordPostWorld` in favor of reading coords from the CP (decision 8).
+- **Collapses:** the `owner` branch (`rebuild.go:948` — `cfg.Runner.Addr != ""`): once
+  bookkeeping is server-side, local `build` is a uniform thin trigger and the branch
+  goes away.
+
+Guardrails:
+
+- Two import-graph tests: nothing under `control-plane/` imports `freehold-cli/`;
+  nothing under `freehold-cli/` imports `control-plane/` (each runs in its module's
+  `go test ./...`; both modules in CI).
+- 5a/5c are **behavior-preserving**; the intended behavior changes are 5b
+  (server-side agent creation + DNS, CP-signed) and the `onboard` removal.
+
+## 7. PR plan
 
 ### PR 1 — one install surface + fail-if-live + identity-preserving adopt (`0.6.9`, **merged**)
 
@@ -260,7 +342,7 @@ install/  control-plane/   composition roots: pick the provider from the access 
   wiped; invoking door + runner substrate key removed, other doors untouched;
   thin-box `--remove-data` refused.
 
-### PR 3 — provider seam + extraction, **no behavior change** (`0.6.11`)
+### PR 3 — provider seam + extraction, **no behavior change** (`0.6.11`, **merged**)
 
 The structural refactor: make `platform/` provider-independent by moving every
 substrate-specific command behind a `Provider` and into a top-level `providers/`
@@ -316,9 +398,11 @@ the strict guardrail requires closing both.
   minimal **`Executor`** (the existing `McpClient`+target adapter implements it) so
   PR4's direct-SSH transport stays provider-internal. No options machinery yet.
 
-### PR 4 — transient access + door rotation (`0.6.12`)
+### PR 4 — transient access + door rotation (`0.6.12`–`0.6.14`, **merged**)
 
 The behavior change the original plan called PR3, now riding a clean provider boundary.
+Landed in `0.6.12`; **record correction:** the re-adopt substrate-key rotation (below)
+landed in `0.6.13`, and the substrate-key *match* fix in `0.6.14`.
 
 - Add the **direct `ssh-root-proxmox` transport** (an executor the proxmox provider
   accepts) so install no longer needs a local served runner for bootstrap.
@@ -337,25 +421,70 @@ The behavior change the original plan called PR3, now riding a clean provider bo
 - **Tests:** rotation preserves the runner pubkey + grants and runs on re-adopt; old
   key removed; transient uninstall removes a dead CP; other boxes' doors untouched.
 
-### PR 5 — `vultr` provider (`0.6.13`)
+### PR 5 — local/server split (`0.6.15`)
+
+The §6 structural refactor, staged so each step is reviewable:
+
+- **5a — de-invert (behavior-preserving):** move the `state` store out of `contract/`
+  into `control-plane/` (keep the `contract/` name); move `cli/teardown` →
+  `providers/proxmox/teardown/`; move the `flows` identity loader into `contract/`
+  (`identity`); repoint server + local callers; add the two no-cross-import guards.
+  `relay`/`delegate` stay in the leaf (used by both sides).
+- **5b — server-ify the engine (behavior change — the precise split in §6):** move CPA
+  creation, departments, agent reconcile, `WorldFacts` registration, and
+  `manageDomainDNS` into `cpbuild`'s `BuildWorldApply`; make local `build`/`teardown`
+  pure CP triggers (the `owner` branch and the `--data` audience hack go away); remove
+  the local `onboard` command; dissolve `flows`.
+  - **Acceptance/tests:** a fresh build creates the CPA + departments via the CP; a
+    `--data` rebuild still creates agents; the CP identity is a relay/roster member
+    for `create_agent`; and a world with stored DNS creds still issues/reuses certs
+    **and** manages A-records after `onboard` removal (now server-side).
+  - **Audience refresh (required):** deleting the `--data` audience hack left
+    `worldMcp` signing with the stale `cfg.AgentToolsPubkey`. Centralize a refresh
+    from the console's `/api/world` (`agent_tools_pubkey`) before signing, so `door`
+    (`freehold-cli/cli/world.go`, `door.go`), `world migrate`, and `world build` keep
+    working after a `--data` rebuild. (No console route covers `world_authorize_door`,
+    so refresh the pubkey rather than reroute.)
+  - **Live gate:** merge is gated on a live run on a real box — a fresh build (CPA +
+    departments via the CP), `teardown --data` → build (agents re-created), and a
+    stored-DNS-cred cert issue/reuse. Unit tests cover only the pure pieces.
+- **5c — create `freehold-cli/`:** new top-level Go module; move the local CLI/TUI tree
+  + `install/` (`cpdeploy`) there; dedupe the twice-defined box self-staged commands
+  (`exec`/`provision`/`storage`/`deploy-cp`) into one `freehold-cli/internal/stages/`
+  (local-only — the CP's `freehold-console` has a different command set and `cpbuild`
+  does not run `box.Engine`); drop `freehold-install` (or a one-release shim); add
+  `freehold-cli` to `justfile` build/test and the CI Go matrix, and update
+  `ResolveBins`.
+- **5d — per-verb reorg: dropped for now.** The functional dedupe is done
+  (`freehold-cli/internal/stages/`); the cosmetic reorg needs the `cli` helper layer
+  exported and every call site touched. Not part of PR 5; revisit only if `cli/` gets
+  unwieldy.
+- **Acceptance:** the two import guards run in `go test ./...` (one per module; both
+  modules in CI); commands/behavior unchanged except the 5b changes + `onboard`
+  removal; the audience refresh lands; a live smoke passes; `justfile`/docs updated.
+
+### PR 6 — `vultr` provider (`0.6.16`)
 
 - `providers/vultr/` (provider API + SSH) implementing `Provider`; an `api-vultr`
   access mode. Same orchestration, different provider. `hetzner` later.
 
-## 7. Docs
+## 8. Docs
 
 - `AGENTS.md`: command model (`install`/`build`/`teardown`/`uninstall`), `--host`,
-  gate semantics. Keep docs current-state only — the `--remove-data` future default
-  flip is a comment at the flag definition, not doc narration.
-- `ARCHITECTURE.md`: the provider boundary (§5 here) — module graph, "platform is
+  gate semantics; the module list gains `freehold-cli/` (and `install/` dissolves).
+  Keep docs current-state only — the `--remove-data` future default flip is a comment
+  at the flag definition, not doc narration.
+- `ARCHITECTURE.md`: the provider boundary (§5) — module graph, "platform is
   provider-independent", the `Provider` interface home, what moved under `providers/`;
   access modes, transient access, CP runner identity + door rotation,
-  teardown/uninstall scopes.
+  teardown/uninstall scopes. Add the local/server split (§6): the two-app graph,
+  "`control-plane` never imports the local CLI and vice versa", and `contract/` as the
+  thin protocol leaf.
 - `README.md`: update the CLI examples (replace `freehold-install bootstrap`; note the
-  provider/access-mode model).
+  provider/access-mode model; drop the `onboard` example).
 - `CHANGELOG.md`: one entry per PR; `roadmap/ROADMAP.md`/`POC.md` where relevant.
 
-## 8. Deferred / out of scope
+## 9. Deferred / out of scope
 
 - **`install --restore`** (whole-plane restore → re-adopt + door rotation). The
   identity model guarantees grants survive by construction: the runner Nostr/enc
@@ -363,26 +492,128 @@ The behavior change the original plan called PR3, now riding a clean provider bo
   `RotateSecret` hardcodes the target `Address` (`provisioner2.go:52`), so a restore
   to a **new host** needs a **target-repoint** step on top of door rotation — PR 4's
   rotation is **same-host only**. Do not implement now, but don't preclude it.
-- **Provider breadth** beyond `ssh-root-proxmox` (Vultr/Hetzner API) — build the
-  seam, implement Proxmox first.
+- **Provider breadth** — `vultr` (PR 6) and later `hetzner`: the seam is in place;
+  each is a new `Provider` implementation, not a new branch.
 - **`--remove-data` becomes the default** — later; comment at the flag, not docs.
 
-## 9. Risks
+## 10. Risks
 
 - **Secret provenance**: the substrate SSH credential is the only runner secret with
   no CP-side source; it is re-minted by design. Any *new* runner-only secret would
-  be lost on re-adopt — the guard test covers this.
-- **Fail-if-live detection** must be reliable (CP LXC present or console answer);
-  a false negative would re-bootstrap over a live CP. PR1 covers the console
-  answer when a profile exists; PR4 adds the host-side guest-list check, which
-  also closes the profile-less case.
+  be lost on re-adopt — the guard test (`0.6.12`) covers this.
 - **Host resolution after a wipe**: by design — install takes `--host`; host access
   is the one thing that cannot be resolved from the plane.
 - **Grants**: never re-mint identity; if any code path re-mints, grants/channel are
-  orphaned. The rotation path must use `RotateSecret` (identity-preserving).
-- **Door-key identification**: removals must target exactly the invoking box's door
-  + the runner substrate key, so freehold-owned host keys need a recognizable marker
-  (e.g. a `freehold-*` comment) at authorize time; never remove another box's door.
-- **Thin-box uninstall**: `--remove-data` refused until the data path is sequenced.
+  orphaned. Rotation uses identity-preserving `RotateSecret`.
+- **Thin-box uninstall**: `--remove-data` still needs the build box.
+- **Cross-import regressions (PR 5)**: the two "no cross-import" rules must be
+  enforced by import-graph tests, not convention, or the entanglement returns one
+  PR at a time.
+- **`onboard` removal**: it is not in the DNS/cert path (creds flow `dns-cred` →
+  CP `world-secrets` → `worldCert`/`manageDomainDNS`), so dropping it must not change
+  `build`/cert behavior — cover with a test that a world with stored DNS creds still
+  issues/reuses certs.
 - **Out-of-band first access**: after uninstall, the next install's first root access
   is PVE console/root SSH (Proxmox) or the provider API (Vultr).
+
+---
+
+## 11. PR 5 implementation status, deviations, and decisions
+
+PR 5 is on `feat/local-server-split` (PR #258, `0.6.15`). CI green; the bot
+review approved after three rounds. **Not merged** (awaiting the operator).
+
+### 11.1 What landed
+
+- **5a — de-invert.** `contract/` is the thin leaf again: `crypto/wire/client/
+  config/console` plus the protocol clients `relay`/`delegate`, the `identity`
+  loader, and a `worldfacts` wire shape. The CP `state` store moved into
+  `control-plane/`. `cli/teardown` moved to `providers/proxmox/teardown/` (it
+  shells `pct`, so `platform/`'s guard correctly rejected it there). The
+  `contract/` → `shared/` rename was dropped, per the updated §6.
+- **5b — CP-owned engine.** New `control-plane/api/cpbuild/agents.go`:
+  `reconcileAgents` (CPA → departments → registry reconcile),
+  `registerWorldFactsServer`, `manageDomainDNS`, durable cert-expiry parse;
+  wired into `BuildWorldApply` as steps 0.5 and 8. Local `build` is a uniform
+  thin trigger; the `owner` branch and the `--data` audience-adoption hack are
+  gone. `onboard` removed; `flows` dissolved to operator helpers.
+- **5c — `freehold-cli/`.** New top-level module: CLI + TUI, `login/`, `flows/`,
+  and the install surface (`install/` + `cpdeploy/`). `install/` module
+  dissolved; `freehold-install` folds into `freehold install` (hidden
+  `bootstrap` alias intact). Both import-graph guards pass
+  (`control-plane/isolation_test.go`, `freehold-cli/isolation_test.go`).
+  `justfile` + CI build/test `freehold-cli/` in place of `install/`.
+- **5d — consolidation (functional half).** The box self-staged
+  `exec`/`provision`/`storage`/`deploy-cp` commands now live in one place,
+  `freehold-cli/internal/stages/`, and the dead duplicate implementations in
+  `cli/handlers3.go` were deleted.
+
+### 11.2 Deviations from the plan text
+
+These are now folded into §6/§7 (which state the final reality); kept here as the
+execution record.
+
+- **`state`/`relay`/`delegate` split.** §6 said all three move into
+  `control-plane/`. `relay` and `delegate` are protocol clients used by BOTH
+  sides, so they stayed in the leaf; only the server-only `state` store moved.
+  Moving all three would have created the local→server edges that make the
+  zero-cross-import rule impossible.
+- **`teardown` home.** §6 said "beside build" server-side. The local transient
+  uninstall also needs it, and it shells `pct`, so it lives in
+  `providers/proxmox/teardown/` — importable by both the CP build and
+  `freehold-cli`, with no cross-module edge and no `platform/` guard violation.
+- **`manageDomainDNS` is now automatic CP-side.** The local opt-in prompt is
+  gone. For a non-Cloudflare stored credential it now skips (no-op) rather than
+  failing the whole build (a non-CF cred is still valid for cert DNS-01).
+- **5d per-verb package reorg deferred.** Moving `build`/`uninstall`/`teardown`/
+  `default` into subpackages requires exporting the `cli` package's shared
+  helper layer (`connect`, `addCommonFlags`, `resolveExecProfile`,
+  `confirmDestructive`, `runnerKeyRefs`, `worldExecThroughCP`, …) and touching
+  every call site — no behavior change, real regression surface, on an
+  already-approved diff. Recorded in the 5d commit.
+
+### 11.3 Issues encountered
+
+1. **Leaf placement contradiction (resolved).** §6 moved the protocol clients
+   server-side while the local CLI still imported them. Resolved by keeping
+   `relay`/`delegate` in the leaf and moving only `state`. See §11.2.
+2. **Identity root across two processes (fixed).** `BuildCreateAgentFn` minted
+   agent identities under `Spec.StateDir`. In the agent-tools server that is
+   `<root>/agent-tools`; in the console executor it is the console dir. A
+   console-side reconcile would therefore have minted a FRESH CPA keypair in the
+   wrong dir and orphaned every grant. Fixed with `Spec.AgentIdentityDir`, set
+   by both roots to `<root>/agent-tools`.
+3. **Registry ownership across two processes (designed around).** The
+   agent-tools serve process holds the registry/facts in memory; the console
+   executor writes the files and then restarts the serve process to reload.
+   `Spec.AgentRegistry`/`Spec.FactsStore` let the in-process `world_build` path
+   write its own stores with no restart. Verified by reasoning only — no live
+   exercise.
+4. **The dedupe hid a live command (caught by a test).** The deleted
+   `storage` tree looked like a duplicate, but `storage destroy-pool` is driven
+   by the teardown engine (`providers/proxmox/teardown/teardown.go:392`). It was
+   ported into `internal/stages` along with `storage info`, and the regression
+   test that every storage subcommand registers the self-stage flags was kept.
+5. **Deleting the `--data` audience-adoption hack left an edge (fixed).** The
+   box signs local agent-tools MCP calls with `cfg.AgentToolsPubkey`
+   (`worldMcp` in `freehold-cli/cli/world.go`), used by `freehold door
+   authorize/revoke`, `freehold world migrate`, `freehold world build`, and the
+   thin-box `exec`. After `teardown --data` wipes `/srv/data`, the agent-tools
+   server mints a fresh identity, so the recorded audience goes stale. Fixed
+   centrally: `worldMcp` now calls `refreshAgentToolsCoords`, which adopts the
+   live URL + pubkey from the console's `/api/world` before signing (best-effort
+   — an unreachable console leaves the recorded values in place). Covered by
+   `TestAdoptAgentToolsCoords`.
+
+### 11.4 Resolved decisions
+
+1. **Audience staleness — fix, centralized.** The `worldMcp` signer refreshes
+   `cfg.AgentToolsPubkey` from the console's `/api/world` before signing, covering
+   `door` (`door.go`), `world migrate`, and `world build` after a `--data` rebuild.
+   Folded into §7 PR 5b acceptance ("Audience refresh").
+2. **Live integration gate — required before merge.** No longer "ship unverified":
+   merge is gated on a live run (fresh build → CPA/departments; `teardown --data` →
+   build re-creates agents; stored-DNS-cred cert issue/reuse). Folded into §7 PR 5b.
+3. **5d per-verb reorg — dropped.** Cosmetic; the functional dedupe
+   (`freehold-cli/internal/stages/`) is done. See §7 PR 5.
+4. **Merge** — operator's call, after #1 and #2 land.

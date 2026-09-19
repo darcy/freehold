@@ -8,9 +8,9 @@ import (
 
 	"freehold/contract/crypto"
 	"freehold/contract/relay"
-	"freehold/contract/state"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/cpstate"
+	"freehold/control-plane/state"
 )
 
 // ---- B2 rotate ----

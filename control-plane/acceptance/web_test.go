@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"freehold/contract/state"
 	"freehold/contract/wire"
 	cpconsole "freehold/control-plane/api/console"
+	"freehold/control-plane/state"
 )
 
 const agentB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

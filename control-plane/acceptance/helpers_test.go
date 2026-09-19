@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"freehold/contract/crypto"
-	"freehold/contract/state"
+	"freehold/control-plane/state"
 )
 
 // ---- fake relay ----

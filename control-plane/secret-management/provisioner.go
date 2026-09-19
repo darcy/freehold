@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"freehold/contract/crypto"
-	"freehold/contract/state"
 	"freehold/contract/wire"
+	"freehold/control-plane/state"
 )
 
 // identity.json is the runner's identity file (private keys).
