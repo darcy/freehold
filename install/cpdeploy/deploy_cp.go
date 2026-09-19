@@ -2,6 +2,7 @@ package cpdeploy
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/config"
+	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
@@ -442,6 +444,15 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 				}
 			}
 		}
+		// RE-ADOPT: rotate the co-located runner's substrate SSH key. The plane
+		// keeps its runner identity (Nostr/enc + grants), but its host
+		// credential is regenerated and re-authorized here, so a re-install
+		// after `uninstall` (which removed the old key) is whole. Same-host only.
+		if adoptedFromPlane {
+			if err := rotateAdoptedSubstrate(t, spec, runnerDir); err != nil {
+				return nil, err
+			}
+		}
 		startRunner := fmt.Sprintf(
 			"systemctl reset-failed freehold-runner 2>/dev/null; systemd-run --unit=freehold-runner --collect %s/freehold-runner serve --state-dir %s >/dev/null 2>&1; sleep 2; systemctl is-active freehold-runner",
 			spec.BinDir, runnerDir)
@@ -532,4 +543,137 @@ func firstTargetKA(raw string) (string, string) {
 		return kind, t.Address
 	}
 	return "ssh", ""
+}
+
+// rotateAdoptedSubstrate regenerates the co-located runner's substrate SSH key
+// and re-seals it into the plane's package: read the plane runner's identity
+// (enc secret), generate a new keypair, authorize it on the HOST, re-seal it
+// into secrets.json, ship it back, and drop the old authorized_keys line. The
+// caller restarts the runner after this returns. Same-host only.
+func rotateAdoptedSubstrate(t Transport, spec *DeployCpSpec, runnerDir string) error {
+	idRaw := readGuestFile(t, spec, runnerDir+"/identity.json")
+	if idRaw == nil {
+		return fmt.Errorf("rotate substrate: no identity.json at %s", runnerDir)
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		return fmt.Errorf("rotate substrate: parse identity: %w", err)
+	}
+	encSecret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return fmt.Errorf("rotate substrate: enc secret: %w", err)
+	}
+	encPub, err := crypto.X25519PublicKey(encSecret)
+	if err != nil {
+		return fmt.Errorf("rotate substrate: enc pubkey: %w", err)
+	}
+
+	pkgRaw := readGuestFile(t, spec, runnerDir+"/secrets.json")
+	if pkgRaw == nil {
+		return fmt.Errorf("rotate substrate: no secrets.json at %s", runnerDir)
+	}
+	pkg := &wire.SecretPackage{}
+	if err := json.Unmarshal(pkgRaw, pkg); err != nil {
+		return fmt.Errorf("rotate substrate: parse package: %w", err)
+	}
+	targetName, secretName := "", ""
+	for name, meta := range pkg.Targets {
+		if meta.Kind == "ssh" {
+			targetName, secretName = name, meta.Secret
+			break
+		}
+	}
+	if targetName == "" {
+		return fmt.Errorf("rotate substrate: no ssh target in %s/secrets.json", runnerDir)
+	}
+
+	// Recover the OLD public line (to remove) — best-effort; the plane's
+	// identity.json decrypts it.
+	oldPub := ""
+	if ct, ok := pkg.Secrets[secretName]; ok {
+		if sealed, derr := hex.DecodeString(ct); derr == nil {
+			if pem, oerr := crypto.Open(encSecret, []byte(secretName), sealed); oerr == nil {
+				if line, lerr := crypto.ExtractED25519PublicKeyLine(pem); lerr == nil {
+					oldPub = line
+				}
+			}
+		}
+	}
+
+	newPEM, newPub, err := crypto.GenerateSSHKeypair(targetName)
+	if err != nil {
+		return fmt.Errorf("rotate substrate: keypair: %w", err)
+	}
+	if err := hostAuthorizeKey(t, newPub); err != nil {
+		return err
+	}
+	sealed, err := crypto.Seal(encPub, []byte(secretName), newPEM)
+	if err != nil {
+		return fmt.Errorf("rotate substrate: seal: %w", err)
+	}
+	if pkg.Secrets == nil {
+		pkg.Secrets = map[string]string{}
+	}
+	pkg.Secrets[secretName] = hex.EncodeToString(sealed)
+	out, err := pkg.Bytes()
+	if err != nil {
+		return fmt.Errorf("rotate substrate: encode package: %w", err)
+	}
+	tmp, err := os.CreateTemp("", "fh-rotate-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(out); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := shipSmallFile(t, spec, tmp.Name(), runnerDir+"/secrets.json", "runner secrets.json (rotated)"); err != nil {
+		return err
+	}
+	if oldPub != "" {
+		hostDeauthorizeKey(t, oldPub)
+	}
+	fmt.Fprintln(os.Stderr, "  rotated the co-located runner substrate key (re-adopt; same-host)")
+	return nil
+}
+
+// hostAuthorizeKey appends a public line to the HOST's root authorized_keys,
+// idempotently (matching on the base64 body).
+func hostAuthorizeKey(t Transport, pubLine string) error {
+	body := keyBodyOf(pubLine)
+	if body == "" {
+		return fmt.Errorf("rotate substrate: malformed public line")
+	}
+	cmd := fmt.Sprintf("mkdir -p /root/.ssh && chmod 700 /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && (grep -qF '%s' /root/.ssh/authorized_keys || echo '%s' >> /root/.ssh/authorized_keys)", body, pubLine)
+	if _, err := execToOK(t, cmd, "authorize rotated substrate key", 60); err != nil {
+		return err
+	}
+	return nil
+}
+
+// hostDeauthorizeKey removes a public line (matched by base64 body) from the
+// HOST's root authorized_keys. Best-effort.
+func hostDeauthorizeKey(t Transport, pubLine string) {
+	body := keyBodyOf(pubLine)
+	if body == "" {
+		return
+	}
+	cmd := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then grep -vF '%s' /root/.ssh/authorized_keys > /tmp/fh-ak && cat /tmp/fh-ak > /root/.ssh/authorized_keys && rm -f /tmp/fh-ak; fi", body)
+	if _, err := t.Exec(cmd, 60); err != nil {
+		fmt.Fprintf(os.Stderr, "  (warning: old substrate key removal failed: %v)\n", err)
+	}
+}
+
+// keyBodyOf returns the base64 body of an authorized_keys line, or "".
+func keyBodyOf(line string) string {
+	f := strings.Fields(line)
+	if len(f) >= 2 && strings.HasPrefix(f[0], "ssh-") {
+		return f[1]
+	}
+	return ""
 }

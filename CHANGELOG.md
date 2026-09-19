@@ -25,6 +25,20 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.13] — re-adopt rotates the runner substrate key
+
+Re-adopt preserved the runner identity but kept its (possibly stale) host credential, so a
+re-install after `uninstall` — which removes the substrate key — left the co-located runner
+unable to reach the host.
+
+- **`deploy-cp` rotates the substrate SSH key on adopt.** It reads the plane runner's
+  `identity.json`, generates a new keypair, authorizes the new line on the host's root
+  `authorized_keys`, re-seals the private half into the plane's `secrets.json` (runner
+  Nostr/enc identity + grants preserved), restarts the runner, and removes the old line.
+  Same-host only; repointing a target to a new host remains `install --restore` (out of
+  scope). Tested with a fake transport (identity/grants preserved, new key opens with the
+  plane's enc secret, host lines swapped).
+
 ## [0.6.12] — transient access: install reaches the host directly
 
 Install and uninstall no longer need a locally served runner. A box derives its
@@ -49,7 +63,7 @@ transport-free.
 - **Guard**: a secret-management test pins that every runner secret kind is
   CP-recoverable or re-mintable (SSH is the only re-mintable one).
 - **Not yet**: rotating the *adopted* runner's substrate SSH key on re-adopt (a CP-side
-  re-seal) — see AGENTS.md "Known gaps".
+  re-seal) — see AGENTS.md "Known gaps". (Landed in `0.6.13`.)
 
 ## Unreleased — the department model collapses five → four
 

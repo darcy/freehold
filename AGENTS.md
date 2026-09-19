@@ -236,13 +236,11 @@ changelog.
   a thin login-only box or against a dead CP through the transient root-SSH path (the box's
   DOOR_SPEC key). `--remove-data` still reaches the durable plane's storage through a LOCAL
   runner, so it needs the build box; `teardown --tenant` likewise needs the build box.
-- **The adopted runner's substrate SSH key is not rotated on re-adopt.** Re-adopt preserves
-  the runner Nostr/enc identity by design; the substrate key lives sealed to that identity in
-  the CP's package, so rotating it needs a CP-side re-seal surface (there is no console
-  `rotate` subcommand yet — only the `/api/rotate` HTTP path). A re-install after `uninstall`
-  mints a fresh package + door key and is whole; a re-adopt of a live plane keeps the existing
-  substrate key. A transient-driven rotation (new keypair → authorize → re-seal → restart →
-  drop the old line) is the named follow-up.
+- **Re-adopt rotates the runner's substrate SSH key (same-host only).** deploy-cp
+  regenerates it, authorizes it on the host, re-seals it into the plane's package (runner
+  identity + grants preserved), restarts the runner, and drops the old `authorized_keys`
+  line. Repointing a target to a **new host** still needs a target-repoint step on top of
+  this (`install --restore`, out of scope).
 - **Whole-world `teardown --data` is refused** — data removal is `uninstall --remove-data`.
   Per-tenant `teardown --tenant --data` still works (needs the build box).
 - **`install`'s live-CP refusal is profile-based *and* host-side.** It probes a profile's
