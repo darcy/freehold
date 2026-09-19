@@ -93,7 +93,10 @@ func TestRotateAdoptedSubstrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	idDoc, _ := json.Marshal(map[string]string{"enc_secret_hex": hex.EncodeToString(encSecret)})
+	idDoc, _ := json.Marshal(map[string]string{
+		"nostr_secret_hex": hex.EncodeToString(make([]byte, 32)),
+		"enc_secret_hex":   hex.EncodeToString(encSecret),
+	})
 	pkg := &wire.SecretPackage{
 		Secrets: map[string]string{target: hex.EncodeToString(sealedOld)},
 		Targets: map[string]wire.TargetMeta{target: {Kind: "ssh", Address: "root@host", Secret: target}},
@@ -107,8 +110,15 @@ func TestRotateAdoptedSubstrate(t *testing.T) {
 	f.hostKeys = []string{oldPub}
 
 	spec := &DeployCpSpec{StateDir: "/srv/data/cp/control-plane"}
-	if err := rotateAdoptedSubstrate(f, spec, runnerDir); err != nil {
+	oldGot, newGot, err := rotateAdoptedSubstrate(f, spec, runnerDir)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if oldGot != oldPub {
+		t.Errorf("recovered old pub = %q, want the plane's", oldGot)
+	}
+	if newGot == oldPub || newGot == "" {
+		t.Fatal("rotation must produce a new key")
 	}
 
 	// The package now holds a NEW key that decrypts with the plane's enc secret.
@@ -121,29 +131,41 @@ func TestRotateAdoptedSubstrate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rotated secret does not open with the plane enc key: %v", err)
 	}
-	newPub, err := crypto.ExtractED25519PublicKeyLine(newPEM)
+	line, err := crypto.ExtractED25519PublicKeyLine(newPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if newPub == oldPub {
-		t.Fatal("rotation must produce a new key")
+	if line != newGot {
+		t.Errorf("shipped key %q != returned new pub %q", line, newGot)
 	}
 	// Identity + grants preserved.
 	if got.Targets[target].Kind != "ssh" || len(got.Grants) != 1 || got.Grants[0] != "console" {
 		t.Errorf("identity/grants not preserved: %+v", got)
 	}
-	// Host authorized_keys: new key in, old key out.
+
+	// The caller authorizes the new line, restarts, then drops the old line.
+	// Before the swap, both lines are present (old still authorized — safe).
+	if err := hostAuthorizeKey(f, newGot); err != nil {
+		t.Fatal(err)
+	}
 	var hasNew, hasOld bool
 	for _, k := range f.hostKeys {
-		if k == newPub {
-			hasNew = true
-		}
-		if k == oldPub {
-			hasOld = true
-		}
+		hasNew = hasNew || k == newGot
+		hasOld = hasOld || k == oldGot
+	}
+	if !hasNew || !hasOld {
+		t.Fatalf("before deauthorize both lines must be present: %v", f.hostKeys)
+	}
+	if err := hostDeauthorizeKey(f, oldGot); err != nil {
+		t.Fatal(err)
+	}
+	hasNew, hasOld = false, false
+	for _, k := range f.hostKeys {
+		hasNew = hasNew || k == newGot
+		hasOld = hasOld || k == oldGot
 	}
 	if !hasNew {
-		t.Errorf("new key not authorized on the host: %v", f.hostKeys)
+		t.Errorf("new key not authorized on the host after rotation: %v", f.hostKeys)
 	}
 	if hasOld {
 		t.Errorf("old key must be removed from the host: %v", f.hostKeys)

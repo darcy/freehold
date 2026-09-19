@@ -333,7 +333,7 @@ func removeHostKey(prov provisioning.Provider, ref, label string) {
 	if token == "" {
 		token = ref // a bare comment/name
 	}
-	rm := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then grep -vF '%s' /root/.ssh/authorized_keys > /tmp/fh-ak && cat /tmp/fh-ak > /root/.ssh/authorized_keys && rm -f /tmp/fh-ak; fi", token)
+	rm := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then ak=$(mktemp) && grep -vF '%s' /root/.ssh/authorized_keys > $ak && cat $ak > /root/.ssh/authorized_keys && rm -f $ak; fi", token)
 	if _, err := prov.GuestExec("", rm, 60); err != nil {
 		fmt.Printf("  (warning: %s removal failed: %v)\n", label, err)
 		return
