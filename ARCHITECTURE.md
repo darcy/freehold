@@ -281,9 +281,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `teardown` and `uninstall`). Whole-world `teardown` is CP-driven and
     CP-preserving (`/api/world-teardown`); `uninstall` additionally removes the
     CP + this box's doors + the local profile, and `--remove-data` erases the
-    datasets + the freehold-created thin pool. The CP-alive `uninstall` path
-    needs a local `[runner]` (the transient-access path lands with the Access
-    seam).
+    datasets + the freehold-created thin pool. From a thin box or against a
+    dead CP, `uninstall` reaches the host over the transient root-SSH seam
+    (the box's DOOR_SPEC key) instead of a local runner.
 
 *   **`control-plane/secret-management/` is the provisioner** (`ProvisionRunner`
     reproduces provision for onboarding existing services; `contract/client`

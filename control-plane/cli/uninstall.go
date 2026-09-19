@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/contract/config"
+	"freehold/contract/crypto"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/teardown"
 	"freehold/platform/provisioning"
@@ -299,8 +300,16 @@ func runUninstallTransient(cfg *config.Config, host string, removeData bool) err
 		}
 		fmt.Printf("  ✓ destroyed %s (%s)\n", role, name)
 	}
-	// Remove this box's operator door + the runner substrate key from the host.
-	removeHostKey(prov, cfg.Runner.Pubkey, "runner substrate key")
+	// Remove the runner substrate key: prefer the exact key line (from the
+	// local package's sealed credential), else match by the runner NAME —
+	// provision sets the authorized_keys comment to the secret name, not the
+	// Nostr pubkey.
+	runnerRef := substratePubLine(cfg)
+	if runnerRef == "" {
+		runnerRef = cfg.Runner.Target
+	}
+	removeHostKey(prov, runnerRef, "runner substrate key")
+	// This box's operator door.
 	if door, derr := doorPubkey(); derr == nil {
 		removeHostKey(prov, door, "this box's operator door")
 	}
@@ -308,22 +317,67 @@ func runUninstallTransient(cfg *config.Config, host string, removeData bool) err
 	return nil
 }
 
-// removeHostKey deletes the authorized_keys line whose trailing comment matches
-// line's comment (so only that box's key is touched).
-func removeHostKey(prov provisioning.Provider, line, label string) {
-	if line == "" {
+// removeHostKey deletes an authorized_keys entry, matching on the key BODY
+// when `ref` is a full ssh line (base64 — shell/regex safe), else on the
+// trailing COMMENT when it is a bare name (the provisioned substrate key's
+// comment is the runner name). It verifies the removal and never reports
+// success it cannot prove.
+func removeHostKey(prov provisioning.Provider, ref, label string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		fmt.Printf("  (warning: no %s reference — cannot remove it)\n", label)
 		return
 	}
-	comment := line
-	if i := strings.LastIndex(line, " "); i >= 0 {
-		comment = line[i+1:]
+	body := keyBody(ref)
+	token := body
+	if token == "" {
+		token = ref // a bare comment/name
 	}
-	cmd := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then sed -i '\\|%s$|d' /root/.ssh/authorized_keys; fi", comment)
-	if _, err := prov.GuestExec("", cmd, 60); err != nil {
+	rm := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then grep -vF '%s' /root/.ssh/authorized_keys > /tmp/fh-ak && cat /tmp/fh-ak > /root/.ssh/authorized_keys && rm -f /tmp/fh-ak; fi", token)
+	if _, err := prov.GuestExec("", rm, 60); err != nil {
 		fmt.Printf("  (warning: %s removal failed: %v)\n", label, err)
 		return
 	}
+	// Verify: no line still carries the token.
+	out, err := prov.GuestExec("", fmt.Sprintf("grep -cF '%s' /root/.ssh/authorized_keys 2>/dev/null || true", token), 30)
+	left := ""
+	if out != nil {
+		left = strings.TrimSpace(out.Stdout)
+	}
+	if err != nil || left != "0" {
+		fmt.Printf("  (warning: %s may still be authorized on the host — %s line(s) carry it)\n", label, left)
+		return
+	}
 	fmt.Printf("  ✓ removed %s from the host\n", label)
+}
+
+// keyBody returns the base64 body (second field) of an authorized_keys line,
+// or "" when ref is a bare token rather than a full line.
+func keyBody(line string) string {
+	f := strings.Fields(line)
+	if len(f) >= 2 && strings.HasPrefix(f[0], "ssh-") {
+		return f[1]
+	}
+	return ""
+}
+
+// substratePubLine derives the substrate key's authorized_keys line from this
+// box's runner package when it is local; "" when there is no package (thin box)
+// so the caller falls back to matching the runner name.
+func substratePubLine(cfg *config.Config) string {
+	if cfg.Runner.Target == "" {
+		return ""
+	}
+	runnerDir := filepath.Join(box.RunnerPkgs(), cfg.Runner.Target)
+	pem, err := box.SubstrateKeyPEM(runnerDir, cfg.Runner.Target)
+	if err != nil {
+		return ""
+	}
+	line, err := crypto.ExtractED25519PublicKeyLine(pem)
+	if err != nil {
+		return ""
+	}
+	return line
 }
 
 // warnOtherDoors lists other freehold boxes' door keys still authorized on the

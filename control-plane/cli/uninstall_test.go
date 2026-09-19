@@ -77,3 +77,17 @@ func TestWipeLocalProfile(t *testing.T) {
 		t.Fatal("profile state dir not wiped")
 	}
 }
+
+// TestKeyBody: a full authorized_keys line yields the base64 body (safe to
+// grep -F), a bare name yields "" so removeHostKey falls back to the comment.
+func TestKeyBody(t *testing.T) {
+	if got := keyBody("ssh-ed25519 AAAAC3Nza freehold-door-host"); got != "AAAAC3Nza" {
+		t.Errorf("keyBody(full line) = %q, want the base64 body", got)
+	}
+	if got := keyBody("proxmox-box"); got != "" {
+		t.Errorf("keyBody(bare name) = %q, want empty", got)
+	}
+	if got := keyBody(""); got != "" {
+		t.Errorf("keyBody(empty) = %q, want empty", got)
+	}
+}
