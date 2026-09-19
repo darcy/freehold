@@ -355,10 +355,11 @@ func (e *buildEngine) consoleEncPubkey(client *console.Client) ([]byte, error) {
 		return nil, fmt.Errorf("console enc pubkey unreadable in the cp LXC:\n%s", out)
 	}
 	pk := strings.TrimSpace(out)
-	if len(pk) != 64 {
+	b, err := hex.DecodeString(pk)
+	if err != nil || len(b) != 32 {
 		return nil, fmt.Errorf("console enc pubkey readback not 64-hex: %q", pk)
 	}
-	return hex.DecodeString(pk)
+	return b, nil
 }
 
 func cpSecretBlob(name, provider string, env map[string]string, seal cert.Sealer, pub []byte) (json.RawMessage, error) {
@@ -410,10 +411,12 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		reuseFrom := ""
 		if slot == "cp" {
 			host = e.F.CpDomain
-			// Offer to reuse the relay credential only when the CP host shares
-			// the relay's zone — a different zone/provider needs its own
-			// credential (the reuse prompt still lets the operator decline).
-			if z := dnsZone(e.F.RelayDomain); z != "" && z == dnsZone(e.F.CpDomain) {
+			// Offer to reuse the relay credential only when it actually exists
+			// locally AND the CP host shares the relay's zone — a different
+			// zone/provider needs its own credential (the reuse prompt still
+			// lets the operator decline).
+			if z := dnsZone(e.F.RelayDomain); z != "" && z == dnsZone(e.F.CpDomain) &&
+				cert.CredExists(e.certCredPath("relay")) {
 				reuseFrom = "relay"
 			}
 		}
