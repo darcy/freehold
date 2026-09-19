@@ -800,6 +800,8 @@ func (f *fakeProvider) GuestIPv4(guest string) (string, error) {
 
 func (f *fakeProvider) GuestMounts(guest string) ([]string, error) { return f.mounts[guest], nil }
 
+func (f *fakeProvider) DestroyGuest(guest string) error { return nil }
+
 func (f *fakeProvider) LocalLvmStatus() (string, int, error) { return f.pool, f.riders, nil }
 
 func (f *fakeProvider) RepointLocalLvm(pool string) error { f.repointed = pool; return nil }

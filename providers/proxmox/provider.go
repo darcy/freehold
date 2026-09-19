@@ -173,3 +173,16 @@ func countLines(s string) int {
 	}
 	return n
 }
+
+// DestroyGuest destroys a guest and its rootfs (idempotent: an absent guest is
+// a no-op). Used by the transient uninstall path when no runner is available.
+func (p *Provider) DestroyGuest(guest string) error {
+	out, err := p.exec(fmt.Sprintf("pct status %s >/dev/null 2>&1 || exit 0; pct destroy %s --purge", guest, guest), 300)
+	if err != nil {
+		return err
+	}
+	if out.ExitCode != nil && *out.ExitCode != 0 {
+		return fmt.Errorf("pct destroy %s: exit %d: %s", guest, *out.ExitCode, strings.TrimSpace(out.Stdout))
+	}
+	return nil
+}

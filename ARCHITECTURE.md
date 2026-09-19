@@ -567,6 +567,18 @@ credentials are injected per attempt via `envFrom`/`env` and the router
 (`litellm.rs`) is an **API connector** whose `baseUrl` and `apiKey` ride as
 env vars (`LITELLM_HOST`, `LITELLM_API_KEY`).
 
+### Transient access (install/uninstall before the runner exists)
+
+A box reaches the Proxmox host **as root over SSH** before (or without) the CP's
+co-located runner, using a DOOR_SPEC key it derives deterministically from its
+agent-ops identity seed (`crypto.SSHPrivateKeyPEMFromSeed`). `providers/proxmox.SSHExec`
+is the `ExecFunc` transport; install's `provision`/`storage`/`deploy-cp` stages and
+`uninstall`'s dead-CP / thin-box path ride it, and `install`'s host-side fail-if-live
+probe uses it to refuse re-deploying over a live `<name>-cp`. The CP's co-located runner
+remains the durable hands once it is up; the transient key is the door that gets it there
+(and removes it). A box's own `Box.Engine` never imports the provider — the composition
+root injects the transport through the `Provider`/`ProviderFactory` seam.
+
 **A `pct` or `qm` command is simply a command.** The `exec` tool is the
 single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 `lxc.*`, `vm.*`, `vm_snapshot`, `vm_restore`, `snapshot.*`, and `backup.*`

@@ -25,6 +25,32 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.12] — transient access: install reaches the host directly
+
+Install and uninstall no longer need a locally served runner. A box derives its
+DOOR_SPEC key from its agent-ops identity and reaches the Proxmox host as root over SSH;
+the substrate commands moved behind the provider's `ExecFunc` seam in `0.6.11` are now
+transport-free.
+
+- **Direct root-SSH transport** (`providers/proxmox.SSHExec`/`SSHUpload`, `crypto.SSHPrivateKeyPEMFromSeed`).
+  `install`'s provision/storage/deploy-cp stages run over it with the runner package's
+  substrate key; `box.RunBootstrap` builds the transient provider after the door gate and
+  verifies with a single host exec. The served-runner path remains only as a fallback.
+- **Every provider function is transport-free**: `providers/proxmox` and
+  `providers/proxmox/drive` take an `ExecFunc` (with `ClientExec` adapters for the
+  runner-backed control-plane callers).
+- **Host-side fail-if-live**: install SSHes to the host with the box's deterministic
+  DOOR_SPEC key and refuses when `<name>-cp` already exists — closing the profile-less
+  box that would otherwise re-deploy over a live world. A fresh box (no identity) or an
+  unreachable host degrades to the profile-based gate.
+- **`uninstall` from a thin box / dead CP**: direct-SSH path destroys the world's guests
+  and removes this box's door + the runner substrate key, and warns about (does not touch)
+  other boxes' doors. `--remove-data` still needs the build box.
+- **Guard**: a secret-management test pins that every runner secret kind is
+  CP-recoverable or re-mintable (SSH is the only re-mintable one).
+- **Not yet**: rotating the *adopted* runner's substrate SSH key on re-adopt (a CP-side
+  re-seal) — see AGENTS.md "Known gaps".
+
 ## Unreleased — the department model collapses five → four
 
 The org had five departments, one of which bundled two unrelated jobs; the names were
