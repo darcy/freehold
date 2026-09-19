@@ -127,6 +127,8 @@ func registerSelfFlags(cmd *cobra.Command) {
 	cmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
 	cmd.Flags().String("agent-dir", box.OpsDir(), "Agent identity dir (signing)")
 	cmd.Flags().String("target", "proxmox-box", "Target runner")
+	cmd.Flags().Bool("transient", false, "reach the host by direct root SSH (no served runner)")
+	cmd.Flags().String("host", "", "host to SSH into for --transient")
 }
 
 // --- provision (self-staged: stageBootstrap) -------------------------------------------------
@@ -139,20 +141,21 @@ var provisionCmd = &cobra.Command{
 		agentDir, _ := cmd.Flags().GetString("agent-dir")
 		target := mustStr(cmd, "target")
 		kind := mustStr(cmd, "kind")
-		c, err := installConnect(addr, agentDir, target)
+		exec, cleanup, err := stageExec(addr, agentDir, target, mustStr(cmd, "host"), mustBool(cmd, "transient"))
 		if err != nil {
 			return err
 		}
+		defer cleanup()
 		switch kind {
 		case "proxmox-lxc":
-			return provisionProxmoxLxc(c, cmd, target)
+			return provisionProxmoxLxc(exec, cmd)
 		default:
 			return fmt.Errorf("unknown kind %q (proxmox-lxc supported)", kind)
 		}
 	},
 }
 
-func provisionProxmoxLxc(c *client.McpClient, cmd *cobra.Command, target string) error {
+func provisionProxmoxLxc(exec proxmox.ExecFunc, cmd *cobra.Command) error {
 	role := mustStr(cmd, "role")
 	hostname := mustStr(cmd, "hostname")
 	if hostname == "" {
@@ -186,7 +189,7 @@ func provisionProxmoxLxc(c *client.McpClient, cmd *cobra.Command, target string)
 		MemoryMB: mustU32(cmd, "memory-mb"), Bridge: mustStr(cmd, "bridge"),
 		NetIP: ip, NetGW: gw, Mounts: mounts,
 	}
-	res, err := proxmox.BootstrapProxmoxLxc(c, target, spec)
+	res, err := proxmox.BootstrapProxmoxLxc(exec, spec)
 	if err != nil {
 		return err
 	}
@@ -207,16 +210,17 @@ var storageResolveCmd = &cobra.Command{
 		target := mustStr(cmd, "target")
 		relayDomain := mustStr(cmd, "relay-domain")
 		confirm := mustBool(cmd, "confirm-storage")
-		c, err := installConnect(addr, agentDir, target)
+		exec, cleanup, err := stageExec(addr, agentDir, target, mustStr(cmd, "host"), mustBool(cmd, "transient"))
 		if err != nil {
 			return err
 		}
+		defer cleanup()
 		// One read-only pass enumerates every backend + its data. The engine
 		// consumes the JSON inventory line and drives the (plain-language)
 		// selection; direct CLI use also prints the recommended backend. The
 		// domain scopes "this world's plane" so another world's freehold data
 		// is ordinary reuse, never a reconnect.
-		inv, err := proxmox.StorageInventory(c, target)
+		inv, err := proxmox.StorageInventory(exec)
 		if err != nil {
 			return err
 		}
@@ -247,7 +251,7 @@ var storageResolveCmd = &cobra.Command{
 			return nil
 		}
 		// A truly bare host: the legacy create/bail branch.
-		action, err := drive.ResolveProxmox(c, target, confirm, optOf(mustStr(cmd, "device")))
+		action, err := drive.ResolveProxmox(exec, confirm, optOf(mustStr(cmd, "device")))
 		if err != nil {
 			return err
 		}
@@ -258,7 +262,7 @@ var storageResolveCmd = &cobra.Command{
 			fmt.Printf("STORAGE: creating new backend (pool %s) with consent…\n", action.Pool)
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
 			if *action.Backend == planebase.BackendZfs {
-				if err := proxmox.EnsureZpool(c, target, action.Pool, optOf(mustStr(cmd, "device"))); err != nil {
+				if err := proxmox.EnsureZpool(exec, action.Pool, optOf(mustStr(cmd, "device"))); err != nil {
 					return err
 				}
 			} else {
@@ -307,15 +311,16 @@ var storageEnsureCmd = &cobra.Command{
 		if tenant == "" || domain == "" || pool == "" {
 			return fmt.Errorf("storage ensure needs --tenant --domain --pool")
 		}
-		c, err := installConnect(addr, agentDir, target)
+		exec, cleanup, err := stageExec(addr, agentDir, target, mustStr(cmd, "host"), mustBool(cmd, "transient"))
 		if err != nil {
 			return err
 		}
+		defer cleanup()
 		t, err := tenantFor(tenant)
 		if err != nil {
 			return err
 		}
-		kind, action, err := parseKind(c, target, kindStr)
+		kind, action, err := parseKind(exec, kindStr)
 		if err != nil {
 			return err
 		}
@@ -325,9 +330,9 @@ var storageEnsureCmd = &cobra.Command{
 		var mounts []planebase.MountSpec
 		switch kind {
 		case planebase.KindZfs:
-			mounts, err = drive.ResolveTenantMounts(c, target, pool, domain, t)
+			mounts, err = drive.ResolveTenantMounts(exec, pool, domain, t)
 		case planebase.KindLvmThin:
-			mounts, err = drive.ResolveLvmMounts(c, target, pool, domain, t,
+			mounts, err = drive.ResolveLvmMounts(exec, pool, domain, t,
 				mustU64(cmd, "size-gb"), mustU64(cmd, "pool-size-gb"), thinPool)
 		}
 		if err != nil {
@@ -362,15 +367,16 @@ var storageDestroyCmd = &cobra.Command{
 		if tenant == "" || domain == "" || pool == "" {
 			return fmt.Errorf("storage destroy needs --tenant --domain --pool")
 		}
-		c, err := installConnect(addr, agentDir, target)
+		exec, cleanup, err := stageExec(addr, agentDir, target, mustStr(cmd, "host"), mustBool(cmd, "transient"))
 		if err != nil {
 			return err
 		}
+		defer cleanup()
 		t, err := tenantFor(tenant)
 		if err != nil {
 			return err
 		}
-		kind, action, err := parseKind(c, target, kindStr)
+		kind, action, err := parseKind(exec, kindStr)
 		if err != nil {
 			return err
 		}
@@ -380,7 +386,7 @@ var storageDestroyCmd = &cobra.Command{
 			fmt.Println("STORAGE-DESTROYED: false")
 			return nil
 		}
-		destroyed, err := drive.DestroyTenantBackend(c, target, kind, pool, domain, t)
+		destroyed, err := drive.DestroyTenantBackend(exec, kind, pool, domain, t)
 		if err != nil {
 			return err
 		}
@@ -401,7 +407,7 @@ func tenantFor(tenant string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q (relay|cp|k3s-volumes)", tenant)
 }
 
-func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendKind, *drive.ResolveAction, error) {
+func parseKind(exec proxmox.ExecFunc, kindFlag string) (planebase.BackendKind, *drive.ResolveAction, error) {
 	switch kindFlag {
 	case "":
 	case "zfs":
@@ -411,7 +417,7 @@ func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendK
 	default:
 		return "", nil, fmt.Errorf("unknown storage backend kind: %s (expected zfs|lvmth)", kindFlag)
 	}
-	action, err := drive.ResolveProxmox(c, target, false, nil)
+	action, err := drive.ResolveProxmox(exec, false, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -558,8 +564,6 @@ func init() {
 	deployCpCmd.Flags().String("relay-pubkey", "", "relay signing pubkey")
 	deployCpCmd.Flags().String("relay-host-ip", "", "relay LXC LAN IP")
 	deployCpCmd.Flags().String("lxc", "", "cp LXC vmid")
-	deployCpCmd.Flags().Bool("transient", false, "reach the host by direct root SSH (no served runner)")
-	deployCpCmd.Flags().String("host", "", "host to SSH into for --transient")
 	deployCpCmd.Flags().String("runner-binary", "", "LOCAL runner binary")
 	deployCpCmd.Flags().String("runner-package", "", "LOCAL runner package dir")
 	deployCpCmd.Flags().String("operator-pubkey", "", "operator Nostr pubkey")

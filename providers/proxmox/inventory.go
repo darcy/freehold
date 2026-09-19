@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"freehold/contract/client"
 	"freehold/platform/provisioning/planebase"
 	"freehold/providers/proxmox/drive"
 )
@@ -20,22 +19,22 @@ import (
 // positively prove is empty is reported as NOT clean.
 
 // StorageInventory probes the host's storage in one read-only pass.
-func StorageInventory(c *client.McpClient, target string) (planebase.Inventory, error) {
+func StorageInventory(exec ExecFunc) (planebase.Inventory, error) {
 	inv := planebase.Inventory{}
 
-	zpools, err := zpoolInfos(c, target)
+	zpools, err := zpoolInfos(exec)
 	if err != nil {
 		return inv, err
 	}
 	inv.Zpools = zpools
 
-	vgs, err := vgInfos(c, target)
+	vgs, err := vgInfos(exec)
 	if err != nil {
 		return inv, err
 	}
 	inv.VGs = vgs
 
-	devices, err := deviceInfos(c, target)
+	devices, err := deviceInfos(exec)
 	if err != nil {
 		return inv, err
 	}
@@ -45,8 +44,8 @@ func StorageInventory(c *client.McpClient, target string) (planebase.Inventory, 
 
 // ---- zpools -----------------------------------------------------------------
 
-func zpoolInfos(c *client.McpClient, target string) ([]planebase.ZpoolInfo, error) {
-	out, err := Exec(c, target, "zpool list -H -o name,size,free,health 2>/dev/null || true", 60)
+func zpoolInfos(exec ExecFunc) ([]planebase.ZpoolInfo, error) {
+	out, err := exec("zpool list -H -o name,size,free,health 2>/dev/null || true", 60)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +64,7 @@ func zpoolInfos(c *client.McpClient, target string) ([]planebase.ZpoolInfo, erro
 		// Dataset audit: how much lives here and whether any of it is
 		// freehold's (the reconnect signal). Best-effort: an absent zfs
 		// command leaves the pool with zero datasets, not an error.
-		if ds, err := Exec(c, target, "zfs list -H -r -o name "+z.Name+" 2>/dev/null || true", 60); err == nil {
+		if ds, err := exec("zfs list -H -r -o name "+z.Name+" 2>/dev/null || true", 60); err == nil {
 			for _, d := range strings.Split(ds.Stdout, "\n") {
 				d = strings.TrimSpace(d)
 				if d == "" || d == z.Name {
@@ -84,12 +83,12 @@ func zpoolInfos(c *client.McpClient, target string) ([]planebase.ZpoolInfo, erro
 
 // ---- LVM volume groups ------------------------------------------------------
 
-func vgInfos(c *client.McpClient, target string) ([]planebase.VGInfo, error) {
-	out, err := Exec(c, target, "vgs --noheadings --units g --nosuffix -o vg_name,vg_size,vg_free 2>/dev/null || true", 60)
+func vgInfos(exec ExecFunc) ([]planebase.VGInfo, error) {
+	out, err := exec("vgs --noheadings --units g --nosuffix -o vg_name,vg_size,vg_free 2>/dev/null || true", 60)
 	if err != nil {
 		return nil, err
 	}
-	localPool, err := localLvmPool(c, target)
+	localPool, err := localLvmPool(exec)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +103,7 @@ func vgInfos(c *client.McpClient, target string) ([]planebase.VGInfo, error) {
 			SizeGB: parseHumanGB(fields[1]),
 			FreeGB: parseHumanGB(fields[2]),
 		}
-		pools, err := PoolInfos(c, target, vg.Name, localPool)
+		pools, err := PoolInfos(exec, vg.Name, localPool)
 		if err != nil {
 			return nil, err
 		}
@@ -117,12 +116,12 @@ func vgInfos(c *client.McpClient, target string) ([]planebase.VGInfo, error) {
 // PoolInfos audits one VG's thin pools: size, usage, every LV riding each pool
 // (the guest disks + freehold volumes sharing its capacity), freehold
 // provenance, and whether PVE's local-lvm points at it.
-func PoolInfos(c *client.McpClient, target, vg, localPool string) ([]planebase.PoolInfo, error) {
-	names, err := drive.ThinPools(c, target, vg)
+func PoolInfos(exec ExecFunc, vg, localPool string) ([]planebase.PoolInfo, error) {
+	names, err := drive.ThinPools(exec, vg)
 	if err != nil {
 		return nil, err
 	}
-	out, err := Exec(c, target,
+	out, err := exec(
 		fmt.Sprintf("lvs --noheadings --units g --nosuffix -o lv_name,lv_size,pool_lv,data_percent %s 2>/dev/null || true", vg), 60)
 	if err != nil {
 		return nil, err
@@ -188,8 +187,8 @@ func internalLV(name string) bool {
 
 // localLvmPool returns the thin pool PVE's stock local-lvm storage points at
 // ("" when there is no block/pointer). Read-only.
-func localLvmPool(c *client.McpClient, target string) (string, error) {
-	out, err := Exec(c, target, drive.LocalLvmProbeScript+" 2>/dev/null || true", 30)
+func localLvmPool(exec ExecFunc) (string, error) {
+	out, err := exec(drive.LocalLvmProbeScript+" 2>/dev/null || true", 30)
 	if err != nil {
 		return "", err
 	}
@@ -217,8 +216,8 @@ type lsblkOut struct {
 // partition) is a filesystem, a PV, a zpool member, a mount, or swap. Anything
 // else is listed as Blocked with a plain reason — freehold never erases a
 // device that carries data.
-func deviceInfos(c *client.McpClient, target string) ([]planebase.DeviceInfo, error) {
-	disks, env, err := deviceEnv(c, target)
+func deviceInfos(exec ExecFunc) ([]planebase.DeviceInfo, error) {
+	disks, env, err := deviceEnv(exec)
 	if err != nil {
 		return nil, err
 	}
@@ -241,8 +240,8 @@ func deviceInfos(c *client.McpClient, target string) ([]planebase.DeviceInfo, er
 // ProbeDevice classifies ONE device path (whole disk) with the same fail-closed
 // rules the inventory uses. Called before a create so `zpool create`/`pvcreate`
 // can never run blind against a device that carries data.
-func ProbeDevice(c *client.McpClient, target, dev string) (planebase.DeviceInfo, error) {
-	disks, env, err := deviceEnv(c, target)
+func ProbeDevice(exec ExecFunc, dev string) (planebase.DeviceInfo, error) {
+	disks, env, err := deviceEnv(exec)
 	if err != nil {
 		return planebase.DeviceInfo{}, err
 	}
@@ -260,8 +259,8 @@ func ProbeDevice(c *client.McpClient, target, dev string) (planebase.DeviceInfo,
 
 // deviceEnv gathers the lsblk tree plus the PV/swap/importable-pool sets used
 // to classify every disk in one pass.
-func deviceEnv(c *client.McpClient, target string) ([]lsblkNode, *deviceState, error) {
-	out, err := Exec(c, target, "lsblk -J -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || true", 60)
+func deviceEnv(exec ExecFunc) ([]lsblkNode, *deviceState, error) {
+	out, err := exec("lsblk -J -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || true", 60)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -270,21 +269,21 @@ func deviceEnv(c *client.McpClient, target string) ([]lsblkNode, *deviceState, e
 		return nil, nil, fmt.Errorf("parse lsblk: %w", err)
 	}
 	env := &deviceState{pvs: map[string]bool{}, swaps: map[string]bool{}}
-	pvsOut, err := Exec(c, target, "pvs --noheadings -o pv_name 2>/dev/null || true", 60)
+	pvsOut, err := exec("pvs --noheadings -o pv_name 2>/dev/null || true", 60)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, p := range strings.Fields(pvsOut.Stdout) {
 		env.pvs[strings.TrimSpace(p)] = true
 	}
-	swapOut, err := Exec(c, target, "swapon --show --noheadings -o NAME 2>/dev/null || true", 60)
+	swapOut, err := exec("swapon --show --noheadings -o NAME 2>/dev/null || true", 60)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, s := range strings.Fields(swapOut.Stdout) {
 		env.swaps[strings.TrimSpace(s)] = true
 	}
-	importOut, err := Exec(c, target, "zpool import 2>/dev/null || true", 60)
+	importOut, err := exec("zpool import 2>/dev/null || true", 60)
 	if err != nil {
 		return nil, nil, err
 	}

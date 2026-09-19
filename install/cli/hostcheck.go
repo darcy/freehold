@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"freehold/contract/client"
+	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 )
@@ -72,4 +73,39 @@ func transientKey(agentDir, target string) (string, func(), error) {
 		return "", nil, fmt.Errorf("read substrate key from %s: %w", runnerDir, err)
 	}
 	return proxmox.WriteTempKey(pem)
+}
+
+// stageExec is the transport for a self-staged command: direct root SSH with
+// the substrate key (--transient) or a served runner (the classic path).
+func stageExec(addr, agentDir, target, host string, transient bool) (proxmox.ExecFunc, func(), error) {
+	if transient {
+		keyPath, cleanup, err := transientKey(agentDir, target)
+		if err != nil {
+			return nil, nil, err
+		}
+		return proxmox.SSHExec(strings.TrimPrefix(host, "root@"), keyPath), cleanup, nil
+	}
+	c, err := installConnect(addr, agentDir, target)
+	if err != nil {
+		return nil, nil, err
+	}
+	return proxmox.ClientExec(c, target), func() {}, nil
+}
+
+// transientFactory builds the direct-SSH provider once the runner package's
+// substrate key exists (after stageProvision + the door gate): box swaps to it
+// and runs host ops without a served runner. The caller must invoke cleanup.
+func transientFactory(eng *box.Engine) func() (provisioning.Provider, func(), error) {
+	return func() (provisioning.Provider, func(), error) {
+		runnerDir := filepath.Join(box.RunnerPkgs(), eng.F.Target)
+		pem, err := box.SubstrateKeyPEM(runnerDir, eng.F.Target)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read substrate key from %s: %w", runnerDir, err)
+		}
+		keyPath, cleanup, err := proxmox.WriteTempKey(pem)
+		if err != nil {
+			return nil, nil, err
+		}
+		return proxmox.New(proxmox.SSHExec(strings.TrimPrefix(eng.F.Host, "root@"), keyPath)), cleanup, nil
+	}
 }

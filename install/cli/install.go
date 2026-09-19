@@ -202,6 +202,7 @@ func runInstallCmd(cmd *cobra.Command, forceYes bool) error {
 		return err
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
+	eng.ProviderFactory = transientFactory(eng)
 	eng.Out = out
 	eng.Stdin = bufio.NewReader(cmd.InOrStdin())
 	return eng.RunBootstrap()
@@ -273,6 +274,7 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 		return err
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
+	eng.ProviderFactory = transientFactory(eng)
 	eng.Out = out
 	eng.Stdin = ui.in
 	return eng.RunBootstrap()

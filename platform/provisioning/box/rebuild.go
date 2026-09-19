@@ -166,6 +166,11 @@ type Engine struct {
 	// repoint). Composition roots inject the concrete provider; nil means the
 	// pct-dependent stages fail with a clear error.
 	Provider provisioning.Provider
+
+	// ProviderFactory builds the TRANSIENT provider once the door key is
+	// installed (direct root SSH). When set, RunBootstrap swaps Provider for
+	// it and verifies over SSH instead of serving a local runner.
+	ProviderFactory func() (provisioning.Provider, func(), error)
 }
 
 // HostExecFunc adapts the engine's self-exec transport into the provider's
@@ -290,11 +295,23 @@ func (e *Engine) RunBootstrap() error {
 		return err
 	}
 	fmt.Fprintf(e.Out, "  ✓ ops agent granted on %s\n", e.F.Target)
-	if _, err := e.stageServe(); err != nil {
-		return err
-	}
-	if err := e.stageVerify(); err != nil {
-		return err
+	if e.ProviderFactory != nil {
+		prov, cleanup, err := e.ProviderFactory()
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		e.Provider = prov
+		if err := e.stageVerifyTransient(); err != nil {
+			return err
+		}
+	} else {
+		if _, err := e.stageServe(); err != nil {
+			return err
+		}
+		if err := e.stageVerify(); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(e.Out, "  ✓ the door works — %s is reachable\n", e.F.Host)
 
@@ -832,6 +849,22 @@ func (e *Engine) stageVerify() error {
 	}
 }
 
+// stageVerifyTransient checks the door over the injected transient provider: a
+// single host exec that must echo the marker. Replaces the served-runner probe.
+func (e *Engine) stageVerifyTransient() error {
+	if e.Provider == nil {
+		return fmt.Errorf("no transient provider wired — cannot verify the door")
+	}
+	out, err := e.Provider.GuestExec("", "echo freehold-door-ok", 60)
+	if err != nil {
+		return fmt.Errorf("the door check failed: %w", err)
+	}
+	if out == nil || out.ExitCode == nil || *out.ExitCode != 0 || !strings.Contains(out.Stdout, "freehold-door-ok") {
+		return fmt.Errorf("the door check failed:\n%s", out.Stdout)
+	}
+	return nil
+}
+
 // isSshAuthFailure detects the runner's ssh auth refusal in exec output
 // (runner/src/ssh.rs SshError::Auth: "authentication failed").
 func isSshAuthFailure(out string) bool {
@@ -855,7 +888,8 @@ func (e *Engine) ExecArgs(cmd string, timeoutS int) []string {
 // stage_any: the CLI's flattened CommonArgs go AFTER the name).
 func (e *Engine) selfStage(name string, args []string) (string, error) {
 	full := make([]string, 0, len(args)+5)
-	full = append(full, args[0], "--addr", e.F.Addr, "--agent-dir", OpsDir())
+	full = append(full, args[0], "--addr", e.F.Addr, "--agent-dir", OpsDir(),
+		"--transient", "--host", e.F.Host)
 	full = append(full, args[1:]...)
 	ok, out := e.RunBin(e.Bins.Self, full)
 	if !ok {
@@ -1081,6 +1115,7 @@ func (e *Engine) FinalSave() error {
 func (e *Engine) stagePlacement() (*placement, error) {
 	resolveArgs := []string{"storage", "resolve",
 		"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
+		"--transient", "--host", e.F.Host,
 		"--relay-domain", e.F.RelayDomain}
 	if e.F.ConfirmStorage {
 		resolveArgs = append(resolveArgs, "--confirm-storage")
@@ -1196,6 +1231,7 @@ func (e *Engine) stageStorage(placement *placement) error {
 		ensureArgs := []string{"storage", "ensure",
 			"--addr", e.F.Addr, "--agent-dir", OpsDir(),
 			"--target", e.F.Target,
+			"--transient", "--host", e.F.Host,
 			"--tenant", tenant,
 			"--domain", e.F.RelayDomain,
 			"--pool", pool,
