@@ -374,6 +374,15 @@ func cpSecretBlob(name, provider string, env map[string]string, seal cert.Sealer
 	return b, nil
 }
 
+// dnsZone returns a host's registrable-ish zone: everything after the first
+// label (e.g. "cp.example.com" -> "example.com"). "" for a bare host.
+func dnsZone(host string) string {
+	if i := strings.Index(host, "."); i >= 0 && i < len(host)-1 {
+		return host[i+1:]
+	}
+	return ""
+}
+
 func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config) error {
 	if !e.WorldHasEdge() {
 		return nil // no TLS edge => no DNS creds or litellm needed
@@ -401,9 +410,12 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		reuseFrom := ""
 		if slot == "cp" {
 			host = e.F.CpDomain
-			// The CP host is almost always the same zone as the relay, so offer
-			// to reuse the relay credential instead of asking twice.
-			reuseFrom = "relay"
+			// Offer to reuse the relay credential only when the CP host shares
+			// the relay's zone — a different zone/provider needs its own
+			// credential (the reuse prompt still lets the operator decline).
+			if z := dnsZone(e.F.RelayDomain); z != "" && z == dnsZone(e.F.CpDomain) {
+				reuseFrom = "relay"
+			}
 		}
 		provider, env, err := e.promptDNSCred(slot, host, reuseFrom)
 		if err != nil {

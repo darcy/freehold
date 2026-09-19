@@ -9,6 +9,22 @@ import (
 	"freehold/contract/console"
 )
 
+// TestDNSZone: the zone is everything after the first label; a bare host has
+// none. (The CP DNS slot only offers relay-cred reuse when zones match.)
+func TestDNSZone(t *testing.T) {
+	for _, tc := range []struct{ host, want string }{
+		{"relay.example.com", "example.com"},
+		{"cp.example.com", "example.com"},
+		{"relay.a.b.example.com", "a.b.example.com"},
+		{"localhost", ""},
+		{"", ""},
+	} {
+		if got := dnsZone(tc.host); got != tc.want {
+			t.Errorf("dnsZone(%q) = %q, want %q", tc.host, got, tc.want)
+		}
+	}
+}
+
 // TestAddrReachable: a listening socket is reachable; a closed port is not.
 // (noLocalRunner uses this so a recorded-but-not-serving runner reads as thin.)
 func TestAddrReachable(t *testing.T) {
