@@ -184,8 +184,9 @@ freehold teardown    # drop the WORLD (the inverse of build): relay/k3s + the CP
                      #  agent-tools process go, internal DNS clears — the CP, its runner,
                      #  the durable plane, and the certs all STAY; data is kept
 freehold uninstall [--remove-data]  # drop the CP too (this box's doors + local state go;
-                     #  --remove-data also drops the durable plane). The CP-alive path runs
-                     #  from a box with a local runner
+                     #  --remove-data also drops the durable plane). Runs from the build box
+                     #  or, for a thin box / dead CP, over direct root SSH; --remove-data
+                     #  still needs the build box
 freehold            # the TUI dashboard
 ```
 
@@ -211,7 +212,8 @@ freehold world build          # trigger the CP's world-build (co-located runner)
 freehold world teardown       # alias of `freehold teardown` (CP-preserving world teardown)
 freehold world migrate        # run the CP's verify-gated migrations
 freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
-                              #  --remove-data drops the durable plane) — needs a local runner
+                              #  --remove-data drops the durable plane); a thin box / dead CP
+                              #  uninstalls over direct root SSH
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no

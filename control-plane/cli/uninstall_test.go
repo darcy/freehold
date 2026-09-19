@@ -9,7 +9,8 @@ import (
 )
 
 // TestResolveUninstall covers the uninstall preconditions: --host wins over the
-// recorded host, a missing host / thin box / missing CP vmid each refuse.
+// recorded host; the local-runner path needs the CP vmid; the transient path
+// (thin box / dead CP) needs a host; neither present refuses.
 func TestResolveUninstall(t *testing.T) {
 	vmid := uint32(200)
 	base := &config.Config{
@@ -29,15 +30,31 @@ func TestResolveUninstall(t *testing.T) {
 	if h, err := resolveUninstall(&noHost, ""); err != nil || h != "" {
 		t.Fatalf("host is optional: h=%q err=%v", h, err)
 	}
+	// A thin box with a recorded host now takes the TRANSIENT path.
 	thin := *base
 	thin.Runner = config.RunnerRef{}
-	if _, err := resolveUninstall(&thin, ""); err == nil {
-		t.Fatal("a thin box (no local runner) must refuse — the PR3 path")
+	if h, err := resolveUninstall(&thin, ""); err != nil || h != "root@host.recorded" {
+		t.Fatalf("thin box with a host must resolve transiently: h=%q err=%v", h, err)
 	}
+	// Neither a runner nor a host: refuse.
+	nowhere := *base
+	nowhere.Runner = config.RunnerRef{}
+	nowhere.Host = ""
+	if _, err := resolveUninstall(&nowhere, ""); err == nil {
+		t.Fatal("no runner and no host must refuse")
+	}
+	// The local-runner path still needs the CP vmid.
 	noCp := *base
 	noCp.Lxc = config.LxcSpec{}
 	if _, err := resolveUninstall(&noCp, ""); err == nil {
-		t.Fatal("a missing CP vmid must refuse")
+		t.Fatal("a missing CP vmid must refuse on the local-runner path")
+	}
+	// The transient path does not need the CP vmid (it lists guests by name).
+	noCpThin := *base
+	noCpThin.Runner = config.RunnerRef{}
+	noCpThin.Lxc = config.LxcSpec{}
+	if _, err := resolveUninstall(&noCpThin, ""); err != nil {
+		t.Fatalf("transient path must not require the CP vmid: %v", err)
 	}
 }
 
@@ -58,5 +75,19 @@ func TestWipeLocalProfile(t *testing.T) {
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
 		t.Fatal("profile state dir not wiped")
+	}
+}
+
+// TestKeyBody: a full authorized_keys line yields the base64 body (safe to
+// grep -F), a bare name yields "" so removeHostKey falls back to the comment.
+func TestKeyBody(t *testing.T) {
+	if got := keyBody("ssh-ed25519 AAAAC3Nza freehold-door-host"); got != "AAAAC3Nza" {
+		t.Errorf("keyBody(full line) = %q, want the base64 body", got)
+	}
+	if got := keyBody("proxmox-box"); got != "" {
+		t.Errorf("keyBody(bare name) = %q, want empty", got)
+	}
+	if got := keyBody(""); got != "" {
+		t.Errorf("keyBody(empty) = %q, want empty", got)
 	}
 }

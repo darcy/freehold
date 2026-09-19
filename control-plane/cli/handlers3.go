@@ -151,9 +151,9 @@ var provisionCmd = &cobra.Command{
 				}
 				spec.Mounts = append(spec.Mounts, ms)
 			}
-			res, err = proxmox.BootstrapProxmoxLxc(c, target, spec)
+			res, err = proxmox.BootstrapProxmoxLxc(proxmox.ClientExec(c, target), spec)
 		case "vultr-vps":
-			res, err = proxmox.BootstrapVultrVps(c, target, &proxmox.VultrVpsSpec{
+			res, err = proxmox.BootstrapVultrVps(proxmox.ClientExec(c, target), target, &proxmox.VultrVpsSpec{
 				Label:        hostname,
 				Region:       mustStr(cmd, "region"),
 				Plan:         mustStr(cmd, "plan"),
@@ -161,7 +161,7 @@ var provisionCmd = &cobra.Command{
 				DestroyAfter: mustBool(cmd, "destroy"),
 			})
 		case "hetzner-vps":
-			res, err = proxmox.BootstrapHetznerVps(c, target, &proxmox.HetznerVpsSpec{
+			res, err = proxmox.BootstrapHetznerVps(proxmox.ClientExec(c, target), target, &proxmox.HetznerVpsSpec{
 				Label:        hostname,
 				Location:     mustStr(cmd, "location"),
 				ServerType:   mustStr(cmd, "server-type"),
@@ -256,7 +256,7 @@ var storageResolveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		action, err := drive.ResolveProxmox(c, target, confirm, optOf(device))
+		action, err := drive.ResolveProxmox(drive.ClientExec(c, target), confirm, optOf(device))
 		if err != nil {
 			return err
 		}
@@ -277,7 +277,7 @@ var storageResolveCmd = &cobra.Command{
 				// a NAMED pool (--thin-pool): a two-pool VG where the named
 				// pool is the SECOND one must adopt it (created=false), and
 				// a name that matches none must carve (created=true).
-				pools, err := drive.ThinPools(c, target, action.Pool)
+				pools, err := drive.ThinPools(drive.ClientExec(c, target), action.Pool)
 				if err != nil {
 					return err
 				}
@@ -295,7 +295,7 @@ var storageResolveCmd = &cobra.Command{
 			fmt.Printf("STORAGE: creating new backend (%s, pool %s) with consent…\n", label, action.Pool)
 			fmt.Printf("STORAGE-POOL: %s\n", action.Pool)
 			if *action.Backend == planebase.BackendZfs {
-				if err := proxmox.EnsureZpool(c, target, action.Pool, optOf(device)); err != nil {
+				if err := proxmox.EnsureZpool(proxmox.ClientExec(c, target), action.Pool, optOf(device)); err != nil {
 					return err
 				}
 			} else {
@@ -329,7 +329,7 @@ func parseKind(c *client.McpClient, target, kindFlag string) (planebase.BackendK
 	default:
 		return "", nil, fmt.Errorf("unknown storage backend kind: %s (expected zfs|lvmth)", kindFlag)
 	}
-	action, err := drive.ResolveProxmox(c, target, false, nil)
+	action, err := drive.ResolveProxmox(drive.ClientExec(c, target), false, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -389,9 +389,9 @@ var storageEnsureCmd = &cobra.Command{
 		var mounts []planebase.MountSpec
 		switch kind {
 		case planebase.KindZfs:
-			mounts, err = drive.ResolveTenantMounts(c, target, pool, domain, t)
+			mounts, err = drive.ResolveTenantMounts(drive.ClientExec(c, target), pool, domain, t)
 		case planebase.KindLvmThin:
-			mounts, err = drive.ResolveLvmMounts(c, target, pool, domain, t, sizeGB, poolSizeGB, thinPool)
+			mounts, err = drive.ResolveLvmMounts(drive.ClientExec(c, target), pool, domain, t, sizeGB, poolSizeGB, thinPool)
 		}
 		if err != nil {
 			return err
@@ -449,7 +449,7 @@ var storageDestroyCmd = &cobra.Command{
 		}
 		// The bool distinguishes ABSENT (nothing to destroy — a no-op for the
 		// caller) from DESTROYED (the dataset subtree went away).
-		destroyed, err := drive.DestroyTenantBackend(c, target, kind, pool, domain, t)
+		destroyed, err := drive.DestroyTenantBackend(drive.ClientExec(c, target), kind, pool, domain, t)
 		if err != nil {
 			return err
 		}
@@ -479,7 +479,7 @@ var storageDestroyPoolCmd = &cobra.Command{
 		// The CLI is the ONLY caller; the pool passed here comes from the
 		// config's plane.thin_pool, recorded only when freehold carved it.
 		// drive.RemoveThinPool refuses while tenant LVs still ride it.
-		if err := drive.RemoveThinPool(c, target, pool, thinPool); err != nil {
+		if err := drive.RemoveThinPool(drive.ClientExec(c, target), pool, thinPool); err != nil {
 			return err
 		}
 		fmt.Println("STORAGE-POOL-DESTROYED: true")
@@ -522,7 +522,7 @@ var storageInfoCmd = &cobra.Command{
 			}
 			mounts = append(mounts, ma)
 		}
-		info, err := drive.ProbeStorage(c, target, kind, pool, mounts)
+		info, err := drive.ProbeStorage(drive.ClientExec(c, target), kind, pool, mounts)
 		if err != nil {
 			return err
 		}

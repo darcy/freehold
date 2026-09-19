@@ -1,4 +1,4 @@
-package proxmox
+package drive
 
 import (
 	"freehold/contract/client"
@@ -6,16 +6,7 @@ import (
 	"freehold/platform/provisioning/bootstrap"
 )
 
-// Generic platform guards, delegated so the provider code reads unchanged.
-var (
-	ExpectOK        = bootstrap.ExpectOK
-	Plain           = bootstrap.Plain
-	PlainPath       = bootstrap.PlainPath
-	TemplateVersion = bootstrap.TemplateVersion
-)
-
-// ExecFunc is the transport-free host-exec seam: the caller owns the transport
-// (McpClient today, direct SSH later); the provider owns command wrapping.
+// ExecFunc is the transport-free host-exec seam (see proxmox.ExecFunc).
 type ExecFunc = provisioning.ExecFunc
 
 // ClientExec adapts a runner MCP client + target to the host-exec seam.
@@ -25,8 +16,8 @@ func ClientExec(clientConn *client.McpClient, target string) ExecFunc {
 	}
 }
 
-// ExecToOK runs cmd on the host and asserts it succeeded.
-func ExecToOK(exec ExecFunc, cmd, step string, timeoutS uint64) (*client.ExecOutcome, error) {
+// execToOK runs cmd on the host and asserts it succeeded.
+func execToOK(exec ExecFunc, cmd, step string, timeoutS uint64) (*client.ExecOutcome, error) {
 	out, err := exec(cmd, timeoutS)
 	if err != nil {
 		return nil, err

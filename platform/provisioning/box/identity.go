@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -83,4 +84,23 @@ func EnsureIdentity(dir string) error {
 		return nil
 	}
 	return MintIdentity(dir)
+}
+
+// DoorKeyPEM derives the DOOR_SPEC SSH PRIVATE key PEM from this box's
+// agent-ops identity seed — the same deterministic key whose public line
+// `freehold door authorize` presents (comment `freehold-door-<hostname>`).
+// Transient by design: the caller writes it 0600, uses it to reach the host
+// directly, and deletes it. ErrNoIdentity when this box has no ops identity
+// (nothing to derive, nothing to check).
+func DoorKeyPEM() ([]byte, error) {
+	id, err := LoadIdentity(OpsDir())
+	if err != nil {
+		return nil, fmt.Errorf("no ops identity at %s: %w", OpsDir(), err)
+	}
+	seed, err := hexDecode(id.NostrSecretHex)
+	if err != nil || len(seed) != 32 {
+		return nil, fmt.Errorf("agent-ops nostr_secret is not a 32-byte seed")
+	}
+	host, _ := os.Hostname()
+	return crypto.SSHPrivateKeyPEMFromSeed(seed, "freehold-door-"+host)
 }

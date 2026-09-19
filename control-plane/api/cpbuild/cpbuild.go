@@ -302,7 +302,7 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 		// the recommended SAFE backend (or the recorded PlanePool). This
 		// replaces the old blind `vgs[0]` guess, which on a multi-VG host
 		// could land the plane on a busy pool.
-		inv, err := proxmox.StorageInventory(mc, s.RunnerTarget)
+		inv, err := proxmox.StorageInventory(proxmox.ClientExec(mc, s.RunnerTarget))
 		if err != nil {
 			return nil, fmt.Errorf("storage inventory: %w", err)
 		}
@@ -345,9 +345,9 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 		var ms []planebase.MountSpec
 		switch kind {
 		case planebase.KindZfs:
-			ms, err = drive.ResolveTenantMounts(mc, s.RunnerTarget, s.PlanePool, s.RelayHost, tenant)
+			ms, err = drive.ResolveTenantMounts(drive.ClientExec(mc, s.RunnerTarget), s.PlanePool, s.RelayHost, tenant)
 		case planebase.KindLvmThin:
-			ms, err = drive.ResolveLvmMounts(mc, s.RunnerTarget, s.PlanePool, s.RelayHost, tenant, s.SizeGB, s.PoolSizeGB, s.ThinPool)
+			ms, err = drive.ResolveLvmMounts(drive.ClientExec(mc, s.RunnerTarget), s.PlanePool, s.RelayHost, tenant, s.SizeGB, s.PoolSizeGB, s.ThinPool)
 		default:
 			return nil, fmt.Errorf("unknown storage backend kind %q (zfs|lvmth)", kind)
 		}
@@ -406,7 +406,7 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if err != nil {
 		return 0, err
 	}
-	res, err := proxmox.BootstrapProxmoxLxc(mc, s.RunnerTarget, spec)
+	res, err := proxmox.BootstrapProxmoxLxc(proxmox.ClientExec(mc, s.RunnerTarget), spec)
 	if err != nil {
 		return 0, fmt.Errorf("boot %s LXC: %w", role, err)
 	}
@@ -1323,11 +1323,11 @@ func (r *cpTeardownRunner) DestroyDataset(tenant, domain, pool, kind, dataset st
 	if err != nil {
 		return false, err
 	}
-	return drive.DestroyTenantBackend(r.c, r.target, planebase.BackendKind(kind), pool, domain, t)
+	return drive.DestroyTenantBackend(drive.ClientExec(r.c, r.target), planebase.BackendKind(kind), pool, domain, t)
 }
 
 func (r *cpTeardownRunner) DestroyPool(vg, pool string) error {
-	return drive.RemoveThinPool(r.c, r.target, vg, pool)
+	return drive.RemoveThinPool(drive.ClientExec(r.c, r.target), vg, pool)
 }
 
 func tenantFromName(name string) (planebase.Tenant, error) {

@@ -287,8 +287,8 @@ func (f *fakeRunner) serve(t *testing.T) *client.McpClient {
 
 func TestEnsureLvmLvFreshVGCarvesPoolThenLV(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "")
+	c := f.exec()
+	err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "")
 	if err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
@@ -314,8 +314,8 @@ func TestEnsureLvmLvReusesExistingThinPool(t *testing.T) {
 	f := newFakeRunner()
 	f.lvs["data_tdata"] = true
 	f.lvs["data_tmeta"] = true
-	c := f.serve(t)
-	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "")
+	c := f.exec()
+	err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "")
 	if err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
@@ -329,8 +329,8 @@ func TestEnsureLvmLvReusesExistingThinPool(t *testing.T) {
 
 func TestEnsureLvmLvHonorsOperatorSizes(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 12, 30, ""); err != nil {
+	c := f.exec()
+	if err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 12, 30, ""); err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
 	if i := indexOfContaining(f.cmds, "lvcreate -L 30G -T pve/freehold-thin"); i < 0 {
@@ -343,12 +343,12 @@ func TestEnsureLvmLvHonorsOperatorSizes(t *testing.T) {
 
 func TestEnsureLvmLvIdempotentSecondRun(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, ""); err != nil {
+	c := f.exec()
+	if err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, ""); err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
 	before := len(f.cmds)
-	if err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, ""); err != nil {
+	if err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, ""); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
 	second := f.cmds[before:]
@@ -371,8 +371,8 @@ func TestEnsureLvmLvIdempotentSecondRun(t *testing.T) {
 
 func TestResolveLvmMountsRelayTwoChildren(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	mounts, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantRelay, 10, 40, "")
+	c := f.exec()
+	mounts, err := ResolveLvmMounts(c, "pve", "t.d", planebase.TenantRelay, 10, 40, "")
 	if err != nil {
 		t.Fatalf("ResolveLvmMounts: %v", err)
 	}
@@ -405,8 +405,8 @@ func TestResolveLvmMountsRelayTwoChildren(t *testing.T) {
 
 func TestResolveLvmMountsCpSingleMount(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	mounts, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantCp, 10, 40, "")
+	c := f.exec()
+	mounts, err := ResolveLvmMounts(c, "pve", "t.d", planebase.TenantCp, 10, 40, "")
 	if err != nil {
 		t.Fatalf("ResolveLvmMounts: %v", err)
 	}
@@ -440,8 +440,8 @@ func TestResolveLvmMountsSurvivingPlaneNeverRecursiveChowns(t *testing.T) {
 		f.fs["/dev/pve/"+lv] = true
 		f.mounted[pair.host] = true
 	}
-	c := f.serve(t)
-	if _, err := ResolveLvmMounts(c, "box", "pve", "t.d", planebase.TenantRelay, 10, 40, ""); err != nil {
+	c := f.exec()
+	if _, err := ResolveLvmMounts(c, "pve", "t.d", planebase.TenantRelay, 10, 40, ""); err != nil {
 		t.Fatalf("ResolveLvmMounts on surviving plane: %v", err)
 	}
 	if indexOfContaining(f.cmds, "chown 100000:100000 /freehold/t-d/docker-root") < 0 {
@@ -466,9 +466,9 @@ func TestDestroyLvmTenantUmountSedPrecedesLvremove(t *testing.T) {
 	f.mounted["/freehold/t-d/cp"] = true
 	f.fs["/dev/pve/freehold-t-d-cp"] = true
 	f.fstab = append(f.fstab, "/dev/pve/freehold-t-d-cp /freehold/t-d/cp ext4 defaults 0 2")
-	c := f.serve(t)
+	c := f.exec()
 
-	destroyed, err := DestroyLvmTenant(c, "box", "pve", "t.d", planebase.TenantCp)
+	destroyed, err := DestroyLvmTenant(c, "pve", "t.d", planebase.TenantCp)
 	if err != nil {
 		t.Fatalf("DestroyLvmTenant: %v", err)
 	}
@@ -490,8 +490,8 @@ func TestDestroyLvmTenantUmountSedPrecedesLvremove(t *testing.T) {
 
 func TestDestroyLvmTenantAbsentIsNoop(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	destroyed, err := DestroyLvmTenant(c, "box", "pve", "t.d", planebase.TenantCp)
+	c := f.exec()
+	destroyed, err := DestroyLvmTenant(c, "pve", "t.d", planebase.TenantCp)
 	if err != nil {
 		t.Fatalf("DestroyLvmTenant: %v", err)
 	}
@@ -510,8 +510,8 @@ func TestDestroyLvmTenantRelayRemovesBothChildren(t *testing.T) {
 	f := newFakeRunner()
 	f.lvs["freehold-t-d-relay-docker-root"] = true
 	f.lvs["freehold-t-d-relay-deploy"] = true
-	c := f.serve(t)
-	destroyed, err := DestroyLvmTenant(c, "box", "pve", "t.d", planebase.TenantRelay)
+	c := f.exec()
+	destroyed, err := DestroyLvmTenant(c, "pve", "t.d", planebase.TenantRelay)
 	if err != nil {
 		t.Fatalf("DestroyLvmTenant: %v", err)
 	}
@@ -529,8 +529,8 @@ func TestDestroyLvmTenantLvremoveFailureLeavesDataIntact(t *testing.T) {
 	f := newFakeRunner()
 	f.lvs["freehold-t-d-cp"] = true
 	f.failCmd["lvremove"] = 5 // simulate a busy LV refusing removal
-	c := f.serve(t)
-	destroyed, err := DestroyLvmTenant(c, "box", "pve", "t.d", planebase.TenantCp)
+	c := f.exec()
+	destroyed, err := DestroyLvmTenant(c, "pve", "t.d", planebase.TenantCp)
 	if err == nil {
 		t.Fatal("a real lvremove failure must surface as an error")
 	}
@@ -549,8 +549,8 @@ func TestDestroyTenantBackendDispatchesOnKind(t *testing.T) {
 	// LVM branch drives lvs/lvremove.
 	f := newFakeRunner()
 	f.lvs["freehold-t-d-cp"] = true
-	c := f.serve(t)
-	destroyed, err := DestroyTenantBackend(c, "box", planebase.KindLvmThin, "pve", "t.d", planebase.TenantCp)
+	c := f.exec()
+	destroyed, err := DestroyTenantBackend(c, planebase.KindLvmThin, "pve", "t.d", planebase.TenantCp)
 	if err != nil || !destroyed {
 		t.Fatalf("lvmth destroy: destroyed=%v err=%v", destroyed, err)
 	}
@@ -562,8 +562,8 @@ func TestDestroyTenantBackendDispatchesOnKind(t *testing.T) {
 	fz := newFakeRunner()
 	fz.zfsDS["rpool/freehold/t-d/cp"] = true
 	fz.zfsMP["rpool/freehold/t-d/cp"] = "/rpool/freehold/t-d/cp"
-	cz := fz.serve(t)
-	destroyed, err = DestroyTenantBackend(cz, "box", planebase.KindZfs, "rpool", "t.d", planebase.TenantCp)
+	cz := fz.exec()
+	destroyed, err = DestroyTenantBackend(cz, planebase.KindZfs, "rpool", "t.d", planebase.TenantCp)
 	if err != nil || !destroyed {
 		t.Fatalf("zfs destroy: destroyed=%v err=%v", destroyed, err)
 	}
@@ -575,8 +575,8 @@ func TestDestroyTenantBackendDispatchesOnKind(t *testing.T) {
 func TestResolveTenantMountsZfsEnsuresAndChowns(t *testing.T) {
 	f := newFakeRunner()
 	f.zfsMP["rpool/freehold/t-d/cp"] = "/rpool/freehold/t-d/cp"
-	c := f.serve(t)
-	mounts, err := ResolveTenantMounts(c, "box", "rpool", "t.d", planebase.TenantCp)
+	c := f.exec()
+	mounts, err := ResolveTenantMounts(c, "rpool", "t.d", planebase.TenantCp)
 	if err != nil {
 		t.Fatalf("ResolveTenantMounts: %v", err)
 	}
@@ -599,4 +599,13 @@ func indexOfContaining(cmds []string, sub string) int {
 		}
 	}
 	return -1
+}
+
+// exec adapts the fakeRunner to the host-exec seam (the production transport
+// contract) without going through the MCP server.
+func (f *fakeRunner) exec() ExecFunc {
+	return func(cmd string, timeoutS uint64) (*client.ExecOutcome, error) {
+		code, out := f.run(cmd)
+		return &client.ExecOutcome{Stdout: out, ExitCode: &code}, nil
+	}
 }

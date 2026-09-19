@@ -800,8 +800,25 @@ func (f *fakeProvider) GuestIPv4(guest string) (string, error) {
 
 func (f *fakeProvider) GuestMounts(guest string) ([]string, error) { return f.mounts[guest], nil }
 
+func (f *fakeProvider) DestroyGuest(guest string) error { return nil }
+
 func (f *fakeProvider) LocalLvmStatus() (string, int, error) { return f.pool, f.riders, nil }
 
 func (f *fakeProvider) RepointLocalLvm(pool string) error { f.repointed = pool; return nil }
 
 var errNotFound = errors.New("not found")
+
+// TestCPGuestLive: the host-side fail-if-live predicate matches the CP guest
+// by exact name and errors without a provider.
+func TestCPGuestLive(t *testing.T) {
+	p := &fakeProvider{guests: []provisioning.Guest{{ID: "101", Name: "myworld-cp"}}}
+	if live, err := CPGuestLive(p, "myworld", ""); err != nil || !live {
+		t.Errorf("myworld-cp present: live=%v err=%v, want true/nil", live, err)
+	}
+	if live, err := CPGuestLive(p, "otherworld", ""); err != nil || live {
+		t.Errorf("otherworld-cp absent: live=%v err=%v, want false/nil", live, err)
+	}
+	if _, err := CPGuestLive(nil, "x", ""); err == nil {
+		t.Error("nil provider must error")
+	}
+}

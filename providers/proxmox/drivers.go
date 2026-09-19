@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"freehold/contract/client"
 	"freehold/platform/provisioning/planebase"
 )
 
@@ -103,8 +102,8 @@ func LxcMpArgs(specs []planebase.MountSpec) []string {
 // HostArch maps the host arch to the template arch suffix. `uname -m` on
 // PVE: x86_64 or aarch64 (arm64 alias included for safety). Anything else
 // fails closed.
-func HostArch(c *client.McpClient, target string) (string, error) {
-	out, err := Exec(c, target, "uname -m", 120)
+func HostArch(exec ExecFunc) (string, error) {
+	out, err := exec("uname -m", 120)
 	if err != nil {
 		return "", err
 	}
@@ -128,7 +127,7 @@ func HostArch(c *client.McpClient, target string) (string, error) {
 // (not the container's `storage`): `pct create` addresses templates as
 // `local:vztmpl/<name>`. pvesm/pveam take NO --output-format (verified
 // against PVE 9.2) — plain tables are parsed.
-func EnsureDebianTemplate(c *client.McpClient, target string, specTemplate *string) (string, error) {
+func EnsureDebianTemplate(exec ExecFunc, specTemplate *string) (string, error) {
 	const templateStorage = "local"
 	// Operator pinned a template: use it verbatim, no download.
 	if specTemplate != nil {
@@ -137,13 +136,13 @@ func EnsureDebianTemplate(c *client.McpClient, target string, specTemplate *stri
 		}
 		return *specTemplate, nil
 	}
-	arch, err := HostArch(c, target)
+	arch, err := HostArch(exec)
 	if err != nil {
 		return "", err
 	}
 
 	// pvesm plain table: header + rows of `<volid> <format> <type> <size> <vmid>`.
-	list, err := Exec(c, target, "pvesm list "+templateStorage, 120)
+	list, err := exec("pvesm list "+templateStorage, 120)
 	if err != nil {
 		return "", err
 	}
@@ -182,14 +181,14 @@ func EnsureDebianTemplate(c *client.McpClient, target string, specTemplate *stri
 	// None in the store: sync the catalog and download the newest Debian
 	// standard template. Update runs first on purpose — the local catalog
 	// may predate the template the user wants.
-	update, err := Exec(c, target, "pveam update", 180)
+	update, err := exec("pveam update", 180)
 	if err != nil {
 		return "", err
 	}
 	if err := ExpectOK(update, "pveam update"); err != nil {
 		return "", err
 	}
-	available, err := Exec(c, target, "pveam available --section system", 120)
+	available, err := exec("pveam available --section system", 120)
 	if err != nil {
 		return "", err
 	}
@@ -226,7 +225,7 @@ func EnsureDebianTemplate(c *client.McpClient, target string, specTemplate *stri
 	if err := Plain(bestName); err != nil {
 		return "", err
 	}
-	download, err := Exec(c, target, "pveam download "+templateStorage+" "+bestName, 600)
+	download, err := exec("pveam download "+templateStorage+" "+bestName, 600)
 	if err != nil {
 		return "", err
 	}
@@ -259,14 +258,14 @@ func verCmp(a, b []uint32) int {
 
 // BootstrapProxmoxLxc is the proxmox-lxc driver: pct create + pct start +
 // pct exec verify, with idempotent template ensurement and guest docker.
-func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpec) (*BootstrapResult, error) {
+func BootstrapProxmoxLxc(exec ExecFunc, spec *ProxmoxLxcSpec) (*BootstrapResult, error) {
 	// Template ensurement: reuse the newest Debian template already in the
 	// store; only when none is present, sync the catalog (pveam update) and
 	// download the newest available. The template MUST match the HOST arch —
 	// the pveam catalog mixes amd64/arm64 rows and an arm64 guest cannot
 	// spawn on x86_64 (observed live). Idempotent — a re-run with a template
 	// present makes NO pveam calls.
-	tpl, err := EnsureDebianTemplate(c, target, spec.Template)
+	tpl, err := EnsureDebianTemplate(exec, spec.Template)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +295,7 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 		}
 		vmid = *spec.VMID
 	} else {
-		vmid, err = PickFreeVMID(c, target, spec.Hostname)
+		vmid, err = PickFreeVMID(exec, spec.Hostname)
 		if err != nil {
 			return nil, err
 		}
@@ -307,7 +306,7 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 	// ALREADY exists with OUR hostname, reuse it; a foreign container is
 	// refused outright.
 	reuse := false
-	cfg, err := Exec(c, target, "pct config "+strconv.FormatUint(uint64(vmid), 10), 30)
+	cfg, err := exec("pct config "+strconv.FormatUint(uint64(vmid), 10), 30)
 	if err == nil && cfg.ExitCode != nil && *cfg.ExitCode == 0 {
 		name := ""
 		for _, l := range strings.Split(cfg.Stdout, "\n") {
@@ -344,7 +343,7 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 		vmid, tpl, spec.Storage, spec.RootfsGB, spec.MemoryMB, spec.Hostname, net0, mp,
 	)
 	if !reuse {
-		out, err := Exec(c, target, create, 120)
+		out, err := exec(create, 120)
 		if err != nil {
 			return nil, err
 		}
@@ -354,12 +353,12 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 	}
 
 	vid := strconv.FormatUint(uint64(vmid), 10)
-	status, err := Exec(c, target, "pct status "+vid, 30)
+	status, err := exec("pct status "+vid, 30)
 	if err != nil {
 		return nil, err
 	}
 	if !strings.Contains(status.Stdout, "status: running") {
-		out, err := Exec(c, target, "pct start "+vid, 120)
+		out, err := exec("pct start "+vid, 120)
 		if err != nil {
 			return nil, err
 		}
@@ -370,7 +369,7 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 
 	// A3 — reachability self-check: the runner asks the guest, through the
 	// host, `pct exec`; the guest answers. No IP guessing.
-	out, err := Exec(c, target, fmt.Sprintf("pct exec %s -- sh -c 'hostname && uname -s && whoami'", vid), 120)
+	out, err := exec(fmt.Sprintf("pct exec %s -- sh -c 'hostname && uname -s && whoami'", vid), 120)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +382,7 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 
 	// Get ahead of docker-in-LXC: the guest hosts the relay, so it needs
 	// docker + compose BEFORE deploy's docker gate runs.
-	if err := EnsureGuestDocker(c, target, vmid); err != nil {
+	if err := EnsureGuestDocker(exec, vmid); err != nil {
 		return nil, err
 	}
 
@@ -391,7 +390,7 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 	// require the DOMAIN to resolve to it (the IP is never the identity).
 	// `pct exec <vmid> -- ip -4 -o addr` needs no shell quoting.
 	ip := ""
-	if ipOut, err := Exec(c, target, fmt.Sprintf("pct exec %s -- ip -4 -o addr", vid), 60); err == nil {
+	if ipOut, err := exec(fmt.Sprintf("pct exec %s -- ip -4 -o addr", vid), 60); err == nil {
 		fields := strings.Fields(ipOut.Stdout)
 		for i := 0; i+1 < len(fields); i++ {
 			if fields[i] == "inet" && !strings.HasPrefix(fields[i+1], "127.") {
@@ -422,8 +421,8 @@ func BootstrapProxmoxLxc(c *client.McpClient, target string, spec *ProxmoxLxcSpe
 // The vmid namespace is SHARED with QEMU VMs, which pct list misses — so
 // the id comes from `pvesh get /cluster/nextid` (canonical cluster-wide
 // next free id), not a pct-only scan.
-func PickFreeVMID(c *client.McpClient, target, hostname string) (uint32, error) {
-	list, err := Exec(c, target, "pct list", 120)
+func PickFreeVMID(exec ExecFunc, hostname string) (uint32, error) {
+	list, err := exec("pct list", 120)
 	if err != nil {
 		return 0, err
 	}
@@ -441,7 +440,7 @@ func PickFreeVMID(c *client.McpClient, target, hostname string) (uint32, error) 
 			return 0, fmt.Errorf("a container named %q already exists on this host; pass --vmid to target it, or pick a different name", hostname)
 		}
 	}
-	next, err := Exec(c, target, "pvesh get /cluster/nextid", 120)
+	next, err := exec("pvesh get /cluster/nextid", 120)
 	if err != nil {
 		return 0, err
 	}
@@ -463,7 +462,7 @@ func PickFreeVMID(c *client.McpClient, target, hostname string) (uint32, error) 
 // idempotent re-runs). The daemon must then answer `docker info`; when the
 // default overlay2 driver fails inside the unprivileged container, fall
 // back to fuse-overlayfs (the canonical fix), restart, and re-verify.
-func EnsureGuestDocker(c *client.McpClient, target string, vmid uint32) error {
+func EnsureGuestDocker(exec ExecFunc, vmid uint32) error {
 	vid := strconv.FormatUint(uint64(vmid), 10)
 	// Docker + compose v2: debian-13/trixie carries docker-compose-v2 in
 	// main, debian-12/bookworm does NOT — when the Debian name is
@@ -491,7 +490,7 @@ func EnsureGuestDocker(c *client.McpClient, target string, vmid uint32) error {
 
 	var installErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		out, err := Exec(c, target, install, 600)
+		out, err := exec(install, 600)
 		if err == nil {
 			err = ExpectOK(out, "guest docker install")
 		}
@@ -518,7 +517,7 @@ func EnsureGuestDocker(c *client.McpClient, target string, vmid uint32) error {
 	// A non-zero exit arrives as Ok(outcome), so BOTH a transport error and
 	// a failing exec must fall through to the overlay fallback.
 	var first error
-	if out, err := Exec(c, target, info, 120); err != nil {
+	if out, err := exec(info, 120); err != nil {
 		first = err
 	} else if e := ExpectOK(out, "guest docker info"); e != nil {
 		first = e
@@ -537,11 +536,11 @@ func EnsureGuestDocker(c *client.McpClient, target string, vmid uint32) error {
 		`systemctl restart docker >/dev/null 2>&1 || ` +
 		`service docker restart >/dev/null 2>&1'`
 	// Even a failed fallback must surface the ORIGINAL daemon error + hint.
-	if out, err := Exec(c, target, fallback, 600); err != nil || ExpectOK(out, "guest docker fuse fallback") != nil {
+	if out, err := exec(fallback, 600); err != nil || ExpectOK(out, "guest docker fuse fallback") != nil {
 		return fmt.Errorf("fuse-overlayfs fallback failed in the guest (%v); original daemon error: (%v); consider a privileged container", err, first)
 	}
 
-	out, err := Exec(c, target, info, 120)
+	out, err := exec(info, 120)
 	if err != nil {
 		return fmt.Errorf("docker daemon failed in the guest after the fuse-overlayfs fallback (%v; re-check: %v); consider a privileged container", first, err)
 	}
@@ -572,7 +571,7 @@ func envName(target string) string {
 // BootstrapVultrVps is the vultr-vps driver — the proven curl shapes,
 // wrapped in the bootstrap orchestration (create -> poll active -> report;
 // optional destroy for tests/cleanup).
-func BootstrapVultrVps(c *client.McpClient, target string, spec *VultrVpsSpec) (*BootstrapResult, error) {
+func BootstrapVultrVps(exec ExecFunc, target string, spec *VultrVpsSpec) (*BootstrapResult, error) {
 	if err := Plain(spec.Label); err != nil {
 		return nil, err
 	}
@@ -590,7 +589,7 @@ func BootstrapVultrVps(c *client.McpClient, target string, spec *VultrVpsSpec) (
 		`curl -sS -X POST "%s/v2/instances" -H "Authorization: Bearer %s" -H 'Content-Type: application/json' -d '{"region":"%s","plan":"%s","os_id":%d,"label":"%s","hostname":"%s"}'`,
 		envURL, envCred, spec.Region, spec.Plan, spec.OsID, spec.Label, spec.Label,
 	)
-	out, err := Exec(c, target, create, 120)
+	out, err := exec(create, 120)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +616,7 @@ func BootstrapVultrVps(c *client.McpClient, target string, spec *VultrVpsSpec) (
 	mainIP := ""
 	for i := 0; i < 60; i++ {
 		poll := fmt.Sprintf(`curl -sS "%s/v2/instances/%s" -H "Authorization: Bearer %s"`, envURL, id, envCred)
-		pout, err := Exec(c, target, poll, 120)
+		pout, err := exec(poll, 120)
 		if err == nil && ExpectOK(pout, "vultr poll") == nil {
 			var status map[string]any
 			if jerr := json.Unmarshal([]byte(strings.TrimSpace(pout.Stdout)), &status); jerr == nil {
@@ -650,7 +649,7 @@ func BootstrapVultrVps(c *client.McpClient, target string, spec *VultrVpsSpec) (
 	}
 
 	if spec.DestroyAfter {
-		if err := destroyVultr(c, target, envURL, envCred, id); err != nil {
+		if err := destroyVultr(exec, envURL, envCred, id); err != nil {
 			return nil, err
 		}
 		detail += "; destroyed"
@@ -666,13 +665,13 @@ func BootstrapVultrVps(c *client.McpClient, target string, spec *VultrVpsSpec) (
 // destroys transitionally: a delete issued right after verification can 409
 // while the instance settles). A MISSED destroy is the one failure that
 // keeps billing. --fail: curl exits non-zero on any HTTP >= 400.
-func destroyVultr(c *client.McpClient, target, envURL, envCred, id string) error {
+func destroyVultr(exec ExecFunc, envURL, envCred, id string) error {
 	destroy := fmt.Sprintf(
 		`curl -sS -X DELETE "%s/v2/instances/%s" -H "Authorization: Bearer %s" -o /dev/null -w '%%{http_code}'`,
 		envURL, id, envCred,
 	)
 	for attempt := 0; attempt < 5; attempt++ {
-		out, err := Exec(c, target, destroy, 120)
+		out, err := exec(destroy, 120)
 		if err != nil {
 			return err
 		}
@@ -701,7 +700,7 @@ func buildHetznerCreate(envURL, envCred, label, location, serverType, image stri
 // unavailable in the location (seen live). On an invalid_input create,
 // query availability and retry ONCE with a known-working type before
 // failing.
-func BootstrapHetznerVps(c *client.McpClient, target string, spec *HetznerVpsSpec) (*BootstrapResult, error) {
+func BootstrapHetznerVps(exec ExecFunc, target string, spec *HetznerVpsSpec) (*BootstrapResult, error) {
 	for _, v := range []string{spec.Label, spec.Location, spec.ServerType, spec.Image} {
 		if err := Plain(v); err != nil {
 			return nil, err
@@ -712,7 +711,7 @@ func BootstrapHetznerVps(c *client.McpClient, target string, spec *HetznerVpsSpe
 	envURL := "${" + env + "_URL}"
 
 	create := buildHetznerCreate(envURL, envCred, spec.Label, spec.Location, spec.ServerType, spec.Image)
-	out, err := Exec(c, target, create, 120)
+	out, err := exec(create, 120)
 	if err != nil {
 		return nil, err
 	}
@@ -730,7 +729,7 @@ func BootstrapHetznerVps(c *client.McpClient, target string, spec *HetznerVpsSpe
 		// Ask the API which types the LOCATION actually sells; pick the
 		// first non-deprecated one with availability there.
 		avail := fmt.Sprintf(`curl -sS "%s/v1/server_types?per_page=100" -H "Authorization: Bearer %s"`, envURL, envCred)
-		ao, err := Exec(c, target, avail, 120)
+		ao, err := exec(avail, 120)
 		if err != nil {
 			return nil, err
 		}
@@ -764,7 +763,7 @@ func BootstrapHetznerVps(c *client.McpClient, target string, spec *HetznerVpsSpe
 				strings.TrimSpace(out.Stdout), spec.ServerType, spec.Location)
 		}
 		create = buildHetznerCreate(envURL, envCred, spec.Label, spec.Location, fallback, spec.Image)
-		out, err = Exec(c, target, create, 120)
+		out, err = exec(create, 120)
 		if err != nil {
 			return nil, err
 		}
@@ -787,7 +786,7 @@ func BootstrapHetznerVps(c *client.McpClient, target string, spec *HetznerVpsSpe
 	mainIP := ""
 	for i := 0; i < 120; i++ {
 		poll := fmt.Sprintf(`curl -sS "%s/v1/servers/%s" -H "Authorization: Bearer %s"`, envURL, id, envCred)
-		pout, err := Exec(c, target, poll, 120)
+		pout, err := exec(poll, 120)
 		if err == nil && ExpectOK(pout, "hetzner poll") == nil {
 			var v map[string]any
 			if jerr := json.Unmarshal([]byte(strings.TrimSpace(pout.Stdout)), &v); jerr == nil {
@@ -821,7 +820,7 @@ func BootstrapHetznerVps(c *client.McpClient, target string, spec *HetznerVpsSpe
 	}
 
 	if spec.DestroyAfter {
-		if err := destroyHetzner(c, target, envURL, envCred, id); err != nil {
+		if err := destroyHetzner(exec, envURL, envCred, id); err != nil {
 			return nil, err
 		}
 		return &BootstrapResult{
@@ -843,13 +842,13 @@ func BootstrapHetznerVps(c *client.McpClient, target string, spec *HetznerVpsSpe
 
 // destroyHetzner deletes a server, retrying transient non-2xx like the
 // vultr driver; a 404 counts as destroyed (idempotent).
-func destroyHetzner(c *client.McpClient, target, envURL, envCred, id string) error {
+func destroyHetzner(exec ExecFunc, envURL, envCred, id string) error {
 	destroy := fmt.Sprintf(
 		`curl -sS -X DELETE "%s/v1/servers/%s" -H "Authorization: Bearer %s" -o /dev/null -w '%%{http_code}'`,
 		envURL, id, envCred,
 	)
 	for attempt := 0; attempt < 5; attempt++ {
-		out, err := Exec(c, target, destroy, 120)
+		out, err := exec(destroy, 120)
 		if err != nil {
 			return err
 		}

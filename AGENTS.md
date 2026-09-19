@@ -231,19 +231,26 @@ changelog.
   any Phase E-created agent reusing `AgentLiteLLMKeyScript` — can register/remove any model and
   mint keys until scoped keys are wired. Minting a bootstrap virtual key and switching agent
   pods to scoped per-agent keys is the named follow-up.
-- **`uninstall` needs a box with a local provisioning runner.** The whole-world `teardown`
-  works from any box (it is CP-driven and CP-preserving), but `uninstall` reaches the host
-  side — the runner substrate key, the CP LXC destroy — through a LOCAL runner. A thin
-  login-only box cannot uninstall until the transient Access seam lands. `teardown --tenant`
-  likewise needs the build box.
+- **`uninstall --remove-data` needs a box with a local provisioning runner.** The
+  whole-world `teardown`, and `uninstall`'s world + door + substrate-key removal, work from
+  a thin login-only box or against a dead CP through the transient root-SSH path (the box's
+  DOOR_SPEC key). `--remove-data` still reaches the durable plane's storage through a LOCAL
+  runner, so it needs the build box; `teardown --tenant` likewise needs the build box.
+- **The adopted runner's substrate SSH key is not rotated on re-adopt.** Re-adopt preserves
+  the runner Nostr/enc identity by design; the substrate key lives sealed to that identity in
+  the CP's package, so rotating it needs a CP-side re-seal surface (there is no console
+  `rotate` subcommand yet — only the `/api/rotate` HTTP path). A re-install after `uninstall`
+  mints a fresh package + door key and is whole; a re-adopt of a live plane keeps the existing
+  substrate key. A transient-driven rotation (new keypair → authorize → re-seal → restart →
+  drop the old line) is the named follow-up.
 - **Whole-world `teardown --data` is refused** — data removal is `uninstall --remove-data`.
   Per-tenant `teardown --tenant --data` still works (needs the build box).
-- **`install`'s live-CP refusal is profile-based.** It probes only a profile's recorded
-  `cp_url` (`/healthz`); a **profile-less** box pointed at a host that already runs a live
-  `<name>-cp` falls to `mint` and does an un-requested re-deploy over the live world. The
-  authoritative host-side check (`pct list` for the `<name>-cp` guest) needs the transient
-  Access seam and lands with it. Re-adopt is already identity-preserving, so the exposure
-  is the un-requested re-deploy, not orphaned grants.
+- **`install`'s live-CP refusal is profile-based *and* host-side.** It probes a profile's
+  recorded `cp_url` (`/healthz`) and, when the box holds an authorized DOOR_SPEC key (a prior
+  `login`), also lists the host's guests for the `<name>-cp` guest and refuses. A box with no
+  ops identity or an unreachable host falls back to the profile probe; re-adopt is already
+  identity-preserving, so the exposure is only the un-requested re-deploy, not orphaned
+  grants.
 
 ## Build / test
 

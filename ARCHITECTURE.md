@@ -281,9 +281,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `teardown` and `uninstall`). Whole-world `teardown` is CP-driven and
     CP-preserving (`/api/world-teardown`); `uninstall` additionally removes the
     CP + this box's doors + the local profile, and `--remove-data` erases the
-    datasets + the freehold-created thin pool. The CP-alive `uninstall` path
-    needs a local `[runner]` (the transient-access path lands with the Access
-    seam).
+    datasets + the freehold-created thin pool. From a thin box or against a
+    dead CP, `uninstall` reaches the host over the transient root-SSH seam
+    (the box's DOOR_SPEC key) instead of a local runner.
 
 *   **`control-plane/secret-management/` is the provisioner** (`ProvisionRunner`
     reproduces provision for onboarding existing services; `contract/client`
@@ -566,6 +566,18 @@ cache plaintext credentials, hold a "master key," or consult the router —
 credentials are injected per attempt via `envFrom`/`env` and the router
 (`litellm.rs`) is an **API connector** whose `baseUrl` and `apiKey` ride as
 env vars (`LITELLM_HOST`, `LITELLM_API_KEY`).
+
+### Transient access (install/uninstall before the runner exists)
+
+A box reaches the Proxmox host **as root over SSH** before (or without) the CP's
+co-located runner, using a DOOR_SPEC key it derives deterministically from its
+agent-ops identity seed (`crypto.SSHPrivateKeyPEMFromSeed`). `providers/proxmox.SSHExec`
+is the `ExecFunc` transport; install's `provision`/`storage`/`deploy-cp` stages and
+`uninstall`'s dead-CP / thin-box path ride it, and `install`'s host-side fail-if-live
+probe uses it to refuse re-deploying over a live `<name>-cp`. The CP's co-located runner
+remains the durable hands once it is up; the transient key is the door that gets it there
+(and removes it). A box's own `Box.Engine` never imports the provider — the composition
+root injects the transport through the `Provider`/`ProviderFactory` seam.
 
 **A `pct` or `qm` command is simply a command.** The `exec` tool is the
 single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,

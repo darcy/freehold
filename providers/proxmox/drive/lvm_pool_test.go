@@ -9,8 +9,8 @@ import (
 
 func TestEnsureLvmLvNamedThinPoolCarvesWhenAbsent(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 30, "my-pool")
+	c := f.exec()
+	err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 30, "my-pool")
 	if err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
@@ -26,8 +26,8 @@ func TestEnsureLvmLvNamedThinPoolAdoptsExisting(t *testing.T) {
 	f := newFakeRunner()
 	f.lvs["data_tdata"] = true
 	f.lvs["data_tmeta"] = true
-	c := f.serve(t)
-	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "data")
+	c := f.exec()
+	err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "data")
 	if err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
@@ -45,8 +45,8 @@ func TestEnsureLvmLvNamedNeverCarvesSecondPool(t *testing.T) {
 	f := newFakeRunner()
 	f.lvs["data_tdata"] = true
 	f.lvs["data_tmeta"] = true
-	c := f.serve(t)
-	err := EnsureLvmLv(c, "box", "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "fh-new")
+	c := f.exec()
+	err := EnsureLvmLv(c, "pve", "freehold-t-d-cp", "/freehold/t-d/cp", 10, 40, "fh-new")
 	if err != nil {
 		t.Fatalf("EnsureLvmLv: %v", err)
 	}
@@ -71,8 +71,8 @@ func seedPool(f *fakeRunner, vg, name string) {
 func TestRemoveThinPoolRemovesEmptyPool(t *testing.T) {
 	f := newFakeRunner()
 	seedPool(f, "pve", "fh")
-	c := f.serve(t)
-	if err := RemoveThinPool(c, "box", "pve", "fh"); err != nil {
+	c := f.exec()
+	if err := RemoveThinPool(c, "pve", "fh"); err != nil {
 		t.Fatalf("RemoveThinPool: %v", err)
 	}
 	if i := indexOfContaining(f.cmds, "lvremove -f pve/fh"); i < 0 {
@@ -92,8 +92,8 @@ func TestRemoveThinPoolRefusesWhileLVRides(t *testing.T) {
 	// a tenant thin volume still riding the doomed pool
 	f.lvs["freehold-t-d-cp"] = true
 	f.thinOf["freehold-t-d-cp"] = "fh"
-	c := f.serve(t)
-	err := RemoveThinPool(c, "box", "pve", "fh")
+	c := f.exec()
+	err := RemoveThinPool(c, "pve", "fh")
 	if err == nil || !strings.Contains(err.Error(), "still holds") {
 		t.Fatalf("must refuse while an LV rides the pool, got %v", err)
 	}
@@ -114,8 +114,8 @@ func TestRemoveThinPoolSurvivorNotARider(t *testing.T) {
 	seedPool(f, "pve", "other")
 	f.lvs["other-guest-lv"] = true
 	f.thinOf["other-guest-lv"] = "other"
-	c := f.serve(t)
-	if err := RemoveThinPool(c, "box", "pve", "fh"); err != nil {
+	c := f.exec()
+	if err := RemoveThinPool(c, "pve", "fh"); err != nil {
 		t.Fatalf("survivor's LVs must not count as riders: %v", err)
 	}
 	if i := indexOfContaining(f.cmds, "lvremove -f pve/fh"); i < 0 {
@@ -125,8 +125,8 @@ func TestRemoveThinPoolSurvivorNotARider(t *testing.T) {
 
 func TestRemoveThinPoolAbsentIsNoop(t *testing.T) {
 	f := newFakeRunner()
-	c := f.serve(t)
-	if err := RemoveThinPool(c, "box", "pve", "gone"); err != nil {
+	c := f.exec()
+	if err := RemoveThinPool(c, "pve", "gone"); err != nil {
 		t.Fatalf("absent pool = no-op, got %v", err)
 	}
 	if i := indexOfContaining(f.cmds, "lvremove"); i >= 0 {
@@ -141,8 +141,8 @@ func TestRemoveThinPoolRepointsLocalLvmToSurvivor(t *testing.T) {
 	// storage.cfg's local-lvm pointer is the BARE pool name (whitespace
 	// block, no vg prefix), pointing at the doomed pool.
 	f.storageCfgThinpool = "fh"
-	c := f.serve(t)
-	if err := RemoveThinPool(c, "box", "pve", "fh"); err != nil {
+	c := f.exec()
+	if err := RemoveThinPool(c, "pve", "fh"); err != nil {
 		t.Fatalf("RemoveThinPool: %v", err)
 	}
 	// The re-point goes through the shared whitespace storage.cfg awk
@@ -173,8 +173,8 @@ func TestRemoveThinPoolNoSurvivorLeavesLocalLvm(t *testing.T) {
 	f := newFakeRunner()
 	seedPool(f, "pve", "fh")
 	f.storageCfgThinpool = "fh"
-	c := f.serve(t)
-	if err := RemoveThinPool(c, "box", "pve", "fh"); err != nil {
+	c := f.exec()
+	if err := RemoveThinPool(c, "pve", "fh"); err != nil {
 		t.Fatalf("RemoveThinPool: %v", err)
 	}
 	if i := indexOfContaining(f.cmds, "awk -v tp="); i >= 0 {

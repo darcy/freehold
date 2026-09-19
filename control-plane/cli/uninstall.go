@@ -9,8 +9,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/contract/config"
+	"freehold/contract/crypto"
 	"freehold/control-plane/cli/flows"
 	"freehold/control-plane/cli/teardown"
+	"freehold/platform/provisioning"
+	"freehold/platform/provisioning/bootstrap"
+	"freehold/platform/provisioning/box"
+	"freehold/providers/proxmox"
 )
 
 // uninstallCmd removes the control plane ITSELF — the counterpart to `teardown`
@@ -62,11 +67,22 @@ var uninstallCmd = &cobra.Command{
 			if removeData {
 				extra = " + the durable plane (--remove-data)"
 			}
-			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %d + the world + this box's door + the runner key%s\n  keeps:   nothing local (config + state are wiped)\n",
-				cfg.Name, displayHost(host, cfg.Runner.Target), *cfg.Lxc.Cp.Vmid, extra)
+			cpLxc := "?"
+			if cfg.Lxc.Cp.Vmid != nil {
+				cpLxc = fmt.Sprintf("%d", *cfg.Lxc.Cp.Vmid)
+			}
+			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %s + the world + this box's door + the runner key%s\n  keeps:   nothing local (config + state are wiped)\n",
+				cfg.Name, displayHost(host, cfg.Runner.Target), cpLxc, extra)
 			if err := confirmDestructive("uninstall"); err != nil {
 				return err
 			}
+		}
+		if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
+			if err := runUninstallTransient(cfg, host, removeData); err != nil {
+				return err
+			}
+			wipeLocalProfile(configPath, config.Current())
+			return nil
 		}
 		if err := runUninstall(cfg, configPath, host, removeData); err != nil {
 			return err
@@ -98,11 +114,16 @@ func resolveUninstall(cfg *config.Config, hostFlag string) (string, error) {
 	if hostFlag != "" {
 		host = hostFlag
 	}
-	if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
-		return "", fmt.Errorf("uninstall needs a local provisioning runner — run it from the box that built the world (the thin-box path lands with the transient Access seam)")
+	// Local-runner path (the build box): needs the runner + the CP vmid.
+	if cfg.Runner.Addr != "" && cfg.Runner.Pubkey != "" {
+		if cfg.Lxc.Cp.Vmid == nil {
+			return "", fmt.Errorf("uninstall needs the recorded CP LXC vmid (the profile has none — the CP may already be gone; re-install or run `teardown` from the build box)")
+		}
+		return host, nil
 	}
-	if cfg.Lxc.Cp.Vmid == nil {
-		return "", fmt.Errorf("uninstall needs the recorded CP LXC vmid (the profile has none — the CP may already be gone; re-install or run `teardown` from the build box)")
+	// Transient path (thin box / dead CP): reach the host by direct root SSH.
+	if host == "" {
+		return "", fmt.Errorf("uninstall needs --host (no local runner and no recorded host to reach the host directly)")
 	}
 	return host, nil
 }
@@ -233,5 +254,146 @@ func wipeLocalProfile(configPath string, p *config.Profile) {
 		} else {
 			fmt.Printf("wiped profile state %s\n", p.StateDir)
 		}
+	}
+}
+
+// runUninstallTransient removes the CP + world from a thin box (or with a dead
+// CP) by direct root SSH — no local provisioning runner. --remove-data is
+// refused: the durable plane needs the build box's storage driver.
+func runUninstallTransient(cfg *config.Config, host string, removeData bool) error {
+	if removeData {
+		return fmt.Errorf("--remove-data needs the build box (a thin box cannot reach the durable plane's storage); re-run without it, or uninstall from the build box")
+	}
+	fmt.Printf("uninstalling %q (host %s, transient access)…\n", cfg.Name, host)
+	pem, err := box.DoorKeyPEM()
+	if err != nil {
+		return fmt.Errorf("no DOOR_SPEC key to reach the host (run `freehold login` first): %w", err)
+	}
+	keyPath, cleanup, err := proxmox.WriteTempKey(pem)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	prov := proxmox.New(proxmox.SSHExec(strings.TrimPrefix(host, "root@"), keyPath))
+
+	guests, err := prov.ListGuests()
+	if err != nil {
+		return fmt.Errorf("uninstall won't touch the host: the door can't be verified (is this box's DOOR_SPEC key authorized?): %w", err)
+	}
+	byName := map[string]string{}
+	for _, g := range guests {
+		byName[g.Name] = g.ID
+	}
+	// Destroy the world's guests, CP last (a dead CP needs no teardown).
+	for _, role := range []string{"relay", "k3s", "cp"} {
+		name, nerr := bootstrap.LXCName(cfg.Name, cfg.TenantSlug(), role)
+		if nerr != nil {
+			return nerr
+		}
+		id, ok := byName[name]
+		if !ok {
+			fmt.Printf("  · %s (%s) absent — skipping\n", role, name)
+			continue
+		}
+		if err := prov.DestroyGuest(id); err != nil {
+			return err
+		}
+		fmt.Printf("  ✓ destroyed %s (%s)\n", role, name)
+	}
+	// Remove the runner substrate key: prefer the exact key line (from the
+	// local package's sealed credential), else match by the runner NAME —
+	// provision sets the authorized_keys comment to the secret name, not the
+	// Nostr pubkey.
+	runnerRef := substratePubLine(cfg)
+	if runnerRef == "" {
+		runnerRef = cfg.Runner.Target
+	}
+	removeHostKey(prov, runnerRef, "runner substrate key")
+	// This box's operator door.
+	if door, derr := doorPubkey(); derr == nil {
+		removeHostKey(prov, door, "this box's operator door")
+	}
+	warnOtherDoors(prov)
+	return nil
+}
+
+// removeHostKey deletes an authorized_keys entry, matching on the key BODY
+// when `ref` is a full ssh line (base64 — shell/regex safe), else on the
+// trailing COMMENT when it is a bare name (the provisioned substrate key's
+// comment is the runner name). It verifies the removal and never reports
+// success it cannot prove.
+func removeHostKey(prov provisioning.Provider, ref, label string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		fmt.Printf("  (warning: no %s reference — cannot remove it)\n", label)
+		return
+	}
+	body := keyBody(ref)
+	token := body
+	if token == "" {
+		token = ref // a bare comment/name
+	}
+	rm := fmt.Sprintf("if [ -f /root/.ssh/authorized_keys ]; then grep -vF '%s' /root/.ssh/authorized_keys > /tmp/fh-ak && cat /tmp/fh-ak > /root/.ssh/authorized_keys && rm -f /tmp/fh-ak; fi", token)
+	if _, err := prov.GuestExec("", rm, 60); err != nil {
+		fmt.Printf("  (warning: %s removal failed: %v)\n", label, err)
+		return
+	}
+	// Verify: no line still carries the token.
+	out, err := prov.GuestExec("", fmt.Sprintf("grep -cF '%s' /root/.ssh/authorized_keys 2>/dev/null || true", token), 30)
+	left := ""
+	if out != nil {
+		left = strings.TrimSpace(out.Stdout)
+	}
+	if err != nil || left != "0" {
+		fmt.Printf("  (warning: %s may still be authorized on the host — %s line(s) carry it)\n", label, left)
+		return
+	}
+	fmt.Printf("  ✓ removed %s from the host\n", label)
+}
+
+// keyBody returns the base64 body (second field) of an authorized_keys line,
+// or "" when ref is a bare token rather than a full line.
+func keyBody(line string) string {
+	f := strings.Fields(line)
+	if len(f) >= 2 && strings.HasPrefix(f[0], "ssh-") {
+		return f[1]
+	}
+	return ""
+}
+
+// substratePubLine derives the substrate key's authorized_keys line from this
+// box's runner package when it is local; "" when there is no package (thin box)
+// so the caller falls back to matching the runner name.
+func substratePubLine(cfg *config.Config) string {
+	if cfg.Runner.Target == "" {
+		return ""
+	}
+	runnerDir := filepath.Join(box.RunnerPkgs(), cfg.Runner.Target)
+	pem, err := box.SubstrateKeyPEM(runnerDir, cfg.Runner.Target)
+	if err != nil {
+		return ""
+	}
+	line, err := crypto.ExtractED25519PublicKeyLine(pem)
+	if err != nil {
+		return ""
+	}
+	return line
+}
+
+// warnOtherDoors lists other freehold boxes' door keys still authorized on the
+// host, so the operator knows uninstall only removed THIS box's door.
+func warnOtherDoors(prov provisioning.Provider) {
+	out, err := prov.GuestExec("", "grep -o 'freehold-door-[^ ]*' /root/.ssh/authorized_keys 2>/dev/null || true", 30)
+	if err != nil || out == nil {
+		return
+	}
+	var others []string
+	for _, l := range strings.Split(out.Stdout, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			others = append(others, l)
+		}
+	}
+	if len(others) > 0 {
+		fmt.Printf("  ! other freehold boxes' doors remain on the host: %s\n    (uninstall removes only THIS box's door — revoke the others with `freehold door revoke` from each)\n", strings.Join(others, ", "))
 	}
 }

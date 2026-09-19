@@ -166,6 +166,11 @@ type Engine struct {
 	// repoint). Composition roots inject the concrete provider; nil means the
 	// pct-dependent stages fail with a clear error.
 	Provider provisioning.Provider
+
+	// ProviderFactory builds the TRANSIENT provider once the door key is
+	// installed (direct root SSH). When set, RunBootstrap swaps Provider for
+	// it and verifies over SSH instead of serving a local runner.
+	ProviderFactory func() (provisioning.Provider, func(), error)
 }
 
 // HostExecFunc adapts the engine's self-exec transport into the provider's
@@ -290,11 +295,23 @@ func (e *Engine) RunBootstrap() error {
 		return err
 	}
 	fmt.Fprintf(e.Out, "  ✓ ops agent granted on %s\n", e.F.Target)
-	if _, err := e.stageServe(); err != nil {
-		return err
-	}
-	if err := e.stageVerify(); err != nil {
-		return err
+	if e.ProviderFactory != nil {
+		prov, cleanup, err := e.ProviderFactory()
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		e.Provider = prov
+		if err := e.stageVerifyTransient(); err != nil {
+			return err
+		}
+	} else {
+		if _, err := e.stageServe(); err != nil {
+			return err
+		}
+		if err := e.stageVerify(); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(e.Out, "  ✓ the door works — %s is reachable\n", e.F.Host)
 
@@ -638,22 +655,39 @@ func (e *Engine) recoverDoorKey() string {
 
 // doorKeyFromPackage opens the sealed door credential with the runner's OWN
 // enc key (identity.json opens secrets.json — the runner's boot path) and
-// re-derives only the PUBLIC authorized_keys line. The private half is
-// parsed past and never returned, written, or shipped — nothing new leaves
-// the machine. Prefer the target's own entry (provision seals under the
-// runner name); fall back to any ssh target in the package.
+// re-derives only the PUBLIC authorized_keys line. The private half is parsed
+// past and never returned, written, or shipped — nothing new leaves the
+// machine. Prefer the target's own entry (provision seals under the runner
+// name); fall back to any ssh target in the package.
 func doorKeyFromPackage(runnerDir, target string) (string, error) {
+	pem, err := substrateSSHPEM(runnerDir, target)
+	if err != nil {
+		return "", err
+	}
+	return crypto.ExtractED25519PublicKeyLine(pem)
+}
+
+// SubstrateKeyPEM opens the runner package's sealed substrate SSH credential
+// with the runner's OWN enc key and returns the private PEM. This is the
+// transient-access credential install uses for direct root SSH (the key the
+// operator just authorized at the door gate) instead of a served runner. The
+// caller writes it 0600 and deletes it; never log or ship it.
+func SubstrateKeyPEM(runnerDir, target string) ([]byte, error) {
+	return substrateSSHPEM(runnerDir, target)
+}
+
+func substrateSSHPEM(runnerDir, target string) ([]byte, error) {
 	id, err := LoadIdentity(runnerDir)
 	if err != nil {
-		return "", fmt.Errorf("read identity: %w", err)
+		return nil, fmt.Errorf("read identity: %w", err)
 	}
 	encSecret, err := hexDecode(id.EncSecretHex)
 	if err != nil {
-		return "", fmt.Errorf("bad enc secret: %w", err)
+		return nil, fmt.Errorf("bad enc secret: %w", err)
 	}
 	pkg, err := wire.Load(runnerDir)
 	if err != nil {
-		return "", fmt.Errorf("read package: %w", err)
+		return nil, fmt.Errorf("read package: %w", err)
 	}
 	names := []string{target}
 	for name := range pkg.Targets {
@@ -679,13 +713,9 @@ func doorKeyFromPackage(runnerDir, target string) (string, error) {
 		if err != nil {
 			continue
 		}
-		line, err := crypto.ExtractED25519PublicKeyLine(pem)
-		if err != nil {
-			continue
-		}
-		return line, nil
+		return pem, nil
 	}
-	return "", fmt.Errorf("no usable ssh credential in %s", runnerDir)
+	return nil, fmt.Errorf("no usable ssh credential in %s", runnerDir)
 }
 
 func (e *Engine) Prompt(label string) (string, error) {
@@ -819,6 +849,22 @@ func (e *Engine) stageVerify() error {
 	}
 }
 
+// stageVerifyTransient checks the door over the injected transient provider: a
+// single host exec that must echo the marker. Replaces the served-runner probe.
+func (e *Engine) stageVerifyTransient() error {
+	if e.Provider == nil {
+		return fmt.Errorf("no transient provider wired — cannot verify the door")
+	}
+	out, err := e.Provider.GuestExec("", "echo freehold-door-ok", 60)
+	if err != nil {
+		return fmt.Errorf("the door check failed: %w", err)
+	}
+	if out == nil || out.ExitCode == nil || *out.ExitCode != 0 || !strings.Contains(out.Stdout, "freehold-door-ok") {
+		return fmt.Errorf("the door check failed:\n%s", out.Stdout)
+	}
+	return nil
+}
+
 // isSshAuthFailure detects the runner's ssh auth refusal in exec output
 // (runner/src/ssh.rs SshError::Auth: "authentication failed").
 func isSshAuthFailure(out string) bool {
@@ -842,7 +888,8 @@ func (e *Engine) ExecArgs(cmd string, timeoutS int) []string {
 // stage_any: the CLI's flattened CommonArgs go AFTER the name).
 func (e *Engine) selfStage(name string, args []string) (string, error) {
 	full := make([]string, 0, len(args)+5)
-	full = append(full, args[0], "--addr", e.F.Addr, "--agent-dir", OpsDir())
+	full = append(full, args[0], "--addr", e.F.Addr, "--agent-dir", OpsDir(),
+		"--transient", "--host", e.F.Host)
 	full = append(full, args[1:]...)
 	ok, out := e.RunBin(e.Bins.Self, full)
 	if !ok {
@@ -1068,6 +1115,7 @@ func (e *Engine) FinalSave() error {
 func (e *Engine) stagePlacement() (*placement, error) {
 	resolveArgs := []string{"storage", "resolve",
 		"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
+		"--transient", "--host", e.F.Host,
 		"--relay-domain", e.F.RelayDomain}
 	if e.F.ConfirmStorage {
 		resolveArgs = append(resolveArgs, "--confirm-storage")
@@ -1183,6 +1231,7 @@ func (e *Engine) stageStorage(placement *placement) error {
 		ensureArgs := []string{"storage", "ensure",
 			"--addr", e.F.Addr, "--agent-dir", OpsDir(),
 			"--target", e.F.Target,
+			"--transient", "--host", e.F.Host,
 			"--tenant", tenant,
 			"--domain", e.F.RelayDomain,
 			"--pool", pool,
@@ -1517,6 +1566,8 @@ func (e *Engine) stageDeployCp() error {
 		cpRoot = mounts[len(mounts)-1]
 	}
 	args := []string{"deploy-cp",
+		"--transient",
+		"--host", e.F.Host,
 		"--target", e.F.Target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
 		"--relay-url", "https://" + e.F.RelayDomain,

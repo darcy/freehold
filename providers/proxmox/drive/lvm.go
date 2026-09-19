@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"freehold/contract/client"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/planebase"
 )
@@ -31,9 +30,9 @@ const (
 // thinPool is adopted when present, carved (poolSizeGB) when not. Then
 // the LV of lvSizeGB, ext4 (blkid-gated), mount (mountpoint-q gated), and
 // the fstab pin. Mirrors Rust drive::ensure_lvm_lv byte-for-byte.
-func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSizeGB, poolSizeGB uint64, thinPool string) error {
+func EnsureLvmLv(exec ExecFunc, vg, lvName, hostPath string, lvSizeGB, poolSizeGB uint64, thinPool string) error {
 	dev := "/dev/" + vg + "/" + lvName
-	exists, err := ThinLVExists(c, target, vg, lvName)
+	exists, err := ThinLVExists(exec, vg, lvName)
 	if err != nil {
 		return err
 	}
@@ -44,7 +43,7 @@ func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSiz
 		// when the VG truly has none.
 		pool := thinPool
 		if pool == "" {
-			p, hasPool, err := ThinPoolName(c, target, vg)
+			p, hasPool, err := ThinPoolName(exec, vg)
 			if err != nil {
 				return err
 			}
@@ -54,16 +53,16 @@ func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSiz
 				pool = FreshThinPool
 			}
 		}
-		if poolExists, err := ThinPoolExists(c, target, vg, pool); err != nil {
+		if poolExists, err := ThinPoolExists(exec, vg, pool); err != nil {
 			return err
 		} else if !poolExists {
-			if _, err := bootstrap.ExecToOK(c, target,
+			if _, err := execToOK(exec,
 				fmt.Sprintf("lvcreate -L %dG -T %s/%s", poolSizeGB, vg, pool),
 				"lvcreate thin pool", 300); err != nil {
 				return err
 			}
 		}
-		if _, err := bootstrap.ExecToOK(c, target,
+		if _, err := execToOK(exec,
 			fmt.Sprintf("lvcreate -V %dG -T %s/%s -n %s", lvSizeGB, vg, pool, lvName),
 			"lvcreate thin LV", 120); err != nil {
 			return err
@@ -72,27 +71,27 @@ func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSiz
 	// mkfs GATED on blkid: runs on first create and recovers a partial
 	// failure (a prior run that died between lvcreate and mkfs leaves the LV
 	// without a filesystem — re-running must mkfs it, not skip).
-	out, err := bootstrap.Exec(c, target, fmt.Sprintf("blkid -s TYPE -o value %s 2>/dev/null", dev), 30)
+	out, err := exec(fmt.Sprintf("blkid -s TYPE -o value %s 2>/dev/null", dev), 30)
 	if err != nil {
 		return err
 	}
 	hasFS := out.ExitCode != nil && *out.ExitCode == 0
 	if !hasFS {
-		if _, err := bootstrap.ExecToOK(c, target, fmt.Sprintf("mkfs.ext4 -q %s", dev), "mkfs LV", 120); err != nil {
+		if _, err := execToOK(exec, fmt.Sprintf("mkfs.ext4 -q %s", dev), "mkfs LV", 120); err != nil {
 			return err
 		}
 	}
 	// mkdir + mount at the host path (idempotent).
-	if _, err := bootstrap.ExecToOK(c, target, fmt.Sprintf("mkdir -p %s", hostPath), "mkdir mount", 60); err != nil {
+	if _, err := execToOK(exec, fmt.Sprintf("mkdir -p %s", hostPath), "mkdir mount", 60); err != nil {
 		return err
 	}
-	mp, err := bootstrap.Exec(c, target, fmt.Sprintf("mountpoint -q %s 2>/dev/null", hostPath), 30)
+	mp, err := exec(fmt.Sprintf("mountpoint -q %s 2>/dev/null", hostPath), 30)
 	if err != nil {
 		return err
 	}
 	mounted := mp.ExitCode != nil && *mp.ExitCode == 0
 	if !mounted {
-		if _, err := bootstrap.ExecToOK(c, target, fmt.Sprintf("mount %s %s", dev, hostPath), "mount LV", 60); err != nil {
+		if _, err := execToOK(exec, fmt.Sprintf("mount %s %s", dev, hostPath), "mount LV", 60); err != nil {
 			return err
 		}
 	}
@@ -101,7 +100,7 @@ func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSiz
 	// `mount` of an ext4 LV does not survive reboot; without this the guest
 	// would bind-mount an empty dir and write into the host root fs.
 	line := fmt.Sprintf("%s %s ext4 defaults 0 2", dev, hostPath)
-	if _, err := bootstrap.ExecToOK(c, target,
+	if _, err := execToOK(exec,
 		fmt.Sprintf("grep -qxF '%s' /etc/fstab || echo '%s' | tee -a /etc/fstab >/dev/null", line, line),
 		"record mount in /etc/fstab", 60); err != nil {
 		return err
@@ -117,8 +116,8 @@ func EnsureLvmLv(c *client.McpClient, target, vg, lvName, hostPath string, lvSiz
 // root and every non-root service EACCESes — that is what broke a rebuild
 // on the SURVIVING plane. This matches what PVE itself does for a freshly
 // allocated volume (chown the volume root, non-recursive).
-func ChownGuestUid(c *client.McpClient, target, path string, shiftedUID uint32) error {
-	_, err := bootstrap.ExecToOK(c, target,
+func ChownGuestUid(exec ExecFunc, path string, shiftedUID uint32) error {
+	_, err := execToOK(exec,
 		fmt.Sprintf("chown %d:%d %s", shiftedUID, shiftedUID, path),
 		"chown dataset to guest uid", 120)
 	return err
@@ -130,7 +129,7 @@ func ChownGuestUid(c *client.McpClient, target, path string, shiftedUID uint32) 
 // created + mounted + chowned to the guest's shifted uid. `thinPool` is
 // the placement gate's pool choice passed straight to EnsureLvmLv ("" =
 // reuse-or-carve default). Mirrors Rust drive::resolve_lvm_mounts.
-func ResolveLvmMounts(c *client.McpClient, target, vg, domain string, tenant planebase.Tenant, lvSizeGB, poolSizeGB uint64, thinPool string) ([]planebase.MountSpec, error) {
+func ResolveLvmMounts(exec ExecFunc, vg, domain string, tenant planebase.Tenant, lvSizeGB, poolSizeGB uint64, thinPool string) ([]planebase.MountSpec, error) {
 	// Host parent dir under which each tenant LV is mounted.
 	base := "/freehold/" + strings.ReplaceAll(domain, ".", "-")
 	type entry struct {
@@ -163,12 +162,12 @@ func ResolveLvmMounts(c *client.McpClient, target, vg, domain string, tenant pla
 	}
 	var mounts []planebase.MountSpec
 	for _, e := range entries {
-		if err := EnsureLvmLv(c, target, vg, e.lv, e.host, lvSizeGB, poolSizeGB, thinPool); err != nil {
+		if err := EnsureLvmLv(exec, vg, e.lv, e.host, lvSizeGB, poolSizeGB, thinPool); err != nil {
 			return nil, err
 		}
 		// Fresh ext4 is root-owned: chown to the guest's shifted uid, same
 		// as the ZFS path (locked: guest-writable, never assumed).
-		if err := ChownGuestUid(c, target, e.host, GuestUID); err != nil {
+		if err := ChownGuestUid(exec, e.host, GuestUID); err != nil {
 			return nil, err
 		}
 		mounts = append(mounts, planebase.MountSpec{Source: e.host, GuestPath: e.guest})
@@ -187,8 +186,8 @@ func tenantGuestPath(t planebase.Tenant) string {
 // MountpointOf returns a dataset's host-mountable path (`zfs get
 // mountpoint`). PVE's `mpN` rejects a bare dataset name — it needs an
 // absolute host path. Mirrors Rust drive::mountpoint_of.
-func MountpointOf(c *client.McpClient, target, dataset string) (string, error) {
-	out, err := bootstrap.Exec(c, target,
+func MountpointOf(exec ExecFunc, dataset string) (string, error) {
+	out, err := exec(
 		fmt.Sprintf("zfs get -H -o value mountpoint %s", dataset), 60)
 	if err != nil {
 		return "", err
@@ -205,7 +204,7 @@ func MountpointOf(c *client.McpClient, target, dataset string) (string, error) {
 // guest's shifted uid, and resolve each to its real host mountpoint (PVE's
 // `mpN` rejects a bare dataset name). Mirrors Rust
 // drive::resolve_tenant_mounts.
-func ResolveTenantMounts(c *client.McpClient, target, pool, domain string, tenant planebase.Tenant) ([]planebase.MountSpec, error) {
+func ResolveTenantMounts(exec ExecFunc, pool, domain string, tenant planebase.Tenant) ([]planebase.MountSpec, error) {
 	type entry struct {
 		ds    string
 		guest string
@@ -234,14 +233,14 @@ func ResolveTenantMounts(c *client.McpClient, target, pool, domain string, tenan
 	}
 	var mounts []planebase.MountSpec
 	for _, e := range entries {
-		if err := EnsureDataset(c, target, e.ds); err != nil {
+		if err := EnsureDataset(exec, e.ds); err != nil {
 			return nil, err
 		}
-		host, err := MountpointOf(c, target, e.ds)
+		host, err := MountpointOf(exec, e.ds)
 		if err != nil {
 			return nil, err
 		}
-		if err := ChownGuestUid(c, target, host, GuestUID); err != nil {
+		if err := ChownGuestUid(exec, host, GuestUID); err != nil {
 			return nil, err
 		}
 		mounts = append(mounts, planebase.MountSpec{Source: host, GuestPath: e.guest})
@@ -255,7 +254,7 @@ func ResolveTenantMounts(c *client.McpClient, target, pool, domain string, tenan
 // (true, nil) when at least one was removed; a real `lvremove` failure is
 // an error and the tenant's data is INTACT. Mirrors Rust
 // drive::destroy_lvm_tenant.
-func DestroyLvmTenant(c *client.McpClient, target, vg, domain string, tenant planebase.Tenant) (bool, error) {
+func DestroyLvmTenant(exec ExecFunc, vg, domain string, tenant planebase.Tenant) (bool, error) {
 	var lvs []string
 	if tenant == planebase.TenantRelay {
 		for _, child := range []planebase.RelayChild{planebase.RelayChildDockerRoot, planebase.RelayChildDeployDir} {
@@ -274,7 +273,7 @@ func DestroyLvmTenant(c *client.McpClient, target, vg, domain string, tenant pla
 	}
 	destroyed := false
 	for _, lv := range lvs {
-		exists, err := ThinLVExists(c, target, vg, lv)
+		exists, err := ThinLVExists(exec, vg, lv)
 		if err != nil {
 			return false, err
 		}
@@ -288,9 +287,9 @@ func DestroyLvmTenant(c *client.McpClient, target, vg, domain string, tenant pla
 		// bail with the LXCs already gone. umount failing is tolerated here
 		// (the LV may never have been mounted); if it is genuinely busy the
 		// lvremove below fails and surfaces it honestly.
-		_, _ = bootstrap.Exec(c, target,
+		_, _ = exec(
 			fmt.Sprintf("umount %s 2>/dev/null; sed -i '\\|^%s |d' /etc/fstab; true", dev, dev), 60)
-		if _, err := bootstrap.ExecToOK(c, target,
+		if _, err := execToOK(exec,
 			fmt.Sprintf("lvremove -f %s/%s", vg, lv), "lvremove tenant thin LV", 120); err != nil {
 			return false, fmt.Errorf("LV %s/%s EXISTS but could not be removed: %w — the tenant's data is INTACT; fix the cause or re-run", vg, lv, err)
 		}
@@ -303,7 +302,7 @@ func DestroyLvmTenant(c *client.McpClient, target, vg, domain string, tenant pla
 // child datasets). Existence probe FIRST — an absent dataset is a no-op,
 // not an error (the same probe EnsureDataset uses). Mirrors Rust
 // drive::destroy_tenant_dataset.
-func DestroyTenantDataset(c *client.McpClient, target, pool, domain string, tenant planebase.Tenant) (bool, error) {
+func DestroyTenantDataset(exec ExecFunc, pool, domain string, tenant planebase.Tenant) (bool, error) {
 	var datasets []string
 	if tenant == planebase.TenantRelay {
 		for _, child := range []planebase.RelayChild{planebase.RelayChildDockerRoot, planebase.RelayChildDeployDir} {
@@ -322,7 +321,7 @@ func DestroyTenantDataset(c *client.McpClient, target, pool, domain string, tena
 	}
 	destroyed := false
 	for _, ds := range datasets {
-		out, err := bootstrap.Exec(c, target,
+		out, err := exec(
 			fmt.Sprintf("zfs list -H -o name %s >/dev/null 2>&1", ds), 60)
 		if err != nil {
 			return false, err
@@ -330,7 +329,7 @@ func DestroyTenantDataset(c *client.McpClient, target, pool, domain string, tena
 		if out.ExitCode == nil || *out.ExitCode != 0 {
 			continue // absent -> no-op
 		}
-		if _, err := bootstrap.ExecToOK(c, target,
+		if _, err := execToOK(exec,
 			fmt.Sprintf("zfs destroy -r %s", ds), "destroy tenant dataset", 120); err != nil {
 			return false, fmt.Errorf("dataset %s EXISTS but could not be destroyed: %w — the tenant's data is INTACT; fix the cause (busy/ref'ed) or re-run. The teardown must not delete the config mapping for data that survived", ds, err)
 		}
@@ -342,12 +341,12 @@ func DestroyTenantDataset(c *client.McpClient, target, pool, domain string, tena
 // DestroyTenantBackend dispatches the tenant destroy on backend kind (ZFS
 // `zfs destroy -r` vs LVM `lvremove`). `backend` is the pool/VG name.
 // Returns (false, nil) when absent (a no-op), (true, nil) when destroyed.
-func DestroyTenantBackend(c *client.McpClient, target string, kind planebase.BackendKind, backend, domain string, tenant planebase.Tenant) (bool, error) {
+func DestroyTenantBackend(exec ExecFunc, kind planebase.BackendKind, backend, domain string, tenant planebase.Tenant) (bool, error) {
 	switch kind {
 	case planebase.KindZfs:
-		return DestroyTenantDataset(c, target, backend, domain, tenant)
+		return DestroyTenantDataset(exec, backend, domain, tenant)
 	case planebase.KindLvmThin:
-		return DestroyLvmTenant(c, target, backend, domain, tenant)
+		return DestroyLvmTenant(exec, backend, domain, tenant)
 	default:
 		return false, fmt.Errorf("unknown storage backend kind %q", kind)
 	}
@@ -363,15 +362,15 @@ func DestroyTenantBackend(c *client.McpClient, target string, kind planebase.Bac
 // stock case — local-lvm pointed at the only pool freehold carved) it is
 // left alone and the next rebuild's storage stage re-points it once the
 // new pool is carved.
-func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
-	exists, err := ThinPoolExists(c, target, vg, pool)
+func RemoveThinPool(exec ExecFunc, vg, pool string) error {
+	exists, err := ThinPoolExists(exec, vg, pool)
 	if err != nil {
 		return err
 	}
 	if !exists {
 		return nil
 	}
-	riders, err := lvsRiders(c, target, vg, pool)
+	riders, err := lvsRiders(exec, vg, pool)
 	if err != nil {
 		return err
 	}
@@ -386,7 +385,7 @@ func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
 	// live-verified on the box; `pvesm set local-lvm --thinpool` is
 	// rejected by PVE ("Unknown option: thinpool" — live-verified).
 	run := func(script string, timeoutS uint64) (string, error) {
-		out, err := bootstrap.Exec(c, target, script, timeoutS)
+		out, err := exec(script, timeoutS)
 		if err != nil {
 			return "", err
 		}
@@ -397,10 +396,10 @@ func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
 	}
 	current, err := run(LocalLvmProbeScript, 30)
 	if err != nil {
-		return fmt.Errorf("local-lvm probe failed on %s: %w", target, err)
+		return fmt.Errorf("local-lvm probe failed: %w", err)
 	}
 	if strings.TrimSpace(current) == pool {
-		other, found, err := ThinPoolNameOther(c, target, vg, pool)
+		other, found, err := ThinPoolNameOther(exec, vg, pool)
 		if err != nil {
 			return err
 		}
@@ -412,7 +411,7 @@ func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
 		// No surviving pool: leave local-lvm as-is; the next rebuild's
 		// storage stage re-points it once the new pool is carved.
 	}
-	if _, err := bootstrap.ExecToOK(c, target,
+	if _, err := execToOK(exec,
 		fmt.Sprintf("lvremove -f %s/%s", vg, pool), "lvremove thin pool", 300); err != nil {
 		return fmt.Errorf("thin pool %s/%s EXISTS but could not be removed: %w — fix the cause (still active?) or re-run", vg, pool, err)
 	}
@@ -426,8 +425,8 @@ func RemoveThinPool(c *client.McpClient, target, vg, pool string) error {
 // mis-count a surviving pool's own LVs — and any PVE guest volume on it —
 // as riders of the doomed pool, refusing removal exactly when the re-point
 // branch needs it.
-func lvsRiders(c *client.McpClient, target, vg, pool string) ([]string, error) {
-	out, err := bootstrap.Exec(c, target, fmt.Sprintf("lvs --noheadings -o pool_lv,lv_name %s 2>/dev/null || true", vg), 60)
+func lvsRiders(exec ExecFunc, vg, pool string) ([]string, error) {
+	out, err := exec(fmt.Sprintf("lvs --noheadings -o pool_lv,lv_name %s 2>/dev/null || true", vg), 60)
 	if err != nil {
 		return nil, err
 	}

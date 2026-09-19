@@ -35,6 +35,8 @@ type Provider interface {
 	GuestIPv4(guest string) (string, error)
 	// GuestMounts returns the guest's mount guest-paths, in order.
 	GuestMounts(guest string) ([]string, error)
+	// DestroyGuest destroys a guest (and its rootfs), best-effort.
+	DestroyGuest(guest string) error
 	// LocalLvmStatus returns the pool PVE's local-lvm currently points at and
 	// how many LVs ride it (the stranding guard's input).
 	LocalLvmStatus() (pool string, riders int, err error)

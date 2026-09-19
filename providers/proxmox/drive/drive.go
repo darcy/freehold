@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"freehold/contract/client"
-	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/planebase"
 )
 
@@ -49,10 +47,10 @@ func HumanBytes(b uint64) string {
 
 // HostCapacity: ZFS = zpool size/alloc/free; LVM = VG size/free + thin-pool
 // data%. Advisory — degrades to "—" on probe failure.
-func HostCapacity(c *client.McpClient, target string, kind planebase.BackendKind, pool string) string {
+func HostCapacity(exec ExecFunc, kind planebase.BackendKind, pool string) string {
 	switch kind {
 	case planebase.KindZfs:
-		out, err := bootstrap.Exec(c, target, "zpool list -H -p -o size,alloc,free "+pool+" 2>/dev/null || true", 60)
+		out, err := exec("zpool list -H -p -o size,alloc,free "+pool+" 2>/dev/null || true", 60)
 		if err != nil || out.ExitCode == nil || *out.ExitCode != 0 {
 			return "zpool capacity unreadable"
 		}
@@ -67,7 +65,7 @@ func HostCapacity(c *client.McpClient, target string, kind planebase.BackendKind
 		}
 		return "zpool capacity unreadable"
 	case planebase.KindLvmThin:
-		out, err := bootstrap.Exec(c, target, "vgs --noheadings --units b -o vg_size,vg_free "+pool+" 2>/dev/null || true", 60)
+		out, err := exec("vgs --noheadings --units b -o vg_size,vg_free "+pool+" 2>/dev/null || true", 60)
 		var size, free *uint64
 		if err == nil && out.ExitCode != nil && *out.ExitCode == 0 {
 			var nums []uint64
@@ -87,7 +85,7 @@ func HostCapacity(c *client.McpClient, target string, kind planebase.BackendKind
 		} else {
 			s = fmt.Sprintf("vg %s · size unreadable", pool)
 		}
-		if p := thinPoolDataPct(c, target, pool); p != nil {
+		if p := thinPoolDataPct(exec, pool); p != nil {
 			s += fmt.Sprintf(" · thin pool data %.1f%%", *p)
 		}
 		return s
@@ -96,8 +94,8 @@ func HostCapacity(c *client.McpClient, target string, kind planebase.BackendKind
 	}
 }
 
-func thinPoolDataPct(c *client.McpClient, target, vg string) *float64 {
-	out, err := bootstrap.Exec(c, target, "lvs -a --noheadings -o lv_name,data_percent "+vg+" 2>/dev/null || true", 60)
+func thinPoolDataPct(exec ExecFunc, vg string) *float64 {
+	out, err := exec("lvs -a --noheadings -o lv_name,data_percent "+vg+" 2>/dev/null || true", 60)
 	if err != nil {
 		return nil
 	}
@@ -200,12 +198,12 @@ type MountArg struct {
 // StorageInfo probes the live plane: host size/used per mount source plus
 // guest bind-mount liveness, and the host capacity summary. mounts reference
 // (role, source, guest, vmid); vmid nil skips the guest probe.
-func ProbeStorage(c *client.McpClient, target string, kind planebase.BackendKind, pool string, mounts []MountArg) (*StorageInfo, error) {
+func ProbeStorage(exec ExecFunc, kind planebase.BackendKind, pool string, mounts []MountArg) (*StorageInfo, error) {
 	var srcs []string
 	for _, m := range mounts {
 		srcs = append(srcs, m.Source)
 	}
-	hOut, err := ExecHost(c, target, strings.Join(srcs, " "))
+	hOut, err := ExecHost(exec, strings.Join(srcs, " "))
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +221,7 @@ func ProbeStorage(c *client.McpClient, target string, kind planebase.BackendKind
 		}
 	}
 	if len(pairs) > 0 {
-		gOut, err := ExecGuests(c, target, strings.Join(pairs, " "))
+		gOut, err := ExecGuests(exec, strings.Join(pairs, " "))
 		if err == nil {
 			for _, line := range strings.Split(gOut, "\n") {
 				if vmid, mp, ok, valid := ParseGLine(line); valid {
@@ -232,7 +230,7 @@ func ProbeStorage(c *client.McpClient, target string, kind planebase.BackendKind
 			}
 		}
 	}
-	capacity := HostCapacity(c, target, kind, pool)
+	capacity := HostCapacity(exec, kind, pool)
 	var rows []MountUsage
 	for _, m := range mounts {
 		sz, us := host[m.Source][0], host[m.Source][1]
@@ -248,9 +246,9 @@ func ProbeStorage(c *client.McpClient, target string, kind planebase.BackendKind
 }
 
 // ExecHost runs the host source probe (zfs used/avail or df).
-func ExecHost(c *client.McpClient, target, srcList string) (string, error) {
+func ExecHost(exec ExecFunc, srcList string) (string, error) {
 	cmd := `for p in ` + srcList + `; do if zfs list -H "$p" >/dev/null 2>&1; then echo "H $p $(zfs list -H -p -o used,avail "$p" | awk '{print $1+$2 " " $1}')"; elif mountpoint -q "$p" 2>/dev/null; then echo "H $p $(df -B1 "$p" | tail -1 | awk '{print $2 " " $3}')"; else echo "H $p - -"; fi; done`
-	out, err := bootstrap.Exec(c, target, cmd, 120)
+	out, err := exec(cmd, 120)
 	if err != nil {
 		return "", err
 	}
@@ -258,9 +256,9 @@ func ExecHost(c *client.McpClient, target, srcList string) (string, error) {
 }
 
 // ExecGuests runs the guest bind-mount liveness probe.
-func ExecGuests(c *client.McpClient, target, spec string) (string, error) {
+func ExecGuests(exec ExecFunc, spec string) (string, error) {
 	cmd := `for s in ` + spec + `; do vmid=${s%%:*}; mp=${s#*:}; if pct status "$vmid" 2>/dev/null | grep -q running; then if pct exec "$vmid" -- mountpoint -q "$mp" 2>/dev/null; then echo "G $vmid $mp ok"; else echo "G $vmid $mp down"; fi; else echo "G $vmid $mp down"; fi; done`
-	out, err := bootstrap.Exec(c, target, cmd, 120)
+	out, err := exec(cmd, 120)
 	if err != nil {
 		return "", err
 	}
