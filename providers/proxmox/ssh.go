@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"freehold/contract/client"
@@ -49,6 +50,34 @@ func SSHExec(host, keyPath string) ExecFunc {
 			TimedOut: timedOut,
 		}, nil
 	}
+}
+
+// SSHUpload copies localPath to remotePath on the host over scp with the same
+// transient key. It returns the LOCAL size on success (scp fails on error);
+// callers compare against the guest-side size to catch a truncated push.
+func SSHUpload(host, keyPath, localPath, remotePath string, timeoutS uint64) (uint64, error) {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return 0, err
+	}
+	ctx := context.Background()
+	if timeoutS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutS)*time.Second)
+		defer cancel()
+	}
+	args := []string{
+		"-i", keyPath,
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ConnectTimeout=15",
+		localPath,
+		"root@" + host + ":" + remotePath,
+	}
+	if out, err := exec.CommandContext(ctx, "scp", args...).CombinedOutput(); err != nil {
+		return 0, fmt.Errorf("scp %s -> %s: %w: %s", localPath, remotePath, err, strings.TrimSpace(string(out)))
+	}
+	return uint64(info.Size()), nil
 }
 
 // sshArgs is the exact ssh invocation (kept separate so it is testable).

@@ -433,9 +433,22 @@ var deployCpCmd = &cobra.Command{
 		addr, _ := cmd.Flags().GetString("addr")
 		agentDir, _ := cmd.Flags().GetString("agent-dir")
 		target := mustStr(cmd, "target")
-		c, err := installConnect(addr, agentDir, target)
-		if err != nil {
-			return err
+		var transport cpdeploy.Transport
+		if mustBool(cmd, "transient") {
+			// Direct root SSH with the runner package's substrate key (just
+			// authorized at the door gate) — no served runner needed.
+			keyPath, cleanup, err := transientKey(agentDir, target)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			transport = sshTransport{host: strings.TrimPrefix(mustStr(cmd, "host"), "root@"), key: keyPath}
+		} else {
+			c, err := installConnect(addr, agentDir, target)
+			if err != nil {
+				return err
+			}
+			transport = cpdeploy.ClientTransport{C: c, Target: target}
 		}
 		binary := mustStr(cmd, "binary")
 		if binary == "" || mustStr(cmd, "relay-url") == "" {
@@ -477,7 +490,7 @@ var deployCpCmd = &cobra.Command{
 			fmt.Sscanf(v, "%d", &n)
 			spec.LXc = &n
 		}
-		res, err := cpdeploy.DeployCp(c, target, spec)
+		res, err := cpdeploy.DeployCp(transport, spec)
 		if err != nil {
 			return err
 		}
@@ -545,6 +558,8 @@ func init() {
 	deployCpCmd.Flags().String("relay-pubkey", "", "relay signing pubkey")
 	deployCpCmd.Flags().String("relay-host-ip", "", "relay LXC LAN IP")
 	deployCpCmd.Flags().String("lxc", "", "cp LXC vmid")
+	deployCpCmd.Flags().Bool("transient", false, "reach the host by direct root SSH (no served runner)")
+	deployCpCmd.Flags().String("host", "", "host to SSH into for --transient")
 	deployCpCmd.Flags().String("runner-binary", "", "LOCAL runner binary")
 	deployCpCmd.Flags().String("runner-package", "", "LOCAL runner package dir")
 	deployCpCmd.Flags().String("operator-pubkey", "", "operator Nostr pubkey")

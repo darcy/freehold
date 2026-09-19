@@ -638,22 +638,39 @@ func (e *Engine) recoverDoorKey() string {
 
 // doorKeyFromPackage opens the sealed door credential with the runner's OWN
 // enc key (identity.json opens secrets.json — the runner's boot path) and
-// re-derives only the PUBLIC authorized_keys line. The private half is
-// parsed past and never returned, written, or shipped — nothing new leaves
-// the machine. Prefer the target's own entry (provision seals under the
-// runner name); fall back to any ssh target in the package.
+// re-derives only the PUBLIC authorized_keys line. The private half is parsed
+// past and never returned, written, or shipped — nothing new leaves the
+// machine. Prefer the target's own entry (provision seals under the runner
+// name); fall back to any ssh target in the package.
 func doorKeyFromPackage(runnerDir, target string) (string, error) {
+	pem, err := substrateSSHPEM(runnerDir, target)
+	if err != nil {
+		return "", err
+	}
+	return crypto.ExtractED25519PublicKeyLine(pem)
+}
+
+// SubstrateKeyPEM opens the runner package's sealed substrate SSH credential
+// with the runner's OWN enc key and returns the private PEM. This is the
+// transient-access credential install uses for direct root SSH (the key the
+// operator just authorized at the door gate) instead of a served runner. The
+// caller writes it 0600 and deletes it; never log or ship it.
+func SubstrateKeyPEM(runnerDir, target string) ([]byte, error) {
+	return substrateSSHPEM(runnerDir, target)
+}
+
+func substrateSSHPEM(runnerDir, target string) ([]byte, error) {
 	id, err := LoadIdentity(runnerDir)
 	if err != nil {
-		return "", fmt.Errorf("read identity: %w", err)
+		return nil, fmt.Errorf("read identity: %w", err)
 	}
 	encSecret, err := hexDecode(id.EncSecretHex)
 	if err != nil {
-		return "", fmt.Errorf("bad enc secret: %w", err)
+		return nil, fmt.Errorf("bad enc secret: %w", err)
 	}
 	pkg, err := wire.Load(runnerDir)
 	if err != nil {
-		return "", fmt.Errorf("read package: %w", err)
+		return nil, fmt.Errorf("read package: %w", err)
 	}
 	names := []string{target}
 	for name := range pkg.Targets {
@@ -679,13 +696,9 @@ func doorKeyFromPackage(runnerDir, target string) (string, error) {
 		if err != nil {
 			continue
 		}
-		line, err := crypto.ExtractED25519PublicKeyLine(pem)
-		if err != nil {
-			continue
-		}
-		return line, nil
+		return pem, nil
 	}
-	return "", fmt.Errorf("no usable ssh credential in %s", runnerDir)
+	return nil, fmt.Errorf("no usable ssh credential in %s", runnerDir)
 }
 
 func (e *Engine) Prompt(label string) (string, error) {
@@ -1517,6 +1530,8 @@ func (e *Engine) stageDeployCp() error {
 		cpRoot = mounts[len(mounts)-1]
 	}
 	args := []string{"deploy-cp",
+		"--transient",
+		"--host", e.F.Host,
 		"--target", e.F.Target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
 		"--relay-url", "https://" + e.F.RelayDomain,

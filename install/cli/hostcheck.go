@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"freehold/contract/client"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 )
@@ -49,4 +50,26 @@ func hostSideLiveCheck(name, host string) error {
 			name, host, name)
 	}
 	return nil
+}
+
+// sshTransport adapts the transient SSH provider to cpdeploy's host transport.
+type sshTransport struct{ host, key string }
+
+func (t sshTransport) Exec(cmd string, timeoutS uint64) (*client.ExecOutcome, error) {
+	return proxmox.SSHExec(t.host, t.key)(cmd, timeoutS)
+}
+
+func (t sshTransport) Upload(local, remote string, timeoutS uint64) (uint64, error) {
+	return proxmox.SSHUpload(t.host, t.key, local, remote, timeoutS)
+}
+
+// transientKey writes the runner package's substrate SSH key to a 0600 temp
+// file and returns its path + a cleanup func.
+func transientKey(agentDir, target string) (string, func(), error) {
+	runnerDir := filepath.Join(stateRootFor(agentDir), "runner", target)
+	pem, err := box.SubstrateKeyPEM(runnerDir, target)
+	if err != nil {
+		return "", nil, fmt.Errorf("read substrate key from %s: %w", runnerDir, err)
+	}
+	return proxmox.WriteTempKey(pem)
 }
