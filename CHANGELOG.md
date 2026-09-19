@@ -25,6 +25,33 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.16] — live-run fixes for the thin-box build + fresh-world DNS
+
+Surfaced by a real `install` → `build` run on a Proxmox host.
+
+- **Point every guest at the CP resolver before the services phase.** The
+  litellm/caddy image pulls happen in the terraform services step, which ran
+  BEFORE `worldDNS` repointed the guests; a fresh k3s node sat on
+  DHCP/public resolvers and containerd's lookups intermittently failed
+  (`EAI_AGAIN`) → `ImagePullBackOff`. `cpbuild` now reps the resolver early
+  (`pointGuestsAtResolver`) and `worldDNS` repeats it idempotently.
+- **The build box reads the console encryption pubkey from `/api/world`.** It is
+  public, and serving it lets a THIN box seal the CP-owned secrets without a
+  runner to `pct exec` into the CP (`console_enc_pubkey` on `WorldSummary`; the
+  old pct-exec readback stays as a fallback for an older CP).
+- **Drop the redundant box-side runner reseed** in `ensureCpSecrets`: the
+  CP-side `cpbuild.reseedCoLocatedRunner` re-seals litellm from the CP store
+  during world-build, so the box no longer needs a runner for it.
+- **The CP DNS slot offers to reuse the relay credential** (they are almost
+  always the same zone); previously `ensureCpSecrets` passed an empty
+  `reuseFrom` and asked for the credential twice.
+- **`noLocalRunner()` dials the recorded runner address.** A transient install
+  records `[runner] addr` but leaves no runner serving, so a configured-but-dead
+  address now reads as thin and exec routes through the CP.
+- **Credential prompts are no-echo.** The DNS API token and the litellm
+  provider key are read with `term.ReadPassword` on a terminal, like the
+  operator nsec — they no longer echo into the screen/scrollback.
+
 ## [0.6.15] — local/server split (two modules, zero cross-imports)
 
 The local operator surface lived inside the `control-plane/` module and the two

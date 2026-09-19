@@ -1,12 +1,30 @@
 package cli
 
 import (
+	"net"
 	"strings"
 	"testing"
 
 	"freehold/contract/config"
 	"freehold/contract/console"
 )
+
+// TestAddrReachable: a listening socket is reachable; a closed port is not.
+// (noLocalRunner uses this so a recorded-but-not-serving runner reads as thin.)
+func TestAddrReachable(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if !addrReachable(l.Addr().String()) {
+		t.Fatalf("listening addr %s must be reachable", l.Addr())
+	}
+	l.Close()
+	if addrReachable(l.Addr().String()) {
+		t.Fatalf("closed addr %s must not be reachable", l.Addr())
+	}
+}
 
 // TestAdoptAgentToolsCoords: a --data rebuild's fresh agent-tools pubkey is
 // adopted (with its URL); an unchanged or empty summary is a no-op.

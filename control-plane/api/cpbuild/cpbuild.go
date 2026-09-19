@@ -244,6 +244,31 @@ func (s *Spec) worldDNS() error {
 			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
+	if err := s.pointGuestsAtResolver(); err != nil {
+		return err
+	}
+	for _, q := range []struct{ name, want string }{
+		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
+	} {
+		if q.want == "" {
+			continue
+		}
+		if err := s.run(proxmox.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
+			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
+		}
+	}
+	return nil
+}
+
+// pointGuestsAtResolver pct-sets each guest's nameserver to the CP resolver and
+// rewrites its resolv.conf now (pct only regenerates it at the next boot). It is
+// called EARLY — before the terraform services phase — because the litellm/caddy
+// image pulls need working DNS, and a freshly booted guest otherwise sits on
+// DHCP/public resolvers that intermittently fail containerd's lookups
+// (EAI_AGAIN). worldDNS calls it again (idempotent) alongside the record
+// registration.
+func (s *Spec) pointGuestsAtResolver() error {
+	searchBase := s.guestSearchBase()
 	router := s.guestNameserver()
 	for _, role := range []struct {
 		name string
@@ -260,20 +285,10 @@ func (s *Spec) worldDNS() error {
 		}
 		pctSet, resolvConf := proxmox.DnsPointCmd(role.vmid, s.CpIP, r, searchBase)
 		if err := s.run(pctSet, 60); err != nil {
-			return fmt.Errorf("world-build dns point %s: %w", role.name, err)
+			return fmt.Errorf("dns point %s: %w", role.name, err)
 		}
 		if err := s.run(resolvConf, 60); err != nil {
-			return fmt.Errorf("world-build dns point %s resolv.conf: %w", role.name, err)
-		}
-	}
-	for _, q := range []struct{ name, want string }{
-		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
-	} {
-		if q.want == "" {
-			continue
-		}
-		if err := s.run(proxmox.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
-			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
+			return fmt.Errorf("dns point %s resolv.conf: %w", role.name, err)
 		}
 	}
 	return nil
@@ -1133,6 +1148,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			return "", fmt.Errorf("world-build resolve guests: %w", err)
 		}
 		spec.refreshGuestIPs()
+		// 3.5a-pre. Point every guest at the CP resolver BEFORE the services
+		// phase: the litellm/caddy image pulls need working DNS, and the guests
+		// otherwise sit on DHCP/public resolvers that intermittently fail
+		// containerd's lookups. worldDNS re-points later (idempotent).
+		if spec.CpLxc != 0 && spec.CpIP != "" {
+			if err := spec.pointGuestsAtResolver(); err != nil {
+				return "", fmt.Errorf("world-build point guests at resolver: %w", err)
+			}
+		}
 		// 3.5a. Re-provision the CP's co-located runner from the CP's own
 		// durable litellm store if a re-deploy wiped its package — the services
 		// phase below requests these BY NAME. No-op when it already holds them.

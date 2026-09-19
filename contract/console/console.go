@@ -238,6 +238,11 @@ type WorldSummary struct {
 	RelayHost        string         `json:"relay_host,omitempty"`
 	CPURL            string         `json:"cp_url"`
 	CPPubkey         string         `json:"cp_pubkey"`
+	// ConsoleEncPubkey is the console identity's X25519 encryption public key
+	// (64-hex). A build box seals the CP-owned secrets (DNS creds, litellm) to
+	// it, so it must be reachable over the public API — a thin box has no runner
+	// to exec into the CP to read it.
+	ConsoleEncPubkey string `json:"console_enc_pubkey,omitempty"`
 	OperatorPubkey   string         `json:"operator_pubkey,omitempty"`
 	AgentToolsURL    string         `json:"agent_tools_url,omitempty"`
 	AgentToolsPubkey string         `json:"agent_tools_pubkey,omitempty"`

@@ -288,6 +288,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"relay_host":         relayHost,
 		"cp_url":             s.PublicOrigin,
 		"cp_pubkey":          s.ConsolePubkey,
+		"console_enc_pubkey": s.consoleEncPubkey(),
 		"agent_tools_url":    agentToolsURL,
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
