@@ -3,14 +3,19 @@
 Status: the provider/transient work is **merged** — PR1 install surface (`0.6.9`),
 PR2 teardown/uninstall (`0.6.10`), PR3 provider seam (`0.6.11`), PR4 transient
 access (`0.6.12`), plus re-adopt substrate-key rotation (`0.6.13`) and the
-substrate-key match fix (`0.6.14`). **Next: the local/server split** (§6), then
-`vultr`. `install --restore` is out of scope for now (see "Deferred"), but the
-identity model below guarantees grants survive a restore when it lands.
+substrate-key match fix (`0.6.14`). **PR 5 (the local/server split, `0.6.15`) is
+implemented and bot-approved on PR #258** (branch `feat/local-server-split`):
+5a/5b/5c landed, and 5d's command consolidation into `freehold-cli/internal/stages/`
+landed. Still open on PR 5: the per-verb package reorg (5d remainder) and the
+live integration gate — see §11. Then `vultr` (PR 6). `install --restore` is out
+of scope for now (see "Deferred"), but the identity model below guarantees grants
+survive a restore when it lands.
 
-Baseline: `main` after `0.6.14`.
+Baseline: `main` after `0.6.14`; PR 5 branches from it.
 
 The storage-scope work (#243/#244) and the provider/transient phases are merged;
-the remaining work is the **local/server split** and provider breadth.
+the remaining work is the **local/server split** (implemented, pending merge) and
+provider breadth.
 
 **For the implementing agent:** this plan states the goal, the locked decisions, and
 the guardrails; it deliberately leaves internal structure, package layout, and naming
@@ -491,3 +496,107 @@ The §6 structural refactor, staged so each step is reviewable:
   issues/reuses certs.
 - **Out-of-band first access**: after uninstall, the next install's first root access
   is PVE console/root SSH (Proxmox) or the provider API (Vultr).
+
+---
+
+## 11. PR 5 implementation status, deviations, and open questions
+
+PR 5 is on `feat/local-server-split` (PR #258, `0.6.15`). CI green; the bot
+review approved after three rounds. **Not merged** (awaiting the operator).
+
+### 11.1 What landed
+
+- **5a — de-invert.** `contract/` is the thin leaf again: `crypto/wire/client/
+  config/console` plus the protocol clients `relay`/`delegate`, the `identity`
+  loader, and a `worldfacts` wire shape. The CP `state` store moved into
+  `control-plane/`. `cli/teardown` moved to `providers/proxmox/teardown/` (it
+  shells `pct`, so `platform/`'s guard correctly rejected it there). The
+  `contract/` → `shared/` rename was dropped, per the updated §6.
+- **5b — CP-owned engine.** New `control-plane/api/cpbuild/agents.go`:
+  `reconcileAgents` (CPA → departments → registry reconcile),
+  `registerWorldFactsServer`, `manageDomainDNS`, durable cert-expiry parse;
+  wired into `BuildWorldApply` as steps 0.5 and 8. Local `build` is a uniform
+  thin trigger; the `owner` branch and the `--data` audience-adoption hack are
+  gone. `onboard` removed; `flows` dissolved to operator helpers.
+- **5c — `freehold-cli/`.** New top-level module: CLI + TUI, `login/`, `flows/`,
+  and the install surface (`install/` + `cpdeploy/`). `install/` module
+  dissolved; `freehold-install` folds into `freehold install` (hidden
+  `bootstrap` alias intact). Both import-graph guards pass
+  (`control-plane/isolation_test.go`, `freehold-cli/isolation_test.go`).
+  `justfile` + CI build/test `freehold-cli/` in place of `install/`.
+- **5d — consolidation (functional half).** The box self-staged
+  `exec`/`provision`/`storage`/`deploy-cp` commands now live in one place,
+  `freehold-cli/internal/stages/`, and the dead duplicate implementations in
+  `cli/handlers3.go` were deleted.
+
+### 11.2 Deviations from the plan text
+
+- **`state`/`relay`/`delegate` split.** §6 said all three move into
+  `control-plane/`. `relay` and `delegate` are protocol clients used by BOTH
+  sides, so they stayed in the leaf; only the server-only `state` store moved.
+  Moving all three would have created the local→server edges that make the
+  zero-cross-import rule impossible.
+- **`teardown` home.** §6 said "beside build" server-side. The local transient
+  uninstall also needs it, and it shells `pct`, so it lives in
+  `providers/proxmox/teardown/` — importable by both the CP build and
+  `freehold-cli`, with no cross-module edge and no `platform/` guard violation.
+- **`manageDomainDNS` is now automatic CP-side.** The local opt-in prompt is
+  gone. For a non-Cloudflare stored credential it now skips (no-op) rather than
+  failing the whole build (a non-CF cred is still valid for cert DNS-01).
+- **5d per-verb package reorg deferred.** Moving `build`/`uninstall`/`teardown`/
+  `default` into subpackages requires exporting the `cli` package's shared
+  helper layer (`connect`, `addCommonFlags`, `resolveExecProfile`,
+  `confirmDestructive`, `runnerKeyRefs`, `worldExecThroughCP`, …) and touching
+  every call site — no behavior change, real regression surface, on an
+  already-approved diff. Recorded in the 5d commit.
+
+### 11.3 Issues encountered
+
+1. **Leaf placement contradiction (resolved).** §6 moved the protocol clients
+   server-side while the local CLI still imported them. Resolved by keeping
+   `relay`/`delegate` in the leaf and moving only `state`. See §11.2.
+2. **Identity root across two processes (fixed).** `BuildCreateAgentFn` minted
+   agent identities under `Spec.StateDir`. In the agent-tools server that is
+   `<root>/agent-tools`; in the console executor it is the console dir. A
+   console-side reconcile would therefore have minted a FRESH CPA keypair in the
+   wrong dir and orphaned every grant. Fixed with `Spec.AgentIdentityDir`, set
+   by both roots to `<root>/agent-tools`.
+3. **Registry ownership across two processes (designed around).** The
+   agent-tools serve process holds the registry/facts in memory; the console
+   executor writes the files and then restarts the serve process to reload.
+   `Spec.AgentRegistry`/`Spec.FactsStore` let the in-process `world_build` path
+   write its own stores with no restart. Verified by reasoning only — no live
+   exercise.
+4. **The dedupe hid a live command (caught by a test).** The deleted
+   `storage` tree looked like a duplicate, but `storage destroy-pool` is driven
+   by the teardown engine (`providers/proxmox/teardown/teardown.go:392`). It was
+   ported into `internal/stages` along with `storage info`, and the regression
+   test that every storage subcommand registers the self-stage flags was kept.
+5. **Deleting the `--data` audience-adoption hack has unverified edges (open —
+   see §11.4).** The box still signs local agent-tools MCP calls with
+   `cfg.AgentToolsPubkey` (`worldMcp` in `freehold-cli/cli/world.go:141`), used
+   by `freehold door authorize/revoke`, `freehold world migrate`, and
+   `freehold world build`. After `teardown --data` wipes `/srv/data`, the
+   agent-tools server mints a fresh identity, and the only remaining re-adopter
+   of that pubkey is `freehold login`. The main `freehold build` path uses the
+   console client and survives; the three edge commands can fail signature
+   verification until a login.
+
+### 11.4 Open questions / decisions needed
+
+1. **Audience staleness (§11.3.5): fix or record?** Options: (a) have `build`
+   re-read/adopt the agent-tools pubkey from the console `/api/world` snapshot
+   (restores the old behavior server-safely), (b) route `door`/`world migrate`
+   through the console API instead of the LAN agent-tools MCP, or (c) record it
+   as a known gap. Recommendation: (a) — smallest, restores the guarantee the
+   deleted hack provided.
+2. **Live integration gate.** 5b's acceptance (fresh build creates the CPA +
+   departments via the CP; a `--data` rebuild still creates agents; stored DNS
+   creds still issue/reuse certs) needs a real box. Unit coverage exists only
+   for the pure pieces (`reconciledChannels`, `cpaNameOrDefault`,
+   `agentIdentityDir`). Do we gate the merge on a live run, or ship with these
+   listed as unverified?
+3. **5d per-verb reorg: do it or drop it?** It is cosmetic; the functional
+   dedupe is done. Keep deferred, or spend the churn?
+4. **When to merge.** PR #258 is `MERGE-READY`; the repo rule defers merging to
+   the operator.
