@@ -2,6 +2,7 @@ package cpdeploy
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"freehold/platform/provisioning/bootstrap"
@@ -48,8 +49,23 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 	if err := stopPriorServe(t, spec, "stop prior control plane"); err != nil {
 		return err
 	}
-	if err := shipConsoleBins(t, spec); err != nil {
+	// Console binary.
+	if err := shipFile(t, spec, spec.BinaryPath, spec.BinDir+"/freehold-console", "console binary"); err != nil {
 		return err
+	}
+	// Agent-tools: capture its running argv BEFORE stopping, replace the
+	// binary, then relaunch the SAME argv so the (new) server comes back with
+	// its CP-derived serve flags. Otherwise update would leave the toolset down
+	// and world_migrate would fail. Empty when it wasn't running.
+	atArgv := ""
+	if spec.AgentToolsBinary != nil && *spec.AgentToolsBinary != "" {
+		atArgv = captureAgentToolsArgv(t, spec)
+		if err := stopAgentTools(t, spec); err != nil {
+			return err
+		}
+		if err := shipFile(t, spec, *spec.AgentToolsBinary, spec.BinDir+"/freehold-agent-tools", "agent-tools binary"); err != nil {
+			return err
+		}
 	}
 
 	restartRunner := spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil
@@ -94,5 +110,48 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 			return err
 		}
 	}
+	if atArgv != "" {
+		if err := restartAgentTools(t, spec, atArgv); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// agentToolsStateDir is the agent-tools durable root, a sibling of the console
+// state dir under the CP plane.
+func agentToolsStateDir(spec *DeployCpSpec) string {
+	return filepath.Join(spec.StateDir, "..", "agent-tools")
+}
+
+// stopAgentTools kills a running agent-tools serve (if any) and clears its pid.
+func stopAgentTools(t Transport, spec *DeployCpSpec) error {
+	at := agentToolsStateDir(spec)
+	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", at, at)
+	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "stop prior agent-tools", 30)
+	return err
+}
+
+// captureAgentToolsArgv reads the running agent-tools serve argv (binary path +
+// flags) from /proc so Redeploy can relaunch it identically after replacing the
+// binary. "" when no agent-tools is running (e.g. before the first world build).
+// The argv is re-run unquoted; agent-tools flags are paths/URLs/IPs with no
+// shell metacharacters, so this is safe. ponytail: argv capture, not a stored
+// serve-flags reconstruction — revisit if agent-tools args ever gain spaces.
+func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
+	at := agentToolsStateDir(spec)
+	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null; true", at)
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read agent-tools argv", 30)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Stdout)
+}
+
+// restartAgentTools relaunches agent-tools with a captured argv.
+func restartAgentTools(t Transport, spec *DeployCpSpec, argv string) error {
+	at := agentToolsStateDir(spec)
+	start := fmt.Sprintf("setsid nohup %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid", argv, at, at)
+	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "restart agent-tools", 60)
+	return err
 }

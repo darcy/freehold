@@ -27,6 +27,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"freehold/contract/version"
 )
 
 // DefaultRepo is the GitHub owner/name release assets come from; override with
@@ -129,6 +131,9 @@ func ListTags(ctx context.Context) ([]TagInfo, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
+	// GitHub rejects API requests without a User-Agent (HTTP 403); Go's client
+	// sends none by default.
+	req.Header.Set("User-Agent", "freehold/"+version.Version)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err

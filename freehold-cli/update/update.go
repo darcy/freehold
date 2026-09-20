@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/contract/config"
+	"freehold/contract/console"
 	"freehold/contract/version"
 	"freehold/freehold-cli/internal/artifact"
 	"freehold/freehold-cli/internal/common"
@@ -129,7 +130,7 @@ func run(ctx context.Context, o options) error {
 	eng.Stdin = bufio.NewReader(os.Stdin)
 
 	fmt.Println("→ deploying binaries + copying migration scripts")
-	if err := eng.RedeployCp(bins); err != nil {
+	if err := eng.RedeployCp(bins, set.MigrationsDir); err != nil {
 		return err
 	}
 
@@ -165,23 +166,28 @@ func resolveChannel(cfg *config.Config, o options) (string, error) {
 
 // currentChannel reads the CP's stamped channel, or "" when unreachable.
 func currentChannel(cfg *config.Config) string {
-	sec, err := oplogin.SecretHex()
-	if err != nil {
-		return ""
-	}
-	key, err := oplogin.NsecToSecret(sec)
-	if err != nil {
-		return ""
-	}
-	c, err := oplogin.Login(cfg.CPURL, key)
-	if err != nil {
-		return ""
-	}
-	w, err := c.World()
+	w, err := readWorld(cfg)
 	if err != nil {
 		return ""
 	}
 	return w.Version.Channel
+}
+
+// readWorld fetches the CP's world summary (version pin + pending migrations).
+func readWorld(cfg *config.Config) (*console.WorldSummary, error) {
+	sec, err := oplogin.SecretHex()
+	if err != nil {
+		return nil, fmt.Errorf("no operator identity (run `freehold login`): %v", err)
+	}
+	key, err := oplogin.NsecToSecret(sec)
+	if err != nil {
+		return nil, err
+	}
+	c, err := oplogin.Login(cfg.CPURL, key)
+	if err != nil {
+		return nil, fmt.Errorf("console login: %v", err)
+	}
+	return c.World()
 }
 
 // acquire resolves the source into a Set. Release channels download + verify
@@ -197,11 +203,17 @@ func acquire(ctx context.Context, o options, channel, cacheDir string) (artifact
 	}
 }
 
-// check performs steps 1–3 in dry-run: report the available version + the CP's
-// current version; change nothing.
+// check performs steps 1–3 in dry-run: report the CP's current version, pending
+// migration count, and the available version; change nothing.
 func check(ctx context.Context, cfg *config.Config, channel, cacheDir string, o options) error {
-	cur := currentVersion(cfg)
-	fmt.Printf("CP version:   %s\n", orDash(cur))
+	cur := ""
+	if w, err := readWorld(cfg); err == nil {
+		cur = w.Version.Version
+		fmt.Printf("CP version:   %s (%s)\n", orDash(cur), orDash(w.Version.Channel))
+		fmt.Printf("migrations:   %d pending\n", w.MigrationsPending)
+	} else {
+		fmt.Printf("CP version:   unreachable (%v)\n", err)
+	}
 	if o.dev || o.ref != "" || o.sha != "" {
 		fmt.Printf("source:       local tree / ref (build on apply)\n")
 		return nil
@@ -225,26 +237,6 @@ func check(ctx context.Context, cfg *config.Config, channel, cacheDir string, o 
 		fmt.Printf("available:    no %s release found\n", channel)
 	}
 	return nil
-}
-
-func currentVersion(cfg *config.Config) string {
-	sec, err := oplogin.SecretHex()
-	if err != nil {
-		return ""
-	}
-	key, err := oplogin.NsecToSecret(sec)
-	if err != nil {
-		return ""
-	}
-	c, err := oplogin.Login(cfg.CPURL, key)
-	if err != nil {
-		return ""
-	}
-	w, err := c.World()
-	if err != nil {
-		return ""
-	}
-	return w.Version.Version
 }
 
 // runMigrations runs the CP's pending scripts through the agent-tools

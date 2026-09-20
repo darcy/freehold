@@ -1672,11 +1672,12 @@ func (e *Engine) stageDeployCp() error {
 	return err
 }
 
-// RedeployCp replaces the CP's binaries from the given Bins and restarts serve
-// — the update path. It reuses the deploy-cp coordinates but runs in
-// --redeploy mode: no runner identity adoption, no secret merge, no substrate
-// rotation, and no version promotion (update stamps the pin itself, LAST).
-func (e *Engine) RedeployCp(bins Bins) error {
+// RedeployCp replaces the CP's binaries from the given Bins, copies the new
+// release's migration scripts (migrationsDir), and restarts serve — the update
+// path. It reuses the deploy-cp coordinates but runs in --redeploy mode: no
+// runner identity adoption, no secret merge, no substrate rotation, and no
+// version promotion (update stamps the pin itself, LAST).
+func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 	vmid, err := e.findLxcVmidExact("cp")
 	if err != nil {
 		return err
@@ -1714,6 +1715,12 @@ func (e *Engine) RedeployCp(bins Bins) error {
 		if wc := e.worldConfigJSON(cfg); wc != "" {
 			args = append(args, "--world-config", wc)
 		}
+	}
+	// The new release's migration scripts: Redeploy copies them (unmarked) so
+	// world_migrate can run what's pending. Without this the migrate-on-update
+	// step silently does nothing.
+	if migrationsDir != "" {
+		args = append(args, "--migrations-dir", migrationsDir)
 	}
 	_, err = e.selfStage("deploy-cp", args)
 	return err

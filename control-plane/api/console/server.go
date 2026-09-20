@@ -19,6 +19,7 @@ import (
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
+	"freehold/platform/migrations"
 )
 
 // Server is the Go console: the loopback admin/ops web surface (web.rs port).
@@ -327,6 +328,11 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"operator_pubkey":    operator,
 		"services":           services,
 		"version":            s.Version,
+	}
+	// Pending migration count (scripts without a completion marker) so a box's
+	// `update --check` / `status` can report it without running anything.
+	if n, err := migrations.PendingCount(filepath.Join(s.StateDir, "migrations")); err == nil {
+		payload["migrations_pending"] = n
 	}
 	// Fold the single-inventory status (agents + runners + dns + facts) served
 	// on the same route the /mcp world_status tool shares — the authoritative
