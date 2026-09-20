@@ -88,6 +88,9 @@ repo, not the history.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
   done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
+- `roadmap/UPDATES.md` — the versioned-update plan: release assets, channels
+  (`stable`/`rc`/`dev` + `--ref`/`--sha`), the CP's pinned/queryable version, and
+  migrations as shipped scripts.
 - `.agents/skills/release/SKILL.md` — the `release` skill: cut a release by
   generating the `CHANGELOG.md` entry from git history since the previous release,
   landing it via a `release/vX.Y.Z` PR, then tagging the merged commit and
