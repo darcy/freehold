@@ -10,7 +10,7 @@ set shell := ["bash", "-c"]
 # the `install` surface is folded into the freehold CLI).
 build:
     @echo "→ freehold (CLI + TUI + install)"
-    @cd freehold-cli && mise exec go@1.25.0 -- go build -o ../target/debug/freehold ./cli/cmd/freehold
+    @cd freehold-cli && mise exec go@1.25.0 -- go build -o ../target/debug/freehold ./cmd/freehold
     @echo "→ freehold-console (debug + release — the Go CP CLI the box stages call, and what deploy-cp ships)"
     @cd control-plane && mise exec go@1.25.0 -- go build -o ../target/debug/freehold-console ./api/cmd/freehold-console
     @cd control-plane && mise exec go@1.25.0 -- go build -o ../target/release/freehold-console ./api/cmd/freehold-console

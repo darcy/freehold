@@ -245,7 +245,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     durable-plane layout, canonical domains, and edge cert metadata the box
     registers at the end of `freehold build`)). It is served **twice from one
     assembly** (`agenttools.WorldStatus`): the console folds it into its public
-    `/api/world` (consumed by the TUI and `freehold world status`), and the
+    `/api/world` (consumed by the TUI and `freehold status`), and the
     `/mcp world_status` tool shares that same assembly for direct MCP callers —
     so the two surfaces can never diverge. `grant_agent` is
     **operator-scoped and wired through the absorbed console-owner
@@ -310,7 +310,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 ### `freehold` TUI (bubbletea; the operator's console)
 
-*   **It is bubbletea, not HTML.** `freehold-cli/cli/tui/tui.go` is full-screen
+*   **It is bubbletea, not HTML.** `freehold-cli/tui/tui.go` is full-screen
     alt-screen (`tea.NewProgram(m, WithAltScreen(), …)`); `freehold` with no
     args enters it, a subcommand routes to the CLI.
 
@@ -332,7 +332,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     dir (`<FREEHOLD_HOME|~/.freehold>/profiles/<name>/`), the filesystem being the
     registry. `login` authorizes this operator against the CP by **CP address +
     operator nsec** (NIP-98), then ends;
-    `freehold-cli/cli/login` persists the nsec 0600 under the profile's operator
+    `freehold-cli/login` persists the nsec 0600 under the profile's operator
     dir and seeds that profile's connection/desire config from the CP's
     `/api/world` summary, so every launch auto-logs in and a fresh box recovers
     with nothing from a lost one. The TUI and `build`/`install`/`teardown`/
@@ -366,13 +366,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     runner reach satisfied and sources CP liveness from the console session
     (`/api/overview`), not the `pct exec` probe a box with a local runner uses.
 
-*   **One activity surface for long ops.** `freehold-cli/cli/tui/activity.go`
+*   **One activity surface for long ops.** `freehold-cli/tui/activity.go`
     streams the boot probe rows and the subprocess windows, `ctrl+c` aborts;
     the dashboard never scrolls under an open activity. The world-mutation
     forms re-exec `freehold` as a subprocess (the same CLI drivers).
 
 *   **Testing the TUI means the BUILT binary** — `go test` under
-    `freehold-cli/cli/tui/` verifies form logic, not the running app (see
+    `freehold-cli/tui/` verifies form logic, not the running app (see
     AGENTS.md for the rebuild+tmux/herdr discipline).
 
 ### `platform/` (`freehold/platform` — the evolving world)
@@ -772,7 +772,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 *   **Nothing in the POC needs a cluster**; POC = a CPA that **lives in
     Buzz** + skills.
 
-*   **The `/srv/data` convention** (durable state) and `freehold-cli/cli/tui`'s
+*   **The `/srv/data` convention** (durable state) and `freehold-cli/tui`'s
     single activity view (**ALWAYS** the top line).
 
 *   **`<n>` is a chunk number and `<module>/<pkg>`** is the module path for

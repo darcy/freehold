@@ -360,7 +360,7 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Builder == nil {
-		writeErr(w, http.StatusServiceUnavailable, "world-build: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold bootstrap` first)")
+		writeErr(w, http.StatusServiceUnavailable, "world-build: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
 		return
 	}
 	applier := cpbuild.BuildWorldApply(s.Builder)
@@ -390,7 +390,7 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Builder == nil {
-		writeErr(w, http.StatusServiceUnavailable, "world-teardown: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold bootstrap` first)")
+		writeErr(w, http.StatusServiceUnavailable, "world-teardown: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
 		return
 	}
 	applier := cpbuild.BuildWorldTeardownApply(s.Builder)

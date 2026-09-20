@@ -63,9 +63,9 @@ repo, not the history.
   domains + the proxy IP (the guided flow prompts). Re-running an existing name whose CP is
   **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
   Nostr/enc key), while a **live** CP is refused (reconcile with `freehold build`, drop it
-  with `teardown`/`uninstall`, or join it with `freehold login`). `bootstrap` is a hidden
-  alias for `install --yes`. A world with no recorded name keeps the domain-derived LXC
-  names, and durable-plane names stay domain-keyed.
+  with `teardown`/`uninstall`, or join it with `freehold login`). There is no `bootstrap`
+  alias — `install --yes` is the non-interactive surface. A world with no recorded name
+  keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
 - `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
@@ -202,9 +202,6 @@ changelog.
   not the (non-secret) base-URL env var — cosmetic, fix is a separate redaction list.
 - **State store is single-process** — not cross-process atomic; planned Postgres swap at MVP
   addresses this.
-- **Orchestrator `onboard` has no rollback** — a hard-fail at the readiness gate leaves CP
-  state + the shipped package on disk; a re-run hits `RunnerExists`/`PackageDirInUse` and
-  needs manual cleanup.
 - **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
   unzeroized body bytes (loopback, TLS-free — same exposure class as the CLI's stdin path).
 - **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP
@@ -282,8 +279,11 @@ changelog.
     and the `proxmox/teardown` world-destroy engine): `cd providers && go build ./... &&
     go vet ./... && go test ./...`. Imports `platform/` + `contract/`; never the reverse.
   - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
-    CLI + TUI, `cli/` + `cli/login` + `cli/flows` + `cli/tui`, and the `install/` +
-    `cpdeploy/` install surface; the `freehold` binary's main is `cli/cmd/freehold`):
+    CLI + TUI, one dir-per-verb (`install/`, `uninstall/`, `build/`, `teardown/`,
+    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`)
+    plus `login/` + `tui/` and `internal/common/` + `internal/certcred/` +
+    `internal/stages/`; the `install/` surface holds `install/cpdeploy/`; the `freehold`
+    binary's main is `cmd/freehold`):
     `cd freehold-cli && go build ./... && go vet ./... && go test ./...`. **It never
     imports `control-plane/`** (an import-graph guard enforces it).
   - `control-plane/` (`freehold/control-plane` — the server + engines: api/cpbuild (build),
@@ -299,7 +299,7 @@ changelog.
   found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
 - **The full binary set a `rebuild`/`teardown`/`install` box needs** (`box.ResolveBins` fails
   the pipeline until every sibling is present, and prints the exact build one-liner):
-  - `target/debug/freehold` (the CLI+TUI+install) — `go build -C freehold-cli -o target/debug/freehold ./cli/cmd/freehold`
+  - `target/debug/freehold` (the CLI+TUI+install) — `go build -C freehold-cli -o target/debug/freehold ./cmd/freehold`
   - `target/debug/freehold-console` **and** `target/release/freehold-console` (the Go CP CLI
     the box-side provision/grant/adopt/add-secret/revoke stages call, and what `deploy-cp`
     ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
@@ -317,9 +317,9 @@ changelog.
   runner owns stay in its Rust tests. It drives the real `runner` binary (a subprocess),
   so the box's `cargo build --bin runner` must have run first.
 
-### Testing the TUI (`freehold`, `freehold-cli/cli/cmd/freehold` → bubbletea dashboard)
+### Testing the TUI (`freehold`, `freehold-cli/cmd/freehold` → bubbletea dashboard)
 
-`go test` under `freehold-cli/cli/tui/` verifies form logic, but it does NOT prove the running TUI.
+`go test` under `freehold-cli/tui/` verifies form logic, but it does NOT prove the running TUI.
 **Always test the BUILT binary** — never reason from `go test` + a stale `~/.cargo/bin/freehold`.
 The test step below rebuilds it FIRST, so there is nothing to remember: if you change a TUI flow
 (forms, keybindings, dispatch, pre-flow chaining like the rebuild→DNS ask), rebuild + test the
@@ -327,7 +327,7 @@ installed binary in one go:
 
 ```bash
 # 0. rebuild + place the binary FIRST (a passing go test does not re-place it):
-cd freehold-cli && go build -o target/debug/freehold ./cli/cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
+cd freehold-cli && go build -o target/debug/freehold ./cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
 
 # 1. isolate state so the flow is deterministic (e.g. no DNS cred already stored):
 cat > /tmp/fh-tui-config.toml <<'EOF'

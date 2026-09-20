@@ -25,6 +25,33 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.18] — verb refactor: dir-per-verb command layout
+
+The deferred 5d layout lands. `freehold-cli/` is now one package per verb
+(`install/`, `uninstall/`, `build/`, `teardown/`, `status/`, `update/`, `exec/`,
+`profiles/`, `door/`, `dns-cred/`, `add-relay-member/`, `login/`, `tui/`), the
+root cobra wiring lives in `cmd/freehold/`, and the shared helper layer
+(profile negotiation, identity loading, the world MCP client, runner-key refs,
+the CP-preserving teardown) moved to `internal/common/`; the DNS-credential
+engine moved to `internal/certcred/`. `cpdeploy/` moved under `install/`.
+
+Command surface changes:
+
+- **Renamed:** `world status` → `status`, `world migrate` → `update`,
+  `relay-member` → `add-relay-member`.
+- **Removed:** `console-login`, `relay-profile`, `relay-join`, `relay-setup`,
+  `delegate`, `delegate-peer`, `memory`, `demo`, `readiness` (legacy/dev
+  surfaces), plus the `world` parent and its `world build`/`world teardown`
+  aliases — top-level `build`/`teardown` cover those.
+- **Removed the `bootstrap` alias.** `install --yes` is the one non-interactive
+  surface.
+- Deleted the dead, unregistered self-staged `exec` in `internal/stages`
+  (the operator `exec` is the single registration).
+
+No behavior change for the surviving verbs. A root-registration test asserts
+each command name is registered exactly once; the command surface is pinned by
+a test.
+
 ## [0.6.17] — teardown reaches the console over the CP's LAN IP
 
 Whole-world `teardown` destroys the k3s LXC, which hosts the Caddy edge fronting

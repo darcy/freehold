@@ -4,8 +4,9 @@ Status: everything through the local/server split is **merged** — PR1 install 
 (`0.6.9`), PR2 teardown/uninstall (`0.6.10`), PR3 provider seam (`0.6.11`), PR4
 transient access (`0.6.12`), substrate rotation/match fixes (`0.6.13`/`0.6.14`),
 PR5 local/server split (`0.6.15`, #258), and the live-run + teardown fixes
-(`0.6.16`/`0.6.17`). **Next: PR 6, the verb refactor** (§6.1/§7) — the deferred 5d
-command layout (cuts + renames + dir-per-verb) — then `vultr` (PR 7).
+(`0.6.16`/`0.6.17`). **PR 6, the verb refactor** (§6.1/§7) — the deferred 5d command
+layout (cuts + renames + dir-per-verb) — is implemented on `refactor/verb-layout`,
+pending merge; then `vultr` (PR 7).
 `install --restore` is out of scope for now (see "Deferred").
 
 Baseline: `main` after `0.6.17`.
@@ -68,11 +69,12 @@ orchestrators over it. See §5.
    `uninstall` drops the CP.
 10. **Thin-box `uninstall --remove-data` is refused** until the data path is
     sequenced (same known gap as `teardown --data`).
-11. **The install box is thin after handoff.** PR4 removes the box's transient
-    world-home runner package once the CP owns the identity and the doors are in
-    place; box-side `exec` already rides the CP's `world_exec`
-    (`noLocalRunner()`, `control-plane/cli/handlers.go:112`). Keeping the package
-    is a harmless fallback, not the target state.
+11. **The install box stays thin-capable; the world-home runner package is
+    kept.** box-side `exec` rides the CP's `world_exec` whenever no local runner
+    is serving (`NoLocalRunner`, `freehold-cli/internal/common/world.go`), so a
+    handoff box needs nothing local. The box's world-home runner package is a
+    harmless, useful fallback and is **not** removed after handoff (decided in
+    PR 6).
 
 ## 3. Current state (post PR5; verb refactor next)
 
@@ -102,10 +104,10 @@ freehold uninstall [--remove-data]               # CP + doors removed; data kept
 freehold login | status | update | exec | profiles | door | dns-cred | add-relay-member
 ```
 
-`install` is folded into `freehold install` (PR 5, merged); the hidden `bootstrap`
-alias stays as `install --yes`. PR 6 (§6.1) completes the layout: it cuts the legacy
-commands and renames `world status`→`status`, `world migrate`→`update`, and
-`relay-member`→`add-relay-member`.
+`install` is folded into `freehold install` (PR 5, merged); `install --yes` is the
+non-interactive surface (there is no `bootstrap` alias). PR 6 (§6.1) completes the
+layout: it cuts the legacy commands and renames `world status`→`status`,
+`world migrate`→`update`, and `relay-member`→`add-relay-member`.
 
 ### Semantics
 
@@ -299,6 +301,7 @@ freehold-cli/
   add-relay-member/        (was `relay-member`)
   default/                 (TUI)
   internal/common/         shared CLI helpers
+  internal/certcred/       DNS-credential engine (build + dns-cred)
   internal/stages/         provision/storage/deploy-cp (hidden, self-staged)
 ```
 
@@ -490,6 +493,8 @@ Pure structure + command removal; no behavior change for the survivors.
 - **Rename:** `relay-member` → `add-relay-member`; `world status` → `status`;
   `world migrate` → `update` (future home for update behavior); drop `world build`/
   `world teardown` and the `world` command.
+- **Remove the `bootstrap` alias** — `install --yes` is the one non-interactive
+  surface.
 - **Move** each survivor into `freehold-cli/<verb>/` as its own package; root wiring
   imports them; the `cmd/freehold` dispatch (login/logout/`--config`/no-args→TUI)
   is preserved.
@@ -504,9 +509,10 @@ Pure structure + command removal; no behavior change for the survivors.
   it); reconcile the §11.3.3 registry-ownership note against the live run.
 - **Tests/acceptance:** both import guards pass; a root-registration test that each
   command name is registered exactly once (catches a duplicate `exec`); survivors
-  behave identically; the `bootstrap` hidden alias is intact; `freehold status`/
-  `update`/`add-relay-member` work; the TUI is the no-arg default; README/ARCHITECTURE
-  command lists updated (no dead commands).
+  behave identically; there is no `bootstrap` alias (`install --yes` is the
+  non-interactive surface); `freehold status`/`update`/`add-relay-member` work; the
+  TUI is the no-arg default; README/ARCHITECTURE command lists updated (no dead
+  commands).
 
 ### PR 7 — `vultr` provider (`0.6.19`)
 
@@ -636,8 +642,8 @@ execution record.
    agent-tools serve process holds the registry/facts in memory; the console
    executor writes the files and then restarts the serve process to reload.
    `Spec.AgentRegistry`/`Spec.FactsStore` let the in-process `world_build` path
-   write its own stores with no restart. Verified by reasoning only — no live
-   exercise.
+   write its own stores with no restart. Exercised live by the `0.6.16` CP-owned
+   build run (agent creation + reconcile through the CP).
 4. **The dedupe hid a live command (caught by a test).** The deleted
    `storage` tree looked like a duplicate, but `storage destroy-pool` is driven
    by the teardown engine (`providers/proxmox/teardown/teardown.go:392`). It was

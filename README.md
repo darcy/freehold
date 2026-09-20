@@ -58,7 +58,7 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
                       + the deployer-side world facts (plane/certs/domains)
                       registered at build. One assembly (agenttools.WorldStatus)
                       feeds BOTH the console's public /api/world — what the TUI and
-                      `freehold world status` read, no local agent-tools coords — and
+                      `freehold status` read, no local agent-tools coords — and
                       the /mcp world_status tool for direct MCP callers; world_build =
                       the CP runs its world stages
                       through the co-located runner)
@@ -198,8 +198,8 @@ recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
 needs the relay/CP domains + proxy IP (the guided flow prompts for them). An
 existing name whose CP is absent is re-adopted (the plane keeps the runner
 identity); a **live** CP is refused — reconcile the world with `freehold build`,
-drop it with `teardown`/`uninstall`, or join it with `freehold login`. The old
-`bootstrap` command remains as a hidden alias for `install --yes`.
+drop it with `teardown`/`uninstall`, or join it with `freehold login`. `install
+--yes` is the non-interactive surface.
 
 ### The appliance (`freehold` — one binary, two surfaces)
 
@@ -208,10 +208,10 @@ freehold                      # no args → the interactive TUI (bubbletea); a s
 freehold login                # root-free: CP address + operator nsec (NIP-98) → authorize,
 freehold                      #   seed a local connection profile from the CP, then END — just run `freehold`
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
-freehold world status         # the CP's single inventory (read via public /api/world)
-freehold world build          # trigger the CP's world-build (co-located runner)
-freehold world teardown       # alias of `freehold teardown` (CP-preserving world teardown)
-freehold world migrate        # run the CP's verify-gated migrations
+freehold status               # the CP's single inventory (read via public /api/world)
+freehold build                # trigger the CP's world-build (co-located runner)
+freehold teardown             # CP-preserving world teardown
+freehold update               # run the CP's verify-gated migrations
 freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
                               #  --remove-data drops the durable plane); a thin box / dead CP
                               #  uninstalls over direct root SSH
@@ -219,8 +219,8 @@ freehold door authorize       # authorize this box's door key on the host (DOOR_
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no
                               #  [runner]) through the CP's runner via world_exec
-freehold provision --kind …   #   deploy-relay, deploy-cp, relay-member,
-freehold deploy-relay …        #   memory, console-login, grant, storage …)
+freehold provision --kind …   #   self-staged stages: provision, deploy-cp,
+freehold deploy-cp …          #   storage, add-relay-member
 freehold --help               # both surfaces
 ```
 
@@ -388,7 +388,7 @@ The CLI binary is `freehold`, built from the `freehold-cli/` Go module
 (the `freehold-orchestrator` binary folded into it — one binary, two surfaces):
 
 ```sh
-go build -C freehold-cli -o ../target/debug/freehold ./cli/cmd/freehold
+go build -C freehold-cli -o ../target/debug/freehold ./cmd/freehold
 freehold --help
 ```
 
@@ -397,10 +397,6 @@ freehold --help
 freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"' \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
   --runner-pubkey <runner-nostr>
-
-freehold demo --addr 127.0.0.1:8787 \
-  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
-  --steps steps.json   # [{target, cmd, secrets?, timeout_s?}]
 
 # World bring-up, one step at a time (every command routes through the
 # provisioning runner — the workstation never holds a PVE credential itself).
@@ -442,20 +438,13 @@ freehold deploy-relay --target proxmox-box --lxc 100 \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
   --runner-pubkey <runner-nostr>
 
-#   relay-member: community membership is the SECOND layer (channel
+#   add-relay-member: community membership is the SECOND layer (channel
 #   membership via 9000/9001 is not enough for relay queries). Add the fresh
 #   console pubkey / operator keys / runners / agents via buzz-admin in the
 #   relay LXC — the CP never holds the relay signing key.
-freehold relay-member --target proxmox-box --lxc 100 \
+freehold add-relay-member --target proxmox-box --lxc 100 \
   --pubkey <pubkey-or-operator-key> --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
-
-#   console-login: the operator logs in with THEIR OWN nsec (NIP-98) — the
-#   key never leaves their machine. Works over the proxy (cp-<relay-domain>).
-#   (In the TUI, just press w on the Runners view — it opens the web console
-#   already authenticated via a single-use portal token, no console-login.)
-freehold console-login \
-  --url https://cp-<relay-domain> --nsec nsec1...
 
 #   grants (Chunk 2.6.1): grants ARE channel membership. With --relay-url,
 #   grant publishes a put-user to the runner's channel; the runner re-reads
