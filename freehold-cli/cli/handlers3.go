@@ -256,9 +256,18 @@ func runWholeWorldTeardown(cfg *config.Config, configPath string, removeDNS, yes
 	if err != nil {
 		return err
 	}
-	c, err := oplogin.Login(cfg.CPURL, secret)
+	// Reach the console over its LAN IP when this box knows it: teardown
+	// destroys the k3s LXC, which hosts the Caddy edge fronting cfg.CPURL —
+	// the response would die with the edge (HTTP/2 GOAWAY). The CP guest keeps
+	// its LAN IP, so the report comes back cleanly. Fall back to the public URL
+	// for a box that never recorded the coords.
+	loginURL := cfg.CPURL
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		loginURL = "http://" + ip + ":8080"
+	}
+	c, err := oplogin.Login(loginURL, secret)
 	if err != nil {
-		return fmt.Errorf("login to %s failed: %w", cfg.CPURL, err)
+		return fmt.Errorf("login to %s failed: %w", loginURL, err)
 	}
 	fmt.Printf("tearing down world %s through the CP (the CP + runner are preserved)…\n", cfg.TenantSlug())
 	res, err := c.WorldTeardown()

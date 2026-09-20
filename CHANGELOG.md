@@ -25,6 +25,18 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.17] — teardown reaches the console over the CP's LAN IP
+
+Whole-world `teardown` destroys the k3s LXC, which hosts the Caddy edge fronting
+`cp_url` — so the `/api/world-teardown` response died with the edge
+(`http/2 GOAWAY`) even though the teardown itself ran. It now logs in over the
+CP's recorded LAN IP (which survives teardown), like `build`, falling back to
+the public URL for a box that never recorded the coords.
+
+Live-verified: teardown returns a clean report (19 terraform resources
+destroyed; relay + k3s LXCs removed; CP preserved and healthy; internal DNS
+cleared; agent-tools stopped; relay/k3s coords cleared for the next build).
+
 ## [0.6.16] — live-run fixes for the thin-box build + fresh-world DNS
 
 Surfaced by a real `install` → `build` run on a Proxmox host.
