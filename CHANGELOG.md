@@ -3,22 +3,27 @@
 All notable decisions, reversals, and supersessions live here — the rest of `roadmap/`
 (ROADMAP.md, POC.md, ARCHITECTURE.md, BUZZ_SURFACE.md, README.md) describes the **current**
 plan only and should never carry inline "SUPERSEDED / formerly / previously" narration.
-When something changes, update the docs to state the new reality plainly and add an entry
-here explaining what changed and why. Most recent changes at the top.
+When something changes, update the docs to state the new reality plainly; this file records
+the change when the next release is cut. Most recent changes at the top.
 
 ## Versioning
 
-This project follows [Semantic Versioning](https://semver.org) once there's a public
-release to version. Before that (pre-1.0), we're using it loosely as a project-progress
-marker:
+A version exists only when it is released. Versions are tied to **releases**, never to
+merges: work lands on `main` with no version attached, and every release is three things
+together — a `CHANGELOG.md` entry, an annotated tag `vX.Y.Z` on `main`, and a GitHub
+Release.
 
-*   **0.x.y** — pre-MVP chunks (see `roadmap/POC.md`); each patch bump roughly corresponds
-    to "through Chunk N," e.g. 0.2.0 = first Chunk 2 step, 0.2.1 next chunk 2 step, 
-    0.3.0 = first Chunk 3 step. Merging chunk steps (sub tasks, etc) to main will increment 
-    the minor version, same for tweaks and fixes. These numbers aren't tied to chunk 
-    deliverables but to merges to main. Note that this was introduced in version 0.3.0,
-    previous versions have all merges and minor versions collapsed.
+This project follows [Semantic Versioning](https://semver.org) loosely pre-MVP:
+
+*   **0.x.y** — pre-MVP (see `roadmap/POC.md`); the minor moves for a chunk's work, the
+    patch for a phase.
 *   **1.0.0** — reserved for the MVP / public release definition in ROADMAP.md.
+
+The entry for each release is **written at release time**. It compares the codebase at the
+previous release to the current one and records the **net** difference — what is true now
+that wasn't then — not a chronological log of every merge; superseded or refactored-away
+work is omitted and the final state wins. The `release` skill owns that flow (see `AGENTS.md`
+"Releases").
 
 ### Known gaps
 See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
