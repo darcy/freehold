@@ -4,7 +4,8 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-The current version is the top entry in `CHANGELOG.md` — this file deliberately never
+The current *released* version is the top entry in `CHANGELOG.md` (equivalently the latest
+`v*` tag) — this file deliberately never
 restates a version number, so it can't go stale. Chunk 1 (engine room) and Chunk 2 (relay
 scope), including the durable volume plane (Phase 0.12), are implemented and live-verified
 against real infrastructure (a real PVE host, a real relay/CP pair under a real domain).
@@ -22,9 +23,9 @@ repo, not the history.
 "SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
 
 1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
-2.  Add an entry to `CHANGELOG.md` explaining what changed and why (see "Pull
-    requests": each phase bumps `0.x.y` and adds a changelog entry; a phase merged
-    to `main` is tagged `v0.x.y`).
+2.  Record the change for the next release: `CHANGELOG.md` is written **at release
+    time** from git history (see "Releases"), so no per-merge changelog entry or
+    version bump happens here.
 
 ## Pull requests (locked) — every unit of work ships through a PR
 
@@ -41,11 +42,27 @@ repo, not the history.
 - **Commit and push; never merge.** Merging is the operator's call — do it only
   when the operator explicitly says "merge when complete" (or equivalent). Until
   then the PR sits in review, even at `MERGE-READY`.
-- **One `0.x.y` per phase.** Each phase that comes online gets its own
-  `CHANGELOG.md` entry and version bump (`0.4.0`, `0.4.1`, …): the minor moves
-  when a chunk's work lands, the patch when a phase inside it does. When a phase
-  merges to `main`, that release tags the tree at `v0.4.1` etc. — the tag and
-  the changelog entry are both part of landing the phase.
+- **No version numbers in commit or PR titles.** The version is assigned only at
+  release time; a merge to `main` is not a release.
+
+## Releases (locked) — a version exists only when it is released
+
+- **Versions are tied to releases, never to merges.** There is no version bump per
+  phase, per chunk, or per merge to `main`. Work lands with no version attached.
+- **Every release is three things together:** a `CHANGELOG.md` entry, an annotated
+  tag `vX.Y.Z` on `main`, and a GitHub Release. A tag or a Release without the
+  changelog entry is not a release; a changelog-only edit is not one either.
+- **The changelog entry is written at release time.** It compares the codebase at the
+  previous release to the current one and records the **net** difference — what is true now
+  that wasn't then — not a chronological log of every merge. Superseded or refactored-away
+  work is omitted; the final state wins. The `release` skill owns this flow.
+- **Release flow:** the skill generates the entry and gets the operator's approval on the
+  draft **before committing**, commits it on a `release/vX.Y.Z`
+  branch → PR → waits for `check` + `bot-review` to settle → **the operator merges**
+  (the skill never merges) → the skill tags the merged commit and publishes the
+  Release with short, high-level notes distilled from the entry.
+- **Numbering:** `0.x.y` stays semver-ish pre-MVP (minor for a chunk's work, patch
+  for a phase); `1.0.0` is reserved for the MVP / public release.
 
 ## Navigation
 
@@ -66,14 +83,16 @@ repo, not the history.
   with `teardown`/`uninstall`, or join it with `freehold login`). `bootstrap` is a hidden
   alias for `install --yes`. A world with no recorded name keeps the domain-derived LXC
   names, and durable-plane names stay domain-keyed.
-- `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
+- `CHANGELOG.md` — history of decisions, reversals, and released versions.
 - `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
   done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
-- `.agents/skills/release/SKILL.md` — the `release` skill: cut a `v0.x.y` annotated
-  tag on `main` and publish a short, high-level GitHub Release (distilled from
-  `CHANGELOG.md`, never the full changelog) — one per phase, per the PR rules above.
+- `.agents/skills/release/SKILL.md` — the `release` skill: cut a release by
+  generating the `CHANGELOG.md` entry from git history since the previous release,
+  landing it via a `release/vX.Y.Z` PR, then tagging the merged commit and
+  publishing a short, high-level GitHub Release (distilled from the entry, never
+  the full changelog) — see "Releases" above.
   This is the canonical, agent-agnostic location (auto-loaded by opencode and any
   other agent that reads `~/.agents/skills/`-style external skills).
 - `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port

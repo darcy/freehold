@@ -1,6 +1,7 @@
 # POC Steps — The AI-operated Appliance
 
-Current version: **0.0.2**. For the history of how this plan changed (superseded decisions,
+Current *released* version: the top entry in `CHANGELOG.md` (equivalently the latest `v*`
+tag; never restated here). For the history of how this plan changed (superseded decisions,
 reordering, reversed calls) see `CHANGELOG.md` — this document describes the current plan
 only.
 
