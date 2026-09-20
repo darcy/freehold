@@ -1,69 +1,107 @@
 ---
 name: release
-description: Use when cutting a tagged GitHub release from main for freehold (e.g. "tag v0.4.0", "ship a release", "cut a release for the current phase"). Creates an annotated git tag on main and a high-level, short GitHub Release — do NOT dump the CHANGELOG verbatim into the release notes.
+description: Use when cutting a tagged GitHub release from main for freehold (e.g. "tag v0.4.0", "ship a release", "cut a release for the current phase"). Generates the CHANGELOG.md entry from git history since the previous release, lands it via a release PR, then tags the merged commit and publishes a short, high-level GitHub Release.
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   author: freehold
   license: MIT
 ---
 
-# Release — tag `main` + publish a GitHub Release
+# Release — generate the changelog, tag `main`, publish a GitHub Release
 
-This repo follows **one `0.x.y` per phase**: each phase that lands on `main`
-gets an annotated tag `v0.x.y` **and** a GitHub Release whose notes are a
-**short, high-level summary** distilled from `CHANGELOG.md` — never the full
-changelog text.
+A version exists only when it is released, and every release is **three things together**:
+a `CHANGELOG.md` entry, an annotated tag `vX.Y.Z` on `main`, and a GitHub Release with
+**short, high-level** notes distilled from that entry. There is no version bump per merge or
+phase; this skill is the only thing that assigns a version.
+
+The entry compares the **codebase** at the previous release to the current one: it describes
+what is true now that wasn't then. It is **not** an exhaustive commit log — if something was
+refactored and then refactored again, only the final shape is recorded; superseded or
+reverted work is omitted.
 
 ## When to use
 
-The operator asks to tag `main`, "cut/tag a release", or "ship a release" for a
-version that has already merged to `main`. If they only want to *tag*, still
-create the Release too (the tag and the Release always ship together).
+The operator asks to "tag a release", "ship a release", or bump the version. The version
+has **not** been recorded anywhere yet — you generate the changelog entry now, from git
+history.
 
 ## Workflow
 
-1. **Pin the version + target.**
+1. **Pin the version + baseline.**
    ```bash
    cd /home/darcy/Work/freehold
    git fetch --tags --quiet
    git log --oneline -1 main          # confirm main is checked out and synced
-   git tag -l 'v*'                     # ensure the target v0.x.y is NOT already tagged
+   git tag -l 'v*' | sort -V | tail -5
    ```
-   If the tag already exists on `main`, stop and tell the operator — do not
-   move a published tag.
+   Choose the next `vX.Y.Z` — the operator's number if given, else bump from the change
+   nature (breaking/foundational → minor pre-1.0, feature → minor, fix → patch).
+   Confirm it is NOT already tagged/released (`git tag -l vX.Y.Z`, `gh release view vX.Y.Z`);
+   if it is, stop — never move a published tag.
 
-2. **Write the release notes (short, high-level).** Read the matching
-   `## [0.x.y] — …` section of `CHANGELOG.md` and **distill** it into ~5–10
-   bullets covering only the headline changes. Keep it scannable: group into
-   `### Added / Fixed / Removed` only if it helps; a few one-liners is ideal.
-   Do **not** copy the changelog paragraphs verbatim.
-
-3. **Tag `main` and create the Release** (tag must point at `main`):
+2. **Generate the entry by comparing the codebase to the previous release.** The baseline
+   is the commit that recorded the top `## [x.y.z]` entry (equivalently the previous `v*`
+   tag):
    ```bash
-   git tag -a v0.x.y -m "v0.x.y — <one-line headline>" main
-   git push origin v0.x.y
+   base=$(git log -1 --format=%H -- CHANGELOG.md)   # the previous release's entry commit
+   git log --oneline "$base"..HEAD                   # the raw material, not the output
+   git diff "$base"..HEAD -- <areas of interest>     # what actually differs now
    ```
-   Then publish:
+   Describe the **net** difference between the released tree and the current one — what is
+   true now that wasn't then. Do **not** enumerate commits/PRs chronologically: if work was
+   refactored twice, record only the final shape; drop superseded, reverted, or
+   intermediate work. Classify into `### Added / Changed / Fixed / Removed` and write the
+   full entry as a new `## [X.Y.Z] — <one-line headline>` section. Group by outcome, not
+   by commit; this is the only place the changelog grows.
+
+3. **Get the draft entry approved.** Show the operator the full generated
+   `CHANGELOG.md` section (and the distilled Release notes) and **wait for their
+   approval**. Do not commit, branch, or tag until they sign off; revise the draft
+   as they ask.
+
+4. **Land it via a release PR.**
    ```bash
-   gh release create v0.x.y \
-     --title "v0.x.y — <one-line headline>" \
-     --notes-file /tmp/opencode/release_v0.x.y.md \
+   git checkout main && git pull --ff-only
+   git checkout -b release/vX.Y.Z
+   # prepend the new section to CHANGELOG.md
+   git commit -am "docs(changelog): vX.Y.Z — <headline>"
+   git push -u origin release/vX.Y.Z
+   gh pr create --base main --title "docs(changelog): vX.Y.Z" --body "<entry summary>"
+   ```
+   Poll `gh pr checks` until `check` + `bot-review` settle (see `AGENTS.md`
+   "Pull requests"). The release commit/tag legitimately carries the version; ordinary
+   work commits must not.
+
+5. **Stop. The operator merges.** Never merge the release PR yourself (see `AGENTS.md`
+   "Pull requests"). Wait for it to land on `main`.
+
+6. **Tag the merged commit + publish the Release.**
+   ```bash
+   git checkout main && git pull --ff-only
+   git rev-parse HEAD           # must be the merged release commit
+   git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z \
+     --title "vX.Y.Z — <one-line headline>" \
+     --notes-file /tmp/opencode/release_vX.Y.Z.md \
      --target main
    ```
-   (Use `--target main` even when already on `main`, and `--generate-notes`
-   only if you skipped step 2.)
+   The notes file is the **distilled** entry (~5–10 headline bullets, never the
+   changelog text verbatim).
 
-4. **Verify** the release URL prints and that `gh release view v0.x.y` shows the
-   correct tag target.
+7. **Verify** the release URL prints and `gh release view vX.Y.Z` shows the tag on the
+   merged `main` commit.
 
 ## Hard rules
 
-- **Tag `main`**, not the current (possibly detached/feature) commit, unless
-  the operator explicitly says otherwise.
-- **Never** create, move, or delete a tag that already exists on `origin`
-  without an explicit go-ahead.
-- **Never** merge a PR as part of releasing — tagging/releasing is separate
-  from merging (merging is the operator's call; see `AGENTS.md`).
+- **Get the draft changelog entry approved before committing anything** — the operator
+  signs off on the generated section first (step 3).
+- **Tag `main`'s merged release commit**, not a feature/detached commit.
+- **Never** create, move, or delete a tag that already exists on `origin` without an
+  explicit go-ahead.
+- **Never merge the release PR** — merging is the operator's call (see `AGENTS.md`).
+- The changelog entry and the tag+Release ship **together**; a changelog-only edit, or a
+  tag/Release without the entry, is not a release.
 - Release notes stay **shorter and higher-level** than the changelog entry.
-- After creating the tag/Release, remind the operator to quit + restart opencode
-  only if you also touched config — a plain tag+Release needs no restart.
+- After creating the tag/Release, remind the operator to quit + restart opencode only if
+  you also touched config — a plain release needs no restart.
