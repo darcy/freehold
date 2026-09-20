@@ -57,6 +57,11 @@ Surfaced by a real `install` → `build` run on a Proxmox host.
   relay service, and the TUI could never show it green. The console now adopts the
   builder's world-config relay scope into its state at startup and falls back to
   it on `/api/world`.
+- **Derive the litellm gateway base URL** (`http://<proxy>:31400/v1`) alongside
+  `litellm_ip`. Without it agent pods got an empty `OPENAI_COMPAT_BASE_URL`, so
+  every turn failed with `llm: transport: builder error` and the agents never
+  replied. `Spec.FillEdgeURLs` fills both from the proxy IP at spec construction
+  (console + agent-tools) and after guest-IP refresh.
 - **Derive `litellm_ip` from the proxy IP** when the console spec has none
   (a fresh world's spec predates k3s). Without it the litellm step is skipped,
   so the CPA pod's `freehold-litellm-key` Secret is never created and the pod

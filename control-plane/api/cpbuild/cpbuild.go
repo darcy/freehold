@@ -526,12 +526,11 @@ func (s *Spec) refreshGuestIPs() {
 		}
 	}
 	// litellm is a k3s NodePort served on the proxy (k3s node) IP. A fresh
-	// world's console spec has no litellm_ip baked (it did not exist at
-	// deploy-cp time), so derive it — otherwise the litellm step (and the CPA
-	// pod's litellm-key Secret it seeds) is skipped.
-	if s.LitellmIP == "" {
-		s.LitellmIP = s.ProxyIP
-	}
+	// world's console spec has no litellm_ip/base baked (litellm did not exist
+	// at deploy-cp time), so derive both — otherwise the litellm step (and the
+	// CPA pod's litellm-key Secret) is skipped, and the agent pods get an empty
+	// OPENAI_COMPAT_BASE_URL.
+	s.FillEdgeURLs()
 }
 
 // worldBootRelay boots the relay LXC (if missing) + deploys the Buzz stack

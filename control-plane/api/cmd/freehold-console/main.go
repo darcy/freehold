@@ -261,6 +261,9 @@ func cmdServe(args []string) error {
 	// grant on the surviving identity.
 	if builder != nil {
 		builder.AgentIdentityDir = *agentToolsStateDir
+		// The world-config may predate litellm; derive the gateway IP/base from
+		// the proxy IP so agent pods get a real OPENAI_COMPAT_BASE_URL.
+		builder.FillEdgeURLs()
 		// A fresh world's install is CP-only, so the --relay-host/--relay-url
 		// flags are empty (the relay did not exist). Adopt the builder's
 		// world-config scope into the durable state so /api/world and the
