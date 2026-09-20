@@ -575,6 +575,9 @@ var deployCpCmd = &cobra.Command{
 			}
 			spec.Pin = &version.Pin{Version: v, Channel: ch, Commit: mustStr(cmd, "commit")}
 		}
+		if d := mustStr(cmd, "migrations-dir"); d != "" {
+			spec.MigrationsDir = &d
+		}
 		if v := mustStr(cmd, "lxc"); v != "" {
 			var n uint32
 			fmt.Sscanf(v, "%d", &n)
@@ -659,4 +662,5 @@ func init() {
 	deployCpCmd.Flags().String("version", "", "version to stamp (version.json); absent = don't promote")
 	deployCpCmd.Flags().String("channel", "", "release channel to stamp (default: derived from --version)")
 	deployCpCmd.Flags().String("commit", "", "commit sha to stamp")
+	deployCpCmd.Flags().String("migrations-dir", "", "LOCAL dir of <epoch>.sh migration scripts (shipped + marked done)")
 }

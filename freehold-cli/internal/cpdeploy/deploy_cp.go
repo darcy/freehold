@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,6 +42,10 @@ type DeployCpSpec struct {
 	// Pin is the version identity to stamp after a successful deploy (install
 	// only). nil on a rebuild/redeploy: build/teardown never promote.
 	Pin *version.Pin
+	// MigrationsDir is the LOCAL dir of shipped <epoch>.sh migration scripts.
+	// DeployCp (install) copies them to the CP and marks them all done; update
+	// copies + runs pending through world_migrate. Empty = none shipped.
+	MigrationsDir *string
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -148,6 +153,57 @@ func shipSmallFile(t Transport, spec *DeployCpSpec, localPath, remoteFinal, step
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// ShipMigrations copies every <epoch>.sh from localDir into
+// <StateDir>/migrations/scripts/ on the CP over the deploy transport. When
+// markDone is set (install), it then touches a completion marker for every
+// shipped script WITHOUT running it — the fresh-install rule: a new world is
+// already at current state. update passes markDone=false and runs pending
+// scripts through world_migrate itself.
+func ShipMigrations(t Transport, spec *DeployCpSpec, localDir string, markDone bool) error {
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".sh") || !isEpoch(strings.TrimSuffix(n, ".sh")) {
+			continue
+		}
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	remoteDir := spec.StateDir + "/migrations/scripts"
+	for _, n := range names {
+		if err := shipSmallFile(t, spec, localDir+"/"+n, remoteDir+"/"+n, "migration "+n); err != nil {
+			return err
+		}
+	}
+	if !markDone {
+		return nil
+	}
+	root := spec.StateDir + "/migrations"
+	cmd := "mkdir -p " + root + " && cd " + remoteDir + " && for f in *.sh; do [ -e \"$f\" ] || continue; : > \"" + root + "/$f\"; done"
+	_, err = execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "mark migrations done", 60)
+	return err
+}
+
+// isEpoch reports whether a basename is a pure decimal epoch.
+func isEpoch(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // StampPin writes the world's version identity to <StateDir>/version.json over
@@ -544,8 +600,13 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		}
 	}
 
-	// Install stamps the version pin last. Build/teardown/redeploy never do:
-	// they operate within the stamp already on the CP.
+	// Ship the migration scripts and mark them all done (fresh install), then
+	// stamp the version pin. Order: deploy → serve green → scripts → pin.
+	if spec.MigrationsDir != nil && *spec.MigrationsDir != "" {
+		if err := ShipMigrations(t, spec, *spec.MigrationsDir, true); err != nil {
+			return nil, err
+		}
+	}
 	if spec.Pin != nil {
 		if err := StampPin(t, spec, *spec.Pin); err != nil {
 			return nil, err

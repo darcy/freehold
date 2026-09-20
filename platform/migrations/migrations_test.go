@@ -7,151 +7,109 @@ import (
 	"testing"
 )
 
-func TestRunAppliesVerifyGatesAndPersists(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cp", "migrations.json")
-	st, err := Open(path)
-	if err != nil {
+// writeScript drops a script into <root>/scripts/<name>.
+func writeScript(t *testing.T, root, name, body string) {
+	t.Helper()
+	if err := os.MkdirAll(ScriptsRoot(root), 0o700); err != nil {
 		t.Fatal(err)
 	}
-
-	var applied []string
-	mig := Migration{
-		Name:   "001-abc",
-		Apply:  func() error { applied = append(applied, "001"); return nil },
-		Verify: func() error { return nil },
-	}
-	res, err := st.Run([]Migration{mig})
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(ScriptsRoot(root), name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
-	}
-	if len(res) != 1 || !res[0].OK || !res[0].Applied {
-		t.Fatalf("expected 1 OK applied result, got %+v", res)
-	}
-	if !st.Done("001-abc") {
-		t.Fatal("migration should be done after apply+verify")
-	}
-
-	// Idempotent: a fresh State over the SAME durable file skips it.
-	st2, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := st2.Pending([]Migration{mig}); len(got) != 0 {
-		t.Fatal("done migration must not be pending on re-open")
 	}
 }
 
-func TestVerifyFailureRetriesNotDone(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "migrations.json")
-	st, err := Open(path)
+func TestScriptsAscendingAndHelpersIgnored(t *testing.T) {
+	root := t.TempDir()
+	writeScript(t, root, "1799900002.sh", "two")
+	writeScript(t, root, "1799900001.sh", "one")
+	writeScript(t, root, "not-a-migration.sh", "helper")
+
+	got, err := Scripts(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	applyCalls := 0
-	mig := Migration{
-		Name:   "002-verify-red",
-		Apply:  func() error { applyCalls++; return nil },
-		Verify: func() error { return fmt.Errorf("not converged yet") },
-	}
-	res, err := st.Run([]Migration{mig})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res[0].OK || !res[0].Applied {
-		t.Fatalf("verify-failed migration must be not-OK but still applied, got %+v", res[0])
-	}
-	if st.Done("002-verify-red") {
-		t.Fatal("verify failure must NOT mark the migration done")
-	}
-	// Next run RETRIES it (Apply is idempotent) because it's still pending.
-	next, err := st.Run([]Migration{mig})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !next[0].Applied {
-		t.Fatal("pending-verify migration must be re-applied on the next run")
-	}
-	if applyCalls != 2 {
-		t.Fatalf("expected 2 apply calls (retry), got %d", applyCalls)
+	want := []string{"1799900001.sh", "1799900002.sh"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Scripts = %v, want %v", got, want)
 	}
 }
 
-func TestApplyFailureStopsPendingsAndKeepsPending(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "migrations.json")
-	st, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
+func TestMarkAllLeavesNothingPendingAndRunsNothing(t *testing.T) {
+	root := t.TempDir()
+	writeScript(t, root, "1799900001.sh", "one")
+	writeScript(t, root, "1799900002.sh", "two")
+
+	n, err := MarkAll(root)
+	if err != nil || n != 2 {
+		t.Fatalf("MarkAll = %d, %v; want 2, nil", n, err)
 	}
-	ok := Migration{Name: "000-ok", Apply: func() error { return nil }, Verify: func() error { return nil }}
-	boom := Migration{Name: "003-boom", Apply: func() error { return fmt.Errorf("apply exploded") }}
-	// Order: ok runs first; then boom fails and stops the run.
-	if _, err := st.Run([]Migration{ok, boom}); err == nil {
-		t.Fatal("expected an error when a migration's apply fails")
+	if p, _ := Pending(root); len(p) != 0 {
+		t.Fatalf("all marked, pending = %v", p)
 	}
-	if !st.Done("000-ok") {
-		t.Fatal("the migration before the failure should still be done")
-	}
-	if st.Done("003-boom") {
-		t.Fatal("failed migration must not be done")
-	}
-	// The failed migration is still pending (retried, not skipped).
-	if got := st.Pending([]Migration{boom}); len(got) != 1 {
-		t.Fatal("failed migration must remain pending")
-	}
-	// State file survives (durable).
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("ledger not persisted: %v", err)
-	}
+	// No apply function was ever passed — MarkAll must not run the scripts.
 }
 
-// TestScriptsEnumeratesAscending verifies the versioned script enumeration:
-// <epoch>.sh (apply) is grouped with its optional <epoch>.verify.sh (gate), in
-// ascending epoch order, exactly the two shipped migrations appearing first.
-func TestScriptsEnumeratesAscending(t *testing.T) {
-	scripts, err := Scripts()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(scripts) != 2 {
-		t.Fatalf("expected the 2 shipped migrations, got %d: %+v", len(scripts), scripts)
-	}
-	// Ascending order.
-	if !(scripts[0].Epoch < scripts[1].Epoch) {
-		t.Fatal("migrations must enumerate in ascending epoch order")
-	}
-	for _, s := range scripts {
-		if s.Body == "" {
-			t.Errorf("migration %s has no apply body", s.Epoch)
+func TestRunAppliesPendingInOrderStopsOnFailureAndRetries(t *testing.T) {
+	root := t.TempDir()
+	writeScript(t, root, "1799900001.sh", "one")
+	writeScript(t, root, "1799900002.sh", "two")
+	writeScript(t, root, "1799900003.sh", "three")
+
+	var order []string
+	run := func(name, path string) error {
+		order = append(order, name)
+		if name == "1799900002.sh" {
+			return fmt.Errorf("boom")
 		}
-		if s.Verify == "" {
-			t.Errorf("migration %s should carry a verify gate", s.Epoch)
-		}
+		return nil
+	}
+	res, err := Run(root, run)
+	if err == nil {
+		t.Fatal("expected an error when a script fails")
+	}
+	if fmt.Sprint(order) != fmt.Sprint([]string{"1799900001.sh", "1799900002.sh"}) {
+		t.Fatalf("order = %v (must stop at the failure)", order)
+	}
+	if len(res) != 2 || !res[0].OK || res[1].OK {
+		t.Fatalf("results = %+v", res)
+	}
+	if !Done(root, "1799900001.sh") {
+		t.Fatal("the script before the failure must be marked done")
+	}
+	if Done(root, "1799900002.sh") {
+		t.Fatal("the failed script must NOT be marked done")
+	}
+
+	// Next run retries only the failed + later scripts.
+	order = nil
+	if _, err := Run(root, func(name, path string) error { order = append(order, name); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(order) != fmt.Sprint([]string{"1799900002.sh", "1799900003.sh"}) {
+		t.Fatalf("retry order = %v, want the two unmarked", order)
 	}
 }
 
-// TestScriptMigrationVerifyGating adapts a Script into a verify-gated Migration
-// and proves a failing verify gate keeps it pending (retried, never "done").
-func TestScriptMigrationVerifyGating(t *testing.T) {
-	run := func(body string) error {
-		if body == "apply" {
-			return nil // apply succeeds
-		}
-		return fmt.Errorf("gate %s not converged", body) // verify fails
-	}
-	s := Script{Epoch: "1799999999", Body: "apply", Verify: "verify"}
-	m := s.Migration(run)
-	if m.Name != "1799999999" {
-		t.Fatalf("migration name must be the epoch, got %q", m.Name)
-	}
-	res, err := (&State{path: filepath.Join(t.TempDir(), "x.json"),
-		entries: map[string]Entry{}}).Run([]Migration{m})
-	if err != nil {
+// TestMarkerSurvivesChannelSwitch proves a marker is a durable per-script file,
+// not version-stamped: switching to a different tree's scripts (the same root,
+// a replaced scripts/ dir) keeps an already-done script done.
+func TestMarkerSurvivesChannelSwitch(t *testing.T) {
+	root := t.TempDir()
+	writeScript(t, root, "1799900001.sh", "one")
+	writeScript(t, root, "1799900002.sh", "two")
+	if _, err := Run(root, func(string, string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if !res[0].Applied {
-		t.Fatal("apply should have run")
+
+	// "Switch channel": replace scripts/ with a NEW release's set (001 + a new
+	// 003), same marker root.
+	if err := os.RemoveAll(ScriptsRoot(root)); err != nil {
+		t.Fatal(err)
 	}
-	if res[0].OK {
-		t.Fatal("a failing verify gate must not mark the migration OK")
+	writeScript(t, root, "1799900001.sh", "one (new release)")
+	writeScript(t, root, "1799900003.sh", "three (new release)")
+
+	if pending, _ := Pending(root); fmt.Sprint(pending) != fmt.Sprint([]string{"1799900003.sh"}) {
+		t.Fatalf("pending = %v, want only the new script", pending)
 	}
 }

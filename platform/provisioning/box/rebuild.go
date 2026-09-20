@@ -187,6 +187,26 @@ func (e *Engine) HostExecFunc() provisioning.ExecFunc {
 	}
 }
 
+// ResolveMigrationsDir finds the top-level migrations/ dir for the running
+// binary: beside it (a release asset layout) or up to two parents up (a
+// target/debug build in the repo tree). "" when absent — the deploy then ships
+// no scripts rather than failing.
+func ResolveMigrationsDir() string {
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(self)
+	for i := 0; i < 3; i++ {
+		p := filepath.Join(dir, "migrations")
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			return p
+		}
+		dir = filepath.Dir(dir)
+	}
+	return ""
+}
+
 // NewEngine builds the provisioning engine from flags + resolved sibling
 // binaries. It normalizes the operator pubkey to 64-hex up front.
 func NewEngine(f Flags, bins Bins) (*Engine, error) {
@@ -1583,6 +1603,11 @@ func (e *Engine) stageDeployCp() error {
 		"--version", version.Version,
 		"--channel", version.Channel(version.Version),
 		"--commit", version.Commit,
+	}
+	// Ship the repo/release migrations dir so install records every migration
+	// done (Omarchy fresh-install rule). Absent dir = the deploy still succeeds.
+	if md := ResolveMigrationsDir(); md != "" {
+		args = append(args, "--migrations-dir", md)
 	}
 	// The relay signing pubkey is the /api/world trust anchor a fresh login box
 	// seeds — read it from the relay's own compose .env (deterministic, unlike

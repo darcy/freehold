@@ -146,7 +146,7 @@ func (s *Server) toolList() []map[string]interface{} {
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
 		{
-			"name": "world_migrate", "description": "Run pending CP migrations (verify-gated: a migration is done only when its postcondition verifies, 🟢/🔴).",
+			"name": "world_migrate", "description": "Run the CP's pending one-time migration scripts (Omarchy-style <epoch>.sh: ascending order, a failure stops the queue and stays pending).",
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
 		{

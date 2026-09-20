@@ -74,12 +74,11 @@ func TestImportConsoleAgentsAdditiveOnly(t *testing.T) {
 }
 
 // TestBuildMigratorRunsScriptsToConvergence exercises the PRODUCTION wiring of
-// BuildMigrator (the gap the previous direct-logic test no longer covers):
-// embedded migration scripts are written to <StateDir>/migrations/files/<epoch>.sh
-// and executed via `exec.Command("bash", path)` with FREEHOLD_AGENT_TOOLS /
-// REGISTRY / CONSOLE_STATE env. A stub `freehold-agent-tools` asserts those env
-// vars are populated (proving cpGuestDirs + path resolution) and exits 0, so
-// both migrations converge and the ledger durably records them "done".
+// BuildMigrator: scripts shipped into <StateDir>/migrations/scripts/<epoch>.sh
+// run via `bash -euo pipefail` with FREEHOLD_AGENT_TOOLS / REGISTRY /
+// CONSOLE_STATE / STATE_DIR env populated. A stub `freehold-agent-tools` asserts
+// those env vars (proving cpGuestDirs + path resolution) and exits 0, so both
+// migrations run and their markers are written.
 func TestBuildMigratorRunsScriptsToConvergence(t *testing.T) {
 	dir := t.TempDir()
 	// cpGuestDirs derives binDir from filepath.Dir(StateDir), so the stub under
@@ -102,10 +101,22 @@ set -eu
 [ -n "${FREEHOLD_AGENT_TOOLS:-}" ] || { echo "no FREEHOLD_AGENT_TOOLS"; exit 1; }
 [ -n "${REGISTRY:-}" ] || { echo "no REGISTRY"; exit 1; }
 [ -n "${CONSOLE_STATE:-}" ] || { echo "no CONSOLE_STATE"; exit 1; }
+[ -n "${STATE_DIR:-}" ] || { echo "no STATE_DIR"; exit 1; }
 exit 0
 `
 	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	// Ship two scripts into the CP's scripts dir (install/update would copy
+	// these from the release asset / tree).
+	scriptsDir := migrations.ScriptsRoot(filepath.Join(stateDir, "migrations"))
+	if err := os.MkdirAll(scriptsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"1799900001.sh", "1799900002.sh"} {
+		if err := os.WriteFile(filepath.Join(scriptsDir, n), []byte("echo hi\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	spec := &Spec{StateDir: stateDir}
@@ -119,25 +130,18 @@ exit 0
 	}
 	for _, r := range results {
 		if !r.OK {
-			t.Errorf("migration %q not converged: %s", r.Name, r.Err)
+			t.Errorf("migration %q failed: %s", r.Name, r.Err)
 		}
 	}
 
-	// The ledger durably records both migrations "done".
-	raw, err := os.ReadFile(filepath.Join(stateDir, "migrations.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var entries map[string]migrations.Entry
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 ledger entries, got %d", len(entries))
-	}
-	for name, e := range entries {
-		if e.Status != "done" {
-			t.Errorf("migration %q not 'done': %s", name, e.Status)
+	// Both completion markers now exist; a second run has nothing pending.
+	root := filepath.Join(stateDir, "migrations")
+	for _, n := range []string{"1799900001.sh", "1799900002.sh"} {
+		if !migrations.Done(root, n) {
+			t.Errorf("marker missing for %s", n)
 		}
+	}
+	if again, err := m(); err != nil || len(again) != 0 {
+		t.Fatalf("second run must be a no-op, got %v / %v", again, err)
 	}
 }
