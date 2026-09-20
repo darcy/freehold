@@ -1,21 +1,18 @@
 # Plan — install access modes → normalized CP lifecycle
 
-Status: the provider/transient work is **merged** — PR1 install surface (`0.6.9`),
-PR2 teardown/uninstall (`0.6.10`), PR3 provider seam (`0.6.11`), PR4 transient
-access (`0.6.12`), plus re-adopt substrate-key rotation (`0.6.13`) and the
-substrate-key match fix (`0.6.14`). **PR 5 (the local/server split, `0.6.15`) is
-implemented and bot-approved on PR #258** (branch `feat/local-server-split`):
-5a/5b/5c landed, and 5d's command consolidation into `freehold-cli/internal/stages/`
-landed. Still open on PR 5: the per-verb package reorg (5d remainder) and the
-live integration gate — see §11. Then `vultr` (PR 6). `install --restore` is out
-of scope for now (see "Deferred"), but the identity model below guarantees grants
-survive a restore when it lands.
+Status: everything through the local/server split is **merged** — PR1 install surface
+(`0.6.9`), PR2 teardown/uninstall (`0.6.10`), PR3 provider seam (`0.6.11`), PR4
+transient access (`0.6.12`), substrate rotation/match fixes (`0.6.13`/`0.6.14`),
+PR5 local/server split (`0.6.15`, #258), and the live-run + teardown fixes
+(`0.6.16`/`0.6.17`). **Next: PR 6, the verb refactor** (§6.1/§7) — the deferred 5d
+command layout (cuts + renames + dir-per-verb) — then `vultr` (PR 7).
+`install --restore` is out of scope for now (see "Deferred").
 
-Baseline: `main` after `0.6.14`; PR 5 branches from it.
+Baseline: `main` after `0.6.17`.
 
-The storage-scope work (#243/#244) and the provider/transient phases are merged;
-the remaining work is the **local/server split** (implemented, pending merge) and
-provider breadth.
+The storage-scope work (#243/#244), the provider/transient phases, and the
+local/server split are merged; the remaining work is the **verb refactor** (§6.1) and
+provider breadth (`vultr`).
 
 **For the implementing agent:** this plan states the goal, the locked decisions, and
 the guardrails; it deliberately leaves internal structure, package layout, and naming
@@ -77,7 +74,7 @@ orchestrators over it. See §5.
     (`noLocalRunner()`, `control-plane/cli/handlers.go:112`). Keeping the package
     is a harmless fallback, not the target state.
 
-## 3. Current state (post PR4 + fixes)
+## 3. Current state (post PR5; verb refactor next)
 
 Landed: one install surface + life-cycle gate + identity-preserving adopt (PR1);
 teardown CP-preserving + `world teardown` alias + `uninstall` + the single
@@ -85,36 +82,30 @@ teardown CP-preserving + `world teardown` alias + `uninstall` + the single
 `providers/` module and the two guards (PR3); direct root-SSH transient access +
 host-side fail-if-live + transient uninstall + the secret-provenance guard (PR4);
 re-adopt substrate-key rotation (`0.6.13`) and the substrate-key match fix
-(`0.6.14`).
+(`0.6.14`); the local/server split — `freehold-cli/` local module, `contract/` thin
+leaf, `state` in `control-plane/`, teardown in `providers/proxmox/teardown/`, both
+import-graph guards (PR5, `0.6.15`); live-run + teardown fixes (`0.6.16`/`0.6.17`).
 
-**Local/server split: implemented on `feat/local-server-split` (PR #258), awaiting a
-live gate before merge — see §11.** For reference, on `main` the CLI tree still lives
-inside `control-plane/` and the two sides import each other in a handful of places:
-
-- **server → local:** `api/agent/agentpod.go`, `api/cmd/freehold-agent-tools/main.go`,
-  and `api/cpbuild/cpbuild.go` import `cli/flows`; `cpbuild` also imports `cli/teardown`.
-- **local → server:** `cli/flows` + `cli/helpers3.go` → `secret-management`;
-  `cli/rebuild.go` → `api/agent` + `api/agenttools`; `cli/tui/*` → `api/agenttools`.
-
-PR 5 (below) cuts these; §11 records the final homes and deviations.
-
-No other module imports `control-plane/cli`.
+**Remaining: the verb refactor** (PR 6, §6.1) — finish the `freehold-cli` layout, cut
+the legacy commands, rename (`status`/`update`/`add-relay-member`) — then `vultr`
+(PR 7). No cross-imports remain (guarded); the old `control-plane/cli ↔ api` edges are
+gone. §11 has the PR 5 execution record.
 
 ## 4. Target command surface
 
 ```
-freehold install [--name] [--host] [--yes]     # fail if a live CP exists
+freehold install [--name] [--host] [--yes]     # CP bring-up; fail if a live CP exists
                  [--relay-domain] [--cp-domain] [--proxy-ip]   # fresh plane only
-freehold build                                  # world bring-up via CP (unchanged)
+freehold build                                  # world bring-up via CP
 freehold teardown                                # inverse of build; CP stays
 freehold uninstall [--remove-data]               # CP + doors removed; data kept by default
-freehold login | world | exec | profiles | …     # unchanged
+freehold login | status | update | exec | profiles | door | dns-cred | add-relay-member
 ```
 
-Until **PR 5**, install lives on the separate `freehold-install` binary; PR 5 folds
-it into `freehold install` and drops the binary (the hidden `bootstrap` alias stays
-as `install --yes`). **`world teardown` is a pure alias** of the CP-preserving
-`teardown`.
+`install` is folded into `freehold install` (PR 5, merged); the hidden `bootstrap`
+alias stays as `install --yes`. PR 6 (§6.1) completes the layout: it cuts the legacy
+commands and renames `world status`→`status`, `world migrate`→`update`, and
+`relay-member`→`add-relay-member`.
 
 ### Semantics
 
@@ -206,7 +197,7 @@ install/  control-plane/   composition roots: pick the provider from the access 
 - The extraction PR is **behavior-preserving**: same commands, same order, existing
   tests pass unchanged apart from moved packages.
 
-## 6. Local/server split (architecture) — implemented on PR #258 (§11)
+## 6. Local/server split (architecture) — merged (`0.6.15`)
 
 **Goal:** two apps with **zero cross-imports**. `control-plane/` is the server + the
 engines that run against the CP; `freehold-cli/` is the local operator surface; the
@@ -284,6 +275,32 @@ Guardrails:
   `go test ./...`; both modules in CI).
 - 5a/5c are **behavior-preserving**; the intended behavior changes are 5b
   (server-side agent creation + DNS, CP-signed) and the `onboard` removal.
+
+### 6.1 Command layout (PR 6)
+
+The deferred 5d: finish the `freehold-cli/` layout with dir-per-verb and prune the
+legacy/dev commands. Cuts, renames, and steps are in §7 PR 6.
+
+```
+freehold-cli/
+  cmd/freehold/            entry + default/TUI dispatch
+  <root wiring>            root cobra + AddCommand
+  install/                 (+ install/cpdeploy/)
+  uninstall/
+  build/
+  teardown/
+  login/
+  status/                  (was `world status`)
+  update/                  (was `world migrate`; future update behavior)
+  exec/                    (the one `exec`)
+  profiles/
+  door/
+  dns-cred/                (the `dns-cred` command)
+  add-relay-member/        (was `relay-member`)
+  default/                 (TUI)
+  internal/common/         shared CLI helpers
+  internal/stages/         provision/storage/deploy-cp (hidden, self-staged)
+```
 
 ## 7. PR plan
 
@@ -455,15 +472,43 @@ The §6 structural refactor, staged so each step is reviewable:
   does not run `box.Engine`); drop `freehold-install` (or a one-release shim); add
   `freehold-cli` to `justfile` build/test and the CI Go matrix, and update
   `ResolveBins`.
-- **5d — per-verb reorg: dropped for now.** The functional dedupe is done
-  (`freehold-cli/internal/stages/`); the cosmetic reorg needs the `cli` helper layer
-  exported and every call site touched. Not part of PR 5; revisit only if `cli/` gets
-  unwieldy.
+- **5d — per-verb reorg: deferred to PR 6.** The functional dedupe is done
+  (`freehold-cli/internal/stages/`); the command layout (dir-per-verb, cuts, renames)
+  is PR 6 (§6.1/§7).
 - **Acceptance:** the two import guards run in `go test ./...` (one per module; both
   modules in CI); commands/behavior unchanged except the 5b changes + `onboard`
   removal; the audience refresh lands; a live smoke passes; `justfile`/docs updated.
 
-### PR 6 — `vultr` provider (`0.6.16`)
+### PR 6 — verb refactor (command layout) (`0.6.18`)
+
+The deferred 5d: finish the `freehold-cli/` layout (§6.1) and prune legacy commands.
+Pure structure + command removal; no behavior change for the survivors.
+
+- **Cut (9 legacy/dev commands):** `console-login`, `relay-profile`, `relay-join`,
+  `relay-setup`, `delegate`, `delegate-peer`, `memory`, `demo`, `readiness`. (Keep
+  `contract/delegate` — `cpbuild` uses it.)
+- **Rename:** `relay-member` → `add-relay-member`; `world status` → `status`;
+  `world migrate` → `update` (future home for update behavior); drop `world build`/
+  `world teardown` and the `world` command.
+- **Move** each survivor into `freehold-cli/<verb>/` as its own package; root wiring
+  imports them; the `cmd/freehold` dispatch (login/logout/`--config`/no-args→TUI)
+  is preserved.
+- **Shared helpers → `freehold-cli/internal/common/`** (profile negotiation,
+  destructive confirm, runner-key refs, `connect`/flags); delete helpers that go dead
+  with the cuts.
+- **`cpdeploy/` → `install/cpdeploy/`.**
+- **Delete dead code:** `internal/stages/stages.go`'s unregistered `exec`
+  (`ExecCommand`) — the root registers the operator `exec`; keep exactly one.
+- **Companion cleanups:** remove the stale AGENTS "`onboard` has no rollback" known
+  gap; resolve decision 11 (box-thin: keep the runner package as a fallback or remove
+  it); reconcile the §11.3.3 registry-ownership note against the live run.
+- **Tests/acceptance:** both import guards pass; a root-registration test that each
+  command name is registered exactly once (catches a duplicate `exec`); survivors
+  behave identically; the `bootstrap` hidden alias is intact; `freehold status`/
+  `update`/`add-relay-member` work; the TUI is the no-arg default; README/ARCHITECTURE
+  command lists updated (no dead commands).
+
+### PR 7 — `vultr` provider (`0.6.19`)
 
 - `providers/vultr/` (provider API + SSH) implementing `Provider`; an `api-vultr`
   access mode. Same orchestration, different provider. `hetzner` later.
@@ -481,7 +526,10 @@ The §6 structural refactor, staged so each step is reviewable:
   "`control-plane` never imports the local CLI and vice versa", and `contract/` as the
   thin protocol leaf.
 - `README.md`: update the CLI examples (replace `freehold-install bootstrap`; note the
-  provider/access-mode model; drop the `onboard` example).
+  provider/access-mode model; drop the `onboard` example). PR 6 also drops the cut
+  commands (`readiness`/`demo`/`memory`/`relay-profile`/`relay-join`/`relay-setup`/
+  `delegate`/`delegate-peer`/`console-login`) and renames (`status`/`update`/
+  `add-relay-member`) from every example.
 - `CHANGELOG.md`: one entry per PR; `roadmap/ROADMAP.md`/`POC.md` where relevant.
 
 ## 9. Deferred / out of scope
@@ -492,7 +540,7 @@ The §6 structural refactor, staged so each step is reviewable:
   `RotateSecret` hardcodes the target `Address` (`provisioner2.go:52`), so a restore
   to a **new host** needs a **target-repoint** step on top of door rotation — PR 4's
   rotation is **same-host only**. Do not implement now, but don't preclude it.
-- **Provider breadth** — `vultr` (PR 6) and later `hetzner`: the seam is in place;
+- **Provider breadth** — `vultr` (PR 7) and later `hetzner`: the seam is in place;
   each is a new `Provider` implementation, not a new branch.
 - **`--remove-data` becomes the default** — later; comment at the flag, not docs.
 
@@ -520,8 +568,9 @@ The §6 structural refactor, staged so each step is reviewable:
 
 ## 11. PR 5 implementation status, deviations, and decisions
 
-PR 5 is on `feat/local-server-split` (PR #258, `0.6.15`). CI green; the bot
-review approved after three rounds. **Not merged** (awaiting the operator).
+PR 5 merged as #258 (`0.6.15`). The live integration gate (§7 PR 5b) was satisfied by
+the `0.6.16` live-run fixes (#261) and the `0.6.17` teardown fix (#262). The 5d
+command layout was deferred to PR 6 (§6.1/§7).
 
 ### 11.1 What landed
 
@@ -611,9 +660,8 @@ execution record.
    `cfg.AgentToolsPubkey` from the console's `/api/world` before signing, covering
    `door` (`door.go`), `world migrate`, and `world build` after a `--data` rebuild.
    Folded into §7 PR 5b acceptance ("Audience refresh").
-2. **Live integration gate — required before merge.** No longer "ship unverified":
-   merge is gated on a live run (fresh build → CPA/departments; `teardown --data` →
-   build re-creates agents; stored-DNS-cred cert issue/reuse). Folded into §7 PR 5b.
-3. **5d per-verb reorg — dropped.** Cosmetic; the functional dedupe
-   (`freehold-cli/internal/stages/`) is done. See §7 PR 5.
-4. **Merge** — operator's call, after #1 and #2 land.
+2. **Live integration gate — satisfied.** The live run(s) behind `0.6.16`/`0.6.17`
+   exercised the CP-owned build path (agent creation, DNS, certs); PR 5 merged.
+3. **5d per-verb reorg — deferred to PR 6.** The functional dedupe is done; the
+   dir-per-verb layout, command cuts, and renames are §7 PR 6 (§6.1).
+4. **Merge** — done (`0.6.15`).
