@@ -244,6 +244,31 @@ func (s *Spec) worldDNS() error {
 			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
+	if err := s.pointGuestsAtResolver(); err != nil {
+		return err
+	}
+	for _, q := range []struct{ name, want string }{
+		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
+	} {
+		if q.want == "" {
+			continue
+		}
+		if err := s.run(proxmox.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
+			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
+		}
+	}
+	return nil
+}
+
+// pointGuestsAtResolver pct-sets each guest's nameserver to the CP resolver and
+// rewrites its resolv.conf now (pct only regenerates it at the next boot). It is
+// called EARLY — before the terraform services phase — because the litellm/caddy
+// image pulls need working DNS, and a freshly booted guest otherwise sits on
+// DHCP/public resolvers that intermittently fail containerd's lookups
+// (EAI_AGAIN). worldDNS calls it again (idempotent) alongside the record
+// registration.
+func (s *Spec) pointGuestsAtResolver() error {
+	searchBase := s.guestSearchBase()
 	router := s.guestNameserver()
 	for _, role := range []struct {
 		name string
@@ -260,20 +285,10 @@ func (s *Spec) worldDNS() error {
 		}
 		pctSet, resolvConf := proxmox.DnsPointCmd(role.vmid, s.CpIP, r, searchBase)
 		if err := s.run(pctSet, 60); err != nil {
-			return fmt.Errorf("world-build dns point %s: %w", role.name, err)
+			return fmt.Errorf("dns point %s: %w", role.name, err)
 		}
 		if err := s.run(resolvConf, 60); err != nil {
-			return fmt.Errorf("world-build dns point %s resolv.conf: %w", role.name, err)
-		}
-	}
-	for _, q := range []struct{ name, want string }{
-		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
-	} {
-		if q.want == "" {
-			continue
-		}
-		if err := s.run(proxmox.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
-			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
+			return fmt.Errorf("dns point %s resolv.conf: %w", role.name, err)
 		}
 	}
 	return nil
@@ -510,6 +525,12 @@ func (s *Spec) refreshGuestIPs() {
 			}
 		}
 	}
+	// litellm is a k3s NodePort served on the proxy (k3s node) IP. A fresh
+	// world's console spec has no litellm_ip/base baked (litellm did not exist
+	// at deploy-cp time), so derive both — otherwise the litellm step (and the
+	// CPA pod's litellm-key Secret) is skipped, and the agent pods get an empty
+	// OPENAI_COMPAT_BASE_URL.
+	s.FillEdgeURLs()
 }
 
 // worldBootRelay boots the relay LXC (if missing) + deploys the Buzz stack
@@ -1133,6 +1154,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			return "", fmt.Errorf("world-build resolve guests: %w", err)
 		}
 		spec.refreshGuestIPs()
+		// 3.5a-pre. Point every guest at the CP resolver BEFORE the services
+		// phase: the litellm/caddy image pulls need working DNS, and the guests
+		// otherwise sit on DHCP/public resolvers that intermittently fail
+		// containerd's lookups. worldDNS re-points later (idempotent).
+		if spec.CpLxc != 0 && spec.CpIP != "" {
+			if err := spec.pointGuestsAtResolver(); err != nil {
+				return "", fmt.Errorf("world-build point guests at resolver: %w", err)
+			}
+		}
 		// 3.5a. Re-provision the CP's co-located runner from the CP's own
 		// durable litellm store if a re-deploy wiped its package — the services
 		// phase below requests these BY NAME. No-op when it already holds them.
@@ -1688,7 +1718,20 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			if authURL == "" {
 				authURL = spec.RelayURL
 			}
-			if err := relay.PutUserAuth(spec.RelayURL, authURL, spec.Sec, spec.Audience, pub); err != nil {
+			// The agent-tools roster channel is OWNED by the agent-tools server,
+			// so its put-user must be signed by THAT identity, not the console's
+			// (the relay rejects a non-owner with "not a channel member"). The
+			// identity lives on the same CP plane, so the console executor reads
+			// it and signs; inside the agent-tools process it is the same key.
+			sec, self := spec.Sec, spec.Audience
+			if id, err := identity.Load(spec.agentToolsRoot()); err == nil {
+				if s2, derr := hex.DecodeString(id.NostrSecretHex); derr == nil {
+					if pk, perr := id.NostrPubkeyHex(); perr == nil {
+						sec, self = s2, pk
+					}
+				}
+			}
+			if err := relay.PutUserAuth(spec.RelayURL, authURL, sec, self, pub); err != nil {
 				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
 			}
 		}

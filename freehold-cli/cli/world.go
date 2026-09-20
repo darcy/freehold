@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"net"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -206,11 +208,27 @@ func adoptAgentToolsCoords(cfg *config.Config, w *console.WorldSummary) bool {
 	return changed
 }
 
-// noLocalRunner reports whether this box is THIN (no deployed provisioning
-// runner): such a box drives the world — including exec — through the CP.
+// noLocalRunner reports whether this box is THIN: such a box drives the world —
+// including exec — through the CP. A recorded runner addr is not enough: a
+// transient install records `[runner] addr` but leaves no runner serving, so the
+// addr must actually answer (a short dial) or the box is treated as thin.
 func noLocalRunner() bool {
 	cfg, err := config.Load(configPath())
-	return err != nil || cfg == nil || cfg.Runner.Addr == ""
+	if err != nil || cfg == nil || cfg.Runner.Addr == "" {
+		return true
+	}
+	return !addrReachable(cfg.Runner.Addr)
+}
+
+// addrReachable reports whether a TCP address accepts a connection within a
+// short timeout.
+func addrReachable(addr string) bool {
+	c, derr := net.DialTimeout("tcp", addr, 700*time.Millisecond)
+	if derr != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // worldExecThroughCP runs cmd on the CP's co-located runner via the world_exec

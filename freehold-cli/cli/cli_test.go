@@ -130,5 +130,3 @@ func bech32EncodeNsec(payload []byte) string {
 	}
 	return out.String()
 }
-
-

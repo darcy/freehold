@@ -8,7 +8,6 @@
 package cli
 
 import (
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"freehold/contract/client"
 	"freehold/contract/config"
@@ -332,7 +332,18 @@ func clearStoredDNSCreds() {
 	}
 }
 
-func (e *buildEngine) consoleEncPubkey() ([]byte, error) {
+// consoleEncPubkey returns the console identity's encryption public key — the
+// recipient the CP-owned secrets are sealed to. It reads it from the console's
+// public /api/world (so a THIN box needs no runner to exec into the CP); an
+// older CP that predates the field falls back to the pct-exec readback.
+func (e *buildEngine) consoleEncPubkey(client *console.Client) ([]byte, error) {
+	if w, err := client.World(); err == nil && w.ConsoleEncPubkey != "" {
+		pk, derr := hex.DecodeString(w.ConsoleEncPubkey)
+		if derr != nil || len(pk) != 32 {
+			return nil, fmt.Errorf("console enc pubkey from /api/world not 32-byte hex: %q", w.ConsoleEncPubkey)
+		}
+		return pk, nil
+	}
 	cfg, err := config.Load(e.F.ConfigPath)
 	if err != nil || cfg == nil || cfg.Lxc.Cp.Vmid == nil {
 		return nil, fmt.Errorf("no cp coords for the console hand-off")
@@ -344,10 +355,11 @@ func (e *buildEngine) consoleEncPubkey() ([]byte, error) {
 		return nil, fmt.Errorf("console enc pubkey unreadable in the cp LXC:\n%s", out)
 	}
 	pk := strings.TrimSpace(out)
-	if len(pk) != 64 {
+	b, err := hex.DecodeString(pk)
+	if err != nil || len(b) != 32 {
 		return nil, fmt.Errorf("console enc pubkey readback not 64-hex: %q", pk)
 	}
-	return hex.DecodeString(pk)
+	return b, nil
 }
 
 func cpSecretBlob(name, provider string, env map[string]string, seal cert.Sealer, pub []byte) (json.RawMessage, error) {
@@ -363,6 +375,15 @@ func cpSecretBlob(name, provider string, env map[string]string, seal cert.Sealer
 	return b, nil
 }
 
+// dnsZone returns a host's registrable-ish zone: everything after the first
+// label (e.g. "cp.example.com" -> "example.com"). "" for a bare host.
+func dnsZone(host string) string {
+	if i := strings.Index(host, "."); i >= 0 && i < len(host)-1 {
+		return host[i+1:]
+	}
+	return ""
+}
+
 func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config) error {
 	if !e.WorldHasEdge() {
 		return nil // no TLS edge => no DNS creds or litellm needed
@@ -375,7 +396,7 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 	for _, n := range present {
 		have[n] = true
 	}
-	pub, err := e.consoleEncPubkey()
+	pub, err := e.consoleEncPubkey(client)
 	if err != nil {
 		return err
 	}
@@ -387,10 +408,19 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 			continue
 		}
 		host := e.F.RelayDomain
+		reuseFrom := ""
 		if slot == "cp" {
 			host = e.F.CpDomain
+			// Offer to reuse the relay credential only when it actually exists
+			// locally AND the CP host shares the relay's zone — a different
+			// zone/provider needs its own credential (the reuse prompt still
+			// lets the operator decline).
+			if z := dnsZone(e.F.RelayDomain); z != "" && z == dnsZone(e.F.CpDomain) &&
+				cert.CredExists(e.certCredPath("relay")) {
+				reuseFrom = "relay"
+			}
 		}
-		provider, env, err := e.promptDNSCred(slot, host, "")
+		provider, env, err := e.promptDNSCred(slot, host, reuseFrom)
 		if err != nil {
 			return fmt.Errorf("%s DNS provider credential: %w", slot, err)
 		}
@@ -419,12 +449,9 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 			return fmt.Errorf("seed litellm on CP: %w", err)
 		}
 		fmt.Fprintln(e.Out, "  · litellm secrets stored on the CP")
-		// The co-located runner holds its keyring in memory from boot, so it must
-		// be re-seeded + restarted to serve $LITELLM/$POSTGRES_PW/$PROVIDER_KEY to
-		// the world-build's litellm/model steps. Seed its package + restart it.
-		if err := e.seedCpRunnerSecrets(cfg, master, pg, providerKey); err != nil {
-			return err
-		}
+		// The co-located runner is re-seeded + restarted CP-side by the
+		// world-build (cpbuild.reseedCoLocatedRunner) from this durable store, so
+		// the box does NOT need a runner (or an exec into the CP) here.
 	}
 	return nil
 }
@@ -447,6 +474,24 @@ func (e *buildEngine) litellmPostgresPw(k3sVmid uint32) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+// promptSecret reads a credential value WITHOUT echo when stdin is a terminal,
+// so secrets like the DNS API token and the litellm provider key are not
+// echoed into the screen/scrollback. Falls back to the ordinary prompt for a
+// non-terminal (piped) stdin.
+func (e *buildEngine) promptSecret(label string) (string, error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return e.Prompt(label)
+	}
+	fmt.Fprintf(e.Out, "%s: ", label)
+	b, err := term.ReadPassword(fd)
+	fmt.Fprintln(e.Out)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
 func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string, string, error) {
@@ -472,7 +517,7 @@ func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string,
 		if e.F.Yes {
 			return "", "", "", fmt.Errorf("litellm needs the provider key: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --yes)")
 		}
-		answer, err := e.Prompt("litellm first provision: the provider (fireworks) API key")
+		answer, err := e.promptSecret("litellm first provision: the provider (fireworks) API key")
 		if err != nil {
 			return "", "", "", err
 		}
@@ -608,7 +653,7 @@ func (e *buildEngine) promptProviderEnv(provider string) (map[string]string, err
 	}
 	fmt.Fprintln(e.Out, "  enter the REQUIRED credential fields:")
 	for _, n := range requiredSet {
-		v, err := e.Prompt(n + " (required)")
+		v, err := e.promptSecret(n + " (required)")
 		if err != nil {
 			return nil, err
 		}
@@ -627,7 +672,7 @@ func (e *buildEngine) promptProviderEnv(provider string) (map[string]string, err
 	if len(rest) > 0 {
 		fmt.Fprintln(e.Out, "  optional fields (blank = unset):")
 		for _, n := range rest {
-			v, err := e.Prompt(n + " (optional)")
+			v, err := e.promptSecret(n + " (optional)")
 			if err != nil {
 				return nil, err
 			}
@@ -699,34 +744,6 @@ func (e *buildEngine) runBuild() error {
   (every box drives the world through the CP; a fresh box only needs
    `+"`freehold login`"+` then `+"`freehold build`"+`)
 `, cfg.RelayHost(), cfg.CPURL, e.F.OperatorPubkey)
-	return nil
-}
-
-func (e *buildEngine) seedCpRunnerSecrets(cfg *config.Config, master, pg, providerKey string) error {
-	if cfg == nil || cfg.Lxc.Cp.Vmid == nil {
-		return fmt.Errorf("no cp coords to seed the co-located runner")
-	}
-	cp := *cfg.Lxc.Cp.Vmid
-	target := e.F.Target
-	for _, s := range []struct{ n, ev, val string }{
-		{"litellm", "LITELLM", master},
-		{"postgres-pw", "POSTGRES_PW", pg},
-		{"provider-key", "PROVIDER_KEY", providerKey},
-	} {
-		// base64 the value so it can never break the sh -c quoting (injection
-		// safe — base64 is [A-Za-z0-9+/=] with no shell metacharacters); decode
-		// inside the CP into the env, then add-secret reads --secret-env.
-		b64 := base64.StdEncoding.EncodeToString([]byte(s.val))
-		cmd := fmt.Sprintf("pct exec %d -- sh -c 'export %s=$(printf %%s %s | base64 -d); /srv/data/cp/bin/freehold-console add-secret %s %s --state-dir /srv/data/cp/control-plane/runner/%s --secret-env %s; true'",
-			cp, s.ev, b64, target, s.n, target, s.ev)
-		if ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(cmd, 60)); !ok {
-			return fmt.Errorf("seed co-located runner %s: %s", s.n, strings.TrimSpace(out))
-		}
-	}
-	if ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(fmt.Sprintf("pct exec %d -- systemctl restart freehold-runner", cp), 60)); !ok {
-		return fmt.Errorf("restart co-located runner: %s", strings.TrimSpace(out))
-	}
-	fmt.Fprintln(e.Out, "  · co-located runner re-seeded with litellm secrets")
 	return nil
 }
 

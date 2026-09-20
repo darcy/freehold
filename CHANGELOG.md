@@ -25,6 +25,53 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.6.16] — live-run fixes for the thin-box build + fresh-world DNS
+
+Surfaced by a real `install` → `build` run on a Proxmox host.
+
+- **Point every guest at the CP resolver before the services phase.** The
+  litellm/caddy image pulls happen in the terraform services step, which ran
+  BEFORE `worldDNS` repointed the guests; a fresh k3s node sat on
+  DHCP/public resolvers and containerd's lookups intermittently failed
+  (`EAI_AGAIN`) → `ImagePullBackOff`. `cpbuild` now reps the resolver early
+  (`pointGuestsAtResolver`) and `worldDNS` repeats it idempotently.
+- **The build box reads the console encryption pubkey from `/api/world`.** It is
+  public, and serving it lets a THIN box seal the CP-owned secrets without a
+  runner to `pct exec` into the CP (`console_enc_pubkey` on `WorldSummary`; the
+  old pct-exec readback stays as a fallback for an older CP).
+- **Drop the redundant box-side runner reseed** in `ensureCpSecrets`: the
+  CP-side `cpbuild.reseedCoLocatedRunner` re-seals litellm from the CP store
+  during world-build, so the box no longer needs a runner for it.
+- **The CP DNS slot offers to reuse the relay credential** (they are almost
+  always the same zone); previously `ensureCpSecrets` passed an empty
+  `reuseFrom` and asked for the credential twice.
+- **`noLocalRunner()` dials the recorded runner address.** A transient install
+  records `[runner] addr` but leaves no runner serving, so a configured-but-dead
+  address now reads as thin and exec routes through the CP.
+- **Credential prompts are no-echo.** The DNS API token and the litellm
+  provider key are read with `term.ReadPassword` on a terminal, like the
+  operator nsec — they no longer echo into the screen/scrollback.
+- **The relay pillar turns green on a fresh world.** Install is CP-only, so the
+  console is deployed before the relay exists and its `--relay-host`/`--relay-url`
+  flags are empty; the state then carried no relay scope, `/api/world` omitted the
+  relay service, and the TUI could never show it green. The console now adopts the
+  builder's world-config relay scope into its state at startup and falls back to
+  it on `/api/world`.
+- **Derive the litellm gateway base URL** (`http://<proxy>:31400/v1`) alongside
+  `litellm_ip`. Without it agent pods got an empty `OPENAI_COMPAT_BASE_URL`, so
+  every turn failed with `llm: transport: builder error` and the agents never
+  replied. `Spec.FillEdgeURLs` fills both from the proxy IP at spec construction
+  (console + agent-tools) and after guest-IP refresh.
+- **Derive `litellm_ip` from the proxy IP** when the console spec has none
+  (a fresh world's spec predates k3s). Without it the litellm step is skipped,
+  so the CPA pod's `freehold-litellm-key` Secret is never created and the pod
+  stays `CreateContainerConfigError`.
+- **Sign the CPA's agent-tools roster write with the agent-tools identity.**
+  The roster channel is owned by the agent-tools server; the relay rejects a
+  put-user from any other signer (`not a channel member`). The console executor
+  reads the same durable identity off the CP plane and signs with it, so the
+  CP-side agent reconcile can member the CPA.
+
 ## [0.6.15] — local/server split (two modules, zero cross-imports)
 
 The local operator surface lived inside the `control-plane/` module and the two
