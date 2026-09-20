@@ -16,6 +16,7 @@ import (
 	"freehold/contract/version"
 	addrelaymember "freehold/freehold-cli/add-relay-member"
 	"freehold/freehold-cli/build"
+	"freehold/freehold-cli/channel"
 	dnscred "freehold/freehold-cli/dns-cred"
 	"freehold/freehold-cli/door"
 	"freehold/freehold-cli/exec"
@@ -46,6 +47,7 @@ func init() {
 		addrelaymember.Command(),
 		status.Command(),
 		update.Command(),
+		channel.Command(),
 		build.Command(),
 		teardown.Command(),
 		uninstall.Command(),
@@ -55,6 +57,7 @@ func init() {
 		stages.ProvisionCommand(),
 		stages.StorageCommand(),
 		stages.DeployCpCommand(),
+		stages.StampVersionCommand(),
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.Version = version.Version + " (" + version.Commit + ")"

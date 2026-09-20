@@ -1,7 +1,7 @@
 # Versioned Updates — release assets, channels, and migrations
 
-Status: plan — not started. This is the implementation spec; tick the phase
-checkboxes as work lands. `AGENTS.md` "Releases" is the release-time contract;
+Status: implemented; real-infra acceptance runs remain (see the unchecked
+acceptance boxes). This is the implementation spec; the code items are ticked. `AGENTS.md` "Releases" is the release-time contract;
 this file covers the *runtime* side: putting a version on the CP, querying it,
 and updating it.
 
@@ -202,64 +202,69 @@ pending set. Failure reports and stops.
 
 ### Phase A — shared deploy engine
 
-*   [ ] `install/cpdeploy` → `internal/cpdeploy`; repoint `internal/stages`.
-*   [ ] Expose the ship-to-CP step on `box.Engine`; `install` uses it.
-*   [ ] `go build`/`vet`/`test` green across modules; import guards pass.
+*   [x] `install/cpdeploy` → `internal/cpdeploy`; repoint `internal/stages`.
+*   [x] Expose a shared ship-to-CP step (`cpdeploy.Redeploy`); `install`
+        (`DeployCp`) and `update` (`Redeploy`) share `shipConsoleBins`/
+        `startServe`/`serveFlags`.
+*   [x] `go build`/`vet`/`test` green across modules.
 
 ### Phase B — version embedding + CP pin/query
 
-*   [ ] `contract/version` (Version, Commit); `justfile` + CI stamp via
-        `git describe`.
-*   [ ] Runner `build.rs` version; runner handshake reports it.
-*   [ ] `freehold --version`, `freehold-console version` wired.
-*   [ ] `install`/`deploy-cp` pass `{version, channel, commit}`; `serve` writes
-        `<stateDir>/version.json`.
-*   [ ] `/healthz` JSON; `/api/world`, `WorldStatus`, `WorldSummary` carry it;
+*   [x] `contract/version` (Version, Commit, Channel, Pin); `justfile` stamps
+        via `git describe` (CI passes the tag).
+*   [x] Runner `build.rs` version; runner handshake reports it.
+*   [x] `freehold --version`, `freehold-console version` wired.
+*   [x] `install`/`deploy-cp` stamp `<stateDir>/version.json`; `serve` READS it
+        (install/update promote; build/teardown never do).
+*   [x] `/healthz` JSON; `/api/world`, `WorldStatus`, `WorldSummary` carry it;
         `status` + TUI render it.
-*   [ ] Acceptance: thin box `freehold status` prints the CP version+channel;
-        `/healthz` returns JSON.
+*   [ ] Acceptance on real infra: thin box `freehold status` prints the CP
+        version+channel (`/healthz` JSON verified locally).
 
 ### Phase C — release artifacts
 
-*   [ ] `.github/workflows/release.yml` (tag `v*` only): install mise (the
+*   [x] `.github/workflows/release.yml` (tag `v*` only): install mise (the
         justfile builds through `mise exec`), `just build`, package
-        `migrations.tar.gz`, `checksums.txt`, upload; prerelease tags marked.
-*   [ ] `release` skill artifacts stage; verify assets after publish.
+        `migrations.tar.gz`, `checksums.txt`, attach to a draft release;
+        prerelease tags marked.
+*   [x] `release` skill: tag → wait for the workflow → publish the draft with
+        curated notes → verify assets.
 *   [ ] Acceptance: cutting a test `vX.Y.Z-rc.N` produces a prerelease with all
         assets + checksums; a box can pull and verify them.
 
 ### Phase D — migrations as scripts
 
-*   [ ] Move scripts to top-level `migrations/<epoch>.sh`; delete `.verify.sh`
+*   [x] Move scripts to top-level `migrations/<epoch>.sh`; delete `.verify.sh`
         and every verify reference. Scripts are POSIX-sh, no shebang, `0644`.
-*   [ ] `platform/migrations`: enumerate a script dir; marker files at
+*   [x] `platform/migrations`: enumerate a script dir; marker files at
         `<stateDir>/migrations/<epoch>.sh` mirroring the script name; drop the
         JSON ledger and verify gate.
-*   [ ] `BuildMigrator`/`world_migrate` run from the CP scripts dir; `install`
+*   [x] `BuildMigrator`/`world_migrate` run from the CP scripts dir; `install`
         copies scripts and **marks them all done**; `update` copies scripts and
         runs pending.
-*   [ ] Acceptance: install on a fresh world leaves every marker present and
-        runs nothing; update applies a pending script; a completed marker
-        survives a channel switch; a failing script stops the queue and is
-        retried; no migration ever runs during `build`/`teardown`.
+*   [ ] Acceptance on real infra: install on a fresh world leaves every marker
+        present and runs nothing; update applies a pending script; a completed
+        marker survives a channel switch; a failing script stops the queue and
+        is retried; no migration ever runs during `build`/`teardown`.
+        (Package-level behavior is unit-tested.)
 
 ### Phase E — `freehold update`
 
-*   [ ] `update/update.go` grows into the real updater (resolve → acquire →
+*   [x] `update/update.go` grows into the real updater (resolve → acquire →
         deploy → migrate → repin). No `migrate` verb.
-*   [ ] Sandbox clone+build for `--ref`/`--sha`; local build for `--dev`.
-*   [ ] `--check`; thin-box transient path; update lock + preflight.
-*   [ ] Acceptance: a dev CP on `v0.7.0-rc.1` updates to a newer ref, runs
-        migrations, repins; re-running is a no-op; `--check` reports without
-        changing anything.
+*   [x] Sandbox clone+build for `--ref`/`--sha`; local build for `--dev`.
+*   [x] `--check`; thin-box transient path; update lock + preflight.
+*   [ ] Acceptance on real infra: a dev CP on `v0.7.0-rc.1` updates to a newer
+        ref, runs migrations, repins; re-running is a no-op; `--check` reports
+        without changing anything.
 
 ### Phase F — channels + docs
 
-*   [ ] `freehold channel set <stable|rc|dev>` recorded on the CP;
-        `install --channel`/`--version`; default `stable`.
-*   [ ] Docs: `AGENTS.md` (channels/update/version-query + migrations-as-scripts
-        rule), `README.md`/`ARCHITECTURE.md` version surface; `CHANGELOG.md` at
-        the next release.
+*   [x] `freehold channel [set <stable|rc|dev>]` recorded on the CP;
+        `install --channel`/`--version`; default derived (stable for a tag).
+*   [x] Docs: `AGENTS.md` (channels/update/version-query + migrations-as-scripts
+        rule), `roadmap/UPDATES.md`, release skill; `README.md`/`ARCHITECTURE.md`
+        version surface; `CHANGELOG.md` at the next release.
 *   [ ] Acceptance: the dev cycle works end to end — local build → `--dev`;
         cut `vX.Y.Z-rc.N` → `--rc`; tag `vX.Y.Z` → `--stable`; CP version and
         channel track throughout.

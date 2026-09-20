@@ -670,6 +670,36 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     `127.0.0.1:3000`) against the `go test ./...` suite before it
     documents that command; **don't guess from prose** — probe first.
 
+### Versions, channels, and updates
+
+*   **A version exists only at release** — a `CHANGELOG.md` entry, an annotated
+    `vX.Y.Z` tag, and a GitHub Release with binary assets (`freehold`,
+    `freehold-console`, `runner`, `freehold-agent-tools`, `migrations.tar.gz`,
+    `checksums.txt`). `0.x.y` is pre-MVP; `vX.Y.Z-rc.N` is the only prerelease
+    vocabulary.
+*   **The build stamps its identity** (`contract/version`: `Version`/`Commit`
+    via `-ldflags`, the runner's `build.rs` into its MCP handshake); the
+    justfile computes `git describe`, CI passes the tag.
+*   **The CP carries a version pin** at `<stateDir>/version.json`
+    (`{version, channel, commit}`). `install`/`update` write it; `serve` only
+    reads it (surfaced on `/healthz` JSON, `/api/world`, `world_status`, and
+    `freehold status`); `build`/`teardown` never promote it.
+*   **Channels** are `stable` (newest non-prerelease tag), `rc` (newest
+    `vX.Y.Z-rc.N`), and `dev` (local tree); any untagged ref is `--ref`/`--sha`
+    (no `edge` channel). The CP records its channel; `freehold channel set`
+    changes it.
+*   **`freehold update`** is remote-world only (never the local CLI): resolve
+    source → acquire (release assets sha256-verified, or sandbox clone+build
+    with the box's toolchain) → redeploy the CP's binaries → copy migration
+    scripts → run pending → repin the version last. `--check` reports without
+    changing anything; thin boxes use the transient root-SSH door.
+*   **Migrations are scripts, never compiled in** — top-level
+    `migrations/<epoch>.sh` (POSIX-sh, no shebang, `0644`), shipped to the CP
+    and run with `bash -euo pipefail`; completion is an Omarchy-style marker
+    file named for the script (`<stateDir>/migrations/<epoch>.sh`). A fresh
+    install **marks every shipped script done** without running it; scripts only
+    run on update. There are no reverse migrations (a named gap).
+
 ## Build plan (chunked)
 
 **POC (pre-MVP, Kubernetes arrives with Chunks 6–7 — see `roadmap/POC.md`):**

@@ -84,9 +84,9 @@ platform/             freehold/platform — the evolving world the mechanism
                       installs/evolves: services/<capability>/<impl>/ (relay/buzz,
                       webproxy/caddy, externaldns/cloudflare, certificates/letsencrypt,
                       …), provisioning/ (bootstrap, planebase, drive, stages, deploy),
-                      migrations/ (verify-gated), terraform/ (the IaC the CP
-                      executes). Adding a service touches only this module —
-                      never control-plane/.
+                      migrations/ (Omarchy-style <epoch>.sh scripts + marker
+                      files), terraform/ (the IaC the CP executes). Adding a
+                      service touches only this module — never control-plane/.
 AGENTS.md             agent guidance: locked model, conventions, known gaps
 roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
                       ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
@@ -211,7 +211,9 @@ freehold logout               # clear THIS box's login ledger (CP/world untouche
 freehold status               # the CP's single inventory (read via public /api/world)
 freehold build                # trigger the CP's world-build (co-located runner)
 freehold teardown             # CP-preserving world teardown
-freehold update               # run the CP's verify-gated migrations
+freehold update               # update the world's CP (release assets / ref / dev),
+                              #  run pending migrations, repin the version
+freehold channel [set C]      # show/set the CP's release channel (stable|rc|dev)
 freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
                               #  --remove-data drops the durable plane); a thin box / dead CP
                               #  uninstalls over direct root SSH

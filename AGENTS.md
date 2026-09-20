@@ -172,6 +172,11 @@ These are open limitations in the shipped code today, not history. Update this l
 close or new ones surface; it's current-state, so it belongs here rather than in the
 changelog.
 
+- **No reverse migrations.** Migrations are one-way `<epoch>.sh` scripts and
+  completion markers are never un-marked, so `freehold update --version <older>`
+  runs old code against config a newer migration may have rewritten and cannot
+  undo it. Rollback below the highest applied migration needs the snapshot
+  escape hatch (out of scope); re-running `update` retries only *pending* work.
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
   issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
   someone else already holds still opens; re-keying after a leaked runner private key is out

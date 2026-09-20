@@ -75,6 +75,14 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 		return err
 	}
 
+	// Copy the new release's migration scripts (do NOT mark them: update runs
+	// pending scripts through world_migrate, then stamps the version last).
+	if spec.MigrationsDir != nil && *spec.MigrationsDir != "" {
+		if err := ShipMigrations(t, spec, *spec.MigrationsDir, false); err != nil {
+			return err
+		}
+	}
+
 	// Restart the co-located runner so the new binary takes effect. Its
 	// identity + sealed secrets are untouched: the unit re-reads them from its
 	// own dir. No adoption, no substrate rotation.

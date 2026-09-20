@@ -396,6 +396,8 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.EraseFreehold, _ = cmd.Flags().GetBool("erase-freehold")
 	f.ConfirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 	f.Yes, _ = cmd.Flags().GetBool("yes")
+	f.Version, _ = cmd.Flags().GetString("version")
+	f.Channel, _ = cmd.Flags().GetString("channel")
 	f.SizeGB, _ = cmd.Flags().GetUint64("size-gb")
 	f.PoolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 	f.LitellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
@@ -447,6 +449,8 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key (or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
+	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|rc|dev; default: derived from the build)")
+	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version)")
 	cmd.Flags().Bool("yes", false, "Non-interactive: run headless (fail actionably) instead of prompting")
 }
 
