@@ -88,9 +88,6 @@ repo, not the history.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
   done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
-- `roadmap/UPDATES.md` — the versioned-update plan: release assets, channels
-  (`stable`/`rc`/`dev` + `--ref`/`--sha`), the CP's pinned/queryable version, and
-  migrations as shipped scripts.
 - `.agents/skills/release/SKILL.md` — the `release` skill: cut a release by
   generating the `CHANGELOG.md` entry from git history since the previous release,
   landing it via a `release/vX.Y.Z` PR, then tagging the merged commit and
@@ -180,10 +177,11 @@ changelog.
   still unwired, below); moving the co-located runner to the relay roster must
   land together with publishing the console's grant to the relay, as one change.
 - **No reverse migrations.** Migrations are one-way `<epoch>.sh` scripts and
-  completion markers are never un-marked, so `freehold update --version <older>`
-  runs old code against config a newer migration may have rewritten and cannot
-  undo it. Rollback below the highest applied migration needs the snapshot
-  escape hatch (out of scope); re-running `update` retries only *pending* work.
+  completion markers are never un-marked, so re-deploying an older version runs
+  old code against config a newer migration may have rewritten and cannot undo
+  it. There is no downgrade verb; rolling back below the highest applied
+  migration needs the snapshot escape hatch (out of scope); re-running `update`
+  retries only *pending* work.
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
   issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
   someone else already holds still opens; re-keying after a leaked runner private key is out

@@ -213,7 +213,6 @@ freehold build                # trigger the CP's world-build (co-located runner)
 freehold teardown             # CP-preserving world teardown
 freehold update               # update the world's CP (release assets / ref / dev),
                               #  run pending migrations, repin the version
-freehold channel [set C]      # show/set the CP's release channel (stable|rc|dev)
 freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
                               #  --remove-data drops the durable plane); a thin box / dead CP
                               #  uninstalls over direct root SSH
