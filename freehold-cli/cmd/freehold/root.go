@@ -56,7 +56,7 @@ func init() {
 		stages.DeployCpCommand(),
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
-	rootCmd.Version = "0.1.0"
+	rootCmd.Version = "0.6.18"
 }
 
 // run executes the CLI with the given subcommand args and returns the process

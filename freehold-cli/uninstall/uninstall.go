@@ -188,12 +188,17 @@ func displayHost(host, runnerTarget string) string {
 }
 
 func wipeLocalProfile(configPath string, p *config.Profile) {
-	if dir := filepath.Dir(configPath); dir != "" && dir != "/" {
+	// Only remove a profile-scoped dir. If the operator pinned --config to the
+	// BASE config (~/.config/freehold/config.toml), its parent is the shared
+	// freehold home — removing it would take every other profile with it.
+	if dir := filepath.Dir(configPath); dir != "" && dir != "/" && dir != filepath.Dir(config.DefaultPath()) {
 		if err := os.RemoveAll(dir); err != nil {
 			fmt.Printf("  (warning: could not remove %s: %v)\n", dir, err)
 		} else {
 			fmt.Printf("wiped profile config %s\n", dir)
 		}
+	} else if configPath != "" {
+		_ = os.Remove(configPath)
 	}
 	if p != nil && p.StateDir != "" && p.StateDir != "/" {
 		if err := os.RemoveAll(p.StateDir); err != nil {

@@ -57,14 +57,21 @@ func ClearStoredDNSCreds() {
 	}
 }
 
-// CPSecretBlob builds a sealed credential blob for a CP secret.
+// CPSecretBlob builds a sealed credential blob for a CP secret. The scratch
+// file is created with a random name (O_EXCL) so a predictable /tmp path can't
+// be pre-created as a symlink by a local attacker.
 func CPSecretBlob(name, provider string, env map[string]string, seal cert.Sealer, pub []byte) (json.RawMessage, error) {
-	p := filepath.Join(os.TempDir(), "fh-cp-"+name+".json")
+	f, err := os.CreateTemp("", "fh-cp-"+name+"-*.json")
+	if err != nil {
+		return nil, err
+	}
+	p := f.Name()
+	_ = f.Close()
+	defer os.Remove(p)
 	if err := cert.SaveCreds(p, provider, env, seal, pub, name); err != nil {
 		return nil, err
 	}
 	b, err := os.ReadFile(p)
-	_ = os.Remove(p)
 	if err != nil {
 		return nil, err
 	}

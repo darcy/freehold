@@ -4,6 +4,8 @@ package addrelaymember
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -30,15 +32,23 @@ var addRelayMemberCmd = &cobra.Command{
 		if role != "" && role != "member" && role != "admin" {
 			return fmt.Errorf("relay member role must be 'member' or 'admin' (got %q)", role)
 		}
+		// The compose dir is interpolated into a shell command on the host, so
+		// reject metacharacters rather than let a path break out of the sh -c.
+		if strings.ContainsAny(composeDir, " \t\n;|&$`'\"\\(){}[]<>*?!#~") {
+			return fmt.Errorf("--compose-dir contains shell metacharacters (%q) — pass a plain path", composeDir)
+		}
 		c, err := common.Connect(commonArgs, target)
 		if err != nil {
 			return err
 		}
 		var lxc *uint32
 		if lxcStr != "" {
-			var v uint32
-			fmt.Sscanf(lxcStr, "%d", &v)
-			lxc = &v
+			v, perr := strconv.ParseUint(lxcStr, 10, 32)
+			if perr != nil || v == 0 {
+				return fmt.Errorf("--lxc must be a positive LXC id (got %q)", lxcStr)
+			}
+			l := uint32(v)
+			lxc = &l
 		}
 		roleSuffix := ""
 		if role != "" {

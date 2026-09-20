@@ -151,38 +151,6 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	return newBuildEngine(f)
 }
 
-func applyConfigDefaults(f *box.Flags, cfgPath string) error {
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return err
-	}
-	if cfg == nil {
-		return nil
-	}
-	if f.OperatorPubkey == "" {
-		f.OperatorPubkey = cfg.OperatorPubkey
-	}
-	if f.RelayDomain == "" {
-		f.RelayDomain = cfg.RelayHost()
-	}
-	if f.CpDomain == "" {
-		f.CpDomain = cfg.CPHost()
-	}
-	if f.ThinPool == "" && cfg.Plane.ThinPool != nil {
-		f.ThinPool = *cfg.Plane.ThinPool
-	}
-	if f.AgentName == "" && cfg.CPAName != "" {
-		f.AgentName = cfg.CPAName
-	}
-	if f.ProxyIP == "" && cfg.Proxy.Ip != nil {
-		f.ProxyIP = *cfg.Proxy.Ip
-	}
-	if !f.ManageDNSExplicit && !f.ManageDNS && cfg.Dns.Manager != nil && cfg.Dns.Manager.Managed {
-		f.ManageDNS = true
-	}
-	return nil
-}
-
 func (e *buildEngine) certIdent() (*box.Identity, []byte, []byte, error) {
 	return e.cc().CertIdent()
 }
