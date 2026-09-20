@@ -437,7 +437,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     the CPA's purpose + skills), `custom/` (the template for agents the CPA
     creates on the fly), `common/orientation.md` (the shared system-orientation
     block composed onto every non-custom prompt), the four **department
-    definitions** (`security/`, `vault/`, `compute/`, `agent-ops/` — each a
+     definitions** (`network/`, `data/`, `compute/`, `ai/` — each a
     distinct identity scoped to one domain), and named
     agents that grow over time. It is
     embedded by the `freehold/agents` Go package and shipped by the control
@@ -451,10 +451,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
     | Department | Domain |
     | --- | --- |
-    | **Security** | Access & exposure: external/public proxy, Tailscale, internal proxy, exposure verification |
-    | **Vault** | Data plane: backup/off-site, DR planning, scheduling, restore verification |
+    | **Network** | The network surface: access & exposure — external/public proxy, Tailscale, internal proxy, exposure verification |
+    | **Data** | Data plane: backup/off-site, DR planning, scheduling, restore verification |
     | **Compute** | The box itself: CPU/RAM/disk, Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning, plus the monitoring tooling it needs. Not what runs on top |
-    | **Agent Ops** | LiteLLM/provider setup & aliases, local AI config, **AI hardware** (local-AI accelerators like an RTX 3090 or DGX Spark — provisioned and tuned by Agent Ops, separate from Compute's general resources), agent optimization, prompt/skill management, agent debugging |
+    | **AI** | LiteLLM/provider setup & aliases, local AI config, **AI hardware** (local-AI accelerators like an RTX 3090 or DGX Spark — provisioned and tuned by AI, separate from Compute's general resources), agent optimization, prompt/skill management, agent debugging |
 
 *   **Service lifecycle is not a department.** Whichever agent created a service
     — a freehold-delegate or a custom agent — owns its install/config/operation,
@@ -486,7 +486,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **Departments check in rather than wait to be asked.** When a new
     service/compute is requested through the CPA's provision path, the relevant
-    department raises the question itself (Vault: "back this up?"; Security:
+    department raises the question itself (Data: "back this up?"; Network:
     "reachable outside your network?"). A "no" is final — the point is that the
     gap is a visible choice, not a silent one.
 
@@ -740,7 +740,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     same harness class, installed as part of the core build.
 
 *   **The agent org is two tiers: the CPA and four departments.** The CPA is the
-    sole user touchpoint; Security / Vault / Compute / Agent Ops
+    sole user touchpoint; Network / Data / Compute / AI
     are its direct reports, each a distinct identity scoped to one
     domain. Communication is unrestricted; capability execution is bounded — a
     department-owned capability is executed by that department's identity and

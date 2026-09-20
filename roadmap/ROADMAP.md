@@ -35,9 +35,9 @@ runners, and memory are scoped to a single relay.
     rebuild) stays as-is — reasoning decides what to do, the same auditable machinery does it.
     
 *   **The agent org is two tiers: the CPA and four departments.** The CPA is the sole user  
-    touchpoint; **Security** (access/exposure), **Vault** (data plane), **Compute** (the box  
+    touchpoint; **Network** (the network surface — access/exposure), **Data** (data plane), **Compute** (the box  
     itself — CPU/RAM/disk, LXC/kube and remote provisioning, plus its monitoring tooling),  
-    and **Agent Ops** (models/providers/agents, plus AI hardware) are  
+    and **AI** (models/providers/agents, plus AI hardware) are  
     its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —  
     the operator and any agent may converse with any department directly; what is bounded is  
     capability execution: a department-owned capability (proxy, backup, compute, model  
@@ -220,7 +220,7 @@ from backup rather than assuming the original dataset is still reachable.
     
 *   **Security hardening** — finer-grained target-scoped grants, privilege escalation, audit,  
     approval gates on the runner; on-demand decryption opt-in for external/less-trusted  
-    runners; Vault for dynamic secrets.
+    runners; Data for dynamic secrets.
     
 *   **Multi-user / multi-tenant** — relay-as-scope enables per-scope agents + secrets.
     
