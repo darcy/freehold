@@ -51,6 +51,15 @@ Surfaced by a real `install` → `build` run on a Proxmox host.
 - **Credential prompts are no-echo.** The DNS API token and the litellm
   provider key are read with `term.ReadPassword` on a terminal, like the
   operator nsec — they no longer echo into the screen/scrollback.
+- **Derive `litellm_ip` from the proxy IP** when the console spec has none
+  (a fresh world's spec predates k3s). Without it the litellm step is skipped,
+  so the CPA pod's `freehold-litellm-key` Secret is never created and the pod
+  stays `CreateContainerConfigError`.
+- **Sign the CPA's agent-tools roster write with the agent-tools identity.**
+  The roster channel is owned by the agent-tools server; the relay rejects a
+  put-user from any other signer (`not a channel member`). The console executor
+  reads the same durable identity off the CP plane and signs with it, so the
+  CP-side agent reconcile can member the CPA.
 
 ## [0.6.15] — local/server split (two modules, zero cross-imports)
 

@@ -525,6 +525,13 @@ func (s *Spec) refreshGuestIPs() {
 			}
 		}
 	}
+	// litellm is a k3s NodePort served on the proxy (k3s node) IP. A fresh
+	// world's console spec has no litellm_ip baked (it did not exist at
+	// deploy-cp time), so derive it — otherwise the litellm step (and the CPA
+	// pod's litellm-key Secret it seeds) is skipped.
+	if s.LitellmIP == "" {
+		s.LitellmIP = s.ProxyIP
+	}
 }
 
 // worldBootRelay boots the relay LXC (if missing) + deploys the Buzz stack
@@ -1712,7 +1719,20 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			if authURL == "" {
 				authURL = spec.RelayURL
 			}
-			if err := relay.PutUserAuth(spec.RelayURL, authURL, spec.Sec, spec.Audience, pub); err != nil {
+			// The agent-tools roster channel is OWNED by the agent-tools server,
+			// so its put-user must be signed by THAT identity, not the console's
+			// (the relay rejects a non-owner with "not a channel member"). The
+			// identity lives on the same CP plane, so the console executor reads
+			// it and signs; inside the agent-tools process it is the same key.
+			sec, self := spec.Sec, spec.Audience
+			if id, err := identity.Load(spec.agentToolsRoot()); err == nil {
+				if s2, derr := hex.DecodeString(id.NostrSecretHex); derr == nil {
+					if pk, perr := id.NostrPubkeyHex(); perr == nil {
+						sec, self = s2, pk
+					}
+				}
+			}
+			if err := relay.PutUserAuth(spec.RelayURL, authURL, sec, self, pub); err != nil {
 				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
 			}
 		}
