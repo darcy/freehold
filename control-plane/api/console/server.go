@@ -238,20 +238,42 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 	// relay_host, so a login box reaches the relay through Caddy (https://
 	// <domain>) instead of adopting the internal LAN dial the console uses for
 	// its own roster/event reads. relay_ws_url mirrors it (wss://<domain>).
+	//
+	// A FRESH world's console is deployed BEFORE the relay boots (install is
+	// CP-only), so the state may carry no relay scope while the builder's
+	// world-config does. Fall back to it, else /api/world omits the relay
+	// service entirely and the box's relay pillar can never turn green.
+	builderHost, builderURL := "", ""
+	if s.Builder != nil {
+		builderHost, builderURL = s.Builder.RelayHost, s.Builder.RelayURL
+	}
 	var relayURL, relayWS *string
-	if snap.RelayHost != nil && *snap.RelayHost != "" && !strings.Contains(*snap.RelayHost, "://") {
+	switch {
+	case snap.RelayHost != nil && *snap.RelayHost != "" && !strings.Contains(*snap.RelayHost, "://"):
 		public := "https://" + *snap.RelayHost
 		ws := "wss://" + *snap.RelayHost
 		relayURL = &public
 		relayWS = &ws
-	} else if snap.RelayURL != nil {
+	case snap.RelayURL != nil:
 		relayURL = snap.RelayURL
 		w := wsOf(*snap.RelayURL)
+		relayWS = &w
+	case builderHost != "":
+		public := "https://" + builderHost
+		ws := "wss://" + builderHost
+		relayURL = &public
+		relayWS = &ws
+	case builderURL != "":
+		relayURL = &builderURL
+		w := wsOf(builderURL)
 		relayWS = &w
 	}
 	var relayHost string
 	if snap.RelayHost != nil {
 		relayHost = *snap.RelayHost
+	}
+	if relayHost == "" {
+		relayHost = builderHost
 	}
 	// Serve the agent-tools MCP surface publicly too: a thin box drives the
 	// world (build/exec/migrate/door) through the CP over the public edge

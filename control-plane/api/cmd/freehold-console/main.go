@@ -261,6 +261,22 @@ func cmdServe(args []string) error {
 	// grant on the surviving identity.
 	if builder != nil {
 		builder.AgentIdentityDir = *agentToolsStateDir
+		// A fresh world's install is CP-only, so the --relay-host/--relay-url
+		// flags are empty (the relay did not exist). Adopt the builder's
+		// world-config scope into the durable state so /api/world and the
+		// console's own relay reads see it.
+		if builder.RelayHost != "" && *relayHost == "" {
+			if err := store.SetRelayHost(strPtr(builder.RelayHost)); err != nil {
+				return err
+			}
+			*relayHost = builder.RelayHost
+		}
+		if builder.RelayURL != "" && *relayURL == "" {
+			if err := store.SetRelayURL(strPtr(builder.RelayURL)); err != nil {
+				return err
+			}
+			*relayURL = builder.RelayURL
+		}
 	}
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,

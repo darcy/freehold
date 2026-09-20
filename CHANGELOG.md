@@ -51,6 +51,12 @@ Surfaced by a real `install` → `build` run on a Proxmox host.
 - **Credential prompts are no-echo.** The DNS API token and the litellm
   provider key are read with `term.ReadPassword` on a terminal, like the
   operator nsec — they no longer echo into the screen/scrollback.
+- **The relay pillar turns green on a fresh world.** Install is CP-only, so the
+  console is deployed before the relay exists and its `--relay-host`/`--relay-url`
+  flags are empty; the state then carried no relay scope, `/api/world` omitted the
+  relay service, and the TUI could never show it green. The console now adopts the
+  builder's world-config relay scope into its state at startup and falls back to
+  it on `/api/world`.
 - **Derive `litellm_ip` from the proxy IP** when the console spec has none
   (a fresh world's spec predates k3s). Without it the litellm step is skipped,
   so the CPA pod's `freehold-litellm-key` Secret is never created and the pod
