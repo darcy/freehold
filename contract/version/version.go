@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -27,15 +28,16 @@ var (
 //   - vX.Y.Z              → stable
 //   - vX.Y.Z-rc.N         → rc
 //   - everything else     → dev (untagged describe strings, dirty trees, "dev")
+// rcExactRe matches EXACTLY a vX.Y.Z-rc.N tag. A describe string that merely
+// follows an rc tag (v0.7.0-rc.1-4-gabc123) must NOT classify as rc.
+var rcExactRe = regexp.MustCompile(`^v\d+\.\d+\.\d+-rc\.\d+$`)
+
 func Channel(v string) string {
 	core := strings.TrimSuffix(v, "-dirty")
-	if !strings.HasPrefix(core, "v") {
-		return "dev"
-	}
-	if strings.Contains(core, "-rc.") {
+	if rcExactRe.MatchString(core) {
 		return "rc"
 	}
-	if strings.Contains(core, "-") {
+	if !strings.HasPrefix(core, "v") || strings.Contains(core, "-") {
 		return "dev"
 	}
 	return "stable"

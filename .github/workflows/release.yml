@@ -28,8 +28,10 @@ jobs:
       - name: Install build toolchains
         run: mise install go@1.25.0 rust@1.98.0 just
 
+      # `mise install` does not put tools on PATH; run just through mise so the
+      # same pinned toolchains the justfile expects are resolved.
       - name: Build the sibling set (stamped with the tag)
-        run: VERSION="${GITHUB_REF_NAME}" just build
+        run: VERSION="${GITHUB_REF_NAME}" mise exec just -- just build
 
       - name: Stage release assets
         run: |

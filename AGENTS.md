@@ -172,6 +172,13 @@ These are open limitations in the shipped code today, not history. Update this l
 close or new ones surface; it's current-state, so it belongs here rather than in the
 changelog.
 
+- **The co-located runner starts with package grants, not the relay roster.**
+  `deploy-cp` starts the CP's runner with only `--state-dir` (install and
+  update alike), so it reads its whitelist from the shipped package grants — the
+  console's self-grant — rather than the relay-signed 39002 roster. That is
+  fine while the only caller is the console (the agent↔runner exec surface is
+  still unwired, below); moving the co-located runner to the relay roster must
+  land together with publishing the console's grant to the relay, as one change.
 - **No reverse migrations.** Migrations are one-way `<epoch>.sh` scripts and
   completion markers are never un-marked, so `freehold update --version <older>`
   runs old code against config a newer migration may have rewritten and cannot

@@ -110,15 +110,19 @@ func run(ctx context.Context, o options) error {
 	}
 	fmt.Printf("acquired %s (%s @ %s)\n", set.Version, set.Channel, short(set.Commit))
 
-	bins, err := box.ResolveBins()
+	// Only the running CLI (for the self-staged deploy) is needed locally; the
+	// release/build artifacts supply the rest. Do NOT ResolveBins here — a box
+	// installed from release assets has no local sibling set.
+	self, err := os.Executable()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve own binary: %w", err)
 	}
-	// The self-staged binaries are the running CLI, but deploy-cp ships the
-	// ACQUIRED release binaries.
-	bins.ReleaseConsole = set.Console
-	bins.ReleaseRun = set.Runner
-	bins.ReleaseAgentTools = set.AgentTools
+	bins := box.Bins{
+		Self:              self,
+		ReleaseConsole:    set.Console,
+		ReleaseRun:        set.Runner,
+		ReleaseAgentTools: set.AgentTools,
+	}
 
 	eng, err := box.NewEngine(box.FlagsFromConfig(cfg), bins)
 	if err != nil {

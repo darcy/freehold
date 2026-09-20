@@ -57,6 +57,15 @@ type Server struct {
 	Builder *cpbuild.Spec
 }
 
+// versionPin re-reads <StateDir>/version.json per call so an update's repin is
+// reflected without a serve restart; falls back to the startup snapshot.
+func (s *Server) versionPin() version.Pin {
+	if p, err := version.Read(filepath.Join(s.StateDir, version.FileName)); err == nil && p.Version != "" {
+		return p
+	}
+	return s.Version
+}
+
 // ServeHTTP routes /api/* (the Rust axum router equivalent).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -68,12 +77,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/healthz" && method == http.MethodGet {
+		pin := s.versionPin()
 		w.Header().Set("Content-Type", "application/json")
 		body, _ := json.Marshal(map[string]interface{}{
 			"status":  "ok",
-			"version": s.Version.Version,
-			"channel": s.Version.Channel,
-			"commit":  s.Version.Commit,
+			"version": pin.Version,
+			"channel": pin.Channel,
+			"commit":  pin.Commit,
 		})
 		w.Write(body)
 		return
@@ -327,7 +337,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
 		"services":           services,
-		"version":            s.Version,
+		"version":            s.versionPin(),
 	}
 	// Pending migration count (scripts without a completion marker) so a box's
 	// `update --check` / `status` can report it without running anything.

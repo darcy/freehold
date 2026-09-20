@@ -27,11 +27,11 @@ var channelCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		ch, ver, err := readPin(cfg)
+		pin, err := readPin(cfg)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("channel: %s\nversion: %s\n", orDash(ch), orDash(ver))
+		fmt.Printf("channel: %s\nversion: %s\n", orDash(pin.Channel), orDash(pin.Version))
 		return nil
 	},
 }
@@ -51,18 +51,20 @@ var setCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		_, ver, err := readPin(cfg)
+		pin, err := readPin(cfg)
 		if err != nil {
 			return err
 		}
-		if ver == "" {
+		if pin.Version == "" {
 			return fmt.Errorf("the CP has no version stamp yet — run `freehold install` or `freehold update` first")
 		}
-		bins, err := box.ResolveBins()
+		// Only the running CLI is needed for the self-staged pin write; a
+		// release-only box has no local sibling set.
+		self, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		eng, err := box.NewEngine(box.FlagsFromConfig(cfg), bins)
+		eng, err := box.NewEngine(box.FlagsFromConfig(cfg), box.Bins{Self: self})
 		if err != nil {
 			return err
 		}
@@ -70,7 +72,8 @@ var setCmd = &cobra.Command{
 		eng.ProviderFactory = stages.TransientFactory(eng)
 		eng.Out = os.Stdout
 		eng.Stdin = bufio.NewReader(os.Stdin)
-		if err := eng.StampVersionPin(version.Pin{Version: ver, Channel: ch}); err != nil {
+		// Preserve the version + commit: channel set changes ONLY the channel.
+		if err := eng.StampVersionPin(version.Pin{Version: pin.Version, Channel: ch, Commit: pin.Commit}); err != nil {
 			return err
 		}
 		fmt.Printf("✓ channel set to %s\n", ch)
@@ -95,25 +98,25 @@ func loadProfile(cmd *cobra.Command) (*config.Config, error) {
 	return config.Load(common.ConfigPath())
 }
 
-// readPin reads the CP's stamped {channel, version} via the console login.
-func readPin(cfg *config.Config) (channel, ver string, err error) {
+// readPin reads the CP's stamped version pin via the console login.
+func readPin(cfg *config.Config) (version.Pin, error) {
 	sec, err := oplogin.SecretHex()
 	if err != nil {
-		return "", "", fmt.Errorf("no operator identity (run `freehold login`): %v", err)
+		return version.Pin{}, fmt.Errorf("no operator identity (run `freehold login`): %v", err)
 	}
 	key, err := oplogin.NsecToSecret(sec)
 	if err != nil {
-		return "", "", err
+		return version.Pin{}, err
 	}
 	c, err := oplogin.Login(cfg.CPURL, key)
 	if err != nil {
-		return "", "", fmt.Errorf("console login: %v", err)
+		return version.Pin{}, fmt.Errorf("console login: %v", err)
 	}
 	w, err := c.World()
 	if err != nil {
-		return "", "", err
+		return version.Pin{}, err
 	}
-	return w.Version.Channel, w.Version.Version, nil
+	return w.Version, nil
 }
 
 func orDash(s string) string {
