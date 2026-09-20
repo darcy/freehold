@@ -207,9 +207,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
      only" boundary cannot be bypassed by calling the server directly); a roster
      member not in the registry is an OPERATOR (full toolset incl. world_* and
      grant). The Caddy CP vhost exposes `/mcp` publicly (→ `:8089`) and
-     `/api/world` serves `agent_tools_url` as the public `https://<cp>/mcp`, so
-     a REMOTE thin box drives the world (build/exec/migrate/door) over the edge
-     — the drive-through-CP transport. Its `mcp` stdio mode is the bridge agent
+     `/api/world` serves `agent_tools_url` as the public `https://<cp>/mcp` plus
+     `console_enc_pubkey` (the console identity's X25519 encryption public key,
+     the seal recipient for CP-owned secrets — so a thin box hands them off with
+     no runner to exec into the CP), so a REMOTE thin box drives the world
+     (build/exec/migrate/door) over the edge — the drive-through-CP transport. Its `mcp` stdio mode is the bridge agent
      pods fetch at boot (same create/manage-only filter, now defense-in-depth).
      The build dogfoods
      `create_agent` to bring the CPA up. It
