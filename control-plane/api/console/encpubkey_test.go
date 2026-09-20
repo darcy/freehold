@@ -2,28 +2,23 @@ package console
 
 import (
 	"encoding/hex"
-	"os"
 	"path/filepath"
 	"testing"
+
+	"freehold/platform/provisioning/box"
 )
 
-// TestConsoleEncPubkey: the helper derives the X25519 pubkey from the console
-// identity's enc secret and returns "" when the identity is absent.
+// TestConsoleEncPubkey: the helper derives the X25519 pubkey from a REAL
+// console identity written by box.MintIdentity (the same writer the deployment
+// uses), and returns "" when the identity is absent. Using the real writer
+// means the field name/format is exercised, not assumed.
 func TestConsoleEncPubkey(t *testing.T) {
 	dir := t.TempDir()
 	s := &Server{StateDir: dir}
 	if got := s.consoleEncPubkey(); got != "" {
 		t.Fatalf("no identity => empty, got %q", got)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "console"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	secret := make([]byte, 32)
-	for i := range secret {
-		secret[i] = byte(i + 1)
-	}
-	doc := `{"enc_secret_hex":"` + hex.EncodeToString(secret) + `"}`
-	if err := os.WriteFile(filepath.Join(dir, "console", "identity.json"), []byte(doc), 0o600); err != nil {
+	if err := box.MintIdentity(filepath.Join(dir, "console")); err != nil {
 		t.Fatal(err)
 	}
 	got := s.consoleEncPubkey()
