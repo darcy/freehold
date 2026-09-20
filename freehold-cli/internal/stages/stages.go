@@ -16,7 +16,7 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
-	"freehold/freehold-cli/install/cpdeploy"
+	"freehold/freehold-cli/internal/cpdeploy"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
 	"freehold/platform/provisioning/planebase"

@@ -38,7 +38,8 @@ Computed from git, one helper shared by `justfile` and CI:
 git describe --tags --always --dirty   # v0.7.0 | v0.7.0-rc.1 | main-gabc123 | v0.7.0-4-gabc123-dirty
 ```
 
-*   Tagged release → `vX.Y.Z` (or `vX.Y.Z-rc.N` for a prerelease tag).
+*   Tagged release → `vX.Y.Z` (or `vX.Y.Z-rc.N` for a prerelease tag; `-rc.*`
+    is the only prerelease vocabulary).
 *   Local/untagged → the describe string; a dev build additionally records the
     ref it came from (`dev(<ref>@<sha>)`).
 
@@ -70,10 +71,13 @@ identically. CI passes the tag explicitly.
 
 ### CP pin + query
 
-*   `install`/`deploy-cp`/`update` pass `{version, channel, commit}` to the CP.
-*   `freehold-console serve` writes `<stateDir>/version.json` (0600) — a small
-    dedicated file rather than a field on `ControlPlaneState` (which mirrors the
-    Rust serde repr; keep that contract untouched).
+*   `install`/`update` stamp `<stateDir>/version.json` (0600) over the deploy
+    transport: a small dedicated file rather than a field on
+    `ControlPlaneState` (which mirrors the Rust serde repr; keep that contract
+    untouched). `{version, channel, commit}`.
+*   `freehold-console serve` **reads** `version.json` at startup and reports it
+    — it does not own the file. `build`/`teardown` operate within the stamp
+    already on the CP and never promote it; only `install`/`update` write it.
 *   Surfaced on `/healthz` (JSON body), `/api/world`, `agenttools.WorldStatus`,
     and `console.WorldSummary`; rendered by `freehold status` and the TUI.
 *   `freehold status` shows the CP's version + channel and, when reachable,
@@ -123,21 +127,31 @@ Scripts travel with the release, not the binary:
     tree.
 
 `freehold install` **and** `freehold update` copy the scripts to the CP's
-migrations dir (via the deploy transport) and then run pending ones. A fresh
-CP starts with an empty marker set, so install applies every migration once
-(most are cheap no-ops on a fresh world, but they are recorded).
+scripts dir (via the deploy transport). **Install marks every shipped migration
+done without running it** (the Omarchy first-install rule: a fresh world is
+already at current state); migrations only ever *run* on `update`. `update` then
+runs pending ones.
 
 ### Completion (marker files)
 
-*   Markers live under `<stateDir>/migrations/done/`, one file per applied
-    migration, named for the script. This is the analog of Omarchy's per-user
-    marker folder and, unlike the current single JSON ledger, survives
+Following Omarchy's layout exactly: scripts live in one dir, markers in a
+sibling state dir where the **marker filename mirrors the script filename**.
+
+*   Scripts → `<stateDir>/migrations/scripts/<epoch>.sh` (shipped per release).
+*   Markers → `<stateDir>/migrations/<epoch>.sh` (one empty file per completed
+    migration). Unlike the current single JSON ledger, this survives
     **jumping between channels/versions**: a migration done on `stable` stays
     done when you move to `--dev` and back.
-*   Pending = scripts present in the migrations dir minus markers present.
-*   Ordering is strictly by epoch; a migration that fails exits non-zero, stays
-    unmarked, stops the queue, and is retried on the next run. Never mark a
-    migration done on failure.
+*   Pending = scripts in `scripts/` whose same-named marker is absent; pending
+    order is strictly by epoch filename.
+*   A migration that fails exits non-zero, stays unmarked, stops the queue, and
+    is retried on the next run. Never mark a migration done on failure.
+*   There are **no reverse migrations**: markers persist across a downgrade, so
+    `update --version <older>` runs old code against newer config (named gap —
+    see Out of scope).
+*   Scripts receive the durable paths + the agent-tools binary via env
+    (`FREEHOLD_AGENT_TOOLS`, `REGISTRY`, `CONSOLE_STATE`, `STATE_DIR`), run
+    with `bash -euo pipefail`, and are enumerated from the CP's scripts dir.
 *   `world_migrate` still exposes the run; its description drops the
     verify-gate language. The CP can also report pending/done counts for
     `--check` and `status`.
@@ -145,17 +159,24 @@ CP starts with an empty marker set, so install applies every migration once
 ### Ordering within an update
 
 Deploy binaries → restart → `/healthz` green → **copy scripts → run pending
-migrations** → repin `version.json`. Migrations always run against the new
-code. Failure reports and stops; re-running `freehold update` retries pending.
+migrations** → **repin `version.json` last**. Migrations always run against the
+new code, and the stamp is promoted only after they succeed, so a failed
+migration leaves `status` reporting the old version and a re-run retries the
+pending set. Failure reports and stops.
 
 ## Package layout
 
 *   Move `freehold-cli/install/cpdeploy/` → `freehold-cli/internal/cpdeploy/`
     (a shared engine, mirroring `internal/stages` and `internal/certcred`).
     Repoint `internal/stages/stages.go`.
-*   Expose a standalone **ship-bytes-to-CP** step on `box.Engine`
-    (`platform/provisioning/box`), parameterized by resolved `Bins` + `Coords`,
-    so `install` and `update` share one path.
+*   Expose a standalone **ship-bytes-to-CP** step, `cpdeploy.Redeploy`,
+    parameterized by the resolved binaries, so `install` (full `DeployCp`) and
+    `update` (`Redeploy`) share one path. It lives in `internal/cpdeploy`, not
+    `platform/provisioning/box`: box is provider-independent and may not name a
+    `pct`/Proxmox command, while the deploy engine is Proxmox-aware. `DeployCp`
+    and `Redeploy` share `shipConsoleBins`/`startServe`/`serveFlags` so they
+    can't drift; `Redeploy` never touches runner identity/secrets/grants and
+    never rotates the substrate key.
 *   Put artifact acquisition (resolve source → assets or sandbox build → verify)
     and the bin/migration resolution in `internal/` (not under `install/`).
 *   Dependency direction stays acyclic:
@@ -200,7 +221,8 @@ code. Failure reports and stops; re-running `freehold update` retries pending.
 
 ### Phase C — release artifacts
 
-*   [ ] `.github/workflows/release.yml` (tag `v*` only): build set, package
+*   [ ] `.github/workflows/release.yml` (tag `v*` only): install mise (the
+        justfile builds through `mise exec`), `just build`, package
         `migrations.tar.gz`, `checksums.txt`, upload; prerelease tags marked.
 *   [ ] `release` skill artifacts stage; verify assets after publish.
 *   [ ] Acceptance: cutting a test `vX.Y.Z-rc.N` produces a prerelease with all
@@ -209,14 +231,17 @@ code. Failure reports and stops; re-running `freehold update` retries pending.
 ### Phase D — migrations as scripts
 
 *   [ ] Move scripts to top-level `migrations/<epoch>.sh`; delete `.verify.sh`
-        and every verify reference.
-*   [ ] `platform/migrations`: enumerate a script dir; marker files under
-        `<stateDir>/migrations/done/`; drop the JSON ledger and verify gate.
-*   [ ] `BuildMigrator`/`world_migrate` run from the CP migrations dir;
-        `install` and `update` copy scripts first.
-*   [ ] Acceptance: a script migration applies on install and update; a
-        completed marker survives a channel switch; a failing script stops the
-        queue and is retried.
+        and every verify reference. Scripts are POSIX-sh, no shebang, `0644`.
+*   [ ] `platform/migrations`: enumerate a script dir; marker files at
+        `<stateDir>/migrations/<epoch>.sh` mirroring the script name; drop the
+        JSON ledger and verify gate.
+*   [ ] `BuildMigrator`/`world_migrate` run from the CP scripts dir; `install`
+        copies scripts and **marks them all done**; `update` copies scripts and
+        runs pending.
+*   [ ] Acceptance: install on a fresh world leaves every marker present and
+        runs nothing; update applies a pending script; a completed marker
+        survives a channel switch; a failing script stops the queue and is
+        retried; no migration ever runs during `build`/`teardown`.
 
 ### Phase E — `freehold update`
 
@@ -224,7 +249,7 @@ code. Failure reports and stops; re-running `freehold update` retries pending.
         deploy → migrate → repin). No `migrate` verb.
 *   [ ] Sandbox clone+build for `--ref`/`--sha`; local build for `--dev`.
 *   [ ] `--check`; thin-box transient path; update lock + preflight.
-*   [ ] Acceptance: a dev CP on `v0.7.0-beta.1` updates to a newer ref, runs
+*   [ ] Acceptance: a dev CP on `v0.7.0-rc.1` updates to a newer ref, runs
         migrations, repins; re-running is a no-op; `--check` reports without
         changing anything.
 
@@ -241,9 +266,12 @@ code. Failure reports and stops; re-running `freehold update` retries pending.
 
 ## Out of scope / follow-ups
 
-*   **Snapshots/rollback.** No automatic binary rollback; a failed migration
-    stays pending and re-runs. Rolling back is `update --version <older>`.
-    A snapshot-based escape hatch (Omarchy's snapper analog) is a later phase.
+*   **No reverse migrations.** A failed migration stays pending and re-runs;
+    markers are never un-marked. `update --version <older>` therefore runs old
+    code against config a newer migration may have rewritten, and cannot undo a
+    migration. This is a named gap (record it in `AGENTS.md` "Known gaps"), not
+    an error path. A snapshot-based escape hatch (Omarchy's snapper analog) is a
+    later phase and the only real rollback story.
 *   **On-demand CI ref builds** (`workflow_dispatch`) so a toolchain-free box
     can test a sha. Untagged refs are box-built for now.
 *   **Remote compile on the CP.** The CP stays toolchain-free.
