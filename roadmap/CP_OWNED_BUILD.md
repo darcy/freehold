@@ -6,7 +6,7 @@
 ## Goal (one sentence)
 
 Turn the monolithic `freehold build` into a clean two-command boundary —
-`freehold bootstrap` (box one creates only the CP) and `freehold build` (any
+`freehold install` (box one creates only the CP) and `freehold build` (any
 logged-in box asks the CP to bring up the whole world) — and drive every infra
 primitive (the LXC substrate + the litellm/postgres kube workloads) through **real
 Terraform** (A1) instead of ad-hoc `pct`/`kubectl` shells.
@@ -14,7 +14,7 @@ Terraform** (A1) instead of ad-hoc `pct`/`kubectl` shells.
 ## Decisions (locked by the operator)
 
 1. **Explicit `bootstrap` / `build` boundary; nothing bleeds.**
-   - `freehold bootstrap` == "create the CP" (box one, the only path that touches
+   - `freehold install` == "create the CP" (box one, the only path that touches
      the bare host). It does **not** boot the relay, deploy agent-tools, bring up
      k3s/litellm/caddy/cert, or trigger `world_build`.
    - `freehold build` == "the CP brings up the world," gated on a live console
@@ -38,7 +38,7 @@ Terraform** (A1) instead of ad-hoc `pct`/`kubectl` shells.
 ## Target architecture
 
 ```
-freehold bootstrap  (box one, root-gated; the ONLY host-touching command)
+freehold install    (box one, root-gated; the ONLY host-touching command)
   1. provision door + doorGate; grant ops identity; serve local runner
   2. capture world inputs IN MEMORY (domains, proxy IP, operator pubkey,
      DNS provider creds, litellm provider key, sizing)
@@ -50,7 +50,7 @@ freehold bootstrap  (box one, root-gated; the ONLY host-touching command)
   → "CP created. run `freehold build` (from any box after `freehold login`)"
 
 freehold build  (any box, login-gated)
-  0. no console session? → "run `freehold bootstrap` first."
+  0. no console session? → "run `freehold install` first."
   1. ask the CONSOLE to run its world_build (operator-scoped; drives the
      co-located runner; no relay required to authorize)
   2. console world_build stages:
@@ -71,7 +71,7 @@ freehold teardown  (combined — unchanged shape, + Terraform destroy)
 
 ## Part 1 — the `bootstrap`/`build` split (CP-owned build)
 
-### 1a. `freehold bootstrap`
+### 1a. `freehold install`
 - New command (box one). Runs the current half-1 stages **minus** relay boot,
   agent-tools deploy, handoff-trigger, and `world_build`:
   door → config → DNS creds → durable plane → cp LXC → deploy-cp (console +
@@ -81,7 +81,7 @@ freehold teardown  (combined — unchanged shape, + Terraform destroy)
   CP LXC needs it to boot with its `--mpN` mounts).
 
 ### 1b. `freehold build`
-- Gated on a live console session. If none → "run `freehold bootstrap` first."
+- Gated on a live console session. If none → "run `freehold install` first."
 - Triggers the **console's** world_build (Part 2), then the box-side bookkeeping
   (record coords / facts / CPA reconcile).
 - Remove the half-1 stages from `build` so a thin box never tries to create a CP
@@ -187,8 +187,8 @@ stack (inside the relay LXC) is not yet Terraform.
 
 ## Acceptance
 
-- `freehold bootstrap` on a bare box: creates a CP (console + co-located runner)
-  and stops; **no** relay/agent-tools/k3s/litellm/caddy. `world status` unreachable.
+- `freehold install` on a bare box: creates a CP (console + co-located runner)
+  and stops; **no** relay/agent-tools/k3s/litellm/caddy. `freehold status` unreachable.
 - `freehold build` (no session) errors → "run bootstrap first."
 - After `freehold login` (on box one **or** a fresh box two), `freehold build`
   brings up the full world through the CP: relay/agent-tools/k3s/DNS/litellm/

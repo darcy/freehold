@@ -106,7 +106,7 @@ agent instead of calling a runner itself.
     `roadmap/BUZZ_SURFACE.md` (membership 13534, memory 30174, audit 48001, jobs
     43001–43006, DMs 41001; GRANTS was the only capability needing a custom kind).
 
-*   **Phase A: bootstrap provisioning (pre-relay, runner-direct).** `freehold bootstrap`
+*   **Phase A: bootstrap provisioning (pre-relay, runner-direct).** `freehold install`
     stands up the target via the existing API runners (`vultr create/destroy`,
     `hetzner create/destroy`) or the ssh runner driving `pvesh`/`pct` — no new
     Proxmox connector. A **blocking domain gate** requires `--domain` and holds until it

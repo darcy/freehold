@@ -7,7 +7,6 @@ package stages
 import (
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,7 +16,7 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
-	"freehold/freehold-cli/cpdeploy"
+	"freehold/freehold-cli/install/cpdeploy"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
 	"freehold/platform/provisioning/planebase"
@@ -87,41 +86,6 @@ func stateRootFor(agentDir string) string {
 		return filepath.Dir(filepath.Dir(agentDir))
 	}
 	return config.StateDir()
-}
-
-var execCmd = &cobra.Command{
-	Use:   "exec <TARGET> <CMD>",
-	Short: "Signed exec against a running runner (self-staged)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) != 2 {
-			return fmt.Errorf("exec needs <TARGET> <CMD>")
-		}
-		addr, _ := cmd.Flags().GetString("addr")
-		agentDir, _ := cmd.Flags().GetString("agent-dir")
-		timeoutS, _ := cmd.Flags().GetUint64("timeout")
-		c, err := installConnect(addr, agentDir, args[0])
-		if err != nil {
-			return err
-		}
-		refs := []string{args[0]}
-		if s, _ := cmd.Flags().GetStringSlice("secret"); len(s) > 0 {
-			refs = s
-		}
-		out, err := c.Exec(args[0], args[1], refs, timeoutS)
-		if err != nil {
-			return err
-		}
-		if out.Stdout != "" {
-			fmt.Print(out.Stdout)
-		}
-		if out.Stderr != "" {
-			fmt.Fprint(os.Stderr, out.Stderr)
-		}
-		if out.TimedOut {
-			return fmt.Errorf("exec timed out")
-		}
-		return nil
-	},
 }
 
 func registerSelfFlags(cmd *cobra.Command) {
@@ -625,11 +589,6 @@ func optOf(s string) *string {
 }
 
 func init() {
-	registerSelfFlags(execCmd)
-	execCmd.Flags().String("config", config.ConfigPath(), "Tenant config path (scope; honored for symmetry)")
-	execCmd.Flags().StringSliceP("secret", "s", nil, "Secret names to request")
-	execCmd.Flags().Uint64("timeout", 60, "Runner-side watchdog in seconds")
-
 	registerSelfFlags(provisionCmd)
 	provisionCmd.Flags().String("kind", "proxmox-lxc", "proxmox-lxc")
 	provisionCmd.Flags().String("role", "", "relay|cp|k3s")
