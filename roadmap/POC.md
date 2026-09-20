@@ -26,9 +26,9 @@ it once there's a real agent workflow worth generalizing to it (see Chunk 5 belo
     sharing via grants (whitelist Nostr pubkeys).
     
 *   **The agent org is two tiers: the CPA and four departments.** The CPA is the sole user  
-    touchpoint; **Security** (access/exposure), **Vault** (data plane), **Compute** (the box  
+    touchpoint; **Network** (the network surface — access/exposure), **Data** (data plane), **Compute** (the box  
     itself — CPU/RAM/disk, LXC/kube and remote provisioning, plus its monitoring tooling),  
-    and **Agent Ops** (models/providers/agents, plus AI hardware) are  
+    and **AI** (models/providers/agents, plus AI hardware) are  
     its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted  
     (the operator and any agent may converse with any department directly); capability  
     execution is bounded — a department-owned capability is executed by that department's  
@@ -356,7 +356,7 @@ kube target.
     numbers gathered in Chunk 3.
     
 *   **The department check-in hook lands here.** When an agent requests a service/compute
-    through the CPA's provision path, Vault asks "back this up?" and Security asks
+    through the CPA's provision path, Data asks "back this up?" and Network asks
     "reachable outside your network?" — a visible choice, with "no" as a valid final answer.
     Department status reuses the same postcondition-gated 🟢/🟡/🔴 language as runner/service
     readiness.

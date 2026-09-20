@@ -111,10 +111,10 @@ repo, not the history.
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.
 - **The agent org is two tiers: the CPA and four departments.** The CPA is the sole user
-  touchpoint; **Security** (access/exposure), **Vault** (data plane), **Compute** (the box
+  touchpoint; **Network** (the network surface — access/exposure), **Data** (data plane), **Compute** (the box
   itself — CPU/RAM/disk, Proxmox LXC/kube and remote provisioning, plus the monitoring tooling
-  it needs), and **Agent Ops** (models/providers/agents, plus AI hardware — local-AI
-  accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by Agent Ops, separate
+  it needs), and **AI** (models/providers/agents, plus AI hardware — local-AI
+  accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by AI, separate
   from Compute's general resources) are its direct reports, each a distinct identity scoped to
   one domain. Talk is unrestricted — the operator and any agent may converse with any
   department or agent directly; what is bounded is *capability execution*. A capability a
@@ -163,7 +163,7 @@ changelog.
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
 - **The four departments are installed, but have no capability tools yet.** `freehold build`
-  creates each reserved department (`security`/`vault`/`compute`/`agent-ops`)
+  creates each reserved department (`network`/`data`/`compute`/`ai`)
   through the same audited `create_agent`: its embedded prompt, `#freehold` plus its own
   private `#<department>` channel, and the CPA added to each channel — four pods, reconciled
   across a rebuild like any registry agent. The capability tooling they broker (external
@@ -173,12 +173,14 @@ changelog.
   through the owning department" is still just the grant model — raw capability grants sit with
   department identities once Chunk 5 wires the agent↔runner exec surface, and custom agents
   never receive them.
-- **A rebuild of a world built before the four-department rename leaves stale agents.** The
-  retired reserved names `gatekeeper`/`provisioner`/`services` are no longer reserved, so on a
+- **A rebuild of a world built before a department rename leaves stale agents.** The
+  retired reserved names `gatekeeper`/`provisioner`/`services` (and, after the latest rename,
+  `security`/`vault`/`agent-ops`) are no longer reserved, so on a
   rebuild `reconcileCreatedAgents` re-creates any surviving registry rows as custom-template
-  agents in their old `#gatekeeper`/`#provisioner`/`#services` channels; nothing removes them.
+  agents in their old `#gatekeeper`/`#provisioner`/`#services` (or `#security`/`#vault`/
+  `#agent-ops`) channels; nothing removes them.
   Fresh builds are clean. A retired-name cleanup on reconcile is a named follow-up.
-- **The Vault/Security "check in on a new service" question has no trigger yet.** The hook
+- **The Data/Network "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
 - **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
@@ -264,7 +266,7 @@ changelog.
   - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
     the CPA prompt + skills, `custom/` the template for agents the CPA creates,
     `common/orientation.md` the shared system-orientation block, and the four
-    department definitions (`security/`, `vault/`, `compute/`, `agent-ops/`);
+    department definitions (`network/`, `data/`, `compute/`, `ai/`);
     embeds its Markdown as Go values):
     `cd agents && go build ./... && go vet ./... && go test ./...`
   - `contract/` (`freehold/contract` — the shared wire/trust/protocol leaf: crypto/wire/client/

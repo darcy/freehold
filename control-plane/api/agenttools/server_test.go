@@ -468,8 +468,8 @@ func TestCreateAgentChannelsAndPrivate(t *testing.T) {
 			t.Fatalf("create_agent failed: %s", rec.Body.String())
 		}
 	}
-	post(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"vault","channels":["#freehold","#vault"],"private":true}}}`)
-	if strings.Join(gotChannels, ",") != "#freehold,#vault" {
+	post(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"data","channels":["#freehold","#data"],"private":true}}}`)
+	if strings.Join(gotChannels, ",") != "#freehold,#data" {
 		t.Errorf("channels not passed through: %v", gotChannels)
 	}
 	if !gotPrivate {

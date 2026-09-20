@@ -40,10 +40,10 @@ func TestOrientationRepoURLOverride(t *testing.T) {
 	if got := CPASystemPrompt(""); !strings.Contains(got, UpstreamRepoURL) {
 		t.Errorf("CPA prompt must fall back to the upstream repo URL")
 	}
-	if got := SystemPrompt("vault", "", repo); !strings.Contains(got, repo) {
+	if got := SystemPrompt("data", "", repo); !strings.Contains(got, repo) {
 		t.Errorf("department prompt must render the supplied repo URL")
 	}
-	if got := SystemPrompt("vault", "", ""); !strings.Contains(got, UpstreamRepoURL) {
+	if got := SystemPrompt("data", "", ""); !strings.Contains(got, UpstreamRepoURL) {
 		t.Errorf("department prompt must fall back to the upstream repo URL")
 	}
 }
@@ -69,7 +69,7 @@ func TestAgentSystemPromptOmitsEmptyPurpose(t *testing.T) {
 }
 
 func TestDepartmentPromptsEmbeddedWithBoundary(t *testing.T) {
-	want := []string{"agent-ops", "compute", "security", "vault"}
+	want := []string{"ai", "compute", "data", "network"}
 	got := DepartmentNames()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("DepartmentNames = %v, want %v", got, want)
@@ -117,10 +117,10 @@ func TestDepartmentPurposeAndChannelsCoverEveryDepartment(t *testing.T) {
 }
 
 func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
-	got := SystemPrompt("security", "look after the garden", "")
-	dept, _ := DepartmentPrompt("security")
+	got := SystemPrompt("network", "look after the garden", "")
+	dept, _ := DepartmentPrompt("network")
 	if !strings.Contains(got, strings.TrimRight(dept, "\n")) {
-		t.Errorf("SystemPrompt(security) must select the department prompt")
+		t.Errorf("SystemPrompt(network) must select the department prompt")
 	}
 	if strings.Contains(got, "look after the garden") {
 		t.Errorf("a department prompt must not embed the create-time purpose")
