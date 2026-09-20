@@ -53,6 +53,27 @@ func TestResolveUninstall(t *testing.T) {
 	}
 }
 
+// TestWipeLocalProfileRefusesForeignDir guards against wiping the parent of an
+// arbitrary --config: with no profile, only the config file itself is removed.
+func TestWipeLocalProfileRefusesForeignDir(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfg, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(sibling, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wipeLocalProfile(cfg, nil)
+	if _, err := os.Stat(cfg); !os.IsNotExist(err) {
+		t.Fatal("config file not removed")
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatal("sibling file must survive")
+	}
+}
+
 // TestWipeLocalProfile proves the local half removes BOTH the profile config dir
 // and the scoped state dir.
 func TestWipeLocalProfile(t *testing.T) {
@@ -64,7 +85,7 @@ func TestWipeLocalProfile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wipeLocalProfile(filepath.Join(cfgDir, "config.toml"), &config.Profile{Name: "demo", StateDir: stateDir})
+	wipeLocalProfile(filepath.Join(cfgDir, "config.toml"), &config.Profile{Name: "demo", ConfigPath: filepath.Join(cfgDir, "config.toml"), StateDir: stateDir})
 	if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
 		t.Fatal("profile config dir not wiped")
 	}
