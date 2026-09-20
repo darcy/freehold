@@ -16,6 +16,7 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/version"
 	"freehold/freehold-cli/internal/cpdeploy"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
@@ -565,6 +566,15 @@ var deployCpCmd = &cobra.Command{
 		spec.AgentToolsBinary = opt("agent-tools-binary")
 		spec.RunnerBinary = opt("runner-binary")
 		spec.RunnerPackage = opt("runner-package")
+		// The version pin: install stamps it, build/teardown don't (their
+		// deploy-cp invocations pass no --version).
+		if v := mustStr(cmd, "version"); v != "" {
+			ch := mustStr(cmd, "channel")
+			if ch == "" {
+				ch = version.Channel(v)
+			}
+			spec.Pin = &version.Pin{Version: v, Channel: ch, Commit: mustStr(cmd, "commit")}
+		}
 		if v := mustStr(cmd, "lxc"); v != "" {
 			var n uint32
 			fmt.Sscanf(v, "%d", &n)
@@ -646,4 +656,7 @@ func init() {
 	deployCpCmd.Flags().String("agent-tools-pubkey", "", "agent-tools pubkey")
 	deployCpCmd.Flags().String("agent-tools-binary", "", "LOCAL freehold-agent-tools binary")
 	deployCpCmd.Flags().String("world-config", "", "cpbuild.Coords JSON (the console's build-executor coords)")
+	deployCpCmd.Flags().String("version", "", "version to stamp (version.json); absent = don't promote")
+	deployCpCmd.Flags().String("channel", "", "release channel to stamp (default: derived from --version)")
+	deployCpCmd.Flags().String("commit", "", "commit sha to stamp")
 }

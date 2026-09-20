@@ -202,7 +202,7 @@ async fn mcp_endpoint(
                 "result": {
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": SERVER_NAME, "version": env!("FREEHOLD_VERSION") }
                 }
             }))
             .into_response();
@@ -259,7 +259,7 @@ async fn mcp_endpoint(
                 },
                 Some("config") => match serde_json::to_string_pretty(&json!({
                     "name": SERVER_NAME,
-                    "version": env!("CARGO_PKG_VERSION"),
+                    "version": env!("FREEHOLD_VERSION"),
                     "transport": "mcp-over-http",
                     "targets": registry::registered(&state.ctx.package.targets),
                 })) {

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"freehold/contract/crypto"
+	"freehold/contract/version"
 	"freehold/control-plane/api/console"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
@@ -28,13 +29,15 @@ import (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|adopt|add-secret|revoke|identity> …")
+		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|adopt|add-secret|revoke|identity|version> …")
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
 	case "serve":
 		err = cmdServe(os.Args[2:])
+	case "version":
+		err = cmdVersion()
 	case "provision":
 		err = cmdProvision(os.Args[2:])
 	case "grant":
@@ -58,6 +61,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// cmdVersion prints the embedded build identity (stamped by the justfile/CI).
+func cmdVersion() error {
+	fmt.Printf("%s (%s)\n", version.Version, version.Commit)
+	return nil
 }
 
 func cmdServe(args []string) error {
@@ -281,11 +290,15 @@ func cmdServe(args []string) error {
 			*relayURL = builder.RelayURL
 		}
 	}
+	// The world's version stamp, written by install/update over the deploy
+	// transport. serve READS it; it never writes it (build/teardown don't
+	// promote either). A missing file leaves a zero pin.
+	pin, _ := version.Read(*stateDir + "/" + version.FileName)
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,
 		Auth: auth, PublicOrigin: pubOrigin, RelayHost: *relayHost,
 		StateDir: *stateDir, AgentToolsDir: *agentToolsStateDir,
-		Builder: builder,
+		Builder: builder, Version: pin,
 	}
 	log.Printf("freehold-console (Go) serving on %s (console agent %s)", *addr, consolePK)
 	return http.ListenAndServe(*addr, srv)

@@ -13,6 +13,7 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/relay"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
@@ -44,6 +45,9 @@ type Server struct {
 	// the authoritative agent registry (registry.json) + world facts (facts.json)
 	// that /api/world serves publicly so every box sees the CP's status.
 	AgentToolsDir string
+	// Version is the world's stamped version identity, read from
+	// <StateDir>/version.json at startup. Zero when unstamped.
+	Version version.Pin
 	// Builder is the CP-owned world bring-up engine (cpbuild.Spec): the console
 	// becomes the CP build executor — the operator-scoped /api/world-build route
 	// drives it through the co-located runner, so a thin login box triggers the
@@ -63,7 +67,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/healthz" && method == http.MethodGet {
-		w.Write([]byte("ok"))
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(map[string]interface{}{
+			"status":  "ok",
+			"version": s.Version.Version,
+			"channel": s.Version.Channel,
+			"commit":  s.Version.Commit,
+		})
+		w.Write(body)
 		return
 	}
 
@@ -315,6 +326,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
 		"services":           services,
+		"version":            s.Version,
 	}
 	// Fold the single-inventory status (agents + runners + dns + facts) served
 	// on the same route the /mcp world_status tool shares — the authoritative

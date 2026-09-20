@@ -13,6 +13,7 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
@@ -37,6 +38,9 @@ type DeployCpSpec struct {
 	AgentToolsPubkey *string
 	WorldConfig      *string // cpbuild.Coords JSON (bounds the console as the CP build executor)
 	AgentToolsBinary *string // local freehold-agent-tools binary, shipped so the console's world_build can deploy it
+	// Pin is the version identity to stamp after a successful deploy (install
+	// only). nil on a rebuild/redeploy: build/teardown never promote.
+	Pin *version.Pin
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -144,6 +148,32 @@ func shipSmallFile(t Transport, spec *DeployCpSpec, localPath, remoteFinal, step
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// StampPin writes the world's version identity to <StateDir>/version.json over
+// the deploy transport (0600). It is the version PROMOTION: install calls it at
+// the end of a deploy, update calls it last (after migrations succeed), and
+// build/teardown never call it. A zero Version is a no-op.
+func StampPin(t Transport, spec *DeployCpSpec, pin version.Pin) error {
+	if pin.Version == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(pin, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("", "fh-version-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return shipSmallFile(t, spec, tmp.Name(), spec.StateDir+"/"+version.FileName, "version.json")
 }
 
 // stopPriorServe kills a previously started serve (if any) and clears its pid
@@ -510,6 +540,14 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		grant := fmt.Sprintf("%s/freehold-console grant %s --state-dir %s --pubkey %s",
 			spec.BinDir, runnerName, spec.StateDir, pubkey)
 		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, grant), "self-grant console to co-located runner", 60); err != nil {
+			return nil, err
+		}
+	}
+
+	// Install stamps the version pin last. Build/teardown/redeploy never do:
+	// they operate within the stamp already on the CP.
+	if spec.Pin != nil {
+		if err := StampPin(t, spec, *spec.Pin); err != nil {
 			return nil, err
 		}
 	}

@@ -9,6 +9,7 @@ import (
 
 	"freehold/contract/config"
 	"freehold/contract/console"
+	"freehold/contract/version"
 	"freehold/freehold-cli/internal/common"
 	oplogin "freehold/freehold-cli/login"
 )
@@ -61,6 +62,13 @@ func statusFromConsole(cfg *config.Config) error {
 
 func printWorldSummary(w *console.WorldSummary) error {
 	fmt.Printf("CP pubkey: %s\n", w.CPPubkey)
+	if v := w.Version.Version; v != "" {
+		ch := w.Version.Channel
+		if ch == "" {
+			ch = version.Channel(v)
+		}
+		fmt.Printf("version:   %s (%s)\n", v, ch)
+	}
 	fmt.Printf("agents (%d):\n", len(w.Agents))
 	for _, a := range w.Agents {
 		fmt.Printf("  %-20s %s", a.Name, a.Pubkey)

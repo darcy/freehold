@@ -36,6 +36,7 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/bootstrap"
@@ -1576,6 +1577,12 @@ func (e *Engine) stageDeployCp() error {
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", e.Bins.ReleaseAgentTools,
+		// install stamps the version pin (its local build identity). A
+		// rebuild/re-adopt of the same CP is still an install run, so this is
+		// the promotion point; `freehold build` never reaches here.
+		"--version", version.Version,
+		"--channel", version.Channel(version.Version),
+		"--commit", version.Commit,
 	}
 	// The relay signing pubkey is the /api/world trust anchor a fresh login box
 	// seeds — read it from the relay's own compose .env (deterministic, unlike

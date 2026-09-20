@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"freehold/contract/version"
 	addrelaymember "freehold/freehold-cli/add-relay-member"
 	"freehold/freehold-cli/build"
 	dnscred "freehold/freehold-cli/dns-cred"
@@ -56,7 +57,7 @@ func init() {
 		stages.DeployCpCommand(),
 	)
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
-	rootCmd.Version = "0.6.18"
+	rootCmd.Version = version.Version + " (" + version.Commit + ")"
 }
 
 // run executes the CLI with the given subcommand args and returns the process
