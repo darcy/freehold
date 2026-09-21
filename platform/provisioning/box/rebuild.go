@@ -202,6 +202,7 @@ func FlagsFromConfig(cfg *config.Config) Flags {
 		Target:         cfg.Runner.Target,
 		Addr:           cfg.Runner.Addr,
 		OperatorPubkey: cfg.OperatorPubkey,
+		AgentName:      cfg.CPAName,
 		ConfigPath:     config.ConfigPath(),
 		RelayDomain:    cfg.RelayHost(),
 		CpDomain:       cfg.CPHost(),
@@ -1678,6 +1679,15 @@ func (e *Engine) stageDeployCp() error {
 // runner identity adoption, no secret merge, no substrate rotation, and no
 // version promotion (update stamps the pin itself, LAST).
 func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
+	// Swap to the transient root-SSH provider for host ops (guest list/exec)
+	// when a factory is wired — the same swap RunBootstrap makes. Without it the
+	// default runner-based provider can't reach the host on an update (no served
+	// runner / agent-tools coords), and the guest list fails.
+	cleanup, err := e.useTransientProvider()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	vmid, err := e.findLxcVmidExact("cp")
 	if err != nil {
 		return err
@@ -1730,6 +1740,11 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 // stamp-version command — the LAST step of an update, so a failed migration
 // never promotes the version.
 func (e *Engine) StampVersionPin(pin version.Pin) error {
+	cleanup, err := e.useTransientProvider()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	vmid, err := e.findLxcVmidExact("cp")
 	if err != nil {
 		return err
@@ -1769,6 +1784,31 @@ func installChannel(f Flags) string {
 		return f.Channel
 	}
 	return version.Channel(installVersion(f))
+}
+
+// useTransientProvider swaps e.Provider to the ProviderFactory's transient
+// root-SSH provider when one is wired, returning a cleanup. The caller defers
+// it. No factory = a no-op cleanup (the runner-based provider stands).
+func (e *Engine) useTransientProvider() (func(), error) {
+	if e.ProviderFactory == nil {
+		return func() {}, nil
+	}
+	prov, cleanup, err := e.ProviderFactory()
+	if err != nil {
+		return nil, err
+	}
+	e.Provider = prov
+	return cleanup, nil
+}
+
+// cpaNameOrDefault defaults the CPA display name, so a world-config never
+// carries an empty `cpa-name` (which would swallow the next flag in the
+// agent-tools serve argv and drop e.g. --owner-pubkey).
+func cpaNameOrDefault(name string) string {
+	if name == "" {
+		return "freehold"
+	}
+	return name
 }
 
 // worldConfigJSON renders the console's build-executor coords (cpbuild.Coords)
@@ -1818,7 +1858,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		RunnerAddr:     config.CoLocatedRunnerMCPAddr,
 		RunnerPK:       cfg.Runner.Pubkey,
 		RunnerTarget:   cfg.Runner.Target,
-		CpaName:        e.F.AgentName,
+		CpaName:        cpaNameOrDefault(e.F.AgentName),
 		OwnerPub:       e.F.OperatorPubkey,
 		LitellmBaseURL: cfg.Litellm.URL,
 		// The agent-tools server's reachable URL, NOT the console's: this is the

@@ -187,7 +187,12 @@ func readWorld(cfg *config.Config) (*console.WorldSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := oplogin.Login(cfg.CPURL, key)
+	// Prefer the CP's recorded LAN IP, like `freehold build`.
+	loginURL := cfg.CPURL
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		loginURL = "http://" + ip + ":8080"
+	}
+	c, err := oplogin.Login(loginURL, key)
 	if err != nil {
 		return nil, fmt.Errorf("console login: %v", err)
 	}

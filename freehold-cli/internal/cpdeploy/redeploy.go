@@ -128,8 +128,10 @@ func agentToolsStateDir(spec *DeployCpSpec) string {
 func stopAgentTools(t Transport, spec *DeployCpSpec) error {
 	at := agentToolsStateDir(spec)
 	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", at, at)
-	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "stop prior agent-tools", 30)
-	return err
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "stop prior agent-tools", 30); err != nil {
+		return err
+	}
+	return stopBinary(t, spec, spec.BinDir+"/freehold-agent-tools", "stop agent-tools process")
 }
 
 // captureAgentToolsArgv reads the running agent-tools serve argv (binary path +
@@ -140,7 +142,10 @@ func stopAgentTools(t Transport, spec *DeployCpSpec) error {
 // serve-flags reconstruction — revisit if agent-tools args ever gain spaces.
 func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
 	at := agentToolsStateDir(spec)
-	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null; true", at)
+	// Double quotes, not single: LxcExec wraps the whole payload in single
+	// quotes, so a single quote inside would break the command. tr understands
+	// \000 in double quotes.
+	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null; true", at)
 	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read agent-tools argv", 30)
 	if err != nil {
 		return ""
@@ -148,10 +153,15 @@ func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
 	return strings.TrimSpace(out.Stdout)
 }
 
-// restartAgentTools relaunches agent-tools with a captured argv.
+// restartAgentTools relaunches agent-tools with a captured argv and waits for
+// it to answer, so the immediately-following world_migrate doesn't race bind.
 func restartAgentTools(t Transport, spec *DeployCpSpec, argv string) error {
 	at := agentToolsStateDir(spec)
 	start := fmt.Sprintf("setsid nohup %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid", argv, at, at)
-	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "restart agent-tools", 60)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "restart agent-tools", 60); err != nil {
+		return err
+	}
+	probe := "for i in $(seq 1 15); do curl -s -m 3 -o /dev/null http://127.0.0.1:8089/mcp && exit 0; sleep 2; done; exit 1"
+	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, probe), "agent-tools healthz", 60)
 	return err
 }

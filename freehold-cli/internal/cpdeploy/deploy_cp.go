@@ -235,8 +235,21 @@ func StampPin(t Transport, spec *DeployCpSpec, pin version.Pin) error {
 // stopPriorServe kills a previously started serve (if any) and clears its pid
 // so the binary can be overwritten and a fresh instance started.
 func stopPriorServe(t Transport, spec *DeployCpSpec, step string) error {
-	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
-		spec.StateDir, spec.StateDir)
+	// Kill via the pid file AND by matching the running binary's /proc/<pid>/exe.
+	// A console started by the world build may have no serve.pid, and a running
+	// binary holds its inode — pct push then silently leaves the old file and the
+	// size check fails. No single quotes: LxcExec's wrapper is single-quoted.
+	bin := spec.BinDir + "/freehold-console"
+	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; for q in /proc/[0-9]*; do [ \"$(readlink $q/exe 2>/dev/null)\" = %s ] && kill ${q#/proc/} 2>/dev/null; done; sleep 1; true",
+		spec.StateDir, spec.StateDir, bin)
+	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), step, 30)
+	return err
+}
+
+// stopBinary kills a running guest binary by matching /proc/<pid>/exe (a guest
+// serve may have no pid file). Single-quote-free for LxcExec.
+func stopBinary(t Transport, spec *DeployCpSpec, bin, step string) error {
+	cmd := fmt.Sprintf("for q in /proc/[0-9]*; do [ \"$(readlink $q/exe 2>/dev/null)\" = %s ] && kill ${q#/proc/} 2>/dev/null; done; sleep 1; true", bin)
 	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), step, 30)
 	return err
 }
@@ -255,6 +268,9 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 	atState := filepath.Join(spec.StateDir, "..", "agent-tools")
 	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
+		return err
+	}
+	if err := stopBinary(t, spec, spec.BinDir+"/freehold-agent-tools", "stop agent-tools process"); err != nil {
 		return err
 	}
 	return shipFile(t, spec, *spec.AgentToolsBinary,

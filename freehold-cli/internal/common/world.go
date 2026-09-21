@@ -78,7 +78,13 @@ func RefreshAgentToolsCoords(cfg *config.Config) {
 	if err != nil {
 		return
 	}
-	c, err := oplogin.Login(cfg.CPURL, key)
+	// Prefer the CP's recorded LAN IP, like `freehold build`: a box whose public
+	// edge is down (or not yet fronted) still reaches its CP.
+	loginURL := cfg.CPURL
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		loginURL = "http://" + ip + ":8080"
+	}
+	c, err := oplogin.Login(loginURL, key)
 	if err != nil {
 		return
 	}
