@@ -30,16 +30,13 @@ answered, built, hosted, and delivered.
 
 freehold is run by two tiers of agents, all living in Buzz:
 
-- **Orchestrator (`freehold`)** — the main touchpoint: a real, LLM-backed reasoning agent on
-  Buzz's `buzz-acp` harness (its prompt lives in `agents/freehold/`). It holds the
-  conversation, plans, and delegates — it doesn't do expert-level work itself — and creates
-  custom agents on request.
-- **Network** — the network surface: access and exposure (external proxy, DNS, ingress).
-- **Data** — the data plane: backups, storage, durability.
-- **Compute** — the box itself: CPU/RAM/disk, Proxmox LXC and kube, remote provisioning, and
-  the monitoring it needs.
-- **AI** — models, providers, and agents, plus AI hardware (a local accelerator like an
-  RTX 3090 or DGX Spark).
+| Agent | Role | Services managed |
+| --- | --- | --- |
+| **@freehold** | Orchestrator and main touchpoint, on Buzz's `buzz-acp` harness (prompt in `agents/freehold/`). Holds the conversation, plans, delegates, and creates custom agents. | Agent lifecycle, agent grants |
+| **@network** | The network surface: access and exposure (external proxy, DNS, ingress). | Caddy, TLS, dnsmasq, Cloudflare |
+| **@data** | The data plane: backups, storage, durability. | Proxmox storage (LVM/ZFS), PBS, TrueNAS, Backblaze (future) |
+| **@compute** | The box itself and provisioning: CPU/RAM/disk, LXC and kube, remote hosts, monitoring. | Proxmox, k3s, monitoring |
+| **@ai** | Models, providers, and agents, plus local AI hardware. | LiteLLM, local AI (RTX 3090 / DGX Spark), benchmarking |
 
 Talk is unrestricted — the operator and any agent may converse with any department directly.
 What's bounded is *capability execution*: a capability a department owns is executed by that
@@ -50,11 +47,12 @@ Orchestrator and departments are installed as part of the core build — a pod e
 
 ## Vision, Architecture & Roadmap
 
-[`VISION.md`](VISION.md) is the narrative and the "why"; [`ARCHITECTURE.md`](ARCHITECTURE.md)
-is the system design and the locked decisions. [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) and
-[`roadmap/POC.md`](roadmap/POC.md) hold the chunked plan and the current scope, with the
-per-chunk plans alongside them (`roadmap/POC_CHUNK*.md`). [`CHANGELOG.md`](CHANGELOG.md)
-records decisions, reversals, and releases.
+- [`VISION.md`](VISION.md) — the narrative and the "why".
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the system design and the locked decisions.
+- [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) and [`roadmap/POC.md`](roadmap/POC.md) — the
+  chunked plan and current scope, with per-chunk plans alongside them
+  (`roadmap/POC_CHUNK*.md`).
+- [`CHANGELOG.md`](CHANGELOG.md) — decisions, reversals, and releases.
 
 ## Getting started
 
@@ -63,10 +61,10 @@ the world itself.
 
 Prereqs:
 
-- **Rust 1.94+** — the workspace declares `rust-version = "1.94"`.
-- **Go 1.25+** — six modules: `agents/`, `contract/`, `platform/`, `providers/`, `freehold-cli/`, `control-plane/`.
-- **[mise](https://mise.jdx.dev/)** — the justfile runs `go`/`rust` through `mise exec`, so the pinned toolchains are guaranteed (`curl https://mise.run | sh`, or `brew install mise`).
-- **[just](https://github.com/casey/just)** — `cargo install just`, or `brew install just`.
+- **[mise](https://mise.jdx.dev/)** — installs and pins the toolchains (Go 1.25.0, Rust 1.98.0)
+  and runs them through `mise exec`, so Rust and Go need no separate install
+  (`curl https://mise.run | sh`, or `brew install mise`).
+- **[just](https://github.com/casey/just)** — `mise use -g just`, or `brew install just`.
 
 `just install` builds everything and puts `freehold` (plus the siblings it resolves at
 runtime) on your PATH; `just build` alone leaves them in `target/`.
@@ -202,9 +200,9 @@ with its state under `~/.freehold/profiles/<name>/` (overridden by `FREEHOLD_HOM
 The config is that tenant's CONNECTION/DESIRE profile:
 
 ```toml
-domain = "freehold-test.darcydev.net"
-relay_url = "https://freehold-test.darcydev.net"
-cp_url = "https://cp-freehold-test.darcydev.net"
+domain = "freehold-test.example.com"
+relay_url = "https://freehold-test.example.com"
+cp_url = "https://cp-freehold-test.example.com"
 operator_pubkey = "1dc07610…"           # console admin + relay owner
 operator_identity = "/home/you/.freehold/control-plane/operator"   # YOUR key, 0600 —
                                         # the TUI auto-logs in with it; optional when
