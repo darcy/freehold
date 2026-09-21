@@ -1,9 +1,10 @@
 name: release
 
 # Build the release assets for a tag and attach them to a DRAFT GitHub Release.
-# The `release` skill owns publishing: after this workflow finishes it edits the
-# draft (curated notes + prerelease flag) and verifies the assets. A tag is the
-# only trigger — there is no main/edge job.
+# The `pre-release` skill publishes it as a pre-release (curated notes + the
+# prerelease flag) and verifies the assets; the `publish-release` skill later
+# e2e-tests those assets and promotes it to a full release. A tag is the only
+# trigger — there is no main/edge job.
 on:
   push:
     tags: ["v*"]
@@ -47,7 +48,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          prerelease: ${{ contains(github.ref_name, '-rc.') }}
+          prerelease: true
           files: |
             dist/freehold
             dist/freehold-console

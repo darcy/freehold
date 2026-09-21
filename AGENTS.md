@@ -4,11 +4,12 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-The current *released* version is the top entry in `CHANGELOG.md` (equivalently the latest
-`v*` tag) — this file deliberately never
-restates a version number, so it can't go stale. Chunk 1 (engine room) and Chunk 2 (relay
-scope), including the durable volume plane (Phase 0.12), are implemented and live-verified
-against real infrastructure (a real PVE host, a real relay/CP pair under a real domain).
+The current *released* version is the top entry in `CHANGELOG.md`; the newest `v*` tag may
+still be a pre-release awaiting e2e validation and promotion (see "Releases") — this file
+deliberately never restates a version number, so it can't go stale. Chunk 1 (engine room)
+and Chunk 2 (relay scope), including the durable volume plane (Phase 0.12), are implemented
+and live-verified against real infrastructure (a real PVE host, a real relay/CP pair under a
+real domain).
 Chunk 3 (the Rust→Go refactor) is complete. Chunk 4 (a real, reasoning CPA that lives in
 Buzz) is live: the CPA holds conversations, survives a full rebuild, and creates new agents
 itself when asked; its remaining Phase-F resource baseline is the current focus — see
@@ -55,15 +56,21 @@ repo, not the history.
 - **The changelog entry is written at release time.** It compares the codebase at the
   previous release to the current one and records the **net** difference — what is true now
   that wasn't then — not a chronological log of every merge. Superseded or refactored-away
-  work is omitted; the final state wins. The `release` skill owns this flow.
+  work is omitted; the final state wins. The `pre-release` skill owns this flow;
+  `publish-release` promotes the result.
+- **A release is cut as a pre-release, then promoted.** The `pre-release` skill produces the
+  candidate: `CHANGELOG.md` entry + annotated tag + a GitHub **pre-release** (marked
+  `prerelease`, assets attached, short notes). The `publish-release` skill then e2e-tests the
+  pre-release's own downloaded assets against real infrastructure and, only on green with the
+  operator's go-ahead, flips it to a full release — same tag, same commit, same assets.
 - **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
   every release is the tip of `main`, so the tag goes there — there is **no release
   branch**. The skill generates the entry and gets the operator's approval on the draft
   **before committing**, commits it on a normal PR branch (e.g. `docs/changelog-vX.Y.Z`) →
   PR → waits for `check` + `bot-review` to settle → **the operator merges** (the skill never
-  merges) → the skill tags the merged `main` commit and publishes the Release with short,
-  high-level notes distilled from the entry. An rc is tagged the same way (`vX.Y.Z-rc.N`);
-  iterating re-tags the next rc on `main`.
+  merges) → the skill tags the merged `main` commit and publishes it as a pre-release with
+  short, high-level notes distilled from the entry. An rc (`vX.Y.Z-rc.N`) is tagged the same
+  way and is likewise a pre-release; iterating re-tags the next rc on `main`.
 - **Release branches (future, when development continues past a release).** Then the model
   becomes trunk-first: `main` stays the trunk where all work lands, and a long-lived
   `release/vX.Y.Z` branch is cut for a release; fixes which should ship in it are
@@ -98,13 +105,16 @@ repo, not the history.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
   done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
-- `.agents/skills/release/SKILL.md` — the `release` skill: cut a release by
-  generating the `CHANGELOG.md` entry from git history since the previous release,
-  landing it via a `release/vX.Y.Z` PR, then tagging the merged commit and
-  publishing a short, high-level GitHub Release (distilled from the entry, never
-  the full changelog) — see "Releases" above.
-  This is the canonical, agent-agnostic location (auto-loaded by opencode and any
-  other agent that reads `~/.agents/skills/`-style external skills).
+- `.agents/skills/pre-release/SKILL.md` — the `pre-release` skill: cut a versioned
+  candidate by generating the `CHANGELOG.md` entry from git history since the previous
+  release, landing it via a normal PR branch (e.g. `docs/changelog-vX.Y.Z`), then tagging
+  the merged commit and publishing a GitHub **pre-release** with the built assets and
+  short, high-level notes (distilled from the entry, never the full changelog) — see
+  "Releases" above. The canonical, agent-agnostic location (auto-loaded by opencode and
+  any other agent that reads `~/.agents/skills/`-style external skills).
+- `.agents/skills/publish-release/SKILL.md` — the `publish-release` skill: promote a
+  pre-release to a full release only after an end-to-end run on its downloaded assets
+  against real infrastructure (metadata-only flip; the tag never moves).
 - `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
 
