@@ -56,9 +56,10 @@ repo, not the history.
   previous release to the current one and records the **net** difference — what is true now
   that wasn't then — not a chronological log of every merge. Superseded or refactored-away
   work is omitted; the final state wins. The `release` skill owns this flow.
-- **Release flow (current).** All work lands on `main` and every release is the tip of
-  `main`, so the tag goes there. The skill generates the entry and gets the operator's
-  approval on the draft **before committing**, commits it on a `release/vX.Y.Z` branch →
+- **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
+  every release is the tip of `main`, so the tag goes there — there is **no release
+  branch**. The skill generates the entry and gets the operator's approval on the draft
+  **before committing**, commits it on a normal PR branch (e.g. `docs/changelog-vX.Y.Z`) →
   PR → waits for `check` + `bot-review` to settle → **the operator merges** (the skill never
   merges) → the skill tags the merged `main` commit and publishes the Release with short,
   high-level notes distilled from the entry. An rc is tagged the same way (`vX.Y.Z-rc.N`);

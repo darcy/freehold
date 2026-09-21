@@ -62,10 +62,10 @@ history.
 4. **Land it via a release PR.**
    ```bash
    git checkout main && git pull --ff-only
-   git checkout -b release/vX.Y.Z          # an rc: release/vX.Y.Z-rc.N
+   git checkout -b docs/changelog-vX.Y.Z   # a normal PR branch, not a release branch
    # prepend the new section to CHANGELOG.md
    git commit -am "docs(changelog): vX.Y.Z — <headline>"
-   git push -u origin release/vX.Y.Z
+   git push -u origin docs/changelog-vX.Y.Z
    gh pr create --base main --title "docs(changelog): vX.Y.Z" --body "<entry summary>"
    ```
    Poll `gh pr checks` until `check` + `bot-review` settle (see `AGENTS.md`
