@@ -1,0 +1,57 @@
+name: release
+
+# Build the release assets for a tag and attach them to a DRAFT GitHub Release.
+# The `release` skill owns publishing: after this workflow finishes it edits the
+# draft (curated notes + prerelease flag) and verifies the assets. A tag is the
+# only trigger — there is no main/edge job.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # git describe needs the tag history for the version stamp.
+          fetch-depth: 0
+
+      # The justfile builds through `mise exec`; install mise + the pinned
+      # toolchains so CI and local stamps are identical.
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+      - name: Install build toolchains
+        run: mise install go@1.25.0 rust@1.98.0 just
+
+      # `mise install` does not put tools on PATH; run just through mise so the
+      # same pinned toolchains the justfile expects are resolved.
+      - name: Build the sibling set (stamped with the tag)
+        run: VERSION="${GITHUB_REF_NAME}" mise exec just -- just build
+
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          cp target/debug/freehold dist/freehold
+          cp target/release/freehold-console dist/freehold-console
+          cp target/release/runner dist/runner
+          cp target/release/freehold-agent-tools dist/freehold-agent-tools
+          tar -czf dist/migrations.tar.gz migrations
+          (cd dist && sha256sum freehold freehold-console runner freehold-agent-tools migrations.tar.gz > checksums.txt)
+
+      - name: Attach assets to a draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
+          files: |
+            dist/freehold
+            dist/freehold-console
+            dist/runner
+            dist/freehold-agent-tools
+            dist/migrations.tar.gz
+            dist/checksums.txt

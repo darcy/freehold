@@ -7,7 +7,8 @@ import (
 )
 
 // CheckRegistry verifies the registry at path is a valid, loadable store — the
-// 001 migration's postcondition (malformed JSON or an unreadable file errors).
+// check the 001 migration script runs (malformed JSON or an unreadable file
+// errors).
 func CheckRegistry(path string) error {
 	if _, err := OpenRegistry(path); err != nil {
 		return fmt.Errorf("registry not loadable: %w", err)
@@ -19,8 +20,7 @@ func CheckRegistry(path string) error {
 // authoritative registry ADDITIVELY (the 002 migration): a name already in the
 // registry keeps its current row — the registry is authoritative and a stale
 // console pubkey must never clobber it. Idempotent. Returns an error unless the
-// postcondition holds: every console agent with a pubkey is present in the
-// registry.
+// check holds: every console agent with a pubkey is present in the registry.
 func ImportConsoleAgents(reg *Registry, consoleStateDir string) error {
 	st, err := cpstate.Read(consoleStateDir)
 	if err != nil {

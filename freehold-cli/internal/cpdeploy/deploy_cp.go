@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/deploy"
@@ -37,6 +39,13 @@ type DeployCpSpec struct {
 	AgentToolsPubkey *string
 	WorldConfig      *string // cpbuild.Coords JSON (bounds the console as the CP build executor)
 	AgentToolsBinary *string // local freehold-agent-tools binary, shipped so the console's world_build can deploy it
+	// Pin is the version identity to stamp after a successful deploy (install
+	// only). nil on a rebuild/redeploy: build/teardown never promote.
+	Pin *version.Pin
+	// MigrationsDir is the LOCAL dir of shipped <epoch>.sh migration scripts.
+	// DeployCp (install) copies them to the CP and marks them all done; update
+	// copies + runs pending through world_migrate. Empty = none shipped.
+	MigrationsDir *string
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -144,6 +153,189 @@ func shipSmallFile(t Transport, spec *DeployCpSpec, localPath, remoteFinal, step
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// ShipMigrations copies every <epoch>.sh from localDir into
+// <StateDir>/migrations/scripts/ on the CP over the deploy transport. When
+// markDone is set (install), it then touches a completion marker for every
+// shipped script WITHOUT running it — the fresh-install rule: a new world is
+// already at current state. update passes markDone=false and runs pending
+// scripts through world_migrate itself.
+func ShipMigrations(t Transport, spec *DeployCpSpec, localDir string, markDone bool) error {
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".sh") || !isEpoch(strings.TrimSuffix(n, ".sh")) {
+			continue
+		}
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	remoteDir := spec.StateDir + "/migrations/scripts"
+	for _, n := range names {
+		if err := shipSmallFile(t, spec, localDir+"/"+n, remoteDir+"/"+n, "migration "+n); err != nil {
+			return err
+		}
+	}
+	if !markDone {
+		return nil
+	}
+	root := spec.StateDir + "/migrations"
+	cmd := "mkdir -p " + root + " && cd " + remoteDir + " && for f in *.sh; do [ -e \"$f\" ] || continue; : > \"" + root + "/$f\"; done"
+	_, err = execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "mark migrations done", 60)
+	return err
+}
+
+// isEpoch reports whether a basename is a pure decimal epoch.
+func isEpoch(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// StampPin writes the world's version identity to <StateDir>/version.json over
+// the deploy transport (0600). It is the version PROMOTION: install calls it at
+// the end of a deploy, update calls it last (after migrations succeed), and
+// build/teardown never call it. A zero Version is a no-op.
+func StampPin(t Transport, spec *DeployCpSpec, pin version.Pin) error {
+	if pin.Version == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(pin, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("", "fh-version-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return shipSmallFile(t, spec, tmp.Name(), spec.StateDir+"/"+version.FileName, "version.json")
+}
+
+// stopPriorServe kills a previously started serve (if any) and clears its pid
+// so the binary can be overwritten and a fresh instance started.
+func stopPriorServe(t Transport, spec *DeployCpSpec, step string) error {
+	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
+		spec.StateDir, spec.StateDir)
+	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), step, 30)
+	return err
+}
+
+// shipConsoleBins ships the console binary and (when provided) the
+// agent-tools binary into the CP's bin dir. A RUNNING agent-tools serve holds
+// the binary, so it is stopped first or the overwrite fails/size-mismatches.
+func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
+	if err := shipFile(t, spec, spec.BinaryPath,
+		spec.BinDir+"/freehold-console", "console binary"); err != nil {
+		return err
+	}
+	if spec.AgentToolsBinary == nil || *spec.AgentToolsBinary == "" {
+		return nil
+	}
+	atState := filepath.Join(spec.StateDir, "..", "agent-tools")
+	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
+		return err
+	}
+	return shipFile(t, spec, *spec.AgentToolsBinary,
+		spec.BinDir+"/freehold-agent-tools", "agent-tools binary")
+}
+
+// startServe launches the console serve in the guest with the given flag
+// string, waits for /healthz, then confirms the started pid is still alive.
+// Shared by the full deploy and update's lighter redeploy.
+func startServe(t Transport, spec *DeployCpSpec, flags string) (uint32, error) {
+	start := fmt.Sprintf(
+		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
+		spec.BinDir, spec.StateDir, spec.BindAddr, flags, spec.StateDir, spec.StateDir)
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "start control plane", 30)
+	if err != nil {
+		return 0, err
+	}
+	pidStr := strings.TrimSpace(out.Stdout)
+	var pid uint32
+	if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil || pid == 0 {
+		return 0, fmt.Errorf("start did not yield a pid: %q", out.Stdout)
+	}
+	healthy := false
+	var lastErr error
+	for i := 0; i < 15; i++ {
+		probe := fmt.Sprintf("curl -fsS -m 3 http://%s/healthz", spec.BindAddr)
+		_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, probe), "cp healthz", 20)
+		if err == nil {
+			healthy = true
+			break
+		}
+		lastErr = err
+		time.Sleep(2 * time.Second)
+	}
+	if !healthy {
+		return pid, fmt.Errorf("control plane did not answer /healthz on %s within the poll window (last probe error: %v)",
+			spec.BindAddr, lastErr)
+	}
+	alive := fmt.Sprintf("kill -0 %d >/dev/null 2>&1", pid)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, alive), "control plane still alive", 10); err != nil {
+		return pid, fmt.Errorf("control plane answered /healthz but the started process (pid %d) is gone — check %s/serve.log (e.g. address already in use)",
+			pid, spec.StateDir)
+	}
+	return pid, nil
+}
+
+// relayDomain strips the scheme and trailing slash from a relay URL.
+func relayDomain(relayURL string) string {
+	d := strings.TrimPrefix(strings.TrimPrefix(relayURL, "https://"), "http://")
+	return strings.TrimSuffix(d, "/")
+}
+
+// serveFlags builds the console `serve` flag string, shared by the full deploy
+// and update's redeploy so the two can never drift. Returns the flags and the
+// relay domain derived from the URL.
+func serveFlags(spec *DeployCpSpec) (string, string) {
+	domain := relayDomain(spec.RelayURL)
+	var b strings.Builder
+	if len(spec.AdminPubkeys) > 0 {
+		b.WriteString(" --admin-pubkeys " + strings.Join(spec.AdminPubkeys, ","))
+	}
+	if spec.PublicOrigin != nil {
+		b.WriteString(" --public-origin " + *spec.PublicOrigin)
+	}
+	if spec.RelayPubkey != nil && *spec.RelayPubkey != "" {
+		scopeURL := spec.RelayURL
+		if spec.RelayHostIP != nil {
+			scopeURL = fmt.Sprintf("http://%s:3000", *spec.RelayHostIP)
+		}
+		b.WriteString(fmt.Sprintf(" --relay-url %s --relay-pubkey %s --relay-host %s", scopeURL, *spec.RelayPubkey, domain))
+	}
+	if spec.AgentToolsURL != nil && *spec.AgentToolsURL != "" {
+		b.WriteString(" --agent-tools-url " + *spec.AgentToolsURL)
+	}
+	if spec.AgentToolsPubkey != nil && *spec.AgentToolsPubkey != "" {
+		b.WriteString(" --agent-tools-pubkey " + *spec.AgentToolsPubkey)
+	}
+	if spec.WorldConfig != nil && *spec.WorldConfig != "" {
+		b.WriteString(" --world-config " + base64.StdEncoding.EncodeToString([]byte(*spec.WorldConfig)))
+	}
+	return b.String(), domain
 }
 
 // readGuestFile returns a file's bytes from inside the LXC, or nil when absent
@@ -271,116 +463,32 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 	}
 
 	// Stop any PRIOR serve instance before writing over the binary.
-	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
-		spec.StateDir, spec.StateDir)
-	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, stop), "stop prior control plane", 30); err != nil {
+	if err := stopPriorServe(t, spec, "stop prior control plane"); err != nil {
+		return nil, err
+	}
+	// Ship the console + agent-tools binaries through the shared path.
+	if err := shipConsoleBins(t, spec); err != nil {
 		return nil, err
 	}
 
-	// Ship the Go console binary (the CP CLI + web server).
-	if err := shipFile(t, spec, spec.BinaryPath,
-		spec.BinDir+"/freehold-console", "console binary"); err != nil {
-		return nil, err
-	}
-	// Ship the agent-tools binary too, so the console's world_build (cpbuild
-	// deployAgentTools) can bring up the operator toolset itself in the guest.
-	if spec.AgentToolsBinary != nil && *spec.AgentToolsBinary != "" {
-		// A RUNNING agent-tools serve (the world brought it up) holds the
-		// binary — stop it first or the overwrite fails/size-mismatches.
-		atState := filepath.Join(spec.StateDir, "..", "agent-tools")
-		stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
-		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
-			return nil, err
-		}
-		if err := shipFile(t, spec, *spec.AgentToolsBinary,
-			spec.BinDir+"/freehold-agent-tools", "agent-tools binary"); err != nil {
-			return nil, err
-		}
-	}
-
-	adminFlag := ""
-	if len(spec.AdminPubkeys) > 0 {
-		adminFlag = " --admin-pubkeys " + strings.Join(spec.AdminPubkeys, ",")
-	}
-	originFlag := ""
-	if spec.PublicOrigin != nil {
-		originFlag = " --public-origin " + *spec.PublicOrigin
-	}
-	domain := strings.TrimPrefix(strings.TrimPrefix(spec.RelayURL, "https://"), "http://")
-	domain = strings.TrimSuffix(domain, "/")
-	relayPK := spec.RelayPubkey
-	scopeURL := spec.RelayURL
-	if spec.RelayHostIP != nil {
-		scopeURL = fmt.Sprintf("http://%s:3000", *spec.RelayHostIP)
-	}
-	relayFlag := ""
-	if relayPK != nil && *relayPK != "" {
-		relayFlag = fmt.Sprintf(" --relay-url %s --relay-pubkey %s --relay-host %s", scopeURL, *relayPK, domain)
-	}
-	atFlag := ""
-	if spec.AgentToolsURL != nil && *spec.AgentToolsURL != "" {
-		atFlag = fmt.Sprintf(" --agent-tools-url %s", *spec.AgentToolsURL)
-	}
-	if spec.AgentToolsPubkey != nil && *spec.AgentToolsPubkey != "" {
-		atFlag += fmt.Sprintf(" --agent-tools-pubkey %s", *spec.AgentToolsPubkey)
-	}
-	// The world config bounds the console as the CP build executor. Base64 so
-	// the JSON (quotes/spaces) survives single-arg embedding; the console serve
-	// decodes it.
-	worldFlag := ""
-	if spec.WorldConfig != nil && *spec.WorldConfig != "" {
-		worldFlag = " --world-config " + base64.StdEncoding.EncodeToString([]byte(*spec.WorldConfig))
-	}
+	flags, domain := serveFlags(spec)
 	// Pin the relay host into the guest's /etc/hosts. grep -Fq (fixed string):
 	// a regex grep would let '.' match '-' and falsely match the guest's own
 	// dashed hostname (relay-librem-...-relay), skipping the pin forever.
 	if spec.RelayHostIP != nil {
-		host := strings.TrimSuffix(domain, "/")
-		host = strings.Split(host, ":")[0]
+		host := strings.Split(strings.TrimSuffix(domain, "/"), ":")[0]
 		hostsCmd := fmt.Sprintf("grep -Fq \"%s\" /etc/hosts 2>/dev/null || echo \"%s %s\" >> /etc/hosts", host, *spec.RelayHostIP, host)
 		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, hostsCmd), "pin relay host", 30); err != nil {
 			return nil, err
 		}
 	}
 
-	start := fmt.Sprintf(
-		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s%s%s%s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
-		spec.BinDir, spec.StateDir, spec.BindAddr, adminFlag, originFlag, relayFlag, atFlag, worldFlag, spec.StateDir, spec.StateDir)
-	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "start control plane", 30)
-	if err != nil {
+	if _, err := startServe(t, spec, flags); err != nil {
 		return nil, err
-	}
-	pidStr := strings.TrimSpace(out.Stdout)
-	var pid uint32
-	if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil || pid == 0 {
-		return nil, fmt.Errorf("start did not yield a pid: %q", out.Stdout)
-	}
-
-	// Poll /healthz, then kill -0 the pid.
-	healthy := false
-	var lastErr error
-	for i := 0; i < 15; i++ {
-		probe := fmt.Sprintf("curl -fsS -m 3 http://%s/healthz", spec.BindAddr)
-		_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, probe), "cp healthz", 20)
-		if err == nil {
-			healthy = true
-			break
-		}
-		lastErr = err
-		time.Sleep(2 * time.Second)
-	}
-	if !healthy {
-		return nil, fmt.Errorf("control plane did not answer /healthz on %s within the poll window (last probe error: %v)",
-			spec.BindAddr, lastErr)
-	}
-	alive := fmt.Sprintf("kill -0 %d >/dev/null 2>&1", pid)
-	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, alive), "control plane still alive", 10); err != nil {
-		return nil, fmt.Errorf("control plane answered /healthz but the started process (pid %d) is gone — check %s/serve.log (e.g. address already in use)",
-			pid, spec.StateDir)
 	}
 
 	// Read back the box's console identity pubkey.
-	out, err = execToOK(t, proxmox.LxcCmd(spec.LXc,
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc,
 		spec.BinDir+"/freehold-console identity --state-dir "+spec.StateDir), "console identity pubkey", 30)
 	if err != nil {
 		return nil, err
@@ -452,9 +560,10 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		// Same-host only.
 		var oldSubstratePub, newSubstratePub string
 		if adoptedFromPlane {
-			oldSubstratePub, newSubstratePub, err = rotateAdoptedSubstrate(t, spec, runnerDir)
-			if err != nil {
-				return nil, err
+			var rerr error
+			oldSubstratePub, newSubstratePub, rerr = rotateAdoptedSubstrate(t, spec, runnerDir)
+			if rerr != nil {
+				return nil, rerr
 			}
 			if newSubstratePub != "" {
 				if err := hostAuthorizeKey(t, newSubstratePub); err != nil {
@@ -487,6 +596,19 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		grant := fmt.Sprintf("%s/freehold-console grant %s --state-dir %s --pubkey %s",
 			spec.BinDir, runnerName, spec.StateDir, pubkey)
 		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, grant), "self-grant console to co-located runner", 60); err != nil {
+			return nil, err
+		}
+	}
+
+	// Ship the migration scripts and mark them all done (fresh install), then
+	// stamp the version pin. Order: deploy → serve green → scripts → pin.
+	if spec.MigrationsDir != nil && *spec.MigrationsDir != "" {
+		if err := ShipMigrations(t, spec, *spec.MigrationsDir, true); err != nil {
+			return nil, err
+		}
+	}
+	if spec.Pin != nil {
+		if err := StampPin(t, spec, *spec.Pin); err != nil {
 			return nil, err
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/version"
 	"freehold/contract/wire"
 )
 
@@ -255,6 +256,11 @@ type WorldSummary struct {
 	Runners []StatusRunner  `json:"runners,omitempty"`
 	DNS     []StatusDNS     `json:"dns,omitempty"`
 	Facts   json.RawMessage `json:"facts,omitempty"`
+	// Version is the CP's stamped world version identity (version.json).
+	Version version.Pin `json:"version"`
+	// MigrationsPending is the count of migration scripts without a completion
+	// marker on the CP (/api/world).
+	MigrationsPending int `json:"migrations_pending,omitempty"`
 }
 
 // StatusRunner is one CP runner line in the /api/world inventory.

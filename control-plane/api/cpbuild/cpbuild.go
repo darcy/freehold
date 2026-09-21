@@ -1421,41 +1421,27 @@ func cpDestroyDetached(vmid uint32) string {
 // BuildCreateAgentFn returns the create-agent deploy: mint a durable identity
 // on the CP, add it as a relay member, seat it in #freehold, apply its pod
 // through the co-located runner, and hand the minted pubkey to Tools.CreateAgent
-// BuildMigrator wires the CP's verify-gated migration runner (Step 7): a
-// durable ledger at <stateDir>/migrations.json (backed up with the CP plane),
-// running the versioned migration SCRIPTS (platform/migrations/files/<epoch>.sh
-// + <epoch>.verify.sh, OMARCY-style: one timestamped .sh per migration).
-// Each pending migration runs in ascending epoch order through bash on the CP
-// (where the data it operates on lives); done only when its verify gate passes.
-// The scripts receive the durable-plane paths + the freehold-agent-tools binary
-// via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE) — never argv, so no
-// credential crosses the audit.
+// BuildMigrator wires the CP's migration runner: the Omarchy-style scripts that
+// install/update shipped into <stateDir>/migrations/scripts/<epoch>.sh, with
+// completion markers at <stateDir>/migrations/<epoch>.sh. Each pending script
+// runs in ascending epoch order with `bash -euo pipefail` on the CP (where the
+// data it operates on lives); success marks it done, failure stops the queue
+// unmarked. The scripts receive the durable-plane paths + the agent-tools binary
+// via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE / STATE_DIR) — never
+// argv, so no credential crosses the audit. A fresh install runs MarkAll
+// instead, so this only ever applies scripts on update.
 func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 	return func() ([]migrations.Result, error) {
-		st, err := migrations.Open(filepath.Join(spec.StateDir, "migrations.json"))
-		if err != nil {
-			return nil, err
-		}
-		scripts, err := migrations.Scripts()
-		if err != nil {
-			return nil, fmt.Errorf("enumerate migration scripts: %w", err)
-		}
+		root := filepath.Join(spec.StateDir, "migrations")
 		binDir, _ := spec.cpGuestDirs()
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
 			"REGISTRY="+filepath.Join(spec.StateDir, "registry.json"),
 			"CONSOLE_STATE="+consoleStateDir,
+			"STATE_DIR="+spec.StateDir,
 		)
-		run := func(epoch, body string) error {
-			dir := filepath.Join(spec.StateDir, "migrations", "files")
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				return err
-			}
-			path := filepath.Join(dir, epoch+".sh")
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-				return err
-			}
-			cmd := exec.Command("bash", path)
+		run := func(name, path string) error {
+			cmd := exec.Command("bash", "-euo", "pipefail", path)
 			cmd.Env = runEnv
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -1463,11 +1449,7 @@ func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 			}
 			return nil
 		}
-		all := make([]migrations.Migration, 0, len(scripts))
-		for _, s := range scripts {
-			all = append(all, s.Migration(func(body string) error { return run(s.Epoch, body) }))
-		}
-		return st.Run(all)
+		return migrations.Run(root, run)
 	}
 }
 

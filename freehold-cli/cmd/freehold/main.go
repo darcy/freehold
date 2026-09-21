@@ -41,7 +41,8 @@ CLI:
     freehold teardown  destroy the managed world for the chosen profile (confirm first)
     freehold uninstall remove the control plane + world (data kept by default)
     freehold status    show the world inventory from the CP
-    freehold update    run the CP's world update/migrate stage
+    freehold update    update the world's CP (release assets / ref / dev), run
+                       pending migrations, repin the version
     freehold exec <target> "<cmd>"   run a command through the runner
     ... (see `+"`freehold <subcommand> --help`"+`)`)
 }

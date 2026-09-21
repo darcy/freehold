@@ -77,7 +77,16 @@ web/API or were intentionally superseded.
 
 The two migrations now carry epoch names (`1799900000`, `1799910000`) instead of
 the old `001-…`/`002-…`. On a world that already ran them under the old names,
-they re-run under the new names once — safe because both are idempotent +
-verify-gated (registry-loadable; import-console additive). A fresh teardown
-world (the PR's verification path) is unaffected.
+they re-run under the new names once — safe because both are idempotent
+(registry-loadable; import-console additive). A fresh teardown world is
+unaffected.
 **Status:** informational; no action unless a long-lived world complains.
+
+## E — Release workflow untested until a real tag
+
+`.github/workflows/release.yml` (build the sibling set, package
+`migrations.tar.gz`, `checksums.txt`, attach to a draft release) can only run on
+a `v*` tag push, so the `mise install …` + `mise exec just -- just build` path
+has never executed. Cut a throwaway `vX.Y.Z-rc.N` tag **before** the first real
+release to prove the assets + checksums upload and a box can pull + verify them.
+**Status:** must do once before the first real release.

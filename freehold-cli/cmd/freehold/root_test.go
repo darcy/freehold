@@ -55,7 +55,7 @@ func TestVerbSurface(t *testing.T) {
 	for _, gone := range []string{
 		"bootstrap", "world", "relay-member", "console-login", "relay-profile",
 		"relay-join", "relay-setup", "delegate", "delegate-peer", "memory",
-		"demo", "readiness",
+		"demo", "readiness", "channel",
 	} {
 		if have[gone] {
 			t.Errorf("command %q must be removed", gone)

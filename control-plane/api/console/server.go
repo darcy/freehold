@@ -13,11 +13,13 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/relay"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
+	"freehold/platform/migrations"
 )
 
 // Server is the Go console: the loopback admin/ops web surface (web.rs port).
@@ -44,12 +46,24 @@ type Server struct {
 	// the authoritative agent registry (registry.json) + world facts (facts.json)
 	// that /api/world serves publicly so every box sees the CP's status.
 	AgentToolsDir string
+	// Version is the world's stamped version identity, read from
+	// <StateDir>/version.json at startup. Zero when unstamped.
+	Version version.Pin
 	// Builder is the CP-owned world bring-up engine (cpbuild.Spec): the console
 	// becomes the CP build executor — the operator-scoped /api/world-build route
 	// drives it through the co-located runner, so a thin login box triggers the
 	// CP to bring up the world WITHOUT depending on the relay roster (which
 	// agent-tools needs) or on box-one hosting it. nil = world_build unsupported.
 	Builder *cpbuild.Spec
+}
+
+// versionPin re-reads <StateDir>/version.json per call so an update's repin is
+// reflected without a serve restart; falls back to the startup snapshot.
+func (s *Server) versionPin() version.Pin {
+	if p, err := version.Read(filepath.Join(s.StateDir, version.FileName)); err == nil && p.Version != "" {
+		return p
+	}
+	return s.Version
 }
 
 // ServeHTTP routes /api/* (the Rust axum router equivalent).
@@ -63,7 +77,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/healthz" && method == http.MethodGet {
-		w.Write([]byte("ok"))
+		pin := s.versionPin()
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(map[string]interface{}{
+			"status":  "ok",
+			"version": pin.Version,
+			"channel": pin.Channel,
+			"commit":  pin.Commit,
+		})
+		w.Write(body)
 		return
 	}
 
@@ -315,6 +337,12 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
 		"services":           services,
+		"version":            s.versionPin(),
+	}
+	// Pending migration count (scripts without a completion marker) so a box's
+	// `update --check` / `status` can report it without running anything.
+	if n, err := migrations.PendingCount(filepath.Join(s.StateDir, "migrations")); err == nil {
+		payload["migrations_pending"] = n
 	}
 	// Fold the single-inventory status (agents + runners + dns + facts) served
 	// on the same route the /mcp world_status tool shares — the authoritative

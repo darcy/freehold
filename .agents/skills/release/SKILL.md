@@ -75,22 +75,35 @@ history.
 5. **Stop. The operator merges.** Never merge the release PR yourself (see `AGENTS.md`
    "Pull requests"). Wait for it to land on `main`.
 
-6. **Tag the merged commit + publish the Release.**
+6. **Tag the merged commit — CI builds the assets.**
    ```bash
    git checkout main && git pull --ff-only
    git rev-parse HEAD           # must be the merged release commit
    git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"
    git push origin vX.Y.Z
-   gh release create vX.Y.Z \
+   ```
+   The tag push triggers `.github/workflows/release.yml`, which builds the
+   sibling set + `migrations.tar.gz` + `checksums.txt` and attaches them to a
+   **draft** GitHub Release. Wait for that run to finish before publishing:
+   ```bash
+   gh run list --workflow=release.yml --limit 5   # until the vX.Y.Z run is completed
+   ```
+   If the run fails, fix forward with a new commit + a NEW tag (never move a
+   published tag) or ask the operator — do not publish a release without assets.
+
+7. **Publish the draft with curated notes + verify the assets.**
+   ```bash
+   gh release edit vX.Y.Z \
+     --draft=false \
      --title "vX.Y.Z — <one-line headline>" \
      --notes-file /tmp/opencode/release_vX.Y.Z.md \
-     --target main
+     $( [[ vX.Y.Z == *-rc.* ]] && echo --prerelease )
+   gh release view vX.Y.Z --json tagName,isDraft,isPrerelease,assets
    ```
    The notes file is the **distilled** entry (~5–10 headline bullets, never the
-   changelog text verbatim).
-
-7. **Verify** the release URL prints and `gh release view vX.Y.Z` shows the tag on the
-   merged `main` commit.
+   changelog text verbatim). Confirm the tag is on the merged `main` commit and
+   every asset (`freehold`, `freehold-console`, `runner`,
+   `freehold-agent-tools`, `migrations.tar.gz`, `checksums.txt`) is present.
 
 ## Hard rules
 

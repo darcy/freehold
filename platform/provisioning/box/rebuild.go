@@ -36,6 +36,7 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/bootstrap"
@@ -85,6 +86,10 @@ type Flags struct {
 	ManageDNSExplicit bool
 	ManageDNS         bool
 	Yes               bool
+	// Version/Channel are the version identity recorded on the CP at install.
+	// Empty = this build's own (version.Version + derived channel).
+	Version string
+	Channel string
 }
 
 // Bins are the resolved sibling binary paths. Go has no
@@ -184,6 +189,50 @@ func (e *Engine) HostExecFunc() provisioning.ExecFunc {
 		}
 		return &client.ExecOutcome{Stdout: out, ExitCode: &code}, nil
 	}
+}
+
+// FlagsFromConfig rebuilds the box.Flags a remote-world verb (update) needs
+// from a recorded profile config, so it can drive the engine without re-asking
+// the install questions. The operator identity + host access come from the
+// profile's recorded state.
+func FlagsFromConfig(cfg *config.Config) Flags {
+	f := Flags{
+		Name:           cfg.Name,
+		Host:           cfg.Host,
+		Target:         cfg.Runner.Target,
+		Addr:           cfg.Runner.Addr,
+		OperatorPubkey: cfg.OperatorPubkey,
+		ConfigPath:     config.ConfigPath(),
+		RelayDomain:    cfg.RelayHost(),
+		CpDomain:       cfg.CPHost(),
+	}
+	if cfg.Proxy.Ip != nil {
+		f.ProxyIP = *cfg.Proxy.Ip
+	}
+	if cfg.OperatorIdentity != nil {
+		f.OperatorIdentity = *cfg.OperatorIdentity
+	}
+	return f
+}
+
+// ResolveMigrationsDir finds the top-level migrations/ dir for the running
+// binary: beside it (a release asset layout) or up to two parents up (a
+// target/debug build in the repo tree). "" when absent — the deploy then ships
+// no scripts rather than failing.
+func ResolveMigrationsDir() string {
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(self)
+	for i := 0; i < 3; i++ {
+		p := filepath.Join(dir, "migrations")
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			return p
+		}
+		dir = filepath.Dir(dir)
+	}
+	return ""
 }
 
 // NewEngine builds the provisioning engine from flags + resolved sibling
@@ -1576,6 +1625,17 @@ func (e *Engine) stageDeployCp() error {
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", e.Bins.ReleaseAgentTools,
+		// install stamps the version pin (its build identity, or the explicit
+		// --version/--channel). A rebuild/re-adopt is still an install run, so
+		// this is the promotion point; `freehold build` never reaches here.
+		"--version", installVersion(e.F),
+		"--channel", installChannel(e.F),
+		"--commit", version.Commit,
+	}
+	// Ship the repo/release migrations dir so install records every migration
+	// done (Omarchy fresh-install rule). Absent dir = the deploy still succeeds.
+	if md := ResolveMigrationsDir(); md != "" {
+		args = append(args, "--migrations-dir", md)
 	}
 	// The relay signing pubkey is the /api/world trust anchor a fresh login box
 	// seeds — read it from the relay's own compose .env (deterministic, unlike
@@ -1610,6 +1670,105 @@ func (e *Engine) stageDeployCp() error {
 	}
 	_, err = e.selfStage("deploy-cp", args)
 	return err
+}
+
+// RedeployCp replaces the CP's binaries from the given Bins, copies the new
+// release's migration scripts (migrationsDir), and restarts serve — the update
+// path. It reuses the deploy-cp coordinates but runs in --redeploy mode: no
+// runner identity adoption, no secret merge, no substrate rotation, and no
+// version promotion (update stamps the pin itself, LAST).
+func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
+	vmid, err := e.findLxcVmidExact("cp")
+	if err != nil {
+		return err
+	}
+	mounts := e.guestMounts(vmid)
+	var cpRoot string
+	if len(mounts) > 0 {
+		cpRoot = mounts[len(mounts)-1]
+	}
+	args := []string{"deploy-cp",
+		"--transient", "--redeploy",
+		"--host", e.F.Host,
+		"--target", e.F.Target,
+		"--lxc", strconv.FormatUint(uint64(vmid), 10),
+		"--relay-url", "https://" + e.F.RelayDomain,
+		"--binary", bins.ReleaseConsole,
+		"--runner-binary", bins.ReleaseRun,
+		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
+		"--operator-pubkey", e.F.OperatorPubkey,
+		"--agent-tools-binary", bins.ReleaseAgentTools,
+	}
+	if rpk := e.relaySigningPubkey(); rpk != "" {
+		args = append(args, "--relay-pubkey", rpk)
+	}
+	if cfg, _ := config.Load(e.F.ConfigPath); cfg != nil && cfg.AgentToolsURL != "" && cfg.AgentToolsPubkey != "" {
+		args = append(args, "--agent-tools-url", cfg.AgentToolsURL, "--agent-tools-pubkey", cfg.AgentToolsPubkey)
+	}
+	if cfg, _ := config.Load(e.F.ConfigPath); cfg != nil && cfg.Lxc.Relay.Ip != nil {
+		args = append(args, "--relay-host-ip", config.StripCIDR(*cfg.Lxc.Relay.Ip))
+	}
+	if cpRoot != "" {
+		args = append(args, "--state-dir", cpRoot+"/control-plane", "--bin-dir", cpRoot+"/bin")
+	}
+	if cfg, _ := config.Load(e.F.ConfigPath); cfg != nil {
+		if wc := e.worldConfigJSON(cfg); wc != "" {
+			args = append(args, "--world-config", wc)
+		}
+	}
+	// The new release's migration scripts: Redeploy copies them (unmarked) so
+	// world_migrate can run what's pending. Without this the migrate-on-update
+	// step silently does nothing.
+	if migrationsDir != "" {
+		args = append(args, "--migrations-dir", migrationsDir)
+	}
+	_, err = e.selfStage("deploy-cp", args)
+	return err
+}
+
+// StampVersionPin writes the CP's version pin through the self-staged
+// stamp-version command — the LAST step of an update, so a failed migration
+// never promotes the version.
+func (e *Engine) StampVersionPin(pin version.Pin) error {
+	vmid, err := e.findLxcVmidExact("cp")
+	if err != nil {
+		return err
+	}
+	mounts := e.guestMounts(vmid)
+	stateDir := "/srv/data/cp/control-plane"
+	if len(mounts) > 0 {
+		stateDir = mounts[len(mounts)-1] + "/control-plane"
+	}
+	args := []string{"stamp-version",
+		"--transient",
+		"--host", e.F.Host,
+		"--target", e.F.Target,
+		"--lxc", strconv.FormatUint(uint64(vmid), 10),
+		"--state-dir", stateDir,
+		"--version", pin.Version,
+		"--channel", pin.Channel,
+		"--commit", pin.Commit,
+	}
+	_, err = e.selfStage("stamp-version", args)
+	return err
+}
+
+// installVersion is the version recorded on the CP at install: the explicit
+// --version, else this build's own.
+func installVersion(f Flags) string {
+	if f.Version != "" {
+		return f.Version
+	}
+	return version.Version
+}
+
+// installChannel is the channel recorded at install: the explicit --channel,
+// else derived from the version.
+func installChannel(f Flags) string {
+	if f.Channel != "" {
+		return f.Channel
+	}
+	return version.Channel(installVersion(f))
 }
 
 // worldConfigJSON renders the console's build-executor coords (cpbuild.Coords)

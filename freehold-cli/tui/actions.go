@@ -679,8 +679,12 @@ func (m *Model) cpWorldSummary() string {
 	if m.cpWorld == nil {
 		return "healthy (world facts waiting on auto-login)"
 	}
-	return fmt.Sprintf("healthy — %d services · %d dns · %d runners · %d agents",
+	s := fmt.Sprintf("healthy — %d services · %d dns · %d runners · %d agents",
 		len(m.cpWorld.Services), len(m.DNS), len(m.Runners), len(m.Agents))
+	if v := m.cpWorld.Version.Version; v != "" {
+		s += " · " + v
+	}
+	return s
 }
 
 func (m *Model) cpRelayStatus() (string, bool) {

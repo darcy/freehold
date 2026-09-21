@@ -206,7 +206,7 @@ func TestWorldStatusAndTeardown(t *testing.T) {
 		t.Fatalf("world_teardown must keep the durable registry, left %d agents", got)
 	}
 
-	// world_migrate runs the bound verify-gated migration runner.
+	// world_migrate runs the bound migration runner.
 	migrated := false
 	srv.Tools.Migrate = func() ([]migrations.Result, error) {
 		migrated = true

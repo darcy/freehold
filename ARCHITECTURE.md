@@ -255,17 +255,18 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     runner re-reads its signed 39002 roster per call, so the grant lands
     without a restart (missing credential fails closed; agents are denied with
      `-32003`, since a grant hands direct exec access to the runner). `world_migrate` runs
-     `platform/migrations` — the CP's verify-gated migration runner (durable
-     ledger at `/srv/data/cp/migrations.json`, a migration is done only when
-     its postcondition verifies), for versioned config/prompt/repair changes
-     that don't have clean desired-state semantics. Migrations are **versioned
-     script files** (Omarchy's `<epoch>.sh` convention — one timestamped shell
-     file per migration, embedded under `platform/migrations/files/`, run in
-     ascending order through `bash` on the CP, each with an optional
-     `<epoch>.verify.sh` postcondition gate). The agent-registry reconcile (the
-     console state.json `agents` map folded into the authoritative
-     `registry.json`) rides that runner as a script migration, driven by the
-     `freehold-agent-tools registry import-console` subcommand.
+     `platform/migrations` — the CP's one-time repair/catch-up scripts for
+     versioned config/prompt/repair changes that don't have clean desired-state
+     semantics. Migrations are **versioned script files** (Omarchy's `<epoch>.sh`
+     convention — one timestamped shell file per migration, shipped to the CP by
+     `install`/`update`, run in ascending order with `bash -euo pipefail`).
+     Completion is an Omarchy-style **marker file** named for the script
+     (`<stateDir>/migrations/<epoch>.sh`, scripts in `migrations/scripts/`); a
+     fresh install marks every shipped script done without running it, and a
+     failure stops the queue unmarked. The agent-registry reconcile (the console
+     state.json `agents` map folded into the authoritative `registry.json`) rides
+     that runner as a script migration, driven by the `freehold-agent-tools
+     registry import-console` subcommand.
 
 *   **`platform/provisioning/box` is the shared provisioning engine.**
     `install`'s wizard → `box.Flags` → `box.NewEngine` → `box.RunBootstrap`
@@ -420,9 +421,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `provider.Install()`; the composition roots (`freehold-cli/`,
     `control-plane/`) decide the sequence and inject the provider.
 
-*   **`platform/migrations/`** is the verify-gated migration runner over
-    versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed
-    → the CP durable plane, run ascending via `bash`); the CP-owned
+*   **`platform/migrations/`** enumerates the CP's shipped migration scripts
+    (`<stateDir>/migrations/scripts/<epoch>.sh`) and tracks completion with
+    marker files named for the script (no embed, ledger, or verify gate), run
+    ascending via `bash`; the CP-owned
     build's IaC is the Terraform module embedded in
     **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
     box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s
@@ -669,6 +671,37 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 *   **The agent MUST verify every `SKILL.md` command** on loopback (e.g.
     `127.0.0.1:3000`) against the `go test ./...` suite before it
     documents that command; **don't guess from prose** — probe first.
+
+### Versions, channels, and updates
+
+*   **A version exists only at release** — a `CHANGELOG.md` entry, an annotated
+    `vX.Y.Z` tag, and a GitHub Release with binary assets (`freehold`,
+    `freehold-console`, `runner`, `freehold-agent-tools`, `migrations.tar.gz`,
+    `checksums.txt`). `0.x.y` is pre-MVP; `vX.Y.Z-rc.N` is the only prerelease
+    vocabulary.
+*   **The build stamps its identity** (`contract/version`: `Version`/`Commit`
+    via `-ldflags`, the runner's `build.rs` into its MCP handshake); the
+    justfile computes `git describe`, CI passes the tag.
+*   **The CP carries a version pin** at `<stateDir>/version.json`
+    (`{version, channel, commit}`). `install`/`update` write it; `serve` only
+    reads it (surfaced on `/healthz` JSON, `/api/world`, `world_status`, and
+    `freehold status`); `build`/`teardown` never promote it.
+*   **Channels** are `stable` (newest non-prerelease tag), `rc` (newest
+    `vX.Y.Z-rc.N`), and `dev` (local tree); any untagged ref is `--ref`/`--sha`
+    (no `edge` channel). The channel is a parameter, not a verb: `install
+    --channel` seeds it and `update --stable|--rc|--dev` re-stamps it to the
+    source it deployed; `freehold status` shows it.
+*   **`freehold update`** is remote-world only (never the local CLI): resolve
+    source → acquire (release assets sha256-verified, or sandbox clone+build
+    with the box's toolchain) → redeploy the CP's binaries → copy migration
+    scripts → run pending → repin the version last. `--check` reports without
+    changing anything; thin boxes use the transient root-SSH door.
+*   **Migrations are scripts, never compiled in** — top-level
+    `migrations/<epoch>.sh` (POSIX-sh, no shebang, `0644`), shipped to the CP
+    and run with `bash -euo pipefail`; completion is an Omarchy-style marker
+    file named for the script (`<stateDir>/migrations/<epoch>.sh`). A fresh
+    install **marks every shipped script done** without running it; scripts only
+    run on update. There are no reverse migrations (a named gap).
 
 ## Build plan (chunked)
 
