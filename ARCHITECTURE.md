@@ -255,17 +255,18 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     runner re-reads its signed 39002 roster per call, so the grant lands
     without a restart (missing credential fails closed; agents are denied with
      `-32003`, since a grant hands direct exec access to the runner). `world_migrate` runs
-     `platform/migrations` — the CP's verify-gated migration runner (durable
-     ledger at `/srv/data/cp/migrations.json`, a migration is done only when
-     its postcondition verifies), for versioned config/prompt/repair changes
-     that don't have clean desired-state semantics. Migrations are **versioned
-     script files** (Omarchy's `<epoch>.sh` convention — one timestamped shell
-     file per migration, embedded under `platform/migrations/files/`, run in
-     ascending order through `bash` on the CP, each with an optional
-     `<epoch>.verify.sh` postcondition gate). The agent-registry reconcile (the
-     console state.json `agents` map folded into the authoritative
-     `registry.json`) rides that runner as a script migration, driven by the
-     `freehold-agent-tools registry import-console` subcommand.
+     `platform/migrations` — the CP's one-time repair/catch-up scripts for
+     versioned config/prompt/repair changes that don't have clean desired-state
+     semantics. Migrations are **versioned script files** (Omarchy's `<epoch>.sh`
+     convention — one timestamped shell file per migration, shipped to the CP by
+     `install`/`update`, run in ascending order with `bash -euo pipefail`).
+     Completion is an Omarchy-style **marker file** named for the script
+     (`<stateDir>/migrations/<epoch>.sh`, scripts in `migrations/scripts/`); a
+     fresh install marks every shipped script done without running it, and a
+     failure stops the queue unmarked. The agent-registry reconcile (the console
+     state.json `agents` map folded into the authoritative `registry.json`) rides
+     that runner as a script migration, driven by the `freehold-agent-tools
+     registry import-console` subcommand.
 
 *   **`platform/provisioning/box` is the shared provisioning engine.**
     `install`'s wizard → `box.Flags` → `box.NewEngine` → `box.RunBootstrap`
@@ -420,9 +421,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `provider.Install()`; the composition roots (`freehold-cli/`,
     `control-plane/`) decide the sequence and inject the provider.
 
-*   **`platform/migrations/`** is the verify-gated migration runner over
-    versioned script files (`files/<epoch>.sh` + `<epoch>.verify.sh`, go:embed
-    → the CP durable plane, run ascending via `bash`); the CP-owned
+*   **`platform/migrations/`** enumerates the CP's shipped migration scripts
+    (`<stateDir>/migrations/scripts/<epoch>.sh`) and tracks completion with
+    marker files named for the script (no embed, ledger, or verify gate), run
+    ascending via `bash`; the CP-owned
     build's IaC is the Terraform module embedded in
     **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
     box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s

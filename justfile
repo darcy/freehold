@@ -41,7 +41,11 @@ install: build
     install -m 755 target/release/freehold-console ~/.cargo/release/freehold-console
     install -m 755 target/release/runner ~/.cargo/release/runner
     install -m 755 target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
-    @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release)"
+    # The migration scripts, where box.ResolveMigrationsDir finds them for an
+    # INSTALLED CLI (~/.cargo/migrations is a parent of ~/.cargo/bin/freehold).
+    # Without this `freehold install` ships no scripts and never marks them done.
+    rm -rf ~/.cargo/migrations && mkdir -p ~/.cargo/migrations && cp -f migrations/*.sh ~/.cargo/migrations/
+    @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release + ~/.cargo/migrations)"
 
 # Verify every sibling `box.ResolveBins` requires is present (AGENTS.md's full
 # binary set). One list, so the gate can't silently lag the ResolveBins set.
