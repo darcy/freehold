@@ -30,6 +30,65 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
+## [0.7.0-rc.1] — versioned updates: release assets, channels, and script migrations
+
+A world now knows exactly what version it runs, any box can query it, and
+`freehold update` moves it to another version — pulling release assets for a
+tagged release or building an untagged ref — then runs migrations and repins.
+
+### Added
+
+-   **Queryable version pin.** `contract/version` embeds `Version`/`Commit`
+    (the justfile computes `git describe`; CI passes the tag) and the runner
+    stamps its own into the MCP handshake. `freehold --version` and
+    `freehold-console version` report it. The CP carries
+    `<stateDir>/version.json` (`{version, channel, commit}`), re-read per
+    request and surfaced on `/healthz` (JSON), `/api/world`, `world_status`,
+    `freehold status`, and the TUI.
+-   **`freehold update`** (remote-world only): resolve a source (the CP's
+    recorded channel, or `--stable`/`--rc`/`--dev`/`--ref`/`--sha`) → acquire
+    (release assets downloaded + sha256-verified, or a sandbox/local build with
+    the box's toolchain) → redeploy the CP's binaries → copy migration scripts →
+    run pending → repin the version **last**, so a failed migration never
+    promotes. `--check` reports the available version and pending count; a lock
+    serializes updates; thin boxes use the transient root-SSH door.
+-   **Channels** — `stable` (newest non-prerelease tag), `rc` (newest
+    `vX.Y.Z-rc.N`), `dev` (local tree); any untagged ref is `--ref`/`--sha`.
+    `install --channel/--version` seeds the pin; `update` re-stamps it to the
+    source it deployed.
+-   **Release assets** — `.github/workflows/release.yml` (tag `v*` only) builds
+    the sibling set via the justfile, packages `migrations.tar.gz`, writes
+    `checksums.txt`, and attaches them to a draft GitHub Release; the `release`
+    skill publishes it.
+-   **Script migrations** — top-level `migrations/<epoch>.sh` (Omarchy-style:
+    POSIX-sh, no shebang, `bash -euo pipefail`, ascending, stop-on-failure)
+    with completion marker files named for the script. A fresh install marks
+    every shipped script done without running it; scripts only run on update.
+-   **Departments renamed** to Network, Data, Compute, and AI (from
+    Security/Vault/Agent-ops/Compute), resolving the collision with the box's
+    local agent-ops identity; the CPA prompt now names them and carries its
+    delegation duty.
+
+### Changed
+
+-   `install`/`deploy-cp` stamp the version pin; `build`/`teardown` operate
+    within the stamp already on the CP and never promote it.
+-   The release contract is locked: a version exists only at release (CHANGELOG
+    entry + annotated tag + GitHub Release), written at release time as the net
+    difference from the previous release.
+-   No `freehold migrate` verb and no `freehold channel` verb — the channel is
+    an install/update parameter.
+
+### Fixed
+
+-   The runner reports the release version in its handshake, not the crate
+    default.
+
+### Removed
+
+-   The verify-gated migration ledger (`migrations.json`) and the `.verify.sh`
+    postcondition gate; migration scripts are shipped, not embedded.
+
 ## [0.6.18] — verb refactor: dir-per-verb command layout
 
 The deferred 5d layout lands. `freehold-cli/` is now one package per verb
