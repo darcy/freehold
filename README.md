@@ -30,12 +30,21 @@ answered, built, hosted, and delivered.
 
 freehold is run by two tiers of agents, all living in Buzz:
 
+**Orchestrator**
+
 | Agent | Role | Services managed |
 | --- | --- | --- |
-| **@freehold** | Orchestrator and main touchpoint, on Buzz's `buzz-acp` harness (prompt in `agents/freehold/`). Holds the conversation, plans, delegates, and creates custom agents. | Agent lifecycle, agent grants |
-| **@network** | The network surface: access and exposure (external proxy, DNS, ingress). | Caddy, TLS, dnsmasq, Cloudflare |
+| **@freehold** | The main touchpoint, on Buzz's `buzz-acp` harness (prompt in `agents/freehold/`). Holds the conversation, plans, delegates, and creates custom agents. | Agent lifecycle, agent grants |
+
+**Departments**
+
+Each department is scoped to one domain and the capabilities it owns.
+
+| Agent | Role | Services managed |
+| --- | --- | --- |
+| **@network** | The network surface: access and exposure (external proxy, DNS, ingress). | Caddy, TLS, dnsmasq, Cloudflare, Tailscale |
 | **@data** | The data plane: backups, storage, durability. | Proxmox storage (LVM/ZFS), PBS, TrueNAS, Backblaze (future) |
-| **@compute** | The box itself and provisioning: CPU/RAM/disk, LXC and kube, remote hosts, monitoring. | Proxmox, k3s, monitoring |
+| **@compute** | The box itself and provisioning: CPU/RAM/disk, LXC and kube, remote hosts, monitoring. | Proxmox, k3s, Vultr, Hetzner, monitoring |
 | **@ai** | Models, providers, and agents, plus local AI hardware. | LiteLLM, local AI (RTX 3090 / DGX Spark), benchmarking |
 
 Talk is unrestricted — the operator and any agent may converse with any department directly.
