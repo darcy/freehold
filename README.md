@@ -1,24 +1,11 @@
 # freehold
 
-*Reclaim the future we were promised.* An open-source appliance — one-command install,
-AI-agent-operated — that lands a Proxmox VE / VPS + Kubernetes stack with Buzz Relay as the
-control plane and a skill framework that installs and configures self-hosted OSS. The agent
-is the wall-breaker: you don't manage servers, you *ask*.
-
-The current *released* version is the top entry in `CHANGELOG.md` (equivalently the latest
-`v*` tag; never restated here). That file also records the history of how this plan got here.
-
-**Status:** the engine room (identity, secret provisioner, MCP runner primitive, SSH/Vultr/
-B2 connectors, coarse grants, local admin/ops console) is live and hermetic-tested. The
-management relay is live: bootstrap-provisioned LXCs under a domain identity, NIP-98 console
-auth, encrypted relay-persisted agent memory, delegation, and the runner lifecycle
-(runners-as-NIP-29-channels) all verified against a real Buzz relay with no custom kinds or
-relay patch. The CPA is a live, talkable Buzz agent: the operator names it at
-install, and it deploys as a k3s Pod running Buzz's `buzz-acp` harness with a
-dedicated create/grant/manage-agent toolset (Chunk 4) that it now drives
-directly from conversation — it survives a full rebuild and creates new
-agents itself when asked in Buzz. The Backblaze B2 connector is
-hermetic-verified; a live account test is still open.
+freehold is an open-source appliance that is operated by AI agents. It lands a full
+self-hosted stack on a Proxmox VE host or VPS — a self-hosted
+[Buzz](https://github.com/block/buzz) relay as its hub, Kubernetes, reverse proxy and TLS,
+and its own control plane. An Orchestrator and four department agents — Network, Data,
+Compute, and AI — run it and create custom agents on request. Whatever you want can be
+answered, built, hosted, and delivered.
 
 ## Design in one paragraph
 
