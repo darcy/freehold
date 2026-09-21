@@ -33,16 +33,24 @@ If the host or credentials aren't available, do **not** fake it: leave the Proxm
 ## Workflow
 
 1. **Restore the assets into a `ResolveBins`-shaped layout** so the pre-release binaries are
-   what gets installed (not a local `just build`):
+   what gets installed (not a local `just build`). `ResolveBins` checks *paths*, not build
+   profile: it wants `freehold-console` + `runner` beside the CLI, and the trio under
+   `../release/`. The download already lands every binary in `bin/`, so only the `release/`
+   copies are missing — stage them and confirm the full set:
    ```bash
    tag=<vX.Y.Z>
    dir=/tmp/opencode/pve-e2e-$tag && rm -rf "$dir" && mkdir -p "$dir/bin" "$dir/release"
-   gh release download "$tag" -D "$dir/bin"
+   gh release download "$tag" -D "$dir/bin"   # puts freehold, freehold-console, runner,
+                                              # freehold-agent-tools + migrations.tar.gz in bin/
    (cd "$dir/bin" && sha256sum -c checksums.txt)        # every asset verifies
    tar -xzf "$dir/bin/migrations.tar.gz" -C "$dir/bin"  # -> bin/migrations/
    for b in freehold-console runner freehold-agent-tools; do
      install -m 755 "$dir/bin/$b" "$dir/release/$b"      # ResolveBins wants ../release/
    done
+   # every sibling ResolveBins requires must exist, or `install` fails before it starts:
+   test -x "$dir/bin/freehold-console" && test -x "$dir/bin/runner" \
+     && test -x "$dir/release/freehold-console" && test -x "$dir/release/runner" \
+     && test -x "$dir/release/freehold-agent-tools" && echo "sibling set ok"
    fh="$dir/bin/freehold"                                # the release CLI under test
    ```
 
