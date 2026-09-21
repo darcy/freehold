@@ -30,7 +30,7 @@ See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
 
-## [0.7.0-rc.2] — versioned updates: release assets, channels, and script migrations
+## [0.7.0] — versioned updates: release assets, channels, and script migrations
 
 A world now knows exactly what version it runs, any box can query it, and
 `freehold update` moves it to another version — pulling release assets for a
@@ -81,6 +81,14 @@ tagged release or building an untagged ref — then runs migrations and repins.
 
 ### Fixed
 
+-   `freehold update` against an edge-down or LAN-only world: console login
+    prefers the https edge and falls back to the CP's LAN IP (the signed login
+    is never downgraded to plaintext by default), guest listing swaps in the
+    transient root-SSH provider, and a running console/agent-tools is stopped
+    by its resolved binary name before replacement.
+-   Agent-tools restart waits for `/mcp` to rebind, and an empty `--cpa-name`
+    can no longer swallow the following flag (e.g. `--owner-pubkey`) in its
+    serve argv.
 -   The runner reports the release version in its handshake, not the crate
     default.
 
