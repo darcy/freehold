@@ -262,11 +262,12 @@ func (s *Spec) worldDNS() error {
 
 // pointGuestsAtResolver pct-sets each guest's nameserver to the CP resolver and
 // rewrites its resolv.conf now (pct only regenerates it at the next boot). It is
-// called EARLY — before the terraform services phase — because the litellm/caddy
-// image pulls need working DNS, and a freshly booted guest otherwise sits on
-// DHCP/public resolvers that intermittently fail containerd's lookups
-// (EAI_AGAIN). worldDNS calls it again (idempotent) alongside the record
-// registration.
+// called by worldDNS, which the build runs EARLY — before the terraform services
+// phase — because the litellm/caddy image pulls need working DNS, and a freshly
+// booted guest otherwise sits on DHCP/public resolvers that intermittently fail
+// containerd's lookups (EAI_AGAIN). The resolver must already be installed by the
+// time this points guests at it (worldDNS registers the records first, which
+// installs and reloads dnsmasq).
 func (s *Spec) pointGuestsAtResolver() error {
 	searchBase := s.guestSearchBase()
 	router := s.guestNameserver()
@@ -1154,14 +1155,19 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			return "", fmt.Errorf("world-build resolve guests: %w", err)
 		}
 		spec.refreshGuestIPs()
-		// 3.5a-pre. Point every guest at the CP resolver BEFORE the services
-		// phase: the litellm/caddy image pulls need working DNS, and the guests
-		// otherwise sit on DHCP/public resolvers that intermittently fail
-		// containerd's lookups. worldDNS re-points later (idempotent).
+		// 3.5a-pre. The CP resolver step runs BEFORE the services phase: it
+		// installs dnsmasq, registers the split-horizon records, points every
+		// guest at the CP, and verifies the resolver answers. The litellm/caddy
+		// image pulls need working DNS, and a freshly booted guest otherwise sits
+		// on DHCP/public resolvers that intermittently fail containerd's lookups.
+		// Pointing guests at a CP whose dnsmasq is not yet installed would leave
+		// them with no resolver at all, so the point and the install ship as one
+		// step.
 		if spec.CpLxc != 0 && spec.CpIP != "" {
-			if err := spec.pointGuestsAtResolver(); err != nil {
-				return "", fmt.Errorf("world-build point guests at resolver: %w", err)
+			if err := spec.worldDNS(); err != nil {
+				return "", fmt.Errorf("world-build dns: %w", err)
 			}
+			report = append(report, "dns register/point applied")
 		}
 		// 3.5a. Re-provision the CP's co-located runner from the CP's own
 		// durable litellm store if a re-deploy wiped its package — the services
@@ -1193,16 +1199,6 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build terraform services: %w", err)
 			}
 			report = append(report, "terraform services applied (postgres/litellm/caddy)")
-		}
-		// 4. The CP-owned resolver: register the split-horizon names (bare
-		// guests + the dotted public hosts via the proxy) and point every guest
-		// at the CP as its nameserver, then verify the resolver actually ANSWERS
-		// (dnsmasq served the records, not merely tcp/53 open). No secrets.
-		if spec.CpLxc != 0 && spec.CpIP != "" {
-			if err := spec.worldDNS(); err != nil {
-				return "", err
-			}
-			report = append(report, "dns register/point applied")
 		}
 		// 5. The litellm gateway — the CPA pod's litellm key seed (the kube
 		// workloads + model registration are owned by the terraform services
