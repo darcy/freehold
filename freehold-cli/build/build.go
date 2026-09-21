@@ -332,11 +332,19 @@ func (e *buildEngine) runBuild() error {
 		return err
 	}
 	fmt.Fprintf(e.Out, "building world %s through the CP…\n", cfg.RelayHost())
-	report, err := client.WorldBuild()
+	res, err := client.WorldBuild()
 	if err != nil {
 		return fmt.Errorf("world_build (console /api/world-build): %v", err)
 	}
-	fmt.Fprintf(e.Out, "CP world_build report:\n%s\n", report)
+	fmt.Fprintf(e.Out, "CP world_build report:\n%s\n", res.Report)
+	// A teardown clears this profile's recorded relay/k3s coords ("the next
+	// build re-creates them"); the CP resolved the freshly-booted guests during
+	// the build, so write them back BEFORE FinalSave (which preserves prev's
+	// coords + derives Managed from the recorded k3s vmid). Without this the
+	// next uninstall reports "never created (no vmid recorded)" and leaks them.
+	if err := e.RecordCoords(res.Coords); err != nil {
+		return err
+	}
 	if err := e.FinalSave(); err != nil {
 		return err
 	}

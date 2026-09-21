@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/version"
 	"freehold/contract/wire"
 )
@@ -459,23 +460,31 @@ func (c *Client) PutSecret(name string, file json.RawMessage) error {
 	return err
 }
 
+// WorldBuildResult is what /api/world-build returned: the stage report plus the
+// world coords the CP resolved during the build (relay/cp/k3s vmids + IPs). A
+// teardown clears the box's recorded coords, so the build caller must write
+// these back — otherwise the next uninstall cannot find the guests it created.
+type WorldBuildResult struct {
+	Report string        `json:"report"`
+	Coords config.Coords `json:"coords"`
+}
+
 // WorldBuild triggers the CP-owned world bring-up (/api/world-build) and
-// returns the stage report. The console drives the shared cpbuild engine
-// through its co-located runner — the drive-through-CP build a thin box uses.
-// The build runs for minutes, so this switches to a long client timeout.
-func (c *Client) WorldBuild() (string, error) {
+// returns the stage report + resolved world coords. The console drives the
+// shared cpbuild engine through its co-located runner — the drive-through-CP
+// build a thin box uses. The build runs for minutes, so this switches to a
+// long client timeout.
+func (c *Client) WorldBuild() (*WorldBuildResult, error) {
 	c.hc = &http.Client{Timeout: 20 * time.Minute}
 	raw, err := c.request(http.MethodPost, "/api/world-build", nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var v struct {
-		Report string `json:"report"`
-	}
+	var v WorldBuildResult
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return "", fmt.Errorf("world-build response: %w", err)
+		return nil, fmt.Errorf("world-build response: %w", err)
 	}
-	return v.Report, nil
+	return &v, nil
 }
 
 // WorldTeardownResult is what the CP-owned world-teardown did: the stage report
