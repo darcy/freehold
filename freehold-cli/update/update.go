@@ -198,12 +198,16 @@ func readWorld(cfg *config.Config) (*console.WorldSummary, error) {
 // assets; dev/ref/sha build the local tree or a sandbox clone.
 func acquire(ctx context.Context, o options, channel, cacheDir string) (artifact.Set, error) {
 	switch {
-	case o.dev:
+	case o.dev, channel == "dev":
+		// A CP on the dev channel tracks the local tree; both `--dev` and a
+		// bare update (using the recorded channel) build it.
 		return artifact.BuildTree(ctx, "", "", repoRoot(), cacheDir)
 	case o.ref != "" || o.sha != "":
 		return artifact.BuildTree(ctx, o.ref, o.sha, "", cacheDir)
-	default:
+	case channel == "stable" || channel == "rc":
 		return artifact.AcquireRelease(ctx, channel, filepath.Join(cacheDir, "release"))
+	default:
+		return artifact.Set{}, fmt.Errorf("unknown channel %q — pass --stable/--rc/--dev/--ref/--sha", channel)
 	}
 }
 
@@ -218,7 +222,7 @@ func check(ctx context.Context, cfg *config.Config, channel, cacheDir string, o 
 	} else {
 		fmt.Printf("CP version:   unreachable (%v)\n", err)
 	}
-	if o.dev || o.ref != "" || o.sha != "" {
+	if o.dev || o.ref != "" || o.sha != "" || channel == "dev" {
 		fmt.Printf("source:       local tree / ref (build on apply)\n")
 		return nil
 	}
