@@ -9,8 +9,8 @@ answered, built, hosted, and delivered.
 
 ## Contents
 
-- [Design in one paragraph](#design-in-one-paragraph)
-- [Roadmap & Vision](#roadmap--vision)
+- [Agents](#agents)
+- [Vision, Architecture & Roadmap](#vision-architecture--roadmap)
 - [Getting started](#getting-started)
   - [The appliance: one binary, two surfaces](#the-appliance-one-binary-two-surfaces)
   - [The config](#the-config)
@@ -18,29 +18,41 @@ answered, built, hosted, and delivered.
   - [The console: provision a service, watch it go green](#the-console-provision-a-service-watch-it-go-green)
   - [Control plane CLI: provision a service](#control-plane-cli-provision-a-service)
   - [freehold: the CLI](#freehold-the-cli)
-- [Bootstrap flow (from zero to a live world)](#bootstrap-flow-from-zero-to-a-live-world)
-- [Runner setup + grant (from credential to first exec)](#runner-setup--grant-from-credential-to-first-exec)
-- [Runtime: one exec call (runner → exec → grant)](#runtime-one-exec-call-runner--exec--grant)
-- [Security model (no master key)](#security-model-no-master-key)
+- [How it works](#how-it-works)
+  - [Bootstrap flow (from zero to a live world)](#bootstrap-flow-from-zero-to-a-live-world)
+  - [Runner setup + grant (from credential to first exec)](#runner-setup--grant-from-credential-to-first-exec)
+  - [Runtime: one exec call (runner → exec → grant)](#runtime-one-exec-call-runner--exec--grant)
+  - [Security model (no master key)](#security-model-no-master-key)
 - [Repository layout (what things do in the code)](#repository-layout-what-things-do-in-the-code)
 - [Contributing / review](#contributing--review)
 
-## Design in one paragraph
+## Agents
 
-A **control plane** (a web app, admin/ops only — chat is Buzz's job) manages **runners**:
-privileged MCP tool servers that own connections and credentials on the target side.
-**Agents** are the brain, **runners** are dumb privileged hands — one generic primitive
-`exec(cmd, target, stream?)`, no semantic tools. The control plane is a **secret
-provisioner, not a vault**: it generates a runner identity, encrypts the credential *to the
-runner's key*, ships ciphertext, and injects the runner's private key. **No master key** —
-the CP holds only ciphertext + public keys, the runner decrypts locally, uses in memory,
-forgets. Host-flexible: Proxmox lead, VPS/cloud first-class, nothing locked to a hypervisor.
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design and the locked decisions.
+freehold is run by two tiers of agents, all living in Buzz:
 
-## Roadmap & Vision
+- **Orchestrator (`freehold`)** — the main touchpoint: a real, LLM-backed reasoning agent on
+  Buzz's `buzz-acp` harness (its prompt lives in `agents/freehold/`). It holds the
+  conversation, plans, and delegates — it doesn't do expert-level work itself — and creates
+  custom agents on request.
+- **Network** — the network surface: access and exposure (external proxy, DNS, ingress).
+- **Data** — the data plane: backups, storage, durability.
+- **Compute** — the box itself: CPU/RAM/disk, Proxmox LXC and kube, remote provisioning, and
+  the monitoring it needs.
+- **AI** — models, providers, and agents, plus AI hardware (a local accelerator like an
+  RTX 3090 or DGX Spark).
 
-[`VISION.md`](VISION.md) is the narrative and the "why". [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md)
-and [`roadmap/POC.md`](roadmap/POC.md) hold the chunked plan and the current scope, with the
+Talk is unrestricted — the operator and any agent may converse with any department directly.
+What's bounded is *capability execution*: a capability a department owns is executed by that
+department's identity, never by a custom agent that would self-serve a second, ungoverned
+path to it. Whichever agent creates a service owns its install, config, and operation. The
+Orchestrator and departments are installed as part of the core build — a pod each, in
+`#freehold` plus its own private channel — and a rebuild reconciles them.
+
+## Vision, Architecture & Roadmap
+
+[`VISION.md`](VISION.md) is the narrative and the "why"; [`ARCHITECTURE.md`](ARCHITECTURE.md)
+is the system design and the locked decisions. [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) and
+[`roadmap/POC.md`](roadmap/POC.md) hold the chunked plan and the current scope, with the
 per-chunk plans alongside them (`roadmap/POC_CHUNK*.md`). [`CHANGELOG.md`](CHANGELOG.md)
 records decisions, reversals, and releases.
 
@@ -353,7 +365,18 @@ cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner \
 #   Coverage lives in the Go acceptance gate (`go test ./acceptance/…`).
 ```
 
-## Bootstrap flow (from zero to a live world)
+## How it works
+
+Three roles, one primitive. A **control plane** (admin/ops only — chat is Buzz's job) drives
+**runners**, the privileged exec endpoints that own connections and credentials on the target
+side. **Agents** are the brain, **runners** are the dumb hands — an agent signs a call and
+the runner executes one generic primitive, `exec(cmd, target, stream?)`, with no semantic
+tools. Agents live in Buzz as pods; one control plane is exactly one relay scope and attaches
+to the relay, so co-location is convenience, never assumed. It's host-flexible: Proxmox leads,
+VPS/cloud are first-class, and the k8s layer above the host driver is identical on every
+substrate. The sections below walk the lifecycle from a bare box to a running exec call.
+
+### Bootstrap flow (from zero to a live world)
 
 `freehold build` is **login-gated, drive-through-CP**: after
 `freehold install` (box one) creates the CP, ANY box runs `freehold build` to trigger
@@ -396,7 +419,7 @@ messages (kind 9, `t=fh-profile`) — deterministic, idempotent, and author-gate
 primitives are `relay.QueryRunnerMetas` + `StateStore.RebuildFrom`, exercised by the Go
 acceptance gate.
 
-## Runner setup + grant (from credential to first exec)
+### Runner setup + grant (from credential to first exec)
 
 **What happens when a runner is first set up and an agent is granted:** the control plane
 generates the runner's identity, seals the credential TO the runner's key, ships a package
@@ -449,7 +472,7 @@ buzz-admin, kind 13534) before ANY of its relay reads work — non-members get
 through the box runner (proxmox-box, the provisioning/relay-admin runner who holds the
 credential into the relay LXC), not by my-runner itself.
 
-## Runtime: one exec call (runner → exec → grant)
+### Runtime: one exec call (runner → exec → grant)
 
 The data path behind any agent action: an agent signs a call, the runner verifies the
 signature AND the grant before touching anything, secrets resolve BY NAME from the sealed
@@ -489,7 +512,7 @@ sequenceDiagram
     end
 ```
 
-## Security model (no master key)
+### Security model (no master key)
 
 - The CP never holds a private key that decrypts anything, and never holds plaintext
   (credentials are sealed, forgotten). The only key under the CP state dir is the console
