@@ -555,6 +555,42 @@ func (e *Engine) RecordPostWorld() error {
 	return cfg.Save(e.F.ConfigPath)
 }
 
+// RecordCoords persists the CP-resolved world coords (the /api/world-build
+// response) into the local profile: the relay/cp/k3s vmids+IPs a prior teardown
+// cleared. The CP resolved them during the build through its co-located runner,
+// so this needs no local host access — the thin-box counterpart to
+// RecordPostWorld (which reads the coords back through a local runner).
+func (e *Engine) RecordCoords(c config.Coords) error {
+	cfg, err := config.Load(e.F.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("no config at %s", e.F.ConfigPath)
+	}
+	for _, g := range []struct {
+		role string
+		vmid uint32
+		ip   string
+	}{
+		{"relay", c.RelayLxc, c.RelayIP},
+		{"cp", c.CpLxc, c.CpIP},
+		// The k3s node's address IS the static proxy IP (k3s carries no Ip of
+		// its own), so the CP reports it as ProxyIP.
+		{"k3s", c.K3sVmid, c.ProxyIP},
+	} {
+		if g.vmid == 0 {
+			continue
+		}
+		ip := g.ip
+		if ip != "" && !strings.Contains(ip, "/") {
+			ip += "/24"
+		}
+		applyLxcCoords(cfg, g.role, g.vmid, ip)
+	}
+	return cfg.Save(e.F.ConfigPath)
+}
+
 func lxcIP(g config.LxcGuest) string { return config.LxcIP(g) }
 
 // stageProvision runs control-plane provision; returns the fresh ssh public

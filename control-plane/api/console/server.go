@@ -397,7 +397,11 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "world-build: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report})
+	// Hand back the world coords the build resolved (relay/cp/k3s vmids + IPs).
+	// A teardown clears the operator box's recorded coords, so the build caller
+	// must write these back to its profile or the next uninstall cannot find the
+	// guests it created. Non-secret.
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report, "coords": s.Builder.Coords()})
 }
 
 // worldTeardown runs the CP-owned world teardown through the co-located runner
