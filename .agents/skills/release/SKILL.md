@@ -1,17 +1,16 @@
 ---
 name: release
-description: Use when cutting a tagged GitHub release for freehold (e.g. "tag v0.4.0", "ship a release", "cut a release for the current phase", "cut an rc"). Generates the CHANGELOG.md entry from git history since the previous release, lands it via a release-branch PR, tags the release branch head, and publishes a short, high-level GitHub Release.
+description: Use when cutting a tagged GitHub release for freehold (e.g. "tag v0.4.0", "ship a release", "cut a release for the current phase", "cut an rc"). Generates the CHANGELOG.md entry from git history since the previous release, lands it via a release PR, tags the merged main commit, and publishes a short, high-level GitHub Release.
 metadata:
   version: 2.0.0
   author: freehold
   license: MIT
 ---
 
-# Release — generate the changelog, tag the release branch, publish a GitHub Release
+# Release — generate the changelog, tag `main`, publish a GitHub Release
 
 A version exists only when it is released, and every release is **three things together**:
-a `CHANGELOG.md` entry on a release branch, an annotated tag `vX.Y.Z` on that branch head,
-and a GitHub Release with
+a `CHANGELOG.md` entry, an annotated tag `vX.Y.Z` on `main`, and a GitHub Release with
 **short, high-level** notes distilled from that entry. There is no version bump per merge or
 phase; this skill is the only thing that assigns a version.
 
@@ -73,24 +72,27 @@ history.
    "Pull requests"). The release commit/tag legitimately carries the version; ordinary
    work commits must not.
 
-5. **Tag the release branch head — CI builds the assets.**
+5. **Stop. The operator merges.** Never merge the release PR yourself (see `AGENTS.md`
+   "Pull requests"). Wait for it to land on `main`.
+
+6. **Tag the merged `main` commit — CI builds the assets.**
    ```bash
-   git checkout release/vX.Y.Z && git pull --ff-only
-   git rev-parse HEAD           # the release branch head
+   git checkout main && git pull --ff-only
+   git rev-parse HEAD           # must be the merged release commit
    git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"
    git push origin vX.Y.Z
    ```
-   The tag goes on the **release branch**, not necessarily `main` (an rc is
-   tagged before merge too). The tag push triggers `.github/workflows/release.yml`,
-   which builds the sibling set + `migrations.tar.gz` + `checksums.txt` and attaches
-   them to a **draft** GitHub Release. Wait for that run to finish before publishing:
+   Every release is currently the tip of `main`, so the tag goes there (an rc too). The
+   tag push triggers `.github/workflows/release.yml`, which builds the sibling set +
+   `migrations.tar.gz` + `checksums.txt` and attaches them to a **draft** GitHub Release.
+   Wait for that run to finish before publishing:
    ```bash
    gh run list --workflow=release.yml --limit 5   # until the vX.Y.Z run is completed
    ```
    If the run fails, fix forward with a new commit + a NEW tag (never move a
    published tag) or ask the operator — do not publish a release without assets.
 
-6. **Publish the draft with curated notes + verify the assets.**
+7. **Publish the draft with curated notes + verify the assets.**
    ```bash
    gh release edit vX.Y.Z \
      --draft=false \
@@ -100,20 +102,23 @@ history.
    gh release view vX.Y.Z --json tagName,isDraft,isPrerelease,assets
    ```
    The notes file is the **distilled** entry (~5–10 headline bullets, never the
-   changelog text verbatim). Confirm the tag is on the release branch head and
+   changelog text verbatim). Confirm the tag is on the merged `main` commit and
    every asset (`freehold`, `freehold-console`, `runner`,
    `freehold-agent-tools`, `migrations.tar.gz`, `checksums.txt`) is present.
 
-7. **Stop. The operator merges the release branch to `main`.** Never merge it
-   yourself (see `AGENTS.md` "Pull requests"). After it lands, `main` carries the
-   changelog entry (and, once merged, the tag's commit is an ancestor of `main`).
+> **Future (when development continues past a release):** switch to trunk-first. `main`
+> stays the trunk; cut a long-lived `release/vX.Y.Z` branch for the release and
+> **backport** (cherry-pick) fixes onto it; the tag goes on the release branch head, not
+> `main`, and the branch is not merged back. Not needed yet — every release is currently
+> the tip of `main`.
 
 ## Hard rules
 
 - **Get the draft changelog entry approved before committing anything** — the operator
   signs off on the generated section first (step 3).
-- **Tag the release branch head** (`release/vX.Y.Z`), not a feature/detached commit; the
-  branch is merged to `main` after the release.
+- **Tag `main`'s merged release commit** (every release is the tip of `main`), not a
+  feature/detached commit. (When release branches arrive, the tag moves to the release
+  branch head instead — see the Future note.)
 - **Never** create, move, or delete a tag that already exists on `origin` without an
   explicit go-ahead.
 - **Never merge the release PR** — merging is the operator's call (see `AGENTS.md`).

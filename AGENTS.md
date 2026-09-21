@@ -49,25 +49,27 @@ repo, not the history.
 
 - **Versions are tied to releases, never to merges.** There is no version bump per
   phase, per chunk, or per merge to `main`. Work lands with no version attached.
-- **Every release gets a release branch.** Cut `release/vX.Y.Z` from `main` (an
-  rc gets its own, e.g. `release/vX.Y.Z-rc.N`); the changelog entry and any
-  release fixes land there. The annotated tag `vX.Y.Z` goes on the **release
-  branch head**, not necessarily `main`; the branch is merged to `main`
-  afterwards so `main` carries the changelog and fixes.
-- **Every release is three things together:** a `CHANGELOG.md` entry (on the
-  release branch), the annotated tag on that branch head, and a GitHub Release.
-  A tag or a Release without the changelog entry is not a release; a
-  changelog-only edit is not one either.
+- **Every release is three things together:** a `CHANGELOG.md` entry, an annotated
+  tag `vX.Y.Z` on `main`, and a GitHub Release. A tag or a Release without the
+  changelog entry is not a release; a changelog-only edit is not one either.
 - **The changelog entry is written at release time.** It compares the codebase at the
   previous release to the current one and records the **net** difference — what is true now
   that wasn't then — not a chronological log of every merge. Superseded or refactored-away
   work is omitted; the final state wins. The `release` skill owns this flow.
-- **Release flow:** the skill generates the entry and gets the operator's approval on the
-  draft **before committing**, commits it on the `release/vX.Y.Z` branch → PR → waits for
-  `check` + `bot-review` to settle → tags the release branch head and publishes the
-  Release with short, high-level notes distilled from the entry → **the operator merges
-  the branch to `main`** (the skill never merges). An rc is tagged the same way before
-  merge; iterating re-tags `-rc.N` on the branch.
+- **Release flow (current).** All work lands on `main` and every release is the tip of
+  `main`, so the tag goes there. The skill generates the entry and gets the operator's
+  approval on the draft **before committing**, commits it on a `release/vX.Y.Z` branch →
+  PR → waits for `check` + `bot-review` to settle → **the operator merges** (the skill never
+  merges) → the skill tags the merged `main` commit and publishes the Release with short,
+  high-level notes distilled from the entry. An rc is tagged the same way (`vX.Y.Z-rc.N`);
+  iterating re-tags the next rc on `main`.
+- **Release branches (future, when development continues past a release).** Then the model
+  becomes trunk-first: `main` stays the trunk where all work lands, and a long-lived
+  `release/vX.Y.Z` branch is cut for a release; fixes which should ship in it are
+  **backported** (cherry-picked) onto that branch, and the tag goes on the **release branch
+  head**, not `main`. The branch is not merged back (the trunk already has the originals).
+  `release/` is the prefix. Not needed yet — everything is currently about the current
+  release.
 - **Numbering:** `0.x.y` stays semver-ish pre-MVP (minor for a chunk's work, patch
   for a phase); `1.0.0` is reserved for the MVP / public release.
 
