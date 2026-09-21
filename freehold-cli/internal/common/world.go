@@ -64,21 +64,46 @@ func CallAgentToolsText(mc *client.McpClient, tool string, args map[string]inter
 	return t, nil
 }
 
+// ConsoleLogin logs the operator in to the CP, preferring the https CPURL — a
+// NIP-98 signed event must not travel over plaintext by default — and falling
+// back to the recorded LAN IP ONLY when the public edge is unreachable.
+func ConsoleLogin(cfg *config.Config) (*console.Client, error) {
+	sec, err := oplogin.SecretHex()
+	if err != nil {
+		return nil, err
+	}
+	key, err := oplogin.NsecToSecret(sec)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	if cfg.CPURL != "" {
+		if c, err := oplogin.Login(cfg.CPURL, key); err == nil {
+			return c, nil
+		} else {
+			lastErr = err
+		}
+	}
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		if c, err := oplogin.Login("http://"+ip+":8080", key); err == nil {
+			return c, nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no CP URL configured")
+	}
+	return nil, lastErr
+}
+
 // RefreshAgentToolsCoords re-reads the CP's live agent-tools URL + pubkey from
-// the console's public /api/world and adopts them into cfg. Best effort.
+// the console's /api/world and adopts them into cfg. Best effort.
 func RefreshAgentToolsCoords(cfg *config.Config) {
 	if cfg == nil || cfg.CPURL == "" {
 		return
 	}
-	sec, err := oplogin.SecretHex()
-	if err != nil {
-		return
-	}
-	key, err := oplogin.NsecToSecret(sec)
-	if err != nil {
-		return
-	}
-	c, err := oplogin.Login(cfg.CPURL, key)
+	c, err := ConsoleLogin(cfg)
 	if err != nil {
 		return
 	}

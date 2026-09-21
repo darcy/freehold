@@ -237,6 +237,19 @@ func StampPin(t Transport, spec *DeployCpSpec, pin version.Pin) error {
 func stopPriorServe(t Transport, spec *DeployCpSpec, step string) error {
 	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
 		spec.StateDir, spec.StateDir)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), step, 30); err != nil {
+		return err
+	}
+	return stopBinary(t, spec, "freehold-console", step)
+}
+
+// stopBinary kills every guest process whose resolved executable basename is
+// name — a build-started serve may have no pid file, and a running binary holds
+// its inode (so pct push would leave the old file and the size check fails).
+// Matching the basename (not a full path) is robust to a symlinked BinDir and
+// to spaces in the path. No single quotes: LxcExec's wrapper is single-quoted.
+func stopBinary(t Transport, spec *DeployCpSpec, name, step string) error {
+	cmd := fmt.Sprintf("for q in /proc/[0-9]*; do exe=$(readlink $q/exe 2>/dev/null); [ \"${exe##*/}\" = %s ] && kill ${q#/proc/} 2>/dev/null; done; sleep 1; true", name)
 	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), step, 30)
 	return err
 }
@@ -255,6 +268,9 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 	atState := filepath.Join(spec.StateDir, "..", "agent-tools")
 	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
+		return err
+	}
+	if err := stopBinary(t, spec, "freehold-agent-tools", "stop agent-tools process"); err != nil {
 		return err
 	}
 	return shipFile(t, spec, *spec.AgentToolsBinary,

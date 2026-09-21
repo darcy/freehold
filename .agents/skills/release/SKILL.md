@@ -1,6 +1,6 @@
 ---
 name: release
-description: Use when cutting a tagged GitHub release from main for freehold (e.g. "tag v0.4.0", "ship a release", "cut a release for the current phase"). Generates the CHANGELOG.md entry from git history since the previous release, lands it via a release PR, then tags the merged commit and publishes a short, high-level GitHub Release.
+description: Use when cutting a tagged GitHub release for freehold (e.g. "tag v0.4.0", "ship a release", "cut a release for the current phase", "cut an rc"). Generates the CHANGELOG.md entry from git history since the previous release, lands it via a release PR, tags the merged main commit, and publishes a short, high-level GitHub Release.
 metadata:
   version: 2.0.0
   author: freehold
@@ -62,10 +62,10 @@ history.
 4. **Land it via a release PR.**
    ```bash
    git checkout main && git pull --ff-only
-   git checkout -b release/vX.Y.Z
+   git checkout -b docs/changelog-vX.Y.Z   # a normal PR branch, not a release branch
    # prepend the new section to CHANGELOG.md
    git commit -am "docs(changelog): vX.Y.Z — <headline>"
-   git push -u origin release/vX.Y.Z
+   git push -u origin docs/changelog-vX.Y.Z
    gh pr create --base main --title "docs(changelog): vX.Y.Z" --body "<entry summary>"
    ```
    Poll `gh pr checks` until `check` + `bot-review` settle (see `AGENTS.md`
@@ -75,16 +75,17 @@ history.
 5. **Stop. The operator merges.** Never merge the release PR yourself (see `AGENTS.md`
    "Pull requests"). Wait for it to land on `main`.
 
-6. **Tag the merged commit — CI builds the assets.**
+6. **Tag the merged `main` commit — CI builds the assets.**
    ```bash
    git checkout main && git pull --ff-only
    git rev-parse HEAD           # must be the merged release commit
    git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"
    git push origin vX.Y.Z
    ```
-   The tag push triggers `.github/workflows/release.yml`, which builds the
-   sibling set + `migrations.tar.gz` + `checksums.txt` and attaches them to a
-   **draft** GitHub Release. Wait for that run to finish before publishing:
+   Every release is currently the tip of `main`, so the tag goes there (an rc too). The
+   tag push triggers `.github/workflows/release.yml`, which builds the sibling set +
+   `migrations.tar.gz` + `checksums.txt` and attaches them to a **draft** GitHub Release.
+   Wait for that run to finish before publishing:
    ```bash
    gh run list --workflow=release.yml --limit 5   # until the vX.Y.Z run is completed
    ```
@@ -105,11 +106,19 @@ history.
    every asset (`freehold`, `freehold-console`, `runner`,
    `freehold-agent-tools`, `migrations.tar.gz`, `checksums.txt`) is present.
 
+> **Future (when development continues past a release):** switch to trunk-first. `main`
+> stays the trunk; cut a long-lived `release/vX.Y.Z` branch for the release and
+> **backport** (cherry-pick) fixes onto it; the tag goes on the release branch head, not
+> `main`, and the branch is not merged back. Not needed yet — every release is currently
+> the tip of `main`.
+
 ## Hard rules
 
 - **Get the draft changelog entry approved before committing anything** — the operator
   signs off on the generated section first (step 3).
-- **Tag `main`'s merged release commit**, not a feature/detached commit.
+- **Tag `main`'s merged release commit** (every release is the tip of `main`), not a
+  feature/detached commit. (When release branches arrive, the tag moves to the release
+  branch head instead — see the Future note.)
 - **Never** create, move, or delete a tag that already exists on `origin` without an
   explicit go-ahead.
 - **Never merge the release PR** — merging is the operator's call (see `AGENTS.md`).

@@ -21,7 +21,6 @@ import (
 	"freehold/freehold-cli/internal/artifact"
 	"freehold/freehold-cli/internal/common"
 	"freehold/freehold-cli/internal/stages"
-	oplogin "freehold/freehold-cli/login"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 )
@@ -177,17 +176,10 @@ func currentChannel(cfg *config.Config) string {
 	return w.Version.Channel
 }
 
-// readWorld fetches the CP's world summary (version pin + pending migrations).
+// readWorld fetches the CP's world summary (version pin + pending migrations),
+// preferring the https CPURL and falling back to the LAN IP only if unreachable.
 func readWorld(cfg *config.Config) (*console.WorldSummary, error) {
-	sec, err := oplogin.SecretHex()
-	if err != nil {
-		return nil, fmt.Errorf("no operator identity (run `freehold login`): %v", err)
-	}
-	key, err := oplogin.NsecToSecret(sec)
-	if err != nil {
-		return nil, err
-	}
-	c, err := oplogin.Login(cfg.CPURL, key)
+	c, err := common.ConsoleLogin(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("console login: %v", err)
 	}

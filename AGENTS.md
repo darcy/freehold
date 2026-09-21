@@ -56,11 +56,21 @@ repo, not the history.
   previous release to the current one and records the **net** difference — what is true now
   that wasn't then — not a chronological log of every merge. Superseded or refactored-away
   work is omitted; the final state wins. The `release` skill owns this flow.
-- **Release flow:** the skill generates the entry and gets the operator's approval on the
-  draft **before committing**, commits it on a `release/vX.Y.Z`
-  branch → PR → waits for `check` + `bot-review` to settle → **the operator merges**
-  (the skill never merges) → the skill tags the merged commit and publishes the
-  Release with short, high-level notes distilled from the entry.
+- **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
+  every release is the tip of `main`, so the tag goes there — there is **no release
+  branch**. The skill generates the entry and gets the operator's approval on the draft
+  **before committing**, commits it on a normal PR branch (e.g. `docs/changelog-vX.Y.Z`) →
+  PR → waits for `check` + `bot-review` to settle → **the operator merges** (the skill never
+  merges) → the skill tags the merged `main` commit and publishes the Release with short,
+  high-level notes distilled from the entry. An rc is tagged the same way (`vX.Y.Z-rc.N`);
+  iterating re-tags the next rc on `main`.
+- **Release branches (future, when development continues past a release).** Then the model
+  becomes trunk-first: `main` stays the trunk where all work lands, and a long-lived
+  `release/vX.Y.Z` branch is cut for a release; fixes which should ship in it are
+  **backported** (cherry-picked) onto that branch, and the tag goes on the **release branch
+  head**, not `main`. The branch is not merged back (the trunk already has the originals).
+  `release/` is the prefix. Not needed yet — everything is currently about the current
+  release.
 - **Numbering:** `0.x.y` stays semver-ish pre-MVP (minor for a chunk's work, patch
   for a phase); `1.0.0` is reserved for the MVP / public release.
 
