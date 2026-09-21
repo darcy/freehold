@@ -1793,12 +1793,16 @@ func (e *Engine) useTransientProvider() (func(), error) {
 	if e.ProviderFactory == nil {
 		return func() {}, nil
 	}
+	prev := e.Provider
 	prov, cleanup, err := e.ProviderFactory()
 	if err != nil {
 		return nil, err
 	}
 	e.Provider = prov
-	return cleanup, nil
+	return func() {
+		e.Provider = prev
+		cleanup()
+	}, nil
 }
 
 // cpaNameOrDefault defaults the CPA display name, so a world-config never

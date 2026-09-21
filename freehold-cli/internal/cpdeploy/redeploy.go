@@ -131,7 +131,7 @@ func stopAgentTools(t Transport, spec *DeployCpSpec) error {
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "stop prior agent-tools", 30); err != nil {
 		return err
 	}
-	return stopBinary(t, spec, spec.BinDir+"/freehold-agent-tools", "stop agent-tools process")
+	return stopBinary(t, spec, "freehold-agent-tools", "stop agent-tools process")
 }
 
 // captureAgentToolsArgv reads the running agent-tools serve argv (binary path +
@@ -156,12 +156,16 @@ func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
 // restartAgentTools relaunches agent-tools with a captured argv and waits for
 // it to answer, so the immediately-following world_migrate doesn't race bind.
 func restartAgentTools(t Transport, spec *DeployCpSpec, argv string) error {
+	if strings.TrimSpace(argv) == "" {
+		return nil // nothing was running; nothing to restart
+	}
 	at := agentToolsStateDir(spec)
 	start := fmt.Sprintf("setsid nohup %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid", argv, at, at)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "restart agent-tools", 60); err != nil {
 		return err
 	}
 	probe := "for i in $(seq 1 15); do curl -s -m 3 -o /dev/null http://127.0.0.1:8089/mcp && exit 0; sleep 2; done; exit 1"
-	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, probe), "agent-tools healthz", 60)
+	// The loop can run ~75s; give execToOK headroom so it isn't cut off.
+	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, probe), "agent-tools healthz", 120)
 	return err
 }
