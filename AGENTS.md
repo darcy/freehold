@@ -56,13 +56,16 @@ repo, not the history.
 - **The changelog entry is written at release time.** It compares the codebase at the
   previous release to the current one and records the **net** difference — what is true now
   that wasn't then — not a chronological log of every merge. Superseded or refactored-away
-  work is omitted; the final state wins. The `pre-release` skill owns this flow;
-  `publish-release` promotes the result.
-- **A release is cut as a pre-release, then promoted.** The `pre-release` skill produces the
-  candidate: `CHANGELOG.md` entry + annotated tag + a GitHub **pre-release** (marked
-  `prerelease`, assets attached, short notes). The `publish-release` skill then e2e-tests the
-  pre-release's own downloaded assets against real infrastructure and, only on green with the
-  operator's go-ahead, flips it to a full release — same tag, same commit, same assets.
+  work is omitted; the final state wins. The `release-prepare` skill owns this flow;
+  `release-publish` promotes the result.
+- **A release is cut as a pre-release, then tested, then promoted.** `release-prepare`
+  produces the candidate: `CHANGELOG.md` entry + annotated tag + a GitHub **pre-release**
+  (marked `prerelease`, assets attached, short notes) whose body ends in a **test-status
+  table** (one row per provider × flow, seeded `⚪ Unverified`). `release-test-proxmox` runs
+  the live lifecycle on the pre-release's downloaded assets and fills the Proxmox rows
+  (`✅`/`❌`; `⚪` when it can't test). `release-publish` then promotes it to a full release
+  only when **every** row is `✅`, with the operator's go-ahead — same tag, same commit, same
+  assets.
 - **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
   every release is the tip of `main`, so the tag goes there — there is **no release
   branch**. The skill generates the entry and gets the operator's approval on the draft
@@ -105,16 +108,22 @@ repo, not the history.
 - `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
 - `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
   done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
-- `.agents/skills/pre-release/SKILL.md` — the `pre-release` skill: cut a versioned
+- `.agents/skills/release-prepare/SKILL.md` — the `release-prepare` skill: cut a versioned
   candidate by generating the `CHANGELOG.md` entry from git history since the previous
   release, landing it via a normal PR branch (e.g. `docs/changelog-vX.Y.Z`), then tagging
-  the merged commit and publishing a GitHub **pre-release** with the built assets and
-  short, high-level notes (distilled from the entry, never the full changelog) — see
-  "Releases" above. The canonical, agent-agnostic location (auto-loaded by opencode and
-  any other agent that reads `~/.agents/skills/`-style external skills).
-- `.agents/skills/publish-release/SKILL.md` — the `publish-release` skill: promote a
-  pre-release to a full release only after an end-to-end run on its downloaded assets
-  against real infrastructure (metadata-only flip; the tag never moves).
+  the merged commit and publishing a GitHub **pre-release** with the built assets, short,
+  high-level notes (distilled from the entry, never the full changelog), and the
+  test-status table — see "Releases" above. The canonical, agent-agnostic location
+  (auto-loaded by opencode and any other agent that reads `~/.agents/skills/`-style
+  external skills).
+- `.agents/skills/release-test-proxmox/SKILL.md` — the `release-test-proxmox` skill:
+  exercise a pre-release's downloaded assets through the full lifecycle (install →
+  agent replies in the relay → teardown → all down → rebuild → agent replies → uninstall →
+  all gone) on a real PVE host, and record the Proxmox rows of the release's test-status
+  table.
+- `.agents/skills/release-publish/SKILL.md` — the `release-publish` skill: promote a
+  pre-release to a full release only when every row of its test-status table is `✅ Passed`
+  (metadata-only flip; the tag never moves).
 - `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
 

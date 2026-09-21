@@ -1,10 +1,11 @@
 name: release
 
 # Build the release assets for a tag and attach them to a DRAFT GitHub Release.
-# The `pre-release` skill publishes it as a pre-release (curated notes + the
-# prerelease flag) and verifies the assets; the `publish-release` skill later
-# e2e-tests those assets and promotes it to a full release. A tag is the only
-# trigger — there is no main/edge job.
+# The `release-prepare` skill publishes it as a pre-release (curated notes,
+# prerelease flag, test-status table) and verifies the assets;
+# `release-test-proxmox` fills the table on a real host and `release-publish`
+# promotes it once every row passes. A tag is the only trigger — there is no
+# main/edge job.
 on:
   push:
     tags: ["v*"]

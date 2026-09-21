@@ -22,8 +22,9 @@ This project follows [Semantic Versioning](https://semver.org) loosely pre-MVP:
 The entry for each release is **written at release time**. It compares the codebase at the
 previous release to the current one and records the **net** difference — what is true now
 that wasn't then — not a chronological log of every merge; superseded or refactored-away
-work is omitted and the final state wins. The `pre-release` skill owns that flow;
-`publish-release` promotes the result (see `AGENTS.md` "Releases").
+work is omitted and the final state wins. The `release-prepare` skill owns that flow;
+`release-test-proxmox` fills the release's test-status table and `release-publish`
+promotes the result (see `AGENTS.md` "Releases").
 
 ### Known gaps
 See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open

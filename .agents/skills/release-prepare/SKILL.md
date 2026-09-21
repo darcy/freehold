@@ -1,21 +1,22 @@
 ---
-name: pre-release
-description: Use when cutting a versioned pre-release for freehold (e.g. "cut v0.8.0", "ship a release", "cut an rc"). Generates the CHANGELOG.md entry from git history since the previous release, lands it via a release PR, tags the merged main commit, and publishes a GitHub pre-release (marked prerelease) with the built assets and short, high-level notes. Promoting it to a full release is the publish-release skill's job.
+name: release-prepare
+description: Use when cutting a versioned pre-release for freehold (e.g. "cut v0.8.0", "ship a release", "cut an rc"). Generates the CHANGELOG.md entry from git history since the previous release, lands it via a release PR, tags the merged main commit, and publishes a GitHub pre-release (marked prerelease) with the built assets, short high-level notes, and a test-status table. release-test-proxmox fills the table; release-publish promotes it when every row passes.
 metadata:
-  version: 3.0.0
+  version: 4.0.0
   author: freehold
   license: MIT
 ---
 
-# Pre-release — generate the changelog, tag `main`, publish a GitHub pre-release
+# Release-prepare — generate the changelog, tag `main`, publish a GitHub pre-release
 
 A version exists only when it is released, and every release is **three things together**:
 a `CHANGELOG.md` entry, an annotated tag `vX.Y.Z` on `main`, and a GitHub Release with
 **short, high-level** notes distilled from that entry. A version is cut as a **pre-release**
-first: the GitHub Release is marked `prerelease` and carries the built assets. It becomes
-final only after `publish-release` end-to-end tests those exact assets and promotes it —
-same tag, same commit, same assets. This skill never promotes. There is no version bump per
-merge or phase; this skill is the only thing that assigns a version.
+first: the GitHub Release is marked `prerelease`, carries the built assets, and ends with a
+**test-status table**. `release-test-proxmox` fills that table by running the live flows;
+`release-publish` promotes the release to final only once every row passes — same tag, same
+commit, same assets. This skill never promotes. There is no version bump per merge or phase;
+this skill is the only thing that assigns a version.
 
 The entry compares the **codebase** at the previous release to the current one: it describes
 what is true now that wasn't then. It is **not** an exhaustive commit log — if something was
@@ -26,7 +27,7 @@ reverted work is omitted.
 
 The operator asks to "tag a release", "ship a release", "cut an rc", or bump the version.
 The version has **not** been recorded anywhere yet — you generate the changelog entry now,
-from git history. Promotion of an already-cut pre-release is `publish-release`, not this.
+from git history. Promotion of an already-cut pre-release is `release-publish`, not this.
 
 ## Workflow
 
@@ -105,13 +106,29 @@ from git history. Promotion of an already-cut pre-release is `publish-release`, 
    gh release view vX.Y.Z --json tagName,isDraft,isPrerelease,assets
    ```
    The notes file is the **distilled** entry (~5–10 headline bullets, never the
-   changelog text verbatim). Confirm the tag is on the merged `main` commit, `isPrerelease`
-   is `true`, and every asset (`freehold`, `freehold-console`, `runner`,
+   changelog text verbatim) followed by the test-status table. Do **not** add an H1
+   headline — the release title already renders as the page heading, so a leading
+   `# vX.Y.Z — …` would duplicate it. Confirm the tag is on the merged `main` commit,
+   `isPrerelease` is `true`, and every asset (`freehold`, `freehold-console`, `runner`,
    `freehold-agent-tools`, `migrations.tar.gz`, `checksums.txt`) is present.
 
+   The notes file ends with the table, seeded as unverified:
+   ```markdown
+   ## Test status
+
+   | Provider | Test | Status |
+   | --- | --- | --- |
+   | Proxmox | Install/Uninstall | ⚪ Unverified |
+   | Proxmox | Rebuild/Teardown | ⚪ Unverified |
+
+   Legend: ⚪ Unverified · ✅ Passed · ❌ Failed — `release-test-proxmox` updates this
+   table; `release-publish` requires every row ✅.
+   ```
+
 8. **Stop — do not promote.** Leave it a pre-release and tell the operator that
-   `publish-release` promotes it after an end-to-end run on these assets. Promotion
-   (`--prerelease=false`) is the one thing this skill must never do.
+   `release-test-proxmox` fills the status table and `release-publish` promotes it once
+   every row passes. Promotion (`--prerelease=false`) is the one thing this skill must
+   never do.
 
 > **Future (when development continues past a release):** switch to trunk-first. `main`
 > stays the trunk; cut a long-lived `release/vX.Y.Z` branch for the release and
@@ -127,7 +144,9 @@ from git history. Promotion of an already-cut pre-release is `publish-release`, 
   feature/detached commit. (When release branches arrive, the tag moves to the release
   branch head instead — see the Future note.)
 - **Always publish as a pre-release** (`--prerelease`). Never run `--prerelease=false` —
-  promotion is `publish-release`'s job, gated on e2e.
+  promotion is `release-publish`'s job, gated on the test-status table.
+- **No H1 in the release body** — the release title is the heading; a leading `#` duplicates
+  it on the release page.
 - **Never** create, move, or delete a tag that already exists on `origin` without an
   explicit go-ahead.
 - **Never merge the release PR** — merging is the operator's call (see `AGENTS.md`).
