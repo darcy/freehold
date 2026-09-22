@@ -1,8 +1,9 @@
-/target/
-control-plane/target/
-contract/target/
-platform/target/
-install/target/
+# build output: the Rust workspace target/ plus every Go module's own target/
+# (the AGENTS.md build/test flow writes target/{debug,release}/ siblings under
+# whichever module dir `go build -C <module> -o target/...` runs from), so the
+# pattern is recursive rather than an enumeration that goes stale when a new
+# module appears.
+**/target/
 # a local `go build -o ../target/...` mishap can drop a binary directly under a
 # module dir — never commit it
 control-plane/freehold-agent-tools
