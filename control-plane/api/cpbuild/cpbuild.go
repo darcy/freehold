@@ -108,6 +108,12 @@ type Spec struct {
 	// surviving identity. Empty = StateDir (the agent-tools server sets both to
 	// its own state dir).
 	AgentIdentityDir string
+
+	// DepartmentRunners maps a department name → the capability runner its pod
+	// may exec through, populated by stageDepartmentRunners each build. Read by
+	// BuildCreateAgentFn to wire the pod's FREEHOLD_RUNNER_* env, and by the
+	// agent reconcile to grant the department's pubkey onto that runner.
+	DepartmentRunners map[string]agent.RunnerCoords
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -1248,6 +1254,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "world-service coords recorded")
 		}
+		// 7.75. Department capability runners: stand up each department's
+		// dedicated runner (the raw capability grant lives with the department
+		// identity) and record the pod-facing coords BEFORE the pods are
+		// (re)created below, so each department pod gets its FREEHOLD_RUNNER_*
+		// env. Idempotent + rebuild-safe.
+		if spec.K3sVmid != 0 && spec.CpLxc != 0 {
+			if err := spec.stageDepartmentRunners(); err != nil {
+				return "", fmt.Errorf("world-build department runners: %w", err)
+			}
+			report = append(report, "department capability runners reconciled")
+		}
 		// 8. The agent org + world facts are CP-owned now: create the CPA +
 		// departments, reconcile every registered agent, and register the world
 		// facts in-process, then restart agent-tools so its in-memory registry/
@@ -1715,7 +1732,13 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience)
+			// A department with a capability runner gets its FREEHOLD_RUNNER_* env
+			// (the CPA and custom agents get none, so their bridge has no exec).
+			var runner []agent.RunnerCoords
+			if rc, ok := spec.DepartmentRunners[name]; ok {
+				runner = append(runner, rc)
+			}
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience, runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)

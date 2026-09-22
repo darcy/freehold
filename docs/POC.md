@@ -88,6 +88,12 @@ it to make and ship a real change — to Buzz's own git and/or GitHub.
     through the CPA land on the Compute identity, which holds the raw compute grant;
     custom agents never receive it.
     
+*   **Data's capability runner (built).** Data holds the first live raw capability grant:
+    a dedicated `data-pve` runner (`root@<host>` SSH) in its own channel, reached from
+    Data's pod by a scoped `exec`/`list` signing as Data's own key against the runner's
+    relay-signed roster. It verifies every LXC/kube volume lands on a backed-up mount.
+    This is the pattern the remaining departments follow.
+    
 *   **Agents can read the repo.** The shared orientation block tells every non-custom agent
     to read the source repo on first boot, keep a memory of it, and re-check periodically;
     this chunk wires the git/GitHub grant and the read/schedule path that makes it real.

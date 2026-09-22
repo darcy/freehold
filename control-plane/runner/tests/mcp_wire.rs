@@ -30,6 +30,7 @@ fn test_ctx() -> RunnerContext {
         state_dir: dir,
         relay_url: None,
         relay_pubkey: None,
+        relay_auth_url: None,
     }
 }
 
@@ -107,7 +108,7 @@ fn rpc(id: u64, method: &str, params: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_wire_shape() {
-    let (addr, server) = mcp::serve("127.0.0.1:0", test_ctx())
+    let (addr, server) = mcp::serve("127.0.0.1:0", test_ctx(), false)
         .await
         .expect("bind server");
     let url = format!("http://{addr}/mcp");
@@ -461,11 +462,20 @@ async fn mcp_wire_shape() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refuses_non_loopback_bind() {
-    let err = mcp::serve("0.0.0.0:0", test_ctx())
+    let err = mcp::serve("0.0.0.0:0", test_ctx(), false)
         .await
-        .expect_err("must refuse non-loopback bind");
+        .expect_err("must refuse non-loopback bind without --allow-remote");
     assert!(
         err.to_string().contains("non-loopback"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_remote_permits_non_loopback_bind() {
+    let (addr, server) = mcp::serve("0.0.0.0:0", test_ctx(), true)
+        .await
+        .expect("allow_remote must permit a non-loopback bind");
+    assert!(!addr.ip().is_loopback(), "bound a loopback addr: {addr}");
+    server.abort();
 }

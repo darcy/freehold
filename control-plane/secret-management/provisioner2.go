@@ -272,7 +272,7 @@ func consoleSecret(stateDir string) ([]byte, error) {
 
 // SyncRunnerChannel creates the runner's private channel (owner = console),
 // members the runner, and publishes the profile meta. Idempotent.
-func SyncRunnerChannel(store *state.StateStore, relayURL, name, stateDir string) error {
+func SyncRunnerChannel(store *state.StateStore, relayURL, relayAuthURL, name, stateDir string) error {
 	profile, err := runnerProfile(store, name)
 	if err != nil {
 		return err
@@ -281,21 +281,24 @@ func SyncRunnerChannel(store *state.StateStore, relayURL, name, stateDir string)
 	if err != nil {
 		return err
 	}
+	if relayAuthURL == "" {
+		relayAuthURL = relayURL
+	}
 	rpk := profile.NostrPubkey
-	if err := relay.CreateRunnerChannel(relayURL, secret, rpk, name); err != nil {
+	if err := relay.CreateRunnerChannelAuth(relayURL, relayAuthURL, secret, rpk, name); err != nil {
 		return fmt.Errorf("relay create channel: %w", err)
 	}
-	if err := relay.PutUser(relayURL, secret, rpk, rpk); err != nil {
+	if err := relay.PutUserAuth(relayURL, relayAuthURL, secret, rpk, rpk); err != nil {
 		return fmt.Errorf("relay member runner: %w", err)
 	}
-	if err := relay.PublishRunnerMeta(relayURL, secret, profile); err != nil {
+	if err := relay.PublishRunnerMetaAuth(relayURL, relayAuthURL, secret, profile); err != nil {
 		return fmt.Errorf("relay publish meta: %w", err)
 	}
 	return nil
 }
 
 // PutUserMembership adds an agent pubkey to the runner's channel (kind 9000).
-func PutUserMembership(store *state.StateStore, relayURL, name, agentPubkey, stateDir string) error {
+func PutUserMembership(store *state.StateStore, relayURL, relayAuthURL, name, agentPubkey, stateDir string) error {
 	rec, ok := store.GetRunner(name)
 	if !ok {
 		return fmt.Errorf("runner %s not found", name)
@@ -304,14 +307,17 @@ func PutUserMembership(store *state.StateStore, relayURL, name, agentPubkey, sta
 	if err != nil {
 		return err
 	}
-	if err := relay.PutUser(relayURL, secret, rec.NostrPubkey, agentPubkey); err != nil {
+	if relayAuthURL == "" {
+		relayAuthURL = relayURL
+	}
+	if err := relay.PutUserAuth(relayURL, relayAuthURL, secret, rec.NostrPubkey, agentPubkey); err != nil {
 		return fmt.Errorf("relay put-user: %w", err)
 	}
 	return nil
 }
 
 // RemoveUserMembership removes an agent pubkey from the runner's channel (kind 9001).
-func RemoveUserMembership(store *state.StateStore, relayURL, name, agentPubkey, stateDir string) error {
+func RemoveUserMembership(store *state.StateStore, relayURL, relayAuthURL, name, agentPubkey, stateDir string) error {
 	rec, ok := store.GetRunner(name)
 	if !ok {
 		return fmt.Errorf("runner %s not found", name)
@@ -320,7 +326,10 @@ func RemoveUserMembership(store *state.StateStore, relayURL, name, agentPubkey, 
 	if err != nil {
 		return err
 	}
-	if err := relay.RemoveUser(relayURL, secret, rec.NostrPubkey, agentPubkey); err != nil {
+	if relayAuthURL == "" {
+		relayAuthURL = relayURL
+	}
+	if err := relay.RemoveUserAuth(relayURL, relayAuthURL, secret, rec.NostrPubkey, agentPubkey); err != nil {
 		return fmt.Errorf("relay remove-user: %w", err)
 	}
 	return nil
@@ -329,7 +338,7 @@ func RemoveUserMembership(store *state.StateStore, relayURL, name, agentPubkey, 
 // RevokeRunnerChannel cuts the runner off ON the relay (removes it from its
 // own roster + best-effort removes shipped-package grants) and re-publishes
 // the revoked meta.
-func RevokeRunnerChannel(store *state.StateStore, relayURL, name, stateDir string) error {
+func RevokeRunnerChannel(store *state.StateStore, relayURL, relayAuthURL, name, stateDir string) error {
 	rec, ok := store.GetRunner(name)
 	if !ok {
 		return fmt.Errorf("runner %s not found", name)
@@ -338,20 +347,23 @@ func RevokeRunnerChannel(store *state.StateStore, relayURL, name, stateDir strin
 	if err != nil {
 		return err
 	}
+	if relayAuthURL == "" {
+		relayAuthURL = relayURL
+	}
 	rpk := rec.NostrPubkey
-	if err := relay.RemoveUser(relayURL, secret, rpk, rpk); err != nil {
+	if err := relay.RemoveUserAuth(relayURL, relayAuthURL, secret, rpk, rpk); err != nil {
 		return fmt.Errorf("relay remove runner: %w", err)
 	}
 	if pkg, err := wire.Load(rec.PackageDir); err == nil {
 		for _, g := range pkg.Grants {
-			_ = relay.RemoveUser(relayURL, secret, rpk, g)
+			_ = relay.RemoveUserAuth(relayURL, relayAuthURL, secret, rpk, g)
 		}
 	}
 	profile, err := runnerProfile(store, name)
 	if err != nil {
 		return err
 	}
-	if err := relay.PublishRunnerMeta(relayURL, secret, profile); err != nil {
+	if err := relay.PublishRunnerMetaAuth(relayURL, relayAuthURL, secret, profile); err != nil {
 		return fmt.Errorf("relay publish revoked meta: %w", err)
 	}
 	return nil

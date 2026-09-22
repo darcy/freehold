@@ -39,15 +39,15 @@ there; if it is work not yet done, it belongs here.
   compute-only teardown/rebuild re-seeds from the *embedded* bytes, so a prompt edit made
   only in the CP's `/srv/data/cp` copy doesn't survive a rebuild until re-deployed. Wire
   the pod to the CP's durable mount.
-- **Capability runners planned but unbuilt.** The Chunk 3 surface designed runners that
-  are not in the code: GitHub (read/repo state/releases/actions), web search (self-hosted
-  SearXNG), and the litellm admin runner for scoped per-agent key minting. These back the
-  department tooling below.
-- **Department capability tooling + raw grants.** The four departments are installed but
-  have no capability tools; raw capability grants (external proxy, backup, compute, model
-  registration, AI hardware) sit with department identities once the agent↔runner exec
-  surface is wired. See `AGENTS.md` known gaps for the shipped-code side; the remaining
-  build is Chunk 5/6 work.
+- **More capability runners planned but unbuilt.** The department-runner surface
+  (`stageDepartmentRunners`) is built and Data's PVE runner is live; GitHub (read/repo
+  state/releases/actions), web search (self-hosted SearXNG), and the litellm admin runner
+  for scoped per-agent key minting are not. These back the remaining department tooling.
+- **Department capability tooling + raw grants (Data shipped).** Data holds a live raw
+  grant (root exec on the PVE host through its dedicated `data-pve` runner) and a scoped
+  `exec`/`list` tool; the other departments (external proxy, backup scheduling, compute,
+  model registration, AI hardware) still have no capability tools. See `AGENTS.md` known
+  gaps; the remaining build is per-department, landed with each capability.
 - **Secondary-relay onboarding.** A user's pre-existing/separate Buzz relay is locked to
   be onboarded as a service (via a relay runner), not a nested scope. Not built.
 
@@ -57,9 +57,11 @@ there; if it is work not yet done, it belongs here.
   runner's exec history; receipts redacted before posting, same discipline as the
   shipped-package flow) but not posted. The operational audit path stays kind-48001 +
   local spool.
-- **Relay-mode runners need an explicit community-membership step.** Provisioning in relay
-  mode requires `freehold relay-member` (community) plus the channel put-user; there is no
-  auto-member. Confirm and document the step, or automate it.
+- **Relay-mode runners need an explicit community-membership step — automated for
+  department runners.** A relay-mode runner cannot read its roster until it is a relay
+  COMMUNITY member (`buzz-admin add-member`); `stageDepartmentRunners` now does this for
+  each department runner. The generic `provision`/`adopt` CLI path still does not
+  auto-member — minting a non-department relay runner needs the step run by hand.
 - **Private channels vs. the activity feed.** "Private channels are excluded from any
   server-wide activity feed, not just direct-read gated" was not separately verified. The
   live deployment showed no exposure; re-check if a Buzz version changes the feed surface.

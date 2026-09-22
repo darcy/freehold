@@ -223,17 +223,22 @@ release notes.
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
-- **The four departments are installed, but have no capability tools yet.** `freehold build`
-  creates each reserved department (`network`/`data`/`compute`/`ai`)
-  through the same audited `create_agent`: its embedded prompt, the private `#freehold` plus its own
-  private `#freehold-<department>` channel, and the CPA added to each channel — four pods, reconciled
-  across a rebuild like any registry agent. The capability tooling they broker (external
-  proxy, backup, compute, model registration, AI hardware) and the runner grants/secrets that
-  back it are **not** in this phase: no agent can reach a runner's exec yet (the pod's MCP
-  bridge exposes only messages + create/manage), so enforcement of "capability work goes
-  through the owning department" is still just the grant model — raw capability grants sit with
-  department identities once Chunk 5 wires the agent↔runner exec surface, and custom agents
-  never receive them.
+- **The agent↔runner exec surface is wired for departments; Data is the first.** `freehold
+  build` creates each reserved department (`network`/`data`/`compute`/`ai`) through the same
+  audited `create_agent` (its embedded prompt, the private `#freehold` plus its own
+  `#freehold-<department>` channel, CPA added to each) and stands up a **dedicated capability
+  runner per department** (`stageDepartmentRunners`): a `root@<host>` SSH runner for Data
+  (`data-pve`, port 8790) with its own key/package/channel/audit stream, bound LAN-reachable
+  and started with the relay roster (`--relay-url/--relay-pubkey/--relay-auth-url
+  --allow-remote`). The department's pod gets `FREEHOLD_RUNNER_*` env and its bridge
+  advertises a scoped `exec`/`list` (target + credential pinned from the env), signing as the
+  agent's own nsec; the runner re-reads its relay-signed 39002 roster per call. The grant is
+  operator/console-issued (`grant_agent` / the build reconcile) and lands live. The CPA and
+  custom agents carry no runner coords, so their bridge never advertises exec — the raw grant
+  attaches only to the department identity. Remaining capability tooling (Network's proxy,
+  backup scheduling, Compute, model registration, AI hardware) is still unbuilt; Data's is a
+  full root exec (read AND write — it may adjust mounts/backup flags), and the runner's audit
+  is local-spool only (kind-48001 relay publish is rejected by stock buzz as an unknown kind).
 - **A rebuild of a world built before a department rename leaves stale agents.** The
   retired reserved names `gatekeeper`/`provisioner`/`services` (and, after the latest rename,
   `security`/`vault`/`agent-ops`) are no longer reserved, so on a

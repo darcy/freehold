@@ -755,6 +755,16 @@ type provisionReq struct {
 	Risk      *string `json:"risk"`
 }
 
+// relayAuthFor returns the NIP-98 canonical URL for relay writes: the relay's
+// public https origin when the community host is known, else "" (the callee
+// falls back to the dial URL — a LAN-only relay with no public domain).
+func (s *Server) relayAuthFor() string {
+	if s.RelayHost != "" {
+		return "https://" + strings.TrimSuffix(s.RelayHost, "/")
+	}
+	return ""
+}
+
 func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.requireSession(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -786,7 +796,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.SyncRunnerChannel(s.Store, *relayURL, req.Name, s.Store.Dir()); err != nil {
+		if err := provisioner.SyncRunnerChannel(s.Store, *relayURL, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -820,7 +830,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.SyncRunnerChannel(s.Store, *relayURL, req.Name, s.Store.Dir()); err != nil {
+		if err := provisioner.SyncRunnerChannel(s.Store, *relayURL, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -850,7 +860,7 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.RevokeRunnerChannel(s.Store, *relayURL, req.Name, s.Store.Dir()); err != nil {
+		if err := provisioner.RevokeRunnerChannel(s.Store, *relayURL, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -881,7 +891,7 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.PutUserMembership(s.Store, *relayURL, req.Name, req.Pubkey, s.Store.Dir()); err != nil {
+		if err := provisioner.PutUserMembership(s.Store, *relayURL, s.relayAuthFor(), req.Name, req.Pubkey, s.Store.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -912,7 +922,7 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.RemoveUserMembership(s.Store, *relayURL, req.Name, req.Pubkey, s.Store.Dir()); err != nil {
+		if err := provisioner.RemoveUserMembership(s.Store, *relayURL, s.relayAuthFor(), req.Name, req.Pubkey, s.Store.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}

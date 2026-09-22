@@ -247,13 +247,15 @@ cargo run -p freehold-runner -- serve         # MCP over HTTP, default 127.0.0.1
                                               # (FREEHOLD_RUNNER_ADDR, loopback only)
 ```
 
-The runner refuses non-loopback binds and non-loopback Origins (DNS-rebinding guard). Every
+The runner refuses non-loopback binds unless `--allow-remote` is passed (signed calls are the
+boundary) and refuses non-loopback Origins (DNS-rebinding guard). Every
 `exec`/`config`/`status`/`snapshot` call must be signed by a GRANTED agent pubkey or it
 fails closed. The whitelist has two sources: the shipped package (re-read from disk per
 call, `control-plane grant <runner> <pubkey>` with no relay configured) or the
-runner's OWN channel roster on the relay (`--relay-url` + `--relay-pubkey`): grants ARE
-channel membership, read live per call from the relay-signed kind-39002 snapshot, so a
-revoke lands without a restart.
+runner's OWN channel roster on the relay (`--relay-url` + `--relay-pubkey`, plus
+`--relay-auth-url` when the dial is a LAN origin — the runner dials `http://<domain>:3000`
+but NIP-98-signs the canonical public URL): grants ARE channel membership, read live per
+call from the relay-signed kind-39002 snapshot, so a revoke lands without a restart.
 
 ### The console: provision a service, watch it go green
 
@@ -461,7 +463,7 @@ sequenceDiagram
     CP->>BR: relay-member add — the runner's pubkey<br/>(community layer)
     BR->>REL: buzz-admin add-member (kind 13534) —<br/>without it, roster reads 403
     CP->>REL: publish the runner profile<br/>(kind-9 fh-profile message)
-    RUN->>RUN: runner serve --relay-url<br/>(whitelist = its own channel roster)
+    RUN->>RUN: runner serve --relay-url<br/>(+ --relay-auth-url / --allow-remote as needed;<br/>whitelist = its own channel roster)
     CP->>RUN: readiness probe (signed MCP)
     RUN-->>CP: green
     OP->>CP: grant my-runner agent-pubkey
@@ -509,7 +511,7 @@ sequenceDiagram
 
     AG->>R: tools/call — signed (runner|ts|body)
     R->>R: verify signature + audience
-    alt whitelist: relay roster (--relay-url + --relay-pubkey)
+    alt whitelist: relay roster (--relay-url + --relay-pubkey + --relay-auth-url)
         R->>REL: read own channel roster (kind 39002, #d)
         REL-->>R: members — relay-signed
     else whitelist: shipped package (no relay)

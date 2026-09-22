@@ -234,11 +234,12 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
     let ctx = RunnerContext {
         relay_url: None,
         relay_pubkey: None,
+        relay_auth_url: None,
         identity: id,
         package: pkg,
         state_dir: dir.path().to_path_buf(),
     };
-    let (mcp_addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let (mcp_addr, server) = mcp::serve("127.0.0.1:0", ctx, false).await.unwrap();
     let url = format!("http://{mcp_addr}/mcp");
 
     let agent = ureq::Agent::new_with_config(

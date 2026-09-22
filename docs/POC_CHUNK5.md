@@ -28,6 +28,12 @@ Status: current chunk. The deliverables below are the current-scope copy from
 *   Proof point: an agent deploys a service to an LXC using what it
     committed.
 
+*   **Department capability runner (Data, built).** Data holds the first raw capability
+    grant: a dedicated `data-pve` runner (`root@<host>` SSH, own channel + audit,
+    LAN-bound, relay-roster grants) reached from Data's pod by a scoped `exec`/`list`
+    signing as Data's own key. Used to verify every LXC/kube volume lands on a
+    backed-up mount. The other departments follow the same shape.
+
 ### Chunk 5 acceptance
 
 *   CPA-routed request → named peer provisions an LXC workspace → agent

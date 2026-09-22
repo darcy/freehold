@@ -181,7 +181,7 @@ func TestBridgeByDefault(t *testing.T) {
 // parser accepts the response (it rejects a reply lacking jsonrpc with a
 // -32700 parse error).
 func TestMergeToolsListPreservesEnvelope(t *testing.T) {
-	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`))
+	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, false))
 	var m map[string]interface{}
 	if err := json.Unmarshal(merged, &m); err != nil {
 		t.Fatalf("merged tools/list is not valid JSON: %v\n%s", err, merged)
@@ -206,6 +206,84 @@ func TestMergeToolsListPreservesEnvelope(t *testing.T) {
 	for _, want := range []string{"buzz_send", "create_agent", "manage_agent"} {
 		if !nameSet[want] {
 			t.Fatalf("merged tools/list missing %q:\n%s", want, merged)
+		}
+	}
+	if nameSet["exec"] || nameSet["list"] {
+		t.Fatalf("no-runner pod must not advertise exec/list:\n%s", merged)
+	}
+}
+
+// TestRunnerCallRequestPinsTargetAndID pins the two safety properties of the
+// runner proxy: the target/credential come from the pod env (an agent-supplied
+// target or secret is overwritten), and the caller's JSON-RPC id is preserved
+// (the harness matches replies by id).
+func TestRunnerCallRequestPinsTargetAndID(t *testing.T) {
+	raw := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"exec","arguments":{"cmd":"id","target":"evil","secrets":["steal"]}}}`)
+	out, err := runnerCallRequest(raw, "data-pve", "data-pve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		ID     json.RawMessage `json:"id"`
+		Params struct {
+			Arguments struct {
+				Cmd     string   `json:"cmd"`
+				Target  string   `json:"target"`
+				Secrets []string `json:"secrets"`
+			} `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	if string(req.ID) != "7" {
+		t.Fatalf("id not preserved: %s", req.ID)
+	}
+	if req.Params.Arguments.Target != "data-pve" {
+		t.Fatalf("target not pinned: %q", req.Params.Arguments.Target)
+	}
+	if len(req.Params.Arguments.Secrets) != 1 || req.Params.Arguments.Secrets[0] != "data-pve" {
+		t.Fatalf("secrets not pinned: %v", req.Params.Arguments.Secrets)
+	}
+	if req.Params.Arguments.Cmd != "id" {
+		t.Fatalf("cmd mangled: %q", req.Params.Arguments.Cmd)
+	}
+	// list carries no target/secrets but still preserves the id.
+	lraw := []byte(`{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{"name":"list","arguments":{}}}`)
+	lout, err := runnerCallRequest(lraw, "data-pve", "data-pve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lreq struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(lout, &lreq); err != nil {
+		t.Fatal(err)
+	}
+	if string(lreq.ID) != `"abc"` {
+		t.Fatalf("string id not preserved: %s", lreq.ID)
+	}
+}
+
+// TestMergeToolsListRunnerGated pins the department boundary: exec/list appear
+// ONLY when the pod carries capability-runner coords, so a runnerless pod (the
+// CPA and every custom agent) can never call the runner.
+func TestMergeToolsListRunnerGated(t *testing.T) {
+	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, true))
+	var m map[string]interface{}
+	if err := json.Unmarshal(merged, &m); err != nil {
+		t.Fatalf("merged tools/list is not valid JSON: %v", err)
+	}
+	tools, _ := m["result"].(map[string]interface{})["tools"].([]interface{})
+	nameSet := map[string]bool{}
+	for _, tl := range tools {
+		if mm, ok := tl.(map[string]interface{}); ok {
+			nameSet[mm["name"].(string)] = true
+		}
+	}
+	for _, want := range []string{"create_agent", "manage_agent", "exec", "list"} {
+		if !nameSet[want] {
+			t.Fatalf("runner pod tools/list missing %q:\n%s", want, merged)
 		}
 	}
 }

@@ -363,11 +363,14 @@ pub struct ExecManager {
     /// Relay for Phase D5 audit publishing (kind 48001, same event as the
     /// local spool); None = local spool only.
     relay_url: Option<String>,
+    /// Canonical NIP-98 URL when `relay_url` is a LAN dial (None = sign the
+    /// dial URL).
+    relay_auth_url: Option<String>,
 }
 
 impl Default for ExecManager {
     fn default() -> Self {
-        Self::new(None, None, None)
+        Self::new(None, None, None, None)
     }
 }
 
@@ -376,6 +379,7 @@ impl ExecManager {
         auditor: Option<Arc<Auditor>>,
         state_dir: Option<Arc<Path>>,
         relay_url: Option<String>,
+        relay_auth_url: Option<String>,
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -383,6 +387,7 @@ impl ExecManager {
             auditor,
             state_dir,
             relay_url,
+            relay_auth_url,
         }
     }
 
@@ -515,7 +520,8 @@ impl ExecManager {
             Ok(event) => {
                 // Phase D5: additive relay copy, detached + surfaced on failure.
                 if let Some(url) = &self.relay_url {
-                    spawn_audit_publish(url, auditor, event);
+                    let auth = self.relay_auth_url.as_deref().unwrap_or(url);
+                    spawn_audit_publish(url, auth, auditor, event);
                 }
             }
             Err(e) => {
@@ -678,7 +684,18 @@ pub fn write_audit(
 /// calling thread (the surfaced rule is a unit-testable contract, not a
 /// thread artifact): both the publish error and success are observable.
 pub fn report_audit_publish(relay_url: &str, secret: &[u8; 32], event_json: &str) {
-    match freehold_core::relay_http::publish_event_json(relay_url, secret, event_json) {
+    report_audit_publish_auth(relay_url, relay_url, secret, event_json)
+}
+
+/// [`report_audit_publish`] with a separate NIP-98 auth URL.
+pub fn report_audit_publish_auth(
+    dial_url: &str,
+    auth_url: &str,
+    secret: &[u8; 32],
+    event_json: &str,
+) {
+    match freehold_core::relay_http::publish_event_json_auth(dial_url, auth_url, secret, event_json)
+    {
         Ok(()) => {}
         Err(e) => tracing::warn!(error = %e, "audit relay publish failed — local spool only"),
     }
@@ -687,12 +704,22 @@ pub fn report_audit_publish(relay_url: &str, secret: &[u8; 32], event_json: &str
 /// Fire the publish detached (spawn_blocking): the agent's exec result must
 /// NEVER wait on a wedged relay. The join failure is ALSO surfaced — the
 /// surfaced rule covers the task boundary too.
-pub fn spawn_audit_publish(relay_url: &str, auditor: &Auditor, event: serde_json::Value) {
+pub fn spawn_audit_publish(
+    relay_url: &str,
+    relay_auth_url: &str,
+    auditor: &Auditor,
+    event: serde_json::Value,
+) {
     let url = relay_url.to_string();
+    let auth = relay_auth_url.to_string();
     let secret = auditor.secret();
     let ev = event.to_string();
     tokio::spawn(async move {
-        match tokio::task::spawn_blocking(move || report_audit_publish(&url, &secret, &ev)).await {
+        match tokio::task::spawn_blocking(move || {
+            report_audit_publish_auth(&url, &auth, &secret, &ev)
+        })
+        .await
+        {
             Ok(()) => {}
             Err(e) => tracing::warn!(error = %e, "audit publish task panicked/failed"),
         }
@@ -787,7 +814,7 @@ mod tests {
         let (dir, id) = sealed_runner_dir("b2", "b2key-123456");
         let pkg = SecretPackage::load(dir.path()).unwrap();
         let envs = resolve_secrets(&id, &pkg, &["b2".to_string()]).unwrap();
-        let mgr = ExecManager::new(None, None, None);
+        let mgr = ExecManager::new(None, None, None, None);
         let sid = mgr.start_streaming(
             "for i in 1 2 3 4 5; do echo line-$i; sleep 0.05; done",
             "local",
@@ -819,7 +846,7 @@ mod tests {
         let (dir, id) = sealed_runner_dir("tok", "super-secret-token-9911");
         let pkg = SecretPackage::load(dir.path()).unwrap();
         let envs = resolve_secrets(&id, &pkg, &["tok".to_string()]).unwrap();
-        let mgr = ExecManager::new(None, None, None);
+        let mgr = ExecManager::new(None, None, None, None);
         let sid = mgr.start_streaming("echo leaked-$TOK", "local", envs, Some(10), None);
         let mut all;
         loop {
@@ -862,7 +889,7 @@ mod tests {
         // Multi-byte UTF-8 straddling a 4096-byte read boundary must not drop
         // the whole chunk (the 4 KB-drop bug): 5000 'é' outputs ~15 KB, so
         // several characters cross boundaries.
-        let mgr = ExecManager::new(None, None, None);
+        let mgr = ExecManager::new(None, None, None, None);
         let sid = mgr.start_streaming(
             "python3 -c \"print('é' * 5000)\"",
             "local",
@@ -895,7 +922,12 @@ mod tests {
         let (dir, id) = sealed_runner_dir("k", "key-value-12345678");
         let auditor = Arc::new(Auditor::new(hex_to_arr(&id.nostr_secret_hex()).unwrap()));
         let state_dir = dir.path().to_path_buf();
-        let mgr = ExecManager::new(Some(auditor), Some(Arc::from(state_dir.as_path())), None);
+        let mgr = ExecManager::new(
+            Some(auditor),
+            Some(Arc::from(state_dir.as_path())),
+            None,
+            None,
+        );
         let _ = mgr
             .run("echo audited", "local", vec![], None, None)
             .await

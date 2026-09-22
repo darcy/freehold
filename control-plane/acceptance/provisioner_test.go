@@ -408,7 +408,7 @@ func TestGrantAndRevokeAreChannelMembershipCommands(t *testing.T) {
 	a := "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
 	b := "2221222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
 
-	if err := provisioner.SyncRunnerChannel(store, relayURL, "relaybox", cpDir); err != nil {
+	if err := provisioner.SyncRunnerChannel(store, relayURL, relayURL, "relaybox", cpDir); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := provisioner.GrantAgent(store, "relaybox", a); err != nil {
@@ -417,10 +417,10 @@ func TestGrantAndRevokeAreChannelMembershipCommands(t *testing.T) {
 	if _, err := provisioner.GrantAgent(store, "relaybox", b); err != nil {
 		t.Fatal(err)
 	}
-	if err := provisioner.PutUserMembership(store, relayURL, "relaybox", a, cpDir); err != nil {
+	if err := provisioner.PutUserMembership(store, relayURL, relayURL, "relaybox", a, cpDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := provisioner.PutUserMembership(store, relayURL, "relaybox", b, cpDir); err != nil {
+	if err := provisioner.PutUserMembership(store, relayURL, relayURL, "relaybox", b, cpDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -444,7 +444,7 @@ func TestGrantAndRevokeAreChannelMembershipCommands(t *testing.T) {
 		}
 	}
 
-	if err := provisioner.RemoveUserMembership(store, relayURL, "relaybox", b, cpDir); err != nil {
+	if err := provisioner.RemoveUserMembership(store, relayURL, relayURL, "relaybox", b, cpDir); err != nil {
 		t.Fatal(err)
 	}
 	removes := 0
