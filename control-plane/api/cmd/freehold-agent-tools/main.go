@@ -356,12 +356,32 @@ func cmdChannel(args []string) {
 			return
 		}
 		if err := delegate.EditChannelAuth(*relayURL, authURL, sec, chID, tags...); err != nil {
+			// A migration must not wedge the queue on a channel whose owner is
+			// someone else (e.g. a legacy channel a custom agent created): treat
+			// an authoritative refusal as a skip. A real error (network/5xx)
+			// still fails, so the queue retries it.
+			if authzRefused(err.Error()) {
+				fmt.Printf("channel %s: relay refused (signer is not owner/admin) — skipping: %v\n", *channel, err)
+				return
+			}
 			log.Fatalf("channel edit %s: %v", *channel, err)
 		}
 		fmt.Printf("channel %s updated\n", *channel)
 	default:
 		log.Fatalf("channel: unknown verb %q (edit)", args[0])
 	}
+}
+
+// authzRefused reports whether a relay publish error is an authoritative
+// refusal (the caller is not the channel owner/admin) rather than a transient
+// failure. Matches the pinned buzz relay's wording + a 403 status.
+func authzRefused(msg string) bool {
+	for _, s := range []string{"not authorized", "not the channel owner", "owner/admin", "HTTP 403"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func cmdServe(args []string) {

@@ -11,9 +11,10 @@ echo "Make #freehold private and prefix department channels with freehold-"
   --channel '#freehold' \
   --visibility private
 
-# Department channels gain the `freehold-` prefix (#ai -> #freehold-ai, …).
-# Each is renamed in place by its OWNER (the department identity), preserving
-# membership and history; a missing identity or channel is skipped (no-op).
+# Department channels gain the `freehold-` prefix (#ai -> #freehold-ai, …) and
+# are forced private (the model every fresh install now creates). Each is edited
+# in place by its OWNER (the department identity), preserving membership and
+# history; a missing identity or channel is skipped (no-op).
 for dept in ai compute network data; do
   "$FREEHOLD_AGENT_TOOLS" channel edit \
     --state-dir "$STATE_DIR" \
@@ -21,5 +22,6 @@ for dept in ai compute network data; do
     --relay-auth-url "$FREEHOLD_RELAY_AUTH_URL" \
     --as "$dept" \
     --channel "#$dept" \
-    --rename "#freehold-$dept"
+    --rename "#freehold-$dept" \
+    --visibility private
 done
