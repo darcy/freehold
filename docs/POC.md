@@ -1,9 +1,9 @@
 # POC Steps — The AI-operated Appliance
 
-Current *released* version: the top entry in `CHANGELOG.md` (equivalently the latest `v*`
-tag; never restated here). For the history of how this plan changed see `CHANGELOG.md` —
-this document describes the current plan only. Deferred work pulled from retired chunk
-plans lives in `docs/followups.md`.
+Current *released* version: the latest GitHub Release (equivalently the latest `v*` tag;
+never restated here). The release history lives in GitHub Releases — this document
+describes the current plan only. Deferred work pulled from retired chunk plans lives in
+`docs/followups.md`.
 
 Scope: proof of concept (pre-MVP). Chunks 1–4 are shipped and live-verified; Chunks 5–7
 remain (agent workspaces + git/GitHub, Kubernetes deploys, and hardware portability).

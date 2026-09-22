@@ -57,5 +57,5 @@ when the operator asks to "publish", "promote", or "make it final". Cutting a ne
   ⚪ Unverified row, or a ❌ Failed row blocks publication — never publish on a partial table.
 - **Never create, move, or delete a tag.** Promotion is a metadata edit (`isPrerelease`).
 - **Never merge anything** — merging PRs is the operator's call (see `AGENTS.md`).
-- The changelog entry already landed at prepare time; do not edit it here.
+- The release notes were written and published at prepare time; do not edit them here.
 - The body (including the table) is owned by the test skills; do not rewrite it here.

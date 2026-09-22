@@ -67,7 +67,8 @@ Orchestrator and departments are installed as part of the core build — a pod e
   plan and current scope, with the current chunk's plan alongside them
   (`docs/POC_CHUNK5.md`). [`docs/followups.md`](docs/followups.md) is the grab bag of
   deferred work.
-- [`CHANGELOG.md`](CHANGELOG.md) — decisions, reversals, and releases.
+- [GitHub Releases](https://github.com/darcy/freehold/releases) — the released versions,
+  their notes, and assets.
 
 ## Getting started
 

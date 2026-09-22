@@ -675,11 +675,11 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 
 ### Versions, channels, and updates
 
-*   **A version exists only at release** — a `CHANGELOG.md` entry, an annotated
-    `vX.Y.Z` tag, and a GitHub Release with binary assets (`freehold`,
-    `freehold-console`, `runner`, `freehold-agent-tools`, `migrations.tar.gz`,
-    `checksums.txt`). `0.x.y` is pre-MVP; `vX.Y.Z-rc.N` is the only prerelease
-    vocabulary.
+*   **A version exists only at release** — an annotated `vX.Y.Z` tag and a
+    GitHub Release with binary assets (`freehold`, `freehold-console`, `runner`,
+    `freehold-agent-tools`, `migrations.tar.gz`, `checksums.txt`). There is no
+    changelog file; the GitHub Release (its notes + assets) is the record.
+    `0.x.y` is pre-MVP; `vX.Y.Z-rc.N` is the only prerelease vocabulary.
 *   **The build stamps its identity** (`contract/version`: `Version`/`Commit`
     via `-ldflags`, the runner's `build.rs` into its MCP handshake); the
     justfile computes `git describe`, CI passes the tag.
@@ -816,5 +816,4 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 
 - Everything under `docs/` (this file, `VISION.md`, `ROADMAP.md`, `POC.md`,
   `BUZZ_SURFACE.md`, `followups.md`) plus the root docs (`README.md`,
-  `AGENTS.md`, `CHANGELOG.md`) describe the current state; the decisions above
-  are current.
+  `AGENTS.md`) describe the current state; the decisions above are current.
