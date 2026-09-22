@@ -7,9 +7,6 @@ import "github.com/spf13/cobra"
 // provisioning engine selfStages them. One home for the once-duplicated
 // definitions (previously split between the local CLI and install).
 
-// ExecCommand self-stages signed exec against a runner.
-func ExecCommand() *cobra.Command { return execCmd }
-
 // ProvisionCommand self-stages the LXC/VPS bootstrap driver.
 func ProvisionCommand() *cobra.Command { return provisionCmd }
 

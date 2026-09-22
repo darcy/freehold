@@ -7,7 +7,6 @@ package stages
 import (
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,7 +16,8 @@ import (
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
-	"freehold/freehold-cli/cpdeploy"
+	"freehold/contract/version"
+	"freehold/freehold-cli/internal/cpdeploy"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
 	"freehold/platform/provisioning/planebase"
@@ -87,41 +87,6 @@ func stateRootFor(agentDir string) string {
 		return filepath.Dir(filepath.Dir(agentDir))
 	}
 	return config.StateDir()
-}
-
-var execCmd = &cobra.Command{
-	Use:   "exec <TARGET> <CMD>",
-	Short: "Signed exec against a running runner (self-staged)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) != 2 {
-			return fmt.Errorf("exec needs <TARGET> <CMD>")
-		}
-		addr, _ := cmd.Flags().GetString("addr")
-		agentDir, _ := cmd.Flags().GetString("agent-dir")
-		timeoutS, _ := cmd.Flags().GetUint64("timeout")
-		c, err := installConnect(addr, agentDir, args[0])
-		if err != nil {
-			return err
-		}
-		refs := []string{args[0]}
-		if s, _ := cmd.Flags().GetStringSlice("secret"); len(s) > 0 {
-			refs = s
-		}
-		out, err := c.Exec(args[0], args[1], refs, timeoutS)
-		if err != nil {
-			return err
-		}
-		if out.Stdout != "" {
-			fmt.Print(out.Stdout)
-		}
-		if out.Stderr != "" {
-			fmt.Fprint(os.Stderr, out.Stderr)
-		}
-		if out.TimedOut {
-			return fmt.Errorf("exec timed out")
-		}
-		return nil
-	},
 }
 
 func registerSelfFlags(cmd *cobra.Command) {
@@ -546,26 +511,11 @@ var deployCpCmd = &cobra.Command{
 	Use:   "deploy-cp",
 	Short: "Deploy the control plane into the cp LXC (OPERATE mode)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		addr, _ := cmd.Flags().GetString("addr")
-		agentDir, _ := cmd.Flags().GetString("agent-dir")
-		target := mustStr(cmd, "target")
-		var transport cpdeploy.Transport
-		if mustBool(cmd, "transient") {
-			// Direct root SSH with the runner package's substrate key (just
-			// authorized at the door gate) — no served runner needed.
-			keyPath, cleanup, err := transientKey(agentDir, target)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-			transport = sshTransport{host: strings.TrimPrefix(mustStr(cmd, "host"), "root@"), key: keyPath}
-		} else {
-			c, err := installConnect(addr, agentDir, target)
-			if err != nil {
-				return err
-			}
-			transport = cpdeploy.ClientTransport{C: c, Target: target}
+		transport, cleanup, err := buildTransport(cmd)
+		if err != nil {
+			return err
 		}
+		defer cleanup()
 		binary := mustStr(cmd, "binary")
 		if binary == "" || mustStr(cmd, "relay-url") == "" {
 			return fmt.Errorf("deploy-cp needs --binary --relay-url")
@@ -601,10 +551,27 @@ var deployCpCmd = &cobra.Command{
 		spec.AgentToolsBinary = opt("agent-tools-binary")
 		spec.RunnerBinary = opt("runner-binary")
 		spec.RunnerPackage = opt("runner-package")
+		// The version pin: install stamps it, build/teardown don't (their
+		// deploy-cp invocations pass no --version).
+		if v := mustStr(cmd, "version"); v != "" {
+			ch := mustStr(cmd, "channel")
+			if ch == "" {
+				ch = version.Channel(v)
+			}
+			spec.Pin = &version.Pin{Version: v, Channel: ch, Commit: mustStr(cmd, "commit")}
+		}
+		if d := mustStr(cmd, "migrations-dir"); d != "" {
+			spec.MigrationsDir = &d
+		}
 		if v := mustStr(cmd, "lxc"); v != "" {
 			var n uint32
 			fmt.Sscanf(v, "%d", &n)
 			spec.LXc = &n
+		}
+		if mustBool(cmd, "redeploy") {
+			// update's lighter path: replace binaries + copy scripts, restart,
+			// no adoption/rotation/promotion.
+			return cpdeploy.Redeploy(transport, spec)
 		}
 		res, err := cpdeploy.DeployCp(transport, spec)
 		if err != nil {
@@ -616,6 +583,63 @@ var deployCpCmd = &cobra.Command{
 	},
 }
 
+// buildTransport builds the host transport shared by the self-staged CP verbs:
+// the served runner (default) or a transient root-SSH door (--transient). The
+// returned cleanup releases any transient key material.
+func buildTransport(cmd *cobra.Command) (cpdeploy.Transport, func(), error) {
+	addr, _ := cmd.Flags().GetString("addr")
+	agentDir, _ := cmd.Flags().GetString("agent-dir")
+	target := mustStr(cmd, "target")
+	if mustBool(cmd, "transient") {
+		keyPath, cleanup, err := transientKey(agentDir, target)
+		if err != nil {
+			return nil, nil, err
+		}
+		return sshTransport{host: strings.TrimPrefix(mustStr(cmd, "host"), "root@"), key: keyPath}, cleanup, nil
+	}
+	c, err := installConnect(addr, agentDir, target)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cpdeploy.ClientTransport{C: c, Target: target}, func() {}, nil
+}
+
+// --- stamp-version (self-staged: the update pin step) --------------------------------------
+
+var stampVersionCmd = &cobra.Command{
+	Use:   "stamp-version",
+	Short: "Write the CP's <state-dir>/version.json pin (install/update only)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		transport, cleanup, err := buildTransport(cmd)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		stateDir := mustStr(cmd, "state-dir")
+		if stateDir == "" {
+			stateDir = cpdeploy.DefaultCPStateDir()
+		}
+		v := mustStr(cmd, "version")
+		if v == "" {
+			return fmt.Errorf("stamp-version needs --version")
+		}
+		ch := mustStr(cmd, "channel")
+		if ch == "" {
+			ch = version.Channel(v)
+		}
+		spec := &cpdeploy.DeployCpSpec{StateDir: stateDir, BinDir: cpdeploy.DefaultCPBinDir()}
+		if lxc := mustStr(cmd, "lxc"); lxc != "" {
+			var n uint32
+			fmt.Sscanf(lxc, "%d", &n)
+			spec.LXc = &n
+		}
+		return cpdeploy.StampPin(transport, spec, version.Pin{Version: v, Channel: ch, Commit: mustStr(cmd, "commit")})
+	},
+}
+
+// StampVersionCommand returns the version-pin command for root registration.
+func StampVersionCommand() *cobra.Command { return stampVersionCmd }
+
 // optOf returns nil for an empty string (optional flag).
 func optOf(s string) *string {
 	if s == "" {
@@ -625,11 +649,6 @@ func optOf(s string) *string {
 }
 
 func init() {
-	registerSelfFlags(execCmd)
-	execCmd.Flags().String("config", config.ConfigPath(), "Tenant config path (scope; honored for symmetry)")
-	execCmd.Flags().StringSliceP("secret", "s", nil, "Secret names to request")
-	execCmd.Flags().Uint64("timeout", 60, "Runner-side watchdog in seconds")
-
 	registerSelfFlags(provisionCmd)
 	provisionCmd.Flags().String("kind", "proxmox-lxc", "proxmox-lxc")
 	provisionCmd.Flags().String("role", "", "relay|cp|k3s")
@@ -687,4 +706,16 @@ func init() {
 	deployCpCmd.Flags().String("agent-tools-pubkey", "", "agent-tools pubkey")
 	deployCpCmd.Flags().String("agent-tools-binary", "", "LOCAL freehold-agent-tools binary")
 	deployCpCmd.Flags().String("world-config", "", "cpbuild.Coords JSON (the console's build-executor coords)")
+	deployCpCmd.Flags().String("version", "", "version to stamp (version.json); absent = don't promote")
+	deployCpCmd.Flags().String("channel", "", "release channel to stamp (default: derived from --version)")
+	deployCpCmd.Flags().String("commit", "", "commit sha to stamp")
+	deployCpCmd.Flags().String("migrations-dir", "", "LOCAL dir of <epoch>.sh migration scripts (shipped + marked done)")
+	deployCpCmd.Flags().Bool("redeploy", false, "replace binaries in an EXISTING plane (update): no adoption/rotation/promotion")
+
+	registerSelfFlags(stampVersionCmd)
+	stampVersionCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "remote state dir")
+	stampVersionCmd.Flags().String("lxc", "", "cp LXC vmid")
+	stampVersionCmd.Flags().String("version", "", "version to stamp")
+	stampVersionCmd.Flags().String("channel", "", "channel to stamp (default: derived from --version)")
+	stampVersionCmd.Flags().String("commit", "", "commit sha to stamp")
 }

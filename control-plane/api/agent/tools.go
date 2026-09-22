@@ -46,7 +46,7 @@ type Tools struct {
 	Console ConsoleOps
 	// Create deploys a new agent pod (mint + apply). nil = create unsupported.
 	Create CreateAgentFn
-	// Migrate runs the CP's pending verify-gated migrations (the versioned
+	// Migrate runs the CP's pending one-time migration scripts (the versioned
 	// config/prompt/repair path). nil = migrations unsupported.
 	Migrate Migrator
 	// World drives the CP's world-build/reconcile stages through its co-located
@@ -85,7 +85,7 @@ func (t *Tools) WorldExec(target, cmd string, timeoutS uint64, secrets ...string
 	return t.Exec(target, cmd, timeoutS, secrets...)
 }
 
-// Migrator applies pending CP migrations and returns their verify-gated results.
+// Migrator applies the CP's pending migration scripts and returns their results.
 type Migrator func() ([]migrations.Result, error)
 
 // DoorAuthorizeAppend authorizes a box's public door key onto the host door
@@ -113,7 +113,8 @@ func (t *Tools) RevokeDoor(pubkey string) error {
 	return t.DoorRevoke(pubkey)
 }
 
-// WorldMigrate runs pending CP migrations (idempotent, 🟢/🔴 verify-gated).
+// WorldMigrate runs the CP's pending migration scripts (idempotent; a failure
+// stops the queue and stays pending for the next run).
 func (t *Tools) WorldMigrate() ([]migrations.Result, error) {
 	if t.Migrate == nil {
 		return nil, fmt.Errorf("world-migrate: no migrations runner bound")

@@ -217,6 +217,45 @@ func TestRecordPostWorld(t *testing.T) {
 	}
 }
 
+// TestRecordCoords: the CP returns the resolved world coords in its
+// world-build response; the build caller writes them to the local profile so a
+// later teardown/uninstall finds the guests a prior teardown's clearing wiped.
+func TestRecordCoords(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := &config.Config{
+		RelayURL: "https://relay.example.test",
+		CPURL:    "https://cp.example.test",
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{F: Flags{ConfigPath: cfgPath}, Out: &bytes.Buffer{}}
+	if err := e.RecordCoords(config.Coords{
+		RelayLxc: 100, RelayIP: "192.168.30.20",
+		CpLxc: 101, CpIP: "192.168.30.21",
+		K3sVmid: 102, ProxyIP: "192.168.30.8",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Lxc.Relay.Vmid == nil || *got.Lxc.Relay.Vmid != 100 || got.Lxc.Relay.Ip == nil || *got.Lxc.Relay.Ip != "192.168.30.20/24" {
+		t.Errorf("relay coords not recorded: %+v", got.Lxc.Relay)
+	}
+	if got.Lxc.Cp.Vmid == nil || *got.Lxc.Cp.Vmid != 101 || got.Lxc.Cp.Ip == nil || *got.Lxc.Cp.Ip != "192.168.30.21/24" {
+		t.Errorf("cp coords not recorded: %+v", got.Lxc.Cp)
+	}
+	if got.Lxc.K3s.Vmid == nil || *got.Lxc.K3s.Vmid != 102 || got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "192.168.30.8/24" {
+		t.Errorf("k3s coords not recorded: %+v", got.Lxc.K3s)
+	}
+	if !containsStr(got.Managed, "k3s") {
+		t.Errorf("managed missing k3s: %v", got.Managed)
+	}
+}
+
 // TestWorldManaged keeps a recorded k3s guest in the manifest when a re-run
 // opted k3s out (--no-k3s), so teardown still destroys it instead of leaking
 // the LXC + LV. litellm rides k3s and needs no guest carve-out.

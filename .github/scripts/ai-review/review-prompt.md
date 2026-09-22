@@ -17,7 +17,7 @@ lines, CLI shapes), note it in `readme_note`. Never blocking, never inline.
 Report only NEW drift; do not re-state drift from prior rounds or unchanged docs.
 
 ARCHITECTURE drift (signal only, never a blocker): if this diff drifts from
-what ARCHITECTURE.md locks or documents, note it in `architecture_note`. Same
+what docs/ARCHITECTURE.md locks or documents, note it in `architecture_note`. Same
 rules — never blocking, never inline; report only NEW drift, once per PR.
 
 Diagram accuracy: the README's mermaid sequence diagrams document real wiring —

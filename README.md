@@ -1,181 +1,96 @@
 # freehold
 
-*Reclaim the future we were promised.* An open-source appliance — one-command install,
-AI-agent-operated — that lands a Proxmox VE / VPS + Kubernetes stack with Buzz Relay as the
-control plane and a skill framework that installs and configures self-hosted OSS. The agent
-is the wall-breaker: you don't manage servers, you *ask*.
+> [!WARNING]
+> **Pre-alpha, under heavy development.** freehold is **not ready to use**. It changes
+> meaningfully day to day, so expect breaking changes, missing features, and possible data
+> loss. Don't run it anywhere you care about yet.
 
-The current version is the top entry in `CHANGELOG.md` (never restated here). That file
-also records the history of how this plan got here.
+freehold is an open-source appliance that is operated by AI agents. It lands a full
+self-hosted stack on a Proxmox VE host or VPS — a self-hosted
+[Buzz](https://github.com/block/buzz) relay as its hub, Kubernetes, reverse proxy and TLS,
+and its own control plane. An Orchestrator and four department agents — Network, Data,
+Compute, and AI — run it and create custom agents on request. Whatever you want can be
+answered, built, hosted, and delivered.
 
-**Status:** the engine room (identity, secret provisioner, MCP runner primitive, SSH/Vultr/
-B2 connectors, coarse grants, local admin/ops console) is live and hermetic-tested. The
-management relay is live: bootstrap-provisioned LXCs under a domain identity, NIP-98 console
-auth, encrypted relay-persisted agent memory, delegation, and the runner lifecycle
-(runners-as-NIP-29-channels) all verified against a real Buzz relay with no custom kinds or
-relay patch. The CPA is a live, talkable Buzz agent: the operator names it at
-install, and it deploys as a k3s Pod running Buzz's `buzz-acp` harness with a
-dedicated create/grant/manage-agent toolset (Chunk 4) that it now drives
-directly from conversation — it survives a full rebuild and creates new
-agents itself when asked in Buzz. The Backblaze B2 connector is
-hermetic-verified; a live account test is still open.
+## Contents
 
-## Design in one paragraph
+- [Agents](#agents)
+- [Vision, Architecture & Roadmap](#vision-architecture--roadmap)
+- [Getting started](#getting-started)
+  - [The appliance: one binary, two surfaces](#the-appliance-one-binary-two-surfaces)
+  - [The config](#the-config)
+  - [Runner: identity + MCP server](#runner-identity--mcp-server)
+  - [The console: provision a service, watch it go green](#the-console-provision-a-service-watch-it-go-green)
+  - [Control plane CLI: provision a service](#control-plane-cli-provision-a-service)
+  - [freehold: the CLI](#freehold-the-cli)
+- [How it works](#how-it-works)
+  - [Bootstrap flow (from zero to a live world)](#bootstrap-flow-from-zero-to-a-live-world)
+  - [Runner setup + grant (from credential to first exec)](#runner-setup--grant-from-credential-to-first-exec)
+  - [Runtime: one exec call (runner → exec → grant)](#runtime-one-exec-call-runner--exec--grant)
+  - [Security model (no master key)](#security-model-no-master-key)
+- [Repository layout (what things do in the code)](#repository-layout-what-things-do-in-the-code)
+- [Contributing / review](#contributing--review)
 
-A **control plane** (a web app, admin/ops only — chat is Buzz's job) manages **runners**:
-privileged MCP tool servers that own connections and credentials on the target side.
-**Agents** are the brain, **runners** are dumb privileged hands — one generic primitive
-`exec(cmd, target, stream?)`, no semantic tools. The control plane is a **secret
-provisioner, not a vault**: it generates a runner identity, encrypts the credential *to the
-runner's key*, ships ciphertext, and injects the runner's private key. **No master key** —
-the CP holds only ciphertext + public keys, the runner decrypts locally, uses in memory,
-forgets. Host-flexible: Proxmox lead, VPS/cloud first-class, nothing locked to a hypervisor.
-See `VISION.md` (the "why"), `ARCHITECTURE.md` (locked decisions), `roadmap/` (chunked plan).
+## Agents
 
-## Repository layout (what things do in the code)
+freehold is run by two tiers of agents, all living in Buzz:
 
-```
-Cargo.toml            workspace: control-plane/core, control-plane/runner,
-                      control-plane/testkit, control-plane/core/harness/oracle
-agents/               freehold/agents — the top-level home for agent definitions:
-                      freehold/ (the CPA prompt + skills), custom/ (the template
-                      for agents the CPA creates on the fly), named agents as they
-                      land. Its own Go module so it embeds its Markdown; the control
-                      plane imports the bytes.
-contract/             freehold/contract — the shared wire/trust leaf BOTH the
-                      control plane and the platform import: crypto/ (Go repro of
-                      the Rust core, byte-exact cross-verified by the harness),
-                      wire/, client/ (the signed MCP client), config/, console/,
-                      relay/, state/, delegate/. Its own Go module so the edge is
-                      platform → contract ← control-plane (no module cycle).
-control-plane/        freehold/control-plane — the stable mechanism (Go logic,
-                      Rust only for runner + core):
-  api/                the unified scoped API: agent toolset (agent/, agenttools/,
-                      cpstate/) + the operator-scoped world_status / world_teardown /
-                      world_migrate / world_build / world_register_facts /
-                      world_authorize_door / world_revoke_door actions (world_status
-                      = the single inventory read: agents + the console's runners/DNS
-                      + the deployer-side world facts (plane/certs/domains)
-                      registered at build. One assembly (agenttools.WorldStatus)
-                      feeds BOTH the console's public /api/world — what the TUI and
-                      `freehold world status` read, no local agent-tools coords — and
-                      the /mcp world_status tool for direct MCP callers; world_build =
-                      the CP runs its world stages
-                      through the co-located runner)
-                      + cmd/freehold-agent-tools (the CP's agent-management MCP
-                      server; `mcp` is the stdio bridge the agent PODS fetch at boot
-                      — the world actions deliberately do NOT reach the CPA's
-                      conversation+create-only harness, scope-gated server-side:
-                      registry agents get create/manage only, operators get
-                      world_* + grant_agent; grant_agent publishes the runner-roster
-                      change with the console's own channel-owner identity)
-   secret-management/  provision/rotate/revoke/grant (the provisioner)
-  core/               (Rust) the byte-exact contract oracle + harness/ (the
-                      Go↔Rust byte-gate, test-only)
-  runner/  testkit/   (Rust) the privileged exec endpoint + its hermetic fixtures
-   acceptance/         the Chunk-1/2 acceptance gate (Go: provisioner lifecycle,
-                       console HTTP surface, relay-channel fold; drives the real
-                       `runner` binary as a subprocess)
-freehold-cli/         freehold/freehold-cli — the LOCAL operator surface (never
-                       imported by control-plane/): cli/ (the freehold CLI + TUI,
-                       login/, flows/, tui/), install/ (the guided/headless CP
-                       bootstrap + the box self-staged stages), cpdeploy/
-platform/             freehold/platform — the evolving world the mechanism
-                      installs/evolves: services/<capability>/<impl>/ (relay/buzz,
-                      webproxy/caddy, externaldns/cloudflare, certificates/letsencrypt,
-                      …), provisioning/ (bootstrap, planebase, drive, stages, deploy),
-                      migrations/ (verify-gated), terraform/ (the IaC the CP
-                      executes). Adding a service touches only this module —
-                      never control-plane/.
-AGENTS.md             agent guidance: locked model, conventions, known gaps
-roadmap/              ROADMAP.md, POC.md, POC_CHUNK1.md + POC_CHUNK2.md (phase checklists,
-                      ticked), BUZZ_SURFACE.md (Chunk 2 Phase-0 deliverable)
-control-plane/core/   freehold-core — the Rust contract oracle, shared by every
-                      crate, no product logic
-  src/identity.rs     Nostr (secp256k1) + X25519 keypairs; env-inject or 0600 file
-  src/auth.rs         the signed-call protocol: BIP-340 signatures over
-                      `runner_pubkey|ts|raw_body` — the runner verifies, every
-                      client signs with the same primitives
-  src/crypto.rs       sealed box TO a runner's X25519 pubkey: ephemeral X25519 +
-                      HKDF-SHA256 + ChaCha20-Poly1305; recipient AND secret-name bound;
-                      low-order-point forgery rejected; versioned wire format
-  src/secrets.rs      SecretPackage: the runner's on-disk secrets.json (name → ciphertext,
-                      target metadata, agent grants)
-  src/audit.rs        BIP-340-signed audit log (0600), caller pubkey recorded
-  src/futil.rs        atomic file discipline: unique 0600-at-birth temp + fsync + rename;
-                      0700 state dirs — used everywhere secret material touches disk
-control-plane/runner/ freehold-runner — the privileged connector bridge
-  src/mcp.rs          MCP-over-HTTP tool server (JSON-RPC 2.0). Contract tools: list,
-                      exec, config, status, snapshot — all live. Every tools/call is
-                      signed by a GRANTED agent pubkey or fails closed (D).
-  src/exec.rs         the ONE generic primitive: exec(cmd, target, timeout) — local
-                      process or an owned connection; secret values resolved BY NAME
-                      from ciphertext, redacted from every response, audited
-  src/ssh.rs          russh connector: in-memory keys, pooled connections, TOFU host keys
-  src/main.rs         CLI: `runner keys init`, `runner serve`
-control-plane/api/console/  the Go console server (web.rs ported at parity): the
-                      loopback admin/ops web surface — /api/* auth/overview/
-                      world/provision/rotate/revoke/grant/DNS/agents/portal with
-                      the SAME security guards (NIP-98 login, HttpOnly session
-                      cookies, single-use portal, DNS-rebinding Origin guard,
-                      loopback-until-authn bind). cmd/freehold-console serves it and carries the
-                      box-side CP CLI verbs (provision/grant/adopt/add-secret/
-                      identity); the deploy ships it end to end.
-control-plane/testkit/  (Rust) freehold-testkit — hermetic fixtures: mock Vultr/B2 API servers +
-                      an in-process russh sshd (shared by the runner's connector tests)
-control-plane/acceptance/  the Chunk-1/2 acceptance gate in Go (`go test ./acceptance/…`):
-                      the CP provisioner lifecycle, the console HTTP surface, and the
-                      relay-channel fold against a hermetic fake relay; it drives the
-                      real `runner` binary (a subprocess) for the live-readiness leg.
-                      The connector/relay behavior the runner owns stays in its Rust tests.
-```
+**Orchestrator**
 
-## Security model (no master key)
+| Agent | Role | Services managed |
+| --- | --- | --- |
+| **@freehold** | The main touchpoint, on Buzz's `buzz-acp` harness (prompt in `agents/freehold/`). Holds the conversation, plans, delegates, and creates custom agents. | Agent lifecycle, agent grants |
 
-- The CP never holds a private key that decrypts anything, and never holds plaintext
-  (credentials are sealed, forgotten). The only key under the CP state dir is the console
-  AGENT key — it signs readiness probes and is provably not the encryption recipient of
-  any runner (G3.3 checks this).
-- The runner holds ciphertext + its own injected private key; only that key opens its
-  blobs, and a blob only opens under the secret name it was sealed with.
-- Rotation re-seals a NEW credential (the erase lever for your copies); revocation blocks
-  provision/rotate and deletes the shipped credential. Honest limits are written down in
-  `AGENTS.md` (no remote revocation of a capability someone else kept; re-keying and
-  epoch/staleness are named follow-ups; a RUNNING runner keeps its in-memory credential
-  until restart — rotate/re-grant reach the next boot).
+**Departments**
 
-## Getting started (current Chunk-1 state)
+Each department is scoped to one domain and the capabilities it owns.
 
-Prereqs: Rust 1.94+ (workspace declares `rust-version = "1.94"`) + Go 1.25+
-(six modules: `agents/`, `contract/`, `platform/`, `providers/`, `freehold-cli/`, `control-plane/`) + `mise`
-(the justfile recipes run `go`/`rust` through `mise exec` so the right
-toolchain versions are guaranteed — `curl https://mise.run | sh` or `brew
-install mise`) + `just` ([just](https://github.com/casey/just) — `cargo
-install just`, or `brew install just`).
+| Agent | Role | Services managed |
+| --- | --- | --- |
+| **@network** | The network surface: access and exposure (external proxy, DNS, ingress). | Caddy, TLS, dnsmasq, Cloudflare, Tailscale |
+| **@data** | The data plane: backups, storage, durability. | Proxmox storage (LVM/ZFS), PBS, TrueNAS, Backblaze (future) |
+| **@compute** | The box itself and provisioning: CPU/RAM/disk, LXC and kube, remote hosts, monitoring. | Proxmox, k3s, Vultr, Hetzner, monitoring |
+| **@ai** | Models, providers, and agents, plus local AI hardware. | LiteLLM, local AI (RTX 3090 / DGX Spark), benchmarking |
+
+Talk is unrestricted — the operator and any agent may converse with any department directly.
+What's bounded is *capability execution*: a capability a department owns is executed by that
+department's identity, never by a custom agent that would self-serve a second, ungoverned
+path to it. Whichever agent creates a service owns its install, config, and operation. The
+Orchestrator and departments are installed as part of the core build — a pod each, in
+`#freehold` plus its own private channel — and a rebuild reconciles them.
+
+## Vision, Architecture & Roadmap
+
+- [`docs/VISION.md`](docs/VISION.md) — the narrative and the "why".
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the system design and the locked decisions.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/POC.md`](docs/POC.md) — the chunked
+  plan and current scope, with the current chunk's plan alongside them
+  (`docs/POC_CHUNK5.md`). [`docs/followups.md`](docs/followups.md) is the grab bag of
+  deferred work.
+- [`CHANGELOG.md`](CHANGELOG.md) — decisions, reversals, and releases.
+
+## Getting started
+
+Build once, then operate the world — the justfile only builds and installs, it never drives
+the world itself.
+
+Prereqs:
+
+- **[mise](https://mise.jdx.dev/)** — installs and pins the toolchains (Go 1.25.0, Rust 1.98.0)
+  and runs them through `mise exec`, so Rust and Go need no separate install
+  (`curl https://mise.run | sh`, or `brew install mise`).
+- **[just](https://github.com/casey/just)** — `mise use -g just`, or `brew install just`.
+
+`just install` builds everything and puts `freehold` (plus the siblings it resolves at
+runtime) on your PATH; `just build` alone leaves them in `target/`.
 
 ```sh
-# build the full binary set a `freehold build`/`teardown` resolves
-# (freehold + freehold-console debug/release + runner debug/release +
-# freehold-agent-tools static) into target/debug + target/release:
-just build
-
-# install freehold AND its sibling binaries onto PATH (~/.cargo/bin +
-# ~/.cargo/release) so the installed `freehold build`/`teardown` resolve them
-# relative to the running executable:
-just install
-
-# run the full gate: cargo fmt/build/test + Go build/vet/test across the five
-# modules + the harness byte-gate + the hermetic Chunk-1/2 acceptance gate:
-just test
-
-# the manual equivalents, if you don't use just:
-cargo build --workspace && cargo test --workspace   # the Rust crates: control-plane/{core,runner,testkit,core/harness/oracle} + `cargo build --bin runner` for the acceptance gate
-for m in agents contract platform providers freehold-cli control-plane; do (cd $m && go build ./... && go vet ./... && go test ./...); done  # the six Go modules + the byte-exact harness gate + the Go acceptance gate
-cargo fmt --all --check          # CI gate
+just build    # build the full binary set into target/debug + target/release
+just install  # build, then place freehold + siblings on PATH
+just test     # the full gate: Rust fmt/build/test + Go build/vet/test + the acceptance gate
 ```
 
-Then operate the world yourself (the justfile does NOT drive the world — it
-only builds + installs):
+Then operate the world yourself:
 
 ```sh
 freehold install --yes --name <world> --host root@<box> \
@@ -198,20 +113,21 @@ recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
 needs the relay/CP domains + proxy IP (the guided flow prompts for them). An
 existing name whose CP is absent is re-adopted (the plane keeps the runner
 identity); a **live** CP is refused — reconcile the world with `freehold build`,
-drop it with `teardown`/`uninstall`, or join it with `freehold login`. The old
-`bootstrap` command remains as a hidden alias for `install --yes`.
+drop it with `teardown`/`uninstall`, or join it with `freehold login`. `install
+--yes` is the non-interactive surface.
 
-### The appliance (`freehold` — one binary, two surfaces)
+### The appliance: one binary, two surfaces
 
 ```sh
 freehold                      # no args → the interactive TUI (bubbletea); a subcommand → the CLI
 freehold login                # root-free: CP address + operator nsec (NIP-98) → authorize,
 freehold                      #   seed a local connection profile from the CP, then END — just run `freehold`
 freehold logout               # clear THIS box's login ledger (CP/world untouched)
-freehold world status         # the CP's single inventory (read via public /api/world)
-freehold world build          # trigger the CP's world-build (co-located runner)
-freehold world teardown       # alias of `freehold teardown` (CP-preserving world teardown)
-freehold world migrate        # run the CP's verify-gated migrations
+freehold status               # the CP's single inventory (read via public /api/world)
+freehold build                # trigger the CP's world-build (co-located runner)
+freehold teardown             # CP-preserving world teardown
+freehold update               # update the world's CP (release assets / ref / dev),
+                              #  run pending migrations, repin the version
 freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
                               #  --remove-data drops the durable plane); a thin box / dead CP
                               #  uninstalls over direct root SSH
@@ -219,8 +135,8 @@ freehold door authorize       # authorize this box's door key on the host (DOOR_
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no
                               #  [runner]) through the CP's runner via world_exec
-freehold provision --kind …   #   deploy-relay, deploy-cp, relay-member,
-freehold deploy-relay …        #   memory, console-login, grant, storage …)
+freehold provision --kind …   #   self-staged stages: provision, deploy-cp,
+freehold deploy-cp …          #   storage, add-relay-member
 freehold --help               # both surfaces
 ```
 
@@ -292,21 +208,20 @@ prompts. Re-runs are safe: an
 existing runner package is reused, the door is re-verified, and a matching LXC
 is reused (a foreign container on the vmid is refused).
 
-#### The config (`~/.config/freehold/profiles/<name>/config.toml`)
+#### The config
 
-Each tenant profile's config lives at `profiles/<name>/config.toml` with its
-state under `~/.freehold/profiles/<name>/` (overridden by `FREEHOLD_HOME`);
-nothing about it is configured. The config is that tenant's CONNECTION/DESIRE
-profile:
+Each tenant profile's config lives at `~/.config/freehold/profiles/<name>/config.toml`
+with its state under `~/.freehold/profiles/<name>/` (overridden by `FREEHOLD_HOME`).
+The config is that tenant's CONNECTION/DESIRE profile:
 
 ```toml
-domain = "freehold-test.darcydev.net"
-relay_url = "https://freehold-test.darcydev.net"
-cp_url = "https://cp-freehold-test.darcydev.net"
+domain = "freehold-test.example.com"
+relay_url = "https://freehold-test.example.com"
+cp_url = "https://cp-freehold-test.example.com"
 operator_pubkey = "1dc07610…"           # console admin + relay owner
 operator_identity = "/home/you/.freehold/control-plane/operator"   # YOUR key, 0600 —
                                         # the TUI auto-logs in with it; optional when
-                                        # you pasted an npub (console-login --nsec then)
+                                        # you pasted an npub (use the portal to authenticate)
 managed = ["relay", "cp"]      # what WE operate — an invited relay wouldn't be here
 
 [runner]                       # the provisioning door (the exec path into the host)
@@ -334,16 +249,16 @@ cargo run -p freehold-runner -- serve         # MCP over HTTP, default 127.0.0.1
 The runner refuses non-loopback binds and non-loopback Origins (DNS-rebinding guard). Every
 `exec`/`config`/`status`/`snapshot` call must be signed by a GRANTED agent pubkey or it
 fails closed. The whitelist has two sources: the shipped package (re-read from disk per
-call, `control-plane grant <runner> <pubkey>` with no relay configured) or — Chunk 2.6.1 —
-the runner's OWN channel roster on the relay (`--relay-url` + `--relay-pubkey`): grants ARE
+call, `control-plane grant <runner> <pubkey>` with no relay configured) or the
+runner's OWN channel roster on the relay (`--relay-url` + `--relay-pubkey`): grants ARE
 channel membership, read live per call from the relay-signed kind-39002 snapshot, so a
 revoke lands without a restart.
 
-### The console: provision a service, watch it go green (the F flow)
+### The console: provision a service, watch it go green
 
 ```sh
 freehold-console serve --state-dir /srv/data/cp/control-plane
-# open http://127.0.0.1:8080 — admin/ops only (chat is Buzz's job, Chunk 2)
+# open http://127.0.0.1:8080 — admin/ops only (chat is Buzz's job)
 ```
 
 Paste a credential into the provision form (or `POST /api/provision`). The console ships the
@@ -351,7 +266,7 @@ runner package, registers the runner's MCP address, and the overview shows the r
 self-check per target — 🟢/🟡/🔴 — probed through the same signed MCP channel an agent
 uses. Manage: rotate, revoke, grant/revoke-grant, set MCP addr.
 
-### Control plane CLI: provision a service (B1 happy path)
+### Control plane CLI: provision a service
 
 ```sh
 freehold-console provision vultr \
@@ -382,13 +297,13 @@ freehold-console revoke vultr --state-dir /srv/data/cp/control-plane
 Provision refuses to clobber: a name that exists, or a `--runner-dir` that already holds a
 package, errors instead of destroying a runner's key.
 
-### freehold: the CLI (the scripted CPA stand-in)
+### freehold: the CLI
 
-The CLI binary is `freehold`, built from the `freehold-cli/` Go module
-(the `freehold-orchestrator` binary folded into it — one binary, two surfaces):
+The CLI binary is `freehold`, built from the `freehold-cli/` Go module (one binary, two
+surfaces):
 
 ```sh
-go build -C freehold-cli -o ../target/debug/freehold ./cli/cmd/freehold
+go build -C freehold-cli -o ../target/debug/freehold ./cmd/freehold
 freehold --help
 ```
 
@@ -397,10 +312,6 @@ freehold --help
 freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"' \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
   --runner-pubkey <runner-nostr>
-
-freehold demo --addr 127.0.0.1:8787 \
-  --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr> \
-  --steps steps.json   # [{target, cmd, secrets?, timeout_s?}]
 
 # World bring-up, one step at a time (every command routes through the
 # provisioning runner — the workstation never holds a PVE credential itself).
@@ -442,25 +353,17 @@ freehold deploy-relay --target proxmox-box --lxc 100 \
   --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
   --runner-pubkey <runner-nostr>
 
-#   relay-member: community membership is the SECOND layer (channel
+#   add-relay-member: community membership is the SECOND layer (channel
 #   membership via 9000/9001 is not enough for relay queries). Add the fresh
 #   console pubkey / operator keys / runners / agents via buzz-admin in the
 #   relay LXC — the CP never holds the relay signing key.
-freehold relay-member --target proxmox-box --lxc 100 \
+freehold add-relay-member --target proxmox-box --lxc 100 \
   --pubkey <pubkey-or-operator-key> --addr 127.0.0.1:8787 \
   --agent-dir ./.freehold/control-plane/agent-my-agent --runner-pubkey <runner-nostr>
 
-#   console-login: the operator logs in with THEIR OWN nsec (NIP-98) — the
-#   key never leaves their machine. Works over the proxy (cp-<relay-domain>).
-#   (In the TUI, just press w on the Runners view — it opens the web console
-#   already authenticated via a single-use portal token, no console-login.)
-freehold console-login \
-  --url https://cp-<relay-domain> --nsec nsec1...
-
-#   grants (Chunk 2.6.1): grants ARE channel membership. With --relay-url,
-#   grant publishes a put-user to the runner's channel; the runner re-reads
-#   its relay-signed roster per call. (revoke-grant is the /api/revoke-grant
-#   web action.)
+#   grants: grants ARE channel membership. With --relay-url, grant publishes a
+#   put-user to the runner's channel; the runner re-reads its relay-signed
+#   roster per call. (revoke-grant is the /api/revoke-grant web action.)
 freehold-console grant my-runner --pubkey <agent-pk> --relay-url https://<relay-domain> --state-dir /srv/data/cp/control-plane
 
 #   a relay-configured runner (whitelist = its own channel roster, verified
@@ -475,13 +378,23 @@ cargo run -p freehold-runner -- serve --state-dir ./.freehold/runner/my-runner \
 #   Coverage lives in the Go acceptance gate (`go test ./acceptance/…`).
 ```
 
-## Bootstrap flow (from zero to a live world)
+## How it works
+
+Three roles, one primitive. A **control plane** (admin/ops only — chat is Buzz's job) drives
+**runners**, the privileged exec endpoints that own connections and credentials on the target
+side. **Agents** are the brain, **runners** are the dumb hands — an agent signs a call and
+the runner executes one generic primitive, `exec(cmd, target, stream?)`, with no semantic
+tools. Agents live in Buzz as pods; one control plane is exactly one relay scope and attaches
+to the relay, so co-location is convenience, never assumed. It's host-flexible: Proxmox leads,
+VPS/cloud are first-class, and the k8s layer above the host driver is identical on every
+substrate. The sections below walk the lifecycle from a bare box to a running exec call.
+
+### Bootstrap flow (from zero to a live world)
 
 `freehold build` is **login-gated, drive-through-CP**: after
 `freehold install` (box one) creates the CP, ANY box runs `freehold build` to trigger
 the console's `/api/world-build` — the CP brings up the WHOLE world
 (relay/agent-tools/k3s → DNS → litellm → Caddy → cert → CPA) through its own
-co-located runner.
 co-located runner. A fresh box only needs `freehold login` (root-free) → then
 `freehold` to trigger. Every command routes through a **provisioning runner**
 (one `exec(cmd, target)` — the same primitive agents use), so the workstation
@@ -510,7 +423,7 @@ sequenceDiagram
     OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records · trigger /api/world-build (console = the CP build executor)
     CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · litellm · Caddy · cert
     CP-->>OP: world_build report (each stage) → Freehold is up
-    OP->>C: console-login — own nsec (NIP-98) / w in the TUI
+    OP->>C: login — own nsec (NIP-98) / w in the TUI
     C-->>OP: live world: relay + console + CPA wired
 ```
 
@@ -519,7 +432,7 @@ messages (kind 9, `t=fh-profile`) — deterministic, idempotent, and author-gate
 primitives are `relay.QueryRunnerMetas` + `StateStore.RebuildFrom`, exercised by the Go
 acceptance gate.
 
-## Runner setup + grant (from credential to first exec)
+### Runner setup + grant (from credential to first exec)
 
 **What happens when a runner is first set up and an agent is granted:** the control plane
 generates the runner's identity, seals the credential TO the runner's key, ships a package
@@ -572,7 +485,7 @@ buzz-admin, kind 13534) before ANY of its relay reads work — non-members get
 through the box runner (proxmox-box, the provisioning/relay-admin runner who holds the
 credential into the relay LXC), not by my-runner itself.
 
-## Runtime: one exec call (runner → exec → grant)
+### Runtime: one exec call (runner → exec → grant)
 
 The data path behind any agent action: an agent signs a call, the runner verifies the
 signature AND the grant before touching anything, secrets resolve BY NAME from the sealed
@@ -612,11 +525,91 @@ sequenceDiagram
     end
 ```
 
-## Roadmap
+### Security model (no master key)
 
-`roadmap/` holds the chunked plan: POC chunks 1–3 (engine room → Buzz relay scope → skills)
-then MVP chunks 4–6 (k8s, console, installer). Phase checklists in `roadmap/POC_CHUNK1.md` and `roadmap/POC_CHUNK2.md` (ticked)
-are ticked as work lands.
+- The CP never holds a private key that decrypts anything, and never holds plaintext
+  (credentials are sealed, forgotten). The only key under the CP state dir is the console
+  AGENT key — it signs readiness probes and is provably not the encryption recipient of
+  any runner (G3.3 checks this).
+- The runner holds ciphertext + its own injected private key; only that key opens its
+  blobs, and a blob only opens under the secret name it was sealed with.
+- Rotation re-seals a NEW credential (the erase lever for your copies); revocation blocks
+  provision/rotate and deletes the shipped credential. Honest limits are written down in
+  `AGENTS.md` (no remote revocation of a capability someone else kept; re-keying and
+  epoch/staleness are named follow-ups; a RUNNING runner keeps its in-memory credential
+  until restart — rotate/re-grant reach the next boot).
+
+## Repository layout (what things do in the code)
+
+```
+Cargo.toml            Rust workspace: control-plane/core, control-plane/runner,
+                      control-plane/testkit, control-plane/core/harness/oracle
+agents/               freehold/agents — the agent definitions, embedded as Markdown:
+                      freehold/ (the Orchestrator prompt + skills), custom/ (the
+                      template for agents it creates), common/orientation.md, and the
+                      four departments (network/, data/, compute/, ai/). Its own Go
+                      module; the control plane imports the bytes.
+contract/             freehold/contract — the shared wire/trust leaf both the control
+                      plane and the platform import: crypto/ (Go repro of the Rust
+                      core, byte-exact cross-verified by the harness), wire/, client/
+                      (the signed MCP client), config/, console/, relay/, identity/,
+                      worldfacts/, delegate/, version/. Its own Go module, so the edge
+                      is platform → contract ← control-plane (no module cycle).
+control-plane/        freehold/control-plane — the stable mechanism (Go logic, Rust
+                      only for runner + core):
+  api/                the scoped API (agent tools + operator world actions) and
+                      cmd/freehold-agent-tools (the agent-management MCP server the
+                      agent pods bridge at boot)
+  api/console/        the loopback admin/ops web surface (NIP-98 login, session
+                      cookies, single-use portal, DNS-rebinding guard)
+  secret-management/  provision/rotate/revoke/grant (the provisioner)
+  state/              the CP state store
+  acceptance/         the acceptance gate (Go): drives the real `runner` binary as a
+                      subprocess
+  core/               (Rust) freehold-core — the byte-exact contract oracle, shared
+                      by every crate, no product logic
+    src/identity.rs   Nostr (secp256k1) + X25519 keypairs; env-inject or 0600 file
+    src/auth.rs       the signed-call protocol: BIP-340 signatures over
+                      `runner_pubkey|ts|raw_body`
+    src/crypto.rs     sealed box TO a runner's X25519 pubkey: ephemeral X25519 +
+                      HKDF-SHA256 + ChaCha20-Poly1305; recipient AND secret-name
+                      bound; low-order-point forgery rejected; versioned wire format
+    src/secrets.rs    SecretPackage: the runner's on-disk secrets.json (name →
+                      ciphertext, target metadata, agent grants)
+    src/audit.rs      BIP-340-signed audit log (0600), caller pubkey recorded
+    src/futil.rs      atomic file discipline: 0600-at-birth temp + fsync + rename;
+                      0700 state dirs
+  runner/             (Rust) freehold-runner — the privileged connector bridge
+    src/mcp.rs        MCP-over-HTTP tool server; every tools/call is signed by a
+                      GRANTED agent pubkey or fails closed
+    src/exec.rs       the ONE generic primitive: exec(cmd, target, timeout) — secret
+                      values resolved BY NAME from ciphertext, redacted, audited
+    src/ssh.rs        russh connector: in-memory keys, pooled connections, TOFU
+    src/main.rs       CLI: `runner keys init`, `runner serve`
+  testkit/            (Rust) freehold-testkit — hermetic mock Vultr/B2 API servers +
+                      an in-process russh sshd
+freehold-cli/         freehold/freehold-cli — the local operator surface (never
+                      imported by control-plane/): one dir per verb (install/,
+                      uninstall/, build/, teardown/, status/, update/, exec/,
+                      profiles/, door/, add-relay-member/, dns-cred/), plus login/,
+                      tui/, and internal/ (artifact, certcred, common, cpdeploy,
+                      stages)
+providers/            freehold/providers — the substrate providers; proxmox/ holds
+                      guest create/exec/list, storage, the pct stage/DNS builders,
+                      and the world-destroy engine. Imports platform/ + contract/;
+                      never the reverse.
+platform/             freehold/platform — the provider-independent world the mechanism
+                      installs/evolves: services/<capability>/<impl>/ (relay/buzz,
+                      webproxy/caddy, externaldns/cloudflare,
+                      certificates/letsencrypt), provisioning/ (bootstrap, box,
+                      deploy, planebase, stages, the provider seam), migrations/
+                      (<epoch>.sh scripts + markers). Adding a service touches only
+                      this module — never control-plane/.
+migrations/           the box-applied migration scripts
+AGENTS.md             agent guidance: locked model, conventions, known gaps
+docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, POC.md, POC_CHUNK5.md,
+                      BUZZ_SURFACE.md, DOOR_SPEC.md, followups.md
+```
 
 ## Contributing / review
 
@@ -633,7 +626,7 @@ Every PR runs two gates:
   protection gates a merge rather than a red check. The operator overrides a `REQUEST_CHANGES`
   by dismissing the review.
 - **README / ARCHITECTURE drift**: when a PR changes something those docs document (or drifts
-  from a locked decision in `ARCHITECTURE.md`), the reviewer adds one `README:` /
+  from a locked decision in `docs/ARCHITECTURE.md`), the reviewer adds one `README:` /
   `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a
   blocker, never nitpicked.
 

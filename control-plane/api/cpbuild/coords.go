@@ -11,7 +11,7 @@ type Coords = config.Coords
 // identity (the console's own secret + pubkey, granted on the co-located
 // runner at deploy). sec must be 32 bytes.
 func NewSpec(c Coords, sec []byte, audience string) *Spec {
-	return &Spec{
+	s := &Spec{
 		Name:           c.Name,
 		StateDir:       c.StateDir,
 		RelayURL:       c.RelayURL,
@@ -47,6 +47,25 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 		SelfURL:        c.SelfURL,
 		Sec:            sec,
 		Audience:       audience,
+	}
+	s.FillEdgeURLs()
+	return s
+}
+
+// FillEdgeURLs fills the gateway URLs that are pure functions of the proxy
+// IP. Fresh-world installs happen before litellm exists, so a spec built from
+// the install-time world-config arrives with LitellmIP/LitellmBaseURL blank —
+// without them the agent pods get an empty OPENAI_COMPAT_BASE_URL and every
+// turn fails with "llm: transport: builder error". Idempotent.
+func (s *Spec) FillEdgeURLs() {
+	if s.ProxyIP == "" {
+		return
+	}
+	if s.LitellmIP == "" {
+		s.LitellmIP = config.StripCIDR(s.ProxyIP)
+	}
+	if s.LitellmBaseURL == "" && s.LitellmIP != "" {
+		s.LitellmBaseURL = "http://" + s.LitellmIP + ":31400/v1"
 	}
 }
 

@@ -1,29 +1,189 @@
 # Changelog
 
-All notable decisions, reversals, and supersessions live here — the rest of `roadmap/`
-(ROADMAP.md, POC.md, ARCHITECTURE.md, BUZZ_SURFACE.md, README.md) describes the **current**
-plan only and should never carry inline "SUPERSEDED / formerly / previously" narration.
-When something changes, update the docs to state the new reality plainly and add an entry
-here explaining what changed and why. Most recent changes at the top.
+All notable decisions, reversals, and supersessions live here — the rest of `docs/`
+(ROADMAP.md, POC.md, BUZZ_SURFACE.md) plus the root docs (ARCHITECTURE.md, README.md)
+describe the **current** plan only and should never carry inline
+"SUPERSEDED / formerly / previously" narration.
+When something changes, update the docs to state the new reality plainly; this file records
+the change when the next release is cut. Most recent changes at the top.
 
 ## Versioning
 
-This project follows [Semantic Versioning](https://semver.org) once there's a public
-release to version. Before that (pre-1.0), we're using it loosely as a project-progress
-marker:
+A version exists only when it is released. Versions are tied to **releases**, never to
+merges: work lands on `main` with no version attached, and every release is three things
+together — a `CHANGELOG.md` entry, an annotated tag `vX.Y.Z` on `main`, and a GitHub
+Release.
 
-*   **0.x.y** — pre-MVP chunks (see `roadmap/POC.md`); each patch bump roughly corresponds
-    to "through Chunk N," e.g. 0.2.0 = first Chunk 2 step, 0.2.1 next chunk 2 step, 
-    0.3.0 = first Chunk 3 step. Merging chunk steps (sub tasks, etc) to main will increment 
-    the minor version, same for tweaks and fixes. These numbers aren't tied to chunk 
-    deliverables but to merges to main. Note that this was introduced in version 0.3.0,
-    previous versions have all merges and minor versions collapsed.
+This project follows [Semantic Versioning](https://semver.org) loosely pre-MVP:
+
+*   **0.x.y** — pre-MVP (see `docs/POC.md`); the minor moves for a chunk's work, the
+    patch for a phase.
 *   **1.0.0** — reserved for the MVP / public release definition in ROADMAP.md.
+
+The entry for each release is **written at release time**. It compares the codebase at the
+previous release to the current one and records the **net** difference — what is true now
+that wasn't then — not a chronological log of every merge; superseded or refactored-away
+work is omitted and the final state wins. The `release-prepare` skill owns that flow;
+`release-test-proxmox` fills the release's test-status table and `release-publish`
+promotes the result (see `AGENTS.md` "Releases").
 
 ### Known gaps
 See `AGENTS.md`'s "Known gaps" section for the current, maintained list of open
 limitations (revocation/rotation reach, replay windows, connector edge cases, etc.) — that
 list is current-state and kept there rather than duplicated here.
+
+## [0.7.0] — versioned updates: release assets, channels, and script migrations
+
+A world now knows exactly what version it runs, any box can query it, and
+`freehold update` moves it to another version — pulling release assets for a
+tagged release or building an untagged ref — then runs migrations and repins.
+
+### Added
+
+-   **Queryable version pin.** `contract/version` embeds `Version`/`Commit`
+    (the justfile computes `git describe`; CI passes the tag) and the runner
+    stamps its own into the MCP handshake. `freehold --version` and
+    `freehold-console version` report it. The CP carries
+    `<stateDir>/version.json` (`{version, channel, commit}`), re-read per
+    request and surfaced on `/healthz` (JSON), `/api/world`, `world_status`,
+    `freehold status`, and the TUI.
+-   **`freehold update`** (remote-world only): resolve a source (the CP's
+    recorded channel, or `--stable`/`--rc`/`--dev`/`--ref`/`--sha`) → acquire
+    (release assets downloaded + sha256-verified, or a sandbox/local build with
+    the box's toolchain) → redeploy the CP's binaries → copy migration scripts →
+    run pending → repin the version **last**, so a failed migration never
+    promotes. `--check` reports the available version and pending count; a lock
+    serializes updates; thin boxes use the transient root-SSH door.
+-   **Channels** — `stable` (newest non-prerelease tag), `rc` (newest
+    `vX.Y.Z-rc.N`), `dev` (local tree); any untagged ref is `--ref`/`--sha`.
+    `install --channel/--version` seeds the pin; `update` re-stamps it to the
+    source it deployed.
+-   **Release assets** — `.github/workflows/release.yml` (tag `v*` only) builds
+    the sibling set via the justfile, packages `migrations.tar.gz`, writes
+    `checksums.txt`, and attaches them to a draft GitHub Release; the `release`
+    skill publishes it.
+-   **Script migrations** — top-level `migrations/<epoch>.sh` (Omarchy-style:
+    POSIX-sh, no shebang, `bash -euo pipefail`, ascending, stop-on-failure)
+    with completion marker files named for the script. A fresh install marks
+    every shipped script done without running it; scripts only run on update.
+-   **Departments renamed** to Network, Data, Compute, and AI (from
+    Security/Vault/Agent-ops/Compute), resolving the collision with the box's
+    local agent-ops identity; the CPA prompt now names them and carries its
+    delegation duty.
+
+### Changed
+
+-   `install`/`deploy-cp` stamp the version pin; `build`/`teardown` operate
+    within the stamp already on the CP and never promote it.
+-   The release contract is locked: a version exists only at release (CHANGELOG
+    entry + annotated tag + GitHub Release), written at release time as the net
+    difference from the previous release.
+-   No `freehold migrate` verb and no `freehold channel` verb — the channel is
+    an install/update parameter.
+
+### Fixed
+
+-   `freehold update` against an edge-down or LAN-only world: console login
+    prefers the https edge and falls back to the CP's LAN IP (the signed login
+    is never downgraded to plaintext by default), guest listing swaps in the
+    transient root-SSH provider, and a running console/agent-tools is stopped
+    by its resolved binary name before replacement.
+-   Agent-tools restart waits for `/mcp` to rebind, and an empty `--cpa-name`
+    can no longer swallow the following flag (e.g. `--owner-pubkey`) in its
+    serve argv.
+-   The runner reports the release version in its handshake, not the crate
+    default.
+
+### Removed
+
+-   The verify-gated migration ledger (`migrations.json`) and the `.verify.sh`
+    postcondition gate; migration scripts are shipped, not embedded.
+
+## [0.6.18] — verb refactor: dir-per-verb command layout
+
+The deferred 5d layout lands. `freehold-cli/` is now one package per verb
+(`install/`, `uninstall/`, `build/`, `teardown/`, `status/`, `update/`, `exec/`,
+`profiles/`, `door/`, `dns-cred/`, `add-relay-member/`, `login/`, `tui/`), the
+root cobra wiring lives in `cmd/freehold/`, and the shared helper layer
+(profile negotiation, identity loading, the world MCP client, runner-key refs,
+the CP-preserving teardown) moved to `internal/common/`; the DNS-credential
+engine moved to `internal/certcred/`. `cpdeploy/` moved under `install/`.
+
+Command surface changes:
+
+- **Renamed:** `world status` → `status`, `world migrate` → `update`,
+  `relay-member` → `add-relay-member`.
+- **Removed:** `console-login`, `relay-profile`, `relay-join`, `relay-setup`,
+  `delegate`, `delegate-peer`, `memory`, `demo`, `readiness` (legacy/dev
+  surfaces), plus the `world` parent and its `world build`/`world teardown`
+  aliases — top-level `build`/`teardown` cover those.
+- **Removed the `bootstrap` alias.** `install --yes` is the one non-interactive
+  surface.
+- Deleted the dead, unregistered self-staged `exec` in `internal/stages`
+  (the operator `exec` is the single registration).
+
+No behavior change for the surviving verbs. A root-registration test asserts
+each command name is registered exactly once; the command surface is pinned by
+a test.
+
+## [0.6.17] — teardown reaches the console over the CP's LAN IP
+
+Whole-world `teardown` destroys the k3s LXC, which hosts the Caddy edge fronting
+`cp_url` — so the `/api/world-teardown` response died with the edge
+(`http/2 GOAWAY`) even though the teardown itself ran. It now logs in over the
+CP's recorded LAN IP (which survives teardown), like `build`, falling back to
+the public URL for a box that never recorded the coords.
+
+Live-verified: teardown returns a clean report (19 terraform resources
+destroyed; relay + k3s LXCs removed; CP preserved and healthy; internal DNS
+cleared; agent-tools stopped; relay/k3s coords cleared for the next build).
+
+## [0.6.16] — live-run fixes for the thin-box build + fresh-world DNS
+
+Surfaced by a real `install` → `build` run on a Proxmox host.
+
+- **Point every guest at the CP resolver before the services phase.** The
+  litellm/caddy image pulls happen in the terraform services step, which ran
+  BEFORE `worldDNS` repointed the guests; a fresh k3s node sat on
+  DHCP/public resolvers and containerd's lookups intermittently failed
+  (`EAI_AGAIN`) → `ImagePullBackOff`. `cpbuild` now reps the resolver early
+  (`pointGuestsAtResolver`) and `worldDNS` repeats it idempotently.
+- **The build box reads the console encryption pubkey from `/api/world`.** It is
+  public, and serving it lets a THIN box seal the CP-owned secrets without a
+  runner to `pct exec` into the CP (`console_enc_pubkey` on `WorldSummary`; the
+  old pct-exec readback stays as a fallback for an older CP).
+- **Drop the redundant box-side runner reseed** in `ensureCpSecrets`: the
+  CP-side `cpbuild.reseedCoLocatedRunner` re-seals litellm from the CP store
+  during world-build, so the box no longer needs a runner for it.
+- **The CP DNS slot offers to reuse the relay credential** (they are almost
+  always the same zone); previously `ensureCpSecrets` passed an empty
+  `reuseFrom` and asked for the credential twice.
+- **`noLocalRunner()` dials the recorded runner address.** A transient install
+  records `[runner] addr` but leaves no runner serving, so a configured-but-dead
+  address now reads as thin and exec routes through the CP.
+- **Credential prompts are no-echo.** The DNS API token and the litellm
+  provider key are read with `term.ReadPassword` on a terminal, like the
+  operator nsec — they no longer echo into the screen/scrollback.
+- **The relay pillar turns green on a fresh world.** Install is CP-only, so the
+  console is deployed before the relay exists and its `--relay-host`/`--relay-url`
+  flags are empty; the state then carried no relay scope, `/api/world` omitted the
+  relay service, and the TUI could never show it green. The console now adopts the
+  builder's world-config relay scope into its state at startup and falls back to
+  it on `/api/world`.
+- **Derive the litellm gateway base URL** (`http://<proxy>:31400/v1`) alongside
+  `litellm_ip`. Without it agent pods got an empty `OPENAI_COMPAT_BASE_URL`, so
+  every turn failed with `llm: transport: builder error` and the agents never
+  replied. `Spec.FillEdgeURLs` fills both from the proxy IP at spec construction
+  (console + agent-tools) and after guest-IP refresh.
+- **Derive `litellm_ip` from the proxy IP** when the console spec has none
+  (a fresh world's spec predates k3s). Without it the litellm step is skipped,
+  so the CPA pod's `freehold-litellm-key` Secret is never created and the pod
+  stays `CreateContainerConfigError`.
+- **Sign the CPA's agent-tools roster write with the agent-tools identity.**
+  The roster channel is owned by the agent-tools server; the relay rejects a
+  put-user from any other signer (`not a channel member`). The console executor
+  reads the same durable identity off the CP plane and signs with it, so the
+  CP-side agent reconcile can member the CPA.
 
 ## [0.6.15] — local/server split (two modules, zero cross-imports)
 
