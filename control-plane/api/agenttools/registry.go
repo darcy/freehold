@@ -105,6 +105,31 @@ func (r *Registry) SetChannels(name string, channels []string, private bool) err
 	return r.save()
 }
 
+// Reload re-reads the registry file into memory. A migration script edits
+// registry.json out-of-band (it shells out to freehold-agent-tools, which opens
+// its own handle), so the running server's in-memory rows are stale afterwards
+// and its NEXT save() would clobber what the script wrote. Reloading after the
+// queue runs keeps the serve's memory aligned with the durable file. A file
+// that has gone missing leaves the current rows in place rather than dropping
+// them; a malformed file is an error for the same reason.
+func (r *Registry) Reload() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw, err := os.ReadFile(r.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	rows := map[string]console.AgentInfo{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return fmt.Errorf("malformed registry %s: %w", r.path, err)
+	}
+	r.rows = rows
+	return nil
+}
+
 // UnregisterAgent drops a registry row.
 func (r *Registry) UnregisterAgent(name string) (json.RawMessage, error) {
 	r.mu.Lock()

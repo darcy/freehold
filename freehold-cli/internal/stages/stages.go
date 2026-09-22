@@ -709,7 +709,7 @@ func init() {
 	deployCpCmd.Flags().String("version", "", "version to stamp (version.json); absent = don't promote")
 	deployCpCmd.Flags().String("channel", "", "release channel to stamp (default: derived from --version)")
 	deployCpCmd.Flags().String("commit", "", "commit sha to stamp")
-	deployCpCmd.Flags().String("migrations-dir", "", "LOCAL dir of <epoch>.sh migration scripts (shipped + marked done)")
+	deployCpCmd.Flags().String("migrations-dir", "", "LOCAL dir of <epoch>.sh migration scripts (shipped unmarked; the queue runs at the end of world bring-up)")
 	deployCpCmd.Flags().Bool("redeploy", false, "replace binaries in an EXISTING plane (update): no adoption/rotation/promotion")
 
 	registerSelfFlags(stampVersionCmd)

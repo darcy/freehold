@@ -91,10 +91,11 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 		return err
 	}
 
-	// Copy the new release's migration scripts (do NOT mark them: update runs
-	// pending scripts through world_migrate, then stamps the version last).
+	// Copy the new release's migration scripts. No markers are written here
+	// either: update runs the pending queue through world_migrate (before it
+	// promotes the version) and world_build runs it at the end of a bring-up.
 	if spec.MigrationsDir != nil && *spec.MigrationsDir != "" {
-		if err := ShipMigrations(t, spec, *spec.MigrationsDir, false); err != nil {
+		if err := ShipMigrations(t, spec, *spec.MigrationsDir); err != nil {
 			return err
 		}
 	}

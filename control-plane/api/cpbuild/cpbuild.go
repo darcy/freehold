@@ -1268,6 +1268,13 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 						report = append(report, "world facts registered")
 					}
 				}
+				report = spec.appendMigrations(report)
+				// The scripts edit registry.json ON DISK while this process holds its
+				// own in-memory rows; re-read so the serve serves what they wrote
+				// instead of overwriting it on its next save.
+				if err := spec.AgentRegistry.Reload(); err != nil {
+					report = append(report, "WARN: migrations re-read: "+err.Error())
+				}
 			} else {
 				// Console executor: write the files, then reload the serve process.
 				if err := spec.reconcileAgents(); err != nil {
@@ -1280,6 +1287,10 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				} else {
 					report = append(report, "world facts registered")
 				}
+				// The scripts read the registry file and talk to the relay directly,
+				// so they need NO running serve — they run BEFORE the restart, and the
+				// process that comes up loads their result as its starting state.
+				report = spec.appendMigrations(report)
 				if err := spec.startAgentTools(); err != nil {
 					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
 				}
@@ -1414,9 +1425,6 @@ func cpDestroyDetached(vmid uint32) string {
 	return fmt.Sprintf("setsid sh -c 'sleep 5; pct stop %d --skiplock; pct destroy %d --skiplock' >/dev/null 2>&1 </dev/null &", vmid, vmid)
 }
 
-// BuildCreateAgentFn returns the create-agent deploy: mint a durable identity
-// on the CP, add it as a relay member, seat it in #freehold, apply its pod
-// through the co-located runner, and hand the minted pubkey to Tools.CreateAgent
 // BuildMigrator wires the CP's migration runner: the Omarchy-style scripts that
 // install/update shipped into <consoleStateDir>/migrations/scripts/<epoch>.sh,
 // with completion markers at <consoleStateDir>/migrations/<epoch>.sh — the
@@ -1428,24 +1436,44 @@ func cpDestroyDetached(vmid uint32) string {
 // unmarked. The scripts receive the durable-plane paths + the agent-tools binary
 // via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE / STATE_DIR) plus the
 // relay coords a channel edit needs (FREEHOLD_RELAY_URL / FREEHOLD_RELAY_AUTH_URL
-// / FREEHOLD_CPA_NAME) — never argv, so no credential crosses the audit. A fresh
-// install runs MarkAll instead, so this only ever applies scripts on update.
+// / FREEHOLD_CPA_NAME) — never argv, so no credential crosses the audit.
+//
+// Every world runs every shipped script exactly once, a fresh install included:
+// the explicit consoleStateDir keeps THIS caller (the agent-tools serve, passing
+// its own --console-state-dir) and the world bring-up (deriving it via
+// consoleStateRoot) from silently diverging on where the scripts live.
 func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
+	root := filepath.Join(consoleStateDir, "migrations")
+	return spec.migrationRunner(root, consoleStateDir)
+}
+
+// consoleStateRoot is the CP's console durable state dir, derived from the
+// agent-tools state dir the Spec is anchored on (`<root>/agent-tools` ->
+// `<root>/control-plane`), which is also the serve's --console-state-dir default.
+// Deriving it here rather than passing StateDir is the point: the scripts and
+// their markers live under the CONSOLE root.
+func (s *Spec) consoleStateRoot() string {
+	_, stateDir := s.cpGuestDirs()
+	return stateDir
+}
+
+// migrationRunner returns the queue closure: every pending script under root,
+// ascending, each with the durable-plane paths + relay coords in its env.
+func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migrations.Result, error) {
 	return func() ([]migrations.Result, error) {
-		root := filepath.Join(consoleStateDir, "migrations")
-		binDir, _ := spec.cpGuestDirs()
-		relayAuthURL := spec.RelayAuthURL
+		binDir, _ := s.cpGuestDirs()
+		relayAuthURL := s.RelayAuthURL
 		if relayAuthURL == "" {
-			relayAuthURL = spec.RelayURL
+			relayAuthURL = s.RelayURL
 		}
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
-			"REGISTRY="+filepath.Join(spec.StateDir, "registry.json"),
+			"REGISTRY="+filepath.Join(s.StateDir, "registry.json"),
 			"CONSOLE_STATE="+consoleStateDir,
-			"STATE_DIR="+spec.StateDir,
-			"FREEHOLD_RELAY_URL="+spec.RelayURL,
+			"STATE_DIR="+s.StateDir,
+			"FREEHOLD_RELAY_URL="+s.RelayURL,
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
-			"FREEHOLD_CPA_NAME="+spec.cpaNameOrDefault(),
+			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
 		run := func(name, path string) error {
 			cmd := exec.Command("bash", "-euo", "pipefail", path)
@@ -1458,6 +1486,46 @@ func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 		}
 		return migrations.Run(root, run)
 	}
+}
+
+// appendMigrations runs the shipped migration queue against the agent org that
+// just came up and appends one report line. Never fatal: a failed script stays
+// unmarked and is retried on the NEXT bring-up, so the line is WARN-prefixed
+// rather than aborting a build that has otherwise converged. The line always
+// names the pending count, so a queue that found nothing can never read as a
+// successful run.
+func (s *Spec) appendMigrations(report []string) []string {
+	root := filepath.Join(s.consoleStateRoot(), "migrations")
+	pending, err := migrations.Pending(root)
+	if err != nil {
+		return append(report, "WARN: migrations: "+err.Error())
+	}
+	if len(pending) == 0 {
+		return append(report, "migrations: 0 pending")
+	}
+	res, err := s.migrationRunner(root, s.consoleStateRoot())()
+	// Run stops at the first failure and returns the results it HAS, so the
+	// per-script cells are reported even alongside the error: the scripts before
+	// the failure really ran and really got marked, and that is exactly what an
+	// operator needs to tell a partial converge from none.
+	cells := make([]string, 0, len(res))
+	failed := err != nil
+	for _, r := range res {
+		if r.OK {
+			cells = append(cells, r.Name+" ok")
+			continue
+		}
+		failed = true
+		cells = append(cells, fmt.Sprintf("%s FAILED: %s", r.Name, r.Err))
+	}
+	if len(cells) == 0 {
+		cells = []string{"nothing reported"}
+	}
+	line := fmt.Sprintf("migrations: %d pending -> %s", len(pending), strings.Join(cells, ", "))
+	if failed {
+		line = "WARN: " + line
+	}
+	return append(report, line)
 }
 
 // doorKeyRe is the DOOR_SPEC §2.5 strict authorized_keys-line gate: key type +
@@ -1580,10 +1648,12 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	return id, name, true, nil
 }
 
-// reconcileChannel force-publishes a channel's discovery/roster events on the
-// relay (kind 39000/39001/39002) via buzz-admin, so roster changes are accepted.
-// (which registers the registry row). Branches to the CPA manifest/prompt when
-// the name is the CPA's, so stageCpa's dogfooded create_agent produces the CPA.
+// BuildCreateAgentFn returns the create-agent deploy: mint a durable identity on
+// the CP, add it as a relay member, publish its profile, ensure each named channel
+// (private when asked), apply its pod through the co-located runner, and hand the
+// minted pubkey to Tools.CreateAgent (which registers the registry row). Branches
+// to the CPA manifest/prompt when the name is the CPA's, so stageCpa's dogfooded
+// create_agent produces the CPA.
 func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 	return func(name, purpose string, channels []string, private bool) (string, error) {
 		if name == "" {

@@ -1,5 +1,5 @@
-// Package migrations runs the CP's one-time repair/catch-up scripts — the
-// Omarchy pattern, followed closely:
+// Package migrations runs the CP's repair/catch-up scripts — the Omarchy
+// pattern, followed closely:
 //
 //   - one `<epoch>.sh` file per migration (epoch = the timestamp/filename
 //     identity), run with `bash -euo pipefail`, no shebang, mode 0644;
@@ -8,15 +8,18 @@
 //   - strictly ascending epoch order; a failure exits non-zero, stays
 //     unmarked, stops the queue, and is retried next run.
 //
-// Layout under the CP state dir:
+// Layout under the console's state dir:
 //
 //	<root>/scripts/<epoch>.sh   the shipped scripts (install/update copy them)
 //	<root>/<epoch>.sh           the completion marker (same filename)
 //
 // There is no verify gate and no JSON ledger: apply success IS done, so "ran"
-// and "converged" are not distinguished (Omarchy's rule). A fresh install
-// MARKS EVERY SHIPPED SCRIPT DONE without running it (a new world is already at
-// current state); migrations only ever run on update.
+// and "converged" are not distinguished (Omarchy's rule). Every world runs every
+// shipped script exactly once — a FRESH install included, at the end of world
+// bring-up (never at CP deploy, when the relay, k3s, the agent identities and the
+// agent-tools serve do not exist yet to operate on). A script therefore MUST be
+// idempotent: safe to re-run, and safe on a world where the thing it trues up was
+// never absent. Nothing marks a script done without running it.
 package migrations
 
 import (
@@ -106,21 +109,6 @@ func Pending(root string) ([]string, error) {
 func PendingCount(root string) (int, error) {
 	p, err := Pending(root)
 	return len(p), err
-}
-
-// MarkAll touches a marker for every shipped script without running it — the
-// fresh-install rule. Returns how many markers were written.
-func MarkAll(root string) (int, error) {
-	all, err := Scripts(root)
-	if err != nil {
-		return 0, err
-	}
-	for _, n := range all {
-		if err := Mark(root, n); err != nil {
-			return 0, err
-		}
-	}
-	return len(all), nil
 }
 
 // Result is one migration's outcome for a run.
