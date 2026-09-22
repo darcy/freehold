@@ -63,9 +63,10 @@ Orchestrator and departments are installed as part of the core build — a pod e
 
 - [`VISION.md`](VISION.md) — the narrative and the "why".
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — the system design and the locked decisions.
-- [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) and [`roadmap/POC.md`](roadmap/POC.md) — the
-  chunked plan and current scope, with per-chunk plans alongside them
-  (`roadmap/POC_CHUNK*.md`).
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/POC.md`](docs/POC.md) — the chunked
+  plan and current scope, with the current chunk's plan alongside them
+  (`docs/POC_CHUNK5.md`). [`docs/followups.md`](docs/followups.md) is the grab bag of
+  deferred work.
 - [`CHANGELOG.md`](CHANGELOG.md) — decisions, reversals, and releases.
 
 ## Getting started
@@ -606,7 +607,8 @@ platform/             freehold/platform — the provider-independent world the m
                       this module — never control-plane/.
 migrations/           the box-applied migration scripts
 AGENTS.md             agent guidance: locked model, conventions, known gaps
-roadmap/              ROADMAP.md, POC.md, POC_CHUNK1–5.md, BUZZ_SURFACE.md
+docs/                 ROADMAP.md, POC.md, POC_CHUNK5.md, BUZZ_SURFACE.md,
+                      DOOR_SPEC.md, followups.md
 ```
 
 ## Contributing / review

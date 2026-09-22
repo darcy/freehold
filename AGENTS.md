@@ -6,14 +6,13 @@ configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 The current *released* version is the top entry in `CHANGELOG.md`; the newest `v*` tag may
 still be a pre-release awaiting e2e validation and promotion (see "Releases") — this file
-deliberately never restates a version number, so it can't go stale. Chunk 1 (engine room)
-and Chunk 2 (relay scope), including the durable volume plane (Phase 0.12), are implemented
-and live-verified against real infrastructure (a real PVE host, a real relay/CP pair under a
-real domain).
-Chunk 3 (the Rust→Go refactor) is complete. Chunk 4 (a real, reasoning CPA that lives in
-Buzz) is live: the CPA holds conversations, survives a full rebuild, and creates new agents
-itself when asked; its remaining Phase-F resource baseline is the current focus — see
-`roadmap/POC.md`. For how we got here, see
+deliberately never restates a version number, so it can't go stale. Chunks 1–4 are
+implemented and live-verified against real infrastructure (a real PVE host, a real relay/CP
+pair under a real domain): the engine room and relay scope, the durable volume plane, the
+Rust→Go refactor, and Chunk 4's real, reasoning CPA that lives in Buzz — it holds
+conversations, survives a full rebuild, and creates new agents itself when asked. Chunk 5
+(agent workspaces + git/GitHub) is next; see `docs/POC.md`. Open deferrals are tracked in
+`docs/followups.md`. For how we got here, see
 `CHANGELOG.md`; this file describes the current state and the rules for working in this
 repo, not the history.
 
@@ -104,10 +103,12 @@ repo, not the history.
   alias — `install --yes` is the non-interactive surface. A world with no recorded name
   keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
 - `CHANGELOG.md` — history of decisions, reversals, and releases.
-- `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
-- `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
-- `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
-  done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
+- `docs/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
+- `docs/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
+- `docs/POC_CHUNK5.md` — the plan that actually exists for the current chunk (agent
+  workspaces + git/GitHub); Chunks 1–4 are shipped and their build plans retired.
+- `docs/followups.md` — the grab bag of deferred work pulled from retired plans. Current
+  limitations of shipped code live in "Known gaps" below, not here.
 - `.agents/skills/release-prepare/SKILL.md` — the `release-prepare` skill: cut a versioned
   candidate by generating the `CHANGELOG.md` entry from git history since the previous
   release, landing it via a normal PR branch (e.g. `docs/changelog-vX.Y.Z`), then tagging
@@ -124,7 +125,7 @@ repo, not the history.
 - `.agents/skills/release-publish/SKILL.md` — the `release-publish` skill: promote a
   pre-release to a full release only when every row of its test-status table is `✅ Passed`
   (metadata-only flip; the tag never moves).
-- `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
+- `docs/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
 
 ## Locked model — do not change without an explicit user decision
@@ -372,9 +373,9 @@ changelog.
   resolve as siblings of the running binary — a box doing world bring-up needs all
   five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
-- `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
-  `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
-  The Chunk-1/2 acceptance gate is Go now (`control-plane/acceptance/`, run by
+- `docs/POC.md` and `docs/POC_CHUNK5.md` carry the live acceptance checkboxes for the
+  current chunk; tick them as work lands. The Chunk-1/2 acceptance gate is Go now
+  (`control-plane/acceptance/`, run by
   `go test ./...`): the CP provisioner lifecycle, the console HTTP surface, and the
   relay-channel fold against a hermetic fake relay — the connector/relay behaviors the
   runner owns stay in its Rust tests. It drives the real `runner` binary (a subprocess),
