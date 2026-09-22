@@ -211,6 +211,27 @@ release notes.
   it. There is no downgrade verb; rolling back below the highest applied
   migration needs the snapshot escape hatch (out of scope); re-running `update`
   retries only *pending* work.
+- **The console executor's migration window still has a live writer.** On the
+  `world_build` path that runs *inside* the agent-tools serve, the queue runs under
+  `Registry.WithRegistryLocked`, so no roster write can interleave with the scripts'
+  out-of-band edit of `registry.json`. The console-executor branch cannot get the same
+  guarantee — the serve it writes through is a different process, and stopping it for
+  the window is not available either, because the agent pods fetch their stdio bridge
+  binary from that server's `/freehold-agent-tools-binary` at container start and a
+  failed fetch silently degrades a pod to plain `buzz-dev-mcp` with no `create_agent`.
+  It is instead closed by order: the scripts run before `startAgentTools`, so the
+  process that comes up loads their result as its starting state. A `create_agent`
+  that lands on the still-running old serve *during* that window can save stale rows
+  over the scripts' edit; routing the scripts' registry write through the serve (so it
+  takes the same lock) is the named follow-up.
+- **Unshipped migration scripts are invisible, not missing.** `install` resolves its
+  scripts with `ResolveMigrationsDir`, which looks for a `migrations/` dir beside the
+  running binary (release-asset layout) or up to two parents above it (a repo build)
+  and yields `""` when it finds none — the deploy then ships **no** scripts rather than
+  failing. An unshipped script is therefore indistinguishable from a converged world:
+  no marker, no pending count, and no error. The `migrations:` report line that names
+  the pending count on every bring-up is what makes a zero-because-never-shipped world
+  detectable rather than silently healthy.
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
   issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
   someone else already holds still opens; re-keying after a leaked runner private key is out

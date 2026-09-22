@@ -7,6 +7,7 @@
 package cpbuild
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -46,6 +47,17 @@ import (
 )
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
+
+// The shipped migration scripts are bounded because the world_build path runs the
+// queue while holding the registry's write lock: one wedged script would otherwise
+// block every roster read and write in the serve for as long as it hung. Each script
+// is a handful of relay curls and file edits, so minutes is generous; the wait delay
+// is how long to give a killed script's orphaned descendants to drop the output pipe
+// before the pipes are closed and the hold is released regardless.
+const (
+	migrationScriptTimeout = 5 * time.Minute
+	migrationWaitDelay     = 5 * time.Second
+)
 
 // AgentToolsPort is the CP's freehold-agent-tools MCP bind port. Any URL the
 // CPA pod bootstraps its stdio bridge from (the agent-tools `--self-url`, and
@@ -1268,15 +1280,24 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 						report = append(report, "world facts registered")
 					}
 				}
-				report = spec.appendMigrations(report)
-				// The scripts edit registry.json ON DISK while this process holds its
-				// own in-memory rows; re-read so the serve serves what they wrote
-				// instead of overwriting it on its next save.
-				if err := spec.AgentRegistry.Reload(); err != nil {
+				// The scripts edit registry.json OUT-OF-BAND (a separate
+				// freehold-agent-tools process), so the queue runs under the serve's
+				// own write lock and re-reads the file when it is done: neither half
+				// is sufficient alone. See Registry.WithRegistryLocked.
+				if err := spec.AgentRegistry.WithRegistryLocked(func() error {
+					report = spec.appendMigrations(report)
+					return nil
+				}); err != nil {
 					report = append(report, "WARN: migrations re-read: "+err.Error())
 				}
 			} else {
 				// Console executor: write the files, then reload the serve process.
+				// The serve is deliberately left RUNNING across this whole block: the
+				// pods reconcileAgents applies curl their stdio bridge binary off this
+				// server's /freehold-agent-tools-binary, and a failed fetch silently
+				// degrades the pod to plain buzz-dev-mcp with no create_agent. It is
+				// restarted (killing any prior serve) by startAgentTools below, so it
+				// loads these writes as its starting state.
 				if err := spec.reconcileAgents(); err != nil {
 					return "", fmt.Errorf("world-build agents: %w", err)
 				}
@@ -1475,17 +1496,35 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
 			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
-		run := func(name, path string) error {
-			cmd := exec.Command("bash", "-euo", "pipefail", path)
-			cmd.Env = runEnv
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%s: %w: %s", path, err, strings.TrimSpace(string(out)))
-			}
-			return nil
-		}
-		return migrations.Run(root, run)
+		return migrations.Run(root, func(_, path string) error {
+			return s.runMigrationScript(path, runEnv, migrationScriptTimeout, migrationWaitDelay)
+		})
 	}
+}
+
+// runMigrationScript runs one shipped script and returns its failure with output
+// attached. Both bounds exist because the world_build path invokes the queue WHILE
+// HOLDING the registry's write lock (Registry.WithRegistryLocked): an unbounded script
+// would block every roster read and write in the serve for as long as it hung, and a
+// relay curl stuck on TCP setup is enough to produce one. A timeout is an ordinary
+// queue failure — the script stays unmarked and is retried on the next bring-up.
+//
+// The context kills the script's shell, but a descendant it left running can still hold
+// the output pipe's write end open, which would keep CombinedOutput blocked past the
+// deadline and defeat the very bound this is here for; WaitDelay closes the pipes and
+// releases the hold once it elapses after the kill. The two durations are parameters so
+// a test can prove both bounds at test speed.
+func (s *Spec) runMigrationScript(path string, env []string, timeout, waitDelay time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-euo", "pipefail", path)
+	cmd.Env = env
+	cmd.WaitDelay = waitDelay
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // appendMigrations runs the shipped migration queue against the agent org that
