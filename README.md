@@ -61,8 +61,8 @@ Orchestrator and departments are installed as part of the core build — a pod e
 
 ## Vision, Architecture & Roadmap
 
-- [`VISION.md`](VISION.md) — the narrative and the "why".
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the system design and the locked decisions.
+- [`docs/VISION.md`](docs/VISION.md) — the narrative and the "why".
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the system design and the locked decisions.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/POC.md`](docs/POC.md) — the chunked
   plan and current scope, with the current chunk's plan alongside them
   (`docs/POC_CHUNK5.md`). [`docs/followups.md`](docs/followups.md) is the grab bag of
@@ -607,8 +607,8 @@ platform/             freehold/platform — the provider-independent world the m
                       this module — never control-plane/.
 migrations/           the box-applied migration scripts
 AGENTS.md             agent guidance: locked model, conventions, known gaps
-docs/                 ROADMAP.md, POC.md, POC_CHUNK5.md, BUZZ_SURFACE.md,
-                      DOOR_SPEC.md, followups.md
+docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, POC.md, POC_CHUNK5.md,
+                      BUZZ_SURFACE.md, DOOR_SPEC.md, followups.md
 ```
 
 ## Contributing / review
@@ -626,7 +626,7 @@ Every PR runs two gates:
   protection gates a merge rather than a red check. The operator overrides a `REQUEST_CHANGES`
   by dismissing the review.
 - **README / ARCHITECTURE drift**: when a PR changes something those docs document (or drifts
-  from a locked decision in `ARCHITECTURE.md`), the reviewer adds one `README:` /
+  from a locked decision in `docs/ARCHITECTURE.md`), the reviewer adds one `README:` /
   `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a
   blocker, never nitpicked.
 

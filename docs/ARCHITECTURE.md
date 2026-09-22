@@ -814,6 +814,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 
 ## Verification
 
-- `ARCHITECTURE.md`, `VISION.md`, `README.md`, `AGENTS.md`, and everything
-  under `docs/` describe the current state; the decisions above are
-  current.
+- Everything under `docs/` (this file, `VISION.md`, `ROADMAP.md`, `POC.md`,
+  `BUZZ_SURFACE.md`, `followups.md`) plus the root docs (`README.md`,
+  `AGENTS.md`, `CHANGELOG.md`) describe the current state; the decisions above
+  are current.

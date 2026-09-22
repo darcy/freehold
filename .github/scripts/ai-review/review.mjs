@@ -347,7 +347,7 @@ async function resolveFixedThreads(fixedComments) {
 
 const PROGRESS_ITEMS = [
   'Read the diff',
-  'Gather context (AGENTS.md, README.md, ARCHITECTURE.md)',
+  'Gather context (AGENTS.md, README.md, docs/ARCHITECTURE.md)',
   'Review for BLOCKING/IMPORTANT issues',
   'Post inline comments',
   'Post final summary with verdict',

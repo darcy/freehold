@@ -18,8 +18,9 @@ repo, not the history.
 
 ## Documentation hygiene (locked) — a primary job of this file
 
-**Docs describe current-world state only.** `ROADMAP.md`, `POC.md`, `ARCHITECTURE.md`,
-`BUZZ_SURFACE.md`, `README.md`, and this file say what's true *now* — never "formerly X,"
+**Docs describe current-world state only.** `docs/ROADMAP.md`, `docs/POC.md`,
+`docs/ARCHITECTURE.md`, `docs/BUZZ_SURFACE.md`, `README.md`, and this file say what's true
+*now* — never "formerly X,"
 "SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
 
 1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
@@ -85,8 +86,8 @@ repo, not the history.
 
 ## Navigation
 
-- `VISION.md` — narrative, single source of truth for the "why".
-- `ARCHITECTURE.md` — system design, locked decisions, build plan.
+- `docs/VISION.md` — narrative, single source of truth for the "why".
+- `docs/ARCHITECTURE.md` — system design, locked decisions, build plan.
 - `freehold-cli/` — the local operator surface (top-level Go module): the `freehold` CLI
   + TUI, `login`/profiles, and the `install` surface. It gets a control plane up in an
   environment (Proxmox today; Vultr/Hetzner providers come later) and a door to it; the
@@ -183,7 +184,7 @@ repo, not the history.
   first-class (the business path). The k8s layer and everything above the host driver run
   identically regardless of substrate. Installer/runner must target a VPS as easily as
   Proxmox — no Proxmox-only shortcuts.
-- **Durable-plane guest paths follow the `/srv/data` convention** (see ARCHITECTURE.md's
+- **Durable-plane guest paths follow the `/srv/data` convention** (see docs/ARCHITECTURE.md's
   "Filesystem layout convention"). Every `--mpN` is born at `pct create` with an explicit
   `backup=` flag: the relay's docker-root stays at `/var/lib/docker` with `backup=1` (its
   Postgres/Redis/MinIO/git live as named volumes under the daemon root — relocating it would
