@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"freehold/contract/config"
+	"freehold/contract/version"
 	"freehold/contract/worldfacts"
 )
 
@@ -537,6 +538,10 @@ func (m *Model) buildAgents(cfg *config.Config) {
 			m.Facts = &facts
 		}
 	}
+	// The CP's stamped pin rides the same /api/world read — the header shows
+	// it so every box reports the version the CP is actually running, not the
+	// version of the CLI it happens to have installed.
+	m.CPVersion = cpVersionLabel(w.Version)
 	for _, a := range w.Agents {
 		created := "just now"
 		if a.CreatedAt > 0 {
@@ -664,7 +669,14 @@ func (m *Model) View() string {
 		return m.activityView()
 	}
 	var b strings.Builder
-	b.WriteString(styleTitle.Render(" freehold ") + styleDim.Render(m.Domain+" · "+m.Mode.String()) + "\n\n")
+	// The CP's own version pin (from /api/world): what the control plane is
+	// running. Absent until a console session has fetched the world facts —
+	// never guessed from the local CLI build.
+	versionTag := ""
+	if m.CPVersion != "" {
+		versionTag = styleDim.Render(" · cp " + m.CPVersion)
+	}
+	b.WriteString(styleTitle.Render(" freehold ") + styleDim.Render(m.Domain+" · "+m.Mode.String()) + versionTag + "\n\n")
 	if m.Err != "" {
 		b.WriteString(styleRed.Render("! "+m.Err) + "\n\n")
 	}
@@ -698,6 +710,24 @@ func renderProbes(m *Model) string {
 		boolStatus(m.CaddyLive, "green", "red"),
 		boolStatus(m.RunnerReach, "green", "red"),
 	)
+}
+
+// cpVersionLabel renders the CP's stamped pin for the header line: its version
+// string, tagged with the short commit when the pin carries one. "" for an
+// unstamped / pre-stamping CP (no pin on record) or a world read that hasn't
+// landed, so the header stays silent rather than reporting a lie.
+func cpVersionLabel(p version.Pin) string {
+	v := strings.TrimSpace(p.Version)
+	if v == "" || v == "dev" {
+		return ""
+	}
+	if c := strings.TrimSpace(p.Commit); c != "" && c != "unknown" {
+		if len(c) > 7 {
+			c = c[:7]
+		}
+		return v + "@" + c
+	}
+	return v
 }
 
 func (m *Model) footer() string {
