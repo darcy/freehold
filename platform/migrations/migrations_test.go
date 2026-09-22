@@ -34,21 +34,6 @@ func TestScriptsAscendingAndHelpersIgnored(t *testing.T) {
 	}
 }
 
-func TestMarkAllLeavesNothingPendingAndRunsNothing(t *testing.T) {
-	root := t.TempDir()
-	writeScript(t, root, "1799900001.sh", "one")
-	writeScript(t, root, "1799900002.sh", "two")
-
-	n, err := MarkAll(root)
-	if err != nil || n != 2 {
-		t.Fatalf("MarkAll = %d, %v; want 2, nil", n, err)
-	}
-	if p, _ := Pending(root); len(p) != 0 {
-		t.Fatalf("all marked, pending = %v", p)
-	}
-	// No apply function was ever passed — MarkAll must not run the scripts.
-}
-
 func TestRunAppliesPendingInOrderStopsOnFailureAndRetries(t *testing.T) {
 	root := t.TempDir()
 	writeScript(t, root, "1799900001.sh", "one")

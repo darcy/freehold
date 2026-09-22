@@ -43,7 +43,7 @@ install: build
     install -m 755 target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
     # The migration scripts, where box.ResolveMigrationsDir finds them for an
     # INSTALLED CLI (~/.cargo/migrations is a parent of ~/.cargo/bin/freehold).
-    # Without this `freehold install` ships no scripts and never marks them done.
+    # Without this `freehold install` ships no scripts at all. They ship unmarked —
     rm -rf ~/.cargo/migrations && mkdir -p ~/.cargo/migrations && cp -f migrations/*.sh ~/.cargo/migrations/
     @echo "✓ freehold + siblings installed (~/.cargo/bin + ~/.cargo/release + ~/.cargo/migrations)"
 

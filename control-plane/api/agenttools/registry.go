@@ -108,6 +108,50 @@ func (r *Registry) SetChannels(name string, channels []string, private bool) err
 	return r.save()
 }
 
+// WithRegistryLocked runs fn while holding the registry's write lock, then
+// re-reads the file into memory. It exists for the migration queue, which edits
+// registry.json OUT-OF-BAND: the script shells out to a separate
+// freehold-agent-tools process that opens its own handle and knows nothing about
+// this serve's in-memory rows. Two hazards therefore have to be closed as ONE
+// critical section: no concurrent roster write may land while the script holds
+// the file (its save() would write this process's stale rows over what the script
+// just wrote), and memory must be re-read afterwards, or the next save() clobbers
+// the edit from the other direction. Doing only the second one leaves the first
+// open, so the two are not separable by a caller.
+//
+// fn must not touch this Registry — it drives the out-of-band writer only, and
+// re-entering a method would self-deadlock. fn's error is returned; the re-read
+// happens either way, because a half-run queue still moved the durable file and
+// memory has to match it.
+func (r *Registry) WithRegistryLocked(fn func() error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	err := fn()
+	if rerr := r.reloadLocked(); rerr != nil && err == nil {
+		err = rerr
+	}
+	return err
+}
+
+// reloadLocked re-reads the registry file into memory. The caller holds mu. A
+// file that has gone missing leaves the current rows in place rather than
+// dropping them; a malformed file is an error for the same reason.
+func (r *Registry) reloadLocked() error {
+	raw, err := os.ReadFile(r.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	rows := map[string]console.AgentInfo{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return fmt.Errorf("malformed registry %s: %w", r.path, err)
+	}
+	r.rows = rows
+	return nil
+}
+
 // UnregisterAgent drops a registry row.
 func (r *Registry) UnregisterAgent(name string) (json.RawMessage, error) {
 	r.mu.Lock()

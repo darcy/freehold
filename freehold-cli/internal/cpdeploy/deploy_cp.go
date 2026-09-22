@@ -43,8 +43,11 @@ type DeployCpSpec struct {
 	// only). nil on a rebuild/redeploy: build/teardown never promote.
 	Pin *version.Pin
 	// MigrationsDir is the LOCAL dir of shipped <epoch>.sh migration scripts.
-	// DeployCp (install) copies them to the CP and marks them all done; update
-	// copies + runs pending through world_migrate. Empty = none shipped.
+	// DeployCp copies them to the CP WITHOUT marking them: the queue runs at the
+	// end of world bring-up (cpbuild world_build), never here — at CP-deploy time
+	// the relay, k3s, the agent identities and the agent-tools serve do not exist
+	// yet, so a channel/registry script could only no-op and be marked done
+	// anyway. Empty = none shipped.
 	MigrationsDir *string
 }
 
@@ -156,12 +159,12 @@ func fileExists(path string) bool {
 }
 
 // ShipMigrations copies every <epoch>.sh from localDir into
-// <StateDir>/migrations/scripts/ on the CP over the deploy transport. When
-// markDone is set (install), it then touches a completion marker for every
-// shipped script WITHOUT running it — the fresh-install rule: a new world is
-// already at current state. update passes markDone=false and runs pending
-// scripts through world_migrate itself.
-func ShipMigrations(t Transport, spec *DeployCpSpec, localDir string, markDone bool) error {
+// <StateDir>/migrations/scripts/ on the CP over the deploy transport. It writes
+// scripts ONLY — never a completion marker. A marker means "this world has run
+// this script", and only a run can earn one; install and update differ solely in
+// WHEN the queue runs (install: at the end of its first world_build; update: via
+// world_migrate before it promotes the version).
+func ShipMigrations(t Transport, spec *DeployCpSpec, localDir string) error {
 	entries, err := os.ReadDir(localDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -184,13 +187,7 @@ func ShipMigrations(t Transport, spec *DeployCpSpec, localDir string, markDone b
 			return err
 		}
 	}
-	if !markDone {
-		return nil
-	}
-	root := spec.StateDir + "/migrations"
-	cmd := "mkdir -p " + root + " && cd " + remoteDir + " && for f in *.sh; do [ -e \"$f\" ] || continue; : > \"" + root + "/$f\"; done"
-	_, err = execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "mark migrations done", 60)
-	return err
+	return nil
 }
 
 // isEpoch reports whether a basename is a pure decimal epoch.
@@ -616,10 +613,13 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		}
 	}
 
-	// Ship the migration scripts and mark them all done (fresh install), then
-	// stamp the version pin. Order: deploy → serve green → scripts → pin.
+	// Ship the migration scripts UNMARKED, then stamp the version pin. Order:
+	// deploy → serve green → scripts → pin. They stay pending on purpose: the
+	// first `freehold build` runs them at the end of its world_build, once the
+	// relay + k3s + agent org exist for them to act on. Marking them done here
+	// would assert a run that never happened.
 	if spec.MigrationsDir != nil && *spec.MigrationsDir != "" {
-		if err := ShipMigrations(t, spec, *spec.MigrationsDir, true); err != nil {
+		if err := ShipMigrations(t, spec, *spec.MigrationsDir); err != nil {
 			return nil, err
 		}
 	}

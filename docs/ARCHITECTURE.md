@@ -255,16 +255,19 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     publishes the kind-9000 put-user to the runner's channel in-process — the
     runner re-reads its signed 39002 roster per call, so the grant lands
     without a restart (missing credential fails closed; agents are denied with
-     `-32003`, since a grant hands direct exec access to the runner). `world_migrate` runs
-     `platform/migrations` — the CP's one-time repair/catch-up scripts for
+     `-32003`, since a grant hands direct exec access to the runner). The
+     `platform/migrations` queue — the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
-     semantics. Migrations are **versioned script files** (Omarchy's `<epoch>.sh`
-     convention — one timestamped shell file per migration, shipped to the CP by
-     `install`/`update`, run in ascending order with `bash -euo pipefail`).
+     semantics — runs from two entry points: the `world_migrate` tool and the
+     tail of `world_build`. Migrations are **versioned script files** (Omarchy's
+     `<epoch>.sh` convention — one timestamped shell file per migration, shipped
+     to the CP by `install`/`update`, run in ascending order with
+     `bash -euo pipefail`).
      Completion is an Omarchy-style **marker file** named for the script
      (`<stateDir>/migrations/<epoch>.sh`, scripts in `migrations/scripts/`); a
-     fresh install marks every shipped script done without running it, and a
-     failure stops the queue unmarked. The agent-registry reconcile (the console
+     script runs exactly once per world — a fresh install included, at the end
+     of world bring-up — and a failure stops the queue unmarked.
+     The agent-registry reconcile (the console
      state.json `agents` map folded into the authoritative `registry.json`) rides
      that runner as a script migration, driven by the `freehold-agent-tools
      registry import-console` subcommand.
@@ -707,9 +710,11 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 *   **Migrations are scripts, never compiled in** — top-level
     `migrations/<epoch>.sh` (POSIX-sh, no shebang, `0644`), shipped to the CP
     and run with `bash -euo pipefail`; completion is an Omarchy-style marker
-    file named for the script (`<stateDir>/migrations/<epoch>.sh`). A fresh
-    install **marks every shipped script done** without running it; scripts only
-    run on update. There are no reverse migrations (a named gap).
+    file named for the script (`<stateDir>/migrations/<epoch>.sh`). `install`
+    ships the scripts **unmarked**; every world runs each one exactly once —
+    a fresh install included, at the end of world bring-up, once the relay,
+    k3s and the agent org exist for the scripts to act on. There are no
+    reverse migrations (a named gap).
 
 ## Build plan (chunked)
 
