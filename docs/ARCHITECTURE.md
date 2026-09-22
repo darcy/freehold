@@ -480,8 +480,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **The four departments are installed as part of the core build** — each a
     pod on the same harness as the CPA, created through the same audited
-    `create_agent`. Each joins `#freehold` plus its own **private**
-    `#<department>` channel, and the CPA is added to every channel. Tools are
+    `create_agent`. Each joins the private `#freehold` plus its own **private**
+    `#freehold-<department>` channel, and the CPA is added to every channel. Tools are
     provisioned lazily, mise-style — a department carries no capability tooling
     until its capability is configured (none in this phase). Status language is
     uniform, runner → service → department: 🟢 all checked / 🟡 some checks
@@ -780,7 +780,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     department-owned capability is executed by that department's identity and
     its raw grant attaches there, never to a custom agent. Service lifecycle is
     not a department — the agent that created a service owns it. The four are installed
-    at build, in `#freehold` plus a private `#<department>` channel with the CPA
+    at build, in the private `#freehold` plus a private `#freehold-<department>` channel with the CPA
     in all; only the identity/grant separation is locked.
 
 *   **Buzz required; the management relay is created by the install; one

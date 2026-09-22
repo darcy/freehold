@@ -187,12 +187,12 @@ type createAgentArgs struct {
 	Name    string `json:"name"`
 	Purpose string `json:"purpose"`
 	// Channel is the single-channel form (the CPA's toolset); Channels is the
-	// multi-channel form (a department joins #freehold + its own #<name>). Both
+	// multi-channel form (a department joins #freehold + its own #freehold-<name>). Both
 	// are accepted; Channel is prepended to Channels when both are present.
 	Channel  string   `json:"channel"`
 	Channels []string `json:"channels"`
 	// Private makes an explicitly created channel visibility=private (the
-	// per-department channels). The default freehold channel is always open.
+	// per-department channels). The default freehold channel is always private.
 	Private bool `json:"private"`
 }
 type grantAgentArgs struct {

@@ -56,8 +56,8 @@ Talk is unrestricted — the operator and any agent may converse with any depart
 What's bounded is *capability execution*: a capability a department owns is executed by that
 department's identity, never by a custom agent that would self-serve a second, ungoverned
 path to it. Whichever agent creates a service owns its install, config, and operation. The
-Orchestrator and departments are installed as part of the core build — a pod each, in
-`#freehold` plus its own private channel — and a rebuild reconciles them.
+Orchestrator and departments are installed as part of the core build — a pod each, in the
+private `#freehold` plus its own private `#freehold-<department>` channel — and a rebuild reconciles them.
 
 ## Vision, Architecture & Roadmap
 

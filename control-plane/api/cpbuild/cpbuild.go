@@ -1426,18 +1426,26 @@ func cpDestroyDetached(vmid uint32) string {
 // runs in ascending epoch order with `bash -euo pipefail` on the CP (where the
 // data it operates on lives); success marks it done, failure stops the queue
 // unmarked. The scripts receive the durable-plane paths + the agent-tools binary
-// via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE / STATE_DIR) — never
-// argv, so no credential crosses the audit. A fresh install runs MarkAll
-// instead, so this only ever applies scripts on update.
+// via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE / STATE_DIR) plus the
+// relay coords a channel edit needs (FREEHOLD_RELAY_URL / FREEHOLD_RELAY_AUTH_URL
+// / FREEHOLD_CPA_NAME) — never argv, so no credential crosses the audit. A fresh
+// install runs MarkAll instead, so this only ever applies scripts on update.
 func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 	return func() ([]migrations.Result, error) {
 		root := filepath.Join(consoleStateDir, "migrations")
 		binDir, _ := spec.cpGuestDirs()
+		relayAuthURL := spec.RelayAuthURL
+		if relayAuthURL == "" {
+			relayAuthURL = spec.RelayURL
+		}
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
 			"REGISTRY="+filepath.Join(spec.StateDir, "registry.json"),
 			"CONSOLE_STATE="+consoleStateDir,
 			"STATE_DIR="+spec.StateDir,
+			"FREEHOLD_RELAY_URL="+spec.RelayURL,
+			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
+			"FREEHOLD_CPA_NAME="+spec.cpaNameOrDefault(),
 		)
 		run := func(name, path string) error {
 			cmd := exec.Command("bash", "-euo", "pipefail", path)
@@ -1525,8 +1533,8 @@ func BuildWorldStatus(spec *Spec, reg *agenttools.Registry, consoleStateDir stri
 // ensureAgentChannel resolves the named channel (kind 39000 group meta, by
 // display name) or creates it — owned by the creating agent — when absent,
 // returning its id + display name. An empty name is the default freehold
-// channel, which is always OPEN and ENSURED because the first agent created may
-// be the one that brings it into existence. An explicit channel is created
+// channel, which is always PRIVATE and ENSURED because the first agent created
+// may be the one that brings it into existence. An explicit channel is created
 // private when private is set (the per-department channels), open otherwise.
 func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id, displayName string, created bool, err error) {
 	authURL := s.RelayAuthURL
@@ -1534,17 +1542,17 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 		authURL = s.RelayURL
 	}
 	if strings.TrimSpace(channel) == "" {
-		if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+		if err := delegate.EnsurePrivateChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
 			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
 		}
 		return relayFreeholdChannel, "#freehold", false, nil
 	}
 	name := "#" + strings.TrimPrefix(strings.TrimSpace(channel), "#")
-	// The shared channel has a FIXED id and is always open: never recreate it
-	// under the name-derived id, and never as private, even when a department
-	// create passes private=true (its own channel is private, #freehold is not).
+	// The shared channel has a FIXED id and is always private: never recreate it
+	// under the name-derived id, and never as open, even when a create passes
+	// private=false.
 	if strings.EqualFold(name, "#freehold") {
-		if err := delegate.EnsureChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+		if err := delegate.EnsurePrivateChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
 			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
 		}
 		return relayFreeholdChannel, "#freehold", false, nil
@@ -1644,13 +1652,33 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// absent) and joined; the operator is added to each. Empty list = the
 		// default freehold channel. After the channels exist the CPA is added to
 		// each so the system's main touchpoint sees every department
-		// (agents.DepartmentChannels gives a department #freehold + #<name>).
+		// (agents.DepartmentChannels gives a department #freehold + #freehold-<name>).
 		type channelRef struct{ id, name string }
 		var joined []channelRef
 		for _, ch := range channelNames(channels) {
 			channelID, channelName, created, err := spec.ensureAgentChannel(nSec, ch, private)
 			if err != nil {
 				return "", err
+			}
+			// #freehold is PRIVATE and owned by the CPA: only its owner can add
+			// members, so the new agent + operator are added signed by the CPA
+			// (a self-join would be refused). Every other channel here is owned
+			// by the created agent, so it self-joins and writes the memberships.
+			if channelID == relayFreeholdChannel && name != spec.CpaName {
+				cpaSec := spec.cpaSecret()
+				if len(cpaSec) != 32 {
+					return "", fmt.Errorf("add %s to #freehold: the CPA identity is unavailable to sign the membership (a private #freehold admits members only through its owner)", name)
+				}
+				if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, pub); err != nil {
+					return "", fmt.Errorf("add %s to #freehold: %w", name, err)
+				}
+				if spec.OwnerPub != "" {
+					if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, spec.OwnerPub); err != nil {
+						return "", fmt.Errorf("add operator to #freehold: %w", err)
+					}
+				}
+				joined = append(joined, channelRef{channelID, channelName})
+				continue
 			}
 			// JOIN it (open channels allow free joins; a private one may refuse —
 			// best-effort), then try to ADD the operator (the agent owns a channel
@@ -1668,8 +1696,11 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
 				for _, ref := range joined {
 					// Best-effort: the created agent signs, so it lands on a
-					// channel it owns (its own #<name>); #freehold is the CPA's
-					// own channel and already has it.
+					// channel it owns (its own #freehold-<name>); the CPA is
+					// already the owner/member of #freehold — skip.
+					if ref.id == relayFreeholdChannel {
+						continue
+					}
 					_ = relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, ref.id, cpaPub)
 				}
 			}
@@ -1756,6 +1787,33 @@ func (s *Spec) cpaPubkey() string {
 		return ""
 	}
 	return pk
+}
+
+// cpaSecret returns the CPA's Nostr secret (32 bytes), or nil when its identity
+// is absent/unreadable. #freehold is private and owned by the CPA, so its
+// membership writes must be signed by this key, not the joining agent's.
+func (s *Spec) cpaSecret() []byte {
+	name := s.CpaName
+	if name == "" {
+		name = agent.DefaultCPAName
+	}
+	id, err := identity.Load(filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name)))
+	if err != nil {
+		return nil
+	}
+	sec, err := hex.DecodeString(id.NostrSecretHex)
+	if err != nil {
+		return nil
+	}
+	return sec
+}
+
+// AgentIdentityPath returns the durable identity dir for an agent named name
+// under an agent-identity root (the layout BuildCreateAgentFn mints into).
+// Exported for the CLI surfaces (registry/channel migrations) that must load
+// the same identity the create path wrote.
+func AgentIdentityPath(root, name string) string {
+	return filepath.Join(root, "agents", sanitizeDir(name))
 }
 
 // sanitizeDir turns an agent name into a filesystem-safe identity dir name.

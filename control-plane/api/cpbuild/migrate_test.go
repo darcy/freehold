@@ -233,3 +233,50 @@ exit 0
 		t.Errorf("console reporter still sees %d pending after a converged run", n)
 	}
 }
+
+// TestBuildMigratorExportsChannelEnv pins the env the channel migration script
+// needs: the agent-tools binary path plus the relay coords + CPA name a kind-9002
+// channel edit signs with. A stub `freehold-agent-tools` asserts every var is set
+// and non-empty, so a dropped/renamed env fails the run.
+func TestBuildMigratorExportsChannelEnv(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "agent-tools")
+	consoleDir := filepath.Join(dir, "control-plane")
+	binDir := filepath.Join(dir, "bin")
+	for _, d := range []string{stateDir, consoleDir, binDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub := filepath.Join(binDir, "freehold-agent-tools")
+	stubSrc := `#!/bin/sh
+set -eu
+for v in FREEHOLD_AGENT_TOOLS REGISTRY CONSOLE_STATE STATE_DIR \
+         FREEHOLD_RELAY_URL FREEHOLD_RELAY_AUTH_URL FREEHOLD_CPA_NAME; do
+  eval "val=\${$v:-}"
+  [ -n "$val" ] || { echo "env $v is empty"; exit 1; }
+done
+exit 0
+`
+	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(consoleDir, "migrations")
+	scriptsDir := migrations.ScriptsRoot(root)
+	if err := os.MkdirAll(scriptsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The script actually invokes the stub, so its env assertions execute.
+	if err := os.WriteFile(filepath.Join(scriptsDir, "1799920000.sh"), []byte(`"$FREEHOLD_AGENT_TOOLS" channel edit`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &Spec{StateDir: stateDir, RelayURL: "https://relay.example", CpaName: "freehold"}
+	results, err := BuildMigrator(spec, consoleDir)()
+	if err != nil {
+		t.Fatalf("BuildMigrator: %v", err)
+	}
+	if len(results) != 1 || !results[0].OK {
+		t.Fatalf("expected the channel migration to run OK, got %+v", results)
+	}
+}

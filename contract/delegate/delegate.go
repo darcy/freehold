@@ -74,6 +74,16 @@ func EnsurePrivateChannelAuth(dialURL, authURL string, secret []byte, channelID,
 	return ensureChannel(dialURL, authURL, secret, channelID, name, "private")
 }
 
+// EditChannelAuth publishes a kind-9002 metadata edit for an EXISTING channel,
+// signed by its owner/admin: each tag is applied (name, visibility, …) and the
+// relay re-emits group discovery. The `h` tag is the channel id. Idempotent —
+// re-sending the same tags is a no-op. Used to true up channels a world already
+// has (make #freehold private; rename #<dept> to #freehold-<dept>).
+func EditChannelAuth(dialURL, authURL string, secret []byte, channelID string, tags ...[]string) error {
+	all := append([][]string{{"h", channelID}}, tags...)
+	return publishSignedAuth(dialURL, authURL, secret, wire.EditMetadata, all, "")
+}
+
 func ensureChannel(dialURL, authURL string, secret []byte, channelID, name, visibility string) error {
 	return publishSignedAuth(dialURL, authURL, secret, ChannelCreateKind, [][]string{
 		{"h", channelID},
