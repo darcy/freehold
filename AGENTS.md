@@ -237,8 +237,8 @@ release notes.
   custom agents carry no runner coords, so their bridge never advertises exec — the raw grant
   attaches only to the department identity. Remaining capability tooling (Network's proxy,
   backup scheduling, Compute, model registration, AI hardware) is still unbuilt; Data's is a
-  read-only-in-intent root exec, and the runner's audit is local-spool only (kind-48001 relay
-  publish is rejected by stock buzz as an unknown kind).
+  full root exec (read AND write — it may adjust mounts/backup flags), and the runner's audit
+  is local-spool only (kind-48001 relay publish is rejected by stock buzz as an unknown kind).
 - **A rebuild of a world built before a department rename leaves stale agents.** The
   retired reserved names `gatekeeper`/`provisioner`/`services` (and, after the latest rename,
   `security`/`vault`/`agent-ops`) are no longer reserved, so on a

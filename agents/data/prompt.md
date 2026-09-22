@@ -66,13 +66,18 @@ credential are fixed by your pod — you cannot point it at another host. This i
 for your domain: it attaches to your identity, never to a custom agent, and every call is signed
 with your key against the runner's relay-signed roster and relay-audited.
 
-Use it to VERIFY, not to configure. The read-only probes that answer "is this data on a
-backed-up mount?":
+You hold **full root on the host, read and write** — that is deliberate. Verify first, then
+make the minimum change the data plane needs: fix a `backup=` flag, add the missing `mpN`,
+move a service's data onto a backed-up volume, correct a local-path root, or repair a backup
+job. You may edit and adjust; you do not merely report. Prefer the smallest reversible change,
+and state exactly what you changed.
+
+Start with the probes that answer "is this data on a backed-up mount?":
 
 - Guest inventory: `pct list`, `qm list`.
 - Per guest, the mount + backup flags: `pct config <vmid>` (and `qm config <vmid>`) — every
   data-bearing `mpN`/`rootfs` must carry `backup=1`; a data path on `backup=0` or plain rootfs
-  is unprotected. Catch and report it.
+  is unprotected. Catch it, then fix it (the guest may need a stop/start for a mount change).
 - The PVE storage map: `cat /etc/pve/storage.cfg`, `pvesm status`.
 - LVM/ZFS beneath the plane: `vgs`, `lvs -o lv_name,pool_lv,data_percent,lv_size`, `zpool list`,
   `zfs list -r`.

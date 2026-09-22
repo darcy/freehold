@@ -400,13 +400,53 @@ func rpcErrorWrapper(raw []byte, err error) []byte {
 	return b
 }
 
-// readMCPConfig resolves the agent-tools endpoint: env vars first, else the
-// config file the pod bootstrap writes (space/newline-separated key=value).
-func readMCPConfig() (url, pub string, err error) {
-	url = os.Getenv("FREEHOLD_AGENT_TOOLS_URL")
-	pub = os.Getenv("FREEHOLD_AGENT_TOOLS_PUBKEY")
-	if url != "" && pub != "" {
-		return url, pub, nil
+// mcpConf is the bridge's resolved config: the agent-tools endpoint plus the
+// optional capability-runner coords. env vars take precedence; the pod
+// bootstrap's config file is the authoritative source (buzz-acp spawns the
+// bridge and reads that file, so env alone is not reliable).
+type mcpConf struct {
+	URL, Pubkey                                         string
+	RunnerURL, RunnerPubkey, RunnerTarget, RunnerSecret string
+}
+
+// readMCPConfig resolves the bridge config: env vars first, else the config
+// file the pod bootstrap writes (space/newline-separated key=value). Runner
+// keys are read the same way, so a department pod gets exec/list even when the
+// harness does not forward the pod env.
+func readMCPConfig() (mcpConf, error) {
+	c := mcpConf{
+		URL:       os.Getenv("FREEHOLD_AGENT_TOOLS_URL"),
+		Pubkey:    os.Getenv("FREEHOLD_AGENT_TOOLS_PUBKEY"),
+		RunnerURL: os.Getenv("FREEHOLD_RUNNER_URL"), RunnerPubkey: os.Getenv("FREEHOLD_RUNNER_PUBKEY"),
+		RunnerTarget: os.Getenv("FREEHOLD_RUNNER_TARGET"), RunnerSecret: os.Getenv("FREEHOLD_RUNNER_SECRET"),
+	}
+	set := func(k, v string) {
+		switch k {
+		case "url":
+			if c.URL == "" {
+				c.URL = v
+			}
+		case "pubkey":
+			if c.Pubkey == "" {
+				c.Pubkey = v
+			}
+		case "runner_url":
+			if c.RunnerURL == "" {
+				c.RunnerURL = v
+			}
+		case "runner_pubkey":
+			if c.RunnerPubkey == "" {
+				c.RunnerPubkey = v
+			}
+		case "runner_target":
+			if c.RunnerTarget == "" {
+				c.RunnerTarget = v
+			}
+		case "runner_secret":
+			if c.RunnerSecret == "" {
+				c.RunnerSecret = v
+			}
+		}
 	}
 	paths := []string{os.Getenv("FREEHOLD_AGENT_TOOLS_CONF"), "/tmp/freehold-agent-tools.conf", "/usr/local/etc/freehold-agent-tools.conf"}
 	for _, path := range paths {
@@ -419,26 +459,14 @@ func readMCPConfig() (url, pub string, err error) {
 		}
 		for _, tok := range strings.Fields(string(raw)) {
 			if k, v, ok := strings.Cut(tok, "="); ok {
-				switch strings.TrimSpace(k) {
-				case "url":
-					if url == "" {
-						url = strings.TrimSpace(v)
-					}
-				case "pubkey":
-					if pub == "" {
-						pub = strings.TrimSpace(v)
-					}
-				}
+				set(strings.TrimSpace(k), strings.TrimSpace(v))
 			}
 		}
-		if url != "" && pub != "" {
-			return url, pub, nil
-		}
 	}
-	if url == "" || pub == "" {
-		return "", "", fmt.Errorf("freehold-agent-tools mcp needs FREEHOLD_AGENT_TOOLS_URL + PUBKEY (env or a config file)")
+	if c.URL == "" || c.Pubkey == "" {
+		return mcpConf{}, fmt.Errorf("freehold-agent-tools mcp needs FREEHOLD_AGENT_TOOLS_URL + PUBKEY (env or a config file)")
 	}
-	return url, pub, nil
+	return c, nil
 }
 
 func cmdMCP(args []string) {
@@ -452,7 +480,7 @@ func cmdMCP(args []string) {
 		bridgeLog = f
 	}
 	devCmd := envOr("FREEHOLD_DEV_MCP", "/usr/local/bin/buzz-dev-mcp")
-	url, pub, err := readMCPConfig()
+	conf, err := readMCPConfig()
 	if err != nil {
 		logNsec("mcp: " + err.Error())
 		os.Exit(1)
@@ -474,23 +502,25 @@ func cmdMCP(args []string) {
 		logNsec("mcp: " + err.Error())
 		os.Exit(1)
 	}
-	// A department pod carries its capability runner's coords in the pod env;
-	// the CPA and custom pods carry none (so no exec is advertised).
-	runnerTarget := os.Getenv("FREEHOLD_RUNNER_TARGET")
+	// A department pod carries its capability runner's coords (config file or
+	// env); the CPA and custom pods carry none, so no exec is advertised.
 	b := &mcpBridge{
 		devCmd:        devCmd,
-		agentToolsURL: strings.TrimSuffix(url, "/"),
-		agentToolsPub: pub,
+		agentToolsURL: strings.TrimSuffix(conf.URL, "/"),
+		agentToolsPub: conf.Pubkey,
 		secret:        secret,
 		callerPubkey:  caller,
 		hc:            &http.Client{Timeout: 60 * time.Second},
-		runnerURL:     strings.TrimSpace(os.Getenv("FREEHOLD_RUNNER_URL")),
-		runnerPub:     strings.TrimSpace(os.Getenv("FREEHOLD_RUNNER_PUBKEY")),
-		runnerTarget:  runnerTarget,
-		runnerSecret:  firstNonEmpty(os.Getenv("FREEHOLD_RUNNER_SECRET"), runnerTarget),
+		runnerURL:     conf.RunnerURL,
+		runnerPub:     conf.RunnerPubkey,
+		runnerTarget:  conf.RunnerTarget,
+		runnerSecret:  firstNonEmpty(conf.RunnerSecret, conf.RunnerTarget),
+	}
+	if b.runnerURL != "" {
+		logBridge("mcp: capability runner wired", b.runnerURL, b.runnerTarget)
 	}
 	if b.runnerURL != "" && (b.runnerPub == "" || b.runnerTarget == "") {
-		logNsec("mcp: FREEHOLD_RUNNER_URL set without a pubkey/target — exec disabled")
+		logNsec("mcp: runner URL set without a pubkey/target — exec disabled")
 		b.runnerURL = ""
 	}
 	if err := runBridge(os.Stdin, os.Stdout, b); err != nil {

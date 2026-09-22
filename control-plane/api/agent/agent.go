@@ -162,13 +162,19 @@ func firstRunner(runner []RunnerCoords) *RunnerCoords {
 // to the plain buzz-dev-mcp MCP command so the agent never loses message tools.
 // The image runs non-root, so the bridge + config land in /tmp (world-writable),
 // not /usr/local. Empty agentToolsURL => no bridge (plain buzz-dev-mcp).
-func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string) string {
+func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string, runner ...RunnerCoords) string {
 	if agentToolsURL == "" {
 		return "exec buzz-acp"
 	}
 	// Single-line key=value config: no embedded newlines or quotes, so the
-	// bootstrap command embeds cleanly in the Pod manifest's JSON string.
+	// bootstrap command embeds cleanly in the Pod manifest's JSON string. The
+	// capability-runner coords ride HERE (not only the pod env): buzz-acp spawns
+	// the bridge as its MCP server and reads this file, so env alone is not a
+	// reliable channel.
 	conf := "url=" + agentToolsURL + " pubkey=" + agentToolsPubkey
+	if r := firstRunner(runner); r != nil {
+		conf += " runner_url=" + r.URL + " runner_pubkey=" + r.Pubkey + " runner_target=" + r.Target + " runner_secret=" + r.Secret
+	}
 	return "if curl -fsSL --max-time 25 '" + agentToolsURL + "/freehold-agent-tools-binary' -o /tmp/freehold-agent-tools && chmod +x /tmp/freehold-agent-tools 2>/dev/null && printf '" + conf + "' > /tmp/freehold-agent-tools.conf; then export BUZZ_ACP_MCP_COMMAND=/tmp/freehold-agent-tools; fi; exec buzz-acp"
 }
 
@@ -211,7 +217,7 @@ func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellm
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
-	podCmd := agentBridgeBootstrap(agentToolsURL, agentToolsPubkey)
+	podCmd := agentBridgeBootstrap(agentToolsURL, agentToolsPubkey, runner...)
 	runnerEnv := ""
 	if r := firstRunner(runner); r != nil {
 		runnerEnv = fmt.Sprintf(`    - {name: FREEHOLD_RUNNER_URL, value: %q}
