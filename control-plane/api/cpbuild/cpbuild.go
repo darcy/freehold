@@ -1418,8 +1418,11 @@ func cpDestroyDetached(vmid uint32) string {
 // on the CP, add it as a relay member, seat it in #freehold, apply its pod
 // through the co-located runner, and hand the minted pubkey to Tools.CreateAgent
 // BuildMigrator wires the CP's migration runner: the Omarchy-style scripts that
-// install/update shipped into <stateDir>/migrations/scripts/<epoch>.sh, with
-// completion markers at <stateDir>/migrations/<epoch>.sh. Each pending script
+// install/update shipped into <consoleStateDir>/migrations/scripts/<epoch>.sh,
+// with completion markers at <consoleStateDir>/migrations/<epoch>.sh — the
+// CONSOLE's durable state dir, which is where ShipMigrations writes them and
+// where the console's /api/world pending count reads them (spec.StateDir is the
+// agent-tools dir, a sibling, and never holds the scripts). Each pending script
 // runs in ascending epoch order with `bash -euo pipefail` on the CP (where the
 // data it operates on lives); success marks it done, failure stops the queue
 // unmarked. The scripts receive the durable-plane paths + the agent-tools binary
@@ -1428,7 +1431,7 @@ func cpDestroyDetached(vmid uint32) string {
 // instead, so this only ever applies scripts on update.
 func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 	return func() ([]migrations.Result, error) {
-		root := filepath.Join(spec.StateDir, "migrations")
+		root := filepath.Join(consoleStateDir, "migrations")
 		binDir, _ := spec.cpGuestDirs()
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
