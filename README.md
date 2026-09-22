@@ -1,5 +1,10 @@
 # freehold
 
+> [!WARNING]
+> **Pre-alpha, under heavy development.** freehold is **not ready to use**. It changes
+> meaningfully day to day, so expect breaking changes, missing features, and possible data
+> loss. Don't run it anywhere you care about yet.
+
 freehold is an open-source appliance that is operated by AI agents. It lands a full
 self-hosted stack on a Proxmox VE host or VPS — a self-hosted
 [Buzz](https://github.com/block/buzz) relay as its hub, Kubernetes, reverse proxy and TLS,
