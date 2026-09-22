@@ -574,6 +574,7 @@ func (m *Model) applyCPWorldHealth() {
 		return
 	}
 	m.cpWorld = w
+	m.CPVersion = cpVersionLabel(w.Version)
 	m.worldSvc = make(map[string]bool, len(w.Services))
 	for _, s := range w.Services {
 		m.worldSvc[s.Kind] = s.Up

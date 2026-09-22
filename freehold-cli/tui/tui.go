@@ -120,6 +120,11 @@ type Model struct {
 	// consolePK is the operator pubkey of the live console session ("" = not
 	// logged in), shown in the footer / views.
 	consolePK string
+	// CPVersion is the control plane's stamped world version, as the CP
+	// reports it on /api/world (its version.json pin). "" = no CP facts yet
+	// (no console session / the world fetch has not landed) — the header then
+	// says nothing rather than inventing a version.
+	CPVersion string
 	// last-loaded config — the `s` toggle and post-flow refreshes need it.
 	cfg *config.Config
 	// activity: while non-nil, the FULL-SCREEN activity view replaces the

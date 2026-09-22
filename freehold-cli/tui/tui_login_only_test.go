@@ -426,3 +426,38 @@ func TestConvergedLoginOnlyIgnoresRelay(t *testing.T) {
 		t.Fatal("all-live local-world box must converge")
 	}
 }
+
+// The dashboard header must report the version the CONTROL PLANE is running —
+// the pin the CP stamps and serves on /api/world — so an operator can see at a
+// glance whether the box's CP is behind the CLI they hold. An unstamped /
+// pre-stamping CP must leave the header silent rather than imply a version.
+func TestHeaderShowsCPVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/world":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"cp_pubkey":"aa","relay_host":"relay.here.freehold.technology","services":[` +
+				`{"name":"control plane","kind":"cp","up":true}],` +
+				`"version":{"version":"v0.8.1","channel":"stable","commit":"abc1234def5678"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{CPURL: srv.URL, CpPubkey: "aa"}
+	m := &Model{Mode: ModeRunning, Domain: "relay.here.freehold.technology", cfg: cfg,
+		console: &consoleClient{client: console.WithCookie(srv.URL, "fh_session=tok123")}}
+	m.applyCPWorldHealth()
+
+	out := m.View()
+	if !strings.Contains(out, "cp v0.8.1@abc1234") {
+		t.Fatalf("header must carry the CP's served version + short commit, got:\n%s", out)
+	}
+
+	// An offline / pre-stamping CP: no pin on record -> no version claim.
+	bare := &Model{Mode: ModeRunning, Domain: "relay.here.freehold.technology", cfg: cfg}
+	if v := bare.View(); strings.Contains(v, "cp v0.8.1") {
+		t.Fatalf("header must not show a version before the CP facts land, got:\n%s", v)
+	}
+}
