@@ -13,11 +13,13 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/relay"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
+	"freehold/platform/migrations"
 )
 
 // Server is the Go console: the loopback admin/ops web surface (web.rs port).
@@ -44,12 +46,24 @@ type Server struct {
 	// the authoritative agent registry (registry.json) + world facts (facts.json)
 	// that /api/world serves publicly so every box sees the CP's status.
 	AgentToolsDir string
+	// Version is the world's stamped version identity, read from
+	// <StateDir>/version.json at startup. Zero when unstamped.
+	Version version.Pin
 	// Builder is the CP-owned world bring-up engine (cpbuild.Spec): the console
 	// becomes the CP build executor — the operator-scoped /api/world-build route
 	// drives it through the co-located runner, so a thin login box triggers the
 	// CP to bring up the world WITHOUT depending on the relay roster (which
 	// agent-tools needs) or on box-one hosting it. nil = world_build unsupported.
 	Builder *cpbuild.Spec
+}
+
+// versionPin re-reads <StateDir>/version.json per call so an update's repin is
+// reflected without a serve restart; falls back to the startup snapshot.
+func (s *Server) versionPin() version.Pin {
+	if p, err := version.Read(filepath.Join(s.StateDir, version.FileName)); err == nil && p.Version != "" {
+		return p
+	}
+	return s.Version
 }
 
 // ServeHTTP routes /api/* (the Rust axum router equivalent).
@@ -63,7 +77,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/healthz" && method == http.MethodGet {
-		w.Write([]byte("ok"))
+		pin := s.versionPin()
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(map[string]interface{}{
+			"status":  "ok",
+			"version": pin.Version,
+			"channel": pin.Channel,
+			"commit":  pin.Commit,
+		})
+		w.Write(body)
 		return
 	}
 
@@ -238,20 +260,42 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 	// relay_host, so a login box reaches the relay through Caddy (https://
 	// <domain>) instead of adopting the internal LAN dial the console uses for
 	// its own roster/event reads. relay_ws_url mirrors it (wss://<domain>).
+	//
+	// A FRESH world's console is deployed BEFORE the relay boots (install is
+	// CP-only), so the state may carry no relay scope while the builder's
+	// world-config does. Fall back to it, else /api/world omits the relay
+	// service entirely and the box's relay pillar can never turn green.
+	builderHost, builderURL := "", ""
+	if s.Builder != nil {
+		builderHost, builderURL = s.Builder.RelayHost, s.Builder.RelayURL
+	}
 	var relayURL, relayWS *string
-	if snap.RelayHost != nil && *snap.RelayHost != "" && !strings.Contains(*snap.RelayHost, "://") {
+	switch {
+	case snap.RelayHost != nil && *snap.RelayHost != "" && !strings.Contains(*snap.RelayHost, "://"):
 		public := "https://" + *snap.RelayHost
 		ws := "wss://" + *snap.RelayHost
 		relayURL = &public
 		relayWS = &ws
-	} else if snap.RelayURL != nil {
+	case snap.RelayURL != nil:
 		relayURL = snap.RelayURL
 		w := wsOf(*snap.RelayURL)
+		relayWS = &w
+	case builderHost != "":
+		public := "https://" + builderHost
+		ws := "wss://" + builderHost
+		relayURL = &public
+		relayWS = &ws
+	case builderURL != "":
+		relayURL = &builderURL
+		w := wsOf(builderURL)
 		relayWS = &w
 	}
 	var relayHost string
 	if snap.RelayHost != nil {
 		relayHost = *snap.RelayHost
+	}
+	if relayHost == "" {
+		relayHost = builderHost
 	}
 	// Serve the agent-tools MCP surface publicly too: a thin box drives the
 	// world (build/exec/migrate/door) through the CP over the public edge
@@ -288,10 +332,17 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		"relay_host":         relayHost,
 		"cp_url":             s.PublicOrigin,
 		"cp_pubkey":          s.ConsolePubkey,
+		"console_enc_pubkey": s.consoleEncPubkey(),
 		"agent_tools_url":    agentToolsURL,
 		"agent_tools_pubkey": snap.AgentToolsPubkey,
 		"operator_pubkey":    operator,
 		"services":           services,
+		"version":            s.versionPin(),
+	}
+	// Pending migration count (scripts without a completion marker) so a box's
+	// `update --check` / `status` can report it without running anything.
+	if n, err := migrations.PendingCount(filepath.Join(s.StateDir, "migrations")); err == nil {
+		payload["migrations_pending"] = n
 	}
 	// Fold the single-inventory status (agents + runners + dns + facts) served
 	// on the same route the /mcp world_status tool shares — the authoritative
@@ -337,7 +388,7 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Builder == nil {
-		writeErr(w, http.StatusServiceUnavailable, "world-build: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold bootstrap` first)")
+		writeErr(w, http.StatusServiceUnavailable, "world-build: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
 		return
 	}
 	applier := cpbuild.BuildWorldApply(s.Builder)
@@ -346,7 +397,11 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "world-build: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report})
+	// Hand back the world coords the build resolved (relay/cp/k3s vmids + IPs).
+	// A teardown clears the operator box's recorded coords, so the build caller
+	// must write these back to its profile or the next uninstall cannot find the
+	// guests it created. Non-secret.
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report, "coords": s.Builder.Coords()})
 }
 
 // worldTeardown runs the CP-owned world teardown through the co-located runner
@@ -367,7 +422,7 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Builder == nil {
-		writeErr(w, http.StatusServiceUnavailable, "world-teardown: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold bootstrap` first)")
+		writeErr(w, http.StatusServiceUnavailable, "world-teardown: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
 		return
 	}
 	applier := cpbuild.BuildWorldTeardownApply(s.Builder)

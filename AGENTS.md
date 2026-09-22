@@ -4,27 +4,29 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-The current version is the top entry in `CHANGELOG.md` — this file deliberately never
-restates a version number, so it can't go stale. Chunk 1 (engine room) and Chunk 2 (relay
-scope), including the durable volume plane (Phase 0.12), are implemented and live-verified
-against real infrastructure (a real PVE host, a real relay/CP pair under a real domain).
-Chunk 3 (the Rust→Go refactor) is complete. Chunk 4 (a real, reasoning CPA that lives in
-Buzz) is live: the CPA holds conversations, survives a full rebuild, and creates new agents
-itself when asked; its remaining Phase-F resource baseline is the current focus — see
-`roadmap/POC.md`. For how we got here, see
+The current *released* version is the top entry in `CHANGELOG.md`; the newest `v*` tag may
+still be a pre-release awaiting e2e validation and promotion (see "Releases") — this file
+deliberately never restates a version number, so it can't go stale. Chunks 1–4 are
+implemented and live-verified against real infrastructure (a real PVE host, a real relay/CP
+pair under a real domain): the engine room and relay scope, the durable volume plane, the
+Rust→Go refactor, and Chunk 4's real, reasoning CPA that lives in Buzz — it holds
+conversations, survives a full rebuild, and creates new agents itself when asked. Chunk 5
+(agent workspaces + git/GitHub) is next; see `docs/POC.md`. Open deferrals are tracked in
+`docs/followups.md`. For how we got here, see
 `CHANGELOG.md`; this file describes the current state and the rules for working in this
 repo, not the history.
 
 ## Documentation hygiene (locked) — a primary job of this file
 
-**Docs describe current-world state only.** `ROADMAP.md`, `POC.md`, `ARCHITECTURE.md`,
-`BUZZ_SURFACE.md`, `README.md`, and this file say what's true *now* — never "formerly X,"
+**Docs describe current-world state only.** `docs/ROADMAP.md`, `docs/POC.md`,
+`docs/ARCHITECTURE.md`, `docs/BUZZ_SURFACE.md`, `README.md`, and this file say what's true
+*now* — never "formerly X,"
 "SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
 
 1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
-2.  Add an entry to `CHANGELOG.md` explaining what changed and why (see "Pull
-    requests": each phase bumps `0.x.y` and adds a changelog entry; a phase merged
-    to `main` is tagged `v0.x.y`).
+2.  Record the change for the next release: `CHANGELOG.md` is written **at release
+    time** from git history (see "Releases"), so no per-merge changelog entry or
+    version bump happens here.
 
 ## Pull requests (locked) — every unit of work ships through a PR
 
@@ -41,16 +43,51 @@ repo, not the history.
 - **Commit and push; never merge.** Merging is the operator's call — do it only
   when the operator explicitly says "merge when complete" (or equivalent). Until
   then the PR sits in review, even at `MERGE-READY`.
-- **One `0.x.y` per phase.** Each phase that comes online gets its own
-  `CHANGELOG.md` entry and version bump (`0.4.0`, `0.4.1`, …): the minor moves
-  when a chunk's work lands, the patch when a phase inside it does. When a phase
-  merges to `main`, that release tags the tree at `v0.4.1` etc. — the tag and
-  the changelog entry are both part of landing the phase.
+- **No version numbers in commit or PR titles.** The version is assigned only at
+  release time; a merge to `main` is not a release.
+
+## Releases (locked) — a version exists only when it is released
+
+- **Versions are tied to releases, never to merges.** There is no version bump per
+  phase, per chunk, or per merge to `main`. Work lands with no version attached.
+- **Every release is three things together:** a `CHANGELOG.md` entry, an annotated
+  tag `vX.Y.Z` on `main`, and a GitHub Release. A tag or a Release without the
+  changelog entry is not a release; a changelog-only edit is not one either.
+- **The changelog entry is written at release time.** It compares the codebase at the
+  previous release to the current one and records the **net** difference — what is true now
+  that wasn't then — not a chronological log of every merge. Superseded or refactored-away
+  work is omitted; the final state wins. The `release-prepare` skill owns this flow;
+  `release-publish` promotes the result.
+- **A release is cut as a pre-release, then tested, then promoted.** `release-prepare`
+  produces the candidate: `CHANGELOG.md` entry + annotated tag + a GitHub **pre-release**
+  (marked `prerelease`, assets attached, short notes) whose body ends in a **test-status
+  table** (one row per provider × flow, seeded `⚪ Unverified`). `release-test-proxmox` runs
+  the live lifecycle on the pre-release's downloaded assets and fills the Proxmox rows
+  (`✅`/`❌`; `⚪` when it can't test). `release-publish` then promotes it to a full release
+  only when **every** row is `✅`, with the operator's go-ahead — same tag, same commit, same
+  assets.
+- **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
+  every release is the tip of `main`, so the tag goes there — there is **no release
+  branch**. The skill generates the entry and gets the operator's approval on the draft
+  **before committing**, commits it on a normal PR branch (e.g. `docs/changelog-vX.Y.Z`) →
+  PR → waits for `check` + `bot-review` to settle → **the operator merges** (the skill never
+  merges) → the skill tags the merged `main` commit and publishes it as a pre-release with
+  short, high-level notes distilled from the entry. An rc (`vX.Y.Z-rc.N`) is tagged the same
+  way and is likewise a pre-release; iterating re-tags the next rc on `main`.
+- **Release branches (future, when development continues past a release).** Then the model
+  becomes trunk-first: `main` stays the trunk where all work lands, and a long-lived
+  `release/vX.Y.Z` branch is cut for a release; fixes which should ship in it are
+  **backported** (cherry-picked) onto that branch, and the tag goes on the **release branch
+  head**, not `main`. The branch is not merged back (the trunk already has the originals).
+  `release/` is the prefix. Not needed yet — everything is currently about the current
+  release.
+- **Numbering:** `0.x.y` stays semver-ish pre-MVP (minor for a chunk's work, patch
+  for a phase); `1.0.0` is reserved for the MVP / public release.
 
 ## Navigation
 
-- `VISION.md` — narrative, single source of truth for the "why".
-- `ARCHITECTURE.md` — system design, locked decisions, build plan.
+- `docs/VISION.md` — narrative, single source of truth for the "why".
+- `docs/ARCHITECTURE.md` — system design, locked decisions, build plan.
 - `freehold-cli/` — the local operator surface (top-level Go module): the `freehold` CLI
   + TUI, `login`/profiles, and the `install` surface. It gets a control plane up in an
   environment (Proxmox today; Vultr/Hetzner providers come later) and a door to it; the
@@ -63,20 +100,33 @@ repo, not the history.
   domains + the proxy IP (the guided flow prompts). Re-running an existing name whose CP is
   **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
   Nostr/enc key), while a **live** CP is refused (reconcile with `freehold build`, drop it
-  with `teardown`/`uninstall`, or join it with `freehold login`). `bootstrap` is a hidden
-  alias for `install --yes`. A world with no recorded name keeps the domain-derived LXC
-  names, and durable-plane names stay domain-keyed.
-- `CHANGELOG.md` — history of decisions, reversals, and version-by-version progress.
-- `roadmap/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
-- `roadmap/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
-- `roadmap/POC_CHUNK<n>.md` — the plan that actually exists: Chunk 3 (Rust→Go refactor,
-  done), Chunk 4 (CPA in Buzz, current), and Chunk 5 (agent workspaces + git/GitHub).
-- `.agents/skills/release/SKILL.md` — the `release` skill: cut a `v0.x.y` annotated
-  tag on `main` and publish a short, high-level GitHub Release (distilled from
-  `CHANGELOG.md`, never the full changelog) — one per phase, per the PR rules above.
-  This is the canonical, agent-agnostic location (auto-loaded by opencode and any
-  other agent that reads `~/.agents/skills/`-style external skills).
-- `roadmap/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
+  with `teardown`/`uninstall`, or join it with `freehold login`). There is no `bootstrap`
+  alias — `install --yes` is the non-interactive surface. A world with no recorded name
+  keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
+- `CHANGELOG.md` — history of decisions, reversals, and releases.
+- `docs/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
+- `docs/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
+- `docs/POC_CHUNK5.md` — the plan that actually exists for the current chunk (agent
+  workspaces + git/GitHub); Chunks 1–4 are shipped and their build plans retired.
+- `docs/followups.md` — the grab bag of deferred work pulled from retired plans. Current
+  limitations of shipped code live in "Known gaps" below, not here.
+- `.agents/skills/release-prepare/SKILL.md` — the `release-prepare` skill: cut a versioned
+  candidate by generating the `CHANGELOG.md` entry from git history since the previous
+  release, landing it via a normal PR branch (e.g. `docs/changelog-vX.Y.Z`), then tagging
+  the merged commit and publishing a GitHub **pre-release** with the built assets, short,
+  high-level notes (distilled from the entry, never the full changelog), and the
+  test-status table — see "Releases" above. The canonical, agent-agnostic location
+  (auto-loaded by opencode and any other agent that reads `~/.agents/skills/`-style
+  external skills).
+- `.agents/skills/release-test-proxmox/SKILL.md` — the `release-test-proxmox` skill:
+  exercise a pre-release's downloaded assets through the full lifecycle (install →
+  agent replies in the relay → teardown → all down → rebuild → agent replies → uninstall →
+  all gone) on a real PVE host, and record the Proxmox rows of the release's test-status
+  table.
+- `.agents/skills/release-publish/SKILL.md` — the `release-publish` skill: promote a
+  pre-release to a full release only when every row of its test-status table is `✅ Passed`
+  (metadata-only flip; the tag never moves).
+- `docs/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
 
 ## Locked model — do not change without an explicit user decision
@@ -111,10 +161,10 @@ repo, not the history.
   secrets, teardown/rebuild) is unchanged by this — reasoning decides what to do, that layer
   still does it auditably.
 - **The agent org is two tiers: the CPA and four departments.** The CPA is the sole user
-  touchpoint; **Security** (access/exposure), **Vault** (data plane), **Compute** (the box
+  touchpoint; **Network** (the network surface — access/exposure), **Data** (data plane), **Compute** (the box
   itself — CPU/RAM/disk, Proxmox LXC/kube and remote provisioning, plus the monitoring tooling
-  it needs), and **Agent Ops** (models/providers/agents, plus AI hardware — local-AI
-  accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by Agent Ops, separate
+  it needs), and **AI** (models/providers/agents, plus AI hardware — local-AI
+  accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by AI, separate
   from Compute's general resources) are its direct reports, each a distinct identity scoped to
   one domain. Talk is unrestricted — the operator and any agent may converse with any
   department or agent directly; what is bounded is *capability execution*. A capability a
@@ -134,7 +184,7 @@ repo, not the history.
   first-class (the business path). The k8s layer and everything above the host driver run
   identically regardless of substrate. Installer/runner must target a VPS as easily as
   Proxmox — no Proxmox-only shortcuts.
-- **Durable-plane guest paths follow the `/srv/data` convention** (see ARCHITECTURE.md's
+- **Durable-plane guest paths follow the `/srv/data` convention** (see docs/ARCHITECTURE.md's
   "Filesystem layout convention"). Every `--mpN` is born at `pct create` with an explicit
   `backup=` flag: the relay's docker-root stays at `/var/lib/docker` with `backup=1` (its
   Postgres/Redis/MinIO/git live as named volumes under the daemon root — relocating it would
@@ -150,6 +200,19 @@ These are open limitations in the shipped code today, not history. Update this l
 close or new ones surface; it's current-state, so it belongs here rather than in the
 changelog.
 
+- **The co-located runner starts with package grants, not the relay roster.**
+  `deploy-cp` starts the CP's runner with only `--state-dir` (install and
+  update alike), so it reads its whitelist from the shipped package grants — the
+  console's self-grant — rather than the relay-signed 39002 roster. That is
+  fine while the only caller is the console (the agent↔runner exec surface is
+  still unwired, below); moving the co-located runner to the relay roster must
+  land together with publishing the console's grant to the relay, as one change.
+- **No reverse migrations.** Migrations are one-way `<epoch>.sh` scripts and
+  completion markers are never un-marked, so re-deploying an older version runs
+  old code against config a newer migration may have rewritten and cannot undo
+  it. There is no downgrade verb; rolling back below the highest applied
+  migration needs the snapshot escape hatch (out of scope); re-running `update`
+  retries only *pending* work.
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
   issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
   someone else already holds still opens; re-keying after a leaked runner private key is out
@@ -163,7 +226,7 @@ changelog.
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
 - **The four departments are installed, but have no capability tools yet.** `freehold build`
-  creates each reserved department (`security`/`vault`/`compute`/`agent-ops`)
+  creates each reserved department (`network`/`data`/`compute`/`ai`)
   through the same audited `create_agent`: its embedded prompt, `#freehold` plus its own
   private `#<department>` channel, and the CPA added to each channel — four pods, reconciled
   across a rebuild like any registry agent. The capability tooling they broker (external
@@ -173,12 +236,14 @@ changelog.
   through the owning department" is still just the grant model — raw capability grants sit with
   department identities once Chunk 5 wires the agent↔runner exec surface, and custom agents
   never receive them.
-- **A rebuild of a world built before the four-department rename leaves stale agents.** The
-  retired reserved names `gatekeeper`/`provisioner`/`services` are no longer reserved, so on a
+- **A rebuild of a world built before a department rename leaves stale agents.** The
+  retired reserved names `gatekeeper`/`provisioner`/`services` (and, after the latest rename,
+  `security`/`vault`/`agent-ops`) are no longer reserved, so on a
   rebuild `reconcileCreatedAgents` re-creates any surviving registry rows as custom-template
-  agents in their old `#gatekeeper`/`#provisioner`/`#services` channels; nothing removes them.
+  agents in their old `#gatekeeper`/`#provisioner`/`#services` (or `#security`/`#vault`/
+  `#agent-ops`) channels; nothing removes them.
   Fresh builds are clean. A retired-name cleanup on reconcile is a named follow-up.
-- **The Vault/Security "check in on a new service" question has no trigger yet.** The hook
+- **The Data/Network "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
 - **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
@@ -202,9 +267,6 @@ changelog.
   not the (non-secret) base-URL env var — cosmetic, fix is a separate redaction list.
 - **State store is single-process** — not cross-process atomic; planned Postgres swap at MVP
   addresses this.
-- **Orchestrator `onboard` has no rollback** — a hard-fail at the readiness gate leaves CP
-  state + the shipped package on disk; a re-run hits `RunnerExists`/`PackageDirInUse` and
-  needs manual cleanup.
 - **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
   unzeroized body bytes (loopback, TLS-free — same exposure class as the CLI's stdin path).
 - **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP
@@ -264,7 +326,7 @@ changelog.
   - `agents/` (`freehold/agents` — the top-level home for agent definitions: `freehold/`
     the CPA prompt + skills, `custom/` the template for agents the CPA creates,
     `common/orientation.md` the shared system-orientation block, and the four
-    department definitions (`security/`, `vault/`, `compute/`, `agent-ops/`);
+    department definitions (`network/`, `data/`, `compute/`, `ai/`);
     embeds its Markdown as Go values):
     `cd agents && go build ./... && go vet ./... && go test ./...`
   - `contract/` (`freehold/contract` — the shared wire/trust/protocol leaf: crypto/wire/client/
@@ -282,8 +344,11 @@ changelog.
     and the `proxmox/teardown` world-destroy engine): `cd providers && go build ./... &&
     go vet ./... && go test ./...`. Imports `platform/` + `contract/`; never the reverse.
   - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
-    CLI + TUI, `cli/` + `cli/login` + `cli/flows` + `cli/tui`, and the `install/` +
-    `cpdeploy/` install surface; the `freehold` binary's main is `cli/cmd/freehold`):
+    CLI + TUI, one dir-per-verb (`install/`, `uninstall/`, `build/`, `teardown/`,
+    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`)
+    plus `login/` + `tui/` and `internal/common/` + `internal/certcred/` +
+    `internal/stages/`; the `install/` surface holds `install/cpdeploy/`; the `freehold`
+    binary's main is `cmd/freehold`):
     `cd freehold-cli && go build ./... && go vet ./... && go test ./...`. **It never
     imports `control-plane/`** (an import-graph guard enforces it).
   - `control-plane/` (`freehold/control-plane` — the server + engines: api/cpbuild (build),
@@ -299,7 +364,7 @@ changelog.
   found"s inside the pod (`interpreter /lib64/ld-linux-x86-64.so.2` is absent).
 - **The full binary set a `rebuild`/`teardown`/`install` box needs** (`box.ResolveBins` fails
   the pipeline until every sibling is present, and prints the exact build one-liner):
-  - `target/debug/freehold` (the CLI+TUI+install) — `go build -C freehold-cli -o target/debug/freehold ./cli/cmd/freehold`
+  - `target/debug/freehold` (the CLI+TUI+install) — `go build -C freehold-cli -o target/debug/freehold ./cmd/freehold`
   - `target/debug/freehold-console` **and** `target/release/freehold-console` (the Go CP CLI
     the box-side provision/grant/adopt/add-secret/revoke stages call, and what `deploy-cp`
     ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
@@ -309,17 +374,17 @@ changelog.
   resolve as siblings of the running binary — a box doing world bring-up needs all
   five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
-- `roadmap/POC_CHUNK3.md` (done), `roadmap/POC_CHUNK4.md` (current), and
-  `roadmap/POC_CHUNK5.md` carry the live acceptance checkboxes; tick them as work lands.
-  The Chunk-1/2 acceptance gate is Go now (`control-plane/acceptance/`, run by
+- `docs/POC.md` and `docs/POC_CHUNK5.md` carry the live acceptance checkboxes for the
+  current chunk; tick them as work lands. The Chunk-1/2 acceptance gate is Go now
+  (`control-plane/acceptance/`, run by
   `go test ./...`): the CP provisioner lifecycle, the console HTTP surface, and the
   relay-channel fold against a hermetic fake relay — the connector/relay behaviors the
   runner owns stay in its Rust tests. It drives the real `runner` binary (a subprocess),
   so the box's `cargo build --bin runner` must have run first.
 
-### Testing the TUI (`freehold`, `freehold-cli/cli/cmd/freehold` → bubbletea dashboard)
+### Testing the TUI (`freehold`, `freehold-cli/cmd/freehold` → bubbletea dashboard)
 
-`go test` under `freehold-cli/cli/tui/` verifies form logic, but it does NOT prove the running TUI.
+`go test` under `freehold-cli/tui/` verifies form logic, but it does NOT prove the running TUI.
 **Always test the BUILT binary** — never reason from `go test` + a stale `~/.cargo/bin/freehold`.
 The test step below rebuilds it FIRST, so there is nothing to remember: if you change a TUI flow
 (forms, keybindings, dispatch, pre-flow chaining like the rebuild→DNS ask), rebuild + test the
@@ -327,7 +392,7 @@ installed binary in one go:
 
 ```bash
 # 0. rebuild + place the binary FIRST (a passing go test does not re-place it):
-cd freehold-cli && go build -o target/debug/freehold ./cli/cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
+cd freehold-cli && go build -o target/debug/freehold ./cmd/freehold && cp target/debug/freehold ~/.cargo/bin/freehold
 
 # 1. isolate state so the flow is deterministic (e.g. no DNS cred already stored):
 cat > /tmp/fh-tui-config.toml <<'EOF'

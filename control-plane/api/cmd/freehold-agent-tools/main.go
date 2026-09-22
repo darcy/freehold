@@ -403,6 +403,9 @@ func cmdServe(args []string) {
 		SelfURL:        strings.TrimSuffix(*selfURL, "/"),
 		RepoURL:        strings.TrimSpace(*repoURL),
 	}
+	// Derive the litellm gateway IP/base from the proxy IP when the deploy-time
+	// spec predates litellm, so agent manifests get a real base URL.
+	spec.FillEdgeURLs()
 
 	// Roster-fresh whitelist, fail-closed: a relay read error yields empty
 	// grants => VerifyRequest denies every request. The roster is the relay's

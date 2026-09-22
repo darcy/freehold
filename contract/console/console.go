@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/config"
+	"freehold/contract/version"
 	"freehold/contract/wire"
 )
 
@@ -232,12 +234,17 @@ func (c *Client) request(method, path string, body interface{}) (json.RawMessage
 // box learns where the relay is and who the relay/CP trust without anything
 // that lived only on the lost box.
 type WorldSummary struct {
-	RelayURL         string         `json:"relay_url"`
-	RelayWsURL       string         `json:"relay_ws_url,omitempty"`
-	RelayPubkey      string         `json:"relay_pubkey,omitempty"`
-	RelayHost        string         `json:"relay_host,omitempty"`
-	CPURL            string         `json:"cp_url"`
-	CPPubkey         string         `json:"cp_pubkey"`
+	RelayURL    string `json:"relay_url"`
+	RelayWsURL  string `json:"relay_ws_url,omitempty"`
+	RelayPubkey string `json:"relay_pubkey,omitempty"`
+	RelayHost   string `json:"relay_host,omitempty"`
+	CPURL       string `json:"cp_url"`
+	CPPubkey    string `json:"cp_pubkey"`
+	// ConsoleEncPubkey is the console identity's X25519 encryption public key
+	// (64-hex). A build box seals the CP-owned secrets (DNS creds, litellm) to
+	// it, so it must be reachable over the public API — a thin box has no runner
+	// to exec into the CP to read it.
+	ConsoleEncPubkey string         `json:"console_enc_pubkey,omitempty"`
 	OperatorPubkey   string         `json:"operator_pubkey,omitempty"`
 	AgentToolsURL    string         `json:"agent_tools_url,omitempty"`
 	AgentToolsPubkey string         `json:"agent_tools_pubkey,omitempty"`
@@ -250,6 +257,11 @@ type WorldSummary struct {
 	Runners []StatusRunner  `json:"runners,omitempty"`
 	DNS     []StatusDNS     `json:"dns,omitempty"`
 	Facts   json.RawMessage `json:"facts,omitempty"`
+	// Version is the CP's stamped world version identity (version.json).
+	Version version.Pin `json:"version"`
+	// MigrationsPending is the count of migration scripts without a completion
+	// marker on the CP (/api/world).
+	MigrationsPending int `json:"migrations_pending,omitempty"`
 }
 
 // StatusRunner is one CP runner line in the /api/world inventory.
@@ -448,23 +460,31 @@ func (c *Client) PutSecret(name string, file json.RawMessage) error {
 	return err
 }
 
+// WorldBuildResult is what /api/world-build returned: the stage report plus the
+// world coords the CP resolved during the build (relay/cp/k3s vmids + IPs). A
+// teardown clears the box's recorded coords, so the build caller must write
+// these back — otherwise the next uninstall cannot find the guests it created.
+type WorldBuildResult struct {
+	Report string        `json:"report"`
+	Coords config.Coords `json:"coords"`
+}
+
 // WorldBuild triggers the CP-owned world bring-up (/api/world-build) and
-// returns the stage report. The console drives the shared cpbuild engine
-// through its co-located runner — the drive-through-CP build a thin box uses.
-// The build runs for minutes, so this switches to a long client timeout.
-func (c *Client) WorldBuild() (string, error) {
+// returns the stage report + resolved world coords. The console drives the
+// shared cpbuild engine through its co-located runner — the drive-through-CP
+// build a thin box uses. The build runs for minutes, so this switches to a
+// long client timeout.
+func (c *Client) WorldBuild() (*WorldBuildResult, error) {
 	c.hc = &http.Client{Timeout: 20 * time.Minute}
 	raw, err := c.request(http.MethodPost, "/api/world-build", nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var v struct {
-		Report string `json:"report"`
-	}
+	var v WorldBuildResult
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return "", fmt.Errorf("world-build response: %w", err)
+		return nil, fmt.Errorf("world-build response: %w", err)
 	}
-	return v.Report, nil
+	return &v, nil
 }
 
 // WorldTeardownResult is what the CP-owned world-teardown did: the stage report

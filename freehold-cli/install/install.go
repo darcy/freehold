@@ -1,10 +1,10 @@
-// The install surface: `freehold install`/`bootstrap` — getting a control
-// plane up in an environment (Proxmox today; Vultr/Hetzner providers come
-// later) and a door to it. It builds box.Flags and drives the SHARED
-// provisioning engine (platform/provisioning/box) which boots the CP LXC and
-// deploy-cp's it. After bootstrap, WORLD bring-up is `freehold build` from any
-// box via the CP — install is done, the environment no longer matters.
-package cli
+// The install surface: `freehold install` — getting a control plane up in an
+// environment (Proxmox today; Vultr/Hetzner providers come later) and a door to
+// it. It builds box.Flags and drives the SHARED provisioning engine
+// (platform/provisioning/box) which boots the CP LXC and deploy-cp's it. After
+// install, WORLD bring-up is `freehold build` from any box via the CP — install
+// is done, the environment no longer matters.
+package install
 
 import (
 	"bufio"
@@ -123,33 +123,18 @@ func seedFromProfile(f *box.Flags, cfg *config.Config) {
 	}
 }
 
-// bootstrapCmd is the deprecated non-interactive alias of `install --yes`: one
-// install surface, kept working for existing scripts.
-var bootstrapCmd = &cobra.Command{
-	Use:    "bootstrap",
-	Hidden: true,
-	Short:  "deprecated alias for `install --yes`",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runInstallCmd(cmd, true)
-	},
-}
-
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Bring up a control plane (guided; --yes for non-interactive) — then `freehold build` brings up the world via the CP",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runInstallCmd(cmd, false)
+		return runInstallCmd(cmd)
 	},
 }
 
-// runInstallCmd is the unified install surface: the guided flow when the flags
-// are incomplete, else the headless pipeline. forceYes is the deprecated
-// `bootstrap` alias (implies --yes).
-func runInstallCmd(cmd *cobra.Command, forceYes bool) error {
+// runInstallCmd is the install surface: the guided flow when the flags are
+// incomplete, else the headless pipeline.
+func runInstallCmd(cmd *cobra.Command) error {
 	f := flagsFromCmd(cmd)
-	if forceYes {
-		f.Yes = true
-	}
 	name := f.Name
 	out := cmd.OutOrStdout()
 
@@ -411,6 +396,8 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.EraseFreehold, _ = cmd.Flags().GetBool("erase-freehold")
 	f.ConfirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
 	f.Yes, _ = cmd.Flags().GetBool("yes")
+	f.Version, _ = cmd.Flags().GetString("version")
+	f.Channel, _ = cmd.Flags().GetString("channel")
 	f.SizeGB, _ = cmd.Flags().GetUint64("size-gb")
 	f.PoolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
 	f.LitellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
@@ -434,12 +421,11 @@ func defaultBins() (box.Bins, error) {
 
 func init() {
 	addInstallFlags(installCmd)
-	addInstallFlags(bootstrapCmd)
 }
 
-// addInstallFlags registers the ONE install surface (install + its hidden
-// bootstrap alias): --name/--host are the non-negotiables, the relay/CP domains
-// + proxy IP are the fresh-plane inputs a re-adopt resolves from the plane.
+// addInstallFlags registers the install surface: --name/--host are the
+// non-negotiables, the relay/CP domains + proxy IP are the fresh-plane inputs a
+// re-adopt resolves from the plane.
 func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("name", "", "World/profile name (REQUIRED — isolates config + state under profiles/<name>)")
 	cmd.Flags().String("host", "", "Host address freehold reaches (REQUIRED, e.g. root@192.168.30.224)")
@@ -463,6 +449,8 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key (or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
+	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|rc|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
+	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().Bool("yes", false, "Non-interactive: run headless (fail actionably) instead of prompting")
 }
 

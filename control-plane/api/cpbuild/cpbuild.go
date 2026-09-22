@@ -244,6 +244,32 @@ func (s *Spec) worldDNS() error {
 			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
+	if err := s.pointGuestsAtResolver(); err != nil {
+		return err
+	}
+	for _, q := range []struct{ name, want string }{
+		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
+	} {
+		if q.want == "" {
+			continue
+		}
+		if err := s.run(proxmox.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
+			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
+		}
+	}
+	return nil
+}
+
+// pointGuestsAtResolver pct-sets each guest's nameserver to the CP resolver and
+// rewrites its resolv.conf now (pct only regenerates it at the next boot). It is
+// called by worldDNS, which the build runs EARLY — before the terraform services
+// phase — because the litellm/caddy image pulls need working DNS, and a freshly
+// booted guest otherwise sits on DHCP/public resolvers that intermittently fail
+// containerd's lookups (EAI_AGAIN). The resolver must already be installed by the
+// time this points guests at it (worldDNS registers the records first, which
+// installs and reloads dnsmasq).
+func (s *Spec) pointGuestsAtResolver() error {
+	searchBase := s.guestSearchBase()
 	router := s.guestNameserver()
 	for _, role := range []struct {
 		name string
@@ -260,20 +286,10 @@ func (s *Spec) worldDNS() error {
 		}
 		pctSet, resolvConf := proxmox.DnsPointCmd(role.vmid, s.CpIP, r, searchBase)
 		if err := s.run(pctSet, 60); err != nil {
-			return fmt.Errorf("world-build dns point %s: %w", role.name, err)
+			return fmt.Errorf("dns point %s: %w", role.name, err)
 		}
 		if err := s.run(resolvConf, 60); err != nil {
-			return fmt.Errorf("world-build dns point %s resolv.conf: %w", role.name, err)
-		}
-	}
-	for _, q := range []struct{ name, want string }{
-		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
-	} {
-		if q.want == "" {
-			continue
-		}
-		if err := s.run(proxmox.DnsVerifyCmd(s.CpLxc, q.name, q.want), 30); err != nil {
-			return fmt.Errorf("world-build dns verify %s: %w", q.name, err)
+			return fmt.Errorf("dns point %s resolv.conf: %w", role.name, err)
 		}
 	}
 	return nil
@@ -510,6 +526,12 @@ func (s *Spec) refreshGuestIPs() {
 			}
 		}
 	}
+	// litellm is a k3s NodePort served on the proxy (k3s node) IP. A fresh
+	// world's console spec has no litellm_ip/base baked (litellm did not exist
+	// at deploy-cp time), so derive both — otherwise the litellm step (and the
+	// CPA pod's litellm-key Secret) is skipped, and the agent pods get an empty
+	// OPENAI_COMPAT_BASE_URL.
+	s.FillEdgeURLs()
 }
 
 // worldBootRelay boots the relay LXC (if missing) + deploys the Buzz stack
@@ -1133,6 +1155,20 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			return "", fmt.Errorf("world-build resolve guests: %w", err)
 		}
 		spec.refreshGuestIPs()
+		// 3.5a-pre. The CP resolver step runs BEFORE the services phase: it
+		// installs dnsmasq, registers the split-horizon records, points every
+		// guest at the CP, and verifies the resolver answers. The litellm/caddy
+		// image pulls need working DNS, and a freshly booted guest otherwise sits
+		// on DHCP/public resolvers that intermittently fail containerd's lookups.
+		// Pointing guests at a CP whose dnsmasq is not yet installed would leave
+		// them with no resolver at all, so the point and the install ship as one
+		// step.
+		if spec.CpLxc != 0 && spec.CpIP != "" {
+			if err := spec.worldDNS(); err != nil {
+				return "", fmt.Errorf("world-build dns: %w", err)
+			}
+			report = append(report, "dns register/point applied")
+		}
 		// 3.5a. Re-provision the CP's co-located runner from the CP's own
 		// durable litellm store if a re-deploy wiped its package — the services
 		// phase below requests these BY NAME. No-op when it already holds them.
@@ -1163,16 +1199,6 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build terraform services: %w", err)
 			}
 			report = append(report, "terraform services applied (postgres/litellm/caddy)")
-		}
-		// 4. The CP-owned resolver: register the split-horizon names (bare
-		// guests + the dotted public hosts via the proxy) and point every guest
-		// at the CP as its nameserver, then verify the resolver actually ANSWERS
-		// (dnsmasq served the records, not merely tcp/53 open). No secrets.
-		if spec.CpLxc != 0 && spec.CpIP != "" {
-			if err := spec.worldDNS(); err != nil {
-				return "", err
-			}
-			report = append(report, "dns register/point applied")
 		}
 		// 5. The litellm gateway — the CPA pod's litellm key seed (the kube
 		// workloads + model registration are owned by the terraform services
@@ -1391,41 +1417,27 @@ func cpDestroyDetached(vmid uint32) string {
 // BuildCreateAgentFn returns the create-agent deploy: mint a durable identity
 // on the CP, add it as a relay member, seat it in #freehold, apply its pod
 // through the co-located runner, and hand the minted pubkey to Tools.CreateAgent
-// BuildMigrator wires the CP's verify-gated migration runner (Step 7): a
-// durable ledger at <stateDir>/migrations.json (backed up with the CP plane),
-// running the versioned migration SCRIPTS (platform/migrations/files/<epoch>.sh
-// + <epoch>.verify.sh, OMARCY-style: one timestamped .sh per migration).
-// Each pending migration runs in ascending epoch order through bash on the CP
-// (where the data it operates on lives); done only when its verify gate passes.
-// The scripts receive the durable-plane paths + the freehold-agent-tools binary
-// via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE) — never argv, so no
-// credential crosses the audit.
+// BuildMigrator wires the CP's migration runner: the Omarchy-style scripts that
+// install/update shipped into <stateDir>/migrations/scripts/<epoch>.sh, with
+// completion markers at <stateDir>/migrations/<epoch>.sh. Each pending script
+// runs in ascending epoch order with `bash -euo pipefail` on the CP (where the
+// data it operates on lives); success marks it done, failure stops the queue
+// unmarked. The scripts receive the durable-plane paths + the agent-tools binary
+// via env (FREEHOLD_AGENT_TOOLS / REGISTRY / CONSOLE_STATE / STATE_DIR) — never
+// argv, so no credential crosses the audit. A fresh install runs MarkAll
+// instead, so this only ever applies scripts on update.
 func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 	return func() ([]migrations.Result, error) {
-		st, err := migrations.Open(filepath.Join(spec.StateDir, "migrations.json"))
-		if err != nil {
-			return nil, err
-		}
-		scripts, err := migrations.Scripts()
-		if err != nil {
-			return nil, fmt.Errorf("enumerate migration scripts: %w", err)
-		}
+		root := filepath.Join(spec.StateDir, "migrations")
 		binDir, _ := spec.cpGuestDirs()
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
 			"REGISTRY="+filepath.Join(spec.StateDir, "registry.json"),
 			"CONSOLE_STATE="+consoleStateDir,
+			"STATE_DIR="+spec.StateDir,
 		)
-		run := func(epoch, body string) error {
-			dir := filepath.Join(spec.StateDir, "migrations", "files")
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				return err
-			}
-			path := filepath.Join(dir, epoch+".sh")
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-				return err
-			}
-			cmd := exec.Command("bash", path)
+		run := func(name, path string) error {
+			cmd := exec.Command("bash", "-euo", "pipefail", path)
 			cmd.Env = runEnv
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -1433,11 +1445,7 @@ func BuildMigrator(spec *Spec, consoleStateDir string) agent.Migrator {
 			}
 			return nil
 		}
-		all := make([]migrations.Migration, 0, len(scripts))
-		for _, s := range scripts {
-			all = append(all, s.Migration(func(body string) error { return run(s.Epoch, body) }))
-		}
-		return st.Run(all)
+		return migrations.Run(root, run)
 	}
 }
 
@@ -1688,7 +1696,20 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			if authURL == "" {
 				authURL = spec.RelayURL
 			}
-			if err := relay.PutUserAuth(spec.RelayURL, authURL, spec.Sec, spec.Audience, pub); err != nil {
+			// The agent-tools roster channel is OWNED by the agent-tools server,
+			// so its put-user must be signed by THAT identity, not the console's
+			// (the relay rejects a non-owner with "not a channel member"). The
+			// identity lives on the same CP plane, so the console executor reads
+			// it and signs; inside the agent-tools process it is the same key.
+			sec, self := spec.Sec, spec.Audience
+			if id, err := identity.Load(spec.agentToolsRoot()); err == nil {
+				if s2, derr := hex.DecodeString(id.NostrSecretHex); derr == nil {
+					if pk, perr := id.NostrPubkeyHex(); perr == nil {
+						sec, self = s2, pk
+					}
+				}
+			}
+			if err := relay.PutUserAuth(spec.RelayURL, authURL, sec, self, pub); err != nil {
 				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
 			}
 		}

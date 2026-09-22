@@ -1,6 +1,9 @@
 package agenttools
 
 import (
+	"path/filepath"
+
+	"freehold/contract/version"
 	"freehold/control-plane/api/cpstate"
 )
 
@@ -29,10 +32,12 @@ func WorldStatus(reg *Registry, facts *FactsStore, consoleStateDir string) (map[
 	for _, d := range cs.DNS {
 		dns = append(dns, map[string]interface{}{"name": d.Name, "ip": d.IP})
 	}
+	pin, _ := version.Read(filepath.Join(consoleStateDir, version.FileName))
 	out := map[string]interface{}{
 		"agents":  agents,
 		"runners": runners,
 		"dns":     dns,
+		"version": pin,
 	}
 	if facts != nil {
 		out["facts"] = facts.Facts()
