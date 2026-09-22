@@ -50,7 +50,7 @@ struct ServeArgs {
     /// Dir holding the runner identity
     #[arg(long, env = "FREEHOLD_STATE_DIR", default_value = "./.freehold")]
     state_dir: PathBuf,
-    /// Loopback address to bind the MCP server (non-loopback binds are rejected)
+    /// Address to bind the MCP server (non-loopback requires --allow-remote)
     #[arg(long, env = "FREEHOLD_RUNNER_ADDR", default_value = "127.0.0.1:8787")]
     addr: String,
     /// The relay this runner belongs to (Chunk 2.6.1: the whitelist is read
@@ -63,6 +63,16 @@ struct ServeArgs {
     /// a whitelist accepted from any other author is a self-admission hole).
     #[arg(long, env = "FREEHOLD_RELAY_PUBKEY")]
     relay_pubkey: Option<String>,
+    /// The relay's CANONICAL URL for NIP-98 signing (public https://<domain>)
+    /// when --relay-url is a LAN dial (http://<domain>:3000). Omit to sign the
+    /// dial URL (a LAN-only relay with no public domain).
+    #[arg(long, env = "FREEHOLD_RELAY_AUTH_URL")]
+    relay_auth_url: Option<String>,
+    /// Allow a non-loopback bind. Every privileged call is signed (audience +
+    /// grant + 60s window), so a LAN bind is safe for runners agents reach over
+    /// the network; off by default so a runner is never exposed by accident.
+    #[arg(long, env = "FREEHOLD_RUNNER_ALLOW_REMOTE", default_value_t = false)]
+    allow_remote: bool,
 }
 
 /// Operator-facing warning printed after `keys init`: env vars override the
@@ -183,7 +193,9 @@ async fn main() -> anyhow::Result<()> {
                     state_dir: args.state_dir.clone(),
                     relay_url: args.relay_url.clone(),
                     relay_pubkey: args.relay_pubkey.clone(),
+                    relay_auth_url: args.relay_auth_url.clone(),
                 },
+                args.allow_remote,
             )
             .await?;
             tracing::info!(addr = %bound, "runner MCP server listening");

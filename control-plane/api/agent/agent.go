@@ -186,11 +186,39 @@ func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string) string {
 // the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
 // Service, and Secrets.
-func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey string) string {
+// RunnerCoords describes the one capability runner an agent pod may exec
+// through — the runner's dial URL + nostr pubkey (the MCP audience), plus the
+// single target + credential NAME the agent is scoped to. Empty URL = no
+// runner access (the pod's bridge advertises conversation + create only). A
+// department gets one from its owning capability runner; the CPA and custom
+// agents get none.
+type RunnerCoords struct {
+	URL    string
+	Pubkey string
+	Target string
+	Secret string
+}
+
+func firstRunner(runner []RunnerCoords) *RunnerCoords {
+	if len(runner) == 0 || runner[0].URL == "" {
+		return nil
+	}
+	return &runner[0]
+}
+
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
 	podCmd := agentBridgeBootstrap(agentToolsURL, agentToolsPubkey)
+	runnerEnv := ""
+	if r := firstRunner(runner); r != nil {
+		runnerEnv = fmt.Sprintf(`    - {name: FREEHOLD_RUNNER_URL, value: %q}
+    - {name: FREEHOLD_RUNNER_PUBKEY, value: %q}
+    - {name: FREEHOLD_RUNNER_TARGET, value: %q}
+    - {name: FREEHOLD_RUNNER_SECRET, value: %q}
+`, r.URL, r.Pubkey, r.Target, r.Secret)
+	}
 	return fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -234,7 +262,7 @@ spec:
     - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
     - {name: FREEHOLD_AGENT_TOOLS_URL, value: %q}
     - {name: FREEHOLD_AGENT_TOOLS_PUBKEY, value: %q}
-    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+%s    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
     - {name: OPENAI_COMPAT_BASE_URL, value: %q}
     - {name: OPENAI_COMPAT_MODEL, value: %q}
     - name: OPENAI_COMPAT_API_KEY
@@ -267,7 +295,7 @@ spec:
 `,
 		promptCm, SystemPromptFile, indentSystemPrompt(systemPrompt),
 		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
-		agentToolsURL, agentToolsPubkey,
+		agentToolsURL, agentToolsPubkey, runnerEnv,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
 		secret, secret, secret, SystemPromptPath, SystemPromptFile, promptCm, pod, pod)
@@ -296,7 +324,7 @@ func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
 // the pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here). agentToolsURL/pubkey wires the CP toolset bridge when
 // non-empty.
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey string) string {
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
@@ -317,7 +345,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey),
+		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, runner...),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 

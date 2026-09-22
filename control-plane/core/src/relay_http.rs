@@ -49,6 +49,23 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// The bare host of a URL (scheme + port stripped) — what buzz keys its
+/// community on. ureq otherwise sends `Host: <host>:<port>`; a LAN dial
+/// (`http://<domain>:3000`) must still present `Host: <domain>` or the relay
+/// answers "no community is configured for this host".
+fn bare_host(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -418,13 +435,34 @@ pub fn query_channel_roster(
     runner_nostr_pubkey: &str,
     auth_secret: &[u8; 32],
 ) -> Result<Vec<String>, String> {
+    query_channel_roster_auth(
+        relay_url,
+        relay_url,
+        relay_pubkey,
+        runner_nostr_pubkey,
+        auth_secret,
+    )
+}
+
+/// Query a runner's roster with a SEPARATE NIP-98 auth URL: `dial` is the LAN
+/// `http://<domain>:3000` origin the CP can reach, `auth` the canonical public
+/// `https://<domain>` the relay verifies signatures against (a LAN dial signed
+/// with its own URL is rejected "URL mismatch"). Same as [`query_channel_roster`]
+/// when the two are equal.
+pub fn query_channel_roster_auth(
+    dial_url: &str,
+    auth_url: &str,
+    relay_pubkey: &str,
+    runner_nostr_pubkey: &str,
+    auth_secret: &[u8; 32],
+) -> Result<Vec<String>, String> {
     let chan = runner_channel_id(runner_nostr_pubkey);
     let filters = serde_json::json!([{
         "kinds": [GROUP_MEMBERS_KIND],
         "#d": [chan],
         "limit": 100,
     }]);
-    let events = query_events(relay_url, auth_secret, filters)?;
+    let events = query_events_auth(dial_url, auth_url, auth_secret, filters)?;
     merge_roster(&events, relay_pubkey, &chan)
 }
 
@@ -496,10 +534,23 @@ pub fn query_events(
     auth_secret: &[u8; 32],
     filters: serde_json::Value,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let url = format!("{relay}/query", relay = relay_url.trim_end_matches('/'));
-    let headers = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
+    query_events_auth(relay_url, relay_url, auth_secret, filters)
+}
+
+/// [`query_events`] with a separate NIP-98 auth URL (dial LAN, sign public).
+pub fn query_events_auth(
+    dial_url: &str,
+    auth_url: &str,
+    auth_secret: &[u8; 32],
+    filters: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    let url = format!("{relay}/query", relay = dial_url.trim_end_matches('/'));
+    let canonical = format!("{relay}/query", relay = auth_url.trim_end_matches('/'));
+    let headers =
+        nip98_auth(auth_secret, "POST", &canonical, now_secs()).map_err(|e| e.to_string())?;
     let mut resp = agent()
         .post(&url)
+        .header("Host", bare_host(&url))
         .header("Authorization", &headers)
         .header("Content-Type", "application/json")
         .send(filters.to_string())
@@ -523,10 +574,23 @@ pub fn publish_event_json(
     auth_secret: &[u8; 32],
     event_json: &str,
 ) -> Result<(), String> {
-    let url = format!("{relay}/events", relay = relay_url.trim_end_matches('/'));
-    let auth = nip98_auth(auth_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
+    publish_event_json_auth(relay_url, relay_url, auth_secret, event_json)
+}
+
+/// [`publish_event_json`] with a separate NIP-98 auth URL (dial LAN, sign public).
+pub fn publish_event_json_auth(
+    dial_url: &str,
+    auth_url: &str,
+    auth_secret: &[u8; 32],
+    event_json: &str,
+) -> Result<(), String> {
+    let url = format!("{relay}/events", relay = dial_url.trim_end_matches('/'));
+    let canonical = format!("{relay}/events", relay = auth_url.trim_end_matches('/'));
+    let auth =
+        nip98_auth(auth_secret, "POST", &canonical, now_secs()).map_err(|e| e.to_string())?;
     let mut resp = agent()
         .post(&url)
+        .header("Host", bare_host(&url))
         .header("Authorization", &auth)
         .header("Content-Type", "application/json")
         .send(event_json.to_string())
@@ -614,6 +678,7 @@ pub fn read_memory(
         nip98_auth(agent_nostr_secret, "POST", &url, now_secs()).map_err(|e| e.to_string())?;
     let mut resp = agent()
         .post(&url)
+        .header("Host", bare_host(&url))
         .header("Authorization", &headers)
         .header("Content-Type", "application/json")
         .send(filters.to_string())

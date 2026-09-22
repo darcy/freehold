@@ -227,6 +227,25 @@ func cmdServe(args []string) error {
 		// producer (rebuild) doesn't know the console's run-time dir, so the
 		// serve always wins with its authoritative *stateDir.
 		builder.StateDir = *stateDir
+		// The world-config carries the PUBLIC relay origin (unreachable from
+		// inside the CP guest) and may predate the relay key; the console's own
+		// serve flags are the authoritative DIAL URL + trust anchor at runtime.
+		// Same dial-LAN / sign-public split agent-tools uses.
+		if *relayURL != "" {
+			builder.RelayURL = *relayURL
+		}
+		if *relayPubkey != "" {
+			builder.RelayPK = *relayPubkey
+		}
+		if *relayHost != "" {
+			builder.RelayHost = *relayHost
+			// Dial the relay DIRECTLY by its community hostname (the CP
+			// resolver maps it to the relay guest): the Host header then matches
+			// the community (an IP dial does not) while NIP-98 signs the public
+			// https canonical.
+			builder.RelayURL = "http://" + *relayHost + ":3000"
+			builder.RelayAuthURL = "https://" + *relayHost
+		}
 	} else if *runnerAddr != "" {
 		builder = &cpbuild.Spec{
 			StateDir:       *stateDir,
@@ -307,6 +326,7 @@ func cmdServe(args []string) error {
 func cmdRevoke(args []string) error {
 	fs := flag.NewFlagSet("revoke", flag.ExitOnError)
 	relayURL := fs.String("relay-url", "", "relay to cut the runner off on")
+	relayAuthURL := fs.String("relay-auth-url", "", "NIP-98 canonical URL (public https); defaults to --relay-url")
 	stateDir := fs.String("state-dir", "", "CP state dir")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
@@ -328,7 +348,7 @@ func cmdRevoke(args []string) error {
 		return err
 	}
 	if *relayURL != "" {
-		if err := provisioner.RevokeRunnerChannel(store, *relayURL, name, *stateDir); err != nil {
+		if err := provisioner.RevokeRunnerChannel(store, *relayURL, relayAuth(*relayAuthURL, *relayURL), name, *stateDir); err != nil {
 			return err
 		}
 		fmt.Printf("revoked %s on the relay (%s)\n", name, *relayURL)
@@ -486,6 +506,7 @@ func cmdProvision(args []string) error {
 	runnerDir := fs.String("runner-dir", "", "where the runner package lands")
 	risk := fs.String("risk", "", "runner risk class override")
 	relayURL := fs.String("relay-url", "", "relay to sync the runner channel to")
+	relayAuthURL := fs.String("relay-auth-url", "", "NIP-98 canonical URL (public https); defaults to --relay-url")
 	stateDir := fs.String("state-dir", "", "CP state dir")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
@@ -543,7 +564,7 @@ func cmdProvision(args []string) error {
 		fmt.Println("  (the private half is the sealed credential — it never leaves this box)")
 	}
 	if *relayURL != "" {
-		if err := provisioner.SyncRunnerChannel(store, *relayURL, name, *stateDir); err != nil {
+		if err := provisioner.SyncRunnerChannel(store, *relayURL, relayAuth(*relayAuthURL, *relayURL), name, *stateDir); err != nil {
 			return err
 		}
 		fmt.Printf("synced runner channel on the relay (%s)\n", *relayURL)
@@ -555,6 +576,7 @@ func cmdGrant(args []string) error {
 	fs := flag.NewFlagSet("grant", flag.ExitOnError)
 	pubkey := fs.String("pubkey", "", "agent pubkey; omitted = the state dir's own console/ops identity")
 	relayURL := fs.String("relay-url", "", "relay to publish the grant to")
+	relayAuthURL := fs.String("relay-auth-url", "", "NIP-98 canonical URL (public https); defaults to --relay-url")
 	stateDir := fs.String("state-dir", "", "CP state dir")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
@@ -586,7 +608,7 @@ func cmdGrant(args []string) error {
 		return err
 	}
 	if *relayURL != "" {
-		if err := provisioner.PutUserMembership(store, *relayURL, name, pk, *stateDir); err != nil {
+		if err := provisioner.PutUserMembership(store, *relayURL, relayAuth(*relayAuthURL, *relayURL), name, pk, *stateDir); err != nil {
 			return err
 		}
 	}
@@ -601,6 +623,7 @@ func cmdAdopt(args []string) error {
 	packageDir := fs.String("package-dir", "", "the runner's existing package dir")
 	mcpAddr := fs.String("mcp-addr", "", "the runner's MCP listen address")
 	relayURL := fs.String("relay-url", "", "relay to sync the runner channel to")
+	relayAuthURL := fs.String("relay-auth-url", "", "NIP-98 canonical URL (public https); defaults to --relay-url")
 	stateDir := fs.String("state-dir", "", "CP state dir")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
@@ -621,7 +644,7 @@ func cmdAdopt(args []string) error {
 		return err
 	}
 	if *relayURL != "" {
-		if err := provisioner.SyncRunnerChannel(store, *relayURL, name, *stateDir); err != nil {
+		if err := provisioner.SyncRunnerChannel(store, *relayURL, relayAuth(*relayAuthURL, *relayURL), name, *stateDir); err != nil {
 			return err
 		}
 	}
@@ -693,6 +716,15 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 		return nil, err
 	}
 	return pos, nil
+}
+
+// relayAuth returns the NIP-98 canonical URL: the explicit --relay-auth-url
+// when given, else the relay dial URL (a LAN-only relay with no public domain).
+func relayAuth(authURL, relayURL string) string {
+	if authURL != "" {
+		return authURL
+	}
+	return relayURL
 }
 
 func optStr(s string) *string {

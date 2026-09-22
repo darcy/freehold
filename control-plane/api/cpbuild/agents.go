@@ -177,11 +177,18 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 	for _, name := range agents.DepartmentNames() {
 		purpose, _ := agents.DepartmentPurpose(name)
 		channels := agents.DepartmentChannels(name)
-		if _, err := tools.CreateAgent(name, purpose, channels, true); err != nil {
+		pub, err := tools.CreateAgent(name, purpose, channels, true)
+		if err != nil {
 			return fmt.Errorf("create department %s: %w", name, err)
 		}
 		_ = reg.SetPurpose(name, purpose)
 		_ = reg.SetChannels(name, channels, true)
+		// Grant the department's identity onto its capability runner (a no-op
+		// for a department without one). This is the raw capability grant — it
+		// attaches to the department identity, never to a custom agent.
+		if err := s.grantDepartmentRunner(name, pub); err != nil {
+			return fmt.Errorf("grant department runner %s: %w", name, err)
+		}
 		departments[name] = true
 	}
 	rows, err := reg.Agents()

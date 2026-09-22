@@ -66,6 +66,11 @@ pub struct RelayState {
     /// When true, POST /events returns 500 — exercises the publish-failure
     /// degradation without disturbing grants reads.
     pub block_events: Mutex<bool>,
+    /// The canonical base URL set at bind time. NIP-98 `u` verification uses
+    /// THIS (like buzz derives it from its configured community domain), not
+    /// the request Host — a client may dial a LAN origin while signing the
+    /// canonical URL.
+    pub canonical_url: Mutex<String>,
 }
 
 impl Default for RelayState {
@@ -75,6 +80,7 @@ impl Default for RelayState {
             authed_callers: Mutex::new(Vec::new()),
             channels: Mutex::new(BTreeMap::new()),
             block_events: Mutex::new(false),
+            canonical_url: Mutex::new(String::new()),
         }
     }
 }
@@ -85,16 +91,27 @@ pub fn shared() -> SharedRelay {
     Arc::new(RelayState::default())
 }
 
-fn verify_from_headers(headers: &HeaderMap, uri: &str) -> Result<String, String> {
+fn verify_from_headers(
+    state: &SharedRelay,
+    headers: &HeaderMap,
+    uri: &str,
+) -> Result<String, String> {
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| "no authorization header".to_string())?;
-    let host = headers
-        .get(HOST)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| "no host header".to_string())?;
-    let url = format!("http://{host}{uri}");
+    // Prefer the bound canonical URL (buzz keys the community on its configured
+    // domain, not the request Host); fall back to the request Host when unset.
+    let base = state.canonical_url.lock().clone();
+    let url = if base.is_empty() {
+        let host = headers
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "no host header".to_string())?;
+        format!("http://{host}{uri}")
+    } else {
+        format!("{base}{uri}")
+    };
     // Both bridge surfaces are POST on the real relay (GET /query is 405).
     freehold_core::nip98::verify_nip98(auth, "POST", &url)
 }
@@ -217,6 +234,7 @@ async fn query(
 ) -> impl IntoResponse {
     // POST /query with a NIP-01 filter body — the real bridge shape.
     let caller = match verify_from_headers(
+        &state,
         &headers,
         uri.path_and_query().map(|p| p.as_str()).unwrap_or("/query"),
     ) {
@@ -319,6 +337,7 @@ async fn publish(
     body: Bytes,
 ) -> impl IntoResponse {
     let caller = match verify_from_headers(
+        &state,
         &headers,
         uri.path_and_query()
             .map(|p| p.as_str())
@@ -359,6 +378,7 @@ pub async fn spawn() -> (String, SharedRelay, tokio::task::JoinHandle<()>) {
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    *state.canonical_url.lock() = format!("http://{addr}");
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

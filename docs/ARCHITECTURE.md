@@ -481,9 +481,16 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **The four departments are installed as part of the core build** — each a
     pod on the same harness as the CPA, created through the same audited
     `create_agent`. Each joins the private `#freehold` plus its own **private**
-    `#freehold-<department>` channel, and the CPA is added to every channel. Tools are
-    provisioned lazily, mise-style — a department carries no capability tooling
-    until its capability is configured (none in this phase). Status language is
+    `#freehold-<department>` channel, and the CPA is added to every channel. Each
+    department also gets a **dedicated capability runner** (`stageDepartmentRunners`):
+    a `root@<host>` SSH runner owned by that identity, in its own private NIP-29
+    channel/audit stream, bound LAN-reachable with the relay roster. The pod
+    receives the runner's coords (`FREEHOLD_RUNNER_*`) and its bridge advertises a
+    scoped `exec`/`list` signing as the agent's own nsec — so the department's
+    capability grant attaches to the department identity, and the CPA/custom
+    agents (with no coords) never see exec. Data's runner is the first (PVE root,
+    for backup-placement verification); the other departments' tooling is
+    provisioned lazily as their capability is configured. Status language is
     uniform, runner → service → department: 🟢 all checked / 🟡 some checks
     missing / 🔴 none.
 

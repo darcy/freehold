@@ -48,7 +48,7 @@ func TestChannelSyncAndQueryMetaRoundtrip(t *testing.T) {
 	relayURL, _ := spawnRelay(t)
 
 	insertRunner(t, store, "relaybox", state.RunnerActive)
-	if err := provisioner.SyncRunnerChannel(store, relayURL, "relaybox", cpDir); err != nil {
+	if err := provisioner.SyncRunnerChannel(store, relayURL, relayURL, "relaybox", cpDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,7 +93,7 @@ func TestRosterReadRequiresMembership(t *testing.T) {
 	relayURL, _ := spawnRelay(t)
 
 	insertRunner(t, store, "relaybox", state.RunnerActive)
-	if err := provisioner.SyncRunnerChannel(store, relayURL, "relaybox", cpDir); err != nil {
+	if err := provisioner.SyncRunnerChannel(store, relayURL, relayURL, "relaybox", cpDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -117,7 +117,7 @@ func TestRevokeFlipsMetaAndCutsOffRunner(t *testing.T) {
 	relayURL, rs := spawnRelay(t)
 
 	insertRunner(t, store, "relaybox", state.RunnerActive)
-	if err := provisioner.SyncRunnerChannel(store, relayURL, "relaybox", cpDir); err != nil {
+	if err := provisioner.SyncRunnerChannel(store, relayURL, relayURL, "relaybox", cpDir); err != nil {
 		t.Fatal(err)
 	}
 	afterActive := profileMsgCount(rs)
@@ -125,7 +125,7 @@ func TestRevokeFlipsMetaAndCutsOffRunner(t *testing.T) {
 	if err := store.SetRunnerStatus("relaybox", state.RunnerRevoked); err != nil {
 		t.Fatal(err)
 	}
-	if err := provisioner.RevokeRunnerChannel(store, relayURL, "relaybox", cpDir); err != nil {
+	if err := provisioner.RevokeRunnerChannel(store, relayURL, relayURL, "relaybox", cpDir); err != nil {
 		t.Fatal(err)
 	}
 	if got := profileMsgCount(rs); got != afterActive+1 {
@@ -157,7 +157,7 @@ func TestRogueAuthorCannotMintOrClobberMetas(t *testing.T) {
 	relayURL, rs := spawnRelay(t)
 
 	insertRunner(t, store, "relaybox", state.RunnerActive)
-	if err := provisioner.SyncRunnerChannel(store, relayURL, "relaybox", cpDir); err != nil {
+	if err := provisioner.SyncRunnerChannel(store, relayURL, relayURL, "relaybox", cpDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -230,7 +230,7 @@ func TestRebuildFoldsSnapshotsIdempotently(t *testing.T) {
 		status state.RunnerStatus
 	}{{"alpha", state.RunnerActive}, {"beta", state.RunnerRevoked}} {
 		insertRunner(t, store, tc.name, tc.status)
-		if err := provisioner.SyncRunnerChannel(store, relayURL, tc.name, cpDir); err != nil {
+		if err := provisioner.SyncRunnerChannel(store, relayURL, relayURL, tc.name, cpDir); err != nil {
 			t.Fatal(err)
 		}
 		rec, _ := store.GetRunner(tc.name)
@@ -300,7 +300,7 @@ func TestRebuildCarriesRiskLabel(t *testing.T) {
 	relayURL, _ := spawnRelay(t)
 
 	insertRunner(t, store, "gamma", state.RunnerActive)
-	if err := provisioner.SyncRunnerChannel(store, relayURL, "gamma", cpDir); err != nil {
+	if err := provisioner.SyncRunnerChannel(store, relayURL, relayURL, "gamma", cpDir); err != nil {
 		t.Fatal(err)
 	}
 	rec, _ := store.GetRunner("gamma")

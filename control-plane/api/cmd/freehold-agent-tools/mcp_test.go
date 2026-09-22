@@ -181,7 +181,7 @@ func TestBridgeByDefault(t *testing.T) {
 // parser accepts the response (it rejects a reply lacking jsonrpc with a
 // -32700 parse error).
 func TestMergeToolsListPreservesEnvelope(t *testing.T) {
-	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`))
+	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, false))
 	var m map[string]interface{}
 	if err := json.Unmarshal(merged, &m); err != nil {
 		t.Fatalf("merged tools/list is not valid JSON: %v\n%s", err, merged)
@@ -206,6 +206,32 @@ func TestMergeToolsListPreservesEnvelope(t *testing.T) {
 	for _, want := range []string{"buzz_send", "create_agent", "manage_agent"} {
 		if !nameSet[want] {
 			t.Fatalf("merged tools/list missing %q:\n%s", want, merged)
+		}
+	}
+	if nameSet["exec"] || nameSet["list"] {
+		t.Fatalf("no-runner pod must not advertise exec/list:\n%s", merged)
+	}
+}
+
+// TestMergeToolsListRunnerGated pins the department boundary: exec/list appear
+// ONLY when the pod carries capability-runner coords, so a runnerless pod (the
+// CPA and every custom agent) can never call the runner.
+func TestMergeToolsListRunnerGated(t *testing.T) {
+	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, true))
+	var m map[string]interface{}
+	if err := json.Unmarshal(merged, &m); err != nil {
+		t.Fatalf("merged tools/list is not valid JSON: %v", err)
+	}
+	tools, _ := m["result"].(map[string]interface{})["tools"].([]interface{})
+	nameSet := map[string]bool{}
+	for _, tl := range tools {
+		if mm, ok := tl.(map[string]interface{}); ok {
+			nameSet[mm["name"].(string)] = true
+		}
+	}
+	for _, want := range []string{"create_agent", "manage_agent", "exec", "list"} {
+		if !nameSet[want] {
+			t.Fatalf("runner pod tools/list missing %q:\n%s", want, merged)
 		}
 	}
 }

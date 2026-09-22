@@ -85,11 +85,12 @@ async fn vultr_create_list_destroy_over_curl() {
     let ctx = RunnerContext {
         relay_url: None,
         relay_pubkey: None,
+        relay_auth_url: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
     };
-    let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let (addr, server) = mcp::serve("127.0.0.1:0", ctx, false).await.unwrap();
     let url = format!("http://{addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {
@@ -180,11 +181,12 @@ async fn b2_authorize_upload_list_roundtrip() {
     let ctx = RunnerContext {
         relay_url: None,
         relay_pubkey: None,
+        relay_auth_url: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
     };
-    let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let (addr, server) = mcp::serve("127.0.0.1:0", ctx, false).await.unwrap();
     let url = format!("http://{addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {
@@ -253,11 +255,12 @@ async fn api_targets_report_green_and_list() {
     let ctx = RunnerContext {
         relay_url: None,
         relay_pubkey: None,
+        relay_auth_url: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
     };
-    let (mcp_addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let (mcp_addr, server) = mcp::serve("127.0.0.1:0", ctx, false).await.unwrap();
     let url = format!("http://{mcp_addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {
@@ -320,11 +323,12 @@ async fn extra_or_missing_secrets_are_rejected() {
     let ctx = RunnerContext {
         relay_url: None,
         relay_pubkey: None,
+        relay_auth_url: None,
         identity: id,
         package: SecretPackage::load(dir.path()).unwrap(),
         state_dir: dir.path().to_path_buf(),
     };
-    let (addr, server) = mcp::serve("127.0.0.1:0", ctx).await.unwrap();
+    let (addr, server) = mcp::serve("127.0.0.1:0", ctx, false).await.unwrap();
     let url = format!("http://{addr}/mcp");
     let agent = agent();
     let call = |params: Value| -> Value {

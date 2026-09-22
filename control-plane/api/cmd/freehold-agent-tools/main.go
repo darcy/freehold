@@ -544,6 +544,10 @@ func cmdServe(args []string) {
 		log.Printf("serve: console-owner credential unreadable at %s — grant_agent will fail closed: %v", *consoleStateDir, cerr)
 	}
 	reg.RelayURL = *relayURL
+	reg.RelayAuthURL = *relayAuthURL
+	if reg.RelayAuthURL == "" {
+		reg.RelayAuthURL = *relayURL
+	}
 	reg.ConsoleSecret = consoleSecret
 	reg.ConsoleStateDir = *consoleStateDir
 

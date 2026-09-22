@@ -331,6 +331,12 @@ func membershipCommandAuth(dialURL, authURL string, consoleSecret []byte, kind u
 // PublishRunnerMeta publishes (or replaces) a runner profile as a kind-9
 // channel message marked t=fh-profile.
 func PublishRunnerMeta(relayURL string, consoleSecret []byte, profile *RunnerProfile) error {
+	return PublishRunnerMetaAuth(relayURL, relayURL, consoleSecret, profile)
+}
+
+// PublishRunnerMetaAuth is PublishRunnerMeta with a separate NIP-98 auth URL
+// (dial the LAN origin, sign the canonical public URL).
+func PublishRunnerMetaAuth(dialURL, authURL string, consoleSecret []byte, profile *RunnerProfile) error {
 	h := RunnerChannelID(profile.NostrPubkey)
 	content, _ := json.Marshal(profile)
 	tags := [][]string{
@@ -338,7 +344,7 @@ func PublishRunnerMeta(relayURL string, consoleSecret []byte, profile *RunnerPro
 		{"d", h},
 		{"t", profileMessageTag},
 	}
-	return publishEvent(relayURL, consoleSecret, wire.ChannelMessage, tags, string(content))
+	return publishEventAuth(dialURL, authURL, consoleSecret, wire.ChannelMessage, tags, string(content))
 }
 
 // QueryRunnerMetas fetches the CURRENT profile of every runner (kind-9

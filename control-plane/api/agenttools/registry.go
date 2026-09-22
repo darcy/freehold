@@ -28,7 +28,10 @@ type Registry struct {
 	// (its channel-owner key, loaded from the console state dir — 0600 durable,
 	// in-process only), and ConsoleStateDir resolves runner names → their
 	// nostr pubkeys. Empty RelayURL/ConsoleSecret = grants stay unwired.
-	RelayURL        string
+	RelayURL string
+	// RelayAuthURL is the NIP-98 canonical URL (public https) when RelayURL is
+	// a LAN dial (http://<domain>:3000). Empty = sign the dial URL.
+	RelayAuthURL    string
 	ConsoleSecret   []byte
 	ConsoleStateDir string
 }
@@ -145,7 +148,11 @@ func (r *Registry) Grant(runner, pubkey string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("grant_agent %s→%s: %w", pubkey, runner, err)
 	}
-	if err := relay.PutUser(r.RelayURL, r.ConsoleSecret, runnerPK, pubkey); err != nil {
+	authURL := r.RelayAuthURL
+	if authURL == "" {
+		authURL = r.RelayURL
+	}
+	if err := relay.PutUserAuth(r.RelayURL, authURL, r.ConsoleSecret, runnerPK, pubkey); err != nil {
 		return nil, fmt.Errorf("grant_agent %s→%s: publish roster change: %w", pubkey, runner, err)
 	}
 	return json.RawMessage(`{}`), nil

@@ -69,6 +69,11 @@ pub struct RunnerContext {
     /// REQUIRED when relay_url is set (fail-fast at serve; a roster
     /// accepted from any other author would be a self-admission hole).
     pub relay_pubkey: Option<String>,
+    /// The relay's CANONICAL URL for NIP-98 signing (public `https://<domain>`)
+    /// when `relay_url` is a LAN dial (`http://<domain>:3000`). None = sign the
+    /// dial URL (a pre-Caddy/LAN-only relay). A LAN dial signed as itself is
+    /// rejected by the relay with "URL mismatch".
+    pub relay_auth_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -85,12 +90,14 @@ pub fn router(ctx: RunnerContext) -> Router {
     ));
     let state_dir = ctx.state_dir.clone();
     let relay_url = ctx.relay_url.clone();
+    let relay_auth_url = ctx.relay_auth_url.clone();
     let state = RunnerState {
         ctx: Arc::new(ctx),
         exec: Arc::new(ExecManager::new(
             Some(auditor),
             Some(Arc::from(state_dir.as_path())),
             relay_url,
+            relay_auth_url,
         )),
         ssh: Arc::new(SshPool::new(&state_dir)),
     };
@@ -99,18 +106,22 @@ pub fn router(ctx: RunnerContext) -> Router {
         .with_state(Arc::new(state))
 }
 
-/// Bind the MCP server to `addr` (loopback only). Returns the bound address and
-/// a task handle; the task serves until aborted or the process exits.
+/// Bind the MCP server to `addr`. A non-loopback bind is refused unless
+/// `allow_remote` is set: every privileged call is already signed (audience +
+/// grant + window), so a LAN bind is the same trust boundary the relay-roster
+/// grants already assume — but it stays opt-in so a runner is never exposed by
+/// accident. Returns the bound address and a task handle.
 pub async fn serve(
     addr: &str,
     ctx: RunnerContext,
+    allow_remote: bool,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    if !bound.ip().is_loopback() {
+    if !bound.ip().is_loopback() && !allow_remote {
         return Err(anyhow::anyhow!(
-            "refusing non-loopback bind {bound}: the runner is unauthenticated \
-             until Phase D — bind 127.0.0.1"
+            "refusing non-loopback bind {bound}: pass --allow-remote to opt \
+             in (signed calls are the boundary) — or bind 127.0.0.1"
         ));
     }
     if ctx.relay_url.is_some() && ctx.relay_pubkey.is_none() {
@@ -226,6 +237,7 @@ async fn mcp_endpoint(
                     &grant_ctx.state_dir,
                     grant_ctx.relay_url.as_deref(),
                     grant_ctx.relay_pubkey.as_deref(),
+                    grant_ctx.relay_auth_url.as_deref(),
                     &grant_ctx.identity,
                 )
             })
@@ -719,6 +731,7 @@ fn current_grants(
     state_dir: &std::path::Path,
     relay_url: Option<&str>,
     relay_pubkey: Option<&str>,
+    relay_auth_url: Option<&str>,
     identity: &Identity,
 ) -> Vec<String> {
     // Chunk 2.6.1: with a relay configured, the whitelist is the runner's
@@ -734,8 +747,12 @@ fn current_grants(
             tracing::warn!("relay whitelist requested without --relay-pubkey — failing closed");
             return Vec::new();
         };
-        return match freehold_core::relay_http::query_channel_roster(
+        // The relay verifies NIP-98 against its CANONICAL public URL; a LAN
+        // dial (`http://<domain>:3000`) must be signed as `https://<domain>`.
+        let auth_url = relay_auth_url.unwrap_or(url);
+        return match freehold_core::relay_http::query_channel_roster_auth(
             url,
+            auth_url,
             relay_key,
             &identity.nostr_pubkey_hex(),
             &secret,
@@ -1002,8 +1019,9 @@ mod tests {
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
             relay_pubkey: Some(fake_relay::relay_pubkey()),
+            relay_auth_url: None,
         };
-        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let (addr, server) = serve("127.0.0.1:0", ctx, false).await.unwrap();
         let url = format!("http://{addr}/mcp");
 
         mcp_list(&url, &a, &runner_pk).expect("A is granted");
@@ -1044,8 +1062,9 @@ mod tests {
             // nothing listens on :1 — the grant query must fail closed
             relay_url: Some("http://127.0.0.1:1".into()),
             relay_pubkey: Some("a".repeat(64)),
+            relay_auth_url: None,
         };
-        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let (addr, server) = serve("127.0.0.1:0", ctx, false).await.unwrap();
         let url = format!("http://{addr}/mcp");
         let err = mcp_list(&url, &a, &runner_pk).unwrap_err();
         assert!(
@@ -1132,8 +1151,9 @@ mod tests {
             state_dir: dir.path().to_path_buf(),
             relay_url: None,
             relay_pubkey: None,
+            relay_auth_url: None,
         };
-        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let (addr, server) = serve("127.0.0.1:0", ctx, false).await.unwrap();
         let url = format!("http://{addr}/mcp");
 
         // Sign + exec: request ALL THREE names. litellm_flavor uses curl, so
@@ -1256,8 +1276,9 @@ mod d5_tests {
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
             relay_pubkey: Some(fake_relay::relay_pubkey()),
+            relay_auth_url: None,
         };
-        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let (addr, server) = serve("127.0.0.1:0", ctx, false).await.unwrap();
         let url = format!("http://{addr}/mcp");
 
         // Granted agent runs a LOCAL exec (no ssh fixture needed).
@@ -1361,8 +1382,9 @@ mod d5_tests {
             state_dir: dir.path().to_path_buf(),
             relay_url: Some(relay_url.clone()),
             relay_pubkey: Some(fake_relay::relay_pubkey()),
+            relay_auth_url: None,
         };
-        let (addr, server) = serve("127.0.0.1:0", ctx).await.unwrap();
+        let (addr, server) = serve("127.0.0.1:0", ctx, false).await.unwrap();
         let url = format!("http://{addr}/mcp");
 
         let body = json!({
