@@ -107,6 +107,26 @@ const CpaLiteLLMModel = "deepseek-v4-flash"
 // minted litellm key (referenced by secretKeyRef, never in the manifest).
 const AgentLiteLLMKeySecretKey = "key"
 
+// RunnerCoords describes the one capability runner an agent pod may exec
+// through — the runner's dial URL + nostr pubkey (the MCP audience), plus the
+// single target + credential NAME the agent is scoped to. Empty URL = no
+// runner access (the pod's bridge advertises conversation + create only). A
+// department gets one from its owning capability runner; the CPA and custom
+// agents get none.
+type RunnerCoords struct {
+	URL    string
+	Pubkey string
+	Target string
+	Secret string
+}
+
+func firstRunner(runner []RunnerCoords) *RunnerCoords {
+	if len(runner) == 0 || runner[0].URL == "" {
+		return nil
+	}
+	return &runner[0]
+}
+
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
 // agent is ONE pod (at-most-one-live-instance, I4); the harness is the
 // container's PID-1 process (entrypoint `exec`), presence is kind:20001, and
@@ -186,25 +206,6 @@ func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string) string {
 // the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
 // Service, and Secrets.
-// RunnerCoords describes the one capability runner an agent pod may exec
-// through — the runner's dial URL + nostr pubkey (the MCP audience), plus the
-// single target + credential NAME the agent is scoped to. Empty URL = no
-// runner access (the pod's bridge advertises conversation + create only). A
-// department gets one from its owning capability runner; the CPA and custom
-// agents get none.
-type RunnerCoords struct {
-	URL    string
-	Pubkey string
-	Target string
-	Secret string
-}
-
-func firstRunner(runner []RunnerCoords) *RunnerCoords {
-	if len(runner) == 0 || runner[0].URL == "" {
-		return nil
-	}
-	return &runner[0]
-}
 
 func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)

@@ -128,7 +128,20 @@ func (b *mcpBridge) postSignedTo(endpoint string, raw []byte, audience string) (
 // are PINNED from the pod env — the agent cannot redirect the runner at another
 // target or name other secrets, so the grant stays scoped to the one target.
 func (b *mcpBridge) forwardRunner(raw []byte) ([]byte, error) {
+	out, err := runnerCallRequest(raw, b.runnerTarget, b.runnerSecret)
+	if err != nil {
+		return nil, err
+	}
+	return b.postSignedTo(strings.TrimSuffix(b.runnerURL, "/")+"/mcp", out, b.runnerPub)
+}
+
+// runnerCallRequest rewrites an exec/list tools/call for the runner: the
+// target + credential NAME are injected from the pod env (the agent can never
+// redirect the call), and the caller's JSON-RPC id is preserved (the harness
+// matches replies by id). Pure + unit-tested.
+func runnerCallRequest(raw []byte, target, secret string) ([]byte, error) {
 	var req struct {
+		ID     json.RawMessage `json:"id"`
 		Params json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -145,17 +158,17 @@ func (b *mcpBridge) forwardRunner(raw []byte) ([]byte, error) {
 		call.Arguments = map[string]interface{}{}
 	}
 	if call.Name == "exec" {
-		call.Arguments["target"] = b.runnerTarget
-		call.Arguments["secrets"] = []string{b.runnerSecret}
+		call.Arguments["target"] = target
+		call.Arguments["secrets"] = []string{secret}
 	}
-	out, err := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+	id := req.ID
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	return json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "id": id, "method": "tools/call",
 		"params": map[string]interface{}{"name": call.Name, "arguments": call.Arguments},
 	})
-	if err != nil {
-		return nil, err
-	}
-	return b.postSignedTo(strings.TrimSuffix(b.runnerURL, "/")+"/mcp", out, b.runnerPub)
 }
 
 type mcpBridge struct {

@@ -173,6 +173,14 @@ func (s *Spec) grantDepartmentRunner(dept, pubkey string) error {
 	if !ok || pubkey == "" {
 		return nil
 	}
+	// The stage is the source of truth for whether the runner was stood up:
+	// when its guard short-circuits (no relay / co-located runner / CP IP) the
+	// coords are absent and there is nothing to grant. Skip rather than fail
+	// the whole build with a "runner not found" from a path we deliberately
+	// no-oped.
+	if rc, staged := s.DepartmentRunners[dept]; !staged || rc.Pubkey == "" {
+		return nil
+	}
 	cpState := s.consoleStateDir()
 	store, err := state.Open(cpState)
 	if err != nil {
@@ -255,11 +263,14 @@ func (s *Spec) addRelayCommunityMember(pubkey string) error {
 func (s *Spec) startDepartmentRunner(spec deptRunnerSpec, pkgDir string) error {
 	binDir, _ := s.cpGuestDirs()
 	bin := binDir + "/freehold-runner"
-	flags := fmt.Sprintf("--state-dir %s --addr 0.0.0.0:%d --relay-url %s --relay-pubkey %s --allow-remote",
-		pkgDir, spec.port, s.relayDialURL(), s.RelayPK)
-	if s.RelayAuthURL != "" {
-		flags += " --relay-auth-url " + s.relaySignURL()
-	}
+	// Always pass --relay-auth-url: the runner signs the CANONICAL URL while
+	// dialing the LAN origin. relaySignURL() falls back to the dial URL when no
+	// public origin is known (a no-op), but if it resolves to https://<host>
+	// while the dial is http://<host>:3000, omitting it would make the runner
+	// sign the LAN URL and the relay would reject it "URL mismatch". Always
+	// threading it keeps the dial/auth split intact.
+	flags := fmt.Sprintf("--state-dir %s --addr 0.0.0.0:%d --relay-url %s --relay-pubkey %s --relay-auth-url %s --allow-remote",
+		pkgDir, spec.port, s.relayDialURL(), s.RelayPK, s.relaySignURL())
 	unit := "freehold-runner-" + spec.dept
 	script := fmt.Sprintf(
 		"systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; systemd-run --unit=%s --collect %s serve %s",
