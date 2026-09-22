@@ -2,7 +2,7 @@
 
 Current *released* version: the top entry in `CHANGELOG.md` (equivalently the latest `v*`
 tag; never restated here). See `CHANGELOG.md` for how this plan arrived here; this document
-describes the current plan only.
+describes the current plan only. Deferred work is tracked in `docs/followups.md`.
 
 Product: open-source appliance — Proxmox VE + k8s, Buzz Relay control plane, and an  
 agent that installs/configures self-hosted OSS via a **skill framework**. One app, three  
@@ -62,43 +62,32 @@ runners, and memory are scoped to a single relay.
 The smallest thing that proves the core idea works: an agent can manage services on your  
 behalf via privileged runners, with a management relay as the scope.
 
-*   **Local control plane web UI** (localhost) — the admin/ops view (services-at-a-glance,  
-    readiness, master agent access). NOT the chat surface (that's Buzz).
+**Shipped:** the first four chunks — the engine room (control plane web UI, runners as MCP  
+tool servers, the secret provisioner, SSH/Vultr/Backblaze connectors, readiness, coarse  
+grants), the management relay scope (identity on real Nostr membership, relay-persisted  
+encrypted memory, delegation mode, the durable volume plane), the Rust→Go refactor, and  
+Chunk 4's real, reasoning CPA that lives in Buzz and creates agents itself. Chunks 1–4 were  
+live-verified against real infrastructure (a real PVE host, a real relay/CP pair under a  
+real domain).
+
+**Remaining — Chunk-by-chunk plan: see `docs/POC.md`.**
+
+*   **Chunk 5 — agent workspaces + git/GitHub:** a named peer provisions the agent's LXC  
+    workspace, the agent commits a durable change to Buzz's git and/or pushes to GitHub.
     
-*   **Runners as MCP tool servers** — privileged connectors, separate from Buzz, generic  
-    `exec` primitive (agent writes commands; runner owns connection + streams + audits).
+*   **Chunk 6 — agents deploy via Kubernetes:** the same loop targets a kube namespace; the  
+    skill schema, postcondition-gated readiness, budgets-as-escalation, Terraform-per-kind,  
+    and the department check-in hook land here.
     
-*   **Secret PROVISIONER embedded in the control plane** — encrypt-to-runner-key + ship +  
-    rotate + membership; NO master key; runner is a Nostr identity + separate encryption  
-    keypair; holds only ciphertext, decrypts locally, uses in memory, forgets.
+*   **Chunk 7 — remaining connectors + North Star:** Vultr and Backblaze exercised for real  
+    onboarding, then portable backup & hardware migration (see below).
+
+*   **Long-standing POC acceptance:** the CPA manages an SSH machine / Vultr / Backblaze via  
+    runner + installs skills (tailscale, pihole) with a readiness view; the management relay  
+    is the scope. The human-facing Buzz leg is live (Chunk 4); skills + kube deploys complete  
+    it in Chunks 5–6.
     
-*   **Connectors (POC): SSH to a local machine + Vultr + Backblaze (S3-compatible).**
-    
-*   **Readiness model** (green/yellow/red = health of runner↔service connection, reported by  
-    the runner's own self-check).
-    
-*   **Coarse grants** (agent ↔ runner; whitelist Nostr pubkeys). Dedicated runner per service  
-    = default.
-    
-*   **Management relay (Buzz required):** the install creates a new relay → becomes the  
-    control plane's scope (agents + secrets scoped to it). User's existing relay is onboarded  
-    as a service (relay runner), not a nested scope.
-    
-*   **Agent placement:** Chunks 1–3 run agents via Buzz's buzz-acp harness on
-    LXCs; Chunk 4 brings the CPA to that harness. Kubernetes is MVP-only —
-    nothing in the POC needs a cluster.
-    
-*   No Kubernetes in Chunks 1–2.
-    
-*   Environments: VPS dev/smoke + PVE host test + home dogfood.
-    
-*   POC acceptance: master agent manages SSH machine / Vultr / Backblaze via runner + installs  
-    skills (tailscale, pihole) with readiness view; management relay is the scope.
-    
-*   **Chunk-by-chunk plan (Chunk 4 onward): see `roadmap/POC.md`** — a real,
-    durable, agent-creating CPA (Chunk 4) → agent workspaces + git/GitHub
-    (Chunk 5) → kube deploys (Chunk 6) → remaining connectors exercised + the
-    North Star below (Chunk 7).
+*   **Environments:** VPS dev/smoke + PVE host test + home dogfood.
     
 
 ## MVP — public release (definition)
@@ -175,7 +164,7 @@ The public release builds on the POC and adds the Kubernetes substrate. Core pro
 
 ## North Star — portable backup & hardware migration
 
-**Target: as soon as Chunk 7** (see `roadmap/POC.md`) — the earliest point a real
+**Target: as soon as Chunk 7** (see `docs/POC.md`) — the earliest point a real
 workflow exists worth migrating.
 
 Run freehold locally, back it up reliably, and stand up a fresh freehold on **different

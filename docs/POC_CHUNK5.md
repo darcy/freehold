@@ -1,8 +1,9 @@
-# Chunk 5 — Detailed Build Plan (holding ground)
+# Chunk 5 — Detailed Build Plan
 
-Status: placeholder
+Status: current chunk. The deliverables below are the current-scope copy from
+`docs/POC.md`; this file is where the build plan and acceptance checkboxes live.
 
-## Chunk 5's own deliverables (unchanged, from `roadmap/POC.md`)
+## Chunk 5's own deliverables (from `docs/POC.md`)
 
 *   A named peer provisions the workspace LXC on request, routed through CPA
     (CPA resolves which peer, gates cost/irreversibility, delegates; the agent

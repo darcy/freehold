@@ -120,30 +120,24 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 | Capability | Decision | Native surface | Custom needed? |
 |---|---|---|---|
 | **Membership** | NATIVE | kind 13534 (relay-signed); `buzz-admin add-member`; relay enforces at auth + channel ingest | No |
-| **Grants** | CUSTOM | none for agent↔runner; (buzz-acp author gate is per-AGENT inbound, not runner grants) | **Yes — a freehold grant-list kind in the ADDRESSABLE range (30000–39999, e.g. 30180), `d`-tag = runner pubkey: one current list per runner; a new event with the same d-tag REPLACES it, so revocation never appends (fail-stale is the wrong direction). Runner re-reads live per call (REQ with the d-tag filter) → closes the running-runner gap** |
+| **Grants** | NATIVE (NIP-29) | a runner is a private channel (9007 create); a grant is adding the agent's pubkey as a channel member (9000 put-user / 9001 remove-user, owner-gated); the runner's live whitelist is its own relay-signed 39002 roster, read fresh per call (fail-closed); profile/status is a kind-9 message tagged `t=fh-profile` | No |
 | **Memory** | NATIVE + encrypted payloads | kind 30174 engram + event-log FTS | Payload encryption is ours (D3) |
 | **Audit** | NATIVE | kind 48001 audit entry + relay hash-chain; local spool stays (D5) | No |
 | **Delegation** | NATIVE | kinds 43001–43006 job request/result/error (or @mention+reply as simplest path) | No |
 | **Surface (F)** | NATIVE | stream channels (kind 9) + DMs (41001); scripted @freehold CPA via its own NIP-42 client | No |
 
-## 9.5 Ingest surface correction (found live, Phase D)
+## 9.5 Ingest surface (found live, Phase D)
 
 The §9 "custom kinds are sanctioned" claim is about the KIND REGISTRY (adding a kind breaks
 nothing) — NOT the ingest gate: `crates/buzz-relay/src/handlers/ingest.rs` `scopes()` has a
 HARDCODED match of accepted kinds, and any kind outside it is refused with `restricted:
-unknown event kind` (verified live: publishing our 30180 got exactly that). There is no
-config allowlist. DECISION (post-Phase-D review): freehold does NOT patch buzz. The
-custom grant kind (30180) stays a DORMANT, hermetic-tested capability, usable only if a
-relay implementation ever accepts it; the OPERATIONAL grant flow is the shipped-package
-one (web console + `control-plane grant`/`revoke-grant`, re-read by the runner per call).
+unknown event kind` (verified live). There is no config allowlist. DECISION: freehold does
+NOT patch buzz. That is why grants ride NATIVE NIP-29 channels/membership rather than a
+custom addressable kind; no freehold custom event kind is published.
 
-**SUPERSEDED (Chunk 2.6.1, roadmap §Chunk 2.6.1):** the custom grant/profile kinds are
-WITHDRAWN in favor of NATIVE NIP-29 channels — runner = private channel (9007 create),
-grants = membership (9000 put-user / 9001 remove-user, owner-gated), whitelist = the
-runner's own RELAY-SIGNED 39002 roster, profile/status = 39000 group metadata. No custom
-kind, no ingest-patch gate; the remaining live question is exactly which of these NIP-29
-kinds the stock `scopes()` accepts (a config-agnostic allowlist read — G-A/G-C in the
-roadmap), not whether any custom kind can pass at all.
+Which NIP-29 kinds stock `scopes()` accepts was read live: `9007/9000/9001` + kind 9 are
+accepted; `39000`/`39001` are refused. The runner profile therefore rides a kind-9 message
+tagged `t=fh-profile`, and rosters are the relay-minted 39002.
 
 ## 9.6 Engram (30174) ingest rules (found live, Phase D3)
 

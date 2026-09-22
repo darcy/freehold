@@ -1,8 +1,9 @@
 # Changelog
 
-All notable decisions, reversals, and supersessions live here — the rest of `roadmap/`
-(ROADMAP.md, POC.md, ARCHITECTURE.md, BUZZ_SURFACE.md, README.md) describes the **current**
-plan only and should never carry inline "SUPERSEDED / formerly / previously" narration.
+All notable decisions, reversals, and supersessions live here — the rest of `docs/`
+(ROADMAP.md, POC.md, BUZZ_SURFACE.md) plus the root docs (ARCHITECTURE.md, README.md)
+describe the **current** plan only and should never carry inline
+"SUPERSEDED / formerly / previously" narration.
 When something changes, update the docs to state the new reality plainly; this file records
 the change when the next release is cut. Most recent changes at the top.
 
@@ -15,7 +16,7 @@ Release.
 
 This project follows [Semantic Versioning](https://semver.org) loosely pre-MVP:
 
-*   **0.x.y** — pre-MVP (see `roadmap/POC.md`); the minor moves for a chunk's work, the
+*   **0.x.y** — pre-MVP (see `docs/POC.md`); the minor moves for a chunk's work, the
     patch for a phase.
 *   **1.0.0** — reserved for the MVP / public release definition in ROADMAP.md.
 

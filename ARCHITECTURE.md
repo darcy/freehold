@@ -3,9 +3,10 @@
 Product: an open-source "box + install script" (Omarchy-style) that lands a
 Proxmox VE / VPS + Kubernetes stack with Buzz Relay as the control plane and
 a skill framework that installs and configures self-hosted OSS. For the
-current chunk numbering (Chunk 3 = the Rust→Go refactor, done; Chunk 4 = a
-real, reasoning CPA in Buzz; Kubernetes arrives with Chunks 6–7), see
-`roadmap/ROADMAP.md` and `roadmap/POC.md`. Narrative: "reclaim the future we
+current chunk numbering (Chunks 1–4 done — the engine room, relay scope, the
+durable plane, the Rust→Go refactor, and a real reasoning CPA in Buzz; Chunk 5
+= agent workspaces + git/GitHub; Kubernetes arrives with Chunks 6–7), see
+`docs/ROADMAP.md` and `docs/POC.md`. Narrative: "reclaim the future we
 were promised" — the full rationale lives in `VISION.md`.
 
 ## System layout
@@ -46,7 +47,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     relay-persisted (kind 30174).
 
 *   **Agent placement:** every agent (CPA and created alike) runs on Buzz's
-    `buzz-acp` remote-agent harness as a k3s pod (see `roadmap/POC.md`).
+    `buzz-acp` remote-agent harness as a k3s pod (see `docs/POC.md`).
     Runners are separate — see the Runners section below.
 
 *   **Runner identity** = Nostr keypair (membership/signing) + a *separate*
@@ -82,12 +83,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     a PBS host. Where one doesn't exist, the durable half of the
     `/srv/data` convention must land on TrueNAS and/or Backblaze B2.
 
-*   **The durable half lands FIRST (Chunk 3; see `roadmap/POC.md`):**
+*   **The durable half lands FIRST (Chunk 3; see `docs/POC.md`):**
     `/srv/data` — everything that survives rebuild: `/srv/data/relay` (all
     relay deploy data: config, CA, keypairs), `/srv/data/cp`
     (`secrets.json` + `providers.json`), `/srv/data/k8s-volumes` (k8s
     storage, Chunks 6–7). **Nothing in the POC needs a cluster**
-    (`roadmap/ROADMAP.md`), and even in MVP most services aren't k8s
+    (`docs/ROADMAP.md`), and even in MVP most services aren't k8s
     workloads: the relay/CP are LXCs, with LiteLLM/Postgres as k8s
     Deployments only in v1.
 
@@ -229,8 +230,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     as the console's own identity and self-granted on the co-located runner)
     and exposes an operator-scoped **`/api/world-build`** — a thin box can
     bring the world up through the CP WITHOUT the relay roster agent-tools
-    needs, so relay+agent-tools can live in `build` (the bootstrap/build split;
-    `roadmap/CP_OWNED_BUILD.md`). Its **`/api/world-teardown`** mirror runs the
+    needs, so relay+agent-tools can live in `build` (the install/build split).
+    Its **`/api/world-teardown`** mirror runs the
     shared teardown engine through the co-located runner — relay/k3s removed and
     the CP-side agent-tools process stopped, while the CP + its runner survive
     (`teardown` is the inverse of `build`; `uninstall` removes the CP) — so a
@@ -705,7 +706,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 
 ## Build plan (chunked)
 
-**POC (pre-MVP, Kubernetes arrives with Chunks 6–7 — see `roadmap/POC.md`):**
+**POC (pre-MVP, Kubernetes arrives with Chunks 6–7 — see `docs/POC.md`):**
 
 1.  **Chunk 1 — Local control plane + runners + secrets + connectors:**
     local web UI (localhost) → one `exec` tool → per-service runners
@@ -737,8 +738,8 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     `drive/lvm_test.go:463`.
 
 4.  **Chunk 4 — A resilient CPA that creates agents and lives in Buzz:**
-    the CPA runs on the `buzz-acp`/`goose-class` harness as a k3s pod (see
-    `roadmap/POC_CHUNK4.md`), with the CP's `freehold-agent-tools` toolset
+    the CPA runs on the `buzz-acp`/`goose-class` harness as a k3s pod, with the
+    CP's `freehold-agent-tools` toolset
     and the durable-plane identity/memory guarantees; `freehold-teardown`
     destroys LXCs but keeps the **recorded coordinates**; `freehold install`
     drives the shared box engine for CP bootstrap.
@@ -794,7 +795,7 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     surface.
 
 *   **K8s arrives with Chunks 6–7 — the public release (MVP), not before.**
-    `roadmap/POC.md` anchors both halves of that claim.
+    `docs/POC.md` anchors both halves of that claim.
 
 *   **Generic exec runner** (an agent writes commands; a runner owns the
     connection and streams + audits them).
@@ -814,5 +815,5 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
 ## Verification
 
 - `ARCHITECTURE.md`, `VISION.md`, `README.md`, `AGENTS.md`, and everything
-  under `roadmap/` describe the current state; the decisions above are
+  under `docs/` describe the current state; the decisions above are
   current.
