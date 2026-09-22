@@ -17,6 +17,7 @@ const (
 	ChannelCreate  = 9007
 	PutUser        = 9000
 	RemoveUser     = 9001
+	EditMetadata   = 9002
 	GroupMeta      = 39000
 	GroupMembers   = 39002
 	MemoryKind     = 30174

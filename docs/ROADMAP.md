@@ -44,8 +44,8 @@ runners, and memory are scoped to a single relay.
     registration, AI hardware) is executed by that department's identity, and its raw grant  
     attaches there, never to a custom agent that would self-serve a second, ungoverned path.  
     Service lifecycle is not a department — whichever agent created a service owns it, ad hoc  
-    and unvetted. The four are installed as part of the core build — each in `#freehold` plus  
-    its own private `#<department>` channel, with the CPA a member of all; only the  
+    and unvetted. The four are installed as part of the core build — each in the private `#freehold` plus  
+    its own private `#freehold-<department>` channel, with the CPA a member of all; only the  
     identity/grant separation is locked (capability tooling arrives per department later).
     
 *   **Runner identity = Nostr membership + separate encryption keypair (env-injected).**  

@@ -40,6 +40,7 @@ import (
 	"freehold/agents"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/delegate"
 	"freehold/contract/identity"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
@@ -77,6 +78,8 @@ func main() {
 		cmdServe(os.Args[2:])
 	case "registry":
 		cmdRegistry(os.Args[2:])
+	case "channel":
+		cmdChannel(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -95,6 +98,10 @@ usage:
   freehold-agent-tools registry verify --registry PATH   migration 001: registry is a loadable store
   freehold-agent-tools registry import-console --registry PATH --console-state DIR
                                                           migration 002: fold console agents into the registry additively
+  freehold-agent-tools channel edit --state-dir DIR --relay-url URL --as NAME --channel '#x'
+                                    [--rename '#y'] [--visibility open|private]
+                                                          true up an EXISTING channel's name/visibility as its owner
+                                                          (migration surface; no-op when the identity/channel is absent)
 
 serve FLAGS:
   --state-dir       DIR          durable identity + created-agent identity dirs (/srv/data/cp on the CP)
@@ -275,6 +282,85 @@ func cmdRegistry(args []string) {
 		fmt.Println("registry import-console converged")
 	default:
 		log.Fatalf("registry: unknown verb %q (verify|import-console)", args[0])
+	}
+}
+
+// cmdChannel edits an EXISTING relay channel's metadata (kind 9002) as the
+// channel's OWNER identity, so a versioned migration can true up channels a
+// world already has (make #freehold private; rename #<dept> to #freehold-<dept>).
+// It is a no-op (exit 0) when the identity or the channel is absent, so it runs
+// safely on worlds that predate either.
+func cmdChannel(args []string) {
+	if len(args) < 1 {
+		log.Fatal("channel needs a verb: edit")
+	}
+	switch args[0] {
+	case "edit":
+		fs := flag.NewFlagSet("channel edit", flag.ExitOnError)
+		stateDir := fs.String("state-dir", "", "agent identity root (the agent-tools state dir)")
+		relayURL := fs.String("relay-url", "", "relay HTTP origin (dial URL)")
+		relayAuthURL := fs.String("relay-auth-url", "", "relay CANONICAL URL for NIP-98 signing; defaults to relay-url")
+		as := fs.String("as", "", "agent name whose identity signs (the channel owner)")
+		channel := fs.String("channel", "", "existing channel display name to edit (e.g. '#ai')")
+		rename := fs.String("rename", "", "new display name (name tag)")
+		visibility := fs.String("visibility", "", "new visibility: open|private")
+		fs.Parse(args[1:])
+		if *stateDir == "" || *relayURL == "" || *as == "" || *channel == "" {
+			log.Fatal("channel edit needs --state-dir --relay-url --as --channel")
+		}
+		if *rename == "" && *visibility == "" {
+			log.Fatal("channel edit needs --rename and/or --visibility")
+		}
+		if *visibility != "" && *visibility != "open" && *visibility != "private" {
+			log.Fatalf("channel edit: --visibility must be open or private, got %q", *visibility)
+		}
+		authURL := *relayAuthURL
+		if authURL == "" {
+			authURL = *relayURL
+		}
+
+		id, err := identity.Load(cpbuild.AgentIdentityPath(*stateDir, *as))
+		if err != nil {
+			fmt.Printf("channel %s: no identity for %q under %s — skipping\n", *channel, *as, *stateDir)
+			return
+		}
+		sec, err := hex.DecodeString(id.NostrSecretHex)
+		if err != nil {
+			log.Fatalf("channel edit: %s identity secret: %v", *as, err)
+		}
+		chID, _, ok, err := relay.FindChannelAuth(*relayURL, authURL, sec, *channel)
+		if err != nil {
+			log.Fatalf("channel edit: look up %s: %v", *channel, err)
+		}
+		if !ok {
+			fmt.Printf("channel %s: not found — skipping\n", *channel)
+			return
+		}
+		var tags [][]string
+		if *rename != "" {
+			// A channel already carrying the target name means this world is
+			// already trued up (or a rebuild created it first): do NOT rename
+			// into a duplicate — leave the old channel alone.
+			other, _, dup, derr := relay.FindChannelAuth(*relayURL, authURL, sec, *rename)
+			if derr == nil && dup && other != chID {
+				fmt.Printf("channel %s: %q already exists — skipping rename\n", *channel, *rename)
+			} else {
+				tags = append(tags, []string{"name", *rename})
+			}
+		}
+		if *visibility != "" {
+			tags = append(tags, []string{"visibility", *visibility})
+		}
+		if len(tags) == 0 {
+			fmt.Printf("channel %s: no change needed\n", *channel)
+			return
+		}
+		if err := delegate.EditChannelAuth(*relayURL, authURL, sec, chID, tags...); err != nil {
+			log.Fatalf("channel edit %s: %v", *channel, err)
+		}
+		fmt.Printf("channel %s updated\n", *channel)
+	default:
+		log.Fatalf("channel: unknown verb %q (edit)", args[0])
 	}
 }
 

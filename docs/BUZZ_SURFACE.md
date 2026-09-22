@@ -136,7 +136,10 @@ NOT patch buzz. That is why grants ride NATIVE NIP-29 channels/membership rather
 custom addressable kind; no freehold custom event kind is published.
 
 Which NIP-29 kinds stock `scopes()` accepts was read live: `9007/9000/9001` + kind 9 are
-accepted; `39000`/`39001` are refused. The runner profile therefore rides a kind-9 message
+accepted; `39000`/`39001` are refused. Kind `9002` (edit metadata: `name`/`visibility`, and
+`topic`/`purpose` for any member) is also accepted, owner/admin-gated — the surface the
+channel truing migration uses to flip `#freehold` private and rename `#<dept>` to
+`#freehold-<dept>`. The runner profile therefore rides a kind-9 message
 tagged `t=fh-profile`, and rosters are the relay-minted 39002.
 
 ## 9.6 Engram (30174) ingest rules (found live, Phase D3)
@@ -168,10 +171,11 @@ unfiltered and filters by author/id client-side. Result: CPA -> relay -> peer ->
 ## 10. Known gaps / verify-before-design
 
 - **Private-channel member management has no REST/event API yet** (Buzz's own listed gap) —
-  channel membership currently via `create_channel` (creator auto-member). Concrete F risk: a
-  runner or agent onboarded AFTER a private channel exists cannot be added to it — F must
-  create its channels deliberately at bootstrap/onboarding time, or accept public channels for
-  the POC. The §9 "Surface: No custom needed" row is scoped to this constraint.
+  channel membership currently via `create_channel` (creator auto-member) or an owner/admin
+  `9000` put-user. Concrete F risk: a runner or agent onboarded AFTER a private channel exists
+  must be added by an owner/admin (an agent cannot self-join) — F creates its channels
+  deliberately at bootstrap/onboarding time, or accepts public channels for the POC. The §9
+  "Surface: No custom needed" row is scoped to this constraint.
 - Engram (30174) schema and job-kind (43001/43004) payload contract: read `buzz-core` in D1
   before adopting — adoption assumes the schema fits; a custom kind stays the fallback.
 - Closed-relay mode (`RELAY_OWNER_PUBKEY`) may already give us "non-member cannot even

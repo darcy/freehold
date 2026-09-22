@@ -172,7 +172,8 @@ describes the current state and the rules for working in this repo, not the hist
   department: whichever agent created a service — a freehold-delegate or a custom agent — owns
   its install/config/operation, ad hoc and unvetted as before. The four departments are
   **installed as part of the core build** (each a pod on the same harness as the CPA): in
-  `#freehold` plus its own private `#<department>` channel, with the CPA a member of all. Only
+  the private `#freehold` plus its own private `#freehold-<department>` channel, with the CPA
+  a member of all. Only
   the identity/grant separation is locked; capability tooling/secrets arrive per department
   later (Chunk 5/6). A custom agent that self-serves a department-owned capability is a
   containment failure even if a grant would technically allow it — the department's prompt is
@@ -224,8 +225,8 @@ release notes.
   credential until restart.
 - **The four departments are installed, but have no capability tools yet.** `freehold build`
   creates each reserved department (`network`/`data`/`compute`/`ai`)
-  through the same audited `create_agent`: its embedded prompt, `#freehold` plus its own
-  private `#<department>` channel, and the CPA added to each channel — four pods, reconciled
+  through the same audited `create_agent`: its embedded prompt, the private `#freehold` plus its own
+  private `#freehold-<department>` channel, and the CPA added to each channel — four pods, reconciled
   across a rebuild like any registry agent. The capability tooling they broker (external
   proxy, backup, compute, model registration, AI hardware) and the runner grants/secrets that
   back it are **not** in this phase: no agent can reach a runner's exec yet (the pod's MCP
