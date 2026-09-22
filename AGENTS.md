@@ -4,7 +4,7 @@ Open-source appliance: one-command install, AI-agent-operated. Lands a Proxmox V
 Kubernetes stack with Buzz Relay as the control plane and a skill framework that installs and
 configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
-The current *released* version is the top entry in `CHANGELOG.md`; the newest `v*` tag may
+The current *released* version is the latest GitHub Release; the newest `v*` tag may
 still be a pre-release awaiting e2e validation and promotion (see "Releases") — this file
 deliberately never restates a version number, so it can't go stale. Chunks 1–4 are
 implemented and live-verified against real infrastructure (a real PVE host, a real relay/CP
@@ -12,9 +12,8 @@ pair under a real domain): the engine room and relay scope, the durable volume p
 Rust→Go refactor, and Chunk 4's real, reasoning CPA that lives in Buzz — it holds
 conversations, survives a full rebuild, and creates new agents itself when asked. Chunk 5
 (agent workspaces + git/GitHub) is next; see `docs/POC.md`. Open deferrals are tracked in
-`docs/followups.md`. For how we got here, see
-`CHANGELOG.md`; this file describes the current state and the rules for working in this
-repo, not the history.
+`docs/followups.md`. For how we got here, see the repository's GitHub Releases; this file
+describes the current state and the rules for working in this repo, not the history.
 
 ## Documentation hygiene (locked) — a primary job of this file
 
@@ -24,9 +23,9 @@ repo, not the history.
 "SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
 
 1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
-2.  Record the change for the next release: `CHANGELOG.md` is written **at release
-    time** from git history (see "Releases"), so no per-merge changelog entry or
-    version bump happens here.
+2.  Record the change for the next release: the release notes are written **at release
+    time** from git history (see "Releases"), so no per-merge entry or version bump happens
+    here.
 
 ## Pull requests (locked) — every unit of work ships through a PR
 
@@ -50,30 +49,29 @@ repo, not the history.
 
 - **Versions are tied to releases, never to merges.** There is no version bump per
   phase, per chunk, or per merge to `main`. Work lands with no version attached.
-- **Every release is three things together:** a `CHANGELOG.md` entry, an annotated
-  tag `vX.Y.Z` on `main`, and a GitHub Release. A tag or a Release without the
-  changelog entry is not a release; a changelog-only edit is not one either.
-- **The changelog entry is written at release time.** It compares the codebase at the
-  previous release to the current one and records the **net** difference — what is true now
+- **Every release is two things together:** an annotated tag `vX.Y.Z` on `main` and a
+  GitHub Release (notes + assets). A tag without its Release, or a Release without the tag
+  it names, is not a release.
+- **The release notes are written at release time.** They compare the codebase at the
+  previous release to the current one and record the **net** difference — what is true now
   that wasn't then — not a chronological log of every merge. Superseded or refactored-away
   work is omitted; the final state wins. The `release-prepare` skill owns this flow;
   `release-publish` promotes the result.
 - **A release is cut as a pre-release, then tested, then promoted.** `release-prepare`
-  produces the candidate: `CHANGELOG.md` entry + annotated tag + a GitHub **pre-release**
-  (marked `prerelease`, assets attached, short notes) whose body ends in a **test-status
-  table** (one row per provider × flow, seeded `⚪ Unverified`). `release-test-proxmox` runs
-  the live lifecycle on the pre-release's downloaded assets and fills the Proxmox rows
-  (`✅`/`❌`; `⚪` when it can't test). `release-publish` then promotes it to a full release
-  only when **every** row is `✅`, with the operator's go-ahead — same tag, same commit, same
-  assets.
+  produces the candidate: annotated tag + a GitHub **pre-release** (marked `prerelease`,
+  assets attached, short notes) whose body ends in a **test-status table** (one row per
+  provider × flow, seeded `⚪ Unverified`). `release-test-proxmox` runs the live lifecycle on
+  the pre-release's downloaded assets and fills the Proxmox rows (`✅`/`❌`; `⚪` when it can't
+  test). `release-publish` then promotes it to a full release only when **every** row is `✅`,
+  with the operator's go-ahead — same tag, same commit, same assets.
 - **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
   every release is the tip of `main`, so the tag goes there — there is **no release
-  branch**. The skill generates the entry and gets the operator's approval on the draft
-  **before committing**, commits it on a normal PR branch (e.g. `docs/changelog-vX.Y.Z`) →
-  PR → waits for `check` + `bot-review` to settle → **the operator merges** (the skill never
-  merges) → the skill tags the merged `main` commit and publishes it as a pre-release with
-  short, high-level notes distilled from the entry. An rc (`vX.Y.Z-rc.N`) is tagged the same
-  way and is likewise a pre-release; iterating re-tags the next rc on `main`.
+  branch**. The skill generates the notes from git history since the previous release and
+  gets the operator's approval on the draft **before tagging**, then tags the `main` commit
+  and publishes it as a pre-release with those short, high-level notes. There is no release
+  PR and no changelog file — the tag and its Release are the release. An rc (`vX.Y.Z-rc.N`)
+  is tagged the same way and is likewise a pre-release; iterating re-tags the next rc on
+  `main`.
 - **Release branches (future, when development continues past a release).** Then the model
   becomes trunk-first: `main` stays the trunk where all work lands, and a long-lived
   `release/vX.Y.Z` branch is cut for a release; fixes which should ship in it are
@@ -103,7 +101,8 @@ repo, not the history.
   with `teardown`/`uninstall`, or join it with `freehold login`). There is no `bootstrap`
   alias — `install --yes` is the non-interactive surface. A world with no recorded name
   keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
-- `CHANGELOG.md` — history of decisions, reversals, and releases.
+- **GitHub Releases** (not a repo file) — the released versions, their notes, and assets; the
+  version history lives there, not in the tree.
 - `docs/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `docs/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
 - `docs/POC_CHUNK5.md` — the plan that actually exists for the current chunk (agent
@@ -111,13 +110,11 @@ repo, not the history.
 - `docs/followups.md` — the grab bag of deferred work pulled from retired plans. Current
   limitations of shipped code live in "Known gaps" below, not here.
 - `.agents/skills/release-prepare/SKILL.md` — the `release-prepare` skill: cut a versioned
-  candidate by generating the `CHANGELOG.md` entry from git history since the previous
-  release, landing it via a normal PR branch (e.g. `docs/changelog-vX.Y.Z`), then tagging
-  the merged commit and publishing a GitHub **pre-release** with the built assets, short,
-  high-level notes (distilled from the entry, never the full changelog), and the
-  test-status table — see "Releases" above. The canonical, agent-agnostic location
-  (auto-loaded by opencode and any other agent that reads `~/.agents/skills/`-style
-  external skills).
+  candidate by generating the release notes from git history since the previous release,
+  getting the operator's approval, then tagging the `main` commit and publishing a GitHub
+  **pre-release** with the built assets, short, high-level notes, and the test-status
+  table — see "Releases" above. The canonical, agent-agnostic location (auto-loaded by
+  opencode and any other agent that reads `~/.agents/skills/`-style external skills).
 - `.agents/skills/release-test-proxmox/SKILL.md` — the `release-test-proxmox` skill:
   exercise a pre-release's downloaded assets through the full lifecycle (install →
   agent replies in the relay → teardown → all down → rebuild → agent replies → uninstall →
@@ -194,11 +191,11 @@ repo, not the history.
   skipped — `ensure` is idempotent and runs every converge, because a skipped ensure after a
   compute-only teardown/rebuild would boot against stale recorded mounts.
 
-## Known gaps (current, maintained here — not in CHANGELOG)
+## Known gaps (current, maintained here — not in release notes)
 
 These are open limitations in the shipped code today, not history. Update this list as gaps
 close or new ones surface; it's current-state, so it belongs here rather than in the
-changelog.
+release notes.
 
 - **The co-located runner starts with package grants, not the relay roster.**
   `deploy-cp` starts the CP's runner with only `--state-dir` (install and

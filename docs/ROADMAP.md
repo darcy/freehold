@@ -1,7 +1,7 @@
 # Roadmap — The AI-operated Appliance
 
-Current *released* version: the top entry in `CHANGELOG.md` (equivalently the latest `v*`
-tag; never restated here). See `CHANGELOG.md` for how this plan arrived here; this document
+Current *released* version: the latest GitHub Release (equivalently the latest `v*` tag;
+never restated here). See GitHub Releases for how this plan arrived here; this document
 describes the current plan only. Deferred work is tracked in `docs/followups.md`.
 
 Product: open-source appliance — Proxmox VE + k8s, Buzz Relay control plane, and an  
