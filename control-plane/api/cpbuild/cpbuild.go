@@ -1282,14 +1282,10 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				}
 				// The scripts edit registry.json OUT-OF-BAND (a separate
 				// freehold-agent-tools process), so the queue runs under the serve's
-				// own write lock and re-reads the file when it is done: neither half
-				// is sufficient alone. See Registry.WithRegistryLocked.
-				if err := spec.AgentRegistry.WithRegistryLocked(func() error {
-					report = spec.appendMigrations(report)
-					return nil
-				}); err != nil {
-					report = append(report, "WARN: migrations re-read: "+err.Error())
-				}
+				// own write lock and re-reads the file when it is done — neither
+				// half is sufficient alone. That guarantee lives in migrationRunner,
+				// not here, so the world_migrate tool gets it too.
+				report = spec.appendMigrations(report)
 			} else {
 				// Console executor: write the files, then reload the serve process.
 				// The serve is deliberately left RUNNING across this whole block: the
@@ -1480,6 +1476,16 @@ func (s *Spec) consoleStateRoot() string {
 
 // migrationRunner returns the queue closure: every pending script under root,
 // ascending, each with the durable-plane paths + relay coords in its env.
+//
+// The run takes the registry's write lock when the Spec carries one, and re-reads the
+// file in the same critical section. This is the ONLY place that guarantee is placed,
+// deliberately: the queue is reachable from two entry points — the tail of world_build
+// and the world_migrate tool (which `freehold update` drives) — and both funnel here,
+// so neither can forget it and neither can wrap it a second time (the mutex is not
+// reentrant). The scripts edit registry.json as a SEPARATE process with its own file
+// handle, so a roster write landing inside that window would save this process's stale
+// rows over what a script just wrote; a re-read alone then loads that clobbered state
+// and reports it converged. See Registry.WithRegistryLocked.
 func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migrations.Result, error) {
 	return func() ([]migrations.Result, error) {
 		binDir, _ := s.cpGuestDirs()
@@ -1496,15 +1502,29 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
 			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
-		return migrations.Run(root, func(_, path string) error {
-			return s.runMigrationScript(path, runEnv, migrationScriptTimeout, migrationWaitDelay)
+		run := func() ([]migrations.Result, error) {
+			return migrations.Run(root, func(_, path string) error {
+				return s.runMigrationScript(path, runEnv, migrationScriptTimeout, migrationWaitDelay)
+			})
+		}
+		if s.AgentRegistry == nil {
+			// No in-process registry to keep aligned (the console-executor build path,
+			// where the serve is a different process restarted after the queue).
+			return run()
+		}
+		var res []migrations.Result
+		err := s.AgentRegistry.WithRegistryLocked(func() error {
+			var rerr error
+			res, rerr = run()
+			return rerr
 		})
+		return res, err
 	}
 }
 
 // runMigrationScript runs one shipped script and returns its failure with output
-// attached. Both bounds exist because the world_build path invokes the queue WHILE
-// HOLDING the registry's write lock (Registry.WithRegistryLocked): an unbounded script
+// attached. Both bounds exist because the queue runs WHILE HOLDING the registry's write
+// lock (migrationRunner, via Registry.WithRegistryLocked): an unbounded script
 // would block every roster read and write in the serve for as long as it hung, and a
 // relay curl stuck on TCP setup is enough to produce one. A timeout is an ordinary
 // queue failure — the script stays unmarked and is retried on the next bring-up.

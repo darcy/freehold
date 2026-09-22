@@ -211,10 +211,11 @@ release notes.
   it. There is no downgrade verb; rolling back below the highest applied
   migration needs the snapshot escape hatch (out of scope); re-running `update`
   retries only *pending* work.
-- **The console executor's migration window still has a live writer.** On the
-  `world_build` path that runs *inside* the agent-tools serve, the queue runs under
-  `Registry.WithRegistryLocked`, so no roster write can interleave with the scripts'
-  out-of-band edit of `registry.json`. The console-executor branch cannot get the same
+- **The console executor's migration window still has a live writer.** Where the queue runs
+  *inside* the agent-tools serve — the tail of `world_build` and the `world_migrate` tool
+  that `freehold update` drives alike — it runs under `Registry.WithRegistryLocked`, so no
+  roster write can interleave with the scripts' out-of-band edit of `registry.json`. The
+  console-executor branch cannot get the same
   guarantee — the serve it writes through is a different process, and stopping it for
   the window is not available either, because the agent pods fetch their stdio bridge
   binary from that server's `/freehold-agent-tools-binary` at container start and a
