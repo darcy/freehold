@@ -2,7 +2,7 @@
 name: release-publish
 description: Use when promoting a validated freehold pre-release to a full release (e.g. "publish v0.8.0", "promote the pre-release", "make it a release"). Reads the release's test-status table and publishes only when every row is ✅ Passed; otherwise it stops and reports what is unverified or failed. Never moves the tag.
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   author: freehold
   license: MIT
 ---
@@ -10,8 +10,8 @@ metadata:
 # Release-publish — gate on the test-status table, then promote to a full release
 
 A version becomes final only after every test in the release's **test-status table** passes.
-The table lives at the bottom of the pre-release body: one row per provider × flow — starting
-with Proxmox Install/Uninstall and Rebuild/Teardown — each marked ⚪ Unverified, ✅ Passed, or
+The table lives at the bottom of the pre-release body: one row per provider × env × test —
+starting with the Proxmox Fresh/Rebuild/Live rows — each marked ⚪ Unverified, ✅ Passed, or
 ❌ Failed. `release-test-proxmox` (and future provider skills) fill it. This skill reads the
 table, refuses to publish while any row is not ✅, and otherwise flips `isPrerelease=false`.
 The tag, commit, and assets never change: promotion is metadata only.
@@ -33,7 +33,8 @@ when the operator asks to "publish", "promote", or "make it final". Cutting a ne
 
 2. **Parse the test-status table and check every row.** Read `## Test status` from the body;
    for each data row, require its Status cell to be `✅ Passed`. The set of rows grows over
-   time (more providers, more flows) — iterate whatever is there; do not hardcode two.
+   time (more providers, envs, tests) — iterate whatever is there; do not hardcode the row
+   set.
    ```bash
    body=$(gh release view "$tag" --json body -q .body)
    printf '%s\n' "$body" | sed -n '/^## Test status/,$p'   # inspect the rows

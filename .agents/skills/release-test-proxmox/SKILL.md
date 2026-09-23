@@ -1,34 +1,62 @@
 ---
 name: release-test-proxmox
-description: Use when validating a freehold pre-release on a real Proxmox host (e.g. "test the release", "run the Proxmox release tests"). Restores the pre-release's own downloaded assets, runs the full lifecycle (install → agent replies in the relay → teardown → all down → rebuild → agent replies → uninstall → all gone) on a real PVE host, and updates the release's test-status table rows for Proxmox.
+description: Use when validating a freehold pre-release on a real Proxmox host (e.g. "test the release", "run the Proxmox release tests"). Restores the pre-release's own downloaded assets and runs three envs on a real PVE host — Fresh (the full install→uninstall lifecycle on a disposable world), Rebuild (teardown→build on the persistent env, left running), and Live (`freehold update` against the always-running env) — then updates the release's test-status table rows for Proxmox.
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   author: freehold
   license: MIT
 ---
 
-# Release-test-proxmox — run the live lifecycle, fill the Proxmox table rows
+# Release-test-proxmox — run the live flows, fill the Proxmox table rows
 
-Exercises a pre-release's **exact downloaded assets** through the full world lifecycle on a
-real Proxmox host, then records the result in the release body's `## Test status` table. It
-never promotes the release — `release-publish` does that once every row is ✅.
+Exercises a pre-release's **exact downloaded assets** through three live flows on a real
+Proxmox host, then records the result in the release body's `## Test status` table — one
+row per provider × env × test. It never promotes the release — `release-publish` does that
+once every row is ✅.
+
+## The three tests
+
+| Test | Env (domains) | Flows | Left behind |
+| --- | --- | --- | --- |
+| **Fresh** | `relay`/`cp.fresh.freehold.technology` | install → CPA replies → teardown → all down → build → CPA replies → uninstall → all gone | nothing — fully destroyed |
+| **Rebuild** | `relay`/`cp.rebuild.freehold.technology` | teardown → all down → build → CPA replies | the world, **left running** |
+| **Live** | the always-running env | `freehold update --rc` → world still healthy | the world, updated + running |
+
+- **Fresh** proves a brand-new world works end to end from the release assets. Mint a NEW
+  operator identity for the install — never the operator Rebuild/Live use.
+- **Rebuild** proves `teardown` works on a world built by the **previous release** (the env
+  persists between releases, so each run tears down old-version state) and `build` brings it
+  back. Reuse the existing operator. **Never uninstall it** — the next release's test needs
+  it running.
+- **Live** proves `update` runs and does what is expected to a running env. Reuse the
+  existing operator.
 
 ## When to use
 
-After `release-prepare` published a pre-release, to validate it on Proxmox. Destructive: it
-creates and destroys a real world, so run it only against a disposable test profile/host, with
-the operator's go-ahead.
+After `release-prepare` published a pre-release, to validate it on Proxmox. Destructive on
+the Fresh env (creates and destroys a real world) and mutating on Rebuild/Live — run only
+against the disposable test host, with the operator's go-ahead.
 
 ## Preconditions
 
 - A pre-release exists (`isPrerelease: true`, not a draft) with all six assets.
-- A real Proxmox host is reachable and a test world name/domains/proxy IP are known
+- **Secrets live in `@.env.test`** (repo root, gitignored, never committed): the DNS API
+  token (`CLOUDFLARE_API_KEY`), the litellm provider key (`FIREWORKS_API_KEY`), and the
+  operator npub (`OPERATOR_NPUB` — the persistent envs' operator), plus the PVE host and
+  proxy IP. Source values from there; never paste them into logs, evidence, or the release
+  body.
+- **Operator identities:** the Fresh install uses a **new** operator (a new identity dir +
+  pubkey — the installer's "Generate one for me" path, or a freshly minted keypair dir
+  passed via `--operator-identity`); Rebuild and Live **reuse the existing operator**
+  (`OPERATOR_NPUB` / the env profile's recorded one) — those worlds already know that
+  pubkey.
+- A real Proxmox host is reachable and each env's domains/proxy IP are known
   (operator-supplied or recorded in a profile).
 - **Root access to the PVE host** (a door key already authorized, or a console/root
   password). A fresh profile mints a NEW door key, and `install --yes` bails until that
   key is in the host's `/root/.ssh/authorized_keys` — see step 2.
-- **DNS provider credentials** for the test zone (e.g. `CLOUDFLARE_DNS_API_TOKEN`). `build`
-  owns DNS (`--manage-dns`) and needs them stored for the profile; see the field notes.
+- **DNS provider credentials** for the test zone. `build` owns DNS (`--manage-dns`) and
+  needs them stored for the profile; see the field notes.
 - **Consent to share the thin pool** when the host already runs another world
   (`--confirm-shared-pool`), and **`--confirm-storage`** only when the host has no usable
   storage at all.
@@ -40,6 +68,22 @@ the operator's go-ahead.
 
 If the host or credentials aren't available, do **not** fake it: leave the Proxmox rows
 `⚪ Unverified` and report that you couldn't test.
+
+## The table this skill fills
+
+Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
+
+```markdown
+| Provider | Env | Test | Status |
+| --- | --- | --- | --- |
+| Proxmox | fresh.freehold.technology | Fresh - Install | ⚪ Unverified |
+| Proxmox | fresh.freehold.technology | Fresh - Teardown | ⚪ Unverified |
+| Proxmox | fresh.freehold.technology | Fresh - Build | ⚪ Unverified |
+| Proxmox | fresh.freehold.technology | Fresh - Uninstall | ⚪ Unverified |
+| Proxmox | rebuild.freehold.technology | Rebuild - Teardown | ⚪ Unverified |
+| Proxmox | rebuild.freehold.technology | Rebuild - Build | ⚪ Unverified |
+| Proxmox | live | Live - Update | ⚪ Unverified |
+```
 
 ## Workflow
 
@@ -57,7 +101,7 @@ If the host or credentials aren't available, do **not** fake it: leave the Proxm
    (cd "$dir/bin" && sha256sum -c checksums.txt)        # every asset verifies
    tar -xzf "$dir/bin/migrations.tar.gz" -C "$dir/bin"  # -> bin/migrations/ (ResolveMigrationsDir wants ./migrations)
    for b in freehold-console runner freehold-agent-tools; do
-     install -m 755 "$dir/bin/$b" "$dir/release/$b"      # ResolveBins wants ../release/
+     install -m 755 "$dir/bin/$b" "$dir/release/$b"     # ResolveBins wants ../release/
    done
    # every sibling ResolveBins requires must exist, or `install` fails before it starts:
    test -x "$dir/bin/freehold-console" && test -x "$dir/bin/runner" \
@@ -66,16 +110,18 @@ If the host or credentials aren't available, do **not** fake it: leave the Proxm
    fh="$dir/bin/freehold"                                # the release CLI under test
    ```
 
-2. **Install flow — fresh world from the release assets, then verify the CPA replies in the
-   relay.**
+2. **Fresh test — full lifecycle on a disposable world, with a NEW operator.**
+   Domains: `relay.fresh.freehold.technology` / `cp.fresh.freehold.technology`. Fresh
+   profile name, freshly minted operator identity (see Preconditions). Run `install`/`build`
+   in the background (`nohup … > log 2>&1 &`) and poll the log — they run for minutes.
    ```bash
-   name=<test-name>
+   name=<fresh-test-name>
    # a fresh profile mints a new door key; with --yes the install prints it and bails.
    # Authorize it on the host, then re-run the SAME command:
    "$fh" install --name "$name" --host root@<pve-host> \
-     --relay-domain <relay.example> --cp-domain <cp.example> \
-     --proxy-ip <ip/cidr> --operator-pubkey <64-hex> \
-     --operator-identity <dir> --litellm-provider-key <key> \
+     --relay-domain relay.fresh.freehold.technology --cp-domain cp.fresh.freehold.technology \
+     --proxy-ip <ip/cidr> --operator-pubkey <new-64-hex> \
+     --operator-identity <new-dir> --litellm-provider-key <key> \
      --confirm-shared-pool --yes
    #   (drop --confirm-shared-pool if the host's pool is empty; add --confirm-storage
    #    only when the host has no usable storage)
@@ -90,51 +136,118 @@ If the host or credentials aren't available, do **not** fake it: leave the Proxm
    sealed `dns-provider-{relay,cp}.json` under `<profile-state>/control-plane/`. See field
    notes.
 
-   Run `install`/`build` in the background (`nohup … > log 2>&1 &`) and poll the log —
-   they run for minutes.
+   Per-row verdicts:
+   - **Fresh - Install** ✅ iff install + build complete, the CP is healthy, and the CPA
+     replies in the relay (post in `#freehold` with the CPA's pubkey in a `p` tag — see
+     Field notes — wait for the reply, capture request + reply).
+   - **Fresh - Teardown**: `"$fh" teardown --yes`; ✅ iff every world guest is gone
+     (relay + k3s LXC destroyed) and the CP is still healthy.
+   - **Fresh - Build**: `"$fh" build`; ✅ iff the CPA replies again **and** the version
+     ping (step 4) shows the expected version.
+   - **Fresh - Uninstall**: `"$fh" uninstall --name "$name" --yes`; ✅ iff the CP, runner,
+     door, and every guest are removed (no `<name>-*` guests remain, the DOOR_SPEC key is
+     gone).
 
-   Verify the CPA replies in the relay: post a message in `#freehold` (Buzz, or the agent's
-   message tools), wait for the CPA's reply, and capture the request + reply. This is the
-   install half of the **Install/Uninstall** row.
-
-3. **Teardown flow — the world goes down, the CP survives.**
+3. **Rebuild test — teardown + build the persistent env; it stays running.**
+   The env (`relay/cp.rebuild.freehold.technology`) is left running by the previous
+   release's test run, so its world was built by an **old release** — this exercises
+   teardown of old-version state. Reuse the existing operator and the env's own profile;
+   drive everything through the release CLI. **Never uninstall this env.**
    ```bash
-   "$fh" teardown --yes
-   "$fh" status
+   "$fh" teardown --config <rebuild-profile-config> --yes
+   "$fh" build    --config <rebuild-profile-config> --yes
    ```
-   Verify every world guest is gone (relay + k3s LXC destroyed) and the CP is still healthy.
-   This is the teardown half of the **Rebuild/Teardown** row.
+   Per-row verdicts:
+   - **Rebuild - Teardown** ✅ iff every world guest is down (relay + k3s LXC destroyed)
+     and the CP is still healthy.
+   - **Rebuild - Build** ✅ iff the world comes back, the CPA replies in the relay, **and**
+     the version ping (step 4) shows the expected version.
+   Leave the world running when done — the next release's test tears it down.
 
-4. **Rebuild flow — the world comes back and the CPA replies again.**
+4. **Version ping — every row that ends with the world running gets one.**
+   After Fresh - Build, Rebuild - Build, and Live - Update, ping the running CP and verify
+   the version is the expected one:
    ```bash
-   "$fh" build
+   "$fh" update --check --config <profile-config>   # prints "CP version:" + pending migrations
    ```
-   Verify the CPA replies in the relay again (post + confirm reply). This is the rebuild half
-   of the **Rebuild/Teardown** row.
+   Expected = the release under test (unless the env is already on something newer). A
+   world that comes back on the wrong version — or with unexpected pending migrations —
+   fails its row even if the command exited 0.
 
-5. **Uninstall flow — nothing is left.**
+5. **Live test — update the always-running env.**
+   The live env is always running (left by the previous cycle); reuse its profile and the
+   existing operator. This verifies `update` runs and does what is expected to a running
+   world:
    ```bash
-   "$fh" uninstall --name <test-name> --yes             # add --remove-data to drop the plane too
+   "$fh" update --check --config <live-profile-config>   # record the before-state
+   "$fh" update --rc   --config <live-profile-config> --yes
+   "$fh" update --check --config <live-profile-config>   # version + migrations after
+   "$fh" status    --config <live-profile-config>
    ```
-   Verify the CP, runner, door, and every guest are removed (no `<test-name>-*` guests remain,
-   the DOOR_SPEC key is gone). This is the uninstall half of the **Install/Uninstall** row.
+   - **Live - Update** ✅ iff the update completed, `update --check` shows the expected
+     version with 0 unexpected pending migrations, `status` is healthy, and the CPA still
+     replies in the relay. Already-on-target is fine: the run must report up-to-date
+     cleanly — that still proves the flow.
 
-6. **Compute the two row statuses** — a row is ✅ only if **both** its halves passed:
-   - **Proxmox | Install/Uninstall** ✅ iff install → CPA replies **and** uninstall → all gone.
-   - **Proxmox | Rebuild/Teardown** ✅ iff teardown → all down **and** rebuild → CPA replies.
-   Mark a row ❌ Failed if it was attempted and failed; `⚪ Unverified` if it wasn't attempted
-   (no host/creds). Never mark ✅ without the evidence above.
-
-7. **Update the release table** — change only the Proxmox rows, leave every other row, the
-   title, assets, and the prerelease flag untouched:
+6. **Update the release table** — change only the Proxmox rows' Status cells, leave every
+   other row, the Env/Test columns, the title, assets, and the prerelease flag untouched:
    ```bash
    gh release view "$tag" --json body -q .body > /tmp/opencode/body.md
-   # edit the two Proxmox Status cells in /tmp/opencode/body.md (⚪/✅/❌), preserving the rest
+   # edit the Proxmox Status cells in /tmp/opencode/body.md (⚪/✅/❌), preserving the rest
    gh release edit "$tag" --notes-file /tmp/opencode/body.md
    gh release view "$tag" --json body -q .body | sed -n '/^## Test status/,$p'
    ```
 
 ## Field notes (learned on the v0.7.0 first run)
+
+### CPA-reply verification (the v0.7.2 run's traps)
+
+- **buzz-acp triggers on a `#p` tag, not message text.** A kind-9 channel message spawns an
+  agent session only when its tags carry the agent's pubkey as `p` (`[["h", channelID],
+  ["p", <agent-pubkey>]]`); "@freehold …" in the CONTENT alone is never seen. Post with the
+  mention tag, poll `kinds:9, "#h":<id>` for a reply whose author differs from yours.
+- **The CPA pod subscribes with a since-filter — ping only AFTER it subscribes.** A ping
+  sent before the pod's `subscribed to channel <#freehold>` log line is never delivered.
+  Pods take ~5–10 min after a build to come up and subscribe; check
+  `kubectl -n agents get pods` (guest 111-class) + the pod log, then ping. The CPA's pubkey
+  comes from `freehold status` (the `freehold` agent row).
+- **`dns-cred` always writes the BASE state dir** (even with `--config <profile>`; product
+  gap confirmed) — and it CLOBBERS the base creds for the base world's domains (restore
+  them by re-running `dns-cred` against the base config afterwards). For a profile-scoped
+  build, seal the cred to the PROFILE's agent-ops identity yourself (the
+  `cert.SaveCreds` shape: `{"provider", "sealed", "aad":"cert-dns-<slot>"}`, sealed with
+  the profile identity's X25519 pubkey) and place it at
+  `<profile-state>/control-plane/dns-provider-<slot>.json`.
+- **A thin pool at 100% puts guests into ext4 emergency-ro.** Writes fail (I/O error -5 →
+  `dpkg was interrupted`, `docker: not found`, read-only `/var/lib`). Fix on the host:
+  `lvextend -L +<n>G pve/<pool>` (the VG usually has free space), then reboot the affected
+  guest and run `dpkg --configure -a` inside it before re-running `build`. Consider
+  `thin_pool_autoextend_threshold` (<100) so the pool grows itself.
+- **Never let a shell timeout kill a build.** A killed build leaves half-provisioned guests
+  (interrupted dpkg). Run every long verb detached (`setsid nohup … & disown`, log + poll),
+  so the calling shell vanishing can't kill it.
+
+### Update-path notes (live test)
+
+- **`update --rc` only matches `vX.Y.Z-rc.N` tags** — a plain `vX.Y.Z` pre-release is
+  UNREACHABLE by the update verb (the rc channel's regex rejects it). For a live env to
+  track a candidate, the candidate needs an rc tag (`vX.Y.Z-rc.N`) on the same commit; CI
+  builds its assets and `update --rc` targets it. A stale newest-rc tag whose assets are
+  gone 404s the channel.
+- **A CP state missing `agent_tools` coords fails every update.** Envs bootstrapped before
+  the coords were recorded report `agent_tools_pubkey=""` in the world summary, and the
+  update's migration window needs them (`no freehold-agent-tools coords recorded`). Fix per
+  env: print the server's pubkey (`freehold-agent-tools identity --state-dir
+  /srv/data/cp/agent-tools` inside the CP LXC), put
+  `agent_tools_pubkey = '<64-hex>'` in the profile config's ROOT section (TOML: a key
+  appended after a `[section]` header belongs to that section and silently doesn't parse as
+  root), and re-run the update. Filing the adoption asymmetry (the URL is guarded against
+  empty overwrite, the pubkey is not a hazard — but the state staying empty forever on old
+  envs is the gap) is a named follow-up.
+- **The version ping is `freehold update --check`** — `CP version:` + pending migrations;
+  run it after every step that leaves the world running.
+
+### Earlier notes (v0.7.0)
 
 - **`gh release download` drops the execute bit** — `chmod +x` the binaries before the
   `test -x` check, or step 1 fails for the wrong reason.
@@ -170,7 +283,8 @@ If the host or credentials aren't available, do **not** fake it: leave the Proxm
   the world out-of-band (manual `pct destroy`, a killed install) and re-build, terraform
   still believes `k3s_bringup` etc. ran and SKIPS them — the rebuild then dies at
   `tf kubeconfig: cat /etc/rancher/k3s/k3s.yaml: No such file`. Clear that dir (or run the
-  product's own `teardown`) before a fresh build.
+  product's own `teardown`) before a fresh build. The rebuild env's teardown → build is the
+  product's own teardown, so its state stays coherent.
 - **Thin-box lifecycle asymmetries.** From a thin box with no local runner:
   `teardown` works (the CP drives its own runner); `uninstall` does **not** — it needs a
   local runner, and its transient fallback runs `pct destroy` on a still-running guest and
@@ -180,7 +294,7 @@ If the host or credentials aren't available, do **not** fake it: leave the Proxm
   relay/k3s vmids ("the next build re-creates them"), but `build` does not re-record them in
   the operator config, so a later `uninstall` reports "never created (no vmid recorded)" and
   leaves those LXCs running. Verify with `pct list | grep <name>` after uninstall — the
-  Install/Uninstall row fails if guests remain. (Product gap to file.)
+  Fresh - Uninstall row fails if guests remain. (Product gap to file.)
 - **A brand-new `v*` hub: re-cutting a failed pre-release.** If the candidate fails and
   `main` is fixed, the operator may say to move the pre-release tag to the new `main` tip and
   rebuild assets. That means (only on that explicit go-ahead): `gh release delete <tag>
@@ -194,12 +308,18 @@ If the host or credentials aren't available, do **not** fake it: leave the Proxm
 ## Hard rules
 
 - **Test the downloaded pre-release assets**, never a local `just build`.
-- **Destructive** — only a disposable test profile/host; get the operator's go-ahead first.
+- **Destructive on Fresh; persistent on Rebuild/Live.** Only the Fresh world is disposable —
+  never uninstall or destroy the rebuild or live envs. Get the operator's go-ahead first.
+- **A NEW operator for the Fresh install; the existing operator for Rebuild and Live.**
+- **Version-check every row that ends running** (Fresh - Build, Rebuild - Build, Live -
+  Update) — a row is ✅ only when the running world reports the expected version.
+- **`.env.test` never leaves the box and is never committed** — it is gitignored; never
+  echo its values into logs, evidence, or the release body.
 - **Never move/create/delete a tag, never change assets, title, or `isPrerelease`; only the
   status-table cells are yours to edit.** The one exception is an explicit operator go-ahead
   to re-cut a failed candidate onto the fixed `main` tip (see the field notes). Never promote
   — that's `release-publish`.
 - Keep the table format and icons exact (`⚪ Unverified` · `✅ Passed` · `❌ Failed`) so
   `release-publish` can parse it. Don't drop rows you didn't test.
-- Record the evidence (checksums, install/teardown/rebuild/uninstall output, agent request +
-  reply) when reporting to the operator.
+- Record the evidence (checksums, per-step output, agent request + reply, version pings)
+  when reporting to the operator.
