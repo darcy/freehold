@@ -531,6 +531,19 @@ async fn api_status(
              \"${{{url_env}}}/health/liveliness\" -H \
              \"Authorization: Bearer ${{{cred}}}\""
         ),
+        // kube API doors: reachability only (-k — the k3s CA is not trusted
+        // CP-side; the token is proven per-exec). /version needs no auth.
+        "kubernetes" => format!(
+            "curl -skS -o /dev/null -w '%{{http_code}}' \"${{{url_env}}}/version\""
+        ),
+        // token-verify endpoint: 200 = the credential itself is still valid.
+        "cloudflare" => format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' \
+             \"${{{url_env}}}/user/tokens/verify\" -H \
+             \"Authorization: Bearer ${{{cred}}}\""
+        ),
+        // a local door IS the runner's own host — alive iff this runner is.
+        "local" => return Ok("green".into()),
         k => return Ok(format!("red(unsupported api kind {k})")),
     };
     match state.exec.probe_env(&cmd, &envs).await {

@@ -30,10 +30,10 @@ import (
 
 // freeholdToolDefs are the create/grant/manage tool schemas merged into
 // buzz-dev-mcp's tools/list (they mirror internal/agenttools/server.go). When
-// the pod holds a capability runner (`hasRunner`), the runner's exec/list are
-// advertised too — the department's scoped path to its own runner. The CPA and
-// custom agents have no runner coords, so they never see exec.
-func freeholdToolDefs(hasRunner bool) []map[string]interface{} {
+// the pod holds capability runners (`hasRunner`), the runner's exec/list are
+// advertised too — the department's scoped path to its own runners. The CPA
+// and custom agents have no runner coords, so they never see exec.
+func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{} {
 	i := func(props map[string]interface{}, req []string) map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
@@ -50,15 +50,20 @@ func freeholdToolDefs(hasRunner bool) []map[string]interface{} {
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},
 	}
 	if hasRunner {
+		execDesc := "Run a shell command VERBATIM on a capability runner's target through the runner-owned connection (the credential is fixed per target by this pod's config). Pass no secrets. Returns {stdout, stderr, exit_code, timed_out}."
+		if len(targets) > 1 {
+			execDesc += " target: which capability to use — one of [" + strings.Join(targets, ", ") + "]."
+		}
 		defs = append(defs,
-			map[string]interface{}{"name": "exec", "description": "Run a shell command VERBATIM on your capability runner's target through the runner-owned connection (the target and credential are fixed by this pod's config). Pass no secrets. Returns {stdout, stderr, exit_code, timed_out}.",
+			map[string]interface{}{"name": "exec", "description": execDesc,
 				"inputSchema": i(map[string]interface{}{
 					"cmd":        map[string]interface{}{"type": "string"},
+					"target":     map[string]interface{}{"type": "string"},
 					"stream":     map[string]interface{}{"type": "boolean"},
 					"session_id": map[string]interface{}{"type": "string"},
 					"timeout_s":  map[string]interface{}{"type": "integer"},
 				}, []string{"cmd"})},
-			map[string]interface{}{"name": "list", "description": "List the targets this runner can reach.",
+			map[string]interface{}{"name": "list", "description": "List the capability targets this pod can reach.",
 				"inputSchema": i(map[string]interface{}{}, []string{})},
 		)
 	}
@@ -123,23 +128,92 @@ func (b *mcpBridge) postSignedTo(endpoint string, raw []byte, audience string) (
 	return body, nil
 }
 
-// forwardRunner proxies an exec/list tools/call to the pod's capability runner
-// (signed as this agent, audience = runner pubkey). exec target + credential
-// are PINNED from the pod env — the agent cannot redirect the runner at another
-// target or name other secrets, so the grant stays scoped to the one target.
+// runnerCoords is one capability runner's pod-facing coords (the pod may hold
+// several — one per capability its department's role grants it).
+type runnerCoords struct {
+	url, pub, target, secret string
+}
+
+// forwardRunner proxies an exec/list tools/call to the pod's capability
+// runners (signed as this agent, audience = the runner pubkey). exec's target
+// selects the runner — each runner is pinned to its OWN single target +
+// credential, so the agent can never redirect a call at an unlisted target.
+// The `list` tool is answered locally from this pod's config.
 func (b *mcpBridge) forwardRunner(raw []byte) ([]byte, error) {
-	out, err := runnerCallRequest(raw, b.runnerTarget, b.runnerSecret)
+	var req struct {
+		ID     json.RawMessage `json:"id"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	var call struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := json.Unmarshal(req.Params, &call); err != nil {
+		return nil, err
+	}
+	if call.Name == "list" {
+		out, _ := json.Marshal(map[string]interface{}{
+			"jsonrpc": "2.0", "id": json.RawMessage(orNull(req.ID)),
+			"result": map[string]interface{}{
+				"content": []map[string]interface{}{{"type": "text", "text": b.targetListText()}},
+				"isError": false,
+			},
+		})
+		return out, nil
+	}
+	rc, err := b.routeRunner(&call)
 	if err != nil {
 		return nil, err
 	}
-	return b.postSignedTo(strings.TrimSuffix(b.runnerURL, "/")+"/mcp", out, b.runnerPub)
+	out, err := runnerCallRequest(raw, rc)
+	if err != nil {
+		return nil, err
+	}
+	return b.postSignedTo(strings.TrimSuffix(rc.url, "/")+"/mcp", out, rc.pub)
 }
 
-// runnerCallRequest rewrites an exec/list tools/call for the runner: the
-// target + credential NAME are injected from the pod env (the agent can never
-// redirect the call), and the caller's JSON-RPC id is preserved (the harness
-// matches replies by id). Pure + unit-tested.
-func runnerCallRequest(raw []byte, target, secret string) ([]byte, error) {
+// routeRunner resolves which capability runner serves an exec call: an
+// explicit target must be one this pod holds; absent, a single-runner pod
+// pins to it and a multi-runner pod fails closed (naming the options).
+func (b *mcpBridge) routeRunner(call *struct {
+	Name      string                 `json:"name"`
+	Arguments map[string]interface{} `json:"arguments"`
+}) (*runnerCoords, error) {
+	requested, _ := call.Arguments["target"].(string)
+	if requested != "" {
+		rc, ok := b.byTarget[requested]
+		if !ok {
+			return nil, fmt.Errorf("unknown target %q — this pod can reach [%s]", requested, strings.Join(b.targetNames(), ", "))
+		}
+		return rc, nil
+	}
+	if len(b.runners) == 1 {
+		return &b.runners[0], nil
+	}
+	return nil, fmt.Errorf("target required — this pod can reach [%s]", strings.Join(b.targetNames(), ", "))
+}
+
+// targetListText renders the list tool's answer from this pod's config.
+func (b *mcpBridge) targetListText() string {
+	return strings.Join(b.targetNames(), ", ")
+}
+
+func (b *mcpBridge) targetNames() []string {
+	out := make([]string, 0, len(b.runners))
+	for _, r := range b.runners {
+		out = append(out, r.target)
+	}
+	return out
+}
+
+// runnerCallRequest rewrites an exec tools/call for the runner: the target +
+// credential NAME are injected from the pod env (the agent can never redirect
+// the call or name other secrets), and the caller's JSON-RPC id is preserved
+// (the harness matches replies by id). Pure + unit-tested.
+func runnerCallRequest(raw []byte, rc *runnerCoords) ([]byte, error) {
 	var req struct {
 		ID     json.RawMessage `json:"id"`
 		Params json.RawMessage `json:"params"`
@@ -157,10 +231,12 @@ func runnerCallRequest(raw []byte, target, secret string) ([]byte, error) {
 	if call.Arguments == nil {
 		call.Arguments = map[string]interface{}{}
 	}
-	if call.Name == "exec" {
-		call.Arguments["target"] = target
-		call.Arguments["secrets"] = []string{secret}
-	}
+	// Drop the routing hint — the runner's exec schema has no target field,
+	// and the runner would reject an unknown argument's extra name only via
+	// its own target handling (it IS an arg: exec(target, ...)); the pin
+	// REPLACES whatever the agent passed.
+	call.Arguments["target"] = rc.target
+	call.Arguments["secrets"] = []string{rc.secret}
 	id := req.ID
 	if len(id) == 0 {
 		id = json.RawMessage("null")
@@ -169,6 +245,14 @@ func runnerCallRequest(raw []byte, target, secret string) ([]byte, error) {
 		"jsonrpc": "2.0", "id": id, "method": "tools/call",
 		"params": map[string]interface{}{"name": call.Name, "arguments": call.Arguments},
 	})
+}
+
+// orNull returns the id or a JSON null.
+func orNull(id json.RawMessage) string {
+	if len(id) == 0 {
+		return "null"
+	}
+	return string(id)
 }
 
 type mcpBridge struct {
@@ -180,13 +264,11 @@ type mcpBridge struct {
 	callerPubkey  string
 	hc            *http.Client
 
-	// Optional capability runner (a department's dedicated runner): when set,
-	// exec/list are advertised and proxied to it, scoped to runnerTarget +
-	// runnerSecret. Empty = no runner access.
-	runnerURL    string
-	runnerPub    string
-	runnerTarget string
-	runnerSecret string
+	// Optional capability runners (a department's dedicated runners): when
+	// set, exec/list are advertised; exec routes by target to the pinned
+	// runner+credential. Empty = no runner access.
+	runners  []runnerCoords
+	byTarget map[string]*runnerCoords
 
 	dev            *exec.Cmd
 	devIn          io.WriteCloser
@@ -256,7 +338,7 @@ func (b *mcpBridge) forwardDev(raw []byte, out *bufio.Writer) ([]byte, error) {
 		if resp.ID != nil && bytes.Equal(resp.ID, req.ID) {
 			// The reply for our request: merge freehold tools into tools/list.
 			if req.Method == "tools/list" {
-				line = mergeToolsList(line, b.runnerURL != "")
+				line = mergeToolsList(line, len(b.runners) > 0, b.targetNames())
 			}
 			return append([]byte(nil), line...), nil
 		}
@@ -271,7 +353,7 @@ func (b *mcpBridge) forwardDev(raw []byte, out *bufio.Writer) ([]byte, error) {
 // preserving every other top-level field the server replied with (jsonrpc, id,
 // _meta …) — a struct-based re-marshal dropped `jsonrpc`, and rmcp rejects a
 // response that lacks it with a parse error, which is what deadlocked the CPA.
-func mergeToolsList(line string, hasRunner bool) string {
+func mergeToolsList(line string, hasRunner bool, targets []string) string {
 	var env map[string]interface{}
 	if err := json.Unmarshal([]byte(line), &env); err != nil {
 		return line
@@ -285,7 +367,7 @@ func mergeToolsList(line string, hasRunner bool) string {
 		b, _ := json.Marshal(raw)
 		_ = json.Unmarshal(b, &tools)
 	}
-	tools = append(tools, freeholdToolDefs(hasRunner)...)
+	tools = append(tools, freeholdToolDefs(hasRunner, targets)...)
 	result["tools"] = tools
 	out, _ := json.Marshal(env)
 	return string(out)
@@ -326,10 +408,10 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 				writeResp(w, resp)
 				continue
 			}
-			// A capability-runner tool (exec/list) is proxied to the pod's own
-			// runner, signed as this agent. Only present when runner coords are
+			// A capability-runner tool (exec/list) is proxied to the pod's
+			// runners, signed as this agent. Only present when runner coords are
 			// wired, so the CPA/custom agents never reach here.
-			if b.runnerURL != "" && isRunnerTool(call.Name) {
+			if len(b.runners) > 0 && isRunnerTool(call.Name) {
 				resp, err := b.forwardRunner(raw)
 				if err != nil {
 					logBridge("runner-forward", call.Name, err.Error())
@@ -401,24 +483,32 @@ func rpcErrorWrapper(raw []byte, err error) []byte {
 }
 
 // mcpConf is the bridge's resolved config: the agent-tools endpoint plus the
-// optional capability-runner coords. env vars take precedence; the pod
-// bootstrap's config file is the authoritative source (buzz-acp spawns the
-// bridge and reads that file, so env alone is not reliable).
+// optional capability-runner coords (aligned comma lists — one entry per
+// runner). env vars take precedence; the pod bootstrap's config file is the
+// authoritative source (buzz-acp spawns the bridge and reads that file, so
+// env alone is not reliable).
 type mcpConf struct {
-	URL, Pubkey                                         string
-	RunnerURL, RunnerPubkey, RunnerTarget, RunnerSecret string
+	URL, Pubkey string
+	Runners     []runnerCoords
 }
 
 // readMCPConfig resolves the bridge config: env vars first, else the config
 // file the pod bootstrap writes (space/newline-separated key=value). Runner
 // keys are read the same way, so a department pod gets exec/list even when the
-// harness does not forward the pod env.
+// harness does not forward the pod env. The old singular runner_* keys parse
+// as a one-entry list.
 func readMCPConfig() (mcpConf, error) {
 	c := mcpConf{
-		URL:       os.Getenv("FREEHOLD_AGENT_TOOLS_URL"),
-		Pubkey:    os.Getenv("FREEHOLD_AGENT_TOOLS_PUBKEY"),
-		RunnerURL: os.Getenv("FREEHOLD_RUNNER_URL"), RunnerPubkey: os.Getenv("FREEHOLD_RUNNER_PUBKEY"),
-		RunnerTarget: os.Getenv("FREEHOLD_RUNNER_TARGET"), RunnerSecret: os.Getenv("FREEHOLD_RUNNER_SECRET"),
+		URL:    os.Getenv("FREEHOLD_AGENT_TOOLS_URL"),
+		Pubkey: os.Getenv("FREEHOLD_AGENT_TOOLS_PUBKEY"),
+	}
+	if urls := firstNonBlank(os.Getenv("FREEHOLD_RUNNER_URLS"), os.Getenv("FREEHOLD_RUNNER_URL")); urls != "" {
+		c.Runners = parseRunnerLists(
+			urls,
+			firstNonBlank(os.Getenv("FREEHOLD_RUNNER_PUBKEYS"), os.Getenv("FREEHOLD_RUNNER_PUBKEY")),
+			firstNonBlank(os.Getenv("FREEHOLD_RUNNER_TARGETS"), os.Getenv("FREEHOLD_RUNNER_TARGET")),
+			firstNonBlank(os.Getenv("FREEHOLD_RUNNER_SECRETS"), os.Getenv("FREEHOLD_RUNNER_SECRET")),
+		)
 	}
 	set := func(k, v string) {
 		switch k {
@@ -430,22 +520,17 @@ func readMCPConfig() (mcpConf, error) {
 			if c.Pubkey == "" {
 				c.Pubkey = v
 			}
-		case "runner_url":
-			if c.RunnerURL == "" {
-				c.RunnerURL = v
-			}
-		case "runner_pubkey":
-			if c.RunnerPubkey == "" {
-				c.RunnerPubkey = v
-			}
-		case "runner_target":
-			if c.RunnerTarget == "" {
-				c.RunnerTarget = v
-			}
-		case "runner_secret":
-			if c.RunnerSecret == "" {
-				c.RunnerSecret = v
-			}
+		case "runner_urls", "runner_url":
+			// Seed (or reset) the runner list with the url column; the other
+			// columns fill as their conf keys arrive.
+			c.Runners = parseRunnerLists(v, "", "", "")
+			c.Runners = fillRunnersFrom(c.Runners, nil, nil, nil)
+		case "runner_pubkeys", "runner_pubkey":
+			c.Runners = fillRunnersFrom(c.Runners, strings.Split(v, ","), nil, nil)
+		case "runner_targets", "runner_target":
+			c.Runners = fillRunnersFrom(c.Runners, nil, strings.Split(v, ","), nil)
+		case "runner_secrets", "runner_secret":
+			c.Runners = fillRunnersFrom(c.Runners, nil, nil, strings.Split(v, ","))
 		}
 	}
 	paths := []string{os.Getenv("FREEHOLD_AGENT_TOOLS_CONF"), "/tmp/freehold-agent-tools.conf", "/usr/local/etc/freehold-agent-tools.conf"}
@@ -467,6 +552,90 @@ func readMCPConfig() (mcpConf, error) {
 		return mcpConf{}, fmt.Errorf("freehold-agent-tools mcp needs FREEHOLD_AGENT_TOOLS_URL + PUBKEY (env or a config file)")
 	}
 	return c, nil
+}
+
+// parseRunnerLists renders aligned comma lists into runner coords. An empty
+// secrets list defaults each entry's secret to its target name (the provision
+// convention ties the two together).
+func parseRunnerLists(urls, pubs, targets, secrets string) []runnerCoords {
+	u := splitCSV(urls)
+	p := splitCSV(pubs)
+	t := splitCSV(targets)
+	s := splitCSV(secrets)
+	out := make([]runnerCoords, 0, len(u))
+	for i := range u {
+		rc := runnerCoords{url: u[i]}
+		if i < len(p) {
+			rc.pub = p[i]
+		}
+		if i < len(t) {
+			rc.target = t[i]
+		}
+		rc.secret = firstNonBlank(listAt(s, i), rc.target)
+		if rc.url != "" && rc.pub != "" && rc.target != "" {
+			out = append(out, rc)
+		}
+	}
+	return out
+}
+
+// fillRunnersFrom backfills a coordinate column into a runner list (the conf
+// file's keys arrive one at a time). A parsed singular url (no other columns
+// yet) grows columns as they land.
+func fillRunnersFrom(existing []runnerCoords, pubs, targets, secrets []string) []runnerCoords {
+	n := len(existing)
+	if len(pubs) > n {
+		n = len(pubs)
+	}
+	if len(targets) > n {
+		n = len(targets)
+	}
+	if len(secrets) > n {
+		n = len(secrets)
+	}
+	out := make([]runnerCoords, n)
+	copy(out, existing)
+	for i := range out {
+		if i < len(pubs) && pubs[i] != "" {
+			out[i].pub = pubs[i]
+		}
+		if i < len(targets) && targets[i] != "" {
+			out[i].target = targets[i]
+		}
+		if i < len(secrets) && secrets[i] != "" {
+			out[i].secret = secrets[i]
+		} else if out[i].secret == "" {
+			out[i].secret = out[i].target
+		}
+	}
+	return out
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+func listAt(list []string, i int) string {
+	if i < len(list) {
+		return list[i]
+	}
+	return ""
+}
+
+func firstNonBlank(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func cmdMCP(args []string) {
@@ -502,8 +671,12 @@ func cmdMCP(args []string) {
 		logNsec("mcp: " + err.Error())
 		os.Exit(1)
 	}
-	// A department pod carries its capability runner's coords (config file or
+	// A department pod carries its capability runners' coords (config file or
 	// env); the CPA and custom pods carry none, so no exec is advertised.
+	byTarget := map[string]*runnerCoords{}
+	for i := range conf.Runners {
+		byTarget[conf.Runners[i].target] = &conf.Runners[i]
+	}
 	b := &mcpBridge{
 		devCmd:        devCmd,
 		agentToolsURL: strings.TrimSuffix(conf.URL, "/"),
@@ -511,17 +684,18 @@ func cmdMCP(args []string) {
 		secret:        secret,
 		callerPubkey:  caller,
 		hc:            &http.Client{Timeout: 60 * time.Second},
-		runnerURL:     conf.RunnerURL,
-		runnerPub:     conf.RunnerPubkey,
-		runnerTarget:  conf.RunnerTarget,
-		runnerSecret:  firstNonEmpty(conf.RunnerSecret, conf.RunnerTarget),
+		runners:       conf.Runners,
+		byTarget:      byTarget,
 	}
-	if b.runnerURL != "" {
-		logBridge("mcp: capability runner wired", b.runnerURL, b.runnerTarget)
-	}
-	if b.runnerURL != "" && (b.runnerPub == "" || b.runnerTarget == "") {
-		logNsec("mcp: runner URL set without a pubkey/target — exec disabled")
-		b.runnerURL = ""
+	if len(b.runners) > 0 {
+		logBridge("mcp: capability runners wired", strings.Join(b.targetNames(), ","))
+		for _, r := range b.runners {
+			if r.pub == "" || r.target == "" {
+				logNsec("mcp: runner URL set without a pubkey/target — exec disabled")
+				b.runners, b.byTarget = nil, map[string]*runnerCoords{}
+				break
+			}
+		}
 	}
 	if err := runBridge(os.Stdin, os.Stdout, b); err != nil {
 		logBridge("runbridge: " + err.Error())
@@ -560,8 +734,7 @@ func envOr(k, def string) string {
 	return def
 }
 
-// firstNonEmpty returns the first non-blank value (the runner secret defaults
-// to the target name — the provision convention ties the two together).
+// firstNonEmpty returns the first non-blank of its arguments.
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {

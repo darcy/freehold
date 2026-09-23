@@ -107,12 +107,13 @@ const CpaLiteLLMModel = "deepseek-v4-flash"
 // minted litellm key (referenced by secretKeyRef, never in the manifest).
 const AgentLiteLLMKeySecretKey = "key"
 
-// RunnerCoords describes the one capability runner an agent pod may exec
-// through — the runner's dial URL + nostr pubkey (the MCP audience), plus the
-// single target + credential NAME the agent is scoped to. Empty URL = no
-// runner access (the pod's bridge advertises conversation + create only). A
-// department gets one from its owning capability runner; the CPA and custom
-// agents get none.
+// RunnerCoords describes one capability runner an agent pod may exec through
+// — the runner's dial URL + nostr pubkey (the MCP audience), plus the single
+// target + credential NAME the runner is scoped to (the target-protocol-
+// identity runner name). A pod may hold SEVERAL (one per capability its role
+// grants it — the grant unit is the runner); empty list = no runner access
+// (the pod's bridge advertises conversation + create only). The CPA and
+// custom agents get none.
 type RunnerCoords struct {
 	URL    string
 	Pubkey string
@@ -120,12 +121,8 @@ type RunnerCoords struct {
 	Secret string
 }
 
-func firstRunner(runner []RunnerCoords) *RunnerCoords {
-	if len(runner) == 0 || runner[0].URL == "" {
-		return nil
-	}
-	return &runner[0]
-}
+// firstRunner is gone: a pod may hold several capability runners and the
+// bridge routes by target (agent.go: agentBridgeBootstrap).
 
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
 // agent is ONE pod (at-most-one-live-instance, I4); the harness is the
@@ -170,12 +167,26 @@ func agentBridgeBootstrap(agentToolsURL, agentToolsPubkey string, runner ...Runn
 	// bootstrap command embeds cleanly in the Pod manifest's JSON string. The
 	// capability-runner coords ride HERE (not only the pod env): buzz-acp spawns
 	// the bridge as its MCP server and reads this file, so env alone is not a
-	// reliable channel.
+	// reliable channel. Aligned comma lists — one entry per capability runner.
 	conf := "url=" + agentToolsURL + " pubkey=" + agentToolsPubkey
-	if r := firstRunner(runner); r != nil {
-		conf += " runner_url=" + r.URL + " runner_pubkey=" + r.Pubkey + " runner_target=" + r.Target + " runner_secret=" + r.Secret
+	if len(runner) > 0 {
+		urls, pubs, targets, secrets := runnerLists(runner)
+		conf += " runner_urls=" + urls + " runner_pubkeys=" + pubs +
+			" runner_targets=" + targets + " runner_secrets=" + secrets
 	}
 	return "if curl -fsSL --max-time 25 '" + agentToolsURL + "/freehold-agent-tools-binary' -o /tmp/freehold-agent-tools && chmod +x /tmp/freehold-agent-tools 2>/dev/null && printf '" + conf + "' > /tmp/freehold-agent-tools.conf; then export BUZZ_ACP_MCP_COMMAND=/tmp/freehold-agent-tools; fi; exec buzz-acp"
+}
+
+// runnerLists renders aligned comma lists of a pod's capability-runner coords.
+func runnerLists(runner []RunnerCoords) (urls, pubs, targets, secrets string) {
+	u := make([]string, len(runner))
+	p := make([]string, len(runner))
+	t := make([]string, len(runner))
+	s := make([]string, len(runner))
+	for i, r := range runner {
+		u[i], p[i], t[i], s[i] = r.URL, r.Pubkey, r.Target, r.Secret
+	}
+	return strings.Join(u, ","), strings.Join(p, ","), strings.Join(t, ","), strings.Join(s, ",")
 }
 
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
@@ -219,12 +230,13 @@ func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellm
 	promptCm := pod + "-prompt"
 	podCmd := agentBridgeBootstrap(agentToolsURL, agentToolsPubkey, runner...)
 	runnerEnv := ""
-	if r := firstRunner(runner); r != nil {
-		runnerEnv = fmt.Sprintf(`    - {name: FREEHOLD_RUNNER_URL, value: %q}
-    - {name: FREEHOLD_RUNNER_PUBKEY, value: %q}
-    - {name: FREEHOLD_RUNNER_TARGET, value: %q}
-    - {name: FREEHOLD_RUNNER_SECRET, value: %q}
-`, r.URL, r.Pubkey, r.Target, r.Secret)
+	if len(runner) > 0 {
+		urls, pubs, targets, secrets := runnerLists(runner)
+		runnerEnv = fmt.Sprintf(`    - {name: FREEHOLD_RUNNER_URLS, value: %q}
+    - {name: FREEHOLD_RUNNER_PUBKEYS, value: %q}
+    - {name: FREEHOLD_RUNNER_TARGETS, value: %q}
+    - {name: FREEHOLD_RUNNER_SECRETS, value: %q}
+`, urls, pubs, targets, secrets)
 	}
 	return fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap

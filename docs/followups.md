@@ -39,15 +39,17 @@ there; if it is work not yet done, it belongs here.
   compute-only teardown/rebuild re-seeds from the *embedded* bytes, so a prompt edit made
   only in the CP's `/srv/data/cp` copy doesn't survive a rebuild until re-deployed. Wire
   the pod to the CP's durable mount.
-- **More capability runners planned but unbuilt.** The department-runner surface
-  (`stageDepartmentRunners`) is built and Data's PVE runner is live; GitHub (read/repo
-  state/releases/actions), web search (self-hosted SearXNG), and the litellm admin runner
-  for scoped per-agent key minting are not. These back the remaining department tooling.
-- **Department capability tooling + raw grants (Data shipped).** Data holds a live raw
-  grant (root exec on the PVE host through its dedicated `data-pve` runner) and a scoped
-  `exec`/`list` tool; the other departments (external proxy, backup scheduling, compute,
-  model registration, AI hardware) still have no capability tools. See `AGENTS.md` known
-  gaps; the remaining build is per-department, landed with each capability.
+- **More capability runners land with their capabilities.** The
+  capability-runner surface (`stageDepartmentRunners`) is built and the
+  departments' current grants are live (`pve-ssh-root`, the kube doors,
+  `litellm-api-admin`, `cloudflare-api-<zone>`, `dnsmasq-local-root`);
+  GitHub (read/repo state/releases/actions) and web search (self-hosted
+  SearXNG) runners are not built yet — each lands as its own capability-named
+  runner with its own grant.
+- **Capability tooling beyond the runners.** Backup scheduling, monitoring
+  dashboards, and AI hardware bring-up still have no tooling — the raw
+  grants/exec paths exist; the per-capability tooling lands with each
+  capability.
 - **Secondary-relay onboarding.** A user's pre-existing/separate Buzz relay is locked to
   be onboarded as a service (via a relay runner), not a nested scope. Not built.
 

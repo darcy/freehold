@@ -28,11 +28,16 @@ Status: current chunk. The deliverables below are the current-scope copy from
 *   Proof point: an agent deploys a service to an LXC using what it
     committed.
 
-*   **Department capability runner (Data, built).** Data holds the first raw capability
-    grant: a dedicated `data-pve` runner (`root@<host>` SSH, own channel + audit,
-    LAN-bound, relay-roster grants) reached from Data's pod by a scoped `exec`/`list`
-    signing as Data's own key. Used to verify every LXC/kube volume lands on a
-    backed-up mount. The other departments follow the same shape.
+*   **Department capability runners (built).** The grant unit is the runner: one runner
+    per capability, named `<target>-<protocol>-<identity>` — `pve-ssh-root` (root@<host>
+    SSH, shared by Network/Compute/Data: one capability, one audit stream), SA-token kube
+    doors (`kube-api-root`, `kube-api-caddysa`, `kube-api-litellmsa`), `litellm-api-admin`
+    (the gateway's master + provider keys), `cloudflare-api-<zone>` per DNS zone, and
+    `dnsmasq-local-root` local on the CP guest. Each department's pod reaches its runners
+    by a scoped `exec`/`list` signing as the department's own key; the CPA and custom
+    agents hold no coords and never see exec. Data uses its grant to verify every
+    LXC/kube volume lands on a backed-up mount; the granting rules + guardrails are the
+    CPA's first skill (`agents/freehold/skills/granting.md`).
 
 ### Chunk 5 acceptance
 

@@ -143,7 +143,11 @@ describes the current state and the rules for working in this repo, not the hist
   agents reference secrets by name only.
 - **Grants are coarse**: agent ↔ runner (whitelist of Nostr pubkeys). Dedicated runner per
   service by default; sharing via grants allowed. Readiness = the runner's own self-check:
-  🟢 green / 🟡 yellow / 🔴 red.
+  🟢 green / 🟡 yellow / 🔴 red. The unit of grant is the runner: one runner per capability,
+  never widened to admit a second use — a new capability is a new runner. Runners are named
+  `<target>-<protocol>-<identity>` (`pve-ssh-root`, `kube-api-caddysa`) — never for the
+  consumer; identical capabilities share one runner's roster. The granting rules + guardrails
+  live in the CPA's first skill (`agents/freehold/skills/granting.md`).
 - **The runner lifecycle rides native Nostr kinds, not custom ones.** A runner is a private
   NIP-29 channel; grant/revoke is channel membership (9000/9001); the runner's live
   whitelist is the relay's own signed roster (39002), read fresh per call, fail-closed on
@@ -245,22 +249,28 @@ release notes.
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
   credential until restart.
-- **The agent↔runner exec surface is wired for departments; Data is the first.** `freehold
-  build` creates each reserved department (`network`/`data`/`compute`/`ai`) through the same
-  audited `create_agent` (its embedded prompt, the private `#freehold` plus its own
-  `#freehold-<department>` channel, CPA added to each) and stands up a **dedicated capability
-  runner per department** (`stageDepartmentRunners`): a `root@<host>` SSH runner for Data
-  (`data-pve`, port 8790) with its own key/package/channel/audit stream, bound LAN-reachable
-  and started with the relay roster (`--relay-url/--relay-pubkey/--relay-auth-url
-  --allow-remote`). The department's pod gets `FREEHOLD_RUNNER_*` env and its bridge
-  advertises a scoped `exec`/`list` (target + credential pinned from the env), signing as the
-  agent's own nsec; the runner re-reads its relay-signed 39002 roster per call. The grant is
-  operator/console-issued (`grant_agent` / the build reconcile) and lands live. The CPA and
-  custom agents carry no runner coords, so their bridge never advertises exec — the raw grant
-  attaches only to the department identity. Remaining capability tooling (Network's proxy,
-  backup scheduling, Compute, model registration, AI hardware) is still unbuilt; Data's is a
-  full root exec (read AND write — it may adjust mounts/backup flags), and the runner's audit
-  is local-spool only (kind-48001 relay publish is rejected by stock buzz as an unknown kind).
+- **The agent↔runner exec surface is wired for departments; the grant unit is the runner.**
+  `freehold build` creates each reserved department (`network`/`data`/`compute`/`ai`) through
+  the same audited `create_agent` (its embedded prompt, the private `#freehold` plus its own
+  `#freehold-<department>` channel, CPA added to each) and stands up the **capability runners**
+  (`stageDepartmentRunners`): one runner per capability, named `<target>-<protocol>-<identity>`
+  (`pve-ssh-root` shared by network+compute+data, `kube-api-root`/`kube-api-caddysa`/
+  `kube-api-litellmsa` SA-token kube doors, `litellm-api-admin` (master + provider keys),
+  `cloudflare-api-<zone>` per stored DNS zone, `dnsmasq-local-root` local on the CP guest) —
+  each with its own key/package/channel/audit stream, bound LAN-reachable and started with the
+  relay roster (`--relay-url/--relay-pubkey/--relay-auth-url --allow-remote`). The kube-door SA
+  tokens re-read from the k3s guest + re-seal EVERY build (a k3s rebuild rotates the CA); the
+  consumer-named `data-pve` is retired by the build (stop + revoke + deauthorize). A
+  department's pod gets aligned `FREEHOLD_RUNNER_*` comma lists and its bridge advertises one
+  `exec`/`list` that ROUTES by target to the pinned runner+credential (fail-closed on an
+  unlisted target), signing as the agent's own nsec; the runner re-reads its relay-signed 39002
+  roster per call. Grants are operator/console-issued (`grant_agent` / the build reconcile) and
+  land live. The CPA and custom agents carry no runner coords, so their bridge never advertises
+  exec — the raw grant attaches only to department identities. The granting rules are captured
+  in the CPA's first skill (`agents/freehold/skills/granting.md`, composed into its prompt);
+  agent-side granting itself is still operator-scoped. Remaining capability tooling (backup
+  scheduling, monitoring dashboards, AI hardware) is still unbuilt; runners' audits are
+  local-spool only (kind-48001 relay publish is rejected by stock buzz as an unknown kind).
 - **A rebuild of a world built before a department rename leaves stale agents.** The
   retired reserved names `gatekeeper`/`provisioner`/`services` (and, after the latest rename,
   `security`/`vault`/`agent-ops`) are no longer reserved, so on a

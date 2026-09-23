@@ -131,6 +131,37 @@ func TestAgentPodManifestDistinctNames(t *testing.T) {
 	}
 }
 
+// TestAgentPodManifestMultiRunner pins the multi-runner pod wiring: every
+// capability runner's coords ride as ALIGNED comma lists (env + the bridge
+// conf file), one entry per runner, so a department pod can reach each of its
+// capability doors.
+func TestAgentPodManifestMultiRunner(t *testing.T) {
+	runners := []RunnerCoords{
+		{URL: "http://10.0.0.5:8791", Pubkey: "pkA", Target: "pve-ssh-root", Secret: "pve-ssh-root"},
+		{URL: "http://10.0.0.5:8793", Pubkey: "pkB", Target: "kube-api-caddysa", Secret: "kube-api-caddysa"},
+	}
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", runners...)
+	urls, pubs, targets, secrets := runnerLists(runners)
+	for _, want := range []string{
+		`value: "` + urls + `"`,
+		`value: "` + pubs + `"`,
+		`value: "` + targets + `"`,
+		`value: "` + secrets + `"`,
+		"runner_urls=" + urls,
+		"runner_targets=" + targets,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("manifest missing %q", want)
+		}
+	}
+	// The old singular env must be gone — the bridge parses lists only.
+	for _, gone := range []string{"FREEHOLD_RUNNER_URL,", "FREEHOLD_RUNNER_TARGET,"} {
+		if strings.Contains(m, gone) {
+			t.Errorf("manifest still carries singular runner env %q", gone)
+		}
+	}
+}
+
 func TestCPAManifestScriptApplies(t *testing.T) {
 	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key", "", "")
 	for _, want := range []string{

@@ -84,15 +84,18 @@ it to make and ship a real change — to Buzz's own git and/or GitHub.
     
 *   Proof point: an agent deploys a service to an LXC using what it committed.
     
-*   **The first department capability gets teeth: Compute.** Compute requests routed
-    through the CPA land on the Compute identity, which holds the raw compute grant;
-    custom agents never receive it.
+*   **The departments hold their capability grants.** Capability execution lands on the
+    department identity through dedicated capability runners — one runner per capability,
+    named `<target>-<protocol>-<identity>` (the shared `pve-ssh-root` host runner, SA-token
+    kube doors per namespace, `litellm-api-admin` for the gateway's admin API,
+    `cloudflare-api-<zone>` per DNS zone, `dnsmasq-local-root` for the resolver guest).
+    Custom agents never receive a department-owned capability grant.
     
-*   **Data's capability runner (built).** Data holds the first live raw capability grant:
-    a dedicated `data-pve` runner (`root@<host>` SSH) in its own channel, reached from
-    Data's pod by a scoped `exec`/`list` signing as Data's own key against the runner's
-    relay-signed roster. It verifies every LXC/kube volume lands on a backed-up mount.
-    This is the pattern the remaining departments follow.
+*   **Data's capability runner (built).** Data verifies every LXC/kube volume lands on a
+    backed-up mount through `pve-ssh-root` (root@<host> SSH, shared with Network and
+    Compute — one capability, one audit stream), reached from Data's pod by a scoped
+    `exec`/`list` signing as Data's own key against the runner's relay-signed roster.
+    This is the pattern every capability follows.
     
 *   **Agents can read the repo.** The shared orientation block tells every non-custom agent
     to read the source repo on first boot, keep a memory of it, and re-check periodically;

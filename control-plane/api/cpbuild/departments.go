@@ -1,6 +1,7 @@
 package cpbuild
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -8,9 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	cert "freehold/platform/services/certificates/letsencrypt"
+
+	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
@@ -18,34 +23,71 @@ import (
 	"freehold/control-plane/state"
 )
 
-// Department capability runners: a dedicated runner per department, owned by
-// that department's identity, carrying the raw grant for one capability. The
-// first is Data's read of the Proxmox box (root@<host> over SSH) so it can
-// verify every LXC/kube volume lands on a backed-up mount. A department's pod
-// reaches its runner directly (signed as the agent's own nsec, audience =
-// runner pubkey) — the runner re-reads its relay-signed 39002 roster per call,
-// so a grant/revoke lands without a restart. The CPA and custom agents hold no
-// runner coords and so never see exec.
-type deptRunnerSpec struct {
-	// dept is the department name (matches agents.DepartmentNames).
-	dept string
-	// name is the runner/target/secret name (the provision convention ties all
-	// three together).
+// Capability runners: the unit of grant is the RUNNER — one runner per
+// capability, named <target>-<protocol>-<identity> (target = the box/service
+// it reaches, protocol = ssh|api|local matching the connector class,
+// identity = the credential level). A department holds a grant = a roster
+// membership on each runner its role needs; several departments share a
+// runner only when the capability is identical (pve-ssh-root). Each runner is
+// its own relay channel (the audit stream) and re-reads its relay-signed
+// 39002 roster per call, so a grant/revoke lands live. A department's pod
+// reaches its runners directly (signed as the agent's own nsec, audience =
+// runner pubkey); the CPA and custom agents hold no runner coords and never
+// see exec.
+type capabilityRunner struct {
+	// name is the runner/target/secret name (the provision convention ties
+	// all three together) — capability-named, never consumer-named.
 	name string
-	// kind is the connector kind (ssh for the Proxmox root target).
+	// kind is the connector kind (TargetMeta.kind): ssh, or an api-class
+	// kind (kubernetes/litellm/cloudflare) whose exec runs locally with the
+	// credential + address injected as env, or local (the runner's own host).
 	kind string
 	// port is the runner's MCP bind port on the CP LXC (the pod dials
 	// http://<cpIP>:<port>).
 	port int
+	// rosters are the departments granted onto this runner.
+	rosters []string
+	// kubernetes doors only: the SA-token Secret (declared in doors.tf) the
+	// token is read back from, re-sealed every build (a k3s rebuild rotates
+	// the CA, so a stale token would fail closed).
+	tokenSecret string
+	tokenNS     string
+	// dns-provider doors only: the zone served + the stored provider env
+	// (the credential fields seal as extra named secrets).
+	dnsZone string
+	dnsEnv  map[string]string
 }
 
-// departmentRunnerSpecs is the capability-runner table. Data first; other
-// departments gain their own runners as their tooling lands.
-func departmentRunnerSpecs() []deptRunnerSpec {
-	return []deptRunnerSpec{
-		{dept: "data", name: "data-pve", kind: "ssh", port: 8790},
+// kubernetesVersion is the kubectl build installed on the CP LXC (the kube
+// doors' exec target) — matches the k3s pin in terraform/scripts/k3s-bringup.sh.
+const kubernetesVersion = "v1.36.4"
+
+// cloudflareAPIBase is the cloudflare API v4 root (the door's address env).
+const cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
+
+// capabilityRunners is the static capability-runner table. Dynamic entries
+// (one cloudflare-api-<domain> runner per stored DNS zone) are appended from
+// the CP's credential store at staging.
+func capabilityRunners() []capabilityRunner {
+	return []capabilityRunner{
+		{name: "pve-ssh-root", kind: "ssh", port: 8791,
+			rosters: []string{"network", "compute", "data"}},
+		{name: "kube-api-root", kind: "kubernetes", port: 8792,
+			rosters: []string{"compute"}, tokenSecret: "compute-door-token", tokenNS: "kube-system"},
+		{name: "kube-api-caddysa", kind: "kubernetes", port: 8793,
+			rosters: []string{"network"}, tokenSecret: "caddy-door-token", tokenNS: "caddy"},
+		{name: "kube-api-litellmsa", kind: "kubernetes", port: 8794,
+			rosters: []string{"ai"}, tokenSecret: "litellm-door-token", tokenNS: "litellm"},
+		{name: "litellm-api-admin", kind: "litellm", port: 8795,
+			rosters: []string{"ai"}},
+		{name: "dnsmasq-local-root", kind: "local", port: 8796,
+			rosters: []string{"network"}},
 	}
 }
+
+// cloudflareRunnerPort is where the dynamic per-zone runners start, after the
+// static table's highest port.
+const cloudflareRunnerPort = 8797
 
 // relayDialURL is the relay origin to DIAL from inside the CP guest: the
 // community hostname on :3000 (the CP resolver maps it to the relay guest), so
@@ -68,15 +110,6 @@ func (s *Spec) relaySignURL() string {
 	return s.RelayURL
 }
 
-func departmentRunnerByDept(dept string) (deptRunnerSpec, bool) {
-	for _, s := range departmentRunnerSpecs() {
-		if s.dept == dept {
-			return s, true
-		}
-	}
-	return deptRunnerSpec{}, false
-}
-
 // consoleStateDir is the CP's console state dir (the home of state.json, the
 // runner records, and console/identity.json) — derived in either executor:
 // agent-tools state `/srv/data/cp/agent-tools` and console state
@@ -86,11 +119,12 @@ func (s *Spec) consoleStateDir() string {
 	return dir
 }
 
-// stageDepartmentRunners provisions/starts each department's capability runner
-// and records the pod-facing coords on the Spec. Idempotent + rebuild-safe: an
-// existing runner package is adopted (identity preserved), its host key
-// re-authorized only when absent, and its relay channel re-synced. A no-op
-// without relay + co-located-runner wiring.
+// stageDepartmentRunners provisions/starts every capability runner and records
+// the pod-facing coords per department. Idempotent + rebuild-safe: an existing
+// runner package is adopted (identity preserved), ssh keys are re-authorized
+// only when absent, rotating credentials (kube tokens, API keys) are re-sealed
+// every build, and relay channels re-sync. A no-op without relay +
+// co-located-runner wiring.
 func (s *Spec) stageDepartmentRunners() error {
 	if s.CpLxc == 0 || s.CpIP == "" || s.RelayHost == "" || s.RunnerTarget == "" || s.RelayPK == "" {
 		return nil
@@ -104,45 +138,160 @@ func (s *Spec) stageDepartmentRunners() error {
 	if !ok || coloc.Address == "" {
 		return fmt.Errorf("department runners: co-located runner %q address not recorded", s.RunnerTarget)
 	}
-	for _, spec := range departmentRunnerSpecs() {
-		if err := s.ensureDepartmentRunner(store, cpState, spec, coloc.Address); err != nil {
-			return fmt.Errorf("department runner %s: %w", spec.name, err)
+	runners := capabilityRunners()
+	runners = append(runners, s.cloudflareRunners()...)
+	needKube := false
+	for _, r := range runners {
+		if r.kind == "kubernetes" {
+			needKube = true
 		}
 	}
+	if needKube {
+		if err := s.ensureKubectl(); err != nil {
+			return fmt.Errorf("kubectl for the kube doors: %w", err)
+		}
+	}
+	for _, r := range runners {
+		if err := s.ensureCapabilityRunner(store, cpState, r, coloc.Address); err != nil {
+			// The shared host runner must never silently die (Data's live
+			// grant rides it); every other door waits loudly for its source
+			// (a DNS credential not yet handed off, the services phase not
+			// yet up) — the next build lights it.
+			if r.name == "pve-ssh-root" {
+				return fmt.Errorf("capability runner %s: %w", r.name, err)
+			}
+			fmt.Fprintf(os.Stderr, "capability runners: %s not staged: %v (the door waits for its source)\n", r.name, err)
+			continue
+		}
+	}
+	// Retired runners (renames keep the capability name, drop the
+	// consumer-named one) die here — after the replacement is staged, so a
+	// department never loses exec across the build.
+	s.retireRunner(store, "data-pve")
 	return nil
 }
 
-// ensureDepartmentRunner brings one department runner up and records its coords.
-// hostAddr is `root@<host>` — the same PVE box the co-located runner owns.
-func (s *Spec) ensureDepartmentRunner(store *state.StateStore, cpState string, spec deptRunnerSpec, hostAddr string) error {
-	pkgDir := filepath.Join(cpState, "runner", spec.name)
-	rec, exists := store.GetRunner(spec.name)
+// cloudflareRunners derives one cloudflare-api-<domain> runner per DISTINCT
+// DNS zone with a stored credential (the CP's own slots: cp, then relay).
+// Skipped (loud, not fatal) when no credential has been handed off yet — the
+// door waits for `freehold build` to hand it off. kind = the record's provider
+// (a non-cloudflare provider probes red until its status arm exists).
+func (s *Spec) cloudflareRunners() []capabilityRunner {
+	var out []capabilityRunner
+	port := cloudflareRunnerPort
+	seen := map[string]bool{}
+	for _, slot := range []string{"cp", "relay"} {
+		host := s.CpHost
+		if slot == "relay" {
+			host = s.RelayHost
+		}
+		zone := zoneOf(host)
+		if zone == "" || seen[zone] {
+			continue
+		}
+		provider, env, err := s.dnsCredFromStore(slot)
+		if err != nil || len(env) == 0 {
+			fmt.Fprintf(os.Stderr, "capability runners: no %s DNS credential yet — the %s door waits for hand-off\n", slot, zone)
+			continue
+		}
+		seen[zone] = true
+		out = append(out, capabilityRunner{
+			name:    "cloudflare-api-" + strings.ReplaceAll(zone, ".", "-"),
+			kind:    strings.ToLower(provider),
+			port:    port,
+			rosters: []string{"network"},
+			dnsZone: zone,
+			dnsEnv:  env,
+		})
+		port++
+	}
+	return out
+}
+
+// zoneOf returns a host's registrable zone: everything after the first label
+// ("cp.example.com" -> "example.com"). "" for a bare host.
+func zoneOf(host string) string {
+	if i := strings.Index(host, "."); i >= 0 && i < len(host)-1 {
+		return host[i+1:]
+	}
+	return ""
+}
+
+// ensureCapabilityRunner brings one capability runner up and records its coords
+// for every rostered department. hostAddr is `root@<host>` — the same PVE box
+// the co-located runner owns.
+func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r capabilityRunner, hostAddr string) error {
+	pkgDir := filepath.Join(cpState, "runner", r.name)
+	rec, exists := store.GetRunner(r.name)
 	if !exists {
-		priv, pub, err := crypto.GenerateSSHKeypair(spec.name)
+		c, err := s.runnerCredential(r, hostAddr)
 		if err != nil {
-			return fmt.Errorf("generate ssh keypair: %w", err)
+			return err
 		}
 		res, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
-			Name: spec.name, Kind: spec.kind, Address: hostAddr, Secret: priv, RunnerDir: pkgDir,
+			Name: r.name, Kind: r.kind, Address: c.addr, Secret: c.secret, RunnerDir: pkgDir,
 		})
 		if err != nil {
 			return fmt.Errorf("provision: %w", err)
 		}
 		rec = state.RunnerRecord{NostrPubkey: res.NostrPubkey, EncPubkey: res.EncPubkey, PackageDir: res.PackageDir}
-		if err := s.authorizeHostKey(pub, spec.name); err != nil {
-			return err
+		for _, name := range sortedNames(c.extras) {
+			if _, err := provisioner.AddSecret(store, r.name, name, c.extras[name]); err != nil {
+				return fmt.Errorf("seal extra %s: %w", name, err)
+			}
+		}
+		if r.kind == "ssh" {
+			if err := s.authorizeHostKey(c.pubLine, r.name); err != nil {
+				return err
+			}
 		}
 	} else {
-		pubLine, err := departmentRunnerPubLine(pkgDir, spec.name)
-		if err != nil {
-			return err
-		}
-		if err := s.authorizeHostKey(pubLine, spec.name); err != nil {
-			return err
+		// ssh credentials are the runner's identity — stable; re-authorize the
+		// SAME key if the host lost it. Everything else rotates (a k3s rebuild
+		// rotates the CA; API keys are re-read from their source), so re-seal
+		// every build — the runner restarts below and loads them. AddSecret
+		// re-ships the whole package (targets + grants preserved).
+		if r.kind == "ssh" {
+			pubLine, err := departmentRunnerPubLine(pkgDir, r.name)
+			if err != nil {
+				return err
+			}
+			if err := s.authorizeHostKey(pubLine, r.name); err != nil {
+				return err
+			}
+		} else {
+			c, err := s.runnerCredential(r, hostAddr)
+			if err != nil {
+				return err
+			}
+			// Preserve the primary record's kind/address (AddSecret stamps
+			// "extra"); the package is the truth, the record mirrors it.
+			before, _ := store.GetSecret(r.name)
+			if _, err := provisioner.AddSecret(store, r.name, r.name, c.secret); err != nil {
+				return fmt.Errorf("re-seal credential: %w", err)
+			}
+			if rec, ok := store.GetSecret(r.name); ok {
+				rec.Kind = before.Kind
+				rec.Address = c.addr
+				store.InsertSecret(r.name, rec)
+				if err := store.Save(); err != nil {
+					return err
+				}
+			}
+			if c.addr != pkgTargetAddr(pkgDir, r.name) {
+				if err := setTargetAddress(store, r.name, c.addr); err != nil {
+					return fmt.Errorf("move target address: %w", err)
+				}
+			}
+			for _, name := range sortedNames(c.extras) {
+				if _, err := provisioner.AddSecret(store, r.name, name, c.extras[name]); err != nil {
+					return fmt.Errorf("re-seal extra %s: %w", name, err)
+				}
+			}
 		}
 	}
 	// The runner is a private NIP-29 channel; membership is the live grant.
-	if err := provisioner.SyncRunnerChannel(store, s.relayDialURL(), s.relaySignURL(), spec.name, cpState); err != nil {
+	if err := provisioner.SyncRunnerChannel(store, s.relayDialURL(), s.relaySignURL(), r.name, cpState); err != nil {
 		return fmt.Errorf("sync relay channel: %w", err)
 	}
 	// A relay-mode runner must be a relay COMMUNITY member to read its roster
@@ -150,43 +299,272 @@ func (s *Spec) ensureDepartmentRunner(store *state.StateStore, cpState string, s
 	if err := s.addRelayCommunityMember(rec.NostrPubkey); err != nil {
 		return fmt.Errorf("relay community membership: %w", err)
 	}
-	if err := s.startDepartmentRunner(spec, pkgDir); err != nil {
+	if err := s.startCapabilityRunner(r, pkgDir); err != nil {
 		return fmt.Errorf("start runner: %w", err)
 	}
 	if s.DepartmentRunners == nil {
-		s.DepartmentRunners = map[string]agent.RunnerCoords{}
+		s.DepartmentRunners = map[string][]agent.RunnerCoords{}
 	}
-	s.DepartmentRunners[spec.dept] = agent.RunnerCoords{
-		URL:    fmt.Sprintf("http://%s:%d", s.CpIP, spec.port),
+	coords := agent.RunnerCoords{
+		URL:    fmt.Sprintf("http://%s:%d", s.CpIP, r.port),
 		Pubkey: rec.NostrPubkey,
-		Target: spec.name,
-		Secret: spec.name,
+		Target: r.name,
+		Secret: r.name,
+	}
+	for _, dept := range r.rosters {
+		s.DepartmentRunners[dept] = append(s.DepartmentRunners[dept], coords)
 	}
 	return nil
 }
 
-// grantDepartmentRunner adds a department agent's pubkey to its capability
-// runner's roster (kind-9000 put-user, signed by the console owner). Called
-// after the department pod's identity exists so a rebuild re-asserts the grant.
-func (s *Spec) grantDepartmentRunner(dept, pubkey string) error {
-	spec, ok := departmentRunnerByDept(dept)
-	if !ok || pubkey == "" {
+// runnerCred is a capability runner's resolved credential material.
+type runnerCred struct {
+	addr    string
+	secret  []byte
+	extras  map[string][]byte
+	pubLine string // ssh only: the authorized_keys line for the fresh keypair
+}
+
+// runnerCredential resolves a runner's target address + credential + extra
+// named secrets for its kind, SOURCING them fresh on every call (the kube
+// tokens and API keys are re-read from where they live; only the ssh keypair
+// is minted once and then stable).
+func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred, error) {
+	switch r.kind {
+	case "ssh":
+		priv, pub, err := crypto.GenerateSSHKeypair(r.name)
+		if err != nil {
+			return runnerCred{}, fmt.Errorf("generate ssh keypair: %w", err)
+		}
+		return runnerCred{addr: hostAddr, secret: priv, pubLine: pub}, nil
+	case "kubernetes":
+		token, err := s.doorToken(r.tokenSecret, r.tokenNS)
+		if err != nil {
+			return runnerCred{}, err
+		}
+		return runnerCred{addr: "https://" + config.StripCIDR(s.ProxyIP) + ":6443", secret: token}, nil
+	case "litellm":
+		master, provider, err := s.litellmDoorKeys()
+		if err != nil {
+			return runnerCred{}, err
+		}
+		return runnerCred{
+			addr:   strings.TrimSuffix(s.LitellmBaseURL, "/v1"),
+			secret: master,
+			extras: map[string][]byte{"provider-key": provider},
+		}, nil
+	case "local":
+		// The credential is a placeholder by convention (secret name = runner
+		// name); the door IS the runner's own host.
+		return runnerCred{secret: []byte("local")}, nil
+	default:
+		// A DNS-provider door (cloudflare today): the zone rides as the target
+		// credential (useful env), the stored provider env seals as extra
+		// named secrets whose names round-trip back to the same env names.
+		if r.dnsZone == "" || len(r.dnsEnv) == 0 {
+			return runnerCred{}, fmt.Errorf("dns door %s has no zone/env", r.name)
+		}
+		extras := map[string][]byte{}
+		for env, value := range r.dnsEnv {
+			extras[envToLower(env)] = []byte(value)
+		}
+		return runnerCred{addr: cloudflareAPIBase, secret: []byte(r.dnsZone), extras: extras}, nil
+	}
+}
+
+// envToLower maps an env var name to a secret name ("CF_DNS_API_TOKEN" ->
+// "cf-dns-api-token") so the runner's env_name() re-derives the same env.
+func envToLower(env string) string {
+	return strings.ToLower(strings.ReplaceAll(env, "_", "-"))
+}
+
+// sortedNames keeps the extra-seal order deterministic (tests + logs).
+func sortedNames(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pkgTargetAddr reads a runner's shipped target address from its PACKAGE (the
+// source of truth for target metadata; the state record mirrors it).
+func pkgTargetAddr(pkgDir, name string) string {
+	pkg, err := wire.Load(pkgDir)
+	if err != nil {
+		return ""
+	}
+	return pkg.Targets[name].Address
+}
+
+// setTargetAddress updates a runner's shipped TargetMeta address + its state
+// record when the endpoint moved (e.g. a re-IPed k3s node). AddSecret cannot
+// do this (it touches only secrets); a full rotate would drop the extras.
+func setTargetAddress(store *state.StateStore, name, addr string) error {
+	rec, ok := store.GetRunner(name)
+	if !ok {
+		return fmt.Errorf("runner %s not found", name)
+	}
+	pkg, err := wire.Load(rec.PackageDir)
+	if err != nil {
+		return err
+	}
+	meta, ok := pkg.Targets[name]
+	if !ok {
+		return fmt.Errorf("runner %s has no target metadata", name)
+	}
+	meta.Address = addr
+	pkg.Targets[name] = meta
+	if err := pkg.WriteToDir(rec.PackageDir); err != nil {
+		return err
+	}
+	secretRec, _ := store.GetSecret(name)
+	secretRec.Address = addr
+	store.InsertSecret(name, secretRec)
+	return store.Save()
+}
+
+// doorToken reads a door's SA token back from the k3s guest (kubectl on the
+// guest through the co-located runner) and decodes it. The token passes
+// through CP memory only — it is sealed into the runner's package, never
+// stored or logged.
+func (s *Spec) doorToken(secret, ns string) ([]byte, error) {
+	out, err := s.execOut(fmt.Sprintf(
+		`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret %s -n %s -o jsonpath='{.data.token}'`,
+		s.K3sVmid, secret, ns), 60)
+	if err != nil {
+		return nil, fmt.Errorf("read door token %s/%s: %w", ns, secret, err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+	if err != nil {
+		return nil, fmt.Errorf("decode door token %s/%s: %w", ns, secret, err)
+	}
+	return raw, nil
+}
+
+// litellmDoorKeys opens the CP's durable litellm store in memory and returns
+// the gateway master key + the provider (fireworks) key. Plaintext lives in
+// memory only long enough to seal into the door runner's package.
+func (s *Spec) litellmDoorKeys() (master, provider []byte, err error) {
+	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	if !cert.CredExists(path) {
+		return nil, nil, fmt.Errorf("no CP litellm store at %s yet — the litellm-api-admin door waits for the services phase", path)
+	}
+	secret, err := s.consoleEncSecret()
+	if err != nil {
+		return nil, nil, err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open CP litellm store: %w", err)
+	}
+	m, ok := env["master"]
+	if !ok || m == "" {
+		return nil, nil, fmt.Errorf("CP litellm store is missing the master key")
+	}
+	p, ok := env["provider"]
+	if !ok || p == "" {
+		return nil, nil, fmt.Errorf("CP litellm store is missing the provider key")
+	}
+	return []byte(m), []byte(p), nil
+}
+
+// ensureKubectl installs kubectl on the CP LXC (the kube doors' exec target)
+// when absent — arch-aware, pinned to the k3s version. Runs locally: the build
+// executor is this guest.
+func (s *Spec) ensureKubectl() error {
+	if _, err := exec.Command("sh", "-c", "command -v kubectl").Output(); err == nil {
 		return nil
 	}
-	// The stage is the source of truth for whether the runner was stood up:
+	arch := "amd64"
+	if out, err := exec.Command("uname", "-m").Output(); err == nil && strings.TrimSpace(string(out)) == "aarch64" {
+		arch = "arm64"
+	}
+	script := fmt.Sprintf(
+		"curl -fsSL --max-time 120 https://dl.k8s.io/release/%s/bin/linux/%s/kubectl -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl",
+		kubernetesVersion, arch)
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		return fmt.Errorf("install kubectl: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// grantDepartmentRunner adds a department agent's pubkey to every capability
+// runner its role holds (kind-9000 put-user, signed by the console owner).
+// Called after the department pod's identity exists so a rebuild re-asserts
+// the grants.
+func (s *Spec) grantDepartmentRunner(dept, pubkey string) error {
+	if pubkey == "" {
+		return nil
+	}
+	// The stage is the source of truth for whether a runner was stood up:
 	// when its guard short-circuits (no relay / co-located runner / CP IP) the
 	// coords are absent and there is nothing to grant. Skip rather than fail
 	// the whole build with a "runner not found" from a path we deliberately
 	// no-oped.
-	if rc, staged := s.DepartmentRunners[dept]; !staged || rc.Pubkey == "" {
+	if len(s.DepartmentRunners[dept]) == 0 {
 		return nil
 	}
-	cpState := s.consoleStateDir()
-	store, err := state.Open(cpState)
+	store, err := state.Open(s.consoleStateDir())
 	if err != nil {
 		return err
 	}
-	return provisioner.PutUserMembership(store, s.relayDialURL(), s.relaySignURL(), spec.name, pubkey, cpState)
+	for _, rc := range s.DepartmentRunners[dept] {
+		if rc.Pubkey == "" || rc.Target == "" {
+			continue
+		}
+		if err := provisioner.PutUserMembership(store, s.relayDialURL(), s.relaySignURL(), rc.Target, pubkey, s.consoleStateDir()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// retireRunner removes a runner retired by a rename (data-pve -> pve-ssh-root):
+// stop its unit, revoke it (the state record flips + the shipped ciphertext is
+// removed), and drop its authorized_keys line from the host. Idempotent; runs
+// AFTER the replacement is staged so a department never loses exec across the
+// build. Best-effort: a half-completed earlier retire (revoked, key line still
+// on the host) cannot re-derive the key blob once the package is gone — the
+// dead line is then a hygiene issue, not access (the identity is revoked).
+func (s *Spec) retireRunner(store *state.StateStore, name string) {
+	rec, ok := store.GetRunner(name)
+	if !ok {
+		return
+	}
+	// The old department-runner convention named the unit after the DEPARTMENT
+	// ("freehold-runner-data"); the new one after the RUNNER. Stop both.
+	script := "systemctl stop freehold-runner-" + name + " 2>/dev/null; " +
+		"systemctl stop freehold-runner-data 2>/dev/null; " +
+		"systemctl reset-failed freehold-runner-" + name + " 2>/dev/null; " +
+		"systemctl reset-failed freehold-runner-data 2>/dev/null; true"
+	_, _ = exec.Command("sh", "-c", script).CombinedOutput()
+	if rec.Status != state.RunnerRevoked {
+		pubLine, perr := departmentRunnerPubLine(rec.PackageDir, name)
+		if _, rerr := provisioner.RevokeRunner(store, name); rerr != nil {
+			fmt.Fprintf(os.Stderr, "retire %s: revoke failed: %v\n", name, rerr)
+			return
+		}
+		if perr == nil {
+			s.deauthorizeHostKey(pubLine, name)
+		}
+	}
+}
+
+// deauthorizeHostKey removes a retired runner's key line from the PVE host's
+// root authorized_keys (idempotent). Runs on the host through the co-located
+// runner; the key blob is base64 — it can never contain the '|' delimiter.
+func (s *Spec) deauthorizeHostKey(pubLine, comment string) {
+	fields := strings.Fields(pubLine)
+	if len(fields) < 2 {
+		return
+	}
+	cmd := fmt.Sprintf(`touch /root/.ssh/authorized_keys; sed -i '\|%s|d' /root/.ssh/authorized_keys`, fields[1])
+	if _, err := s.execOut(cmd, 60); err != nil {
+		fmt.Fprintf(os.Stderr, "retire %s: deauthorize on host: %v\n", comment, err)
+	}
 }
 
 // departmentRunnerPubLine opens a runner package's sealed SSH credential with
@@ -257,10 +635,10 @@ func (s *Spec) addRelayCommunityMember(pubkey string) error {
 	return s.run(fmt.Sprintf("pct exec %d -- sh -c '%s'", relayLxc, cmdLine), 120)
 }
 
-// startDepartmentRunner (re)starts the runner as a transient systemd unit on
+// startCapabilityRunner (re)starts the runner as a transient systemd unit on
 // the CP LXC (systemctl/systemd-run run LOCALLY — the CP executor is this
 // guest). Reloads the binary + package on every build.
-func (s *Spec) startDepartmentRunner(spec deptRunnerSpec, pkgDir string) error {
+func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	binDir, _ := s.cpGuestDirs()
 	bin := binDir + "/freehold-runner"
 	// Always pass --relay-auth-url: the runner signs the CANONICAL URL while
@@ -270,8 +648,8 @@ func (s *Spec) startDepartmentRunner(spec deptRunnerSpec, pkgDir string) error {
 	// sign the LAN URL and the relay would reject it "URL mismatch". Always
 	// threading it keeps the dial/auth split intact.
 	flags := fmt.Sprintf("--state-dir %s --addr 0.0.0.0:%d --relay-url %s --relay-pubkey %s --relay-auth-url %s --allow-remote",
-		pkgDir, spec.port, s.relayDialURL(), s.RelayPK, s.relaySignURL())
-	unit := "freehold-runner-" + spec.dept
+		pkgDir, r.port, s.relayDialURL(), s.RelayPK, s.relaySignURL())
+	unit := "freehold-runner-" + r.name
 	script := fmt.Sprintf(
 		"systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; systemd-run --unit=%s --collect %s serve %s",
 		unit, unit, unit, bin, flags)
@@ -279,7 +657,7 @@ func (s *Spec) startDepartmentRunner(spec deptRunnerSpec, pkgDir string) error {
 		return fmt.Errorf("systemd-run %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	// Wait for the port to listen so the next step never races a refused dial.
-	addr := fmt.Sprintf("127.0.0.1:%d", spec.port)
+	addr := fmt.Sprintf("127.0.0.1:%d", r.port)
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		c, derr := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -288,7 +666,7 @@ func (s *Spec) startDepartmentRunner(spec deptRunnerSpec, pkgDir string) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("department runner %s did not listen on %s: %v", spec.name, addr, derr)
+			return fmt.Errorf("capability runner %s did not listen on %s: %v", r.name, addr, derr)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
