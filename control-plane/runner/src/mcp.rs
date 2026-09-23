@@ -533,9 +533,9 @@ async fn api_status(
         ),
         // kube API doors: reachability only (-k — the k3s CA is not trusted
         // CP-side; the token is proven per-exec). /version needs no auth.
-        "kubernetes" => format!(
-            "curl -skS -o /dev/null -w '%{{http_code}}' \"${{{url_env}}}/version\""
-        ),
+        "kubernetes" => {
+            format!("curl -skS -o /dev/null -w '%{{http_code}}' \"${{{url_env}}}/version\"")
+        }
         // token-verify endpoint: 200 = the credential itself is still valid.
         "cloudflare" => format!(
             "curl -sS -o /dev/null -w '%{{http_code}}' \
