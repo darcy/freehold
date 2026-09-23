@@ -30,6 +30,12 @@ fail-closed on relay outage. From this, everything else follows:
 - **Every grant stays revocable and auditable.** Revoke = remove the roster
   entry — it lands live, no restart. The audit is the runner's channel. A
   grant that could not be revoked by roster removal alone must not be made.
+- **Know what a door is worth.** Doors are intent + audit boundaries, not hard
+  containment: a local door is root on the runner's own host, and a root door
+  reaches every guest it can `pct exec` into. Grant the SCOPED identity where
+  one exists (a namespace-scoped ServiceAccount over a cluster-admin token for
+  a single-namespace job); grant root-on-a-box only where root IS the job —
+  and say so plainly when the door is as wide as it is.
 
 ## Who may hold what
 

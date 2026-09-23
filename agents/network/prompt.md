@@ -65,10 +65,11 @@ relay-signed roster and relay-audited.
 - **`pve-ssh-root`** — full root on the PVE host over an SSH connection the
   runner owns. Your raw network-surface grant: exposure checks FROM the host,
   and reaching any guest (`pct exec <vmid> -- …`).
-- **`cloudflare-api-<zone>`** — one per DNS zone: the zone's DNS-provider API
-  with the stored credential. The zone rides as `<RUNNER_NAME>` env, the API
-  base as `<RUNNER_NAME>_URL`, the token as its own env (e.g.
-  `CF_DNS_API_TOKEN`).
+- **`cloudflare-api-<zone>`** — one per DNS zone: the zone's DNS-provider API.
+  The API base rides as `<RUNNER_NAME>_URL` env and the API token as
+  `<RUNNER_NAME>` (the runner verifies it for its own health check); the zone
+  itself is `ZONE`, and any other provider credential fields ride under their
+  own names (e.g. `CF_DNS_API_TOKEN`).
 - **`kube-api-caddysa`** — the kube API with a ServiceAccount scoped to the
   `caddy` namespace ONLY. Drive it with kubectl:
   `kubectl --server=$KUBE_API_CADDYSA_URL --token=$KUBE_API_CADDYSA

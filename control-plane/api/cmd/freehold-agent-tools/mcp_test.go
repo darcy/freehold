@@ -310,6 +310,28 @@ func TestParseRunnerLists(t *testing.T) {
 	}
 }
 
+// TestConfFileSequentialFill pins the conf-file fill order (the pod bootstrap
+// writes runner_urls BEFORE the other columns): a url-only seed survives the
+// column fills with its URL intact — the regression where URLs were dropped
+// and every exec posted to "/mcp".
+func TestConfFileSequentialFill(t *testing.T) {
+	runners := parseRunnerLists("http://a:8791,http://b:8792", "", "", "")
+	if len(runners) != 2 || runners[0].url != "http://a:8791" {
+		t.Fatalf("url-only seed dropped: %+v", runners)
+	}
+	runners = fillRunnersFrom(runners, []string{"pka", "pkb"}, nil, nil)
+	runners = fillRunnersFrom(runners, nil, []string{"pve-ssh-root", "kube-api-caddysa"}, nil)
+	runners = fillRunnersFrom(runners, nil, nil, nil)
+	for i, want := range []struct{ url, pub, target, secret string }{
+		{"http://a:8791", "pka", "pve-ssh-root", "pve-ssh-root"},
+		{"http://b:8792", "pkb", "kube-api-caddysa", "kube-api-caddysa"},
+	} {
+		if runners[i].url != want.url || runners[i].pub != want.pub || runners[i].target != want.target || runners[i].secret != want.secret {
+			t.Fatalf("runner %d mangled: %+v (want %+v)", i, runners[i], want)
+		}
+	}
+}
+
 // TestRouteRunnerFailClosed pins the containment boundary: an exec names a
 // target the pod holds or it is refused; a multi-runner pod with no target
 // named is refused (never a silent default), and a single-runner pod pins.

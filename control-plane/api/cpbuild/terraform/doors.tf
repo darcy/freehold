@@ -100,11 +100,14 @@ resource "kubernetes_manifest" "litellm_door_role" {
     metadata   = { name = "litellm-door", namespace = "litellm" }
     rules = [
       {
-        # root of the litellm environment: everything in its namespace, and
-        # nothing outside it
-        apiGroups = ["*"]
-        resources = ["*"]
-        verbs     = ["*"]
+        # root of the litellm ENVIRONMENT (its workloads, config, and PVC-backed
+        # state) — but NOT its Secrets: the gateway's master/provider keys ride
+        # the litellm-api-admin runner's sealed package, and an agent reading
+        # them off a kube Secret would be a second, ungoverned path to
+        # plaintext. serviceaccounts/token minting is likewise excluded.
+        apiGroups = ["", "apps"]
+        resources = ["configmaps", "deployments", "pods", "pods/log", "persistentvolumeclaims", "services", "statefulsets"]
+        verbs     = ["get", "list", "watch", "create", "update", "patch", "delete"]
       },
     ]
   }

@@ -91,6 +91,20 @@ func TestEnvToLower(t *testing.T) {
 	}
 }
 
+// TestDNSTokenKey pins the door credential pick: the bearer the runner's
+// verify probe uses must be the API token, never a non-credential env.
+func TestDNSTokenKey(t *testing.T) {
+	if got := dnsTokenKey(map[string]string{"CF_ACCOUNT_ID": "x", "CF_DNS_API_TOKEN": "t"}); got != "CF_DNS_API_TOKEN" {
+		t.Fatalf("dnsTokenKey = %q", got)
+	}
+	if got := dnsTokenKey(map[string]string{"CF_ACCOUNT_ID": "x", "OTHER_TOKEN": "t"}); got != "OTHER_TOKEN" {
+		t.Fatalf("dnsTokenKey = %q", got)
+	}
+	if got := dnsTokenKey(map[string]string{"CF_ACCOUNT_ID": "x", "AAAA": "t"}); got != "AAAA" {
+		t.Fatalf("dnsTokenKey should fall back to the first sorted key: %q", got)
+	}
+}
+
 // TestCPACarriesGrantingSkill pins the CPA prompt composition: the granting
 // skill's rules ship inside the CPA's system prompt (the only grant-capable
 // identity), not just as a file.

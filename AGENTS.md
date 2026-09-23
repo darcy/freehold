@@ -271,6 +271,14 @@ release notes.
   agent-side granting itself is still operator-scoped. Remaining capability tooling (backup
   scheduling, monitoring dashboards, AI hardware) is still unbuilt; runners' audits are
   local-spool only (kind-48001 relay publish is rejected by stock buzz as an unknown kind).
+- **The doors are intent+audit boundaries, not hard containment on a shared
+  host.** `dnsmasq-local-root` executes on the CP guest (where every runner
+  package + the state store live), and `pve-ssh-root` reaches the CP guest via
+  `pct exec` — so a fully compromised department can widen from a door to
+  CP-guest root. This mirrors Data's deliberate full-host root (0.7.2): the
+  prompt is the first line of defense, the runner's roster+audit the second;
+  hard per-department containment on shared hosts is out of scope until
+  capability-scoped exec exists.
 - **A rebuild of a world built before a department rename leaves stale agents.** The
   retired reserved names `gatekeeper`/`provisioner`/`services` (and, after the latest rename,
   `security`/`vault`/`agent-ops`) are no longer reserved, so on a

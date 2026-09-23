@@ -358,18 +358,49 @@ func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred
 		// name); the door IS the runner's own host.
 		return runnerCred{secret: []byte("local")}, nil
 	default:
-		// A DNS-provider door (cloudflare today): the zone rides as the target
-		// credential (useful env), the stored provider env seals as extra
-		// named secrets whose names round-trip back to the same env names.
+		// A DNS-provider door (cloudflare today): the API token is the target
+		// credential (the runner's own self-check verifies it), the remaining
+		// provider env + the zone seal as extra named secrets whose names
+		// round-trip back to the same env names.
 		if r.dnsZone == "" || len(r.dnsEnv) == 0 {
 			return runnerCred{}, fmt.Errorf("dns door %s has no zone/env", r.name)
 		}
-		extras := map[string][]byte{}
+		tokenKey := dnsTokenKey(r.dnsEnv)
+		extras := map[string][]byte{"zone": []byte(r.dnsZone)}
 		for env, value := range r.dnsEnv {
+			if env == tokenKey {
+				continue
+			}
 			extras[envToLower(env)] = []byte(value)
 		}
-		return runnerCred{addr: cloudflareAPIBase, secret: []byte(r.dnsZone), extras: extras}, nil
+		return runnerCred{addr: cloudflareAPIBase, secret: []byte(r.dnsEnv[tokenKey]), extras: extras}, nil
 	}
+}
+
+// dnsTokenKey picks the credential-bearing env var of a stored DNS-provider
+// credential (the runner's verify probe uses it as the bearer). Preference:
+// the lego DNS-token names, then any *TOKEN, then the first key sorted.
+func dnsTokenKey(env map[string]string) string {
+	for _, preferred := range []string{"CF_DNS_API_TOKEN", "CF_API_TOKEN"} {
+		if _, ok := env[preferred]; ok {
+			return preferred
+		}
+	}
+	for _, k := range sortedStrings(env) {
+		if strings.HasSuffix(k, "TOKEN") {
+			return k
+		}
+	}
+	return sortedStrings(env)[0]
+}
+
+func sortedStrings(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // envToLower maps an env var name to a secret name ("CF_DNS_API_TOKEN" ->

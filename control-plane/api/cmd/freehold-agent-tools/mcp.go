@@ -556,7 +556,9 @@ func readMCPConfig() (mcpConf, error) {
 
 // parseRunnerLists renders aligned comma lists into runner coords. An empty
 // secrets list defaults each entry's secret to its target name (the provision
-// convention ties the two together).
+// convention ties the two together). An entry survives on its URL alone so the
+// conf file's sequential fill (urls first, then pubkeys/targets/secrets) can
+// complete it — cmdMCP validates the full set before advertising exec.
 func parseRunnerLists(urls, pubs, targets, secrets string) []runnerCoords {
 	u := splitCSV(urls)
 	p := splitCSV(pubs)
@@ -564,6 +566,9 @@ func parseRunnerLists(urls, pubs, targets, secrets string) []runnerCoords {
 	s := splitCSV(secrets)
 	out := make([]runnerCoords, 0, len(u))
 	for i := range u {
+		if u[i] == "" {
+			continue
+		}
 		rc := runnerCoords{url: u[i]}
 		if i < len(p) {
 			rc.pub = p[i]
@@ -572,9 +577,7 @@ func parseRunnerLists(urls, pubs, targets, secrets string) []runnerCoords {
 			rc.target = t[i]
 		}
 		rc.secret = firstNonBlank(listAt(s, i), rc.target)
-		if rc.url != "" && rc.pub != "" && rc.target != "" {
-			out = append(out, rc)
-		}
+		out = append(out, rc)
 	}
 	return out
 }
@@ -688,14 +691,16 @@ func cmdMCP(args []string) {
 		byTarget:      byTarget,
 	}
 	if len(b.runners) > 0 {
-		logBridge("mcp: capability runners wired", strings.Join(b.targetNames(), ","))
 		for _, r := range b.runners {
-			if r.pub == "" || r.target == "" {
-				logNsec("mcp: runner URL set without a pubkey/target — exec disabled")
+			if r.url == "" || r.pub == "" || r.target == "" {
+				logNsec("mcp: runner coord missing url/pubkey/target — exec disabled")
 				b.runners, b.byTarget = nil, map[string]*runnerCoords{}
 				break
 			}
 		}
+	}
+	if len(b.runners) > 0 {
+		logBridge("mcp: capability runners wired", strings.Join(b.targetNames(), ","))
 	}
 	if err := runBridge(os.Stdin, os.Stdout, b); err != nil {
 		logBridge("runbridge: " + err.Error())
