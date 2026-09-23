@@ -48,7 +48,7 @@ type ProvisionRequest struct {
 func defaultRisk(kind string) *string {
 	var v string
 	switch kind {
-	case "vultr", "b2", "hetzner", "github", "websearch", "litellm":
+	case "vultr", "b2", "hetzner", "github", "websearch", "litellm", "kubernetes", "cloudflare":
 		v = "safe"
 	case "ssh":
 		v = "risky-install"

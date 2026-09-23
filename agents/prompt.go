@@ -30,6 +30,16 @@ const UpstreamRepoURL = "https://github.com/darcy/freehold"
 //go:embed freehold/prompt.md
 var cpaPrompt string
 
+// grantingSkill is the freehold agent's first skill (skills/granting.md): the
+// rules + guardrails for giving away capability — the unit of grant (the
+// runner), the naming convention, who may hold what, and the
+// revocation/audit discipline. Composed onto the CPA's prompt (the only
+// grant-capable identity) until the skill-schema work ships proper
+// skill-serving; the file stays the canonical text.
+//
+//go:embed freehold/skills/granting.md
+var grantingSkill string
+
 // orientationTmplSrc is the shared system-orientation block (repo knowledge,
 // read-on-boot + periodic re-check, the be-loud escalation discipline) prepended
 // to every non-custom prompt: the CPA and the four departments. Custom agents
@@ -69,9 +79,11 @@ func renderOrientation(repoURL string) string {
 }
 
 // CPASystemPrompt is the freehold named agent's full purpose: the shared system
-// orientation plus freehold/prompt.md. repoURL empty = the upstream default.
+// orientation plus freehold/prompt.md, plus the granting skill. repoURL empty
+// = the upstream default.
 func CPASystemPrompt(repoURL string) string {
-	return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(cpaPrompt, "\n")
+	return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(cpaPrompt, "\n") +
+		"\n\n" + strings.TrimRight(grantingSkill, "\n")
 }
 
 // Department prompts: the four departments the CPA delegates to (see AGENTS.md

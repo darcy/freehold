@@ -485,15 +485,20 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     pod on the same harness as the CPA, created through the same audited
     `create_agent`. Each joins the private `#freehold` plus its own **private**
     `#freehold-<department>` channel, and the CPA is added to every channel. Each
-    department also gets a **dedicated capability runner** (`stageDepartmentRunners`):
-    a `root@<host>` SSH runner owned by that identity, in its own private NIP-29
-    channel/audit stream, bound LAN-reachable with the relay roster. The pod
-    receives the runner's coords (`FREEHOLD_RUNNER_*`) and its bridge advertises a
-    scoped `exec`/`list` signing as the agent's own nsec — so the department's
-    capability grant attaches to the department identity, and the CPA/custom
-    agents (with no coords) never see exec. Data's runner is the first (PVE root,
-    for backup-placement verification); the other departments' tooling is
-    provisioned lazily as their capability is configured. Status language is
+    department also holds **capability runners** (`stageDepartmentRunners`):
+    one runner per capability its role needs — named
+    `<target>-<protocol>-<identity>` (`pve-ssh-root` shared by
+    network+compute+data, `kube-api-root`/`kube-api-caddysa`/`kube-api-litellmsa`
+    SA-token kube doors, `litellm-api-admin`, `cloudflare-api-<zone>`,
+    `dnsmasq-local-root`) — each in its own private NIP-29 channel/audit
+    stream, bound LAN-reachable with the relay roster. The pod receives the
+    runners' coords (`FREEHOLD_RUNNER_*`) and its bridge advertises a scoped
+    `exec`/`list` that routes by target to the pinned runner+credential,
+    signing as the agent's own nsec — so the department's capability grants
+    attach to the department identity, and the CPA/custom agents (with no
+    coords) never see exec. A capability a department doesn't hold yet ships
+    as its runner when the capability lands — never by widening a runner's
+    package. Status language is
     uniform, runner → service → department: 🟢 all checked / 🟡 some checks
     missing / 🔴 none.
 

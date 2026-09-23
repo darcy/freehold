@@ -121,11 +121,12 @@ type Spec struct {
 	// its own state dir).
 	AgentIdentityDir string
 
-	// DepartmentRunners maps a department name → the capability runner its pod
-	// may exec through, populated by stageDepartmentRunners each build. Read by
-	// BuildCreateAgentFn to wire the pod's FREEHOLD_RUNNER_* env, and by the
-	// agent reconcile to grant the department's pubkey onto that runner.
-	DepartmentRunners map[string]agent.RunnerCoords
+	// DepartmentRunners maps a department name → the capability runners its
+	// pod may exec through (one per capability its role holds — the grant
+	// unit is the runner), populated by stageDepartmentRunners each build.
+	// Read by BuildCreateAgentFn to wire the pod's FREEHOLD_RUNNER_* env, and
+	// by the agent reconcile to grant the department's pubkey onto each.
+	DepartmentRunners map[string][]agent.RunnerCoords
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -1861,12 +1862,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
-			// A department with a capability runner gets its FREEHOLD_RUNNER_* env
+			// A department with capability runners gets their FREEHOLD_RUNNER_* env
 			// (the CPA and custom agents get none, so their bridge has no exec).
-			var runner []agent.RunnerCoords
-			if rc, ok := spec.DepartmentRunners[name]; ok {
-				runner = append(runner, rc)
-			}
+			runner := spec.DepartmentRunners[name]
 			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience, runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {

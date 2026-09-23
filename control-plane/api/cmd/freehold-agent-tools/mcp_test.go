@@ -181,7 +181,7 @@ func TestBridgeByDefault(t *testing.T) {
 // parser accepts the response (it rejects a reply lacking jsonrpc with a
 // -32700 parse error).
 func TestMergeToolsListPreservesEnvelope(t *testing.T) {
-	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, false))
+	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, false, nil))
 	var m map[string]interface{}
 	if err := json.Unmarshal(merged, &m); err != nil {
 		t.Fatalf("merged tools/list is not valid JSON: %v\n%s", err, merged)
@@ -219,7 +219,7 @@ func TestMergeToolsListPreservesEnvelope(t *testing.T) {
 // (the harness matches replies by id).
 func TestRunnerCallRequestPinsTargetAndID(t *testing.T) {
 	raw := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"exec","arguments":{"cmd":"id","target":"evil","secrets":["steal"]}}}`)
-	out, err := runnerCallRequest(raw, "data-pve", "data-pve")
+	out, err := runnerCallRequest(raw, &runnerCoords{url: "http://r", pub: "pk", target: "data-pve", secret: "data-pve"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,9 +248,10 @@ func TestRunnerCallRequestPinsTargetAndID(t *testing.T) {
 	if req.Params.Arguments.Cmd != "id" {
 		t.Fatalf("cmd mangled: %q", req.Params.Arguments.Cmd)
 	}
-	// list carries no target/secrets but still preserves the id.
-	lraw := []byte(`{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{"name":"list","arguments":{}}}`)
-	lout, err := runnerCallRequest(lraw, "data-pve", "data-pve")
+	// list is answered LOCALLY from the pod's config (the routing table), so
+	// only exec is rewritten per runner — and the id is still preserved.
+	lraw := []byte(`{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{"name":"exec","arguments":{"cmd":"uptime"}}}`)
+	lout, err := runnerCallRequest(lraw, &runnerCoords{url: "http://r", pub: "pk", target: "data-pve", secret: "data-pve"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +270,7 @@ func TestRunnerCallRequestPinsTargetAndID(t *testing.T) {
 // ONLY when the pod carries capability-runner coords, so a runnerless pod (the
 // CPA and every custom agent) can never call the runner.
 func TestMergeToolsListRunnerGated(t *testing.T) {
-	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, true))
+	merged := []byte(mergeToolsList(`{"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"buzz_send"}]}}`, true, []string{"data-pve"}))
 	var m map[string]interface{}
 	if err := json.Unmarshal(merged, &m); err != nil {
 		t.Fatalf("merged tools/list is not valid JSON: %v", err)
@@ -285,5 +286,88 @@ func TestMergeToolsListRunnerGated(t *testing.T) {
 		if !nameSet[want] {
 			t.Fatalf("runner pod tools/list missing %q:\n%s", want, merged)
 		}
+	}
+}
+
+// TestParseRunnerLists pins the aligned comma-list config: each column maps
+// 1:1 per runner, and a missing secrets column defaults each secret to its
+// target name (the provision convention).
+func TestParseRunnerLists(t *testing.T) {
+	runners := parseRunnerLists(
+		"http://a:8791,http://b:8792",
+		"pka,pkb",
+		"pve-ssh-root,kube-api-caddysa",
+		"", // secrets unset -> default to target names
+	)
+	if len(runners) != 2 {
+		t.Fatalf("want 2 runners, got %d", len(runners))
+	}
+	if runners[0].url != "http://a:8791" || runners[0].pub != "pka" || runners[0].target != "pve-ssh-root" || runners[0].secret != "pve-ssh-root" {
+		t.Fatalf("runner 0 mangled: %+v", runners[0])
+	}
+	if runners[1].secret != "kube-api-caddysa" {
+		t.Fatalf("runner 1 secret should default to the target name: %+v", runners[1])
+	}
+}
+
+// TestConfFileSequentialFill pins the conf-file fill order (the pod bootstrap
+// writes runner_urls BEFORE the other columns): a url-only seed survives the
+// column fills with its URL intact — the regression where URLs were dropped
+// and every exec posted to "/mcp".
+func TestConfFileSequentialFill(t *testing.T) {
+	runners := parseRunnerLists("http://a:8791,http://b:8792", "", "", "")
+	if len(runners) != 2 || runners[0].url != "http://a:8791" {
+		t.Fatalf("url-only seed dropped: %+v", runners)
+	}
+	runners = fillRunnersFrom(runners, []string{"pka", "pkb"}, nil, nil)
+	runners = fillRunnersFrom(runners, nil, []string{"pve-ssh-root", "kube-api-caddysa"}, nil)
+	runners = fillRunnersFrom(runners, nil, nil, nil)
+	for i, want := range []struct{ url, pub, target, secret string }{
+		{"http://a:8791", "pka", "pve-ssh-root", "pve-ssh-root"},
+		{"http://b:8792", "pkb", "kube-api-caddysa", "kube-api-caddysa"},
+	} {
+		if runners[i].url != want.url || runners[i].pub != want.pub || runners[i].target != want.target || runners[i].secret != want.secret {
+			t.Fatalf("runner %d mangled: %+v (want %+v)", i, runners[i], want)
+		}
+	}
+}
+
+// TestRouteRunnerFailClosed pins the containment boundary: an exec names a
+// target the pod holds or it is refused; a multi-runner pod with no target
+// named is refused (never a silent default), and a single-runner pod pins.
+func TestRouteRunnerFailClosed(t *testing.T) {
+	b := &mcpBridge{runners: []runnerCoords{
+		{url: "http://a", pub: "pka", target: "pve-ssh-root", secret: "pve-ssh-root"},
+		{url: "http://b", pub: "pkb", target: "kube-api-caddysa", secret: "kube-api-caddysa"},
+	}}
+	b.byTarget = map[string]*runnerCoords{"pve-ssh-root": &b.runners[0], "kube-api-caddysa": &b.runners[1]}
+
+	if _, err := b.routeRunner(&struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}{Arguments: map[string]interface{}{"target": "kube-api-root"}}); err == nil {
+		t.Fatal("an unlisted target must be refused")
+	}
+	if _, err := b.routeRunner(&struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}{Arguments: map[string]interface{}{}}); err == nil {
+		t.Fatal("a multi-runner pod must refuse a target-less exec")
+	}
+	rc, err := b.routeRunner(&struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}{Arguments: map[string]interface{}{"target": "kube-api-caddysa"}})
+	if err != nil || rc.target != "kube-api-caddysa" {
+		t.Fatalf("routed to %v (err %v)", rc, err)
+	}
+
+	single := &mcpBridge{runners: []runnerCoords{{url: "http://a", pub: "pk", target: "pve-ssh-root", secret: "pve-ssh-root"}}}
+	rc, err = single.routeRunner(&struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}{Arguments: map[string]interface{}{}})
+	if err != nil || rc.target != "pve-ssh-root" {
+		t.Fatalf("single-runner pod must pin its one target: %v (err %v)", rc, err)
 	}
 }

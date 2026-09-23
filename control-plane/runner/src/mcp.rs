@@ -531,10 +531,34 @@ async fn api_status(
              \"${{{url_env}}}/health/liveliness\" -H \
              \"Authorization: Bearer ${{{cred}}}\""
         ),
+        // kube API doors: a SelfSubjectReview POST — 201 proves BOTH that the
+        // API is reachable AND that the door's token is still valid (a k3s
+        // CA rotation invalidates it; -k because the CA is not trusted
+        // CP-side).
+        "kubernetes" => format!(
+            "curl -skS -o /dev/null -w '%{{http_code}}' -X POST \
+             \"${{{url_env}}}/apis/authentication.k8s.io/v1/selfsubjectreviews\" -H \
+             \"Authorization: Bearer ${{{cred}}}\" -H 'Content-Type: application/json' \
+             -d '{{\"apiVersion\":\"authentication.k8s.io/v1\",\"kind\":\"SelfSubjectReview\"}}'"
+        ),
+        // token-verify endpoint: 200 = the credential itself is still valid.
+        "cloudflare" => format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' \
+             \"${{{url_env}}}/user/tokens/verify\" -H \
+             \"Authorization: Bearer ${{{cred}}}\""
+        ),
+        // a local door IS the runner's own host — alive iff this runner is.
+        "local" => return Ok("green".into()),
         k => return Ok(format!("red(unsupported api kind {k})")),
     };
+    // kubernetes answers a SelfSubjectReview with 201; every other probe 200s.
+    let want = if meta.kind == "kubernetes" {
+        "201"
+    } else {
+        "200"
+    };
     match state.exec.probe_env(&cmd, &envs).await {
-        Ok(r) if r.stdout.trim() == "200" => Ok("green".into()),
+        Ok(r) if r.stdout.trim() == want => Ok("green".into()),
         Ok(r) => Ok(format!("yellow(probe {})", r.stdout.trim())),
         Err(e) => Ok(format!("red({e})")),
     }
