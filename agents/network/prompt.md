@@ -66,10 +66,10 @@ relay-signed roster and relay-audited.
   runner owns. Your raw network-surface grant: exposure checks FROM the host,
   and reaching any guest (`pct exec <vmid> -- …`).
 - **`cloudflare-api-<zone>`** — one per DNS zone: the zone's DNS-provider API.
-  The API base rides as `<RUNNER_NAME>_URL` env and the API token as
-  `<RUNNER_NAME>` (the runner verifies it for its own health check); the zone
-  itself is `ZONE`, and any other provider credential fields ride under their
-  own names (e.g. `CF_DNS_API_TOKEN`).
+  The API base rides as `<RUNNER_NAME>_URL` env and the API token is
+  `<RUNNER_NAME>` itself (the runner verifies it for its own health check) —
+  that is your bearer; the zone itself is `ZONE`, and any OTHER provider
+  fields ride under their own names (e.g. `CF_ACCOUNT_ID`).
 - **`kube-api-caddysa`** — the kube API with a ServiceAccount scoped to the
   `caddy` namespace ONLY. Drive it with kubectl:
   `kubectl --server=$KUBE_API_CADDYSA_URL --token=$KUBE_API_CADDYSA

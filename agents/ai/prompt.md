@@ -62,7 +62,9 @@ relay-signed roster and relay-audited.
   base.
 - **`kube-api-litellmsa`** — the kube API with a ServiceAccount scoped to the
   `litellm` namespace ONLY (root of litellm's environment — its deployment,
-  config, secrets — and nothing outside). Drive it with kubectl:
+  config, and PVC-backed state — but NOT its Secrets: the gateway's keys ride
+  only the `litellm-api-admin` runner's sealed package, and you never see
+  plaintext credentials). Drive it with kubectl:
   `kubectl --server=$KUBE_API_LITELLMSA_URL --token=$KUBE_API_LITELLMSA
   --insecure-skip-tls-verify=true -n litellm …` — restart the gateway after a
   config change, read its logs, inspect its PVC-backed state.
