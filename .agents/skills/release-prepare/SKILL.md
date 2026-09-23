@@ -2,7 +2,7 @@
 name: release-prepare
 description: Use when cutting a versioned pre-release for freehold (e.g. "cut v0.8.0", "ship a release", "cut an rc"). Generates the release notes from git history since the previous release, gets the operator's approval, tags the main commit, and publishes a GitHub pre-release (marked prerelease) with the built assets, short high-level notes, and a test-status table. release-test-proxmox fills the table; release-publish promotes it when every row passes.
 metadata:
-  version: 5.0.0
+  version: 5.1.0
   author: freehold
   license: MIT
 ---
@@ -99,14 +99,20 @@ history. Promotion of an already-cut pre-release is `release-publish`, not this.
    and every asset (`freehold`, `freehold-console`, `runner`, `freehold-agent-tools`,
    `migrations.tar.gz`, `checksums.txt`) is present.
 
-   The notes file ends with the table, seeded as unverified:
+   The notes file ends with the table, seeded as unverified — one row per provider × env ×
+   test (the envs `release-test-proxmox` runs):
    ```markdown
    ## Test status
 
-   | Provider | Test | Status |
-   | --- | --- | --- |
-   | Proxmox | Install/Uninstall | ⚪ Unverified |
-   | Proxmox | Rebuild/Teardown | ⚪ Unverified |
+   | Provider | Env | Test | Status |
+   | --- | --- | --- | --- |
+   | Proxmox | fresh.freehold.technology | Fresh - Install | ⚪ Unverified |
+   | Proxmox | fresh.freehold.technology | Fresh - Teardown | ⚪ Unverified |
+   | Proxmox | fresh.freehold.technology | Fresh - Build | ⚪ Unverified |
+   | Proxmox | fresh.freehold.technology | Fresh - Uninstall | ⚪ Unverified |
+   | Proxmox | rebuild.freehold.technology | Rebuild - Teardown | ⚪ Unverified |
+   | Proxmox | rebuild.freehold.technology | Rebuild - Build | ⚪ Unverified |
+   | Proxmox | live | Live - Update | ⚪ Unverified |
 
    Legend: ⚪ Unverified · ✅ Passed · ❌ Failed — `release-test-proxmox` updates this
    table; `release-publish` requires every row ✅.

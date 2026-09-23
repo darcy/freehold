@@ -17,3 +17,5 @@ control-plane/freehold-agent-tools
 # node deps for the ai-pr-review workflow
 node_modules/
 roadmap/CP_DRIVEN_BUILD.md
+# release-test secrets (DNS token, provider keys, operator npub) — local only
+.env.test
