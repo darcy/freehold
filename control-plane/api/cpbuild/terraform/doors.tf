@@ -13,7 +13,7 @@
 # ---- Network: the caddy namespace (ConfigMap edits + pod restart) ----------
 
 resource "kubernetes_manifest" "caddy_door_sa" {
-  depends_on = [null_resource.k3s_bringup]
+  depends_on = [kubernetes_manifest.caddy_namespace]
   manifest = {
     apiVersion = "v1"
     kind       = "ServiceAccount"
@@ -22,7 +22,7 @@ resource "kubernetes_manifest" "caddy_door_sa" {
 }
 
 resource "kubernetes_manifest" "caddy_door_role" {
-  depends_on = [kubernetes_manifest.caddy_door_sa]
+  depends_on = [kubernetes_manifest.caddy_namespace, kubernetes_manifest.caddy_door_sa]
   manifest = {
     apiVersion = "rbac.authorization.k8s.io/v1"
     kind       = "Role"
@@ -49,7 +49,7 @@ resource "kubernetes_manifest" "caddy_door_role" {
 }
 
 resource "kubernetes_manifest" "caddy_door_binding" {
-  depends_on = [kubernetes_manifest.caddy_door_role]
+  depends_on = [kubernetes_manifest.caddy_namespace, kubernetes_manifest.caddy_door_role]
   manifest = {
     apiVersion = "rbac.authorization.k8s.io/v1"
     kind       = "RoleBinding"
@@ -68,7 +68,7 @@ resource "kubernetes_manifest" "caddy_door_binding" {
 }
 
 resource "kubernetes_manifest" "caddy_door_token" {
-  depends_on = [kubernetes_manifest.caddy_door_sa]
+  depends_on = [kubernetes_manifest.caddy_namespace, kubernetes_manifest.caddy_door_sa]
   manifest = {
     apiVersion = "v1"
     kind       = "Secret"
@@ -84,7 +84,7 @@ resource "kubernetes_manifest" "caddy_door_token" {
 # ---- AI: the litellm namespace (root of litellm's environment) -------------
 
 resource "kubernetes_manifest" "litellm_door_sa" {
-  depends_on = [null_resource.k3s_bringup]
+  depends_on = [kubernetes_manifest.litellm_namespace]
   manifest = {
     apiVersion = "v1"
     kind       = "ServiceAccount"
@@ -93,7 +93,7 @@ resource "kubernetes_manifest" "litellm_door_sa" {
 }
 
 resource "kubernetes_manifest" "litellm_door_role" {
-  depends_on = [kubernetes_manifest.litellm_door_sa]
+  depends_on = [kubernetes_manifest.litellm_namespace, kubernetes_manifest.litellm_door_sa]
   manifest = {
     apiVersion = "rbac.authorization.k8s.io/v1"
     kind       = "Role"
@@ -114,7 +114,7 @@ resource "kubernetes_manifest" "litellm_door_role" {
 }
 
 resource "kubernetes_manifest" "litellm_door_binding" {
-  depends_on = [kubernetes_manifest.litellm_door_role]
+  depends_on = [kubernetes_manifest.litellm_namespace, kubernetes_manifest.litellm_door_role]
   manifest = {
     apiVersion = "rbac.authorization.k8s.io/v1"
     kind       = "RoleBinding"
@@ -133,7 +133,7 @@ resource "kubernetes_manifest" "litellm_door_binding" {
 }
 
 resource "kubernetes_manifest" "litellm_door_token" {
-  depends_on = [kubernetes_manifest.litellm_door_sa]
+  depends_on = [kubernetes_manifest.litellm_namespace, kubernetes_manifest.litellm_door_sa]
   manifest = {
     apiVersion = "v1"
     kind       = "Secret"
