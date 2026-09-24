@@ -229,6 +229,21 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 ### Update-path notes (live test)
 
+- **A re-install over a leftover durable plane records the WRONG runner pubkey.** When
+  `install` says "reconnecting to your previous freehold data", the box-side runner package
+  is minted FRESH while the CP adopts the plane's OLD co-located runner — the profile's
+  `[runner] pubkey` (what the world-config carries as the signing audience) then names a
+  runner that no longer exists, and every world-build exec dies with
+  `unauthorized: signature does not verify`. Fix: compare the profile config's `[runner]`
+  pubkey against the CP guest's `state.json` runner record (`pct exec <cp-vmid> -- …`) —
+  when they differ, the world is half-old/half-new; `uninstall --remove-data` (local runner
+  required) and re-install on the clean plane. Don't hand-patch the pubkey — the rest of
+  the plane's state is the old world's too.
+- **The door SAs raced the namespaces on the first services apply (fixed on main after
+  v0.7.3):** the first build's services apply can 500 with
+  `NotFound namespaces [caddy]`; the namespaces then exist, so a plain `build` retry
+  passes. A released candidate whose assets predate the fix still tests fine with the
+  retry, but a RE-CUT carries the fix.
 - **`update --rc` only matches `vX.Y.Z-rc.N` tags** — a plain `vX.Y.Z` pre-release is
   UNREACHABLE by the update verb (the rc channel's regex rejects it). For a live env to
   track a candidate, the candidate needs an rc tag (`vX.Y.Z-rc.N`) on the same commit; CI
