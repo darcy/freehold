@@ -1210,7 +1210,13 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 					cpUpstream = fmt.Sprintf("%s:8080", spec.CpIP)
 					cpMcpUpstream = fmt.Sprintf("%s:8089", spec.CpIP)
 				}
-				caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
+				// pairUpstream: the pair-relay pod binds 5000 on the k3s node
+				// itself (hostNetwork, same node as the caddy edge).
+				pairUpstream := ""
+				if spec.ProxyIP != "" {
+					pairUpstream = fmt.Sprintf("%s:5000", spec.ProxyIP)
+				}
+				caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, pairUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
 				extra = append(extra, "-var",
 					"caddyfile_b64="+base64.StdEncoding.EncodeToString([]byte(caddyfile)))
 			}

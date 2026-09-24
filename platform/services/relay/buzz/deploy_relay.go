@@ -62,7 +62,11 @@ func isHexPubkey(s string) bool {
 	return true
 }
 
-// InstallCmd reproduces the upstream bundle install command.
+// InstallCmd reproduces the upstream bundle install command. Domain-anchored
+// deploys also advertise the NIP-AB device-pairing sidecar
+// (BUZZ_PAIRING_RELAY_URL — the relay publishes it in NIP-11 so Buzz clients
+// pair through the edge's /pair route; the sidecar itself is a k3s pod
+// deployed by the terraform services phase, not part of this compose stack).
 func InstallCmd(spec *RelayDeploySpec) string {
 	dir := spec.DeployDir
 	owner := spec.OwnerPubkey
@@ -73,6 +77,15 @@ func InstallCmd(spec *RelayDeploySpec) string {
 	} else {
 		host = strings.TrimPrefix(strings.TrimPrefix(spec.RelayURL, "http://"), "https://")
 		host = strings.TrimSuffix(host, "/")
+	}
+	pairEnv := ""
+	if spec.Domain != nil {
+		pairURL := "wss://" + *spec.Domain + "/pair"
+		pairEnv = fmt.Sprintf(
+			"(grep -q \"^BUZZ_PAIRING_RELAY_URL=\" .env && "+
+				"sed -i \"s|^BUZZ_PAIRING_RELAY_URL=.*|BUZZ_PAIRING_RELAY_URL=%s|\" .env || "+
+				"echo \"BUZZ_PAIRING_RELAY_URL=%s\" >> .env) && ",
+			pairURL, pairURL)
 	}
 	rwsScheme := "ws"
 	if spec.Domain != nil || strings.HasPrefix(strings.TrimSpace(spec.RelayURL), "https://") {
@@ -105,6 +118,7 @@ func InstallCmd(spec *RelayDeploySpec) string {
 			"(grep -q \"^BUZZ_MEDIA_SERVER_DOMAIN=\" .env && "+
 			"sed -i \"s|^BUZZ_MEDIA_SERVER_DOMAIN=.*|BUZZ_MEDIA_SERVER_DOMAIN=%s|\" .env || "+
 			"echo \"BUZZ_MEDIA_SERVER_DOMAIN=%s\" >> .env) && "+
+			pairEnv+
 			"for k in BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET POSTGRES_PASSWORD "+
 			"REDIS_PASSWORD BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY; do "+
 			"if grep -q \"^$k=CHANGE_ME\" .env; then "+

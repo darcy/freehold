@@ -28,6 +28,18 @@ there; if it is work not yet done, it belongs here.
 - **Fresh-box vmid allocation.** The LXC create path still lives in Go + exec script
   (terraform adopts via `null_resource`), so allocating a vmid for a genuinely fresh box
   is still a follow-up.
+- **Infra migrations — one-time transforms beyond the CP, executed through the runner.**
+  The CP's `<epoch>.sh` queue runs on the CP guest and reaches the relay only over its
+  HTTP API, so it cannot patch guest filesystems/docker (that class of repair is a
+  *desired-state true-up* and belongs in the re-running deploy paths — e.g. the relay
+  deploy re-applies its compose patches on every build). When a genuine ONE-TIME infra
+  transform is first needed (data migration between volumes, recorded-state rewrite on a
+  guest), ship it as a bash script in `migrations/` (data, not binary — the property that
+  matters) executed by the CP's world build **through the co-located runner** (`mc.Exec`,
+  the same transport `deploy_relay.go` uses): a small build stage runs pending scripts
+  against a named target before the services phase, markers on the CP durable plane.
+  Runner calls re-read the relay-signed roster per call and fail closed on relay outage,
+  so relay-down repair stays on the box-side transient path.
 
 ## CPA / agents
 
