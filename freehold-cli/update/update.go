@@ -21,6 +21,7 @@ import (
 	"freehold/freehold-cli/internal/artifact"
 	"freehold/freehold-cli/internal/common"
 	"freehold/freehold-cli/internal/stages"
+	oplogin "freehold/freehold-cli/login"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 )
@@ -142,6 +143,15 @@ func run(ctx context.Context, o options) error {
 		return fmt.Errorf("migrations failed (version NOT promoted; re-run `freehold update` to retry): %w", err)
 	}
 
+	// Reconcile: the deploy stopped EVERY freehold-runner* unit on the CP guest
+	// (the binary ship needs the inode free) and restarted only the co-located
+	// runner — the capability doors re-stage + the pods re-assert through the
+	// world-build, so the update converges instead of leaving dead doors.
+	fmt.Println("→ reconciling the world (capability doors re-stage)")
+	if err := reconcileWorld(cfg); err != nil {
+		return fmt.Errorf("world reconcile failed (the deploy + migrations landed; run `freehold build` to finish): %w", err)
+	}
+
 	fmt.Println("→ pinning version")
 	if err := eng.StampVersionPin(version.Pin{Version: set.Version, Channel: set.Channel, Commit: set.Commit}); err != nil {
 		return err
@@ -251,6 +261,37 @@ func runMigrations(cfg *config.Config) error {
 		return err
 	}
 	if t := strings.TrimSpace(text); t != "" {
+		fmt.Println(t)
+	}
+	return nil
+}
+
+// reconcileWorld triggers the console's /api/world-build (the same trigger
+// `freehold build` uses): the CP re-runs its build stages through its
+// co-located runner — the capability doors re-stage, grants re-assert, the
+// agent pods re-apply.
+func reconcileWorld(cfg *config.Config) error {
+	secStr, err := oplogin.SecretHex()
+	if err != nil {
+		return fmt.Errorf("no operator identity: %v", err)
+	}
+	key, err := oplogin.NsecToSecret(secStr)
+	if err != nil {
+		return err
+	}
+	loginURL := cfg.CPURL
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		loginURL = "http://" + ip + ":8080"
+	}
+	c, err := oplogin.Login(loginURL, key)
+	if err != nil {
+		return fmt.Errorf("console login at %s: %v", loginURL, err)
+	}
+	res, err := c.WorldBuild()
+	if err != nil {
+		return fmt.Errorf("world_build (console /api/world-build): %v", err)
+	}
+	if t := strings.TrimSpace(res.Report); t != "" {
 		fmt.Println(t)
 	}
 	return nil
