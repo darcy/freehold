@@ -33,10 +33,18 @@ operator whether there's an API and what account it needs).
   switch; `freehold-console grants-mode`). The server cannot see Buzz threads,
   so the in-thread/DM discipline is the granting skill's to enforce — the same
   trust class as `create_agent`.
-- **Credentials:** ssh doors mint their OWN keypair — the operator installs
-  the returned public key on the target once (the operator's password or
-  private key never enters any context); api-class doors (unifi) seal the
-  operator-supplied credential on arrival. Plaintext never persists.
+- **Credentials:** every door is filled WITHOUT any agent ever seeing the
+  credential. ssh doors mint their OWN keypair — the operator installs the
+  returned public key on the target once. api-class doors ship EMPTY (a
+  "pending" placeholder seals): the provisioning agent DMs the operator the
+  door's own console URL (`/runner/<name>`), the operator fills the
+  credential in the console web UI (kind-aware form — a unifi door takes
+  username + password and the console composes the JSON login body), the
+  console seals it to the door's key and RESTARTS the unit (a capability
+  door picks a rotated credential up only on restart), and the requesting
+  agent verifies by exec-probe. A direct-credential mode (the operator hands
+  the credential to an agent for freehold to seal) is a named future
+  `agent_grants` option — not built; chat is never the credential path.
 - **Pod pickup.** After granting, the grantees' pods are re-applied with the
   new `FREEHOLD_RUNNER_*` coords resolved from state (static + per-zone DNS +
   dynamic) — the exec surface carries the new target without a full build.
@@ -51,9 +59,14 @@ operator whether there's an API and what account it needs).
 - The `unifi` kind: an api-class door whose exec runs locally with the
   credential + base URL injected as env; the runner's self-check probe posts
   the JSON login body to the controller's `/api/auth/login`.
+- The console's per-door pages (`/runner/<name>`): the deep link opens that
+  door's fill form (login preserves the path), the form is kind-aware
+  (unifi: username + password → the JSON login body), and a successful fill
+  restarts the door's unit so the door goes live without any agent hop.
 - The prompts: the granting skill carries the grant-giving flow (confirm
-  discipline, interview checklist, only-own-runners); the AI and Network
-  department prompts carry the request-a-capability protocol.
+  discipline, interview checklist, only-own-runners, the credential-never-
+  in-chat rule, honest 🟢 reporting); the AI and Network department prompts
+  carry the request-a-capability protocol.
 - `freehold-console grants-mode` to read/flip the knob.
 
 ## Acceptance
@@ -71,6 +84,15 @@ operator whether there's an API and what account it needs).
 *   [x] The unifi probe arm is unit-tested (posts the login body; unknown
     kinds report red, never silently green).
 
-*   [ ] Live-world leg (on the release's test run): the CPA provisions an ssh
-    door for AI onto a real box on the network and the AI agent execs through
-    it; the same for Network against a UniFi controller.
+*   [x] An api door provisions EMPTY (a "pending" placeholder seals; the
+    report carries the door page link); a secret-less re-provision never
+    re-seals (the operator's filled credential survives the restart); a
+    with-secret re-provision rotates.
+
+*   [x] The console's rotate restarts a recorded capability door's unit
+    (hermetic hook test); non-capability runners don't restart.
+
+*   [ ] Live-world leg (on the release's test run): the CPA provisions an
+    empty ssh door for AI onto a real box and an empty unifi door for
+    Network; the operator fills both via the door pages; the agents verify
+    by exec.

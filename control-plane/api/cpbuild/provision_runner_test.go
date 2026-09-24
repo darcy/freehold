@@ -1,14 +1,18 @@
 package cpbuild
 
 import (
+	"encoding/hex"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"freehold/contract/crypto"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
-	"freehold/contract/wire"
 )
 
 func openTestStore(t *testing.T) *state.StateStore {
@@ -36,7 +40,6 @@ func TestProvisionRunnerValidation(t *testing.T) {
 		{"missing kind", args("rtx-ssh-root", "", "a@h", "", "ai"), "kind"},
 		{"unknown kind", args("rtx-ssh-root", "smtp", "a@h", "", "ai"), "unsupported kind"},
 		{"ssh with inline secret", args("rtx-ssh-root", "ssh", "a@h", "hunter2", "ai"), "mint their own keypair"},
-		{"api kind without credential", args("unifi-api-admin", "unifi", "https://u", "", "ai"), "operator-supplied credential"},
 		{"no grantee", args("rtx-ssh-root", "ssh", "a@h", ""), "grant_to is required"},
 		{"grants to the CPA", args("rtx-ssh-root", "ssh", "a@h", "", "freehold"), "the CPA holds no exec"},
 	} {
@@ -85,6 +88,124 @@ func TestProvisionRunnerNeverTouchesBuildTimeRunners(t *testing.T) {
 	if _, err := fn2(args("ops-unifi", "unifi", "https://unifi.local", "key", "ai")); err == nil ||
 		!strings.Contains(err.Error(), "not provisioned by an agent") {
 		t.Fatalf("operator-provisioned runner must be refused, got %v", err)
+	}
+}
+
+// TestProvisionRunnerEmptyDoor pins the empty-shell-door flow: an api-kind
+// door provisions with NO secret (a "pending" placeholder seals) — the
+// credential is filled via the console web UI, never any agent's chat. The
+// seal lands before the staging tail (which fails hermetically at the relay
+// sync); the report's door link is pinned in TestDoorLink.
+func TestProvisionRunnerEmptyDoor(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold",
+		CpIP: "10.0.0.9", CpHost: "cp.example.com",
+	}
+	fn := BuildProvisionRunner(spec, nil)
+	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "", "ai"))
+	// The placeholder sealed (the disk is the truth).
+	st, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := st.GetSecret("unifi-api-admin")
+	if !ok || rec.CiphertextHex == "" {
+		t.Fatal("the empty door must seal its placeholder")
+	}
+	pkg, err := wire.Load(runnerPackageDir(cpState, "unifi-api-admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := hex.DecodeString(pkg.Secrets["unifi-api-admin"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The placeholder round-trips through the door's own key (aad = the name).
+	idRaw, err := os.ReadFile(filepath.Join(runnerPackageDir(cpState, "unifi-api-admin"), "identity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		t.Fatal(err)
+	}
+	encKey, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := crypto.Open(encKey, []byte("unifi-api-admin"), blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plain) != "pending" {
+		t.Fatalf("the empty door's placeholder = %q, want pending", plain)
+	}
+}
+
+// TestDoorLink pins the per-door console URL: public https when the CP host
+// is known, LAN IP:8080 otherwise.
+func TestDoorLink(t *testing.T) {
+	if got := doorLink(&Spec{CpHost: "cp.example.com", CpIP: "10.0.0.9"}, "unifi-api-admin"); got != "https://cp.example.com/runner/unifi-api-admin" {
+		t.Fatalf("doorLink = %q", got)
+	}
+	if got := doorLink(&Spec{CpIP: "10.0.0.9"}, "unifi-api-admin"); got != "http://10.0.0.9:8080/runner/unifi-api-admin" {
+		t.Fatalf("doorLink (no host) = %q", got)
+	}
+}
+
+// TestProvisionRunnerSecretlessAdoptKeepsFilled pins the restart-only
+// semantics: a secret-less re-provision (the "finish/verify" call) must NOT
+// re-seal — the operator's filled credential survives the door's restart.
+func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
+		Name: "unifi-api-admin", Kind: "unifi", Address: "https://unifi.local",
+		Secret: []byte("old-cred"), RunnerDir: runnerPackageDir(cpState, "unifi-api-admin"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("unifi-api-admin", state.CapabilityRecord{
+		Kind: "unifi", Address: "https://unifi.local", Port: 8800, Rosters: []string{"ai"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The operator fills the door via the console (rotate).
+	if _, err := provisioner.RotateSecret(store, "unifi-api-admin", []byte("filled-by-operator")); err != nil {
+		t.Fatal(err)
+	}
+	filled, _ := store.GetSecret("unifi-api-admin")
+
+	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
+	fn := BuildProvisionRunner(spec, nil)
+	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "", "ai"))
+	// The flow writes through its own store handle; re-open (the disk is the
+	// truth) before asserting.
+	disk, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := disk.GetSecret("unifi-api-admin")
+	if after.CiphertextHex != filled.CiphertextHex {
+		t.Fatal("a secret-less re-provision must keep the operator's filled credential")
+	}
+	// ...and a WITH-secret re-provision still rotates (the round-1 contract).
+	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "rotated-cred", "ai"))
+	disk2, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, _ := disk2.GetSecret("unifi-api-admin")
+	if rotated.CiphertextHex == filled.CiphertextHex {
+		t.Fatal("a with-secret re-provision must re-seal")
 	}
 }
 

@@ -256,7 +256,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     the console's own identity from its state dir (0600 durable plane) and
     publishes the kind-9000 put-user to the runner's channel in-process — the
     runner re-reads its signed 39002 roster per call, so the grant lands
-     without a restart (missing credential fails closed; agents are denied with
+      without a restart (missing credential fails closed; agents are denied with
       `-32003`, since a grant hands direct exec access to the runner). The
       ONE carve-out is the CPA's `provision_runner` (grants on the fly): it
       stages a NEW capability runner — keypair + sealed credential + private
@@ -267,7 +267,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
       widens an existing runner, `agent_grants: off` on the CP state is the
       server-side kill switch (`freehold-console grants-mode`), and the
       in-thread-vs-DM confirmation discipline lives in the granting skill
-      (`docs/POC_GRANTS.md`). The
+      (`docs/POC_GRANTS.md`). An api-kind door provisions EMPTY — the agent
+      DMs the operator the door's own console page (`/runner/<name>`), whose
+      kind-aware fill form seals the credential via `/api/rotate` and
+      restarts the door's unit; no credential ever transits agent chat. The
      `platform/migrations` queue — the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
      semantics — runs from two entry points: the `world_migrate` tool and the

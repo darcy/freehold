@@ -92,13 +92,12 @@ of questions up front:
   it is in. Until then say the door is waiting, not that it works.
 - For a service API (e.g. UniFi): figure out WITH the operator what the
   surface is — does it have an API (its URL, and an account with the right
-  role), or does it need an account created first? The credential the operator
-  supplies is sealed to the runner's key on arrival and referenced by env name
-  afterwards. Restate it back once, briefly, then move on — do not echo
-  credentials into summaries. For a username/password API, the sealed secret
-  is the JSON login body the door's calls and self-check both use — for unifi,
-  `{"username":"…","password":"…"}` against the controller's
-  `/api/auth/login`.
+  role), or does it need an account created first? **Never take the
+  credential in chat** — provision the door EMPTY (omit the secret) and DM
+  the operator the door page link from the tool's report; they fill the
+  credential in the console web UI (the console seals it to the door's key
+  and restarts the door). You reference the credential by env name only,
+  after the fact. Restate nothing back — you never saw it.
 - Name it `<target>-<protocol>-<identity>` (`rtx3090-ssh-root`,
   `unifi-api-admin`) — what it reaches, how, at what level. Never for the
   consumer.
@@ -112,8 +111,13 @@ console) — when two agents need the identical capability, provision the
 capability's runner once for both, or a fresh identical runner for the second
 use; never ask the operator to widen one.
 
-**After granting:** re-apply is automatic (the grantee's pod picks the new
-coords up), verify the runner's self-check, and say what is actually live.
+**After granting:** the grantees' pods re-apply automatically (the exec surface
+picks the new coords up); an EMPTY door stays 🟡 until the operator fills its
+credential via the door page link (the console seals + restarts it) — then
+verify the door's own self-check / an exec probe, and say what is actually
+live. A direct-credential mode (the operator handing the credential to this
+agent for freehold to seal) is a possible future `agent_grants` mode; it is
+not built, and until it is, chat is never the credential path.
 
 ## State of this skill
 

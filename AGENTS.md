@@ -253,7 +253,9 @@ release notes.
 - **Rotate/re-grant don't reach an already-running runner.** A runner holds its package in
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
-  credential until restart.
+  credential until restart. ONE exception: the console's rotate on a RECORDED CAPABILITY door
+  restarts the unit itself (the fill flow — the credential the operator pastes goes live
+  without any agent hop).
 - **The agent↔runner exec surface is wired for departments; the grant unit is the runner.**
   `freehold build` creates each reserved department (`network`/`data`/`compute`/`ai`) through
   the same audited `create_agent` (its embedded prompt, the private `#freehold` plus its own
@@ -288,7 +290,13 @@ release notes.
   boundary; the prompt is the first line of defense. Dynamic capability records make an
   on-the-fly door rebuild-safe (re-staged adopt-only every build; a record whose package
   vanished fails loudly — the credential is not re-derivable), and the grantees' pods are
-  re-applied with coords resolved from state.
+  re-applied with coords resolved from state. **Credentials never ride chat**: an api-kind
+  door provisions EMPTY (a "pending" placeholder) and the agent DMs the operator the door's
+  own console page (`/runner/<name>` — the deep link opens its fill form, kind-aware: a
+  unifi door takes username + password and the console composes the JSON login body); the
+  console seals + restarts the door (a rotate on a capability door restarts the unit — the
+  fill goes live without any agent hop). A direct-credential mode (an agent relaying the
+  credential for freehold to seal) is a named future `agent_grants` option, not built.
 - **The doors are intent+audit boundaries, not hard containment on a shared
   host.** `dnsmasq-local-root` executes on the CP guest (where every runner
   package + the state store live), and `pve-ssh-root` reaches the CP guest via

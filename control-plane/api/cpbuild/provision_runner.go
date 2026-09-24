@@ -73,9 +73,11 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if kind == "ssh" && strings.TrimSpace(args.Secret) != "" {
 			return "", fmt.Errorf("provision_runner %s: ssh runners mint their own keypair — leave secret empty and install the returned public key on the target", name)
 		}
-		if kind != "ssh" && strings.TrimSpace(args.Secret) == "" {
-			return "", fmt.Errorf("provision_runner %s: a %s runner needs the operator-supplied credential as secret", name, kind)
-		}
+		// An api-kind door ships EMPTY when no secret is supplied (the
+		// empty-shell door): a "pending" placeholder seals now and the OPERATOR
+		// fills the real credential through the console web UI — the credential
+		// never transits any agent's context.
+		emptyDoor := kind != "ssh" && strings.TrimSpace(args.Secret) == ""
 		grantTo := dedupNonBlank(args.GrantTo)
 		if len(grantTo) == 0 {
 			return "", fmt.Errorf("provision_runner %s: grant_to is required (which agent does this capability belong to?)", name)
@@ -121,15 +123,19 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// Create (first call) or adopt (re-provision): the package is the
 		// identity — an existing one is never re-keyed, so the ssh public line
 		// is stable and re-returned. A re-provision updates the endpoint (the
-		// box changed IP) and re-seals the operator-supplied credential (an
-		// api-class door's rotation), then the runner restarts below and loads
-		// both.
+		// box changed IP); it re-seals the credential ONLY when one is supplied
+		// in this call — a secret-less re-provision means "restart + verify"
+		// and never wipes the credential the operator filled in via the console.
 		_, runnerExists := store.GetRunner(name)
 		var pubLine string
 		if !runnerExists {
+			secret := args.Secret
+			if emptyDoor {
+				secret = "pending"
+			}
 			if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
 				Name: name, Kind: kind, Address: strings.TrimSpace(args.Address),
-				Secret: []byte(args.Secret), RunnerDir: pkgDir,
+				Secret: []byte(secret), RunnerDir: pkgDir,
 			}); err != nil {
 				return "", fmt.Errorf("provision %s: %w", name, err)
 			}
@@ -139,7 +145,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 					return "", fmt.Errorf("move %s target address: %w", name, err)
 				}
 			}
-			if kind != "ssh" {
+			if kind != "ssh" && strings.TrimSpace(args.Secret) != "" {
 				if _, err := provisioner.RotateSecret(store, name, []byte(args.Secret)); err != nil {
 					return "", fmt.Errorf("re-seal %s credential: %w", name, err)
 				}
@@ -213,6 +219,13 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if pubLine != "" {
 			report += "\nSSH public key (install in the target's authorized_keys — the runner's self-check goes green once it is):\n" + pubLine
 		}
+		// Every door has its own console URL; an empty-shell door's link is
+		// how the operator fills the credential (never via any agent's chat).
+		link := doorLink(spec, name)
+		report += "\nDoor page: " + link
+		if emptyDoor {
+			report += "\nThe door awaits its credential: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals it and restarts the door; verify by exec-probe before claiming the capability is live."
+		}
 		report += "\nVerify with the runner's self-check before claiming the capability is live."
 		return report, nil
 	}
@@ -222,6 +235,16 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 // same layout ensureCapabilityRunner uses.
 func runnerPackageDir(cpState, name string) string {
 	return cpState + "/runner/" + name
+}
+
+// doorLink is a door's console URL — the deep link the agents DM the operator
+// for the credential fill (the page opens the door's form; login preserves
+// the path).
+func doorLink(spec *Spec, name string) string {
+	if spec.CpHost != "" {
+		return "https://" + spec.CpHost + "/runner/" + name
+	}
+	return fmt.Sprintf("http://%s:8080/runner/%s", spec.CpIP, name)
 }
 
 // agentRunnerCoords resolves the FULL capability-runner coord list a pod for

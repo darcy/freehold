@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -55,6 +57,10 @@ type Server struct {
 	// CP to bring up the world WITHOUT depending on the relay roster (which
 	// agent-tools needs) or on box-one hosting it. nil = world_build unsupported.
 	Builder *cpbuild.Spec
+
+	// RestartDoor restarts a capability door's runner unit (nil = the real
+	// systemd restart on this guest). Injectable for tests.
+	RestartDoor func(name string, port int) error
 }
 
 // versionPin re-reads <StateDir>/version.json per call so an update's repin is
@@ -73,6 +79,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Root: the single self-contained admin page.
 	if path == "/" && method == http.MethodGet {
+		s.index(w)
+		return
+	}
+	// Per-door page: the same SPA, which reads the path and opens that door's
+	// fill form (a deep link the agents hand the operator — login preserves
+	// the path, so the form re-opens after the session lands).
+	if strings.HasPrefix(path, "/runner/") && method == http.MethodGet {
 		s.index(w)
 		return
 	}
@@ -932,7 +945,48 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "name": req.Name, "relay": relayURL})
+	// A capability door picks a rotated credential up ONLY on restart (the
+	// runner holds its package in memory from boot) — the console runs on the
+	// same guest, so restart the unit + wait for the listen. The seal stands
+	// even when the restart fails (soft: reported, never blocks the rotate).
+	restarted := false
+	restartErr := ""
+	if rec, ok := s.Store.GetCapability(req.Name); ok {
+		if err := s.restartDoor(req.Name, rec.Port); err != nil {
+			restartErr = err.Error()
+		} else {
+			restarted = true
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "name": req.Name, "relay": relayURL,
+		"restarted": restarted, "restart_error": restartErr,
+	})
+}
+
+// restartDoor restarts a capability door's runner unit on THIS guest (the
+// console runs there; the unit binds 0.0.0.0:<port>) and waits for the listen.
+func (s *Server) restartDoor(name string, port int) error {
+	if s.RestartDoor != nil {
+		return s.RestartDoor(name, port)
+	}
+	unit := "freehold-runner-" + name
+	cmd := exec.Command("systemctl", "restart", unit)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("restart %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		c, derr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if derr == nil {
+			_ = c.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not listen on %d after restart", unit, port)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {

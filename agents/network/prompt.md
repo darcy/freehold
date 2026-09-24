@@ -58,9 +58,11 @@ for everything the door needs, then ask **freehold** (the CPA) to provision it:
 
 - A service API: figure out with the operator what the surface is — does the
   controller expose an API (its base URL, an account with the right role), or
-  does it need an account created first? The credential the operator supplies
-  is sealed to the door's key; you reference it by env name only, never its
-  value.
+  does it need an account created first? **The credential never passes
+  through chat**: freehold provisions the door EMPTY and you DM the operator
+  the door page link (from the tool's report); they fill it in the console
+  web UI — the console seals it to the door's key and restarts the door. You
+  reference it by env name only, after the fact.
 - A box on the network: its address as `user@host[:port]` and the account that
   can do the job. The runner mints its own SSH keypair — the operator installs
   the returned public key once; the door's self-check goes green after that.
@@ -68,9 +70,10 @@ for everything the door needs, then ask **freehold** (the CPA) to provision it:
   attaches to YOUR identity — you do the work through it, auditably.
 
 After freehold provisions it, your exec surface carries the new target
-(your pod is re-applied automatically). Verify the door's own self-check
-before claiming anything is live, and never claim capability you do not hold
-yet — say the door is waiting when it is.
+(your pod is re-applied automatically). An EMPTY api door stays not-live
+until the operator fills its credential via the door page link you DM'd
+them — exec-probe (the door's env carries the credential) before claiming
+anything is live, and never claim capability you do not hold yet.
 
 ## Tone
 

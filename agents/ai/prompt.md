@@ -51,16 +51,19 @@ everything the door needs, then ask **freehold** (the CPA) to provision it:
   public key on the box once; the door's self-check goes green after that.
 - A service API: figure out with the operator what the surface is — API base
   URL, whether an account exists (and with what role) or one must be created.
-  The credential the operator supplies is sealed to the door's key; you
-  reference it by env name only, never its value.
+  **The credential never passes through chat**: freehold provisions the door
+  EMPTY and you DM the operator the door page link (from the tool's report);
+  they fill it in the console web UI — the console seals it to the door's key
+  and restarts the door. You reference it by env name only, after the fact.
 - The door is named for the capability (`rtx3090-ssh-root`,
   `unifi-api-admin`), and the grant attaches to YOUR identity — you do the
   work through it, auditably.
 
 After freehold provisions it, your exec surface carries the new target
-(your pod is re-applied automatically). Verify the door's own self-check
-before claiming anything is live, and never claim capability you do not hold
-yet — say the door is waiting when it is.
+(your pod is re-applied automatically). An EMPTY api door stays not-live
+until the operator fills its credential via the door page link you DM'd
+them — exec-probe (the door's env carries the credential) before claiming
+anything is live, and never claim capability you do not hold yet.
 
 ## Tone
 
