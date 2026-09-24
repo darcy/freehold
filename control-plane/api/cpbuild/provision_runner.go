@@ -93,8 +93,23 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if err != nil {
 			return "", fmt.Errorf("open CP state: %w", err)
 		}
-		if rec, ok := store.GetRunner(name); ok && rec.Status == state.RunnerRevoked {
-			return "", fmt.Errorf("provision_runner %s: runner is revoked — pick a new name", name)
+		// Name guards: a build-time capability runner is operator-owned —
+		// refusing its name (even before its package exists) keeps the CPA from
+		// shadowing it with an agent-keyed door or adopt-granting onto it; an
+		// existing runner with NO capability record was provisioned by the
+		// operator/console — grants onto it stay operator-scoped.
+		for _, static := range capabilityRunners() {
+			if static.name == name {
+				return "", fmt.Errorf("provision_runner %s: a build-time capability runner is operator-owned — provision a NEW runner instead (never widen one)", name)
+			}
+		}
+		if rec, ok := store.GetRunner(name); ok {
+			if rec.Status == state.RunnerRevoked {
+				return "", fmt.Errorf("provision_runner %s: runner is revoked — pick a new name", name)
+			}
+			if _, isCap := store.GetCapability(name); !isCap {
+				return "", fmt.Errorf("provision_runner %s: runner already exists and was not provisioned by an agent — grants onto it stay operator-scoped (the console)", name)
+			}
 		}
 
 		port := nextCapabilityPort(store)
@@ -105,24 +120,34 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 
 		// Create (first call) or adopt (re-provision): the package is the
 		// identity — an existing one is never re-keyed, so the ssh public line
-		// is stable and re-returned. A re-provision with a moved endpoint
-		// (the box changed IP) updates the package's target address.
+		// is stable and re-returned. A re-provision updates the endpoint (the
+		// box changed IP) and re-seals the operator-supplied credential (an
+		// api-class door's rotation), then the runner restarts below and loads
+		// both.
+		_, runnerExists := store.GetRunner(name)
 		var pubLine string
-		if _, exists := store.GetRunner(name); !exists {
+		if !runnerExists {
 			if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
 				Name: name, Kind: kind, Address: strings.TrimSpace(args.Address),
 				Secret: []byte(args.Secret), RunnerDir: pkgDir,
 			}); err != nil {
 				return "", fmt.Errorf("provision %s: %w", name, err)
 			}
-			for _, extra := range sortedExtraList(args.Extras) {
-				if _, err := provisioner.AddSecret(store, name, extra.name, []byte(extra.value)); err != nil {
-					return "", fmt.Errorf("seal extra %s: %w", extra.name, err)
+		} else {
+			if addr := strings.TrimSpace(args.Address); addr != pkgTargetAddr(pkgDir, name) {
+				if err := setTargetAddress(store, name, addr); err != nil {
+					return "", fmt.Errorf("move %s target address: %w", name, err)
 				}
 			}
-		} else if addr := strings.TrimSpace(args.Address); addr != pkgTargetAddr(pkgDir, name) {
-			if err := setTargetAddress(store, name, addr); err != nil {
-				return "", fmt.Errorf("move %s target address: %w", name, err)
+			if kind != "ssh" {
+				if _, err := provisioner.RotateSecret(store, name, []byte(args.Secret)); err != nil {
+					return "", fmt.Errorf("re-seal %s credential: %w", name, err)
+				}
+			}
+		}
+		for _, extra := range sortedExtraList(args.Extras) {
+			if _, err := provisioner.AddSecret(store, name, extra.name, []byte(extra.value)); err != nil {
+				return "", fmt.Errorf("seal extra %s: %w", extra.name, err)
 			}
 		}
 		if kind == "ssh" {

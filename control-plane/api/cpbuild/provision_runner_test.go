@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"freehold/control-plane/api/agent"
+	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
+	"freehold/contract/wire"
 )
 
 func openTestStore(t *testing.T) *state.StateStore {
@@ -47,6 +49,95 @@ func TestProvisionRunnerValidation(t *testing.T) {
 // args builds ProvisionArgs positionally (secret "" for ssh doors).
 func args(name, kind, address, secret string, grantTo ...string) agent.ProvisionArgs {
 	return agent.ProvisionArgs{Name: name, Kind: kind, Address: address, Secret: secret, GrantTo: grantTo}
+}
+
+// TestProvisionRunnerNeverTouchesBuildTimeRunners pins the containment
+// boundary the review flagged: a build-time capability runner's name is
+// refused outright, and an existing runner with NO capability record (the
+// operator/console provisioned it) is refused — the CPA only ever widens its
+// OWN doors (re-provisions of recorded capabilities).
+func TestProvisionRunnerNeverTouchesBuildTimeRunners(t *testing.T) {
+	root := t.TempDir()
+	spec := &Spec{StateDir: filepath.Join(root, "cp"), CpaName: "freehold"}
+	fn := BuildProvisionRunner(spec, nil)
+
+	// A static-table name is refused even when no package exists yet (the
+	// build just hasn't staged it — the name is still operator-owned).
+	if _, err := fn(args("pve-ssh-root", "ssh", "root@10.0.0.5", "", "ai")); err == nil ||
+		!strings.Contains(err.Error(), "operator-owned") {
+		t.Fatalf("static-runner name must be refused, got %v", err)
+	}
+
+	// An existing operator-provisioned runner (no capability record) is
+	// refused on the adopt path. The state dirs mirror the CP layout (the
+	// agent-tools state dir is the console state dir's sibling).
+	store2, err := state.Open(filepath.Join(root, "control-plane"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.ProvisionRunner(store2, &provisioner.ProvisionRequest{
+		Name: "ops-unifi", Kind: "unifi", Address: "https://unifi.local",
+		Secret: []byte("key"), RunnerDir: runnerPackageDir(filepath.Join(root, "control-plane"), "ops-unifi"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fn2 := BuildProvisionRunner(&Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold"}, nil)
+	if _, err := fn2(args("ops-unifi", "unifi", "https://unifi.local", "key", "ai")); err == nil ||
+		!strings.Contains(err.Error(), "not provisioned by an agent") {
+		t.Fatalf("operator-provisioned runner must be refused, got %v", err)
+	}
+}
+
+// TestProvisionRunnerAdoptReseals pins the re-provision contract for an
+// api-class door: the operator-supplied credential is re-sealed to the
+// runner's key (a rotation), never silently retained.
+func TestProvisionRunnerAdoptReseals(t *testing.T) {
+	root := t.TempDir()
+	// The spec's state dirs mirror the CP layout: the agent-tools state dir is
+	// a sibling of the console state dir the flow reads (cpGuestDirs).
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
+		Name: "unifi-api-admin", Kind: "unifi", Address: "https://unifi.local",
+		Secret: []byte("old-cred"), RunnerDir: runnerPackageDir(cpState, "unifi-api-admin"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("unifi-api-admin", state.CapabilityRecord{
+		Kind: "unifi", Address: "https://unifi.local", Port: 8800, Rosters: []string{"ai"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := store.GetSecret("unifi-api-admin")
+
+	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold"}
+	fn := BuildProvisionRunner(spec, nil)
+	// The flow re-seals, then fails at the relay-channel sync (no relay in the
+	// unit harness) — the rotation has already landed in the store.
+	_, err = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "new-cred", "ai"))
+	if err == nil {
+		t.Fatal("adopt without a relay must fail at the channel sync")
+	}
+	// Re-open: the flow writes through its OWN store handle; the disk is the
+	// truth.
+	afterStore, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := afterStore.GetSecret("unifi-api-admin")
+	if after.CiphertextHex == before.CiphertextHex {
+		t.Fatal("adopt must re-seal the operator-supplied credential")
+	}
+	pkg, err := wire.Load(runnerPackageDir(cpState, "unifi-api-admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Secrets["unifi-api-admin"] != after.CiphertextHex {
+		t.Fatal("the re-sealed package must ship the new ciphertext")
+	}
 }
 
 // TestDynamicRunnersStageFromRecords pins the record → staging-table mapping:

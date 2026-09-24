@@ -46,8 +46,8 @@ operator whether there's an API and what account it needs).
 - `provision_runner` on the CP toolset (agent-tools server + the stdio
   bridge's advertised tools), bound to the staging flow
   (`cpbuild.BuildProvisionRunner`); a `console` `/api/provision` parity path
-  (rosters as pubkeys + a port) so operator-provisioned runners are
-  rebuild-safe too.
+  (rosters as agent NAMES, resolved through the agent registry, + a port) so
+  operator-provisioned runners are rebuild-safe too.
 - The `unifi` kind: an api-class door whose exec runs locally with the
   credential + base URL injected as env; the runner's self-check probe posts
   the JSON login body to the controller's `/api/auth/login`.

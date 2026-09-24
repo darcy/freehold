@@ -754,9 +754,11 @@ type provisionReq struct {
 	RunnerDir *string `json:"runner_dir"`
 	Risk      *string `json:"risk"`
 	// Rosters (optional) records the runner as a capability whose grant is the
-	// given agent PUBKEYS (kind-9000 put-user, live) and makes it
-	// rebuild-safe: the recorded capability re-stages + re-asserts the grants
-	// on every build. Port (optional) pins the runner's MCP bind port on the
+	// given agent NAMES (resolved through the agent registry; kind-9000
+	// put-user, live) and makes it rebuild-safe: the recorded capability
+	// re-stages + re-asserts the grants on every build — the record's rosters
+	// are NAMES so the rebuild re-assertion resolves them the same way the
+	// agent flow's do. Port (optional) pins the runner's MCP bind port on the
 	// CP LXC (allocated above the capability table when 0). The runner UNIT
 	// starts on the next build/world_build reconcile.
 	Rosters []string `json:"rosters"`
@@ -810,12 +812,17 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Capability rosters: record the runner as an agent-provisioned capability
-	// (rebuild-safe) and grant each roster pubkey onto its channel live. The
-	// operator names pubkeys directly (the console has no agent-name registry;
-	// the agent-tools flow resolves names).
+	// (rebuild-safe) and grant each roster agent onto its channel live. The
+	// record's rosters hold agent NAMES — the same representation the rebuild
+	// re-assertion consumes — resolved to pubkeys here for the live grant.
 	granted := []string{s.ConsolePubkey}
 	var capability *state.CapabilityRecord
 	if len(req.Rosters) > 0 {
+		resolved, err := resolveAgentRoster(s.AgentToolsDir, req.Rosters)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		port := req.Port
 		if port == 0 {
 			port = capabilityPortAbove(snap.Capabilities)
@@ -830,7 +837,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		capability = &rec
-		for _, pk := range req.Rosters {
+		for _, pk := range resolved {
 			if err := provisioner.PutUserMembership(s.Store, dialOr(relayURL), s.relayAuthFor(), req.Name, pk, s.Store.Dir()); err != nil {
 				writeErr(w, statusForAction(err), err.Error())
 				return
@@ -851,6 +858,36 @@ func dialOr(u *string) string {
 		return ""
 	}
 	return *u
+}
+
+// resolveAgentRoster resolves agent NAMES to their registry pubkeys (the
+// authoritative registry lives in the agent-tools state dir). An unknown name
+// is a 400 — a recorded roster that cannot resolve would silently lose its
+// grants on rebuild.
+func resolveAgentRoster(agentToolsDir string, names []string) ([]string, error) {
+	reg, err := agenttools.OpenRegistry(filepath.Join(agentToolsDir, "registry.json"))
+	if err != nil {
+		return nil, fmt.Errorf("open agent registry: %w", err)
+	}
+	rows, err := reg.Agents()
+	if err != nil {
+		return nil, fmt.Errorf("read agent registry: %w", err)
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		found := ""
+		for _, a := range rows {
+			if a.Name == name {
+				found = a.Pubkey
+				break
+			}
+		}
+		if found == "" {
+			return nil, fmt.Errorf("unknown agent %q — create it first, then grant", name)
+		}
+		out = append(out, found)
+	}
+	return out, nil
 }
 
 // capabilityPortAbove allocates the first free MCP port above the dynamic
