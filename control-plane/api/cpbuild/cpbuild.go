@@ -1608,21 +1608,22 @@ func (s *Spec) appendMigrations(report []string) []string {
 }
 
 // appendAgentToolsAudience appends the audience-drift check line. The live
-// agent-tools identity (Spec.Audience — what every pod's signed call must
-// verify against) is compared against the pubkey the console state recorded
-// from the box's profile at deploy. A mismatch means the durable agent-tools
-// identity was re-minted under the fleet (e.g. a serve boot against an
-// unmounted durable plane): every EXISTING pod still signs the dead audience,
-// so every CP tool call fails signature verify while the world otherwise
-// looks healthy. Detection only — the repair (restore the durable agent-tools
-// state from backup, or a deliberate re-point + pod re-create) is an operator
-// decision, never an auto-write.
+// agent-tools identity (agentToolsAudience — what every pod's signed call
+// must verify against) is compared against the pubkey the console state
+// recorded from the box's profile at deploy. A mismatch means the durable
+// agent-tools identity was re-minted under the fleet (e.g. a serve boot
+// against an unmounted durable plane): every EXISTING pod still signs the
+// dead audience, so every CP tool call fails signature verify while the
+// world otherwise looks healthy. Detection only — the repair (restore the
+// durable agent-tools state from backup, or a deliberate re-point + pod
+// re-create) is an operator decision, never an auto-write.
 func (s *Spec) appendAgentToolsAudience(report []string) []string {
-	if s.Audience == "" {
+	audience := s.agentToolsAudience()
+	if audience == "" {
 		return report
 	}
 	if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), state.StateFile)); err != nil {
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(s.Audience)+" (no console state — nothing recorded to compare)")
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (no console state — nothing recorded to compare)")
 	}
 	store, err := state.Open(s.consoleStateRoot())
 	if err != nil {
@@ -1631,11 +1632,11 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 	rec := store.AgentToolsPubkey()
 	switch {
 	case rec == nil || *rec == "":
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(s.Audience)+" (console state records none — pre-recording world)")
-	case *rec == s.Audience:
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(s.Audience)+" matches the console record")
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — pre-recording world)")
+	case *rec == audience:
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" matches the console record")
 	default:
-		return append(report, "WARN: agent-tools: AUDIENCE DRIFT — the live identity is "+agenttools.ShortHex(s.Audience)+
+		return append(report, "WARN: agent-tools: AUDIENCE DRIFT — the live identity is "+agenttools.ShortHex(audience)+
 			" but the console/box profile records "+agenttools.ShortHex(*rec)+
 			": every existing agent pod signs the stale pubkey and every CP tool call fails signature verify. "+
 			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods.")
@@ -1893,16 +1894,21 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if err := spec.run(agent.AgentIdentityScript(spec.K3sVmid, id.NostrSecretHex, spec.OwnerPub, name), 120); err != nil {
 			return "", fmt.Errorf("%s identity secret: %w", name, err)
 		}
+		// The bridge audience is the AGENT-TOOLS server's pubkey (resolved from
+		// the durable identity), not spec.Audience — for the console executor
+		// that is the console's own runner-signing identity, and a pod stamped
+		// with it signs a dead audience forever.
+		audience := spec.agentToolsAudience()
 		var manifest string
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, spec.Audience)
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, audience)
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
 			// A department with capability runners gets their FREEHOLD_RUNNER_* env
 			// (the CPA and custom agents get none, so their bridge has no exec).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience, runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)

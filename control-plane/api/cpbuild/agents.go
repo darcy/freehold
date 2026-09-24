@@ -10,6 +10,7 @@ import (
 
 	"freehold/agents"
 	"freehold/contract/console"
+	"freehold/contract/identity"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/platform/provisioning/planebase"
@@ -20,6 +21,23 @@ import (
 // facts.json), a sibling of the console state dir. Mirrors deployAgentTools.
 func (s *Spec) agentToolsRoot() string {
 	return filepath.Join(filepath.Dir(s.StateDir), "agent-tools")
+}
+
+// agentToolsAudience resolves the pubkey the agent pods' stdio bridge signs
+// against: the AGENT-TOOLS server's own identity, read from the durable
+// plane. NOT spec.Audience — for the console executor that is the console's
+// runner-signing identity (its runner auth + the seed revoke), which only
+// coincides with the agent-tools audience when the build runs inside the
+// agent-tools serve itself. A pod manifest stamped with the wrong audience
+// leaves the pod signing a dead key: every CP tool call fails "-32001
+// signature does not verify" while the world otherwise looks healthy.
+func (s *Spec) agentToolsAudience() string {
+	if id, err := identity.Load(s.agentToolsRoot()); err == nil {
+		if pk, perr := id.NostrPubkeyHex(); perr == nil {
+			return pk
+		}
+	}
+	return s.Audience
 }
 
 // agentToolsServeFlags builds the `freehold-agent-tools serve` argv. Extracted

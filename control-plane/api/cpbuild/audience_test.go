@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"freehold/control-plane/api/agent"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/state"
 )
 
@@ -61,8 +63,23 @@ func TestAppendAgentToolsAudience(t *testing.T) {
 		t.Fatalf("drift report must name the recorded pubkey, not the live one verbatim: %q", line[0])
 	}
 
-	// A spec that never carried a live audience checks nothing.
+	// A spec that never carried a live audience and has no durable identity
+	// resolves to nothing — silent.
 	if got := (&Spec{StateDir: stateDir}).appendAgentToolsAudience(nil); got != nil {
 		t.Fatalf("empty-audience spec must stay silent, got %q", got)
+	}
+
+	// The console-executor resolution: the live audience comes from the
+	// durable agent-tools identity ON DISK (what the serve actually verifies
+	// against), never from Spec.Audience — the console executor's Spec.Audience
+	// is its own runner-signing identity, and a manifest stamped with it signs
+	// a dead audience forever. Mint a fresh identity and the line must name IT.
+	disk, err := agent.EnsureIdentity(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line = spec.appendAgentToolsAudience(nil)
+	if len(line) != 1 || !strings.Contains(line[0], agenttools.ShortHex(disk)) {
+		t.Fatalf("resolved-audience report = %q, want the disk identity's pubkey named", line)
 	}
 }
