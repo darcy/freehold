@@ -30,11 +30,11 @@ type ConsoleOps interface {
 type CreateAgentFn func(name, purpose string, channels []string, private bool) (pubkey string, err error)
 
 // ProvisionArgs is one provision_runner call: a NEW capability runner's spec
-// plus the agents to grant it to. Secret is the operator-supplied credential —
-// sealed to the runner's key on arrival, never persisted or logged as
-// plaintext. For kind "ssh" the runner mints its OWN keypair instead (Secret
-// must be empty; the public line comes back for a one-time install on the
-// target box).
+// plus the agents to grant it to. The tool is CREDENTIAL-BLIND by construction
+// — it accepts no secret at all: ssh doors mint their own keypair (the public
+// line comes back for a one-time install on the target box), api-class doors
+// ship EMPTY (a "pending" placeholder) and the operator fills the credential
+// through the console web UI. No credential can transit an agent's context.
 type ProvisionArgs struct {
 	// Name is the runner name, <target>-<protocol>-<identity> (e.g.
 	// rtx3090-ssh-root, unifi-api-admin) — capability-named, never
@@ -47,11 +47,6 @@ type ProvisionArgs struct {
 	// Address is the target endpoint: user@host[:port] (ssh) or the base URL
 	// (api-class).
 	Address string `json:"address"`
-	// Secret is the inline credential (api-class kinds); ignored + rejected
-	// for ssh. Extras are additional named secrets (sealed under their names;
-	// env name = UPPER_SNAKE of the secret name).
-	Secret string            `json:"secret"`
-	Extras map[string]string `json:"extras"`
 	// GrantTo are the agent NAMES to grant onto the runner's roster (a
 	// department that owns the capability class, or a custom agent that owns
 	// the service). Each must exist in the agent registry.

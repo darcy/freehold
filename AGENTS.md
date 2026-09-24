@@ -295,8 +295,10 @@ release notes.
   own console page (`/runner/<name>` — the deep link opens its fill form, kind-aware: a
   unifi door takes username + password and the console composes the JSON login body); the
   console seals + restarts the door (a rotate on a capability door restarts the unit — the
-  fill goes live without any agent hop). A direct-credential mode (an agent relaying the
-  credential for freehold to seal) is a named future `agent_grants` option, not built.
+  fill goes live without any agent hop). The tool is credential-blind BY CONSTRUCTION
+  (provision_runner takes no secret/extras field — a direct-credential mode, an agent
+  relaying the credential for freehold to seal, is a named future `agent_grants` option
+  that the current tool surface makes unreachable).
 - **The doors are intent+audit boundaries, not hard containment on a shared
   host.** `dnsmasq-local-root` executes on the CP guest (where every runner
   package + the state store live), and `pve-ssh-root` reaches the CP guest via

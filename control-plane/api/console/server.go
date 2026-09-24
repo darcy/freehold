@@ -838,11 +838,12 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		}
 		port := req.Port
 		if port == 0 {
-			port = capabilityPortAbove(snap.Capabilities)
+			port = s.capabilityPortAbove(s.Builder)
 		}
 		rec := state.CapabilityRecord{
 			Kind: req.Kind, Address: req.Address, Port: port,
 			Rosters:   append([]string(nil), req.Rosters...),
+			Origin:    state.OriginOperator,
 			CreatedAt: uint64(time.Now().Unix()),
 		}
 		if err := s.Store.InsertCapability(req.Name, rec); err != nil {
@@ -904,13 +905,15 @@ func resolveAgentRoster(agentToolsDir string, names []string) ([]string, error) 
 }
 
 // capabilityPortAbove allocates the first free MCP port above the dynamic
-// base, skipping recorded capability ports (the same base the agent-tools
-// flow uses).
-func capabilityPortAbove(caps map[string]state.CapabilityRecord) int {
-	occupied := map[int]bool{}
-	for _, rec := range caps {
-		occupied[rec.Port] = true
+// base. With a build Spec, the SAME allocator cpbuild uses runs (it also
+// skips the per-zone DNS doors' derived ports — two allocators must never
+// disagree); without one (a console not bound as the build executor), the
+// recorded + static ports are the only known occupancy.
+func (s *Server) capabilityPortAbove(builder *cpbuild.Spec) int {
+	if builder != nil {
+		return builder.NextCapabilityPort(s.Store)
 	}
+	occupied := cpbuild.OccupiedCapabilityPorts(s.Store)
 	port := 8800
 	for occupied[port] {
 		port++

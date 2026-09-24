@@ -106,8 +106,24 @@ type CapabilityRecord struct {
 	Port int `json:"port"`
 	// Rosters are the agent names granted onto this runner (a department or a
 	// custom agent the CPA provisioned it for); re-asserted on every rebuild.
-	Rosters   []string `json:"rosters"`
-	CreatedAt uint64   `json:"created_at"`
+	Rosters []string `json:"rosters"`
+	// Origin is who provisioned it: "agent" (the CPA's provision_runner — the
+	// only records the agent flow may re-provision/grant onto) or "operator"
+	// (the console's rosters path — rebuild-safe but agent-untouchable). ""
+	// reads as "agent" (records predate the field).
+	Origin    string `json:"origin,omitempty"`
+	CreatedAt uint64 `json:"created_at"`
+}
+
+// Capability origins.
+const (
+	OriginAgent    = "agent"
+	OriginOperator = "operator"
+)
+
+// AgentProvisioned reports whether the CPA's flow owns this record.
+func (r CapabilityRecord) AgentProvisioned() bool {
+	return r.Origin == "" || r.Origin == OriginAgent
 }
 
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.

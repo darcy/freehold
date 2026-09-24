@@ -93,11 +93,11 @@ of questions up front:
 - For a service API (e.g. UniFi): figure out WITH the operator what the
   surface is — does it have an API (its URL, and an account with the right
   role), or does it need an account created first? **Never take the
-  credential in chat** — provision the door EMPTY (omit the secret) and DM
-  the operator the door page link from the tool's report; they fill the
-  credential in the console web UI (the console seals it to the door's key
-  and restarts the door). You reference the credential by env name only,
-  after the fact. Restate nothing back — you never saw it.
+  credential in chat** — provision the door EMPTY and DM the operator the
+  door page link from the tool's report; they fill the credential in the
+  console web UI (the console seals it to the door's key and restarts the
+  door). You reference the credential by env name only, after the fact. The
+  TOOL enforces this: provision_runner takes no credential field at all.
 - Name it `<target>-<protocol>-<identity>` (`rtx3090-ssh-root`,
   `unifi-api-admin`) — what it reaches, how, at what level. Never for the
   consumer.

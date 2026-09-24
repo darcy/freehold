@@ -48,13 +48,11 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 			}, []string{"name"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},
-		{"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds (unifi) seal the supplied credential. Grants land live; the grantees' pods are re-applied with the new coords. Follow the granting skill: confirm with the operator when the ask did not come from them in this thread.",
+		{"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds (unifi) ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. Grants land live; the grantees' pods are re-applied with the new coords. Follow the granting skill: confirm with the operator when the ask did not come from them in this thread.",
 			"inputSchema": i(map[string]interface{}{
 				"name":     map[string]interface{}{"type": "string"},
 				"kind":     map[string]interface{}{"type": "string"},
 				"address":  map[string]interface{}{"type": "string"},
-				"secret":   map[string]interface{}{"type": "string"},
-				"extras":   map[string]interface{}{"type": "object"},
 				"grant_to": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 			}, []string{"name", "kind", "address", "grant_to"})},
 	}

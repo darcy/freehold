@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"freehold/contract/console"
+	"freehold/contract/crypto"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/secret-management"
@@ -70,14 +71,10 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if strings.TrimSpace(args.Address) == "" {
 			return "", fmt.Errorf("provision_runner %s: address is required (user@host[:port] for ssh, the base URL for %s)", name, kind)
 		}
-		if kind == "ssh" && strings.TrimSpace(args.Secret) != "" {
-			return "", fmt.Errorf("provision_runner %s: ssh runners mint their own keypair — leave secret empty and install the returned public key on the target", name)
-		}
-		// An api-kind door ships EMPTY when no secret is supplied (the
-		// empty-shell door): a "pending" placeholder seals now and the OPERATOR
-		// fills the real credential through the console web UI — the credential
-		// never transits any agent's context.
-		emptyDoor := kind != "ssh" && strings.TrimSpace(args.Secret) == ""
+		// (The tool is credential-blind BY CONSTRUCTION: ProvisionArgs carries
+		// no secret/extras at all — an unknown "secret" in the call JSON is
+		// dropped by the unmarshal and never reaches this code. ssh mints its
+		// own keypair; api doors ship EMPTY for the console fill.)
 		grantTo := dedupNonBlank(args.GrantTo)
 		if len(grantTo) == 0 {
 			return "", fmt.Errorf("provision_runner %s: grant_to is required (which agent does this capability belong to?)", name)
@@ -90,21 +87,41 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			}
 		}
 
-		cpState := spec.consoleStateDir()
-		store, err := state.Open(cpState)
-		if err != nil {
-			return "", fmt.Errorf("open CP state: %w", err)
-		}
-		// Name guards: a build-time capability runner is operator-owned —
-		// refusing its name (even before its package exists) keeps the CPA from
-		// shadowing it with an agent-keyed door or adopt-granting onto it; an
-		// existing runner with NO capability record was provisioned by the
-		// operator/console — grants onto it stay operator-scoped.
+		// Name guards (pure string checks, before any I/O): a build-time
+		// capability runner is operator-owned — refusing its name keeps the CPA
+		// from shadowing it with an agent-keyed door or adopt-granting onto it.
+		// The per-zone DNS doors share a reserved prefix (their names derive
+		// from the stored zones — today's AND any future one).
 		for _, static := range capabilityRunners() {
 			if static.name == name {
 				return "", fmt.Errorf("provision_runner %s: a build-time capability runner is operator-owned — provision a NEW runner instead (never widen one)", name)
 			}
 		}
+		if strings.HasPrefix(name, "cloudflare-api-") {
+			return "", fmt.Errorf("provision_runner %s: the cloudflare-api- prefix is reserved (per-zone DNS doors are operator-owned)", name)
+		}
+
+		// Resolve EVERY grantee up front (a re-provision may shrink the roster
+		// or rename it — the whole list must be resolvable BEFORE any side
+		// effect, or a typo'd name would leave a live runner + record behind).
+		granteeRows := map[string]console.AgentInfo{}
+		for _, g := range grantTo {
+			row, err := registryRow(reg, g)
+			if err != nil {
+				return "", fmt.Errorf("provision_runner %s: %w", name, err)
+			}
+			granteeRows[g] = row
+		}
+
+		cpState := spec.consoleStateDir()
+		store, err := state.Open(cpState)
+		if err != nil {
+			return "", fmt.Errorf("open CP state: %w", err)
+		}
+		// State guards: an existing runner with NO capability record was
+		// provisioned by the operator/console — grants onto it stay
+		// operator-scoped. A record with operator provenance likewise.
+		prevRecord, hasPrevRecord := store.GetCapability(name)
 		if rec, ok := store.GetRunner(name); ok {
 			if rec.Status == state.RunnerRevoked {
 				return "", fmt.Errorf("provision_runner %s: runner is revoked — pick a new name", name)
@@ -113,47 +130,45 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 				return "", fmt.Errorf("provision_runner %s: runner already exists and was not provisioned by an agent — grants onto it stay operator-scoped (the console)", name)
 			}
 		}
+		if hasPrevRecord && !prevRecord.AgentProvisioned() {
+			return "", fmt.Errorf("provision_runner %s: this door was provisioned by the operator — grants onto it stay operator-scoped (the console)", name)
+		}
 
-		port := nextCapabilityPort(store)
-		if prev, ok := store.GetCapability(name); ok {
-			port = prev.Port // coords stay stable across re-provisions
+		port := spec.NextCapabilityPort(store)
+		if hasPrevRecord {
+			port = prevRecord.Port // coords stay stable across re-provisions
 		}
 		pkgDir := runnerPackageDir(cpState, name)
 
 		// Create (first call) or adopt (re-provision): the package is the
 		// identity — an existing one is never re-keyed, so the ssh public line
 		// is stable and re-returned. A re-provision updates the endpoint (the
-		// box changed IP); it re-seals the credential ONLY when one is supplied
-		// in this call — a secret-less re-provision means "restart + verify"
-		// and never wipes the credential the operator filled in via the console.
+		// box changed IP); the credential is ONLY ever sealed by the console
+		// (the operator's fill) — a re-provision restarts the door to load it.
 		_, runnerExists := store.GetRunner(name)
 		var pubLine string
 		if !runnerExists {
-			secret := args.Secret
-			if emptyDoor {
-				secret = "pending"
+			// The sealed secret per kind: ssh mints its OWN keypair (the
+			// private half seals; the public line returns for the operator's
+			// one-time install); api doors seal the empty-shell "pending"
+			// placeholder for the console fill.
+			secret := []byte("pending")
+			if kind == "ssh" {
+				priv, _, err := crypto.GenerateSSHKeypair(name)
+				if err != nil {
+					return "", fmt.Errorf("generate %s ssh keypair: %w", name, err)
+				}
+				secret = priv
 			}
 			if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
 				Name: name, Kind: kind, Address: strings.TrimSpace(args.Address),
-				Secret: []byte(secret), RunnerDir: pkgDir,
+				Secret: secret, RunnerDir: pkgDir,
 			}); err != nil {
 				return "", fmt.Errorf("provision %s: %w", name, err)
 			}
-		} else {
-			if addr := strings.TrimSpace(args.Address); addr != pkgTargetAddr(pkgDir, name) {
-				if err := setTargetAddress(store, name, addr); err != nil {
-					return "", fmt.Errorf("move %s target address: %w", name, err)
-				}
-			}
-			if kind != "ssh" && strings.TrimSpace(args.Secret) != "" {
-				if _, err := provisioner.RotateSecret(store, name, []byte(args.Secret)); err != nil {
-					return "", fmt.Errorf("re-seal %s credential: %w", name, err)
-				}
-			}
-		}
-		for _, extra := range sortedExtraList(args.Extras) {
-			if _, err := provisioner.AddSecret(store, name, extra.name, []byte(extra.value)); err != nil {
-				return "", fmt.Errorf("seal extra %s: %w", extra.name, err)
+		} else if addr := strings.TrimSpace(args.Address); addr != pkgTargetAddr(pkgDir, name) {
+			if err := setTargetAddress(store, name, addr); err != nil {
+				return "", fmt.Errorf("move %s target address: %w", name, err)
 			}
 		}
 		if kind == "ssh" {
@@ -166,7 +181,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// point heals on the next build/reconcile (the record re-stages it).
 		if err := store.InsertCapability(name, state.CapabilityRecord{
 			Kind: kind, Address: strings.TrimSpace(args.Address), Port: port,
-			Rosters:   append([]string(nil), grantTo...),
+			Rosters: append([]string(nil), grantTo...), Origin: state.OriginAgent,
 			CreatedAt: uint64(time.Now().Unix()),
 		}); err != nil {
 			return "", fmt.Errorf("record capability: %w", err)
@@ -190,13 +205,21 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 
 		// Grant each grantee onto the runner's roster (live — the runner
 		// re-reads the signed 39002 per call), then re-apply the grantee's pod
-		// so its exec surface carries the new coords.
+		// so its exec surface carries the new coords. A re-provision that
+		// SHRANK the roster revokes the dropped agents first — a grant that
+		// could not be revoked must not be made.
+		for _, dropped := range droppedRosters(prevRecord.Rosters, grantTo) {
+			row, err := registryRow(reg, dropped)
+			if err != nil {
+				return "", fmt.Errorf("re-provision %s: the dropped grantee %s is no longer in the registry — revoke it by hand (console) so its exec does not linger: %w", name, dropped, err)
+			}
+			if err := provisioner.RemoveUserMembership(store, spec.relayDialURL(), spec.relaySignURL(), name, row.Pubkey, cpState); err != nil {
+				return "", fmt.Errorf("revoke dropped grantee %s from %s: %w", dropped, name, err)
+			}
+		}
 		granted := []string{}
 		for _, grantee := range grantTo {
-			row, err := registryRow(reg, grantee)
-			if err != nil {
-				return "", err
-			}
+			row := granteeRows[grantee]
 			if _, err := reg.Grant(name, row.Pubkey); err != nil {
 				return "", fmt.Errorf("grant %s → %s: %w", grantee, name, err)
 			}
@@ -223,12 +246,24 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// how the operator fills the credential (never via any agent's chat).
 		link := doorLink(spec, name)
 		report += "\nDoor page: " + link
-		if emptyDoor {
-			report += "\nThe door awaits its credential: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals it and restarts the door; verify by exec-probe before claiming the capability is live."
+		if kind != "ssh" {
+			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals the credential and restarts the door; verify by exec-probe before claiming the capability is live."
 		}
 		report += "\nVerify with the runner's self-check before claiming the capability is live."
 		return report, nil
 	}
+}
+
+// droppedRosters returns the names in prev (a door's current roster) that the
+// re-provision's roster drops — the grants to revoke.
+func droppedRosters(prev, next []string) []string {
+	dropped := []string{}
+	for _, p := range prev {
+		if !containsRoster(next, p) {
+			dropped = append(dropped, p)
+		}
+	}
+	return dropped
 }
 
 // runnerPackageDir is the package-dir convention (cpState/runner/<name>) — the

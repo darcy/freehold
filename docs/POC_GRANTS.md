@@ -44,7 +44,10 @@ operator whether there's an API and what account it needs).
   door picks a rotated credential up only on restart), and the requesting
   agent verifies by exec-probe. A direct-credential mode (the operator hands
   the credential to an agent for freehold to seal) is a named future
-  `agent_grants` option — not built; chat is never the credential path.
+  `agent_grants` option — and it is UNREACHABLE through the tool:
+  provision_runner is credential-blind by construction (no secret field —
+  an unknown "secret" in the call JSON never reaches the code). Chat is
+  never the credential path, enforced.
 - **Pod pickup.** After granting, the grantees' pods are re-applied with the
   new `FREEHOLD_RUNNER_*` coords resolved from state (static + per-zone DNS +
   dynamic) — the exec surface carries the new target without a full build.

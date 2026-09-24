@@ -258,14 +258,28 @@ func occupiedPorts(store *state.StateStore) map[int]bool {
 	return occupied
 }
 
-// nextCapabilityPort returns the first free port above dynamicRunnerPortBase.
-func nextCapabilityPort(store *state.StateStore) int {
+// NextCapabilityPort returns the first free MCP port above
+// dynamicRunnerPortBase, skipping every port the capability-runner table can
+// bind: the static runners, the recorded capabilities, and the per-zone DNS
+// doors (derived — with enough zones their ports climb toward the dynamic
+// base). Shared by the agent flow AND the console's rosters path, so both
+// allocators always agree.
+func (s *Spec) NextCapabilityPort(store *state.StateStore) int {
 	occupied := occupiedPorts(store)
+	for _, r := range s.cloudflareRunners(store) {
+		occupied[r.port] = true
+	}
 	port := dynamicRunnerPortBase
 	for occupied[port] {
 		port++
 	}
 	return port
+}
+
+// OccupiedCapabilityPorts exposes the recorded+static port set for surfaces
+// without a build Spec (the console's fallback allocator).
+func OccupiedCapabilityPorts(store *state.StateStore) map[int]bool {
+	return occupiedPorts(store)
 }
 
 // zoneOf returns a host's registrable zone: everything after the first label

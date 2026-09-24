@@ -139,13 +139,11 @@ func (s *Server) toolList() []map[string]interface{} {
 			}, []string{"runner", "pubkeys"}),
 		},
 		{
-			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds (unifi) seal the supplied credential. Grants land live; the grantees' pods are re-applied with the new coords.",
+			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds (unifi) ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. Grants land live; the grantees' pods are re-applied with the new coords.",
 			"inputSchema": i(map[string]interface{}{
 				"name":     map[string]interface{}{"type": "string"},
 				"kind":     map[string]interface{}{"type": "string"},
 				"address":  map[string]interface{}{"type": "string"},
-				"secret":   map[string]interface{}{"type": "string"},
-				"extras":   map[string]interface{}{"type": "object"},
 				"grant_to": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 			}, []string{"name", "kind", "address", "grant_to"}),
 		},
@@ -218,12 +216,10 @@ type grantAgentArgs struct {
 	Pubkeys []string `json:"pubkeys"`
 }
 type provisionRunnerArgs struct {
-	Name    string            `json:"name"`
-	Kind    string            `json:"kind"`
-	Address string            `json:"address"`
-	Secret  string            `json:"secret"`
-	Extras  map[string]string `json:"extras"`
-	GrantTo []string          `json:"grant_to"`
+	Name    string   `json:"name"`
+	Kind    string   `json:"kind"`
+	Address string   `json:"address"`
+	GrantTo []string `json:"grant_to"`
 }
 type manageAgentArgs struct {
 	Remove string `json:"remove"`
@@ -337,8 +333,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		report, err := s.Tools.ProvisionRunner(agent.ProvisionArgs{
-			Name: a.Name, Kind: a.Kind, Address: a.Address,
-			Secret: a.Secret, Extras: a.Extras, GrantTo: a.GrantTo,
+			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
 		})
 		s.textResult(w, id, err, report)
 	case "manage_agent":
