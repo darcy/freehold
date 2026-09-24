@@ -56,6 +56,14 @@ type capabilityRunner struct {
 	// (the credential fields seal as extra named secrets).
 	dnsZone string
 	dnsEnv  map[string]string
+	// addr overrides the ssh target address (dynamic runners: the operator's
+	// box, not the PVE host the co-located runner owns).
+	addr string
+	// dynamic marks an agent-provisioned runner (a state CapabilityRecord):
+	// adopt-only on rebuild — its credential came from the operator, there is
+	// no build-time source to re-seal from, and the ssh pubkey is installed on
+	// the TARGET box (by the operator), never on the PVE host.
+	dynamic bool
 }
 
 // kubernetesVersion is the kubectl build installed on the CP LXC (the kube
@@ -66,8 +74,9 @@ const kubernetesVersion = "v1.36.4"
 const cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
 
 // capabilityRunners is the static capability-runner table. Dynamic entries
-// (one cloudflare-api-<domain> runner per stored DNS zone) are appended from
-// the CP's credential store at staging.
+// (one cloudflare-api-<domain> runner per stored DNS zone, and one runner per
+// agent-provisioned CapabilityRecord) are appended from the CP's state at
+// staging.
 func capabilityRunners() []capabilityRunner {
 	return []capabilityRunner{
 		{name: "pve-ssh-root", kind: "ssh", port: 8791,
@@ -86,8 +95,13 @@ func capabilityRunners() []capabilityRunner {
 }
 
 // cloudflareRunnerPort is where the dynamic per-zone runners start, after the
-// static table's highest port.
+// static table's highest port. Agent-provisioned capability records start
+// above it (dynamicRunnerPortBase) so the two derivation paths never collide.
 const cloudflareRunnerPort = 8797
+
+// dynamicRunnerPortBase is where agent-provisioned capability records start
+// (the per-zone DNS doors occupy at most the cp+relay slots above 8796).
+const dynamicRunnerPortBase = 8800
 
 // relayDialURL is the relay origin to DIAL from inside the CP guest: the
 // community hostname on :3000 (the CP resolver maps it to the relay guest), so
@@ -139,7 +153,8 @@ func (s *Spec) stageDepartmentRunners() error {
 		return fmt.Errorf("department runners: co-located runner %q address not recorded", s.RunnerTarget)
 	}
 	runners := capabilityRunners()
-	runners = append(runners, s.cloudflareRunners()...)
+	runners = append(runners, s.cloudflareRunners(store)...)
+	runners = append(runners, dynamicRunners(store)...)
 	needKube := false
 	for _, r := range runners {
 		if r.kind == "kubernetes" {
@@ -175,10 +190,12 @@ func (s *Spec) stageDepartmentRunners() error {
 // DNS zone with a stored credential (the CP's own slots: cp, then relay).
 // Skipped (loud, not fatal) when no credential has been handed off yet — the
 // door waits for `freehold build` to hand it off. kind = the record's provider
-// (a non-cloudflare provider probes red until its status arm exists).
-func (s *Spec) cloudflareRunners() []capabilityRunner {
+// (a non-cloudflare provider probes red until its status arm exists). Ports
+// skip anything an agent-provisioned capability record already holds.
+func (s *Spec) cloudflareRunners(store *state.StateStore) []capabilityRunner {
 	var out []capabilityRunner
 	port := cloudflareRunnerPort
+	occupied := occupiedPorts(store)
 	seen := map[string]bool{}
 	for _, slot := range []string{"cp", "relay"} {
 		host := s.CpHost
@@ -195,6 +212,9 @@ func (s *Spec) cloudflareRunners() []capabilityRunner {
 			continue
 		}
 		seen[zone] = true
+		for occupied[port] {
+			port++
+		}
 		out = append(out, capabilityRunner{
 			name:    "cloudflare-api-" + strings.ReplaceAll(zone, ".", "-"),
 			kind:    strings.ToLower(provider),
@@ -206,6 +226,46 @@ func (s *Spec) cloudflareRunners() []capabilityRunner {
 		port++
 	}
 	return out
+}
+
+// dynamicRunners maps the state store's capability records (the
+// provision_runner flow's agent-provisioned runners) onto the staging table.
+func dynamicRunners(store *state.StateStore) []capabilityRunner {
+	var out []capabilityRunner
+	for name, rec := range store.Capabilities() {
+		rosters := append([]string(nil), rec.Rosters...)
+		out = append(out, capabilityRunner{
+			name: name, kind: rec.Kind, port: rec.Port,
+			rosters: rosters, addr: rec.Address, dynamic: true,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+// occupiedPorts collects every port the capability-runner table can bind: the
+// static runners, the agent-provisioned records (fixed at creation), and the
+// per-zone DNS doors' derivation base. A new record allocates above all of
+// them so pod env coords stay stable across rebuilds.
+func occupiedPorts(store *state.StateStore) map[int]bool {
+	occupied := map[int]bool{}
+	for _, r := range capabilityRunners() {
+		occupied[r.port] = true
+	}
+	for _, rec := range store.Capabilities() {
+		occupied[rec.Port] = true
+	}
+	return occupied
+}
+
+// nextCapabilityPort returns the first free port above dynamicRunnerPortBase.
+func nextCapabilityPort(store *state.StateStore) int {
+	occupied := occupiedPorts(store)
+	port := dynamicRunnerPortBase
+	for occupied[port] {
+		port++
+	}
+	return port
 }
 
 // zoneOf returns a host's registrable zone: everything after the first label
@@ -224,6 +284,12 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	pkgDir := filepath.Join(cpState, "runner", r.name)
 	rec, exists := store.GetRunner(r.name)
 	if !exists {
+		if r.dynamic {
+			// An agent-provisioned runner whose package vanished: its
+			// credential came from the operator and cannot be re-derived —
+			// fail loudly (the door waits) instead of silently re-keying.
+			return fmt.Errorf("capability record %s has no runner package — re-provision it (the credential is not re-derivable)", r.name)
+		}
 		c, err := s.runnerCredential(r, hostAddr)
 		if err != nil {
 			return err
@@ -240,11 +306,18 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 				return fmt.Errorf("seal extra %s: %w", name, err)
 			}
 		}
-		if r.kind == "ssh" {
+		// A dynamic ssh door's pubkey is installed on the TARGET box by the
+		// operator (the provision flow hands the line back) — never appended to
+		// the PVE host's authorized_keys.
+		if r.kind == "ssh" && !r.dynamic {
 			if err := s.authorizeHostKey(c.pubLine, r.name); err != nil {
 				return err
 			}
 		}
+	} else if r.dynamic {
+		// Adopt-only: the record is the spec, the package holds the operator's
+		// credential, and no build-time source exists to re-seal from. The
+		// channel sync + (re)start below are the re-assert.
 	} else {
 		// ssh credentials are the runner's identity — stable; re-authorize the
 		// SAME key if the host lost it. Everything else rotates (a k3s rebuild
@@ -332,11 +405,15 @@ type runnerCred struct {
 func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred, error) {
 	switch r.kind {
 	case "ssh":
+		addr := hostAddr
+		if r.addr != "" {
+			addr = r.addr
+		}
 		priv, pub, err := crypto.GenerateSSHKeypair(r.name)
 		if err != nil {
 			return runnerCred{}, fmt.Errorf("generate ssh keypair: %w", err)
 		}
-		return runnerCred{addr: hostAddr, secret: priv, pubLine: pub}, nil
+		return runnerCred{addr: addr, secret: priv, pubLine: pub}, nil
 	case "kubernetes":
 		token, err := s.doorToken(r.tokenSecret, r.tokenNS)
 		if err != nil {

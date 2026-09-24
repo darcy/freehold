@@ -29,7 +29,7 @@ import (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|adopt|add-secret|revoke|identity|version> …")
+		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns> …")
 		os.Exit(2)
 	}
 	var err error
@@ -42,6 +42,8 @@ func main() {
 		err = cmdProvision(os.Args[2:])
 	case "grant":
 		err = cmdGrant(os.Args[2:])
+	case "grants-mode":
+		err = cmdGrantsMode(os.Args[2:])
 	case "adopt":
 		err = cmdAdopt(os.Args[2:])
 	case "add-secret":
@@ -55,7 +57,7 @@ func main() {
 	case "dns":
 		err = cmdDNS(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|adopt|add-secret|revoke|identity|services|dns)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -613,6 +615,37 @@ func cmdGrant(args []string) error {
 		}
 	}
 	fmt.Printf("runner %s grants: %d\n", name, len(grants))
+	return nil
+}
+
+// cmdGrantsMode reads or sets the CP's agent-grant mode (the provision_runner
+// kill switch): "confirm" (default — the CPA grants when the operator's ask is
+// in its own thread, else DMs for a yes), "auto", "off".
+func cmdGrantsMode(args []string) error {
+	fs := flag.NewFlagSet("grants-mode", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	mode := fs.String("mode", "", "confirm|auto|off; omitted = print the current mode")
+	fs.Parse(args)
+	if *stateDir == "" {
+		return fmt.Errorf("grants-mode --state-dir [--mode confirm|auto|off]")
+	}
+	store, err := state.Open(*stateDir)
+	if err != nil {
+		return err
+	}
+	if *mode == "" {
+		fmt.Println(store.AgentGrantsMode())
+		return nil
+	}
+	switch *mode {
+	case "confirm", "auto", "off":
+	default:
+		return fmt.Errorf("grants-mode: mode must be confirm|auto|off (got %q)", *mode)
+	}
+	if err := store.SetAgentGrantsMode(*mode); err != nil {
+		return err
+	}
+	fmt.Printf("agent-grants mode: %s\n", *mode)
 	return nil
 }
 

@@ -88,6 +88,28 @@ type SecretRecord struct {
 	RotatedAt     *uint64 `json:"rotated_at,omitempty"`
 }
 
+// CapabilityRecord is an agent-provisioned capability runner's spec (the
+// provision_runner flow): the dynamic half of the capability-runner table. A
+// record makes an on-the-fly runner rebuild-safe — stageDepartmentRunners
+// re-stages it every build, adopting the existing package (its credential came
+// from the operator, so there is no build-time source to re-seal from). The
+// record's presence IS the "the CPA provisioned this" marker: grants via the
+// agent flow attach only to runners recorded here.
+type CapabilityRecord struct {
+	// Kind is the connector kind: ssh, or an api-class kind (unifi, ...).
+	Kind string `json:"kind"`
+	// Address is the target endpoint: user@host[:port] (ssh) or a base URL
+	// (api-class).
+	Address string `json:"address"`
+	// Port is the runner's MCP bind port on the CP LXC — fixed at creation so
+	// pod env coords stay stable across rebuilds.
+	Port int `json:"port"`
+	// Rosters are the agent names granted onto this runner (a department or a
+	// custom agent the CPA provisioned it for); re-asserted on every rebuild.
+	Rosters   []string `json:"rosters"`
+	CreatedAt uint64   `json:"created_at"`
+}
+
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
 type ControlPlaneState struct {
 	Runners map[string]RunnerRecord `json:"runners"`
@@ -96,6 +118,13 @@ type ControlPlaneState struct {
 	// Services is the world-services health registry (k3s/litellm/caddy coords),
 	// recorded at build and served on /api/world for management boxes.
 	Services         map[string]WorldService `json:"services,omitempty"`
+	// Capabilities is the dynamic capability-runner table (the provision_runner
+	// flow's records; the static half lives in cpbuild.capabilityRunners).
+	Capabilities     map[string]CapabilityRecord `json:"capabilities,omitempty"`
+	// AgentGrants is the agent-grant mode: "confirm" (default — the CPA grants
+	// when the operator's ask is in its own thread, else DMs for a yes), "auto"
+	// (grants land unconfirmed), "off" (server-denies agent provisioning).
+	AgentGrants      *string                 `json:"agent_grants,omitempty"`
 	ResolverDomain   *string                 `json:"resolver_domain,omitempty"`
 	ResolverWildcard *DnsWildcard            `json:"resolver_wildcard,omitempty"`
 	Agents           map[string]AgentRecord  `json:"agents"`
@@ -159,6 +188,9 @@ func ensureMaps(cp *ControlPlaneState) {
 	}
 	if cp.Services == nil {
 		cp.Services = map[string]WorldService{}
+	}
+	if cp.Capabilities == nil {
+		cp.Capabilities = map[string]CapabilityRecord{}
 	}
 	if cp.Agents == nil {
 		cp.Agents = map[string]AgentRecord{}
@@ -290,6 +322,50 @@ func (s *StateStore) InsertService(name string, rec WorldService) { s.state.Serv
 
 // RemoveService deletes a world-services record.
 func (s *StateStore) RemoveService(name string) { delete(s.state.Services, name) }
+
+// GetCapability returns a dynamic capability-runner record.
+func (s *StateStore) GetCapability(name string) (CapabilityRecord, bool) {
+	r, ok := s.state.Capabilities[name]
+	return r, ok
+}
+
+// Capabilities returns the dynamic capability-runner table (sorted by name).
+func (s *StateStore) Capabilities() map[string]CapabilityRecord {
+	out := make(map[string]CapabilityRecord, len(s.state.Capabilities))
+	for k, v := range s.state.Capabilities {
+		out[k] = v
+	}
+	return out
+}
+
+// InsertCapability records a dynamic capability-runner spec + saves.
+func (s *StateStore) InsertCapability(name string, rec CapabilityRecord) error {
+	if s.state.Capabilities == nil {
+		s.state.Capabilities = map[string]CapabilityRecord{}
+	}
+	s.state.Capabilities[name] = rec
+	return s.Save()
+}
+
+// RemoveCapability drops a dynamic capability-runner spec + saves.
+func (s *StateStore) RemoveCapability(name string) error {
+	delete(s.state.Capabilities, name)
+	return s.Save()
+}
+
+// AgentGrantsMode returns the agent-grant mode ("confirm" when unset).
+func (s *StateStore) AgentGrantsMode() string {
+	if s.state.AgentGrants == nil || *s.state.AgentGrants == "" {
+		return "confirm"
+	}
+	return *s.state.AgentGrants
+}
+
+// SetAgentGrantsMode sets the agent-grant mode + saves.
+func (s *StateStore) SetAgentGrantsMode(mode string) error {
+	s.state.AgentGrants = &mode
+	return s.Save()
+}
 
 // ResolverDomain returns the resolver's world-domain suffix.
 func (s *StateStore) ResolverDomain() *string { return s.state.ResolverDomain }

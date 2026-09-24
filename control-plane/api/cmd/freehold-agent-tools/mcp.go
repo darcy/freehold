@@ -48,6 +48,15 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 			}, []string{"name"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},
+		{"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds (unifi) seal the supplied credential. Grants land live; the grantees' pods are re-applied with the new coords. Follow the granting skill: confirm with the operator when the ask did not come from them in this thread.",
+			"inputSchema": i(map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"kind":     map[string]interface{}{"type": "string"},
+				"address":  map[string]interface{}{"type": "string"},
+				"secret":   map[string]interface{}{"type": "string"},
+				"extras":   map[string]interface{}{"type": "object"},
+				"grant_to": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name", "kind", "address", "grant_to"})},
 	}
 	if hasRunner {
 		execDesc := "Run a shell command VERBATIM on a capability runner's target through the runner-owned connection (the credential is fixed per target by this pod's config). Pass no secrets. Returns {stdout, stderr, exit_code, timed_out}."
@@ -74,8 +83,10 @@ func isFreeholdTool(name string) bool {
 	switch name {
 	// grant_agent is deliberately absent: it is operator-scoped (a grant hands
 	// direct exec access to a runner), so the CPA's conversation+create-only
-	// harness must not advertise or call it.
-	case "create_agent", "manage_agent":
+	// harness must not advertise or call it. provision_runner IS the CPA's
+	// narrow grant-giving carve-out: it stages NEW capability runners only —
+	// grants onto the build-time capability runners stay operator-only.
+	case "create_agent", "manage_agent", "provision_runner":
 		return true
 	}
 	return false

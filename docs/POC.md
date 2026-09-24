@@ -60,6 +60,14 @@ and a full compute-only teardown/rebuild with identity and memory intact, and cr
 agents on request. Its Phase-F resource baseline and the other open deferrals are tracked in
 `docs/followups.md`.
 
+## Grants on the fly (current)
+
+The department capability runners are live (one runner per capability, the grant unit is
+the runner), and the CPA stages NEW capability doors on the fly and grants agents onto
+them live — `provision_runner`, with dynamic capability records making an on-the-fly door
+rebuild-safe. The model, the confirmation discipline, and the acceptance checkboxes live
+in `docs/POC_GRANTS.md`.
+
 ## Chunk 5 — Agents get a workspace and can commit code
 
 Goal: an agent can get its own LXC workspace, provisioned by a named hardware peer, and use

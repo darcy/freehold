@@ -484,28 +484,14 @@ async fn handle_api_exec(
     Ok(serde_json::to_string_pretty(&result)?)
 }
 
-/// Runner's OWN self-check against an API connector: a curl probe with the
-/// credential in env; HTTP 200 = green. Never reports red for the whole
-/// report — every failure folds into the string.
-async fn api_status(
-    state: &RunnerState,
-    meta: &freehold_core::secrets::TargetMeta,
-) -> Result<String, exec::ExecError> {
-    let value =
-        match exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret) {
-            Ok(v) => v,
-            Err(e) => return Ok(format!("red({e})")),
-        };
-    let cred = exec::env_name(&meta.secret);
-    let url_env = format!("{cred}_URL");
-    let envs = vec![
-        (cred.clone(), value.clone()),
-        (
-            url_env.clone(),
-            zeroize::Zeroizing::new(meta.address.clone()),
-        ),
-    ];
-    let cmd = match meta.kind.as_str() {
+/// The api-class probe command per kind: a curl one-liner with the credential
+/// in `${cred}` and the base address in `${url_env}`. Returns None for kinds
+/// with no probe arm (they report red — the door is unsupported until someone
+/// writes its arm), and "local" is handled by the caller.
+/// Pure + unit-tested: the Go side seals an api-class runner's credential and
+/// the probe is what turns the runner's self-check green.
+fn api_probe_cmd(kind: &str, cred: &str, url_env: &str) -> Option<String> {
+    Some(match kind {
         "vultr" => format!(
             "curl -sS -o /dev/null -w '%{{http_code}}' \"${{{url_env}}}/v2/account\" -H \
              \"Authorization: Bearer ${{{cred}}}\""
@@ -547,9 +533,46 @@ async fn api_status(
              \"${{{url_env}}}/user/tokens/verify\" -H \
              \"Authorization: Bearer ${{{cred}}}\""
         ),
-        // a local door IS the runner's own host — alive iff this runner is.
-        "local" => return Ok("green".into()),
-        k => return Ok(format!("red(unsupported api kind {k})")),
+        // UniFi controller (UniFi OS): the credential env holds the JSON login
+        // body {"username":...,"password":...} the agent reuses for exec; a
+        // 200 proves reachability AND the account.
+        "unifi" => format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' -X POST \
+             \"${{{url_env}}}/api/auth/login\" -H 'Content-Type: application/json' \
+             -d \"${{{cred}}}\""
+        ),
+        _ => return None,
+    })
+}
+
+/// Runner's OWN self-check against an API connector: a curl probe with the
+/// credential in env; HTTP 200 = green. Never reports red for the whole
+/// report — every failure folds into the string.
+async fn api_status(
+    state: &RunnerState,
+    meta: &freehold_core::secrets::TargetMeta,
+) -> Result<String, exec::ExecError> {
+    let value =
+        match exec::resolve_secret_value(&state.ctx.identity, &state.ctx.package, &meta.secret) {
+            Ok(v) => v,
+            Err(e) => return Ok(format!("red({e})")),
+        };
+    let cred = exec::env_name(&meta.secret);
+    let url_env = format!("{cred}_URL");
+    let envs = vec![
+        (cred.clone(), value.clone()),
+        (
+            url_env.clone(),
+            zeroize::Zeroizing::new(meta.address.clone()),
+        ),
+    ];
+    let cmd = match api_probe_cmd(meta.kind.as_str(), &cred, &url_env) {
+        Some(cmd) => cmd,
+        None => match meta.kind.as_str() {
+            // a local door IS the runner's own host — alive iff this runner is.
+            "local" => return Ok("green".into()),
+            k => return Ok(format!("red(unsupported api kind {k})")),
+        },
     };
     // kubernetes answers a SelfSubjectReview with 201; every other probe 200s.
     let want = if meta.kind == "kubernetes" {
@@ -966,6 +989,41 @@ mod tests {
         let required = exec["inputSchema"]["required"].as_array().unwrap();
         assert!(required.contains(&json!("cmd")));
         assert!(required.contains(&json!("target")));
+    }
+
+    #[test]
+    fn api_probe_covers_every_supported_kind() {
+        // Every kind the Go side can provision (secret-management defaultRisk's
+        // safe list + ssh/local) has a probe arm (or is local/ssh), so an
+        // agent-provisioned door never probes red for lack of an arm.
+        for kind in [
+            "vultr",
+            "b2",
+            "hetzner",
+            "github",
+            "websearch",
+            "litellm",
+            "kubernetes",
+            "cloudflare",
+            "unifi",
+        ] {
+            assert!(
+                api_probe_cmd(kind, "CRED", "CRED_URL").is_some(),
+                "kind {kind} has no api probe arm"
+            );
+        }
+    }
+
+    #[test]
+    fn unifi_probe_posts_the_login_body() {
+        let cmd = api_probe_cmd("unifi", "UNIFI_AUTH", "UNIFI_AUTH_URL").unwrap();
+        assert!(cmd.contains("curl"));
+        assert!(cmd.contains("-X POST"));
+        assert!(cmd.contains("\"${UNIFI_AUTH_URL}/api/auth/login\""));
+        assert!(cmd.contains("-d \"${UNIFI_AUTH}\""));
+        // The credential is the JSON login body — the same env an exec uses.
+        assert!(!cmd.contains("Bearer"));
+        assert!(api_probe_cmd("nosuchkind", "C", "U").is_none());
     }
 
     /// Sign + POST an MCP tools/call (`list`) as `agent` against the runner.

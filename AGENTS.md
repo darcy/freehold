@@ -10,10 +10,12 @@ deliberately never restates a version number, so it can't go stale. Chunks 1–4
 implemented and live-verified against real infrastructure (a real PVE host, a real relay/CP
 pair under a real domain): the engine room and relay scope, the durable volume plane, the
 Rust→Go refactor, and Chunk 4's real, reasoning CPA that lives in Buzz — it holds
-conversations, survives a full rebuild, and creates new agents itself when asked. Chunk 5
-(agent workspaces + git/GitHub) is next; see `docs/POC.md`. Open deferrals are tracked in
-`docs/followups.md`. For how we got here, see the repository's GitHub Releases; this file
-describes the current state and the rules for working in this repo, not the history.
+conversations, survives a full rebuild, and creates new agents itself when asked. The
+department capability runners are live, and the CPA can provision capability on the fly
+(`provision_runner`; `docs/POC_GRANTS.md`). Chunk 5 (agent workspaces + git/GitHub) is
+next; see `docs/POC.md`. Open deferrals are tracked in `docs/followups.md`. For how we got
+here, see the repository's GitHub Releases; this file describes the current state and the
+rules for working in this repo, not the history.
 
 ## Documentation hygiene (locked) — a primary job of this file
 
@@ -105,7 +107,10 @@ describes the current state and the rules for working in this repo, not the hist
   version history lives there, not in the tree.
 - `docs/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
 - `docs/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
-- `docs/POC_CHUNK5.md` — the plan that actually exists for the current chunk (agent
+- `docs/POC_GRANTS.md` — the grants-on-the-fly build plan (the CPA's
+  `provision_runner` flow): the model, the confirmation discipline, and the
+  live acceptance checkboxes for the current work.
+- `docs/POC_CHUNK5.md` — the plan for the next chunk (agent
   workspaces + git/GitHub); Chunks 1–4 are shipped and their build plans retired.
 - `docs/followups.md` — the grab bag of deferred work pulled from retired plans. Current
   limitations of shipped code live in "Known gaps" below, not here.
@@ -264,13 +269,26 @@ release notes.
   department's pod gets aligned `FREEHOLD_RUNNER_*` comma lists and its bridge advertises one
   `exec`/`list` that ROUTES by target to the pinned runner+credential (fail-closed on an
   unlisted target), signing as the agent's own nsec; the runner re-reads its relay-signed 39002
-  roster per call. Grants are operator/console-issued (`grant_agent` / the build reconcile) and
-  land live. The CPA and custom agents carry no runner coords, so their bridge never advertises
+  roster per call. Grants are operator/console-issued (`grant_agent` / the build reconcile)
+  and land live — EXCEPT the CPA's provision_runner carve-out (next gap). The CPA and custom
+  agents carry no runner coords, so their bridge never advertises
   exec — the raw grant attaches only to department identities. The granting rules are captured
-  in the CPA's first skill (`agents/freehold/skills/granting.md`, composed into its prompt);
-  agent-side granting itself is still operator-scoped. Remaining capability tooling (backup
+  in the CPA's first skill (`agents/freehold/skills/granting.md`, composed into its prompt).
+  Remaining capability tooling (backup
   scheduling, monitoring dashboards, AI hardware) is still unbuilt; runners' audits are
   local-spool only (kind-48001 relay publish is rejected by stock buzz as an unknown kind).
+- **Agent-initiated grants exist, but only as new doors, and only in confirm mode.** The
+  CPA's `provision_runner` (0.7.4, `docs/POC_GRANTS.md`) stages a NEW capability runner on
+  the fly and grants the named agents onto it live — it cannot widen an existing runner's
+  roster (grants onto build-time capability runners stay operator/console-issued via
+  `grant_agent`, `-32003` for agents), and `agent_grants: off` on the CP state is the
+  server-side kill switch (`freehold-console grants-mode`; default `confirm`). The
+  in-thread-vs-DM confirmation discipline lives in the granting skill — the server cannot
+  see Buzz threads, so a compromised CPA's only technical barrier is the new-runner-only
+  boundary; the prompt is the first line of defense. Dynamic capability records make an
+  on-the-fly door rebuild-safe (re-staged adopt-only every build; a record whose package
+  vanished fails loudly — the credential is not re-derivable), and the grantees' pods are
+  re-applied with coords resolved from state.
 - **The doors are intent+audit boundaries, not hard containment on a shared
   host.** `dnsmasq-local-root` executes on the CP guest (where every runner
   package + the state store live), and `pve-ssh-root` reaches the CP guest via
@@ -312,8 +330,8 @@ release notes.
   addresses this.
 - **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
   unzeroized body bytes (loopback, TLS-free — same exposure class as the CLI's stdin path).
-- **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP
-  surface on the CP (`freehold-agent-tools`), not chat.** The Go methods
+- **The freehold CP toolset (create-agent / provision-runner / grant-agent / manage-agent)
+  is a real MCP surface on the CP (`freehold-agent-tools`), not chat.** The Go methods
   (`control-plane/api/agent/tools.go`) are served by a dedicated CP-side binary
   (`control-plane/api/cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
   shared signed-header scheme and authorized against the server's own relay roster (its
@@ -321,8 +339,8 @@ release notes.
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
   the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
   via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
-  aggregates buzz-dev-mcp's message tools with create/manage, signed as the agent and
-  authorized by the server's roster. **`grant_agent` is wired through the absorbed
+  aggregates buzz-dev-mcp's message tools with create/provision/manage, signed as the agent
+  and authorized by the server's roster. **`grant_agent` is wired through the absorbed
   console-owner credential and is OPERATOR-scoped** (not reachable by the CPA's
   conversation+create-only harness): the server loads the console's own identity from the
   console's state dir (`/srv/data/cp/control-plane/console`, 0600 durable plane) and
@@ -330,8 +348,10 @@ release notes.
   re-reads its signed 39002 roster per call, so the grant lands without a restart. A
   missing console credential fails closed ("no relay/console-owner wiring") rather than
   silently succeeding. An agent granting onto an arbitrary runner would hand direct exec
-  access to that runner's MCP surface, so grants are the operator's call (server-enforced,
-  `-32003` for agents).
+  access to that runner's MCP surface, so grants onto EXISTING runners are the operator's
+  call (server-enforced, `-32003` for agents); the CPA's `provision_runner` is the narrow
+  carve-out — NEW capability runners only, kill-switchable with `agent_grants: off`
+  (see the agent-initiated-grants gap above).
 - **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
   the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
   bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and
@@ -417,8 +437,9 @@ release notes.
   resolve as siblings of the running binary — a box doing world bring-up needs all
   five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
-- `docs/POC.md` and `docs/POC_CHUNK5.md` carry the live acceptance checkboxes for the
-  current chunk; tick them as work lands. The Chunk-1/2 acceptance gate is Go now
+- `docs/POC_GRANTS.md` carries the live acceptance checkboxes for the grants-on-the-fly
+  work; `docs/POC.md` and `docs/POC_CHUNK5.md` carry them for the numbered chunks — tick
+  as work lands. The Chunk-1/2 acceptance gate is Go now
   (`control-plane/acceptance/`, run by
   `go test ./...`): the CP provisioner lifecycle, the console HTTP surface, and the
   relay-channel fold against a hermetic fake relay — the connector/relay behaviors the

@@ -29,6 +29,43 @@ type ConsoleOps interface {
 // records the registry row.
 type CreateAgentFn func(name, purpose string, channels []string, private bool) (pubkey string, err error)
 
+// ProvisionArgs is one provision_runner call: a NEW capability runner's spec
+// plus the agents to grant it to. Secret is the operator-supplied credential —
+// sealed to the runner's key on arrival, never persisted or logged as
+// plaintext. For kind "ssh" the runner mints its OWN keypair instead (Secret
+// must be empty; the public line comes back for a one-time install on the
+// target box).
+type ProvisionArgs struct {
+	// Name is the runner name, <target>-<protocol>-<identity> (e.g.
+	// rtx3090-ssh-root, unifi-api-admin) — capability-named, never
+	// consumer-named.
+	Name string `json:"name"`
+	// Kind is the connector kind: "ssh" (user@host[:port] address), or an
+	// api-class kind ("unifi", ...) whose exec runs locally with the
+	// credential + address injected as env.
+	Kind string `json:"kind"`
+	// Address is the target endpoint: user@host[:port] (ssh) or the base URL
+	// (api-class).
+	Address string `json:"address"`
+	// Secret is the inline credential (api-class kinds); ignored + rejected
+	// for ssh. Extras are additional named secrets (sealed under their names;
+	// env name = UPPER_SNAKE of the secret name).
+	Secret string            `json:"secret"`
+	Extras map[string]string `json:"extras"`
+	// GrantTo are the agent NAMES to grant onto the runner's roster (a
+	// department that owns the capability class, or a custom agent that owns
+	// the service). Each must exist in the agent registry.
+	GrantTo []string `json:"grant_to"`
+}
+
+// ProvisionRunnerFn stages a NEW capability runner on the fly (the CPA's
+// grant-giving flow): provision the runner package, sync its relay channel,
+// start it on the CP guest, record the dynamic capability (rebuild-safe), grant
+// the named agents onto its roster live, and re-apply the grantees' pods so
+// their exec surface picks the new coords up. Built by cpbuild.BuildProvisionRunner;
+// nil = unsupported.
+type ProvisionRunnerFn func(args ProvisionArgs) (report string, err error)
+
 // Tools is the CPA's dedicated agent-management toolset (A4): create-agent,
 // grant-agent, manage-agent. These are what the CPA's reasoning calls (via its
 // MCP layer → console client) — the "dedicated create/grant/manage-agent
@@ -55,6 +92,9 @@ type Tools struct {
 	// WorldTeardownFn runs the CP-owned world teardown (the physical inverse of
 	// build; the CP + runner survive). nil = unsupported.
 	WorldTeardownFn func() (string, error)
+	// Provision stages a new capability runner on the fly (provision_runner —
+	// the CPA's grant-giving flow). nil = unsupported.
+	Provision ProvisionRunnerFn
 	// Status builds the single inventory world_status returns (agents + the
 	// console's runners/DNS read underneath). nil = agents only.
 	Status WorldStatusFunc
@@ -184,6 +224,16 @@ func (t *Tools) GrantAgent(runner string, agentPubkeys []string) error {
 		}
 	}
 	return nil
+}
+
+// ProvisionRunner stages a new capability runner on the fly and grants the
+// named agents onto it (the CPA-scoped grant-giving flow; raw grants onto
+// EXISTING runners stay operator-scoped via grant_agent).
+func (t *Tools) ProvisionRunner(args ProvisionArgs) (string, error) {
+	if t.Provision == nil {
+		return "", fmt.Errorf("provision-runner: no staging path bound")
+	}
+	return t.Provision(args)
 }
 
 // ManageAgent lists registered agents, or (with remove) drops one's registry

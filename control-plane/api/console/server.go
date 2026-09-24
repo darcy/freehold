@@ -753,6 +753,14 @@ type provisionReq struct {
 	Secret    string  `json:"secret"`
 	RunnerDir *string `json:"runner_dir"`
 	Risk      *string `json:"risk"`
+	// Rosters (optional) records the runner as a capability whose grant is the
+	// given agent PUBKEYS (kind-9000 put-user, live) and makes it
+	// rebuild-safe: the recorded capability re-stages + re-asserts the grants
+	// on every build. Port (optional) pins the runner's MCP bind port on the
+	// CP LXC (allocated above the capability table when 0). The runner UNIT
+	// starts on the next build/world_build reconcile.
+	Rosters []string `json:"rosters"`
+	Port    int      `json:"port"`
 }
 
 // relayAuthFor returns the NIP-98 canonical URL for relay writes: the relay's
@@ -801,11 +809,63 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Capability rosters: record the runner as an agent-provisioned capability
+	// (rebuild-safe) and grant each roster pubkey onto its channel live. The
+	// operator names pubkeys directly (the console has no agent-name registry;
+	// the agent-tools flow resolves names).
+	granted := []string{s.ConsolePubkey}
+	var capability *state.CapabilityRecord
+	if len(req.Rosters) > 0 {
+		port := req.Port
+		if port == 0 {
+			port = capabilityPortAbove(snap.Capabilities)
+		}
+		rec := state.CapabilityRecord{
+			Kind: req.Kind, Address: req.Address, Port: port,
+			Rosters:   append([]string(nil), req.Rosters...),
+			CreatedAt: uint64(time.Now().Unix()),
+		}
+		if err := s.Store.InsertCapability(req.Name, rec); err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+		capability = &rec
+		for _, pk := range req.Rosters {
+			if err := provisioner.PutUserMembership(s.Store, dialOr(relayURL), s.relayAuthFor(), req.Name, pk, s.Store.Dir()); err != nil {
+				writeErr(w, statusForAction(err), err.Error())
+				return
+			}
+			granted = append(granted, pk)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true, "name": res.Name, "nostr_pubkey": res.NostrPubkey,
 		"enc_pubkey": res.EncPubkey, "package_dir": res.PackageDir,
-		"granted": []string{s.ConsolePubkey}, "relay": relayURL,
+		"granted": granted, "relay": relayURL, "capability": capability,
 	})
+}
+
+// dialOr returns the relay dial URL or a non-nil fallback for put-user.
+func dialOr(u *string) string {
+	if u == nil {
+		return ""
+	}
+	return *u
+}
+
+// capabilityPortAbove allocates the first free MCP port above the dynamic
+// base, skipping recorded capability ports (the same base the agent-tools
+// flow uses).
+func capabilityPortAbove(caps map[string]state.CapabilityRecord) int {
+	occupied := map[int]bool{}
+	for _, rec := range caps {
+		occupied[rec.Port] = true
+	}
+	port := 8800
+	for occupied[port] {
+		port++
+	}
+	return port
 }
 
 func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {

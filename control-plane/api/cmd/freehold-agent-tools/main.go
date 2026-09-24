@@ -570,6 +570,7 @@ func cmdServe(args []string) {
 	tools.World = cpbuild.BuildWorldApply(spec)
 	tools.Exec = cpbuild.BuildWorldExec(spec)
 	tools.Status = cpbuild.BuildWorldStatus(spec, reg, *consoleStateDir, facts)
+	tools.Provision = cpbuild.BuildProvisionRunner(spec, reg)
 	doorAuth, doorRevoke := cpbuild.BuildWorldDoor(spec)
 	tools.DoorAuthorize = doorAuth
 	tools.DoorRevoke = doorRevoke
@@ -578,6 +579,9 @@ func cmdServe(args []string) {
 		Audience: audience,
 		Grants:   grants,
 		Tools:    tools,
+		// The agent-grant kill switch, read fresh per call (the operator flips
+		// it through the console; the next provision_runner call sees it).
+		AgentGrants: func() string { return cpstate.AgentGrantsMode(*consoleStateDir) },
 		IsAgent: func(caller string) bool {
 			agents, err := reg.Agents()
 			if err != nil {
