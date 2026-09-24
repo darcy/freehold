@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -95,6 +96,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	caller, aerr := VerifyRequest(grants, s.Audience,
 		r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
 	if aerr != nil {
+		// Server-side detail the client error deliberately omits: WHO claimed
+		// to call and WHO this server is. An audience drift (a pod signing a
+		// stale agent-tools identity after a durable-state re-mint) reads here
+		// as "signature does not verify" with two different pubkeys.
+		log.Printf("freehold-agent-tools: rejected caller %s: %v (audience %s)",
+			ShortHex(r.Header.Get(PubkeyHeader)), aerr, ShortHex(s.Audience))
 		s.rpcError(w, req.ID, -32001, aerr.Error())
 		return
 	}

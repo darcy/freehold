@@ -657,6 +657,10 @@ func cmdMCP(args []string) {
 		logNsec("mcp: " + err.Error())
 		os.Exit(1)
 	}
+	// The pod-side half of the audience-drift diagnosis: what this bridge
+	// signs as the agent-tools audience, next to the server's own boot log —
+	// two different values here IS the "-32001 signature does not verify" bug.
+	logBridge("mcp: agent-tools " + conf.URL + " (audience " + conf.Pubkey + ")")
 	// buzz-acp injects the agent's nsec into the MCP server env as
 	// BUZZ_PRIVATE_KEY (bech32 nsec1).
 	nsec := os.Getenv("BUZZ_PRIVATE_KEY")

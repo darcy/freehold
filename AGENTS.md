@@ -310,6 +310,14 @@ release notes.
   not the (non-secret) base-URL env var — cosmetic, fix is a separate redaction list.
 - **State store is single-process** — not cross-process atomic; planned Postgres swap at MVP
   addresses this.
+- **Agent-tools audience drift is detected, not repaired.** Every bring-up's report
+  compares the live agent-tools identity against the pubkey the console state recorded
+  from the box's profile; a drift (the durable identity re-minted under the fleet — e.g. a
+  serve boot against an unmounted `/srv/data`) means every existing agent pod still signs
+  the dead audience and every CP tool call fails `-32001 signature does not verify` while
+  the world otherwise looks healthy. The repair — restore `/srv/data/cp/agent-tools` from
+  backup, or deliberately re-point the profile and re-create the pods — is an operator
+  call; nothing auto-writes either side.
 - **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
   unzeroized body bytes (loopback, TLS-free — same exposure class as the CLI's stdin path).
 - **The freehold CP toolset (create-agent / grant-agent / manage-agent) is a real MCP

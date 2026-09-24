@@ -1304,6 +1304,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// half is sufficient alone. That guarantee lives in migrationRunner,
 				// not here, so the world_migrate tool gets it too.
 				report = spec.appendMigrations(report)
+				report = spec.appendAgentToolsAudience(report)
 			} else {
 				// Console executor: write the files, then reload the serve process.
 				// The serve is deliberately left RUNNING across this whole block: the
@@ -1326,6 +1327,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// so they need NO running serve — they run BEFORE the restart, and the
 				// process that comes up loads their result as its starting state.
 				report = spec.appendMigrations(report)
+				report = spec.appendAgentToolsAudience(report)
 				if err := spec.startAgentTools(); err != nil {
 					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
 				}
@@ -1603,6 +1605,41 @@ func (s *Spec) appendMigrations(report []string) []string {
 		line = "WARN: " + line
 	}
 	return append(report, line)
+}
+
+// appendAgentToolsAudience appends the audience-drift check line. The live
+// agent-tools identity (Spec.Audience — what every pod's signed call must
+// verify against) is compared against the pubkey the console state recorded
+// from the box's profile at deploy. A mismatch means the durable agent-tools
+// identity was re-minted under the fleet (e.g. a serve boot against an
+// unmounted durable plane): every EXISTING pod still signs the dead audience,
+// so every CP tool call fails signature verify while the world otherwise
+// looks healthy. Detection only — the repair (restore the durable agent-tools
+// state from backup, or a deliberate re-point + pod re-create) is an operator
+// decision, never an auto-write.
+func (s *Spec) appendAgentToolsAudience(report []string) []string {
+	if s.Audience == "" {
+		return report
+	}
+	if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), state.StateFile)); err != nil {
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(s.Audience)+" (no console state — nothing recorded to compare)")
+	}
+	store, err := state.Open(s.consoleStateRoot())
+	if err != nil {
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
+	}
+	rec := store.AgentToolsPubkey()
+	switch {
+	case rec == nil || *rec == "":
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(s.Audience)+" (console state records none — pre-recording world)")
+	case *rec == s.Audience:
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(s.Audience)+" matches the console record")
+	default:
+		return append(report, "WARN: agent-tools: AUDIENCE DRIFT — the live identity is "+agenttools.ShortHex(s.Audience)+
+			" but the console/box profile records "+agenttools.ShortHex(*rec)+
+			": every existing agent pod signs the stale pubkey and every CP tool call fails signature verify. "+
+			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods.")
+	}
 }
 
 // doorKeyRe is the DOOR_SPEC §2.5 strict authorized_keys-line gate: key type +

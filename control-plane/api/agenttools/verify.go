@@ -72,6 +72,15 @@ func VerifyRequest(grants []string, audience, pubkey, sig, tsStr, rawBody string
 	return pubkey, nil
 }
 
+// ShortHex truncates a hex pubkey for a log/report line (pubkeys are public;
+// the full value lives in the header/registry when it matters).
+func ShortHex(s string) string {
+	if len(s) > 12 {
+		return s[:12] + "…"
+	}
+	return s
+}
+
 // ParseGrants splits a comma-separated grant list (env-shaped), trimming.
 func ParseGrants(s string) []string {
 	var out []string
