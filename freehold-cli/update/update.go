@@ -138,18 +138,23 @@ func run(ctx context.Context, o options) error {
 		return err
 	}
 
+	// Reconcile FIRST: the deploy stopped every freehold-runner* unit (the
+	// binary ship needs the inode free) and restarted only the console serve —
+	// the world-build re-runs the CP's stages through its co-located runner:
+	// the agent-tools serve comes back up, the capability doors re-stage,
+	// grants re-assert, the pods re-apply, and the world-build's own tail runs
+	// the pending migrations.
+	fmt.Println("→ reconciling the world (doors re-stage, migrations run in the build tail)")
+	if err := reconcileWorld(cfg); err != nil {
+		return fmt.Errorf("world reconcile failed (the deploy landed; run `freehold build` then `freehold update` to finish): %w", err)
+	}
+
+	// A final migration sweep through the now-up agent-tools (the reconcile's
+	// tail already ran what was pending; this catches a failed queue and makes
+	// the report visible). Version pins only after this.
 	fmt.Println("→ running pending migrations")
 	if err := runMigrations(cfg); err != nil {
 		return fmt.Errorf("migrations failed (version NOT promoted; re-run `freehold update` to retry): %w", err)
-	}
-
-	// Reconcile: the deploy stopped EVERY freehold-runner* unit on the CP guest
-	// (the binary ship needs the inode free) and restarted only the co-located
-	// runner — the capability doors re-stage + the pods re-assert through the
-	// world-build, so the update converges instead of leaving dead doors.
-	fmt.Println("→ reconciling the world (capability doors re-stage)")
-	if err := reconcileWorld(cfg); err != nil {
-		return fmt.Errorf("world reconcile failed (the deploy + migrations landed; run `freehold build` to finish): %w", err)
 	}
 
 	fmt.Println("→ pinning version")

@@ -72,6 +72,15 @@ there; if it is work not yet done, it belongs here.
 
 ## Relay / Buzz
 
+- **After a relay redeploy, private-channel publishes 403 until the channels'
+  roster snapshots are reconciled.** The relay's kind-39002 roster events live
+  in its event store; a relay LXC redeploy (the teardown→rebuild cycle)
+  leaves them stale against the DB's memberships, and the new buzz enforces
+  the signed snapshot on private-channel publishes — an agent's own reply to
+  its own channel 403s while everything else looks healthy. Repair:
+  `buzz-admin reconcile-channels --channel <id>` per channel (verified live).
+  The durable fix: deploy_relay (or the world-build's relay stage) runs
+  `reconcile-channels` across the community's channels after a redeploy.
 - **Audit exec receipts as channel messages.** Designed (grant implies read access to a
   runner's exec history; receipts redacted before posting, same discipline as the
   shipped-package flow) but not posted. The operational audit path stays kind-48001 +

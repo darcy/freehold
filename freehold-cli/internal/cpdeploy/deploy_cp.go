@@ -522,9 +522,11 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		// restarts it below. The capability doors (freehold-runner-<name>)
 		// execute the SAME binary — stop every one of them too (they re-stage
 		// at the world-build reconcile the update triggers after the deploy).
-		// Tolerated when none is running.
+		// The glob reaches systemctl unquoted (LxcExec single-quotes the whole
+		// payload — no shell quotes may appear inside); when nothing matches,
+		// systemctl errors and the trailing true tolerates it.
 		if _, err := execToOK(t,
-			proxmox.LxcCmd(spec.LXc, `for u in $(systemctl list-units --all 'freehold-runner*' --no-legend | awk '{print $1}'); do systemctl stop "$u"; done; true`),
+			proxmox.LxcCmd(spec.LXc, "systemctl stop freehold-runner* 2>/dev/null; true"),
 			"stop co-located runner", 30); err != nil {
 			return nil, err
 		}
