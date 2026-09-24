@@ -294,6 +294,12 @@ release notes.
   naming the repo and the read-on-boot/periodic-recheck discipline, and is honest that access
   is not available yet. The git/GitHub grant + the read/schedule path land with Chunk 5's
   workspace/git work.
+- **Buzz mobile pairing needs the k3s edge.** The pair-relay sidecar (NIP-AB device
+  pairing) is a k3s pod deployed by the terraform services phase, and the rendered
+  Caddyfile routes the relay vhost's `/pair*` to it — so a domain world WITHOUT the k3s
+  layer (`--no-k3s`, TLS via the relay-guest local-CA posture) has no pairing surface and
+  the handshake 404s there. The relay still advertises `BUZZ_PAIRING_RELAY_URL` in NIP-11
+  on those worlds (the .env write is unconditional for domain deploys).
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out

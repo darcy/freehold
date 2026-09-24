@@ -94,3 +94,41 @@ resource "kubernetes_manifest" "caddy_service" {
     }
   }
 }
+
+# pair-relay — Buzz's NIP-AB device-pairing sidecar (a stateless WS matcher:
+# matches kind:24134 pairing events against live #p subscriptions; no
+# persistence, no auth, bounded resources). The desktop's QR + the mobile app
+# dial wss://<relay-host>/pair through the edge, which routes /pair* here.
+# hostNetwork like caddy (binds 5000 on the node; the edge's rendered Caddyfile
+# proxies to it by node IP) + Recreate for the same port-hold reason.
+resource "kubernetes_manifest" "pair_relay_deploy" {
+  depends_on = [kubernetes_manifest.caddy_namespace]
+  manifest = {
+    apiVersion = "apps/v1"
+    kind       = "Deployment"
+    metadata   = { name = "pair-relay", namespace = "caddy" }
+    spec = {
+      replicas = 1
+      strategy = { type = "Recreate" }
+      selector = { matchLabels = { app = "pair-relay" } }
+      template = {
+        metadata = { labels = { app = "pair-relay" } }
+        spec = {
+          hostNetwork = true
+          containers = [{
+            name    = "pair-relay"
+            image   = "ghcr.io/block/buzz:main"
+            # :main moves; Always so a pod restart picks up the current image
+            # (the delivery path for the sidecar binary on live worlds).
+            imagePullPolicy = "Always"
+            command         = ["/usr/local/bin/buzz-pair-relay"]
+            env = [{
+              name  = "BUZZ_PAIR_RELAY_BIND_ADDR"
+              value = "0.0.0.0:5000"
+            }]
+          }]
+        }
+      }
+    }
+  }
+}
