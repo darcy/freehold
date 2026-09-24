@@ -221,6 +221,15 @@ func cmdServe(args []string) error {
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return fmt.Errorf("world-config not valid cpbuild coords JSON: %w", err)
 		}
+		// The origin guard's public exception (C3.5), derived: the operator's
+		// CONFIGURED CP public host rides the world-config; an explicit
+		// --public-origin flag wins when passed. Without either, the guard
+		// refuses the fronted console URL's own browser as cross-origin —
+		// every /api POST from the public host (the door-fill pages) dies with
+		// "console is loopback-only" even though the console is authed + fronted.
+		if pubOrigin == nil && c.CpHost != "" {
+			pubOrigin = strPtr("https://" + c.CpHost)
+		}
 		builder = cpbuild.NewSpec(c, secret, consolePK)
 		// The Spec drives identity / migrations / world-secrets / the CP guest
 		// dirs, all relative to the CONSOLE's own state dir — the world-config
