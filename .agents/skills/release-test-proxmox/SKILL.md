@@ -96,6 +96,24 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 > update issues nothing). Circle back to Fresh when the TXT resolves — re-run
 > `build`, it installs the cert and continues — and finish the Fresh rows last.
 > Never let the Fresh wait idle the whole run: the other tests are not blocked by it.
+>
+> **Never probe the challenge name through a caching resolver while it is negative.**
+> An NXDOMAIN answer is cached (negative TTL — minutes to an hour) by 1.1.1.1/8.8.8.8
+> and public DoH resolvers alike, and a cached no-hit can outlive the actual
+> propagation — poisoning later checks and (in principle) the ACME validation path.
+> While the record is negative, check either the provider's API (the record exists?)
+> or the AUTHORITATIVE NS directly (`@<zone NS>`, uncached); the build's own
+> propagation check already targets the authoritative NS. Hold the fresh build's
+> next retry until the other tests' rows are done, so its first ACME-triggering
+> attempt runs on a settled box instead of interleaved with the other builds'
+> terraform work (the host-side tf dir locks — concurrent builds contest it).
+>
+> **Track the run as a todo list** — one item per prep step + per table row, in the
+> order they run: assets restored → Fresh install → Fresh build (waiting on CF) →
+> Rebuild - Teardown → Rebuild - Build → Live - Update → Fresh rows (cert → CPA
+> reply → teardown → build → uninstall) → table updated → release-publish. Mark
+> each in_progress when started and completed only on its own evidence, so the
+> operator sees where the run is at any moment.
 
 1. **Restore the assets into a `ResolveBins`-shaped layout** so the pre-release binaries are
    what gets installed (not a local `just build`). `ResolveBins` checks *paths*, not build
