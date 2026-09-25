@@ -55,6 +55,9 @@ type State struct {
 	Runners map[string]Runner `json:"runners"`
 	DNS     map[string]DnsRecord `json:"dns"`
 	Agents  map[string]Agent  `json:"agents"`
+	// AgentGrants is the agent-grant mode knob ("confirm" default; "off" =
+	// the server denies agent provisioning outright).
+	AgentGrants *string `json:"agent_grants,omitempty"`
 }
 
 // Read loads the console's state.json from the CP state dir.
@@ -111,6 +114,17 @@ func RunnerNostrPubkey(consoleStateDir, name string) (string, error) {
 		return "", fmt.Errorf("runner %q has no recorded nostr pubkey", name)
 	}
 	return r.NostrPubkey, nil
+}
+
+// AgentGrantsMode reads the CP's agent-grant mode fresh from the console's
+// state.json ("confirm" when unset — the CPA grants when the operator's ask is
+// in its own thread, else DMs for a yes; "off" = the server denies the flow).
+func AgentGrantsMode(consoleStateDir string) string {
+	st, err := Read(consoleStateDir)
+	if err != nil || st.AgentGrants == nil || *st.AgentGrants == "" {
+		return "confirm"
+	}
+	return *st.AgentGrants
 }
 
 // ConsoleSecret loads the console's own Nostr secret from

@@ -267,7 +267,22 @@ freehold-console serve --state-dir /srv/data/cp/control-plane
 Paste a credential into the provision form (or `POST /api/provision`). The console ships the
 runner package, registers the runner's MCP address, and the overview shows the runner's OWN
 self-check per target — 🟢/🟡/🔴 — probed through the same signed MCP channel an agent
-uses. Manage: rotate, revoke, grant/revoke-grant, set MCP addr.
+uses. Manage: rotate, revoke, grant/revoke-grant, set MCP addr. A provision body may also
+carry `rosters` (agent NAMES — resolved through the agent registry, granted live) + `port`:
+the runner is then recorded as an agent-provisioned capability and re-staged on every build.
+
+Every runner has its own page: `/runner/<name>` — the deep link opens that door's fill
+form (kind-aware: a `unifi` door takes username + password and the console composes the
+login body). The agents use these links when they provision a door on the fly: the door
+ships EMPTY, the operator fills it here, and the console seals it + restarts the door —
+no credential ever transits agent chat. The freehold agent (the CPA) stages capability
+runners itself (`provision_runner` on its MCP toolset) under the granting skill's
+confirmation discipline; the operator's kill switch:
+
+```sh
+freehold-console grants-mode --state-dir /srv/data/cp/control-plane            # current mode
+freehold-console grants-mode --mode off --state-dir /srv/data/cp/control-plane # deny the flow
+```
 
 ### Control plane CLI: provision a service
 

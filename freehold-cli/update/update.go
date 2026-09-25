@@ -21,6 +21,7 @@ import (
 	"freehold/freehold-cli/internal/artifact"
 	"freehold/freehold-cli/internal/common"
 	"freehold/freehold-cli/internal/stages"
+	oplogin "freehold/freehold-cli/login"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 )
@@ -137,6 +138,20 @@ func run(ctx context.Context, o options) error {
 		return err
 	}
 
+	// Reconcile FIRST: the deploy stopped every freehold-runner* unit (the
+	// binary ship needs the inode free) and restarted only the console serve —
+	// the world-build re-runs the CP's stages through its co-located runner:
+	// the agent-tools serve comes back up, the capability doors re-stage,
+	// grants re-assert, the pods re-apply, and the world-build's own tail runs
+	// the pending migrations.
+	fmt.Println("→ reconciling the world (doors re-stage, migrations run in the build tail)")
+	if err := reconcileWorld(cfg); err != nil {
+		return fmt.Errorf("world reconcile failed (the deploy landed; run `freehold build` then `freehold update` to finish): %w", err)
+	}
+
+	// A final migration sweep through the now-up agent-tools (the reconcile's
+	// tail already ran what was pending; this catches a failed queue and makes
+	// the report visible). Version pins only after this.
 	fmt.Println("→ running pending migrations")
 	if err := runMigrations(cfg); err != nil {
 		return fmt.Errorf("migrations failed (version NOT promoted; re-run `freehold update` to retry): %w", err)
@@ -251,6 +266,37 @@ func runMigrations(cfg *config.Config) error {
 		return err
 	}
 	if t := strings.TrimSpace(text); t != "" {
+		fmt.Println(t)
+	}
+	return nil
+}
+
+// reconcileWorld triggers the console's /api/world-build (the same trigger
+// `freehold build` uses): the CP re-runs its build stages through its
+// co-located runner — the capability doors re-stage, grants re-assert, the
+// agent pods re-apply.
+func reconcileWorld(cfg *config.Config) error {
+	secStr, err := oplogin.SecretHex()
+	if err != nil {
+		return fmt.Errorf("no operator identity: %v", err)
+	}
+	key, err := oplogin.NsecToSecret(secStr)
+	if err != nil {
+		return err
+	}
+	loginURL := cfg.CPURL
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		loginURL = "http://" + ip + ":8080"
+	}
+	c, err := oplogin.Login(loginURL, key)
+	if err != nil {
+		return fmt.Errorf("console login at %s: %v", loginURL, err)
+	}
+	res, err := c.WorldBuild()
+	if err != nil {
+		return fmt.Errorf("world_build (console /api/world-build): %v", err)
+	}
+	if t := strings.TrimSpace(res.Report); t != "" {
 		fmt.Println(t)
 	}
 	return nil

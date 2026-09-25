@@ -11,6 +11,23 @@ there; if it is work not yet done, it belongs here.
 
 ## Provisioning / substrate
 
+- **World-config degradation on update.** `FlagsFromConfig` derives flags from
+  the tenant config only, and the config does not record the substrate-create
+  params (memory/bridge/storage/rootfs/relay-gw/thin-pool), so an update's
+  redeploy re-renders the console's world-config WITHOUT them — fine while
+  guests exist (they're only create params), but a teardown→rebuild after an
+  update then cannot create the relay/k3s guests ("memory: value must have a
+  minimum value of 16"). Worked around live (relaunched the console serve with
+  a completed world-config); the durable fix is persisting the world-config on
+  the CP's durable plane (deploy writes it, redeploys merge/re-read) or
+  recording the params in the tenant config at install.
+- **Pre-tf kube workloads cannot be adopted by an updated world.**
+  `kubernetes_manifest` does not support import, so a world whose namespaces/
+  workloads predate the terraform module (0.7.1→0.7.3+) fails its build's
+  services phase with "Cannot create resource that already exists". The
+  repair is the tested teardown→rebuild cycle (durable-plane data survives);
+  an adoption path (a migration that adopts, or a tf-side import workaround)
+  would make the upgrade seamless.
 - **Vultr provider.** The `providers/` seam exists (`providers/proxmox/`), but no
   `providers/vultr/` or `api-vultr` access mode. Same orchestration, second provider;
   Hetzner follows the same pattern later. (The install-access plan's last unshipped leg.)
@@ -67,6 +84,15 @@ there; if it is work not yet done, it belongs here.
 
 ## Relay / Buzz
 
+- **After a relay redeploy, private-channel publishes 403 until the channels'
+  roster snapshots are reconciled.** The relay's kind-39002 roster events live
+  in its event store; a relay LXC redeploy (the teardown→rebuild cycle)
+  leaves them stale against the DB's memberships, and the new buzz enforces
+  the signed snapshot on private-channel publishes — an agent's own reply to
+  its own channel 403s while everything else looks healthy. Repair:
+  `buzz-admin reconcile-channels --channel <id>` per channel (verified live).
+  The durable fix: deploy_relay (or the world-build's relay stage) runs
+  `reconcile-channels` across the community's channels after a redeploy.
 - **Audit exec receipts as channel messages.** Designed (grant implies read access to a
   runner's exec history; receipts redacted before posting, same discipline as the
   shipped-package flow) but not posted. The operational audit path stays kind-48001 +

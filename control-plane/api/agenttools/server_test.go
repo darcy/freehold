@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 11 {
-		t.Fatalf("expected 11 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 12 {
+		t.Fatalf("expected 12 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "grant_agent", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
+	for _, name := range []string{"create_agent", "grant_agent", "provision_runner", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -373,6 +373,64 @@ func TestServerScopeAuth(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if strings.Contains(rec.Body.String(), "-32003") {
 		t.Fatalf("registry agent manage_agent must be allowed: %s", rec.Body.String())
+	}
+}
+
+// TestProvisionRunnerAgentGate pins the grant-giving carve-out: a registry
+// agent (the CPA) may call provision_runner in the default confirm mode — the
+// operator-in-thread / DM-confirm discipline lives in the granting skill —
+// with the args plumbed to the staging path verbatim; `agent_grants: off` is
+// the server-side kill switch that denies EVERY caller.
+func TestProvisionRunnerAgentGate(t *testing.T) {
+	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	agentSec := make([]byte, 32)
+	agentSec[0] = 9
+	agentPK, err := crypto.PubkeyFromSecret(agentSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	var got agent.ProvisionArgs
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{agentPK}, nil },
+		Tools: &agent.Tools{
+			Provision: func(a agent.ProvisionArgs) (string, error) {
+				called++
+				got = a
+				return "runner staged report", nil
+			},
+		},
+		IsAgent: func(pk string) bool { return pk == agentPK },
+	}
+	call := func(mode string) string {
+		t.Helper()
+		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"provision_runner","arguments":` +
+			`{"name":"rtx3090-ssh-root","kind":"ssh","address":"darcy@192.168.1.50","grant_to":["ai"]}}}`
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, agentPK)
+		req.Header.Set(SigHeader, signForTest(agentSec, aud, ts, raw))
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+
+	if body := call(""); called != 1 || !strings.Contains(body, "runner staged report") {
+		t.Fatalf("confirm-mode (default) must dispatch to the staging path: called=%d body=%s", called, body)
+	}
+	if got.Name != "rtx3090-ssh-root" || got.Kind != "ssh" || got.Address != "darcy@192.168.1.50" ||
+		len(got.GrantTo) != 1 || got.GrantTo[0] != "ai" {
+		t.Fatalf("args not plumbed verbatim: %+v", got)
+	}
+
+	srv.AgentGrants = func() string { return "off" }
+	if body := call("off"); !strings.Contains(body, "agent_grants is off") {
+		t.Fatalf("the kill switch must deny provision_runner: %s", body)
+	}
+	if called != 1 {
+		t.Fatalf("the kill switch must stop the staging path from running (called=%d)", called)
 	}
 }
 

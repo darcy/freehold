@@ -519,9 +519,14 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		// push cannot atomically overwrite the live-executable inode (the old
 		// process keeps the old inode, so the shipped-binary size check reads
 		// stale bytes and deploy-cp fails on the surviving binary). deploy-cp
-		// restarts it below. Tolerated when it isn't running.
+		// restarts it below. The capability doors (freehold-runner-<name>)
+		// execute the SAME binary — stop every one of them too (they re-stage
+		// at the world-build reconcile the update triggers after the deploy).
+		// The glob reaches systemctl unquoted (LxcExec single-quotes the whole
+		// payload — no shell quotes may appear inside); when nothing matches,
+		// systemctl errors and the trailing true tolerates it.
 		if _, err := execToOK(t,
-			proxmox.LxcCmd(spec.LXc, "systemctl stop freehold-runner 2>/dev/null; true"),
+			proxmox.LxcCmd(spec.LXc, "systemctl stop freehold-runner* 2>/dev/null; true"),
 			"stop co-located runner", 30); err != nil {
 			return nil, err
 		}

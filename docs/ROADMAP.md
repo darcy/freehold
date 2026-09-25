@@ -68,7 +68,8 @@ grants), the management relay scope (identity on real Nostr membership, relay-pe
 encrypted memory, delegation mode, the durable volume plane), the Rust→Go refactor, and  
 Chunk 4's real, reasoning CPA that lives in Buzz and creates agents itself. Chunks 1–4 were  
 live-verified against real infrastructure (a real PVE host, a real relay/CP pair under a  
-real domain).
+real domain). The department capability runners are live, and the CPA provisions capability  
+on the fly (`provision_runner`; `docs/POC_GRANTS.md`).
 
 **Remaining — Chunk-by-chunk plan: see `docs/POC.md`.**
 

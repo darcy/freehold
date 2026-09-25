@@ -42,6 +42,13 @@ type Server struct {
 	// fresh per call, so a revoked registry row loses world access on the
 	// next request. nil = everyone is an operator (no registry filtering).
 	IsAgent func(callerPubkey string) bool
+
+	// AgentGrants reads the CP's agent-grant mode fresh per call ("confirm" =
+	// the default, the CPA's provision_runner flow is up and the confirmation
+	// discipline lives in the granting skill; "auto" = grants land without
+	// confirmation; "off" = the server denies provision_runner outright —
+	// the kill switch). nil = "confirm".
+	AgentGrants func() string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +139,15 @@ func (s *Server) toolList() []map[string]interface{} {
 			}, []string{"runner", "pubkeys"}),
 		},
 		{
+			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds (unifi) ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. Grants land live; the grantees' pods are re-applied with the new coords.",
+			"inputSchema": i(map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"kind":     map[string]interface{}{"type": "string"},
+				"address":  map[string]interface{}{"type": "string"},
+				"grant_to": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name", "kind", "address", "grant_to"}),
+		},
+		{
 			"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{
 				"remove": map[string]interface{}{"type": "string"},
@@ -199,6 +215,12 @@ type grantAgentArgs struct {
 	Runner  string   `json:"runner"`
 	Pubkeys []string `json:"pubkeys"`
 }
+type provisionRunnerArgs struct {
+	Name    string   `json:"name"`
+	Kind    string   `json:"kind"`
+	Address string   `json:"address"`
+	GrantTo []string `json:"grant_to"`
+}
 type manageAgentArgs struct {
 	Remove string `json:"remove"`
 }
@@ -209,13 +231,19 @@ type manageAgentArgs struct {
 // operator-only because a grant hands direct exec access to a runner's MCP
 // surface — letting a prompt-reachable agent (e.g. the CPA) bind an arbitrary
 // pubkey onto an arbitrary runner (incl. the CP's own co-located runner) would
-// bypass this very boundary. The CPA's agent toolset is create + manage only.
+// bypass this very boundary. The CPA's agent toolset is create + manage +
+// provision_runner (the narrow carve-out: it stages NEW capability runners and
+// grants only onto those; grants onto the build-time capability runners stay
+// operator-only here).
 //
 // This is also the enforcement point for the two-tier agent org: a raw
 // capability grant (proxy/backup/compute/model) attaches to the department
-// identity that owns it, never to a custom agent. Since only an operator can
-// grant, and a registry agent is denied here (-32003), a custom agent cannot
-// self-serve a second, ungoverned path to a department-owned capability.
+// identity that owns it, never to a custom agent. The provision_runner carve-out
+// is bounded by the same discipline — the granting skill (the CPA's first
+// skill) governs who may hold what; the server's part is the agent_grants
+// kill switch. Since only an operator can grant onto a build-time runner, and
+// a registry agent is denied here (-32003), a custom agent cannot self-serve a
+// second, ungoverned path to a department-owned capability.
 func isWorldTool(name string) bool {
 	switch name {
 	case "grant_agent", "world_status", "world_teardown", "world_migrate", "world_build",
@@ -223,6 +251,17 @@ func isWorldTool(name string) bool {
 		return true
 	}
 	return false
+}
+
+// agentGrantsMode returns the configured agent-grant mode ("confirm" default).
+func (s *Server) agentGrantsMode() string {
+	if s.AgentGrants == nil {
+		return "confirm"
+	}
+	if mode := s.AgentGrants(); mode != "" {
+		return mode
+	}
+	return "confirm"
 }
 
 func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json.RawMessage, caller string) {
@@ -279,6 +318,24 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		}
 		err := s.Tools.GrantAgent(a.Runner, a.Pubkeys)
 		s.textResult(w, id, err, "granted")
+	case "provision_runner":
+		// The grant-giving carve-out: registry agents (the CPA) may stage NEW
+		// capability runners — unless the operator's kill switch is set. The
+		// confirm/auto discipline (operator present in-thread vs. DM-confirm)
+		// lives in the granting skill; the server cannot see threads.
+		if mode := s.agentGrantsMode(); mode == "off" {
+			s.rpcError(w, id, -32003, "unauthorized: agent_grants is off — provision_runner is disabled (the operator grants via the console)")
+			return
+		}
+		var a provisionRunnerArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "provision_runner arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.ProvisionRunner(agent.ProvisionArgs{
+			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
+		})
+		s.textResult(w, id, err, report)
 	case "manage_agent":
 		var a manageAgentArgs
 		if err := json.Unmarshal(call.Arguments, &a); err != nil {

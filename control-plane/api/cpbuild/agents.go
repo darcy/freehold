@@ -204,6 +204,12 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 			return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
 		}
 		_ = reg.SetChannels(a.Name, channels, private)
+		// Re-assert grants for agents holding capability runners (the
+		// agent-provisioned dynamic doors re-assert alongside the departments';
+		// a no-op when the agent holds none).
+		if err := s.grantDepartmentRunner(a.Name, a.Pubkey); err != nil {
+			return fmt.Errorf("re-assert runner grants %s: %w", a.Name, err)
+		}
 	}
 	return nil
 }

@@ -64,9 +64,64 @@ report what you actually verified. When access you need is missing, say so
 loudly — to freehold and the operator — instead of routing around the audited
 surfaces.
 
+## Grant-giving flow (provision_runner)
+
+Grant-giving runs through `provision_runner` (the freehold CP toolset): it
+stands up a NEW capability runner — named, keyed, channel-audited — and grants
+the named agents onto its roster live. The code enforces the mechanics below;
+you enforce the judgment.
+
+**The confirmation discipline.** A grant is the operator's call. When the
+operator's ask is in a thread with you — they told YOU what to make possible —
+grant when you have everything you need. When the request arrived second-hand
+(a department relaying an ask you did not witness), DM the operator, state
+exactly what will be provisioned and granted to whom, and wait for their yes
+before calling the tool. When unsure whether you witnessed the ask, ask. The
+operator can set `agent_grants: off` on the CP, which disables this flow
+entirely; if your call is refused on those grounds, report it plainly.
+
+**Interview before you grant.** Collect everything the tool needs before
+calling it — going back to the operator mid-provision is worse than one round
+of questions up front:
+
+- For a box on the network (ssh): address as `user@host[:port]`, and whether
+  the account can do the job (least privilege where a scoped account exists).
+  The runner mints its OWN keypair — never take the operator's password or
+  private key. The tool returns the public line; the operator installs it on
+  the target (offer the one-liner), and the runner's self-check goes 🟢 once
+  it is in. Until then say the door is waiting, not that it works.
+- For a service API (e.g. UniFi): figure out WITH the operator what the
+  surface is — does it have an API (its URL, and an account with the right
+  role), or does it need an account created first? **Never take the
+  credential in chat** — provision the door EMPTY and DM the operator the
+  door page link from the tool's report; they fill the credential in the
+  console web UI (the console seals it to the door's key and restarts the
+  door). You reference the credential by env name only, after the fact. The
+  TOOL enforces this: provision_runner takes no credential field at all.
+- Name it `<target>-<protocol>-<identity>` (`rtx3090-ssh-root`,
+  `unifi-api-admin`) — what it reaches, how, at what level. Never for the
+  consumer.
+- `grant_to` is the agent (or agents) that will DO the work — the department
+  that owns the capability class, or the custom agent that owns the service.
+  You hold no exec yourself; never grant a capability to you.
+
+**Only runners you provisioned.** The tool stages NEW capability runners. You
+cannot widen an existing runner's roster (that stays operator-scoped via the
+console) — when two agents need the identical capability, provision the
+capability's runner once for both, or a fresh identical runner for the second
+use; never ask the operator to widen one.
+
+**After granting:** the grantees' pods re-apply automatically (the exec surface
+picks the new coords up); an EMPTY door stays 🟡 until the operator fills its
+credential via the door page link (the console seals + restarts it) — then
+verify the door's own self-check / an exec probe, and say what is actually
+live. A direct-credential mode (the operator handing the credential to this
+agent for freehold to seal) is a possible future `agent_grants` mode; it is
+not built, and until it is, chat is never the credential path.
+
 ## State of this skill
 
-Grant-giving is operator-scoped today (`grant_agent` refuses agent callers —
-server-enforced). This skill is the rule set that binding captures: when
-grants unlock for the CPA, they unlock UNDER these rules — the wiring changes,
-the guardrails do not.
+The flow above is live (`provision_runner`, confirm-mode by default; the
+operator's `agent_grants` switch is the kill switch). When the wiring changes,
+these guardrails do not.
+

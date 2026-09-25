@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -55,6 +57,10 @@ type Server struct {
 	// CP to bring up the world WITHOUT depending on the relay roster (which
 	// agent-tools needs) or on box-one hosting it. nil = world_build unsupported.
 	Builder *cpbuild.Spec
+
+	// RestartDoor restarts a capability door's runner unit (nil = the real
+	// systemd restart on this guest). Injectable for tests.
+	RestartDoor func(name string, port int) error
 }
 
 // versionPin re-reads <StateDir>/version.json per call so an update's repin is
@@ -73,6 +79,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Root: the single self-contained admin page.
 	if path == "/" && method == http.MethodGet {
+		s.index(w)
+		return
+	}
+	// Per-door page: the same SPA, which reads the path and opens that door's
+	// fill form (a deep link the agents hand the operator — login preserves
+	// the path, so the form re-opens after the session lands).
+	if strings.HasPrefix(path, "/runner/") && method == http.MethodGet {
 		s.index(w)
 		return
 	}
@@ -753,6 +766,16 @@ type provisionReq struct {
 	Secret    string  `json:"secret"`
 	RunnerDir *string `json:"runner_dir"`
 	Risk      *string `json:"risk"`
+	// Rosters (optional) records the runner as a capability whose grant is the
+	// given agent NAMES (resolved through the agent registry; kind-9000
+	// put-user, live) and makes it rebuild-safe: the recorded capability
+	// re-stages + re-asserts the grants on every build — the record's rosters
+	// are NAMES so the rebuild re-assertion resolves them the same way the
+	// agent flow's do. Port (optional) pins the runner's MCP bind port on the
+	// CP LXC (allocated above the capability table when 0). The runner UNIT
+	// starts on the next build/world_build reconcile.
+	Rosters []string `json:"rosters"`
+	Port    int      `json:"port"`
 }
 
 // relayAuthFor returns the NIP-98 canonical URL for relay writes: the relay's
@@ -801,11 +824,101 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Capability rosters: record the runner as an agent-provisioned capability
+	// (rebuild-safe) and grant each roster agent onto its channel live. The
+	// record's rosters hold agent NAMES — the same representation the rebuild
+	// re-assertion consumes — resolved to pubkeys here for the live grant.
+	granted := []string{s.ConsolePubkey}
+	var capability *state.CapabilityRecord
+	if len(req.Rosters) > 0 {
+		resolved, err := resolveAgentRoster(s.AgentToolsDir, req.Rosters)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		port := req.Port
+		if port == 0 {
+			port = s.capabilityPortAbove(s.Builder)
+		}
+		rec := state.CapabilityRecord{
+			Kind: req.Kind, Address: req.Address, Port: port,
+			Rosters:   append([]string(nil), req.Rosters...),
+			Origin:    state.OriginOperator,
+			CreatedAt: uint64(time.Now().Unix()),
+		}
+		if err := s.Store.InsertCapability(req.Name, rec); err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+		capability = &rec
+		for _, pk := range resolved {
+			if err := provisioner.PutUserMembership(s.Store, dialOr(relayURL), s.relayAuthFor(), req.Name, pk, s.Store.Dir()); err != nil {
+				writeErr(w, statusForAction(err), err.Error())
+				return
+			}
+			granted = append(granted, pk)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true, "name": res.Name, "nostr_pubkey": res.NostrPubkey,
 		"enc_pubkey": res.EncPubkey, "package_dir": res.PackageDir,
-		"granted": []string{s.ConsolePubkey}, "relay": relayURL,
+		"granted": granted, "relay": relayURL, "capability": capability,
 	})
+}
+
+// dialOr returns the relay dial URL or a non-nil fallback for put-user.
+func dialOr(u *string) string {
+	if u == nil {
+		return ""
+	}
+	return *u
+}
+
+// resolveAgentRoster resolves agent NAMES to their registry pubkeys (the
+// authoritative registry lives in the agent-tools state dir). An unknown name
+// is a 400 — a recorded roster that cannot resolve would silently lose its
+// grants on rebuild.
+func resolveAgentRoster(agentToolsDir string, names []string) ([]string, error) {
+	reg, err := agenttools.OpenRegistry(filepath.Join(agentToolsDir, "registry.json"))
+	if err != nil {
+		return nil, fmt.Errorf("open agent registry: %w", err)
+	}
+	rows, err := reg.Agents()
+	if err != nil {
+		return nil, fmt.Errorf("read agent registry: %w", err)
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		found := ""
+		for _, a := range rows {
+			if a.Name == name {
+				found = a.Pubkey
+				break
+			}
+		}
+		if found == "" {
+			return nil, fmt.Errorf("unknown agent %q — create it first, then grant", name)
+		}
+		out = append(out, found)
+	}
+	return out, nil
+}
+
+// capabilityPortAbove allocates the first free MCP port above the dynamic
+// base. With a build Spec, the SAME allocator cpbuild uses runs (it also
+// skips the per-zone DNS doors' derived ports — two allocators must never
+// disagree); without one (a console not bound as the build executor), the
+// recorded + static ports are the only known occupancy.
+func (s *Server) capabilityPortAbove(builder *cpbuild.Spec) int {
+	if builder != nil {
+		return builder.NextCapabilityPort(s.Store)
+	}
+	occupied := cpbuild.OccupiedCapabilityPorts(s.Store)
+	port := 8800
+	for occupied[port] {
+		port++
+	}
+	return port
 }
 
 func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
@@ -835,7 +948,48 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "name": req.Name, "relay": relayURL})
+	// A capability door picks a rotated credential up ONLY on restart (the
+	// runner holds its package in memory from boot) — the console runs on the
+	// same guest, so restart the unit + wait for the listen. The seal stands
+	// even when the restart fails (soft: reported, never blocks the rotate).
+	restarted := false
+	restartErr := ""
+	if rec, ok := s.Store.GetCapability(req.Name); ok {
+		if err := s.restartDoor(req.Name, rec.Port); err != nil {
+			restartErr = err.Error()
+		} else {
+			restarted = true
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "name": req.Name, "relay": relayURL,
+		"restarted": restarted, "restart_error": restartErr,
+	})
+}
+
+// restartDoor restarts a capability door's runner unit on THIS guest (the
+// console runs there; the unit binds 0.0.0.0:<port>) and waits for the listen.
+func (s *Server) restartDoor(name string, port int) error {
+	if s.RestartDoor != nil {
+		return s.RestartDoor(name, port)
+	}
+	unit := "freehold-runner-" + name
+	cmd := exec.Command("systemctl", "restart", unit)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("restart %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		c, derr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if derr == nil {
+			_ = c.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not listen on %d after restart", unit, port)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {

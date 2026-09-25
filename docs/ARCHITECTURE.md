@@ -199,13 +199,15 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`freehold-agent-tools` is a distinct SEMANTIC surface on the CP**, not
     the runner's `exec`. Its Go methods (`control-plane/api/agent/tools.go`,
-    `create_agent`/`grant_agent`/`manage_agent`) are served in-process by
+    `create_agent`/`provision_runner`/`grant_agent`/`manage_agent`) are served
+    in-process by
      `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
      authorized per call against the server's own relay roster (NIP-29 channel
      + 39002, fail-closed) **and scoped by caller class**: a pubkey in the CP's
-     agent registry is an AGENT (create/manage only — the world_* actions AND
-     `grant_agent` are denied server-side, so the CPA's "conversation + create
-     only" boundary cannot be bypassed by calling the server directly); a roster
+     agent registry is an AGENT (create/manage + the `provision_runner`
+     carve-out — the world_* actions AND `grant_agent` are denied server-side,
+     so the CPA's boundary cannot be bypassed by calling the server directly);
+     a roster
      member not in the registry is an OPERATOR (full toolset incl. world_* and
      grant). The Caddy CP vhost exposes `/mcp` publicly (→ `:8089`) and
      `/api/world` serves `agent_tools_url` as the public `https://<cp>/mcp` plus
@@ -254,8 +256,21 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     the console's own identity from its state dir (0600 durable plane) and
     publishes the kind-9000 put-user to the runner's channel in-process — the
     runner re-reads its signed 39002 roster per call, so the grant lands
-    without a restart (missing credential fails closed; agents are denied with
-     `-32003`, since a grant hands direct exec access to the runner). The
+      without a restart (missing credential fails closed; agents are denied with
+      `-32003`, since a grant hands direct exec access to the runner). The
+      ONE carve-out is the CPA's `provision_runner` (grants on the fly): it
+      stages a NEW capability runner — keypair + sealed credential + private
+      channel + a systemd unit on the CP guest — records it as a dynamic
+      capability (re-staged adopt-only on every build; fixed port so pod
+      coords stay stable), grants the named agents onto its roster live, and
+      re-applies the grantees' pods with coords resolved from state. It never
+      widens an existing runner, `agent_grants: off` on the CP state is the
+      server-side kill switch (`freehold-console grants-mode`), and the
+      in-thread-vs-DM confirmation discipline lives in the granting skill
+      (`docs/POC_GRANTS.md`). An api-kind door provisions EMPTY — the agent
+      DMs the operator the door's own console page (`/runner/<name>`), whose
+      kind-aware fill form seals the credential via `/api/rotate` and
+      restarts the door's unit; no credential ever transits agent chat. The
      `platform/migrations` queue — the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
      semantics — runs from two entry points: the `world_migrate` tool and the
@@ -479,7 +494,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     containment failure even if a grant would technically allow it — the
     department's prompt is the first line of defense, the grant the second.
     Today's enforcement is the existing grant model: custom agents hold no raw
-    capability grants, and only the operator-scoped `grant_agent` issues them.
+    capability grants on the build-time runners (`grant_agent` is
+    operator-scoped), and the CPA's `provision_runner` grants only onto
+    NEW capability doors it stages — the department that gets the grant is
+    named in the flow itself.
 
 *   **The four departments are installed as part of the core build** — each a
     pod on the same harness as the CPA, created through the same audited
@@ -498,7 +516,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     attach to the department identity, and the CPA/custom agents (with no
     coords) never see exec. A capability a department doesn't hold yet ships
     as its runner when the capability lands — never by widening a runner's
-    package. Status language is
+    package; the CPA's `provision_runner` stages such a door on the fly (a
+    dynamic capability record re-staged adopt-only every build). Status
+    language is
     uniform, runner → service → department: 🟢 all checked / 🟡 some checks
     missing / 🔴 none.
 
@@ -535,12 +555,17 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     departments are reachable by anyone; what the CPA routes is capability work,
     not conversation.
 
-*   It is **conversation + agent-creation only** in this phase: it calls the
-    CP toolset's `create_agent` / `grant_agent` / `manage_agent` (through the
+*   It is **conversation + agent-creation + grant-giving** in this phase: it
+    calls the CP toolset's `create_agent` / `provision_runner` /
+    `manage_agent` (through the
     `freehold-agent-tools mcp` stdio bridge, signed as its own nsec and
-    authorized by the server's roster). It does not run arbitrary `exec` or
-    provision targets — that boundary is unchanged: reasoning decides *what*
-    to do, the deterministic runner/CP layer does it auditably.
+    authorized by the server's roster). `provision_runner` stages a NEW
+    capability runner and grants agents onto it under the granting skill's
+    rules (`agents/freehold/skills/granting.md`, composed into its prompt);
+    grants onto runners it did not provision stay operator-scoped. It does not
+    run arbitrary `exec` or
+    provision targets itself — that boundary is unchanged: reasoning decides
+    *what* to do, the deterministic runner/CP layer does it auditably.
 
 *   **It never sees plaintext secrets** and references credentials by name
     only.

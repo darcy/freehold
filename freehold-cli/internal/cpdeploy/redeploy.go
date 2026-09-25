@@ -70,7 +70,13 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 
 	restartRunner := spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil
 	if restartRunner {
-		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, "systemctl stop freehold-runner 2>/dev/null; true"),
+		// The capability doors (freehold-runner-<name>) execute the SAME
+		// binary — stop every one of them too (the world-build reconcile the
+		// update triggers after the deploy re-stages them). The glob reaches
+		// systemctl unquoted (LxcExec single-quotes the payload — no shell
+		// quotes may appear inside); when nothing matches, systemctl errors
+		// and the trailing true tolerates it.
+		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, "systemctl stop freehold-runner* 2>/dev/null; true"),
 			"stop co-located runner", 30); err != nil {
 			return err
 		}

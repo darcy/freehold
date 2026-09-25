@@ -34,6 +34,9 @@
   .row { display: flex; gap: 8px; align-items: center; }
   .small { font-size: 11px; color: #8b949e; }
   #err { color: #ff7b72; }
+  tr.door-focus td { background: #10243a; }
+  tr.door-focus td:first-child { border-left: 2px solid #58a6ff; }
+  #fill-fields input { margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -59,8 +62,33 @@
 
 <div id="err" class="muted"></div>
 
+<div id="fill-overlay" style="display:none;position:fixed;inset:0;z-index:8;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
+  <div style="max-width:30rem;padding:2rem;width:100%">
+    <h2 id="fill-title">fill credential</h2>
+    <p class="muted" id="fill-note"></p>
+    <div id="fill-fields"></div>
+    <div class="row" style="margin-top:.8rem">
+      <button id="fill-submit">seal + restart door</button>
+      <button id="fill-cancel">cancel</button>
+    </div>
+    <div id="fill-err" class="muted"></div>
+  </div>
+</div>
+
 <script>
 const $ = (s) => document.querySelector(s);
+
+// The door a /runner/<name> deep link points at ("" on the dashboard root) —
+// the agents hand the operator this link for the credential fill; the login
+// overlay + reload preserve the path, so the form re-opens after login.
+const doorName = (location.pathname.match(/^\/runner\/([^/]+)\/?$/) || [])[1] || "";
+let doorOpened = false;
+let RUNNERS = [];
+
+function runnerKind(name) {
+  const r = (RUNNERS || []).find((x) => x.name === name);
+  return r && r.secret ? String(r.secret.kind) : "";
+}
 
 async function api(path, body) {
   const r = await fetch(path, {
@@ -95,6 +123,7 @@ function chip(state) {
 async function refresh() {
   const o = await api("/api/overview");
   $("#console-line").textContent = "console agent: " + o.console_pubkey;
+  RUNNERS = o.runners;
   const rows = o.runners.map((r) => {
     const rd = r.readiness;
     const readiness = rd && Object.keys(rd).length
@@ -117,7 +146,7 @@ async function refresh() {
       ? esc(r.secret.name) + " · " + esc(r.secret.kind) + " · " + esc(r.secret.address) +
         (r.secret.rotated_at ? " · rotated" : "")
       : '<span class="muted">—</span>';
-    return `<tr>
+    return `<tr ${r.name === doorName ? 'class="door-focus"' : ""}>
       <td><b>${esc(r.name)}</b><div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
       <td>${r.status === "revoked" ? chip("red(revoked)") : chip("green(active)")}</td>
       <td>${r.risk ? chip(esc(r.risk)) : '<span class="muted">?</span>'}</td>
@@ -138,6 +167,13 @@ async function refresh() {
   }).join("");
   $("#rows").innerHTML = rows || '<tr><td colspan="7" class="muted">no runners yet — provision one above</td></tr>';
   bindActions();
+  // A deep link to one door opens its fill form once (after login the reload
+  // lands on the same path, so the form re-opens there too).
+  if (doorName && !doorOpened) {
+    doorOpened = true;
+    if (RUNNERS.some((r) => r.name === doorName)) openFill(doorName);
+    else $("#err").textContent = "door " + doorName + " not found (yet) — the runner list is live; it appears when its agent provisions it";
+  }
 }
 
 async function act(kind, payload) {
@@ -162,9 +198,7 @@ function bindActions() {
           if (!pk) return;
           await act("ungrant", { name, pubkey: pk });
         } else if (b.dataset.act === "rotate") {
-          const secret = prompt("NEW credential for " + name);
-          if (!secret) return;
-          await act("rotate", { name, secret });
+          openFill(name);
         } else if (b.dataset.act === "addr") {
           const inp = b.parentElement.querySelector(".mcp");
           await act("addr", { name, addr: inp.value.trim() });
@@ -185,6 +219,55 @@ $("#provision-form").onsubmit = async (ev) => {
     ev.target.reset();
     await refresh();
   } catch (e) { $("#err").textContent = "error: " + e.message; }
+};
+
+// The credential fill: the OPERATOR types the door's credential here — it is
+// sealed to the door's key by /api/rotate and never reaches any agent. Kind
+// aware: a unifi door takes username + password and the console composes the
+// JSON login body the door's probe and execs use; ssh doors carry their own
+// minted keypair (nothing to fill).
+let fillName = "";
+function openFill(name) {
+  fillName = name;
+  const kind = runnerKind(name);
+  $("#fill-title").textContent = "fill credential — " + name;
+  const fields = $("#fill-fields");
+  fields.innerHTML = "";
+  if (kind === "ssh") {
+    $("#fill-note").textContent = "ssh doors carry their own minted keypair — no credential to fill. Install the runner's public key on the target (it rode the provisioning report); the door's self-check goes green after that.";
+    $("#fill-submit").style.display = "none";
+  } else {
+    $("#fill-note").textContent = kind === "unifi"
+      ? "The UniFi Network application account for this door (an Admin role). Sealed to the door's key; the agent never sees it. The door restarts and verifies itself."
+      : "Credential for this door, pasted once — sealed to the door's key, never stored. The door restarts and picks it up.";
+    $("#fill-submit").style.display = "";
+    fields.innerHTML = kind === "unifi"
+      ? '<input id="fill-user" placeholder="username" autocomplete="off">' +
+        '<input id="fill-pass" type="password" placeholder="password" autocomplete="new-password">'
+      : '<input id="fill-cred" placeholder="credential" autocomplete="off">';
+  }
+  $("#fill-err").textContent = "";
+  $("#fill-overlay").style.display = "flex";
+}
+
+$("#fill-cancel").onclick = () => { $("#fill-overlay").style.display = "none"; };
+$("#fill-submit").onclick = async () => {
+  const kind = runnerKind(fillName);
+  let secret = "";
+  if (kind === "unifi") {
+    const u = $("#fill-user").value, p = $("#fill-pass").value;
+    if (!u || !p) { $("#fill-err").textContent = "username and password required"; return; }
+    secret = JSON.stringify({ username: u, password: p });
+  } else {
+    secret = $("#fill-cred").value;
+    if (!secret) { $("#fill-err").textContent = "credential required"; return; }
+  }
+  try {
+    const res = await api("/api/rotate", { name: fillName, secret });
+    if (res.restart_error) $("#err").textContent = "sealed, but the door restart failed: " + res.restart_error;
+    $("#fill-overlay").style.display = "none";
+    await refresh();
+  } catch (e) { $("#fill-err").textContent = "error: " + e.message; }
 };
 
 refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
