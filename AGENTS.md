@@ -17,6 +17,16 @@ next; see `docs/POC.md`. Open deferrals are tracked in `docs/followups.md`. For 
 here, see the repository's GitHub Releases; this file describes the current state and the
 rules for working in this repo, not the history.
 
+## Todo tracking (always)
+
+**Every multi-step task runs under a todo list** (`todowrite`): one item per unit of work
+or evidence gate, in the order it runs. Exactly one item is `in_progress` at a time;
+items become `completed` only on evidence (a command's output, a check's pass), never on
+intent; new work discovered mid-task becomes a new item instead of silently expanding an
+old one. The list is the operator's live progress bar — keep it current, surface it when
+reporting state, and let blocked items carry their blocker in the item text so a paused
+task is resumable without re-deriving where it stopped.
+
 ## Documentation hygiene (locked) — a primary job of this file
 
 **Docs describe current-world state only.** `docs/ROADMAP.md`, `docs/POC.md`,
