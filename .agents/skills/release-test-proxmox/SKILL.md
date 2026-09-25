@@ -87,6 +87,16 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 ## Workflow
 
+> **Order the tests around the CF gate.** The Fresh env's first build waits on DNS-01
+> propagation — the long pole (~10–45 min: the provider API accepts the challenge TXT
+> immediately while the authoritative NS keeps answering NXDOMAIN). Start Fresh's
+> install + first build FIRST (detached, retrying — the resumable order reuses the
+> challenge), and while the NS is still NXDOMAIN, move on to Rebuild and Live:
+> neither needs the DNS gate (the rebuild env's cert is already issued; the live
+> update issues nothing). Circle back to Fresh when the TXT resolves — re-run
+> `build`, it installs the cert and continues — and finish the Fresh rows last.
+> Never let the Fresh wait idle the whole run: the other tests are not blocked by it.
+
 1. **Restore the assets into a `ResolveBins`-shaped layout** so the pre-release binaries are
    what gets installed (not a local `just build`). `ResolveBins` checks *paths*, not build
    profile: it wants `freehold-console` + `runner` beside the CLI, and the trio under
