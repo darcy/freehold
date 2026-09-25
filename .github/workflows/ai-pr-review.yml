@@ -1,7 +1,15 @@
 name: Bot Review
 
 on:
+  # Dependabot PRs MUST NOT be reviewed from the `pull_request` event: a
+  # dependabot-initiated `pull_request` run gets a read-only GITHUB_TOKEN and no
+  # repo secrets, so `review.mjs` would die on `Missing required env var:
+  # GITHUB_TOKEN`. They are reviewed from `pull_request_target` instead (below),
+  # which runs in the base repo's context with secrets and a writable token. The
+  # two clauses are mutually exclusive, so a PR revision is reviewed exactly once.
   pull_request:
+    types: [opened, synchronize, ready_for_review, reopened, review_requested]
+  pull_request_target:
     types: [opened, synchronize, ready_for_review, reopened, review_requested]
 
 permissions:
@@ -14,7 +22,20 @@ jobs:
   bot-review:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    # Exactly one branch of the `on:` fires per PR revision: a human PR is reviewed
+    # from `pull_request`, a Dependabot PR from `pull_request_target`. Both keyed on
+    # the PR author, not `github.actor` — Dependabot PRs also get re-synced by an
+    # operator's "Update branch" click (actor = the operator), and those re-reviews
+    # must still run. `pull_request_target` runs in the base repo's context, so the
+    # bot token and the Fireworks key are present; here the base ref is `main`, never
+    # a Dependabot-created ref, which is the one case the docs flag as still restricted.
+    if: (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]') || (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]')
+    # No `ref:` on the checkout below: on `pull_request_target` checkout resolves to
+    # the base branch, which is what this job wants — the review scripts and the
+    # context files come from trusted main, never from the PR head, and
+    # `allow-unsafe-pr-checkout` is deliberately NOT set. The reviewed diff is
+    # fetched over the API (`pulls.listFiles`), so nothing from an unreviewed head
+    # is ever checked out or executed.
     steps:
       - uses: actions/checkout@v6
         with:
