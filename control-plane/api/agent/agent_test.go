@@ -35,6 +35,12 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		// as an OpenAI-compatible endpoint (alias ControlPlaneAgent).
 		"BUZZ_AGENT_PROVIDER",
 		`value: "openai-compat"`,
+		// The reply-guard nag: a turn ending without a publish attempt gets
+		// one more round. Without it a model that writes its reply as
+		// assistant text (never calling `buzz messages send`) silently
+		// drops every answer on the floor.
+		"BUZZ_AGENT_REQUIRE_REPLY",
+		`value: "1"`,
 		"OPENAI_COMPAT_BASE_URL",
 		LiteLLMServiceURL,
 		"OPENAI_COMPAT_MODEL",

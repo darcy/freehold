@@ -289,6 +289,7 @@ spec:
     - {name: BUZZ_ACP_AGENT_COMMAND, value: "buzz-agent"}
     - {name: BUZZ_ACP_RESPOND_TO, value: %q}
     - {name: BUZZ_AGENT_PROVIDER, value: "openai-compat"}
+    - {name: BUZZ_AGENT_REQUIRE_REPLY, value: "1"}
     - {name: RUST_LOG, value: "debug"}
     - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
     - {name: FREEHOLD_AGENT_TOOLS_URL, value: %q}
