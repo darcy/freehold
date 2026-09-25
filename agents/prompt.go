@@ -40,6 +40,15 @@ var cpaPrompt string
 //go:embed freehold/skills/granting.md
 var grantingSkill string
 
+// accessUnifiSkill is the unifi access runbook (skills/access-unifi.md): how
+// the CPA stands up UniFi access for network — the empty door, the
+// operator-filled credential, the env contract, the network briefing (the
+// caution is planted in network's own relay-persisted memory, not prompts),
+// and the authenticated-probe discipline.
+//
+//go:embed freehold/skills/access-unifi.md
+var accessUnifiSkill string
+
 // orientationTmplSrc is the shared system-orientation block (repo knowledge,
 // read-on-boot + periodic re-check, the be-loud escalation discipline) prepended
 // to every non-custom prompt: the CPA and the four departments. Custom agents
@@ -83,7 +92,8 @@ func renderOrientation(repoURL string) string {
 // = the upstream default.
 func CPASystemPrompt(repoURL string) string {
 	return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(cpaPrompt, "\n") +
-		"\n\n" + strings.TrimRight(grantingSkill, "\n")
+		"\n\n" + strings.TrimRight(grantingSkill, "\n") +
+		"\n\n" + strings.TrimRight(accessUnifiSkill, "\n")
 }
 
 // Department prompts: the four departments the CPA delegates to (see AGENTS.md
