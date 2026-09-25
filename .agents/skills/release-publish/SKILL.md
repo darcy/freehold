@@ -2,7 +2,7 @@
 name: release-publish
 description: Use when promoting a validated freehold pre-release to a full release (e.g. "publish v0.8.0", "promote the pre-release", "make it a release"). Reads the release's test-status table and publishes only when every row is ✅ Passed; otherwise it stops and reports what is unverified or failed. Never moves the tag.
 metadata:
-  version: 1.1.0
+  version: 1.2.0
   author: freehold
   license: MIT
 ---
@@ -46,17 +46,21 @@ when the operator asks to "publish", "promote", or "make it final". Cutting a ne
 
 4. **Promote (all rows ✅ + go-ahead only).**
    ```bash
-   gh release edit "$tag" --prerelease=false
+   gh release edit "$tag" --prerelease=false --latest
    gh release view "$tag" --json tagName,isDraft,isPrerelease,assets
+   gh api "$(gh repo view --json nameWithOwner -q .nameWithOwner | sed 's|^|repos/|')/releases/latest" --jq .tag_name
    ```
-   Confirm `isPrerelease` is now `false` and the tag still points at the same commit with the
-   same assets.
+   Confirm `isPrerelease` is now `false`, the `releases/latest` call returns this tag
+   (GitHub does NOT recompute the Latest badge on a prerelease→full edit — `--latest`
+   moves it; without it a full release sits stranded behind a stale badge), and the tag
+   still points at the same commit with the same assets.
 
 ## Hard rules
 
 - **No promotion unless every row in the test-status table is ✅ Passed.** A missing table, an
   ⚪ Unverified row, or a ❌ Failed row blocks publication — never publish on a partial table.
-- **Never create, move, or delete a tag.** Promotion is a metadata edit (`isPrerelease`).
+- **Never create, move, or delete a tag.** Promotion is a metadata edit (`isPrerelease`
+  + the Latest badge).
 - **Never merge anything** — merging PRs is the operator's call (see `AGENTS.md`).
 - The release notes were written and published at prepare time; do not edit them here.
 - The body (including the table) is owned by the test skills; do not rewrite it here.

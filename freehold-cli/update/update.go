@@ -28,7 +28,6 @@ import (
 
 type options struct {
 	stable bool
-	rc     bool
 	dev    bool
 	ref    string
 	sha    string
@@ -49,7 +48,6 @@ var updateCmd = &cobra.Command{
 		}
 		o := options{}
 		o.stable, _ = cmd.Flags().GetBool("stable")
-		o.rc, _ = cmd.Flags().GetBool("rc")
 		o.dev, _ = cmd.Flags().GetBool("dev")
 		o.ref, _ = cmd.Flags().GetString("ref")
 		o.sha, _ = cmd.Flags().GetString("sha")
@@ -62,7 +60,6 @@ var updateCmd = &cobra.Command{
 func init() {
 	updateCmd.Flags().String("config", common.DefaultConfigPath(), "Tenant config path to drive the world against")
 	updateCmd.Flags().Bool("stable", false, "update to the newest stable release")
-	updateCmd.Flags().Bool("rc", false, "update to the newest release candidate")
 	updateCmd.Flags().Bool("dev", false, "build + deploy the local working tree")
 	updateCmd.Flags().String("ref", "", "build + deploy an untagged git ref (e.g. main)")
 	updateCmd.Flags().String("sha", "", "build + deploy a specific commit")
@@ -171,12 +168,14 @@ func resolveChannel(cfg *config.Config, o options) (string, error) {
 	switch {
 	case o.stable:
 		return "stable", nil
-	case o.rc:
-		return "rc", nil
 	case o.dev || o.ref != "" || o.sha != "":
 		return "dev", nil
 	}
 	if ch := currentChannel(cfg); ch != "" {
+		if ch == "rc" {
+			// The rc channel is gone; a world pinned to it tracks stable now.
+			ch = "stable"
+		}
 		return ch, nil
 	}
 	return "stable", nil
@@ -205,16 +204,17 @@ func readWorld(cfg *config.Config) (*console.WorldSummary, error) {
 // assets; dev/ref/sha build the local tree or a sandbox clone.
 func acquire(ctx context.Context, o options, channel, cacheDir string) (artifact.Set, error) {
 	switch {
+	case o.ref != "" || o.sha != "":
+		// An explicit ref/sha wins over the channel: build that tree.
+		return artifact.BuildTree(ctx, o.ref, o.sha, "", cacheDir)
 	case o.dev, channel == "dev":
 		// A CP on the dev channel tracks the local tree; both `--dev` and a
 		// bare update (using the recorded channel) build it.
 		return artifact.BuildTree(ctx, "", "", repoRoot(), cacheDir)
-	case o.ref != "" || o.sha != "":
-		return artifact.BuildTree(ctx, o.ref, o.sha, "", cacheDir)
-	case channel == "stable" || channel == "rc":
+	case channel == "stable":
 		return artifact.AcquireRelease(ctx, channel, filepath.Join(cacheDir, "release"))
 	default:
-		return artifact.Set{}, fmt.Errorf("unknown channel %q — pass --stable/--rc/--dev/--ref/--sha", channel)
+		return artifact.Set{}, fmt.Errorf("unknown channel %q — pass --stable/--dev/--ref/--sha", channel)
 	}
 }
 

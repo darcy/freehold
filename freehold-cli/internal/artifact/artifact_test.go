@@ -13,8 +13,8 @@ func TestSelectTag(t *testing.T) {
 	if got, ok := SelectTag("stable", tags); !ok || got != "v0.7.0" {
 		t.Errorf("stable = %q,%v want v0.7.0", got, ok)
 	}
-	if got, ok := SelectTag("rc", tags); !ok || got != "v0.7.1-rc.10" {
-		t.Errorf("rc = %q,%v want v0.7.1-rc.10 (numeric, not lexical)", got, ok)
+	if _, ok := SelectTag("rc", tags); ok {
+		t.Error("the rc channel is gone; it must select nothing")
 	}
 	if _, ok := SelectTag("stable", []string{"v0.7.1-rc.1"}); ok {
 		t.Error("an rc must not satisfy stable")
