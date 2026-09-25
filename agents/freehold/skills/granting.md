@@ -103,8 +103,8 @@ of questions up front:
   a JSON object with the keys username and password; authenticate with
   `POST <controller>/api/auth/login` (body: the parsed username/password),
   take the session token from the response, and call the API with it. Do NOT
-  try the value as an X-API-KEY/Bearer — an API-key door would be named that
-  way in the description; this one is a login pair.
+  try the value as an X-API-KEY or similar header — an API-key door would be
+  named that way in the description; this one is a login pair.
 - Name it `<target>-<protocol>-<identity>` (`rtx3090-ssh-root`,
   `unifi-api-admin`) — what it reaches, how, at what level. Never for the
   consumer.
