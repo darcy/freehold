@@ -81,13 +81,14 @@ func TestCPAPodManifestBasics(t *testing.T) {
 	if !strings.Contains(m, "secretKeyRef: {name: waldo-identity, key: nsec}") {
 		t.Errorf("manifest missing the agent-specific identity Secret ref")
 	}
-	// The allowlist gate must carry the owner pubkey (from the identity
-	// Secret's owner), or buzz-acp refuses to boot (allowlist needs pubkeys).
-	if !strings.Contains(m, "BUZZ_ACP_RESPOND_TO_ALLOWLIST") {
-		t.Errorf("manifest missing BUZZ_ACP_RESPOND_TO_ALLOWLIST")
+	// The CPA's inbound author gate is "anyone" — relay membership is the
+	// bound (the CPA is the system's main touchpoint and every agent's
+	// delegate) — so no allowlist env rides its manifest.
+	if !strings.Contains(m, `name: BUZZ_ACP_RESPOND_TO, value: "anyone"`) {
+		t.Errorf("CPA manifest must run the anyone gate")
 	}
-	if !strings.Contains(m, "secretKeyRef: {name: waldo-identity, key: owner}") {
-		t.Errorf("allowlist must come from the identity Secret's owner, not a literal")
+	if strings.Contains(m, "BUZZ_ACP_RESPOND_TO_ALLOWLIST") {
+		t.Errorf("anyone gate must not carry an allowlist")
 	}
 	// The litellm key must also ride a per-agent Secret (waldo-litellm-key),
 	// never a literal in the manifest.
@@ -140,7 +141,7 @@ func TestAgentPodManifestMultiRunner(t *testing.T) {
 		{URL: "http://10.0.0.5:8791", Pubkey: "pkA", Target: "pve-ssh-root", Secret: "pve-ssh-root"},
 		{URL: "http://10.0.0.5:8793", Pubkey: "pkB", Target: "kube-api-caddysa", Secret: "kube-api-caddysa"},
 	}
-	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", runners...)
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", runners...)
 	urls, pubs, targets, secrets := runnerLists(runners)
 	for _, want := range []string{
 		`value: "` + urls + `"`,
@@ -159,6 +160,34 @@ func TestAgentPodManifestMultiRunner(t *testing.T) {
 		if strings.Contains(m, gone) {
 			t.Errorf("manifest still carries singular runner env %q", gone)
 		}
+	}
+}
+
+// TestAgentPodRespondGate pins the inbound author gate wiring: the CPA runs
+// "anyone" (relay membership is the bound); every other agent runs an explicit
+// "allowlist" whose pubkeys ride the manifest as a plain env value — pubkeys
+// are public, the identity Secret carries only the nsec + agent-owner.
+func TestAgentPodRespondGate(t *testing.T) {
+	dept := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,network,data,compute,ai,cpa")
+	if !strings.Contains(dept, `name: BUZZ_ACP_RESPOND_TO, value: "allowlist"`) {
+		t.Errorf("department manifest must run the allowlist gate")
+	}
+	if !strings.Contains(dept, `name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "op,network,data,compute,ai,cpa"`) {
+		t.Errorf("department manifest must carry its respond-to allowlist")
+	}
+	custom := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa")
+	if !strings.Contains(custom, `name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "op,cpa"`) {
+		t.Errorf("custom-agent manifest must carry its asker + CPA allowlist")
+	}
+	cpa := CPAPodManifest("waldo", "wss://relay.test", "/p/x.md")
+	if !strings.Contains(cpa, `name: BUZZ_ACP_RESPOND_TO, value: "anyone"`) {
+		t.Errorf("CPA manifest must run the anyone gate")
+	}
+	// An empty allowlist must omit the env entirely (buzz-acp then wakes for
+	// the owner only — the legacy owner-only behavior).
+	ownerOnly := AgentPodManifest("legacy", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "")
+	if strings.Contains(ownerOnly, "BUZZ_ACP_RESPOND_TO_ALLOWLIST") {
+		t.Errorf("empty allowlist must omit the allowlist env")
 	}
 }
 

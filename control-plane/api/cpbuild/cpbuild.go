@@ -1960,8 +1960,12 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
 			// A department with capability runners gets their FREEHOLD_RUNNER_* env
 			// (the CPA and custom agents get none, so their bridge has no exec).
+			// The inbound author gate: a reserved department wakes for the
+			// operator + every core identity; a custom agent wakes for its
+			// asker (today the operator — the CP cannot see chat threads) +
+			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
@@ -2020,10 +2024,12 @@ func channelNames(channels []string) []string {
 // when the CPA has not been created yet (a fresh world where stageCpa has not
 // run). Used to add the CPA to every department channel.
 func (s *Spec) cpaPubkey() string {
-	name := s.CpaName
-	if name == "" {
-		name = agent.DefaultCPAName
-	}
+	return s.identityPubkey(s.cpaNameOrDefault())
+}
+
+// identityPubkey returns the Nostr pubkey of the agent named name from its
+// durable identity dir, or "" when absent/unreadable.
+func (s *Spec) identityPubkey(name string) string {
 	id, err := identity.Load(filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name)))
 	if err != nil {
 		return ""
@@ -2033,6 +2039,40 @@ func (s *Spec) cpaPubkey() string {
 		return ""
 	}
 	return pk
+}
+
+// respondAllowlist renders the comma-separated pubkeys an agent pod's inbound
+// author gate accepts (the manifest's BUZZ_ACP_RESPOND_TO_ALLOWLIST). A
+// reserved department wakes for the operator + every core identity (the CPA +
+// the four departments — itself included; buzz-acp ignores self-events); a
+// custom agent wakes for its asker + the CPA. The asker is the operator today:
+// create_agent is called by the CPA's harness and the CP cannot see chat
+// threads. A missing core identity is skipped — reconcileAgentsInto pre-mints
+// them, so a fresh first build still has them all.
+func (s *Spec) respondAllowlist(name string) string {
+	isDepartment := false
+	for _, dep := range agents.DepartmentNames() {
+		if dep == name {
+			isDepartment = true
+			break
+		}
+	}
+	pubkeys := []string{s.OwnerPub, s.cpaPubkey()}
+	if isDepartment {
+		for _, dep := range agents.DepartmentNames() {
+			pubkeys = append(pubkeys, s.identityPubkey(dep))
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, pk := range pubkeys {
+		if pk == "" || seen[pk] {
+			continue
+		}
+		seen[pk] = true
+		out = append(out, pk)
+	}
+	return strings.Join(out, ",")
 }
 
 // cpaSecret returns the CPA's Nostr secret (32 bytes), or nil when its identity

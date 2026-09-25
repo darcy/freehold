@@ -183,7 +183,10 @@ task is resumable without re-deriving where it stopped.
   accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by AI, separate
   from Compute's general resources) are its direct reports, each a distinct identity scoped to
   one domain. Talk is unrestricted — the operator and any agent may converse with any
-  department or agent directly; what is bounded is *capability execution*. A capability a
+  department or agent directly; what is bounded is *capability execution*. On the wire the
+  talk surface is buzz-acp's inbound author gate: the CPA responds to **anyone** (relay
+  membership is the bound), each core department to an explicit **allowlist** — the operator
+  plus the core agents — and a custom agent to its asker plus the CPA. A capability a
   department owns (external proxy, backup, compute/LXC, model registration, AI hardware) is
   executed by that department's identity, and the raw grant for it attaches to department
   identities, never to a custom agent that would then self-serve a second, ungoverned path to

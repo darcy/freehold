@@ -175,3 +175,10 @@ there; if it is work not yet done, it belongs here.
 - **The transient uninstall cannot destroy running guests** (no stop-first;
   `pct destroy` 255s). Stop-then-destroy in the transient path like the runner
   path does.
+- **Respond-to allowlist management via freehold.** An agent pod's inbound
+  author gate is fixed at deploy time (the CPA: anyone; a core department: the
+  operator + the core agents; a custom agent: its asker + the CPA — the asker
+  is recorded as the operator because the CP cannot see chat threads). The
+  follow-up: anyone who can talk to an agent may ask freehold to add another
+  identity to that agent's allowlist — freehold validates the request and
+  re-applies the pod — and `create_agent` learns the real asker's pubkey.

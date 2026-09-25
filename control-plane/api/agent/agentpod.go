@@ -60,7 +60,7 @@ func (p *AgentPod) Prepare() (pubkey string, identityScript, manifestScript stri
 	}
 	return pubkey,
 		AgentIdentityScript(p.K3sVmid, id.NostrSecretHex, p.OwnerPub, p.Name),
-		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, base, CpaLiteLLMModel, p.Name, keySec, "", ""),
+		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, base, CpaLiteLLMModel, p.Name, keySec, "", "", "allowlist", p.OwnerPub),
 		nil
 }
 

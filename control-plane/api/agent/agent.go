@@ -218,17 +218,29 @@ func runnerLists(runner []RunnerCoords) (urls, pubs, targets, secrets string) {
 // tools with create/grant/manage-agent (signed as this agent's nsec), so the
 // agent can drive the CP toolset from conversation.
 //
+// respondTo + respondAllowlist wire buzz-acp's inbound author gate — which
+// authors' mentions wake the agent. The CPA passes "anyone" (relay membership
+// is the bound); every other agent passes "allowlist" with an explicit
+// comma-separated pubkey list (a core department: the operator + the core
+// agents; a custom agent: its asker + the CPA). The allowlist is a plain env
+// value — pubkeys are public (the relay publishes them) — while the nsec and
+// agent-owner keep riding the identity Secret.
+//
 // The nsec also NEVER rides the manifest: it comes from the `<pod>-identity`
 // Secret (a `secretKeyRef`), which the deploy step writes ONLY when absent —
 // the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
 // Service, and Secrets.
 
-func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey string, runner ...RunnerCoords) string {
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
 	podCmd := agentBridgeBootstrap(agentToolsURL, agentToolsPubkey, runner...)
+	respondAllowlistEnv := ""
+	if respondAllowlist != "" {
+		respondAllowlistEnv = fmt.Sprintf("    - {name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: %q}\n", respondAllowlist)
+	}
 	runnerEnv := ""
 	if len(runner) > 0 {
 		urls, pubs, targets, secrets := runnerLists(runner)
@@ -275,13 +287,13 @@ spec:
     - {name: BUZZ_RELAY_URL, value: %q}
     - {name: BUZZ_ACP_SYSTEM_PROMPT_FILE, value: %q}
     - {name: BUZZ_ACP_AGENT_COMMAND, value: "buzz-agent"}
-    - {name: BUZZ_ACP_RESPOND_TO, value: "allowlist"}
+    - {name: BUZZ_ACP_RESPOND_TO, value: %q}
     - {name: BUZZ_AGENT_PROVIDER, value: "openai-compat"}
     - {name: RUST_LOG, value: "debug"}
     - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
     - {name: FREEHOLD_AGENT_TOOLS_URL, value: %q}
     - {name: FREEHOLD_AGENT_TOOLS_PUBKEY, value: %q}
-%s    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+%s%s    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
     - {name: OPENAI_COMPAT_BASE_URL, value: %q}
     - {name: OPENAI_COMPAT_MODEL, value: %q}
     - name: OPENAI_COMPAT_API_KEY
@@ -291,9 +303,6 @@ spec:
       valueFrom:
         secretKeyRef: {name: %s, key: nsec}
     - name: BUZZ_ACP_AGENT_OWNER
-      valueFrom:
-        secretKeyRef: {name: %s, key: owner}
-    - name: BUZZ_ACP_RESPOND_TO_ALLOWLIST
       valueFrom:
         secretKeyRef: {name: %s, key: owner}
     volumeMounts:
@@ -314,10 +323,10 @@ spec:
 `,
 		promptCm, SystemPromptFile, indentSystemPrompt(systemPrompt),
 		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
-		agentToolsURL, agentToolsPubkey, runnerEnv,
+		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, runnerEnv,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
-		secret, secret, secret, SystemPromptPath, SystemPromptFile, promptCm, pod, pod)
+		secret, secret, SystemPromptPath, SystemPromptFile, promptCm, pod, pod)
 }
 
 // indentSystemPrompt indents every prompt line by four spaces so it embeds as
@@ -335,15 +344,16 @@ func indentSystemPrompt(prompt string) string {
 // display name (A1's stored value, default freehold) wired to the litellm
 // gateway (LiteLLMServiceURL + CpaLiteLLMModel).
 func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
-	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, sanitizePodName(cpaName)+"-litellm-key", "", "")
+	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, sanitizePodName(cpaName)+"-litellm-key", "", "", "anyone", "")
 }
 
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
 // the litellm workload pattern. agentName is the display name (sanitized into
 // the pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here). agentToolsURL/pubkey wires the CP toolset bridge when
-// non-empty.
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey string, runner ...RunnerCoords) string {
+// non-empty. respondTo/respondAllowlist wire the inbound author gate (see
+// AgentPodManifest).
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
@@ -364,7 +374,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, runner...),
+		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, runner...),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 
@@ -375,13 +385,15 @@ echo AGENT_LEG1_OK`,
 // litellmBaseURL must therefore be the recorded NodePort URL (cfg.Litellm.URL,
 // e.g. http://192.168.30.8:31400/v1), which the node itself answers. It wires
 // the agent-tools stdio bridge (agentToolsURL/pubkey) so the CPA can drive the
-// CP toolset.
+// CP toolset. The CPA's inbound author gate is "anyone" — relay membership is
+// the bound; the CPA is the system's main user touchpoint and every agent's
+// delegate.
 func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey string) string {
 	keySec := litellmKeySecret
 	if keySec == "" {
 		keySec = sanitizePodName(cpaName) + "-litellm-key"
 	}
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey)
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "")
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in
