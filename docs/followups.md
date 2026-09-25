@@ -146,3 +146,32 @@ there; if it is work not yet done, it belongs here.
 - **Caddy cert/DNS issuance staying the CP's in-process overlay** — this is the current
   design, not a gap; certs are event-driven (`worldCert`) while `caddy.tf` defines only the
   static shape.
+
+### Release-test v0.7.4 findings (the fresh cycle)
+
+- **A re-adopted plane's terraform destroy reaches OTHER worlds.** The fresh env
+  re-adopted a leftover durable plane whose tf/kube state referenced the librem
+  cluster; the uninstall's `terraform destroy` then destroyed the LIBREM world's
+  kubernetes workloads (caddy, door SAs, litellm/postgres) while everything else
+  looked healthy. Guard every tf kube stage: verify the kubeconfig's cluster is
+  THIS world's k3s before apply/destroy.
+- **The CP + relay LXCs are DHCP unless pinned.** A fresh install records the
+  lease-du-jour; the next guest reboot moves it and the recorded coordinates
+  strand the build/uninstall (the CP at .209 became .244 mid-test; the relay
+  moved mid-build). Pin the recorded IP at create (or re-resolve by guest name
+  on every verb).
+- **The console is not a systemd unit.** It runs under `setsid nohup`; a CP
+  guest reboot kills it and the world is headless until a deploy re-runs. The
+  co-located runner already has `systemd-run` — give the console the same.
+- **All profiles' local runners collide on 127.0.0.1:8787.** A multi-profile
+  box's `freehold exec` silently hits whichever profile's runner owns the port
+  (fresh-074's stole every other profile's execs for an hour, with misleading
+  `-32001 not granted` errors). Per-profile ports minted at install.
+- **A relay redeploy leaves the console's relay membership stale** (the live env:
+  its console identity was never membered; the first reconcile publish 403'd
+  `relay_membership_required`). The durable fix from the note above
+  (reconcile-channels after a redeploy) plus: deploy re-members the console
+  identity on every deploy, not just install.
+- **The transient uninstall cannot destroy running guests** (no stop-first;
+  `pct destroy` 255s). Stop-then-destroy in the transient path like the runner
+  path does.
