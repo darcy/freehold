@@ -265,4 +265,13 @@ func TestIsMemberFromEvents(t *testing.T) {
 	if isMemberFromEvents([]map[string]interface{}{ev(remove, 5, me), ev(add, 2, me)}, me) {
 		t.Fatal("the newest event must decide, not the last in the slice")
 	}
+	// Same-second add/remove ties to NOT a member — deterministic in both
+	// slice orders, and the safe side (the caller re-asserts rather than
+	// skipping a needed add).
+	if isMemberFromEvents([]map[string]interface{}{ev(add, 5, me), ev(remove, 5, me)}, me) {
+		t.Fatal("same-second add-then-remove must tie to NOT a member")
+	}
+	if isMemberFromEvents([]map[string]interface{}{ev(remove, 5, me), ev(add, 5, me)}, me) {
+		t.Fatal("same-second remove-then-add must tie to NOT a member")
+	}
 }

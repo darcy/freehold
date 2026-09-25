@@ -646,7 +646,7 @@ func (s *Spec) deployAgentTools() error {
 	if err := s.pinRelayHost(); err != nil {
 		return err
 	}
-	relayDial := "http://" + s.RelayHost + ":3000"
+	relayDial := config.RelayLanDial(s.RelayHost)
 	// Seed the server's channel + the operator into its roster. The console's
 	// driving identity (s.Audience) is deliberately NOT seeded: the console
 	// never calls this MCP (it reads the registry/facts files directly), so
@@ -1597,12 +1597,20 @@ func (s *Spec) appendMigrations(report []string) []string {
 // durable agent-tools state from backup, or a deliberate re-point + pod
 // re-create) is an operator decision, never an auto-write.
 func (s *Spec) appendAgentToolsAudience(report []string) []string {
-	audience := s.agentToolsAudience()
+	audience, aerr := s.agentToolsAudience()
+	if aerr != nil {
+		// The durable identity is unreadable — the very failure the line
+		// exists to surface. Say so; never misattribute another identity as
+		// the "live" audience.
+		return append(report, "WARN: agent-tools: "+aerr.Error()+" — pods' bridge audience is undeterminable; restore the durable agent-tools state from backup")
+	}
 	if audience == "" {
 		return report
 	}
-	if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), state.StateFile)); err != nil {
+	if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), state.StateFile)); os.IsNotExist(err) {
 		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (no console state — nothing recorded to compare)")
+	} else if err != nil {
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
 	}
 	store, err := state.Open(s.consoleStateRoot())
 	if err != nil {
@@ -1631,6 +1639,13 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 // relay by HOSTNAME depends on this pin (the console's channel sync, the
 // agent-tools serve's roster queries, the seed) — the edge DNS record for the
 // same name points at the PROXY, so an unpinned resolve reaches the wrong box.
+// hostsLineRe is the strict gate for /etc/hosts pin values: a hostname
+// (dot-separated alphanumerics/hyphens) and a bare IP. Both reach a
+// root-executed sh -c single-quoted into the CP guest, so anything outside
+// this charset (a quote, a dollar, whitespace) is refused BEFORE
+// interpolation — the same posture as the doorKeyRe gate.
+var hostsLineRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+
 func (s *Spec) pinRelayHost() error {
 	relayIP := s.RelayIP
 	if s.RelayLxc != 0 {
@@ -1644,6 +1659,9 @@ func (s *Spec) pinRelayHost() error {
 		}
 	}
 	if relayIP != "" && s.RelayHost != "" {
+		if !hostsLineRe.MatchString(s.RelayHost) || !hostsLineRe.MatchString(relayIP) {
+			return fmt.Errorf("pin relay host into cp: refusing unsafe values (host %q / ip %q must be a bare hostname and IP)", s.RelayHost, relayIP)
+		}
 		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
 		if err := s.run(pin, 30); err != nil {
 			return fmt.Errorf("pin relay host into cp: %w", err)
@@ -1839,7 +1857,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if authURL == "" {
 			authURL = spec.RelayURL
 		}
-		if err := relay.PublishProfileAuth(spec.RelayURL, authURL, nSec, name, "freehold agent"); err != nil {
+		if err := relay.PublishProfileAuth(spec.relayDial(), authURL, nSec, name, "freehold agent"); err != nil {
 			return "", fmt.Errorf("publish %s profile: %w", name, err)
 		}
 		// Each named channel is resolved (created, owned by this agent, when
@@ -1868,14 +1886,14 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 				if len(cpaSec) != 32 {
 					return "", fmt.Errorf("add %s to #freehold: the CPA identity is unavailable to sign the membership (a private #freehold admits members only through its owner)", name)
 				}
-				if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, cpaSec, channelID, pub); merr != nil || !member {
-					if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, pub); err != nil {
+				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, pub); merr != nil || !member {
+					if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, pub); err != nil {
 						return "", fmt.Errorf("add %s to #freehold: %w", name, err)
 					}
 				}
 				if spec.OwnerPub != "" {
-					if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, cpaSec, channelID, spec.OwnerPub); merr != nil || !member {
-						if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, spec.OwnerPub); err != nil {
+					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, spec.OwnerPub); merr != nil || !member {
+						if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, spec.OwnerPub); err != nil {
 							return "", fmt.Errorf("add operator to #freehold: %w", err)
 						}
 					}
@@ -1886,12 +1904,12 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// JOIN it (open channels allow free joins; a private one may refuse —
 			// best-effort), then try to ADD the operator (the agent owns a channel
 			// it created; it may not own a pre-existing one).
-			if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, nSec, channelID, pub); merr != nil || !member {
-				_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, pub); merr != nil || !member {
+				_ = relay.JoinChannelAuth(spec.relayDial(), authURL, nSec, channelID)
 			}
 			if spec.OwnerPub != "" {
-				if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub); merr != nil || !member {
-					perr := relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
+				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, spec.OwnerPub); merr != nil || !member {
+					perr := relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, channelID, spec.OwnerPub)
 					if perr != nil && created {
 						return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
 					}
@@ -1908,10 +1926,10 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 					if ref.id == relayFreeholdChannel {
 						continue
 					}
-					if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, nSec, ref.id, cpaPub); merr == nil && member {
+					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, ref.id, cpaPub); merr == nil && member {
 						continue
 					}
-					_ = relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, ref.id, cpaPub)
+					_ = relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, ref.id, cpaPub)
 				}
 			}
 		}
@@ -1922,8 +1940,12 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// The bridge audience is the AGENT-TOOLS server's pubkey (resolved from
 		// the durable identity), not spec.Audience — for the console executor
 		// that is the console's own runner-signing identity, and a pod stamped
-		// with it signs a dead audience forever.
-		audience := spec.agentToolsAudience()
+		// with it signs a dead audience forever. An unreadable durable identity
+		// fails the create loudly rather than stamping a wrong key.
+		audience, aerr := spec.agentToolsAudience()
+		if aerr != nil {
+			return "", fmt.Errorf("create-agent %q: %w", name, aerr)
+		}
 		var manifest string
 		if name == spec.CpaName {
 			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, audience)
@@ -1961,7 +1983,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 					}
 				}
 			}
-			if err := relay.PutUserAuth(spec.RelayURL, authURL, sec, self, pub); err != nil {
+			if err := relay.PutUserAuth(spec.relayDial(), authURL, sec, self, pub); err != nil {
 				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
 			}
 		}

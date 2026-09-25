@@ -322,11 +322,17 @@ func RemoveUserChannelAuth(dialURL, authURL string, secret []byte, channelID, me
 // each write and skip the re-add. An unreadable relay returns an error (the
 // caller fails open to the write attempt).
 func IsMemberAuth(dialURL, authURL string, secret []byte, channelID, memberPubkey string) (bool, error) {
+	// The filter is scoped to ONE member in ONE channel (#h + #p), so the
+	// result set only holds that member's own membership events — a world's
+	// accumulation is bounded by real joins/leaves/revokes for that member
+	// (the churn this check prevents is exactly what would have grown it).
+	// 1000 covers any plausible history; the newest-decides read scans the
+	// whole set client-side (NIP-01 gives no server-side order guarantee).
 	filters := []interface{}{map[string]interface{}{
 		"kinds": []interface{}{wire.PutUser, wire.RemoveUser},
 		"#h":    []interface{}{channelID},
 		"#p":    []interface{}{memberPubkey},
-		"limit": 500,
+		"limit": 1000,
 	}}
 	evs, err := QueryEventsAuth(dialURL, authURL, secret, filters)
 	if err != nil {
@@ -337,7 +343,10 @@ func IsMemberAuth(dialURL, authURL string, secret []byte, channelID, memberPubke
 
 // isMemberFromEvents is the pure membership read: of the events naming the
 // member, the newest decides (9000 => member, 9001 => not). Events naming a
-// DIFFERENT member are ignored; an empty set is not a member.
+// DIFFERENT member are ignored; an empty set is not a member. A same-second
+// add/remove ties to NOT a member (deterministic in both slice orders, and
+// the safe side: the caller re-asserts the membership — one redundant event
+// — rather than skipping a needed add).
 func isMemberFromEvents(evs []map[string]interface{}, memberPubkey string) bool {
 	newest := int64(-1)
 	member := false
@@ -346,9 +355,12 @@ func isMemberFromEvents(evs []map[string]interface{}, memberPubkey string) bool 
 			continue
 		}
 		ts := eventCreatedAt(e)
-		if ts > newest {
-			newest = ts
-			member = eventKindIs(e, wire.PutUser)
+		kindIsPut := eventKindIs(e, wire.PutUser)
+		switch {
+		case ts > newest:
+			newest, member = ts, kindIsPut
+		case ts == newest && !kindIsPut:
+			member = false
 		}
 	}
 	return member

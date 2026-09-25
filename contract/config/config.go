@@ -145,6 +145,22 @@ type RunnerRef struct {
 	Target string `toml:"target"`
 }
 
+// RelayLanDial renders the relay's LAN dial URL (pre-Caddy): the relay's own
+// hostname on the LAN HTTP port. A host already carrying a port is used
+// verbatim (it names its own dial port). Empty host => empty URL. Buzz keys
+// the community to the HOST header, so the dial must be the relay's hostname,
+// never a raw IP.
+func RelayLanDial(host string) string {
+	host = strings.TrimSuffix(strings.TrimSpace(host), "/")
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, ":") {
+		return "http://" + host
+	}
+	return "http://" + host + ":3000"
+}
+
 // RelayHost returns the relay's own public host (its Buzz origin) from
 // RelayURL — never derived; it is whatever the operator chose.
 func (c *Config) RelayHost() string {

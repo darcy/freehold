@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"freehold/contract/client"
+	"freehold/contract/config"
 	"freehold/contract/relay"
 	"freehold/contract/version"
 	"freehold/contract/wire"
@@ -775,11 +776,8 @@ func (s *Server) relayAuthFor() string {
 // sign-public split agent-tools and cpbuild use. The port is the relay's LAN
 // HTTP port (pre-Caddy), 3000 as everywhere else.
 func (s *Server) relayDialFor(snapURL *string) string {
-	if s.RelayHost != "" {
-		host := strings.TrimSuffix(s.RelayHost, "/")
-		if host != "" && !strings.Contains(host, ":") {
-			return "http://" + host + ":3000"
-		}
+	if d := config.RelayLanDial(s.RelayHost); d != "" {
+		return d
 	}
 	if snapURL != nil {
 		return *snapURL
