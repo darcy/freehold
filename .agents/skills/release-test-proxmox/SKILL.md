@@ -2,7 +2,7 @@
 name: release-test-proxmox
 description: Use when validating a freehold pre-release on a real Proxmox host (e.g. "test the release", "run the Proxmox release tests"). Restores the pre-release's own downloaded assets and runs three envs on a real PVE host — Fresh (the full install→uninstall lifecycle on a disposable world), Rebuild (teardown→build on the persistent env, left running), and Live (`freehold update` against the always-running env) — then updates the release's test-status table rows for Proxmox.
 metadata:
-  version: 2.0.0
+  version: 2.1.0
   author: freehold
   license: MIT
 ---
@@ -11,8 +11,8 @@ metadata:
 
 Exercises a pre-release's **exact downloaded assets** through three live flows on a real
 Proxmox host, then records the result in the release body's `## Test status` table — one
-row per provider × env × test. It never promotes the release — `release-publish` does that
-once every row is ✅.
+row per provider × env × test. When every row is ✅, it hands off to `release-publish`
+(step 7) — the promotion itself is `release-publish`'s job.
 
 ## The three tests
 
@@ -20,7 +20,7 @@ once every row is ✅.
 | --- | --- | --- | --- |
 | **Fresh** | `relay`/`cp.fresh.freehold.technology` | install → CPA replies → teardown → all down → build → CPA replies → uninstall → all gone | nothing — fully destroyed |
 | **Rebuild** | `relay`/`cp.rebuild.freehold.technology` | teardown → all down → build → CPA replies | the world, **left running** |
-| **Live** | the always-running env | `freehold update --rc` → world still healthy | the world, updated + running |
+| **Live** | the always-running env | `freehold update --ref main` → world still healthy | the world, updated + running |
 
 - **Fresh** proves a brand-new world works end to end from the release assets. Mint a NEW
   operator identity for the install — never the operator Rebuild/Live use.
@@ -179,11 +179,16 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    existing operator. This verifies `update` runs and does what is expected to a running
    world:
    ```bash
-   "$fh" update --check --config <live-profile-config>   # record the before-state
-   "$fh" update --rc   --config <live-profile-config> --yes
-   "$fh" update --check --config <live-profile-config>   # version + migrations after
+   "$fh" update --check   --config <live-profile-config>   # record the before-state
+   "$fh" update --ref main --config <live-profile-config> --yes
+   "$fh" update --check   --config <live-profile-config>   # version + migrations after
    "$fh" status    --config <live-profile-config>
    ```
+   `--ref main` sandbox-clones `main` and builds on the box. Pre-release candidates are
+   plain `vX.Y.Z` tags marked prerelease — the update verb has no channel that selects
+   them — so the Live row tests a **main build**, not the candidate's downloaded assets.
+   The candidate is `main`'s tip at prepare time, so it is the same code the assets were
+   cut from (this trade-off is accepted for now).
    - **Live - Update** ✅ iff the update completed, `update --check` shows the expected
      version with 0 unexpected pending migrations, `status` is healthy, and the CPA still
      replies in the relay. Already-on-target is fine: the run must report up-to-date
@@ -197,6 +202,13 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    gh release edit "$tag" --notes-file /tmp/opencode/body.md
    gh release view "$tag" --json body -q .body | sed -n '/^## Test status/,$p'
    ```
+
+7. **If every row you filled is ✅, run `release-publish`** — the next step of this
+   release's flow, not an optional extra. Invoke the skill; it re-gates on the table, gets
+   the operator's go-ahead, and flips the release to final (with the Latest badge). A
+   fully-green table left unpromoted is how a release gets stranded behind a stale Latest
+   badge — don't omit it. If any row is ⚪/❌ (or another provider's rows are still
+   unverified), stop here and report the failing state instead.
 
 ## Field notes (learned on the v0.7.0 first run)
 
@@ -244,11 +256,11 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   `NotFound namespaces [caddy]`; the namespaces then exist, so a plain `build` retry
   passes. A released candidate whose assets predate the fix still tests fine with the
   retry, but a RE-CUT carries the fix.
-- **`update --rc` only matches `vX.Y.Z-rc.N` tags** — a plain `vX.Y.Z` pre-release is
-  UNREACHABLE by the update verb (the rc channel's regex rejects it). For a live env to
-  track a candidate, the candidate needs an rc tag (`vX.Y.Z-rc.N`) on the same commit; CI
-  builds its assets and `update --rc` targets it. A stale newest-rc tag whose assets are
-  gone 404s the channel.
+- **The update verb has no rc channel.** Pre-release candidates are plain `vX.Y.Z` tags
+  marked prerelease, and `update`'s release channels select tags by shape — the former
+  `--rc` channel matched only `vX.Y.Z-rc.N` tags and could never see a candidate, so it
+  is gone. The live env tracks `main` (`update --ref main`, a sandbox clone+build on the
+  box); a stable-tracking env uses `--stable` or its recorded channel.
 - **A CP state missing `agent_tools` coords fails every update.** Envs bootstrapped before
   the coords were recorded report `agent_tools_pubkey=""` in the world summary, and the
   update's migration window needs them (`no freehold-agent-tools coords recorded`). Fix per
@@ -332,8 +344,10 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   echo its values into logs, evidence, or the release body.
 - **Never move/create/delete a tag, never change assets, title, or `isPrerelease`; only the
   status-table cells are yours to edit.** The one exception is an explicit operator go-ahead
-  to re-cut a failed candidate onto the fixed `main` tip (see the field notes). Never promote
-  — that's `release-publish`.
+  to re-cut a failed candidate onto the fixed `main` tip (see the field notes).
+- **Never promote directly — promotion is `release-publish`'s job, gated on the
+  test-status table and the operator's go-ahead.** When every row you filled is ✅, hand
+  off to `release-publish` (step 7) rather than leaving the table unpublished.
 - Keep the table format and icons exact (`⚪ Unverified` · `✅ Passed` · `❌ Failed`) so
   `release-publish` can parse it. Don't drop rows you didn't test.
 - Record the evidence (checksums, per-step output, agent request + reply, version pings)

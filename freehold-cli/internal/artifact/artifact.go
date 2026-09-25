@@ -1,7 +1,7 @@
 // Package artifact acquires a version's binaries + migration scripts for
 // `freehold update`:
 //
-//   - release assets for a channel (stable/rc): download + sha256-verify the
+//   - release assets for a channel (stable): download + sha256-verify the
 //     GitHub Release assets, extract migrations.tar.gz;
 //   - a sandbox clone+build for an untagged ref/sha (the box has the toolchain);
 //   - the local tree for --dev.
@@ -55,25 +55,15 @@ type Set struct {
 	Commit        string
 }
 
-var (
-	stableRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
-	rcRe     = regexp.MustCompile(`^v\d+\.\d+\.\d+-rc\.\d+$`)
-)
+var stableRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 
 // SelectTag picks the newest tag for a channel: the highest semver stable tag
-// for "stable", the highest vX.Y.Z-rc.N for "rc". ok=false when none match.
+// for "stable". ok=false when none match.
 func SelectTag(channel string, tags []string) (string, bool) {
 	var candidates []string
 	for _, t := range tags {
-		switch channel {
-		case "stable":
-			if stableRe.MatchString(t) {
-				candidates = append(candidates, t)
-			}
-		case "rc":
-			if rcRe.MatchString(t) {
-				candidates = append(candidates, t)
-			}
+		if channel == "stable" && stableRe.MatchString(t) {
+			candidates = append(candidates, t)
 		}
 	}
 	if len(candidates) == 0 {

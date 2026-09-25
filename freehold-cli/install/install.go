@@ -449,7 +449,7 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
 	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key (or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
-	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|rc|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
+	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().Bool("yes", false, "Non-interactive: run headless (fail actionably) instead of prompting")
 }

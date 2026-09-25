@@ -727,11 +727,13 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     (`{version, channel, commit}`). `install`/`update` write it; `serve` only
     reads it (surfaced on `/healthz` JSON, `/api/world`, `world_status`, and
     `freehold status`); `build`/`teardown` never promote it.
-*   **Channels** are `stable` (newest non-prerelease tag), `rc` (newest
-    `vX.Y.Z-rc.N`), and `dev` (local tree); any untagged ref is `--ref`/`--sha`
-    (no `edge` channel). The channel is a parameter, not a verb: `install
-    --channel` seeds it and `update --stable|--rc|--dev` re-stamps it to the
-    source it deployed; `freehold status` shows it.
+*   **Channels** are `stable` (newest non-prerelease tag) and `dev` (local
+    tree); any untagged ref is `--ref`/`--sha` (no `edge` channel). There is no
+    `rc` channel: a release candidate is a plain `vX.Y.Z` tag marked
+    prerelease, and a world tracking one updates with `update --ref main`
+    (the candidate is `main`'s tip). The channel is a parameter, not a verb:
+    `install --channel` seeds it and `update --stable|--dev` re-stamps it to
+    the source it deployed; `freehold status` shows it.
 *   **`freehold update`** is remote-world only (never the local CLI): resolve
     source → acquire (release assets sha256-verified, or sandbox clone+build
     with the box's toolchain) → redeploy the CP's binaries → copy migration
