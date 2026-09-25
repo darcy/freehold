@@ -51,7 +51,8 @@ against the disposable test host, with the operator's go-ahead.
   (`OPERATOR_NPUB` / the env profile's recorded one) — those worlds already know that
   pubkey.
 - A real Proxmox host is reachable and each env's domains/proxy IP are known
-  (operator-supplied or recorded in a profile).
+  (operator-supplied or recorded in a profile). The Rebuild/Live profiles are listed
+  under `test-proxmox-rebuild` / `test-proxmox-live` in `.envs.yml` (repo root).
 - **Root access to the PVE host** (a door key already authorized, or a console/root
   password). A fresh profile mints a NEW door key, and `install --yes` bails until that
   key is in the host's `/root/.ssh/authorized_keys` — see step 2.

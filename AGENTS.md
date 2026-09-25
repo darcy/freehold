@@ -94,6 +94,33 @@ task is resumable without re-deriving where it stopped.
 - **Numbering:** `0.x.y` stays semver-ish pre-MVP (minor for a chunk's work, patch
   for a phase); `1.0.0` is reserved for the MVP / public release.
 
+## Environments — dev, test, prod
+
+`.envs.yml` at the repo root (gitignored — it maps this operator box's profiles) is the
+source of truth for what each world is. Role keys — `dev`, `test-<provider>-<env>`
+(`test-proxmox-rebuild`, `test-proxmox-live`; Vultr slots in later), `prod` — each hold a
+list of profile names (`freehold profiles`). A world is reached through the agent's own
+shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the file governs
+*which* worlds, not *how*.
+
+- **Listed = accessible and expected to work there. Unlisted = do NOT access it.** If a
+  task touches a world that isn't in the file, get its mode from the operator — never
+  guess — then add the listing yourself and proceed. The file is agent-extensible by
+  design; the operator-stated mode is the only gate. `fresh` is transient (gone on
+  uninstall) and is never listed.
+- **dev — build, test, sandbox.** Provision new services for agents, verify they work,
+  write the skills prod agents will use; refactor and exercise directly on the box. No PR
+  is needed to make something work in dev — the PR is only how finished code lands in
+  `main` so **other worlds** get it. When dev work exposes a fix: fix the world, then
+  reproduce it in the codebase — a fix that lives only on the box isn't done until the PR
+  merges.
+- **test — release e2e only**, via `release-test-proxmox` (Fresh/Rebuild/Live; Proxmox
+  now, Vultr later). Never a dev sandbox. Fresh is disposable; Rebuild/Live persist
+  between releases.
+- **prod — review/debug only.** Observe, diagnose, report. No changes without the
+  operator's explicit go-ahead; the fix path is always recreate on dev → PR → release.
+  A direct prod fix happens only when explicitly allowed (hotfix).
+
 ## Navigation
 
 - `docs/VISION.md` — narrative, single source of truth for the "why".

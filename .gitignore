@@ -19,3 +19,5 @@ node_modules/
 roadmap/CP_DRIVEN_BUILD.md
 # release-test secrets (DNS token, provider keys, operator npub) — local only
 .env.test
+# the operator box's env-mode map (which profile is dev/test/prod) — local only
+.envs.yml
