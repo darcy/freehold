@@ -643,29 +643,8 @@ func (s *Spec) deployAgentTools() error {
 	// The relay host must DIAL via the LAN URL (http://<relayHost>:3000, pinned
 	// into the cp guest's /etc/hosts so it reaches the just-booted relay before
 	// the Caddy edge exists) while the NIP-98 signature uses the PUBLIC URL.
-	// Resolve the relay's current IP (bootstrap did not boot the relay; this
-	// world_build just did).
-	relayIP := s.RelayIP
-	if s.RelayLxc != 0 {
-		// Always re-read the relay's CURRENT DHCP lease: a prior cycle's recorded
-		// IP can go stale (the relay LXC can come back on a different .30.x lease
-		// after a teardown+rebuild), and pinning the seed against a dead IP makes
-		// the agent-tools roster seed fail with "no route to host". Fall back to
-		// the recorded value only if the live read yields nothing.
-		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
-			for _, t := range strings.Fields(out) {
-				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
-					relayIP = config.StripCIDR(t)
-					break
-				}
-			}
-		}
-	}
-	if relayIP != "" && s.RelayHost != "" {
-		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
-		if err := s.run(pin, 30); err != nil {
-			return fmt.Errorf("pin relay host into cp: %w", err)
-		}
+	if err := s.pinRelayHost(); err != nil {
+		return err
 	}
 	relayDial := "http://" + s.RelayHost + ":3000"
 	// Seed the server's channel + the operator into its roster. The console's
@@ -1641,6 +1620,36 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 			": every existing agent pod signs the stale pubkey and every CP tool call fails signature verify. "+
 			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods.")
 	}
+}
+
+// pinRelayHost idempotently pins the relay's LAN IP to its hostname in the CP
+// guest's /etc/hosts. Always re-reads the relay's CURRENT DHCP lease: a prior
+// cycle's recorded IP can go stale (the relay LXC can come back on a different
+// .30.x lease after a teardown+rebuild), and pinning against a dead IP makes
+// the relay dial fail with "no route to host". The recorded value is the
+// fallback when the live read yields nothing. Every consumer that dials the
+// relay by HOSTNAME depends on this pin (the console's channel sync, the
+// agent-tools serve's roster queries, the seed) — the edge DNS record for the
+// same name points at the PROXY, so an unpinned resolve reaches the wrong box.
+func (s *Spec) pinRelayHost() error {
+	relayIP := s.RelayIP
+	if s.RelayLxc != 0 {
+		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
+			for _, t := range strings.Fields(out) {
+				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
+					relayIP = config.StripCIDR(t)
+					break
+				}
+			}
+		}
+	}
+	if relayIP != "" && s.RelayHost != "" {
+		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
+		if err := s.run(pin, 30); err != nil {
+			return fmt.Errorf("pin relay host into cp: %w", err)
+		}
+	}
+	return nil
 }
 
 // doorKeyRe is the DOOR_SPEC §2.5 strict authorized_keys-line gate: key type +

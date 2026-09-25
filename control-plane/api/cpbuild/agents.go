@@ -126,6 +126,14 @@ func (s *Spec) agentToolsServeFlags() string {
 // facts.json at startup, so a restart is how a CP-side registry/facts write
 // becomes visible to the running server (its rows live in memory).
 func (s *Spec) startAgentTools() error {
+	// Re-assert the relay-host pin EVERY converge: /etc/hosts is PVE-ephemeral
+	// (a rebuilt CP guest loses it), the full-deploy path that drops the pin
+	// only runs on a fresh/changed agent-tools stage, and the console's relay
+	// publishes + this serve's roster queries dial the relay by HOSTNAME —
+	// without the pin they resolve to the Caddy EDGE record first.
+	if err := s.pinRelayHost(); err != nil {
+		return fmt.Errorf("agent-tools relay pin: %w", err)
+	}
 	binDir, _ := s.cpGuestDirs()
 	bin := binDir + "/freehold-agent-tools"
 	atState := s.agentToolsRoot()
