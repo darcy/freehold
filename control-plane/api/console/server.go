@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"freehold/contract/client"
+	"freehold/contract/config"
 	"freehold/contract/relay"
 	"freehold/contract/version"
 	"freehold/contract/wire"
@@ -788,6 +789,25 @@ func (s *Server) relayAuthFor() string {
 	return ""
 }
 
+// relayDialFor returns the relay DIAL URL for buzz publishes: the relay's own
+// hostname when known, because buzz keys the community to the HOST header — a
+// raw-IP dial (the recorded state RelayURL is the LAN-IP form) publishes to
+// "no community is configured for this host". The CP guest's /etc/hosts pin
+// (deploy drops it, every build re-asserts it) maps the hostname to the
+// relay's LAN IP, so the host-form dial resolves LAN-side while NIP-98 signs
+// the CANONICAL public origin (relayAuthFor) — the same dial-LAN /
+// sign-public split agent-tools and cpbuild use. The port is the relay's LAN
+// HTTP port (pre-Caddy), 3000 as everywhere else.
+func (s *Server) relayDialFor(snapURL *string) string {
+	if d := config.RelayLanDial(s.RelayHost); d != "" {
+		return d
+	}
+	if snapURL != nil {
+		return *snapURL
+	}
+	return ""
+}
+
 func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.requireSession(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -818,8 +838,8 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 	var relayURL *string
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
-	if relayURL != nil {
-		if err := provisioner.SyncRunnerChannel(s.Store, *relayURL, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
+	if dial := s.relayDialFor(snap.RelayURL); dial != "" {
+		if err := provisioner.SyncRunnerChannel(s.Store, dial, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -942,8 +962,8 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	var relayURL *string
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
-	if relayURL != nil {
-		if err := provisioner.SyncRunnerChannel(s.Store, *relayURL, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
+	if dial := s.relayDialFor(snap.RelayURL); dial != "" {
+		if err := provisioner.SyncRunnerChannel(s.Store, dial, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}

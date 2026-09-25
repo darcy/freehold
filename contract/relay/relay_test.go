@@ -228,3 +228,50 @@ var _ = hex.DecodeString
 func publicKeyHex(secret []byte) (string, error) {
 	return crypto.PubkeyFromSecret(secret)
 }
+
+// TestIsMemberFromEvents pins the membership read the reconcile consults
+// before every channel write: the NEWEST event naming the member decides
+// (9000 add => member, 9001 remove => not), events naming other members are
+// ignored, and an empty set is not a member. This is what keeps a converged
+// world from re-asserting memberships on every bring-up — each re-assert is
+// a fresh "you were added" event on the relay.
+func TestIsMemberFromEvents(t *testing.T) {
+	me, other := "a1a1a1a1a1a1", "b2b2b2b2b2b2"
+	ev := func(kind int, ts int, member string) map[string]interface{} {
+		return map[string]interface{}{
+			"kind":       float64(kind),
+			"created_at": float64(ts),
+			"tags":       []interface{}{[]interface{}{"h", "chan"}, []interface{}{"p", member}},
+		}
+	}
+	add, remove := wire.PutUser, wire.RemoveUser
+
+	if isMemberFromEvents(nil, me) {
+		t.Fatal("no events must read as not a member")
+	}
+	if isMemberFromEvents([]map[string]interface{}{ev(add, 1, other)}, me) {
+		t.Fatal("events naming another member must be ignored")
+	}
+	if !isMemberFromEvents([]map[string]interface{}{ev(add, 1, me)}, me) {
+		t.Fatal("a lone add must read as a member")
+	}
+	if isMemberFromEvents([]map[string]interface{}{ev(add, 1, me), ev(remove, 2, me)}, me) {
+		t.Fatal("a remove after an add must read as NOT a member")
+	}
+	if !isMemberFromEvents([]map[string]interface{}{ev(remove, 1, me), ev(add, 2, me)}, me) {
+		t.Fatal("a re-add after a remove must read as a member")
+	}
+	// Newest wins regardless of slice order.
+	if isMemberFromEvents([]map[string]interface{}{ev(remove, 5, me), ev(add, 2, me)}, me) {
+		t.Fatal("the newest event must decide, not the last in the slice")
+	}
+	// Same-second add/remove ties to NOT a member — deterministic in both
+	// slice orders, and the safe side (the caller re-asserts rather than
+	// skipping a needed add).
+	if isMemberFromEvents([]map[string]interface{}{ev(add, 5, me), ev(remove, 5, me)}, me) {
+		t.Fatal("same-second add-then-remove must tie to NOT a member")
+	}
+	if isMemberFromEvents([]map[string]interface{}{ev(remove, 5, me), ev(add, 5, me)}, me) {
+		t.Fatal("same-second remove-then-add must tie to NOT a member")
+	}
+}

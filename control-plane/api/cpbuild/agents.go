@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"freehold/agents"
+	"freehold/contract/config"
 	"freehold/contract/console"
+	"freehold/contract/identity"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/platform/provisioning/planebase"
@@ -22,12 +24,51 @@ func (s *Spec) agentToolsRoot() string {
 	return filepath.Join(filepath.Dir(s.StateDir), "agent-tools")
 }
 
+// agentToolsAudience resolves the pubkey the agent pods' stdio bridge signs
+// against: the AGENT-TOOLS server's own identity, read from the durable
+// plane. NOT spec.Audience — for the console executor that is the console's
+// runner-signing identity (its runner auth + the seed revoke), which only
+// coincides with the agent-tools audience when the build runs inside the
+// agent-tools serve itself. A pod manifest stamped with the wrong audience
+// leaves the pod signing a dead key: every CP tool call fails "-32001
+// signature does not verify" while the world otherwise looks healthy.
+//
+// The fallback when the durable identity is unreadable: the IN-SERVE spec's
+// own Audience IS that identity (derived from the same state dir at boot).
+// The console executor has no honest fallback — its Audience is the console's
+// key — so it errors and the manifest/report fail loudly instead of stamping
+// a dead audience back into the world.
+func (s *Spec) agentToolsAudience() (string, error) {
+	if id, err := identity.Load(s.agentToolsRoot()); err == nil {
+		if pk, perr := id.NostrPubkeyHex(); perr == nil {
+			return pk, nil
+		}
+	}
+	if s.AgentIdentityDir == "" {
+		return s.Audience, nil
+	}
+	return "", fmt.Errorf("durable agent-tools identity unreadable at %s", s.agentToolsRoot())
+}
+
+// relayDial is the relay DIAL URL for event publishes/queries: the relay's
+// own hostname on the LAN HTTP port when known (buzz keys the community to
+// the HOST header, and the relay client presents the dial URL's hostname — a
+// raw-IP dial presents the IP and reads "no community is configured for this
+// host"), the recorded RelayURL otherwise. The NIP-98 signature covers the
+// CANONICAL public origin (RelayAuthURL) — the dial-LAN / sign-public split.
+func (s *Spec) relayDial() string {
+	if d := config.RelayLanDial(s.RelayHost); d != "" {
+		return d
+	}
+	return s.RelayURL
+}
+
 // agentToolsServeFlags builds the `freehold-agent-tools serve` argv. Extracted
 // from deployAgentTools so a registry/facts write can restart the serve process
 // (and reload it) without re-running the one-time seed/grant/pin steps.
 func (s *Spec) agentToolsServeFlags() string {
 	atState := s.agentToolsRoot()
-	relayDial := "http://" + s.RelayHost + ":3000"
+	relayDial := config.RelayLanDial(s.RelayHost)
 	serveFlags := fmt.Sprintf(
 		"--state-dir %s --addr 0.0.0.0:"+AgentToolsPort+" --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
 		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
@@ -108,6 +149,14 @@ func (s *Spec) agentToolsServeFlags() string {
 // facts.json at startup, so a restart is how a CP-side registry/facts write
 // becomes visible to the running server (its rows live in memory).
 func (s *Spec) startAgentTools() error {
+	// Re-assert the relay-host pin EVERY converge: /etc/hosts is PVE-ephemeral
+	// (a rebuilt CP guest loses it), the full-deploy path that drops the pin
+	// only runs on a fresh/changed agent-tools stage, and the console's relay
+	// publishes + this serve's roster queries dial the relay by HOSTNAME —
+	// without the pin they resolve to the Caddy EDGE record first.
+	if err := s.pinRelayHost(); err != nil {
+		return fmt.Errorf("agent-tools relay pin: %w", err)
+	}
 	binDir, _ := s.cpGuestDirs()
 	bin := binDir + "/freehold-agent-tools"
 	atState := s.agentToolsRoot()

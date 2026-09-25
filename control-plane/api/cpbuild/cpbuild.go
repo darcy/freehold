@@ -643,31 +643,10 @@ func (s *Spec) deployAgentTools() error {
 	// The relay host must DIAL via the LAN URL (http://<relayHost>:3000, pinned
 	// into the cp guest's /etc/hosts so it reaches the just-booted relay before
 	// the Caddy edge exists) while the NIP-98 signature uses the PUBLIC URL.
-	// Resolve the relay's current IP (bootstrap did not boot the relay; this
-	// world_build just did).
-	relayIP := s.RelayIP
-	if s.RelayLxc != 0 {
-		// Always re-read the relay's CURRENT DHCP lease: a prior cycle's recorded
-		// IP can go stale (the relay LXC can come back on a different .30.x lease
-		// after a teardown+rebuild), and pinning the seed against a dead IP makes
-		// the agent-tools roster seed fail with "no route to host". Fall back to
-		// the recorded value only if the live read yields nothing.
-		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
-			for _, t := range strings.Fields(out) {
-				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
-					relayIP = config.StripCIDR(t)
-					break
-				}
-			}
-		}
+	if err := s.pinRelayHost(); err != nil {
+		return err
 	}
-	if relayIP != "" && s.RelayHost != "" {
-		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
-		if err := s.run(pin, 30); err != nil {
-			return fmt.Errorf("pin relay host into cp: %w", err)
-		}
-	}
-	relayDial := "http://" + s.RelayHost + ":3000"
+	relayDial := config.RelayLanDial(s.RelayHost)
 	// Seed the server's channel + the operator into its roster. The console's
 	// driving identity (s.Audience) is deliberately NOT seeded: the console
 	// never calls this MCP (it reads the registry/facts files directly), so
@@ -1310,6 +1289,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// half is sufficient alone. That guarantee lives in migrationRunner,
 				// not here, so the world_migrate tool gets it too.
 				report = spec.appendMigrations(report)
+				report = spec.appendAgentToolsAudience(report)
 			} else {
 				// Console executor: write the files, then reload the serve process.
 				// The serve is deliberately left RUNNING across this whole block: the
@@ -1332,6 +1312,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// so they need NO running serve — they run BEFORE the restart, and the
 				// process that comes up loads their result as its starting state.
 				report = spec.appendMigrations(report)
+				report = spec.appendAgentToolsAudience(report)
 				if err := spec.startAgentTools(); err != nil {
 					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
 				}
@@ -1611,6 +1592,90 @@ func (s *Spec) appendMigrations(report []string) []string {
 	return append(report, line)
 }
 
+// appendAgentToolsAudience appends the audience-drift check line. The live
+// agent-tools identity (agentToolsAudience — what every pod's signed call
+// must verify against) is compared against the pubkey the console state
+// recorded from the box's profile at deploy. A mismatch means the durable
+// agent-tools identity was re-minted under the fleet (e.g. a serve boot
+// against an unmounted durable plane): every EXISTING pod still signs the
+// dead audience, so every CP tool call fails signature verify while the
+// world otherwise looks healthy. Detection only — the repair (restore the
+// durable agent-tools state from backup, or a deliberate re-point + pod
+// re-create) is an operator decision, never an auto-write.
+func (s *Spec) appendAgentToolsAudience(report []string) []string {
+	audience, aerr := s.agentToolsAudience()
+	if aerr != nil {
+		// The durable identity is unreadable — the very failure the line
+		// exists to surface. Say so; never misattribute another identity as
+		// the "live" audience.
+		return append(report, "WARN: agent-tools: "+aerr.Error()+" — pods' bridge audience is undeterminable; restore the durable agent-tools state from backup")
+	}
+	if audience == "" {
+		return report
+	}
+	if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), state.StateFile)); os.IsNotExist(err) {
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (no console state — nothing recorded to compare)")
+	} else if err != nil {
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
+	}
+	store, err := state.Open(s.consoleStateRoot())
+	if err != nil {
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
+	}
+	rec := store.AgentToolsPubkey()
+	switch {
+	case rec == nil || *rec == "":
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — pre-recording world)")
+	case *rec == audience:
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" matches the console record")
+	default:
+		return append(report, "WARN: agent-tools: AUDIENCE DRIFT — the live identity is "+agenttools.ShortHex(audience)+
+			" but the console/box profile records "+agenttools.ShortHex(*rec)+
+			": every existing agent pod signs the stale pubkey and every CP tool call fails signature verify. "+
+			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods.")
+	}
+}
+
+// pinRelayHost idempotently pins the relay's LAN IP to its hostname in the CP
+// guest's /etc/hosts. Always re-reads the relay's CURRENT DHCP lease: a prior
+// cycle's recorded IP can go stale (the relay LXC can come back on a different
+// .30.x lease after a teardown+rebuild), and pinning against a dead IP makes
+// the relay dial fail with "no route to host". The recorded value is the
+// fallback when the live read yields nothing. Every consumer that dials the
+// relay by HOSTNAME depends on this pin (the console's channel sync, the
+// agent-tools serve's roster queries, the seed) — the edge DNS record for the
+// same name points at the PROXY, so an unpinned resolve reaches the wrong box.
+// hostsLineRe is the strict gate for /etc/hosts pin values: a hostname
+// (dot-separated alphanumerics/hyphens) and a bare IP. Both reach a
+// root-executed sh -c single-quoted into the CP guest, so anything outside
+// this charset (a quote, a dollar, whitespace) is refused BEFORE
+// interpolation — the same posture as the doorKeyRe gate.
+var hostsLineRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+
+func (s *Spec) pinRelayHost() error {
+	relayIP := s.RelayIP
+	if s.RelayLxc != 0 {
+		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.RelayLxc), 30); err == nil {
+			for _, t := range strings.Fields(out) {
+				if strings.Contains(t, "/") && t != "127.0.0.1/8" {
+					relayIP = config.StripCIDR(t)
+					break
+				}
+			}
+		}
+	}
+	if relayIP != "" && s.RelayHost != "" {
+		if !hostsLineRe.MatchString(s.RelayHost) || !hostsLineRe.MatchString(relayIP) {
+			return fmt.Errorf("pin relay host into cp: refusing unsafe values (host %q / ip %q must be a bare hostname and IP)", s.RelayHost, relayIP)
+		}
+		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
+		if err := s.run(pin, 30); err != nil {
+			return fmt.Errorf("pin relay host into cp: %w", err)
+		}
+	}
+	return nil
+}
+
 // doorKeyRe is the DOOR_SPEC §2.5 strict authorized_keys-line gate: key type +
 // base64 body + an optional safe comment, with NO whitespace runs, quotes,
 // backticks, $, (, ;, &, |, or newlines. A string passing this is a key line,
@@ -1798,7 +1863,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if authURL == "" {
 			authURL = spec.RelayURL
 		}
-		if err := relay.PublishProfileAuth(spec.RelayURL, authURL, nSec, name, "freehold agent"); err != nil {
+		if err := relay.PublishProfileAuth(spec.relayDial(), authURL, nSec, name, "freehold agent"); err != nil {
 			return "", fmt.Errorf("publish %s profile: %w", name, err)
 		}
 		// Each named channel is resolved (created, owned by this agent, when
@@ -1817,17 +1882,26 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// members, so the new agent + operator are added signed by the CPA
 			// (a self-join would be refused). Every other channel here is owned
 			// by the created agent, so it self-joins and writes the memberships.
+			// Every write is guarded by IsMemberAuth: membership is
+			// state-idempotent but NOT event-idempotent (buzz renders each
+			// put-user as a fresh "you were added"), so the reconcile must
+			// re-assert nothing on a converged world. A relay read error fails
+			// OPEN to the write attempt (the add lands or fails as before).
 			if channelID == relayFreeholdChannel && name != spec.CpaName {
 				cpaSec := spec.cpaSecret()
 				if len(cpaSec) != 32 {
 					return "", fmt.Errorf("add %s to #freehold: the CPA identity is unavailable to sign the membership (a private #freehold admits members only through its owner)", name)
 				}
-				if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, pub); err != nil {
-					return "", fmt.Errorf("add %s to #freehold: %w", name, err)
+				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, pub); merr != nil || !member {
+					if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, pub); err != nil {
+						return "", fmt.Errorf("add %s to #freehold: %w", name, err)
+					}
 				}
 				if spec.OwnerPub != "" {
-					if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, spec.OwnerPub); err != nil {
-						return "", fmt.Errorf("add operator to #freehold: %w", err)
+					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, spec.OwnerPub); merr != nil || !member {
+						if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, spec.OwnerPub); err != nil {
+							return "", fmt.Errorf("add operator to #freehold: %w", err)
+						}
 					}
 				}
 				joined = append(joined, channelRef{channelID, channelName})
@@ -1836,11 +1910,15 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// JOIN it (open channels allow free joins; a private one may refuse —
 			// best-effort), then try to ADD the operator (the agent owns a channel
 			// it created; it may not own a pre-existing one).
-			_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, pub); merr != nil || !member {
+				_ = relay.JoinChannelAuth(spec.relayDial(), authURL, nSec, channelID)
+			}
 			if spec.OwnerPub != "" {
-				perr := relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
-				if perr != nil && created {
-					return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
+				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, spec.OwnerPub); merr != nil || !member {
+					perr := relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, channelID, spec.OwnerPub)
+					if perr != nil && created {
+						return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
+					}
 				}
 			}
 			joined = append(joined, channelRef{channelID, channelName})
@@ -1854,7 +1932,10 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 					if ref.id == relayFreeholdChannel {
 						continue
 					}
-					_ = relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, ref.id, cpaPub)
+					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, ref.id, cpaPub); merr == nil && member {
+						continue
+					}
+					_ = relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, ref.id, cpaPub)
 				}
 			}
 		}
@@ -1862,16 +1943,25 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if err := spec.run(agent.AgentIdentityScript(spec.K3sVmid, id.NostrSecretHex, spec.OwnerPub, name), 120); err != nil {
 			return "", fmt.Errorf("%s identity secret: %w", name, err)
 		}
+		// The bridge audience is the AGENT-TOOLS server's pubkey (resolved from
+		// the durable identity), not spec.Audience — for the console executor
+		// that is the console's own runner-signing identity, and a pod stamped
+		// with it signs a dead audience forever. An unreadable durable identity
+		// fails the create loudly rather than stamping a wrong key.
+		audience, aerr := spec.agentToolsAudience()
+		if aerr != nil {
+			return "", fmt.Errorf("create-agent %q: %w", name, aerr)
+		}
 		var manifest string
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, spec.Audience)
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, audience)
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
 			// A department with capability runners gets their FREEHOLD_RUNNER_* env
 			// (the CPA and custom agents get none, so their bridge has no exec).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, spec.Audience, runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
@@ -1899,7 +1989,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 					}
 				}
 			}
-			if err := relay.PutUserAuth(spec.RelayURL, authURL, sec, self, pub); err != nil {
+			if err := relay.PutUserAuth(spec.relayDial(), authURL, sec, self, pub); err != nil {
 				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
 			}
 		}
