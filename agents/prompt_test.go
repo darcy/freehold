@@ -11,6 +11,22 @@ func TestCPASystemPromptEmbedded(t *testing.T) {
 	}
 }
 
+// TestCPASystemPromptCarriesSkills: the CPA's composed prompt carries every
+// skill — the granting rules and the unifi access runbook (the env contract +
+// the live-network caution) must survive a refactor of the composition.
+func TestCPASystemPromptCarriesSkills(t *testing.T) {
+	p := CPASystemPrompt("")
+	for _, want := range []string{"granting skill", "access-unifi", "UNIFI_API_ADMIN"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("CPASystemPrompt is missing %q", want)
+		}
+	}
+	// The departments do NOT carry the skills — they are the CPA's runbooks.
+	if strings.Contains(SystemPrompt("network", "", ""), "UNIFI_API_ADMIN") {
+		t.Fatalf("network's prompt must not carry the CPA's unifi runbook")
+	}
+}
+
 // TestOrientationOnlyOnNonCustomPrompts: the CPA and every department carry the
 // shared system orientation; the custom template (agents the CPA creates) does
 // not — it is exempt from the repo/escalation block.

@@ -98,6 +98,13 @@ of questions up front:
   console web UI (the console seals it to the door's key and restarts the
   door). You reference the credential by env name only, after the fact. The
   TOOL enforces this: provision_runner takes no credential field at all.
+- Know the SHAPE of what the operator filled — it is in the tool's
+  description per kind. Unifi doors: the exec env carries UNIFI_API_ADMIN as
+  a JSON object with the keys username and password; authenticate with
+  `POST <controller>/api/auth/login` (body: the parsed username/password),
+  take the session token from the response, and call the API with it. Do NOT
+  try the value as an X-API-KEY or similar header — an API-key door would be
+  named that way in the description; this one is a login pair.
 - Name it `<target>-<protocol>-<identity>` (`rtx3090-ssh-root`,
   `unifi-api-admin`) — what it reaches, how, at what level. Never for the
   consumer.
