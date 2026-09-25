@@ -1,10 +1,13 @@
 package cpbuild
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"freehold/agents"
 	"freehold/contract/console"
+	"freehold/control-plane/api/agent"
 )
 
 // TestReconciledChannels: a reserved department re-derives its fixed channels
@@ -43,5 +46,33 @@ func TestCPANameOrDefault(t *testing.T) {
 	}
 	if got := (&Spec{CpaName: "boss"}).cpaNameOrDefault(); got != "boss" {
 		t.Fatalf("cpaNameOrDefault = %q, want boss", got)
+	}
+}
+
+// TestRespondAllowlist: a reserved department's respond-to allowlist names the
+// operator + every core identity (DepartmentNames order, deduped); a custom
+// agent's names its asker (the operator today — the CP cannot see chat
+// threads) + the CPA.
+func TestRespondAllowlist(t *testing.T) {
+	root := t.TempDir()
+	s := &Spec{OwnerPub: "op", CpaName: "boss", AgentIdentityDir: root}
+	for _, name := range append([]string{"boss"}, agents.DepartmentNames()...) {
+		if _, err := agent.EnsureIdentity(filepath.Join(root, "agents", sanitizeDir(name))); err != nil {
+			t.Fatalf("mint %s identity: %v", name, err)
+		}
+	}
+	cpa := s.identityPubkey("boss")
+	if cpa == "" {
+		t.Fatal("CPA identity pubkey unreadable")
+	}
+	want := "op," + cpa
+	for _, dep := range agents.DepartmentNames() {
+		want += "," + s.identityPubkey(dep)
+	}
+	if got := s.respondAllowlist("network"); got != want {
+		t.Fatalf("department allowlist = %q, want %q", got, want)
+	}
+	if got := s.respondAllowlist("helper"); got != "op,"+cpa {
+		t.Fatalf("custom allowlist = %q, want op + the CPA", got)
 	}
 }

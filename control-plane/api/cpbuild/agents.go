@@ -215,6 +215,15 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 	}
 	tools := &agent.Tools{Console: reg, Create: BuildCreateAgentFn(s)}
 	cpa := s.cpaNameOrDefault()
+	// Pre-mint every core identity (CPA + departments) BEFORE staging any pod:
+	// a department's respond-to allowlist names all core pubkeys, and the pods
+	// apply in sequence — without this, a fresh world's early departments would
+	// ship allowlists missing their not-yet-minted siblings. Idempotent.
+	for _, name := range append([]string{cpa}, agents.DepartmentNames()...) {
+		if _, err := agent.EnsureIdentity(filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))); err != nil {
+			return fmt.Errorf("mint %s identity: %w", name, err)
+		}
+	}
 	cpaPurpose := "the control plane agent — freehold's main reasoning touchpoint"
 	if _, err := tools.CreateAgent(cpa, cpaPurpose, nil, false); err != nil {
 		return fmt.Errorf("create CPA over the registry: %w", err)

@@ -39,7 +39,10 @@ runners, and memory are scoped to a single relay.
     itself — CPU/RAM/disk, LXC/kube and remote provisioning, plus its monitoring tooling),  
     and **AI** (models/providers/agents, plus AI hardware) are  
     its direct reports, each a distinct identity scoped to one domain. Talk is unrestricted —  
-    the operator and any agent may converse with any department directly; what is bounded is  
+    the operator and any agent may converse with any department directly (the CPA's harness  
+    wakes for anyone — relay membership is the bound — and each department's for an explicit  
+    allowlist: the operator plus the core agents; a custom agent's is its asker plus the  
+    CPA); what is bounded is  
     capability execution: a department-owned capability (proxy, backup, compute, model  
     registration, AI hardware) is executed by that department's identity, and its raw grant  
     attaches there, never to a custom agent that would self-serve a second, ungoverned path.  

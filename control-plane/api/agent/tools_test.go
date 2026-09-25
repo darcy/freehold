@@ -24,6 +24,7 @@ func TestAgentPodPrepare(t *testing.T) {
 		SystemPromptPath: "/p/PROMPT.md",
 		IdentityDir:      filepath.Join(dir, "helper-id"),
 		OwnerPub:         strings.Repeat("a", 64),
+		RespondAllowlist: strings.Repeat("a", 64) + "," + strings.Repeat("b", 64),
 	}
 	pub1, idScr, manScr, err := pod.Prepare()
 	if err != nil {
@@ -31,6 +32,11 @@ func TestAgentPodPrepare(t *testing.T) {
 	}
 	if len(pub1) != 64 {
 		t.Errorf("minted pubkey not 64 hex: %q", pub1)
+	}
+	// The full respond-to allowlist (asker + the CPA) rides the manifest; an
+	// empty RespondAllowlist falls back to the owner pubkey alone.
+	if !strings.Contains(manScr, `BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "`+pod.RespondAllowlist+`"`) {
+		t.Errorf("manifest missing the full respond-to allowlist")
 	}
 	// The object names are derived from the agent's own name, never a
 	// shared/fixed CPA name — a second agent must never apply over the CPA's

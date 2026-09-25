@@ -23,6 +23,12 @@ type AgentPod struct {
 	SystemPromptPath string
 	IdentityDir      string // durable identity dir (survives rebuilds)
 	OwnerPub         string // respond-to allowlist owner
+	// RespondAllowlist is the FULL comma-separated respond-to allowlist
+	// (pubkeys are public). Empty falls back to the owner pubkey alone (the
+	// owner-only wake). Production create paths pass the full list — the CP's
+	// BuildCreateAgentFn computes a custom agent's as its asker + the CPA via
+	// spec.respondAllowlist.
+	RespondAllowlist string
 	LiteLLMKeySecret string // k8s Secret (agents ns) for OPENAI_COMPAT key; "" → own <pod>-litellm-key
 	LiteLLMBaseURL   string // reachable litellm base URL (hostNetwork: NodePort, else in-kube)
 }
@@ -58,9 +64,13 @@ func (p *AgentPod) Prepare() (pubkey string, identityScript, manifestScript stri
 	if keySec == "" {
 		keySec = sanitizePodName(p.Name) + "-litellm-key"
 	}
+	respondAllowlist := p.RespondAllowlist
+	if respondAllowlist == "" {
+		respondAllowlist = p.OwnerPub
+	}
 	return pubkey,
 		AgentIdentityScript(p.K3sVmid, id.NostrSecretHex, p.OwnerPub, p.Name),
-		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, base, CpaLiteLLMModel, p.Name, keySec, "", ""),
+		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, base, CpaLiteLLMModel, p.Name, keySec, "", "", "allowlist", respondAllowlist),
 		nil
 }
 
