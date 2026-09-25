@@ -1858,17 +1858,26 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// members, so the new agent + operator are added signed by the CPA
 			// (a self-join would be refused). Every other channel here is owned
 			// by the created agent, so it self-joins and writes the memberships.
+			// Every write is guarded by IsMemberAuth: membership is
+			// state-idempotent but NOT event-idempotent (buzz renders each
+			// put-user as a fresh "you were added"), so the reconcile must
+			// re-assert nothing on a converged world. A relay read error fails
+			// OPEN to the write attempt (the add lands or fails as before).
 			if channelID == relayFreeholdChannel && name != spec.CpaName {
 				cpaSec := spec.cpaSecret()
 				if len(cpaSec) != 32 {
 					return "", fmt.Errorf("add %s to #freehold: the CPA identity is unavailable to sign the membership (a private #freehold admits members only through its owner)", name)
 				}
-				if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, pub); err != nil {
-					return "", fmt.Errorf("add %s to #freehold: %w", name, err)
+				if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, cpaSec, channelID, pub); merr != nil || !member {
+					if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, pub); err != nil {
+						return "", fmt.Errorf("add %s to #freehold: %w", name, err)
+					}
 				}
 				if spec.OwnerPub != "" {
-					if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, spec.OwnerPub); err != nil {
-						return "", fmt.Errorf("add operator to #freehold: %w", err)
+					if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, cpaSec, channelID, spec.OwnerPub); merr != nil || !member {
+						if err := relay.PutUserChannelAuth(spec.RelayURL, authURL, cpaSec, channelID, spec.OwnerPub); err != nil {
+							return "", fmt.Errorf("add operator to #freehold: %w", err)
+						}
 					}
 				}
 				joined = append(joined, channelRef{channelID, channelName})
@@ -1877,11 +1886,15 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// JOIN it (open channels allow free joins; a private one may refuse —
 			// best-effort), then try to ADD the operator (the agent owns a channel
 			// it created; it may not own a pre-existing one).
-			_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, nSec, channelID, pub); merr != nil || !member {
+				_ = relay.JoinChannelAuth(spec.RelayURL, authURL, nSec, channelID)
+			}
 			if spec.OwnerPub != "" {
-				perr := relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
-				if perr != nil && created {
-					return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
+				if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub); merr != nil || !member {
+					perr := relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, channelID, spec.OwnerPub)
+					if perr != nil && created {
+						return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
+					}
 				}
 			}
 			joined = append(joined, channelRef{channelID, channelName})
@@ -1893,6 +1906,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 					// channel it owns (its own #freehold-<name>); the CPA is
 					// already the owner/member of #freehold — skip.
 					if ref.id == relayFreeholdChannel {
+						continue
+					}
+					if member, merr := relay.IsMemberAuth(spec.RelayURL, authURL, nSec, ref.id, cpaPub); merr == nil && member {
 						continue
 					}
 					_ = relay.PutUserChannelAuth(spec.RelayURL, authURL, nSec, ref.id, cpaPub)

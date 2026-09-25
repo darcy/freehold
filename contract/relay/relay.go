@@ -313,6 +313,89 @@ func RemoveUserChannelAuth(dialURL, authURL string, secret []byte, channelID, me
 	return publishEventAuth(dialURL, authURL, secret, wire.RemoveUser, tags, "")
 }
 
+// IsMemberAuth reports whether memberPubkey is a member of the channel per the
+// relay's own event log: the newest kind-9000 (add) / kind-9001 (remove)
+// event naming the member in that channel decides. Membership writes are
+// state-idempotent but NOT event-idempotent — buzz renders every put-user as
+// a fresh "you were added" event, so a reconcile that re-asserts existing
+// memberships reads as churn on every bring-up. Callers consult this before
+// each write and skip the re-add. An unreadable relay returns an error (the
+// caller fails open to the write attempt).
+func IsMemberAuth(dialURL, authURL string, secret []byte, channelID, memberPubkey string) (bool, error) {
+	filters := []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.PutUser, wire.RemoveUser},
+		"#h":    []interface{}{channelID},
+		"#p":    []interface{}{memberPubkey},
+		"limit": 500,
+	}}
+	evs, err := QueryEventsAuth(dialURL, authURL, secret, filters)
+	if err != nil {
+		return false, err
+	}
+	return isMemberFromEvents(evs, memberPubkey), nil
+}
+
+// isMemberFromEvents is the pure membership read: of the events naming the
+// member, the newest decides (9000 => member, 9001 => not). Events naming a
+// DIFFERENT member are ignored; an empty set is not a member.
+func isMemberFromEvents(evs []map[string]interface{}, memberPubkey string) bool {
+	newest := int64(-1)
+	member := false
+	for _, e := range evs {
+		if !eventNamesMember(e, memberPubkey) {
+			continue
+		}
+		ts := eventCreatedAt(e)
+		if ts > newest {
+			newest = ts
+			member = eventKindIs(e, wire.PutUser)
+		}
+	}
+	return member
+}
+
+// eventNamesMember reports whether the event's p tag names memberPubkey.
+func eventNamesMember(e map[string]interface{}, memberPubkey string) bool {
+	tags, ok := e["tags"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, t := range tags {
+		parts, ok := t.([]interface{})
+		if !ok || len(parts) < 2 {
+			continue
+		}
+		name, _ := parts[0].(string)
+		val, _ := parts[1].(string)
+		if name == "p" && val == memberPubkey {
+			return true
+		}
+	}
+	return false
+}
+
+// eventCreatedAt returns the event's created_at as seconds (-1 when absent).
+func eventCreatedAt(e map[string]interface{}) int64 {
+	switch v := e["created_at"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	}
+	return -1
+}
+
+// eventKindIs reports whether the event's kind equals want.
+func eventKindIs(e map[string]interface{}, want int) bool {
+	switch v := e["kind"].(type) {
+	case float64:
+		return int(v) == want
+	case int:
+		return v == want
+	}
+	return false
+}
+
 // RemoveUserAuth is RemoveUser with a separate NIP-98 auth URL.
 func RemoveUserAuth(dialURL, authURL string, consoleSecret []byte, runnerNostrPubkey, memberPubkey string) error {
 	return membershipCommandAuth(dialURL, authURL, consoleSecret, wire.RemoveUser, runnerNostrPubkey, memberPubkey)
