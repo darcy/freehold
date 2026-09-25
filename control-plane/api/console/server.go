@@ -326,13 +326,18 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 	services := []WorldServiceJSON{}
 	if relayURL != nil {
 		up, detail := false, "co-located relay"
-		// Probe the relay through the PUBLIC edge (the proxy/Caddy IP is static),
-		// NOT the recorded LAN dial: the relay LXC is DHCP, so its recorded LAN IP
-		// goes stale every time the lease re-issues after a rebuild, and a probe
-		// against a dead IP reports the relay down even though the relay + edge
-		// are serving (the box reaches https://<relayHost> => 200). The proxy IP is
-		// the stable host every box resolves the public relay to.
-		up, detail = answered(*relayURL, false)
+		// Probe the relay the way THIS guest dials it: the LAN dial by HOSTNAME
+		// (the /etc/hosts pin re-reads the relay's current DHCP lease every
+		// converge — the same URL relayDialFor publishes through), never the
+		// public https origin. On the CP guest the public name resolves through
+		// that same pin to the raw relay LXC, where only buzz :3000 listens —
+		// the TLS edge is the proxy, so an https dial here is refused while the
+		// relay is actually serving.
+		dial := config.RelayLanDial(relayHost)
+		if dial == "" {
+			dial = *relayURL
+		}
+		up, detail = answered(dial, false)
 		services = append(services, WorldServiceJSON{Name: "relay", Kind: "relay", URL: *relayURL, Up: up, Detail: detail})
 	}
 	if s.PublicOrigin != nil && *s.PublicOrigin != "" {
