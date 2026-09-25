@@ -60,8 +60,9 @@ func TestWorldServiceRows(t *testing.T) {
 // re-read from the live DHCP lease every converge) — never the public https
 // origin, which on the CP guest resolves through that same pin to the raw relay
 // LXC where only buzz :3000 listens (TLS lives at the proxy edge). The listener
-// here is plain HTTP: the LAN dial answers, an https dial to it cannot — an
-// up=true row proves the dial went LAN-form.
+// here is plain HTTP while the recorded relay URL is the https origin: only the
+// LAN dial can answer it — an https dial to a plain listener cannot — so an
+// up=true row proves the dial went LAN-form (and fails on the old code).
 func TestWorldRelayRowProbesLanDial(t *testing.T) {
 	buzz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound) // any answer = up (buzz 404s on /)
@@ -72,7 +73,7 @@ func TestWorldRelayRowProbesLanDial(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
 	s, store := testServer(t, NewAuth([]string{adminPK}))
-	rh, ru := host, "http://"+host
+	rh, ru := host, "https://"+host // the recorded relay URL is the https origin: the fallback dial CANNOT answer (plain listener), so up=true proves the LAN dial ran
 	if err := store.SetRelayHost(&rh); err != nil {
 		t.Fatal(err)
 	}
