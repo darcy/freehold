@@ -27,7 +27,7 @@ jobs:
     # the PR author, not `github.actor` — Dependabot PRs also get re-synced by an
     # operator's "Update branch" click (actor = the operator), and those re-reviews
     # must still run. `pull_request_target` runs in the base repo's context, so the
-    # bot token and the OpenRouter key are present; here the base ref is `main`, never
+    # bot token and the provider key are present; here the base ref is `main`, never
     # a Dependabot-created ref, which is the one case the docs flag as still restricted.
     if: (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]') || (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]')
     # No `ref:` on the checkout below: on `pull_request_target` checkout resolves to
@@ -62,9 +62,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.AI_REVIEW_BOT_TOKEN }}
 
           # ---- provider config: this is the only provider-specific part ----
+          # Toggle providers: comment one block out, uncomment the other.
           LLM_BASE_URL: "https://openrouter.ai/api/v1"
           LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LLM_MODEL: "deepseek/deepseek-v4-flash-0731"
+          # LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
+          # LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          # LLM_MODEL: "accounts/fireworks/models/glm-5p3-flash"
           # Abort a single stalled LLM request after 10 min so callLlm retries
           # instead of hanging to the job's 60-minute cap.
           LLM_TIMEOUT_MS: "600000"
