@@ -129,7 +129,7 @@ func TestTeardownRebuildHints(t *testing.T) {
 // TestDoorKeyWaitingDetection pins the expected-pause detection: the
 // door-gate bail is a NORMAL operator-paused state, not a failure.
 func TestDoorKeyWaitingDetection(t *testing.T) {
-	// The CLI's --yes bail includes stage logs before the message; the
+	// The CLI's --non-interactive bail includes stage logs before the message; the
 	// extraction must find the marker and return just the instruction.
 	out := "provisioning runner...\nthe door needs a NEW ssh key before rebuild can continue — install it on host, then re-run rebuild:\n\n    ssh-ed25519 AAAA... freehold\n\n  (on the host: mkdir -p /root/.ssh && echo 'ssh-ed25519 AAAA...' >> /root/.ssh/authorized_keys)\n"
 	got := doorKeyWaiting(out)
@@ -153,7 +153,7 @@ func TestDoorKeyWaitingDetection(t *testing.T) {
 // the EXPECTED operator-paused state.
 func TestDoorKeyWaitingRenderedNotError(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap, CfgPath: "/nonexistent/config.toml"}
-	args := []string{"rebuild", "--yes"}
+	args := []string{"rebuild", "--non-interactive"}
 	a := &activity{kind: "rebuild", title: "rebuilding", args: args, spin: newSpinner()}
 	a.lines = []string{
 		"provisioning runner…",
@@ -195,7 +195,7 @@ func TestDoorGateEnterRetry(t *testing.T) {
 	activityExec = func(bin string, args ...string) *exec.Cmd { return exec.Command("true") }
 	defer func() { activityExec = oldExec }()
 
-	args := []string{"rebuild", "--yes", "--operator-pubkey", strings.Repeat("a", 64), "--domain", "world.test"}
+	args := []string{"rebuild", "--non-interactive", "--operator-pubkey", strings.Repeat("a", 64), "--domain", "world.test"}
 	m := &Model{Mode: ModeBootstrap, CfgPath: "/nonexistent/config.toml"}
 	pause := func(a *activity, out string) {
 		a.lines = []string{out}
@@ -247,7 +247,7 @@ func TestDoorGateEnterRetry(t *testing.T) {
 // B) must not open flows or disarm the gate — only ENTER/esc pass.
 func TestDoorGateSwallowsKeys(t *testing.T) {
 	m := &Model{Mode: ModeBootstrap}
-	a := &activity{kind: "rebuild", args: []string{"rebuild", "--yes"}, spin: newSpinner(), done: true, wait: "the door needs …"}
+	a := &activity{kind: "rebuild", args: []string{"rebuild", "--non-interactive"}, spin: newSpinner(), done: true, wait: "the door needs …"}
 	m.activity = a
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
 	if m.Flow != nil {
@@ -573,9 +573,9 @@ func TestIsSkipDetail(t *testing.T) {
 }
 
 // TestRebuildFormDispatchArgs pins the EXACT args the TUI dispatches for a
-// completed rebuild form: --yes + --relay-domain + --cp-domain + --operator-pubkey,
+// completed rebuild form: --non-interactive + --relay-domain + --cp-domain + --operator-pubkey,
 // and NO --domain (the removed world-domain flag). The headless run then reuses
-// the stored DNS credential (or errors under --yes only if truly absent).
+// the stored DNS credential (or errors under --non-interactive only if truly absent).
 
 // stubDnsCred points FREEHOLD_HOME at a temp dir with a stored relay DNS cred
 // present, so a completed rebuild form dispatches immediately (the pre-rebuild

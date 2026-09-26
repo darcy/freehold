@@ -11,6 +11,7 @@ import (
 
 	"freehold/freehold-cli/internal/common"
 	"freehold/platform/provisioning/bootstrap"
+	"freehold/platform/provisioning/box"
 )
 
 var addRelayMemberCmd = &cobra.Command{
@@ -74,7 +75,7 @@ var addRelayMemberCmd = &cobra.Command{
 
 func init() {
 	common.AddCommonFlags(addRelayMemberCmd, nil)
-	addRelayMemberCmd.Flags().String("target", "proxmox-box", "Target runner (the box holding the relay host)")
+	addRelayMemberCmd.Flags().String("target", box.RunnerTarget, "Target runner (the box holding the relay host)")
 	addRelayMemberCmd.Flags().String("pubkey", "", "Nostr pubkey (64-hex) to add as a relay member")
 	addRelayMemberCmd.Flags().String("role", "", "Role: member (default) or admin (owner comes from RELAY_OWNER_PUBKEY)")
 	addRelayMemberCmd.Flags().String("lxc", "", "The LXC on the box holding the relay compose stack")

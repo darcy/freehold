@@ -54,7 +54,7 @@ against the disposable test host, with the operator's go-ahead.
   (operator-supplied or recorded in a profile). The Rebuild/Live profiles are listed
   under `test-proxmox-rebuild` / `test-proxmox-live` in `.envs.yml` (repo root).
 - **Root access to the PVE host** (a door key already authorized, or a console/root
-  password). A fresh profile mints a NEW door key, and `install --yes` bails until that
+  password). A fresh profile mints a NEW door key, and `install --non-interactive` bails until that
   key is in the host's `/root/.ssh/authorized_keys` — see step 2.
 - **DNS provider credentials** for the test zone. `build` owns DNS (`--manage-dns`) and
   needs them stored for the profile; see the field notes.
@@ -145,23 +145,23 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    in the background (`nohup … > log 2>&1 &`) and poll the log — they run for minutes.
    ```bash
    name=<fresh-test-name>
-   # a fresh profile mints a new door key; with --yes the install prints it and bails.
+   # a fresh profile mints a new door key; with --non-interactive the install prints it and bails.
    # Authorize it on the host, then re-run the SAME command:
    "$fh" install --name "$name" --host root@<pve-host> \
      --relay-domain relay.fresh.freehold.technology --cp-domain cp.fresh.freehold.technology \
      --proxy-ip <ip/cidr> --operator-pubkey <new-64-hex> \
      --operator-identity <new-dir> --litellm-provider-key <key> \
-     --confirm-shared-pool --yes
+     --confirm-shared-pool --non-interactive
    #   (drop --confirm-shared-pool if the host's pool is empty; add --confirm-storage
    #    only when the host has no usable storage)
    # On the host: echo '<printed ssh-ed25519 line>' >> /root/.ssh/authorized_keys
    "$fh" build --config <profile-config> --manage-dns \
-     --litellm-provider-key <key> --yes     # install lands CP-only; build brings the world up
+     --litellm-provider-key <key> --non-interactive     # install lands CP-only; build brings the world up
    ```
    `build` needs a DNS-01 credential stored *for the profile*. The shipped `dns-cred`
    writes to the **base** state dir (and seals to the base ops identity), not the profile's,
    so for a profile-scoped world it is not usable as-is — either run `build` once WITHOUT
-   `--yes` and let its prompt store the credential in the profile state dir, or place the
+   `--non-interactive` and let its prompt store the credential in the profile state dir, or place the
    sealed `dns-provider-{relay,cp}.json` under `<profile-state>/control-plane/`. See field
    notes.
 
@@ -169,11 +169,11 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    - **Fresh - Install** ✅ iff install + build complete, the CP is healthy, and the CPA
      replies in the relay (post in `#freehold` with the CPA's pubkey in a `p` tag — see
      Field notes — wait for the reply, capture request + reply).
-   - **Fresh - Teardown**: `"$fh" teardown --yes`; ✅ iff every world guest is gone
+   - **Fresh - Teardown**: `"$fh" teardown --config <profile-config> --non-interactive`; ✅ iff every world guest is gone
      (relay + k3s LXC destroyed) and the CP is still healthy.
-   - **Fresh - Build**: `"$fh" build`; ✅ iff the CPA replies again **and** the version
+   - **Fresh - Build**: `"$fh" build --config <profile-config>`; ✅ iff the CPA replies again **and** the version
      ping (step 4) shows the expected version.
-   - **Fresh - Uninstall**: `"$fh" uninstall --name "$name" --yes`; ✅ iff the CP, runner,
+   - **Fresh - Uninstall**: `"$fh" uninstall --name "$name" --non-interactive`; ✅ iff the CP, runner,
      door, and every guest are removed (no `<name>-*` guests remain, the DOOR_SPEC key is
      gone).
 
@@ -183,8 +183,8 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    teardown of old-version state. Reuse the existing operator and the env's own profile;
    drive everything through the release CLI. **Never uninstall this env.**
    ```bash
-   "$fh" teardown --config <rebuild-profile-config> --yes
-   "$fh" build    --config <rebuild-profile-config> --yes
+   "$fh" teardown --config <rebuild-profile-config> --non-interactive
+   "$fh" build    --config <rebuild-profile-config> --non-interactive
    ```
    Per-row verdicts:
    - **Rebuild - Teardown** ✅ iff every world guest is down (relay + k3s LXC destroyed)
@@ -209,7 +209,7 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    world:
    ```bash
    "$fh" update --check   --config <live-profile-config>   # record the before-state
-   "$fh" update --ref main --config <live-profile-config> --yes
+   "$fh" update --ref main --config <live-profile-config> --non-interactive
    "$fh" update --check   --config <live-profile-config>   # version + migrations after
    "$fh" status    --config <live-profile-config>
    ```
@@ -307,7 +307,7 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 - **`gh release download` drops the execute bit** — `chmod +x` the binaries before the
   `test -x` check, or step 1 fails for the wrong reason.
-- **A fresh profile needs a new host door.** `install --yes` refuses until the key it prints
+- **A fresh profile needs a new host door.** `install --non-interactive` refuses until the key it prints
   is in the host's `authorized_keys`; authorize it and re-run. If this box already has an
   authorized door for a prior profile, you can derive it
   (`platform/provisioning/box.DoorKeyPEM`) and use it for the direct SSH.
@@ -354,7 +354,7 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 - **A brand-new `v*` hub: re-cutting a failed pre-release.** If the candidate fails and
   `main` is fixed, the operator may say to move the pre-release tag to the new `main` tip and
   rebuild assets. That means (only on that explicit go-ahead): `gh release delete <tag>
-  --yes` (tag survives), `git tag -f -a <tag> <main-sha>`, `git push -f origin <tag>` (CI
+  --yes` (tag survives — this `--yes` is gh's own flag), `git tag -f -a <tag> <main-sha>`, `git push -f origin <tag>` (CI
   `release.yml` builds a fresh draft), then re-publish it as a pre-release with the same
   notes + table (`gh release edit --draft=false --prerelease …`).
 - **Running the test itself.** Put long installs/builds in the background with a log and

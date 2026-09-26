@@ -423,7 +423,13 @@ func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred
 		if r.addr != "" {
 			addr = r.addr
 		}
-		priv, pub, err := crypto.GenerateSSHKeypair(r.name)
+		// The authorized_keys comment carries the world so keys from several
+		// worlds on one host stay tell-apart-able (freehold-<name>-<runner>).
+		comment := r.name
+		if s.Name != "" {
+			comment = "freehold-" + s.Name + "-" + r.name
+		}
+		priv, pub, err := crypto.GenerateSSHKeypair(comment)
 		if err != nil {
 			return runnerCred{}, fmt.Errorf("generate ssh keypair: %w", err)
 		}

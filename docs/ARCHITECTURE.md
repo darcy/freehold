@@ -298,13 +298,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `<name>-<relay|cp|k3s>`. A life-cycle gate **mints** when no profile exists,
     **re-adopts** an existing profile whose CP is absent (the durable plane keeps
     the runner identity; deploy-cp never overwrites it), and **refuses a live
-    CP** (`build`/`teardown`/`uninstall`/`login`); `bootstrap` is a hidden alias
-    for `install --yes`. A world with no recorded name (installed before
+    CP** (`build`/`teardown`/`uninstall`/`login`); there is no `bootstrap`
+    alias — `install --non-interactive` is the headless surface. A world with no recorded name (installed before
     names) keeps the domain-derived `<domain-dashed>-<role>` names, so it still
     reconciles; durable-plane names stay domain-keyed either way.
     **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS
     creds + litellm; sealed to the **console** identity in `world-secrets/`,
-    asked only when missing), points the public A records (`manageDomainDNS`),
+    asked only when missing), points the public A records when the world
+    opts in (`--manage-dns`, recorded per profile — `--reset-dns` re-asks),
     then triggers the console's `/api/world-build` — the CP brings up relay/
     agent-tools/k3s/storage/litellm/Caddy/cert through its co-located runner,
     re-seeding litellm into the runner from the CP store →

@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 
 	"freehold/contract/config"
@@ -54,6 +56,41 @@ func selectProfile(name string) error {
 		StateDir:   config.NewProfileState(name),
 	})
 	return nil
+}
+
+// seedOperatorLedger materializes the operator identity ledger the local CLI
+// logs in from (`oplogin` reads <state>/control-plane/operator): a headless
+// install that was handed --operator-identity copies that identity in
+// (verified against --operator-pubkey) instead of leaving build to fail with
+// "no operator identity". First-run-wins: an existing ledger is never touched.
+func seedOperatorLedger(f *box.Flags) error {
+	if f.OperatorIdentity == "" {
+		return nil
+	}
+	ledger := operatorDir()
+	if _, err := os.Stat(filepath.Join(ledger, "identity.json")); err == nil {
+		return nil
+	}
+	src := filepath.Join(f.OperatorIdentity, "identity.json")
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("--operator-identity %s unreadable: %w", f.OperatorIdentity, err)
+	}
+	var doc map[string]string
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("--operator-identity %s malformed: %w", f.OperatorIdentity, err)
+	}
+	pk, err := box.LoadPubkey(f.OperatorIdentity)
+	if err != nil {
+		return fmt.Errorf("--operator-identity %s unusable: %w", f.OperatorIdentity, err)
+	}
+	if pk != f.OperatorPubkey {
+		return fmt.Errorf("--operator-identity's key (%s) does not derive --operator-pubkey (%s) — paste a matching pair", pk, f.OperatorPubkey)
+	}
+	if err := wire.EnsurePrivateDir(ledger); err != nil {
+		return err
+	}
+	return wire.WriteJSON0600(filepath.Join(ledger, "identity.json"), doc)
 }
 
 // lifecycleAction is the install gate's verdict.
@@ -125,7 +162,7 @@ func seedFromProfile(f *box.Flags, cfg *config.Config) {
 
 var installCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Bring up a control plane (guided; --yes for non-interactive) — then `freehold build` brings up the world via the CP",
+	Short: "Bring up a control plane (guided; --non-interactive for headless) — then `freehold build` brings up the world via the CP",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runInstallCmd(cmd)
 	},
@@ -139,7 +176,7 @@ func runInstallCmd(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 
 	// A fresh plane has nothing to resolve from, so headless needs the full
-	// answer set; with gaps (and no --yes), fall back to the guided flow.
+	// answer set; with gaps (and no --non-interactive), fall back to the guided flow.
 	if !f.Yes && (name == "" || f.Host == "" || f.RelayDomain == "" || f.CpDomain == "" ||
 		f.ProxyIP == "" || f.OperatorPubkey == "") {
 		return runInstall(cmd.InOrStdin(), out, name)
@@ -160,14 +197,15 @@ func runInstallCmd(cmd *cobra.Command) error {
 	f.Name = name
 	if action == lifecycleReAdopt {
 		// A re-adopt resolves its inputs from the surviving profile/plane:
-		// the recorded runner coords + the relay/CP hosts + proxy IP, unless a
-		// flag explicitly overrode them.
+		// the recorded runner coords + the relay/CP hosts + proxy IP. The
+		// plane keeps the runner identity — its name/addr come from the
+		// config, never the (removed) defaults; --local-port overrides.
 		prev, _ := config.Load(installConfigPath())
 		if prev != nil {
-			if !cmd.Flags().Changed("target") && prev.Runner.Target != "" {
+			if prev.Runner.Target != "" {
 				f.Target = prev.Runner.Target
 			}
-			if !cmd.Flags().Changed("addr") && prev.Runner.Addr != "" {
+			if !cmd.Flags().Changed("local-port") && prev.Runner.Addr != "" {
 				f.Addr = prev.Runner.Addr
 			}
 		}
@@ -176,6 +214,9 @@ func runInstallCmd(cmd *cobra.Command) error {
 	}
 	applyInstallDefaults(&f)
 	f.ConfigPath = installConfigPath()
+	if err := seedOperatorLedger(&f); err != nil {
+		return err
+	}
 	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
 	}
@@ -272,14 +313,11 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 // so a re-install does not re-ask what the plane already knows.
 func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	fmt.Fprintln(ui.out, "  A few details about your world. Defaults in [brackets].")
-	hostDef, runnerDef := "root@192.168.30.224", "proxmox-box"
+	hostDef := "root@192.168.30.224"
 	relayDef, cpDef, proxyDef := "", "", ""
 	if seed != nil {
 		if seed.Host != "" {
 			hostDef = seed.Host
-		}
-		if seed.Runner.Target != "" {
-			runnerDef = seed.Runner.Target
 		}
 		relayDef, cpDef = seed.RelayHost(), seed.CPHost()
 		if seed.Proxy.Ip != nil {
@@ -290,11 +328,7 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if err != nil {
 		return box.Flags{}, err
 	}
-	runner, err := ui.ask("Runner name", runnerDef)
-	if err != nil {
-		return box.Flags{}, err
-	}
-	serve, err := ui.ask("Runner MCP address (loopback)", "127.0.0.1:8787")
+	port, err := ui.askUint32("Runner MCP port (local loopback)", box.DefaultRunnerPort)
 	if err != nil {
 		return box.Flags{}, err
 	}
@@ -333,8 +367,7 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 		return box.Flags{}, err
 	}
 	return box.Flags{
-		Addr:               serve,
-		Target:             runner,
+		Addr:               box.LoopbackAddr(uint16(port)),
 		Host:               host,
 		RelayDomain:        relayDomain,
 		CpDomain:           cpDomain,
@@ -355,7 +388,8 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 
 // applyInstallDefaults fills the static defaults install's own answers would
 // otherwise leave empty (flag-layer defaults apply to bootstrap; install owns
-// its answers). Empty storage/bridge/agent-name boot the CP LXC malformed.
+// its answers). Empty storage/bridge/agent-name/runner boot the CP LXC
+// malformed.
 func applyInstallDefaults(f *box.Flags) {
 	if f.StorageName == "" {
 		f.StorageName = "local-lvm"
@@ -365,6 +399,12 @@ func applyInstallDefaults(f *box.Flags) {
 	}
 	if f.AgentName == "" {
 		f.AgentName = "freehold"
+	}
+	// The provisioning runner's name is not an operator input: it is the
+	// ssh-as-root-to-the-PVE-host capability (`<target>-<protocol>-<identity>`),
+	// fixed so the build's capability-runner stage adopts this same runner.
+	if f.Target == "" {
+		f.Target = box.RunnerTarget
 	}
 	// Proxmox-over-root-SSH is the only implemented access mode today;
 	// provider-API modes (api-vultr) arrive with the Access seam (PR3).
@@ -377,8 +417,8 @@ func applyInstallDefaults(f *box.Flags) {
 func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f := box.Flags{}
 	f.Name, _ = cmd.Flags().GetString("name")
-	f.Addr, _ = cmd.Flags().GetString("addr")
-	f.Target, _ = cmd.Flags().GetString("target")
+	f.LocalPort, _ = cmd.Flags().GetUint32("local-port")
+	f.Addr = box.LoopbackAddr(uint16(f.LocalPort))
 	f.Host, _ = cmd.Flags().GetString("host")
 	f.RelayDomain, _ = cmd.Flags().GetString("relay-domain")
 	f.CpDomain, _ = cmd.Flags().GetString("cp-domain")
@@ -395,7 +435,7 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.ConfirmSharedPool, _ = cmd.Flags().GetBool("confirm-shared-pool")
 	f.EraseFreehold, _ = cmd.Flags().GetBool("erase-freehold")
 	f.ConfirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
-	f.Yes, _ = cmd.Flags().GetBool("yes")
+	f.Yes, _ = cmd.Flags().GetBool("non-interactive")
 	f.Version, _ = cmd.Flags().GetString("version")
 	f.Channel, _ = cmd.Flags().GetString("channel")
 	f.SizeGB, _ = cmd.Flags().GetUint64("size-gb")
@@ -429,8 +469,7 @@ func init() {
 func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("name", "", "World/profile name (REQUIRED — isolates config + state under profiles/<name>)")
 	cmd.Flags().String("host", "", "Host address freehold reaches (REQUIRED, e.g. root@192.168.30.224)")
-	cmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
-	cmd.Flags().String("target", "proxmox-box", "Runner name")
+	cmd.Flags().Uint32("local-port", box.DefaultRunnerPort, "Runner MCP port on the box's loopback (127.0.0.1:<port>)")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("proxy-ip", "", "STATIC proxy IP (CIDR) — REQUIRED on a fresh plane")
@@ -451,7 +490,7 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version). Install deploys the LOCAL build; it does not fetch")
-	cmd.Flags().Bool("yes", false, "Non-interactive: run headless (fail actionably) instead of prompting")
+	cmd.Flags().Bool("non-interactive", false, "Run headless: fail actionably instead of prompting")
 }
 
 // ---- operator identity + storage (shared helpers install needs) -------------
@@ -488,7 +527,30 @@ func collectHaveKey(ui *installerUI) (string, string, error) {
 	if _, err := os.Stat(filepath.Join(opDir, "identity.json")); err == nil {
 		return "", "", fmt.Errorf("an operator identity already exists at %s — remove it or reuse that key", opDir)
 	}
-	return pk, "", nil
+	// The pubkey alone cannot operate the world — capture the matching nsec
+	// now (no-echo on a TTY), verify it derives to the pasted pubkey, and
+	// persist the identity so `freehold build` works from this box without a
+	// separate `freehold login`.
+	nsec, err := ui.askSecret("Your Nostr secret key (nsec1… or 64-hex — saved 0600, never shown)")
+	if err != nil {
+		return "", "", err
+	}
+	secret, err := crypto.NsecToSecret(nsec)
+	if err != nil {
+		return "", "", fmt.Errorf("bad nsec: %w", err)
+	}
+	derived, err := crypto.PubkeyFromSecret(secret[:])
+	if err != nil {
+		return "", "", err
+	}
+	if derived != pk {
+		return "", "", fmt.Errorf("the nsec derives %s, not the pubkey you entered (%s) — paste a matching pair", derived, pk)
+	}
+	if err := writeOperatorIdentity(opDir, secret[:]); err != nil {
+		return "", "", err
+	}
+	fmt.Fprintf(ui.out, "  stored: %s (0600 — this IS your key, keep it safe)\n", opDir)
+	return pk, opDir, nil
 }
 
 func collectGenerate(ui *installerUI) (string, string, error) {
@@ -600,6 +662,31 @@ func (u *installerUI) askPubkey() (string, error) {
 		}
 		return pk, nil
 	}
+}
+
+// askSecret reads a secret line WITHOUT echo when stdin is a terminal (the
+// key must never appear on screen); piped input reads a plain line. Shares
+// the ONE buffered reader discipline — on a TTY nothing buffers ahead, so
+// the direct fd read cannot strand input in u.in.
+func (u *installerUI) askSecret(label string) (string, error) {
+	fmt.Fprintf(u.out, "  %s: ", label)
+	if term.IsTerminal(os.Stdin.Fd()) {
+		b, err := term.ReadPassword(os.Stdin.Fd())
+		fmt.Fprintln(u.out) // the suppressed Enter
+		if err != nil && len(b) == 0 {
+			return "", fmt.Errorf("no input (EOF)")
+		}
+		s := strings.TrimSpace(string(b))
+		for i := range b {
+			b[i] = 0
+		}
+		return s, nil
+	}
+	line, err := u.readLine()
+	if err != nil && line == "" {
+		return "", fmt.Errorf("no input (EOF)")
+	}
+	return strings.TrimSpace(line), nil
 }
 
 func (u *installerUI) readLine() (string, error) {

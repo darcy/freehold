@@ -94,8 +94,9 @@ just test     # the full gate: Rust fmt/build/test + Go build/vet/test + the acc
 Then operate the world yourself:
 
 ```sh
-freehold install --yes --name <world> --host root@<box> \
-                     --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr>  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
+freehold install --non-interactive --name <world> --host root@<box> \
+                     --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr> \
+                     --operator-pubkey <64-hex> [--operator-identity <dir>]  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # drop the WORLD (the inverse of build): relay/k3s + the CP-side
                      #  agent-tools process go, internal DNS clears — the CP, its runner,
@@ -107,15 +108,20 @@ freehold uninstall [--remove-data]  # drop the CP too (this box's doors + local 
 freehold            # the TUI dashboard
 ```
 
-`freehold install` (guided) or `install --yes` (headless) requires
+`freehold install` (guided) or `install --non-interactive` (headless) requires
 `--name` + `--host`: the profile name scopes the config + state to
 `profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; the host is
 recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
-needs the relay/CP domains + proxy IP (the guided flow prompts for them). An
+needs the relay/CP domains + proxy IP (the guided flow prompts for them) and
+the operator identity: `--operator-pubkey` (headless; `--operator-identity`
+seeds this box's login ledger from a keypair dir, verified against the
+pubkey — the guided flow pastes or mints it). The
+runner needs no name — it is the fixed `pve-ssh-root` capability — and the local
+MCP port defaults to 8787 (`--local-port` to move it). An
 existing name whose CP is absent is re-adopted (the plane keeps the runner
 identity); a **live** CP is refused — reconcile the world with `freehold build`,
-drop it with `teardown`/`uninstall`, or join it with `freehold login`. `install
---yes` is the non-interactive surface.
+drop it with `teardown`/`uninstall`, or join it with `freehold login`.
+`install --non-interactive` is the headless surface.
 
 ### The appliance: one binary, two surfaces
 
@@ -228,7 +234,7 @@ managed = ["relay", "cp"]      # what WE operate — an invited relay wouldn't b
 [runner]                       # the provisioning door (the exec path into the host)
 addr = "127.0.0.1:8787"
 pubkey = "f7510b07…"           # the runner's own identity (filled at config-write)
-target = "proxmox-box"
+target = "pve-ssh-root"        # the fixed capability name (--target pre-0.8 worlds may differ)
 
 [lxc.relay]                    # connect/status coords only; sizing is bootstrap-time
 vmid = 100
@@ -438,7 +444,7 @@ sequenceDiagram
     OP->>PVE: bootstrap (box one) · build (ANY box): signed MCP via the runner
     PVE->>C: create + start + verify + docker (cp LXC)
     OP->>C: bootstrap deploy-cp + console + co-located runner
-    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records · trigger /api/world-build (console = the CP build executor)
+    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records (opt-in --manage-dns) · trigger /api/world-build (console = the CP build executor)
     CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · litellm · Caddy · cert
     CP-->>OP: world_build report (each stage) → Freehold is up
     OP->>C: login — own nsec (NIP-98) / w in the TUI

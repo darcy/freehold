@@ -52,7 +52,7 @@ var updateCmd = &cobra.Command{
 		o.ref, _ = cmd.Flags().GetString("ref")
 		o.sha, _ = cmd.Flags().GetString("sha")
 		o.check, _ = cmd.Flags().GetBool("check")
-		o.yes, _ = cmd.Flags().GetBool("yes")
+		o.yes, _ = cmd.Flags().GetBool("non-interactive")
 		return run(cmd.Context(), o)
 	},
 }
@@ -64,7 +64,7 @@ func init() {
 	updateCmd.Flags().String("ref", "", "build + deploy an untagged git ref (e.g. main)")
 	updateCmd.Flags().String("sha", "", "build + deploy a specific commit")
 	updateCmd.Flags().Bool("check", false, "report the available version + pending migrations without changing anything")
-	updateCmd.Flags().Bool("yes", false, "do not ask for confirmation")
+	updateCmd.Flags().Bool("non-interactive", false, "do not ask for confirmation")
 }
 
 func run(ctx context.Context, o options) error {

@@ -49,6 +49,9 @@ type DeployCpSpec struct {
 	// yet, so a channel/registry script could only no-op and be marked done
 	// anyway. Empty = none shipped.
 	MigrationsDir *string
+	// KeyComment is the authorized_keys comment a rotated substrate key carries
+	// (freehold-<profile>-<runner>) — empty falls back to the target name.
+	KeyComment string
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -760,7 +763,11 @@ func rotateAdoptedSubstrate(t Transport, spec *DeployCpSpec, runnerDir string) (
 		}
 	}
 
-	newPEM, newPub, err := crypto.GenerateSSHKeypair(targetName)
+	comment := spec.KeyComment
+	if comment == "" {
+		comment = targetName
+	}
+	newPEM, newPub, err := crypto.GenerateSSHKeypair(comment)
 	if err != nil {
 		return "", "", fmt.Errorf("rotate substrate: keypair: %w", err)
 	}

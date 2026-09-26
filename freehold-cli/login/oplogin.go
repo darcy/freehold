@@ -118,21 +118,28 @@ func Save(secret [32]byte) (bool, error) {
 	if _, err := SecretHex(); err == nil {
 		return false, nil
 	}
+	return true, writeSecret(secret)
+}
+
+// SaveOverwrite unconditionally (over)writes the operator identity ledger —
+// the "change the key" path: a stored nsec that fails its login is replaced
+// only once the replacement has logged in successfully.
+func SaveOverwrite(secret [32]byte) error { return writeSecret(secret) }
+
+// writeSecret writes the ledger doc (0600 file / 0700 dir).
+func writeSecret(secret [32]byte) error {
 	if err := wire.EnsurePrivateDir(Dir()); err != nil {
-		return false, err
+		return err
 	}
 	enc := make([]byte, 32)
 	if _, err := rand.Read(enc); err != nil {
-		return false, err
+		return err
 	}
 	doc := map[string]string{
 		"nostr_secret_hex": hex.EncodeToString(secret[:]),
 		"enc_secret_hex":   hex.EncodeToString(enc),
 	}
-	if err := wire.WriteJSON0600(filepath.Join(Dir(), "identity.json"), doc); err != nil {
-		return false, err
-	}
-	return true, nil
+	return wire.WriteJSON0600(filepath.Join(Dir(), "identity.json"), doc)
 }
 
 // NsecToSecret accepts nsec1<bech32> or bare 64-hex -> 32-byte secret.
@@ -469,7 +476,11 @@ func promptLine(in *bufio.Reader, prompt string) string {
 // (the key must never appear on screen); piped input (scripts/tests) reads a
 // plain line. Mirrors installer::ask_nsec. The read bytes are zeroed on return.
 // Reads through the caller's ONE shared buffered reader (`in`).
-func readNsec(in *bufio.Reader) (string, error) {
+func readNsec(in *bufio.Reader) (string, error) { return ReadNsec(in) }
+
+// ReadNsec is the exported no-echo nsec prompt (build's login fallback shares
+// the installer's discipline: same reader, same no-echo-on-TTY behavior).
+func ReadNsec(in *bufio.Reader) (string, error) {
 	fmt.Fprint(os.Stderr, "operator nsec (nsec1… or 64-hex): ")
 	if term.IsTerminal(os.Stdin.Fd()) {
 		b, err := term.ReadPassword(os.Stdin.Fd())
