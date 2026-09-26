@@ -1032,13 +1032,22 @@ func (e *Engine) fromAnswers() *config.Config {
 	// supplied domain: the early writeInitialConfig lands before bootstrap's
 	// interactive prompt on the sequential path, and an empty host must merge
 	// prev's recorded value, not clobber it with the bare scheme.
+	//
+	// The runner addr derives from LocalPort when the caller did not pass one
+	// explicitly: the uninstall picks its runner path by cfg.Runner.Addr, and
+	// an empty addr forced the transient path (whose pct-destroy on a running
+	// guest is broken) instead of the box's own local runner.
+	runnerAddr := e.F.Addr
+	if runnerAddr == "" && e.F.LocalPort > 0 {
+		runnerAddr = LoopbackAddr(uint16(e.F.LocalPort))
+	}
 	cfg := &config.Config{
 		Name:           e.F.Name,
 		Host:           e.F.Host,
 		AccessMode:     e.F.AccessMode,
 		OperatorPubkey: e.F.OperatorPubkey,
 		Runner: config.RunnerRef{
-			Addr:   e.F.Addr,
+			Addr:   runnerAddr,
 			Pubkey: runnerPK,
 			Target: e.F.Target,
 		},

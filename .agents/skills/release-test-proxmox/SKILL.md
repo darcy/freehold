@@ -2,7 +2,7 @@
 name: release-test-proxmox
 description: Use when validating a freehold pre-release on a real Proxmox host (e.g. "test the release", "run the Proxmox release tests"). Restores the pre-release's own downloaded assets and runs three envs on a real PVE host — Fresh (the full install→uninstall lifecycle on a disposable world), Rebuild (teardown→build on the persistent env, left running), and Live (`freehold update` against the always-running env) — then updates the release's test-status table rows for Proxmox.
 metadata:
-  version: 2.1.0
+  version: 2.2.0
   author: freehold
   license: MIT
 ---
@@ -223,7 +223,25 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
      replies in the relay. Already-on-target is fine: the run must report up-to-date
      cleanly — that still proves the flow.
 
-6. **Update the release table** — change only the Proxmox rows' Status cells, leave every
+6. **Disposition the run's findings BEFORE updating the table — the release must be CLEAN
+   except for known issues.** Every defect the run surfaced (a crash, a data-clobbering
+   path, a broken flow, a wrong default) is classified against AGENTS.md's "Known gaps":
+   - **Already a known gap** → the row may pass if the tested flow itself works; the gap
+     stays recorded.
+   - **NEW (undocumented) defect** → the run STOPS here: the affected rows stay ⚪/❌, and
+     the report to the operator names the defect and says the release needs a fix + re-cut
+     (release-prepare's re-cut path). Do NOT paper a new defect over with a green cell, do
+     NOT reclassify it as a followup on your own authority, and do NOT leave the candidate
+     published-and-green while a fix is pending — un-gold it (the operator's call) or leave
+     the table honestly red.
+   - **Operator-accepted** → the operator's explicit "ship it with that" in so many words;
+     record the acceptance in the PR/report, and the defect lands in AGENTS.md's "Known
+     gaps" (an accepted defect is a known gap the moment it ships).
+   A defect that ONLY the test procedure triggers (e.g. an interaction unique to running
+   several worlds on one host) is still a defect: file it, and the disposition decides
+   whether it blocks.
+
+7. **Update the release table** — change only the Proxmox rows' Status cells, leave every
    other row, the Env/Test columns, the title, assets, and the prerelease flag untouched:
    ```bash
    gh release view "$tag" --json body -q .body > /tmp/opencode/body.md
@@ -232,7 +250,7 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    gh release view "$tag" --json body -q .body | sed -n '/^## Test status/,$p'
    ```
 
-7. **If every row you filled is ✅, run `release-publish`** — the next step of this
+8. **If every row you filled is ✅ AND the disposition is clean, run `release-publish`** — the next step of this
    release's flow, not an optional extra. Invoke the skill; it re-gates on the table, gets
    the operator's go-ahead, and flips the release to final (with the Latest badge). A
    fully-green table left unpromoted is how a release gets stranded behind a stale Latest

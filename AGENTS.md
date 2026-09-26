@@ -364,6 +364,11 @@ release notes.
   workspace/git work.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
+- **Agent memory writes (kind-30174 engrams) are rejected on some worlds** — the pod's
+  buzz-acp memory path needs an owner-attestation env the pod manifest does not carry (the
+  relay refuses the write: "exactly one p tag required"), so the agent boots with no core
+  memory on affected worlds; sessions/relay/channels work. The fix is the pod env wiring
+  (or the harness's write path); surfaced by the v0.7.5 live-update test.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
 - **Replay window:** a signed call can be replayed against the *same* runner within its 60s
