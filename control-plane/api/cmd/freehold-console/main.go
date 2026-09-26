@@ -454,7 +454,11 @@ func cmdDNS(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("dns <add NAME IP SOURCE|apex --apex BASE --ip PROXY> [--state-dir DIR]")
+		// Flags BEFORE the sub-verb in every usage line: Go's flag.Parse stops
+		// at the first non-flag arg, so a flag after the sub-verb is silently
+		// unparsed (a trailing --state-dir would open the DEFAULT store and
+		// still print success — a silent write to the wrong state dir).
+		return fmt.Errorf("dns [--state-dir DIR] [--domain <base>] <add NAME IP SOURCE|remove NAME|apex --apex BASE --ip PROXY>")
 	}
 	store, err := state.Open(*stateDir)
 	if err != nil {
@@ -473,7 +477,7 @@ func cmdDNS(args []string) error {
 		return syncDNS(store, *stateDir, *domain)
 	case "add":
 		if len(rest) < 4 {
-			return fmt.Errorf("dns add <name> <ip> <source> [--domain <base>] [--state-dir DIR]")
+			return fmt.Errorf("dns [--state-dir DIR] add <name> <ip> <source> (--domain must precede add: it is parsed before the sub-verb)")
 		}
 		name, ip, source := rest[1], rest[2], rest[3]
 		if _, err := console.Upsert(store, name, ip, source); err != nil {
@@ -484,8 +488,20 @@ func cmdDNS(args []string) error {
 		}
 		fmt.Printf("dns %s -> %s\n", name, ip)
 		return nil
+	case "remove":
+		if len(rest) < 2 {
+			return fmt.Errorf("dns [--state-dir DIR] remove <name>")
+		}
+		if err := console.RemoveDNSRecord(store, rest[1]); err != nil {
+			return err
+		}
+		if err := syncDNS(store, *stateDir, *domain); err != nil {
+			return err
+		}
+		fmt.Printf("dns removed %s\n", rest[1])
+		return nil
 	default:
-		return fmt.Errorf("dns: unknown verb %q (add|apex)", rest[0])
+		return fmt.Errorf("dns: unknown verb %q (add|remove|apex)", rest[0])
 	}
 }
 
