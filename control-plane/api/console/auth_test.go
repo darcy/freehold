@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -139,8 +140,8 @@ func TestLoginRoundtrip(t *testing.T) {
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == sessionCookie {
 			cookie = c.Value
-			if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode {
-				t.Fatalf("cookie flags wrong: HttpOnly=%v SameSite=%v", c.HttpOnly, c.SameSite)
+			if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || !c.Secure {
+				t.Fatalf("cookie flags wrong: HttpOnly=%v SameSite=%v Secure=%v", c.HttpOnly, c.SameSite, c.Secure)
 			}
 			if c.MaxAge != sessionMaxAge {
 				t.Fatalf("cookie Max-Age = %d, want %d (a browser-session cookie logs the operator out on close)", c.MaxAge, sessionMaxAge)
@@ -472,22 +473,54 @@ func TestWorldBuildGating(t *testing.T) {
 // are pruned on load.
 func TestSessionsSurviveRestart(t *testing.T) {
 	file := t.TempDir() + "/sessions.json"
-	a := NewAuth([]string{}, file)
-	tok, err := a.IssueSession("pk1")
+	adminPK, _ := crypto.PubkeyFromSecret(adminSecret())
+	a := NewAuth([]string{adminPK}, file)
+	tok, err := a.IssueSession(adminPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewAuth([]string{adminPK}, file)
+	if pk, ok := b.SessionIdentity(tok); !ok || pk != adminPK {
+		t.Fatalf("restarted auth lost the session: %v %v", pk, ok)
+	}
+}
+
+// Whitelist rotation must lock a removed key out even when its session row
+// survives on disk.
+func TestSessionsDroppedWhenPubkeyLeavesWhitelist(t *testing.T) {
+	file := t.TempDir() + "/sessions.json"
+	oldPK, _ := crypto.PubkeyFromSecret(adminSecret())
+	a := NewAuth([]string{oldPK}, file)
+	tok, err := a.IssueSession(oldPK)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	b := NewAuth([]string{}, file)
-	if pk, ok := b.SessionIdentity(tok); !ok || pk != "pk1" {
-		t.Fatalf("restarted auth lost the session: %v %v", pk, ok)
+	if _, ok := b.SessionIdentity(tok); ok {
+		t.Fatal("a session for a pubkey no longer on the whitelist must not resurrect")
+	}
+}
+
+// A broken state dir fails the login loudly — silent persistence loss would be
+// exactly the logout-on-restart the session file exists to prevent.
+func TestIssueSessionFailsWhenStateDirBroken(t *testing.T) {
+	dir := t.TempDir() + "/sessions.json"
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := NewAuth([]string{}, dir)
+	if _, err := a.IssueSession("pk1"); err == nil {
+		t.Fatal("a session file that is a directory must fail IssueSession")
 	}
 }
 
 func TestSessionsPruneExpiredOnLoad(t *testing.T) {
 	file := t.TempDir() + "/sessions.json"
-	a := NewAuth([]string{}, file)
-	tok, err := a.IssueSession("pk1")
+	adminPK, _ := crypto.PubkeyFromSecret(adminSecret())
+	a := NewAuth([]string{adminPK}, file)
+	tok, err := a.IssueSession(adminPK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +531,7 @@ func TestSessionsPruneExpiredOnLoad(t *testing.T) {
 	a.saveSessions()
 	a.mu.Unlock()
 
-	b := NewAuth([]string{}, file)
+	b := NewAuth([]string{adminPK}, file)
 	if _, ok := b.SessionIdentity(tok); ok {
 		t.Fatal("an expired session must be pruned, not resurrected")
 	}

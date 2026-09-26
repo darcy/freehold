@@ -98,8 +98,10 @@ type sessionRow struct {
 	Expires int64  `json:"expires"`
 }
 
-// loadSessions reads the persisted sessions, dropping expired ones. A missing
-// or corrupt file just means a fresh start.
+// loadSessions reads the persisted sessions, dropping expired ones and any
+// pubkey no longer on the admin whitelist (rotating the whitelist must lock
+// an old key out even when its session file row survives). A missing or
+// corrupt file just means a fresh start.
 func (a *Auth) loadSessions() {
 	if a.file == "" {
 		return
@@ -113,7 +115,7 @@ func (a *Auth) loadSessions() {
 		return
 	}
 	for tok, r := range rows {
-		if r.Pubkey == "" {
+		if r.Pubkey == "" || !a.admins[r.Pubkey] {
 			continue
 		}
 		exp := time.Unix(r.Expires, 0)
@@ -125,10 +127,12 @@ func (a *Auth) loadSessions() {
 }
 
 // saveSessions persists the current sessions (0600, temp+rename so a crash
-// mid-write never leaves a corrupt file behind).
-func (a *Auth) saveSessions() {
+// mid-write never leaves a corrupt file behind). Callers surface the error —
+// swallowed, a broken state dir looks like healthy sessions until the next
+// restart logs everyone out.
+func (a *Auth) saveSessions() error {
 	if a.file == "" {
-		return
+		return nil
 	}
 	rows := make(map[string]sessionRow, len(a.sessions))
 	for tok, s := range a.sessions {
@@ -136,12 +140,13 @@ func (a *Auth) saveSessions() {
 	}
 	raw, err := json.Marshal(rows)
 	if err != nil {
-		return
+		return err
 	}
 	tmp := a.file + ".tmp"
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, a.file)
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
 	}
+	return os.Rename(tmp, a.file)
 }
 
 // AdminCount reports the number of seeded admins.
@@ -174,7 +179,9 @@ func (a *Auth) ConsumeChallenge(nonce string) bool {
 	return now().Sub(ts) <= challengeTTL
 }
 
-// IssueSession mints a session token for an operator.
+// IssueSession mints a session token for an operator. An error from a broken
+// state dir propagates: persistence silently stopping would be exactly the
+// logout-on-restart this file exists to prevent.
 func (a *Auth) IssueSession(pubkey string) (string, error) {
 	token, err := randomHex(32)
 	if err != nil {
@@ -183,7 +190,10 @@ func (a *Auth) IssueSession(pubkey string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sessions[token] = Session{expires: now().Add(sessionTTL), pubkey: pubkey}
-	a.saveSessions()
+	if err := a.saveSessions(); err != nil {
+		delete(a.sessions, token)
+		return "", err
+	}
 	return token, nil
 }
 
@@ -325,9 +335,12 @@ func checkOrigin(r *http.Request, publicOrigin *string) error {
 	return errForbidden
 }
 
-// setSessionCookie writes the HttpOnly; SameSite=Strict session cookie. The
-// Max-Age matches the server-side sliding TTL so the browser keeps the cookie
-// as long as the session could still be valid.
+// setSessionCookie writes the HttpOnly; Secure; SameSite=Strict session cookie.
+// The Max-Age matches the server-side sliding TTL so the browser keeps the
+// cookie as long as the session could still be valid. Secure: loopback
+// (trustworthy origin) and the TLS-fronted public domain both accept it — a
+// plain-HTTP LAN bind refuses the cookie, which is the correct failure mode
+// (the bearer token must not ride cleartext).
 func setSessionCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
@@ -335,6 +348,7 @@ func setSessionCookie(w http.ResponseWriter, token string) {
 		Path:     "/",
 		MaxAge:   sessionMaxAge,
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
