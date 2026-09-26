@@ -10,9 +10,11 @@ package console
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +29,8 @@ var loopbackHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "[::1]
 // Session/session cookie/portal/auth freshness constants (web.rs).
 const (
 	sessionCookie    = "fh_session"
-	sessionTTL       = 24 * 3600 * time.Second
+	sessionTTL       = 7 * 24 * 3600 * time.Second
+	sessionMaxAge    = int(sessionTTL / time.Second)
 	challengeTTL     = 120 * time.Second
 	authFreshness    = 60 * time.Second
 	portalTTL        = 60 * time.Second
@@ -60,25 +63,84 @@ type Portal struct {
 
 // Auth is the NIP-98 operator auth. Present ONLY when an admin whitelist is
 // configured; absent => the loopback-only posture (all /api routes open).
+// Sessions persist to a JSON file (0600) so a serve restart — every
+// build/update restarts this process — does not log the operator out.
 type Auth struct {
 	admins     map[string]bool
 	sessions   map[string]Session
 	challenges map[string]time.Time
 	portals    map[string]Portal
+	file       string
 	mu         sync.Mutex
 }
 
-// NewAuth builds an Auth from the admin whitelist.
-func NewAuth(admins []string) *Auth {
+// NewAuth builds an Auth from the admin whitelist. file is the session
+// persistence path ("" = memory-only, for tests).
+func NewAuth(admins []string, file string) *Auth {
 	set := make(map[string]bool, len(admins))
 	for _, a := range admins {
 		set[a] = true
 	}
-	return &Auth{
+	a := &Auth{
 		admins:     set,
 		sessions:   map[string]Session{},
 		challenges: map[string]time.Time{},
 		portals:    map[string]Portal{},
+		file:       file,
+	}
+	a.loadSessions()
+	return a
+}
+
+// sessionRow is the on-disk shape of one session (expires as unix seconds).
+type sessionRow struct {
+	Pubkey  string `json:"pubkey"`
+	Expires int64  `json:"expires"`
+}
+
+// loadSessions reads the persisted sessions, dropping expired ones. A missing
+// or corrupt file just means a fresh start.
+func (a *Auth) loadSessions() {
+	if a.file == "" {
+		return
+	}
+	raw, err := os.ReadFile(a.file)
+	if err != nil {
+		return
+	}
+	var rows map[string]sessionRow
+	if json.Unmarshal(raw, &rows) != nil {
+		return
+	}
+	for tok, r := range rows {
+		if r.Pubkey == "" {
+			continue
+		}
+		exp := time.Unix(r.Expires, 0)
+		if exp.Before(now()) {
+			continue
+		}
+		a.sessions[tok] = Session{expires: exp, pubkey: r.Pubkey}
+	}
+}
+
+// saveSessions persists the current sessions (0600, temp+rename so a crash
+// mid-write never leaves a corrupt file behind).
+func (a *Auth) saveSessions() {
+	if a.file == "" {
+		return
+	}
+	rows := make(map[string]sessionRow, len(a.sessions))
+	for tok, s := range a.sessions {
+		rows[tok] = sessionRow{Pubkey: s.pubkey, Expires: s.expires.Unix()}
+	}
+	raw, err := json.Marshal(rows)
+	if err != nil {
+		return
+	}
+	tmp := a.file + ".tmp"
+	if os.WriteFile(tmp, raw, 0o600) == nil {
+		_ = os.Rename(tmp, a.file)
 	}
 }
 
@@ -121,6 +183,7 @@ func (a *Auth) IssueSession(pubkey string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sessions[token] = Session{expires: now().Add(sessionTTL), pubkey: pubkey}
+	a.saveSessions()
 	return token, nil
 }
 
@@ -262,12 +325,15 @@ func checkOrigin(r *http.Request, publicOrigin *string) error {
 	return errForbidden
 }
 
-// setSessionCookie writes the HttpOnly; SameSite=Strict session cookie.
+// setSessionCookie writes the HttpOnly; SameSite=Strict session cookie. The
+// Max-Age matches the server-side sliding TTL so the browser keeps the cookie
+// as long as the session could still be valid.
 func setSessionCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
+		MaxAge:   sessionMaxAge,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})

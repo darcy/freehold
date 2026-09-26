@@ -46,7 +46,7 @@ func testServer(t *testing.T, auth *Auth) (*Server, *state.StateStore) {
 }
 
 func TestAuthChallengeSessionPortal(t *testing.T) {
-	a := NewAuth([]string{})
+	a := NewAuth([]string{}, "")
 	nonce, err := a.IssueChallenge()
 	if err != nil || nonce == "" {
 		t.Fatalf("challenge: %v %q", err, nonce)
@@ -111,7 +111,7 @@ func TestCheckOrigin(t *testing.T) {
 func TestLoginRoundtrip(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, _ := testServer(t, NewAuth([]string{adminPK}))
+	s, _ := testServer(t, NewAuth([]string{adminPK}, ""))
 
 	// 1. challenge.
 	rec := httptest.NewRecorder()
@@ -142,6 +142,9 @@ func TestLoginRoundtrip(t *testing.T) {
 			if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode {
 				t.Fatalf("cookie flags wrong: HttpOnly=%v SameSite=%v", c.HttpOnly, c.SameSite)
 			}
+			if c.MaxAge != sessionMaxAge {
+				t.Fatalf("cookie Max-Age = %d, want %d (a browser-session cookie logs the operator out on close)", c.MaxAge, sessionMaxAge)
+			}
 		}
 	}
 	if cookie == "" {
@@ -171,7 +174,7 @@ func TestLoginRoundtrip(t *testing.T) {
 func TestWorldServesPublicRelayURL(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, store := testServer(t, NewAuth([]string{adminPK}))
+	s, store := testServer(t, NewAuth([]string{adminPK}, ""))
 	relayHost := "relay.librem.freehold.technology"
 	relayLan := "http://192.168.30.249:3000"
 	if err := store.SetRelayHost(&relayHost); err != nil {
@@ -240,7 +243,7 @@ func TestWorldServesPublicRelayURL(t *testing.T) {
 func TestLoginRejects(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, _ := testServer(t, NewAuth([]string{adminPK}))
+	s, _ := testServer(t, NewAuth([]string{adminPK}, ""))
 	// A stale signature timestamp is rejected.
 	nonce := "not-consumed"
 	pk, sig, tags := signLoginEvent(t, sec, nonce, time.Now().Unix()-200)
@@ -281,7 +284,7 @@ func TestLoginRejects(t *testing.T) {
 func TestPortalSingleUse(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, _ := testServer(t, NewAuth([]string{adminPK}))
+	s, _ := testServer(t, NewAuth([]string{adminPK}, ""))
 
 	// Login to get a session.
 	rec := httptest.NewRecorder()
@@ -355,7 +358,7 @@ func TestWorldRequiresAuthWhenConfigured(t *testing.T) {
 func TestOverviewListsRunners(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, store := testServer(t, NewAuth([]string{adminPK}))
+	s, store := testServer(t, NewAuth([]string{adminPK}, ""))
 	cs := make([]byte, 32)
 	cs[0] = 0x11
 	cpk, _ := crypto.PubkeyFromSecret(cs)
@@ -422,7 +425,7 @@ var _ = hex.EncodeToString
 func TestWorldBuildGating(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, _ := testServer(t, NewAuth([]string{adminPK}))
+	s, _ := testServer(t, NewAuth([]string{adminPK}, ""))
 	// No Builder bound yet.
 	post := func(r *http.Request) int {
 		rec := httptest.NewRecorder()
@@ -461,5 +464,42 @@ func TestWorldBuildGating(t *testing.T) {
 	s.ServeHTTP(rec, r)
 	if rec.Code != 503 {
 		t.Fatalf("world-build with a session but no builder must be 503 (run bootstrap), got %d", rec.Code)
+	}
+}
+
+// A serve restart (every build/update restarts the console) must not log the
+// operator out: issued sessions reload from the state-dir file, expired ones
+// are pruned on load.
+func TestSessionsSurviveRestart(t *testing.T) {
+	file := t.TempDir() + "/sessions.json"
+	a := NewAuth([]string{}, file)
+	tok, err := a.IssueSession("pk1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewAuth([]string{}, file)
+	if pk, ok := b.SessionIdentity(tok); !ok || pk != "pk1" {
+		t.Fatalf("restarted auth lost the session: %v %v", pk, ok)
+	}
+}
+
+func TestSessionsPruneExpiredOnLoad(t *testing.T) {
+	file := t.TempDir() + "/sessions.json"
+	a := NewAuth([]string{}, file)
+	tok, err := a.IssueSession("pk1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	s := a.sessions[tok]
+	s.expires = now().Add(-time.Second)
+	a.sessions[tok] = s
+	a.saveSessions()
+	a.mu.Unlock()
+
+	b := NewAuth([]string{}, file)
+	if _, ok := b.SessionIdentity(tok); ok {
+		t.Fatal("an expired session must be pruned, not resurrected")
 	}
 }

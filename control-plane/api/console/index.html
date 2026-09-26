@@ -301,7 +301,7 @@ refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
           ? v.slice("fh_session=".length).split(";")[0].trim()
           : v;
         if (!token) { document.getElementById("login-err").textContent = "paste the cookie first"; return; }
-        document.cookie = "fh_session=" + token + "; Path=/; SameSite=Strict";
+        document.cookie = "fh_session=" + token + "; Path=/; SameSite=Strict; Max-Age=604800";
         location.reload();
       };
     }

@@ -167,7 +167,7 @@ func TestWorldServesOperatorSeedAfterLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	url, _, consolePub := bootConsole(t, cpDir, cpconsole.NewAuth([]string{adminPub}))
+	url, _, consolePub := bootConsole(t, cpDir, cpconsole.NewAuth([]string{adminPub}, ""))
 
 	// Anon world fails closed.
 	if s, _ := getJSON(t, url, "/api/world", "", ""); s != http.StatusUnauthorized && s != http.StatusForbidden {
@@ -378,7 +378,7 @@ func TestTeardownClearsCPManagedScopeAfterLogin(t *testing.T) {
 	adminSecret := make([]byte, 32)
 	adminSecret[0] = 0x42
 	adminPub, _ := pubkeyOf(adminSecret)
-	url, _, _ := bootConsole(t, cpDir, cpconsole.NewAuth([]string{adminPub}))
+	url, _, _ := bootConsole(t, cpDir, cpconsole.NewAuth([]string{adminPub}, ""))
 
 	if s, _, _ := req(t, http.MethodPost, url+"/api/teardown", "", "", ""); s != http.StatusUnauthorized && s != http.StatusForbidden {
 		t.Fatalf("anon teardown status = %d", s)
