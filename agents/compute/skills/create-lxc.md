@@ -38,8 +38,10 @@ the vmid you actually got (`pct list` for the next free one); never invent one.
 3. **Boot + address** — `pct start <vmid>`, then
    `pct exec <vmid> -- hostname -I` for the DHCP address the guest actually
    got (first entry, eth0).
-4. **The account** — `lxcadmin` with passwordless sudo, and no password:
+4. **The account** — `lxcadmin` with passwordless sudo, and no password. The
+   Debian standard template ships WITHOUT sudo, so install it first:
 
+       pct exec <vmid> -- sh -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq sudo'
        pct exec <vmid> -- useradd -m -s /bin/bash lxcadmin
        pct exec <vmid> -- sh -c 'echo "lxcadmin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/lxcadmin; chmod 0440 /etc/sudoers.d/lxcadmin; visudo -cf /etc/sudoers.d/lxcadmin'
 
@@ -96,6 +98,17 @@ this be backed up?" — name it in the thread; "no" is a valid, final answer; a
 silent gap is a failure. Exposure is Network's lane and you have not touched
 it: a DHCP guest with a resolver record is internal-only. If the caller wants
 the guest reachable from outside, say so plainly and hand the ask to Network.
+
+## Teardown (when the guest dies)
+
+Destroying a skill-created guest is two steps, in this order:
+
+    pct stop <vmid> && pct destroy <vmid>
+    pct exec <cp-vmid> -- sh -c '<bin>/freehold-console dns --state-dir /srv/data/cp/control-plane remove <name>'
+
+Unpin AFTER destroying (the pin has no other purpose once the guest is gone),
+and never leave a stale record — a resolver entry pointing at a dead IP is
+exactly the kind of drift this runbook exists to prevent.
 
 ## Tone
 

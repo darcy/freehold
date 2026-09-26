@@ -454,7 +454,7 @@ func cmdDNS(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("dns <add NAME IP SOURCE|apex --apex BASE --ip PROXY> [--state-dir DIR]")
+		return fmt.Errorf("dns <add NAME IP SOURCE|remove NAME|apex --apex BASE --ip PROXY> [--state-dir DIR]")
 	}
 	store, err := state.Open(*stateDir)
 	if err != nil {
@@ -484,8 +484,20 @@ func cmdDNS(args []string) error {
 		}
 		fmt.Printf("dns %s -> %s\n", name, ip)
 		return nil
+	case "remove":
+		if len(rest) < 2 {
+			return fmt.Errorf("dns remove <name> [--state-dir DIR]")
+		}
+		if err := console.RemoveDNSRecord(store, rest[1]); err != nil {
+			return err
+		}
+		if err := syncDNS(store, *stateDir, *domain); err != nil {
+			return err
+		}
+		fmt.Printf("dns removed %s\n", rest[1])
+		return nil
 	default:
-		return fmt.Errorf("dns: unknown verb %q (add|apex)", rest[0])
+		return fmt.Errorf("dns: unknown verb %q (add|remove|apex)", rest[0])
 	}
 }
 
