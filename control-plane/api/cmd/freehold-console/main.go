@@ -512,6 +512,7 @@ func cmdProvision(args []string) error {
 	kind := fs.String("kind", "", "connector kind")
 	address := fs.String("address", "", "target address")
 	secretEnv := fs.String("secret-env", "", "read the credential from this env var")
+	keyComment := fs.String("key-comment", "", "authorized_keys comment for a generated ssh key (default: the runner name)")
 	var grants multiFlag
 	fs.Var(&grants, "grant", "agent pubkey granted to call the runner (repeatable)")
 	runnerDir := fs.String("runner-dir", "", "where the runner package lands")
@@ -550,7 +551,11 @@ func cmdProvision(args []string) error {
 		}
 		secret = []byte(v)
 	case *kind == "ssh":
-		priv, pub, err := crypto.GenerateSSHKeypair(name)
+		comment := *keyComment
+		if comment == "" {
+			comment = name
+		}
+		priv, pub, err := crypto.GenerateSSHKeypair(comment)
 		if err != nil {
 			return err
 		}

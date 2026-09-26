@@ -51,6 +51,9 @@ type Flags struct {
 	// the profile config beside the host.
 	AccessMode         string
 	Name               string
+	// LocalPort is the box-side runner MCP loopback port (--local-port); Addr
+	// is derived 127.0.0.1:<LocalPort> at the composition roots.
+	LocalPort          uint32
 	Addr               string
 	Target             string
 	Host               string
@@ -312,6 +315,20 @@ func StateRoot() string  { return config.StateDir() }
 func OpsDir() string     { return filepath.Join(StateDir(), "agent-ops") }
 func RunnerPkgs() string { return filepath.Join(config.StateDir(), "runner") }
 func ServeLog() string   { return filepath.Join(config.StateDir(), "installer", "serve.log") }
+
+// RunnerTarget is the provisioning runner's fixed name: the
+// ssh-as-root-to-the-PVE-host capability, `<target>-<protocol>-<identity>`.
+// Not an operator input — the build's capability-runner stage adopts this
+// same runner, so its name IS the capability's name.
+const RunnerTarget = "pve-ssh-root"
+
+// DefaultRunnerPort is the box-side runner MCP port (loopback); the CP guest's
+// co-located runner shares it (config.CoLocatedRunnerMCPAddr) — different
+// loopbacks, no conflict.
+const DefaultRunnerPort = 8787
+
+// LoopbackAddr is the runner MCP bind address for a local port.
+func LoopbackAddr(port uint16) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))) }
 
 // ---- the pipeline ---------------------------------------------------------
 
@@ -628,7 +645,10 @@ func (e *Engine) CertExpiry(cfg *config.Config, slot string) string {
 	return ""
 }
 
-// key line when a NEW door key was generated ("" on reuse).
+// stageProvision provisions the door runner (reuse keeps the package — the
+// identity — and returns no key). The generated key's authorized_keys comment
+// carries the profile so the host's authorized_keys is tell-apart-able across
+// worlds on one box.
 func (e *Engine) stageProvision(agentPK string) (string, error) {
 	runnerDir := filepath.Join(RunnerPkgs(), e.F.Target)
 	ok, out := e.RunBin(e.Bins.Console, []string{
@@ -638,6 +658,7 @@ func (e *Engine) stageProvision(agentPK string) (string, error) {
 		"--state-dir", StateDir(),
 		"--runner-dir", runnerDir,
 		"--grant", agentPK,
+		"--key-comment", "freehold-" + e.F.Name + "-" + e.F.Target,
 	})
 	if ok {
 		return extractSSHKey(out), nil
@@ -1052,6 +1073,13 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	cfg := *ans
 	cfg.Plane = prev.Plane
+	// The runner identity never changes after install (re-adopt preserves it),
+	// and a box without the local package cannot re-derive its pubkey — keep
+	// the recorded runner whenever the answers carry none (a thin-box build
+	// would otherwise clobber [runner] with an empty pubkey).
+	if ans.Runner.Pubkey == "" {
+		cfg.Runner = prev.Runner
+	}
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
 	// keep them (like Plane) or it would silently erase them on every run —
@@ -1655,6 +1683,7 @@ func (e *Engine) stageDeployCp() error {
 		"--transient",
 		"--host", e.F.Host,
 		"--target", e.F.Target,
+		"--key-comment", "freehold-" + e.F.Name + "-" + e.F.Target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
 		"--relay-url", "https://" + e.F.RelayDomain,
 		"--binary", e.Bins.ReleaseConsole,

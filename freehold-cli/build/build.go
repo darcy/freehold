@@ -97,15 +97,13 @@ func registerBuildFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cp-ip", "", "STATIC CP LXC IP (CIDR)")
 	cmd.Flags().String("config", config.DefaultPath(), "Config path (default: ~/.config/freehold/config.toml)")
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
-	cmd.Flags().Bool("yes", false, "Non-interactive: bail (actionably) where the interactive pipeline would prompt")
+	cmd.Flags().Bool("non-interactive", false, "Bail (actionably) where the interactive pipeline would prompt")
 	cmd.Flags().Bool("reset-dns", false, "Forget any stored DNS provider credentials so the build prompts for them again")
 	cmd.Flags().Bool("manage-dns", false, "Opt-in: freehold MANAGEs the world's DNS")
 }
 
 func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	f := box.Flags{}
-	f.Addr, _ = cmd.Flags().GetString("addr")
-	f.Target, _ = cmd.Flags().GetString("target")
 	f.Host, _ = cmd.Flags().GetString("host")
 	f.Domain, _ = cmd.Flags().GetString("domain")
 	f.RelayDomain, _ = cmd.Flags().GetString("relay-domain")
@@ -132,7 +130,7 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	f.CpIP, _ = cmd.Flags().GetString("cp-ip")
 	f.ConfigPath = common.ProfileConfigPath(cmd)
 	f.ConfirmStorage, _ = cmd.Flags().GetBool("confirm-storage")
-	f.Yes, _ = cmd.Flags().GetBool("yes")
+	f.Yes, _ = cmd.Flags().GetBool("non-interactive")
 	f.ResetDNS, _ = cmd.Flags().GetBool("reset-dns")
 	f.ManageDNS, _ = cmd.Flags().GetBool("manage-dns")
 	f.ManageDNSExplicit = cmd.Flags().Changed("manage-dns")
@@ -142,11 +140,6 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	if f.ResetDNS {
 		certcred.ClearStoredDNSCreds()
 		fmt.Fprintln(cmd.OutOrStdout(), "  (cleared stored DNS provider credentials — the build will ask for them again)")
-	}
-	if !cmd.Flags().Changed("target") {
-		if cfg2, _ := config.Load(f.ConfigPath); cfg2 != nil && cfg2.Runner.Target != "" {
-			f.Target = cfg2.Runner.Target
-		}
 	}
 	return newBuildEngine(f)
 }
@@ -290,7 +283,7 @@ func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string,
 	providerKey := e.F.LitellmProviderKey
 	if providerKey == "" {
 		if e.F.Yes {
-			return "", "", "", fmt.Errorf("litellm needs the provider key: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --yes)")
+			return "", "", "", fmt.Errorf("litellm needs the provider key: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --non-interactive)")
 		}
 		answer, err := e.cc().PromptSecret("litellm first provision: the provider (fireworks) API key")
 		if err != nil {
@@ -312,21 +305,13 @@ func (e *buildEngine) runBuild() error {
 	if cfg == nil || cfg.CPURL == "" {
 		return fmt.Errorf("no CP configured — run `freehold install` first (an operator box only), then `freehold login` here")
 	}
-	secStr, err := oplogin.SecretHex()
-	if err != nil {
-		return fmt.Errorf("no operator identity — run `freehold login` first: %v", err)
-	}
-	key, err := oplogin.NsecToSecret(secStr)
-	if err != nil {
-		return fmt.Errorf("operator secret invalid: %v", err)
-	}
 	loginURL := cfg.CPURL
 	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
 		loginURL = "http://" + ip + ":8080"
 	}
-	client, err := oplogin.Login(loginURL, key)
+	client, err := e.consoleLogin(loginURL)
 	if err != nil {
-		return fmt.Errorf("console login at %s: %v", loginURL, err)
+		return err
 	}
 	if err := e.ensureCpSecrets(client, cfg); err != nil {
 		return err
@@ -365,3 +350,53 @@ func (e *buildEngine) runBuild() error {
 
 // Command returns the build command for root registration.
 func Command() *cobra.Command { return buildCmd }
+
+// consoleLogin establishes the operator's NIP-98 console session: the stored
+// identity when it works; otherwise (interactive only) a no-echo nsec prompt,
+// persisted ONLY after a successful login — a mistyped key never poisons the
+// ledger, and a refused stored key is re-asked (overwritten on success).
+// Headless (--non-interactive) never prompts: it fails actionably instead.
+func (e *buildEngine) consoleLogin(loginURL string) (*console.Client, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		secStr, err := oplogin.SecretHex()
+		if err == nil {
+			key, kerr := oplogin.NsecToSecret(secStr)
+			if kerr != nil {
+				if e.F.Yes {
+					return nil, fmt.Errorf("stored operator identity is invalid: %v", kerr)
+				}
+				fmt.Fprintf(e.Out, "  stored operator identity is invalid (%v) — enter the operator key\n", kerr)
+			} else if client, lerr := oplogin.Login(loginURL, key); lerr == nil {
+				return client, nil
+			} else if e.F.Yes {
+				return nil, fmt.Errorf("console login at %s failed with the stored operator identity: %v", loginURL, lerr)
+			} else {
+				fmt.Fprintf(e.Out, "  login refused (%v) — enter the operator key again\n", lerr)
+			}
+		} else if e.F.Yes {
+			return nil, fmt.Errorf("no operator identity — run `freehold login` first: %v", err)
+		}
+		raw, err := oplogin.ReadNsec(e.Stdin)
+		if err != nil {
+			return nil, err
+		}
+		if raw == "" {
+			return nil, fmt.Errorf("no nsec provided")
+		}
+		key, err := oplogin.NsecToSecret(raw)
+		if err != nil {
+			fmt.Fprintf(e.Out, "  (bad nsec: %v)\n", err)
+			continue
+		}
+		client, err := oplogin.Login(loginURL, key)
+		if err != nil {
+			fmt.Fprintf(e.Out, "  login refused (%v) — try again\n", err)
+			continue
+		}
+		if err := oplogin.SaveOverwrite(key); err != nil {
+			return nil, fmt.Errorf("save operator identity: %w", err)
+		}
+		return client, nil
+	}
+	return nil, fmt.Errorf("console login at %s: too many failed attempts", loginURL)
+}

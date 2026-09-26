@@ -299,7 +299,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     **re-adopts** an existing profile whose CP is absent (the durable plane keeps
     the runner identity; deploy-cp never overwrites it), and **refuses a live
     CP** (`build`/`teardown`/`uninstall`/`login`); `bootstrap` is a hidden alias
-    for `install --yes`. A world with no recorded name (installed before
+    for `install --non-interactive`. A world with no recorded name (installed before
     names) keeps the domain-derived `<domain-dashed>-<role>` names, so it still
     reconciles; durable-plane names stay domain-keyed either way.
     **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS

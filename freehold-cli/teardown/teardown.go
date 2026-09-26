@@ -28,7 +28,7 @@ var teardownCmd = &cobra.Command{
 			return fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
 		}
 		configPath := common.ProfileConfigPath(cmd)
-		yes, _ := cmd.Flags().GetBool("yes")
+		yes, _ := cmd.Flags().GetBool("non-interactive")
 		tenant, _ := cmd.Flags().GetString("tenant")
 		data, _ := cmd.Flags().GetBool("data")
 		removeDNS, _ := cmd.Flags().GetBool("remove-dns")
@@ -128,7 +128,7 @@ var teardownCmd = &cobra.Command{
 func init() {
 	common.AddCommonFlags(teardownCmd, nil)
 	teardownCmd.Flags().String("config", common.DefaultConfigPath(), "Config path (default: ~/.config/freehold/config.toml)")
-	teardownCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
+	teardownCmd.Flags().Bool("non-interactive", false, "Skip the confirmation prompt (scripting/CI only)")
 	teardownCmd.Flags().String("tenant", "", "Per-tenant scoped teardown: only this tenant's LXC (and, with --data, its dataset) is destroyed. relay | cp | k3s-volumes. Omitted = whole-world teardown")
 	teardownCmd.Flags().Bool("data", false, "With --tenant: ALSO destroy that tenant's dataset (data+compute). Without --tenant: REFUSED — teardown keeps your data; `freehold uninstall --remove-data` drops the durable plane")
 	teardownCmd.Flags().Bool("remove-dns", false, "ALSO delete the freehold-managed RELAY A record on the DNS provider recorded in config (Dns.Manager, created by `build --manage-dns`). The CP's record is kept (the CP survives teardown). Default leaves them")

@@ -149,6 +149,11 @@ there; if it is work not yet done, it belongs here.
 
 ### Release-test v0.7.4 findings (the fresh cycle)
 
+- **A completed uninstall left the fresh profile behind.** The fresh-074 world
+  was gone from the host (no guests, no authorized_keys lines — verified), but
+  the profile's config + state dirs survived: the uninstall's local wipe
+  (`wipeLocalProfile`) never ran for that attempt. Diagnose why the wipe was
+  skipped when the logs exist; the dirs were removed by hand in the meantime.
 - **A re-adopted plane's terraform destroy reaches OTHER worlds.** The fresh env
   re-adopted a leftover durable plane whose tf/kube state referenced the librem
   cluster; the uninstall's `terraform destroy` then destroyed the LIBREM world's
