@@ -169,9 +169,9 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    - **Fresh - Install** ✅ iff install + build complete, the CP is healthy, and the CPA
      replies in the relay (post in `#freehold` with the CPA's pubkey in a `p` tag — see
      Field notes — wait for the reply, capture request + reply).
-   - **Fresh - Teardown**: `"$fh" teardown --non-interactive`; ✅ iff every world guest is gone
+   - **Fresh - Teardown**: `"$fh" teardown --config <profile-config> --non-interactive`; ✅ iff every world guest is gone
      (relay + k3s LXC destroyed) and the CP is still healthy.
-   - **Fresh - Build**: `"$fh" build`; ✅ iff the CPA replies again **and** the version
+   - **Fresh - Build**: `"$fh" build --config <profile-config>`; ✅ iff the CPA replies again **and** the version
      ping (step 4) shows the expected version.
    - **Fresh - Uninstall**: `"$fh" uninstall --name "$name" --non-interactive`; ✅ iff the CP, runner,
      door, and every guest are removed (no `<name>-*` guests remain, the DOOR_SPEC key is

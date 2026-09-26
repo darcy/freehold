@@ -440,7 +440,7 @@ sequenceDiagram
     OP->>PVE: bootstrap (box one) · build (ANY box): signed MCP via the runner
     PVE->>C: create + start + verify + docker (cp LXC)
     OP->>C: bootstrap deploy-cp + console + co-located runner
-    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records · trigger /api/world-build (console = the CP build executor)
+    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records (opt-in --manage-dns) · trigger /api/world-build (console = the CP build executor)
     CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · litellm · Caddy · cert
     CP-->>OP: world_build report (each stage) → Freehold is up
     OP->>C: login — own nsec (NIP-98) / w in the TUI
