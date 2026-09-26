@@ -95,7 +95,8 @@ Then operate the world yourself:
 
 ```sh
 freehold install --non-interactive --name <world> --host root@<box> \
-                     --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr>  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
+                     --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr> \
+                     --operator-pubkey <64-hex> [--operator-identity <dir>]  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # drop the WORLD (the inverse of build): relay/k3s + the CP-side
                      #  agent-tools process go, internal DNS clears — the CP, its runner,
@@ -111,7 +112,10 @@ freehold            # the TUI dashboard
 `--name` + `--host`: the profile name scopes the config + state to
 `profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; the host is
 recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
-needs the relay/CP domains + proxy IP (the guided flow prompts for them). The
+needs the relay/CP domains + proxy IP (the guided flow prompts for them) and
+the operator identity: `--operator-pubkey` (headless; `--operator-identity`
+seeds this box's login ledger from a keypair dir, verified against the
+pubkey — the guided flow pastes or mints it). The
 runner needs no name — it is the fixed `pve-ssh-root` capability — and the local
 MCP port defaults to 8787 (`--local-port` to move it). An
 existing name whose CP is absent is re-adopted (the plane keeps the runner
