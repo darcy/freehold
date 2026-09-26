@@ -72,7 +72,7 @@ func TestWorldRelayRowProbesLanDial(t *testing.T) {
 
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, store := testServer(t, NewAuth([]string{adminPK}))
+	s, store := testServer(t, NewAuth([]string{adminPK}, ""))
 	rh, ru := host, "https://"+host // the recorded relay URL is the https origin: the fallback dial CANNOT answer (plain listener), so up=true proves the LAN dial ran
 	if err := store.SetRelayHost(&rh); err != nil {
 		t.Fatal(err)
