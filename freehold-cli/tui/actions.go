@@ -461,7 +461,7 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			if !strings.EqualFold(strings.TrimSpace(f.Inputs[1]), "yes") {
 				return flowMsg{err: fmt.Errorf("teardown cancelled: type yes to confirm destroying the whole world")}
 			}
-			if strings.EqualFold(f.Inputs[0], "yes") {
+			if strings.EqualFold(strings.TrimSpace(f.Inputs[0]), "yes") {
 				return activityStartMsg{kind: "uninstall", title: "uninstalling (removing the CP + plane)", args: []string{"uninstall", "--remove-data", "--non-interactive"}}
 			}
 			return activityStartMsg{kind: "teardown", title: "tearing down the world (CP preserved)", args: []string{"teardown", "--non-interactive"}}

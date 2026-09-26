@@ -298,8 +298,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `<name>-<relay|cp|k3s>`. A life-cycle gate **mints** when no profile exists,
     **re-adopts** an existing profile whose CP is absent (the durable plane keeps
     the runner identity; deploy-cp never overwrites it), and **refuses a live
-    CP** (`build`/`teardown`/`uninstall`/`login`); `bootstrap` is a hidden alias
-    for `install --non-interactive`. A world with no recorded name (installed before
+    CP** (`build`/`teardown`/`uninstall`/`login`); there is no `bootstrap`
+    alias — `install --non-interactive` is the headless surface. A world with no recorded name (installed before
     names) keeps the domain-derived `<domain-dashed>-<role>` names, so it still
     reconciles; durable-plane names stay domain-keyed either way.
     **`build`** (any box, login-gated) ensures the **CP-owned secrets** (DNS
