@@ -458,7 +458,7 @@ func cmdDNS(args []string) error {
 		// at the first non-flag arg, so a flag after the sub-verb is silently
 		// unparsed (a trailing --state-dir would open the DEFAULT store and
 		// still print success — a silent write to the wrong state dir).
-		return fmt.Errorf("dns [--state-dir DIR] <add NAME IP SOURCE|remove NAME|apex --apex BASE --ip PROXY> [--domain <base>]")
+		return fmt.Errorf("dns [--state-dir DIR] [--domain <base>] <add NAME IP SOURCE|remove NAME|apex --apex BASE --ip PROXY>")
 	}
 	store, err := state.Open(*stateDir)
 	if err != nil {
