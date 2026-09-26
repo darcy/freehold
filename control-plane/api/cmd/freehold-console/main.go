@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -197,7 +198,7 @@ func cmdServe(args []string) error {
 	// Bind guard: unauthenticated console stays loopback-only (C3).
 	var auth *console.Auth
 	if len(admins) > 0 {
-		auth = console.NewAuth(admins)
+		auth = console.NewAuth(admins, filepath.Join(*stateDir, "sessions.json"))
 		log.Printf("console auth enabled (NIP-98, %d operators) — non-loopback bind allowed", len(admins))
 	} else {
 		if err := console.ValidateLoopbackBind(*addr); err != nil {
