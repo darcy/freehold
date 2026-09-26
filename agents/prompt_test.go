@@ -21,9 +21,22 @@ func TestCPASystemPromptCarriesSkills(t *testing.T) {
 			t.Fatalf("CPASystemPrompt is missing %q", want)
 		}
 	}
-	// The departments do NOT carry the skills — they are the CPA's runbooks.
+	// The other departments do NOT carry the CPA's skills — they are the
+	// CPA's runbooks (compute carries its own create-lxc runbook instead).
 	if strings.Contains(SystemPrompt("network", "", ""), "UNIFI_API_ADMIN") {
 		t.Fatalf("network's prompt must not carry the CPA's unifi runbook")
+	}
+}
+
+// TestComputePromptCarriesCreateLxc: compute's composed prompt carries its
+// create-lxc runbook — the required-name rule and the door handoff must
+// survive a refactor of the composition.
+func TestComputePromptCarriesCreateLxc(t *testing.T) {
+	p := SystemPrompt("compute", "", "")
+	for _, want := range []string{"create-lxc", "No name, no create", "provision_runner"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("compute's prompt is missing %q", want)
+		}
 	}
 }
 
