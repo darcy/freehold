@@ -50,7 +50,11 @@ the vmid you actually got (`pct list` for the next free one); never invent one.
    every other agent and guest can find the box by name. On the CP guest
    (via `pct exec <cp-vmid>` through `pve-ssh-root`):
 
-       freehold-console --state-dir /srv/data/cp/control-plane dns add <name> <ip> "compute create-lxc"
+       freehold-console dns --state-dir /srv/data/cp/control-plane add <name> <ip> "compute create-lxc"
+
+   (Flags sit between the `dns` verb and the `add` sub-verb — Go's flag.Parse
+   stops at the first non-flag arg, so a trailing `--state-dir` would be
+   silently unparsed.)
 
    This is the state-backed record — the same mechanism the build uses to
    name guests: it renders into the dnsmasq addn-hosts, reloads the resolver,
