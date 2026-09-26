@@ -20,9 +20,21 @@ import (
 //go:embed terraform/*.tf terraform/scripts/*.sh
 var terraformFS embed.FS
 
-// tfDir is where the module lives ON the provisioning box (the storage-tier
-// rule for sensitive terraform state: /srv/data at 0700).
+// tfDir is the LEGACY shared tf root: one dir per PVE host, used by every
+// world on that host until per-world roots shipped. A world adopting the
+// legacy dir (same k3s IP in its staged kubeconfig) migrates it wholesale;
+// otherwise it is left for the world that owns it.
 const tfDir = "/srv/data/freehold-tf"
+
+// tfRoot is THIS world's tf module + state root on the provisioning box —
+// per-world, so multiple worlds on one host never clobber each other's state
+// or staged kubeconfig (the shared-root design destroyed a world's services
+// when another world's teardown ran terraform destroy against the shared
+// state). The kubeconfig staged beside the state is the world's fingerprint:
+// its server IP is the world's own k3s node.
+func (s *Spec) tfRoot() string {
+	return "/srv/data/freehold-tf-" + s.dashedDomain()
+}
 
 // dashedDomain mirrors planebase's backend root for a dotted relay host: the
 // /freehold/<dashed> base + the `freehold-<dashed>-*` LV names adopt.
@@ -37,13 +49,40 @@ func (s *Spec) tfLxcName(role string) (string, error) {
 	return bootstrap.LXCName(s.Name, s.RelayHost, role)
 }
 
-// stageDeployTf ships the embedded module onto the provisioning box at
-// /srv/data/freehold-tf (0700) via a single signed exec on the co-located
+// stageDeployTf ships the embedded module onto the provisioning box at the
+// world's own tf root (0700) via a single signed exec on the co-located
 // runner — each file is base64'd (no secrets, no network), decoupled from the
 // PVE host's reachability to this repo. Idempotent.
+//
+// Legacy adoption: a world built before per-world roots kept its state in the
+// SHARED /srv/data/freehold-tf. When that dir exists, the per-world root does
+// not, and the legacy staged kubeconfig's server IP is THIS world's k3s node,
+// the legacy dir IS this world's state — move it wholesale (state, lock file,
+// module) so the world's next apply stays plan-clean. A legacy dir belonging
+// to ANOTHER world (its kubeconfig names a different k3s IP) is left alone;
+// this world then starts with an empty state and its first apply fails loud
+// on "already exists" (the release-test repair: delete the world's orphaned
+// terraform-managed k8s objects once, rebuild — the state re-populates).
 func (s *Spec) stageDeployTf() error {
+	root := s.tfRoot()
+	adopt := "false"
+	if s.ProxyIP != "" {
+		// The kubeconfig is the fingerprint: its rewritten server points at the
+		// world's own k3s node IP. grep -q is the whole check; a missing file
+		// (the legacy dir never got that far) simply does not adopt.
+		kip := config.StripCIDR(s.ProxyIP)
+		adopt = fmt.Sprintf(
+			`[ -d %[1]q ] || { [ -f %[2]q/kubeconfig ] && grep -q 'server: https://%[3]s:' %[2]q/kubeconfig && mv %[2]q %[1]q && echo adopted-legacy-tf-root; true; }`,
+			root, tfDir, kip)
+	} else {
+		adopt = `[ -d ` + fmt.Sprintf("%q", root) + ` ] || true`
+	}
 	var parts []string
-	parts = append(parts, "umask 077; mkdir -p "+tfDir+"/scripts; rm -f "+tfDir+"/main.tf "+tfDir+"/scripts/*")
+	parts = append(parts,
+		"umask 077",
+		adopt,
+		"mkdir -p "+root+"/scripts",
+		"rm -f "+root+"/main.tf "+root+"/scripts/*")
 	err := fs.WalkDir(terraformFS, "terraform", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -58,13 +97,13 @@ func (s *Spec) stageDeployTf() error {
 		rel := strings.TrimPrefix(p, "terraform/")
 		parts = append(parts,
 			fmt.Sprintf("printf '%%s' '%s' | base64 -d > %s/%s",
-				base64.StdEncoding.EncodeToString(b), tfDir, rel))
+				base64.StdEncoding.EncodeToString(b), root, rel))
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("stage tf: walk: %w", err)
 	}
-	parts = append(parts, "chmod 755 "+tfDir+"/scripts/*")
+	parts = append(parts, "chmod 755 "+root+"/scripts/*")
 	return s.run(strings.Join(parts, " && "), 120)
 }
 
@@ -123,8 +162,11 @@ func (s *Spec) tfRun(action string, targets, extraVars []string, requiresSecrets
 	for _, t := range targets {
 		args = append(args, "-target", t)
 	}
-	script := tfDir + "/scripts/tf.sh"
-	cmdline := script + " " + strings.Join(args, " ")
+	script := s.tfRoot() + "/scripts/tf.sh"
+	// TF_ROOT pins the world's own module+state root (tf.sh defaults to the
+	// legacy shared dir); the env-prefix rides the runner's sh so the state and
+	// the staged kubeconfig are this world's, never another world's.
+	cmdline := "TF_ROOT=" + s.tfRoot() + " " + script + " " + strings.Join(args, " ")
 	if requiresSecrets {
 		if err := s.runSecrets(cmdline, 900, "litellm", "postgres-pw", "provider-key"); err != nil {
 			return fmt.Errorf("tf %s: %w", action, err)
@@ -139,7 +181,7 @@ func (s *Spec) tfRun(action string, targets, extraVars []string, requiresSecrets
 
 // stageKubeconfig fetches the k3s guest's kubeconfig, rewrites its `server` to
 // the k3s NODE IP (the guest's kubeconfig points at 127.0.0.1, unreachable from
-// the provisioning box), and writes it at <tfDir>/kubeconfig (0600) for the
+// the provisioning box), and writes it at the world's tf root (0600) for the
 // kubernetes provider. Runs only AFTER k3s is up (k3s_bringup applied).
 func (s *Spec) stageKubeconfig() error {
 	if s.K3sVmid == 0 {
@@ -168,8 +210,9 @@ func (s *Spec) stageKubeconfig() error {
 		return fmt.Errorf("could not rewrite the kubeconfig server to https://%s:6443", kip)
 	}
 	b64 := base64.StdEncoding.EncodeToString([]byte(rewritten))
+	root := s.tfRoot()
 	cmd := fmt.Sprintf("umask 077; mkdir -p %s && printf '%%s' '%s' | base64 -d > %s/kubeconfig && chmod 600 %s/kubeconfig",
-		tfDir, b64, tfDir, tfDir)
+		root, b64, root, root)
 	if err := s.run(cmd, 30); err != nil {
 		return fmt.Errorf("stage kubeconfig: %w", err)
 	}
