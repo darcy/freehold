@@ -64,7 +64,7 @@ jobs:
           # ---- provider config: this is the only provider-specific part ----
           LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
           LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
-          LLM_MODEL: "accounts/fireworks/models/deepseek-v4-flash-0731"
+          LLM_MODEL: "accounts/fireworks/models/deepseek-v4p1-flash"
           # Abort a single stalled LLM request after 10 min so callLlm retries
           # instead of hanging to the job's 60-minute cap.
           LLM_TIMEOUT_MS: "600000"
