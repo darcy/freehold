@@ -114,13 +114,21 @@ var computePrompt string
 //go:embed ai/prompt.md
 var aiPrompt string
 
+// createLxcSkill is compute's create-lxc runbook (skills/create-lxc.md): the
+// required-name rule, the template/create/bootstrap/DNS-pin recipe, and the
+// door handoff to the CPA's provision_runner. Composed onto compute's prompt
+// (the identity that executes it); the file stays the canonical text.
+//
+//go:embed compute/skills/create-lxc.md
+var createLxcSkill string
+
 // departmentPrompts maps a reserved department identity name to its embedded
 // system prompt. The names are reserved: a create_agent naming one of them
 // selects that department's prompt rather than the custom template.
 var departmentPrompts = map[string]string{
 	"network": networkPrompt,
 	"data":    dataPrompt,
-	"compute": computePrompt,
+	"compute": computePrompt + "\n\n" + strings.TrimRight(createLxcSkill, "\n"),
 	"ai":      aiPrompt,
 }
 
