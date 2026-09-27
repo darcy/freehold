@@ -1135,6 +1135,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "relay booted + stack deployed")
 		}
+		// 2.4. Re-assert the CONSOLE identity's relay membership on EVERY build.
+		// A relay rebuild/reseed can drop it, and then every console-signed
+		// publish (the runner channels, agent rosters, agent-tools seeding) 403s
+		// relay_membership_required — the console is not re-membered anywhere else
+		// (install did it once, a later reconcile didn't). buzz-admin add-member
+		// is idempotent.
+		if spec.Audience != "" && spec.CpLxc != 0 {
+			if err := spec.addRelayCommunityMember(spec.Audience); err != nil {
+				return "", fmt.Errorf("world-build console relay membership: %w", err)
+			}
+		}
 		// 2.5. Deploy the operator toolset (freehold-agent-tools) once the relay
 		// it seeds its roster against is up — the console's world_build brings
 		// up agent-tools itself (no box-one / deploy-cp dependency).
