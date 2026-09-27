@@ -939,6 +939,38 @@ func resolveAgentRoster(agentToolsDir string, names []string) ([]string, error) 
 	return out, nil
 }
 
+// agentNameForPubkey resolves a registry agent's pubkey back to its NAME (the
+// reverse of resolveAgentRoster) — "" when the pubkey is not a registry agent
+// (the operator's, an external identity's). Best-effort: a registry read
+// failure returns "" (the grant still lands relay-side; only the durable
+// roster bookkeeping is skipped).
+func agentNameForPubkey(agentToolsDir, pubkey string) string {
+	reg, err := agenttools.OpenRegistry(filepath.Join(agentToolsDir, "registry.json"))
+	if err != nil {
+		return ""
+	}
+	rows, err := reg.Agents()
+	if err != nil {
+		return ""
+	}
+	for _, a := range rows {
+		if a.Pubkey == pubkey {
+			return a.Name
+		}
+	}
+	return ""
+}
+
+// containsString reports whether s is in list.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // capabilityPortAbove allocates the first free MCP port above the dynamic
 // base. With a build Spec, the SAME allocator cpbuild uses runs (it also
 // skips the per-zone DNS doors' derived ports — two allocators must never
@@ -1166,6 +1198,22 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		grants = []string{req.Pubkey}
+		// A pubkey that belongs to a REGISTRY agent joins the record's
+		// Rosters: that list drives the pod coords (the grantee's exec
+		// surface) AND the rebuild's grant re-assertion. An unknown pubkey
+		// (the operator, an external identity) rides the relay roster alone —
+		// nothing prunes it, so it persists across builds without a record.
+		if agentName := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
+			rosters := cap.Rosters
+			if !containsString(rosters, agentName) {
+				rosters = append(rosters, agentName)
+				cap.Rosters = rosters
+				if err := fresh.InsertCapability(req.Name, cap); err != nil {
+					writeErr(w, statusForAction(err), err.Error())
+					return
+				}
+			}
+		}
 	} else {
 		grants, err = provisioner.GrantAgent(fresh, req.Name, req.Pubkey)
 		if err != nil {
@@ -1209,6 +1257,22 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	var grants []string
 	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
 		grants = []string{}
+		// Mirror of grant: a rostered agent's pubkey leaves the record's
+		// Rosters too — else the rebuild's re-assertion re-adds the member
+		// the operator just revoked.
+		if agentName := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
+			kept := make([]string, 0, len(cap.Rosters))
+			for _, r := range cap.Rosters {
+				if r != agentName {
+					kept = append(kept, r)
+				}
+			}
+			cap.Rosters = kept
+			if err := fresh.InsertCapability(req.Name, cap); err != nil {
+				writeErr(w, statusForAction(err), err.Error())
+				return
+			}
+		}
 	} else {
 		grants, err = provisioner.RevokeGrant(fresh, req.Name, req.Pubkey)
 		if err != nil {

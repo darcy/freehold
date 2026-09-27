@@ -81,6 +81,19 @@ func TestRotateSecretSelfHostedRoundTrip(t *testing.T) {
 		strings.Repeat("a", 64), hex.EncodeToString(encPub), "192.168.30.50:8800"); err != nil {
 		t.Fatal(err)
 	}
+	// The confirm gate lives in the OPERATION: the fill is refused until the
+	// operator confirmed the presented pubkeys (the door page) — then it seals.
+	if _, _, err := RotateSecretSelfHosted(store, "dev-local-lxcadmin", []byte("git-deploy-key")); err == nil ||
+		!strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("an unconfirmed self-hosted fill must be refused, got %v", err)
+	}
+	if err := store.InsertCapability("dev-local-lxcadmin", state.CapabilityRecord{
+		Kind: "local", Address: "lxcadmin@h", Rosters: []string{"deployer"},
+		Hosted: state.HostedSelf, Host: "192.168.30.50",
+		EnrollConfirmedAt: &[]uint64{7}[0],
+	}); err != nil {
+		t.Fatal(err)
+	}
 	rec, pkgJSON, err := RotateSecretSelfHosted(store, "dev-local-lxcadmin", []byte("git-deploy-key"))
 	if err != nil {
 		t.Fatal(err)
