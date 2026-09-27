@@ -56,8 +56,9 @@ type ProvisionArgs struct {
 	// installed there by the agent (the runner-client), identity minted
 	// on-guest. The CP holds no private material either way.
 	Hosted string `json:"hosted,omitempty"`
-	// Self-hosted only: the target's LAN address the pods will dial
-	// (http://<host>:<port>).
+	// Self-hosted only: the target's dial address — the box's pinned name
+	// (bare host, no port; the CP allocates the port). Pods dial
+	// http://<host>:<port>.
 	Host string `json:"host,omitempty"`
 	// Self-hosted only: the runner's presented Nostr + X25519 pubkeys
 	// (64-hex each, from `runner enroll` on the target).

@@ -68,9 +68,11 @@ the vmid you actually got (`pct list` for the next free one); never invent one.
 Every guest you create gets the **runner-client** — the resident runner the
 box itself will run once freehold enrolls it. Install it right after the
 account: download the `runner` asset from the repo's latest GitHub release
-(on the PVE host, which has outbound access), push it into the guest, and
-mint the identity as `lxcadmin` (the keys live in `lxcadmin`'s state dir and
-never leave the guest):
+(on the PVE host, which has outbound access) and verify it against the
+release's `checksums.txt` (`sha256sum -c` — the binary is about to hold
+every sealed credential on this guest; an unverified one is a hole, not a
+client), push it into the guest, and mint the identity as `lxcadmin` (the
+keys live in `lxcadmin`'s state dir and never leave the guest):
 
     pct push <vmid> <path-to-runner> /tmp/freehold-runner
     pct exec <vmid> -- install -m 755 /tmp/freehold-runner /usr/local/bin/freehold-runner
@@ -78,8 +80,9 @@ never leave the guest):
     pct exec <vmid> -- su - lxcadmin -c 'FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold freehold-runner enroll'
 
 `enroll` is idempotent: it mints the identity once and KEEPS it on re-runs —
-never re-key a guest that already has one. It prints the two pubkeys; the
-next section uses them.
+never re-key a guest that already has one (a re-enroll under a changed
+identity orphans every grant + sealed credential on it). It prints the two
+pubkeys; the next section uses them.
 
 ## The door (handoff to freehold)
 
@@ -101,13 +104,19 @@ Report in the thread — name, vmid, IP, pinned, and the two pubkeys from
 
 The report carries the relay coords + the allocated port. Install the unit
 yourself (for boxes you created, YOU are the installer): a systemd unit
-`User=lxcadmin`, `EnvironmentFile=/home/lxcadmin/.freehold/serve.env`
-(write the env file from the report's values), `ExecStart` = the binary
-`serve`. Enable + start it, then verify before claiming: an exec probe
-through the door — `whoami` says `lxcadmin`, `sudo -n true` works,
-`hostname` says `<name>` — and the door's self-check goes 🟢. If freehold's
-confirm discipline is waiting on the operator's yes, say the door is
-WAITING, not that it works.
+`User=lxcadmin` with `EnvironmentFile=/home/lxcadmin/.freehold/serve.env` —
+write that env file root-side from the report's values, and it MUST carry
+`FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold` (the dir `enroll` minted into)
+alongside the report's values (`FREEHOLD_RUNNER_ADDR=0.0.0.0:<port>`,
+`FREEHOLD_RELAY_URL`, `FREEHOLD_RELAY_PUBKEY`, `FREEHOLD_RELAY_AUTH_URL`,
+`FREEHOLD_RUNNER_ALLOW_REMOTE=1`); `ExecStart` = the binary `serve`. Without
+`FREEHOLD_STATE_DIR` the unit defaults to `/.freehold` (systemd's cwd is
+`/`), mints a DIFFERENT identity than the enrolled one, and the sealed
+credentials never decrypt. Enable + start it, then verify before claiming:
+an exec probe through the door — `whoami` says `lxcadmin`, `sudo -n true`
+works, `hostname` says `<name>` — and the door's self-check goes 🟢. If
+freehold's confirm discipline is waiting on the operator's yes, say the door
+is WAITING, not that it works.
 
 The **ssh door** (`kind=ssh`, the CP mints a keypair you install into
 `authorized_keys`) is the fallback for boxes that cannot hold the

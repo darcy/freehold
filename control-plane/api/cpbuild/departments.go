@@ -413,9 +413,10 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 		s.DepartmentRunners = map[string][]agent.RunnerCoords{}
 	}
 	// A self-hosted runner's pods dial the TARGET's LAN address, not the CP
-	// IP (the record carries the host).
+	// IP (the record carries the host) — gated on the mode, never on the
+	// field being merely non-empty.
 	dialHost := s.CpIP
-	if r.host != "" {
+	if r.selfHosted && r.host != "" {
 		dialHost = r.host
 	}
 	coords := agent.RunnerCoords{

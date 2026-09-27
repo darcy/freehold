@@ -80,8 +80,11 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			if kind != "local" {
 				return "", fmt.Errorf("provision_runner %s: hosted=self runs the connector on the target itself — kind must be \"local\" (got %q)", name, kind)
 			}
-			if host == "" || strings.Contains(host, "://") || strings.Contains(host, "/") {
-				return "", fmt.Errorf("provision_runner %s: host is required for hosted=self — the target's LAN address the pods will dial (got %q)", name, args.Host)
+			// A BARE host (the pinned name or LAN IP) — the port is
+			// CP-allocated, so a host:port here would record a door whose
+			// coords can never work.
+			if host == "" || strings.ContainsAny(host, ":/ \t") {
+				return "", fmt.Errorf("provision_runner %s: host is required for hosted=self — a BARE host (the pinned name or LAN IP, no port — the CP allocates it), got %q", name, args.Host)
 			}
 			if !provisioner.IsPubkey(args.Pubkey) || !provisioner.IsPubkey(args.EncPubkey) {
 				return "", fmt.Errorf("provision_runner %s: hosted=self enrolls the target's own identity — pubkey and enc_pubkey (64-hex each, from `runner enroll` on the guest) are required", name)
@@ -89,6 +92,12 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		} else {
 			if !agentProvisionKinds[kind] {
 				return "", fmt.Errorf("provision_runner %s: unsupported kind %q (supported: %s; or hosted=self with kind=local)", name, args.Kind, strings.Join(supportedProvisionKinds(), ", "))
+			}
+			// host is a self-hosted-only field: accepted on a CP-guest door it
+			// would silently repoint the granted pods' exec surface elsewhere
+			// while the unit still starts on the CP guest.
+			if host != "" {
+				return "", fmt.Errorf("provision_runner %s: host is a hosted=self field — a CP-guest door always dials the CP itself", name)
 			}
 		}
 		if strings.TrimSpace(args.Address) == "" {
@@ -298,10 +307,9 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		report := ""
 		if selfHosted {
 			report = fmt.Sprintf("runner %s (local on %s, resident) enrolled; roster [%s]; pods dial %s:%d. "+
-				"The CP holds no identity and starts nothing: run the unit ON %s (User=lxcadmin, EnvironmentFile from `runner enroll`, "+
-				"ExecStart the runner binary `serve` with FREEHOLD_RUNNER_ADDR=0.0.0.0:%d, FREEHOLD_RELAY_URL=%s, FREEHOLD_RELAY_PUBKEY=%s, "+
-				"FREEHOLD_RELAY_AUTH_URL=%s, FREEHOLD_RUNNER_ALLOW_REMOTE=1) and verify by exec-probe before claiming the capability is live.",
-				name, host, strings.Join(granted, ", "), host, port, host, port,
+				"The CP holds no identity and starts nothing — the unit runs ON %s as User=lxcadmin, and %s must CONFIRM the enrollment on the door page (verify the presented pubkeys against %s's own `runner enroll` output / Compute's report) before the credential fill unlocks. "+
+				"The unit: EnvironmentFile=/home/lxcadmin/.freehold/serve.env (write it root-side: FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold — the dir `runner enroll` minted into, or serve mints a DIFFERENT identity under / — plus FREEHOLD_RUNNER_ADDR=0.0.0.0:%d, FREEHOLD_RELAY_URL=%s, FREEHOLD_RELAY_PUBKEY=%s, FREEHOLD_RELAY_AUTH_URL=%s, FREEHOLD_RUNNER_ALLOW_REMOTE=1), ExecStart the runner binary `serve`.",
+				name, host, strings.Join(granted, ", "), host, port, host, granted[0], name, port,
 				spec.relayDialURL(), spec.RelayPK, spec.relaySignURL())
 		} else {
 			report = fmt.Sprintf("runner %s (%s → %s) listening on %s:%d, granted to [%s].",
@@ -318,7 +326,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals the credential and restarts the door; verify by exec-probe before claiming the capability is live."
 		}
 		if selfHosted {
-			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals the credential to the runner's own key and returns the package JSON — write it to the guest's state dir as secrets.json and restart the unit there; verify by exec-probe before claiming the capability is live."
+			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked) — they verify the presented pubkeys and confirm the enrollment on the page, then fill the credential. The console seals it to the runner's own key and returns the package JSON; the GRANTEE writes it to the guest's state dir as secrets.json (through its own door exec) and restarts the unit there. Verify by exec-probe before claiming the capability is live."
 		}
 		report += "\nVerify with the runner's self-check before claiming the capability is live."
 		return report, nil
@@ -372,9 +380,10 @@ func (s *Spec) agentRunnerCoords(store *state.StateStore, name string) []agent.R
 			continue
 		}
 		// A self-hosted runner's pods dial the TARGET's LAN address, not the
-		// CP IP (the record carries the host).
+		// CP IP (the record carries the host) — gated on the mode, never on
+		// the field being merely non-empty.
 		dialHost := s.CpIP
-		if r.host != "" {
+		if r.selfHosted && r.host != "" {
 			dialHost = r.host
 		}
 		out = append(out, agent.RunnerCoords{
