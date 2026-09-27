@@ -55,27 +55,27 @@ func (s *Spec) tfLxcName(role string) (string, error) {
 // PVE host's reachability to this repo. Idempotent.
 //
 // Legacy adoption: a world built before per-world roots kept its state in the
-// SHARED /srv/data/freehold-tf. When that dir exists, the per-world root does
-// not, and the legacy staged kubeconfig's server IP is THIS world's k3s node,
-// the legacy dir IS this world's state — move it wholesale (state, lock file,
-// module) so the world's next apply stays plan-clean. A legacy dir belonging
-// to ANOTHER world (its kubeconfig names a different k3s IP) is left alone;
-// this world then starts with an empty state and its first apply fails loud
-// on "already exists" (the release-test repair: delete the world's orphaned
-// terraform-managed k8s objects once, rebuild — the state re-populates).
+// SHARED /srv/data/freehold-tf. Two shapes are recovered, both fingerprinted by
+// THIS world's k3s node IP (each world has a unique one):
+//   - the per-world root does not exist and the legacy dir's staged kubeconfig
+//     names this world's k3s IP → move the legacy dir wholesale (module + state)
+//     into the per-world root;
+//   - the per-world root EXISTS but has no terraform.tfstate (staged by a prior
+//     build that still pinned the shared backend) while the legacy state names
+//     this world's k3s IP → move just the legacy STATE into the root.
+//
+// A legacy dir/state belonging to ANOTHER world (a different k3s IP) is left
+// alone; this world then starts empty and its first apply fails loud on
+// "already exists" (the release-test repair: delete the orphaned k8s objects
+// once, rebuild — the state re-populates).
 func (s *Spec) stageDeployTf() error {
 	root := s.tfRoot()
-	adopt := "false"
+	adopt := "true"
 	if s.ProxyIP != "" {
-		// The kubeconfig is the fingerprint: its rewritten server points at the
-		// world's own k3s node IP. grep -q is the whole check; a missing file
-		// (the legacy dir never got that far) simply does not adopt.
 		kip := config.StripCIDR(s.ProxyIP)
 		adopt = fmt.Sprintf(
-			`[ -d %[1]q ] || { [ -f %[2]q/kubeconfig ] && grep -q 'server: https://%[3]s:' %[2]q/kubeconfig && mv %[2]q %[1]q && echo adopted-legacy-tf-root; true; }`,
+			`if [ ! -d %[1]q ]; then { [ -f %[2]q/kubeconfig ] && grep -q 'server: https://%[3]s:' %[2]q/kubeconfig && mv %[2]q %[1]q && echo adopted-legacy-tf-root; true; }; elif [ ! -f %[1]q/terraform.tfstate ] && [ -f %[2]q/terraform.tfstate ] && grep -q %[3]q %[2]q/terraform.tfstate; then mv %[2]q/terraform.tfstate %[1]q/terraform.tfstate && { [ -f %[2]q/terraform.tfstate.backup ] && mv %[2]q/terraform.tfstate.backup %[1]q/terraform.tfstate.backup; true; } && echo adopted-legacy-tf-state; fi; true`,
 			root, tfDir, kip)
-	} else {
-		adopt = `[ -d ` + fmt.Sprintf("%q", root) + ` ] || true`
 	}
 	var parts []string
 	parts = append(parts,

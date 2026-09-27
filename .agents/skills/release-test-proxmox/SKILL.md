@@ -88,15 +88,22 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 ## Workflow
 
-> **Order the tests around the CF gate — and around ANY fresh stall.** The Fresh env's
-> first build waits on DNS-01 propagation — the long pole (~10–45 min: the provider API
-> accepts the challenge TXT immediately while the authoritative NS keeps answering
-> NXDOMAIN). Start Fresh's install + first build FIRST (detached, retrying — the
-> resumable order reuses the challenge), and while the NS is still NXDOMAIN, move on to
-> Rebuild and Live: neither needs the DNS gate (the rebuild env's cert is already issued;
-> the live update issues nothing). Circle back to Fresh when the TXT resolves — re-run
-> `build`, it installs the cert and continues — and finish the Fresh rows last. Never let
-> the Fresh wait idle the whole run: the other tests are not blocked by it.
+> **Order of operations (LOCKED) — start Fresh FIRST, then run Rebuild + Live, then
+> finish Fresh.** The Fresh env's first build is gated on Cloudflare DNS-01 propagation —
+> the long pole (~10–45 min: the provider API accepts the challenge TXT immediately while
+> the authoritative NS keeps answering NXDOMAIN). Rebuild and Live do NOT need that gate
+> (the rebuild env's cert is already issued; the live update issues nothing), so they run
+> WHILE Fresh waits — never after it. Concretely, in this order:
+>   1. **Fresh install**, then its **first build**, DETACHED (log + poll). Do not sit on it.
+>   2. **Rebuild - Teardown** → **Rebuild - Build** → **Live - Update** — the whole point
+>      of starting Fresh first is that these run during the Fresh DNS wait.
+>   3. **Return to Fresh** once the challenge TXT serves at the authoritative NS: re-run
+>      the resumable `build` (it installs the cert and continues), then Fresh - Teardown,
+>      Fresh - Build, Fresh - Uninstall.
+> Every Fresh-side stall (cert propagation, a docker-pull flake, a slow image) is handled
+> the same way: the moment Fresh is blocked on something that does not need the operator,
+> start/continue Rebuild and Live and let Fresh's detached loop retry — a stall in one
+> world is never a reason to idle the others.
 >
 > **The same rule covers EVERY fresh-side stall** — a docker-pull auth/rate-limit flake, a
 > slow image download, a waiting-on-a-service loop: the moment Fresh is blocked on
@@ -335,6 +342,41 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   envs is the gap) is a named follow-up.
 - **The version ping is `freehold update --check`** — `CP version:` + pending migrations;
   run it after every step that leaves the world running.
+
+### Per-world terraform state (the shared-root clobber)
+
+- **A world's terraform state is pinned per world ONLY when the module drops its
+  `backend` block.** Pre-fix, `main.tf` pinned `backend "local" { path =
+  "/srv/data/freehold-tf/terraform.tfstate" }`, so every world on a host wrote the
+  SAME state file — one world's build clobbered another's (fresh's build destroyed
+  librem's state). The fix removes the block (default local backend → state lands in
+  `$ROOT/terraform.tfstate`, and `tf.sh` cd's to the world's per-world root via
+  `TF_ROOT`) and `tf.sh` drops a stale `.terraform/terraform.tfstate` before init —
+  TF 1.9's `-reconfigure` does NOT handle UNSETTING a backend, so the recorded
+  backend must be removed or the apply refuses with "Backend initialization
+  required". Diagnose: `ls /srv/data/freehold-tf*/` — every world should have its own
+  `freehold-tf-<dashed-domain>/terraform.tfstate`; the shared `/srv/data/freehold-tf`
+  should stay empty.
+- **A world built under the old shared backend is adopted, keyed by its k3s IP.**
+  `stageDeployTf` moves a legacy `/srv/data/freehold-tf` state (or the whole dir)
+  into the per-world root when its k3s node IP appears in the legacy state/kubeconfig
+  — each world has a unique k3s IP. A world whose state was CLOBBERED (its objects
+  exist but no state names them) is repaired once by deleting the orphaned
+  terraform-managed k8s objects (namespaces `caddy`/`litellm`, the
+  `freehold-compute-door` ClusterRoleBinding + `compute-door` SA) and re-running
+  `build` — the state re-populates.
+- **A deployed CP binary only takes effect once the console process restarts.**
+  `update` replaces `/srv/data/cp/bin/freehold-console` AND restarts the serve, so a
+  post-update build runs the new code; verify with the console's process start time
+  vs the binary mtime (`ps -o lstart,cmd -C freehold-console`). A STALE running
+  console is the trap: the on-disk binary contains the fix but the world still
+  behaves old.
+- **A pre-persistence world's config lacks the `[plane]` size fields.** `[plane]` must
+  carry `size_gb`/`pool_size_gb`/`rootfs_gb`/`memory_mb`/`storage`/`bridge`/`relay_gw`;
+  the new binary LOUD-FAILS the build without them ("the world's config carries no
+  memory_mb/…"). Add them to the profile config and re-run `update`, which re-renders
+  the console's `--world-config` (a build alone reads the console's copy, not the
+  operator's file).
 
 ### Earlier notes (v0.7.0)
 

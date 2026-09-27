@@ -35,9 +35,30 @@ const (
 	ScopeTenantData
 )
 
-// tfModuleDir is where the embedded terraform module lives ON the box (ships
-// there by the CP world_build's stageDeployTf); destroy runs it from there.
+// tfModuleDir is the LEGACY shared terraform module/state dir on the box. The
+// embedded module now ships to a PER-WORLD root (tfModuleDir + "-" + dashed
+// domain) — the shared root clobbered another world's state. It survives only
+// as a fallback for a world built before per-world roots.
 const tfModuleDir = "/srv/data/freehold-tf"
+
+// tfRootFor picks the dir to run `terraform destroy` from: the world's own
+// per-world root when it holds a staged module + state, else the legacy shared
+// root when THAT holds a staged module + state, else none. A directory with a
+// state file but no scripts/tf.sh (an orphaned legacy state left by a world
+// installed before per-world roots) is skipped, not run — running it would fail
+// on the missing script and abort the teardown.
+func (r *ExecRunner) tfRootFor() (string, bool) {
+	perWorld := tfModuleDir
+	if r.Domain != "" {
+		perWorld = tfModuleDir + "-" + strings.ReplaceAll(r.Domain, ".", "-")
+	}
+	for _, dir := range []string{perWorld, tfModuleDir} {
+		if ok, _ := r.Exec("test -f " + dir + "/terraform.tfstate && test -x " + dir + "/scripts/tf.sh"); ok {
+			return dir, true
+		}
+	}
+	return "", false
+}
 
 // String renders the scope for operator-facing output.
 func (s Scope) String() string {
@@ -414,15 +435,15 @@ func (r *ExecRunner) DestroyPool(vg, pool string) error {
 // survives by design (the --data path handles datasets separately).
 func (r *ExecRunner) TerraformDestroy() ([]string, error) {
 	var log []string
-	ok, _ := r.Exec("test -f " + tfModuleDir + "/terraform.tfstate")
+	dir, ok := r.tfRootFor()
 	if !ok {
 		log = append(log, "terraform: no managed state on the box — skipping terraform destroy")
 		return log, nil
 	}
 	log = append(log, "terraform destroy (substrate + litellm/postgres kube workloads)")
-	ok, out := r.Exec("cd " + tfModuleDir + " && " + tfModuleDir + "/scripts/tf.sh destroy")
+	ok2, out := r.Exec("cd " + dir + " && TF_ROOT=" + dir + " " + dir + "/scripts/tf.sh destroy")
 	log = append(log, strings.TrimSpace(out))
-	if !ok {
+	if !ok2 {
 		return log, fmt.Errorf("terraform destroy failed:\n%s", out)
 	}
 	return log, nil

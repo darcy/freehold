@@ -1688,7 +1688,10 @@ func (s *Spec) pinRelayHost() error {
 		if !hostsLineRe.MatchString(s.RelayHost) || !hostsLineRe.MatchString(relayIP) {
 			return fmt.Errorf("pin relay host into cp: refusing unsafe values (host %q / ip %q must be a bare hostname and IP)", s.RelayHost, relayIP)
 		}
-		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
+		// REPLACE any existing line for this host, never merely append-if-absent:
+		// a stale entry from a prior cycle (the relay came back on a new lease)
+		// would otherwise satisfy a grep and keep resolving to the dead IP.
+		pin := fmt.Sprintf("pct exec %d -- sh -c \"sed -i '/[[:space:]]%s$/d' /etc/hosts; echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
 		if err := s.run(pin, 30); err != nil {
 			return fmt.Errorf("pin relay host into cp: %w", err)
 		}

@@ -572,3 +572,40 @@ func TestRemoveRunnerSubstrateResidualErrors(t *testing.T) {
 		t.Fatal("a residual key must error, not report success")
 	}
 }
+
+// TestTfRootForPicksPerWorldThenLegacy: destroy runs from the world's own
+// per-world root when it holds a staged module+state; the legacy shared root
+// is only a fallback. A legacy state with no scripts (an orphaned legacy dir)
+// must be SKIPPED, never run — running it fails on the missing tf.sh.
+func TestTfRootForPicksPerWorldThenLegacy(t *testing.T) {
+	const perWorld = "/srv/data/freehold-tf-world-test"
+	cases := []struct {
+		name       string
+		perWorldOK bool
+		legacyOK   bool
+		wantDir    string
+		wantFound  bool
+	}{
+		{"per-world wins", true, true, perWorld, true},
+		{"legacy fallback", false, true, "/srv/data/freehold-tf", true},
+		{"orphaned legacy skipped", false, false, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := &ExecRunner{Domain: "world.test"}
+			r.SetExec(func(cmd string) (bool, string) {
+				switch {
+				case strings.HasPrefix(cmd, "test -f "+perWorld+"/"):
+					return c.perWorldOK, ""
+				case strings.HasPrefix(cmd, "test -f /srv/data/freehold-tf/"):
+					return c.legacyOK, ""
+				}
+				return false, ""
+			})
+			dir, ok := r.tfRootFor()
+			if ok != c.wantFound || dir != c.wantDir {
+				t.Fatalf("got (%q,%v), want (%q,%v)", dir, ok, c.wantDir, c.wantFound)
+			}
+		})
+	}
+}
