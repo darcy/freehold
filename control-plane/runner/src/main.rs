@@ -82,7 +82,13 @@ struct ServeArgs {
     /// Allow a non-loopback bind. Every privileged call is signed (audience +
     /// grant + 60s window), so a LAN bind is safe for runners agents reach over
     /// the network; off by default so a runner is never exposed by accident.
-    #[arg(long, env = "FREEHOLD_RUNNER_ALLOW_REMOTE", default_value_t = false)]
+    /// Boolish env values (1/yes/on) are accepted — the env-file convention.
+    #[arg(
+        long,
+        env = "FREEHOLD_RUNNER_ALLOW_REMOTE",
+        default_value_t = false,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     allow_remote: bool,
 }
 

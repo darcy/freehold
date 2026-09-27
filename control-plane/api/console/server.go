@@ -981,18 +981,28 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	// it, nothing else). The fill is refused until the operator CONFIRMED the
 	// presented pubkeys on this page — the barrier that keeps a compromised
 	// provisioning agent from sealing the credential to its own key.
-	if cap, isCap := s.Store.GetCapability(req.Name); isCap && cap.SelfHosted() {
+	//
+	// State is read FRESH from disk (not the startup memory snapshot): the
+	// capability record was written by the agent-tools PROCESS (the
+	// provision_runner flow), out-of-band from this serve — the same reason
+	// overview() re-opens.
+	fresh, err := state.Open(s.stateDir())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
+		return
+	}
+	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
 		if cap.EnrollConfirmedAt == nil {
 			writeErr(w, http.StatusBadRequest, "self-hosted door not confirmed — verify the presented pubkeys on this page against the guest's own `runner enroll` output (Compute's report), then confirm the enrollment; the fill unlocks after that")
 			return
 		}
-		rec, pkgJSON, err := provisioner.RotateSecretSelfHosted(s.Store, req.Name, []byte(req.Secret))
+		rec, pkgJSON, err := provisioner.RotateSecretSelfHosted(fresh, req.Name, []byte(req.Secret))
 		if err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
-		if dial := s.relayDialFor(s.Store.Snapshot().RelayURL); dial != "" {
-			if err := provisioner.SyncRunnerChannel(s.Store, dial, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
+		if dial := s.relayDialFor(fresh.Snapshot().RelayURL); dial != "" {
+			if err := provisioner.SyncRunnerChannel(fresh, dial, s.relayAuthFor(), req.Name, fresh.Dir()); err != nil {
 				writeErr(w, statusForAction(err), err.Error())
 				return
 			}
@@ -1004,15 +1014,18 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if _, err := provisioner.RotateSecret(s.Store, req.Name, []byte(req.Secret)); err != nil {
+	// The CP-guest path rotates through the FRESH store too: the runner (and
+	// its secret) may have been provisioned by the agent-tools process after
+	// this serve started.
+	if _, err := provisioner.RotateSecret(fresh, req.Name, []byte(req.Secret)); err != nil {
 		writeErr(w, statusForAction(err), err.Error())
 		return
 	}
 	var relayURL *string
-	snap := s.Store.Snapshot()
+	snap := fresh.Snapshot()
 	relayURL = snap.RelayURL
 	if dial := s.relayDialFor(snap.RelayURL); dial != "" {
-		if err := provisioner.SyncRunnerChannel(s.Store, dial, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
+		if err := provisioner.SyncRunnerChannel(fresh, dial, s.relayAuthFor(), req.Name, fresh.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -1023,7 +1036,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	// even when the restart fails (soft: reported, never blocks the rotate).
 	restarted := false
 	restartErr := ""
-	if rec, ok := s.Store.GetCapability(req.Name); ok {
+	if rec, ok := fresh.GetCapability(req.Name); ok {
 		if err := s.restartDoor(req.Name, rec.Port); err != nil {
 			restartErr = err.Error()
 		} else {
@@ -1041,6 +1054,8 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 // `runner enroll` output (Compute's audited report in the thread) BEFORE
 // confirming — this is what binds the later credential fill to the key the
 // guest actually holds, not to whatever the provisioning agent presented.
+// State is read fresh from disk: the capability was recorded by the
+// agent-tools process (out-of-band from this serve's startup snapshot).
 func (s *Server) enrollConfirm(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.requireSession(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -1057,7 +1072,12 @@ func (s *Server) enrollConfirm(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	if err := s.Store.ConfirmEnrollment(req.Name, uint64(time.Now().Unix())); err != nil {
+	fresh, err := state.Open(s.stateDir())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
+		return
+	}
+	if err := fresh.ConfirmEnrollment(req.Name, uint64(time.Now().Unix())); err != nil {
 		writeErr(w, statusForAction(err), err.Error())
 		return
 	}
@@ -1133,16 +1153,34 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad grant body")
 		return
 	}
-	grants, err := provisioner.GrantAgent(s.Store, req.Name, req.Pubkey)
+	// A SELF-HOSTED runner's whitelist is the LIVE relay roster only (no
+	// shipped package exists to append grants to) — the grant is a pure
+	// put-user; state read fresh from disk (the capability was recorded by
+	// the agent-tools process, out-of-band from this serve).
+	fresh, err := state.Open(s.stateDir())
 	if err != nil {
-		writeErr(w, statusForAction(err), err.Error())
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
+	var grants []string
+	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
+		if !provisioner.IsPubkey(req.Pubkey) {
+			writeErr(w, http.StatusBadRequest, "invalid pubkey")
+			return
+		}
+		grants = []string{req.Pubkey}
+	} else {
+		grants, err = provisioner.GrantAgent(fresh, req.Name, req.Pubkey)
+		if err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+	}
 	var relayURL *string
-	snap := s.Store.Snapshot()
+	snap := fresh.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.PutUserMembership(s.Store, *relayURL, s.relayAuthFor(), req.Name, req.Pubkey, s.Store.Dir()); err != nil {
+		if err := provisioner.PutUserMembership(fresh, s.relayDialFor(relayURL), s.relayAuthFor(), req.Name, req.Pubkey, fresh.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -1164,16 +1202,28 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad revoke-grant body")
 		return
 	}
-	grants, err := provisioner.RevokeGrant(s.Store, req.Name, req.Pubkey)
+	// Mirror of grant: a SELF-HOSTED runner's whitelist is the live roster —
+	// no package to strip; state read fresh from disk.
+	fresh, err := state.Open(s.stateDir())
 	if err != nil {
-		writeErr(w, statusForAction(err), err.Error())
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
+	var grants []string
+	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
+		grants = []string{}
+	} else {
+		grants, err = provisioner.RevokeGrant(fresh, req.Name, req.Pubkey)
+		if err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+	}
 	var relayURL *string
-	snap := s.Store.Snapshot()
+	snap := fresh.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.RemoveUserMembership(s.Store, *relayURL, s.relayAuthFor(), req.Name, req.Pubkey, s.Store.Dir()); err != nil {
+		if err := provisioner.RemoveUserMembership(fresh, s.relayDialFor(relayURL), s.relayAuthFor(), req.Name, req.Pubkey, fresh.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
