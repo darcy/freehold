@@ -1099,6 +1099,15 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	if ans.Runner.Pubkey == "" {
 		cfg.Runner = prev.Runner
 	}
+	// The runner ADDR is an install-time fact too: a run whose answers carry no
+	// addr (the CP-driven reconcile, a thin-box build — no --local-port) must
+	// keep the recorded one, else every such run writes [runner] addr = '' and
+	// uninstall later falls into the broken transient path. Pubkey being
+	// non-empty (loaded from the package) means the branch above kept ans, so
+	// preserve the addr on its own.
+	if ans.Runner.Addr == "" {
+		cfg.Runner.Addr = prev.Runner.Addr
+	}
 	// Size/placement: per-field — the answers' non-zero values win, the
 	// prev's survive otherwise (an update's zero-filled answers must not
 	// wipe the persisted placement).
