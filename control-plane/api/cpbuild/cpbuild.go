@@ -448,6 +448,9 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if spec.Bridge == "" {
 		spec.Bridge = "vmbr0"
 	}
+	if spec.Storage == "" {
+		spec.Storage = "local-lvm"
+	}
 	if vmid != 0 {
 		spec.VMID = &vmid
 	}

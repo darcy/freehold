@@ -1054,6 +1054,16 @@ func (e *Engine) fromAnswers() *config.Config {
 		Managed: []string{"relay", "cp"},
 		CPAName: e.F.AgentName,
 	}
+	// Persist the guest size/placement: the world-config renders them from
+	// the CONFIG (not the invocation's flags — an update's flags never carry
+	// them), so every later boot sees the operator's actual values.
+	cfg.Plane.SizeGB = uint32(e.F.SizeGB)
+	cfg.Plane.PoolSizeGB = uint32(e.F.PoolSizeGB)
+	cfg.Plane.RootfsGB = e.F.RootfsGB
+	cfg.Plane.MemoryMB = e.F.MemoryMB
+	cfg.Plane.Storage = e.F.StorageName
+	cfg.Plane.Bridge = e.F.Bridge
+	cfg.Plane.RelayGW = e.F.RelayGw
 	if relayDomain != "" {
 		cfg.RelayURL = "https://" + relayDomain
 		cfg.RelayWsURL = "wss://" + relayDomain
@@ -1994,13 +2004,16 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		PlanePool:      derefStrPtr(cfg.Plane.Backend),
 		PlaneKind:      derefStrPtr(cfg.Plane.BackendKind),
 		ThinPool:       derefStrPtr(cfg.Plane.ThinPool),
-		SizeGB:         e.F.SizeGB,
-		PoolSizeGB:     e.F.PoolSizeGB,
-		RootfsGB:       e.F.RootfsGB,
-		MemoryMB:       e.F.MemoryMB,
-		StorageName:    e.F.StorageName,
-		RelayGW:        e.F.RelayGw,
-		Bridge:         e.F.Bridge,
+		// Size/placement: the CONFIG is the durable source (the install
+		// persists them); the invocation's flags are the fallback for a
+		// config written before persistence shipped.
+		SizeGB:         uint64(cfg.Plane.SizeGB),
+		PoolSizeGB:     uint64(cfg.Plane.PoolSizeGB),
+		RootfsGB:       cfg.Plane.RootfsGB,
+		MemoryMB:       cfg.Plane.MemoryMB,
+		StorageName:    cfg.Plane.Storage,
+		RelayGW:        cfg.Plane.RelayGW,
+		Bridge:         cfg.Plane.Bridge,
 		RelayLxc:       derefU32(cfg.Lxc.Relay.Vmid),
 		RelayCompose:   stages.RelayComposeDir,
 		K3sVmid:        derefU32(cfg.Lxc.K3s.Vmid),
