@@ -434,6 +434,20 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 		Bridge:   s.Bridge,
 		Mounts:   mounts,
 	}
+	// Defensive defaults: a spec with blank size/placement fields fails pct
+	// with "memory: minimum 16" / "net0: invalid format" — a console whose
+	// world-config was rendered by an update (whose flags carry no size
+	// fields) ships exactly those blanks. The house shape's own values are
+	// the floor; a populated spec is untouched.
+	if spec.MemoryMB < 16 {
+		spec.MemoryMB = 2048
+	}
+	if spec.RootfsGB < 4 {
+		spec.RootfsGB = 16
+	}
+	if spec.Bridge == "" {
+		spec.Bridge = "vmbr0"
+	}
 	if vmid != 0 {
 		spec.VMID = &vmid
 	}

@@ -1797,6 +1797,16 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 	}
 	if cfg, _ := config.Load(e.F.ConfigPath); cfg != nil {
 		if wc := e.worldConfigJSON(cfg); wc != "" {
+			// The update's flags carry no size/placement fields (memory,
+			// bridge, storage, rootfs) — worldConfigJSON renders them from
+			// e.F, which is zero here. The RUNNING console's world-config is
+			// the last full render: merge it in so the redeployed console
+			// keeps a bootable spec. (A blank spec made the next
+			// guest-create after any update fail the substrate tool's
+			// parameter validation.)
+			if prior := e.runningWorldConfig(); prior != "" {
+				wc = mergeWorldConfig(prior, wc)
+			}
 			args = append(args, "--world-config", wc)
 		}
 	}
@@ -1808,6 +1818,67 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 	}
 	_, err = e.selfStage("deploy-cp", args)
 	return err
+}
+
+// runningWorldConfig reads the world-config the RUNNING console was started
+// with (its unit file's ExecStart), or "" when there is none. Read-only; the
+// value is the last FULL render (the install/bootstrap's flags were complete
+// when it was written).
+func (e *Engine) runningWorldConfig() string {
+	if e.Provider == nil {
+		return ""
+	}
+	vmid, err := e.findLxcVmidExact("cp")
+	if err != nil {
+		return ""
+	}
+	out, err := e.Provider.GuestExec(strconv.FormatUint(uint64(vmid), 10),
+		`sh -c 'cat /proc/$(pgrep -f "console serve" | head -1)/cmdline | tr "\000" "\n" | grep -A1 world-config | tail -1'`, 30)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Stdout)
+}
+
+// mergeWorldConfig fills the NEW world-config's zero/missing fields from the
+// prior one. The new render is authoritative for identity/coords (name, urls,
+// pubkeys, vmids); the prior is authoritative for the size/placement fields
+// the update's flags never carry (memory_mb, bridge, storage, rootfs_gb,
+// size_gb, pool_size_gb, relay_gw).
+func mergeWorldConfig(prior, next string) string {
+	var p, n config.Coords
+	if err := json.Unmarshal([]byte(prior), &p); err != nil {
+		return next
+	}
+	if err := json.Unmarshal([]byte(next), &n); err != nil {
+		return next
+	}
+	if n.MemoryMB == 0 {
+		n.MemoryMB = p.MemoryMB
+	}
+	if n.Bridge == "" {
+		n.Bridge = p.Bridge
+	}
+	if n.StorageName == "" {
+		n.StorageName = p.StorageName
+	}
+	if n.RootfsGB == 0 {
+		n.RootfsGB = p.RootfsGB
+	}
+	if n.SizeGB == 0 {
+		n.SizeGB = p.SizeGB
+	}
+	if n.PoolSizeGB == 0 {
+		n.PoolSizeGB = p.PoolSizeGB
+	}
+	if n.RelayGW == "" {
+		n.RelayGW = p.RelayGW
+	}
+	b, err := json.Marshal(n)
+	if err != nil {
+		return next
+	}
+	return string(b)
 }
 
 // StampVersionPin writes the CP's version pin through the self-staged
