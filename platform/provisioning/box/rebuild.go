@@ -1099,6 +1099,44 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	if ans.Runner.Pubkey == "" {
 		cfg.Runner = prev.Runner
 	}
+	// Size/placement: per-field — the answers' non-zero values win, the
+	// prev's survive otherwise (an update's zero-filled answers must not
+	// wipe the persisted placement).
+	if ans.Plane.SizeGB != 0 {
+		cfg.Plane.SizeGB = ans.Plane.SizeGB
+	} else {
+		cfg.Plane.SizeGB = prev.Plane.SizeGB
+	}
+	if ans.Plane.PoolSizeGB != 0 {
+		cfg.Plane.PoolSizeGB = ans.Plane.PoolSizeGB
+	} else {
+		cfg.Plane.PoolSizeGB = prev.Plane.PoolSizeGB
+	}
+	if ans.Plane.RootfsGB != 0 {
+		cfg.Plane.RootfsGB = ans.Plane.RootfsGB
+	} else {
+		cfg.Plane.RootfsGB = prev.Plane.RootfsGB
+	}
+	if ans.Plane.MemoryMB != 0 {
+		cfg.Plane.MemoryMB = ans.Plane.MemoryMB
+	} else {
+		cfg.Plane.MemoryMB = prev.Plane.MemoryMB
+	}
+	if ans.Plane.Storage != "" {
+		cfg.Plane.Storage = ans.Plane.Storage
+	} else {
+		cfg.Plane.Storage = prev.Plane.Storage
+	}
+	if ans.Plane.Bridge != "" {
+		cfg.Plane.Bridge = ans.Plane.Bridge
+	} else {
+		cfg.Plane.Bridge = prev.Plane.Bridge
+	}
+	if ans.Plane.RelayGW != "" {
+		cfg.Plane.RelayGW = ans.Plane.RelayGW
+	} else {
+		cfg.Plane.RelayGW = prev.Plane.RelayGW
+	}
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
 	// keep them (like Plane) or it would silently erase them on every run —
