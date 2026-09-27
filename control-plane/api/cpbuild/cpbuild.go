@@ -434,19 +434,25 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 		Bridge:   s.Bridge,
 		Mounts:   mounts,
 	}
-	// Defensive defaults: a spec with blank size/placement fields fails pct
-	// with "memory: minimum 16" / "net0: invalid format" — a console whose
-	// world-config was rendered by an update (whose flags carry no size
-	// fields) ships exactly those blanks. The house shape's own values are
-	// the floor; a populated spec is untouched.
+	// Fail LOUD on blank size/placement: a world-config without them (a
+	// world installed before persistence shipped) would otherwise reach the
+	// substrate tool as "memory 0"/"bridge=" and fail with a cryptic usage
+	// error. The operator's values live in the world's config; name the fix.
+	var missing []string
 	if spec.MemoryMB < 16 {
-		spec.MemoryMB = 2048
+		missing = append(missing, "memory_mb")
 	}
 	if spec.RootfsGB < 4 {
-		spec.RootfsGB = 16
+		missing = append(missing, "rootfs_gb")
 	}
 	if spec.Bridge == "" {
-		spec.Bridge = "vmbr0"
+		missing = append(missing, "bridge")
+	}
+	if spec.Storage == "" {
+		missing = append(missing, "storage")
+	}
+	if len(missing) > 0 {
+		return 0, fmt.Errorf("the world's config carries no %s — guest creation cannot proceed; add them under [plane] in the world's config and re-run the build (worlds installed after persistence ship them)", strings.Join(missing, "/"))
 	}
 	if vmid != 0 {
 		spec.VMID = &vmid

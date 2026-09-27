@@ -1054,6 +1054,16 @@ func (e *Engine) fromAnswers() *config.Config {
 		Managed: []string{"relay", "cp"},
 		CPAName: e.F.AgentName,
 	}
+	// Persist the guest size/placement: the world-config renders them from
+	// the CONFIG (not the invocation's flags — an update's flags never carry
+	// them), so every later boot sees the operator's actual values.
+	cfg.Plane.SizeGB = uint32(e.F.SizeGB)
+	cfg.Plane.PoolSizeGB = uint32(e.F.PoolSizeGB)
+	cfg.Plane.RootfsGB = e.F.RootfsGB
+	cfg.Plane.MemoryMB = e.F.MemoryMB
+	cfg.Plane.Storage = e.F.StorageName
+	cfg.Plane.Bridge = e.F.Bridge
+	cfg.Plane.RelayGW = e.F.RelayGw
 	if relayDomain != "" {
 		cfg.RelayURL = "https://" + relayDomain
 		cfg.RelayWsURL = "wss://" + relayDomain
@@ -1088,6 +1098,44 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	// would otherwise clobber [runner] with an empty pubkey).
 	if ans.Runner.Pubkey == "" {
 		cfg.Runner = prev.Runner
+	}
+	// Size/placement: per-field — the answers' non-zero values win, the
+	// prev's survive otherwise (an update's zero-filled answers must not
+	// wipe the persisted placement).
+	if ans.Plane.SizeGB != 0 {
+		cfg.Plane.SizeGB = ans.Plane.SizeGB
+	} else {
+		cfg.Plane.SizeGB = prev.Plane.SizeGB
+	}
+	if ans.Plane.PoolSizeGB != 0 {
+		cfg.Plane.PoolSizeGB = ans.Plane.PoolSizeGB
+	} else {
+		cfg.Plane.PoolSizeGB = prev.Plane.PoolSizeGB
+	}
+	if ans.Plane.RootfsGB != 0 {
+		cfg.Plane.RootfsGB = ans.Plane.RootfsGB
+	} else {
+		cfg.Plane.RootfsGB = prev.Plane.RootfsGB
+	}
+	if ans.Plane.MemoryMB != 0 {
+		cfg.Plane.MemoryMB = ans.Plane.MemoryMB
+	} else {
+		cfg.Plane.MemoryMB = prev.Plane.MemoryMB
+	}
+	if ans.Plane.Storage != "" {
+		cfg.Plane.Storage = ans.Plane.Storage
+	} else {
+		cfg.Plane.Storage = prev.Plane.Storage
+	}
+	if ans.Plane.Bridge != "" {
+		cfg.Plane.Bridge = ans.Plane.Bridge
+	} else {
+		cfg.Plane.Bridge = prev.Plane.Bridge
+	}
+	if ans.Plane.RelayGW != "" {
+		cfg.Plane.RelayGW = ans.Plane.RelayGW
+	} else {
+		cfg.Plane.RelayGW = prev.Plane.RelayGW
 	}
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
@@ -1994,13 +2042,18 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		PlanePool:      derefStrPtr(cfg.Plane.Backend),
 		PlaneKind:      derefStrPtr(cfg.Plane.BackendKind),
 		ThinPool:       derefStrPtr(cfg.Plane.ThinPool),
-		SizeGB:         e.F.SizeGB,
-		PoolSizeGB:     e.F.PoolSizeGB,
-		RootfsGB:       e.F.RootfsGB,
-		MemoryMB:       e.F.MemoryMB,
-		StorageName:    e.F.StorageName,
-		RelayGW:        e.F.RelayGw,
-		Bridge:         e.F.Bridge,
+		// Size/placement: the CONFIG is the durable source (the install
+		// persists them). A config written before persistence shipped has
+		// none — the world-config then renders blanks and the boot fails
+		// loudly; the repair is adding the fields under [plane] in that
+		// world's config (or re-running its install).
+		SizeGB:         uint64(cfg.Plane.SizeGB),
+		PoolSizeGB:     uint64(cfg.Plane.PoolSizeGB),
+		RootfsGB:       cfg.Plane.RootfsGB,
+		MemoryMB:       cfg.Plane.MemoryMB,
+		StorageName:    cfg.Plane.Storage,
+		RelayGW:        cfg.Plane.RelayGW,
+		Bridge:         cfg.Plane.Bridge,
 		RelayLxc:       derefU32(cfg.Lxc.Relay.Vmid),
 		RelayCompose:   stages.RelayComposeDir,
 		K3sVmid:        derefU32(cfg.Lxc.K3s.Vmid),
