@@ -2,7 +2,7 @@
 name: release-test-proxmox
 description: Use when validating a freehold pre-release on a real Proxmox host (e.g. "test the release", "run the Proxmox release tests"). Restores the pre-release's own downloaded assets and runs three envs on a real PVE host — Fresh (the full install→uninstall lifecycle on a disposable world), Rebuild (teardown→build on the persistent env, left running), and Live (`freehold update` against the always-running env) — then updates the release's test-status table rows for Proxmox.
 metadata:
-  version: 2.2.0
+  version: 2.3.0
   author: freehold
   license: MIT
 ---
@@ -88,15 +88,28 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 ## Workflow
 
-> **Order the tests around the CF gate.** The Fresh env's first build waits on DNS-01
-> propagation — the long pole (~10–45 min: the provider API accepts the challenge TXT
-> immediately while the authoritative NS keeps answering NXDOMAIN). Start Fresh's
-> install + first build FIRST (detached, retrying — the resumable order reuses the
-> challenge), and while the NS is still NXDOMAIN, move on to Rebuild and Live:
-> neither needs the DNS gate (the rebuild env's cert is already issued; the live
-> update issues nothing). Circle back to Fresh when the TXT resolves — re-run
-> `build`, it installs the cert and continues — and finish the Fresh rows last.
-> Never let the Fresh wait idle the whole run: the other tests are not blocked by it.
+> **Order the tests around the CF gate — and around ANY fresh stall.** The Fresh env's
+> first build waits on DNS-01 propagation — the long pole (~10–45 min: the provider API
+> accepts the challenge TXT immediately while the authoritative NS keeps answering
+> NXDOMAIN). Start Fresh's install + first build FIRST (detached, retrying — the
+> resumable order reuses the challenge), and while the NS is still NXDOMAIN, move on to
+> Rebuild and Live: neither needs the DNS gate (the rebuild env's cert is already issued;
+> the live update issues nothing). Circle back to Fresh when the TXT resolves — re-run
+> `build`, it installs the cert and continues — and finish the Fresh rows last. Never let
+> the Fresh wait idle the whole run: the other tests are not blocked by it.
+>
+> **The same rule covers EVERY fresh-side stall** — a docker-pull auth/rate-limit flake, a
+> slow image download, a waiting-on-a-service loop: the moment Fresh is blocked on
+> something that does not need the operator, START (or continue) Rebuild and Live and let
+> Fresh's detached loop retry. The tests are independent worlds; a stall in one is never
+> a reason to idle the others. Come back when the blocker clears (a retry of the resumable
+> build usually just continues).
+>
+> **Update the release table AS EACH ROW'S EVIDENCE LANDS** — green when the row's
+> evidence is captured, red the moment a row fails — not in a batch at the end. The table
+> is the operator's live progress bar; a run that dies mid-way still leaves an honest,
+> current table. (The disposition step below still gates the FINAL state before
+> release-publish.)
 >
 > **Never probe the challenge name through a caching resolver while it is negative.**
 > An NXDOMAIN answer is cached (negative TTL — minutes to an hour) by 1.1.1.1/8.8.8.8
@@ -104,10 +117,12 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 > propagation — poisoning later checks and (in principle) the ACME validation path.
 > While the record is negative, check either the provider's API (the record exists?)
 > or the AUTHORITATIVE NS directly (`@<zone NS>`, uncached); the build's own
-> propagation check already targets the authoritative NS. Hold the fresh build's
-> next retry until the other tests' rows are done, so its first ACME-triggering
-> attempt runs on a settled box instead of interleaved with the other builds'
-> terraform work (the host-side tf dir locks — concurrent builds contest it).
+> propagation check already targets the authoritative NS.
+>
+> **Concurrent builds: safe since per-world tf roots (v0.7.5) — except a world whose CP
+> predates them.** A current CP builds in its OWN tf root (no contention); a CP on an
+> older build still uses the legacy shared `/srv/data/freehold-tf` — never run two such
+> worlds' builds concurrently (their terraform states clobber each other).
 >
 > **Track the run as a todo list** — one item per prep step + per table row, in the
 > order they run: assets restored → Fresh install → Fresh build (waiting on CF) →

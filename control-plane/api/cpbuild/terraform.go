@@ -134,6 +134,9 @@ func (s *Spec) tfVars() ([]string, error) {
 		"-var", "k3s_ip=" + config.StripCIDR(s.ProxyIP),
 		"-var", "k3s_gw=" + s.RelayGW,
 		"-var", "thin_pool=" + s.ThinPool,
+		// The provider's kubeconfig rides the WORLD's own tf root — the
+		// variables.tf default is the LEGACY shared path.
+		"-var", "kubeconfig_path=" + s.tfRoot() + "/kubeconfig",
 	}, nil
 }
 
