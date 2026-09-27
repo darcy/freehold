@@ -396,11 +396,11 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   ```
   Run it detached (the buzz image is large — a single `pct exec` pipe can exceed
   the runner's call timeout; background it on the host and poll a marker file).
-- **A fresh install may not record `[runner] addr` (fixed on main #313).** If the
-  profile's `[runner] addr` is empty, `uninstall --remove-data` refuses ("needs
-  the build box") because it can't take the box's local-runner path. Until the
-  fix ships, set `addr = '127.0.0.1:<port>'` in the profile config (and start the
-  matching runner) before the Fresh - Uninstall step.
+- **A profile whose `[runner] addr` is empty forces `uninstall --remove-data`
+  onto the broken transient path** ("needs the build box"). `install` records the
+  addr; a profile that predates that, or whose addr was cleared by an older
+  build, needs `addr = '127.0.0.1:<port>'` written under `[runner]` (and the
+  matching runner started there) before the Fresh - Uninstall step.
 
 ### Earlier notes (v0.7.0)
 
