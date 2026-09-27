@@ -11,6 +11,13 @@ there; if it is work not yet done, it belongs here.
 
 ## Provisioning / substrate
 
+- **The runner-client baked into every guest, and kept fresh on update.** The
+  runner-client install is a `create-lxc` skill step today (Compute fetches
+  the `runner` release asset per guest); the mechanical version bakes it into
+  the provisioning engine's LXC boot for CORE LXCs too (cp/relay/k3s), and
+  `freehold update` sweeps EVERY created/adopted guest — replace the binary
+  where it drifted, re-run nothing else — so a resident runner never runs a
+  stale build against a newer world.
 - **World-config degradation on update.** `FlagsFromConfig` derives flags from
   the tenant config only, and the config does not record the substrate-create
   params (memory/bridge/storage/rootfs/relay-gw/thin-pool), so an update's

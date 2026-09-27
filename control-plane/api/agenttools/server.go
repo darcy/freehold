@@ -146,12 +146,16 @@ func (s *Server) toolList() []map[string]interface{} {
 			}, []string{"runner", "pubkeys"}),
 		},
 		{
-			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door. Grants land live; the grantees' pods are re-applied with the new coords.",
+			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door. hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's LAN address pods will dial); the CP records the identity, starts nothing, and the target runs its own unit. Grants land live; the grantees' pods are re-applied with the new coords.",
 			"inputSchema": i(map[string]interface{}{
-				"name":     map[string]interface{}{"type": "string"},
-				"kind":     map[string]interface{}{"type": "string"},
-				"address":  map[string]interface{}{"type": "string"},
-				"grant_to": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"name":       map[string]interface{}{"type": "string"},
+				"kind":       map[string]interface{}{"type": "string"},
+				"address":    map[string]interface{}{"type": "string"},
+				"grant_to":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"hosted":     map[string]interface{}{"type": "string"},
+				"host":       map[string]interface{}{"type": "string"},
+				"pubkey":     map[string]interface{}{"type": "string"},
+				"enc_pubkey": map[string]interface{}{"type": "string"},
 			}, []string{"name", "kind", "address", "grant_to"}),
 		},
 		{
@@ -234,6 +238,10 @@ type provisionRunnerArgs struct {
 	Kind    string   `json:"kind"`
 	Address string   `json:"address"`
 	GrantTo []string `json:"grant_to"`
+	Hosted  string   `json:"hosted"`
+	Host    string   `json:"host"`
+	Pubkey  string   `json:"pubkey"`
+	EncPub  string   `json:"enc_pubkey"`
 }
 type revokeRunnerArgs struct {
 	Name string `json:"name"`
@@ -354,6 +362,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		}
 		report, err := s.Tools.ProvisionRunner(agent.ProvisionArgs{
 			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
+			Hosted: a.Hosted, Host: a.Host, Pubkey: a.Pubkey, EncPubkey: a.EncPub,
 		})
 		s.textResult(w, id, err, report)
 	case "revoke_runner":

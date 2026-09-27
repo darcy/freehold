@@ -265,6 +265,12 @@ $("#fill-submit").onclick = async () => {
   try {
     const res = await api("/api/rotate", { name: fillName, secret });
     if (res.restart_error) $("#err").textContent = "sealed, but the door restart failed: " + res.restart_error;
+    if (res.self_hosted && res.package_json) {
+      // A self-hosted door runs on its own box — the console sealed to the
+      // runner's own key but cannot restart anything. The package JSON goes
+      // to the guest (secrets.json beside identity.json + a unit restart).
+      $("#err").textContent = "sealed for a self-hosted door — deliver to the guest: " + res.package_json;
+    }
     $("#fill-overlay").style.display = "none";
     await refresh();
   } catch (e) { $("#fill-err").textContent = "error: " + e.message; }

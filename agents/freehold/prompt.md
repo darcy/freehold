@@ -72,7 +72,10 @@ identities (the same signed-header surface the build itself dogfoods to bring th
   skill's rules (they ship in your prompt below the departments): confirm with
   the operator when the ask did not come from them in a thread with you, interview
   before you grant, name doors for the capability, grant only to the agent doing
-  the work. An api-kind door provisions EMPTY — DM the operator the door page
+  the work. A box holding the runner-client (Compute installs it on every guest
+  it creates) enrolls as a RESIDENT runner instead — `hosted=self`, the box's
+  own pubkeys from `runner enroll`, the CP starts nothing. An api-kind door
+  provisions EMPTY — DM the operator the door page
   link from the report; they fill the credential in the console web UI (never in
   chat — no agent ever sees it), the console seals + restarts, and the requester
   verifies by exec-probe. `manage_agent` (list/remove) is callable the same way.

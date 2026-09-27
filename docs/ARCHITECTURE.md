@@ -275,24 +275,32 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
       channel + a systemd unit on the CP guest — records it as a dynamic
       capability (re-staged adopt-only on every build; fixed port so pod
       coords stay stable), grants the named agents onto its roster live, and
-      re-applies the grantees' pods with coords resolved from state. It never
+      re-applies the grantees' pods with coords resolved from state. It also
+      ENROLLS a runner resident on its own target (`hosted=self`, kind
+      `local`): the target box holds the runner-client and `runner enroll`
+      minted its identity ON the box — the CP records the presented pubkeys,
+      seals credentials to them, starts nothing, and pods dial the box's LAN
+      address directly; a re-provision must present the same pubkeys. It never
       widens an existing runner, `agent_grants: off` on the CP state is the
       server-side kill switch (`freehold-console grants-mode`), and the
       in-thread-vs-DM confirmation discipline lives in the granting skill
       (`docs/POC_GRANTS.md`). An api-kind door provisions EMPTY — the agent
       DMs the operator the door's own console page (`/runner/<name>`), whose
       kind-aware fill form seals the credential via `/api/rotate` and
-      restarts the door's unit; no credential ever transits agent chat. Its
-      counterpart is the CPA's `revoke_runner` (take-away on the fly), gated by the
-      SAME `agent_grants` switch: with `revoke_from` it drops named grantees from a
-      door's roster AND from the dynamic capability record that the build re-grants
-      from (a relay-only removal would be silently undone by the next build), then
-      re-applies their pods without it; with it empty it retires the whole door —
-      channel folded but kept (its audit stream stays queryable), the CP's sealed
-      credential erased and re-opened to prove it, the unit stopped where the build
-      hosts it, the record dropped. Each leg self-reports `[verified]` or
-      `[UNVERIFIED]`, and the substrate credential is handed to Compute rather than
-      touched. A retired name is refused to the agent in both directions until an
+      restarts the door's unit (a self-hosted runner instead returns the
+      package JSON — the grantee writes `secrets.json` on the guest through
+      its own door and restarts the unit there); no credential ever transits
+      agent chat. Its counterpart is the CPA's `revoke_runner` (take-away on
+      the fly), gated by the SAME `agent_grants` switch: with `revoke_from` it
+      drops named grantees from a door's roster AND from the dynamic capability
+      record that the build re-grants from (a relay-only removal would be
+      silently undone by the next build), then re-applies their pods without
+      it; with it empty it retires the whole door — channel folded but kept
+      (its audit stream stays queryable), the CP's sealed credential erased and
+      re-opened to prove it, the unit stopped where the build hosts it, the
+      record dropped. Each leg self-reports `[verified]` or `[UNVERIFIED]`, and
+      the substrate credential is handed to Compute rather than touched. A
+      retired name is refused to the agent in both directions until an
       operator re-enables it by provisioning the door from the console. The
      `platform/migrations` queue — the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
@@ -543,8 +551,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     coords) never see exec. A capability a department doesn't hold yet ships
     as its runner when the capability lands — never by widening a runner's
     package; the CPA's `provision_runner` stages such a door on the fly (a
-    dynamic capability record re-staged adopt-only every build) and its
-    `revoke_runner` retires one again. Status
+    package; the CPA's `provision_runner` stages such a door on the fly (a
+    dynamic capability record re-staged adopt-only every build), or enrolls a
+    runner RESIDENT on the box itself (`hosted=self`) when the box holds the
+    runner-client — the exec is native on that guest — and its `revoke_runner`
+    retires one again. Status
+    language is
     language is
     uniform, runner → service → department: 🟢 all checked / 🟡 some checks
     missing / 🔴 none.

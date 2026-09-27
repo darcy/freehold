@@ -19,8 +19,19 @@ struct Cli {
 enum Cmd {
     /// Manage runner identity keypairs (Nostr + X25519 encryption)
     Keys(KeysCmd),
+    /// Enroll this host's runner: ensure the identity (mint on-guest if
+    /// missing, never re-key) and print the pubkeys + the provision_runner
+    /// arguments for the control-plane enroll call.
+    Enroll(EnrollArgs),
     /// Start the MCP tool server
     Serve(ServeArgs),
+}
+
+#[derive(Args)]
+struct EnrollArgs {
+    /// State dir for identity files (the serve unit's --state-dir)
+    #[arg(long, env = "FREEHOLD_STATE_DIR", default_value = "./.freehold")]
+    state_dir: PathBuf,
 }
 
 #[derive(Parser)]
@@ -104,6 +115,41 @@ fn env_shadow_note(nsec: Option<String>, enc: Option<String>, state_dir: &Path) 
     }
 }
 
+/// The enroll printout: whether the identity was kept or minted, the pubkeys
+/// (the ONLY thing that ever crosses the host boundary), and the exact
+/// provision_runner arguments to come back with. Pure + testable.
+fn enroll_report(id: &Identity, kept: bool) -> String {
+    let mut out = String::new();
+    if kept {
+        out.push_str(
+            "identity already present — kept (enroll never re-keys; `runner keys init --force` \
+             replaces it and orphans every grant on it)\n",
+        );
+    } else {
+        out.push_str("identity minted on this host — the private keys never leave it\n");
+    }
+    out.push_str(&format!(
+        "nostr pubkey (hex):      {}\n",
+        id.nostr_pubkey_hex()
+    ));
+    out.push_str(&format!(
+        "encryption pubkey (hex): {}\n",
+        id.enc_pubkey_hex()
+    ));
+    out.push_str("\nEnroll with the control plane (the freehold CP toolset, provision_runner):\n");
+    out.push_str("  name: <target>-local-<identity>   (e.g. freehold-dev-local-lxcadmin)\n");
+    out.push_str(
+        "  kind: local, hosted: self, host: <this box's LAN address>, address: <user>@<host>\n",
+    );
+    out.push_str(&format!(
+        "  pubkey: {}, enc_pubkey: {}\n",
+        id.nostr_pubkey_hex(),
+        id.enc_pubkey_hex()
+    ));
+    out.push_str("  grant_to: [the agent that works this box]\n");
+    out
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -146,6 +192,27 @@ async fn main() -> anyhow::Result<()> {
                 std::env::var(identity::ENC_ENV).ok(),
                 &args.state_dir,
             ) {
+                println!("{note}");
+            }
+            Ok(())
+        }
+        Cmd::Enroll(args) => {
+            // Same env priority as serve: with FREEHOLD_RUNNER_NSEC/ENC set,
+            // the ENV identity is what will run, so it is what enroll prints.
+            let env_nsec = std::env::var(identity::NSEC_ENV).ok();
+            let env_enc = std::env::var(identity::ENC_ENV).ok();
+            let (id, kept) =
+                match Identity::load_with(&args.state_dir, env_nsec.clone(), env_enc.clone()) {
+                    Ok(id) => (id, true),
+                    Err(_) => {
+                        let id = Identity::generate();
+                        let written = id.write_to_dir(&args.state_dir)?;
+                        println!("wrote identity to {}", written.display());
+                        (id, false)
+                    }
+                };
+            println!("{}", enroll_report(&id, kept));
+            if let Some(note) = env_shadow_note(env_nsec, env_enc, &args.state_dir) {
                 println!("{note}");
             }
             Ok(())
@@ -221,6 +288,25 @@ mod tests {
             enc.map(String::from),
             &PathBuf::from("/nonexistent"),
         )
+    }
+
+    #[test]
+    fn enroll_report_minted_names_both_pubkeys() {
+        let id = Identity::generate();
+        let r = enroll_report(&id, false);
+        assert!(r.contains("minted on this host"), "got: {r}");
+        assert!(r.contains(&id.nostr_pubkey_hex()), "got: {r}");
+        assert!(r.contains(&id.enc_pubkey_hex()), "got: {r}");
+        assert!(r.contains("hosted: self"), "must name the enroll mode: {r}");
+    }
+
+    #[test]
+    fn enroll_report_kept_never_rekeys() {
+        let id = Identity::generate();
+        let r = enroll_report(&id, true);
+        assert!(r.contains("kept"), "got: {r}");
+        assert!(!r.contains("minted"), "got: {r}");
+        assert!(r.contains(&id.nostr_pubkey_hex()), "got: {r}");
     }
 
     #[test]

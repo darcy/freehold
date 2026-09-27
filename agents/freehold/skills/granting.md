@@ -90,6 +90,19 @@ entirely; if your call is refused on those grounds, report it plainly.
 calling it — going back to the operator mid-provision is worse than one round
 of questions up front:
 
+- **For a guest that holds the runner-client (a resident runner):** Compute
+  installed the runner-client on the box (`create-lxc` does this) and ran
+  `runner enroll` there — the box minted its OWN identity and printed two
+  pubkeys. Enroll it: `provision_runner(name, kind=local, hosted=self,
+  host=<the pinned name>, address=<user>@<host>, pubkey=<nostr>,
+  enc_pubkey=<enc>, grant_to=[...])`. The custody property is the point: the
+  private keys were minted ON the target and never transited anything — the
+  control plane records the pubkeys, seals credentials TO them, and starts
+  nothing; the box runs its own unit (as `lxcadmin`, never root). The exec
+  is native on the guest — no ssh hop, no key on any other box. A
+  re-provision must present the SAME pubkeys; a mismatch is a different
+  process claiming the name and is refused. The Network check-in applies —
+  a resident runner is a new LAN listener the pods dial directly.
 - For a box on the network (ssh): address as `user@host[:port]`, and whether
   the account can do the job (least privilege where a scoped account exists).
   The runner mints its OWN keypair — never take the operator's password or
@@ -112,8 +125,8 @@ of questions up front:
   try the value as an X-API-KEY or similar header — an API-key door would be
   named that way in the description; this one is a login pair.
 - Name it `<target>-<protocol>-<identity>` (`rtx3090-ssh-root`,
-  `unifi-api-admin`) — what it reaches, how, at what level. Never for the
-  consumer.
+  `unifi-api-admin`, `freehold-dev-local-lxcadmin`) — what it reaches, how,
+  at what level. Never for the consumer.
 - `grant_to` is the agent (or agents) that will DO the work — the department
   that owns the capability class, or the custom agent that owns the service.
   You hold no exec yourself; never grant a capability to you.
@@ -126,11 +139,16 @@ use; never ask the operator to widen one.
 
 **After granting:** the grantees' pods re-apply automatically (the exec surface
 picks the new coords up); an EMPTY door stays 🟡 until the operator fills its
-credential via the door page link (the console seals + restarts it) — then
-verify the door's own self-check / an exec probe, and say what is actually
-live. A direct-credential mode (the operator handing the credential to this
-agent for freehold to seal) is a possible future `agent_grants` mode; it is
-not built, and until it is, chat is never the credential path.
+credential via the door page link — for a CP-guest door the console seals +
+restarts it; for a SELF-HOSTED one the console seals to the runner's own key
+and returns the package JSON, which is written to the guest's state dir as
+`secrets.json` (the ciphertext transits the agent's context — that is the
+system's normal trust level; only the runner's key opens it) and the unit is
+restarted on the guest. Then verify the door's own self-check / an exec
+probe, and say what is actually live. A direct-credential mode (the operator
+handing the credential to this agent for freehold to seal) is a possible
+future `agent_grants` mode; it is not built, and until it is, chat is never
+the credential path.
 
 ## Take-away flow (revoke_runner)
 

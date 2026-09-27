@@ -64,6 +64,14 @@ type capabilityRunner struct {
 	// no build-time source to re-seal from, and the ssh pubkey is installed on
 	// the TARGET box (by the operator), never on the PVE host.
 	dynamic bool
+	// selfHosted marks a runner RESIDENT on its own target (the runner-client
+	// enroll flow): the CP holds no identity, ships no package, and starts no
+	// unit — the target runs its own process; the rebuild only re-syncs the
+	// channel + rosters and records the coords.
+	selfHosted bool
+	// host is a self-hosted runner's LAN address — pod coords dial it instead
+	// of the CP IP.
+	host string
 }
 
 // kubernetesVersion is the kubectl build installed on the CP LXC (the kube
@@ -237,6 +245,7 @@ func dynamicRunners(store *state.StateStore) []capabilityRunner {
 		out = append(out, capabilityRunner{
 			name: name, kind: rec.Kind, port: rec.Port,
 			rosters: rosters, addr: rec.Address, dynamic: true,
+			selfHosted: rec.SelfHosted(), host: rec.Host,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
@@ -299,9 +308,13 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	rec, exists := store.GetRunner(r.name)
 	if !exists {
 		if r.dynamic {
-			// An agent-provisioned runner whose package vanished: its
-			// credential came from the operator and cannot be re-derived —
-			// fail loudly (the door waits) instead of silently re-keying.
+			// An agent-provisioned runner whose record lost its runner row:
+			// fail loudly. For a CP-guest door the credential came from the
+			// operator and cannot be re-derived; for a self-hosted one the
+			// identity lives on the target — re-enroll it there.
+			if r.selfHosted {
+				return fmt.Errorf("capability record %s is self-hosted but has no runner row — re-enroll it on the target (`runner enroll` + provision_runner hosted=self)", r.name)
+			}
 			return fmt.Errorf("capability record %s has no runner package — re-provision it (the credential is not re-derivable)", r.name)
 		}
 		c, err := s.runnerCredential(r, hostAddr)
@@ -331,7 +344,9 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	} else if r.dynamic {
 		// Adopt-only: the record is the spec, the package holds the operator's
 		// credential, and no build-time source exists to re-seal from. The
-		// channel sync + (re)start below are the re-assert.
+		// channel sync + (re)start below are the re-assert. A self-hosted
+		// runner has no package here at all — its identity lives on the
+		// target; the sync below re-asserts its rosters the same way.
 	} else {
 		// ssh credentials are the runner's identity — stable; re-authorize the
 		// SAME key if the host lost it. Everything else rotates (a k3s rebuild
@@ -386,14 +401,25 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	if err := s.addRelayCommunityMember(rec.NostrPubkey); err != nil {
 		return fmt.Errorf("relay community membership: %w", err)
 	}
-	if err := s.startCapabilityRunner(r, pkgDir); err != nil {
-		return fmt.Errorf("start runner: %w", err)
+	// A SELF-HOSTED runner runs its own unit on its own target — the CP
+	// starts nothing (the enroll flow / the owning agent did); the rebuild
+	// only re-asserted its channel + rosters above.
+	if !r.selfHosted {
+		if err := s.startCapabilityRunner(r, pkgDir); err != nil {
+			return fmt.Errorf("start runner: %w", err)
+		}
 	}
 	if s.DepartmentRunners == nil {
 		s.DepartmentRunners = map[string][]agent.RunnerCoords{}
 	}
+	// A self-hosted runner's pods dial the TARGET's LAN address, not the CP
+	// IP (the record carries the host).
+	dialHost := s.CpIP
+	if r.host != "" {
+		dialHost = r.host
+	}
 	coords := agent.RunnerCoords{
-		URL:    fmt.Sprintf("http://%s:%d", s.CpIP, r.port),
+		URL:    fmt.Sprintf("http://%s:%d", dialHost, r.port),
 		Pubkey: rec.NostrPubkey,
 		Target: r.name,
 		Secret: r.name,

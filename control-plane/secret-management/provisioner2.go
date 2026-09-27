@@ -73,6 +73,56 @@ func RotateSecret(store *state.StateStore, name string, newSecret []byte) (*stat
 	return &rec, nil
 }
 
+// RotateSecretSelfHosted re-seals the NEW credential to a self-hosted
+// runner's (presented) encryption key and returns the ready-to-ship package
+// JSON. There is no CP-side package dir to write — the identity lives on the
+// target — so the caller carries the ciphertext to the guest (writes it next
+// to the runner's identity.json) and restarts the runner's unit there. The
+// record keeps ciphertext only, as everywhere else.
+func RotateSecretSelfHosted(store *state.StateStore, name string, newSecret []byte) (state.SecretRecord, []byte, error) {
+	before, ok := store.GetSecret(name)
+	if !ok {
+		return state.SecretRecord{}, nil, fmt.Errorf("secret %s not found", name)
+	}
+	runnerRec, ok := store.GetRunner(before.Runner)
+	if !ok {
+		return state.SecretRecord{}, nil, fmt.Errorf("runner %s not found", before.Runner)
+	}
+	if runnerRec.Status == state.RunnerRevoked {
+		return state.SecretRecord{}, nil, fmt.Errorf("runner %s is revoked", before.Runner)
+	}
+	if runnerRec.PackageDir != "" {
+		return state.SecretRecord{}, nil, fmt.Errorf("runner %s is not self-hosted — rotate via the console (it re-ships the package)", before.Runner)
+	}
+	encPub, err := hexToArr(runnerRec.EncPubkey)
+	if err != nil {
+		return state.SecretRecord{}, nil, err
+	}
+	sealed, err := crypto.Seal(encPub[:], []byte(name), newSecret)
+	if err != nil {
+		return state.SecretRecord{}, nil, err
+	}
+	ciphertextHex := fmt.Sprintf("%x", sealed)
+	pkgJSON, err := wire.New(
+		map[string]string{name: ciphertextHex},
+		map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name}},
+		nil,
+	).Bytes()
+	if err != nil {
+		return state.SecretRecord{}, nil, err
+	}
+	now := uint64(time.Now().Unix())
+	if err := store.UpdateSecretCiphertext(name, ciphertextHex, now); err != nil {
+		return state.SecretRecord{}, nil, err
+	}
+	if err := store.Save(); err != nil {
+		_ = store.SetSecretCiphertext(name, before.CiphertextHex, before.RotatedAt)
+		return state.SecretRecord{}, nil, err
+	}
+	rec, _ := store.GetSecret(name)
+	return rec, pkgJSON, nil
+}
+
 // ---- B3 revoke ----
 
 // RevokeRunner flips the runner to revoked (blocking provision/rotate) and
@@ -108,7 +158,7 @@ func removeShippedSecrets(rec *state.RunnerRecord) {
 // GrantAgent adds an agent pubkey to a runner's shipped-package grants
 // (idempotent), so the runner's live grant check picks it up without a restart.
 func GrantAgent(store *state.StateStore, name, agentPubkey string) ([]string, error) {
-	if !isPubkey(agentPubkey) {
+	if !IsPubkey(agentPubkey) {
 		return nil, fmt.Errorf("invalid agent pubkey %q: must be 64 hex chars", agentPubkey)
 	}
 	rec, ok := store.GetRunner(name)
@@ -134,7 +184,7 @@ func GrantAgent(store *state.StateStore, name, agentPubkey string) ([]string, er
 // RevokeGrant removes an agent pubkey from a runner's shipped-package grants
 // (idempotent; the last grant leaves the package fail-closed).
 func RevokeGrant(store *state.StateStore, name, agentPubkey string) ([]string, error) {
-	if !isPubkey(agentPubkey) {
+	if !IsPubkey(agentPubkey) {
 		return nil, fmt.Errorf("invalid agent pubkey %q: must be 64 hex chars", agentPubkey)
 	}
 	rec, ok := store.GetRunner(name)

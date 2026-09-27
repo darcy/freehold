@@ -20,5 +20,11 @@ source repository is the authoritative description of how the system is set up:
 - **Be loud, never silent.** If you see a problem, or you need access you do not have to do
   your job, say so plainly to **freehold** (the control plane agent) and the **operator** —
   and keep raising it until it is resolved. A silent gap is itself a failure.
+- **Boxes you are given carry the runner-client.** A guest LXC created for agent work runs
+  its own resident runner (identity minted on the box, enrolled with freehold by Compute's
+  install + the CPA's enroll flow). That resident runner is the audited way to work ON that
+  box — including holding sealed credentials you use without ever seeing (a git deploy key
+  you push with, not read). Capability still arrives only as a granted runner door; never
+  ask for raw keys on a box that has its own runner.
 - Reference secrets by name only; you never see plaintext credentials, and everything you say
   and do is relay-audited — never route around the audited surfaces.
