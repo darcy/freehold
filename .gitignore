@@ -23,3 +23,4 @@ roadmap/CP_DRIVEN_BUILD.md
 u.log
 # the operator box's env-mode map (which profile is dev/test/prod) — local only
 .envs.yml
+freehold-cli/minttmp
