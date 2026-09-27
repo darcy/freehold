@@ -1802,8 +1802,8 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 			// e.F, which is zero here. The RUNNING console's world-config is
 			// the last full render: merge it in so the redeployed console
 			// keeps a bootable spec. (A blank spec made the next
-			// guest-create after any update fail pct with "memory: minimum
-			// 16" / "net0: invalid format".)
+			// guest-create after any update fail the substrate tool's
+			// parameter validation.)
 			if prior := e.runningWorldConfig(); prior != "" {
 				wc = mergeWorldConfig(prior, wc)
 			}
