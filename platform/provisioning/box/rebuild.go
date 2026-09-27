@@ -2043,8 +2043,10 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		PlaneKind:      derefStrPtr(cfg.Plane.BackendKind),
 		ThinPool:       derefStrPtr(cfg.Plane.ThinPool),
 		// Size/placement: the CONFIG is the durable source (the install
-		// persists them); the invocation's flags are the fallback for a
-		// config written before persistence shipped.
+		// persists them). A config written before persistence shipped has
+		// none — the world-config then renders blanks and the boot fails
+		// loudly; the repair is adding the fields under [plane] in that
+		// world's config (or re-running its install).
 		SizeGB:         uint64(cfg.Plane.SizeGB),
 		PoolSizeGB:     uint64(cfg.Plane.PoolSizeGB),
 		RootfsGB:       cfg.Plane.RootfsGB,
