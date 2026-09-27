@@ -252,12 +252,19 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 
 		// Record the dynamic capability BEFORE staging so a failure after this
 		// point heals on the next build/reconcile (the record re-stages it).
-		if err := store.InsertCapability(name, state.CapabilityRecord{
+		// A re-provision preserves the operator's enrollment confirmation (the
+		// pubkeys are unchanged — the confirm binds to THEM, not to the
+		// address/port this call may update).
+		capRec := state.CapabilityRecord{
 			Kind: kind, Address: strings.TrimSpace(args.Address), Port: port,
 			Rosters: append([]string(nil), grantTo...), Origin: state.OriginAgent,
 			Hosted: hosted, Host: host,
 			CreatedAt: uint64(time.Now().Unix()),
-		}); err != nil {
+		}
+		if hasPrevRecord {
+			capRec.EnrollConfirmedAt = prevRecord.EnrollConfirmedAt
+		}
+		if err := store.InsertCapability(name, capRec); err != nil {
 			return "", fmt.Errorf("record capability: %w", err)
 		}
 

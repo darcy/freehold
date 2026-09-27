@@ -94,6 +94,13 @@ func RotateSecretSelfHosted(store *state.StateStore, name string, newSecret []by
 	if runnerRec.PackageDir != "" {
 		return state.SecretRecord{}, nil, fmt.Errorf("runner %s is not self-hosted — rotate via the console (it re-ships the package)", before.Runner)
 	}
+	// The operator-confirm barrier lives with the OPERATION (not just the
+	// console transport): a self-hosted door's credential is sealed only
+	// after the enrollment was confirmed on the door page — every caller of
+	// this function gets the same check.
+	if cap, ok := store.GetCapability(name); !ok || !cap.SelfHosted() || cap.EnrollConfirmedAt == nil {
+		return state.SecretRecord{}, nil, fmt.Errorf("self-hosted door %s is not confirmed — the operator verifies the presented pubkeys on the door page first", name)
+	}
 	encPub, err := hexToArr(runnerRec.EncPubkey)
 	if err != nil {
 		return state.SecretRecord{}, nil, err
