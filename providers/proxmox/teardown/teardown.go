@@ -42,19 +42,34 @@ const (
 const tfModuleDir = "/srv/data/freehold-tf"
 
 // tfRootFor picks the dir to run `terraform destroy` from: the world's own
-// per-world root when it holds a staged module + state, else the legacy shared
-// root when THAT holds a staged module + state, else none. A directory with a
-// state file but no scripts/tf.sh (an orphaned legacy state left by a world
-// installed before per-world roots) is skipped, not run — running it would fail
-// on the missing script and abort the teardown.
+// per-world root when it holds a staged module + state; else the legacy shared
+// root ONLY when this world has no per-world root at all (a genuinely legacy
+// world). The shared root is never reached for a world with a per-world root —
+// that root can exist without state (staged but never applied, or destroyed),
+// and running destroy in the shared dir would destroy ANOTHER world's surviving
+// state. A dir with a state file but no scripts/tf.sh is skipped, not run
+// (running it would fail on the missing script and abort the teardown); each
+// probe is its OWN Exec so a test can distinguish state-present from
+// module-present.
 func (r *ExecRunner) tfRootFor() (string, bool) {
 	perWorld := tfModuleDir
 	if r.Domain != "" {
 		perWorld = tfModuleDir + "-" + strings.ReplaceAll(r.Domain, ".", "-")
 	}
-	for _, dir := range []string{perWorld, tfModuleDir} {
-		if ok, _ := r.Exec("test -f " + dir + "/terraform.tfstate && test -x " + dir + "/scripts/tf.sh"); ok {
-			return dir, true
+	if ok, _ := r.Exec("test -f " + perWorld + "/terraform.tfstate"); ok {
+		if ok2, _ := r.Exec("test -x " + perWorld + "/scripts/tf.sh"); ok2 {
+			return perWorld, true
+		}
+		return "", false // orphaned per-world state: no module to run it
+	}
+	// No per-world state: fall back to the shared dir ONLY when this world has
+	// no per-world root at all.
+	if hasRoot, _ := r.Exec("test -d " + perWorld); hasRoot {
+		return "", false
+	}
+	if ok, _ := r.Exec("test -f " + tfModuleDir + "/terraform.tfstate"); ok {
+		if ok2, _ := r.Exec("test -x " + tfModuleDir + "/scripts/tf.sh"); ok2 {
+			return tfModuleDir, true
 		}
 	}
 	return "", false

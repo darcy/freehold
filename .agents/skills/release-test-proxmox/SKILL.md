@@ -409,13 +409,13 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   `world_build`; rebuilds hid it. Fixed in `74b0875` (install the resolver before pointing
   guests at it). If a fresh build 500s at `terraform services`, check
   `ss -lunp | grep :53` inside the CP LXC (empty = not installed).
-- **The PVE host's terraform workdir is shared host state, not world state.**
-  `/srv/data/freehold-tf` keeps `terraform.tfstate` across a world's life. If you destroy
+- **Terraform state is per world (see "Per-world terraform state" above).** Each world's
+  state lives at `/srv/data/freehold-tf-<dashed-domain>/terraform.tfstate`. If you destroy
   the world out-of-band (manual `pct destroy`, a killed install) and re-build, terraform
   still believes `k3s_bringup` etc. ran and SKIPS them — the rebuild then dies at
-  `tf kubeconfig: cat /etc/rancher/k3s/k3s.yaml: No such file`. Clear that dir (or run the
-  product's own `teardown`) before a fresh build. The rebuild env's teardown → build is the
-  product's own teardown, so its state stays coherent.
+  `tf kubeconfig: cat /etc/rancher/k3s/k3s.yaml: No such file`. Clear that world's root (or
+  run the product's own `teardown`) before a fresh build. The rebuild env's teardown → build
+  is the product's own teardown, so its state stays coherent.
 - **Thin-box lifecycle asymmetries.** From a thin box with no local runner:
   `teardown` works (the CP drives its own runner); `uninstall` does **not** — it needs a
   local runner, and its transient fallback runs `pct destroy` on a still-running guest and

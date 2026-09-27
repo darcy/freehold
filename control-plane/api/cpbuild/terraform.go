@@ -74,7 +74,7 @@ func (s *Spec) stageDeployTf() error {
 	if s.ProxyIP != "" {
 		kip := config.StripCIDR(s.ProxyIP)
 		adopt = fmt.Sprintf(
-			`if [ ! -d %[1]q ]; then { [ -f %[2]q/kubeconfig ] && grep -q 'server: https://%[3]s:' %[2]q/kubeconfig && mv %[2]q %[1]q && echo adopted-legacy-tf-root; true; }; elif [ ! -f %[1]q/terraform.tfstate ] && [ -f %[2]q/terraform.tfstate ] && grep -q %[3]q %[2]q/terraform.tfstate; then mv %[2]q/terraform.tfstate %[1]q/terraform.tfstate && { [ -f %[2]q/terraform.tfstate.backup ] && mv %[2]q/terraform.tfstate.backup %[1]q/terraform.tfstate.backup; true; } && echo adopted-legacy-tf-state; fi; true`,
+			`if [ ! -d %[1]q ]; then { [ -f %[2]q/kubeconfig ] && grep -q 'server: https://%[3]s:' %[2]q/kubeconfig && mv %[2]q %[1]q && echo adopted-legacy-tf-root; true; }; elif [ ! -f %[1]q/terraform.tfstate ] && [ -f %[2]q/terraform.tfstate ] && grep -qE '(^|[^0-9.])%[3]s([^0-9.]|$)' %[2]q/terraform.tfstate; then mv %[2]q/terraform.tfstate %[1]q/terraform.tfstate && { [ -f %[2]q/terraform.tfstate.backup ] && mv %[2]q/terraform.tfstate.backup %[1]q/terraform.tfstate.backup; true; } && echo adopted-legacy-tf-state; fi; true`,
 			root, tfDir, kip)
 	}
 	var parts []string

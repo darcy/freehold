@@ -447,7 +447,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     ascending via `bash`; the CP-owned
     build's IaC is the Terraform module embedded in
     **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
-    box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s
+    box at the world's own root `/srv/data/freehold-tf-<dashed-domain>`, with its
+    state beside it — the shared `/srv/data/freehold-tf` survives only as a
+    legacy-adoption source): the substrate (durable plane + cp/relay/k3s
     LXCs + k3s bring-up) is exec-first `null_resource` shell, while the SERVICE
     definitions (`postgres.tf` / `litellm.tf` / `caddy.tf`) are real
     `kubernetes`-provider resources — the deterministic static files that define
