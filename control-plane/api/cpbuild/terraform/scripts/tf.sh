@@ -31,6 +31,11 @@ fi
 # Keep a stale staged kubeconfig from a prior build from satisfying a validate
 # against a k3s that was torn down: always point the provider at the durable one.
 export KUBECONFIG="${KUBECONFIG:-$ROOT/kubeconfig}"
+# The kubernetes provider reads var.kubeconfig_path (passed as -var on apply);
+# DESTROY passes no vars, so default the var to the world's own root here or the
+# provider falls back to the legacy shared default and destroy dies with
+# "cannot create discovery client: no client config". A -var on apply still wins.
+export TF_VAR_kubeconfig_path="${TF_VAR_kubeconfig_path:-$ROOT/kubeconfig}"
 
 export TF_VAR_litellm_master_key="${LITELLM:-}"
 export TF_VAR_postgres_password="${POSTGRES_PW:-}"
