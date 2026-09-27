@@ -445,9 +445,6 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if spec.RootfsGB < 4 {
 		missing = append(missing, "rootfs_gb")
 	}
-	if spec.SizeGB < 1 {
-		missing = append(missing, "size_gb")
-	}
 	if spec.Bridge == "" {
 		missing = append(missing, "bridge")
 	}
