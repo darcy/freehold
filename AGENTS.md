@@ -357,18 +357,23 @@ release notes.
 - **The Data/Network "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
-- **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
-  not wired.** Every non-custom prompt (CPA + departments) carries a shared orientation block
-  naming the repo and the read-on-boot/periodic-recheck discipline, and is honest that access
-  is not available yet. The git/GitHub grant + the read/schedule path land with Chunk 5's
-  workspace/git work.
+- **Agents can read the repo but cannot write it, and nothing schedules the re-check.** The repo is
+  public, so the shared orientation block (CPA + departments) tells every non-custom agent to clone
+  it and read from `main` — that read is real, and the prompts claim only it. Write access
+  (branches, pushes, PRs) and any scheduled re-check are unwired: the read-on-boot/periodic-recheck
+  discipline is prompt-level, enforced by the agent, not a mechanism the appliance runs. The
+  git/GitHub grant lands with Chunk 5's workspace/git work.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
 - **Agent memory writes (kind-30174 engrams) are rejected on some worlds** — the pod's
   buzz-acp memory path needs an owner-attestation env the pod manifest does not carry (the
   relay refuses the write: "exactly one p tag required"), so the agent boots with no core
   memory on affected worlds; sessions/relay/channels work. The fix is the pod env wiring
-  (or the harness's write path); surfaced by the v0.7.5 live-update test.
+  (or the harness's write path); surfaced by the v0.7.5 live-update test. The
+  **read** half round-trips today through the CLI with the owner stated explicitly —
+  `buzz mem <cmd> --owner <operator-pubkey>` (proven by four agents on the live fleet); the
+  **write** half stays blocked by the same p-tag defect until the pod env plus the harness write
+  path land, which closes this entry rather than adding to it.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
 - **Replay window:** a signed call can be replayed against the *same* runner within its 60s

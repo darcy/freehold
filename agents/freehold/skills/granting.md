@@ -36,6 +36,12 @@ fail-closed on relay outage. From this, everything else follows:
   one exists (a namespace-scoped ServiceAccount over a cluster-admin token for
   a single-namespace job); grant root-on-a-box only where root IS the job —
   and say so plainly when the door is as wide as it is.
+- **A door that repairs a resource must not live inside it.** Never colocate a runner
+  with the thing it exists to repair: a door resident on its target goes down with it,
+  so the repair path for the host cannot run through a guest on that host (today's
+  outage — every PVE repair door died with the guest it was repairing, and recovery
+  needed a door that lived outside). Repair-reachable doors live OFF the target. A door
+  that must be resident or self-hosted trades reach for custody — say so at grant time.
 
 ## Who may hold what
 
