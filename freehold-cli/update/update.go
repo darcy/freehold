@@ -7,6 +7,8 @@ package update
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -85,7 +87,7 @@ func run(ctx context.Context, o options) error {
 		return check(ctx, cfg, channel, cacheDir, o)
 	}
 
-	unlock, err := lock()
+	unlock, err := lock(common.ConfigPath())
 	if err != nil {
 		return err
 	}
@@ -331,10 +333,18 @@ func cacheDir() (string, error) {
 	return d, nil
 }
 
-// lock guards against two concurrent updates.
-func lock() (func(), error) {
+// lock guards against two concurrent updates of the SAME world. The lock is
+// PER PROFILE (keyed by the resolved config path): two profiles on one box are
+// different worlds and must be able to update concurrently — a single shared
+// lock file made an unrelated profile's stale lock block the other.
+func lock(key string) (func(), error) {
 	d, err := cacheDir()
 	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(key))
+	d = filepath.Join(d, "locks", hex.EncodeToString(sum[:8]))
+	if err := os.MkdirAll(d, 0o700); err != nil {
 		return nil, err
 	}
 	p := filepath.Join(d, "update.lock")
@@ -344,9 +354,9 @@ func lock() (func(), error) {
 			// A stale lock (> 1h) is reclaimed.
 			if fi, serr := os.Stat(p); serr == nil && time.Since(fi.ModTime()) > time.Hour {
 				_ = os.Remove(p)
-				return lock()
+				return lock(key)
 			}
-			return nil, fmt.Errorf("another update is in progress (%s); remove it if stale", p)
+			return nil, fmt.Errorf("another update of this world is in progress (%s); remove it if stale", p)
 		}
 		return nil, err
 	}
