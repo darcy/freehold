@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
@@ -124,9 +125,23 @@ func TestRotateSelfHostedReturnsPackage(t *testing.T) {
 		hooked = append(hooked, name)
 		return nil
 	}}
-	r := httptest.NewRequest(http.MethodPost, "/api/rotate", strings.NewReader(`{"name":"dev-local-lxcadmin","secret":"git-deploy-key"}`))
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, r)
+	post := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/rotate", strings.NewReader(`{"name":"dev-local-lxcadmin","secret":"git-deploy-key"}`))
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, r)
+		return rec
+	}
+	// The fill is REFUSED until the operator confirmed the presented pubkeys
+	// on the door page (the barrier that binds the fill to the key the guest
+	// holds — not to whatever the provisioning agent presented).
+	if rec := post(); rec.Code != 400 || !strings.Contains(rec.Body.String(), "not confirmed") {
+		t.Fatalf("an unconfirmed self-hosted fill must be refused, got %d %s", rec.Code, rec.Body.String())
+	}
+	now := uint64(time.Now().Unix())
+	if err := store.ConfirmEnrollment("dev-local-lxcadmin", now); err != nil {
+		t.Fatal(err)
+	}
+	rec := post()
 	if rec.Code != 200 {
 		t.Fatalf("rotate: %d %s", rec.Code, rec.Body.String())
 	}

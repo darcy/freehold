@@ -139,7 +139,7 @@ fn enroll_report(id: &Identity, kept: bool) -> String {
     out.push_str("\nEnroll with the control plane (the freehold CP toolset, provision_runner):\n");
     out.push_str("  name: <target>-local-<identity>   (e.g. freehold-dev-local-lxcadmin)\n");
     out.push_str(
-        "  kind: local, hosted: self, host: <this box's LAN address>, address: <user>@<host>\n",
+        "  kind: local, hosted: self, host: <the PINNED NAME from Compute's report — not a raw IP>, address: <user>@<host>\n",
     );
     out.push_str(&format!(
         "  pubkey: {}, enc_pubkey: {}\n",
@@ -148,6 +148,32 @@ fn enroll_report(id: &Identity, kept: bool) -> String {
     ));
     out.push_str("  grant_to: [the agent that works this box]\n");
     out
+}
+
+/// The enroll identity leg: keep + load the existing identity, or mint a
+/// fresh one — and when a file EXISTS but will not load, fail loudly instead
+/// of minting over it (a re-key orphans every grant + sealed credential on
+/// the guest). Returns the identity and whether it was kept.
+fn enroll_identity(
+    state_dir: &Path,
+    env_nsec: Option<String>,
+    env_enc: Option<String>,
+) -> anyhow::Result<(Identity, bool)> {
+    let identity_path = state_dir.join(identity::IDENTITY_FILE);
+    if identity_path.exists() {
+        return match Identity::load_with(state_dir, env_nsec, env_enc) {
+            Ok(id) => Ok((id, true)),
+            Err(e) => Err(anyhow::anyhow!(
+                "identity at {} exists but is unreadable ({e}) — enroll never re-keys; \
+                 repair or remove it by hand, or start from a fresh guest",
+                identity_path.display()
+            )),
+        };
+    }
+    let id = Identity::generate();
+    let written = id.write_to_dir(state_dir)?;
+    println!("wrote identity to {}", written.display());
+    Ok((id, false))
 }
 
 #[tokio::main]
@@ -201,16 +227,7 @@ async fn main() -> anyhow::Result<()> {
             // the ENV identity is what will run, so it is what enroll prints.
             let env_nsec = std::env::var(identity::NSEC_ENV).ok();
             let env_enc = std::env::var(identity::ENC_ENV).ok();
-            let (id, kept) =
-                match Identity::load_with(&args.state_dir, env_nsec.clone(), env_enc.clone()) {
-                    Ok(id) => (id, true),
-                    Err(_) => {
-                        let id = Identity::generate();
-                        let written = id.write_to_dir(&args.state_dir)?;
-                        println!("wrote identity to {}", written.display());
-                        (id, false)
-                    }
-                };
+            let (id, kept) = enroll_identity(&args.state_dir, env_nsec.clone(), env_enc.clone())?;
             println!("{}", enroll_report(&id, kept));
             if let Some(note) = env_shadow_note(env_nsec, env_enc, &args.state_dir) {
                 println!("{note}");
@@ -307,6 +324,28 @@ mod tests {
         assert!(r.contains("kept"), "got: {r}");
         assert!(!r.contains("minted"), "got: {r}");
         assert!(r.contains(&id.nostr_pubkey_hex()), "got: {r}");
+    }
+
+    #[test]
+    fn enroll_identity_mints_then_keeps_never_rekeys() {
+        let dir = std::env::temp_dir().join(format!("fh-enroll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Missing: mints.
+        let (id, kept) = enroll_identity(&dir, None, None).expect("mints when absent");
+        assert!(!kept);
+        // Present + valid: KEPT (the same identity — never re-keyed).
+        let (again, kept2) = enroll_identity(&dir, None, None).expect("keeps when present");
+        assert!(kept2);
+        assert_eq!(again.nostr_pubkey_hex(), id.nostr_pubkey_hex());
+        // Present but CORRUPT: loud failure, never a mint-over.
+        std::fs::write(dir.join(identity::IDENTITY_FILE), "{ not json").unwrap();
+        let err = enroll_identity(&dir, None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("never re-keys"),
+            "corrupt identity must fail loudly, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

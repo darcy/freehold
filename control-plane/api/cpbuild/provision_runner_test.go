@@ -440,6 +440,11 @@ func TestProvisionRunnerSelfHostedValidation(t *testing.T) {
 		{"self needs 64-hex pubkeys", agent.ProvisionArgs{Name: "dev-local-lxcadmin", Kind: "local",
 			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "self", Host: "192.168.30.50",
 			Pubkey: "nope", EncPubkey: enc}, "pubkey and enc_pubkey"},
+		{"self host must be bare (no port)", agent.ProvisionArgs{Name: "dev-local-lxcadmin", Kind: "local",
+			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "self", Host: "192.168.30.50:8800",
+			Pubkey: nostr, EncPubkey: enc}, "BARE host"},
+		{"host is self-hosted-only", agent.ProvisionArgs{Name: "rtx-ssh-root", Kind: "ssh",
+			Address: "darcy@10.0.0.5", GrantTo: []string{"ai"}, Host: "10.0.0.99"}, "hosted=self field"},
 	} {
 		if _, err := fn(tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: want error %q, got %v", tc.name, tc.want, err)

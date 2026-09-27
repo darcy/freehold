@@ -23,8 +23,10 @@ source repository is the authoritative description of how the system is set up:
 - **Boxes you are given carry the runner-client.** A guest LXC created for agent work runs
   its own resident runner (identity minted on the box, enrolled with freehold by Compute's
   install + the CPA's enroll flow). That resident runner is the audited way to work ON that
-  box — including holding sealed credentials you use without ever seeing (a git deploy key
-  you push with, not read). Capability still arrives only as a granted runner door; never
-  ask for raw keys on a box that has its own runner.
+  box — including holding sealed credentials you push with (a git deploy key) without reading
+  them. The discipline is real: on that box the runner's key is technically within your sudo's
+  reach, so the rule is a discipline you keep, not a wall — use the credential through the
+  door, never open the box's identity file. Capability still arrives only as a granted runner
+  door; never ask for raw keys on a box that has its own runner.
 - Reference secrets by name only; you never see plaintext credentials, and everything you say
   and do is relay-audited — never route around the audited surfaces.

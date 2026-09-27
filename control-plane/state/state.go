@@ -118,10 +118,17 @@ type CapabilityRecord struct {
 	// LXC — and enrolled with presented pubkeys; the CP never holds its
 	// identity, ships no package, and starts nothing for it).
 	Hosted string `json:"hosted,omitempty"`
-	// Host is a self-hosted runner's LAN address (the box the process runs
-	// on) — pod coords dial it directly instead of the CP IP.
-	Host      string `json:"host,omitempty"`
-	CreatedAt uint64 `json:"created_at"`
+	// Host is a self-hosted runner's dial target — the box's pinned name (a
+	// bare host; the CP allocates the port) so a re-IPed guest keeps its
+	// coords. Pod coords dial it instead of the CP IP.
+	Host string `json:"host,omitempty"`
+	// EnrollConfirmedAt is when the operator CONFIRMED the presented pubkeys
+	// on the door page (against the guest's own `runner enroll` output /
+	// Compute's audited report). Until then the console refuses the
+	// credential fill — the barrier that keeps a compromised provisioning
+	// agent from sealing to its own key.
+	EnrollConfirmedAt *uint64 `json:"enroll_confirmed_at,omitempty"`
+	CreatedAt         uint64  `json:"created_at"`
 }
 
 // Capability origins.
@@ -437,6 +444,22 @@ func (s *StateStore) InsertRetired(name string, rec RetiredCapability) error {
 		s.state.RetiredCapabilities = map[string]RetiredCapability{}
 	}
 	s.state.RetiredCapabilities[name] = rec
+	return s.Save()
+}
+
+// ConfirmEnrollment stamps the operator's pubkey confirmation on a
+// self-hosted capability record (the door page's confirm — the barrier that
+// binds the credential fill to the guest's own `runner enroll` output).
+func (s *StateStore) ConfirmEnrollment(name string, at uint64) error {
+	rec, ok := s.state.Capabilities[name]
+	if !ok {
+		return fmt.Errorf("capability %s not found", name)
+	}
+	if !rec.SelfHosted() {
+		return fmt.Errorf("capability %s is not self-hosted — nothing to confirm", name)
+	}
+	rec.EnrollConfirmedAt = &at
+	s.state.Capabilities[name] = rec
 	return s.Save()
 }
 

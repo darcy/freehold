@@ -126,6 +126,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.provision(w, r)
 	case path == "/api/rotate" && method == http.MethodPost:
 		s.rotate(w, r)
+	case path == "/api/enroll-confirm" && method == http.MethodPost:
+		s.enrollConfirm(w, r)
 	case path == "/api/revoke" && method == http.MethodPost:
 		s.revoke(w, r)
 	case path == "/api/grant" && method == http.MethodPost:
@@ -594,6 +596,10 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		Secret    interface{} `json:"secret"`
 		Grants    interface{} `json:"grants"`
 		Readiness interface{} `json:"readiness,omitempty"`
+		// Self-hosted (a resident runner) + whether the operator confirmed its
+		// presented pubkeys (the fill unlocks on confirm).
+		SelfHosted      bool `json:"self_hosted,omitempty"`
+		EnrollConfirmed bool `json:"enroll_confirmed,omitempty"`
 	}
 	runners := make([]runnerOut, 0, len(snap.Runners))
 	type probe struct {
@@ -618,6 +624,10 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			Name: name, Status: string(rec.Status), NostrPub: rec.NostrPubkey,
 			EncPub: rec.EncPubkey, McpAddr: rec.McpAddr, Risk: rec.RiskLevel,
 			Secret: secret, Grants: grants,
+		}
+		if capability, ok := snap.Capabilities[name]; ok && capability.SelfHosted() {
+			out.SelfHosted = true
+			out.EnrollConfirmed = capability.EnrollConfirmedAt != nil
 		}
 		// Live readiness probe (the console signs a status call as its own
 		// identity — the runner still fails closed).
@@ -964,12 +974,18 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A SELF-HOSTED runner has no CP-side package dir to re-ship: seal to its
-	// presented key and return the package JSON — the caller carries it to
-	// the guest (writes secrets.json beside the runner's identity.json) and
-	// restarts the unit there. Ciphertext in an agent's context is the
-	// system's normal trust level (the runner's key decrypts it, nothing
-	// else).
+	// presented key and return the package JSON — the grantee carries it to
+	// the guest through its own door (writes secrets.json beside the runner's
+	// identity.json) and restarts the unit there. Ciphertext in an agent's
+	// context is the system's normal trust level (the runner's key decrypts
+	// it, nothing else). The fill is refused until the operator CONFIRMED the
+	// presented pubkeys on this page — the barrier that keeps a compromised
+	// provisioning agent from sealing the credential to its own key.
 	if cap, isCap := s.Store.GetCapability(req.Name); isCap && cap.SelfHosted() {
+		if cap.EnrollConfirmedAt == nil {
+			writeErr(w, http.StatusBadRequest, "self-hosted door not confirmed — verify the presented pubkeys on this page against the guest's own `runner enroll` output (Compute's report), then confirm the enrollment; the fill unlocks after that")
+			return
+		}
 		rec, pkgJSON, err := provisioner.RotateSecretSelfHosted(s.Store, req.Name, []byte(req.Secret))
 		if err != nil {
 			writeErr(w, statusForAction(err), err.Error())
@@ -1018,6 +1034,34 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "name": req.Name, "relay": relayURL,
 		"restarted": restarted, "restart_error": restartErr,
 	})
+}
+
+// enrollConfirm records the operator's confirmation of a self-hosted door's
+// presented pubkeys. The operator verifies them against the guest's own
+// `runner enroll` output (Compute's audited report in the thread) BEFORE
+// confirming — this is what binds the later credential fill to the key the
+// guest actually holds, not to whatever the provisioning agent presented.
+func (s *Server) enrollConfirm(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	if err := s.Store.ConfirmEnrollment(req.Name, uint64(time.Now().Unix())); err != nil {
+		writeErr(w, statusForAction(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "name": req.Name, "confirmed": true})
 }
 
 // restartDoor restarts a capability door's runner unit on THIS guest (the

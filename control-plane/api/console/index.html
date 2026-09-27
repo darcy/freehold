@@ -160,6 +160,7 @@ async function refresh() {
           <button data-act="rotate" data-name="${esc(r.name)}">rotate</button>
           <button data-act="grant" data-name="${esc(r.name)}">grant</button>
           <button data-act="ungrant" data-name="${esc(r.name)}">ungrant</button>
+          ${r.self_hosted && !r.enroll_confirmed ? '<button class="danger" data-act="confirm-enroll" data-name="' + esc(r.name) + '">confirm enroll</button>' : ""}
           ${r.status === "revoked" ? "" : '<button class="danger" data-act="revoke" data-name="' + esc(r.name) + '">revoke</button>'}
         </div>
       </td>
@@ -178,7 +179,7 @@ async function refresh() {
 
 async function act(kind, payload) {
   const path = { rotate: "/api/rotate", grant: "/api/grant", ungrant: "/api/revoke-grant",
-                 revoke: "/api/revoke", addr: "/api/runner-addr" }[kind];
+                 revoke: "/api/revoke", addr: "/api/runner-addr", "confirm-enroll": "/api/enroll-confirm" }[kind];
   await api(path, payload);
   await refresh();
 }
@@ -189,7 +190,12 @@ function bindActions() {
       try {
         const name = b.dataset.name;
         if (b.dataset.act === "revoke" && !confirm("revoke " + name + "? removes its credential capability")) return;
-        if (b.dataset.act === "grant") {
+        if (b.dataset.act === "confirm-enroll") {
+          const r = RUNNERS.find((x) => x.name === name);
+          const msg = "confirm the enrollment of " + name + "?\n\nVerify these pubkeys against the guest's own `runner enroll` output (Compute's report in the thread) FIRST — confirming binds the credential fill to the key this box actually holds:\n\nnostr: " + (r ? r.nostr_pubkey : "?") + "\nenc:   " + (r ? r.enc_pubkey : "?");
+          if (!confirm(msg)) return;
+          await act("confirm-enroll", { name });
+        } else if (b.dataset.act === "grant") {
           const pk = prompt("agent pubkey to grant (64 hex)");
           if (!pk) return;
           await act("grant", { name, pubkey: pk });
@@ -230,10 +236,14 @@ let fillName = "";
 function openFill(name) {
   fillName = name;
   const kind = runnerKind(name);
+  const row = RUNNERS.find((x) => x.name === name);
   $("#fill-title").textContent = "fill credential — " + name;
   const fields = $("#fill-fields");
   fields.innerHTML = "";
-  if (kind === "ssh") {
+  if (row && row.self_hosted && !row.enroll_confirmed) {
+    $("#fill-note").textContent = "This is a SELF-HOSTED door and its enrollment is not confirmed yet: verify the presented pubkeys (the row above, or Compute's report in the thread) against the guest's own `runner enroll` output, then press \"confirm enroll\" — the fill unlocks after that. Confirming is what binds the credential to the key the guest actually holds.";
+    $("#fill-submit").style.display = "none";
+  } else if (kind === "ssh") {
     $("#fill-note").textContent = "ssh doors carry their own minted keypair — no credential to fill. Install the runner's public key on the target (it rode the provisioning report); the door's self-check goes green after that.";
     $("#fill-submit").style.display = "none";
   } else {
@@ -267,9 +277,10 @@ $("#fill-submit").onclick = async () => {
     if (res.restart_error) $("#err").textContent = "sealed, but the door restart failed: " + res.restart_error;
     if (res.self_hosted && res.package_json) {
       // A self-hosted door runs on its own box — the console sealed to the
-      // runner's own key but cannot restart anything. The package JSON goes
-      // to the guest (secrets.json beside identity.json + a unit restart).
-      $("#err").textContent = "sealed for a self-hosted door — deliver to the guest: " + res.package_json;
+      // runner's own key but cannot restart anything. The GRANTEE (it holds
+      // exec on that guest through this very door) carries the package JSON
+      // over: secrets.json beside identity.json, then a unit restart there.
+      $("#err").textContent = "sealed for a self-hosted door — hand this package JSON to the granted agent (it writes it on the guest and restarts the unit): " + res.package_json;
     }
     $("#fill-overlay").style.display = "none";
     await refresh();

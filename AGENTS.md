@@ -292,7 +292,11 @@ release notes.
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
   issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
   someone else already holds still opens; re-keying after a leaked runner private key is out
-  of scope. Epoch/staleness rejection is a named follow-up.
+  of scope. Epoch/staleness rejection is a named follow-up. For a SELF-HOSTED runner the
+  same cut is narrower still: revoke removes membership/coords and blocks the CP-side flows,
+  but the guest's unit keeps running with its identity + sealed files until the box-side
+  action lands (stop the unit, remove the state dir — or destroy the guest); revoke on a
+  resident door is a feed-cut, not a stop.
 - **Backups can outlive "rotation = erase your copies."** `/srv/data` sits in the PBS +
   TrueNAS + Backblaze backup set, so a revoke that deletes the shipped `secrets.json` can
   still leave the old ciphertext in an off-site snapshot; backup retention is a named
@@ -348,9 +352,12 @@ release notes.
   own console page (`/runner/<name>` — the deep link opens its fill form, kind-aware: a
   unifi door takes username + password and the console composes the JSON login body); the
   console seals + restarts the door (a rotate on a capability door restarts the unit — the
-  fill goes live without any agent hop); on a SELF-HOSTED door the rotate seals to the
-  presented key and returns the package JSON — the caller writes `secrets.json` on the
-  guest and restarts the unit there. The tool is credential-blind BY CONSTRUCTION
+  fill goes live without any agent hop); on a SELF-HOSTED door the operator first CONFIRMS
+  the enrollment on the door page (verifying the presented pubkeys against the guest's own
+  `runner enroll` output — the barrier that binds the fill to the key the guest holds, so a
+  compromised CPA cannot seal to its own key), the rotate seals to the presented key and
+  returns the package JSON, and the GRANTEE writes `secrets.json` on the guest through its
+  own door exec and restarts the unit there. The tool is credential-blind BY CONSTRUCTION
   (provision_runner takes no secret/extras field — a direct-credential mode, an agent
   relaying the credential for freehold to seal, is a named future `agent_grants` option
   that the current tool surface makes unreachable).
