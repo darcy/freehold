@@ -1406,7 +1406,11 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 		if err != nil {
 			return "", err
 		}
-		er := &teardown.ExecRunner{}
+		// Domain keys the world's per-world tf root (TerraformDestroy resolves
+		// /srv/data/freehold-tf-<dashed-domain>, falling back to the shared dir
+		// only for a world with no per-world root) — without it the destroy
+		// half looks at the wrong dir and skips destroying the world's state.
+		er := &teardown.ExecRunner{Domain: spec.RelayHost}
 		er.SetExec(func(cmd string) (bool, string) {
 			out, err := spec.execOut(cmd, 600)
 			if err != nil {
