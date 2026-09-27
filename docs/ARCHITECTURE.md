@@ -263,14 +263,21 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
       channel + a systemd unit on the CP guest — records it as a dynamic
       capability (re-staged adopt-only on every build; fixed port so pod
       coords stay stable), grants the named agents onto its roster live, and
-      re-applies the grantees' pods with coords resolved from state. It never
+      re-applies the grantees' pods with coords resolved from state. It also
+      ENROLLS a runner resident on its own target (`hosted=self`, kind
+      `local`): the target box holds the runner-client and `runner enroll`
+      minted its identity ON the box — the CP records the presented pubkeys,
+      seals credentials to them, starts nothing, and pods dial the box's LAN
+      address directly; a re-provision must present the same pubkeys. It never
       widens an existing runner, `agent_grants: off` on the CP state is the
       server-side kill switch (`freehold-console grants-mode`), and the
       in-thread-vs-DM confirmation discipline lives in the granting skill
       (`docs/POC_GRANTS.md`). An api-kind door provisions EMPTY — the agent
       DMs the operator the door's own console page (`/runner/<name>`), whose
       kind-aware fill form seals the credential via `/api/rotate` and
-      restarts the door's unit; no credential ever transits agent chat. The
+      restarts the door's unit (a self-hosted runner instead returns the
+      package JSON — the caller writes `secrets.json` on the guest and
+      restarts the unit there); no credential ever transits agent chat. The
      `platform/migrations` queue — the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
      semantics — runs from two entry points: the `world_migrate` tool and the
@@ -520,7 +527,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     coords) never see exec. A capability a department doesn't hold yet ships
     as its runner when the capability lands — never by widening a runner's
     package; the CPA's `provision_runner` stages such a door on the fly (a
-    dynamic capability record re-staged adopt-only every build). Status
+    dynamic capability record re-staged adopt-only every build), or enrolls a
+    runner RESIDENT on the box itself (`hosted=self`) when the box holds the
+    runner-client — the exec is native on that guest. Status
     language is
     uniform, runner → service → department: 🟢 all checked / 🟡 some checks
     missing / 🔴 none.

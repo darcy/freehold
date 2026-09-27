@@ -52,7 +52,7 @@ the vmid you actually got (`pct list` for the next free one); never invent one.
    every other agent and guest can find the box by name. On the CP guest
    (via `pct exec <cp-vmid>` through `pve-ssh-root`):
 
-       freehold-console dns --state-dir /srv/data/cp/control-plane add <name> <ip> "compute create-lxc"
+        freehold-console dns --state-dir /srv/data/cp/control-plane add <name> <ip> "compute create-lxc"
 
    (Flags sit between the `dns` verb and the `add` sub-verb — Go's flag.Parse
    stops at the first non-flag arg, so a trailing `--state-dir` would be
@@ -63,41 +63,68 @@ the vmid you actually got (`pct list` for the next free one); never invent one.
    and survives a re-converge. Do NOT hand-edit dnsmasq files instead — a
    build's render would not know the record, and the pin would be drift.
 
+## The runner-client (install on every guest you create)
+
+Every guest you create gets the **runner-client** — the resident runner the
+box itself will run once freehold enrolls it. Install it right after the
+account: download the `runner` asset from the repo's latest GitHub release
+(on the PVE host, which has outbound access), push it into the guest, and
+mint the identity as `lxcadmin` (the keys live in `lxcadmin`'s state dir and
+never leave the guest):
+
+    pct push <vmid> <path-to-runner> /tmp/freehold-runner
+    pct exec <vmid> -- install -m 755 /tmp/freehold-runner /usr/local/bin/freehold-runner
+    pct exec <vmid> -- rm -f /tmp/freehold-runner
+    pct exec <vmid> -- su - lxcadmin -c 'FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold freehold-runner enroll'
+
+`enroll` is idempotent: it mints the identity once and KEEPS it on re-runs —
+never re-key a guest that already has one. It prints the two pubkeys; the
+next section uses them.
+
 ## The door (handoff to freehold)
 
-The guest is up but has no runner yet — capability is provisioned through the
-CPA's `provision_runner`, never by you (you hold no CP toolset, and grants
-are not yours to make). Report in the thread — name, vmid, IP, pinned — and
-ask freehold to stand the door up:
+A guest you created gets its door as a **resident runner** — the
+runner-client you installed IS the door; freehold enrolls it and the exec
+runs natively on the guest (no ssh hop, no credential on any other box).
+Report in the thread — name, vmid, IP, pinned, and the two pubkeys from
+`runner enroll` — and ask freehold to stand the door up:
 
-- `provision_runner(name=<name>-ssh-lxcadmin, kind=ssh,
-  address=lxcadmin@<name>, grant_to=<the agent who will work the box>)`
+- `provision_runner(name=<name>-local-lxcadmin, kind=local, hosted=self,
+  host=<name>, address=lxcadmin@<name>, pubkey=<nostr>, enc_pubkey=<enc>,
+  grant_to=<the agent who will work the box>)`
 - The runner name is `<target>-<protocol>-<identity>` — never named for the
-  consumer (the granting skill's rule). `lxcadmin` IS the identity level.
-- The address is the PINNED NAME, not the raw IP — that is why the pin runs
+  consumer (the granting skill's rule). `local` IS the protocol (the runner
+  is resident); `lxcadmin` IS the identity level — the unit runs as
+  `lxcadmin`, never root.
+- `host` is the PINNED NAME, not the raw IP — that is why the pin runs
   before the door: a re-IPed guest keeps its door address.
 
-The tool returns the door's own **public** key line — the door mints its own
-keypair; no password and no operator key is ever involved. Install it on the
-guest yourself: for boxes you created, YOU are the installer (the granting
-skill's "operator installs it" step collapses to zero hops here):
+The report carries the relay coords + the allocated port. Install the unit
+yourself (for boxes you created, YOU are the installer): a systemd unit
+`User=lxcadmin`, `EnvironmentFile=/home/lxcadmin/.freehold/serve.env`
+(write the env file from the report's values), `ExecStart` = the binary
+`serve`. Enable + start it, then verify before claiming: an exec probe
+through the door — `whoami` says `lxcadmin`, `sudo -n true` works,
+`hostname` says `<name>` — and the door's self-check goes 🟢. If freehold's
+confirm discipline is waiting on the operator's yes, say the door is
+WAITING, not that it works.
 
-    pct exec <vmid> -- sh -c 'install -d -m 700 -o lxcadmin -g lxcadmin /home/lxcadmin/.ssh; grep -qF "<key-blob>" /home/lxcadmin/.ssh/authorized_keys || echo "<pubkey line>" >> /home/lxcadmin/.ssh/authorized_keys'
-
-(The idempotent grep-guard matches how the build authorizes its own doors.)
-
-Then verify before claiming: an exec probe through the door — `whoami` says
-`lxcadmin`, `sudo -n true` works, `hostname` says `<name>` — and the door's
-self-check goes 🟢. If freehold's confirm discipline is waiting on the
-operator's yes, say the door is WAITING, not that it works.
+The **ssh door** (`kind=ssh`, the CP mints a keypair you install into
+`authorized_keys`) is the fallback for boxes that cannot hold the
+runner-client — an appliance you do not control, a guest where the install
+is refused. Everything else about it is unchanged: provision through
+freehold, never by you (you hold no CP toolset, and grants are not yours to
+make).
 
 ## The check-ins
 
 A new guest is new surface. Data's question fires on your report: "should
 this be backed up?" — name it in the thread; "no" is a valid, final answer; a
-silent gap is a failure. Exposure is Network's lane and you have not touched
-it: a DHCP guest with a resolver record is internal-only. If the caller wants
-the guest reachable from outside, say so plainly and hand the ask to Network.
+silent gap is a failure. Exposure is Network's lane: a DHCP guest with a
+resolver record is internal-only, but a RESIDENT runner is a new LAN listener
+on a new host — the pods dial it directly — so name that exposure in the
+thread too and let Network's check-in get said. If the caller wants the guest
+reachable from outside, say so plainly and hand the ask to Network.
 
 ## Teardown (when the guest dies)
 

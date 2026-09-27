@@ -960,6 +960,31 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad rotate body")
 		return
 	}
+	// A SELF-HOSTED runner has no CP-side package dir to re-ship: seal to its
+	// presented key and return the package JSON — the caller carries it to
+	// the guest (writes secrets.json beside the runner's identity.json) and
+	// restarts the unit there. Ciphertext in an agent's context is the
+	// system's normal trust level (the runner's key decrypts it, nothing
+	// else).
+	if cap, isCap := s.Store.GetCapability(req.Name); isCap && cap.SelfHosted() {
+		rec, pkgJSON, err := provisioner.RotateSecretSelfHosted(s.Store, req.Name, []byte(req.Secret))
+		if err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+		if dial := s.relayDialFor(s.Store.Snapshot().RelayURL); dial != "" {
+			if err := provisioner.SyncRunnerChannel(s.Store, dial, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
+				writeErr(w, statusForAction(err), err.Error())
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok": true, "name": req.Name, "self_hosted": true,
+			"package_json": string(pkgJSON), "rotated_at": rec.RotatedAt,
+			"restarted": false,
+		})
+		return
+	}
 	if _, err := provisioner.RotateSecret(s.Store, req.Name, []byte(req.Secret)); err != nil {
 		writeErr(w, statusForAction(err), err.Error())
 		return
