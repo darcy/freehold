@@ -35,6 +35,11 @@ export KUBECONFIG="${KUBECONFIG:-$ROOT/kubeconfig}"
 export TF_VAR_litellm_master_key="${LITELLM:-}"
 export TF_VAR_postgres_password="${POSTGRES_PW:-}"
 
+# Drop any backend record left by the old pinned shared-backend config: TF 1.9's
+# `-reconfigure` does NOT handle UNSETTING a backend, so init would otherwise
+# refuse the apply ("Backend initialization required"). With the record gone the
+# default local backend takes effect and state lives in $ROOT (per world).
+rm -f "$ROOT/.terraform/terraform.tfstate"
 terraform init -input=false >/dev/null
 case "$CMD" in apply|destroy) set -- "$@" -auto-approve;; esac
 exec terraform "$CMD" -input=false "$@"

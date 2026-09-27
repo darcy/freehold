@@ -187,3 +187,31 @@ there; if it is work not yet done, it belongs here.
   follow-up: anyone who can talk to an agent may ask freehold to add another
   identity to that agent's allowlist — freehold validates the request and
   re-applies the pod — and `create_agent` learns the real asker's pubkey.
+
+## Identity / local-vs-global
+
+- **Local runner port should be per-invocation, not a fixed default.** A box's
+  runner only serves that box's own commands (the CP dials its OWN co-located
+  runner), so nothing needs a stable port. Today `exec`/`build`/`teardown`/
+  `uninstall`/TUI default `--addr 127.0.0.1:8787`, and two profiles' runners on
+  one box collide (live's clobbered librem's on the release-test host). Lazy fix:
+  default `--addr` from the profile config (install already records a per-profile
+  port, #308) instead of the flag default. Better: start the runner on demand on a
+  free port, hand the addr to the command, and stop it when the command exits —
+  the runner is alive for the whole command (execs stream over minutes), not
+  per-exec.
+- **LXC guest names should key on the Buzz domain, not the install profile name.**
+  Guest names are `<world-name>-<role>`, where world-name is the profile name
+  typed at install (baked into the world-config). This is only cosmetic for other
+  boxes — discovery is domain → CP URL → NIP-98 auth → world facts/coords, and
+  `resolveGuestVmids` uses the world-config's name, so every box agrees — but it
+  ties the guest names to what the installer happened to type. The global instance
+  id IS the relay (Buzz) domain, dashed — the same key already used host-side for
+  LV/dataset names and per-world tf roots. Re-key guest names off it. Pairs with
+  the domain-re-point punt (deferred; Buzz keys on the domain anyway).
+- **An onboarded (adopted) relay's data plane needs a freehold-namespaced path.**
+  When freehold onboards a relay guest it did NOT create (the locked "existing
+  relay as a service" path, not yet built), the container is shared with the
+  user's own files, so a fixed guest path like `/srv/data/relay` could step on
+  them. Use a freehold-prefixed path (e.g. `/srv/data/freehold/relay`) for the
+  adopted case; freehold-created guests keep the plain `/srv/data/<tenant>`.
