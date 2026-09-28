@@ -944,24 +944,24 @@ func resolveAgentRoster(agentToolsDir string, names []string) ([]string, error) 
 
 // agentNameForPubkey resolves a registry agent's pubkey back to its NAME (the
 // reverse of resolveAgentRoster) — "" when the pubkey is not a registry agent
-// (the operator's, an external identity's). Best-effort: a registry read
-// failure returns "" (the grant still lands relay-side; only the durable
-// roster bookkeeping is skipped).
-func agentNameForPubkey(agentToolsDir, pubkey string) string {
+// (the operator's, an external identity's). err != nil is a REGISTRY READ
+// failure (callers that must not silently skip the durable bookkeeping fail
+// on it; best-effort callers may ignore it).
+func agentNameForPubkey(agentToolsDir, pubkey string) (string, error) {
 	reg, err := agenttools.OpenRegistry(filepath.Join(agentToolsDir, "registry.json"))
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("open agent registry: %w", err)
 	}
 	rows, err := reg.Agents()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read agent registry: %w", err)
 	}
 	for _, a := range rows {
 		if a.Pubkey == pubkey {
-			return a.Name
+			return a.Name, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // containsString reports whether s is in list.
@@ -1200,13 +1200,22 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid pubkey")
 			return
 		}
+		// The door's runner row must exist + be active: the record alone (a
+		// runner row that vanished) yields coords that can never resolve —
+		// grant the re-enroll, not a ghost.
+		if rec, ok := fresh.GetRunner(req.Name); !ok || rec.Status == state.RunnerRevoked {
+			writeErr(w, http.StatusBadRequest, "runner "+req.Name+" is not active — re-enroll it on the target first")
+			return
+		}
 		grants = []string{req.Pubkey}
 		// A pubkey that belongs to a REGISTRY agent joins the record's
 		// Rosters: that list drives the pod coords (the grantee's exec
 		// surface) AND the rebuild's grant re-assertion. An unknown pubkey
 		// (the operator, an external identity) rides the relay roster alone —
 		// nothing prunes it, so it persists across builds without a record.
-		if agentName := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
+		// Best-effort here: a registry-read failure still lands the live
+		// grant; only the durable bookkeeping is skipped.
+		if agentName, _ := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
 			rosters := cap.Rosters
 			if !containsString(rosters, agentName) {
 				rosters = append(rosters, agentName)
@@ -1262,8 +1271,15 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 		grants = []string{}
 		// Mirror of grant: a rostered agent's pubkey leaves the record's
 		// Rosters too — else the rebuild's re-assertion re-adds the member
-		// the operator just revoked.
-		if agentName := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
+		// the operator just revoked. The name resolution is LOUD here (not
+		// best-effort): a registry-read failure must not silently leave the
+		// revoked member in the durable roster.
+		agentName, nameErr := agentNameForPubkey(s.AgentToolsDir, req.Pubkey)
+		if nameErr != nil {
+			writeErr(w, http.StatusInternalServerError, "revoke-grant: resolve the pubkey in the agent registry: "+nameErr.Error())
+			return
+		}
+		if agentName != "" {
 			kept := make([]string, 0, len(cap.Rosters))
 			for _, r := range cap.Rosters {
 				if r != agentName {

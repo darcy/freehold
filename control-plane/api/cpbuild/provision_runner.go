@@ -355,9 +355,9 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			// stays canonical via FREEHOLD_RELAY_AUTH_URL (the dial-LAN /
 			// sign-public split).
 			report = fmt.Sprintf("runner %s (local on %s, resident) enrolled; roster [%s]; pods dial %s:%d. "+
-				"The CP holds no identity and starts nothing — the unit runs ON %s as User=lxcadmin, and %s must CONFIRM the enrollment on the door page (verify the presented pubkeys against %s's own `runner enroll` output / Compute's report) before the credential fill unlocks. "+
+				"The CP holds no identity and starts nothing — the unit runs ON %s as User=lxcadmin, and the OPERATOR must CONFIRM the enrollment on the door page (verify the presented pubkeys against %s's own `runner enroll` output / Compute's report) before the credential fill unlocks. "+
 				"The unit: EnvironmentFile=/home/lxcadmin/.freehold/serve.env (write it root-side: FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold — the dir `runner enroll` minted into, or serve mints a DIFFERENT identity under / — plus FREEHOLD_RUNNER_ADDR=0.0.0.0:%d, FREEHOLD_RELAY_URL=http://%s:3000, FREEHOLD_RELAY_PUBKEY=%s, FREEHOLD_RELAY_AUTH_URL=%s, FREEHOLD_RUNNER_ALLOW_REMOTE=1), ExecStart the runner binary `serve`.",
-				name, host, strings.Join(granted, ", "), host, port, host, granted[0], name, port,
+				name, host, strings.Join(granted, ", "), host, port, host, name, port,
 				spec.RelayIP, spec.RelayPK, spec.relaySignURL())
 		} else {
 			report = fmt.Sprintf("runner %s (%s → %s) listening on %s:%d, granted to [%s].",
