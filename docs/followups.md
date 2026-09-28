@@ -108,6 +108,13 @@ there; if it is work not yet done, it belongs here.
 - **Emergency-repair drill.** The relay-down case re-invokes the same dormant local
   provisioning expert against the same target. The path is exercised on every operational
   teardown/rebuild, but a dedicated relay-down drill is later, pre-MVP work.
+- **Relay-contract verification skill (write it once, after the exec-audit fix).** Two
+  native integrations have been failing silently fleet-wide: kind-30174 memory writes,
+  and kind-48001 exec-audit publishes (400 for the appliance's entire lifetime, invisible
+  behind NIP-42 auth on the reject). Candidate skill: after any relay/buzz change or a new
+  event kind, probe ingest under a *runner* identity and assert the gate accepts what we
+  publish — the publish side is what our own checks never see. Write it once, against the
+  tested outcome of the exec-audit fix (fail-loud on an unknown kind), not speculatively.
 
 ## Verification / harness
 
