@@ -31,6 +31,10 @@ type AgentPod struct {
 	RespondAllowlist string
 	LiteLLMKeySecret string // k8s Secret (agents ns) for OPENAI_COMPAT key; "" → own <pod>-litellm-key
 	LiteLLMBaseURL   string // reachable litellm base URL (hostNetwork: NodePort, else in-kube)
+	// AuthTag is the rendered NIP-OA attestation (BUZZ_AUTH_TAG) that gives this
+	// pod's `buzz mem` an owner to address; empty boots the pod with no writable
+	// long-term memory. The CP mints it from its own owner key at build time.
+	AuthTag string
 }
 
 // Prepare mints (or reuses) the agent's durable identity, returns its pubkey,
@@ -70,7 +74,7 @@ func (p *AgentPod) Prepare() (pubkey string, identityScript, manifestScript stri
 	}
 	return pubkey,
 		AgentIdentityScript(p.K3sVmid, id.NostrSecretHex, p.OwnerPub, p.Name),
-		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, base, CpaLiteLLMModel, p.Name, keySec, "", "", "allowlist", respondAllowlist),
+		AgentManifestScript(p.K3sVmid, p.RelayURL, p.SystemPromptPath, base, CpaLiteLLMModel, p.Name, keySec, "", "", "allowlist", respondAllowlist, p.AuthTag),
 		nil
 }
 

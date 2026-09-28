@@ -239,6 +239,30 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		}
 		fmt.Fprintln(e.Out, "  · litellm secrets stored on the CP")
 	}
+
+	// The owner identity (the world's operator key, the relay's owner-role
+	// member) ships sealed alongside the creds the CP owns: the CP mints every
+	// agent pod's memory-plane attestation with it, and an unshipped key is a
+	// world whose agents boot with no writable memory — the exact silent shape
+	// this fixes. Sealed to the console identity like the rest, opened only
+	// in-memory at mint time; the raw secret never appears in the report, a
+	// command, or the audit.
+	if !have["operator"] {
+		opID, err := box.LoadIdentity(oplogin.Dir())
+		if err != nil {
+			return fmt.Errorf("read the operator identity ledger: %w (the CP needs it to attest agent memory — run `freehold login`)", err)
+		}
+		blob, err := certcred.CPSecretBlob("operator", "operator", map[string]string{
+			"nostr": opID.NostrSecretHex, "enc": opID.EncSecretHex,
+		}, seal, pub)
+		if err != nil {
+			return err
+		}
+		if err := client.PutSecret("operator", blob); err != nil {
+			return fmt.Errorf("seed the operator identity on CP: %w", err)
+		}
+		fmt.Fprintln(e.Out, "  · operator identity stored on the CP (attests agent memory)")
+	}
 	return nil
 }
 
