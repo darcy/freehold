@@ -324,8 +324,15 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			// The unit. Only where freehold hosted it — the same condition
 			// stageDepartmentRunners requires to stand one up — is "it is down" a
 			// claim rather than a hope, and a state-only call is a leg that verified
-			// NOTHING, never a verified leg.
-			if spec.CpLxc == 0 || spec.CpIP == "" || spec.RelayHost == "" || spec.RunnerTarget == "" || spec.RelayPK == "" {
+			// NOTHING, never a verified leg. A SELF-HOSTED (resident) door's unit is
+			// not on this box at all: a CP-guest stop/probe here would be theater
+			// reporting "verified down" while the unit runs on the target — the leg
+			// reports the residency + hands the close-out to the operator instead.
+			if rec.Hosted == state.HostedSelf {
+				rep.outcomes = append(rep.outcomes, revokeOutcome{step: "unit", ok: false, detail: fmt.Sprintf(
+					"resident door: the unit is NOT on this box — it runs ON %s (port %d) with its identity + sealed files; the relay cut above is the only revocation freehold can make. The box-side close-out is the OPERATOR's: stop + disable freehold-runner-%s ON %s, remove its unit file + the runner's state dir, and verify nothing answers on %s:%d — never ask the agent that just lost the door",
+					orDefaultHost(rec.Host), rec.Port, name, orDefaultHost(rec.Host), orDefaultHost(rec.Host), rec.Port)})
+			} else if spec.CpLxc == 0 || spec.CpIP == "" || spec.RelayHost == "" || spec.RunnerTarget == "" || spec.RelayPK == "" {
 				rep.outcomes = append(rep.outcomes, revokeOutcome{step: "unit", ok: false, detail: fmt.Sprintf(
 					"state-only: this build has no substrate/relay wiring, so freehold never hosted this door's unit — no stop was made and NOTHING was verified about where it actually runs; wherever that is, the door is now unauthorized and MUST NOT be trusted to answer")})
 			} else {
@@ -375,11 +382,13 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 		if extra := stillHeld(store, targets, name); extra != "" {
 			rep.notes = append(rep.notes, "other doors the affected agents legitimately keep: "+extra+" — revoked doors are gone from their coords feed; these remain theirs")
 		}
-		if !single && !rep.hosted {
+		if !single && !rep.hosted && rec.Hosted != state.HostedSelf {
 			// The box-hosted / resident case: freehold never started this process, so
 			// whoever hosts it closes it. It is NOT handed to the agent whose access
 			// was just taken — asking that agent to tear down the door you just
 			// removed is both a privilege it may no longer hold and an audit lie.
+			// (A SELF-HOSTED door's close-out rode its own unit leg above — the
+			// package dir below is a CP path that does not exist for one.)
 			rep.notes = append(rep.notes, fmt.Sprintf(
 				"box-side close-out (this door was not hosted by freehold here — it runs on a box the build does not drive, e.g. a VPS): the OPERATOR on that box runs "+
 					"(1) systemctl stop && disable freehold-runner-%s, then remove its unit file; "+
@@ -617,6 +626,16 @@ func unitOutcomes(name string, port int, legacyUnit string) []revokeOutcome {
 // legacyDeptName is the department whose pre-convention unit name has to be
 // considered alongside the door's own (retireRunner's second stop).
 const legacyDeptName = "data"
+
+// orDefaultHost is a resident door's dial host for report text — the record
+// carries the pinned name; an empty one reads as "the target" rather than
+// printing nothing.
+func orDefaultHost(host string) string {
+	if host == "" {
+		return "the target"
+	}
+	return host
+}
 
 func systemctlActive(unit string) string {
 	raw, _ := exec.Command("sh", "-c", fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", unit)).CombinedOutput()
