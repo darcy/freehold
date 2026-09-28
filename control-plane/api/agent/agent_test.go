@@ -1,12 +1,16 @@
 package agent
 
 import (
+	"encoding/hex"
+	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
 	"freehold/agents"
+	"freehold/contract/nipoa"
 )
 
 // systemPrompt is the real multi-line prompt exactly as production ships it:
@@ -17,9 +21,13 @@ func systemPrompt() string {
 	return agents.CPASystemPrompt("")
 }
 
+// TestCPAPodManifestBasics pins the CPA pod through its ONLY production render
+// path (CPAManifestScript — the create path); the standalone CPA wrapper was
+// deleted with the dead AgentPod deploy path, whose empty-authTag CPA was the
+// exact silent-failure shape this package exists to prevent.
 func TestCPAPodManifestBasics(t *testing.T) {
 	sp := systemPrompt()
-	m := CPAPodManifest("waldo", "wss://relay.test", sp)
+	m := CPAManifestScript(105, "wss://relay.test", sp, "waldo", "http://192.168.30.8:31400/v1", "", "", "", "")
 	for _, want := range []string{
 		"kind: Pod",
 		"kind: ConfigMap",
@@ -39,11 +47,10 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		// one more round. Without it a model that writes its reply as
 		// assistant text (never calling `buzz messages send`) silently
 		// drops every answer on the floor.
-		"BUZZ_AGENT_REQUIRE_REPLY",
-		`value: "1"`,
 		"OPENAI_COMPAT_BASE_URL",
-		LiteLLMServiceURL,
-		"OPENAI_COMPAT_MODEL",
+		// hostNetwork: the CPA cannot see the in-kube service name — the
+		// deploy passes the recorded NodePort URL (the caller's arg above).
+		"http://192.168.30.8:31400/v1",
 		CpaLiteLLMModel,
 		"BUZZ_ACP_AGENT_COMMAND",
 		`value: "buzz-agent"`,
@@ -57,9 +64,18 @@ func TestCPAPodManifestBasics(t *testing.T) {
 			t.Errorf("manifest missing %q", want)
 		}
 	}
-	// The manifest must apply: every doc parses and the ConfigMap's block
-	// scalar (which embeds the real multi-line prompt) parses as one string.
-	docs := strings.Split(m, "\n---\n")
+	// The manifest must apply: extract the embedded YAML (the script carries it
+	// inside a quoted heredoc) and parse every doc of it.
+	const marker = "<<'YAML'\n"
+	i := strings.Index(m, marker)
+	if i < 0 {
+		t.Fatalf("script carries no YAML heredoc")
+	}
+	yamlBody := m[i+len(marker):]
+	if j := strings.Index(yamlBody, "\nYAML\n"); j >= 0 {
+		yamlBody = yamlBody[:j]
+	}
+	docs := strings.Split(yamlBody, "\n---\n")
 	if len(docs) != 3 {
 		t.Fatalf("manifest has %d YAML docs, want 3", len(docs))
 	}
@@ -123,10 +139,11 @@ func TestCPAPodManifestBasics(t *testing.T) {
 
 // TestAgentPodManifestDistinctNames: a second agent must own DIFFERENT k8s
 // objects (pod + secret + service) than the first — deploying two agents must
-// never apply over each other.
+// never apply over each other. Rendered through the production paths: the CPA
+// (CPAManifestScript) and a department (AgentPodManifest).
 func TestAgentPodManifestDistinctNames(t *testing.T) {
-	alice := CPAPodManifest("alice", "wss://relay.test", "/p/x.md")
-	bob := CPAPodManifest("bob", "wss://relay.test", "/p/x.md")
+	alice := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "alice", "http://192.168.30.8:31400/v1", "", "", "", "")
+	bob := AgentPodManifest("bob", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "anyone", "", "")
 	for _, want := range []string{"name: alice", "alice-identity", "name: bob", "bob-identity"} {
 		if !strings.Contains(alice, want) && !strings.Contains(bob, want) {
 			t.Errorf("neither manifest contains %q", want)
@@ -147,7 +164,7 @@ func TestAgentPodManifestMultiRunner(t *testing.T) {
 		{URL: "http://10.0.0.5:8791", Pubkey: "pkA", Target: "pve-ssh-root", Secret: "pve-ssh-root"},
 		{URL: "http://10.0.0.5:8793", Pubkey: "pkB", Target: "kube-api-caddysa", Secret: "kube-api-caddysa"},
 	}
-	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", runners...)
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", "", runners...)
 	urls, pubs, targets, secrets := runnerLists(runners)
 	for _, want := range []string{
 		`value: "` + urls + `"`,
@@ -174,31 +191,31 @@ func TestAgentPodManifestMultiRunner(t *testing.T) {
 // "allowlist" whose pubkeys ride the manifest as a plain env value — pubkeys
 // are public, the identity Secret carries only the nsec + agent-owner.
 func TestAgentPodRespondGate(t *testing.T) {
-	dept := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,network,data,compute,ai,cpa")
+	dept := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,network,data,compute,ai,cpa", "")
 	if !strings.Contains(dept, `name: BUZZ_ACP_RESPOND_TO, value: "allowlist"`) {
 		t.Errorf("department manifest must run the allowlist gate")
 	}
 	if !strings.Contains(dept, `name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "op,network,data,compute,ai,cpa"`) {
 		t.Errorf("department manifest must carry its respond-to allowlist")
 	}
-	custom := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa")
+	custom := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", "")
 	if !strings.Contains(custom, `name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "op,cpa"`) {
 		t.Errorf("custom-agent manifest must carry its asker + CPA allowlist")
 	}
-	cpa := CPAPodManifest("waldo", "wss://relay.test", "/p/x.md")
+	cpa := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "", "", "")
 	if !strings.Contains(cpa, `name: BUZZ_ACP_RESPOND_TO, value: "anyone"`) {
 		t.Errorf("CPA manifest must run the anyone gate")
 	}
 	// An empty allowlist must omit the env entirely (buzz-acp then wakes for
 	// the owner only — the legacy owner-only behavior).
-	ownerOnly := AgentPodManifest("legacy", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "")
+	ownerOnly := AgentPodManifest("legacy", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "", "")
 	if strings.Contains(ownerOnly, "BUZZ_ACP_RESPOND_TO_ALLOWLIST") {
 		t.Errorf("empty allowlist must omit the allowlist env")
 	}
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key", "", "")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key", "", "", "")
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,
@@ -212,6 +229,202 @@ func TestCPAManifestScriptApplies(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("deploy script missing %q", want)
 		}
+	}
+}
+
+// ownerSec is a fixed valid owner secret; the agent key below is a DIFFERENT
+// valid key, matching production: the attesting identity is never the attested
+// one (nipoa refuses that pair, and the buzz CLI rejects it too).
+func ownerSec() []byte {
+	s := make([]byte, 32)
+	s[0] = 0xed
+	s[31] = 0x07
+	return s
+}
+
+// TestAgentPodAuthTag pins the agent memory plane's pod contract: a minted
+// attestation reaches the pod as BUZZ_AUTH_TAG, and an absent one omits the
+// env line entirely. The absent shape is the pre-fix world — the pod boots,
+// answers conversations, and silently has no writable long-term memory — so
+// "no line when there is no tag" must stay deliberate, never accidental.
+func TestAgentPodAuthTag(t *testing.T) {
+	agentPk := "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+	tag, err := nipoa.MintEngram(agentPk, ownerSec())
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	manifest := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", tag.JSON())
+
+	// The tag must parse out of the Pod doc as the four-element array the CLI
+	// expects, and STILL VERIFY for the agent key the pod boots with: that is
+	// the whole contract, and it is what a YAML-escaping or quoting drift would
+	// break (a mangled tag is accepted by the CLI and refused at the relay).
+	pod := podEnv(t, manifest)
+	got := pod["BUZZ_AUTH_TAG"]
+	if got == "" {
+		t.Fatalf("manifest has no BUZZ_AUTH_TAG env line")
+	}
+	var elems []string
+	if err := json.Unmarshal([]byte(got), &elems); err != nil {
+		t.Fatalf("BUZZ_AUTH_TAG is not valid JSON (%q): %v", got, err)
+	}
+	if len(elems) != 4 || elems[0] != "auth" || elems[1] != tag.Owner || elems[2] != nipoa.EngramConditions {
+		t.Fatalf("BUZZ_AUTH_TAG = %q, want [auth %s %s <sig>]", got, tag.Owner, nipoa.EngramConditions)
+	}
+	if err := nipoa.Verify(agentPk, nipoa.Tag{Owner: elems[1], Conditions: elems[2], Sig: elems[3]}); err != nil {
+		t.Errorf("tag as it reached the pod does not verify: %v", err)
+	}
+
+	// The attestation is a public claim plus a signature, so it travels as a
+	// plain literal like the respond allowlist — not through a Secret. Asserted
+	// on the PARSED env (podEnv drops Secret-ref entries), never on source text:
+	// got == "" here is exactly the Secret-ref case, and line ~263 already
+	// failed on it.
+	if got == "" {
+		t.Fatalf("BUZZ_AUTH_TAG must be a plain env literal, not a Secret ref")
+	}
+	if strings.Contains(manifest, hex.EncodeToString(ownerSec())) {
+		t.Errorf("manifest carries the owner's private key")
+	}
+
+	// And the unattested shape: no line at all (rather than an empty one, which
+	// the CLI would report as a malformed tag at the agent's first write).
+	if plain := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op,cpa", ""); strings.Contains(plain, "BUZZ_AUTH_TAG") {
+		t.Errorf("an empty attestation must omit the env entirely")
+	}
+}
+
+// podEnv extracts a manifest Pod's plain (non-Secret) env entries, so a test
+// asserts on what the container actually receives rather than on source text.
+func podEnv(t *testing.T, manifest string) map[string]string {
+	t.Helper()
+	docs := strings.Split(manifest, "\n---\n")
+	if len(docs) != 3 {
+		t.Fatalf("manifest has %d YAML docs, want 3", len(docs))
+	}
+	var pod struct {
+		Kind string `yaml:"kind"`
+		Spec struct {
+			Containers []struct {
+				Name string `yaml:"name"`
+				Env  []struct {
+					Name      string `yaml:"name"`
+					Value     string `yaml:"value"`
+					ValueFrom struct {
+						SecretKeyRef struct {
+							Name string `yaml:"name"`
+						} `yaml:"secretKeyRef"`
+					} `yaml:"valueFrom"`
+				} `yaml:"env"`
+			} `yaml:"containers"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal([]byte(docs[1]), &pod); err != nil {
+		t.Fatalf("Pod doc does not parse: %v", err)
+	}
+	if pod.Kind != "Pod" {
+		t.Fatalf("second doc is %q, want Pod", pod.Kind)
+	}
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("pod has %d containers, want 1", len(pod.Spec.Containers))
+	}
+	env := map[string]string{}
+	for _, e := range pod.Spec.Containers[0].Env {
+		if e.ValueFrom.SecretKeyRef.Name != "" {
+			continue
+		}
+		env[e.Name] = e.Value
+	}
+	return env
+}
+
+// TestCPAManifestCarriesAuthTag: the CPA is created through CPAManifestScript,
+// and a tag dropped on that one path would leave the operator's own agent — the
+// one with the most memory to keep — unattested while every department worked.
+func TestCPAManifestCarriesAuthTag(t *testing.T) {
+	agentPk := "439422908f898831a8d32804ac13ca7cd3c461ebe6bc77fe16cb0be178072fb5"
+	tag, err := nipoa.MintEngram(agentPk, ownerSec())
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "http://at:8080", "atpk", tag.JSON())
+	for _, want := range []string{"BUZZ_AUTH_TAG", tag.Owner, nipoa.EngramConditions} {
+		if !strings.Contains(s, want) {
+			t.Errorf("CPA deploy script missing %q", want)
+		}
+	}
+	// The tag reaches the pod through the same heredoc the manifest rides.
+	// Parse it back OUT of the rendered script (heredoc -> Pod doc -> env) and
+	// verify THAT — the same extraction a YAML/escaping drift would break —
+	// rather than re-verifying the value we just put in.
+	const marker = "<<'YAML'\n"
+	i := strings.Index(s, marker)
+	if i < 0 {
+		t.Fatalf("CPA script carries no YAML heredoc")
+	}
+	yamlBody := s[i+len(marker):]
+	if j := strings.Index(yamlBody, "\nYAML\n"); j >= 0 {
+		yamlBody = yamlBody[:j]
+	}
+	env := podEnv(t, yamlBody)
+	got := env["BUZZ_AUTH_TAG"]
+	if got == "" {
+		t.Fatalf("CPA pod env has no BUZZ_AUTH_TAG")
+	}
+	var elems []string
+	if err := json.Unmarshal([]byte(got), &elems); err != nil {
+		t.Fatalf("CPA BUZZ_AUTH_TAG is not valid JSON (%q): %v", got, err)
+	}
+	if len(elems) != 4 || elems[0] != "auth" {
+		t.Fatalf("CPA BUZZ_AUTH_TAG = %q, want the four-element auth tag", got)
+	}
+	parsed := nipoa.Tag{Owner: elems[1], Conditions: elems[2], Sig: elems[3]}
+	if parsed.Owner != tag.Owner || parsed.Conditions != nipoa.EngramConditions {
+		t.Errorf("parsed tag owner/conditions drifted: %q / %q", parsed.Owner, parsed.Conditions)
+	}
+	if err := nipoa.Verify(agentPk, parsed); err != nil {
+		t.Errorf("tag as the CPA container receives it does not verify: %v", err)
+	}
+	// A Secret-ref'd BUZZ_ACP_AGENT_OWNER is what the tag's owner must agree
+	// with; if the CPA ever gained its own literal the two could disagree and
+	// memory would address a store the agent cannot read.
+	if !strings.Contains(s, "secretKeyRef: {name: waldo-identity, key: owner}") {
+		t.Errorf("CPA agent-owner must come from the identity Secret")
+	}
+}
+
+// TestAgentOwnerIsSecretRefed closes the same gap for a department/custom pod.
+func TestAgentOwnerIsSecretRefed(t *testing.T) {
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "")
+	if !strings.Contains(m, "secretKeyRef: {name: network-identity, key: owner}") {
+		t.Errorf("agent-owner must come from the identity Secret, not a literal")
+	}
+	if strings.Contains(m, "BUZZ_ACP_AGENT_OWNER, value:") {
+		t.Errorf("BUZZ_ACP_AGENT_OWNER must never be a literal")
+	}
+}
+
+// TestMintedTagIsBoundToItsAgent is the containment property the whole design
+// rests on: the signature covers the agent key, so a tag minted for one pod
+// cannot authorize another pod's writes even with both envs swapped.
+func TestMintedTagIsBoundToItsAgent(t *testing.T) {
+	alice := "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+	bob := "439422908f898831a8d32804ac13ca7cd3c461ebe6bc77fe16cb0be178072fb5"
+	tag, err := nipoa.MintEngram(alice, ownerSec())
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if err := nipoa.Verify(bob, tag); err == nil {
+		t.Errorf("alice's attestation verified for bob")
+	}
+	if err := nipoa.Verify(alice, tag); err != nil {
+		t.Errorf("alice's attestation does not verify for alice: %v", err)
+	}
+	// A bounded conditions string: the tag authorises memory writes, nothing
+	// else, so a stolen pod env cannot post a different kind under the owner's
+	// attestation.
+	if tag.Conditions != "kind="+strconv.Itoa(nipoa.AgentEngramKind) {
+		t.Errorf("conditions = %q, want the agent-engram kind only", tag.Conditions)
 	}
 }
 

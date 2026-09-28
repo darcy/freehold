@@ -59,6 +59,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     ciphertext → inject the runner private key → rotate. No master key.
     Runner holds only ciphertext + its own key; decrypts in its own memory,
     uses in memory, forgets. Plaintext never on disk, never in agent context.
+    Two deliberate CP-held secrets, both sealed to the console identity: the
+    DNS/litellm creds (world-secrets, opened in memory at build), and the
+    OPERATOR's Nostr SIGNING key (`world-secrets/operator.json`, shipped by
+    the box build) — it attests agent memory (`contract/nipoa`) and, as the
+    operator's full signing key, also authorizes console logins and relay
+    owner-role actions: a CP compromise yields operator impersonation (the
+    same class as losing the operator box). Runner blobs still stay sealed:
+    nothing under the CP state dir opens one.
 
 *   **Grants are coarse:** agent ↔ runner (whitelist of Nostr pubkeys);
     dedicated runner per service by default. Readiness = the runner's own
@@ -138,8 +146,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
   repro of the Rust `core`), `wire/` (envelopes), `client/` (the signed MCP
   client), `config/`, `console/` (the console client), `relay/` (the relay HTTP
   client), `delegate/` (the kind-9 delegation envelopes), `identity/` (the
-  identity.json format loader), and `worldfacts/` (the world-inventory wire
-  shape). The CP's `state/` store lives in `control-plane/` (server-only).
+  identity.json format loader), `nipoa/` (the NIP-OA owner attestation — the
+  `["auth", owner, conditions, sig]` tag that rides every agent pod as
+  `BUZZ_AUTH_TAG` and gives the agent's `buzz mem` its owner; conditions
+  bounded to `kind=30174`, self-attestation refused), and `worldfacts/` (the
+  world-inventory wire shape). The CP's `state/` store lives in
+  `control-plane/` (server-only).
 
 * **Contents:** NIP-44 v2 encryption (chacha20poly1305, bech32, hkdf-sha256,
   sha256, hex) and the signer (`CryptoProvider` over `CryptoDyn` —

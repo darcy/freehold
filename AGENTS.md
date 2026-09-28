@@ -182,7 +182,14 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 - **CP = secret PROVISIONER, not a vault.** Encrypt-to-runner-key → ship ciphertext → inject
   runner private key → rotate. No master key. Runner holds only ciphertext + its own key;
   decrypts locally, uses in memory, forgets. Plaintext never on disk, never in agent context;
-  agents reference secrets by name only.
+  agents reference secrets by name only. Two deliberate CP-held secrets, both sealed to the
+  console identity: the DNS/litellm creds, and the operator's Nostr SIGNING key
+  (`world-secrets/operator.json`, shipped by the box build). The operator key is the
+  world's root credential — it attests agent memory (`contract/nipoa`) AND signs
+  arbitrary operator events (console logins, relay owner-role actions), so a CP
+  compromise yields operator impersonation; the CP holds it because the attestation is
+  minted at every agent create/re-apply. Nothing under the CP state dir opens a runner's
+  blobs.
 - **Grants are coarse**: agent ↔ runner (whitelist of Nostr pubkeys). Dedicated runner per
   service by default; sharing via grants allowed. Readiness = the runner's own self-check:
   🟢 green / 🟡 yellow / 🔴 red. The unit of grant is the runner: one runner per capability,
@@ -391,15 +398,11 @@ release notes.
   git/GitHub grant lands with Chunk 5's workspace/git work.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
-- **Agent memory writes (kind-30174 engrams) are rejected on some worlds** — the pod's
-  buzz-acp memory path needs an owner-attestation env the pod manifest does not carry (the
-  relay refuses the write: "exactly one p tag required"), so the agent boots with no core
-  memory on affected worlds; sessions/relay/channels work. The fix is the pod env wiring
-  (or the harness's write path); surfaced by the v0.7.5 live-update test. The
-  **read** half round-trips today through the CLI with the owner stated explicitly —
-  `buzz mem <cmd> --owner <operator-pubkey>` (proven by four agents on the live fleet); the
-  **write** half stays blocked by the same p-tag defect until the pod env plus the harness write
-  path land, which closes this entry rather than adding to it.
+- **The agent memory plane has no revocation story for a leaked pod env** — the
+  attestation is bounded to kind=30174 but unbounded in time, so a leaked
+  `BUZZ_AUTH_TAG` authorizes memory writes until the pod is re-applied; minting
+  with an expiry clause + a re-mint on build is the named follow-up
+  (docs/followups.md).
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
 - **Replay window:** a signed call can be replayed against the *same* runner within its 60s

@@ -93,17 +93,6 @@ func TestChannelIDFromName(t *testing.T) {
 // derived ids must never collide with it).
 func relayFreeholdChannelForTest() string { return "00000000-0000-4000-8000-00000000f0ef" }
 
-func TestMemoryDTag(t *testing.T) {
-	d := MemoryDTag(strRepeat("a", 64), "key")
-	if len(d) != 64 {
-		t.Fatalf("d-tag must be 64 hex, got %d", len(d))
-	}
-	// Deterministic.
-	if MemoryDTag(strRepeat("a", 64), "key") != d {
-		t.Fatal("d-tag must be deterministic")
-	}
-}
-
 // --- merge_runner_metas (newest wins per channel; rogue author ignored) ---
 
 func metaEvent(t *testing.T, who []byte, p *RunnerProfile, ts int64) map[string]interface{} {
