@@ -287,8 +287,8 @@ func cmdRegistry(args []string) {
 
 // cmdChannel edits an EXISTING relay channel's metadata (kind 9002) as the
 // channel's OWNER identity, so a versioned migration can true up channels a
-// world already has (make #freehold private; rename #<dept> to #freehold-<dept>).
-// It is a no-op (exit 0) when the identity or the channel is absent, so it runs
+// world already has (make #freehold private; archive a retired channel). It is
+// a no-op (exit 0) when the identity or the channel is absent, so it runs
 // safely on worlds that predate either.
 func cmdChannel(args []string) {
 	if len(args) < 1 {
@@ -301,18 +301,22 @@ func cmdChannel(args []string) {
 		relayURL := fs.String("relay-url", "", "relay HTTP origin (dial URL)")
 		relayAuthURL := fs.String("relay-auth-url", "", "relay CANONICAL URL for NIP-98 signing; defaults to relay-url")
 		as := fs.String("as", "", "agent name whose identity signs (the channel owner)")
-		channel := fs.String("channel", "", "existing channel display name to edit (e.g. '#ai')")
+		channel := fs.String("channel", "", "existing channel display name to edit (e.g. '#freehold-ai')")
 		rename := fs.String("rename", "", "new display name (name tag)")
 		visibility := fs.String("visibility", "", "new visibility: open|private")
+		archived := fs.String("archived", "", "new archived state: true|false")
 		fs.Parse(args[1:])
 		if *stateDir == "" || *relayURL == "" || *as == "" || *channel == "" {
 			log.Fatal("channel edit needs --state-dir --relay-url --as --channel")
 		}
-		if *rename == "" && *visibility == "" {
-			log.Fatal("channel edit needs --rename and/or --visibility")
+		if *rename == "" && *visibility == "" && *archived == "" {
+			log.Fatal("channel edit needs --rename, --visibility, and/or --archived")
 		}
 		if *visibility != "" && *visibility != "open" && *visibility != "private" {
 			log.Fatalf("channel edit: --visibility must be open or private, got %q", *visibility)
+		}
+		if *archived != "" && *archived != "true" && *archived != "false" {
+			log.Fatalf("channel edit: --archived must be true or false, got %q", *archived)
 		}
 		authURL := *relayAuthURL
 		if authURL == "" {
@@ -351,6 +355,9 @@ func cmdChannel(args []string) {
 		if *visibility != "" {
 			tags = append(tags, []string{"visibility", *visibility})
 		}
+		if *archived != "" {
+			tags = append(tags, []string{"archived", *archived})
+		}
 		if len(tags) == 0 {
 			fmt.Printf("channel %s: no change needed\n", *channel)
 			return
@@ -362,6 +369,17 @@ func cmdChannel(args []string) {
 			// still fails, so the queue retries it.
 			if authzRefused(err.Error()) {
 				fmt.Printf("channel %s: relay refused (signer is not owner/admin) — skipping: %v\n", *channel, err)
+				return
+			}
+			// The relay rejects EVERY mutation on an archived channel except an
+			// archived=false edit — so archiving an already-archived channel is
+			// the desired end state, not a failure (a retried migration run
+			// lands here). Unarchive (archived=false) still fails loudly, and a
+			// COMBINED edit (rename/visibility alongside archive) fails too: the
+			// relay would drop the non-archive tags, so reporting success would
+			// hide a partially-applied edit.
+			if strings.Contains(err.Error(), "channel is archived") && *archived == "true" && *rename == "" && *visibility == "" {
+				fmt.Printf("channel %s: already archived\n", *channel)
 				return
 			}
 			log.Fatalf("channel edit %s: %v", *channel, err)

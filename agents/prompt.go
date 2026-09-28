@@ -166,15 +166,17 @@ func DepartmentPurpose(name string) (string, bool) {
 }
 
 // DepartmentChannels returns the channels a department identity joins: the
-// shared freehold channel plus its own per-department channel, both prefixed
-// `freehold-` so they read as one system (#freehold, #freehold-network, …). Nil
-// for a non-department name. create_agent resolves each by name (creating it,
-// owned by the department, when absent) and adds the CPA to every channel.
+// shared freehold channel only — departments hold their conversations in
+// #freehold (or wherever a conversation already includes them), not in
+// per-department rooms. Non-nil for a department so a rebuild re-derives the
+// fixed list rather than falling back to stale persisted channels; nil for a
+// non-department name. create_agent resolves each by name (creating it when
+// absent) and adds the CPA to every channel it does not already hold.
 func DepartmentChannels(name string) []string {
 	if _, ok := departmentPrompts[name]; !ok {
 		return nil
 	}
-	return []string{"#freehold", "#freehold-" + name}
+	return []string{"#freehold"}
 }
 
 // SystemPrompt returns the system prompt to ship for a create: a reserved

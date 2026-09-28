@@ -527,8 +527,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **The four departments are installed as part of the core build** — each a
     pod on the same harness as the CPA, created through the same audited
-    `create_agent`. Each joins the private `#freehold` plus its own **private**
-    `#freehold-<department>` channel, and the CPA is added to every channel. Each
+    `create_agent`. All join the private `#freehold` channel (there are no
+    per-department channels; conversations happen where they already are,
+    with #freehold the fallback every core agent belongs to). Each
     department also holds **capability runners** (`stageDepartmentRunners`):
     one runner per capability its role needs — named
     `<target>-<protocol>-<identity>` (`pve-ssh-root` shared by
@@ -858,8 +859,8 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     department-owned capability is executed by that department's identity and
     its raw grant attaches there, never to a custom agent. Service lifecycle is
     not a department — the agent that created a service owns it. The four are installed
-    at build, in the private `#freehold` plus a private `#freehold-<department>` channel with the CPA
-    in all; only the identity/grant separation is locked.
+    at build, all in the private `#freehold` channel; only the identity/grant separation is
+    locked.
 
 *   **Buzz required; the management relay is created by the install; one
     relay per control plane.**
