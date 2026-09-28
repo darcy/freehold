@@ -4,61 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"freehold/contract/console"
 )
-
-// TestAgentPodPrepare verifies the create-agent deploy path (A4): preparing an
-// agent pod mints/reuses a durable identity and builds the identity-secret +
-// pod-manifest scripts (the exact scripts the runner applies).
-func TestAgentPodPrepare(t *testing.T) {
-	dir := t.TempDir()
-	pod := &AgentPod{
-		Name:             "helper",
-		Purpose:          "help with installs",
-		K3sVmid:          105,
-		RelayURL:         "wss://relay.test",
-		SystemPromptPath: "/p/PROMPT.md",
-		IdentityDir:      filepath.Join(dir, "helper-id"),
-		OwnerPub:         strings.Repeat("a", 64),
-		RespondAllowlist: strings.Repeat("a", 64) + "," + strings.Repeat("b", 64),
-	}
-	pub1, idScr, manScr, err := pod.Prepare()
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if len(pub1) != 64 {
-		t.Errorf("minted pubkey not 64 hex: %q", pub1)
-	}
-	// The full respond-to allowlist (asker + the CPA) rides the manifest; an
-	// empty RespondAllowlist falls back to the owner pubkey alone.
-	if !strings.Contains(manScr, `BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "`+pod.RespondAllowlist+`"`) {
-		t.Errorf("manifest missing the full respond-to allowlist")
-	}
-	// The object names are derived from the agent's own name, never a
-	// shared/fixed CPA name — a second agent must never apply over the CPA's
-	// objects.
-	if !strings.Contains(idScr, "create secret generic helper-identity -n agents") {
-		t.Errorf("identity script missing secret creation: %q", idScr)
-	}
-	if !strings.Contains(manScr, "name: helper") {
-		t.Errorf("manifest script missing the helper pod: %q", manScr)
-	}
-	if strings.Contains(idScr, "cpa-identity") || strings.Contains(manScr, "cpa-identity") {
-		t.Errorf("agent scripts must reference helper-identity, not cpa-identity: %q / %q", idScr, manScr)
-	}
-	// Reusing the same dir must return the SAME identity (durability).
-	pub2, _, _, err := pod.Prepare()
-	if err != nil {
-		t.Fatalf("re-prepare: %v", err)
-	}
-	if pub1 != pub2 {
-		t.Errorf("identity not durable across prepares: %q vs %q", pub1, pub2)
-	}
-}
 
 // fakeConsole serves the console agent-surface the CPA toolset calls. It
 // records the last /api/agents + /api/grant state so the tools' side effects

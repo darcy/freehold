@@ -184,8 +184,9 @@ are. There is no implicit "default" profile.
   desire config (relay + CP coords, the CP's own identity, the operator pubkey
   derived from the nsec), so a fresh box recovers with nothing that lived only
   on a lost one. The operator nsec persists 0600 under the profile's
-  `control-plane/operator` dir (excluded from
-  any off-box backup/sync — it is a box-local, user-held key). The operator key
+  `control-plane/operator` dir (box-local, user-held — the CP holds only a COPY
+  sealed to the console identity, for agent-memory attestation; see the security
+  model). The operator key
   **is** the credential: the console only admits NIP-98 operators whose pubkey
   was minted into its admin whitelist at deploy, so logging in as yourself from
   any box unlocks the world. The recorded `cp_pubkey` is the CP's *own* identity
@@ -551,10 +552,20 @@ sequenceDiagram
 
 ### Security model (no master key)
 
-- The CP never holds a private key that decrypts anything, and never holds plaintext
-  (credentials are sealed, forgotten). The only key under the CP state dir is the console
+- The CP never holds a private key that decrypts a RUNNER's blobs, and never holds runner
+  plaintext (credentials are sealed, forgotten). The only key under the CP state dir is the console
   AGENT key — it signs readiness probes and is provably not the encryption recipient of
   any runner (G3.3 checks this).
+  One deliberate extension: the CP also holds the OPERATOR's Nostr SIGNING key, sealed to the
+  console identity at `world-secrets/operator.json` — the key that attests agent memory
+  (`contract/nipoa`), shipped by `freehold build` because only the operator box has it.
+  This is real authority, NOT a narrow attestation credential: whoever holds it signs
+  arbitrary events as the operator — NIP-98 console logins (the console admin
+  credential) and relay owner-role actions included. A CP compromise therefore yields
+  operator impersonation, the same class as losing the operator box itself. The CP holds
+  it because the attestation must be minted at every agent create/re-apply, and the
+  alternative (pre-minting on the box) cannot reach the CP's create path. Runner blobs
+  still stay sealed: nothing under the CP state dir opens one.
 - The runner holds ciphertext + its own injected private key; only that key opens its
   blobs, and a blob only opens under the secret name it was sealed with.
 - Rotation re-seals a NEW credential (the erase lever for your copies); revocation blocks
@@ -568,17 +579,14 @@ sequenceDiagram
 ```
 Cargo.toml            Rust workspace: control-plane/core, control-plane/runner,
                       control-plane/testkit, control-plane/core/harness/oracle
-agents/               freehold/agents — the agent definitions, embedded as Markdown:
-                      freehold/ (the Orchestrator prompt + skills), custom/ (the
-                      template for agents it creates), common/orientation.md, and the
-                      four departments (network/, data/, compute/, ai/). Its own Go
-                      module; the control plane imports the bytes.
 contract/             freehold/contract — the shared wire/trust leaf both the control
                       plane and the platform import: crypto/ (Go repro of the Rust
                       core, byte-exact cross-verified by the harness), wire/, client/
                       (the signed MCP client), config/, console/, relay/, identity/,
-                      worldfacts/, delegate/, version/. Its own Go module, so the edge
-                      is platform → contract ← control-plane (no module cycle).
+                      worldfacts/, delegate/, nipoa/ (the NIP-OA owner attestation
+                      behind every pod's BUZZ_AUTH_TAG), version/. Its own Go module,
+                      so the edge is platform → contract ← control-plane (no module
+                      cycle).
 control-plane/        freehold/control-plane — the stable mechanism (Go logic, Rust
                       only for runner + core):
   api/                the scoped API (agent tools + operator world actions) and

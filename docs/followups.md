@@ -97,6 +97,35 @@ there; if it is work not yet done, it belongs here.
   runner's exec history; receipts redacted before posting, same discipline as the
   shipped-package flow) but not posted. The operational audit path stays kind-48001 +
   local spool.
+- **Upstream buzz: the agent memory plane's integrity is a prompt, not a
+  signature.** The relay validates a kind-30174 engram's envelope shape only
+  (`validate_engram_envelope`: exactly one 64-hex `d`, exactly one 64-hex `p`,
+  plausible NIP-44 content) and never checks that the event's signature is the
+  claimed `p` owner's — so any community member can post an engram under a
+  registered agent's identity, and readers (querying `#p` + decrypting with
+  their own conversation key) simply never see it. Confidentiality holds
+  (NIP-44 pairs writer↔owner), authenticity does not. Upstream fix: replicate
+  the `is_agent_owner` check for KIND_AGENT_ENGRAM at ingest; reported with a
+  two-key reproducer (owner-signed OK, foreign-signed accepted).
+- **Upstream buzz: `mem set` on the shipped image can push a 30174 with no `p`
+  tag.** Observed twice live on the deployed image (`sprig`-shipped buzz, Sep
+  23): `buzz mem set <slug> v --owner <the author's own pubkey>` is refused by
+  the relay with "exactly one `p` tag (got 0)", while the same command with a
+  foreign owner writes. The pinned relay source's `build_event` unconditionally
+  attaches the `p` tag, so the deployed image predates or diverges from the pin
+  (`deploy_relay.go` `DefaultBufRef = f956e6fe…`) and the client-side mechanism
+  is unconfirmed — the report should carry the repro, not a cause. Unreachable
+  from freehold: every pod now mints its attestation (owner ≠ agent by
+  construction), and the CLI itself rejects self-attestation.
+- **Bound the memory attestation in time.** `contract/nipoa` signs only
+  `kind=30174`; it has no `created_at<` clause, so a leaked pod env authorizes
+  memory writes until the pod is re-applied. A rotation story (mint with an
+  expiry + re-mint on `freehold build`) is the named follow-up; the same trust
+  root already supports the clause.
+- **Pin the sprig image.** `agent.SprigImage` is `ghcr.io/block/buzz-sprig:main`
+  — a moving tag with no digest pin, so an upstream `main` push changes every
+  agent pod's binary on the next re-apply. Pin by digest (after establishing
+  the publishing workflow's provenance) and roll deliberately.
 - **Relay-mode runners need an explicit community-membership step — automated for
   department runners.** A relay-mode runner cannot read its roster until it is a relay
   COMMUNITY member (`buzz-admin add-member`); `stageDepartmentRunners` now does this for
@@ -108,6 +137,13 @@ there; if it is work not yet done, it belongs here.
 - **Emergency-repair drill.** The relay-down case re-invokes the same dormant local
   provisioning expert against the same target. The path is exercised on every operational
   teardown/rebuild, but a dedicated relay-down drill is later, pre-MVP work.
+- **Relay-contract verification skill (write it once, after the exec-audit fix).** Two
+  native integrations have been failing silently fleet-wide: kind-30174 memory writes,
+  and kind-48001 exec-audit publishes (400 for the appliance's entire lifetime, invisible
+  behind NIP-42 auth on the reject). Candidate skill: after any relay/buzz change or a new
+  event kind, probe ingest under a *runner* identity and assert the gate accepts what we
+  publish — the publish side is what our own checks never see. Write it once, against the
+  tested outcome of the exec-audit fix (fail-loud on an unknown kind), not speculatively.
 
 ## Verification / harness
 

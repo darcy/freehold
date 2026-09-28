@@ -118,6 +118,18 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if err != nil {
 			return "", fmt.Errorf("open CP state: %w", err)
 		}
+		// A retired door's name is refused to the agent surface, read BEFORE the
+		// runner-row guards: after a retire the row survives as REVOKED, so the
+		// checks below would answer "runner is revoked — pick a new name" or "was
+		// not provisioned by an agent" to what is really "revoke_runner took this
+		// away". Take-away and re-grant must not be the same caller's two hands, or
+		// a revocation the CPA could instantly undo would be a gesture rather than a
+		// control. The name is NOT reserved forever — the operator re-enables it by
+		// re-provisioning the door from the console, whose InsertCapability drops
+		// the guard.
+		if prior, retired := store.GetRetired(name); retired {
+			return "", fmt.Errorf("provision_runner %s: this door was retired by revoke_runner (%s) — an agent may not re-mint a capability it was just told to take away; the operator re-enables the name by provisioning it from the console", name, orUnknown(prior.RetiredBy))
+		}
 		// State guards: an existing runner with NO capability record was
 		// provisioned by the operator/console — grants onto it stay
 		// operator-scoped. A record with operator provenance likewise.

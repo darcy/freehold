@@ -239,6 +239,14 @@ func cmdServe(args []string) error {
 		// producer (rebuild) doesn't know the console's run-time dir, so the
 		// serve always wins with its authoritative *stateDir.
 		builder.StateDir = *stateDir
+		// The agent memory plane's attestation key resolves through cpbuild's
+		// ownerKey at mint time — the sealed `operator` world-secret (this
+		// world's owner, shipped by the box build) first, the console identity
+		// second. The console deliberately does NOT hand its own secret over:
+		// on a world where the console identity is NOT the owner (every world
+		// where the operator's key differs from the CP's runner-signing
+		// identity — the normal case), pre-setting it would short-circuit the
+		// resolver and attest every agent with the WRONG key.
 		// The world-config carries the PUBLIC relay origin (unreachable from
 		// inside the CP guest) and may predate the relay key; the console's own
 		// serve flags are the authoritative DIAL URL + trust anchor at runtime.

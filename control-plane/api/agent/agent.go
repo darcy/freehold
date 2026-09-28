@@ -16,8 +16,15 @@
 package agent
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+
+	"freehold/contract/identity"
 )
 
 // SprigImage is the default agent harness image (buzz multipain — buzz-acp,
@@ -189,6 +196,18 @@ func runnerLists(runner []RunnerCoords) (urls, pubs, targets, secrets string) {
 	return strings.Join(u, ","), strings.Join(p, ","), strings.Join(t, ","), strings.Join(s, ",")
 }
 
+// authTagEnvLine renders the BUZZ_AUTH_TAG pod env line for an agent's memory
+// plane. The value is a NIP-OA attestation — a public claim plus the owner's
+// signature, carrying NO private key — so it rides the manifest as a plain
+// literal, exactly as the respond-to allowlist does; the nsec/owner stay in the
+// identity Secret. Empty renders no line.
+func authTagEnvLine(authTag string) string {
+	if authTag == "" {
+		return ""
+	}
+	return fmt.Sprintf("    - {name: BUZZ_AUTH_TAG, value: %q}\n", authTag)
+}
+
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
 // agent is ONE pod (at-most-one-live-instance, I4); the harness is the
 // container's PID-1 process (entrypoint `exec`), presence is kind:20001, and
@@ -231,8 +250,11 @@ func runnerLists(runner []RunnerCoords) (urls, pubs, targets, secrets string) {
 // the same first-run-wins discipline as litellm's keys. The object names are
 // derived from the agent's sanitized name, so each agent owns its own Pod,
 // Service, and Secrets.
-
-func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist string, runner ...RunnerCoords) string {
+//
+// authTag is the rendered NIP-OA attestation for the agent's memory plane
+// (BUZZ_AUTH_TAG) — see authTagEnvLine. Empty omits the env: the agent then has
+// the harness but no writable long-term memory, which is the pre-fix shape.
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
@@ -241,6 +263,7 @@ func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellm
 	if respondAllowlist != "" {
 		respondAllowlistEnv = fmt.Sprintf("    - {name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: %q}\n", respondAllowlist)
 	}
+	authTagEnv := authTagEnvLine(authTag)
 	runnerEnv := ""
 	if len(runner) > 0 {
 		urls, pubs, targets, secrets := runnerLists(runner)
@@ -294,7 +317,7 @@ spec:
     - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
     - {name: FREEHOLD_AGENT_TOOLS_URL, value: %q}
     - {name: FREEHOLD_AGENT_TOOLS_PUBKEY, value: %q}
-%s%s    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+%s%s%s    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
     - {name: OPENAI_COMPAT_BASE_URL, value: %q}
     - {name: OPENAI_COMPAT_MODEL, value: %q}
     - name: OPENAI_COMPAT_API_KEY
@@ -324,7 +347,7 @@ spec:
 `,
 		promptCm, SystemPromptFile, indentSystemPrompt(systemPrompt),
 		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
-		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, runnerEnv,
+		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, authTagEnv, runnerEnv,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
 		secret, secret, SystemPromptPath, SystemPromptFile, promptCm, pod, pod)
@@ -341,20 +364,18 @@ func indentSystemPrompt(prompt string) string {
 	return strings.Join(lines, "\n")
 }
 
-// CPAPodManifest is the CPA's pod manifest — AgentPodManifest with the CPA's
-// display name (A1's stored value, default freehold) wired to the litellm
-// gateway (LiteLLMServiceURL + CpaLiteLLMModel).
-func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
-	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, sanitizePodName(cpaName)+"-litellm-key", "", "", "anyone", "")
-}
-
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
 // the litellm workload pattern. agentName is the display name (sanitized into
 // the pod name). The nsec is provided separately via the identity-secret step
 // (never embedded here). agentToolsURL/pubkey wires the CP toolset bridge when
 // non-empty. respondTo/respondAllowlist wire the inbound author gate (see
 // AgentPodManifest).
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist string, runner ...RunnerCoords) string {
+//
+// authTag is the rendered NIP-OA attestation for this pod's memory plane
+// (BUZZ_AUTH_TAG; see AgentPodManifest). It travels with the manifest, so the
+// delete-then-apply below carries it on every re-apply — a re-apply must never
+// be the thing that silently drops an agent's memory.
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
@@ -375,7 +396,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, runner...),
+		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, runner...),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 
@@ -389,12 +410,12 @@ echo AGENT_LEG1_OK`,
 // CP toolset. The CPA's inbound author gate is "anyone" — relay membership is
 // the bound; the CPA is the system's main user touchpoint and every agent's
 // delegate.
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey string) string {
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey, authTag string) string {
 	keySec := litellmKeySecret
 	if keySec == "" {
 		keySec = sanitizePodName(cpaName) + "-litellm-key"
 	}
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "")
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in
@@ -441,4 +462,55 @@ echo AGENT_LITELLM_KEY_OK`,
 // in the values we pass — 64-hex nsec and owner pubkey).
 func shQ(s string) string {
 	return "'" + s + "'"
+}
+
+// mintIdentityIn mints a fresh runner-style identity (nostr + enc secrets) in
+// dir, persisting it on first use. Reuse is decided by the caller re-loading; a
+// raced re-mint would orphan a grant, so callers re-check via LoadIdentity.
+func mintIdentityIn(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return fmt.Errorf("mint identity: %w", err)
+	}
+	enc := make([]byte, 32)
+	if _, err := rand.Read(enc); err != nil {
+		return fmt.Errorf("mint identity: %w", err)
+	}
+	id := identity.Identity{
+		NostrSecretHex: hex.EncodeToString(secret),
+		EncSecretHex:   hex.EncodeToString(enc),
+	}
+	raw, err := json.MarshalIndent(id, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "identity.json"), raw, 0o600)
+}
+
+// EnsureIdentity mints an identity in dir on first use and returns its pubkey;
+// reuses the recorded identity on later calls (identity continuity across
+// rebuilds). Shared by the CPA stage and the create-agent tool.
+func EnsureIdentity(dir string) (string, error) {
+	if err := ensureIdentity(dir); err != nil {
+		return "", err
+	}
+	id, err := identity.Load(dir)
+	if err != nil {
+		return "", err
+	}
+	return id.NostrPubkeyHex()
+}
+
+// ensureIdentity mints a runner-style identity in dir if absent, returns nil.
+func ensureIdentity(dir string) error {
+	if _, err := identity.Load(dir); err == nil {
+		return nil
+	}
+	// Mint on demand (same shape as min identity in the rebuild engine's
+	// stageCpa). The identity must survive compute-only teardown, so the
+	// caller passes a durable dir (under the CP's durable-plane area).
+	return mintIdentityIn(dir)
 }
