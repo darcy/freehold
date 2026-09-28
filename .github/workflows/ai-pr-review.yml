@@ -72,10 +72,12 @@ jobs:
           # ---- review harness config: this is the only provider-specific part ----
           # review.mjs runs opencode headless over the checked-out repo with
           # read-only tools (bash/edit/write denied in the harness process,
-          # which never sees GITHUB_TOKEN). LLM_MODEL is the opencode model
-          # id; the `openrouter/` provider prefix is added when missing.
-          LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          LLM_MODEL: "deepseek/deepseek-v4.1-flash"
+          # which never sees GITHUB_TOKEN). LLM_MODEL is the FULL opencode
+          # model id (`<provider>/<model>`); LLM_KEY_ENV names the provider's
+          # key env var and LLM_API_KEY its value.
+          LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          LLM_KEY_ENV: "FIREWORKS_API_KEY"
+          LLM_MODEL: "fireworks-ai/accounts/fireworks/models/glm-5p3-flash"
           # TOTAL harness budget across both attempts (60/40 split).
           HARNESS_TIMEOUT_MS: "900000"
           # --------------------------------------------------------------------

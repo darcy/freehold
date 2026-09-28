@@ -163,7 +163,14 @@ async function buildDiff() {
 // loads none. --standalone boots a private server (v2 otherwise attaches to
 // a shared background service). Nothing from an unreviewed head is ever
 // executed (the workflow relies on the same property).
-const HARNESS_MODEL = LLM_MODEL.startsWith('openrouter/') ? LLM_MODEL : `openrouter/${LLM_MODEL}`;
+// LLM_MODEL is the FULL opencode model id: `<provider>/<model>` — e.g.
+// `openrouter/deepseek/deepseek-v4.1-flash` or
+// `fireworks-ai/accounts/fireworks/models/glm-5p3-flash`. LLM_KEY_ENV names
+// the provider's expected key env var (OPENROUTER_API_KEY, FIREWORKS_API_KEY,
+// ...) and LLM_API_KEY holds the key itself; only that env var enters the
+// harness process.
+const HARNESS_MODEL = LLM_MODEL;
+const LLM_KEY_ENV = process.env.LLM_KEY_ENV || 'OPENROUTER_API_KEY';
 const HARNESS_PERMISSIONS = JSON.stringify({
   $schema: 'https://opencode.ai/config.json',
   // v2 ordered rules, LAST MATCH WINS: deny everything, then allow only the
@@ -213,7 +220,7 @@ async function runHarnessOnce(prompt, timeoutMs) {
     ];
     core.info(
       `Harness: opencode ${HARNESS_MODEL} · ${prompt.length.toLocaleString()} char prompt · ` +
-      `timeout ${timeoutMs / 1000}s · OPENROUTER_API_KEY ${LLM_API_KEY ? 'set' : 'MISSING'}`,
+      `timeout ${timeoutMs / 1000}s · ${LLM_KEY_ENV} ${LLM_API_KEY ? 'set' : 'MISSING'}`,
     );
     const child = spawn('opencode', args, {
       cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
@@ -231,7 +238,7 @@ async function runHarnessOnce(prompt, timeoutMs) {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
         TMPDIR: process.env.TMPDIR,
-        OPENROUTER_API_KEY: LLM_API_KEY,
+        [LLM_KEY_ENV]: LLM_API_KEY,
         OPENCODE_DISABLE_PROJECT_CONFIG: '1',
         OPENCODE_CONFIG_CONTENT: HARNESS_PERMISSIONS,
       },
