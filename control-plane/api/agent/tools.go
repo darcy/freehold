@@ -51,6 +51,19 @@ type ProvisionArgs struct {
 	// department that owns the capability class, or a custom agent that owns
 	// the service). Each must exist in the agent registry.
 	GrantTo []string `json:"grant_to"`
+	// Hosted selects where the runner process lives: "" (default) stages it
+	// on the CP guest; "self" enrolls a runner RESIDENT on the target —
+	// installed there by the agent (the runner-client), identity minted
+	// on-guest. The CP holds no private material either way.
+	Hosted string `json:"hosted,omitempty"`
+	// Self-hosted only: the target's dial address — the box's pinned name
+	// (bare host, no port; the CP allocates the port). Pods dial
+	// http://<host>:<port>.
+	Host string `json:"host,omitempty"`
+	// Self-hosted only: the runner's presented Nostr + X25519 pubkeys
+	// (64-hex each, from `runner enroll` on the target).
+	Pubkey    string `json:"pubkey,omitempty"`
+	EncPubkey string `json:"enc_pubkey,omitempty"`
 }
 
 // ProvisionRunnerFn stages a NEW capability runner on the fly (the CPA's

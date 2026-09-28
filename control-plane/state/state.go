@@ -111,14 +111,33 @@ type CapabilityRecord struct {
 	// only records the agent flow may re-provision/grant onto) or "operator"
 	// (the console's rosters path — rebuild-safe but agent-untouchable). ""
 	// reads as "agent" (records predate the field).
-	Origin    string `json:"origin,omitempty"`
-	CreatedAt uint64 `json:"created_at"`
+	Origin string `json:"origin,omitempty"`
+	// Hosted is where the runner process lives: "" (the CP guest — the CP
+	// stages and restarts its systemd unit) or "self" (resident on the
+	// target: the runner was installed ON the target box — e.g. a sandbox
+	// LXC — and enrolled with presented pubkeys; the CP never holds its
+	// identity, ships no package, and starts nothing for it).
+	Hosted string `json:"hosted,omitempty"`
+	// Host is a self-hosted runner's dial target — the box's pinned name (a
+	// bare host; the CP allocates the port) so a re-IPed guest keeps its
+	// coords. Pod coords dial it instead of the CP IP.
+	Host string `json:"host,omitempty"`
+	// EnrollConfirmedAt is when the operator CONFIRMED the presented pubkeys
+	// on the door page (against the guest's own `runner enroll` output /
+	// Compute's audited report). Until then the console refuses the
+	// credential fill — the barrier that keeps a compromised provisioning
+	// agent from sealing to its own key.
+	EnrollConfirmedAt *uint64 `json:"enroll_confirmed_at,omitempty"`
+	CreatedAt         uint64  `json:"created_at"`
 }
 
 // Capability origins.
 const (
 	OriginAgent    = "agent"
 	OriginOperator = "operator"
+	// HostedSelf marks a runner resident on its own target (the runner-client
+	// enroll flow); "" is the CP-guest hosting.
+	HostedSelf = "self"
 )
 
 // AgentProvisioned reports whether the CPA's flow owns this record. Strict:
@@ -149,6 +168,12 @@ type RetiredCapability struct {
 	// LastRoster is the roster the door carried at retirement — the record of
 	// which agents the capability was taken away from.
 	LastRoster []string `json:"last_roster,omitempty"`
+}
+
+// SelfHosted reports whether the runner process lives on the target itself
+// (the CP holds no identity, ships no package, starts no unit for it).
+func (r CapabilityRecord) SelfHosted() bool {
+	return r.Hosted == HostedSelf
 }
 
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
@@ -419,6 +444,22 @@ func (s *StateStore) InsertRetired(name string, rec RetiredCapability) error {
 		s.state.RetiredCapabilities = map[string]RetiredCapability{}
 	}
 	s.state.RetiredCapabilities[name] = rec
+	return s.Save()
+}
+
+// ConfirmEnrollment stamps the operator's pubkey confirmation on a
+// self-hosted capability record (the door page's confirm — the barrier that
+// binds the credential fill to the guest's own `runner enroll` output).
+func (s *StateStore) ConfirmEnrollment(name string, at uint64) error {
+	rec, ok := s.state.Capabilities[name]
+	if !ok {
+		return fmt.Errorf("capability %s not found", name)
+	}
+	if !rec.SelfHosted() {
+		return fmt.Errorf("capability %s is not self-hosted — nothing to confirm", name)
+	}
+	rec.EnrollConfirmedAt = &at
+	s.state.Capabilities[name] = rec
 	return s.Save()
 }
 

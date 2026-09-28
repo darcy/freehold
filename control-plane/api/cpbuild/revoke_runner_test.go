@@ -40,6 +40,24 @@ func seedDoor(t *testing.T, root, name, kind, addr string, rosters ...string) {
 	}
 }
 
+// seedSelfHostedDoor seeds a RESIDENT door's record (Hosted=self + a host) —
+// the runner's row + sealed secret live on the target, not on the CP.
+func seedSelfHostedDoor(t *testing.T, root, name, addr, host string, rosters ...string) {
+	t.Helper()
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability(name, state.CapabilityRecord{
+		Kind: "local", Address: addr, Port: 8800,
+		Rosters: append([]string(nil), rosters...), Origin: state.OriginAgent,
+		Hosted: state.HostedSelf, Host: host, CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // reopen reads the disk through a fresh handle: the flow writes through its own
 // store, so the on-disk truth is what a later build or the console would see.
 func reopen(t *testing.T, root string) *state.StateStore {
@@ -262,6 +280,43 @@ func TestRevokeRunnerWholeRetireRemovesRecordAndGuardsName(t *testing.T) {
 	}
 	if strings.Join(note.LastRoster, ",") != "ai,network" {
 		t.Fatalf("the note must record the roster it took away: %+v", note.LastRoster)
+	}
+}
+
+// TestRevokeRunnerSelfHostedRetireNeverClaimsTheUnitIsDown pins the resident
+// door's retire: the unit leg does not run a CP-guest stop/probe (theater —
+// the unit is not on this box) and NOTHING may claim "verified down"; the leg
+// names the residency + hands the box-side close-out to the operator. The
+// record is still dropped + the name guarded (the revoke is real; the unit's
+// stop is not freehold's to verify).
+func TestRevokeRunnerSelfHostedRetireNeverClaimsTheUnitIsDown(t *testing.T) {
+	root := t.TempDir()
+	seedSelfHostedDoor(t, root, "dev-local-lxcadmin", "lxcadmin@freehold-dev", "freehold-dev", "deployer")
+	reg, _ := testRegistry(t)
+
+	report, err := BuildRevokeRunner(revokeSpec(t, root), reg)(agent.RetireArgs{Name: "dev-local-lxcadmin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(report, "verified down") {
+		t.Fatalf("a resident door's unit must never be claimed down: %s", report)
+	}
+	if !strings.Contains(report, "resident door") || !strings.Contains(report, "NOT on this box") {
+		t.Fatalf("the unit leg must name the residency: %s", report)
+	}
+	if !strings.Contains(report, "still") || !strings.Contains(report, "freehold-dev:8800") {
+		t.Fatalf("the leg must say the unit is still up on the record's host:port: %s", report)
+	}
+	if !strings.Contains(report, "close-out is the OPERATOR") || !strings.Contains(report, "stop + disable freehold-runner-dev-local-lxcadmin") {
+		t.Fatalf("the close-out must be handed to the operator with the guest-side steps: %s", report)
+	}
+	// The retire itself is real: the record drops + the name guards.
+	disk := reopen(t, root)
+	if _, ok := disk.GetCapability("dev-local-lxcadmin"); ok {
+		t.Fatal("the capability record must be gone")
+	}
+	if _, retired := disk.GetRetired("dev-local-lxcadmin"); !retired {
+		t.Fatal("the retirement guard must be recorded")
 	}
 }
 

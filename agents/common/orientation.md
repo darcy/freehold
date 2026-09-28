@@ -20,6 +20,14 @@ source repository is the authoritative description of how the system is set up:
 - **Be loud, never silent.** If you see a problem, or you need access you do not have to do
   your job, say so plainly to **freehold** (the control plane agent) and the **operator** —
   and keep raising it until it is resolved. A silent gap is itself a failure.
+- **Boxes you are given carry the runner-client.** A guest LXC created for agent work runs
+  its own resident runner (identity minted on the box, enrolled with freehold by Compute's
+  install + the CPA's enroll flow). That resident runner is the audited way to work ON that
+  box — including holding sealed credentials you push with (a git deploy key) without reading
+  them. The discipline is real: on that box the runner's key is technically within your sudo's
+  reach, so the rule is a discipline you keep, not a wall — use the credential through the
+  door, never open the box's identity file. Capability still arrives only as a granted runner
+  door; never ask for raw keys on a box that has its own runner.
 - **Hold conversations where they already are.** Reply in the channel the conversation is
   happening in; when you start something, do it in **#freehold** (mention who you need) —
   that channel is where every core agent lives. If the conversation needs someone who is

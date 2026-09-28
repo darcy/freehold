@@ -2,8 +2,10 @@ package cpbuild
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,7 +39,10 @@ var runnerNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 // agentProvisionKinds are the kinds an on-the-fly runner may use: ssh (a box
 // on the network) and the api-class kinds whose exec runs locally with the
 // credential + address injected as env (unifi today; a new kind needs a
-// runner-side verify arm to report green).
+// runner-side verify arm to report green). kind=local is reserved for
+// SELF-HOSTED runners (the runner-client enroll flow): a local door on the
+// CP guest would hand its caller the guest itself, so it never provisions
+// hosted on the CP.
 var agentProvisionKinds = map[string]bool{
 	"ssh": true, "unifi": true,
 }
@@ -65,8 +70,35 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			return "", fmt.Errorf("provision_runner: name must be kebab-case [a-z0-9-] (got %q) — <target>-<protocol>-<identity>", args.Name)
 		}
 		kind := strings.ToLower(strings.TrimSpace(args.Kind))
-		if !agentProvisionKinds[kind] {
-			return "", fmt.Errorf("provision_runner %s: unsupported kind %q (supported: %s)", name, args.Kind, strings.Join(supportedProvisionKinds(), ", "))
+		hosted := strings.ToLower(strings.TrimSpace(args.Hosted))
+		if hosted != "" && hosted != state.HostedSelf {
+			return "", fmt.Errorf("provision_runner %s: hosted must be \"\" (CP guest) or %q (resident on the target)", name, state.HostedSelf)
+		}
+		selfHosted := hosted == state.HostedSelf
+		host := strings.TrimSpace(args.Host)
+		if selfHosted {
+			if kind != "local" {
+				return "", fmt.Errorf("provision_runner %s: hosted=self runs the connector on the target itself — kind must be \"local\" (got %q)", name, kind)
+			}
+			// A BARE host (the pinned name or LAN IP) — the port is
+			// CP-allocated, so a host:port here would record a door whose
+			// coords can never work.
+			if host == "" || strings.ContainsAny(host, ":/ \t") {
+				return "", fmt.Errorf("provision_runner %s: host is required for hosted=self — a BARE host (the pinned name or LAN IP, no port — the CP allocates it), got %q", name, args.Host)
+			}
+			if !provisioner.IsPubkey(args.Pubkey) || !provisioner.IsPubkey(args.EncPubkey) {
+				return "", fmt.Errorf("provision_runner %s: hosted=self enrolls the target's own identity — pubkey and enc_pubkey (64-hex each, from `runner enroll` on the guest) are required", name)
+			}
+		} else {
+			if !agentProvisionKinds[kind] {
+				return "", fmt.Errorf("provision_runner %s: unsupported kind %q (supported: %s; or hosted=self with kind=local)", name, args.Kind, strings.Join(supportedProvisionKinds(), ", "))
+			}
+			// host is a self-hosted-only field: accepted on a CP-guest door it
+			// would silently repoint the granted pods' exec surface elsewhere
+			// while the unit still starts on the CP guest.
+			if host != "" {
+				return "", fmt.Errorf("provision_runner %s: host is a hosted=self field — a CP-guest door always dials the CP itself", name)
+			}
 		}
 		if strings.TrimSpace(args.Address) == "" {
 			return "", fmt.Errorf("provision_runner %s: address is required (user@host[:port] for ssh, the base URL for %s)", name, kind)
@@ -157,9 +189,43 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// is stable and re-returned. A re-provision updates the endpoint (the
 		// box changed IP); the credential is ONLY ever sealed by the console
 		// (the operator's fill) — a re-provision restarts the door to load it.
+		// A SELF-HOSTED runner has no CP-side package at all: its identity was
+		// minted on the guest and is presented here — a re-provision must
+		// present the SAME pubkeys (a mismatch is a different process claiming
+		// the name — refuse loudly).
 		_, runnerExists := store.GetRunner(name)
+		adopted := false // self-hosted: the record carries a CONFIRMED enrollment only on the adopt path
 		var pubLine string
-		if !runnerExists {
+		if selfHosted {
+			if !runnerExists {
+				if _, err := provisioner.EnrollRunner(store, name, kind,
+					strings.TrimSpace(args.Address), args.Pubkey, args.EncPubkey,
+					net.JoinHostPort(host, strconv.Itoa(port)),
+				); err != nil {
+					return "", fmt.Errorf("enroll %s: %w", name, err)
+				}
+			} else {
+				rec, _ := store.GetRunner(name)
+				if rec.Status == state.RunnerRevoked {
+					return "", fmt.Errorf("provision_runner %s: runner is revoked — pick a new name", name)
+				}
+				if rec.NostrPubkey != args.Pubkey || rec.EncPubkey != args.EncPubkey {
+					return "", fmt.Errorf("provision_runner %s: the presented pubkeys do not match the enrolled runner — the guest's identity IS the runner (re-enroll under a new name, or fix the guest's state dir)", name)
+				}
+				adopted = true
+			}
+			if before, ok := store.GetSecret(name); ok && before.Address != strings.TrimSpace(args.Address) {
+				if err := setTargetAddress(store, name, strings.TrimSpace(args.Address)); err != nil {
+					return "", fmt.Errorf("move %s target address: %w", name, err)
+				}
+			}
+			// The runner's unit lives on the guest; a moved host updates the
+			// console's readiness probe target.
+			mcpAddr := net.JoinHostPort(host, strconv.Itoa(port))
+			if err := store.SetRunnerMcpAddr(name, &mcpAddr); err != nil {
+				return "", fmt.Errorf("update %s mcp addr: %w", name, err)
+			}
+		} else if !runnerExists {
 			// The sealed secret per kind: ssh mints its OWN keypair (the
 			// private half seals; the public line returns for the operator's
 			// one-time install); api doors seal the empty-shell "pending"
@@ -183,7 +249,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 				return "", fmt.Errorf("move %s target address: %w", name, err)
 			}
 		}
-		if kind == "ssh" {
+		if kind == "ssh" && !selfHosted {
 			if pubLine, err = departmentRunnerPubLine(pkgDir, name); err != nil {
 				return "", fmt.Errorf("read %s public key: %w", name, err)
 			}
@@ -191,17 +257,43 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 
 		// Record the dynamic capability BEFORE staging so a failure after this
 		// point heals on the next build/reconcile (the record re-stages it).
-		if err := store.InsertCapability(name, state.CapabilityRecord{
+		// A re-provision:
+		//   - preserves the operator's enrollment confirmation ONLY on the
+		//     adopt path (the runner row exists AND presented the same
+		//     pubkeys) — a fresh enroll is a NEW identity, never pre-confirmed;
+		//   - UNIONS the self-hosted Rosters with the previous record's: a
+		//     resident door's re-provision is a MOVE/repair op and must never
+		//     silently revoke a console-granted agent — the console's ungrant
+		//     is the revoke path there. (A CP-guest re-provision keeps the
+		//     shrink semantics: grant_to is the whole desired roster and the
+		//     dropped agents are revoked below.)
+		capRec := state.CapabilityRecord{
 			Kind: kind, Address: strings.TrimSpace(args.Address), Port: port,
 			Rosters: append([]string(nil), grantTo...), Origin: state.OriginAgent,
+			Hosted: hosted, Host: host,
 			CreatedAt: uint64(time.Now().Unix()),
-		}); err != nil {
+		}
+		if hasPrevRecord {
+			if adopted {
+				capRec.EnrollConfirmedAt = prevRecord.EnrollConfirmedAt
+			}
+			if selfHosted {
+				for _, r := range prevRecord.Rosters {
+					if !containsRoster(capRec.Rosters, r) {
+						capRec.Rosters = append(capRec.Rosters, r)
+					}
+				}
+			}
+		}
+		if err := store.InsertCapability(name, capRec); err != nil {
 			return "", fmt.Errorf("record capability: %w", err)
 		}
 
-		// Stage: relay channel (the audit stream) + community membership + the
-		// systemd unit on the CP guest. Idempotent; the same tail the build's
-		// ensureCapabilityRunner runs on a rebuild.
+		// Stage: relay channel (the audit stream) + community membership, then
+		// the systemd unit on the CP guest — self-hosted runners run their own
+		// unit on the target, so the CP stages everything EXCEPT the process.
+		// Idempotent; the same tail the build's ensureCapabilityRunner runs on
+		// a rebuild.
 		if err := provisioner.SyncRunnerChannel(store, spec.relayDialURL(), spec.relaySignURL(), name, cpState); err != nil {
 			return "", fmt.Errorf("sync relay channel: %w", err)
 		}
@@ -210,17 +302,23 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			return "", fmt.Errorf("relay community membership: %w", err)
 		}
 		r := capabilityRunner{name: name, kind: kind, port: port,
-			rosters: append([]string(nil), grantTo...), addr: strings.TrimSpace(args.Address), dynamic: true}
-		if err := spec.startCapabilityRunner(r, pkgDir); err != nil {
-			return "", fmt.Errorf("start runner: %w", err)
+			rosters: append([]string(nil), capRec.Rosters...), addr: strings.TrimSpace(args.Address), dynamic: true,
+			selfHosted: selfHosted, host: host}
+		if !selfHosted {
+			if err := spec.startCapabilityRunner(r, pkgDir); err != nil {
+				return "", fmt.Errorf("start runner: %w", err)
+			}
 		}
 
 		// Grant each grantee onto the runner's roster (live — the runner
 		// re-reads the signed 39002 per call), then re-apply the grantee's pod
-		// so its exec surface carries the new coords. A re-provision that
-		// SHRANK the roster revokes the dropped agents first — a grant that
-		// could not be revoked must not be made.
-		for _, dropped := range droppedRosters(prevRecord.Rosters, grantTo) {
+		// so its exec surface carries the new coords. A CP-guest re-provision
+		// that SHRANK the roster revokes the dropped agents first — a grant
+		// that could not be revoked must not be made. A self-hosted
+		// re-provision revokes nobody: its record UNIONed the rosters above
+		// (the move/repair op never silently revokes; the console's ungrant
+		// is the revoke path there).
+		for _, dropped := range droppedRosters(prevRecord.Rosters, capRec.Rosters) {
 			row, err := registryRow(reg, dropped)
 			if err != nil {
 				return "", fmt.Errorf("re-provision %s: the dropped grantee %s is no longer in the registry — revoke it by hand (console) so its exec does not linger: %w", name, dropped, err)
@@ -249,8 +347,22 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			}
 		}
 
-		report := fmt.Sprintf("runner %s (%s → %s) listening on %s:%d, granted to [%s].",
-			name, kind, strings.TrimSpace(args.Address), spec.CpIP, port, strings.Join(granted, ", "))
+		report := ""
+		if selfHosted {
+			// The relay dial is the LAN IP:3000 — a sandbox guest has no
+			// /etc/hosts pin for the relay hostname (the CP guest does), and
+			// the public edge does not listen on 3000. The NIP-98 signature
+			// stays canonical via FREEHOLD_RELAY_AUTH_URL (the dial-LAN /
+			// sign-public split).
+			report = fmt.Sprintf("runner %s (local on %s, resident) enrolled; roster [%s]; pods dial %s:%d. "+
+				"The CP holds no identity and starts nothing — the unit runs ON %s as User=lxcadmin, and the OPERATOR must CONFIRM the enrollment on the door page (verify the presented pubkeys against %s's own `runner enroll` output / Compute's report) before the credential fill unlocks. "+
+				"The unit: EnvironmentFile=/home/lxcadmin/.freehold/serve.env (write it root-side: FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold — the dir `runner enroll` minted into, or serve mints a DIFFERENT identity under / — plus FREEHOLD_RUNNER_ADDR=0.0.0.0:%d, FREEHOLD_RELAY_URL=http://%s:3000, FREEHOLD_RELAY_PUBKEY=%s, FREEHOLD_RELAY_AUTH_URL=%s, FREEHOLD_RUNNER_ALLOW_REMOTE=1), ExecStart the runner binary `serve`.",
+				name, host, strings.Join(granted, ", "), host, port, host, name, port,
+				spec.RelayIP, spec.RelayPK, spec.relaySignURL())
+		} else {
+			report = fmt.Sprintf("runner %s (%s → %s) listening on %s:%d, granted to [%s].",
+				name, kind, strings.TrimSpace(args.Address), spec.CpIP, port, strings.Join(granted, ", "))
+		}
 		if pubLine != "" {
 			report += "\nSSH public key (install in the target's authorized_keys — the runner's self-check goes green once it is):\n" + pubLine
 		}
@@ -258,8 +370,11 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// how the operator fills the credential (never via any agent's chat).
 		link := doorLink(spec, name)
 		report += "\nDoor page: " + link
-		if kind != "ssh" {
+		if kind != "ssh" && !selfHosted {
 			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals the credential and restarts the door; verify by exec-probe before claiming the capability is live."
+		}
+		if selfHosted {
+			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked) — they verify the presented pubkeys and confirm the enrollment on the page, then fill the credential. The console seals it to the runner's own key and returns the package JSON; the GRANTEE writes it to the guest's state dir as secrets.json (through its own door exec) and restarts the unit there. Verify by exec-probe before claiming the capability is live."
 		}
 		report += "\nVerify with the runner's self-check before claiming the capability is live."
 		return report, nil
@@ -312,8 +427,15 @@ func (s *Spec) agentRunnerCoords(store *state.StateStore, name string) []agent.R
 		if !ok || rec.NostrPubkey == "" {
 			continue
 		}
+		// A self-hosted runner's pods dial the TARGET's LAN address, not the
+		// CP IP (the record carries the host) — gated on the mode, never on
+		// the field being merely non-empty.
+		dialHost := s.CpIP
+		if r.selfHosted && r.host != "" {
+			dialHost = r.host
+		}
 		out = append(out, agent.RunnerCoords{
-			URL:    fmt.Sprintf("http://%s:%d", s.CpIP, r.port),
+			URL:    fmt.Sprintf("http://%s:%d", dialHost, r.port),
 			Pubkey: rec.NostrPubkey,
 			Target: r.name,
 			Secret: r.name,

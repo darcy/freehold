@@ -90,6 +90,19 @@ entirely; if your call is refused on those grounds, report it plainly.
 calling it — going back to the operator mid-provision is worse than one round
 of questions up front:
 
+- **For a guest that holds the runner-client (a resident runner):** Compute
+  installed the runner-client on the box (`create-lxc` does this) and ran
+  `runner enroll` there — the box minted its OWN identity and printed two
+  pubkeys. Enroll it: `provision_runner(name, kind=local, hosted=self,
+  host=<the pinned name>, address=<user>@<host>, pubkey=<nostr>,
+  enc_pubkey=<enc>, grant_to=[...])`. The custody property is the point: the
+  private keys were minted ON the target and never transited anything — the
+  control plane records the pubkeys, seals credentials TO them, and starts
+  nothing; the box runs its own unit (as `lxcadmin`, never root). The exec
+  is native on the guest — no ssh hop, no key on any other box. A
+  re-provision must present the SAME pubkeys; a mismatch is a different
+  process claiming the name and is refused. The Network check-in applies —
+  a resident runner is a new LAN listener the pods dial directly.
 - For a box on the network (ssh): address as `user@host[:port]`, and whether
   the account can do the job (least privilege where a scoped account exists).
   The runner mints its OWN keypair — never take the operator's password or
@@ -112,8 +125,8 @@ of questions up front:
   try the value as an X-API-KEY or similar header — an API-key door would be
   named that way in the description; this one is a login pair.
 - Name it `<target>-<protocol>-<identity>` (`rtx3090-ssh-root`,
-  `unifi-api-admin`) — what it reaches, how, at what level. Never for the
-  consumer.
+  `unifi-api-admin`, `freehold-dev-local-lxcadmin`) — what it reaches, how,
+  at what level. Never for the consumer.
 - `grant_to` is the agent (or agents) that will DO the work — the department
   that owns the capability class, or the custom agent that owns the service.
   You hold no exec yourself; never grant a capability to you.
@@ -126,11 +139,34 @@ use; never ask the operator to widen one.
 
 **After granting:** the grantees' pods re-apply automatically (the exec surface
 picks the new coords up); an EMPTY door stays 🟡 until the operator fills its
-credential via the door page link (the console seals + restarts it) — then
-verify the door's own self-check / an exec probe, and say what is actually
-live. A direct-credential mode (the operator handing the credential to this
-agent for freehold to seal) is a possible future `agent_grants` mode; it is
-not built, and until it is, chat is never the credential path.
+credential via the door page link — for a CP-guest door the console seals +
+restarts it; for a SELF-HOSTED one the operator first CONFIRMS the enrollment
+on the page (verifying the presented pubkeys against the guest's own
+`runner enroll` output — Compute's audited report in the thread; this confirm
+is the technical barrier that binds the fill to the key the guest actually
+holds, so a compromised provisioning agent cannot seal the credential to its
+own key), then fills: the console seals to the runner's own key and returns
+the package JSON, and the GRANTEE carries it over — it holds exec on that
+guest through this very door — writing `secrets.json` beside the runner's
+identity.json and restarting the unit there. The ciphertext transits the
+grantee's context: that is the system's normal trust level (only the
+runner's key opens it), but on a RESIDENT runner the grantee could also read
+the runner's own key (it is on a box the grantee holds sudo on) — nothing
+technically stops it, so this is a discipline, not a containment: the agent
+uses the sealed credential through the door and does not open the box's
+identity file. Say what is actually live after verifying the door's own
+self-check / an exec probe. A direct-credential mode (the operator handing
+the credential to this agent for freehold to seal) is a possible future
+`agent_grants` mode; it is not built, and until it is, chat is never the
+credential path.
+
+**Revoking a self-hosted door is a feed-cut, not a stop.** The CP holds no
+identity and starts no unit for it, so roster removal + revoke cut the
+grants and the coords — but the guest's unit keeps running with its identity
+and sealed files intact until the box-side action lands (stop the unit,
+remove the state dir — or destroy the guest, which is what `create-lxc`'s
+teardown does). Say so plainly when revoking a resident door; a revoked door
+that is still up is a known state, not a silent one.
 
 ## Take-away flow (revoke_runner)
 

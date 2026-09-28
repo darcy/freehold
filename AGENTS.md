@@ -294,7 +294,11 @@ release notes.
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
   issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
   someone else already holds still opens; re-keying after a leaked runner private key is out
-  of scope. Epoch/staleness rejection is a named follow-up.
+  of scope. Epoch/staleness rejection is a named follow-up. For a SELF-HOSTED runner the
+  same cut is narrower still: revoke removes membership/coords and blocks the CP-side flows,
+  but the guest's unit keeps running with its identity + sealed files until the box-side
+  action lands (stop the unit, remove the state dir — or destroy the guest); revoke on a
+  resident door is a feed-cut, not a stop.
 - **Backups can outlive "rotation = erase your copies."** `/srv/data` sits in the PBS +
   TrueNAS + Backblaze backup set, so a revoke that deletes the shipped `secrets.json` can
   still leave the old ciphertext in an off-site snapshot; backup retention is a named
@@ -333,18 +337,29 @@ release notes.
   the fly and grants the named agents onto it live — it cannot widen an existing runner's
   roster (grants onto build-time capability runners stay operator/console-issued via
   `grant_agent`, `-32003` for agents), and `agent_grants: off` on the CP state is the
-  server-side kill switch (`freehold-console grants-mode`; default `confirm`). The
+  server-side kill switch (`freehold-console grants-mode`; default `confirm`). A second
+  mode enrolls a runner RESIDENT on its own target (`hosted=self`, kind `local`): the box
+  holds the runner-client (`runner enroll` mints the identity ON the guest — Compute
+  installs the client on every guest it creates, `create-lxc` skill), presents its
+  pubkeys, and the CP records them, seals to them, starts nothing — pods dial the box's
+  LAN address directly. The
   in-thread-vs-DM confirmation discipline lives in the granting skill — the server cannot
   see Buzz threads, so a compromised CPA's only technical barrier is the new-runner-only
   boundary; the prompt is the first line of defense. Dynamic capability records make an
   on-the-fly door rebuild-safe (re-staged adopt-only every build; a record whose package
-  vanished fails loudly — the credential is not re-derivable), and the grantees' pods are
+  vanished fails loudly — the credential is not re-derivable; a self-hosted record whose
+  runner row vanished says re-enroll), and the grantees' pods are
   re-applied with coords resolved from state. **Credentials never ride chat**: an api-kind
   door provisions EMPTY (a "pending" placeholder) and the agent DMs the operator the door's
   own console page (`/runner/<name>` — the deep link opens its fill form, kind-aware: a
   unifi door takes username + password and the console composes the JSON login body); the
   console seals + restarts the door (a rotate on a capability door restarts the unit — the
-  fill goes live without any agent hop). The tool is credential-blind BY CONSTRUCTION
+  fill goes live without any agent hop); on a SELF-HOSTED door the operator first CONFIRMS
+  the enrollment on the door page (verifying the presented pubkeys against the guest's own
+  `runner enroll` output — the barrier that binds the fill to the key the guest holds, so a
+  compromised CPA cannot seal to its own key), the rotate seals to the presented key and
+  returns the package JSON, and the GRANTEE writes `secrets.json` on the guest through its
+  own door exec and restarts the unit there. The tool is credential-blind BY CONSTRUCTION
   (provision_runner takes no secret/extras field — a direct-credential mode, an agent
   relaying the credential for freehold to seal, is a named future `agent_grants` option
   that the current tool surface makes unreachable).
