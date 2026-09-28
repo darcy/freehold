@@ -217,6 +217,10 @@ async function runHarnessOnce(prompt, timeoutMs) {
     );
     const child = spawn('opencode', args, {
       cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      // stdin MUST be closed: the v2 CLI reads stdin to EOF before acting
+      // (an open-but-empty pipe hangs it forever — spawnSync closed stdin
+      // implicitly, async spawn does not).
+      stdio: ['ignore', 'pipe', 'pipe'],
       // Node kills the child and reports the signal on close.
       timeout: timeoutMs,
       killSignal: 'SIGKILL',
