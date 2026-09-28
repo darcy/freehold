@@ -51,6 +51,11 @@ jobs:
         working-directory: .github/scripts/ai-review
         run: npm ci
 
+      # The review harness. Pinned version: a floating agent binary inside a
+      # job that reviews untrusted PRs is a supply-chain surface.
+      - name: Install opencode
+        run: npm install -g opencode-ai@1.18.32
+
       - name: Run AI review
         working-directory: .github/scripts/ai-review
         env:
@@ -61,17 +66,15 @@ jobs:
           # account named 'Bot Review'. Reviews also author as that account.
           GITHUB_TOKEN: ${{ secrets.AI_REVIEW_BOT_TOKEN }}
 
-          # ---- provider config: this is the only provider-specific part ----
-          # Toggle providers: comment one block out, uncomment the other.
-          LLM_BASE_URL: "https://openrouter.ai/api/v1"
+          # ---- review harness config: this is the only provider-specific part ----
+          # review.mjs runs opencode headless over the checked-out repo with
+          # read-only tools (bash/edit/write denied in the harness process,
+          # which never sees GITHUB_TOKEN). LLM_MODEL is the opencode model
+          # id; the `openrouter/` provider prefix is added when missing.
           LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LLM_MODEL: "deepseek/deepseek-v4.1-flash"
-          # LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
-          # LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
-          # LLM_MODEL: "accounts/fireworks/models/glm-5p3-flash"
-          # Abort a single stalled LLM request after 10 min so callLlm retries
-          # instead of hanging to the job's 60-minute cap.
-          LLM_TIMEOUT_MS: "600000"
+          # Wall-clock cap for the whole headless session (all of its turns).
+          HARNESS_TIMEOUT_MS: "1200000"
           # --------------------------------------------------------------------
 
           PROMPT_FILE: "review-prompt.md"

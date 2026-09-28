@@ -1,16 +1,18 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { readFileSync, existsSync } from 'fs';
-import { reassembleStream } from './sse.mjs';
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { spawnSync } from 'child_process';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { parseReview, harnessText } from './parse.mjs';
 import { buildReviewReplies, buildThreadIndex } from './threads.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const LLM_BASE_URL = process.env.LLM_BASE_URL;
 const LLM_API_KEY = process.env.LLM_API_KEY;
 const LLM_MODEL = process.env.LLM_MODEL;
-// Cap a single LLM request (headers + body). A stalled stream otherwise hangs
-// until the job's 60-minute timeout; aborting lets callLlm retry instead.
-const LLM_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '600000', 10);
+// Wall-clock cap for the whole headless harness session (all of its turns), so
+// a wedged run fails and retries instead of hanging to the job's 60-minute cap.
+const HARNESS_TIMEOUT_MS = parseInt(process.env.HARNESS_TIMEOUT_MS || '1200000', 10);
 const PROMPT_FILE = process.env.PROMPT_FILE || 'review-prompt.md';
 const CONTEXT_FILES = (process.env.CONTEXT_FILES || '').split(',').map(s => s.trim()).filter(Boolean);
 const EXCLUDE_PATTERNS = (process.env.EXCLUDE_PATTERNS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -19,7 +21,7 @@ const MAX_CONTEXT_FILE_CHARS = parseInt(process.env.MAX_CONTEXT_FILE_CHARS || '2
 const FAIL_ON_OVERSIZED_DIFF = (process.env.FAIL_ON_OVERSIZED_DIFF || 'true') === 'true';
 const TRACKING_MARKER = '<!-- ai-review:tracking -->';
 
-for (const [name, val] of Object.entries({ GITHUB_TOKEN, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL })) {
+for (const [name, val] of Object.entries({ GITHUB_TOKEN, LLM_API_KEY, LLM_MODEL })) {
   if (!val) throw new Error(`Missing required env var: ${name}`);
 }
 
@@ -147,146 +149,91 @@ async function buildDiff() {
   return { ok: true, diff: annotatedFiles.map(f => f.text).join('\n\n'), fileCount: annotatedFiles.length, totalChars };
 }
 
-// flash-class models ignore response_format and answer in prose, but they
-// still honor function calling. Force the model into a `review` tool so it
-// emits the review as JSON tool-call arguments.
-const REVIEW_TOOL = {
-  type: 'function',
-  function: {
-    name: 'review',
-    description: 'Report the PR review findings as a single JSON object.',
-    parameters: {
-      type: 'object',
-      properties: {
-        verdict: { type: 'string', description: '"MERGE-READY: <reason>" or "NEEDS WORK: <n> blocking, <m> important"' },
-        summary: { type: 'string', description: '2-6 sentence prose summary of the review' },
-        readme_note: { type: 'string', description: 'one line, or empty string if no README drift' },
-        architecture_note: { type: 'string', description: 'one line, or empty string if no ARCHITECTURE drift' },
-        inline: {
-          type: 'array',
-          description: 'blocking/important findings only, each pinned to an exact line in the diff',
-          items: {
-            type: 'object',
-            properties: {
-              path: { type: 'string' },
-              line: { type: 'integer' },
-              severity: { type: 'string', enum: ['blocking', 'important'] },
-              comment: { type: 'string', description: 'Specific and actionable. Format for readability with line breaks (short lines or bullet points), not one long paragraph.' },
-            },
-            required: ['path', 'line', 'severity', 'comment'],
-          },
-        },
-      },
-      required: ['verdict', 'summary', 'inline'],
-    },
+// The review runs as an opencode headless session (`opencode run`) over the
+// checked-out repo: it reads the attached instructions (repo context + full
+// diff), explores the working tree with READ-ONLY tools to verify cross-file
+// claims, and answers with the review JSON. The child env carries ONLY the
+// model key — GITHUB_TOKEN never enters the harness, so a prompt-injected
+// agent cannot touch the PR; this process keeps posting. The PR's own
+// opencode config is ignored (OPENCODE_DISABLE_PROJECT_CONFIG) and
+// OPENCODE_CONFIG_CONTENT — which merges after every other standard config
+// source — explicitly denies every mutating tool, so a shipped config cannot
+// re-enable them; --pure skips external plugins. Nothing from an unreviewed
+// head is ever executed (the workflow relies on the same property).
+const HARNESS_MODEL = LLM_MODEL.startsWith('openrouter/') ? LLM_MODEL : `openrouter/${LLM_MODEL}`;
+const HARNESS_PERMISSIONS = JSON.stringify({
+  $schema: 'https://opencode.ai/config.json',
+  // The config merge is shallow per key: any permission NOT set here would
+  // survive from an earlier config source, so the mutating tools are denied
+  // explicitly even though `*` covers them.
+  permission: {
+    '*': 'deny',
+    read: 'allow', grep: 'allow', glob: 'allow', list: 'allow',
+    bash: 'deny', edit: 'deny', write: 'deny', patch: 'deny', webfetch: 'deny',
   },
-};
+});
 
-// deepseek-v4p1-flash ignored BOTH `reasoning_effort` and `response_format` and
-// narrated its review in prose (no JSON) on a dense diff, so the reviewer uses
-// deepseek-v4-flash-0731, which honors function calling. Keep `reasoning_effort`
-// off by default (0731 does not need it); set LLM_REASONING_EFFORT to override.
-const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT ?? '';
-
-// extractJsonObject returns the first brace-balanced `{...}` substring that
-// contains a "verdict" key — the safety net when the model wraps its JSON in
-// prose. It tries EVERY `{` (not just the first) so a prose brace like
-// "{1: ...}" before the real JSON does not hide it. String/escape aware so
-// braces inside strings don't break the scan.
-function extractJsonObject(s) {
-  for (let start = s.indexOf('{'); start >= 0; start = s.indexOf('{', start + 1)) {
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = start; i < s.length; i++) {
-      const ch = s[i];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (ch === '\\') esc = true;
-        else if (ch === '"') inStr = false;
-        continue;
-      }
-      if (ch === '"') inStr = true;
-      else if (ch === '{') depth += 1;
-      else if (ch === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          const cand = s.slice(start, i + 1);
-          if (cand.includes('"verdict"')) return cand;
-          break; // this start did not yield the verdict object; try the next
-        }
-      }
-    }
-  }
-  return '';
-}
-
-async function callLlmOnce(prompt) {
-  const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
-    signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
-    body: JSON.stringify({
-      model: LLM_MODEL,
-      temperature: 0.1,
-      max_tokens: 64000,
-      stream: true,
-      ...(LLM_REASONING_EFFORT ? { reasoning_effort: LLM_REASONING_EFFORT } : {}),
-      messages: [{ role: 'user', content: prompt }],
-      tools: [REVIEW_TOOL],
-      tool_choice: { type: 'function', function: { name: 'review' } },
-    }),
-  });
-  if (!res.ok) throw new Error(`LLM API error ${res.status}: ${await res.text()}`);
-  // Streamed: headers arrive immediately, so a multi-minute reasoning call no
-  // longer trips undici's 5-minute headers timeout (which surfaced as
-  // "fetch failed" and retried until the job looked hung).
-  const msg = reassembleStream(await res.text());
-  if (!msg) throw new Error('LLM returned no message');
-
-  // JSON normally lands in content; fall back to tool-call args / reasoning
-  // for providers that answer another way. Log head + tail so a drift into
-  // prose is diagnosable from the run log.
-  let content = msg.tool_calls?.[0]?.function?.arguments?.trim() || '';
-  if (!content.trim()) {
-    if (typeof msg.content === 'string') content = msg.content;
-    else if (Array.isArray(msg.content)) content = msg.content.map(p => p?.text || '').join('');
-  }
-  if (!content.trim() && typeof msg.reasoning_content === 'string') content = msg.reasoning_content;
-  core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 200)}`);
-  core.info(`LLM raw tail: ${content.trim().slice(-300)}`);
-
-  const raw = content.trim() || '{}';
-  const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-  let parsed = null;
+function runHarnessOnce(prompt) {
+  // The prompt (context + diff) exceeds argv limits; attach it as a file.
+  const dir = mkdtempSync(join(tmpdir(), 'ai-review-harness-'));
   try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    const cand = extractJsonObject(cleaned);
-    if (cand) {
-      try {
-        parsed = JSON.parse(cand);
-      } catch {
-        parsed = null;
+    const promptFile = join(dir, 'prompt.md');
+    writeFileSync(promptFile, prompt);
+    const message = 'You are a PR review agent. The attached file contains your complete ' +
+      'review instructions, repo context, and the diff under review — follow it exactly. ' +
+      'The repository is checked out at the current working directory at the PR state; ' +
+      'use your read-only tools to inspect surrounding code and verify cross-file claims. ' +
+      'Finish by outputting ONLY the single JSON review object the instructions specify.';
+    const res = spawnSync('opencode', [
+      'run', '--pure', '--format', 'json', '--model', HARNESS_MODEL, '--file', promptFile, message,
+    ], {
+      cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      timeout: HARNESS_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        OPENROUTER_API_KEY: LLM_API_KEY,
+        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+        OPENCODE_CONFIG_CONTENT: HARNESS_PERMISSIONS,
+      },
+    });
+    if (res.error) throw new Error(`opencode failed to run: ${res.error.message}`);
+    if (res.signal) throw new Error(`opencode timed out after ${HARNESS_TIMEOUT_MS}ms (signal ${res.signal})`);
+    if (res.status !== 0) throw new Error(`opencode exited ${res.status}: ${String(res.stderr).slice(-300)}`);
+
+    const stdout = res.stdout.toString();
+    core.info(`opencode stdout: ${stdout.length} chars`);
+    // A failed session (bad key, provider outage) is reported as a JSON
+    // `error` event on stdout and still exits 0 — surface it explicitly.
+    for (const line of stdout.split('\n')) {
+      if (!line.trim().startsWith('{')) continue;
+      let e;
+      try { e = JSON.parse(line); } catch { continue; }
+      if (e?.type === 'error') {
+        throw new Error(`opencode session error: ${e.error?.data?.message || e.error?.name || JSON.stringify(e.error).slice(0, 200)}`);
       }
     }
+    const text = harnessText(stdout) || stdout;
+    core.info(`Harness raw (${text.length} chars): ${text.trim().slice(0, 200)}`);
+    core.info(`Harness raw tail: ${text.trim().slice(-300)}`);
+    return parseReview(text);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.verdict) {
-    throw new Error(`LLM response missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`);
-  }
-  return parsed;
 }
 
-// The flash model intermittently drifts into prose instead of the JSON tool
-// call, so retry a few times before failing the run.
-async function callLlm(prompt) {
+// Transient harness failures (provider hiccups, slow start) retry once before
+// failing the run — a retry is a full re-explore, so only one.
+async function runHarness(prompt) {
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      return await callLlmOnce(prompt);
+      return await runHarnessOnce(prompt);
     } catch (e) {
       lastErr = e;
-      core.warning(`LLM attempt ${attempt}/3 failed: ${e.message}`);
+      core.warning(`Harness attempt ${attempt}/2 failed: ${e.message}`);
     }
   }
   throw lastErr;
@@ -455,28 +402,12 @@ async function main() {
     .replace('{{CONTEXT_FILES}}', () => ctx.text)
     .replace('{{DIFF}}', () => diff);
 
-  const result = await callLlm(prompt);
+  const result = await runHarness(prompt);
 
-  // The weak flash model commonly stops after the first finding. Iterate:
-  // while findings exist, ask again for ADDITIONAL distinct findings until the
-  // model reports none new (capped) — so a review doesn't stop at one issue.
-  const merged = (Array.isArray(result.inline) ? result.inline : []).slice();
-  const already = () => new Set(merged.map(f => `${f.path}:${f.line}`));
-  for (let pass = 1; pass <= 3 && merged.length > 0; pass++) {
-    const foundText = merged.map(f => `- [${f.severity}] ${f.path}${typeof f.line === 'number' ? `:${f.line}` : ''}`).join('\n');
-    const followUp = `PR ${owner}/${repo} #${pull_number}\n\nThese blocking/important findings are ALREADY reported:\n${foundText}\n\nReview the diff again. Report ONLY ADDITIONAL distinct blocking/important findings you have NOT already covered above — one per file:line. If there are no more, return an empty "inline" array and verdict "MERGE-READY".\n\nDo not repeat findings already listed.\n\nDIFF:\n${diff}`;
-    let more;
-    try {
-      more = await callLlm(followUp);
-    } catch (e) {
-      core.warning(`Follow-up pass ${pass} failed: ${e.message}`);
-      break;
-    }
-    const added = (Array.isArray(more.inline) ? more.inline : []).filter(f => !already().has(`${f.path}:${f.line}`));
-    if (added.length === 0) break;
-    merged.push(...added);
-  }
-  const inline = merged;
+  // The harness explores iteratively by nature (it reads the repo rather than
+  // answering from one prompt), so there is no follow-up machinery: whatever
+  // it reports in `inline` is the round's finding set.
+  const inline = Array.isArray(result.inline) ? result.inline : [];
   await progress(3, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
 
   // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
