@@ -1707,29 +1707,40 @@ func (s *Spec) ownerKey() ([]byte, error) {
 		return s.validatedOwnerKey(s.OwnerSecret)
 	}
 	sealed := filepath.Join(s.StateDir, "world-secrets", "operator.json")
-	if cert.CredExists(sealed) {
-		encSec, serr := s.consoleEncSecret()
-		if serr != nil {
-			return nil, fmt.Errorf("the sealed operator identity at %s needs the console enc key: %w", sealed, serr)
-		}
-		open := func(recSecret, aad, blob []byte) ([]byte, error) { return crypto.Open(recSecret, aad, blob) }
-		_, env, err := cert.LoadCreds(sealed, open, encSec)
+	if !cert.CredExists(sealed) {
+		disk, err := cpstate.ConsoleSecret(s.consoleStateRoot())
 		if err != nil {
-			return nil, fmt.Errorf("the sealed operator identity at %s is unreadable: %w", sealed, err)
+			return nil, fmt.Errorf("no owner key: the operator identity is not sealed on the CP (run `freehold build` from the operator box) and the console identity under %s/console is unreadable: %w", s.consoleStateRoot(), err)
 		}
-		if hexRaw := env["nostr"]; hexRaw != "" {
-			sec, err := hex.DecodeString(hexRaw)
-			if err == nil && len(sec) == 32 {
-				return s.validatedOwnerKey(sec)
+		return s.validatedOwnerKey(disk)
+	}
+	encSec, serr := s.consoleEncSecret()
+	if serr != nil {
+		return nil, fmt.Errorf("the sealed operator identity at %s needs the console enc key: %w", sealed, serr)
+	}
+	open := func(recSecret, aad, blob []byte) ([]byte, error) { return crypto.Open(recSecret, aad, blob) }
+	_, env, err := cert.LoadCreds(sealed, open, encSec)
+	if err != nil {
+		return nil, s.staleSealedOwner(sealed, fmt.Errorf("unreadable (%w)", err))
+	}
+	if hexRaw := env["nostr"]; hexRaw != "" {
+		sec, derr := hex.DecodeString(hexRaw)
+		if derr == nil && len(sec) == 32 {
+			if _, verr := s.validatedOwnerKey(sec); verr == nil {
+				return sec, nil
 			}
 		}
-		return nil, fmt.Errorf("the sealed operator identity at %s carries no usable nostr secret — re-run `freehold build` to re-hand it off", sealed)
 	}
-	disk, err := cpstate.ConsoleSecret(s.consoleStateRoot())
-	if err != nil {
-		return nil, fmt.Errorf("no owner key: the operator identity is not sealed on the CP (run `freehold build` from the operator box) and the console identity under %s/console is unreadable: %w", s.consoleStateRoot(), err)
-	}
-	return s.validatedOwnerKey(disk)
+	return nil, s.staleSealedOwner(sealed, fmt.Errorf("usable for a different owner"))
+}
+
+// staleSealedOwner reports a sealed operator record that no longer serves —
+// unreadable, or sealed for a key that is not the recorded owner. The record is
+// NEVER deleted here (a CP-side delete of the only copy is a destructive act
+// the operator owns); the message names the one file to remove so the next
+// `freehold build` re-seeds it from the box's ledger.
+func (s *Spec) staleSealedOwner(path string, cause error) error {
+	return fmt.Errorf("the sealed operator identity at %s is %s — remove that file and re-run `freehold build` from the operator box to re-seed it", path, cause)
 }
 
 // validatedOwnerKey checks a candidate secret against the recorded OwnerPub —
@@ -1755,9 +1766,11 @@ func (s *Spec) validatedOwnerKey(sec []byte) ([]byte, error) {
 // key must resolve, and the minted tag must verify against the very agent key
 // the pod boots with.
 //
-// The attesting key is the console identity, never the agent's own: the CLI
-// rejects self-attestation outright, and an owner-signed tag keeps every agent
-// store in the same owner namespace the respond gate already uses.
+// The attesting key is the OWNER key (OwnerPub — the operator identity the
+// world was installed under, resolved by ownerKey), never the agent's own: the
+// CLI rejects self-attestation outright, and an owner-signed tag keeps every
+// agent store in the same owner namespace the respond gate already uses. It is
+// normally NOT the console identity — see ownerKey.
 func (s *Spec) mintAuthTag(agentPk, who string) (string, error) {
 	ownerSec, err := s.ownerKey()
 	if err != nil {

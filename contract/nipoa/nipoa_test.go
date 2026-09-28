@@ -49,12 +49,22 @@ func TestMintRoundTrips(t *testing.T) {
 	}
 	// The agent key is the subject of the tag: it never appears in the tag's
 	// own fields, and an attestation minted for one agent must not verify for
-	// another.
+	// another — the cross-check runs against a THIRD key unrelated to the mint,
+	// so the assertion exercises the signature binding rather than tripping the
+	// (earlier) self-attestation guard.
 	if strings.Contains(tag.JSON(), vectorAgentPk) {
 		t.Errorf("agent pubkey leaked into the tag: %s", tag.JSON())
 	}
+	third := sk(3)
+	thirdPk, err := crypto.PubkeyFromSecret(third)
+	if err != nil {
+		t.Fatalf("third key: %v", err)
+	}
+	if err := Verify(thirdPk, tag); err == nil {
+		t.Errorf("tag minted for one agent verified against an unrelated agent key")
+	}
 	if err := Verify(vectorOwnerPk, tag); err == nil {
-		t.Errorf("tag minted for one agent verified against a different subject")
+		t.Errorf("tag verified against its own owner (self-attestation accepted)")
 	}
 }
 
@@ -98,6 +108,7 @@ func TestConditionsGrammar(t *testing.T) {
 		"KIND=1",                // wrong case
 		"created_at=1",          // wrong operator
 		"kind=-1",               // negative
+		"kind=+1",               // explicit plus (not canonical base-10)
 		"created_at<4294967296", // past the stated bound
 		"",                      // empty is VALID: it is the no-op case
 	}

@@ -246,14 +246,21 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 	// world whose agents boot with no writable memory — the exact silent shape
 	// this fixes. Sealed to the console identity like the rest, opened only
 	// in-memory at mint time; the raw secret never appears in the report, a
-	// command, or the audit.
+	// command, or the audit. Only the NOSTR half ships: it is all the mint
+	// needs, and the operator's X25519 enc key buys a reader nothing but risk.
+	//
+	// Seeded only when absent — a PRESENT record is never overwritten by a
+	// build (the CP is the durable owner; a box-side blind overwrite could
+	// clobber a deliberate rotate). When the sealed record no longer serves
+	// (operator key rotated, wrong restore), ownerKey fails the create with a
+	// message naming the one file to remove; the next build then re-seeds it.
 	if !have["operator"] {
 		opID, err := box.LoadIdentity(oplogin.Dir())
 		if err != nil {
 			return fmt.Errorf("read the operator identity ledger: %w (the CP needs it to attest agent memory — run `freehold login`)", err)
 		}
 		blob, err := certcred.CPSecretBlob("operator", "operator", map[string]string{
-			"nostr": opID.NostrSecretHex, "enc": opID.EncSecretHex,
+			"nostr": opID.NostrSecretHex,
 		}, seal, pub)
 		if err != nil {
 			return err

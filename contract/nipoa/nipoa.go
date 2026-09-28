@@ -25,6 +25,7 @@ package nipoa
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -68,9 +69,18 @@ type Tag struct {
 }
 
 // JSON renders the tag exactly as the buzz CLI's --auth-tag / BUZZ_AUTH_TAG
-// parser expects it: a four-element JSON array of strings.
+// parser expects it: a four-element JSON array of strings. Serialization goes
+// through encoding/json so a Tag assembled outside Mint (a parsed tag, a
+// future caller) cannot render malformed output the CLI only reports at the
+// agent's first write.
 func (t Tag) JSON() string {
-	return `["auth","` + t.Owner + `","` + t.Conditions + `","` + t.Sig + `"]`
+	b, err := json.Marshal([]string{"auth", t.Owner, t.Conditions, t.Sig})
+	if err != nil {
+		// Marshal of []string cannot fail; a Tag must never render a broken tag
+		// silently, so the impossible stays loud.
+		panic("nipoa: tag JSON: " + err.Error())
+	}
+	return string(b)
 }
 
 // Mint signs an attestation for agentPk under ownerSecret, bounded to
@@ -179,10 +189,10 @@ func validConditions(s string) error {
 	return nil
 }
 
-// canonical parses a canonical base-10 non-negative integer (no leading zeroes
-// beyond a bare "0") bounded by max.
+// canonical parses a canonical base-10 non-negative integer (no sign, no
+// leading zeroes beyond a bare "0") bounded by max.
 func canonical(s string, max int64) (int64, error) {
-	if s == "" || (s[0] == '0' && len(s) != 1) {
+	if s == "" || s[0] == '+' || (s[0] == '0' && len(s) != 1) {
 		return 0, fmt.Errorf("not canonical base-10")
 	}
 	n, err := strconv.ParseInt(s, 10, 64)

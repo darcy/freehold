@@ -182,7 +182,11 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 - **CP = secret PROVISIONER, not a vault.** Encrypt-to-runner-key → ship ciphertext → inject
   runner private key → rotate. No master key. Runner holds only ciphertext + its own key;
   decrypts locally, uses in memory, forgets. Plaintext never on disk, never in agent context;
-  agents reference secrets by name only.
+  agents reference secrets by name only. Two deliberate CP-held secrets, both sealed to the
+  console identity: the DNS/litellm creds, and the operator's Nostr key
+  (`world-secrets/operator.json`, shipped by the box build) — it attests agent memory
+  (`contract/nipoa`) and decrypts nothing else. Nothing under the CP state dir opens a
+  runner's blobs.
 - **Grants are coarse**: agent ↔ runner (whitelist of Nostr pubkeys). Dedicated runner per
   service by default; sharing via grants allowed. Readiness = the runner's own self-check:
   🟢 green / 🟡 yellow / 🔴 red. The unit of grant is the runner: one runner per capability,

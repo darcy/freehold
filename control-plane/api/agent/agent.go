@@ -16,8 +16,15 @@
 package agent
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+
+	"freehold/contract/identity"
 )
 
 // SprigImage is the default agent harness image (buzz multipain — buzz-acp,
@@ -357,13 +364,6 @@ func indentSystemPrompt(prompt string) string {
 	return strings.Join(lines, "\n")
 }
 
-// CPAPodManifest is the CPA's pod manifest — AgentPodManifest with the CPA's
-// display name (A1's stored value, default freehold) wired to the litellm
-// gateway (LiteLLMServiceURL + CpaLiteLLMModel).
-func CPAPodManifest(cpaName, relayURL, systemPrompt string) string {
-	return AgentPodManifest(cpaName, relayURL, systemPrompt, LiteLLMServiceURL, CpaLiteLLMModel, sanitizePodName(cpaName)+"-litellm-key", "", "", "anyone", "", "")
-}
-
 // AgentManifestScript applies an agent's Pod inside the k3s LXC, mirroring
 // the litellm workload pattern. agentName is the display name (sanitized into
 // the pod name). The nsec is provided separately via the identity-secret step
@@ -462,4 +462,55 @@ echo AGENT_LITELLM_KEY_OK`,
 // in the values we pass — 64-hex nsec and owner pubkey).
 func shQ(s string) string {
 	return "'" + s + "'"
+}
+
+// mintIdentityIn mints a fresh runner-style identity (nostr + enc secrets) in
+// dir, persisting it on first use. Reuse is decided by the caller re-loading; a
+// raced re-mint would orphan a grant, so callers re-check via LoadIdentity.
+func mintIdentityIn(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return fmt.Errorf("mint identity: %w", err)
+	}
+	enc := make([]byte, 32)
+	if _, err := rand.Read(enc); err != nil {
+		return fmt.Errorf("mint identity: %w", err)
+	}
+	id := identity.Identity{
+		NostrSecretHex: hex.EncodeToString(secret),
+		EncSecretHex:   hex.EncodeToString(enc),
+	}
+	raw, err := json.MarshalIndent(id, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "identity.json"), raw, 0o600)
+}
+
+// EnsureIdentity mints an identity in dir on first use and returns its pubkey;
+// reuses the recorded identity on later calls (identity continuity across
+// rebuilds). Shared by the CPA stage and the create-agent tool.
+func EnsureIdentity(dir string) (string, error) {
+	if err := ensureIdentity(dir); err != nil {
+		return "", err
+	}
+	id, err := identity.Load(dir)
+	if err != nil {
+		return "", err
+	}
+	return id.NostrPubkeyHex()
+}
+
+// ensureIdentity mints a runner-style identity in dir if absent, returns nil.
+func ensureIdentity(dir string) error {
+	if _, err := identity.Load(dir); err == nil {
+		return nil
+	}
+	// Mint on demand (same shape as min identity in the rebuild engine's
+	// stageCpa). The identity must survive compute-only teardown, so the
+	// caller passes a durable dir (under the CP's durable-plane area).
+	return mintIdentityIn(dir)
 }
