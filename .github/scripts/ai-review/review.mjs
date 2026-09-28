@@ -73,9 +73,10 @@ function annotatePatch(patch) {
 
 function readContextFiles() {
   // Context files are repo-root files, read from the TRUSTED checkout this
-  // script lives in (two levels up from this script dir) — never from
-  // GITHUB_WORKSPACE, which is the explored PR state (untrusted data).
-  const root = join(import.meta.dirname, '../..');
+  // script lives in — this dir is <root>/.github/scripts/ai-review, so the
+  // repo root is THREE levels up. Never resolve against GITHUB_WORKSPACE,
+  // which is the explored PR state (untrusted data).
+  const root = join(import.meta.dirname, '../../..');
   const files = CONTEXT_FILES
     .filter(f => existsSync(`${root}/${f}`))
     .map(f => {
@@ -303,9 +304,15 @@ async function runHarnessOnce(prompt, timeoutMs) {
           try { e = JSON.parse(line); } catch { return; }
           counts[e.type] = (counts[e.type] || 0) + 1;
           if (e.type === 'error') {
-            // A failed session (bad key, provider outage, unknown model) is
-            // reported as an `error` event and still exits 0 — surface it.
-            sessionError = e.error?.data?.message || e.error?.message || e.error?.name || JSON.stringify(e.error).slice(0, 200);
+            sessionError = e.error?.data?.message || e.error?.message || e.error?.name;
+            if (!sessionError) {
+              // The last-ditch fallback must not throw: JSON.stringify(undefined)
+              // yields undefined (and throws on cycles), and a throw inside this
+              // readline listener is an uncaught exception that kills the run —
+              // the opposite of what this branch exists for.
+              try { sessionError = JSON.stringify(e.error ?? null).slice(0, 200); }
+              catch { sessionError = String(e.error).slice(0, 200); }
+            }
             core.error(`Harness session error event: ${sessionError}`);
           } else if (e.type === 'tool_use' || e.type === 'step_start' || e.type === 'step_finish') {
             core.info(`  · ${summarizeEvent(e)}`);

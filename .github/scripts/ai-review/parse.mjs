@@ -2,12 +2,16 @@
 // json) streams JSONL events; the assistant's final answer is the joined text
 // parts, which must contain the review JSON object.
 
-// extractJsonObject returns the first brace-balanced `{...}` substring that
+// extractJsonObject returns the LAST brace-balanced `{...}` substring that
 // contains a "verdict" key — the safety net when the model wraps its JSON in
 // prose. It tries EVERY `{` (not just the first) so a prose brace like
-// "{1: ...}" before the real JSON does not hide it. String/escape aware so
-// braces inside strings don't break the scan.
+// "{1: ...}" before the real JSON does not hide it, and it keeps the LAST
+// match because earlier output is attacker-quotable: a PR can plant a fake
+// `{"verdict": ...}` for the reviewer to quote, so the first match must not
+// win — the model's final answer is always the last thing it emits.
+// String/escape aware so braces inside strings don't break the scan.
 export function extractJsonObject(s) {
+  let best = '';
   for (let start = s.indexOf('{'); start >= 0; start = s.indexOf('{', start + 1)) {
     let depth = 0;
     let inStr = false;
@@ -26,13 +30,13 @@ export function extractJsonObject(s) {
         depth -= 1;
         if (depth === 0) {
           const cand = s.slice(start, i + 1);
-          if (cand.includes('"verdict"')) return cand;
-          break; // this start did not yield the verdict object; try the next
+          if (cand.includes('"verdict"')) best = cand;
+          break; // this start did not yield a deeper object; try the next
         }
       }
     }
   }
-  return '';
+  return best;
 }
 
 // parseReview turns raw model output into the review object. Handles plain

@@ -3,10 +3,10 @@ name: Bot Review
 on:
   # Both PR events, for the same activity (a same-repo PR fires both), with
   # the job's `if:` picking exactly one so a revision is reviewed once:
-  # human PRs from `pull_request`, fork/Dependabot PRs from
-  # `pull_request_target` (whose event context carries the base repo's
-  # secrets — a dependabot-initiated `pull_request` run gets a read-only
-  # token and no secrets, so review.mjs would die).
+  # same-repo human PRs from `pull_request`; fork PRs — Dependabot's
+  # included — from `pull_request_target`, whose event context carries the
+  # base repo's secrets (a fork-initiated `pull_request` run gets a
+  # read-only token and no secrets, so review.mjs would die).
   # EITHER WAY the job executes only trusted main's code: the scripts, npm
   # deps, and prompt template come from a second checkout pinned to `main`,
   # never from the event's own checkout. The event checkout (the PR state on
@@ -29,26 +29,33 @@ jobs:
   bot-review:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Exactly one branch fires per PR revision (see `on:`), keyed on the PR
-    # author, not github.actor — Dependabot PRs also get re-synced by an
-    # operator's "Update branch" click (actor = the operator), and those
-    # re-reviews must still run.
-    if: (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]') || (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]')
+    # Exactly one branch fires per PR revision (see `on:`): same-repo human
+    # PRs from `pull_request`, fork PRs (including Dependabot's) from
+    # `pull_request_target` — fork runs need the base repo's secrets; a
+    # fork-initiated `pull_request` run gets a read-only token and none.
+    # Keyed on the PR author, not github.actor — Dependabot PRs also get
+    # re-synced by an operator's "Update branch" click (actor = the
+    # operator), and those re-reviews must still run.
+    if: (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'pull_request_target' && (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.head.repo.fork))
     steps:
       # The explored repo: the PR state on `pull_request`, the base state on
       # `pull_request_target`. Data only — nothing in this checkout is
       # executed; the harness runs with read-only tools.
+      # persist-credentials: false — the default writes the token into this
+      # tree's .git/config, i.e. a file inside the harness's read scope; a
+      # planted "check .git/config" would leak it into the public review.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          persist-credentials: false
 
-      # The executed code: always trusted main. `allow-unsafe-pr-checkout` is
-      # deliberately NOT set anywhere.
+      # The executed code: always trusted main, same persist-credentials rule.
       - uses: actions/checkout@v6
         with:
           ref: main
           path: trusted-review
           fetch-depth: 1
+          persist-credentials: false
 
       - uses: actions/setup-node@v6
         with:
@@ -65,7 +72,11 @@ jobs:
       # surface. The package's postinstall downloads the platform binary —
       # npm's allowScripts gate must permit it or the shim exits 1 with no
       # binary behind it.
+      # working-directory MUST be the trusted tree: npm reads ./.npmrc from
+      # the cwd, and at the event checkout (the PR state) a planted .npmrc
+      # would hijack this global install's postinstall.
       - name: Install opencode
+        working-directory: trusted-review/.github/scripts/ai-review
         run: npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18
 
       - name: Run AI review
