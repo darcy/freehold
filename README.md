@@ -647,12 +647,16 @@ docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, POC.md, POC_CHUNK5
 
 Every PR runs two gates:
 
-- **CI** (`ci.yml`): `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on the
-  workspace (toolchain pinned to the declared `rust-version`). Green/red, no exceptions.
+- **CI** (`ci.yml`): rust (`cargo fmt --check`, `build`, `clippy -D warnings`, `test`, toolchain
+  pinned to the declared `rust-version`), Go (build/vet/test per module), and the review
+  harness's node tests (`ai-review` job) — fanned into a required `check`. Green/red, no
+  exceptions.
 - **AI review** (`ai-pr-review.yml`, "Bot Review"): reviews for real problems only. The reviewer
   runs as an opencode headless session over the checked-out repo, exploring it with read-only
   tools (no shell, no file writes, no PR-write token in its process) to verify cross-file
-  claims against the actual code. Findings
+  claims against the actual code. The job executes only trusted `main`'s workflow, scripts,
+  and deps (`pull_request_target`); the PR head contributes just the API-fetched diff —
+  nothing from an unreviewed head is ever run. Findings
   are tiered in the top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER
   (named follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
   BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
