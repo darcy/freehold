@@ -121,9 +121,34 @@ const (
 	OriginOperator = "operator"
 )
 
-// AgentProvisioned reports whether the CPA's flow owns this record.
+// AgentProvisioned reports whether the CPA's flow owns this record. Strict:
+// only an explicit "agent" counts. An empty Origin reads as operator — the
+// safe direction — because the console stamps "operator" and the agent flow
+// stamps "agent", so a record WITHOUT one predates the field and its
+// provenance is unprovable; an unset provenance must never widen what the
+// agent surface may grant onto or take away. The cost lands on worlds with
+// records from before the field existed: those doors are operator-owned now,
+// and the console's ordinary re-provision re-enables them.
 func (r CapabilityRecord) AgentProvisioned() bool {
-	return r.Origin == "" || r.Origin == OriginAgent
+	return r.Origin == OriginAgent
+}
+
+// RetiredCapability is the guard note a capability door leaves when it is
+// retired: when it went away, who retired it, and who held the roster. It
+// makes the retirement auditable AND keeps the name out of provision_runner's
+// reach until an operator clears it — an agent may not re-mint a door it was
+// just told to take away. It is deliberately NOT a permanent tombstone:
+// re-provisioning the name clears the note, so a retired capability is
+// re-enablable by the ordinary provision flow.
+type RetiredCapability struct {
+	// RevokedAt is when the retirement happened (unix seconds).
+	RevokedAt uint64 `json:"revoked_at"`
+	// RetiredBy is the provenance of the take-down: "agent" (the CPA's
+	// revoke_runner) or "operator" (the console).
+	RetiredBy string `json:"retired_by,omitempty"`
+	// LastRoster is the roster the door carried at retirement — the record of
+	// which agents the capability was taken away from.
+	LastRoster []string `json:"last_roster,omitempty"`
 }
 
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
@@ -137,6 +162,11 @@ type ControlPlaneState struct {
 	// Capabilities is the dynamic capability-runner table (the provision_runner
 	// flow's records; the static half lives in cpbuild.capabilityRunners).
 	Capabilities     map[string]CapabilityRecord `json:"capabilities,omitempty"`
+	// RetiredCapabilities holds the guard notes for doors the CPA's
+	// revoke_runner retired (see RetiredCapability). The name stays refused by
+	// provision_runner until an operator clears the note — by re-provisioning
+	// the name, or by the console's "re-enable" action.
+	RetiredCapabilities map[string]RetiredCapability `json:"retired_capabilities,omitempty"`
 	// AgentGrants is the agent-grant mode: "confirm" (default — the CPA grants
 	// when the operator's ask is in its own thread, else DMs for a yes), "auto"
 	// (grants land unconfirmed), "off" (server-denies agent provisioning).
@@ -207,6 +237,9 @@ func ensureMaps(cp *ControlPlaneState) {
 	}
 	if cp.Capabilities == nil {
 		cp.Capabilities = map[string]CapabilityRecord{}
+	}
+	if cp.RetiredCapabilities == nil {
+		cp.RetiredCapabilities = map[string]RetiredCapability{}
 	}
 	if cp.Agents == nil {
 		cp.Agents = map[string]AgentRecord{}
@@ -360,12 +393,32 @@ func (s *StateStore) InsertCapability(name string, rec CapabilityRecord) error {
 		s.state.Capabilities = map[string]CapabilityRecord{}
 	}
 	s.state.Capabilities[name] = rec
+	// Re-enabling the name (a re-provision of a retired door, by the operator's
+	// console path) drops its retirement guard — see RetiredCapability.
+	delete(s.state.RetiredCapabilities, name)
 	return s.Save()
 }
 
 // RemoveCapability drops a dynamic capability-runner spec + saves.
 func (s *StateStore) RemoveCapability(name string) error {
 	delete(s.state.Capabilities, name)
+	return s.Save()
+}
+
+// GetRetired returns a retired capability's guard note.
+func (s *StateStore) GetRetired(name string) (RetiredCapability, bool) {
+	r, ok := s.state.RetiredCapabilities[name]
+	return r, ok
+}
+
+// InsertRetired records a retirement guard note + saves: from here the name is
+// refused to the agent surface in BOTH directions (revoke_runner and
+// provision_runner), until an operator's record write clears it.
+func (s *StateStore) InsertRetired(name string, rec RetiredCapability) error {
+	if s.state.RetiredCapabilities == nil {
+		s.state.RetiredCapabilities = map[string]RetiredCapability{}
+	}
+	s.state.RetiredCapabilities[name] = rec
 	return s.Save()
 }
 

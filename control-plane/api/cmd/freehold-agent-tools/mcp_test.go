@@ -104,6 +104,7 @@ func TestBridgeProxyAndDispatch(t *testing.T) {
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"buzz_send","arguments":{"text":"hi"}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"manage_agent","arguments":{}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"revoke_runner","arguments":{"name":"rtx3090-ssh-root"}}}
 `
 	var out bytes.Buffer
 	if err := runBridge(strings.NewReader(input), &out, b); err != nil {
@@ -115,12 +116,22 @@ func TestBridgeProxyAndDispatch(t *testing.T) {
 		t.Fatalf("blank line emitted between responses:\n%q", out.String())
 	}
 	lines := nonEmptyLines2(out.String())
-	if len(lines) != 4 {
-		t.Fatalf("expected 4 response lines, got %d:\n%s", len(lines), out.String())
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 response lines, got %d:\n%s", len(lines), out.String())
 	}
 
-	if listLine := findJSONByID2(lines, 2); !strings.Contains(listLine, "buzz_send") || !strings.Contains(listLine, "create_agent") || !strings.Contains(listLine, "manage_agent") {
+	// revoke_runner must be advertised too, or the CPA's harness never sees the
+	// take-away half of the capability pair and the tool is unreachable in practice.
+	if listLine := findJSONByID2(lines, 2); !strings.Contains(listLine, "buzz_send") || !strings.Contains(listLine, "create_agent") || !strings.Contains(listLine, "manage_agent") || !strings.Contains(listLine, "revoke_runner") {
 		t.Fatalf("tools/list not merged: %s", listLine)
+	}
+	// Both freehold calls (manage_agent, revoke_runner) must reach agent-tools,
+	// not the dev server: the fake agent-tools answers "from-agent-tools" and the
+	// fake dev answers "dev-ok". A revoke_runner that leaked to dev would be
+	// answered by the chat server — freehold's own semantic tool, not chat. (The
+	// fake agent-tools pins id 4, so this counts payloads rather than ids.)
+	if got := countContains(lines, "from-agent-tools"); got != 2 {
+		t.Fatalf("expected 2 freehold calls forwarded to agent-tools, got %d:\n%s", got, out.String())
 	}
 	if callLine := findJSONByID2(lines, 3); !strings.Contains(callLine, "dev-ok") {
 		t.Fatalf("buzz tools/call not proxied to dev: %s", callLine)
@@ -158,6 +169,16 @@ func findJSONByID2(lines []string, wantID int) string {
 		}
 	}
 	return ""
+}
+
+func countContains(lines []string, needle string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, needle) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestBridgeByDefault pins the regression that broke the CPA: buzz-agent spawns

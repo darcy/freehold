@@ -339,6 +339,32 @@ release notes.
   (provision_runner takes no secret/extras field — a direct-credential mode, an agent
   relaying the credential for freehold to seal, is a named future `agent_grants` option
   that the current tool surface makes unreachable).
+- **Agent-initiated take-away exists, is verified per leg, and stops at the box
+  boundary.** The CPA's `revoke_runner` (`cpbuild.BuildRevokeRunner`) is the mirror
+  of `provision_runner` on the same audited surface and the SAME `agent_grants` kill
+  switch: with `revoke_from` it removes named grantees from the roster and from the
+  capability record's roster (both — a relay-only removal would be silently reversed
+  by the next build, which re-grants from the record) and re-applies their pods with
+  the door cut from their coords feed, leaving the door standing for the rest of its
+  roster; with it empty it retires the whole door (channel folded but KEPT so the
+  roster history + kind-48001 audit stream stay queryable, credential erased through
+  the audited revoke verb, unit stopped, record dropped). Ownership guards mirror the
+  grant side exactly: build-time capability runners, the `cloudflare-api-` prefix, a
+  missing capability record, and operator-origin records are all refused — the agent
+  surface only takes back what the agent flow gave. Each leg is checked on its own
+  terms and reported `[verified]`/`[UNVERIFIED]` (roster re-read from the
+  relay-signed 39002, sealed package re-opened via `wire.Load`, unit asked via
+  `systemctl is-active` plus a TCP probe of its port); the unit stop runs LOCAL to the
+  CP process, never through a runner — the flow is revoking exec, so it must not depend
+  on holding one. Two honest limits: the stop is claimed only where the build's own
+  substrate/relay condition held (otherwise the leg says `state-only`), and the
+  substrate credential the door carried stays authorized on its target — the report
+  hands that to Compute, and hands a box-hosted door's numbered close-out to the
+  OPERATOR, never to the agent that just lost the door. A retired name is NOT reserved
+  forever, but it is refused to the agent in both directions (`revoke_runner` again,
+  and a `provision_runner` re-mint) until an operator re-enables it by provisioning the
+  door from the console — `InsertCapability` is the single re-enable verb, deliberately
+  not a new tool, so take-away and re-grant are never the same caller's two hands.
 - **The doors are intent+audit boundaries, not hard containment on a shared
   host.** `dnsmasq-local-root` executes on the CP guest (where every runner
   package + the state store live), and `pve-ssh-root` reaches the CP guest via
