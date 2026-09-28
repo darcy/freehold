@@ -1,9 +1,12 @@
 package cpbuild
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -101,7 +104,18 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 		if !rec.AgentProvisioned() {
 			return "", fmt.Errorf("revoke_runner %s: this door was provisioned by the operator — revoking it stays operator-scoped (the console)", name)
 		}
-		single := len(named) > 0
+		// The single-vs-whole decision reads the RAW argument, never the filtered
+		// list. `revoke_from: [""]` filters down to nothing, and deciding on the
+		// filtered list would read that as "no list given" — silently escalating a
+		// malformed removal request into a WHOLE-DOOR RETIREMENT (roster cleared,
+		// credential erased, record dropped, name refused to the agent surface).
+		// A caller that asked to remove named agents must never get a teardown for
+		// a blank entry, so an all-blank list is refused outright rather than
+		// reinterpreted.
+		single := len(args.RevokeFrom) > 0
+		if single && len(named) == 0 {
+			return "", fmt.Errorf("revoke_runner %s: revoke_from was given but names no agent (every entry is blank) — name the agents to take the door from, or pass an empty revoke_from to retire the door deliberately", name)
+		}
 		targets := []string{}
 		if single {
 			// A from-the-roster removal: only names actually on the roster are
@@ -121,6 +135,7 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 				return renderRevoke(revokeReport{
 					name:         name,
 					single:       true,
+					noop:         true,
 					grantees:     named,
 					auditChannel: relay.RunnerChannelID(rpkOrEmpty(store, cpState, name)),
 					outcomes: []revokeOutcome{{step: "roster", ok: true, detail: fmt.Sprintf(
@@ -166,12 +181,21 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 		default:
 			var failed []string
 			for _, g := range targets {
+				// An unresolved grantee has no pubkey to remove: a remove-user
+				// carrying "" is not a revocation this call can honestly issue (the
+				// relay's reading of it is undefined — it may no-op or error), and a
+				// silent no-op is precisely what would let the leg below print a
+				// clean mark over a still-live grant. rosterOutcome marks the leg
+				// UNVERIFIED for exactly these names.
+				if pubkeys[g] == "" {
+					continue
+				}
 				if err := provisioner.RemoveUserMembership(store, dial, auth, name, pubkeys[g], cpState); err != nil {
 					failed = append(failed, fmt.Sprintf("%s: %v", g, err))
 				}
 			}
 			have, qerr := relay.QueryChannelRoster(dial, spec.RelayPK, runnerPK, secret)
-			rep.outcomes = append(rep.outcomes, rosterOutcome(single, targets, pubkeys, failed, have, qerr))
+			rep.outcomes = append(rep.outcomes, rosterOutcome(single, targets, pubkeys, runnerPK, failed, have, qerr))
 		}
 
 		// The capability record's roster is the BUILD-TIME source of both the
@@ -184,7 +208,10 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			updated := rec
 			updated.Rosters = without(rec.Rosters, targets)
 			if err := store.InsertCapability(name, updated); err != nil {
-				return "", fmt.Errorf("revoke_runner %s: drop [%s] from the door's recorded roster: %w (the relay removal landed; leaving the record as it was would re-grant them on the next build)", name, strings.Join(targets, ", "), err)
+				// The relay removal has landed; the report of it must not be
+				// dropped with the error, so failLoud renders it into the error text.
+				return failLoud(rep, "revoke_runner %s: drop [%s] from the door's recorded roster FAILED (%v) — the relay removal landed; leaving the record as it was would re-grant them on the next build",
+					name, strings.Join(targets, ", "), err)
 			}
 		}
 
@@ -241,13 +268,27 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			//    the unit, drop the record — each verified on its own terms.
 			if _, hasRow := store.GetRunner(name); !hasRow {
 				// A door recorded but never provisioned (a half-finished earlier
-				// provision): there is nothing to fold, and saying so beats the
-				// "runner not found" error the fold would return.
-				rep.outcomes = append(rep.outcomes,
-					revokeOutcome{step: "channel", ok: true, detail: fmt.Sprintf(
-						"no runner was ever provisioned under this name, so no channel %s came up to fold — the door existed only as a capability record", rep.auditChannel)},
-					revokeOutcome{step: "credential", ok: true, detail: fmt.Sprintf(
-						"no sealed package exists at %s — the CP holds no credential copy of this door", runnerPackageDir(cpState, name))})
+				// provision). The state says nothing was stood up, but the state is
+				// not evidence: a package can exist under this name even with no
+				// runner row, because rpkOrEmpty falls back to the on-disk CP state.
+				// So the legs still RUN rather than being asserted clean — the fold is
+				// attempted with whatever identity resolved, and the package is
+				// checked on disk — and only a check that finds nothing is allowed to
+				// report "nothing to fold / nothing to erase".
+				if runnerPK == "" {
+					rep.outcomes = append(rep.outcomes, revokeOutcome{step: "channel", ok: false, detail: fmt.Sprintf(
+						"no runner row and no resolvable relay identity — nothing could be folded and it cannot be established that no channel %s was ever opened; an operator must check the relay", rep.auditChannel)})
+				} else if secErr != nil {
+					rep.outcomes = append(rep.outcomes, revokeOutcome{step: "channel", ok: false, detail: fmt.Sprintf(
+						"no runner row and the console's channel-owner credential is unavailable (%v) — the fold of %s could not be attempted, so its existence is UNKNOWN", secErr, rep.auditChannel)})
+				} else if err := provisioner.RevokeRunnerChannel(store, dial, auth, name, cpState); err != nil {
+					rep.outcomes = append(rep.outcomes, revokeOutcome{step: "channel", ok: false, detail: fmt.Sprintf(
+						"no runner row is recorded under this name, and the attempted fold of %s reported (%v) — treat a channel as possibly live and have an operator check it", rep.auditChannel, err)})
+				} else {
+					rep.outcomes = append(rep.outcomes, revokeOutcome{step: "channel", ok: true, detail: fmt.Sprintf(
+						"folded from the identity the state still held: %s is off its own roster and its meta is republished as revoked; the channel is KEPT so the roster history and the door's audit stream stay readable", rep.auditChannel)})
+				}
+				rep.outcomes = append(rep.outcomes, credentialOutcome(runnerPackageDir(cpState, name)))
 			} else {
 				if err := provisioner.RevokeRunnerChannel(store, dial, auth, name, cpState); err != nil {
 					rep.outcomes = append(rep.outcomes, revokeOutcome{step: "channel", ok: false, detail: fmt.Sprintf(
@@ -269,17 +310,29 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 
 			// The unit. Only where freehold hosted it — the same condition
 			// stageDepartmentRunners requires to stand one up — is "it is down" a
-			// claim rather than a hope.
+			// claim rather than a hope, and a state-only call is a leg that verified
+			// NOTHING, never a verified leg.
 			if spec.CpLxc == 0 || spec.CpIP == "" || spec.RelayHost == "" || spec.RunnerTarget == "" || spec.RelayPK == "" {
-				rep.outcomes = append(rep.outcomes, revokeOutcome{step: "unit", ok: true, detail: fmt.Sprintf(
-					"state-only: this build has no substrate/relay wiring, so freehold never hosted this door's unit — wherever it runs it is now unauthorized and unserved, and MUST NOT be trusted to answer")})
+				rep.outcomes = append(rep.outcomes, revokeOutcome{step: "unit", ok: false, detail: fmt.Sprintf(
+					"state-only: this build has no substrate/relay wiring, so freehold never hosted this door's unit — no stop was made and NOTHING was verified about where it actually runs; wherever that is, the door is now unauthorized and MUST NOT be trusted to answer")})
 			} else {
 				rep.hosted = true
-				rep.outcomes = append(rep.outcomes, unitOutcome(name, rec.Port))
+				// The department-named legacy unit is in play ONLY where this door's
+				// own roster implicates it (retireRunner's second stop exists because
+				// the data department's door was renamed): stopping it for an
+				// unrelated door took down a capability nobody asked about.
+				legacy := ""
+				if containsRoster(rec.Rosters, legacyDeptName) {
+					legacy = "freehold-runner-" + legacyDeptName
+				}
+				rep.outcomes = append(rep.outcomes, unitOutcomes(name, rec.Port, legacy)...)
 			}
 
 			if err := store.RemoveCapability(name); err != nil {
-				return "", fmt.Errorf("revoke_runner %s: drop the capability record: %w", name, err)
+				// Side effects have already landed (the fold, the erase, the stop):
+				// failLoud keeps their report in the error text instead of letting
+				// the serve drop it.
+				return failLoud(rep, "revoke_runner %s: drop the capability record FAILED (%v) — the fold, the credential erase and the unit stop already ran; read the legs below for what completed", name, err)
 			}
 			rep.outcomes = append(rep.outcomes, revokeOutcome{step: "record", ok: true, detail: fmt.Sprintf(
 				"removed — %s is no longer re-staged by any build and no longer resolves into any agent's coords feed", name)})
@@ -288,10 +341,11 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 				RetiredBy:  state.OriginAgent,
 				LastRoster: append([]string(nil), rec.Rosters...),
 			}); err != nil {
-				return "", fmt.Errorf("revoke_runner %s: record the retirement: %w", name, err)
+				// The record is already gone but the guard note did not land: the
+				// name is re-mintable until this is fixed, so the report must say so.
+				return failLoud(rep, "revoke_runner %s: the capability record is DROPPED and the retirement guard note did NOT land (%v) — the name is re-mintable until this is fixed", name, err)
 			}
 		}
-
 		// 4) Follow-ups someone else owns, each addressed to whoever can do it.
 		rep.notes = append(rep.notes, fmt.Sprintf(
 			"the door's channel %s stays live and read-only: its roster history and its kind-48001 audit stream remain queryable, so the revocation stays auditable — do not delete it", rep.auditChannel))
@@ -338,8 +392,16 @@ type revokeOutcome struct {
 
 // revokeReport is the structured truth of one call.
 type revokeReport struct {
-	name         string
-	single       bool
+	name   string
+	single bool
+	// noop marks the nothing-to-take outcome: the header must then say UNCHANGED,
+	// because the single header's "removed from the roster of" would open a report
+	// whose every line says nothing was touched.
+	noop bool
+	// failed marks a mid-flight abort: the report is then rendered into the
+	// error text (the serve drops the text half when an error comes back), and
+	// its header must not read as a completed removal or retirement.
+	failed       bool
 	grantees     []string
 	outcomes     []revokeOutcome
 	notes        []string
@@ -348,9 +410,31 @@ type revokeReport struct {
 	verdict      string
 }
 
+// failLoud aborts the flow with the report preserved: the serve path
+// (textResult) discards the text half whenever an error is present, so a bare
+// `return "", err` after irreversible legs have run (a roster removal, a
+// channel fold, a credential erase, a unit stop) would leave the caller — and
+// the audit — with only "it failed" and no record of what did change. The
+// report rides inside the error instead.
+func failLoud(rep revokeReport, format string, args ...any) (string, error) {
+	rep.failed = true
+	rep.verdict = fmt.Sprintf(format, args...)
+	return "", fmt.Errorf("%s\n%s", rep.verdict, renderRevoke(rep))
+}
+
 // rosterOutcome judges the revocation against the roster the relay actually
-// holds now. A read failure is NEVER folded into success.
-func rosterOutcome(single bool, targets []string, pubkeys map[string]string, failed []string, have []string, qerr error) revokeOutcome {
+// holds now. A read failure is NEVER folded into success, and a target whose
+// pubkey could not be resolved NEVER counts as verified: it was not removable by
+// this call, so its grant may still be live and the leg must say so rather than
+// print a clean mark the note below then contradicts.
+//
+// The whole-door leg does not claim the roster is EMPTY: the runner itself is a
+// member of its own channel (provisioner.SyncRunnerChannel members rpk twice, as
+// channel owner and as member), and the fold that removes it runs later than this
+// read-back — so emptiness is not establishable here, and claiming it beside a
+// printed non-zero count was a self-contradiction. What IS establishable, and is
+// what revocation means, is that no AGENT identity remains on it.
+func rosterOutcome(single bool, targets []string, pubkeys map[string]string, runnerPK string, failed []string, have []string, qerr error) revokeOutcome {
 	if qerr != nil {
 		return revokeOutcome{step: "roster", ok: false, detail: fmt.Sprintf(
 			"the removals were issued but the roster could NOT be read back to confirm them (%v) — do not claim the door is gone from [%s] until its roster is re-read%s",
@@ -360,68 +444,128 @@ func rosterOutcome(single bool, targets []string, pubkeys map[string]string, fai
 	for _, pk := range have {
 		present[pk] = true
 	}
+	// Every target had to resolve to a pubkey to be revocable at all; an
+	// unresolved one is an open hole, counted separately so it can never be
+	// absorbed into a verified reading.
+	var unresolved []string
+	for _, g := range targets {
+		if pubkeys[g] == "" {
+			unresolved = append(unresolved, g)
+		}
+	}
 	var still []string
 	for _, g := range targets {
 		if pk := pubkeys[g]; pk != "" && present[pk] {
 			still = append(still, g)
 		}
 	}
-	if len(still) > 0 {
+	// Who else is on the roster beyond the agents this call set out: the runner's
+	// own membership is the expected one, anything else is a grant this flow did
+	// not account for and must not be reported as a clean roster.
+	unknown := []string{}
+	for _, pk := range have {
+		if pk == runnerPK || pk == "" {
+			continue
+		}
+		known := false
+		for _, g := range targets {
+			if pubkeys[g] == pk {
+				known = true
+				break
+			}
+		}
+		if !known {
+			unknown = append(unknown, pk)
+		}
+	}
+	switch {
+	case len(still) > 0:
 		return revokeOutcome{step: "roster", ok: false, detail: fmt.Sprintf(
 			"the relay roster STILL lists [%s] (%d entr%s total) — the remove-user did not land; the door is NOT taken from them%s",
 			strings.Join(still, ", "), len(have), pluralize(len(have)), joinFailures(failed))}
-	}
-	if len(failed) > 0 {
+	case len(unresolved) > 0:
+		return revokeOutcome{step: "roster", ok: false, detail: fmt.Sprintf(
+			"[%s] could not be revoked by pubkey (their registry row is gone) — the roster reads back without the identities this call held, which says NOTHING about them: treat them as still holding exec until an operator clears the roster from the console%s",
+			strings.Join(unresolved, ", "), joinFailures(failed))}
+	case len(failed) > 0:
 		return revokeOutcome{step: "roster", ok: false, detail: fmt.Sprintf(
 			"the roster reads back without the targets (%d entr%s) but %d removal%s reported a failure — treat as UNCONFIRMED%s",
 			len(have), pluralize(len(have)), len(failed), sIf(len(failed)), joinFailures(failed))}
-	}
-	if single {
+	case single:
 		return revokeOutcome{step: "roster", ok: true, detail: fmt.Sprintf(
-			"verified against the relay-signed roster: [%s] is off it (%d entr%s remain)", strings.Join(targets, ", "), len(have), pluralize(len(have)))}
+			"verified against the relay-signed roster: [%s] is off it (%d entr%s remain, the door's other grantees and its own identity among them)",
+			strings.Join(targets, ", "), len(have), pluralize(len(have)))}
+	case len(unknown) > 0:
+		// Whole-door ONLY: a from-the-roster removal leaves the door's other
+		// grantees standing, so entries beyond the targets are its normal state —
+		// but a RETIRED door's roster must hold nothing but its own runner
+		// identity (which the fold below removes), and anything else is a grant
+		// this record no longer accounts for.
+		return revokeOutcome{step: "roster", ok: false, detail: fmt.Sprintf(
+			"[%s] are off the roster, but it still lists %d entr%s this call did not account for (%s) — the roster is NOT clear, so the door keeps a holder the record does not name; have an operator read the roster and close them out",
+			orNone(targets), len(unknown), pluralize(len(unknown)), strings.Join(unknown, ", "))}
+	default:
+		return revokeOutcome{step: "roster", ok: true, detail: fmt.Sprintf(
+			"verified against the relay-signed roster: no agent identity is on it any more — every grantee is off it (%d entr%s left, the door's own membership)",
+			len(have), pluralize(len(have)))}
 	}
-	return revokeOutcome{step: "roster", ok: true, detail: fmt.Sprintf(
-		"verified against the relay-signed roster: the door's roster is empty (%d entr%s left) — every grantee is off it", len(have), pluralize(len(have)))}
 }
 
 // credentialOutcome re-opens the sealed package to prove the CP no longer holds
-// a copy of the credential.
+// a copy of the credential. Absence is established from the FILESYSTEM, not from
+// a load error: wire.Load fails for a truncated, corrupt, unparseable or
+// unreadable file exactly as it fails for a missing one, and reading any error as
+// "the credential is gone" would report a still-shippable secret as erased — the
+// one mistake this leg cannot be allowed to make. A load that fails for a reason
+// other than absence is reported UNVERIFIED with the error, because the bytes are
+// plainly still there.
 func credentialOutcome(pkgDir string) revokeOutcome {
+	if _, err := os.Stat(pkgDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return revokeOutcome{step: "credential", ok: false, detail: fmt.Sprintf(
+			"the package dir %s could not be inspected (%v) — its credential status is UNKNOWN, not erased", pkgDir, err)}
+	}
+	if _, err := os.Stat(filepath.Join(pkgDir, wire.SECRETS_FILE)); errors.Is(err, os.ErrNotExist) {
+		return revokeOutcome{step: "credential", ok: true, detail: fmt.Sprintf(
+			"no sealed package exists at %s (checked on disk) — the CP holds no copy of the credential for this door", pkgDir)}
+	} else if err != nil {
+		return revokeOutcome{step: "credential", ok: false, detail: fmt.Sprintf(
+			"the sealed package at %s could not be inspected (%v) — its credential status is UNKNOWN, not erased", pkgDir, err)}
+	}
 	if _, err := wire.Load(pkgDir); err == nil {
 		return revokeOutcome{step: "credential", ok: false, detail: fmt.Sprintf(
 			"the sealed package at %s is STILL READABLE after the revoke — treat the credential as live and close it by hand", pkgDir)}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return revokeOutcome{step: "credential", ok: false, detail: fmt.Sprintf(
+			"the sealed package at %s exists on disk but could not be opened (%v) — the file is PRESENT, so the credential must be treated as live and closed by hand", pkgDir, err)}
 	}
 	return revokeOutcome{step: "credential", ok: true, detail: fmt.Sprintf(
 		"the sealed package at %s is gone — the CP holds no copy of the credential any more", pkgDir)}
 }
 
-// unitOutcome stops the transient unit and VERIFIES the stop locally. The CP
-// executor's own exec path is the CP guest — that is how startCapabilityRunner
-// gets the unit up with systemctl/systemd-run — so the teardown asks the same
-// box the same way, without routing a root exec through a runner: this flow is
-// revoking exec, so it must not depend on holding any.
-func unitOutcome(name string, port int) revokeOutcome {
+// unitOutcomes stops the transient unit(s) and VERIFIES each stop on its own leg.
+// The CP executor's own exec path is the CP guest — that is how
+// startCapabilityRunner gets the unit up with systemctl/systemd-run — so the
+// teardown asks the same box the same way, without routing a root exec through a
+// runner: this flow is revoking exec, so it must not depend on holding any.
+//
+// The department-named legacy unit (retireRunner's second stop, for worlds built
+// before the runner-named convention) is stopped ONLY where this door's own roster
+// implicates that department. Stopping `freehold-runner-data` on the way to
+// retiring an unrelated GPU door took out a capability nobody asked about, and
+// verified only the door-named unit while it did — a side effect that belonged in
+// no report. When it IS in play it gets its own leg, so the stop is visible.
+func unitOutcomes(name string, port int, legacyUnit string) []revokeOutcome {
 	unit := "freehold-runner-" + name
-	// The department-named legacy unit is stopped too, exactly as retireRunner does:
-	// a world built before the runner-named convention can still hold it. The stop
-	// runs on the box this process IS (the CP guest), the same way the start path
-	// runs systemctl/systemd-run — no runner credential is borrowed to prove a
-	// teardown.
-	script := fmt.Sprintf("systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; "+
-		"systemctl stop freehold-runner-data 2>/dev/null; systemctl reset-failed freehold-runner-data 2>/dev/null; true", unit, unit)
+	script := fmt.Sprintf("systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; true", unit, unit)
 	stopOut, _ := exec.Command("sh", "-c", script).CombinedOutput()
 	// systemd releases the transient unit's cgroup synchronously, so a short settle
 	// is the whole grace the probe needs: longer than that is a real residue.
 	time.Sleep(revokeProbeWait)
-	activeRaw, _ := exec.Command("sh", "-c", fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", unit)).CombinedOutput()
-	active := strings.TrimSpace(string(activeRaw))
-	if active == "" {
-		active = "unknown"
-	}
-	if active != "inactive" {
-		return revokeOutcome{step: "unit", ok: false, detail: fmt.Sprintf(
-			"freehold-runner-%s reports %q after the stop (stop output: %s) — the door is revoked and unauthorized, which is the security answer, but a running unit is a known state, not a clean one",
-			name, active, firstLine(string(stopOut)))}
+	active := systemctlActive(unit)
+	if failedState(active) {
+		return []revokeOutcome{{step: "unit", ok: false, detail: fmt.Sprintf(
+			"%s reports %q after the stop (stop output: %s) — the door is revoked and unauthorized, which is the security answer, but a running unit is a known state, not a clean one",
+			unit, active, firstLine(string(stopOut)))}}
 	}
 	// The listener is the second, independent witness: a process that outlived its
 	// transient unit (a wedged child, a re-exec) still holds the port. Dialled
@@ -429,21 +573,74 @@ func unitOutcome(name string, port int) revokeOutcome {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	if c, derr := net.DialTimeout("tcp", addr, 2*time.Second); derr == nil {
 		_ = c.Close()
-		return revokeOutcome{step: "unit", ok: false, detail: fmt.Sprintf(
-			"freehold-runner-%s is inactive yet %s STILL ANSWERS — the door is unauthorized, NOT stopped-and-verified", name, addr)}
+		return []revokeOutcome{{step: "unit", ok: false, detail: fmt.Sprintf(
+			"%s is %s yet %s STILL ANSWERS — the door is unauthorized, NOT stopped-and-verified", unit, active, addr)}}
 	}
-	return revokeOutcome{step: "unit", ok: true, detail: fmt.Sprintf(
-		"freehold-runner-%s is inactive and nothing answers on %s — verified down after the stop", name, addr)}
+	legs := []revokeOutcome{{step: "unit", ok: true, detail: fmt.Sprintf(
+		"%s is %s and nothing answers on %s — verified down after the stop", unit, active, addr)}}
+	if legacyUnit == "" {
+		return legs
+	}
+	legacyOut, _ := exec.Command("sh", "-c", fmt.Sprintf(
+		"systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; true", legacyUnit, legacyUnit)).CombinedOutput()
+	legacyActive := systemctlActive(legacyUnit)
+	switch {
+	case failedState(legacyActive):
+		legs = append(legs, revokeOutcome{step: "legacy unit", ok: false, detail: fmt.Sprintf(
+			"%s (the department-named unit from before the runner-named convention) still reports %q after the stop (output: %s) — a second door of the %s department is up; close it by hand",
+			legacyUnit, legacyActive, firstLine(string(legacyOut)), legacyDeptName)})
+	case legacyActive == "unknown":
+		// Observed absence, not an asserted one: is-active was asked and the unit is
+		// simply not there on this box.
+		legs = append(legs, revokeOutcome{step: "legacy unit", ok: true, detail: fmt.Sprintf(
+			"%s is not present on this box (is-active reports %q) — the door is the only unit this flow had to close", legacyUnit, legacyActive)})
+	default:
+		legs = append(legs, revokeOutcome{step: "legacy unit", ok: true, detail: fmt.Sprintf(
+			"%s stopped and now reports %s — the %s department's legacy unit is down too", legacyUnit, legacyActive, legacyDeptName)})
+	}
+	return legs
+}
+
+// legacyDeptName is the department whose pre-convention unit name has to be
+// considered alongside the door's own (retireRunner's second stop).
+const legacyDeptName = "data"
+
+func systemctlActive(unit string) string {
+	raw, _ := exec.Command("sh", "-c", fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", unit)).CombinedOutput()
+	active := strings.TrimSpace(string(raw))
+	if active == "" {
+		active = "unknown"
+	}
+	return active
+}
+
+// failedState is any state in which the unit is still a live thing on the box.
+// "unknown" (no systemd, or a unit that was never loaded) is NOT one: nothing is
+// running under it.
+func failedState(active string) bool {
+	switch active {
+	case "active", "activating", "reloading":
+		return true
+	}
+	return false
 }
 
 // renderRevoke turns the structured report into what the agent reads and relays.
 // The order is fixed (steps, then follow-ups, then the verdict) so the operator's
-// eye finds the verdict in the same place every time.
+// eye finds the verdict in the same place every time. The header is driven by what
+// the call ACTUALLY did — a no-op must not open with a sentence claiming a removal,
+// since a verbatim-relayed report whose first line is wrong is a misreport, not a
+// summary.
 func renderRevoke(r revokeReport) string {
 	var b strings.Builder
-	if r.single {
+	switch {
+	case r.failed:
+		fmt.Fprintf(&b, "revoke_runner: %s FAILED — the call stopped mid-flight; the legs below are what actually completed\n", r.name)
+	case r.noop:
+		fmt.Fprintf(&b, "revoke_runner: %s UNCHANGED — nothing was taken from [%s]\n", r.name, orNone(r.grantees))
+	case r.single:
 		fmt.Fprintf(&b, "revoke_runner: %s removed from the roster of [%s]\n", r.name, orNone(r.grantees))
-	} else {
+	default:
 		fmt.Fprintf(&b, "revoke_runner: capability door %s retired (its roster held [%s])\n", r.name, orNone(r.grantees))
 	}
 	for _, o := range r.outcomes {
@@ -461,22 +658,43 @@ func renderRevoke(r revokeReport) string {
 }
 
 func revokeVerdict(name string, single bool, targets []string, r revokeReport) string {
-	var bad []string
+	bad := map[string]bool{}
+	var badList []string
 	for _, o := range r.outcomes {
 		if !o.ok {
-			bad = append(bad, o.step)
+			if !bad[o.step] {
+				bad[o.step] = true
+				badList = append(badList, o.step)
+			}
 		}
 	}
+	sort.Strings(badList)
 	who := orNone(targets)
 	switch {
-	case single && len(bad) == 0:
+	case single && len(badList) == 0:
 		return fmt.Sprintf("%s is out of [%s]'s hands (verified against the relay roster) and out of their pod's coords feed; the door itself stands for whoever remains on its roster", name, who)
 	case single:
-		return fmt.Sprintf("%s: the removal from [%s] was issued but is NOT fully verified (%s) — do not tell the operator it is gone until those legs report clean", name, who, strings.Join(bad, ", "))
-	case len(bad) == 0:
-		return fmt.Sprintf("%s is retired: its roster is empty and verified, [%s] is out of their hands, its credential is erased from the CP, its unit is verified down, and its name is refused to the agent surface until the operator re-enables it from the console", name, who)
+		return fmt.Sprintf("%s: the removal from [%s] was issued but is NOT fully verified (%s) — do not tell the operator it is gone until those legs report clean", name, who, strings.Join(badList, ", "))
+	case len(badList) == 0:
+		// Every sentence here has a leg that checked it. The unit is claimed down
+		// ONLY where this build hosted it (the state-only leg ran no stop, asked no
+		// is-active, dialled no port), so the clean verdict must not say otherwise.
+		unit := "its unit is verified down"
+		if !r.hosted {
+			unit = "its unit was not hosted by this build, so no stop was made or verified (see the unit leg)"
+		}
+		return fmt.Sprintf("%s is retired: its roster is verified clear of every grantee, [%s] is out of their hands, its credential is erased from the CP, %s, and its name is refused to the agent surface until the operator re-enables it from the console", name, who, unit)
 	default:
-		return fmt.Sprintf("%s is retired in state — the roster write, the record removal and the name guard all ran — but these did NOT verify: %s. A revoked door that is still running is a known state, never a silent one: say what is unverified and let the operator close it", name, strings.Join(bad, ", "))
+		// Only claim what ran: the record removal and the name guard are the last
+		// two writes and this branch is reached only after them, but the roster WRITE
+		// may have been impossible (no relay identity / no console credential), and
+		// a report that claims a write its own leg just said could not be made is a
+		// self-contradiction the agent would relay verbatim.
+		ran := "the record removal and the name guard ran"
+		if !bad["roster"] {
+			ran = "the roster write, " + ran
+		}
+		return fmt.Sprintf("%s is retired in state — %s — but these did NOT verify: %s. A revoked door that is still running is a known state, never a silent one: say what is unverified and let the operator close it", name, ran, strings.Join(badList, ", "))
 	}
 }
 

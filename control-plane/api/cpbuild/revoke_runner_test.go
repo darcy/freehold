@@ -1,6 +1,8 @@
 package cpbuild
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -123,6 +125,35 @@ func TestRevokeRunnerSingleRemovalOfNonGranteeIsNoOp(t *testing.T) {
 	}
 	if _, retired := disk.GetRetired("rtx-ssh-root"); retired {
 		t.Fatal("a no-op must not retire the door")
+	}
+}
+
+// TestRevokeRunnerBlankRevokeFromNeverEscalates pins the decision boundary the
+// single-vs-whole switch reads: a revoke_from that arrives non-empty but filters
+// down to nothing (every entry blank) must be REFUSED, never reinterpreted as "no
+// list given" — the whole-door path erases the credential, clears the roster and
+// drops the record, and a malformed removal request that lands there is a teardown
+// caused by a typo. The door must survive untouched either way.
+func TestRevokeRunnerBlankRevokeFromNeverEscalates(t *testing.T) {
+	for _, tc := range [][]string{{""}, {"  "}, {"", "   "}} {
+		root := t.TempDir()
+		seedDoor(t, root, "rtx-ssh-root", "ssh", "darcy@10.0.0.55", "ai")
+		reg, _ := testRegistry(t)
+
+		_, err := BuildRevokeRunner(revokeSpec(t, root), reg)(agent.RetireArgs{Name: "rtx-ssh-root", RevokeFrom: tc})
+		if err == nil {
+			t.Fatalf("revoke_from %q must be refused, not escalated to a retirement", tc)
+		}
+		if !strings.Contains(err.Error(), "revoke_from was given but names no agent") {
+			t.Fatalf("the refusal must name the malformed list, got: %v", err)
+		}
+		disk := reopen(t, root)
+		if _, ok := disk.GetCapability("rtx-ssh-root"); !ok {
+			t.Fatalf("revoke_from %q took the door down", tc)
+		}
+		if _, retired := disk.GetRetired("rtx-ssh-root"); retired {
+			t.Fatalf("revoke_from %q retired the door", tc)
+		}
 	}
 }
 
@@ -282,12 +313,13 @@ func TestRevokeRunnerWholeRetireErasesTheCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// "is gone", not the other credential branch's "no sealed package exists":
-	// that one is what a never-provisioned door says, and it would let this test
-	// pass with the erasure path never having run.
-	if !strings.Contains(report, "[verified] credential") || !strings.Contains(report, "is gone") ||
-		strings.Contains(report, "no sealed package exists") {
-		t.Fatalf("the credential leg must report an erasure it verified: %s", report)
+	// "[verified] credential" now means the DISK CHECK ran: the secrets file is
+	// confirmed absent. The old branch wording ("no sealed package exists" as a
+	// never-provisioned claim) is gone — one check covers both, so the erasure
+	// path is pinned by the state row plus the on-disk load below, not by which
+	// sentence printed.
+	if !strings.Contains(report, "[verified] credential") || !strings.Contains(report, "the CP holds no copy of the credential") {
+		t.Fatalf("the credential leg must report an absence it verified on disk: %s", report)
 	}
 	// The state says revoked AND the sealed bytes are gone: a door that is
 	// "revoked" while its package still loads is the failure this guards.
@@ -342,5 +374,131 @@ func TestRevokeRunnerKeepsThePodsOtherDoors(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "unifi-api-admin" {
 		t.Fatalf("the revoked door must be cut while its sibling survives, got [%s]", strings.Join(got, ", "))
+	}
+}
+
+// TestRevokeRunnerRosterLegNeverClaimsBeyondItsCheck drives rosterOutcome
+// directly across the readings that decide whether the report may say
+// "revoked": a failed read-back, a target the relay still lists, a grantee
+// whose pubkey never resolved, and — the whole-door case — entries the call did
+// not account for. None of these may print a verified mark, and the whole-door
+// leg must never call a roster with leftover entries "empty".
+func TestRevokeRunnerRosterLegNeverClaimsBeyondItsCheck(t *testing.T) {
+	aiPK, netPK, runPK := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	pubkeys := map[string]string{"ai": aiPK, "network": netPK}
+
+	t.Run("read-back failure is never a success", func(t *testing.T) {
+		o := rosterOutcome(true, []string{"ai"}, pubkeys, runPK, nil, nil, fmt.Errorf("relay down"))
+		if o.ok || !strings.Contains(o.detail, "could NOT be read back") {
+			t.Fatalf("a failed read-back must be UNVERIFIED, got %+v", o)
+		}
+	})
+	t.Run("a target still listed is a failure", func(t *testing.T) {
+		o := rosterOutcome(false, []string{"ai"}, pubkeys, runPK, nil, []string{aiPK}, nil)
+		if o.ok || !strings.Contains(o.detail, "STILL lists [ai]") {
+			t.Fatalf("a still-listed target must fail the leg, got %+v", o)
+		}
+	})
+	t.Run("an unresolved grantee can never verify", func(t *testing.T) {
+		// The orphan's pubkey is absent from pubkeys: the leg must say the grant
+		// may linger rather than print a clean mark over an unchecked hole.
+		o := rosterOutcome(true, []string{"ai", "ghost"}, pubkeys, runPK, nil, []string{}, nil)
+		if o.ok || !strings.Contains(o.detail, "ghost") || !strings.Contains(o.detail, "still holding exec") {
+			t.Fatalf("an unresolved grantee must be named as unverifiable, got %+v", o)
+		}
+	})
+	t.Run("whole-door leftovers are named, never called empty", func(t *testing.T) {
+		// Every resolved target is off, but a fourth identity the record does not
+		// name is still on the roster: the leg must fail and print it.
+		o := rosterOutcome(false, []string{"ai", "network"}, pubkeys, runPK, nil,
+			[]string{runPK, strings.Repeat("d", 64)}, nil)
+		if o.ok || !strings.Contains(o.detail, "NOT clear") || !strings.Contains(o.detail, strings.Repeat("d", 64)) {
+			t.Fatalf("an unaccounted roster entry must fail the whole-door leg, got %+v", o)
+		}
+	})
+	t.Run("whole-door clean leaves only the door's own identity", func(t *testing.T) {
+		o := rosterOutcome(false, []string{"ai", "network"}, pubkeys, runPK, nil, []string{runPK}, nil)
+		if !o.ok || strings.Contains(o.detail, "roster is empty") {
+			t.Fatalf("the clean whole-door leg must claim only the agents are off, got %+v", o)
+		}
+	})
+	t.Run("single clean keeps the door's other grantees", func(t *testing.T) {
+		o := rosterOutcome(true, []string{"ai"}, pubkeys, runPK, nil, []string{runPK, netPK}, nil)
+		if !o.ok {
+			t.Fatalf("a single removal's survivors must not fail the leg, got %+v", o)
+		}
+	})
+}
+
+// TestRevokeRunnerCredentialLegDistinguishesGoneFromUnreadable pins the
+// filesystem basis of the credential claim: "gone" requires the secrets file to
+// be confirmed ABSENT — a corrupt or truncated file fails wire.Load exactly like
+// a deleted one does, and reading that as an erasure would report a still-present
+// secret as destroyed.
+func TestRevokeRunnerCredentialLegDistinguishesGoneFromUnreadable(t *testing.T) {
+	t.Run("absent file verifies", func(t *testing.T) {
+		dir := t.TempDir() // exists, but holds no secrets.json
+		o := credentialOutcome(dir)
+		if !o.ok || !strings.Contains(o.detail, "no sealed package exists") {
+			t.Fatalf("an absent secrets file is verified absence, got %+v", o)
+		}
+	})
+	t.Run("still-readable fails", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := wire.New(map[string]string{"k": "v"}, nil, nil).WriteToDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		o := credentialOutcome(dir)
+		if o.ok || !strings.Contains(o.detail, "STILL READABLE") {
+			t.Fatalf("a loadable package must fail the leg, got %+v", o)
+		}
+	})
+	t.Run("corrupt-but-present fails, never reads as gone", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, wire.SECRETS_FILE), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		o := credentialOutcome(dir)
+		if o.ok || strings.Contains(o.detail, "gone") || !strings.Contains(o.detail, "PRESENT") {
+			t.Fatalf("a corrupt package is present bytes, not an erasure, got %+v", o)
+		}
+	})
+}
+
+// TestRevokeRunnerFatalKeepsTheAuditReport pins what a mid-flight abort owes the
+// audit: the serve (textResult) drops a tool's text whenever the call returns an
+// error, so failLoud — the one exit every post-side-effect failure goes through —
+// must fold the report of what DID complete into the error text itself. A
+// half-revoked world whose only witness was the discarded report half is the
+// failure mode this closes.
+func TestRevokeRunnerFatalKeepsTheAuditReport(t *testing.T) {
+	rep := revokeReport{
+		name:     "rtx-ssh-root",
+		single:   true,
+		grantees: []string{"ai"},
+		outcomes: []revokeOutcome{
+			{step: "roster", ok: true, detail: "verified against the relay-signed roster: [ai] is off it"},
+			{step: "coords", ok: false, detail: "ai: pod re-apply FAILED — it may still carry the revoked door"},
+		},
+	}
+	report, err := failLoud(rep, "revoke_runner %s: drop [%s] from the door's recorded roster FAILED (%v)",
+		"rtx-ssh-root", "ai", "disk full")
+	if err == nil {
+		t.Fatal("a fatal must be an error")
+	}
+	if report != "" {
+		t.Fatalf("the report half stays empty on the error path (the serve would drop it): %q", report)
+	}
+	// The account of what completed rides in the error the caller actually sees.
+	for _, want := range []string{
+		"FAILED — the call stopped mid-flight",                         // the header: not a completed removal
+		"drop [ai] from the door's recorded roster FAILED (disk full)", // the reason
+		"[verified] roster",                                            // the leg that DID land
+		"[UNVERIFIED] coords",                                          // the leg that did not
+		"verdict:",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error must carry %q, got: %s", want, err.Error())
+		}
 	}
 }

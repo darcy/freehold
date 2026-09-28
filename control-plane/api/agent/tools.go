@@ -79,9 +79,10 @@ type RetireArgs struct {
 // RevokeRunnerFn is the CPA's take-away-half twin of ProvisionRunnerFn: the
 // whole-door retirement flow — clear the roster (the live revocation), cut the
 // coords feed, and retire the record. CP-hosted doors get their unit stopped
-// here; a resident door's box-side clean-up is handed to the grantee that holds
-// exec through it, with the steps in the report. Built by
-// cpbuild.BuildRevokeRunner; nil = unsupported.
+// here; a resident door's box-side close-out is the OPERATOR's (on the box the
+// build does not drive — Compute for a substrate credential), with the steps in
+// the report: the agent that just lost the door is never handed a teardown job
+// for it. Built by cpbuild.BuildRevokeRunner; nil = unsupported.
 type RevokeRunnerFn func(args RetireArgs) (report string, err error)
 
 // Tools is the CPA's dedicated agent-management toolset (A4): create-agent,
