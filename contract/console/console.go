@@ -38,7 +38,15 @@ type Runner struct {
 	Risk        *string     `json:"risk"`
 	Secret      *SecretInfo `json:"secret"`
 	Grants      []string    `json:"grants"`
-	Readiness   interface{} `json:"readiness,omitempty"`
+	// GrantsSource names where Grants was read from: "live" (the relay-signed
+	// 39002 roster — what actually gates exec for a relay-mode runner) or
+	// "package" (the shipped fallback file — the co-located runner's mode).
+	// Empty when neither was readable.
+	GrantsSource string       `json:"grants_source,omitempty"`
+	Readiness    interface{}  `json:"readiness,omitempty"`
+	// Colocated marks the CP's own co-located runner (the build/relay-admin
+	// hands on the CP guest) so clients can label it.
+	Colocated bool `json:"colocated,omitempty"`
 }
 
 // SecretInfo mirrors the console client SecretInfo.

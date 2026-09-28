@@ -40,7 +40,7 @@
 </style>
 </head>
 <body>
-<h1>freehold <span>·</span> control plane</h1>
+<h1>freehold <span>·</span> control plane <span class="muted" id="cp-version"></span></h1>
 <div class="muted" id="console-line">console agent: loading…</div>
 
 <div class="card">
@@ -77,6 +77,18 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
+
+// The CP's own version pin (public /healthz, no session needed) — the header
+// stays quiet when the pin is unstamped ("dev" / absent) rather than lying.
+(async () => {
+  try {
+    const h = await (await fetch("/healthz")).json();
+    if (h.version && h.version !== "dev") {
+      const c = h.commit && h.commit !== "unknown" ? "@" + String(h.commit).slice(0, 7) : "";
+      $("#cp-version").textContent = " cp " + h.version + c;
+    }
+  } catch (e) { /* unstamped / unreachable — no version line */ }
+})();
 
 // The door a /runner/<name> deep link points at ("" on the dashboard root) —
 // the agents hand the operator this link for the credential fill; the login
@@ -134,20 +146,27 @@ async function refresh() {
       : '<span class="muted">—</span>';
     // grants null = package UNREADABLE (a real anomaly), distinct from an
     // honest empty list. r.grants[i] comes from the API only after validate
-    // (64-hex or console) — still escaped.
+    // (64-hex or console) — still escaped. The chip names WHERE the list was
+    // read from: "live" = the relay-signed roster (what gates exec),
+    // "package" = the shipped fallback (the co-located runner's mode).
+    const src = r.grants_source === "live"
+      ? '<span class="chip green">live roster</span> '
+      : r.grants_source === "package"
+        ? '<span class="chip gray">package</span> '
+        : "";
     const grants = r.grants === null
       ? (r.status === "revoked"
           ? '<span class="muted">revoked — secrets.json removed (B3)</span>'
           : '<span class="chip red">package unreadable — check the runner dir</span>')
       : r.grants.length
-        ? r.grants.map((g) => '<div class="muted">' + esc(g) + "</div>").join("")
-        : '<span class="muted">nobody (fail closed)</span>';
+        ? src + r.grants.map((g) => '<div class="muted">' + esc(g) + "</div>").join("")
+        : src + '<span class="muted">nobody (fail closed)</span>';
     const secret = r.secret
       ? esc(r.secret.name) + " · " + esc(r.secret.kind) + " · " + esc(r.secret.address) +
         (r.secret.rotated_at ? " · rotated" : "")
       : '<span class="muted">—</span>';
     return `<tr ${r.name === doorName ? 'class="door-focus"' : ""}>
-      <td><b>${esc(r.name)}</b><div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
+      <td><b>${esc(r.name)}</b>${r.colocated ? ' <span class="chip gray">co-located</span>' : ""}<div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
       <td>${r.status === "revoked" ? chip("red(revoked)") : chip("green(active)")}</td>
       <td>${r.risk ? chip(esc(r.risk)) : '<span class="muted">?</span>'}</td>
       <td>${secret}</td>

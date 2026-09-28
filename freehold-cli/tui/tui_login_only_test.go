@@ -265,7 +265,9 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 		case "/api/dns":
 			w.Write([]byte(`{"dns":[{"name":"relay","ip":"10.0.0.5","source":"record_lxc"},{"name":"relay.here.freehold.technology","ip":"10.0.0.8","source":"cp_public"}]}`))
 		case "/api/overview":
-			w.Write([]byte(`{"console_pubkey":"aa","runners":[{"name":"proxmox-box","status":"active","nostr_pubkey":"bb"}]}`))
+			w.Write([]byte(`{"console_pubkey":"aa","runners":[` +
+				`{"name":"proxmox-box","status":"active","nostr_pubkey":"bb","grants":["op-pk","console-pk"],"grants_source":"package","colocated":true},` +
+				`{"name":"pve-ssh-root","status":"active","nostr_pubkey":"cc","grants":["net-pk","compute-pk","data-pk"],"grants_source":"live"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -294,8 +296,16 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 			t.Fatalf("relay row must come from the CP report, got URL %q", s.URL)
 		}
 	}
-	if len(m.Runners) == 0 {
-		t.Fatal("Runners not populated from console /api/overview")
+	if len(m.Runners) < 2 {
+		t.Fatalf("Runners not populated from console /api/overview: %+v", m.Runners)
+	}
+	// The grants cell names its source (package fallback vs the live
+	// relay-signed roster) and the co-located runner is labeled.
+	if m.Runners[0].Name != "proxmox-box (co-located)" || m.Runners[0].Grants != "2 · pkg" {
+		t.Fatalf("co-located runner row wrong: %+v", m.Runners[0])
+	}
+	if m.Runners[1].Name != "pve-ssh-root" || m.Runners[1].Grants != "3 · live" {
+		t.Fatalf("live-roster runner row wrong: %+v", m.Runners[1])
 	}
 	if len(m.Agents) == 0 || !strings.Contains(m.Agents[0].Name, "cpa") {
 		t.Fatalf("Agents not populated from console /api/world: %+v", m.Agents)

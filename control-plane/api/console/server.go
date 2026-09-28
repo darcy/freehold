@@ -593,15 +593,31 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		Risk      *string     `json:"risk"`
 		Secret    interface{} `json:"secret"`
 		Grants    interface{} `json:"grants"`
-		Readiness interface{} `json:"readiness,omitempty"`
+		// grants_source: "live" (the relay-signed 39002 roster — what actually
+		// gates exec) or "package" (the shipped fallback — the co-located
+		// runner's mode). Empty when neither was readable (grants = null).
+		GrantsSource string `json:"grants_source,omitempty"`
+		Readiness    interface{} `json:"readiness,omitempty"`
+		// colocated marks the CP's own co-located runner.
+		Colocated bool `json:"colocated,omitempty"`
 	}
 	runners := make([]runnerOut, 0, len(snap.Runners))
+	// Per-runner package state, kept by slice index so the roster results can
+	// fall back to it after the concurrent collects.
+	pkgGrants := make([][]string, 0, len(snap.Runners))
+	pkgReadable := make([]bool, 0, len(snap.Runners))
 	type probe struct {
 		name  string
 		value interface{}
 	}
 	probes := make(chan probe, len(snap.Runners))
 	probeCount := 0
+	rosters := make(chan probe, len(snap.Runners))
+	rosterCount := 0
+	// Roster reads need the relay coords (the runner's channel lives there) and
+	// the console's own secret (it is every channel's owner).
+	canReadRoster := snap.RelayURL != nil && *snap.RelayURL != "" &&
+		snap.RelayPubkey != nil && *snap.RelayPubkey != "" && len(s.ConsoleSecret) == 32
 	for name, rec := range snap.Runners {
 		var secret interface{}
 		if sc, ok := snap.Secrets[name]; ok {
@@ -610,14 +626,23 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 				"rotated_at": sc.RotatedAt, "created_at": sc.CreatedAt,
 			}
 		}
-		var grants interface{}
-		if pkg, err := wire.Load(rec.PackageDir); err == nil {
-			grants = pkg.Grants
+		var pkg []string
+		readable := false
+		if p, err := wire.Load(rec.PackageDir); err == nil {
+			pkg, readable = p.Grants, true
 		}
+		pkgGrants = append(pkgGrants, pkg)
+		pkgReadable = append(pkgReadable, readable)
 		out := runnerOut{
 			Name: name, Status: string(rec.Status), NostrPub: rec.NostrPubkey,
 			EncPub: rec.EncPubkey, McpAddr: rec.McpAddr, Risk: rec.RiskLevel,
-			Secret: secret, Grants: grants,
+			Secret: secret,
+		}
+		// The package result rides in upfront (it is the fallback); a live
+		// roster result below overwrites it when the query ran and returned.
+		out.Grants, out.GrantsSource = grantsFor(nil, nil, pkg, readable)
+		if s.Builder != nil && name == s.Builder.RunnerTarget {
+			out.Colocated = true
 		}
 		// Live readiness probe (the console signs a status call as its own
 		// identity — the runner still fails closed).
@@ -626,6 +651,16 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			go func(name string, addr, rpk string) {
 				probes <- probe{name, s.probeReadiness(addr, rpk)}
 			}(name, *rec.McpAddr, rec.NostrPubkey)
+		}
+		// Live grants: the relay-signed 39002 roster, read fresh per call (the
+		// same source the runner itself authorizes against). A revoked runner's
+		// channel is moot — its package is gone and the report must stay null.
+		if canReadRoster && rec.Status == state.RunnerActive {
+			rosterCount++
+			go func(name string, url, rpk, runnerPK string) {
+				members, rerr := relay.QueryChannelRoster(url, rpk, runnerPK, s.ConsoleSecret)
+				rosters <- probe{name, rosterResult{members, rerr}}
+			}(name, *snap.RelayURL, *snap.RelayPubkey, rec.NostrPubkey)
 		}
 		runners = append(runners, out)
 	}
@@ -637,10 +672,41 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	for i := 0; i < rosterCount; i++ {
+		p := <-rosters
+		for j := range runners {
+			if runners[j].Name == p.name {
+				res := p.value.(rosterResult)
+				runners[j].Grants, runners[j].GrantsSource = grantsFor(res.members, res.err, pkgGrants[j], pkgReadable[j])
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"console_pubkey": s.ConsolePubkey,
 		"runners":        runners,
 	})
+}
+
+// rosterResult is one concurrent roster read's outcome.
+type rosterResult struct {
+	members []string
+	err     error
+}
+
+// grantsFor picks a runner's reported grants: the LIVE relay-signed roster
+// when the read succeeded and holds members — that is what actually gates the
+// runner's exec (it re-reads it per call). An empty or failed read falls back
+// to the shipped package grants (the co-located runner's mode: it has no
+// relay channel, so its package IS its whitelist). pkgReadable=false leaves
+// grants nil so clients keep rendering the "package unreadable" anomaly.
+func grantsFor(live []string, liveErr error, pkg []string, pkgReadable bool) (grants []string, source string) {
+	if liveErr == nil && len(live) > 0 {
+		return live, "live"
+	}
+	if pkgReadable {
+		return pkg, "package"
+	}
+	return nil, ""
 }
 
 // probeReadiness signs a status call as the console and returns the runner's

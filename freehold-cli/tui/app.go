@@ -486,22 +486,38 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 		} else if cfg != nil {
 			addr = cfg.Runner.Addr
 		}
+		// The grants cell names its source: "live" = the relay-signed roster
+		// (what actually gates exec), "pkg" = the shipped package fallback
+		// (the co-located runner's mode — no relay channel).
 		grants := "—"
 		if len(r.Grants) > 0 {
-			grants = fmt.Sprintf("%d grants", len(r.Grants))
+			grants = fmt.Sprintf("%d · %s", len(r.Grants), grantsSourceLabel(r.GrantsSource))
 		}
 		readiness := "—"
 		if r.Readiness != nil {
 			readiness = fmt.Sprintf("%v", r.Readiness)
 		}
+		name := r.Name
+		if r.Colocated {
+			name += " (co-located)"
+		}
 		m.Runners = append(m.Runners, RunnerRow{
-			Name: r.Name, Status: r.Status, Pubkey: r.NostrPubkey,
+			Name: name, Status: r.Status, Pubkey: r.NostrPubkey,
 			Addr: addr, Grants: grants, Readiness: readiness,
 		})
 	}
 	if len(m.Runners) == 0 {
 		m.Runners = []RunnerRow{{Name: "(no runners on the console)", Status: styleDim.Render("provision one with p")}}
 	}
+}
+
+// grantsSourceLabel renders the overview's grants_source for the runners
+// table.
+func grantsSourceLabel(src string) string {
+	if src == "live" {
+		return "live"
+	}
+	return "pkg"
 }
 
 // buildAgents fills the Agents view from the CP's /api/world — the same
