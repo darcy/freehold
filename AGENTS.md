@@ -109,11 +109,13 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   design; the operator-stated mode is the only gate. `fresh` is transient (gone on
   uninstall) and is never listed.
 - **dev — build, test, sandbox.** Provision new services for agents, verify they work,
-  write the skills prod agents will use; refactor and exercise directly on the box. No PR
-  is needed to make something work in dev — the PR is only how finished code lands in
-  `main` so **other worlds** get it. When dev work exposes a fix: fix the world, then
-  reproduce it in the codebase — a fix that lives only on the box isn't done until the PR
-  merges.
+  write the skills prod agents will use; refactor and exercise directly on the box. **The
+  update flow is the only way changes reach any world — dev included:** PR → `main` →
+  `freehold update` (or a world's `freehold build`). Doing a thing by hand on a box is
+  for TESTING only — proving a fix works before it is code — never the way a change lands.
+  When dev work exposes a fix: fix the world to unblock testing, then reproduce it in the
+  codebase — a fix that lives only on the box isn't done until the PR merges and the update
+  flow delivers it.
 - **test — release e2e only**, via `release-test-proxmox` (Fresh/Rebuild/Live; Proxmox
   now, Vultr later). Never a dev sandbox. Fresh is disposable; Rebuild/Live persist
   between releases.
@@ -227,9 +229,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   the exact capability the department exists to own and audit. Service lifecycle is **not** a
   department: whichever agent created a service — a freehold-delegate or a custom agent — owns
   its install/config/operation, ad hoc and unvetted as before. The four departments are
-  **installed as part of the core build** (each a pod on the same harness as the CPA): in
-  the private `#freehold` plus its own private `#freehold-<department>` channel, with the CPA
-  a member of all. Only
+  **installed as part of the core build** (each a pod on the same harness as the CPA): all in
+  the shared private `#freehold` channel — there are no per-department channels; conversations
+  happen where they already are, with #freehold the fallback every core agent belongs to. Only
   the identity/grant separation is locked; capability tooling/secrets arrive per department
   later (Chunk 5/6). A custom agent that self-serves a department-owned capability is a
   containment failure even if a grant would technically allow it — the department's prompt is
@@ -305,8 +307,8 @@ release notes.
   without any agent hop).
 - **The agent↔runner exec surface is wired for departments; the grant unit is the runner.**
   `freehold build` creates each reserved department (`network`/`data`/`compute`/`ai`) through
-  the same audited `create_agent` (its embedded prompt, the private `#freehold` plus its own
-  `#freehold-<department>` channel, CPA added to each) and stands up the **capability runners**
+  the same audited `create_agent` (its embedded prompt, the private `#freehold` channel) and
+  stands up the **capability runners**
   (`stageDepartmentRunners`): one runner per capability, named `<target>-<protocol>-<identity>`
   (`pve-ssh-root` shared by network+compute+data, `kube-api-root`/`kube-api-caddysa`/
   `kube-api-litellmsa` SA-token kube doors, `litellm-api-admin` (master + provider keys),

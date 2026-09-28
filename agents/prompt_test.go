@@ -132,7 +132,7 @@ func TestDepartmentPurposeAndChannelsCoverEveryDepartment(t *testing.T) {
 		if p, ok := DepartmentPurpose(name); !ok || strings.TrimSpace(p) == "" {
 			t.Errorf("department %q has no purpose", name)
 		}
-		want := []string{"#freehold", "#freehold-" + name}
+		want := []string{"#freehold"}
 		if got := DepartmentChannels(name); strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Errorf("DepartmentChannels(%q) = %v, want %v", name, got, want)
 		}

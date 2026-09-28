@@ -2049,7 +2049,8 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// absent) and joined; the operator is added to each. Empty list = the
 		// default freehold channel. After the channels exist the CPA is added to
 		// each so the system's main touchpoint sees every department
-		// (agents.DepartmentChannels gives a department #freehold + #freehold-<name>).
+		// (agents.DepartmentChannels gives a department #freehold only — the
+		// departments hold their conversations there).
 		type channelRef struct{ id, name string }
 		var joined []channelRef
 		for _, ch := range channelNames(channels) {
@@ -2105,9 +2106,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
 				for _, ref := range joined {
-					// Best-effort: the created agent signs, so it lands on a
-					// channel it owns (its own #freehold-<name>); the CPA is
-					// already the owner/member of #freehold — skip.
+				// Best-effort: the created agent signs, so it lands on a
+				// channel it owns (a custom channel it created); the CPA is
+				// already the owner/member of #freehold — skip.
 					if ref.id == relayFreeholdChannel {
 						continue
 					}
