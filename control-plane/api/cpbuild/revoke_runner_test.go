@@ -173,7 +173,7 @@ func TestRevokeRunnerSingleRemovalEditsTheRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(report, "removed from the roster of [ai]") {
+	if !strings.Contains(report, "[ai] removed from the roster of rtx-ssh-root") {
 		t.Fatalf("the report must name whose grant went: %s", report)
 	}
 	if !strings.Contains(report, "untouched by design") {

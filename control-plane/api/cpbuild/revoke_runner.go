@@ -639,9 +639,10 @@ func renderRevoke(r revokeReport) string {
 	case r.noop:
 		fmt.Fprintf(&b, "revoke_runner: %s UNCHANGED — nothing was taken from [%s]\n", r.name, orNone(r.grantees))
 	case r.single:
-		fmt.Fprintf(&b, "revoke_runner: %s removed from the roster of [%s]\n", r.name, orNone(r.grantees))
-	default:
-		fmt.Fprintf(&b, "revoke_runner: capability door %s retired (its roster held [%s])\n", r.name, orNone(r.grantees))
+		// Subject and object: the AGENTS were removed from the DOOR's roster —
+		// the door keeps serving whoever remains. The phrasing before read the
+		// other way round, and the agent relays this line verbatim.
+		fmt.Fprintf(&b, "revoke_runner: [%s] removed from the roster of %s\n", orNone(r.grantees), r.name)
 	}
 	for _, o := range r.outcomes {
 		mark := "verified"
