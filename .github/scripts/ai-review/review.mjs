@@ -9,8 +9,11 @@ import { parseReview, harnessText } from './parse.mjs';
 import { buildReviewReplies, buildThreadIndex } from './threads.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const LLM_API_KEY = process.env.LLM_API_KEY;
-const LLM_MODEL = process.env.LLM_MODEL;
+// HARNESS_API_KEY/HARNESS_MODEL take precedence over the legacy single-shot
+// vars (LLM_API_KEY/LLM_MODEL) — during the transition both sets are present
+// because the job may run main's previous script until this merges.
+const LLM_API_KEY = process.env.HARNESS_API_KEY || process.env.LLM_API_KEY;
+const LLM_MODEL = process.env.HARNESS_MODEL || process.env.LLM_MODEL;
 // Wall-clock cap for the whole headless harness session (all of its turns), so
 // a wedged run fails and retries instead of hanging to the job's 60-minute cap.
 const HARNESS_TIMEOUT_MS = parseInt(process.env.HARNESS_TIMEOUT_MS || '1200000', 10);
@@ -69,10 +72,10 @@ function annotatePatch(patch) {
 }
 
 function readContextFiles() {
-  // Context files are repo-root files (AGENTS.md etc.), but the job runs with
-  // working-directory set to this script's dir — resolve them against the
-  // workspace root, not cwd.
-  const root = process.env.GITHUB_WORKSPACE || process.cwd();
+  // Context files are repo-root files, read from the TRUSTED checkout this
+  // script lives in (two levels up from this script dir) — never from
+  // GITHUB_WORKSPACE, which is the explored PR state (untrusted data).
+  const root = join(import.meta.dirname, '../..');
   const files = CONTEXT_FILES
     .filter(f => existsSync(`${root}/${f}`))
     .map(f => {
