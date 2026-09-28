@@ -614,9 +614,10 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	probeCount := 0
 	rosters := make(chan probe, len(snap.Runners))
 	rosterCount := 0
-	// Roster reads need the relay coords (the runner's channel lives there) and
-	// the console's own secret (it is every channel's owner).
-	canReadRoster := snap.RelayURL != nil && *snap.RelayURL != "" &&
+	// Roster reads need the relay coords (the runner's channel lives there)
+	// and the console's own secret (it is every channel's owner).
+	relayDial, relayAuth := s.relayDialAuth(snap)
+	canReadRoster := relayDial != "" &&
 		snap.RelayPubkey != nil && *snap.RelayPubkey != "" && len(s.ConsoleSecret) == 32
 	for name, rec := range snap.Runners {
 		var secret interface{}
@@ -652,16 +653,16 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}(name, *rec.McpAddr, rec.NostrPubkey)
 		}
 		// Live grants: the relay-signed 39002 roster, read fresh per call (the
-		// same source the runner itself authorizes against). Relay-mode only —
-		// the co-located runner has no channel (its package IS its whitelist),
-		// and a revoked runner's channel is moot (its package is gone; the
-		// report must stay null).
+		// same source the runner itself authorizes against, same dial/auth
+		// split). Relay-mode only — the co-located runner has no channel (its
+		// package IS its whitelist), and a revoked runner's channel is moot
+		// (its package is gone; the report must stay null).
 		if canReadRoster && rec.Status == state.RunnerActive && !colocated {
 			rosterCount++
-			go func(name string, url, rpk, runnerPK string) {
-				members, rerr := relay.QueryChannelRoster(url, rpk, runnerPK, s.ConsoleSecret)
+			go func(name string, rpk, runnerPK string) {
+				members, rerr := relay.QueryChannelRosterAuth(relayDial, relayAuth, rpk, runnerPK, s.ConsoleSecret)
 				rosters <- probe{name, rosterResult{members, rerr}}
-			}(name, *snap.RelayURL, *snap.RelayPubkey, rec.NostrPubkey)
+			}(name, *snap.RelayPubkey, rec.NostrPubkey)
 		}
 		runners = append(runners, out)
 	}
@@ -692,6 +693,34 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 type rosterResult struct {
 	members []string
 	err     error
+}
+
+// relayDialAuth derives the relay DIAL + CANONICAL NIP-98 auth URLs for the
+// console's own relay reads: the LAN dial by HOSTNAME (buzz keys the
+// community to the request Host — an IP dial presents a Host no community is
+// configured for — and the /etc/hosts pin re-resolves it), the auth against
+// the canonical public origin (a dial-URL-signed auth 401s "URL mismatch").
+// Mirrors world()'s relay probe and the build's dial/sign split; the single
+// recorded relay_url (the raw LAN IP:port) is the last fallback for both.
+func (s *Server) relayDialAuth(snap state.ControlPlaneState) (dial, auth string) {
+	relayHost := ""
+	if snap.RelayHost != nil {
+		relayHost = *snap.RelayHost
+	}
+	if relayHost == "" && s.Builder != nil {
+		relayHost = s.Builder.RelayHost
+	}
+	if relayHost != "" {
+		dial = config.RelayLanDial(relayHost)
+		auth = "https://" + relayHost
+	}
+	if dial == "" && snap.RelayURL != nil {
+		dial = *snap.RelayURL
+	}
+	if auth == "" && snap.RelayURL != nil {
+		auth = *snap.RelayURL
+	}
+	return dial, auth
 }
 
 // grantsFor picks a runner's reported grants + source. queryLive marks a
@@ -1361,7 +1390,8 @@ func (s *Server) runnerChannel(w http.ResponseWriter, r *http.Request, name stri
 		return
 	}
 	channelID := relay.RunnerChannelID(rec.NostrPubkey)
-	members, err := relay.QueryChannelRoster(*snap.RelayURL, *snap.RelayPubkey, rec.NostrPubkey, s.ConsoleSecret)
+	dial, auth := s.relayDialAuth(snap)
+	members, err := relay.QueryChannelRosterAuth(dial, auth, *snap.RelayPubkey, rec.NostrPubkey, s.ConsoleSecret)
 	var membersJSON interface{}
 	if err != nil {
 		membersJSON = map[string]interface{}{"error": err.Error()}

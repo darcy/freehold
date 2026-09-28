@@ -531,14 +531,25 @@ func mergeRunnerMetas(events []map[string]interface{}, expectedAuthor string) ([
 // QueryChannelRoster reads the runner's current roster (its exec whitelist):
 // kinds [39002] filtered by #d = the runner channel. Members = the `p` tags,
 // sorted. Trust anchor = relay_pubkey (verified locally); newest wins.
+// Single-URL form: the dial and the NIP-98 auth are the same origin — only
+// correct when relayURL IS the canonical public origin.
 func QueryChannelRoster(relayURL, relayPubkey, runnerNostrPubkey string, authSecret []byte) ([]string, error) {
+	return QueryChannelRosterAuth(relayURL, relayURL, relayPubkey, runnerNostrPubkey, authSecret)
+}
+
+// QueryChannelRosterAuth is QueryChannelRoster with a separate NIP-98 auth
+// URL: the dial reaches the relay on its LAN origin (by HOSTNAME — buzz keys
+// the community to the request Host) while the auth signs the CANONICAL
+// public URL. This is the form a runtime console needs: its recorded
+// relay_url is the LAN dial, and a dial-URL-signed auth 401s "URL mismatch".
+func QueryChannelRosterAuth(dialURL, authURL, relayPubkey, runnerNostrPubkey string, authSecret []byte) ([]string, error) {
 	chanID := RunnerChannelID(runnerNostrPubkey)
 	filters := []interface{}{map[string]interface{}{
 		"kinds": []interface{}{wire.GroupMembers},
 		"#d":    []interface{}{chanID},
 		"limit": 100,
 	}}
-	events, err := QueryEvents(relayURL, authSecret, filters)
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, filters)
 	if err != nil {
 		return nil, err
 	}
