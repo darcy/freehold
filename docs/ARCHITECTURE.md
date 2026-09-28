@@ -59,12 +59,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     ciphertext → inject the runner private key → rotate. No master key.
     Runner holds only ciphertext + its own key; decrypts in its own memory,
     uses in memory, forgets. Plaintext never on disk, never in agent context.
-    Two deliberate CP-held secrets, both sealed to the console identity and
-    both narrow: the DNS/litellm creds (world-secrets, opened in memory at
-    build), and the OPERATOR's Nostr key (`world-secrets/operator.json`,
-    shipped by the box build) — it attests agent memory (`contract/nipoa`)
-    and decrypts nothing else. Still no master key: nothing under the CP
-    state dir opens a runner's blobs.
+    Two deliberate CP-held secrets, both sealed to the console identity: the
+    DNS/litellm creds (world-secrets, opened in memory at build), and the
+    OPERATOR's Nostr SIGNING key (`world-secrets/operator.json`, shipped by
+    the box build) — it attests agent memory (`contract/nipoa`) and, as the
+    operator's full signing key, also authorizes console logins and relay
+    owner-role actions: a CP compromise yields operator impersonation (the
+    same class as losing the operator box). Runner blobs still stay sealed:
+    nothing under the CP state dir opens one.
 
 *   **Grants are coarse:** agent ↔ runner (whitelist of Nostr pubkeys);
     dedicated runner per service by default. Readiness = the runner's own

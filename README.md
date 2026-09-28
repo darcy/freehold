@@ -556,11 +556,16 @@ sequenceDiagram
   plaintext (credentials are sealed, forgotten). The only key under the CP state dir is the console
   AGENT key — it signs readiness probes and is provably not the encryption recipient of
   any runner (G3.3 checks this).
-  One deliberate extension: the CP also holds the OPERATOR's Nostr key, sealed to the
+  One deliberate extension: the CP also holds the OPERATOR's Nostr SIGNING key, sealed to the
   console identity at `world-secrets/operator.json` — the key that attests agent memory
   (`contract/nipoa`), shipped by `freehold build` because only the operator box has it.
-  It decrypts nothing else, and it lives inside the backed-up durable plane like every
-  CP-owned secret.
+  This is real authority, NOT a narrow attestation credential: whoever holds it signs
+  arbitrary events as the operator — NIP-98 console logins (the console admin
+  credential) and relay owner-role actions included. A CP compromise therefore yields
+  operator impersonation, the same class as losing the operator box itself. The CP holds
+  it because the attestation must be minted at every agent create/re-apply, and the
+  alternative (pre-minting on the box) cannot reach the CP's create path. Runner blobs
+  still stay sealed: nothing under the CP state dir opens one.
 - The runner holds ciphertext + its own injected private key; only that key opens its
   blobs, and a blob only opens under the secret name it was sealed with.
 - Rotation re-seals a NEW credential (the erase lever for your copies); revocation blocks

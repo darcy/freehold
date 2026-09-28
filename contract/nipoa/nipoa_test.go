@@ -107,7 +107,8 @@ func TestConditionsGrammar(t *testing.T) {
 		"kind=1 ",               // whitespace
 		"KIND=1",                // wrong case
 		"created_at=1",          // wrong operator
-		"kind=-1",               // negative
+		"kind=-1",               // negative (range check)
+		"kind=-0",               // negative zero (ParseInt accepts; sign must not)
 		"kind=+1",               // explicit plus (not canonical base-10)
 		"created_at<4294967296", // past the stated bound
 		"",                      // empty is VALID: it is the no-op case

@@ -192,7 +192,7 @@ func validConditions(s string) error {
 // canonical parses a canonical base-10 non-negative integer (no sign, no
 // leading zeroes beyond a bare "0") bounded by max.
 func canonical(s string, max int64) (int64, error) {
-	if s == "" || s[0] == '+' || (s[0] == '0' && len(s) != 1) {
+	if s == "" || s[0] == '+' || s[0] == '-' || (s[0] == '0' && len(s) != 1) {
 		return 0, fmt.Errorf("not canonical base-10")
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
