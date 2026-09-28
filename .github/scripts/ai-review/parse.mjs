@@ -51,14 +51,16 @@ const REVIEW_SHAPE = (parsed) =>
 // parseReview turns the model's final answer into the review object. Handles
 // plain JSON, fenced JSON, and JSON embedded in prose.
 //
-// There is EXACTLY ONE shape-valid candidate or this throws. Every selection
-// heuristic is attacker-steerable otherwise: position (first/last) via
-// planted objects the reviewer quotes, length via padding — a diff can embed
-// an arbitrarily large shape-valid fake for the reviewer to restate. The
-// prompt requires the answer to be exactly the single review object, so a
-// well-behaved model yields one candidate; anything else is injection
-// suspicion and must fail CLOSED (throw → the round retries → a red check if
-// it persists), never fail open on a guessed verdict.
+// Fail-closed rules — a security gate must never guess a verdict:
+// - EVERY brace-balanced verdict-bearing region must parse. A malformed one
+//   (the ordinary LLM failure — raw newline in a string, trailing comma)
+//   throws, even when another candidate parses: otherwise a planted,
+//   well-formed verdict wins precisely because the model's real answer
+//   happened to be malformed.
+// - EXACTLY ONE shape-valid candidate must remain. Position (first/last) and
+//   length are attacker-steerable; multiple distinct verdicts mean injection
+//   suspicion, not a choice to make.
+// Throws so the caller retries; a persistent failure is a red check.
 export function parseReview(raw) {
   const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
   const byShape = new Map();
@@ -70,12 +72,20 @@ export function parseReview(raw) {
   } catch {
     // not plain JSON — the brace-balanced scan below still applies
   }
-  for (const cand of extractJsonObject(cleaned)) {
+  const regions = extractJsonObject(cleaned);
+  let malformed = 0;
+  for (const cand of regions) {
+    let parsed = null;
     try {
-      consider(JSON.parse(cand));
+      parsed = JSON.parse(cand);
     } catch {
-      // skip unparseable candidate
+      malformed += 1;
+      continue;
     }
+    consider(parsed);
+  }
+  if (malformed) {
+    throw new Error(`malformed verdict JSON in model output (${malformed} unparseable verdict-bearing region(s))`);
   }
   const valid = [...byShape.values()];
   if (valid.length !== 1) {
@@ -100,8 +110,10 @@ export function parseReviewFromEvents(stdout) {
 }
 
 // harnessTextParts reconstructs the assistant's messages from --format json
-// output: one JSON event per line; text parts are collected in order.
-// Non-event lines are ignored. The LAST part is the model's final answer.
+// output: one JSON event per line; text parts are collected in order —
+// INCLUDING empty ones, so the LAST part is always the model's final message
+// (an empty final message must fail the parse, not reveal an earlier part).
+// Non-event lines are ignored.
 export function harnessTextParts(stdout) {
   const parts = [];
   for (const line of stdout.split('\n')) {
@@ -115,7 +127,7 @@ export function harnessTextParts(stdout) {
     }
     if (e?.type !== 'text') continue;
     const text = typeof e.part?.text === 'string' ? e.part.text : (typeof e.text === 'string' ? e.text : '');
-    if (text) parts.push(text);
+    parts.push(text);
   }
   return parts;
 }

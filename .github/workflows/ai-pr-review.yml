@@ -29,6 +29,12 @@ jobs:
   bot-review:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # The auto GITHUB_TOKEN is only used by the checkouts (fetch). The review
+    # posts through the bot PAT, so the auto token gets read-only contents and
+    # nothing else — minimal blast radius if any executed code were ever
+    # compromised.
+    permissions:
+      contents: read
     # Exactly one branch fires per PR revision (see `on:`): same-repo human
     # PRs from `pull_request`, fork PRs (including Dependabot's) from
     # `pull_request_target` — fork runs need the base repo's secrets; a

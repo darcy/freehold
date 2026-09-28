@@ -16,7 +16,13 @@ const LLM_API_KEY = process.env.HARNESS_API_KEY || process.env.LLM_API_KEY;
 const LLM_MODEL = process.env.HARNESS_MODEL || process.env.LLM_MODEL;
 // Wall-clock cap for the whole headless harness session (all of its turns), so
 // a wedged run fails and retries instead of hanging to the job's 60-minute cap.
+// Parsed with validation: a malformed operator value must fail the run, not
+// silently disable the cap (NaN propagates through spawn's timeout as "no
+// timeout"; parseInt('15m') yields 15 — a 15ms cap).
 const HARNESS_TIMEOUT_MS = parseInt(process.env.HARNESS_TIMEOUT_MS || '1200000', 10);
+if (!Number.isFinite(HARNESS_TIMEOUT_MS) || HARNESS_TIMEOUT_MS < 60_000) {
+  throw new Error(`HARNESS_TIMEOUT_MS must be a millisecond value >= 60000 (got ${process.env.HARNESS_TIMEOUT_MS})`);
+}
 const PROMPT_FILE = process.env.PROMPT_FILE || 'review-prompt.md';
 const CONTEXT_FILES = (process.env.CONTEXT_FILES || '').split(',').map(s => s.trim()).filter(Boolean);
 const EXCLUDE_PATTERNS = (process.env.EXCLUDE_PATTERNS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -359,8 +365,7 @@ async function runHarnessOnce(prompt, timeoutMs) {
       core.info(`Harness answer (${finalPart.length} chars): ${logSafe(finalPart.trim().slice(0, 200))}`);
       core.info(`Harness answer tail: ${logSafe(finalPart.trim().slice(-300))}`);
     }
-    return parseReviewFromEvents(stdout);
-  } finally {
+    return parseReviewFromEvents(stdout);  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -381,7 +386,9 @@ async function runHarness(prompt) {
       return await runHarnessOnce(prompt, Math.min(budget, remaining));
     } catch (e) {
       lastErr = e;
-      core.warning(`Harness attempt ${attempt}/2 failed after ${Math.round((Date.now() - startedAt) / 1000)}s: ${e.message}`);
+      // e.message embeds untrusted content (session errors, raw model text) —
+      // escape it or a crafted failure can emit workflow commands.
+      core.warning(`Harness attempt ${attempt}/2 failed after ${Math.round((Date.now() - startedAt) / 1000)}s: ${logSafe(e.message)}`);
     }
   }
   throw lastErr || new Error('harness budget exhausted');
