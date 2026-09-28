@@ -280,7 +280,9 @@ async function runHarnessOnce(prompt, timeoutMs) {
       }),
     ]);
 
-    const { code, signal } = await pumped;
+    // Promise.all resolves to [stdoutResult, stderrResult, exitStatus] — the
+    // exit status is the THIRD element; the first two resolve with no value.
+    const { code, signal } = (await pumped)[2];
     core.info(`Harness events: ${Object.entries(counts).map(([t, n]) => `${t}=${n}`).join(', ') || 'none'}`);
     if (signal) throw new Error(`opencode timed out after ${timeoutMs}ms (signal ${signal})`);
     if (sessionError) throw new Error(`opencode session error: ${sessionError}`);
