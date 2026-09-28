@@ -643,6 +643,8 @@ func renderRevoke(r revokeReport) string {
 		// the door keeps serving whoever remains. The phrasing before read the
 		// other way round, and the agent relays this line verbatim.
 		fmt.Fprintf(&b, "revoke_runner: [%s] removed from the roster of %s\n", orNone(r.grantees), r.name)
+	default:
+		fmt.Fprintf(&b, "revoke_runner: capability door %s retired (its roster held [%s])\n", r.name, orNone(r.grantees))
 	}
 	for _, o := range r.outcomes {
 		mark := "verified"
