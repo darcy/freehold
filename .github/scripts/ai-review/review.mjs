@@ -197,7 +197,7 @@ function summarizeEvent(e) {
   return name ? `${name}: ${brief}` : JSON.stringify(e).slice(0, 140);
 }
 
-async function runHarnessOnce(prompt) {
+async function runHarnessOnce(prompt, timeoutMs) {
   // The prompt (context + diff) exceeds argv limits; attach it as a file.
   const dir = mkdtempSync(join(tmpdir(), 'ai-review-harness-'));
   try {
@@ -213,13 +213,16 @@ async function runHarnessOnce(prompt) {
     ];
     core.info(
       `Harness: opencode ${HARNESS_MODEL} · ${prompt.length.toLocaleString()} char prompt · ` +
-      `timeout ${HARNESS_TIMEOUT_MS / 1000}s · OPENROUTER_API_KEY ${LLM_API_KEY ? 'set' : 'MISSING'}`,
+      `timeout ${timeoutMs / 1000}s · OPENROUTER_API_KEY ${LLM_API_KEY ? 'set' : 'MISSING'}`,
     );
     const child = spawn('opencode', args, {
       cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
       // Node kills the child and reports the signal on close.
-      timeout: HARNESS_TIMEOUT_MS,
+      timeout: timeoutMs,
       killSignal: 'SIGKILL',
+      // Own process group: a timeout must reach descendants (the v1 runner's
+      // known "timeout kills the shell, not its children" gap, closed here).
+      detached: true,
       env: {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
@@ -228,6 +231,19 @@ async function runHarnessOnce(prompt) {
         OPENCODE_DISABLE_PROJECT_CONFIG: '1',
         OPENCODE_CONFIG_CONTENT: HARNESS_PERMISSIONS,
       },
+    });
+    // spawn's timeout kills the direct child only; the group kill happens on
+    // the exit path (below) so a SIGTERM/SIGKILL can't leave a grandchild
+    // holding the stdout pipe.
+    let killed = false;
+    child.on('close', (code, signal) => {
+      if (signal && !killed) {
+        killed = true;
+        try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      }
+      // A lingering descendant can hold stdout open after close; stop
+      // waiting for EOF shortly after the process is gone.
+      setTimeout(() => { try { child.stdout.destroy(); child.stderr.destroy(); } catch {} }, 5000).unref();
     });
 
     const lines = [];
@@ -262,7 +278,7 @@ async function runHarnessOnce(prompt) {
 
     const { code, signal } = await pumped;
     core.info(`Harness events: ${Object.entries(counts).map(([t, n]) => `${t}=${n}`).join(', ') || 'none'}`);
-    if (signal) throw new Error(`opencode timed out after ${HARNESS_TIMEOUT_MS}ms (signal ${signal})`);
+    if (signal) throw new Error(`opencode timed out after ${timeoutMs}ms (signal ${signal})`);
     if (sessionError) throw new Error(`opencode session error: ${sessionError}`);
     if (code !== 0) throw new Error(`opencode exited ${code}: ${lines.join('\n').slice(-500)}`);
 
@@ -275,19 +291,26 @@ async function runHarnessOnce(prompt) {
   }
 }
 
-// Transient harness failures (provider hiccups, slow start) retry once before
-// failing the run — a retry is a full re-explore, so only one.
+// HARNESS_TIMEOUT_MS is the TOTAL budget across attempts, so a timed-out
+// session never gets a second full leash: attempt 1 takes 60%, the retry the
+// remainder. A session that can't finish in either window is a problem run —
+// fail the job rather than burn 40 minutes.
 async function runHarness(prompt) {
+  const deadline = Date.now() + HARNESS_TIMEOUT_MS;
   let lastErr = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 30_000) break;
+    const budget = attempt === 1 ? Math.floor(HARNESS_TIMEOUT_MS * 0.6) : remaining;
+    const startedAt = Date.now();
     try {
-      return await runHarnessOnce(prompt);
+      return await runHarnessOnce(prompt, Math.min(budget, remaining));
     } catch (e) {
       lastErr = e;
-      core.warning(`Harness attempt ${attempt}/2 failed: ${e.message}`);
+      core.warning(`Harness attempt ${attempt}/2 failed after ${Math.round((Date.now() - startedAt) / 1000)}s: ${e.message}`);
     }
   }
-  throw lastErr;
+  throw lastErr || new Error('harness budget exhausted');
 }
 
 // Each commit gets a NEW parent comment. Create it with all checkboxes

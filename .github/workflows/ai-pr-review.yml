@@ -76,8 +76,8 @@ jobs:
           # id; the `openrouter/` provider prefix is added when missing.
           LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LLM_MODEL: "deepseek/deepseek-v4.1-flash"
-          # Wall-clock cap for the whole headless session (all of its turns).
-          HARNESS_TIMEOUT_MS: "1200000"
+          # TOTAL harness budget across both attempts (60/40 split).
+          HARNESS_TIMEOUT_MS: "900000"
           # --------------------------------------------------------------------
 
           PROMPT_FILE: "review-prompt.md"
