@@ -61,6 +61,29 @@ type ProvisionArgs struct {
 // nil = unsupported.
 type ProvisionRunnerFn func(args ProvisionArgs) (report string, err error)
 
+// RetireArgs is one revoke_runner call. The tool takes no secret (retirement
+// only removes; there is nothing to seal).
+type RetireArgs struct {
+	// Name is the runner to take capability away from — always capability-named
+	// <target>-<protocol>-<identity>, never the consumer's name.
+	Name string `json:"name"`
+	// RevokeFrom narrows the call to a from-the-roster removal: the named agent
+	// NAMES lose their grant on this door while the door keeps serving whoever
+	// remains on its roster. Empty = retire the WHOLE door (its unit is stopped,
+	// its credential erased, its record dropped under a re-enablable guard note).
+	// A named agent that is not on the roster is a reported no-op, never a
+	// fall-through to the whole-door path.
+	RevokeFrom []string `json:"revoke_from,omitempty"`
+}
+
+// RevokeRunnerFn is the CPA's take-away-half twin of ProvisionRunnerFn: the
+// whole-door retirement flow — clear the roster (the live revocation), cut the
+// coords feed, and retire the record. CP-hosted doors get their unit stopped
+// here; a resident door's box-side clean-up is handed to the grantee that holds
+// exec through it, with the steps in the report. Built by
+// cpbuild.BuildRevokeRunner; nil = unsupported.
+type RevokeRunnerFn func(args RetireArgs) (report string, err error)
+
 // Tools is the CPA's dedicated agent-management toolset (A4): create-agent,
 // grant-agent, manage-agent. These are what the CPA's reasoning calls (via its
 // MCP layer → console client) — the "dedicated create/grant/manage-agent
@@ -90,6 +113,9 @@ type Tools struct {
 	// Provision stages a new capability runner on the fly (provision_runner —
 	// the CPA's grant-giving flow). nil = unsupported.
 	Provision ProvisionRunnerFn
+	// Revoke retires a capability door on the fly (revoke_runner — the CPA's
+	// take-away flow; the counterpart of Provision above). nil = unsupported.
+	Revoke RevokeRunnerFn
 	// Status builds the single inventory world_status returns (agents + the
 	// console's runners/DNS read underneath). nil = agents only.
 	Status WorldStatusFunc
@@ -229,6 +255,16 @@ func (t *Tools) ProvisionRunner(args ProvisionArgs) (string, error) {
 		return "", fmt.Errorf("provision-runner: no staging path bound")
 	}
 	return t.Provision(args)
+}
+
+// RevokeRunner retires a capability door: roster cleared, coords cut, record
+// marked retired (the CPA's take-away flow; raw grant/revoke onto EXISTING
+// runners stay operator-scoped via grant_agent).
+func (t *Tools) RevokeRunner(args RetireArgs) (string, error) {
+	if t.Revoke == nil {
+		return "", fmt.Errorf("revoke_runner: no retirement path bound")
+	}
+	return t.Revoke(args)
 }
 
 // ManageAgent lists registered agents, or (with remove) drops one's registry

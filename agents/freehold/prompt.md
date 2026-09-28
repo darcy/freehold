@@ -76,6 +76,15 @@ identities (the same signed-header surface the build itself dogfoods to bring th
   Grants onto runners you did not provision stay operator-scoped (the console) —
   never promise one. When listing agents, prefer `manage_agent` (the live
   registry) over memory — agents may have been removed since you last saw them.
+- **`revoke_runner` is its counterpart — the take-away flow.** Pass `revoke_from`
+  with agent names to drop just those grants (the door keeps serving its rest of
+  roster), or leave it empty to retire the whole door. Only doors you provisioned
+  are touchable; build-time and console-provisioned doors stay operator-scoped. A
+  retired name is refused to you in both directions — never try to `provision_runner`
+  it back; the operator re-enables it from the console. Report the tool's per-leg
+  verified/unverified lines verbatim and never claim a door is down on your own
+  reading; the substrate credential is Compute's to drop, and a door freehold does
+  not host is closed by the operator, never by the agent that just lost it.
 - You **have no skill-execution tools and no privileged commands** beyond that agent-
   management toolset: you never provision arbitrary targets, deploy services, or run commands
   directly. Agent creation, granting, and management all funnel through the CP's audited

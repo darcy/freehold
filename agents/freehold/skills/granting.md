@@ -1,4 +1,4 @@
-# The granting skill — how capabilities are given away
+# The granting skill — how capabilities are given and taken away
 
 This is freehold's first skill. It binds whoever grants capability in this
 system — the operator today, the freehold agent (CPA) as grant-giving unlocks
@@ -126,9 +126,48 @@ live. A direct-credential mode (the operator handing the credential to this
 agent for freehold to seal) is a possible future `agent_grants` mode; it is
 not built, and until it is, chat is never the credential path.
 
+## Take-away flow (revoke_runner)
+
+`revoke_runner` is the counterpart: it takes capability away, and it is the only
+agent-reachable way to do it. Two shapes, one tool — pass `revoke_from` with the
+agent NAMES whose grant goes and the door keeps serving the rest of its roster;
+pass it empty and the WHOLE door is retired (roster cleared, the CP's sealed
+credential erased, its unit stopped where freehold hosts it, its record dropped).
+
+**Removing one agent is not retiring the door.** Say which you meant before you
+call it: a whole retirement takes the capability from everyone. Naming an agent
+that holds no grant on the door is a no-op the tool reports as such — it does not
+take the door down for a typo.
+
+**A retired name is not yours to bring back.** Once retired, the name is refused
+to you in both directions: you may not revoke it again and you may not
+`provision_runner` it back. The name is not lost — the operator re-enables it by
+provisioning the door from the console. That separation is the point: the hand
+that takes capability away must not be the hand that instantly hands it back.
+
+**Report the legs, not a verdict of your own.** The tool ends with each leg
+marked `[verified]` or `[UNVERIFIED]` — the roster re-read from the relay (what
+the runner actually checks per call), the sealed package re-opened, the unit
+asked whether it is still active with its port probed. Relay those verbatim,
+including the unverified ones. A revoked door that is still running is a known
+state, never a silent one: say what is unverified and let the operator close it.
+Never claim the door is down because the tool succeeded.
+
+**Two follow-ups are not yours.** The substrate credential stays authorized on
+the target (`darcy@host`, a kube ServiceAccount token, an API key) — dropping it
+is Compute's, so hand the door to Compute rather than reaching for it. And when
+the door was not hosted by freehold, the numbered box-side close-out in the
+report is addressed to the OPERATOR: never ask the agent that just lost the door
+to run its teardown — that is a privilege it may no longer hold, and it fakes the
+audit. The door's channel and its audit stream stay live and read-only; do not
+ask for their deletion.
+
+The same `agent_grants` kill switch governs both directions: with it `off`, the
+console is the only revocation surface, and a refusal is reported plainly.
+
 ## State of this skill
 
-The flow above is live (`provision_runner`, confirm-mode by default; the
-operator's `agent_grants` switch is the kill switch). When the wiring changes,
-these guardrails do not.
+Both flows are live (`provision_runner` gives, `revoke_runner` takes, both
+confirm-mode by default; the operator's `agent_grants` switch is the kill switch
+for both). When the wiring changes, these guardrails do not.
 

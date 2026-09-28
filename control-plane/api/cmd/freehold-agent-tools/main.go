@@ -571,6 +571,10 @@ func cmdServe(args []string) {
 	tools.Exec = cpbuild.BuildWorldExec(spec)
 	tools.Status = cpbuild.BuildWorldStatus(spec, reg, *consoleStateDir, facts)
 	tools.Provision = cpbuild.BuildProvisionRunner(spec, reg)
+	// The take-away half of the same carve-out: bound to the same spec + registry
+	// so the two flows share their ownership guards by construction (they read the
+	// same capability table through the same registry handle).
+	tools.Revoke = cpbuild.BuildRevokeRunner(spec, reg)
 	doorAuth, doorRevoke := cpbuild.BuildWorldDoor(spec)
 	tools.DoorAuthorize = doorAuth
 	tools.DoorRevoke = doorRevoke

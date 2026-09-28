@@ -155,6 +155,13 @@ func (s *Server) toolList() []map[string]interface{} {
 			}, []string{"name", "kind", "address", "grant_to"}),
 		},
 		{
+			"name": "revoke_runner", "description": "Take a capability away — the counterpart of provision_runner. With revoke_from set, those agent NAMES lose their grant on the door while it keeps serving the rest of its roster; with revoke_from empty the WHOLE door is retired (roster cleared, credential erased from the CP, its unit stopped where freehold hosts it, its record dropped). Every leg reports whether it was VERIFIED: the roster is re-read from the relay (what the runner checks per call), the unit is asked if it is still active and its port probed, the sealed package is re-opened. Anything unverified is named — a revoked door that is still running is a known state, never a silent one, so relay the unverified legs to the operator instead of claiming a clean teardown. The door's audit channel is KEPT read-only so the revocation stays auditable. Only doors provision_runner gave are touchable: build-time capability runners, the cloudflare-api- doors, and console-provisioned ones stay operator-scoped.",
+			"inputSchema": i(map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"}),
+		},
+		{
 			"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{
 				"remove": map[string]interface{}{"type": "string"},
@@ -227,6 +234,12 @@ type provisionRunnerArgs struct {
 	Kind    string   `json:"kind"`
 	Address string   `json:"address"`
 	GrantTo []string `json:"grant_to"`
+}
+type revokeRunnerArgs struct {
+	Name string `json:"name"`
+	// RevokeFrom are the agent NAMES to drop from the door's roster; empty =
+	// retire the whole door. The server never interprets it — the flow does.
+	RevokeFrom []string `json:"revoke_from"`
 }
 type manageAgentArgs struct {
 	Remove string `json:"remove"`
@@ -342,6 +355,25 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		report, err := s.Tools.ProvisionRunner(agent.ProvisionArgs{
 			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
 		})
+		s.textResult(w, id, err, report)
+	case "revoke_runner":
+		// The take-away carve-out, governed by the SAME kill switch as the
+		// grant-giving one: an operator who turns agent grants off has said the
+		// agent may neither hand capability out nor take it back — the console is
+		// then the only revocation surface. Deliberately shared rather than a
+		// second knob: a world where the agent can provision but not revoke (or
+		// the reverse) is a half-governed capability plane, and two independent
+		// switches is how a half-governed plane stays that way.
+		if mode := s.agentGrantsMode(); mode == "off" {
+			s.rpcError(w, id, -32003, "unauthorized: agent_grants is off — revoke_runner is disabled (the operator revokes via the console)")
+			return
+		}
+		var a revokeRunnerArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "revoke_runner arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.RevokeRunner(agent.RetireArgs{Name: a.Name, RevokeFrom: a.RevokeFrom})
 		s.textResult(w, id, err, report)
 	case "manage_agent":
 		var a manageAgentArgs

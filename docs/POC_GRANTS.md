@@ -51,6 +51,15 @@ operator whether there's an API and what account it needs).
 - **Pod pickup.** After granting, the grantees' pods are re-applied with the
   new `FREEHOLD_RUNNER_*` coords resolved from state (static + per-zone DNS +
   dynamic) — the exec surface carries the new target without a full build.
+- **Take-away is the same shape, reversed.** `revoke_runner` retires a door the
+  agent flow provisioned (or removes named grantees from its roster): the
+  roster write is re-read from the relay, the pods' coords feed is cut and the
+  pods re-applied, the CP's sealed credential is erased through the audited
+  revoke verb and re-opened to prove it, the unit is stopped and probed where
+  freehold hosts it, and the record is dropped. The name then carries a
+  re-enablable guard the agent cannot clear in either direction — the operator
+  re-enables it by provisioning from the console. Every leg reports verified or
+  unverified; the audit channel is kept.
 
 ## Deliverables
 
@@ -68,9 +77,19 @@ operator whether there's an API and what account it needs).
   restarts the door's unit so the door goes live without any agent hop.
 - The prompts: the granting skill carries the grant-giving flow (confirm
   discipline, interview checklist, only-own-runners, the credential-never-
-  in-chat rule, honest 🟢 reporting); the AI and Network department prompts
-  carry the request-a-capability protocol.
-- `freehold-console grants-mode` to read/flip the knob.
+  in-chat rule, honest 🟢 reporting) and the take-away flow (single-vs-whole
+  intent stated before the call, the retired-name rule, verbatim leg reporting,
+  the substrate credential as Compute's, the box close-out as the operator's);
+  the AI and Network department prompts carry the request-a-capability
+  protocol.
+- `freehold-console grants-mode` to read/flip the knob (it governs both
+  directions).
+- `revoke_runner` on the CP toolset (server + stdio bridge), bound to the
+  retirement flow (`cpbuild.BuildRevokeRunner`), governed by the same
+  `agent_grants` kill switch as the grant-giving one.
+- `RetiredCapability` in the CP state: the guard note a retirement leaves
+  (when, by whom, last roster), refused to both agent flows and cleared by the
+  console's `InsertCapability`.
 
 ## Acceptance
 
@@ -94,6 +113,28 @@ operator whether there's an API and what account it needs).
 
 *   [x] The console's rotate restarts a recorded capability door's unit
     (hermetic hook test); non-capability runners don't restart.
+
+*   [x] `revoke_runner` removes named grantees while leaving the door standing
+    for its remaining roster, and edits the capability record's roster (not just
+    the relay) so the next build does not silently re-grant what was taken; a
+    named non-grantee is a reported no-op that touches nothing.
+
+*   [x] A whole retirement drops the capability record, marks the runner revoked,
+    erases the sealed package (re-opened to prove it), keeps the audit channel,
+    and records the guard note with its provenance and last roster.
+
+*   [x] A retired name is refused to the agent in BOTH directions — a second
+    `revoke_runner` and a `provision_runner` re-mint of the same name both fail —
+    and the console's record write is what re-enables it.
+
+*   [x] Ownership guards mirror the grant side: build-time capability runners, the
+    `cloudflare-api-` doors, a missing capability record, and operator-provisioned
+    doors are all refused; `agent_grants: off` denies `revoke_runner` server-side
+    without reaching the retirement path.
+
+*   [ ] Live-world leg (on the release's test run): the CPA revokes a door it
+    provisioned — roster re-read empty from the relay, the unit verified down, its
+    port unanswered, and the grantees' pods re-applied without it.
 
 *   [ ] Live-world leg (on the release's test run): the CPA provisions an
     empty ssh door for AI onto a real box and an empty unifi door for
