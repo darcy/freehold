@@ -49,34 +49,54 @@ const REVIEW_SHAPE = (parsed) =>
   Array.isArray(parsed?.inline);
 
 // parseReview turns the model's final answer into the review object. Handles
-// plain JSON, fenced JSON, and JSON embedded in prose. Among shape-valid
-// candidates the LAST one wins: the prompt requires the answer to end with
-// the single review object, and earlier candidates in the same message are
-// its own narration — or quoted, PR-planted fake verdicts. (A model that
-// restates a plant AFTER its review violates the prompt; that residual is
-// the reviewer prompt's job to flag, not the parser's to guess.) Throws when
-// no shape-valid verdict is present so the caller can retry.
+// plain JSON, fenced JSON, and JSON embedded in prose.
+//
+// There is EXACTLY ONE shape-valid candidate or this throws. Every selection
+// heuristic is attacker-steerable otherwise: position (first/last) via
+// planted objects the reviewer quotes, length via padding — a diff can embed
+// an arbitrarily large shape-valid fake for the reviewer to restate. The
+// prompt requires the answer to be exactly the single review object, so a
+// well-behaved model yields one candidate; anything else is injection
+// suspicion and must fail CLOSED (throw → the round retries → a red check if
+// it persists), never fail open on a guessed verdict.
 export function parseReview(raw) {
   const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-  const candidates = [];
+  const byShape = new Map();
+  const consider = parsed => {
+    if (parsed && REVIEW_SHAPE(parsed)) byShape.set(JSON.stringify(parsed), parsed);
+  };
   try {
-    candidates.push(JSON.parse(cleaned));
+    consider(JSON.parse(cleaned));
   } catch {
     // not plain JSON — the brace-balanced scan below still applies
   }
   for (const cand of extractJsonObject(cleaned)) {
     try {
-      candidates.push(JSON.parse(cand));
+      consider(JSON.parse(cand));
     } catch {
       // skip unparseable candidate
     }
   }
-  const valid = candidates.filter(p => p && REVIEW_SHAPE(p));
-  const parsed = valid[valid.length - 1];
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`review output missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`);
+  const valid = [...byShape.values()];
+  if (valid.length !== 1) {
+    throw new Error(
+      valid.length
+        ? `ambiguous review output: ${valid.length} distinct verdict candidates (possible injected verdict)`
+        : `review output missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`,
+    );
   }
-  return parsed;
+  return valid[0];
+}
+
+// The production parse path: the model's FINAL text part is the only thing
+// that may reach the verdict extractor — earlier parts (and the raw event
+// stream, whose tool-result events carry attacker-controlled file contents)
+// are narration and can quote PR-planted fake verdicts. review.mjs calls
+// THIS; tests pin it, not a re-implementation of the call shape.
+export function parseReviewFromEvents(stdout) {
+  const finalPart = harnessTextParts(stdout).pop();
+  if (!finalPart) throw new Error('harness produced no text events — format drift?');
+  return parseReview(finalPart);
 }
 
 // harnessTextParts reconstructs the assistant's messages from --format json

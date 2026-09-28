@@ -105,10 +105,17 @@ jobs:
 
   # The bot-review harness scripts are plain Node (`node --test`); gate them
   # here so a parser/threads regression can't ship behind a green review job.
+  # This job EXECUTES PR-controlled code (npm ci + npm test run the PR's
+  # lockfile scripts), so it runs with no token permissions at all and no
+  # persisted checkout credentials — there is nothing for PR-supplied code
+  # to steal.
   ai-review:
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v6
         with:

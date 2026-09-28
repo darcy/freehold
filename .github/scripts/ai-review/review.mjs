@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { parseReview, harnessTextParts } from './parse.mjs';
+import { parseReviewFromEvents, harnessTextParts } from './parse.mjs';
 import { buildReviewReplies, buildThreadIndex } from './threads.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -348,16 +348,18 @@ async function runHarnessOnce(prompt, timeoutMs) {
     if (code !== 0) throw new Error(`opencode exited ${code}: ${logSafe(lines.join('\n').slice(-500))}`);
 
     // The model's final answer is its LAST text part (the prompt requires the
-    // review JSON alone there). Parsing ONLY that part is the injection
-    // boundary: earlier parts — and the raw event stream, whose tool-result
-    // events carry attacker-controlled file contents — never reach the
-    // verdict extractor. No fallback scan: a format drift must fail loudly
+    // review JSON alone there). parseReviewFromEvents is the production parse
+    // path — only that part reaches the verdict extractor; earlier parts and
+    // the raw event stream (tool-result events carry attacker-controlled file
+    // contents) never do. No fallback scan: a format drift must fail loudly
     // (and retry), not parse attacker text.
-    const finalPart = harnessTextParts(lines.join('\n')).pop();
-    if (!finalPart) throw new Error('harness produced no text events — format drift?');
-    core.info(`Harness answer (${finalPart.length} chars): ${logSafe(finalPart.trim().slice(0, 200))}`);
-    core.info(`Harness answer tail: ${logSafe(finalPart.trim().slice(-300))}`);
-    return parseReview(finalPart);
+    const stdout = lines.join('\n');
+    const finalPart = harnessTextParts(stdout).pop();
+    if (finalPart) {
+      core.info(`Harness answer (${finalPart.length} chars): ${logSafe(finalPart.trim().slice(0, 200))}`);
+      core.info(`Harness answer tail: ${logSafe(finalPart.trim().slice(-300))}`);
+    }
+    return parseReviewFromEvents(stdout);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
