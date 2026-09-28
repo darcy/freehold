@@ -1,7 +1,8 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
-import { spawnSync } from 'child_process';
+import { spawn } from 'child_process';
+import { createInterface } from 'readline';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { parseReview, harnessText } from './parse.mjs';
@@ -183,7 +184,20 @@ const HARNESS_PERMISSIONS = JSON.stringify({
   ],
 });
 
-function runHarnessOnce(prompt) {
+// The event stream is the debug surface: every line is logged as it arrives
+// (tool calls especially), so a failed or slow review shows exactly what the
+// agent explored. Shapes are handled leniently — v1 and v2 both spread the
+// message part into the event, under `part`.
+function summarizeEvent(e) {
+  const p = e.part || {};
+  const name = p.tool || p.name || e.tool || e.name || '';
+  const brief = typeof p.description === 'string' && p.description
+    ? p.description
+    : JSON.stringify(p.metadata || p.arguments || p.input || '').slice(0, 120);
+  return name ? `${name}: ${brief}` : JSON.stringify(e).slice(0, 140);
+}
+
+async function runHarnessOnce(prompt) {
   // The prompt (context + diff) exceeds argv limits; attach it as a file.
   const dir = mkdtempSync(join(tmpdir(), 'ai-review-harness-'));
   try {
@@ -194,12 +208,18 @@ function runHarnessOnce(prompt) {
       'The repository is checked out at the current working directory at the PR state; ' +
       'use your read-only tools to inspect surrounding code and verify cross-file claims. ' +
       'Finish by outputting ONLY the single JSON review object the instructions specify.';
-    const res = spawnSync('opencode', [
+    const args = [
       'run', '--standalone', '--format', 'json', '--model', HARNESS_MODEL, '--file', promptFile, message,
-    ], {
+    ];
+    core.info(
+      `Harness: opencode ${HARNESS_MODEL} · ${prompt.length.toLocaleString()} char prompt · ` +
+      `timeout ${HARNESS_TIMEOUT_MS / 1000}s · OPENROUTER_API_KEY ${LLM_API_KEY ? 'set' : 'MISSING'}`,
+    );
+    const child = spawn('opencode', args, {
       cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      // Node kills the child and reports the signal on close.
       timeout: HARNESS_TIMEOUT_MS,
-      maxBuffer: 10 * 1024 * 1024,
+      killSignal: 'SIGKILL',
       env: {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
@@ -209,23 +229,44 @@ function runHarnessOnce(prompt) {
         OPENCODE_CONFIG_CONTENT: HARNESS_PERMISSIONS,
       },
     });
-    if (res.error) throw new Error(`opencode failed to run: ${res.error.message}`);
-    if (res.signal) throw new Error(`opencode timed out after ${HARNESS_TIMEOUT_MS}ms (signal ${res.signal})`);
-    if (res.status !== 0) throw new Error(`opencode exited ${res.status}: ${String(res.stderr).slice(-300)}`);
 
-    const stdout = res.stdout.toString();
-    core.info(`opencode stdout: ${stdout.length} chars`);
-    // A failed session (bad key, provider outage) is reported as a JSON
-    // `error` event on stdout and still exits 0 — surface it explicitly.
-    for (const line of stdout.split('\n')) {
-      if (!line.trim().startsWith('{')) continue;
-      let e;
-      try { e = JSON.parse(line); } catch { continue; }
-      if (e?.type === 'error') {
-        throw new Error(`opencode session error: ${e.error?.data?.message || e.error?.name || JSON.stringify(e.error).slice(0, 200)}`);
-      }
-    }
-    const text = harnessText(stdout) || stdout;
+    const lines = [];
+    const counts = {};
+    let sessionError = null;
+    const pumped = Promise.all([
+      new Promise((resolve, reject) => {
+        const rl = createInterface({ input: child.stdout });
+        rl.on('line', (line) => {
+          lines.push(line);
+          let e;
+          try { e = JSON.parse(line); } catch { return; }
+          counts[e.type] = (counts[e.type] || 0) + 1;
+          if (e.type === 'error') {
+            // A failed session (bad key, provider outage, unknown model) is
+            // reported as an `error` event and still exits 0 — surface it.
+            sessionError = e.error?.data?.message || e.error?.message || e.error?.name || JSON.stringify(e.error).slice(0, 200);
+            core.error(`Harness session error event: ${sessionError}`);
+          } else if (e.type === 'tool_use' || e.type === 'step_start' || e.type === 'step_finish') {
+            core.info(`  · ${summarizeEvent(e)}`);
+          }
+        });
+        rl.on('error', reject);
+        rl.on('close', resolve);
+      }),
+      new Promise((resolve) => { child.stderr.on('data', () => {}); child.stderr.on('close', resolve); }),
+      new Promise((resolve, reject) => {
+        child.on('close', (code, signal) => resolve({ code, signal }));
+        child.on('error', reject);
+      }),
+    ]);
+
+    const { code, signal } = await pumped;
+    core.info(`Harness events: ${Object.entries(counts).map(([t, n]) => `${t}=${n}`).join(', ') || 'none'}`);
+    if (signal) throw new Error(`opencode timed out after ${HARNESS_TIMEOUT_MS}ms (signal ${signal})`);
+    if (sessionError) throw new Error(`opencode session error: ${sessionError}`);
+    if (code !== 0) throw new Error(`opencode exited ${code}: ${lines.join('\n').slice(-500)}`);
+
+    const text = harnessText(lines.join('\n')) || lines.join('\n');
     core.info(`Harness raw (${text.length} chars): ${text.trim().slice(0, 200)}`);
     core.info(`Harness raw tail: ${text.trim().slice(-300)}`);
     return parseReview(text);
