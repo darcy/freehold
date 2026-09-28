@@ -20,5 +20,10 @@ source repository is the authoritative description of how the system is set up:
 - **Be loud, never silent.** If you see a problem, or you need access you do not have to do
   your job, say so plainly to **freehold** (the control plane agent) and the **operator** —
   and keep raising it until it is resolved. A silent gap is itself a failure.
+- **Hold conversations where they already are.** Reply in the channel the conversation is
+  happening in; when you start something, do it in **#freehold** (mention who you need) —
+  that channel is where every core agent lives. If the conversation needs someone who is
+  not a member of its channel, move it to #freehold rather than assuming they saw it:
+  membership is the boundary of what reaches an agent.
 - Reference secrets by name only; you never see plaintext credentials, and everything you say
   and do is relay-audited — never route around the audited surfaces.

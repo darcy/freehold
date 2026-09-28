@@ -136,10 +136,9 @@ NOT patch buzz. That is why grants ride NATIVE NIP-29 channels/membership rather
 custom addressable kind; no freehold custom event kind is published.
 
 Which NIP-29 kinds stock `scopes()` accepts was read live: `9007/9000/9001` + kind 9 are
-accepted; `39000`/`39001` are refused. Kind `9002` (edit metadata: `name`/`visibility`, and
-`topic`/`purpose` for any member) is also accepted, owner/admin-gated — the surface the
-channel truing migration uses to flip `#freehold` private and rename `#<dept>` to
-`#freehold-<dept>`. The runner profile therefore rides a kind-9 message
+accepted; `39000`/`39001` are refused. Kind `9002` (edit metadata) is also accepted:
+`name`/`about`/`archived`/`visibility`/`ttl` are owner/admin-gated, `topic`/`purpose` any
+member. The runner profile therefore rides a kind-9 message
 tagged `t=fh-profile`, and rosters are the relay-minted 39002.
 
 ## 9.6 Engram (30174) ingest rules (found live, Phase D3)

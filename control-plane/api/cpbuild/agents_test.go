@@ -15,8 +15,8 @@ import (
 // the single recorded channel for legacy rows.
 func TestReconciledChannels(t *testing.T) {
 	dept, private := reconciledChannels(console.AgentInfo{Name: "network"})
-	if !private || len(dept) < 2 || dept[0] != "#freehold" || dept[1] != "#freehold-network" {
-		t.Fatalf("department channels = %v private=%v, want #freehold + private #freehold-network", dept, private)
+	if !private || len(dept) != 1 || dept[0] != "#freehold" {
+		t.Fatalf("department channels = %v private=%v, want just private #freehold", dept, private)
 	}
 	got, priv := reconciledChannels(console.AgentInfo{Name: "custom", Channels: []string{"#a", "#b"}, Private: true})
 	if !reflect.DeepEqual(got, []string{"#a", "#b"}) || !priv {
