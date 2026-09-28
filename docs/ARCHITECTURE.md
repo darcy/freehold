@@ -533,10 +533,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **Every non-custom agent is oriented the same way.** The CPA and the four
     departments are prefixed with a shared system-orientation block: the source
-    repo URL (configurable; upstream default), read-it-on-boot + keep a memory +
-    re-check periodically because the repo is active, and the "be loud" rule —
-    surface problems and missing access to freehold and the operator, never
-    silently. Custom agents (those the CPA creates on the fly) are exempt.
+    repo URL (configurable; upstream default) with **real read access** (the repo
+    is public — clone and read from `main`; write access is unwired, so agents
+    consult but never push), read-it-on-boot + keep a memory + re-check
+    periodically because the repo is active, the VISION-is-the-why /
+    ARCHITECTURE-is-the-how pairing, and the "be loud" rule — surface problems
+    and missing access to freehold and the operator, never silently. Custom
+    agents (those the CPA creates on the fly) are exempt.
 
 ### `agents/freehold/prompt.md` (the CPA's purpose)
 

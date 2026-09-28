@@ -357,13 +357,19 @@ release notes.
 - **The Data/Network "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
-- **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
-  not wired.** Every non-custom prompt (CPA + departments) carries a shared orientation block
-  naming the repo and the read-on-boot/periodic-recheck discipline, and is honest that access
-  is not available yet. The git/GitHub grant + the read/schedule path land with Chunk 5's
-  workspace/git work.
+- **Agents can read the repo but cannot write it, and nothing schedules the re-check.** The repo is
+  public, so the shared orientation block (CPA + departments) tells every non-custom agent to clone
+  it and read from `main` — that read is real, and the prompts claim only it. Write access
+  (branches, pushes, PRs) and any scheduled re-check are unwired: the read-on-boot/periodic-recheck
+  discipline is prompt-level, enforced by the agent, not a mechanism the appliance runs. The
+  git/GitHub grant lands with Chunk 5's workspace/git work.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
+- **The agent memory plane has no revocation story for a leaked pod env** — the
+  attestation is bounded to kind=30174 but unbounded in time, so a leaked
+  `BUZZ_AUTH_TAG` authorizes memory writes until the pod is re-applied; minting
+  with an expiry clause + a re-mint on build is the named follow-up
+  (docs/followups.md).
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
 - **Replay window:** a signed call can be replayed against the *same* runner within its 60s
