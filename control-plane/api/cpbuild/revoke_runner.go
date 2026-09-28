@@ -208,10 +208,23 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			updated := rec
 			updated.Rosters = without(rec.Rosters, targets)
 			if err := store.InsertCapability(name, updated); err != nil {
-				// The relay removal has landed; the report of it must not be
-				// dropped with the error, so failLoud renders it into the error text.
-				return failLoud(rep, "revoke_runner %s: drop [%s] from the door's recorded roster FAILED (%v) — the relay removal landed; leaving the record as it was would re-grant them on the next build",
-					name, strings.Join(targets, ", "), err)
+				// The report rides inside the error (the serve drops the text half
+				// when an error comes back). The "roster landed" half of the reason
+				// reads its own leg first: when the roster leg could not be written
+				// at all (no relay identity, no console credential), claiming the
+				// removal landed would contradict the leg the same error renders.
+				rosterOK := false
+				for _, o := range rep.outcomes {
+					if o.step == "roster" {
+						rosterOK = o.ok
+					}
+				}
+				landed := "the relay leg could NOT write the roster (see it below) — but the record still holds the grants, so fix the write failure before re-trying either half"
+				if rosterOK {
+					landed = "the relay removal landed; leaving the record as it was would re-grant them on the next build"
+				}
+				return failLoud(rep, "revoke_runner %s: drop [%s] from the door's recorded roster FAILED (%v) — %s",
+					name, strings.Join(targets, ", "), err, landed)
 			}
 		}
 

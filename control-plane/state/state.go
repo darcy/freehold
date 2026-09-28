@@ -121,9 +121,16 @@ const (
 	OriginOperator = "operator"
 )
 
-// AgentProvisioned reports whether the CPA's flow owns this record.
+// AgentProvisioned reports whether the CPA's flow owns this record. Strict:
+// only an explicit "agent" counts. An empty Origin reads as operator — the
+// safe direction — because the console stamps "operator" and the agent flow
+// stamps "agent", so a record WITHOUT one predates the field and its
+// provenance is unprovable; an unset provenance must never widen what the
+// agent surface may grant onto or take away. The cost lands on worlds with
+// records from before the field existed: those doors are operator-owned now,
+// and the console's ordinary re-provision re-enables them.
 func (r CapabilityRecord) AgentProvisioned() bool {
-	return r.Origin == "" || r.Origin == OriginAgent
+	return r.Origin == OriginAgent
 }
 
 // RetiredCapability is the guard note a capability door leaves when it is

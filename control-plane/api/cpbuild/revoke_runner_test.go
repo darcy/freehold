@@ -88,11 +88,24 @@ func TestRevokeRunnerOwnershipGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.InsertCapability("ops-box-ssh-root", state.CapabilityRecord{
-		Kind: "ssh", Address: "darcy@10.0.0.5", Port: 8801,
-		Rosters: []string{"ai"}, Origin: state.OriginOperator,
+	// Empty provenance reads as OPERATOR, never agent: the console stamps
+	// operator, the agent flow stamps agent, so a record without an Origin
+	// predates the field and its provenance is unprovable — an unset one must
+	// never widen the agent surface's reach in either direction.
+	if err := store.InsertCapability("pre-origin-ssh-root", state.CapabilityRecord{
+		Kind: "ssh", Address: "darcy@10.0.0.5", Port: 8802,
+		Rosters: []string{"ai"},
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := fn(agent.RetireArgs{Name: "pre-origin-ssh-root"}); err == nil ||
+		!strings.Contains(err.Error(), "operator") {
+		t.Fatalf("a record with no Origin must be refused as operator-owned, got %v", err)
+	}
+	pfn := BuildProvisionRunner(revokeSpec(t, root), reg)
+	if _, err := pfn(agent.ProvisionArgs{Name: "pre-origin-ssh-root", Kind: "ssh", Address: "darcy@10.0.0.5", GrantTo: []string{"ai"}}); err == nil ||
+		!strings.Contains(err.Error(), "operator") {
+		t.Fatalf("the provision side must refuse the same record, got %v", err)
 	}
 	if _, err := fn(agent.RetireArgs{Name: "ops-box-ssh-root"}); err == nil ||
 		!strings.Contains(err.Error(), "operator") {
