@@ -595,19 +595,36 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		Risk      *string     `json:"risk"`
 		Secret    interface{} `json:"secret"`
 		Grants    interface{} `json:"grants"`
-		Readiness interface{} `json:"readiness,omitempty"`
+		// grants_source: "live" (the relay-signed 39002 roster — what actually
+		// gates exec) or "package" (the shipped fallback — the co-located
+		// runner's mode). Empty when neither was readable (grants = null).
+		GrantsSource string `json:"grants_source,omitempty"`
+		Readiness    interface{} `json:"readiness,omitempty"`
+		// colocated marks the CP's own co-located runner.
+		Colocated bool `json:"colocated,omitempty"`
 		// Self-hosted (a resident runner) + whether the operator confirmed its
 		// presented pubkeys (the fill unlocks on confirm).
 		SelfHosted      bool `json:"self_hosted,omitempty"`
 		EnrollConfirmed bool `json:"enroll_confirmed,omitempty"`
 	}
 	runners := make([]runnerOut, 0, len(snap.Runners))
+	// Per-runner package state, kept by slice index so the roster results can
+	// fall back to it after the concurrent collects.
+	pkgGrants := make([][]string, 0, len(snap.Runners))
+	pkgReadable := make([]bool, 0, len(snap.Runners))
 	type probe struct {
 		name  string
 		value interface{}
 	}
 	probes := make(chan probe, len(snap.Runners))
 	probeCount := 0
+	rosters := make(chan probe, len(snap.Runners))
+	rosterCount := 0
+	// Roster reads need the relay coords (the runner's channel lives there)
+	// and the console's own secret (it is every channel's owner).
+	relayDial, relayAuth := s.relayDialAuth(snap)
+	canReadRoster := relayDial != "" &&
+		snap.RelayPubkey != nil && *snap.RelayPubkey != "" && len(s.ConsoleSecret) == 32
 	for name, rec := range snap.Runners {
 		var secret interface{}
 		if sc, ok := snap.Secrets[name]; ok {
@@ -616,15 +633,23 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 				"rotated_at": sc.RotatedAt, "created_at": sc.CreatedAt,
 			}
 		}
-		var grants interface{}
-		if pkg, err := wire.Load(rec.PackageDir); err == nil {
-			grants = pkg.Grants
+		var pkg []string
+		readable := false
+		if p, err := wire.Load(rec.PackageDir); err == nil {
+			pkg, readable = p.Grants, true
 		}
+		pkgGrants = append(pkgGrants, pkg)
+		pkgReadable = append(pkgReadable, readable)
+		colocated := s.Builder != nil && name == s.Builder.RunnerTarget
 		out := runnerOut{
 			Name: name, Status: string(rec.Status), NostrPub: rec.NostrPubkey,
 			EncPub: rec.EncPubkey, McpAddr: rec.McpAddr, Risk: rec.RiskLevel,
-			Secret: secret, Grants: grants,
+			Secret: secret, Colocated: colocated,
 		}
+		// The package result rides in upfront (it is the final answer for a
+		// package-mode runner); a live roster result below overwrites it for
+		// relay-mode runners.
+		out.Grants, out.GrantsSource = grantsFor(nil, nil, pkg, readable, false)
 		if capability, ok := snap.Capabilities[name]; ok && capability.SelfHosted() {
 			out.SelfHosted = true
 			out.EnrollConfirmed = capability.EnrollConfirmedAt != nil
@@ -637,6 +662,18 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 				probes <- probe{name, s.probeReadiness(addr, rpk)}
 			}(name, *rec.McpAddr, rec.NostrPubkey)
 		}
+		// Live grants: the relay-signed 39002 roster, read fresh per call (the
+		// same source the runner itself authorizes against, same dial/auth
+		// split). Relay-mode only — the co-located runner has no channel (its
+		// package IS its whitelist), and a revoked runner's channel is moot
+		// (its package is gone; the report must stay null).
+		if canReadRoster && rec.Status == state.RunnerActive && !colocated {
+			rosterCount++
+			go func(name string, rpk, runnerPK string) {
+				members, rerr := relay.QueryChannelRosterAuth(relayDial, relayAuth, rpk, runnerPK, s.ConsoleSecret)
+				rosters <- probe{name, rosterResult{members, rerr}}
+			}(name, *snap.RelayPubkey, rec.NostrPubkey)
+		}
 		runners = append(runners, out)
 	}
 	for i := 0; i < probeCount; i++ {
@@ -647,10 +684,85 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	for i := 0; i < rosterCount; i++ {
+		p := <-rosters
+		for j := range runners {
+			if runners[j].Name == p.name {
+				res := p.value.(rosterResult)
+				runners[j].Grants, runners[j].GrantsSource = grantsFor(res.members, res.err, pkgGrants[j], pkgReadable[j], true)
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"console_pubkey": s.ConsolePubkey,
 		"runners":        runners,
 	})
+}
+
+// rosterResult is one concurrent roster read's outcome.
+type rosterResult struct {
+	members []string
+	err     error
+}
+
+// relayDialAuth derives the relay DIAL + CANONICAL NIP-98 auth URLs for the
+// console's own relay reads: the LAN dial by HOSTNAME (buzz keys the
+// community to the request Host — an IP dial presents a Host no community is
+// configured for — and the /etc/hosts pin re-resolves it), the auth against
+// the canonical public origin (a dial-URL-signed auth 401s "URL mismatch").
+// Mirrors world()'s relay probe and the build's dial/sign split; the single
+// recorded relay_url (the raw LAN IP:port) is the last fallback for both.
+func (s *Server) relayDialAuth(snap state.ControlPlaneState) (dial, auth string) {
+	relayHost := ""
+	if snap.RelayHost != nil {
+		relayHost = *snap.RelayHost
+	}
+	if relayHost == "" && s.Builder != nil {
+		relayHost = s.Builder.RelayHost
+	}
+	if relayHost != "" {
+		dial = config.RelayLanDial(relayHost)
+		auth = "https://" + relayHost
+	}
+	if dial == "" && snap.RelayURL != nil {
+		dial = *snap.RelayURL
+	}
+	if auth == "" && snap.RelayURL != nil {
+		auth = *snap.RelayURL
+	}
+	return dial, auth
+}
+
+// grantsFor picks a runner's reported grants + source. queryLive marks a
+// RELAY-MODE runner whose roster was actually read: the roster is the ONLY
+// gate on its exec, so a successful read is reported verbatim — an EMPTY
+// roster is an honest fail-closed (never masked by the stale package
+// fallback) — and a failed read is "unavailable" (the console cannot see the
+// whitelist; the runner itself still fails closed on the same outage).
+// !queryLive (the co-located runner — no relay channel — or a CP with no
+// relay coords) reports the shipped package grants, and an unreadable
+// package stays nil so clients keep rendering the anomaly. A readable
+// package always yields a NON-nil slice: null on the wire is reserved for
+// "unreadable / unavailable".
+func grantsFor(live []string, liveErr error, pkg []string, pkgReadable bool, queryLive bool) (grants []string, source string) {
+	if queryLive {
+		if liveErr == nil {
+			return nonNil(live), "live"
+		}
+		return nil, "unavailable"
+	}
+	if pkgReadable {
+		return nonNil(pkg), "package"
+	}
+	return nil, ""
+}
+
+// nonNil keeps an honest empty list marshaling as [] (never null).
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // probeReadiness signs a status call as the console and returns the runner's
@@ -1484,7 +1596,8 @@ func (s *Server) runnerChannel(w http.ResponseWriter, r *http.Request, name stri
 		return
 	}
 	channelID := relay.RunnerChannelID(rec.NostrPubkey)
-	members, err := relay.QueryChannelRoster(*snap.RelayURL, *snap.RelayPubkey, rec.NostrPubkey, s.ConsoleSecret)
+	dial, auth := s.relayDialAuth(snap)
+	members, err := relay.QueryChannelRosterAuth(dial, auth, *snap.RelayPubkey, rec.NostrPubkey, s.ConsoleSecret)
 	var membersJSON interface{}
 	if err != nil {
 		membersJSON = map[string]interface{}{"error": err.Error()}

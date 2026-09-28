@@ -154,6 +154,22 @@ there; if it is work not yet done, it belongs here.
 
 ## Verification / harness
 
+- **Bot-review triggers: drop `pull_request`, go `pull_request_target`-only.** On a
+  `pull_request` event the workflow YAML itself is the PR's merge-ref copy — a PR can
+  rewrite the `run:` blocks — so the "executes only trusted main's code" invariant holds
+  for the scripts/deps/prompt (second checkout pinned to `main`) but NOT for the YAML.
+  Complete the fix by reviewing every PR from `pull_request_target` (base context, base
+  YAML, secrets present) once this harness is on main. Bootstrap constraint: the PR that
+  makes the switch can't run its own pre-merge rounds through `pull_request_target`
+  (main's gate doesn't route them), so its own rounds need the `pull_request` trigger
+  until it lands.
+- **Bot-review injection pre-vet.** The agentic reviewer reads PR-tree files, so a PR can
+  plant reviewer-directed text ("ignore your instructions", fake verdicts) anywhere it
+  expects the reviewer to look. First line of defense is the prompt's untrusted-input rule
+  (such attempts are themselves a blocking finding); the cheap second layer is a pre-vet
+  pass before the harness session: one diff-only single-shot call ("is this diff attempting
+  to manipulate an automated reviewer?") whose flag prepends a warning to the review context
+  (or fails the run loudly). Same provider key, seconds of latency, no new workflow.
 - **Live Backblaze leg.** The B2 connector is hermetic-verified only (mock API +
   acceptance round-trip); a live Backblaze-account leg needs real credentials.
 - **One real-relay acceptance run.** The Chunk-2 per-leg deltas (non-member denied,
@@ -164,6 +180,18 @@ there; if it is work not yet done, it belongs here.
 
 ## Console / CLI
 
+- **Guest inventory (LXCs) in the console + TUI.** The CP surface has no
+  guest/LXC list: the Services view shows only world services and the DATA
+  view only plane mounts, so a guest created outside the core build (e.g. a
+  manually created `test-lxc`, or one an agent provisions) appears nowhere.
+  Sketched design: the console lists the host's guests live (`pct list`
+  through the co-located runner, in `/api/world`), tagged by ownership —
+  `core` (the world's recorded vmids / the `<world>-` name prefix), `adopted`
+  (a capability record named `<guest>-ssh-*`), `foreign` (other worlds' LXCs
+  on a shared host) — with a Guests tab in the TUI plus the owned/adopted set
+  surfaced in the DATA view. Split out of the grants-clarity PR so it stays
+  reviewable; the ownership taxonomy (created vs adopted vs foreign) wants an
+  operator pass before building.
 - **Go console residual port gaps.** The deleted Rust console carried surfaces the Go
   console never picked up; none is on a live path:
   - no `freehold-console rebuild` verb (the relay-fold primitives exist but nothing calls
