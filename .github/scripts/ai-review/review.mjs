@@ -149,28 +149,38 @@ async function buildDiff() {
   return { ok: true, diff: annotatedFiles.map(f => f.text).join('\n\n'), fileCount: annotatedFiles.length, totalChars };
 }
 
-// The review runs as an opencode headless session (`opencode run`) over the
-// checked-out repo: it reads the attached instructions (repo context + full
-// diff), explores the working tree with READ-ONLY tools to verify cross-file
-// claims, and answers with the review JSON. The child env carries ONLY the
-// model key — GITHUB_TOKEN never enters the harness, so a prompt-injected
-// agent cannot touch the PR; this process keeps posting. The PR's own
-// opencode config is ignored (OPENCODE_DISABLE_PROJECT_CONFIG) and
-// OPENCODE_CONFIG_CONTENT — which merges after every other standard config
-// source — explicitly denies every mutating tool, so a shipped config cannot
-// re-enable them; --pure skips external plugins. Nothing from an unreviewed
-// head is ever executed (the workflow relies on the same property).
+// The review runs as an opencode v2 headless session (`opencode run
+// --standalone`) over the checked-out repo: it reads the attached instructions
+// (repo context + full diff), explores the working tree with READ-ONLY tools
+// to verify cross-file claims, and answers with the review JSON. The child env
+// carries ONLY the model key — GITHUB_TOKEN never enters the harness, so a
+// prompt-injected agent cannot touch the PR; this process keeps posting. The
+// PR's own opencode config is ignored (OPENCODE_DISABLE_PROJECT_CONFIG) and
+// OPENCODE_CONFIG_CONTENT — which merges after the project-level sources —
+// carries the lockdown, so a shipped config cannot re-enable tools; --pure
+// does not exist in v2, plugins are only loaded through config, and ours
+// loads none. --standalone boots a private server (v2 otherwise attaches to
+// a shared background service). Nothing from an unreviewed head is ever
+// executed (the workflow relies on the same property).
 const HARNESS_MODEL = LLM_MODEL.startsWith('openrouter/') ? LLM_MODEL : `openrouter/${LLM_MODEL}`;
 const HARNESS_PERMISSIONS = JSON.stringify({
   $schema: 'https://opencode.ai/config.json',
-  // The config merge is shallow per key: any permission NOT set here would
-  // survive from an earlier config source, so the mutating tools are denied
-  // explicitly even though `*` covers them.
-  permission: {
-    '*': 'deny',
-    read: 'allow', grep: 'allow', glob: 'allow', list: 'allow',
-    bash: 'deny', edit: 'deny', write: 'deny', patch: 'deny', webfetch: 'deny',
-  },
+  // v2 ordered rules, LAST MATCH WINS: deny everything, then allow only the
+  // local discovery tools. The explicit dangerous-tool denies after the
+  // wildcard are redundant with `*` but state the intent and survive any
+  // `*`-semantics drift.
+  permissions: [
+    { action: '*', resource: '*', effect: 'deny' },
+    { action: 'read', resource: '*', effect: 'allow' },
+    { action: 'glob', resource: '*', effect: 'allow' },
+    { action: 'grep', resource: '*', effect: 'allow' },
+    { action: 'shell', resource: '*', effect: 'deny' },
+    { action: 'edit', resource: '*', effect: 'deny' },
+    { action: 'webfetch', resource: '*', effect: 'deny' },
+    { action: 'websearch', resource: '*', effect: 'deny' },
+    { action: 'subagent', resource: '*', effect: 'deny' },
+    { action: 'skill', resource: '*', effect: 'deny' },
+  ],
 });
 
 function runHarnessOnce(prompt) {
@@ -185,7 +195,7 @@ function runHarnessOnce(prompt) {
       'use your read-only tools to inspect surrounding code and verify cross-file claims. ' +
       'Finish by outputting ONLY the single JSON review object the instructions specify.';
     const res = spawnSync('opencode', [
-      'run', '--pure', '--format', 'json', '--model', HARNESS_MODEL, '--file', promptFile, message,
+      'run', '--standalone', '--format', 'json', '--model', HARNESS_MODEL, '--file', promptFile, message,
     ], {
       cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
       timeout: HARNESS_TIMEOUT_MS,

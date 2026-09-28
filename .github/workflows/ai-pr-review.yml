@@ -51,12 +51,13 @@ jobs:
         working-directory: .github/scripts/ai-review
         run: npm ci
 
-      # The review harness. Pinned version: a floating agent binary inside a
-      # job that reviews untrusted PRs is a supply-chain surface. The package's
-      # postinstall downloads the platform binary — npm's allowScripts gate
-      # must permit it or the shim exits 1 with no binary behind it.
+      # The review harness (opencode v2). Pinned version: a floating agent
+      # binary inside a job that reviews untrusted PRs is a supply-chain
+      # surface. The package's postinstall downloads the platform binary —
+      # npm's allowScripts gate must permit it or the shim exits 1 with no
+      # binary behind it.
       - name: Install opencode
-        run: npm install -g --allow-scripts=opencode-ai opencode-ai@1.18.32
+        run: npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18
 
       - name: Run AI review
         working-directory: .github/scripts/ai-review
