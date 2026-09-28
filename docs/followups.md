@@ -157,6 +157,18 @@ there; if it is work not yet done, it belongs here.
 
 ## Console / CLI
 
+- **Guest inventory (LXCs) in the console + TUI.** The CP surface has no
+  guest/LXC list: the Services view shows only world services and the DATA
+  view only plane mounts, so a guest created outside the core build (e.g. a
+  manually created `test-lxc`, or one an agent provisions) appears nowhere.
+  Sketched design: the console lists the host's guests live (`pct list`
+  through the co-located runner, in `/api/world`), tagged by ownership —
+  `core` (the world's recorded vmids / the `<world>-` name prefix), `adopted`
+  (a capability record named `<guest>-ssh-*`), `foreign` (other worlds' LXCs
+  on a shared host) — with a Guests tab in the TUI plus the owned/adopted set
+  surfaced in the DATA view. Split out of the grants-clarity PR so it stays
+  reviewable; the ownership taxonomy (created vs adopted vs foreign) wants an
+  operator pass before building.
 - **Go console residual port gaps.** The deleted Rust console carried surfaces the Go
   console never picked up; none is on a live path:
   - no `freehold-console rebuild` verb (the relay-fold primitives exist but nothing calls
