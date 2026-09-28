@@ -202,13 +202,20 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 				cut = append(cut, fmt.Sprintf("%s: no longer in the registry — its pod was NOT re-applied, so its coords feed may still name the door (the roster gate is what denies it); an operator must clear its row", g))
 				continue
 			}
-			// Re-resolve the pod's coords from state, then cut the door explicitly:
-			// on the retire path the record is still present at this point (it leaves
-			// only after the teardown legs), and the roster it mirrors is behind the
+			// Re-resolve the pod's whole coords feed FROM STATE, then cut the door
+			// explicitly: the re-apply renders the department's entire
+			// FREEHOLD_RUNNER_* set out of this map, so a feed that merely reflects
+			// what this call touched would strip the department's other doors. The
+			// map is lazily initialised because in the CP's serve process only a
+			// build's stageDepartmentRunners populates it — skipping it when nil
+			// would hand create() an empty feed, which is the bug. The explicit cut
+			// stays: on the retire path the record is still present here (it leaves
+			// only after the teardown legs), so the roster it mirrors is behind the
 			// truth this call just wrote to the relay.
-			if spec.DepartmentRunners != nil {
-				spec.DepartmentRunners[g] = cutCoord(spec.agentRunnerCoords(store, g), name)
+			if spec.DepartmentRunners == nil {
+				spec.DepartmentRunners = map[string][]agent.RunnerCoords{}
 			}
+			spec.DepartmentRunners[g] = cutCoord(spec.agentRunnerCoords(store, g), name)
 			channels, private := reconciledChannels(row)
 			if _, err := create(g, row.Purpose, channels, private); err != nil {
 				unverified = append(unverified, g)

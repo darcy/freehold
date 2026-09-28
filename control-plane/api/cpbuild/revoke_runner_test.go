@@ -300,3 +300,47 @@ func TestRevokeRunnerWholeRetireErasesTheCredential(t *testing.T) {
 		t.Fatal("the sealed package survived the retirement — the CP can still serve the credential")
 	}
 }
+
+// TestRevokeRunnerKeepsThePodsOtherDoors pins the difference between taking one
+// door away and disabling an agent: the pod re-apply rebuilds the department's
+// WHOLE FREEHOLD_RUNNER_* feed from this map, so the cut must be resolved from
+// state rather than replacing it with only what this call touched. Otherwise
+// revoking one door leaves the department with no exec at all.
+func TestRevokeRunnerKeepsThePodsOtherDoors(t *testing.T) {
+	root := t.TempDir()
+	seedDoor(t, root, "rtx-ssh-root", "ssh", "darcy@10.0.0.55", "ai")
+	seedDoor(t, root, "unifi-api-admin", "unifi", "http://10.0.0.1", "ai")
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both doors must be LIVE in state (a runner row carrying its identity) or
+	// agentRunnerCoords resolves neither and the feed would be empty for the
+	// wrong reason, proving nothing.
+	store.InsertRunner("rtx-ssh-root", state.RunnerRecord{
+		NostrPubkey: strings.Repeat("a", 64), EncPubkey: strings.Repeat("b", 64),
+		Status: state.RunnerActive, PackageDir: runnerPackageDir(cpState, "rtx-ssh-root"), CreatedAt: 1,
+	})
+	store.InsertRunner("unifi-api-admin", state.RunnerRecord{
+		NostrPubkey: strings.Repeat("c", 64), EncPubkey: strings.Repeat("d", 64),
+		Status: state.RunnerActive, PackageDir: runnerPackageDir(cpState, "unifi-api-admin"), CreatedAt: 1,
+	})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := revokeSpec(t, root)
+	reg, _ := testRegistry(t)
+	if _, err := BuildRevokeRunner(spec, reg)(agent.RetireArgs{Name: "rtx-ssh-root"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := []string{}
+	for _, c := range spec.DepartmentRunners["ai"] {
+		got = append(got, c.Target)
+	}
+	if strings.Join(got, ",") != "unifi-api-admin" {
+		t.Fatalf("the revoked door must be cut while its sibling survives, got [%s]", strings.Join(got, ", "))
+	}
+}
