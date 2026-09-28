@@ -107,6 +107,15 @@ func TestRevokeRunnerOwnershipGuards(t *testing.T) {
 		!strings.Contains(err.Error(), "operator") {
 		t.Fatalf("the provision side must refuse the same record, got %v", err)
 	}
+	// An explicit operator origin — the console's stamp — is refused the same
+	// way (seeded: the no-record refusal also says "operator", so this case is
+	// only meaningful with the record actually present).
+	if err := store.InsertCapability("ops-box-ssh-root", state.CapabilityRecord{
+		Kind: "ssh", Address: "darcy@10.0.0.5", Port: 8801,
+		Rosters: []string{"ai"}, Origin: state.OriginOperator,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fn(agent.RetireArgs{Name: "ops-box-ssh-root"}); err == nil ||
 		!strings.Contains(err.Error(), "operator") {
 		t.Fatalf("an operator-origin record must be refused, got %v", err)
