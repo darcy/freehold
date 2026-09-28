@@ -165,16 +165,20 @@ fn enroll_identity(
     env_nsec: Option<String>,
     env_enc: Option<String>,
 ) -> anyhow::Result<(Identity, bool)> {
+    // Serve gives the env identity priority — so enroll prints THAT (with no
+    // file present, an env identity still runs; no file is minted over it).
+    if let Ok(id) = Identity::load_with(state_dir, env_nsec.clone(), env_enc.clone()) {
+        return Ok((id, true));
+    }
+    // An identity file that exists but will not load: loud failure — enroll
+    // NEVER re-keys a guest (that orphans every grant + sealed credential).
     let identity_path = state_dir.join(identity::IDENTITY_FILE);
     if identity_path.exists() {
-        return match Identity::load_with(state_dir, env_nsec, env_enc) {
-            Ok(id) => Ok((id, true)),
-            Err(e) => Err(anyhow::anyhow!(
-                "identity at {} exists but is unreadable ({e}) — enroll never re-keys; \
-                 repair or remove it by hand, or start from a fresh guest",
-                identity_path.display()
-            )),
-        };
+        return Err(anyhow::anyhow!(
+            "identity at {} exists but is unreadable — enroll never re-keys; \
+             repair or remove it by hand, or start from a fresh guest",
+            identity_path.display()
+        ));
     }
     let id = Identity::generate();
     let written = id.write_to_dir(state_dir)?;

@@ -194,6 +194,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// present the SAME pubkeys (a mismatch is a different process claiming
 		// the name — refuse loudly).
 		_, runnerExists := store.GetRunner(name)
+		adopted := false // self-hosted: the record carries a CONFIRMED enrollment only on the adopt path
 		var pubLine string
 		if selfHosted {
 			if !runnerExists {
@@ -205,9 +206,13 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 				}
 			} else {
 				rec, _ := store.GetRunner(name)
+				if rec.Status == state.RunnerRevoked {
+					return "", fmt.Errorf("provision_runner %s: runner is revoked — pick a new name", name)
+				}
 				if rec.NostrPubkey != args.Pubkey || rec.EncPubkey != args.EncPubkey {
 					return "", fmt.Errorf("provision_runner %s: the presented pubkeys do not match the enrolled runner — the guest's identity IS the runner (re-enroll under a new name, or fix the guest's state dir)", name)
 				}
+				adopted = true
 			}
 			if before, ok := store.GetSecret(name); ok && before.Address != strings.TrimSpace(args.Address) {
 				if err := setTargetAddress(store, name, strings.TrimSpace(args.Address)); err != nil {
@@ -252,9 +257,16 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 
 		// Record the dynamic capability BEFORE staging so a failure after this
 		// point heals on the next build/reconcile (the record re-stages it).
-		// A re-provision preserves the operator's enrollment confirmation (the
-		// pubkeys are unchanged — the confirm binds to THEM, not to the
-		// address/port this call may update).
+		// A re-provision:
+		//   - preserves the operator's enrollment confirmation ONLY on the
+		//     adopt path (the runner row exists AND presented the same
+		//     pubkeys) — a fresh enroll is a NEW identity, never pre-confirmed;
+		//   - UNIONS the self-hosted Rosters with the previous record's: a
+		//     resident door's re-provision is a MOVE/repair op and must never
+		//     silently revoke a console-granted agent — the console's ungrant
+		//     is the revoke path there. (A CP-guest re-provision keeps the
+		//     shrink semantics: grant_to is the whole desired roster and the
+		//     dropped agents are revoked below.)
 		capRec := state.CapabilityRecord{
 			Kind: kind, Address: strings.TrimSpace(args.Address), Port: port,
 			Rosters: append([]string(nil), grantTo...), Origin: state.OriginAgent,
@@ -262,7 +274,16 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			CreatedAt: uint64(time.Now().Unix()),
 		}
 		if hasPrevRecord {
-			capRec.EnrollConfirmedAt = prevRecord.EnrollConfirmedAt
+			if adopted {
+				capRec.EnrollConfirmedAt = prevRecord.EnrollConfirmedAt
+			}
+			if selfHosted {
+				for _, r := range prevRecord.Rosters {
+					if !containsRoster(capRec.Rosters, r) {
+						capRec.Rosters = append(capRec.Rosters, r)
+					}
+				}
+			}
 		}
 		if err := store.InsertCapability(name, capRec); err != nil {
 			return "", fmt.Errorf("record capability: %w", err)
@@ -281,7 +302,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			return "", fmt.Errorf("relay community membership: %w", err)
 		}
 		r := capabilityRunner{name: name, kind: kind, port: port,
-			rosters: append([]string(nil), grantTo...), addr: strings.TrimSpace(args.Address), dynamic: true,
+			rosters: append([]string(nil), capRec.Rosters...), addr: strings.TrimSpace(args.Address), dynamic: true,
 			selfHosted: selfHosted, host: host}
 		if !selfHosted {
 			if err := spec.startCapabilityRunner(r, pkgDir); err != nil {
@@ -291,10 +312,13 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 
 		// Grant each grantee onto the runner's roster (live — the runner
 		// re-reads the signed 39002 per call), then re-apply the grantee's pod
-		// so its exec surface carries the new coords. A re-provision that
-		// SHRANK the roster revokes the dropped agents first — a grant that
-		// could not be revoked must not be made.
-		for _, dropped := range droppedRosters(prevRecord.Rosters, grantTo) {
+		// so its exec surface carries the new coords. A CP-guest re-provision
+		// that SHRANK the roster revokes the dropped agents first — a grant
+		// that could not be revoked must not be made. A self-hosted
+		// re-provision revokes nobody: its record UNIONed the rosters above
+		// (the move/repair op never silently revokes; the console's ungrant
+		// is the revoke path there).
+		for _, dropped := range droppedRosters(prevRecord.Rosters, capRec.Rosters) {
 			row, err := registryRow(reg, dropped)
 			if err != nil {
 				return "", fmt.Errorf("re-provision %s: the dropped grantee %s is no longer in the registry — revoke it by hand (console) so its exec does not linger: %w", name, dropped, err)
