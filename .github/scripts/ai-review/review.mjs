@@ -110,6 +110,32 @@ async function getBotLogin() {
   return botLogin;
 }
 
+// A new review round invalidates the previous one: dismiss the bot's own
+// outstanding verdict (APPROVED / CHANGES_REQUESTED) so a stale approval from
+// an earlier revision can never satisfy branch protection — including
+// re-request-triggered rounds, which push no commits for GitHub's stale-
+// approval auto-dismiss to catch. COMMENTED reviews gate nothing; leave them.
+async function dismissOwnPriorReviews() {
+  const me = await getBotLogin();
+  if (!me) return 0;
+  const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, { owner, repo, pull_number, per_page: 100 });
+  const mine = reviews.filter(r => r.user?.login === me && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED'));
+  for (const r of mine) {
+    try {
+      await octokit.rest.pulls.dismissReview({
+        owner, repo, pull_number, review_id: r.id,
+        message: 'Superseded: a new review round is starting; this verdict applied to a previous revision.',
+      });
+      core.info(`Dismissed my prior ${r.state.toLowerCase()} review (id ${r.id}).`);
+    } catch (e) {
+      // Already dismissed (or a rights blip) must not kill the round — the
+      // fresh verdict below replaces it either way.
+      core.warning(`Could not dismiss prior review ${r.id}: ${e.message}`);
+    }
+  }
+  return mine.length;
+}
+
 // Builds the diff and fails closed (rather than silently truncating) if it's
 // too large for a reliable single-pass review. Also flags any single file
 // that's oversized on its own, since that's usually an exclude-pattern gap
@@ -391,6 +417,7 @@ async function resolveFixedThreads(fixedComments) {
 }
 
 const PROGRESS_ITEMS = [
+  'Dismiss previous review',
   'Read the diff',
   'Gather context (AGENTS.md, README.md, docs/ARCHITECTURE.md)',
   'Review for BLOCKING/IMPORTANT issues',
@@ -431,6 +458,10 @@ async function main() {
     }
   }
 
+  // FIRST step of every round: retire the bot's own prior verdict, so the
+  // only review that can gate a merge is the one this run produces.
+  await dismissOwnPriorReviews();
+
   // Read the PRIOR round's notes BEFORE creating this round's tracking comment:
   // getPreviousRoundNotes takes the most recent TRACKING_MARKER comment, so
   // creating ours first would make it read the fresh, empty one and drop the
@@ -447,8 +478,9 @@ async function main() {
   const threadIndex = buildThreadIndex(existingComments, { bot, author: pr.user.login });
 
   // Create the progress comment up front so the checkboxes light up as work
-  // happens, rather than appearing fully-formed at the end.
-  await createParentComment(progressBody(0));
+  // happens, rather than appearing fully-formed at the end. The dismissal
+  // step is already done, so its box starts checked.
+  await createParentComment(progressBody(1));
 
   const diffResult = await buildDiff();
 
@@ -483,10 +515,10 @@ async function main() {
   }
 
   const diff = diffResult.diff;
-  await progress(1, `Read the diff — ${diffResult.fileCount} file(s), ~${diffResult.totalChars.toLocaleString()} chars`);
+  await progress(2, `Read the diff — ${diffResult.fileCount} file(s), ~${diffResult.totalChars.toLocaleString()} chars`);
 
   const ctx = readContextFiles();
-  await progress(2, ctx.names.length ? `Read context — ${ctx.names.join(', ')}` : 'No context files found');
+  await progress(3, ctx.names.length ? `Read context — ${ctx.names.join(', ')}` : 'No context files found');
 
   const template = readFileSync(PROMPT_FILE, 'utf8');
   // Use function replacements: String.replace interprets $&, $', $$ etc. in the
@@ -506,7 +538,7 @@ async function main() {
   // answering from one prompt), so there is no follow-up machinery: whatever
   // it reports in `inline` is the round's finding set.
   const inline = Array.isArray(result.inline) ? result.inline : [];
-  await progress(3, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
+  await progress(4, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
 
   // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
   // findings (already commented in a prior round). GitHub rewrites a prior
@@ -586,7 +618,7 @@ async function main() {
   }
   const postedReplies = repliedKeys.size;
 
-  await progress(4, `Posted ${postedInline} inline comment(s)` + (postedReplies ? ` · replied in ${postedReplies} thread(s)` : '') + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
+  await progress(5, `Posted ${postedInline} inline comment(s)` + (postedReplies ? ` · replied in ${postedReplies} thread(s)` : '') + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
   const loc = (c) => `\`${c.path}${typeof c.line === 'number' ? `:${c.line}` : ''}\``;
