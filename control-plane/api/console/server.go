@@ -1023,8 +1023,15 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
-	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
-		if cap.EnrollConfirmedAt == nil {
+	// Self-hosted-ness routes on the RUNNER record too (PackageDir empty =
+	// resident): a failure between EnrollRunner and the record write must
+	// never drop a self-hosted runner into the CP-guest path below (whose
+	// seal assumes a package dir to re-ship).
+	runnerRec, hasRunner := fresh.GetRunner(req.Name)
+	cap, isCap := fresh.GetCapability(req.Name)
+	isSelfHosted := (hasRunner && runnerRec.PackageDir == "") || (isCap && cap.SelfHosted())
+	if isSelfHosted {
+		if !isCap || cap.EnrollConfirmedAt == nil {
 			writeErr(w, http.StatusBadRequest, "self-hosted door not confirmed — verify the presented pubkeys on this page against the guest's own `runner enroll` output (Compute's report), then confirm the enrollment; the fill unlocks after that")
 			return
 		}
