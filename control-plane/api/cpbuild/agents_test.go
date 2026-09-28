@@ -18,6 +18,13 @@ func TestReconciledChannels(t *testing.T) {
 	if !private || len(dept) != 1 || dept[0] != "#freehold" {
 		t.Fatalf("department channels = %v private=%v, want just private #freehold", dept, private)
 	}
+	// The migration case: a department row that still carries stale persisted
+	// channels from before the department channels were retired must re-derive
+	// the fixed list, never rejoin a retired channel.
+	stale, private := reconciledChannels(console.AgentInfo{Name: "network", Channels: []string{"#freehold-network"}})
+	if !private || len(stale) != 1 || stale[0] != "#freehold" {
+		t.Fatalf("stale department channels = %v private=%v, want just private #freehold", stale, private)
+	}
 	got, priv := reconciledChannels(console.AgentInfo{Name: "custom", Channels: []string{"#a", "#b"}, Private: true})
 	if !reflect.DeepEqual(got, []string{"#a", "#b"}) || !priv {
 		t.Fatalf("custom channels = %v private=%v, want [#a #b] true", got, priv)

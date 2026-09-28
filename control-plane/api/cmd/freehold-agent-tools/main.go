@@ -301,7 +301,7 @@ func cmdChannel(args []string) {
 		relayURL := fs.String("relay-url", "", "relay HTTP origin (dial URL)")
 		relayAuthURL := fs.String("relay-auth-url", "", "relay CANONICAL URL for NIP-98 signing; defaults to relay-url")
 		as := fs.String("as", "", "agent name whose identity signs (the channel owner)")
-		channel := fs.String("channel", "", "existing channel display name to edit (e.g. '#ai')")
+		channel := fs.String("channel", "", "existing channel display name to edit (e.g. '#freehold-ai')")
 		rename := fs.String("rename", "", "new display name (name tag)")
 		visibility := fs.String("visibility", "", "new visibility: open|private")
 		archived := fs.String("archived", "", "new archived state: true|false")
@@ -374,8 +374,11 @@ func cmdChannel(args []string) {
 			// The relay rejects EVERY mutation on an archived channel except an
 			// archived=false edit — so archiving an already-archived channel is
 			// the desired end state, not a failure (a retried migration run
-			// lands here). Unarchive (archived=false) still fails loudly.
-			if strings.Contains(err.Error(), "channel is archived") && *archived == "true" {
+			// lands here). Unarchive (archived=false) still fails loudly, and a
+			// COMBINED edit (rename/visibility alongside archive) fails too: the
+			// relay would drop the non-archive tags, so reporting success would
+			// hide a partially-applied edit.
+			if strings.Contains(err.Error(), "channel is archived") && *archived == "true" && *rename == "" && *visibility == "" {
 				fmt.Printf("channel %s: already archived\n", *channel)
 				return
 			}
