@@ -404,31 +404,14 @@ func (s *StateStore) GetRetired(name string) (RetiredCapability, bool) {
 	return r, ok
 }
 
-// Retired returns the retirement guard notes (a copy, so callers never hold
-// the store's map).
-func (s *StateStore) Retired() map[string]RetiredCapability {
-	out := make(map[string]RetiredCapability, len(s.state.RetiredCapabilities))
-	for k, v := range s.state.RetiredCapabilities {
-		out[k] = v
-	}
-	return out
-}
-
 // InsertRetired records a retirement guard note + saves: from here the name is
-// refused by provision_runner (see RetiredCapability).
+// refused to the agent surface in BOTH directions (revoke_runner and
+// provision_runner), until an operator's record write clears it.
 func (s *StateStore) InsertRetired(name string, rec RetiredCapability) error {
 	if s.state.RetiredCapabilities == nil {
 		s.state.RetiredCapabilities = map[string]RetiredCapability{}
 	}
 	s.state.RetiredCapabilities[name] = rec
-	return s.Save()
-}
-
-// ClearRetired drops a retirement guard note + saves, re-enabling the name for
-// provision_runner. The console's operator-only "re-enable" action; a
-// re-provision clears the note through InsertCapability on its own.
-func (s *StateStore) ClearRetired(name string) error {
-	delete(s.state.RetiredCapabilities, name)
 	return s.Save()
 }
 
