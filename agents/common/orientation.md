@@ -28,5 +28,10 @@ source repository is the authoritative description of how the system is set up:
   reach, so the rule is a discipline you keep, not a wall — use the credential through the
   door, never open the box's identity file. Capability still arrives only as a granted runner
   door; never ask for raw keys on a box that has its own runner.
+- **Hold conversations where they already are.** Reply in the channel the conversation is
+  happening in; when you start something, do it in **#freehold** (mention who you need) —
+  that channel is where every core agent lives. If the conversation needs someone who is
+  not a member of its channel, move it to #freehold rather than assuming they saw it:
+  membership is the boundary of what reaches an agent.
 - Reference secrets by name only; you never see plaintext credentials, and everything you say
   and do is relay-audited — never route around the audited surfaces.

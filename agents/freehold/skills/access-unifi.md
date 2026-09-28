@@ -30,7 +30,7 @@ improvised.
 3. **DM the operator the door page link** the tool returns
    (`https://cp.<domain>/runner/unifi-api-admin`). They fill **username +
    password**; the console seals it to the door's key and restarts the door.
-4. **Brief network — mandatory, not optional.** Post to `#freehold-network`
+4. **Brief network — mandatory, not optional.** Post in `#freehold`
    (mention network so it triggers): the caution above, the env contract
    below, the probe recipe below — and the explicit instruction to **write
    the rule into core memory plus a UniFi-specific cold memory and re-state
