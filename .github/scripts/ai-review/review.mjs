@@ -243,26 +243,31 @@ async function runHarnessOnce(prompt, timeoutMs) {
         OPENCODE_CONFIG_CONTENT: HARNESS_PERMISSIONS,
       },
     });
-    // spawn's timeout kills the direct child only; the group kill happens on
-    // the exit path (below) so a SIGTERM/SIGKILL can't leave a grandchild
-    // holding the stdout pipe.
+    const lines = [];
+    const counts = {};
+    let sessionError = null;
+    const rl = createInterface({ input: child.stdout });
+    // The group kill and the stream shutdown ride 'exit' — it fires the moment
+    // the process dies, while 'close' waits for stdout/stderr EOF and a
+    // lingering descendant holding the pipes suppresses it forever (the run
+    // would hang to the job's 60-minute cap instead of failing into the
+    // retry). spawn's timeout kills the direct child only; the group kill
+    // here is what reaches grandchildren.
     let killed = false;
-    child.on('close', (code, signal) => {
+    child.on('exit', (code, signal) => {
       if (signal && !killed) {
         killed = true;
         try { process.kill(-child.pid, 'SIGKILL'); } catch {}
       }
-      // A lingering descendant can hold stdout open after close; stop
-      // waiting for EOF shortly after the process is gone.
-      setTimeout(() => { try { child.stdout.destroy(); child.stderr.destroy(); } catch {} }, 5000).unref();
+      // Stop waiting for EOF shortly after the process is gone: a descendant
+      // can hold stdout/stderr open past exit. rl.close() specifically —
+      // destroying the stream alone does not close a readline that never saw
+      // EOF (node readline does not forward a destroyed input's close).
+      setTimeout(() => { try { rl.close(); child.stdout.destroy(); child.stderr.destroy(); } catch {} }, 5000).unref();
     });
 
-    const lines = [];
-    const counts = {};
-    let sessionError = null;
     const pumped = Promise.all([
       new Promise((resolve, reject) => {
-        const rl = createInterface({ input: child.stdout });
         rl.on('line', (line) => {
           lines.push(line);
           let e;
@@ -282,7 +287,10 @@ async function runHarnessOnce(prompt, timeoutMs) {
       }),
       new Promise((resolve) => { child.stderr.on('data', () => {}); child.stderr.on('close', resolve); }),
       new Promise((resolve, reject) => {
-        child.on('close', (code, signal) => resolve({ code, signal }));
+        // 'exit', not 'close': close can be suppressed by a descendant
+        // holding the stdio pipes; exit always fires, and the 5s destroy
+        // (above) bounds the stream waiters this promise is combined with.
+        child.on('exit', (code, signal) => resolve({ code, signal }));
         child.on('error', reject);
       }),
     ]);

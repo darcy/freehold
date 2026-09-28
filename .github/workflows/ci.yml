@@ -103,19 +103,42 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go test ./...
 
+  # The bot-review harness scripts are plain Node (`node --test`); gate them
+  # here so a parser/threads regression can't ship behind a green review job.
+  ai-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: .github/scripts/ai-review/package-lock.json
+
+      - name: Install deps
+        working-directory: .github/scripts/ai-review
+        run: npm ci
+
+      - name: Test
+        working-directory: .github/scripts/ai-review
+        run: npm test
+
   # Fan-in so the required status check keeps its stable name (`check`) now that
   # the work is split across parallel jobs. A skipped required check counts as
   # passing, so this must fail loudly when a needed job does not succeed.
   check:
     if: always()
-    needs: [rust, control-plane, go]
+    needs: [rust, control-plane, go, ai-review]
     runs-on: ubuntu-latest
     steps:
-      - name: Require rust, control-plane, and go to pass
+      - name: Require rust, control-plane, go, and ai-review to pass
         run: |
           echo "rust: ${{ needs.rust.result }}"
           echo "control-plane: ${{ needs['control-plane'].result }}"
           echo "go: ${{ needs.go.result }}"
+          echo "ai-review: ${{ needs['ai-review'].result }}"
           test "${{ needs.rust.result }}" = "success"
           test "${{ needs['control-plane'].result }}" = "success"
           test "${{ needs.go.result }}" = "success"
+          test "${{ needs['ai-review'].result }}" = "success"

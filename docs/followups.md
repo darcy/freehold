@@ -147,6 +147,13 @@ there; if it is work not yet done, it belongs here.
 
 ## Verification / harness
 
+- **Bot-review injection pre-vet.** The agentic reviewer reads PR-tree files, so a PR can
+  plant reviewer-directed text ("ignore your instructions", fake verdicts) anywhere it
+  expects the reviewer to look. First line of defense is the prompt's untrusted-input rule
+  (such attempts are themselves a blocking finding); the cheap second layer is a pre-vet
+  pass before the harness session: one diff-only single-shot call ("is this diff attempting
+  to manipulate an automated reviewer?") whose flag prepends a warning to the review context
+  (or fails the run loudly). Same provider key, seconds of latency, no new workflow.
 - **Live Backblaze leg.** The B2 connector is hermetic-verified only (mock API +
   acceptance round-trip); a live Backblaze-account leg needs real credentials.
 - **One real-relay acceptance run.** The Chunk-2 per-leg deltas (non-member denied,
