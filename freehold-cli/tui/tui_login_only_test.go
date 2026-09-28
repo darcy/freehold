@@ -267,7 +267,9 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 		case "/api/overview":
 			w.Write([]byte(`{"console_pubkey":"aa","runners":[` +
 				`{"name":"proxmox-box","status":"active","nostr_pubkey":"bb","grants":["op-pk","console-pk"],"grants_source":"package","colocated":true},` +
-				`{"name":"pve-ssh-root","status":"active","nostr_pubkey":"cc","grants":["net-pk","compute-pk","data-pk"],"grants_source":"live"}]}`))
+				`{"name":"pve-ssh-root","status":"active","nostr_pubkey":"cc","grants":["net-pk","compute-pk","data-pk"],"grants_source":"live"},` +
+				`{"name":"kube-api-root","status":"active","nostr_pubkey":"dd","grants":[],"grants_source":"live"},` +
+				`{"name":"litellm-api-admin","status":"active","nostr_pubkey":"ee","grants":null,"grants_source":"unavailable"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -296,7 +298,7 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 			t.Fatalf("relay row must come from the CP report, got URL %q", s.URL)
 		}
 	}
-	if len(m.Runners) < 2 {
+	if len(m.Runners) < 4 {
 		t.Fatalf("Runners not populated from console /api/overview: %+v", m.Runners)
 	}
 	// The grants cell names its source (package fallback vs the live
@@ -306,6 +308,14 @@ func TestManagementBoxFullyPopulatedFromCP(t *testing.T) {
 	}
 	if m.Runners[1].Name != "pve-ssh-root" || m.Runners[1].Grants != "3 · live" {
 		t.Fatalf("live-roster runner row wrong: %+v", m.Runners[1])
+	}
+	// An empty LIVE roster is an honest fail-closed (distinct from an
+	// unreadable/unavailable list — nil grants).
+	if m.Runners[2].Grants != "0 · live" {
+		t.Fatalf("empty live roster row wrong: %+v", m.Runners[2])
+	}
+	if m.Runners[3].Grants != "roster unavailable" {
+		t.Fatalf("unavailable roster row wrong: %+v", m.Runners[3])
 	}
 	if len(m.Agents) == 0 || !strings.Contains(m.Agents[0].Name, "cpa") {
 		t.Fatalf("Agents not populated from console /api/world: %+v", m.Agents)

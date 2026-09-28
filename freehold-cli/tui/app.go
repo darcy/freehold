@@ -486,11 +486,20 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 		} else if cfg != nil {
 			addr = cfg.Runner.Addr
 		}
-		// The grants cell names its source: "live" = the relay-signed roster
-		// (what actually gates exec), "pkg" = the shipped package fallback
-		// (the co-located runner's mode — no relay channel).
+		// The grants cell keeps the API's three states distinct: nil (null on
+		// the wire) = the console could NOT read a list — the relay roster
+		// read failed ("unavailable": the runner fails closed, the whitelist
+		// is just unseen) or the package is unreadable (anomaly); an empty
+		// non-nil list = honest fail-closed; otherwise the count + source
+		// ("live" = the relay-signed roster that gates exec, "pkg" = the
+		// shipped package fallback — the co-located runner's mode).
 		grants := "—"
-		if len(r.Grants) > 0 {
+		switch {
+		case r.Grants == nil && r.GrantsSource == "unavailable":
+			grants = "roster unavailable"
+		case r.Grants == nil && r.Status != "revoked":
+			grants = "pkg unreadable"
+		case r.Grants != nil:
 			grants = fmt.Sprintf("%d · %s", len(r.Grants), grantsSourceLabel(r.GrantsSource))
 		}
 		readiness := "—"

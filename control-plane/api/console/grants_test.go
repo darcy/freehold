@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,10 +16,13 @@ import (
 	"freehold/control-plane/state"
 )
 
-// TestGrantsFor pins the merge rule: a successful non-empty live roster wins
-// (it is what gates exec); empty/failed reads fall back to the shipped
-// package grants; an unreadable package keeps grants nil (the "unreadable"
-// anomaly) rather than masquerading as an honest empty list.
+// TestGrantsFor pins the merge rule. queryLive marks a relay-mode runner
+// whose roster was actually read: a successful read is reported VERBATIM (an
+// empty roster is an honest fail-closed, never masked by the stale package
+// fallback) and a failed read is "unavailable" (the console cannot see the
+// whitelist). Only a package-mode runner reports package grants, and a
+// readable package always yields a NON-nil slice — null on the wire is
+// reserved for "unreadable / unavailable".
 func TestGrantsFor(t *testing.T) {
 	pkg := []string{"pk-a", "pk-b"}
 	cases := []struct {
@@ -27,23 +31,35 @@ func TestGrantsFor(t *testing.T) {
 		liveErr    error
 		pkg        []string
 		pkgRead    bool
+		queryLive  bool
 		wantGrants []string
 		wantSource string
 	}{
-		{"live wins", []string{"pk-live"}, nil, pkg, true, []string{"pk-live"}, "live"},
-		{"empty roster falls back to package", nil, nil, pkg, true, pkg, "package"},
-		{"roster error falls back to package", nil, errFake, pkg, true, pkg, "package"},
-		{"package mode with no channel", nil, nil, pkg, true, pkg, "package"},
-		{"unreadable package stays nil", nil, nil, nil, false, nil, ""},
-		{"nothing readable stays nil", nil, errFake, nil, false, nil, ""},
+		{"live members win", []string{"pk-live"}, nil, pkg, true, true, []string{"pk-live"}, "live"},
+		{"empty live roster is an honest fail-closed", []string{}, nil, pkg, true, true, []string{}, "live"},
+		{"nil live roster reads as empty, not package", nil, nil, pkg, true, true, []string{}, "live"},
+		{"failed roster read is unavailable (stays null)", nil, errFake, pkg, true, true, nil, "unavailable"},
+		{"package mode reports the package list", nil, nil, pkg, true, false, pkg, "package"},
+		{"readable-but-EMPTY package is [] not null", nil, nil, []string{}, true, false, []string{}, "package"},
+		{"nil package grants normalize to []", nil, nil, nil, true, false, []string{}, "package"},
+		{"unreadable package stays null", nil, errFake, nil, false, false, nil, ""},
 	}
 	for _, tc := range cases {
-		grants, source := grantsFor(tc.live, tc.liveErr, tc.pkg, tc.pkgRead)
+		grants, source := grantsFor(tc.live, tc.liveErr, tc.pkg, tc.pkgRead, tc.queryLive)
 		if source != tc.wantSource {
 			t.Errorf("%s: source = %q, want %q", tc.name, source, tc.wantSource)
 		}
-		if len(grants) != len(tc.wantGrants) {
-			t.Errorf("%s: grants = %v, want %v", tc.name, grants, tc.wantGrants)
+		// Nil-vs-empty is load-bearing (clients key the unreadable anomaly off
+		// null), so equality is asserted exactly — DeepEqual, never len-only.
+		if tc.wantGrants == nil && grants != nil {
+			t.Errorf("%s: grants = %v, want nil", tc.name, grants)
+		}
+		if tc.wantGrants != nil {
+			if grants == nil {
+				t.Errorf("%s: grants = nil, want %v", tc.name, tc.wantGrants)
+			} else if !reflect.DeepEqual(grants, tc.wantGrants) {
+				t.Errorf("%s: grants = %v, want %v", tc.name, grants, tc.wantGrants)
+			}
 		}
 	}
 }

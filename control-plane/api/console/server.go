@@ -633,17 +633,16 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		}
 		pkgGrants = append(pkgGrants, pkg)
 		pkgReadable = append(pkgReadable, readable)
+		colocated := s.Builder != nil && name == s.Builder.RunnerTarget
 		out := runnerOut{
 			Name: name, Status: string(rec.Status), NostrPub: rec.NostrPubkey,
 			EncPub: rec.EncPubkey, McpAddr: rec.McpAddr, Risk: rec.RiskLevel,
-			Secret: secret,
+			Secret: secret, Colocated: colocated,
 		}
-		// The package result rides in upfront (it is the fallback); a live
-		// roster result below overwrites it when the query ran and returned.
-		out.Grants, out.GrantsSource = grantsFor(nil, nil, pkg, readable)
-		if s.Builder != nil && name == s.Builder.RunnerTarget {
-			out.Colocated = true
-		}
+		// The package result rides in upfront (it is the final answer for a
+		// package-mode runner); a live roster result below overwrites it for
+		// relay-mode runners.
+		out.Grants, out.GrantsSource = grantsFor(nil, nil, pkg, readable, false)
 		// Live readiness probe (the console signs a status call as its own
 		// identity — the runner still fails closed).
 		if rec.Status == state.RunnerActive && rec.McpAddr != nil && len(s.ConsoleSecret) == 32 {
@@ -653,9 +652,11 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}(name, *rec.McpAddr, rec.NostrPubkey)
 		}
 		// Live grants: the relay-signed 39002 roster, read fresh per call (the
-		// same source the runner itself authorizes against). A revoked runner's
-		// channel is moot — its package is gone and the report must stay null.
-		if canReadRoster && rec.Status == state.RunnerActive {
+		// same source the runner itself authorizes against). Relay-mode only —
+		// the co-located runner has no channel (its package IS its whitelist),
+		// and a revoked runner's channel is moot (its package is gone; the
+		// report must stay null).
+		if canReadRoster && rec.Status == state.RunnerActive && !colocated {
 			rosterCount++
 			go func(name string, url, rpk, runnerPK string) {
 				members, rerr := relay.QueryChannelRoster(url, rpk, runnerPK, s.ConsoleSecret)
@@ -677,7 +678,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		for j := range runners {
 			if runners[j].Name == p.name {
 				res := p.value.(rosterResult)
-				runners[j].Grants, runners[j].GrantsSource = grantsFor(res.members, res.err, pkgGrants[j], pkgReadable[j])
+				runners[j].Grants, runners[j].GrantsSource = grantsFor(res.members, res.err, pkgGrants[j], pkgReadable[j], true)
 			}
 		}
 	}
@@ -693,20 +694,36 @@ type rosterResult struct {
 	err     error
 }
 
-// grantsFor picks a runner's reported grants: the LIVE relay-signed roster
-// when the read succeeded and holds members — that is what actually gates the
-// runner's exec (it re-reads it per call). An empty or failed read falls back
-// to the shipped package grants (the co-located runner's mode: it has no
-// relay channel, so its package IS its whitelist). pkgReadable=false leaves
-// grants nil so clients keep rendering the "package unreadable" anomaly.
-func grantsFor(live []string, liveErr error, pkg []string, pkgReadable bool) (grants []string, source string) {
-	if liveErr == nil && len(live) > 0 {
-		return live, "live"
+// grantsFor picks a runner's reported grants + source. queryLive marks a
+// RELAY-MODE runner whose roster was actually read: the roster is the ONLY
+// gate on its exec, so a successful read is reported verbatim — an EMPTY
+// roster is an honest fail-closed (never masked by the stale package
+// fallback) — and a failed read is "unavailable" (the console cannot see the
+// whitelist; the runner itself still fails closed on the same outage).
+// !queryLive (the co-located runner — no relay channel — or a CP with no
+// relay coords) reports the shipped package grants, and an unreadable
+// package stays nil so clients keep rendering the anomaly. A readable
+// package always yields a NON-nil slice: null on the wire is reserved for
+// "unreadable / unavailable".
+func grantsFor(live []string, liveErr error, pkg []string, pkgReadable bool, queryLive bool) (grants []string, source string) {
+	if queryLive {
+		if liveErr == nil {
+			return nonNil(live), "live"
+		}
+		return nil, "unavailable"
 	}
 	if pkgReadable {
-		return pkg, "package"
+		return nonNil(pkg), "package"
 	}
 	return nil, ""
+}
+
+// nonNil keeps an honest empty list marshaling as [] (never null).
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // probeReadiness signs a status call as the console and returns the runner's
