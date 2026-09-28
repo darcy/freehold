@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { parseReview, harnessText } from './parse.mjs';
+import { parseReview, harnessTextParts } from './parse.mjs';
 import { buildReviewReplies, buildThreadIndex } from './threads.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -221,6 +221,12 @@ const HARNESS_PERMISSIONS = JSON.stringify({
   ],
 });
 
+// Actions interprets %-sequences and ::-prefixed lines in log output as
+// workflow commands (::add-mask::, ::stop-commands::, ::error:: …). Harness
+// output is attacker-influenced (the PR controls the diff and the files the
+// agent reads), so every untrusted string must be escaped before logging.
+const logSafe = s => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+
 // The event stream is the debug surface: every line is logged as it arrives
 // (tool calls especially), so a failed or slow review shows exactly what the
 // agent explored. Shapes are handled leniently — v1 and v2 both spread the
@@ -231,7 +237,7 @@ function summarizeEvent(e) {
   const brief = typeof p.description === 'string' && p.description
     ? p.description
     : JSON.stringify(p.metadata || p.arguments || p.input || '').slice(0, 120);
-  return name ? `${name}: ${brief}` : JSON.stringify(e).slice(0, 140);
+  return logSafe(name ? `${name}: ${brief}` : JSON.stringify(e).slice(0, 140));
 }
 
 async function runHarnessOnce(prompt, timeoutMs) {
@@ -315,7 +321,7 @@ async function runHarnessOnce(prompt, timeoutMs) {
               try { sessionError = JSON.stringify(e.error ?? null).slice(0, 200); }
               catch { sessionError = String(e.error).slice(0, 200); }
             }
-            core.error(`Harness session error event: ${sessionError}`);
+            core.error(`Harness session error event: ${logSafe(sessionError)}`);
           } else if (e.type === 'tool_use' || e.type === 'step_start' || e.type === 'step_finish') {
             core.info(`  · ${summarizeEvent(e)}`);
           }
@@ -339,12 +345,19 @@ async function runHarnessOnce(prompt, timeoutMs) {
     core.info(`Harness events: ${Object.entries(counts).map(([t, n]) => `${t}=${n}`).join(', ') || 'none'}`);
     if (signal) throw new Error(`opencode timed out after ${timeoutMs}ms (signal ${signal})`);
     if (sessionError) throw new Error(`opencode session error: ${sessionError}`);
-    if (code !== 0) throw new Error(`opencode exited ${code}: ${lines.join('\n').slice(-500)}`);
+    if (code !== 0) throw new Error(`opencode exited ${code}: ${logSafe(lines.join('\n').slice(-500))}`);
 
-    const text = harnessText(lines.join('\n')) || lines.join('\n');
-    core.info(`Harness raw (${text.length} chars): ${text.trim().slice(0, 200)}`);
-    core.info(`Harness raw tail: ${text.trim().slice(-300)}`);
-    return parseReview(text);
+    // The model's final answer is its LAST text part (the prompt requires the
+    // review JSON alone there). Parsing ONLY that part is the injection
+    // boundary: earlier parts — and the raw event stream, whose tool-result
+    // events carry attacker-controlled file contents — never reach the
+    // verdict extractor. No fallback scan: a format drift must fail loudly
+    // (and retry), not parse attacker text.
+    const finalPart = harnessTextParts(lines.join('\n')).pop();
+    if (!finalPart) throw new Error('harness produced no text events — format drift?');
+    core.info(`Harness answer (${finalPart.length} chars): ${logSafe(finalPart.trim().slice(0, 200))}`);
+    core.info(`Harness answer tail: ${logSafe(finalPart.trim().slice(-300))}`);
+    return parseReview(finalPart);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

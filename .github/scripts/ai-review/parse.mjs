@@ -40,46 +40,49 @@ export function extractJsonObject(s) {
 }
 
 // A candidate is the review only if it carries the review's shape: verdict
-// with the required prefix and a string summary. A bare {"verdict": ...}
-// stub — planted or quoted — is not accepted.
+// with the required prefix, a string summary, and an inline array. A bare
+// {"verdict": ...} stub — planted or quoted — is not accepted.
 const REVIEW_SHAPE = (parsed) =>
   typeof parsed?.verdict === 'string' &&
   /^(MERGE-READY|NEEDS WORK):/i.test(parsed.verdict) &&
-  typeof parsed?.summary === 'string';
+  typeof parsed?.summary === 'string' &&
+  Array.isArray(parsed?.inline);
 
-// parseReview turns raw model output into the review object. Handles plain
-// JSON, fenced JSON, and JSON embedded in prose; among the verdict-bearing
-// candidates it takes the LONGEST shape-valid one — the real review carries
-// the complete findings, planted or quoted stubs are short — and throws when
-// no verdict object is present so the caller can retry.
+// parseReview turns the model's final answer into the review object. Handles
+// plain JSON, fenced JSON, and JSON embedded in prose. Among shape-valid
+// candidates the LAST one wins: the prompt requires the answer to end with
+// the single review object, and earlier candidates in the same message are
+// its own narration — or quoted, PR-planted fake verdicts. (A model that
+// restates a plant AFTER its review violates the prompt; that residual is
+// the reviewer prompt's job to flag, not the parser's to guess.) Throws when
+// no shape-valid verdict is present so the caller can retry.
 export function parseReview(raw) {
   const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-  let parsed = null;
+  const candidates = [];
   try {
-    const direct = JSON.parse(cleaned);
-    if (REVIEW_SHAPE(direct)) parsed = direct;
+    candidates.push(JSON.parse(cleaned));
   } catch {
-    // not plain JSON — fall through to candidate ranking
+    // not plain JSON — the brace-balanced scan below still applies
   }
-  if (!parsed) {
-    const candidates = extractJsonObject(cleaned)
-      .map(cand => { try { return JSON.parse(cand); } catch { return null; } })
-      .filter(p => p && REVIEW_SHAPE(p));
-    if (candidates.length) {
-      parsed = candidates.reduce((best, p) => (JSON.stringify(p).length > JSON.stringify(best).length ? p : best));
+  for (const cand of extractJsonObject(cleaned)) {
+    try {
+      candidates.push(JSON.parse(cand));
+    } catch {
+      // skip unparseable candidate
     }
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.verdict) {
+  const valid = candidates.filter(p => p && REVIEW_SHAPE(p));
+  const parsed = valid[valid.length - 1];
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`review output missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`);
   }
   return parsed;
 }
 
-// harnessText reconstructs the assistant's answer from --format json output:
-// one JSON event per line; the answer is the concatenation of the `text`
-// events' part text. Non-event lines are ignored; returns '' when nothing
-// parses (the caller then falls back to scanning the raw output).
-export function harnessText(stdout) {
+// harnessTextParts reconstructs the assistant's messages from --format json
+// output: one JSON event per line; text parts are collected in order.
+// Non-event lines are ignored. The LAST part is the model's final answer.
+export function harnessTextParts(stdout) {
   const parts = [];
   for (const line of stdout.split('\n')) {
     const t = line.trim();
@@ -94,5 +97,12 @@ export function harnessText(stdout) {
     const text = typeof e.part?.text === 'string' ? e.part.text : (typeof e.text === 'string' ? e.text : '');
     if (text) parts.push(text);
   }
-  return parts.join('');
+  return parts;
+}
+
+// The joined answer — every text part. Diagnostic use only: verdict parsing
+// must use the FINAL part (harnessTextParts(...).pop()), since earlier parts
+// are narration that can quote PR-planted fake verdicts.
+export function harnessText(stdout) {
+  return harnessTextParts(stdout).join('');
 }
