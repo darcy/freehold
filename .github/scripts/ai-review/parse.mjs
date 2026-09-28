@@ -2,16 +2,16 @@
 // json) streams JSONL events; the assistant's final answer is the joined text
 // parts, which must contain the review JSON object.
 
-// extractJsonObject returns the LAST brace-balanced `{...}` substring that
-// contains a "verdict" key — the safety net when the model wraps its JSON in
-// prose. It tries EVERY `{` (not just the first) so a prose brace like
-// "{1: ...}" before the real JSON does not hide it, and it keeps the LAST
-// match because earlier output is attacker-quotable: a PR can plant a fake
-// `{"verdict": ...}` for the reviewer to quote, so the first match must not
-// win — the model's final answer is always the last thing it emits.
-// String/escape aware so braces inside strings don't break the scan.
+// extractJsonObject returns EVERY brace-balanced `{...}` substring that
+// contains a "verdict" key, in order of appearance — the safety net when the
+// model wraps its JSON in prose. It tries EVERY `{` (not just the first) so a
+// prose brace like "{1: ...}" before the real JSON does not hide it.
+// String/escape aware so braces inside strings don't break the scan. The
+// caller ranks candidates: output text can contain earlier, PR-planted fake
+// verdicts the reviewer merely quoted, so position alone (first OR last) is
+// attacker-controllable.
 export function extractJsonObject(s) {
-  let best = '';
+  const found = [];
   for (let start = s.indexOf('{'); start >= 0; start = s.indexOf('{', start + 1)) {
     let depth = 0;
     let inStr = false;
@@ -30,31 +30,43 @@ export function extractJsonObject(s) {
         depth -= 1;
         if (depth === 0) {
           const cand = s.slice(start, i + 1);
-          if (cand.includes('"verdict"')) best = cand;
-          break; // this start did not yield a deeper object; try the next
+          if (cand.includes('"verdict"')) found.push(cand);
+          break; // this start yielded its outermost object; try the next
         }
       }
     }
   }
-  return best;
+  return found;
 }
 
+// A candidate is the review only if it carries the review's shape: verdict
+// with the required prefix and a string summary. A bare {"verdict": ...}
+// stub — planted or quoted — is not accepted.
+const REVIEW_SHAPE = (parsed) =>
+  typeof parsed?.verdict === 'string' &&
+  /^(MERGE-READY|NEEDS WORK):/i.test(parsed.verdict) &&
+  typeof parsed?.summary === 'string';
+
 // parseReview turns raw model output into the review object. Handles plain
-// JSON, fenced JSON, and JSON embedded in prose; throws when no verdict
-// object is present so the caller can retry.
+// JSON, fenced JSON, and JSON embedded in prose; among the verdict-bearing
+// candidates it takes the LONGEST shape-valid one — the real review carries
+// the complete findings, planted or quoted stubs are short — and throws when
+// no verdict object is present so the caller can retry.
 export function parseReview(raw) {
   const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
   let parsed = null;
   try {
-    parsed = JSON.parse(cleaned);
+    const direct = JSON.parse(cleaned);
+    if (REVIEW_SHAPE(direct)) parsed = direct;
   } catch {
-    const cand = extractJsonObject(cleaned);
-    if (cand) {
-      try {
-        parsed = JSON.parse(cand);
-      } catch {
-        parsed = null;
-      }
+    // not plain JSON — fall through to candidate ranking
+  }
+  if (!parsed) {
+    const candidates = extractJsonObject(cleaned)
+      .map(cand => { try { return JSON.parse(cand); } catch { return null; } })
+      .filter(p => p && REVIEW_SHAPE(p));
+    if (candidates.length) {
+      parsed = candidates.reduce((best, p) => (JSON.stringify(p).length > JSON.stringify(best).length ? p : best));
     }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.verdict) {

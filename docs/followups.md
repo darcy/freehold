@@ -147,6 +147,15 @@ there; if it is work not yet done, it belongs here.
 
 ## Verification / harness
 
+- **Bot-review triggers: drop `pull_request`, go `pull_request_target`-only.** On a
+  `pull_request` event the workflow YAML itself is the PR's merge-ref copy — a PR can
+  rewrite the `run:` blocks — so the "executes only trusted main's code" invariant holds
+  for the scripts/deps/prompt (second checkout pinned to `main`) but NOT for the YAML.
+  Complete the fix by reviewing every PR from `pull_request_target` (base context, base
+  YAML, secrets present) once this harness is on main. Bootstrap constraint: the PR that
+  makes the switch can't run its own pre-merge rounds through `pull_request_target`
+  (main's gate doesn't route them), so its own rounds need the `pull_request` trigger
+  until it lands.
 - **Bot-review injection pre-vet.** The agentic reviewer reads PR-tree files, so a PR can
   plant reviewer-directed text ("ignore your instructions", fake verdicts) anywhere it
   expects the reviewer to look. First line of defense is the prompt's untrusted-input rule
