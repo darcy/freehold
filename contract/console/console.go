@@ -37,8 +37,23 @@ type Runner struct {
 	McpAddr     *string     `json:"mcp_addr"`
 	Risk        *string     `json:"risk"`
 	Secret      *SecretInfo `json:"secret"`
+	// Grants is the runner's whitelist as the console sees it. The wire shape
+	// carries the three states clients must keep distinct: null (nil slice) =
+	// the console could NOT read a list — grants_source "unavailable" (the
+	// relay roster read failed; the runner fails closed) or "" (a revoked
+	// runner whose shipped package was removed, i.e. the package-unreadable
+	// anomaly); an EMPTY non-null slice = honestly empty (fail closed — for a
+	// relay-mode runner that is a live roster with nobody on it); otherwise
+	// the members themselves. grants_source names the source: "live" (the
+	// relay-signed 39002 roster — what actually gates exec), "package" (the
+	// shipped fallback — the co-located runner's mode), "unavailable" (the
+	// read failed). Empty when no list was readable.
 	Grants      []string    `json:"grants"`
-	Readiness   interface{} `json:"readiness,omitempty"`
+	GrantsSource string       `json:"grants_source,omitempty"`
+	Readiness    interface{}  `json:"readiness,omitempty"`
+	// Colocated marks the CP's own co-located runner (the build/relay-admin
+	// hands on the CP guest) so clients can label it.
+	Colocated bool `json:"colocated,omitempty"`
 }
 
 // SecretInfo mirrors the console client SecretInfo.
