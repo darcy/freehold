@@ -263,6 +263,13 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 				return berr
 			}
 			if err := client.PutSecret("cert-seed-"+slot, blob); err != nil {
+				// The pre-seed is an optimization, never a gate: a CP whose
+				// secret allowlist predates the cert-seed names (mixed-version
+				// skew — the box updates before the CP) just issues as before.
+				if strings.Contains(err.Error(), "refusing secret name") {
+					fmt.Fprintf(e.Out, "  · CP predates the cert cache — the build will issue\n")
+					continue
+				}
 				return fmt.Errorf("ship %s cert cache to CP: %w", slot, err)
 			}
 			fmt.Fprintf(e.Out, "  · %s cert cache shipped for pre-seed\n", slot)
