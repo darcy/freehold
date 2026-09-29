@@ -783,6 +783,36 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	return cert.LoadCreds(path, open, secret)
 }
 
+// certSeedFromCache installs a slot's edge cert from the box-shipped seed
+// (world-secrets/cert-seed-<slot>.json — the box cert cache, sealed to the
+// console identity like the DNS creds). It is the FRESH lifecycle's escape
+// from the LE order loop: the full-destroy uninstall wipes the plane (and the
+// durable mirror with it), so the operator box carries the issued cert across
+// worlds instead. Absent/stale/wrong-host seeds report (false, nil) — the
+// caller falls through to the normal issue path; only a failed INSTALL errors
+// (the same failure the issue path would hit).
+func (s *Spec) certSeedFromCache(k3sVmid uint32, slot, host string) (bool, error) {
+	path := filepath.Join(s.StateDir, "world-secrets", "cert-seed-"+slot+".json")
+	if !cert.CredExists(path) {
+		return false, nil
+	}
+	secret, err := s.consoleEncSecret()
+	if err != nil {
+		return false, err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	fullchain, key, err := cert.LoadSeed(path, open, secret, host, time.Now(), 30*24*time.Hour)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cert %s: seed cache unusable (%v) — issuing\n", slot, err)
+		return false, nil
+	}
+	if err := s.installCaddyCertFile(k3sVmid, slot, fullchain, key); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(os.Stderr, "cert %s: seeded from the box cert cache (no LE order)\n", slot)
+	return true, nil
+}
+
 // runnerLitellmSecrets maps the CP store's litellm env keys to the secret NAMES
 // the world-build requests from the co-located runner.
 var runnerLitellmSecrets = []struct{ name, env string }{
@@ -1042,6 +1072,18 @@ func (s *Spec) worldCert() error {
 				}
 				continue
 			}
+		}
+		// Box-shipped seed: the operator box caches each slot's issued cert
+		// across builds, so a world whose plane was destroyed (the FRESH
+		// lifecycle's full-destroy uninstall) pre-seeds from it — no new LE
+		// order, no challenge, no rate-limit exposure. Absent/stale seeds fall
+		// through to the issue path.
+		seeded, serr := s.certSeedFromCache(s.K3sVmid, sl.slot, sl.host)
+		if serr != nil {
+			return fmt.Errorf("cert %s seed: %w", sl.slot, serr)
+		}
+		if seeded {
+			continue
 		}
 		// Issue path: the sealed DNS cred must be on the CP (the box build's
 		// hand-off ships it). The fresh fullchain+key pair is installed by
