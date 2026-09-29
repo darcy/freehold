@@ -1,8 +1,8 @@
 ---
 name: release-prepare
-description: Use when cutting a versioned pre-release for freehold (e.g. "cut v0.8.0", "ship a release", "cut an rc"). Generates the release notes from git history since the previous release, gets the operator's approval, tags the main commit, and publishes a GitHub pre-release (marked prerelease) with the built assets, short high-level notes, and a test-status table. release-test-proxmox fills the table; release-publish promotes it when every row passes.
+description: Use when cutting a versioned pre-release for freehold (e.g. "cut v0.8.0", "ship a release", "cut an rc"). Generates the release notes from git history since the previous release, gets the operator's approval, tags the main commit, and publishes a GitHub pre-release (marked prerelease) with the built assets, short high-level notes, and a test-status table. release-test fills the table (dev first, then per-provider e2e); release-publish promotes it when every row passes.
 metadata:
-  version: 5.1.0
+  version: 5.2.0
   author: freehold
   license: MIT
 ---
@@ -13,8 +13,9 @@ A version exists only when it is released, and every release is **two things tog
 annotated tag `vX.Y.Z` on `main` and a GitHub Release with **short, high-level** notes. There
 is **no changelog file** — the GitHub Release is the record. A version is cut as a
 **pre-release** first: the GitHub Release is marked `prerelease`, carries the built assets,
-and ends with a **test-status table**. `release-test-proxmox` fills that table by running the
-live flows; `release-publish` promotes the release to final only once every row passes — same
+and ends with a **test-status table**. `release-test` fills that table (dev deploy first via
+`test-dev`, then the per-provider e2e — `release-test-proxmox` today); `release-publish`
+promotes the release to final only once every row passes — same
 tag, same commit, same assets. This skill never promotes. There is no version bump per merge
 or phase; this skill is the only thing that assigns a version.
 
@@ -100,7 +101,7 @@ history. Promotion of an already-cut pre-release is `release-publish`, not this.
    `migrations.tar.gz`, `checksums.txt`) is present.
 
    The notes file ends with the table, seeded as unverified — one row per provider × env ×
-   test (the envs `release-test-proxmox` runs):
+   test (the envs the `release-test-<provider>` skills run):
    ```markdown
    ## Test status
 
@@ -114,12 +115,13 @@ history. Promotion of an already-cut pre-release is `release-publish`, not this.
    | Proxmox | rebuild.freehold.technology | Rebuild - Build | ⚪ Unverified |
    | Proxmox | live | Live - Update | ⚪ Unverified |
 
-   Legend: ⚪ Unverified · ✅ Passed · ❌ Failed — `release-test-proxmox` updates this
+   Legend: ⚪ Unverified · ✅ Passed · ❌ Failed — `release-test` updates this
    table; `release-publish` requires every row ✅.
    ```
 
 6. **Stop — do not promote.** Leave it a pre-release and tell the operator that
-   `release-test-proxmox` fills the status table and `release-publish` promotes it once
+   `release-test` fills the status table (dev first, then the per-provider e2e) and
+   `release-publish` promotes it once
    every row passes. Promotion (`--prerelease=false`) is the one thing this skill must
    never do.
 

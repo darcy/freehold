@@ -72,8 +72,10 @@ task is resumable without re-deriving where it stopped.
 - **A release is cut as a pre-release, then tested, then promoted.** `release-prepare`
   produces the candidate: annotated tag + a GitHub **pre-release** (marked `prerelease`,
   assets attached, short notes) whose body ends in a **test-status table** (one row per
-  provider × flow, seeded `⚪ Unverified`). `release-test-proxmox` runs the live lifecycle on
-  the pre-release's downloaded assets and fills the Proxmox rows (`✅`/`❌`; `⚪` when it can't
+  provider × flow, seeded `⚪ Unverified`). `release-test` orchestrates the testing — a dev
+  deploy first (`test-dev`: update dev to main, manually verify the changes with the
+  operator), then the per-provider e2e (`release-test-proxmox` runs the live lifecycle on
+  the pre-release's downloaded assets and fills the Proxmox rows `✅`/`❌`; `⚪` when it can't
   test). `release-publish` then promotes it to a full release only when **every** row is `✅`,
   with the operator's go-ahead — same tag, same commit, same assets.
 - **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
@@ -117,7 +119,8 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   codebase — a fix that lives only on the box isn't done until the PR merges and the update
   flow delivers it.
 - **test — release e2e only**, via `release-test-proxmox` (Fresh/Rebuild/Live; Proxmox
-  now, Vultr later). Never a dev sandbox. Fresh is disposable; Rebuild/Live persist
+  now, Vultr later), reached only after the dev deploy (`test-dev`) is green. Never a dev
+  sandbox. Fresh is disposable; Rebuild/Live persist
   between releases.
 - **prod — review/debug only.** Observe, diagnose, report. No changes without the
   operator's explicit go-ahead; the fix path is always recreate on dev → PR → release.
@@ -159,6 +162,13 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   **pre-release** with the built assets, short, high-level notes, and the test-status
   table — see "Releases" above. The canonical, agent-agnostic location (auto-loaded by
   opencode and any other agent that reads `~/.agents/skills/`-style external skills).
+- `.agents/skills/release-test/SKILL.md` — the `release-test` skill: the testing
+  orchestrator, in LOCKED order — the dev deploy + manual verification first (`test-dev`),
+  then the per-provider e2e; hands off to `release-publish`.
+- `.agents/skills/test-dev/SKILL.md` — the `test-dev` skill: deploy main to the dev world
+  (the profile listed under `dev:` in `.envs.yml`), diffing first and confirming with the
+  operator what to manually test, then deploying via the update flow and running those
+  checks. A NEW defect stops the release e2e.
 - `.agents/skills/release-test-proxmox/SKILL.md` — the `release-test-proxmox` skill:
   exercise a pre-release's downloaded assets through the full lifecycle (install →
   agent replies in the relay → teardown → all down → rebuild → agent replies → uninstall →
@@ -424,6 +434,14 @@ release notes.
   `BUZZ_AUTH_TAG` authorizes memory writes until the pod is re-applied; minting
   with an expiry clause + a re-mint on build is the named follow-up
   (docs/followups.md).
+- **Agent tool shells run UTC despite the operator-timezone setting.** The CP half
+  works — the setting persists (TUI 's' form / console settings card /
+  `freehold-console settings`), pods get `TZ` env + a read-only zoneinfo hostPath, and
+  `kubectl exec` honors it — but buzz's agent harness strips the env before the MCP
+  server spawns (`buzz-agent`'s `spawn_one` runs `env_clear()` + a `PASSTHROUGH_ENV`
+  allowlist with no `TZ`), so every agent tool shell still reports UTC. The fix is
+  upstream in buzz (add `TZ` to that allowlist); the orientation block naming the
+  operator zone is the prompt-level workaround until then.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
 - **Replay window:** a signed call can be replayed against the *same* runner within its 60s
