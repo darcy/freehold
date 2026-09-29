@@ -238,7 +238,9 @@ exit 0
 // TestBuildMigratorExportsChannelEnv pins the env the channel migration script
 // needs: the agent-tools binary path plus the relay coords + CPA name a kind-9002
 // channel edit signs with. A stub `freehold-agent-tools` asserts every var is set
-// and non-empty, so a dropped/renamed env fails the run.
+// and non-empty, so a dropped/renamed env fails the run; FREEHOLD_RELAY_URL must
+// be the LAN DIAL form (the CP's dnsmasq pins the relay host to the relay LXC,
+// where nothing listens on 443) while FREEHOLD_RELAY_AUTH_URL stays canonical.
 func TestBuildMigratorExportsChannelEnv(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "agent-tools")
@@ -257,6 +259,8 @@ for v in FREEHOLD_AGENT_TOOLS REGISTRY CONSOLE_STATE STATE_DIR \
   eval "val=\${$v:-}"
   [ -n "$val" ] || { echo "env $v is empty"; exit 1; }
 done
+[ "$FREEHOLD_RELAY_URL" = "http://relay.example:3000" ] || { echo "FREEHOLD_RELAY_URL=$FREEHOLD_RELAY_URL, want the LAN dial"; exit 1; }
+[ "$FREEHOLD_RELAY_AUTH_URL" = "https://relay.example" ] || { echo "FREEHOLD_RELAY_AUTH_URL=$FREEHOLD_RELAY_AUTH_URL, want the canonical origin"; exit 1; }
 exit 0
 `
 	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
@@ -272,7 +276,7 @@ exit 0
 		t.Fatal(err)
 	}
 
-	spec := &Spec{StateDir: stateDir, RelayURL: "https://relay.example", CpaName: "freehold"}
+	spec := &Spec{StateDir: stateDir, RelayURL: "https://relay.example", RelayHost: "relay.example", CpaName: "freehold"}
 	results, err := BuildMigrator(spec, consoleDir)()
 	if err != nil {
 		t.Fatalf("BuildMigrator: %v", err)

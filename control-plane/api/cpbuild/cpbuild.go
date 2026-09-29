@@ -1548,12 +1548,16 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 		if relayAuthURL == "" {
 			relayAuthURL = s.RelayURL
 		}
+		// The script's DIAL is the relay's LAN form (the CP's dnsmasq pins the
+		// relay host to the relay LXC, where nothing listens on 443 — TLS is
+		// the edge's); the NIP-98 signature still covers the canonical https.
+		// The same dial-LAN / sign-public split every other relay client uses.
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
 			"REGISTRY="+filepath.Join(s.StateDir, "registry.json"),
 			"CONSOLE_STATE="+consoleStateDir,
 			"STATE_DIR="+s.StateDir,
-			"FREEHOLD_RELAY_URL="+s.RelayURL,
+			"FREEHOLD_RELAY_URL="+s.relayDial(),
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
 			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
