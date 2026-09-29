@@ -99,6 +99,25 @@ const SystemPromptFile = "SYSTEM_PROMPT.md"
 // the pod, and the agent re-reads it on every spawn — never cached.
 const SystemPromptPath = "/srv/freehold/SYSTEM_PROMPT.md"
 
+// AgentWorkspaceRoot is the durable-plane dir (on the k3s guest, under the
+// locked /srv/data/k8s-volumes carve-out — backup=1, survives a compute
+// teardown) holding every agent pod's workspace. Keyed by the SANITIZED POD
+// NAME — deterministic across rebuilds, unlike a local-path PVC's uid-keyed
+// directory (a re-applied PVC reattaches, but a REBUILT k3s mints a fresh PVC
+// uid and orphans the old dir). The deploy script creates + chowns the dir
+// before the pod applies, so the uid-1000 agent user can write it.
+const AgentWorkspaceRoot = "/srv/data/k8s-volumes/agent-home"
+
+// AgentHomePath is where an agent pod's workspace mounts in the container: the
+// sprig image's agent user home AND the harness's working directory (buzz-acp
+// runs there), so files an agent creates survive pod re-applies and rebuilds.
+const AgentHomePath = "/home/agent"
+
+// AgentWorkspaceDir is the durable hostPath dir for one agent pod.
+func AgentWorkspaceDir(podName string) string {
+	return AgentWorkspaceRoot + "/" + sanitizePodName(podName)
+}
+
 // LiteLLMServiceURL is the in-kube OpenAI-compatible endpoint the agent
 // harness reaches the litellm gateway at (ClusterIP Service litellm.litellm
 // port 4000 — litellm's OpenAI-compat API lives under /v1). The CPA's
@@ -330,8 +349,16 @@ spec:
       valueFrom:
         secretKeyRef: {name: %s, key: owner}
     volumeMounts:
+    - {name: workspace, mountPath: %s}
     - {name: prompt, mountPath: %s, readOnly: true, subPath: %s}
   volumes:
+  # The workspace: a name-keyed dir on the durable plane (the deploy script
+  # mkdirs + chowns it to the agent user before this manifest applies), so an
+  # agent's files survive pod re-applies AND a rebuilt k3s guest. hostPath is
+  # deliberate — a PVC's local-path dir is keyed by the PVC uid, so a rebuilt
+  # cluster re-mints the claim and silently orphans the data.
+  - name: workspace
+    hostPath: {path: %s, type: DirectoryOrCreate}
   - name: prompt
     configMap: {name: %s}
 ---
@@ -350,7 +377,8 @@ spec:
 		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, authTagEnv, runnerEnv,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
-		secret, secret, SystemPromptPath, SystemPromptFile, promptCm, pod, pod)
+		secret, secret, AgentHomePath, SystemPromptPath, SystemPromptFile,
+		AgentWorkspaceDir(pod), promptCm, pod, pod)
 }
 
 // indentSystemPrompt indents every prompt line by four spaces so it embeds as
@@ -377,10 +405,16 @@ func indentSystemPrompt(prompt string) string {
 // be the thing that silently drops an agent's memory.
 func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
+	wsDir := AgentWorkspaceDir(pod)
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec %d -- sh -c"
 $EX "$K create ns agents 2>/dev/null || true"
+# The durable workspace dir must EXIST IN THE GUEST (and be writable by the
+# image's agent user, uid 1000) before the pod mounts it — a rebuilt k3s guest
+# comes back with the durable dataset intact but this dir absent. Strict (no
+# || true): the durable mount missing means the plane stage did not run.
+$EX "mkdir -p %s && chown 1000:1000 %s"
 # The pct push destination needs /tmp/agent-manifests to EXIST IN THE GUEST;
 # a bare host-side mkdir is not enough (the guest mount is separate).
 $EX "mkdir -p /tmp/agent-manifests"
@@ -396,7 +430,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, runner...),
+		k3sVmid, wsDir, wsDir, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, runner...),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 

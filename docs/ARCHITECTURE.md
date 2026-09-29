@@ -44,7 +44,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     first-run-wins `<pod>-identity` Secret via `secretKeyRef` (the nsec never
     rides the manifest); `restartPolicy: Never` keeps an intentional exit
     terminal (I5); no mgmt channel by design; no PVC — agent memory is
-    relay-persisted (kind 30174).
+    relay-persisted (kind 30174). The pod's workspace (its `/home/agent`
+    working directory) mounts a name-keyed dir on the durable plane
+    (`/srv/data/k8s-volumes/agent-home/<pod>` on the k3s guest via hostPath),
+    so files an agent creates survive pod re-applies and a rebuilt k3s guest;
+    the deploy stage re-creates + chowns the dir before every apply.
 
 *   **Agent placement:** every agent (CPA and created alike) runs on Buzz's
     `buzz-acp` remote-agent harness as a k3s pod (see `docs/POC.md`).

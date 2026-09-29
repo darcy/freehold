@@ -220,6 +220,10 @@ func TestCPAManifestScriptApplies(t *testing.T) {
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,
 		"create ns agents 2>/dev/null || true",
+		// The durable workspace dir is mkdir'd + chowned (to the image's agent
+		// user) BEFORE the pod applies — a rebuilt k3s guest re-runs this and
+		// reattaches the same name-keyed dir.
+		"mkdir -p " + AgentWorkspaceDir("waldo") + " && chown 1000:1000 " + AgentWorkspaceDir("waldo"),
 		"apply -f /tmp/agent-manifests/waldo.yaml",
 		"delete pod waldo -n agents",
 		"wait --for=condition=Ready pod/waldo -n agents --timeout=300s",
@@ -229,6 +233,59 @@ func TestCPAManifestScriptApplies(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("deploy script missing %q", want)
 		}
+	}
+}
+
+// TestAgentPodWorkspaceIsDurableAndNameKeyed pins the agent workspace contract:
+// the pod mounts a durable-plane dir (under the k3s guest's /srv/data
+// carve-out) at the harness's working directory, and the dir is keyed by the
+// SANITIZED POD NAME — the property that makes the workspace reattach after a
+// pod re-apply AND a rebuilt k3s guest. A uid-keyed PVC dir would orphan the
+// data on exactly the rebuild path this exists to survive.
+func TestAgentPodWorkspaceIsDurableAndNameKeyed(t *testing.T) {
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "")
+	for _, want := range []string{
+		"mountPath: " + AgentHomePath,
+		"hostPath: {path: " + AgentWorkspaceDir("network") + ", type: DirectoryOrCreate}",
+		AgentWorkspaceRoot,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("manifest missing %q", want)
+		}
+	}
+	// Two agents must own DIFFERENT durable dirs (no shared workspace).
+	other := AgentPodManifest("network-two", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "")
+	if strings.Contains(other, "hostPath: {path: "+AgentWorkspaceDir("network")+",") {
+		t.Errorf("a second agent's manifest reuses the first agent's workspace dir")
+	}
+	// The workspace must be the parsed Pod's actual volume (not just text):
+	// parse the hostPath back out of the Pod doc.
+	docs := strings.Split(m, "\n---\n")
+	var pod struct {
+		Spec struct {
+			Volumes []struct {
+				Name     string `yaml:"name"`
+				HostPath struct {
+					Path string `yaml:"path"`
+					Type string `yaml:"type"`
+				} `yaml:"hostPath"`
+			} `yaml:"volumes"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal([]byte(docs[1]), &pod); err != nil {
+		t.Fatalf("Pod doc does not parse: %v", err)
+	}
+	found := false
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "workspace" {
+			found = true
+			if v.HostPath.Path != AgentWorkspaceDir("network") || v.HostPath.Type != "DirectoryOrCreate" {
+				t.Errorf("workspace volume = %+v, want path %s type DirectoryOrCreate", v.HostPath, AgentWorkspaceDir("network"))
+			}
+		}
+	}
+	if !found {
+		t.Errorf("pod has no workspace volume")
 	}
 }
 
