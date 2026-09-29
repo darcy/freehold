@@ -370,13 +370,17 @@ release notes.
   capability record's roster (both — a relay-only removal would be silently reversed
   by the next build, which re-grants from the record) and re-applies their pods with
   the door cut from their coords feed, leaving the door standing for the rest of its
-  roster; with it empty it retires the whole door (channel folded but KEPT so the
-  roster history + kind-48001 audit stream stay queryable, credential erased through
-  the audited revoke verb, unit stopped, record dropped). Ownership guards mirror the
-  grant side exactly: build-time capability runners, the `cloudflare-api-` prefix, a
-  missing capability record, and operator-origin records are all refused — the agent
-  surface only takes back what the agent flow gave. Each leg is checked on its own
-  terms and reported `[verified]`/`[UNVERIFIED]` (roster re-read from the
+  roster. A grantee whose registry row is gone is still revoked: its pubkey resolves
+  from the durable identity dir the create path minted (UnregisterAgent deletes only
+  the row), so the de-escalation never stalls on a dropped agent; only a grantee with
+  neither row nor identity dir is unaddressable and reported for an operator console
+  clear. With `revoke_from` empty it retires the whole door (channel folded but KEPT
+  so the roster history + kind-48001 audit stream stay queryable, credential erased
+  through the audited revoke verb, unit stopped, record dropped). Ownership guards
+  mirror the grant side exactly: build-time capability runners, the `cloudflare-api-`
+  prefix, a missing capability record, and operator-origin records are all refused —
+  the agent surface only takes back what the agent flow gave. Each leg is checked on
+  its own terms and reported `[verified]`/`[UNVERIFIED]` (roster re-read from the
   relay-signed 39002, sealed package re-opened via `wire.Load`, unit asked via
   `systemctl is-active` plus a TCP probe of its port); the unit stop runs LOCAL to the
   CP process, never through a runner — the flow is revoking exec, so it must not depend

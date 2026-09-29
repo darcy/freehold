@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/identity"
 	"freehold/contract/relay"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
@@ -147,19 +148,38 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			targets = append(targets, rec.Rosters...)
 		}
 
-		// Resolve every target's pubkey BEFORE any write: a grantee whose registry
-		// row is gone cannot be revoked by pubkey, and that has to surface as a loud
-		// gap in the report rather than a silent skip (its exec would otherwise
-		// linger unmentioned, which is exactly the hole this tool exists to close).
+		// Resolve every target's pubkey BEFORE any write: a grantee whose pubkey
+		// cannot be established must surface as a loud gap in the report, never a
+		// silent skip (its exec would otherwise linger unmentioned — the hole this
+		// tool exists to close).
 		pubkeys := map[string]string{}
 		orphaned := []string{}
 		for _, g := range targets {
 			row, err := registryRow(reg, g)
-			if err != nil || row.Pubkey == "" {
+			if err == nil && row.Pubkey != "" {
+				pubkeys[g] = row.Pubkey
+				continue
+			}
+			// The registry row is gone (the agent was removed with manage_agent)
+			// — but its DURABLE IDENTITY is not: the create path mints every
+			// identity under the agent-identity root and UnregisterAgent deletes
+			// only the row. Resolving the pubkey from that dir takes a grant AWAY
+			// by the same identity the grant was made to — pure de-escalation, no
+			// new capability — and closes the gap where a dropped agent's roster
+			// entry could linger because no one could name its pubkey any more.
+			// When even the identity dir is gone, the grant is genuinely
+			// unaddressable and stays orphaned (the report says so below).
+			id, iderr := identity.Load(AgentIdentityPath(spec.agentIdentityDir(), g))
+			if iderr != nil {
 				orphaned = append(orphaned, g)
 				continue
 			}
-			pubkeys[g] = row.Pubkey
+			pk, perr := id.NostrPubkeyHex()
+			if perr != nil || pk == "" {
+				orphaned = append(orphaned, g)
+				continue
+			}
+			pubkeys[g] = pk
 		}
 
 		runnerPK := rpkOrEmpty(store, cpState, name)
@@ -194,7 +214,11 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 					failed = append(failed, fmt.Sprintf("%s: %v", g, err))
 				}
 			}
-			have, qerr := relay.QueryChannelRoster(dial, spec.RelayPK, runnerPK, secret)
+			// The Auth form, same split as every write above: the dial reaches the
+			// relay on its LAN origin, the NIP-98 u tag signs the CANONICAL public
+			// URL — a dial-URL-signed read 401s "NIP-98 URL mismatch", which used
+			// to make every revoke's roster leg UNVERIFIED on a live world.
+			have, qerr := relay.QueryChannelRosterAuth(dial, auth, spec.RelayPK, runnerPK, secret)
 			rep.outcomes = append(rep.outcomes, rosterOutcome(single, targets, pubkeys, runnerPK, failed, have, qerr))
 		}
 
@@ -238,8 +262,11 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 		for _, g := range targets {
 			row, rerr := registryRow(reg, g)
 			if rerr != nil {
-				unverified = append(unverified, g)
-				cut = append(cut, fmt.Sprintf("%s: no longer in the registry — its pod was NOT re-applied, so its coords feed may still name the door (the roster gate is what denies it); an operator must clear its row", g))
+				// A registry-less agent has no pod to re-apply — create() would
+				// MINT a new agent, the exact opposite of taking capability away.
+				// Its coords feed died with its row; the roster leg above is what
+				// revokes the grant itself (resolved from the durable identity).
+				cut = append(cut, fmt.Sprintf("%s: no longer in the registry — no pod to re-apply (its coords feed died with its row); the roster leg is what revokes it", g))
 				continue
 			}
 			// Re-resolve the pod's whole coords feed FROM STATE, then cut the door
@@ -371,8 +398,8 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			"the door's channel %s stays live and read-only: its roster history and its kind-48001 audit stream remain queryable, so the revocation stays auditable — do not delete it", rep.auditChannel))
 		if len(orphaned) > 0 {
 			rep.notes = append(rep.notes, fmt.Sprintf(
-				"[%s] %s no longer in the agent registry, so their roster entries could not be revoked by pubkey — their exec may linger until an operator clears the roster from the console (the console signs the same remove-user). Ask the operator; never the agent itself",
-				strings.Join(orphaned, ", "), isAre(orphaned)))
+				"[%s] %s no registry row AND no durable identity dir could be found, so %s roster entries could not be revoked by pubkey — the grant is unaddressable from here; an operator must clear the roster from the console (the console signs the same remove-user). Ask the operator; never the agent itself",
+				strings.Join(orphaned, ", "), isAre(orphaned), isAre(orphaned)))
 		}
 		if !single {
 			rep.notes = append(rep.notes, fmt.Sprintf(
