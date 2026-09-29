@@ -493,8 +493,11 @@ func (s *Server) worldInventory() (map[string]interface{}, error) {
 // stdSecrets are the CP-owned secret names the build ensures idempotently.
 // "operator" is the box's operator identity ledger (the world's owner): the
 // memory plane attests agent pods with it, so it ships sealed to the console
-// identity alongside the DNS/litellm creds.
-var stdSecrets = []string{"dns-relay", "dns-cp", "litellm", "operator"}
+// identity alongside the DNS/litellm creds. The cert-seed pair is the box cert
+// cache shipped for the worldCert pre-seed gate — the box OVERWRITES it on
+// every build it ships (the box cache is that record's durable owner, unlike
+// the secrets above, which the CP owns).
+var stdSecrets = []string{"dns-relay", "dns-cp", "litellm", "operator", "cert-seed-relay", "cert-seed-cp"}
 
 // secretsList reports which CP-owned secrets are present on disk (the idempotent
 // inventory `build` uses to ask the operator only for what's missing).

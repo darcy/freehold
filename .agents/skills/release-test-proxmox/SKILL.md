@@ -63,9 +63,13 @@ against the disposable test host, with the operator's go-ahead.
   storage at all.
 - The hermetic gates are green (`just test`) — run them first so a live failure isn't a
   known-broken unit.
-- Time: a fresh world's DNS-01 cert issuance can take a long time (observed ~45 min on a
-  Cloudflare zone); budget for it. Run long commands in the background with a log and poll
-  (a coding-agent shell often caps a single command at ~2 min).
+- Time: the FIRST build on a test zone (no box cert cache yet) pays DNS-01 cert
+  issuance — observed ~45 min on a Cloudflare zone; budget for it. Later builds
+  pre-seed from the box's sealed cert cache (`build` prints "cert cache shipped
+  for pre-seed"; the world's log says "seeded from the box cert cache (no LE
+  order)") — only a cache-expiry run (~60d) pays the pole again. Run long
+  commands in the background with a log and poll (a coding-agent shell often
+  caps a single command at ~2 min).
 
 If the host or credentials aren't available, do **not** fake it: leave the Proxmox rows
 `⚪ Unverified` and report that you couldn't test.
@@ -89,9 +93,11 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 ## Workflow
 
 > **Order of operations (LOCKED) — start Fresh FIRST, then run Rebuild + Live, then
-> finish Fresh.** The Fresh env's first build is gated on Cloudflare DNS-01 propagation —
-> the long pole (~10–45 min: the provider API accepts the challenge TXT immediately while
-> the authoritative NS keeps answering NXDOMAIN). Rebuild and Live do NOT need that gate
+> finish Fresh.** The Fresh env's first build MAY be gated on Cloudflare DNS-01
+> propagation — the long pole (~10–45 min: the provider API accepts the challenge TXT
+> immediately while the authoritative NS keeps answering NXDOMAIN) — but only when the
+> box has no valid cert cache (first-ever run on the zone, or cache expiry); a cached
+> run pre-seeds and skips it entirely. Rebuild and Live do NOT need that gate
 > (the rebuild env's cert is already issued; the live update issues nothing), so they run
 > WHILE Fresh waits — never after it. Concretely, in this order:
 >   1. **Fresh install**, then its **first build**, DETACHED (log + poll). Do not sit on it.
@@ -162,7 +168,9 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    ```
 
 2. **Fresh test — full lifecycle on a disposable world, with a NEW operator.**
-   Domains: `relay.fresh.freehold.technology` / `cp.fresh.freehold.technology`. Fresh
+   Domains: `relay.fresh.freehold.technology` / `cp.fresh.freehold.technology` — PINNED
+   names, never rotated (relay5-style renames defeat the SAN-bound box cert cache and put
+   every run back on the ~45-min DNS-01 pole + the LE duplicate-cert budget). Fresh
    profile name, freshly minted operator identity (see Preconditions). Run `install`/`build`
    in the background (`nohup … > log 2>&1 &`) and poll the log — they run for minutes.
    ```bash

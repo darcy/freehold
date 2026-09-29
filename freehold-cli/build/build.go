@@ -4,10 +4,13 @@
 package build
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -231,6 +234,48 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		fmt.Fprintf(e.Out, "  · %s DNS credential stored on the CP\n", slot)
 	}
 
+	// The cert PRE-SEED ships whenever the box cache is fresh — and it
+	// OVERWRITES (unlike the CP-owned secrets below, the box cache is this
+	// record's durable owner; a renewed cert must replace the stale seed).
+	// A world whose plane was destroyed then pre-seeds from it with no LE
+	// order. Absent/stale caches ship nothing: the build issues as before and
+	// the cache refills after.
+	if _, boxSec, _, serr := e.certIdent(); serr != nil {
+		fmt.Fprintf(e.Out, "  · no box ops identity for the cert cache (%v) — the build will issue\n", serr)
+	} else {
+		open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+		for _, slot := range []string{"relay", "cp"} {
+			path := certCachePath(slot)
+			if !cert.CredExists(path) {
+				continue
+			}
+			_, env, lerr := cert.LoadCreds(path, open, boxSec)
+			if lerr != nil {
+				fmt.Fprintf(e.Out, "  · cert cache %s unreadable (%v) — the build will issue\n", slot, lerr)
+				continue
+			}
+			if _, ok := cert.ReuseIfValidBytes([]byte(env["fullchain"]), time.Now(), 30*24*time.Hour); !ok {
+				fmt.Fprintf(e.Out, "  · cached %s cert under 30d remaining — the build will issue and refill the cache\n", slot)
+				continue
+			}
+			blob, berr := certcred.CPSecretBlob("cert-seed-"+slot, "cert-cache", env, seal, pub)
+			if berr != nil {
+				return berr
+			}
+			if err := client.PutSecret("cert-seed-"+slot, blob); err != nil {
+				// The pre-seed is an optimization, never a gate: a CP whose
+				// secret allowlist predates the cert-seed names (mixed-version
+				// skew — the box updates before the CP) just issues as before.
+				if strings.Contains(err.Error(), "refusing secret name") {
+					fmt.Fprintf(e.Out, "  · CP predates the cert cache — the build will issue\n")
+					continue
+				}
+				return fmt.Errorf("ship %s cert cache to CP: %w", slot, err)
+			}
+			fmt.Fprintf(e.Out, "  · %s cert cache shipped for pre-seed\n", slot)
+		}
+	}
+
 	if !have["litellm"] {
 		master, pg, providerKey, err := e.litellmSecretMaterial(cfg)
 		if err != nil {
@@ -284,8 +329,80 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 	return nil
 }
 
-func (e *buildEngine) litellmMasterKey(k3sVmid uint32) string {
-	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
+// certCachePath is the box-side sealed cache of a slot's issued edge cert
+// (fullchain + key + host, SaveCreds-shaped), written after a successful
+// build so a world whose plane was destroyed pre-seeds from it.
+func certCachePath(slot string) string {
+	return filepath.Join(box.StateDir(), "cert-cache-"+slot+".json")
+}
+
+// cacheEdgeCerts copies each slot's issued cert off the durable mirror (read
+// through the runner) into the box's sealed cache. A mirror that is missing,
+// stale (<30d left), or whose leaf does not cover the slot's host (renamed
+// domains) is skipped loudly — the next issue refills the cache.
+func (e *buildEngine) cacheEdgeCerts() error {
+	if !e.WorldHasEdge() {
+		return nil
+	}
+	cfg, err := config.Load(e.F.ConfigPath)
+	if err != nil || cfg == nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	k3s := uint32(0)
+	if cfg.Lxc.K3s.Vmid != nil {
+		k3s = *cfg.Lxc.K3s.Vmid
+	}
+	if k3s == 0 {
+		return fmt.Errorf("no k3s vmid recorded")
+	}
+	_, _, pub, err := e.certIdent()
+	if err != nil {
+		return err
+	}
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+	for _, sl := range []struct{ slot, host string }{
+		{"relay", e.F.RelayDomain}, {"cp", e.F.CpDomain},
+	} {
+		if sl.host == "" {
+			continue
+		}
+		dir := stages.CaddyEdgeDurableDir(sl.slot)
+		fc, ferr := e.readGuestFileB64(k3s, dir+"/fullchain.pem")
+		key, kerr := e.readGuestFileB64(k3s, dir+"/key.pem")
+		if ferr != nil || kerr != nil {
+			fmt.Fprintf(e.Out, "  · no %s edge cert on the durable mirror yet — cache skips\n", sl.slot)
+			continue
+		}
+		exp, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour)
+		if !ok {
+			fmt.Fprintf(e.Out, "  · %s edge cert under 30d remaining — cache skips (the next issue refills it)\n", sl.slot)
+			continue
+		}
+		names, nerr := cert.LoadDNSNames(fc)
+		if nerr != nil || !cert.CoversHost(names, sl.host) {
+			fmt.Fprintf(e.Out, "  · %s mirror cert does not cover %s — cache skips\n", sl.slot, sl.host)
+			continue
+		}
+		env := map[string]string{"host": sl.host, "fullchain": string(fc), "key": string(key)}
+		if err := cert.SaveCreds(certCachePath(sl.slot), "cert-cache", env, seal, pub, "cert-cache-"+sl.slot); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.Out, "  · cached the %s edge cert for pre-seed (valid until %s)\n", sl.slot, exp.UTC().Format("2006-01-02"))
+	}
+	return nil
+}
+
+// readGuestFileB64 reads a guest file through the runner (base64 on the wire).
+func (e *buildEngine) readGuestFileB64(k3s uint32, path string) ([]byte, error) {
+	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(fmt.Sprintf(
+		"pct exec %d -- bash -c 'test -s %s 2>/dev/null && base64 -w0 < %s'", k3s, path, path), 60))
+	if !ok {
+		return nil, fmt.Errorf("unreadable: %s", path)
+	}
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+}
+
+func (e *buildEngine) litellmMasterKey(k3sVmid uint32) string {	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
 		k3sVmid)
 	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(cmd, 30))
 	if !ok {
@@ -371,6 +488,12 @@ func (e *buildEngine) runBuild() error {
 	// next uninstall reports "never created (no vmid recorded)" and leaks them.
 	if err := e.RecordCoords(res.Coords); err != nil {
 		return err
+	}
+	// Cache each slot's issued edge cert box-side (best-effort): the FRESH
+	// lifecycle's full-destroy uninstall wipes the plane — this sealed copy is
+	// what pre-seeds the next world without a new LE order.
+	if err := e.cacheEdgeCerts(); err != nil {
+		fmt.Fprintf(e.Out, "  (cert cache update skipped: %v)\n", err)
 	}
 	if err := e.FinalSave(); err != nil {
 		return err
