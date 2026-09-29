@@ -3,7 +3,6 @@ package console
 import (
 	"encoding/json"
 	"net/http"
-	"time"
 
 	"freehold/control-plane/state"
 )
@@ -57,11 +56,9 @@ func (s *Server) settingsSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tz := *req.OperatorTZ
-	if tz != "" {
-		if _, err := time.LoadLocation(tz); err != nil {
-			writeErr(w, http.StatusBadRequest, "unknown timezone "+tz+" (want an IANA name, e.g. America/Chicago)")
-			return
-		}
+	if !state.ValidOperatorTZ(tz) {
+		writeErr(w, http.StatusBadRequest, "unknown timezone "+tz+" (want an IANA name, e.g. America/Chicago)")
+		return
 	}
 	// Read-modify-write through a FRESH store so another process's settings
 	// write (the CLI verb) is never clobbered by this serve's snapshot.

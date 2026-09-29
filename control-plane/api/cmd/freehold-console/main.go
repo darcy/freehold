@@ -730,10 +730,8 @@ func cmdSettings(args []string) error {
 		fmt.Printf("operator timezone already set (%s) — kept\n", cur.OperatorTZ)
 		return nil
 	}
-	if *tz != "" {
-		if _, err := time.LoadLocation(*tz); err != nil {
-			return fmt.Errorf("unknown timezone %s (want an IANA name, e.g. America/Chicago)", *tz)
-		}
+	if *tz != "" && !state.ValidOperatorTZ(*tz) {
+		return fmt.Errorf("unknown timezone %s (want an IANA name, e.g. America/Chicago)", *tz)
 	}
 	cur.OperatorTZ = *tz
 	if err := store.SetSettings(&cur); err != nil {

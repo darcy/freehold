@@ -283,8 +283,11 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 // operator can set the timezone in the console/TUI/CLI at any time.
 func seedOperatorTZ(t Transport, spec *DeployCpSpec) {
 	tz := time.Local.String()
-	if tz == "" || tz == "UTC" {
-		return // nothing non-default to seed; pods already run UTC
+	// "" / "UTC" need no setting (pods run UTC anyway); Go's "Local" (TZ unset,
+	// the common default) is NOT an IANA name — a pod cannot resolve it, so
+	// seeding it would fake success and --if-empty would preserve it forever.
+	if tz == "" || tz == "UTC" || tz == "Local" {
+		return
 	}
 	cmd := fmt.Sprintf("%s/freehold-console settings --state-dir %s --operator-tz %s --if-empty",
 		spec.BinDir, spec.StateDir, tz)

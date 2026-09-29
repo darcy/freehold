@@ -38,6 +38,24 @@ func TestSettingsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestValidOperatorTZ: empty (unset) is valid; real IANA names are valid;
+// Go's "Local" special case is refused (no pod resolves it — it would fake a
+// setting while reading as UTC); garbage is invalid.
+func TestValidOperatorTZ(t *testing.T) {
+	for tz, want := range map[string]bool{
+		"":                true,
+		"America/Chicago": true,
+		"Europe/Berlin":   true,
+		"UTC":             true,
+		"Local":           false,
+		"Mars/Olympus":    false,
+	} {
+		if got := ValidOperatorTZ(tz); got != want {
+			t.Errorf("ValidOperatorTZ(%q) = %v, want %v", tz, got, want)
+		}
+	}
+}
+
 // TestSettingsNilReadsZero: a pre-settings state file (no settings key) must
 // read as nil/zero — the pods-run-UTC default — never an error.
 func TestSettingsNilReadsZero(t *testing.T) {
