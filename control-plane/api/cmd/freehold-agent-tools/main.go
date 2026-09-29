@@ -363,14 +363,6 @@ func cmdChannel(args []string) {
 			return
 		}
 		if err := delegate.EditChannelAuth(*relayURL, authURL, sec, chID, tags...); err != nil {
-			// A migration must not wedge the queue on a channel whose owner is
-			// someone else (e.g. a legacy channel a custom agent created): treat
-			// an authoritative refusal as a skip. A real error (network/5xx)
-			// still fails, so the queue retries it.
-			if authzRefused(err.Error()) {
-				fmt.Printf("channel %s: relay refused (signer is not owner/admin) — skipping: %v\n", *channel, err)
-				return
-			}
 			// The relay rejects EVERY mutation on an archived channel except an
 			// archived=false edit — so archiving an already-archived channel is
 			// the desired end state, not a failure (a retried migration run
@@ -381,6 +373,15 @@ func cmdChannel(args []string) {
 			if strings.Contains(err.Error(), "channel is archived") && *archived == "true" && *rename == "" && *visibility == "" {
 				fmt.Printf("channel %s: already archived\n", *channel)
 				return
+			}
+			// An authoritative refusal (the signer is not the channel
+			// owner/admin) FAILS the command: the channel exists and needs its
+			// edit, so a skip would report a hollow success — the librem
+			// archive migration ran "ok" for days while archiving nothing.
+			// Failing keeps the migration queue unmarked and the build report
+			// loud until ownership is fixed.
+			if authzRefused(err.Error()) {
+				log.Fatalf("channel edit %s: relay refused (signer is not owner/admin): %v", *channel, err)
 			}
 			log.Fatalf("channel edit %s: %v", *channel, err)
 		}

@@ -75,13 +75,45 @@ func QueryGroups(relayURL string, authSecret []byte) ([]GroupMeta, error) {
 
 // QueryGroupsAuth is QueryGroups with a separate NIP-98 auth URL (the
 // pre-Caddy LAN-dial case: dial http://<host>:3000, sign the canonical https).
+//
+// The query PAGINATES: the relay clamps every query page at 1000 events
+// (newest-first), and kind-39000 is parameterized-replaceable — the relay
+// re-emits a channel's whole discovery event on every roster/metadata change,
+// so a busy relay holds many emissions per channel (a world's runner channels
+// re-stage on every build). A single page's window slides past quiet channels'
+// newest metadata as the event count grows, so page through with the relay's
+// until+before_id cursor until a short page and dedupe newest-wins by `d`.
 func QueryGroupsAuth(dialURL, authURL string, authSecret []byte) ([]GroupMeta, error) {
-	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
-		"kinds": []interface{}{wire.GroupMeta},
-		"limit": 1000,
-	}})
-	if err != nil {
-		return nil, err
+	const pageLimit = 1000
+	var events []map[string]interface{}
+	until := int64(0)
+	var beforeID string
+	for {
+		filter := map[string]interface{}{
+			"kinds": []interface{}{wire.GroupMeta},
+			"limit": pageLimit,
+		}
+		if until > 0 {
+			filter["until"] = until
+			filter["before_id"] = beforeID
+		}
+		page, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{filter})
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, page...)
+		if len(page) < pageLimit {
+			break
+		}
+		// The page is newest-first; its LAST event is the oldest — the next
+		// cursor (a same-second tie needs the id, not just the timestamp).
+		oldest := page[len(page)-1]
+		ca := intOr(oldest["created_at"])
+		id, _ := oldest["id"].(string)
+		if ca == 0 || id == "" || (ca == until && id == beforeID) {
+			break // malformed or no forward progress — keep what we have
+		}
+		until, beforeID = ca, id
 	}
 	newest := map[string]int64{}
 	name := map[string]string{}
