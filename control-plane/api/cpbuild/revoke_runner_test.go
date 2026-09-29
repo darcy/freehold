@@ -232,6 +232,49 @@ func TestRevokeRunnerSingleRemovalEditsTheRecord(t *testing.T) {
 	}
 }
 
+// TestRevokeRunnerRevokesADroppedAgentByItsDurableIdentity pins the
+// live-world case the v0.7.6 test hit: test-lxc's registry row was deleted
+// (manage_agent remove), but its grant lingered on the door's roster because
+// nothing could name its pubkey any more. The create path mints every agent's
+// identity under the agent-identity root and UnregisterAgent deletes only the
+// row, so the flow CAN resolve the pubkey itself — taking a grant away by the
+// identity it was granted to is pure de-escalation. The call must revoke it
+// (no orphan note), and must NOT try to re-apply a pod for an agent that no
+// longer exists (create() would mint a new one — the opposite of revoking).
+func TestRevokeRunnerRevokesADroppedAgentByItsDurableIdentity(t *testing.T) {
+	root := t.TempDir()
+	seedDoor(t, root, "rtx-ssh-root", "ssh", "darcy@10.0.0.55", "test-lxc", "network")
+	spec := revokeSpec(t, root)
+	// The durable identity survives the row: minted the way the create path
+	// mints, under the same root layout (AgentIdentityDir -> agents/<dir>).
+	spec.AgentIdentityDir = filepath.Join(root, "agent-tools")
+	if _, err := agent.EnsureIdentity(AgentIdentityPath(spec.AgentIdentityDir, "test-lxc")); err != nil {
+		t.Fatal(err)
+	}
+	// The registry row is the thing that is gone: a registry with no such row.
+	reg, _ := testRegistry(t)
+
+	report, err := BuildRevokeRunner(spec, reg)(agent.RetireArgs{
+		Name: "rtx-ssh-root", RevokeFrom: []string{"test-lxc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The grant was taken away by pubkey: the report cannot claim an unaddressable
+	// orphan, because the identity resolved.
+	if strings.Contains(report, "no registry row AND no durable identity dir") {
+		t.Fatalf("a durable identity must resolve the orphan's pubkey, got: %s", report)
+	}
+	if !strings.Contains(report, "no pod to re-apply") {
+		t.Fatalf("a registry-less agent must not be re-applied as a pod: %s", report)
+	}
+	disk := reopen(t, root)
+	rec, ok := disk.GetCapability("rtx-ssh-root")
+	if !ok || strings.Join(rec.Rosters, ",") != "network" {
+		t.Fatalf("test-lxc must be out of the recorded roster, got %+v (ok=%v)", rec, ok)
+	}
+}
+
 // TestRevokeRunnerWholeRetireRemovesRecordAndGuardsName pins the retirement:
 // the record leaves the table (so no build re-stages it and no agent's coords
 // resolve it) and the guard note lands with its provenance and its last roster —
