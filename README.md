@@ -654,10 +654,10 @@ Every PR runs two gates:
 - **AI review** (`ai-pr-review.yml`, "Bot Review"): reviews for real problems only. The reviewer
   runs as an opencode headless session over the checked-out repo, exploring it with read-only
   tools (no shell, no file writes, no PR-write token in its process) to verify cross-file
-  claims against the actual code. The job executes only trusted `main`'s scripts
-  and deps (a second checkout pinned to `main`); the PR state is explored read-only
-  by the agent and its diff fetched via the API —
-  nothing from an unreviewed head is ever run. Findings
+  claims against the actual code. The workflow runs `pull_request_target`-only, so the YAML,
+  scripts, and deps it executes are always trusted `main`'s — a PR can never rewrite what
+  reviews it — and the explored tree is trusted main too; the diff comes via the API, so
+  nothing from an unreviewed head is ever checked out, let alone run. Findings
   are tiered in the top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER
   (named follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
   BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
