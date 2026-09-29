@@ -62,6 +62,15 @@
 
 <div id="err" class="muted"></div>
 
+<div class="card">
+  <b>settings</b>
+  <div class="row" style="margin-top:8px">
+    <input id="set-tz" placeholder="timezone (IANA name, e.g. America/Chicago — blank = UTC)">
+    <button id="set-save">save settings</button>
+  </div>
+  <div class="small">Applies to agent pods on their next apply (a rebuild or agent create). Blank = pods run UTC.</div>
+</div>
+
 <div id="fill-overlay" style="display:none;position:fixed;inset:0;z-index:8;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
   <div style="max-width:30rem;padding:2rem;width:100%">
     <h2 id="fill-title">fill credential</h2>
@@ -251,6 +260,22 @@ $("#provision-form").onsubmit = async (ev) => {
   } catch (e) { $("#err").textContent = "error: " + e.message; }
 };
 
+// Settings: prefill from the CP (best-effort — before login this 401s and
+// the fields stay empty), save on click.
+async function loadSettings() {
+  try {
+    const res = await api("/api/settings");
+    if (res.settings) $("#set-tz").value = res.settings.operator_tz || "";
+  } catch (e) { /* not logged in yet — the save button surfaces errors */ }
+}
+$("#set-save").onclick = async () => {
+  try {
+    await api("/api/settings", { operator_tz: $("#set-tz").value.trim() });
+    $("#err").textContent = "";
+    $("#set-tz").value = $("#set-tz").value.trim();
+  } catch (e) { $("#err").textContent = "error: " + e.message; }
+};
+
 // The credential fill: the OPERATOR types the door's credential here — it is
 // sealed to the door's key by /api/rotate and never reaches any agent. Kind
 // aware: a unifi door takes username + password and the console composes the
@@ -312,6 +337,7 @@ $("#fill-submit").onclick = async () => {
 };
 
 refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
+loadSettings();
 </script>
 <div id="login-overlay" style="display:none;position:fixed;inset:0;z-index:9;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
   <div style="max-width:36rem;padding:2rem">

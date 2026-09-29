@@ -14,11 +14,11 @@ import (
 )
 
 // systemPrompt is the real multi-line prompt exactly as production ships it:
-// stageCpa passes agents.CPASystemPrompt("") into AgentManifestScript, so the
+// stageCpa passes agents.CPASystemPrompt("", "") into AgentManifestScript, so the
 // test uses that same composed value — the old tests passed a path string,
 // which is why the block-scalar bug compiled.
 func systemPrompt() string {
-	return agents.CPASystemPrompt("")
+	return agents.CPASystemPrompt("", "")
 }
 
 // TestCPAPodManifestBasics pins the CPA pod through its ONLY production render
@@ -27,7 +27,7 @@ func systemPrompt() string {
 // exact silent-failure shape this package exists to prevent.
 func TestCPAPodManifestBasics(t *testing.T) {
 	sp := systemPrompt()
-	m := CPAManifestScript(105, "wss://relay.test", sp, "waldo", "http://192.168.30.8:31400/v1", "", "", "", "")
+	m := CPAManifestScript(105, "wss://relay.test", sp, "waldo", "http://192.168.30.8:31400/v1", "", "", "", "", "")
 	for _, want := range []string{
 		"kind: Pod",
 		"kind: ConfigMap",
@@ -142,8 +142,8 @@ func TestCPAPodManifestBasics(t *testing.T) {
 // never apply over each other. Rendered through the production paths: the CPA
 // (CPAManifestScript) and a department (AgentPodManifest).
 func TestAgentPodManifestDistinctNames(t *testing.T) {
-	alice := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "alice", "http://192.168.30.8:31400/v1", "", "", "", "")
-	bob := AgentPodManifest("bob", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "anyone", "", "")
+	alice := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "alice", "http://192.168.30.8:31400/v1", "", "", "", "", "")
+	bob := AgentPodManifest("bob", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "anyone", "", "", "")
 	for _, want := range []string{"name: alice", "alice-identity", "name: bob", "bob-identity"} {
 		if !strings.Contains(alice, want) && !strings.Contains(bob, want) {
 			t.Errorf("neither manifest contains %q", want)
@@ -164,7 +164,7 @@ func TestAgentPodManifestMultiRunner(t *testing.T) {
 		{URL: "http://10.0.0.5:8791", Pubkey: "pkA", Target: "pve-ssh-root", Secret: "pve-ssh-root"},
 		{URL: "http://10.0.0.5:8793", Pubkey: "pkB", Target: "kube-api-caddysa", Secret: "kube-api-caddysa"},
 	}
-	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", "", runners...)
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", "", "", runners...)
 	urls, pubs, targets, secrets := runnerLists(runners)
 	for _, want := range []string{
 		`value: "` + urls + `"`,
@@ -191,31 +191,31 @@ func TestAgentPodManifestMultiRunner(t *testing.T) {
 // "allowlist" whose pubkeys ride the manifest as a plain env value — pubkeys
 // are public, the identity Secret carries only the nsec + agent-owner.
 func TestAgentPodRespondGate(t *testing.T) {
-	dept := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,network,data,compute,ai,cpa", "")
+	dept := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,network,data,compute,ai,cpa", "", "")
 	if !strings.Contains(dept, `name: BUZZ_ACP_RESPOND_TO, value: "allowlist"`) {
 		t.Errorf("department manifest must run the allowlist gate")
 	}
 	if !strings.Contains(dept, `name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "op,network,data,compute,ai,cpa"`) {
 		t.Errorf("department manifest must carry its respond-to allowlist")
 	}
-	custom := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", "")
+	custom := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", "", "")
 	if !strings.Contains(custom, `name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "op,cpa"`) {
 		t.Errorf("custom-agent manifest must carry its asker + CPA allowlist")
 	}
-	cpa := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "", "", "")
+	cpa := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "", "", "", "")
 	if !strings.Contains(cpa, `name: BUZZ_ACP_RESPOND_TO, value: "anyone"`) {
 		t.Errorf("CPA manifest must run the anyone gate")
 	}
 	// An empty allowlist must omit the env entirely (buzz-acp then wakes for
 	// the owner only — the legacy owner-only behavior).
-	ownerOnly := AgentPodManifest("legacy", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "", "")
+	ownerOnly := AgentPodManifest("legacy", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "", "", "")
 	if strings.Contains(ownerOnly, "BUZZ_ACP_RESPOND_TO_ALLOWLIST") {
 		t.Errorf("empty allowlist must omit the allowlist env")
 	}
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key", "", "", "")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key", "", "", "", "")
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,
@@ -243,7 +243,7 @@ func TestCPAManifestScriptApplies(t *testing.T) {
 // pod re-apply AND a rebuilt k3s guest. A uid-keyed PVC dir would orphan the
 // data on exactly the rebuild path this exists to survive.
 func TestAgentPodWorkspaceIsDurableAndNameKeyed(t *testing.T) {
-	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "")
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "", "")
 	for _, want := range []string{
 		"mountPath: " + AgentHomePath,
 		"hostPath: {path: " + AgentWorkspaceDir("network") + ", type: DirectoryOrCreate}",
@@ -254,7 +254,7 @@ func TestAgentPodWorkspaceIsDurableAndNameKeyed(t *testing.T) {
 		}
 	}
 	// Two agents must own DIFFERENT durable dirs (no shared workspace).
-	other := AgentPodManifest("network-two", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "")
+	other := AgentPodManifest("network-two", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "", "")
 	if strings.Contains(other, "hostPath: {path: "+AgentWorkspaceDir("network")+",") {
 		t.Errorf("a second agent's manifest reuses the first agent's workspace dir")
 	}
@@ -310,7 +310,7 @@ func TestAgentPodAuthTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	manifest := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", tag.JSON())
+	manifest := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "http://at:8080", "atpk", "allowlist", "op,cpa", tag.JSON(), "")
 
 	// The tag must parse out of the Pod doc as the four-element array the CLI
 	// expects, and STILL VERIFY for the agent key the pod boots with: that is
@@ -346,7 +346,7 @@ func TestAgentPodAuthTag(t *testing.T) {
 
 	// And the unattested shape: no line at all (rather than an empty one, which
 	// the CLI would report as a malformed tag at the agent's first write).
-	if plain := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op,cpa", ""); strings.Contains(plain, "BUZZ_AUTH_TAG") {
+	if plain := AgentPodManifest("helper", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op,cpa", "", ""); strings.Contains(plain, "BUZZ_AUTH_TAG") {
 		t.Errorf("an empty attestation must omit the env entirely")
 	}
 }
@@ -404,7 +404,7 @@ func TestCPAManifestCarriesAuthTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "http://at:8080", "atpk", tag.JSON())
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "http://at:8080", "atpk", tag.JSON(), "")
 	for _, want := range []string{"BUZZ_AUTH_TAG", tag.Owner, nipoa.EngramConditions} {
 		if !strings.Contains(s, want) {
 			t.Errorf("CPA deploy script missing %q", want)
@@ -452,7 +452,7 @@ func TestCPAManifestCarriesAuthTag(t *testing.T) {
 
 // TestAgentOwnerIsSecretRefed closes the same gap for a department/custom pod.
 func TestAgentOwnerIsSecretRefed(t *testing.T) {
-	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "")
+	m := AgentPodManifest("network", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "allowlist", "op", "", "")
 	if !strings.Contains(m, "secretKeyRef: {name: network-identity, key: owner}") {
 		t.Errorf("agent-owner must come from the identity Secret, not a literal")
 	}
@@ -496,5 +496,32 @@ func TestSanitizePodName(t *testing.T) {
 		if got := sanitizePodName(in); got != want {
 			t.Errorf("sanitizePodName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestAgentPodTimezone: an operator TZ reaches the pod as a TZ env line plus a
+// read-only zoneinfo hostPath mount (the Alpine image ships no tzdata); no
+// setting renders NEITHER — the pod runs UTC, the pre-settings shape.
+func TestAgentPodTimezone(t *testing.T) {
+	tz := AgentPodManifest("bob", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "anyone", "", "", "America/Chicago")
+	env := podEnv(t, tz)
+	if env["TZ"] != "America/Chicago" {
+		t.Errorf("TZ env = %q, want America/Chicago", env["TZ"])
+	}
+	for _, want := range []string{
+		"mountPath: /usr/share/zoneinfo, readOnly: true",
+		"hostPath: {path: /usr/share/zoneinfo, type: DirectoryOrCreate}",
+	} {
+		if !strings.Contains(tz, want) {
+			t.Errorf("manifest with a timezone missing %q", want)
+		}
+	}
+
+	utc := AgentPodManifest("bob", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "anyone", "", "", "")
+	if _, ok := podEnv(t, utc)["TZ"]; ok {
+		t.Errorf("no-setting manifest carries a TZ env; pods must run UTC unchanged")
+	}
+	if strings.Contains(utc, "zoneinfo") {
+		t.Errorf("no-setting manifest mounts zoneinfo; want no TZ bits at all")
 	}
 }

@@ -623,6 +623,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Mode == ModeRunning {
 				m.beginPrompt(flowGrant)
 			}
+		case "s":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowSettings)
+				// Prefill the current setting (best-effort sync read — the
+				// same session the form will write through).
+				if m.console != nil && m.console.client != nil {
+					if set, err := m.console.client.SettingsGet(); err == nil {
+						m.Flow.Defaults[0] = set.OperatorTZ
+						m.Flow.Field.SetValue(set.OperatorTZ)
+						m.Flow.Field.CursorEnd()
+					}
+				}
+			}
 			// Build/bootstrap/teardown/deploy are NOT run from the TUI — the TUI is
 			// a status/operating dashboard. Run `freehold build` / `freehold teardown`
 			// in a terminal instead (single canonical flow).
@@ -764,7 +777,7 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s%s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second), op)) +
-			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · w web · build/teardown run from the shell")
+			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · s settings · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
 	case ModeBootstrap, ModeConfigure:

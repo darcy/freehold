@@ -30,7 +30,7 @@ import (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns> …")
+		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings> …")
 		os.Exit(2)
 	}
 	var err error
@@ -57,8 +57,10 @@ func main() {
 		err = cmdServices(os.Args[2:])
 	case "dns":
 		err = cmdDNS(os.Args[2:])
+	case "settings":
+		err = cmdSettings(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -685,6 +687,61 @@ func cmdGrantsMode(args []string) error {
 		return err
 	}
 	fmt.Printf("agent-grants mode: %s\n", *mode)
+	return nil
+}
+
+// cmdSettings reads or sets the operator settings (state.Settings): the
+// timezone the agent pods run (the seed the deploy does when the setting is
+// unset, and the console/TUI edit surface's CLI twin). --operator-tz omitted
+// prints the current value; --if-empty writes only when the setting is unset
+// (an operator's edit survives re-deploys).
+func cmdSettings(args []string) error {
+	fs := flag.NewFlagSet("settings", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	tz := fs.String("operator-tz", "", "operator IANA timezone (e.g. America/Chicago); omitted = print the current value; empty (--operator-tz=) clears")
+	ifEmpty := fs.Bool("if-empty", false, "write only when the timezone setting is currently unset")
+	fs.Parse(args)
+	if *stateDir == "" {
+		return fmt.Errorf("settings --state-dir [--operator-tz ZONE] [--if-empty]")
+	}
+	store, err := state.Open(*stateDir)
+	if err != nil {
+		return err
+	}
+	cur := state.Settings{}
+	if s := store.Settings(); s != nil {
+		cur = *s
+	}
+	tzSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "operator-tz" {
+			tzSet = true
+		}
+	})
+	if !tzSet {
+		if cur.OperatorTZ == "" {
+			fmt.Println("operator timezone: unset (pods run UTC)")
+		} else {
+			fmt.Println("operator timezone:", cur.OperatorTZ)
+		}
+		return nil
+	}
+	if *ifEmpty && cur.OperatorTZ != "" {
+		fmt.Printf("operator timezone already set (%s) — kept\n", cur.OperatorTZ)
+		return nil
+	}
+	if *tz != "" && !state.ValidOperatorTZ(*tz) {
+		return fmt.Errorf("unknown timezone %s (want an IANA name, e.g. America/Chicago)", *tz)
+	}
+	cur.OperatorTZ = *tz
+	if err := store.SetSettings(&cur); err != nil {
+		return err
+	}
+	if *tz == "" {
+		fmt.Println("operator timezone cleared (pods run UTC)")
+	} else {
+		fmt.Printf("operator timezone: %s\n", *tz)
+	}
 	return nil
 }
 

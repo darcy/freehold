@@ -373,7 +373,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
     Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
     recheck the world, `w` open the web console, `l` log in with the operator nsec,
-    `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
+    `p`/`x`/`g` provision/revoke/grant, `s` edit the operator settings
+    (today: the agent pods' timezone). Build/teardown run from the shell.
     (The `s` Runners-source toggle is gone: the box-local `state.json` mirror
     is deleted — the Runners view reads the console `/api/overview` only. The
     CP-lifecycle door model — implemented as `world_authorize_door` /
@@ -640,6 +641,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     shipped) that signs readiness probes against each runner — no side door,
     the runner still fails closed. `contract/console` is the Go client that
     talks to it.
+
+*   **Operator settings live in CP state** (`state.Settings`, edited via
+    `GET/POST /api/settings` — the console web's settings card, the TUI's `s`
+    form, and `freehold-console settings`; the deploy seeds the box's own
+    timezone if-empty). The first setting is `operator_tz`: the IANA timezone
+    agent pods run (`TZ` env + the node's zoneinfo mounted read-only; empty =
+    pods run UTC). The build reads it fresh per pod apply, so an edit lands on
+    the next create/rebuild.
 
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`

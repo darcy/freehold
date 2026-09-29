@@ -203,7 +203,9 @@ are. There is no implicit "default" profile.
   untouched, box
   identity kept). `w` then opens the web console in your browser already
   authenticated (single-use portal token — no `console-login`). Keys are scoped
-  to the active view.
+  to the active view. `s` edits the operator settings (today: the timezone
+  agent pods run) against the CP; the web console carries the same settings
+  card, and `freehold-console settings` is the CP-side CLI verb.
 
 The same session flows bootstrap → configure → running as the world converges.
 

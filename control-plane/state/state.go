@@ -176,6 +176,18 @@ func (r CapabilityRecord) SelfHosted() bool {
 	return r.Hosted == HostedSelf
 }
 
+// Settings is the operator-editable control-plane configuration (the console
+// web / TUI / `freehold-console settings` all write it; the build reads it).
+// Typed fields, not a map: a new setting is a field with a known JSON shape.
+// The group is a pointer in ControlPlaneState, so old state files (no key)
+// unmarshal to nil and read as zero values — no migration needed.
+type Settings struct {
+	// OperatorTZ is the IANA timezone the operator lives in (e.g.
+	// "America/Chicago"). Agent pods get it as TZ (+ the node's zoneinfo
+	// mounted) so their clocks report local time; empty = pods run UTC.
+	OperatorTZ string `json:"operator_tz,omitempty"`
+}
+
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
 type ControlPlaneState struct {
 	Runners map[string]RunnerRecord `json:"runners"`
@@ -183,10 +195,10 @@ type ControlPlaneState struct {
 	DNS     map[string]DnsRecord    `json:"dns"`
 	// Services is the world-services health registry (k3s/litellm/caddy coords),
 	// recorded at build and served on /api/world for management boxes.
-	Services         map[string]WorldService `json:"services,omitempty"`
+	Services map[string]WorldService `json:"services,omitempty"`
 	// Capabilities is the dynamic capability-runner table (the provision_runner
 	// flow's records; the static half lives in cpbuild.capabilityRunners).
-	Capabilities     map[string]CapabilityRecord `json:"capabilities,omitempty"`
+	Capabilities map[string]CapabilityRecord `json:"capabilities,omitempty"`
 	// RetiredCapabilities holds the guard notes for doors the CPA's
 	// revoke_runner retired (see RetiredCapability). The name stays refused by
 	// provision_runner until an operator clears the note — by re-provisioning
@@ -195,16 +207,17 @@ type ControlPlaneState struct {
 	// AgentGrants is the agent-grant mode: "confirm" (default — the CPA grants
 	// when the operator's ask is in its own thread, else DMs for a yes), "auto"
 	// (grants land unconfirmed), "off" (server-denies agent provisioning).
-	AgentGrants      *string                 `json:"agent_grants,omitempty"`
-	ResolverDomain   *string                 `json:"resolver_domain,omitempty"`
-	ResolverWildcard *DnsWildcard            `json:"resolver_wildcard,omitempty"`
-	Agents           map[string]AgentRecord  `json:"agents"`
-	RelayHost        *string                 `json:"relay_host,omitempty"`
-	Admins           []string                `json:"admins"`
-	RelayURL         *string                 `json:"relay_url,omitempty"`
-	RelayPubkey      *string                 `json:"relay_pubkey,omitempty"`
-	AgentToolsURL    *string                 `json:"agent_tools_url,omitempty"`
-	AgentToolsPubkey *string                 `json:"agent_tools_pubkey,omitempty"`
+	AgentGrants      *string                `json:"agent_grants,omitempty"`
+	Settings         *Settings              `json:"settings,omitempty"`
+	ResolverDomain   *string                `json:"resolver_domain,omitempty"`
+	ResolverWildcard *DnsWildcard           `json:"resolver_wildcard,omitempty"`
+	Agents           map[string]AgentRecord `json:"agents"`
+	RelayHost        *string                `json:"relay_host,omitempty"`
+	Admins           []string               `json:"admins"`
+	RelayURL         *string                `json:"relay_url,omitempty"`
+	RelayPubkey      *string                `json:"relay_pubkey,omitempty"`
+	AgentToolsURL    *string                `json:"agent_tools_url,omitempty"`
+	AgentToolsPubkey *string                `json:"agent_tools_pubkey,omitempty"`
 }
 
 // StateStore wraps the in-memory control-plane state with atomic-0600 save.
@@ -511,6 +524,47 @@ func (s *StateStore) AgentToolsPubkey() *string { return s.state.AgentToolsPubke
 func (s *StateStore) SetAgentToolsPubkey(p *string) error {
 	s.state.AgentToolsPubkey = p
 	return s.Save()
+}
+
+// Settings returns the operator settings (nil = all defaults).
+func (s *StateStore) Settings() *Settings { return s.state.Settings }
+
+// SetSettings replaces the operator settings + saves.
+func (s *StateStore) SetSettings(set *Settings) error {
+	s.state.Settings = set
+	return s.Save()
+}
+
+// ValidOperatorTZ reports whether tz is a settings-writable operator
+// timezone: empty (= unset, pods run UTC) or an IANA zone name. Go's "Local"
+// special case is refused — it loads fine but no musl/glibc pod resolves it,
+// so it would silently read as UTC while looking like a setting (and the
+// deploy's seed would preserve it forever via --if-empty).
+func ValidOperatorTZ(tz string) bool {
+	if tz == "" {
+		return true
+	}
+	if tz == "Local" {
+		return false
+	}
+	_, err := time.LoadLocation(tz)
+	return err == nil
+}
+
+// LoadReadOnly reads state.json from dir WITHOUT opening a writable store —
+// the read a second process (the agent-tools serve) does per build so a
+// console-side settings edit is visible without a serve restart. The state
+// store is single-writer by design; this never writes.
+func LoadReadOnly(dir string) (*ControlPlaneState, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, StateFile))
+	if err != nil {
+		return nil, err
+	}
+	var cp ControlPlaneState
+	if err := json.Unmarshal(raw, &cp); err != nil {
+		return nil, fmt.Errorf("malformed state json: %w", err)
+	}
+	return &cp, nil
 }
 
 // Dir returns the state dir.
