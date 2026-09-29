@@ -19,8 +19,10 @@ import (
 
 	"freehold/contract/config"
 	"freehold/contract/console"
+	"freehold/contract/crypto"
 	"freehold/contract/version"
 	"freehold/freehold-cli/internal/artifact"
+	"freehold/freehold-cli/internal/certcred"
 	"freehold/freehold-cli/internal/common"
 	"freehold/freehold-cli/internal/stages"
 	oplogin "freehold/freehold-cli/login"
@@ -135,6 +137,18 @@ func run(ctx context.Context, o options) error {
 	fmt.Println("→ deploying binaries + copying migration scripts")
 	if err := eng.RedeployCp(bins, set.MigrationsDir); err != nil {
 		return err
+	}
+
+	// Seed the operator identity the NEW console already accepts (the deploy
+	// above shipped it): the memory-plane attestation mints every agent pod
+	// with it, and a world built before the operator secret existed fails its
+	// reconcile at create-CPA with "no owner key to attest". The build seeds
+	// the same secret; seeding here too makes `update` alone heal an old world
+	// instead of demanding a build-then-update dance. Best-effort: a failure
+	// surfaces through the reconcile's own attest error, which names the
+	// recovery.
+	if err := seedOperatorSecret(cfg); err != nil {
+		fmt.Printf("  (operator secret not seeded: %v — the reconcile names the recovery if it's needed)\n", err)
 	}
 
 	// Reconcile FIRST: the deploy stopped every freehold-runner* unit (the
@@ -376,6 +390,51 @@ func orDash(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// seedOperatorSecret ships the operator identity (the world's owner key) to the
+// CP when absent — the same sealed record `build` seeds, needed by the
+// memory-plane attestation the reconcile's create-CPA runs. Skipped when the
+// CP already holds it (the CP is the durable owner; a build never overwrites
+// it either).
+func seedOperatorSecret(cfg *config.Config) error {
+	client, err := common.ConsoleLogin(cfg)
+	if err != nil {
+		return err
+	}
+	names, err := client.SecretNames()
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if n == "operator" {
+			return nil
+		}
+	}
+	w, err := client.World()
+	if err != nil || w.ConsoleEncPubkey == "" {
+		return fmt.Errorf("no console enc pubkey from /api/world")
+	}
+	pub, err := hex.DecodeString(w.ConsoleEncPubkey)
+	if err != nil || len(pub) != 32 {
+		return fmt.Errorf("console enc pubkey not 32-byte hex")
+	}
+	opID, err := box.LoadIdentity(oplogin.Dir())
+	if err != nil {
+		return fmt.Errorf("read the operator identity ledger: %w (run `freehold login`)", err)
+	}
+	seal := func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) }
+	blob, err := certcred.CPSecretBlob("operator", "operator", map[string]string{
+		"nostr": opID.NostrSecretHex,
+	}, seal, pub)
+	if err != nil {
+		return err
+	}
+	if err := client.PutSecret("operator", blob); err != nil {
+		return err
+	}
+	fmt.Println("  · operator identity stored on the CP (attests agent memory)")
+	return nil
 }
 
 // Command returns the update command for root registration.

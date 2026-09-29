@@ -72,8 +72,8 @@ func init() {
 }
 
 func registerBuildFlags(cmd *cobra.Command) {
-	cmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
-	cmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
+	cmd.Flags().String("addr", "", "Runner MCP address (loopback; default: the config's [runner] addr, else 127.0.0.1:8787)")
+	cmd.Flags().String("target", "", "Runner name (default: the config's [runner] target, else proxmox-box)")
 	cmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
 	cmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
@@ -134,8 +134,16 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	f.ResetDNS, _ = cmd.Flags().GetBool("reset-dns")
 	f.ManageDNS, _ = cmd.Flags().GetBool("manage-dns")
 	f.ManageDNSExplicit = cmd.Flags().Changed("manage-dns")
+	f.Addr, _ = cmd.Flags().GetString("addr")
+	f.Target, _ = cmd.Flags().GetString("target")
 	if err := box.ApplyConfigDefaults(&f, f.ConfigPath); err != nil {
 		return nil, err
+	}
+	if f.Addr == "" {
+		f.Addr = "127.0.0.1:8787"
+	}
+	if f.Target == "" {
+		f.Target = "proxmox-box"
 	}
 	if f.ResetDNS {
 		certcred.ClearStoredDNSCreds()
@@ -266,6 +274,9 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 			return err
 		}
 		if err := client.PutSecret("operator", blob); err != nil {
+			if strings.Contains(err.Error(), "refusing secret name") {
+				return fmt.Errorf("seed the operator identity on CP: %w — the CP predates this release (it rejects the operator secret the memory plane needs); run `freehold update` first (it ships the current console), then re-run `freehold build`", err)
+			}
 			return fmt.Errorf("seed the operator identity on CP: %w", err)
 		}
 		fmt.Fprintln(e.Out, "  · operator identity stored on the CP (attests agent memory)")
