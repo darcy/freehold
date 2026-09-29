@@ -79,19 +79,23 @@ func repoURLOr(url string) string {
 }
 
 // renderOrientation renders the shared system-orientation block for a repo URL
-// (empty = the upstream default). The template is fixed at build time and its
-// only field is provided, so Execute cannot fail at runtime.
-func renderOrientation(repoURL string) string {
+// (empty = the upstream default) and the operator's timezone (empty = no
+// timezone note — pods run UTC). The template is fixed at build time and its
+// only fields are provided, so Execute cannot fail at runtime.
+func renderOrientation(repoURL, operatorTZ string) string {
 	var b strings.Builder
-	_ = orientationTmpl.Execute(&b, struct{ RepoURL string }{repoURLOr(repoURL)})
+	_ = orientationTmpl.Execute(&b, struct {
+		RepoURL    string
+		OperatorTZ string
+	}{repoURLOr(repoURL), strings.TrimSpace(operatorTZ)})
 	return strings.TrimRight(b.String(), "\n")
 }
 
 // CPASystemPrompt is the freehold named agent's full purpose: the shared system
 // orientation plus freehold/prompt.md, plus the granting skill. repoURL empty
-// = the upstream default.
-func CPASystemPrompt(repoURL string) string {
-	return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(cpaPrompt, "\n") +
+// = the upstream default; operatorTZ empty = no timezone note.
+func CPASystemPrompt(repoURL, operatorTZ string) string {
+	return renderOrientation(repoURL, operatorTZ) + "\n\n" + strings.TrimRight(cpaPrompt, "\n") +
 		"\n\n" + strings.TrimRight(grantingSkill, "\n") +
 		"\n\n" + strings.TrimRight(accessUnifiSkill, "\n")
 }
@@ -184,10 +188,11 @@ func DepartmentChannels(name string) []string {
 // shared system orientation; any other name renders the custom template with the
 // purpose supplied at create time (and NO orientation — custom agents are exempt
 // from the repo/escalation block). This is the single selection point for which
-// definition a create uses. repoURL empty = the upstream default.
-func SystemPrompt(name, purpose, repoURL string) string {
+// definition a create uses. repoURL empty = the upstream default; operatorTZ
+// empty = no timezone note.
+func SystemPrompt(name, purpose, repoURL, operatorTZ string) string {
 	if p, ok := DepartmentPrompt(name); ok {
-		return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(p, "\n")
+		return renderOrientation(repoURL, operatorTZ) + "\n\n" + strings.TrimRight(p, "\n")
 	}
 	return AgentSystemPrompt(name, purpose)
 }

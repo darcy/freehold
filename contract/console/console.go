@@ -538,6 +538,50 @@ type DnsRecord struct {
 	CreatedAt uint64 `json:"created_at"`
 }
 
+// Settings mirrors the CP's operator settings (state.Settings). OperatorTZ
+// empty = the pods run UTC.
+type Settings struct {
+	OperatorTZ string `json:"operator_tz,omitempty"`
+}
+
+// SettingsGet reads the CP's operator settings (GET /api/settings). Nil
+// settings (never written) read as zero values.
+func (c *Client) SettingsGet() (*Settings, error) {
+	raw, err := c.request(http.MethodGet, "/api/settings", nil)
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Settings *Settings `json:"settings"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	if v.Settings == nil {
+		v.Settings = &Settings{}
+	}
+	return v.Settings, nil
+}
+
+// SettingsSet writes the operator settings (POST /api/settings). tz is the
+// IANA timezone the agent pods run; empty clears it (pods run UTC).
+func (c *Client) SettingsSet(tz string) (*Settings, error) {
+	raw, err := c.request(http.MethodPost, "/api/settings", map[string]string{"operator_tz": tz})
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Settings *Settings `json:"settings"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	if v.Settings == nil {
+		v.Settings = &Settings{}
+	}
+	return v.Settings, nil
+}
+
 // DnsView is the console's DNS surface: records + the rendered addn-hosts.
 type DnsView struct {
 	DNS       []DnsRecord `json:"dns"`

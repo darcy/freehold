@@ -176,6 +176,18 @@ func (r CapabilityRecord) SelfHosted() bool {
 	return r.Hosted == HostedSelf
 }
 
+// Settings is the operator-editable control-plane configuration (the console
+// web / TUI / `freehold-console settings` all write it; the build reads it).
+// Typed fields, not a map: a new setting is a field with a known JSON shape.
+// The group is a pointer in ControlPlaneState, so old state files (no key)
+// unmarshal to nil and read as zero values — no migration needed.
+type Settings struct {
+	// OperatorTZ is the IANA timezone the operator lives in (e.g.
+	// "America/Chicago"). Agent pods get it as TZ (+ the node's zoneinfo
+	// mounted) so their clocks report local time; empty = pods run UTC.
+	OperatorTZ string `json:"operator_tz,omitempty"`
+}
+
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
 type ControlPlaneState struct {
 	Runners map[string]RunnerRecord `json:"runners"`
@@ -196,6 +208,7 @@ type ControlPlaneState struct {
 	// when the operator's ask is in its own thread, else DMs for a yes), "auto"
 	// (grants land unconfirmed), "off" (server-denies agent provisioning).
 	AgentGrants      *string                 `json:"agent_grants,omitempty"`
+	Settings         *Settings               `json:"settings,omitempty"`
 	ResolverDomain   *string                 `json:"resolver_domain,omitempty"`
 	ResolverWildcard *DnsWildcard            `json:"resolver_wildcard,omitempty"`
 	Agents           map[string]AgentRecord  `json:"agents"`
@@ -511,6 +524,31 @@ func (s *StateStore) AgentToolsPubkey() *string { return s.state.AgentToolsPubke
 func (s *StateStore) SetAgentToolsPubkey(p *string) error {
 	s.state.AgentToolsPubkey = p
 	return s.Save()
+}
+
+// Settings returns the operator settings (nil = all defaults).
+func (s *StateStore) Settings() *Settings { return s.state.Settings }
+
+// SetSettings replaces the operator settings + saves.
+func (s *StateStore) SetSettings(set *Settings) error {
+	s.state.Settings = set
+	return s.Save()
+}
+
+// LoadReadOnly reads state.json from dir WITHOUT opening a writable store —
+// the read a second process (the agent-tools serve) does per build so a
+// console-side settings edit is visible without a serve restart. The state
+// store is single-writer by design; this never writes.
+func LoadReadOnly(dir string) (*ControlPlaneState, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, StateFile))
+	if err != nil {
+		return nil, err
+	}
+	var cp ControlPlaneState
+	if err := json.Unmarshal(raw, &cp); err != nil {
+		return nil, fmt.Errorf("malformed state json: %w", err)
+	}
+	return &cp, nil
 }
 
 // Dir returns the state dir.

@@ -33,5 +33,9 @@ source repository is the authoritative description of how the system is set up:
   that channel is where every core agent lives. If the conversation needs someone who is
   not a member of its channel, move it to #freehold rather than assuming they saw it:
   membership is the boundary of what reaches an agent.
-- Reference secrets by name only; you never see plaintext credentials, and everything you say
+{{if .OperatorTZ}}- **Timezones:** your pod's clock runs the operator's timezone
+  (**{{.OperatorTZ}}**). Guest boxes you exec on and some message/metadata timestamps still
+  report UTC — check which clock you are reading (a quick `date` tells you) before stating
+  a time to the operator.
+{{end}}- Reference secrets by name only; you never see plaintext credentials, and everything you say
   and do is relay-audited — never route around the audited surfaces.

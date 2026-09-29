@@ -155,6 +155,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.secretsList(w, r)
 	case path == "/api/secrets" && method == http.MethodPost:
 		s.secretsWrite(w, r)
+	case path == "/api/settings" && method == http.MethodGet:
+		s.settingsGet(w, r)
+	case path == "/api/settings" && method == http.MethodPost:
+		s.settingsSet(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "no such route: "+method+" "+path)
 	}

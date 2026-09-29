@@ -227,6 +227,22 @@ func authTagEnvLine(authTag string) string {
 	return fmt.Sprintf("    - {name: BUZZ_AUTH_TAG, value: %q}\n", authTag)
 }
 
+// tzPodBits renders the TZ extras for an agent pod: the env line plus a
+// read-only hostPath mount of the node's zoneinfo (the Alpine image ships no
+// tzdata, so a named zone only resolves with the node's files). Empty tz (no
+// setting) renders nothing — the pod runs UTC, the pre-settings shape.
+// DirectoryOrCreate (not Directory) degrades gracefully: a node without
+// zoneinfo mounts an empty dir and musl falls back to UTC.
+func tzPodBits(tz string) (envLine, mountLine, volume string) {
+	if tz == "" {
+		return "", "", ""
+	}
+	envLine = fmt.Sprintf("    - {name: TZ, value: %q}\n", tz)
+	mountLine = "    - {name: zoneinfo, mountPath: /usr/share/zoneinfo, readOnly: true}\n"
+	volume = "  - name: zoneinfo\n    hostPath: {path: /usr/share/zoneinfo, type: DirectoryOrCreate}\n"
+	return envLine, mountLine, volume
+}
+
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
 // agent is ONE pod (at-most-one-live-instance, I4); the harness is the
 // container's PID-1 process (entrypoint `exec`), presence is kind:20001, and
@@ -273,7 +289,7 @@ func authTagEnvLine(authTag string) string {
 // authTag is the rendered NIP-OA attestation for the agent's memory plane
 // (BUZZ_AUTH_TAG) — see authTagEnvLine. Empty omits the env: the agent then has
 // the harness but no writable long-term memory, which is the pre-fix shape.
-func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag string, runner ...RunnerCoords) string {
+func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
@@ -283,6 +299,7 @@ func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellm
 		respondAllowlistEnv = fmt.Sprintf("    - {name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: %q}\n", respondAllowlist)
 	}
 	authTagEnv := authTagEnvLine(authTag)
+	tzEnv, tzMount, tzVolume := tzPodBits(operatorTZ)
 	runnerEnv := ""
 	if len(runner) > 0 {
 		urls, pubs, targets, secrets := runnerLists(runner)
@@ -336,7 +353,7 @@ spec:
     - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
     - {name: FREEHOLD_AGENT_TOOLS_URL, value: %q}
     - {name: FREEHOLD_AGENT_TOOLS_PUBKEY, value: %q}
-%s%s%s    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+%s%s%s%s    - {name: PATH, value: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
     - {name: OPENAI_COMPAT_BASE_URL, value: %q}
     - {name: OPENAI_COMPAT_MODEL, value: %q}
     - name: OPENAI_COMPAT_API_KEY
@@ -351,7 +368,7 @@ spec:
     volumeMounts:
     - {name: workspace, mountPath: %s}
     - {name: prompt, mountPath: %s, readOnly: true, subPath: %s}
-  volumes:
+%s  volumes:
   # The workspace: a name-keyed dir on the durable plane (the deploy script
   # mkdirs + chowns it to the agent user before this manifest applies), so an
   # agent's files survive pod re-applies AND a rebuilt k3s guest. hostPath is
@@ -361,7 +378,7 @@ spec:
     hostPath: {path: %s, type: DirectoryOrCreate}
   - name: prompt
     configMap: {name: %s}
----
+%s---
 apiVersion: v1
 kind: Service
 metadata:
@@ -374,11 +391,11 @@ spec:
 `,
 		promptCm, SystemPromptFile, indentSystemPrompt(systemPrompt),
 		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
-		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, authTagEnv, runnerEnv,
+		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, authTagEnv, runnerEnv, tzEnv,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
-		secret, secret, AgentHomePath, SystemPromptPath, SystemPromptFile,
-		AgentWorkspaceDir(pod), promptCm, pod, pod)
+		secret, secret, AgentHomePath, SystemPromptPath, SystemPromptFile, tzMount,
+		AgentWorkspaceDir(pod), promptCm, tzVolume, pod, pod)
 }
 
 // indentSystemPrompt indents every prompt line by four spaces so it embeds as
@@ -403,7 +420,10 @@ func indentSystemPrompt(prompt string) string {
 // (BUZZ_AUTH_TAG; see AgentPodManifest). It travels with the manifest, so the
 // delete-then-apply below carries it on every re-apply — a re-apply must never
 // be the thing that silently drops an agent's memory.
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag string, runner ...RunnerCoords) string {
+//
+// operatorTZ sets the pod's TZ (+ the node's zoneinfo mount) — see tzPodBits.
+// Empty = the pod runs UTC.
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	wsDir := AgentWorkspaceDir(pod)
 	return fmt.Sprintf(`set -euo pipefail
@@ -430,7 +450,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, wsDir, wsDir, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, runner...),
+		k3sVmid, wsDir, wsDir, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ, runner...),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 
@@ -444,12 +464,12 @@ echo AGENT_LEG1_OK`,
 // CP toolset. The CPA's inbound author gate is "anyone" — relay membership is
 // the bound; the CPA is the system's main user touchpoint and every agent's
 // delegate.
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey, authTag string) string {
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey, authTag, operatorTZ string) string {
 	keySec := litellmKeySecret
 	if keySec == "" {
 		keySec = sanitizePodName(cpaName) + "-litellm-key"
 	}
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag)
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag, operatorTZ)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in

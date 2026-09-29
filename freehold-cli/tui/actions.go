@@ -87,6 +87,7 @@ const (
 	flowRotate
 	flowRevoke
 	flowGrant
+	flowSettings
 	flowBootstrap
 	flowDeployRelay
 	flowDeployCp
@@ -229,6 +230,8 @@ func promptLabel(k flowKind, step int) string {
 			return "runner name"
 		}
 		return "agent pubkey (64-hex)"
+	case flowSettings:
+		return "operator timezone (IANA, e.g. America/Chicago — blank = UTC)"
 	case flowBootstrap:
 		switch step {
 		case 0:
@@ -501,6 +504,11 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				return flowMsg{err: err}
 			}
 			return flowMsg{ok: "granted " + f.Inputs[1] + " on " + f.Inputs[0]}
+		case flowSettings:
+			if _, err := c.SettingsSet(strings.TrimSpace(f.Inputs[0])); err != nil {
+				return flowMsg{err: err}
+			}
+			return flowMsg{ok: "settings saved — agent pods pick the timezone up on their next apply"}
 		default:
 			return flowMsg{err: fmt.Errorf("unhandled flow")}
 		}

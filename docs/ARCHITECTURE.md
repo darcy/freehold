@@ -641,6 +641,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     the runner still fails closed. `contract/console` is the Go client that
     talks to it.
 
+*   **Operator settings live in CP state** (`state.Settings`, edited via
+    `GET/POST /api/settings` — the console web's settings card, the TUI's `s`
+    form, and `freehold-console settings`; the deploy seeds the box's own
+    timezone if-empty). The first setting is `operator_tz`: the IANA timezone
+    agent pods run (`TZ` env + the node's zoneinfo mounted read-only; empty =
+    pods run UTC). The build reads it fresh per pod apply, so an edit lands on
+    the next create/rebuild.
+
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`
     per connector the system never parses.
