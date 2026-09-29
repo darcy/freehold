@@ -2,7 +2,7 @@
 name: release-test-proxmox
 description: Use when validating a freehold pre-release on a real Proxmox host (e.g. "test the release", "run the Proxmox release tests"). Restores the pre-release's own downloaded assets and runs three envs on a real PVE host — Fresh (the full install→uninstall lifecycle on a disposable world), Rebuild (teardown→build on the persistent env, left running), and Live (`freehold update` against the always-running env) — then updates the release's test-status table rows for Proxmox.
 metadata:
-  version: 2.3.0
+  version: 2.4.0
   author: freehold
   license: MIT
 ---
@@ -33,7 +33,9 @@ row per provider × env × test. When every row is ✅, it hands off to `release
 
 ## When to use
 
-After `release-prepare` published a pre-release, to validate it on Proxmox. Destructive on
+After `release-prepare` published a pre-release, to validate it on Proxmox — invoked by
+`release-test` (the orchestrator) once the dev deploy (`test-dev`) is green; do not start the
+e2e on a red or untested dev. Destructive on
 the Fresh env (creates and destroys a real world) and mutating on Rebuild/Live — run only
 against the disposable test host, with the operator's go-ahead.
 
@@ -206,6 +208,18 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    - **Fresh - Uninstall**: `"$fh" uninstall --name "$name" --non-interactive`; ✅ iff the CP, runner,
      door, and every guest are removed (no `<name>-*` guests remain, the DOOR_SPEC key is
      gone).
+
+   **The second Fresh run — cert-cache proof (evidence only, until the box cert cache has
+   shipped in a release).** After the first lifecycle completes, run the ENTIRE Fresh
+   lifecycle once more (new profile name, new operator, same pinned domains): the first run
+   paid the ~45-min DNS-01 pole and filled the box's sealed cert cache; the second run's
+   install + build must pre-seed from it instead of minting LE orders. Evidence: the build
+   prints `cert cache shipped for pre-seed` (box side) and the world's log says `seeded from
+   the box cert cache (no LE order)` — capture both, and check the build time (no 45-min
+   pole). A second run that falls back to a fresh DNS-01 issue is a FAILED cache proof —
+   disposition it as a defect, not a pass. The second run fills NO table rows (the first
+   run's verdicts stand); its logs are the cache evidence in the report. From the first
+   release that ships the cache onward, this second run can be dropped.
 
 3. **Rebuild test — teardown + build the persistent env; it stays running.**
    The env (`relay/cp.rebuild.freehold.technology`) is left running by the previous
