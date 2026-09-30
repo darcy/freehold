@@ -436,11 +436,19 @@ func (e *Engine) RunBootstrap() error {
 			if v = strings.TrimSpace(v); v != "" {
 				n, cerr := strconv.Atoi(v)
 				if cerr != nil || n <= 0 {
-					return fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
-				}
-				e.F.GatewayVlan = n
+				return fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
 			}
+			e.F.GatewayVlan = n
 		}
+	}
+	// Validate on BOTH paths (headless flag + interactive prompt): a malformed
+	// CIDR would otherwise fail far later, at the first guest's net args.
+	if e.F.GatewayCIDR != "" {
+		if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
+			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
+		}
+	}
+
 	}
 
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
@@ -1651,7 +1659,9 @@ func (e *Engine) stageBootstrap(role string) error {
 	if role == "gateway" {
 		// The gateway: a small two-NIC guest — eth0 on the LAN bridge (the
 		// ONE address the world resolves to = the proxy IP), eth1 the tagged
-		// internal side. Smaller footprint than a service guest.
+		// internal side. Smaller footprint than a service guest. pct's net
+		// args are CIDR-typed: the LAN IP takes the /24 home-lab default,
+		// the internal NIC takes the subnet's own prefix.
 		cidr := e.F.GatewayCIDR
 		if cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
 			cidr = *cfg.Gateway.Cidr
@@ -1661,8 +1671,8 @@ func (e *Engine) stageBootstrap(role string) error {
 			lan = *cfg.Proxy.Ip
 		}
 		args = append(args, "--rootfs-gb", "4", "--memory-mb", "512",
-			"--lxc-ip", lan, "--lxc-gw", e.F.RelayGw,
-			"--net1-ip", config.GatewayInternalIP(cidr), "--net1-tag", strconv.Itoa(e.F.GatewayVlan))
+			"--lxc-ip", withPrefix(lan, 24), "--lxc-gw", e.F.RelayGw,
+			"--net1-ip", withPrefix(config.GatewayInternalIP(cidr), prefixBits(cidr)), "--net1-tag", strconv.Itoa(e.F.GatewayVlan))
 		if cfg != nil && cfg.Lxc.Gateway.Vmid != nil {
 			args = append(args, "--vmid", strconv.FormatUint(uint64(*cfg.Lxc.Gateway.Vmid), 10))
 		}
@@ -1670,17 +1680,19 @@ func (e *Engine) stageBootstrap(role string) error {
 		if err != nil {
 			return err
 		}
-		return e.stageGatewayNft(cidr, lan, cfg)
+		return e.stageGatewayNft(cidr, cfg)
 	}
 	if ip := bootstrapStaticIP(role, e.F, cfg); ip != "" {
 		gw := e.F.RelayGw
-		// Behind a gateway the guest rides the tagged internal bridge and its
-		// default route is the gateway's internal address.
+		// Behind a gateway the guest rides the tagged internal bridge, its
+		// default route is the gateway's internal address, and the IP needs
+		// the subnet's prefix (pct net0 is CIDR-typed).
 		if cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
 			gw = config.GatewayInternalIP(*cfg.Gateway.Cidr)
 			if cfg.Gateway.Vlan != nil && *cfg.Gateway.Vlan > 0 {
 				args = append(args, "--tag", strconv.Itoa(*cfg.Gateway.Vlan))
 			}
+			ip = withPrefix(ip, prefixBits(*cfg.Gateway.Cidr))
 		}
 		args = append(args, "--lxc-ip", ip, "--lxc-gw", gw)
 	}
@@ -1698,6 +1710,28 @@ func (e *Engine) stageBootstrap(role string) error {
 	}
 	_, err = e.selfStage("booting the "+role+" LXC", args)
 	return err
+}
+
+// withPrefix appends a CIDR prefix to a bare IP — pct's net args are
+// host/prefix typed (cpbuild's own comment: "pct net0 wants CIDR"), and the
+// deterministic internal addresses come out bare. bits=0 (unparseable subnet)
+// or an already-suffixed IP passes through unchanged.
+func withPrefix(ip string, bits int) string {
+	if bits == 0 || strings.Contains(ip, "/") {
+		return ip
+	}
+	return ip + "/" + strconv.Itoa(bits)
+}
+
+// prefixBits returns the prefix length of a CIDR, 0 when it does not parse.
+func prefixBits(cidr string) int {
+	_, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return 0
+	}
+	_, bits, _ := net.ParseCIDR(cidr)
+	n, _ := bits.Mask.Size()
+	return n
 }
 
 // bootstrapStaticIP returns the role's STATIC address, or "" = DHCP. k3s is
@@ -1737,7 +1771,7 @@ func bootstrapStaticIP(role string, f Flags, cfg *config.Config) string {
 // the guests' default route + image pulls depend on it the moment the next
 // guest boots, so it cannot wait for the CP build's re-assert. Uses the SHARED
 // renderer (config.GatewayNftConf) so box and CP write one ruleset.
-func (e *Engine) stageGatewayNft(cidr, edgeIP string, cfg *config.Config) error {
+func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 	if e.Provider == nil {
 		return fmt.Errorf("no provisioning provider wired — cannot configure the gateway")
 	}
@@ -1756,7 +1790,9 @@ func (e *Engine) stageGatewayNft(cidr, edgeIP string, cfg *config.Config) error 
 		vmid = strconv.FormatUint(uint64(v), 10)
 	}
 	k3sIP := config.InternalIPFor(cidr, "k3s")
-	conf := config.GatewayNftConf(cidr, edgeIP, k3sIP, "eth0")
+	// Both forwards target the k3s node's INTERNAL address — never the
+	// gateway's own LAN IP (self-DNAT is silent death).
+	conf := config.GatewayNftConf(cidr, k3sIP, k3sIP, "eth0")
 	script := fmt.Sprintf(`set -e
 apt-get install -y -qq nftables >/dev/null 2>&1 || true
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf

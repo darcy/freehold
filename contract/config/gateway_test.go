@@ -25,10 +25,12 @@ func TestNthIP(t *testing.T) {
 }
 
 func TestGatewayNftConf(t *testing.T) {
-	conf := GatewayNftConf("10.77.0.0/24", "192.168.30.8", "10.77.0.13", "eth0")
+	// Behind a gateway BOTH forwards target the k3s node's INTERNAL address —
+	// never the gateway's own LAN IP (self-DNAT is silent death).
+	conf := GatewayNftConf("10.77.0.0/24", "10.77.0.13", "10.77.0.13", "eth0")
 	for _, want := range []string{
 		"ip saddr 10.77.0.0/24 oifname \"eth0\" masquerade",
-		"tcp dport { 80, 443 } dnat to 192.168.30.8",
+		"tcp dport { 80, 443 } dnat to 10.77.0.13",
 		"tcp dport 6443 dnat to 10.77.0.13:6443",
 	} {
 		if !contains(conf, want) {

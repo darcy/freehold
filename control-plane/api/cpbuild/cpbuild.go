@@ -706,14 +706,12 @@ func (s *Spec) worldGateway() error {
 	if kip == "" {
 		return nil
 	}
-	edge := s.ProxyIP
-	if edge == "" {
-		edge = kip // no gateway LAN IP recorded — the k3s node is the edge
-	}
-	// Forwards: 80/443 (tcp+udp — Caddy serves h3) → the k3s Caddy edge;
-	// 6443 → the kube-apiserver (kubectl from the LAN). Masquerade carries
-	// the subnet out. The ruleset is rewritten whole — never merged.
-	conf := config.GatewayNftConf(s.GatewayCIDR, edge, kip, "eth0")
+	// Forwards: 80/443 (tcp+udp — Caddy serves h3) and 6443 (kubectl from the
+	// LAN) DNAT to the k3s node's INTERNAL address — NOT the gateway's own
+	// LAN IP (that would self-DNAT: the gateway's INPUT chain listens on
+	// nothing, and the world's public surface dies). Masquerade carries the
+	// subnet out. The ruleset is rewritten whole — never merged.
+	conf := config.GatewayNftConf(s.GatewayCIDR, kip, kip, "eth0")
 	// No single quotes in the script (the heredoc delimiter is unquoted; the
 	// ruleset has none) — it rides `sh -c '...'` through the runner verbatim.
 	script := fmt.Sprintf(`set -e
