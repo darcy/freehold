@@ -47,7 +47,7 @@ func loginWorldSession(t *testing.T, s *Server, sec []byte) string {
 func TestWorldRoutesGating(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, _ := testServer(t, NewAuth([]string{adminPK}))
+	s, _ := testServer(t, NewAuth([]string{adminPK}, ""))
 	post := func(path string, body []byte) int {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
@@ -89,7 +89,7 @@ func TestWorldRoutesGating(t *testing.T) {
 func TestWorldMigrateProxy(t *testing.T) {
 	sec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(sec)
-	s, store := testServer(t, NewAuth([]string{adminPK}))
+	s, store := testServer(t, NewAuth([]string{adminPK}, ""))
 	consoleSec := make([]byte, 32)
 	consoleSec[0] = 0x33
 	consolePK, err := crypto.PubkeyFromSecret(consoleSec)
