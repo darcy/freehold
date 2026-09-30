@@ -311,3 +311,47 @@ func TestRevokeGrantPreHostedRecord(t *testing.T) {
 		t.Fatalf("runner-row-only ungrant must be 200, got %d", code)
 	}
 }
+
+// TestGrantPreHostedRecord pins the grant-side mirror of the revoke fallback:
+// a pre-hosted record (no hosted, empty package_dir) grants roster-only
+// instead of dying in provisioner.GrantAgent's wire.Load on the missing
+// package. The agent joins Rosters; the runner row gates re-enroll.
+func TestGrantPreHostedRecord(t *testing.T) {
+	dir := t.TempDir()
+	reg, err := agenttools.OpenRegistry(filepath.Join(dir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.RegisterAgent("deployer", strings.Repeat("c", 64), "deployer"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.EnrollRunner(store, "dev-local-lxcadmin", "local", "lxcadmin@h",
+		strings.Repeat("a", 64), strings.Repeat("b", 64), "192.168.30.50:8800"); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-hosted shape: no Hosted field at all.
+	if err := store.InsertCapability("dev-local-lxcadmin", state.CapabilityRecord{
+		Kind: "local", Address: "lxcadmin@h", Port: 8800, Rosters: []string{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Store: store, StateDir: dir, AgentToolsDir: dir}
+	r := httptest.NewRequest(http.MethodPost, "/api/grant", strings.NewReader(`{"name":"dev-local-lxcadmin","pubkey":"`+strings.Repeat("c", 64)+`"}`))
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("pre-hosted grant must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	fresh, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cap, _ := fresh.GetCapability("dev-local-lxcadmin")
+	if len(cap.Rosters) != 1 || cap.Rosters[0] != "deployer" {
+		t.Fatalf("pre-hosted grant must join Rosters: %v", cap.Rosters)
+	}
+}

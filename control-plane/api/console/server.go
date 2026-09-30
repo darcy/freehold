@@ -1457,13 +1457,24 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 	// shipped package exists to append grants to) — the grant is a pure
 	// put-user; state read fresh from disk (the capability was recorded by
 	// the agent-tools process, out-of-band from this serve).
+	//
+	// Records that predate the hosted field read the same way (no hosted,
+	// empty package_dir — the runner is resident on its target and the CP
+	// holds no package to append to); the runner row says the same thing.
+	// Mirror of revoke-grant's fallback.
 	fresh, err := state.Open(s.stateDir())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
 	var grants []string
-	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
+	cap, isCap := fresh.GetCapability(req.Name)
+	runnerOnlyNoPackage := false
+	if rec, ok := fresh.GetRunner(req.Name); ok {
+		runnerOnlyNoPackage = rec.PackageDir == ""
+	}
+	selfHosted := (isCap && cap.SelfHosted()) || runnerOnlyNoPackage
+	if selfHosted {
 		if !provisioner.IsPubkey(req.Pubkey) {
 			writeErr(w, http.StatusBadRequest, "invalid pubkey")
 			return
