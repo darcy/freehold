@@ -1,9 +1,6 @@
 package build
 
 import (
-	crand "crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +9,6 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	cert "freehold/platform/services/certificates/letsencrypt"
-	"freehold/platform/provisioning/box"
 )
 
 func TestCertCachePathIsBaseScopedAndHostKeyed(t *testing.T) {
@@ -33,30 +29,14 @@ func TestCertCacheRoundtripThroughBaseIdentity(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FREEHOLD_HOME", home)
 
-	// the base ops identity the cache seals to (what a box's first login mints)
-	enc := make([]byte, 32)
-	if _, err := crand.Read(enc); err != nil {
-		t.Fatal(err)
-	}
-	opsDir := filepath.Join(home, "control-plane", "agent-ops")
-	if err := os.MkdirAll(opsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	idJSON, err := json.Marshal(map[string]string{"nostr_secret_hex": hex.EncodeToString(enc), "enc_secret_hex": hex.EncodeToString(enc)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(opsDir, "identity.json"), idJSON, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := box.LoadIdentity(opsDir); err != nil {
-		t.Fatalf("identity the fill/ship relies on must load: %v", err)
-	}
-
-	// fill: seal to the base identity's pub; ship: open with its secret
+	// baseCacheIdent MINTS the base ops identity on first use (nothing else
+	// creates it — login/install both pin a profile first)
 	_, baseSec, pub, err := baseCacheIdent()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "control-plane", "agent-ops", "identity.json")); err != nil {
+		t.Fatalf("baseCacheIdent must mint the base ops identity: %v", err)
 	}
 	host := "relay.fresh.freehold.technology"
 	path := certCachePath(host)

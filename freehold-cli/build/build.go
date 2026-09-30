@@ -346,13 +346,17 @@ func certCachePath(host string) string {
 	return filepath.Join(config.DefaultStateHome(), "cert-cache", host+".json")
 }
 
-// baseCacheIdent loads the box's BASE ops identity (the state root's
-// agent-ops, not the active profile's): the cert cache must be openable by
-// every future profile's build on this box, so it seals to an identity no
-// world lifecycle can wipe. Absent on a box with no base login — the cache
-// then degrades loudly to issuing.
+// baseCacheIdent loads (minting on first use) the box's BASE ops identity —
+// the state root's agent-ops, not the active profile's: the cert cache must
+// be openable by every future profile's build on this box, so it seals to an
+// identity no world lifecycle can wipe. No flow mints it today (login and
+// install both pin a profile before their ops mint) — the FIRST fill creates
+// it; a box where the mint fails degrades loudly to issuing.
 func baseCacheIdent() (*box.Identity, []byte, []byte, error) {
 	dir := filepath.Join(config.DefaultStateHome(), "control-plane", "agent-ops")
+	if err := box.EnsureIdentity(dir); err != nil {
+		return nil, nil, nil, fmt.Errorf("no base ops identity at %s: %w", dir, err)
+	}
 	id, err := box.LoadIdentity(dir)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("no base ops identity at %s", dir)
