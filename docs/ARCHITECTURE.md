@@ -646,9 +646,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `GET/POST /api/settings` — the console web's settings card, the TUI's `s`
     form, and `freehold-console settings`; the deploy seeds the box's own
     timezone if-empty). The first setting is `operator_tz`: the IANA timezone
-    agent pods run (`TZ` env + the node's zoneinfo mounted read-only; empty =
-    pods run UTC). The build reads it fresh per pod apply, so an edit lands on
-    the next create/rebuild.
+    agent pods run (`TZ` env, the node's zoneinfo mounted read-only, and an init
+    container that copies the zone file to an emptyDir the main container mounts
+    over `/etc/localtime` — buzz's harness env-clears before spawning the MCP
+    servers, so the env alone never reaches a tool shell; the file does. A node
+    without the zone's file degrades to UTC; empty = pods run UTC). The build
+    reads it fresh per pod apply, so an edit lands on the next create/rebuild.
 
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`

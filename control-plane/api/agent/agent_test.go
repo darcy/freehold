@@ -500,8 +500,11 @@ func TestSanitizePodName(t *testing.T) {
 }
 
 // TestAgentPodTimezone: an operator TZ reaches the pod as a TZ env line plus a
-// read-only zoneinfo hostPath mount (the Alpine image ships no tzdata); no
-// setting renders NEITHER — the pod runs UTC, the pre-settings shape.
+// read-only zoneinfo hostPath mount, and — because buzz's harness env-clears
+// before spawning the MCP servers, so nothing env-based reaches a tool shell —
+// the init container materializes the zone as /etc/localtime for every process
+// in the pod; no setting renders NEITHER — the pod runs UTC, the pre-settings
+// shape.
 func TestAgentPodTimezone(t *testing.T) {
 	tz := AgentPodManifest("bob", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "anyone", "", "", "America/Chicago")
 	env := podEnv(t, tz)
@@ -511,6 +514,9 @@ func TestAgentPodTimezone(t *testing.T) {
 	for _, want := range []string{
 		"mountPath: /usr/share/zoneinfo, readOnly: true",
 		"hostPath: {path: /usr/share/zoneinfo, type: DirectoryOrCreate}",
+		"initContainers:",
+		"cp /usr/share/zoneinfo/America/Chicago /tz/localtime 2>/dev/null || touch /tz/localtime",
+		"mountPath: /etc/localtime, subPath: localtime, readOnly: true",
 	} {
 		if !strings.Contains(tz, want) {
 			t.Errorf("manifest with a timezone missing %q", want)
@@ -521,7 +527,7 @@ func TestAgentPodTimezone(t *testing.T) {
 	if _, ok := podEnv(t, utc)["TZ"]; ok {
 		t.Errorf("no-setting manifest carries a TZ env; pods must run UTC unchanged")
 	}
-	if strings.Contains(utc, "zoneinfo") {
-		t.Errorf("no-setting manifest mounts zoneinfo; want no TZ bits at all")
+	if strings.Contains(utc, "zoneinfo") || strings.Contains(utc, "localtime") {
+		t.Errorf("no-setting manifest mounts tz bits; want no TZ bits at all")
 	}
 }
