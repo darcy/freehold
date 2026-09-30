@@ -289,7 +289,7 @@ func Run(r Runner, cfg *Cfg, scope Scope, confirm bool) (string, error) {
 			return "", err
 		}
 		say(lines...)
-		for _, m := range []string{"relay", "cp", "k3s"} {
+		for _, m := range []string{"relay", "cp", "k3s", "gateway"} {
 			managed := contains(cfg.Managed, m)
 			if !managed {
 				say(fmt.Sprintf("skipped %s LXC (not managed)", m))

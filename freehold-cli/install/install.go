@@ -152,6 +152,12 @@ func seedFromProfile(f *box.Flags, cfg *config.Config) {
 	if f.ProxyIP == "" && cfg.Proxy.Ip != nil {
 		f.ProxyIP = *cfg.Proxy.Ip
 	}
+	if f.GatewayCIDR == "" && cfg.Gateway.Cidr != nil {
+		f.GatewayCIDR = *cfg.Gateway.Cidr
+	}
+	if f.GatewayVlan == 0 && cfg.Gateway.Vlan != nil {
+		f.GatewayVlan = *cfg.Gateway.Vlan
+	}
 	if f.OperatorPubkey == "" {
 		f.OperatorPubkey = cfg.OperatorPubkey
 	}
@@ -340,9 +346,27 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if err != nil {
 		return box.Flags{}, err
 	}
-	proxyIP, err := ui.ask("proxy static IP (CIDR, e.g. 192.168.30.8/24) — REQUIRED", proxyDef)
+	proxyIP, err := ui.ask("the ONE LAN address — the gateway's (CIDR, e.g. 192.168.30.8/24) — REQUIRED; everything public resolves here", proxyDef)
 	if err != nil {
 		return box.Flags{}, err
+	}
+	gatewayCIDR, err := ui.ask("internal subnet CIDR for the freehold-subnet (e.g. 10.77.0.0/24) — blank = flat LAN (no gateway); the PVE bridge must be VLAN-aware for a tag", "")
+	if err != nil {
+		return box.Flags{}, err
+	}
+	gatewayVlan := 0
+	if gatewayCIDR != "" {
+		v, err := ui.ask("VLAN tag for the internal bridge (a number, e.g. 77; blank = untagged)", "")
+		if err != nil {
+			return box.Flags{}, err
+		}
+		if v != "" {
+			n, cerr := strconv.Atoi(v)
+			if cerr != nil || n <= 0 {
+				return box.Flags{}, fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
+			}
+			gatewayVlan = n
+		}
 	}
 	rootfs, err := ui.askUint32("LXC rootfs size (GB)", 16)
 	if err != nil {
@@ -372,6 +396,8 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 		RelayDomain:        relayDomain,
 		CpDomain:           cpDomain,
 		ProxyIP:            proxyIP,
+		GatewayCIDR:        gatewayCIDR,
+		GatewayVlan:        gatewayVlan,
 		OperatorPubkey:     pk,
 		OperatorIdentity:   opDir,
 		SizeGB:             drive.TenantLVSizeGB,
@@ -423,6 +449,10 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.RelayDomain, _ = cmd.Flags().GetString("relay-domain")
 	f.CpDomain, _ = cmd.Flags().GetString("cp-domain")
 	f.ProxyIP, _ = cmd.Flags().GetString("proxy-ip")
+	f.GatewayCIDR, _ = cmd.Flags().GetString("gateway-cidr")
+	if v, _ := cmd.Flags().GetString("gateway-vlan"); v != "" {
+		f.GatewayVlan, _ = strconv.Atoi(v)
+	}
 	f.OperatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
 	f.OperatorIdentity, _ = cmd.Flags().GetString("operator-identity")
 	f.RootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
@@ -472,7 +502,9 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint32("local-port", box.DefaultRunnerPort, "Runner MCP port on the box's loopback (127.0.0.1:<port>)")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host (REQUIRED on a fresh plane)")
-	cmd.Flags().String("proxy-ip", "", "STATIC proxy IP (CIDR) — REQUIRED on a fresh plane")
+	cmd.Flags().String("proxy-ip", "", "the ONE LAN address (CIDR) — REQUIRED on a fresh plane; the gateway's when a subnet is set, the k3s/proxy node otherwise")
+	cmd.Flags().String("gateway-cidr", "", "internal subnet CIDR for the freehold-subnet gateway (e.g. 10.77.0.0/24); empty = flat LAN")
+	cmd.Flags().String("gateway-vlan", "", "in-host bridge VLAN tag for the internal subnet (0/blank = untagged)")
 	cmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — REQUIRED")
 	cmd.Flags().String("operator-identity", "", "Operator identity dir to record (optional)")
 	cmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")

@@ -71,8 +71,7 @@ func (s *Spec) tfLxcName(role string) (string, error) {
 func (s *Spec) stageDeployTf() error {
 	root := s.tfRoot()
 	adopt := "true"
-	if s.ProxyIP != "" {
-		kip := config.StripCIDR(s.ProxyIP)
+	if kip := config.StripCIDR(s.k3sIP()); kip != "" {
 		adopt = fmt.Sprintf(
 			`if [ ! -d %[1]q ]; then { [ -f %[2]q/kubeconfig ] && grep -q 'server: https://%[3]s:' %[2]q/kubeconfig && mv %[2]q %[1]q && echo adopted-legacy-tf-root; true; }; elif [ ! -f %[1]q/terraform.tfstate ] && [ -f %[2]q/terraform.tfstate ] && grep -qE '(^|[^0-9.])%[3]s([^0-9.]|$)' %[2]q/terraform.tfstate; then mv %[2]q/terraform.tfstate %[1]q/terraform.tfstate && { [ -f %[2]q/terraform.tfstate.backup ] && mv %[2]q/terraform.tfstate.backup %[1]q/terraform.tfstate.backup; true; } && echo adopted-legacy-tf-state; fi; true`,
 			root, tfDir, kip)
@@ -131,8 +130,8 @@ func (s *Spec) tfVars() ([]string, error) {
 		"-var", "host_cp=" + hostCp,
 		"-var", "host_relay=" + hostRelay,
 		"-var", "host_k3s=" + hostK3s,
-		"-var", "k3s_ip=" + config.StripCIDR(s.ProxyIP),
-		"-var", "k3s_gw=" + s.RelayGW,
+		"-var", "k3s_ip=" + config.StripCIDR(s.k3sIP()),
+		"-var", "k3s_gw=" + s.k3sGW(),
 		"-var", "thin_pool=" + s.ThinPool,
 		// The provider's kubeconfig rides the WORLD's own tf root — the
 		// variables.tf default is the LEGACY shared path.
@@ -194,7 +193,7 @@ func (s *Spec) stageKubeconfig() error {
 	if err != nil {
 		return fmt.Errorf("fetch kubeconfig: %w", err)
 	}
-	kip := config.StripCIDR(s.ProxyIP)
+	kip := config.StripCIDR(s.k3sIP())
 	if kip == "" || kip == "-" {
 		if out, err := s.runOut(fmt.Sprintf("pct exec %d -- ip -4 -o addr show eth0", s.K3sVmid), 30); err == nil {
 			for _, f := range strings.Fields(out) {

@@ -141,6 +141,26 @@ func provisionProxmoxLxc(exec proxmox.ExecFunc, cmd *cobra.Command) error {
 	if v := mustStr(cmd, "lxc-gw"); v != "" {
 		gw = &v
 	}
+	// The freehold-subnet gateway's second NIC (eth1, tagged): the internal
+	// side. tag applies to eth0's bridge.
+	var tag, net1Tag *int
+	if v := mustStr(cmd, "tag"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			tag = &n
+		}
+	}
+	var net1IP, net1GW *string
+	if v := mustStr(cmd, "net1-ip"); v != "" {
+		net1IP = &v
+	}
+	if v := mustStr(cmd, "net1-gw"); v != "" {
+		net1GW = &v
+	}
+	if v := mustStr(cmd, "net1-tag"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			net1Tag = &n
+		}
+	}
 	mounts := []planebase.MountSpec{}
 	for _, m := range mustArr(cmd, "mount") {
 		ms, err := bootstrap.ParseMount(m)
@@ -153,7 +173,9 @@ func provisionProxmoxLxc(exec proxmox.ExecFunc, cmd *cobra.Command) error {
 		Hostname: hostname, VMID: vmid,
 		Storage: mustStr(cmd, "storage"), RootfsGB: mustU32(cmd, "rootfs-gb"),
 		MemoryMB: mustU32(cmd, "memory-mb"), Bridge: mustStr(cmd, "bridge"),
-		NetIP: ip, NetGW: gw, Mounts: mounts,
+		NetIP: ip, NetGW: gw, Tag: tag,
+		Net1IP: net1IP, Net1GW: net1GW, Net1Tag: net1Tag,
+		Mounts: mounts,
 	}
 	res, err := proxmox.BootstrapProxmoxLxc(exec, spec)
 	if err != nil {
@@ -661,6 +683,10 @@ func init() {
 	provisionCmd.Flags().String("bridge", "vmbr0", "network bridge")
 	provisionCmd.Flags().String("lxc-ip", "", "static IPv4 (CIDR)")
 	provisionCmd.Flags().String("lxc-gw", "", "gateway for static IP")
+	provisionCmd.Flags().String("tag", "", "VLAN tag on the bridge for eth0")
+	provisionCmd.Flags().String("net1-ip", "", "second NIC (eth1) static IPv4 (CIDR)")
+	provisionCmd.Flags().String("net1-gw", "", "gateway for the second NIC")
+	provisionCmd.Flags().String("net1-tag", "", "VLAN tag for the second NIC")
 	provisionCmd.Flags().String("vmid", "", "VMID (auto when empty)")
 	provisionCmd.Flags().StringArray("mount", nil, "durable mount <source>:<guest>")
 	provisionCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (accepted for symmetry; unused by proxmox-lxc)")

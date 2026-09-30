@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,6 +97,16 @@ type Spec struct {
 	RelayLxc       uint32
 	RelayCompose   string
 	K3sVmid        uint32
+	// The freehold-subnet gateway (docs/NETWORK.md Phase 1). GatewayCIDR is
+	// the internal subnet ("" = no gateway — guests ride the LAN bridge as
+	// before); GatewayVlan the in-host bridge tag; GatewayLxc the gateway
+	// guest's vmid. K3sIP is the k3s node's address — with a gateway the
+	// INTERNAL one (ProxyIP is then the gateway's LAN address, the edge);
+	// without one it mirrors ProxyIP.
+	GatewayCIDR string
+	GatewayVlan int
+	GatewayLxc  uint32
+	K3sIP       string
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
@@ -473,7 +484,7 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	roleIP := ""
 	switch role {
 	case "k3s":
-		roleIP = s.ProxyIP
+		roleIP = s.k3sIP()
 	case "relay":
 		roleIP = s.RelayIP
 	case "cp":
@@ -489,7 +500,17 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 		if !strings.Contains(ip, "/") {
 			ip += "/24"
 		}
+		// Behind the gateway the guests' default route is the gateway's
+		// INTERNAL address, and eth0 rides the internal subnet's tag — the
+		// "born on the freehold-subnet" rule (docs/NETWORK.md).
 		gw := s.RelayGW
+		if s.GatewayCIDR != "" {
+			gw = config.GatewayInternalIP(s.GatewayCIDR)
+			if s.GatewayVlan > 0 {
+				spec.Tag = &s.GatewayVlan
+			}
+			ip = roleIP + "/" + strconv.Itoa(maskBits(s.GatewayCIDR))
+		}
 		spec.NetIP = &ip
 		spec.NetGW = &gw
 	}
@@ -518,12 +539,41 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 // vmids world_build just booted. An invalid world name is a config error and
 // fails the build; a transient `pct list` failure stays best-effort (the
 // recorded vmid, if any, is used).
+// k3sIP is the k3s node's address: the recorded internal one behind a
+// gateway, else the proxy IP (the legacy flat-LAN world, where the k3s node
+// IS the proxy).
+func (s *Spec) k3sIP() string {
+	if s.K3sIP != "" {
+		return s.K3sIP
+	}
+	return s.ProxyIP
+}
+
+// k3sGW is the k3s node's default route: the gateway's internal address
+// behind a gateway, else the LAN gateway the world was installed with.
+func (s *Spec) k3sGW() string {
+	if s.GatewayCIDR != "" {
+		return config.GatewayInternalIP(s.GatewayCIDR)
+	}
+	return s.RelayGW
+}
+
+// maskBits returns the prefix length of a CIDR (24 for 10.77.0.0/24), 0 when
+// it does not parse.
+func maskBits(cidr string) int {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return 0
+	}
+	return p.Bits()
+}
+
 func (s *Spec) resolveGuestVmids() error {
 	for _, r := range []struct {
 		role string
 		vmid *uint32
 	}{
-		{"relay", &s.RelayLxc}, {"cp", &s.CpLxc}, {"k3s", &s.K3sVmid},
+		{"relay", &s.RelayLxc}, {"cp", &s.CpLxc}, {"k3s", &s.K3sVmid}, {"gateway", &s.GatewayLxc},
 	} {
 		if *r.vmid != 0 {
 			continue
@@ -560,7 +610,10 @@ func (s *Spec) refreshGuestIPs() {
 	for _, r := range []role{
 		{s.RelayLxc, &s.RelayIP},
 		{s.CpLxc, &s.CpIP},
-		{s.K3sVmid, &s.ProxyIP},
+		// The k3s node address lands in K3sIP: behind a gateway that is the
+		// INTERNAL address (ProxyIP is the gateway edge; clobbering it would
+		// repoint the DNS records at a guest).
+		{s.K3sVmid, &s.K3sIP},
 	} {
 		if r.vmid == 0 {
 			continue
@@ -637,6 +690,44 @@ func (s *Spec) worldBootK3s(mounts []planebase.MountSpec) error {
 		return err
 	}
 	s.K3sVmid = vmid
+	return nil
+}
+
+// worldGateway (re)writes the gateway guest's nftables ruleset — a pure
+// function of the recorded coords, so every build re-asserts it (a rebuilt
+// k3s with a new internal IP must not leave a stale DNAT). The gateway guest
+// is created by the BOX install (before the CP, whose default route it
+// becomes); the CP build only owns the config. No-op without one.
+func (s *Spec) worldGateway() error {
+	if s.GatewayLxc == 0 || s.GatewayCIDR == "" {
+		return nil
+	}
+	kip := s.k3sIP()
+	if kip == "" {
+		return nil
+	}
+	edge := s.ProxyIP
+	if edge == "" {
+		edge = kip // no gateway LAN IP recorded — the k3s node is the edge
+	}
+	// Forwards: 80/443 (tcp+udp — Caddy serves h3) → the k3s Caddy edge;
+	// 6443 → the kube-apiserver (kubectl from the LAN). Masquerade carries
+	// the subnet out. The ruleset is rewritten whole — never merged.
+	conf := config.GatewayNftConf(s.GatewayCIDR, edge, kip, "eth0")
+	// No single quotes in the script (the heredoc delimiter is unquoted; the
+	// ruleset has none) — it rides `sh -c '...'` through the runner verbatim.
+	script := fmt.Sprintf(`set -e
+apt-get install -y -qq nftables >/dev/null 2>&1 || true
+echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
+sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
+cat > /etc/nftables.conf <<NFT
+%sNFT
+systemctl enable --now nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
+`, conf)
+	cmd := fmt.Sprintf("pct exec %d -- sh -c '%s'", s.GatewayLxc, script)
+	if err := s.run(cmd, 300); err != nil {
+		return fmt.Errorf("gateway nftables: %w", err)
+	}
 	return nil
 }
 
@@ -1247,6 +1338,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// Pointing guests at a CP whose dnsmasq is not yet installed would leave
 		// them with no resolver at all, so the point and the install ship as one
 		// step.
+		// 3.5a0. The gateway's nftables (re)assert — after the k3s boot (its
+		// DNAT target is the recorded internal IP), before anything dials the
+		// edge through it. No-op without a gateway.
+		if err := spec.worldGateway(); err != nil {
+			return "", fmt.Errorf("world-build gateway: %w", err)
+		}
+		if spec.GatewayLxc != 0 && spec.GatewayCIDR != "" {
+			report = append(report, "gateway nftables asserted")
+		}
 		if spec.CpLxc != 0 && spec.CpIP != "" {
 			if err := spec.worldDNS(); err != nil {
 				return "", fmt.Errorf("world-build dns: %w", err)
@@ -1278,8 +1378,8 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// pairUpstream: the pair-relay pod binds 5000 on the k3s node
 				// itself (hostNetwork, same node as the caddy edge).
 				pairUpstream := ""
-				if spec.ProxyIP != "" {
-					pairUpstream = fmt.Sprintf("%s:5000", spec.ProxyIP)
+				if kip := spec.k3sIP(); kip != "" {
+					pairUpstream = fmt.Sprintf("%s:5000", kip)
 				}
 				caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, pairUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
 				extra = append(extra, "-var",

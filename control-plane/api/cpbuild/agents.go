@@ -151,6 +151,14 @@ func (s *Spec) agentToolsServeFlags() string {
 	if s.ProxyIP != "" {
 		serveFlags += " --proxy-ip " + s.ProxyIP
 	}
+	if s.K3sIP != "" {
+		serveFlags += " --k3s-ip " + s.K3sIP
+	}
+	if s.GatewayCIDR != "" {
+		serveFlags += " --gateway-cidr " + s.GatewayCIDR
+		serveFlags += fmt.Sprintf(" --gateway-vlan %d", s.GatewayVlan)
+		serveFlags += fmt.Sprintf(" --gateway-lxc %d", s.GatewayLxc)
+	}
 	if s.LitellmIP != "" {
 		serveFlags += " --litellm-ip " + s.LitellmIP
 	}
