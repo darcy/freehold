@@ -67,6 +67,9 @@ private `#freehold` channel — and a rebuild reconciles them.
   plan and current scope, with the current chunk's plan alongside them
   (`docs/POC_CHUNK5.md`). [`docs/followups.md`](docs/followups.md) is the grab bag of
   deferred work.
+- [`docs/NETWORK.md`](docs/NETWORK.md) and [`docs/DATA.md`](docs/DATA.md) — the named
+  build plans (gateway + freehold-subnet + Pangolin; snapshots + export + restic off-site)
+  that run alongside the chunked work.
 - [GitHub Releases](https://github.com/darcy/freehold/releases) — the released versions,
   their notes, and assets.
 
@@ -642,7 +645,7 @@ platform/             freehold/platform — the provider-independent world the m
 migrations/           the box-applied migration scripts
 AGENTS.md             agent guidance: locked model, conventions, known gaps
 docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, POC.md, POC_CHUNK5.md,
-                      BUZZ_SURFACE.md, DOOR_SPEC.md, followups.md
+                      NETWORK.md, DATA.md, BUZZ_SURFACE.md, DOOR_SPEC.md, followups.md
 ```
 
 ## Contributing / review

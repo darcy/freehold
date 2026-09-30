@@ -182,6 +182,10 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 - `docs/NETWORK.md` — the network-plane build plan (a named build plan, not a numbered
   chunk): the gateway guest, the freehold-subnet, Pangolin as the public-path north
   star, and the agent-operated exposure phase.
+- `docs/DATA.md` — the data-plane build plan (a named build plan, not a numbered
+  chunk): `freehold snapshot` (durable-plane snapshots + guarded rollback),
+  `freehold export` (the vzdump portable bundle), and restic off-site to an
+  arbitrary backend — the Data department's home ground without a PBS VM.
 
 ## Locked model — do not change without an explicit user decision
 
