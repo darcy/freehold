@@ -446,6 +446,9 @@ func (e *Engine) RunBootstrap() error {
 			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
 		}
 	}
+	if e.F.GatewayVlan < 0 {
+		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
+	}
 
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
 	// relay/k3s datasets are re-ensured by world_build, idempotently).

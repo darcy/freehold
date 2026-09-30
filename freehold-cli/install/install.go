@@ -451,7 +451,12 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.ProxyIP, _ = cmd.Flags().GetString("proxy-ip")
 	f.GatewayCIDR, _ = cmd.Flags().GetString("gateway-cidr")
 	if v, _ := cmd.Flags().GetString("gateway-vlan"); v != "" {
-		f.GatewayVlan, _ = strconv.Atoi(v)
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			f.GatewayVlan = -1 // sentinel: rejected by RunBootstrap's validation
+		} else {
+			f.GatewayVlan = n
+		}
 	}
 	f.OperatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
 	f.OperatorIdentity, _ = cmd.Flags().GetString("operator-identity")
