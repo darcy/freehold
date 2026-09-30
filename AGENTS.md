@@ -434,14 +434,6 @@ release notes.
   `BUZZ_AUTH_TAG` authorizes memory writes until the pod is re-applied; minting
   with an expiry clause + a re-mint on build is the named follow-up
   (docs/followups.md).
-- **Agent tool shells run UTC despite the operator-timezone setting.** The CP half
-  works — the setting persists (TUI 's' form / console settings card /
-  `freehold-console settings`), pods get `TZ` env + a read-only zoneinfo hostPath, and
-  `kubectl exec` honors it — but buzz's agent harness strips the env before the MCP
-  server spawns (`buzz-agent`'s `spawn_one` runs `env_clear()` + a `PASSTHROUGH_ENV`
-  allowlist with no `TZ`), so every agent tool shell still reports UTC. The fix is
-  upstream in buzz (add `TZ` to that allowlist); the orientation block naming the
-  operator zone is the prompt-level workaround until then.
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
 - **Replay window:** a signed call can be replayed against the *same* runner within its 60s

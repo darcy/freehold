@@ -227,20 +227,39 @@ func authTagEnvLine(authTag string) string {
 	return fmt.Sprintf("    - {name: BUZZ_AUTH_TAG, value: %q}\n", authTag)
 }
 
-// tzPodBits renders the TZ extras for an agent pod: the env line plus a
-// read-only hostPath mount of the node's zoneinfo (the Alpine image ships no
-// tzdata, so a named zone only resolves with the node's files). Empty tz (no
-// setting) renders nothing — the pod runs UTC, the pre-settings shape.
-// DirectoryOrCreate (not Directory) degrades gracefully: a node without
-// zoneinfo mounts an empty dir and musl falls back to UTC.
-func tzPodBits(tz string) (envLine, mountLine, volume string) {
+// tzPodBits renders the TZ extras for an agent pod. The env line serves the
+// container itself (kubectl exec honors it), but buzz's harness env-clears
+// before spawning the MCP servers, so nothing env-based reaches a tool shell;
+// the init container instead materializes the zone as /etc/localtime —
+// filesystem state an env_clear cannot strip — into an emptyDir file the main
+// container mounts over /etc/localtime, so every process in the pod (harness,
+// MCP servers, tool shells) reads the operator's local time from libc. The
+// image runs non-root (user `agent`), so the one-shot copy runs as root in the
+// throwaway init container. A node without the zone's file degrades to UTC
+// (touch fallback), matching the zoneinfo mount's DirectoryOrCreate fallback.
+// Empty tz (no setting) renders nothing — the pod runs UTC, the pre-settings
+// shape.
+func tzPodBits(tz, image string) (envLine, initBlock, mountLine, volume string) {
 	if tz == "" {
-		return "", "", ""
+		return "", "", "", ""
 	}
 	envLine = fmt.Sprintf("    - {name: TZ, value: %q}\n", tz)
-	mountLine = "    - {name: zoneinfo, mountPath: /usr/share/zoneinfo, readOnly: true}\n"
-	volume = "  - name: zoneinfo\n    hostPath: {path: /usr/share/zoneinfo, type: DirectoryOrCreate}\n"
-	return envLine, mountLine, volume
+	initBlock = fmt.Sprintf(`  initContainers:
+  - name: tz
+    image: %s
+    securityContext: {runAsUser: 0}
+    command: ["/bin/sh", "-c", "cp /usr/share/zoneinfo/%s /tz/localtime 2>/dev/null || touch /tz/localtime"]
+    env:
+    - {name: TZ, value: %q}
+    volumeMounts:
+    - {name: zoneinfo, mountPath: /usr/share/zoneinfo, readOnly: true}
+    - {name: tz, mountPath: /tz}
+`, image, tz, tz)
+	mountLine = "    - {name: zoneinfo, mountPath: /usr/share/zoneinfo, readOnly: true}\n" +
+		"    - {name: tz, mountPath: /etc/localtime, subPath: localtime, readOnly: true}\n"
+	volume = "  - name: zoneinfo\n    hostPath: {path: /usr/share/zoneinfo, type: DirectoryOrCreate}\n" +
+		"  - name: tz\n    emptyDir: {}\n"
+	return envLine, initBlock, mountLine, volume
 }
 
 // AgentPodManifest is the agent Pod + Service manifest for a named agent. The
@@ -299,7 +318,7 @@ func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellm
 		respondAllowlistEnv = fmt.Sprintf("    - {name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: %q}\n", respondAllowlist)
 	}
 	authTagEnv := authTagEnvLine(authTag)
-	tzEnv, tzMount, tzVolume := tzPodBits(operatorTZ)
+	tzEnv, tzInit, tzMount, tzVolume := tzPodBits(operatorTZ, SprigImage)
 	runnerEnv := ""
 	if len(runner) > 0 {
 		urls, pubs, targets, secrets := runnerLists(runner)
@@ -338,7 +357,7 @@ spec:
   # appliance's own trained identity on the operator's relay — it does not
   # need pod-CNI isolation from its own control plane.
   hostNetwork: true
-  containers:
+%s  containers:
   - name: %s
     image: %s
     command: ["/bin/bash", "-c", "%s"]
@@ -390,7 +409,7 @@ spec:
   - {port: 443}
 `,
 		promptCm, SystemPromptFile, indentSystemPrompt(systemPrompt),
-		pod, pod, agentName, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
+		pod, pod, agentName, tzInit, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
 		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, authTagEnv, runnerEnv, tzEnv,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
@@ -421,8 +440,9 @@ func indentSystemPrompt(prompt string) string {
 // delete-then-apply below carries it on every re-apply — a re-apply must never
 // be the thing that silently drops an agent's memory.
 //
-// operatorTZ sets the pod's TZ (+ the node's zoneinfo mount) — see tzPodBits.
-// Empty = the pod runs UTC.
+// operatorTZ sets the pod's TZ, the node's zoneinfo mount, and the
+// /etc/localtime init-container mount — see tzPodBits. Empty = the pod runs
+// UTC.
 func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ string, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	wsDir := AgentWorkspaceDir(pod)
