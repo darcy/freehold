@@ -618,3 +618,90 @@ func TestConsolePeerScope(t *testing.T) {
 		t.Fatal("an ungranted non-peer caller must be denied world_migrate")
 	}
 }
+
+// TestOperatorPeerScope pins the seed's break-glass path: the operator
+// (--owner-pubkey) authenticates by signature alone — a peer, never a roster
+// member — with full operator scope (create + the world tools). This is also
+// what keeps a stale CLI's operator-signed migration sweep working across a
+// version jump: the seed revokes the operator's channel membership, and the
+// peer rule authorizes the signature regardless.
+func TestOperatorPeerScope(t *testing.T) {
+	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	opSec := make([]byte, 32)
+	opSec[0] = 13
+	opPK, err := crypto.PubkeyFromSecret(opSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated := false
+	srv := &Server{
+		Audience:     aud,
+		Grants:       func() ([]string, error) { return []string{}, nil }, // the operator is NOT on the roster
+		Tools:        &agent.Tools{Console: &fakeOps{}},
+		OperatorPeer: opPK,
+	}
+	srv.Tools.Migrate = func() ([]migrations.Result, error) {
+		migrated = true
+		return []migrations.Result{{Name: "001-x", OK: true, Applied: true}}, nil
+	}
+	post := func(tool, arguments string) (string, bool) {
+		t.Helper()
+		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":` + arguments + `}}`
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, opPK)
+		req.Header.Set(SigHeader, signForTest(opSec, aud, ts, raw))
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		var resp struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if resp.Error == nil {
+			return "", false
+		}
+		return resp.Error.Message, true
+	}
+
+	// The operator peer drives the world tools roster-free.
+	if _, denied := post("world_migrate", "{}"); denied {
+		t.Fatal("operator peer must call world_migrate without roster membership")
+	}
+	if !migrated {
+		t.Fatal("operator peer world_migrate did not invoke the bound migrator")
+	}
+	if _, denied := post("world_status", "{}"); denied {
+		t.Fatal("operator peer must call world_status")
+	}
+	if _, denied := post("manage_agent", "{}"); denied {
+		t.Fatal("operator peer must call manage_agent (full operator scope)")
+	}
+
+	// An unknown caller without a peer match still fails closed.
+	strangerSec := make([]byte, 32)
+	strangerSec[0] = 14
+	strangerPK, err := crypto.PubkeyFromSecret(strangerSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"world_status","arguments":{}}}`
+	ts := time.Now().Unix()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+	req.Header.Set(PubkeyHeader, strangerPK)
+	req.Header.Set(SigHeader, signForTest(strangerSec, aud, ts, raw))
+	req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	var resp struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Fatal("an ungranted non-peer caller must be denied")
+	}
+}

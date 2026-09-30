@@ -394,9 +394,13 @@ release notes.
   (`control-plane/api/agent/tools.go`) are served by a dedicated CP-side binary
   (`control-plane/api/cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
   shared signed-header scheme and authorized against the server's own relay roster (its
-  NIP-29 channel + 39002 membership, read fresh per call, fail-closed); the console is
-  additionally a signed LOCAL PEER for `world_migrate` only (the `/api/world-migrate`
-  proxy — the registry lock lives in the serve), never a roster member. Seeded at bootstrap;
+  NIP-29 channel + 39002 membership, read fresh per call, fail-closed) — the AGENT
+  surface (the CPA, membered at create; the seed members nobody else and revokes any
+  prior operator/console rows). The CP's own identities are LOCAL PEERS, verified by
+  signature alone and never roster members: the console for `world_migrate` only (the
+  `/api/world-migrate` proxy — the registry lock lives in the serve) and the operator
+  (`--owner-pubkey`) with full operator scope as break-glass (which also keeps a stale
+  CLI's operator-signed migration sweep working across a version jump). Seeded at bootstrap;
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
   the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
   via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it

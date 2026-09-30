@@ -647,19 +647,21 @@ func (s *Spec) deployAgentTools() error {
 		return err
 	}
 	relayDial := config.RelayLanDial(s.RelayHost)
-	// Seed the server's channel + the operator into its roster. The console's
-	// driving identity (s.Audience) is deliberately NOT seeded: the console
-	// never calls this MCP (it reads the registry/facts files directly, and
-	// since the world verbs moved to console routes it only PROXIES
-	// world_migrate as a signed local peer — no roster membership), so
-	// membering it only put an un-nameable identity in the roster. The CPA is
-	// membered separately, by this server's own identity (BuildCreateAgentFn).
-	// The operator's seed grant is TRANSITION (the CLI no longer calls this
-	// MCP — its world verbs go through the console — so the flip to --revoke
-	// is tracked in docs/followups.md, kept one release behind so a
-	// stale-binary `freehold update` mid-sweep still authorizes).
-	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
-		bin, atState, relayDial, s.OwnerPub)
+	// Seed the server's channel. The roster is the AGENT surface: the CPA is
+	// membered by this server's own identity (BuildCreateAgentFn). The
+	// console's driving identity (s.Audience) was deliberately never seeded —
+	// the console never calls this MCP (it reads the registry/facts files
+	// directly, and its world_migrate trigger is a signed local peer). The
+	// OPERATOR is likewise a peer (--owner-pubkey, full operator scope) and is
+	// REVOKED from the channel here: its CLI world verbs live on console
+	// routes, and its signature authenticates via the peer rule regardless of
+	// membership — a stale CLI's migration sweep must survive this flip.
+	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --name agent-tools",
+		bin, atState, relayDial)
+	// Heal any prior membership (put-user is additive; only --revoke drops).
+	if s.OwnerPub != "" {
+		seedFlags += " --revoke " + s.OwnerPub
+	}
 	// Revoke the console's driving identity if a PRIOR seed membered it: put-user
 	// is additive, so dropping it from --granted alone doesn't heal a world that
 	// already has it. The console never calls this MCP.

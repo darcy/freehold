@@ -7,11 +7,11 @@
 // Callers authenticate with the SAME shared signed-header scheme the runner
 // uses (core/src/auth.rs): x-freehold-pubkey/sig/ts over
 // `audience|ts|raw_body`, BIP-340, granted-pubkey check, 60s window. The
-// audience is this server's own pubkey (the CP's agent-tools identity), and
-// the grants list is the relay roster of its private channel (seeded with the
-// operator during the transition — its CLI world verbs have moved to console
-// routes) plus, separately, the console as a signed local peer for
-// world_migrate.
+// audience is this server's own pubkey (the CP's agent-tools identity). The
+// grants list is the relay roster of its private channel — the AGENT surface
+// (the CPA, membered at create). The CP's own identities are NOT members:
+// the console (world_migrate proxy) and the operator (break-glass) are local
+// peers verified by signature alone.
 package agenttools
 
 import (

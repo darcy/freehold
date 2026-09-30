@@ -182,15 +182,3 @@ there; if it is work not yet done, it belongs here.
   follow-up: anyone who can talk to an agent may ask freehold to add another
   identity to that agent's allowlist — freehold validates the request and
   re-applies the pod — and `create_agent` learns the real asker's pubkey.
-- **Drop the operator's seed grant from the agent-tools roster.** The
-  operator's CLI world verbs moved to console routes (`/api/world-exec`,
-  `/api/world-door`, `/api/world-migrate` — the last proxies into the serve as
-  its signed local peer, since the registry lock lives there), so the only
-  legitimate roster caller left is the CPA. This release keeps the seed's
-  `--granted <owner>` for transition — a stale-binary `freehold update` still
-  drives its migration sweep operator-signed through the old code path. The
-  flip: change the seed to `--revoke <owner-pub>` (mirroring the console
-  identity's healing) once worlds update with a current CLI, which also stops
-  the `#runner-agent-tools` channel rendering for the operator. Same posture
-  question applies to explicit operator grants on capability doors (e.g. an
-  LXC-admin door) — revocable today via the console's ungrant.

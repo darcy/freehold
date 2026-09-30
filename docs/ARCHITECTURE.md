@@ -259,7 +259,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     assembly** (`agenttools.WorldStatus`): the console folds it into its public
     `/api/world` (consumed by the TUI and `freehold status`), and the
     `/mcp world_status` tool shares that same assembly for direct MCP callers —
-    so the two surfaces can never diverge. `grant_agent` is
+    so the two surfaces can never diverge. The toolset's callers are the
+    relay-roster members (the AGENT surface — the CPA, membered at create)
+    plus two signature-verified LOCAL PEERS that are never roster members:
+    the console (`/api/world-migrate` proxies into the serve — the registry
+    lock lives there — so the console peer may call `world_migrate` only) and
+    the operator (`--owner-pubkey`, full operator scope as break-glass, which
+    also keeps a stale CLI's operator-signed migration sweep working across a
+    version jump). `grant_agent` is
     **operator-scoped and wired through the absorbed console-owner
     credential**: the server loads
     the console's own identity from its state dir (0600 durable plane) and

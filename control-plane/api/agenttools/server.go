@@ -57,6 +57,16 @@ type Server struct {
 	// scheme but never by the roster (the console is deliberately not a
 	// channel member), and it may call world_migrate ONLY. Empty = no peer.
 	ConsolePeer string
+
+	// OperatorPeer is the operator identity's pubkey (--owner-pubkey): the
+	// seed's break-glass caller, full operator scope (the dispatch gates a
+	// roster-member operator gets — create/grant/manage + the world tools,
+	// the IsAgent check still denying registry agents). Peer, not member: the
+	// roster is the agent surface (the CPA), while the CP's own identities
+	// authenticate by signature at boot — which also keeps a stale CLI's
+	// operator-signed migration sweep working across a version jump. Empty =
+	// no peer.
+	OperatorPeer string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -109,12 +119,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	caller, aerr := VerifyRequest(grants, s.Audience,
 		r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
-	if aerr != nil && s.ConsolePeer != "" && r.Header.Get(PubkeyHeader) == s.ConsolePeer {
-		// The console is the local admin peer: same signature check, no roster
-		// (it is not a channel member by design). Scoped to world_migrate in
-		// dispatch; nothing else widens this path.
-		caller, aerr = VerifyRequest([]string{s.ConsolePeer}, s.Audience,
-			r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
+	if aerr != nil {
+		// Local peers authenticate by signature, never by roster: the console
+		// (the world_migrate proxy) and the operator (the seed's break-glass
+		// caller — a stale CLI's sweep must survive a version jump). Each
+		// verifies with itself as the grant, so the signature check is
+		// unchanged; the peer's IDENTITY is the authorization.
+		self := ""
+		if s.ConsolePeer != "" && r.Header.Get(PubkeyHeader) == s.ConsolePeer {
+			self = s.ConsolePeer
+		} else if s.OperatorPeer != "" && r.Header.Get(PubkeyHeader) == s.OperatorPeer {
+			self = s.OperatorPeer
+		}
+		if self != "" {
+			caller, aerr = VerifyRequest([]string{self}, s.Audience,
+				r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
+		}
 	}
 	if aerr != nil {
 		// Server-side detail the client error deliberately omits: WHO claimed
