@@ -362,6 +362,16 @@ func TestGrantPreHostedRecord(t *testing.T) {
 // Port 0) — the next build would read that as a CP-guest dynamic door.
 func TestGrantRecordlessRunnerRow(t *testing.T) {
 	dir := t.TempDir()
+	reg, err := agenttools.OpenRegistry(filepath.Join(dir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pubkey MUST resolve in the registry: only then does the join run and
+	// an unguarded InsertCapability upsert the zero record. An unregistered
+	// pubkey makes the pin vacuous (the join never fires).
+	if _, err := reg.RegisterAgent("deployer", strings.Repeat("c", 64), "deployer"); err != nil {
+		t.Fatal(err)
+	}
 	store, err := state.Open(dir)
 	if err != nil {
 		t.Fatal(err)
