@@ -160,7 +160,7 @@ func (e *Engine) PromptDNSCred(slot, host, reuseFrom string) (string, map[string
 	}
 
 	if e.Yes {
-		return "", nil, fmt.Errorf("no %s DNS provider credential stored and interactive collection is disabled (--yes); run without --yes once to store it", slot)
+		return "", nil, fmt.Errorf("no %s DNS provider credential stored and interactive collection is disabled (--non-interactive); run without --non-interactive once to store it", slot)
 	}
 
 	provider, err := e.PromptProvider()

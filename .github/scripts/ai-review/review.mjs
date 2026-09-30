@@ -1,16 +1,28 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { readFileSync, existsSync } from 'fs';
-import { reassembleStream } from './sse.mjs';
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { spawn } from 'child_process';
+import { createInterface } from 'readline';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { parseReviewFromEvents, harnessTextParts } from './parse.mjs';
 import { buildReviewReplies, buildThreadIndex } from './threads.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const LLM_BASE_URL = process.env.LLM_BASE_URL;
-const LLM_API_KEY = process.env.LLM_API_KEY;
-const LLM_MODEL = process.env.LLM_MODEL;
-// Cap a single LLM request (headers + body). A stalled stream otherwise hangs
-// until the job's 60-minute timeout; aborting lets callLlm retry instead.
-const LLM_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '600000', 10);
+// HARNESS_API_KEY/HARNESS_MODEL take precedence over the legacy single-shot
+// vars (LLM_API_KEY/LLM_MODEL) — during the transition both sets are present
+// because the job may run main's previous script until this merges.
+const LLM_API_KEY = process.env.HARNESS_API_KEY || process.env.LLM_API_KEY;
+const LLM_MODEL = process.env.HARNESS_MODEL || process.env.LLM_MODEL;
+// Wall-clock cap for the whole headless harness session (all of its turns), so
+// a wedged run fails and retries instead of hanging to the job's 60-minute cap.
+// Parsed with validation: a malformed operator value must fail the run, not
+// silently disable the cap (NaN propagates through spawn's timeout as "no
+// timeout"; parseInt('15m') yields 15 — a 15ms cap).
+const HARNESS_TIMEOUT_MS = parseInt(process.env.HARNESS_TIMEOUT_MS || '1200000', 10);
+if (!Number.isFinite(HARNESS_TIMEOUT_MS) || HARNESS_TIMEOUT_MS < 60_000) {
+  throw new Error(`HARNESS_TIMEOUT_MS must be a millisecond value >= 60000 (got ${process.env.HARNESS_TIMEOUT_MS})`);
+}
 const PROMPT_FILE = process.env.PROMPT_FILE || 'review-prompt.md';
 const CONTEXT_FILES = (process.env.CONTEXT_FILES || '').split(',').map(s => s.trim()).filter(Boolean);
 const EXCLUDE_PATTERNS = (process.env.EXCLUDE_PATTERNS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -19,7 +31,7 @@ const MAX_CONTEXT_FILE_CHARS = parseInt(process.env.MAX_CONTEXT_FILE_CHARS || '2
 const FAIL_ON_OVERSIZED_DIFF = (process.env.FAIL_ON_OVERSIZED_DIFF || 'true') === 'true';
 const TRACKING_MARKER = '<!-- ai-review:tracking -->';
 
-for (const [name, val] of Object.entries({ GITHUB_TOKEN, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL })) {
+for (const [name, val] of Object.entries({ GITHUB_TOKEN, LLM_API_KEY, LLM_MODEL })) {
   if (!val) throw new Error(`Missing required env var: ${name}`);
 }
 
@@ -66,10 +78,11 @@ function annotatePatch(patch) {
 }
 
 function readContextFiles() {
-  // Context files are repo-root files (AGENTS.md etc.), but the job runs with
-  // working-directory set to this script's dir — resolve them against the
-  // workspace root, not cwd.
-  const root = process.env.GITHUB_WORKSPACE || process.cwd();
+  // Context files are repo-root files, read from the TRUSTED checkout this
+  // script lives in — this dir is <root>/.github/scripts/ai-review, so the
+  // repo root is THREE levels up. Never resolve against GITHUB_WORKSPACE,
+  // which is the explored PR state (untrusted data).
+  const root = join(import.meta.dirname, '../../..');
   const files = CONTEXT_FILES
     .filter(f => existsSync(`${root}/${f}`))
     .map(f => {
@@ -102,6 +115,32 @@ async function getBotLogin() {
   try { botLogin = (await octokit.rest.users.getAuthenticated()).data.login; }
   catch { botLogin = ''; }
   return botLogin;
+}
+
+// A new review round invalidates the previous one: dismiss the bot's own
+// outstanding verdict (APPROVED / CHANGES_REQUESTED) so a stale approval from
+// an earlier revision can never satisfy branch protection — including
+// re-request-triggered rounds, which push no commits for GitHub's stale-
+// approval auto-dismiss to catch. COMMENTED reviews gate nothing; leave them.
+async function dismissOwnPriorReviews() {
+  const me = await getBotLogin();
+  if (!me) return 0;
+  const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, { owner, repo, pull_number, per_page: 100 });
+  const mine = reviews.filter(r => r.user?.login === me && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED'));
+  for (const r of mine) {
+    try {
+      await octokit.rest.pulls.dismissReview({
+        owner, repo, pull_number, review_id: r.id,
+        message: 'Superseded: a new review round is starting; this verdict applied to a previous revision.',
+      });
+      core.info(`Dismissed my prior ${r.state.toLowerCase()} review (id ${r.id}).`);
+    } catch (e) {
+      // Already dismissed (or a rights blip) must not kill the round — the
+      // fresh verdict below replaces it either way.
+      core.warning(`Could not dismiss prior review ${r.id}: ${e.message}`);
+    }
+  }
+  return mine.length;
 }
 
 // Builds the diff and fails closed (rather than silently truncating) if it's
@@ -147,149 +186,212 @@ async function buildDiff() {
   return { ok: true, diff: annotatedFiles.map(f => f.text).join('\n\n'), fileCount: annotatedFiles.length, totalChars };
 }
 
-// flash-class models ignore response_format and answer in prose, but they
-// still honor function calling. Force the model into a `review` tool so it
-// emits the review as JSON tool-call arguments.
-const REVIEW_TOOL = {
-  type: 'function',
-  function: {
-    name: 'review',
-    description: 'Report the PR review findings as a single JSON object.',
-    parameters: {
-      type: 'object',
-      properties: {
-        verdict: { type: 'string', description: '"MERGE-READY: <reason>" or "NEEDS WORK: <n> blocking, <m> important"' },
-        summary: { type: 'string', description: '2-6 sentence prose summary of the review' },
-        readme_note: { type: 'string', description: 'one line, or empty string if no README drift' },
-        architecture_note: { type: 'string', description: 'one line, or empty string if no ARCHITECTURE drift' },
-        inline: {
-          type: 'array',
-          description: 'blocking/important findings only, each pinned to an exact line in the diff',
-          items: {
-            type: 'object',
-            properties: {
-              path: { type: 'string' },
-              line: { type: 'integer' },
-              severity: { type: 'string', enum: ['blocking', 'important'] },
-              comment: { type: 'string', description: 'Specific and actionable. Format for readability with line breaks (short lines or bullet points), not one long paragraph.' },
-            },
-            required: ['path', 'line', 'severity', 'comment'],
-          },
-        },
-      },
-      required: ['verdict', 'summary', 'inline'],
-    },
-  },
-};
+// The review runs as an opencode v2 headless session (`opencode run
+// --standalone`) over the checked-out repo: it reads the attached instructions
+// (repo context + full diff), explores the working tree with READ-ONLY tools
+// to verify cross-file claims, and answers with the review JSON. The child env
+// carries ONLY the model key — GITHUB_TOKEN never enters the harness, so a
+// prompt-injected agent cannot touch the PR; this process keeps posting. The
+// PR's own opencode config is ignored (OPENCODE_DISABLE_PROJECT_CONFIG) and
+// OPENCODE_CONFIG_CONTENT — which merges after the project-level sources —
+// carries the lockdown, so a shipped config cannot re-enable tools; --pure
+// does not exist in v2, plugins are only loaded through config, and ours
+// loads none. --standalone boots a private server (v2 otherwise attaches to
+// a shared background service). Nothing from an unreviewed head is ever
+// executed (the workflow relies on the same property).
+// LLM_MODEL is the FULL opencode model id: `<provider>/<model>` — e.g.
+// `openrouter/deepseek/deepseek-v4.1-flash` or
+// `fireworks-ai/accounts/fireworks/models/glm-5p3-flash`. LLM_KEY_ENV names
+// the provider's expected key env var (OPENROUTER_API_KEY, FIREWORKS_API_KEY,
+// ...) and LLM_API_KEY holds the key itself; only that env var enters the
+// harness process.
+const HARNESS_MODEL = LLM_MODEL;
+const LLM_KEY_ENV = process.env.LLM_KEY_ENV || 'OPENROUTER_API_KEY';
+const HARNESS_PERMISSIONS = JSON.stringify({
+  $schema: 'https://opencode.ai/config.json',
+  // v2 ordered rules, LAST MATCH WINS: deny everything, then allow only the
+  // local discovery tools. The explicit dangerous-tool denies after the
+  // wildcard are redundant with `*` but state the intent and survive any
+  // `*`-semantics drift.
+  permissions: [
+    { action: '*', resource: '*', effect: 'deny' },
+    { action: 'read', resource: '*', effect: 'allow' },
+    { action: 'glob', resource: '*', effect: 'allow' },
+    { action: 'grep', resource: '*', effect: 'allow' },
+    { action: 'shell', resource: '*', effect: 'deny' },
+    { action: 'edit', resource: '*', effect: 'deny' },
+    { action: 'webfetch', resource: '*', effect: 'deny' },
+    { action: 'websearch', resource: '*', effect: 'deny' },
+    { action: 'subagent', resource: '*', effect: 'deny' },
+    { action: 'skill', resource: '*', effect: 'deny' },
+  ],
+});
 
-// deepseek-v4p1-flash ignored BOTH `reasoning_effort` and `response_format` and
-// narrated its review in prose (no JSON) on a dense diff, so the reviewer uses
-// deepseek-v4-flash-0731, which honors function calling. Keep `reasoning_effort`
-// off by default (0731 does not need it); set LLM_REASONING_EFFORT to override.
-const LLM_REASONING_EFFORT = process.env.LLM_REASONING_EFFORT ?? '';
+// Actions interprets %-sequences and ::-prefixed lines in log output as
+// workflow commands (::add-mask::, ::stop-commands::, ::error:: …). Harness
+// output is attacker-influenced (the PR controls the diff and the files the
+// agent reads), so every untrusted string must be escaped before logging.
+const logSafe = s => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 
-// extractJsonObject returns the first brace-balanced `{...}` substring that
-// contains a "verdict" key — the safety net when the model wraps its JSON in
-// prose. It tries EVERY `{` (not just the first) so a prose brace like
-// "{1: ...}" before the real JSON does not hide it. String/escape aware so
-// braces inside strings don't break the scan.
-function extractJsonObject(s) {
-  for (let start = s.indexOf('{'); start >= 0; start = s.indexOf('{', start + 1)) {
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = start; i < s.length; i++) {
-      const ch = s[i];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (ch === '\\') esc = true;
-        else if (ch === '"') inStr = false;
-        continue;
-      }
-      if (ch === '"') inStr = true;
-      else if (ch === '{') depth += 1;
-      else if (ch === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          const cand = s.slice(start, i + 1);
-          if (cand.includes('"verdict"')) return cand;
-          break; // this start did not yield the verdict object; try the next
-        }
-      }
-    }
-  }
-  return '';
+// The event stream is the debug surface: every line is logged as it arrives
+// (tool calls especially), so a failed or slow review shows exactly what the
+// agent explored. Shapes are handled leniently — v1 and v2 both spread the
+// message part into the event, under `part`.
+function summarizeEvent(e) {
+  const p = e.part || {};
+  const name = p.tool || p.name || e.tool || e.name || '';
+  const brief = typeof p.description === 'string' && p.description
+    ? p.description
+    : JSON.stringify(p.metadata || p.arguments || p.input || '').slice(0, 120);
+  return logSafe(name ? `${name}: ${brief}` : JSON.stringify(e).slice(0, 140));
 }
 
-async function callLlmOnce(prompt) {
-  const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
-    signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
-    body: JSON.stringify({
-      model: LLM_MODEL,
-      temperature: 0.1,
-      max_tokens: 64000,
-      stream: true,
-      ...(LLM_REASONING_EFFORT ? { reasoning_effort: LLM_REASONING_EFFORT } : {}),
-      messages: [{ role: 'user', content: prompt }],
-      tools: [REVIEW_TOOL],
-      tool_choice: { type: 'function', function: { name: 'review' } },
-    }),
-  });
-  if (!res.ok) throw new Error(`LLM API error ${res.status}: ${await res.text()}`);
-  // Streamed: headers arrive immediately, so a multi-minute reasoning call no
-  // longer trips undici's 5-minute headers timeout (which surfaced as
-  // "fetch failed" and retried until the job looked hung).
-  const msg = reassembleStream(await res.text());
-  if (!msg) throw new Error('LLM returned no message');
-
-  // JSON normally lands in content; fall back to tool-call args / reasoning
-  // for providers that answer another way. Log head + tail so a drift into
-  // prose is diagnosable from the run log.
-  let content = msg.tool_calls?.[0]?.function?.arguments?.trim() || '';
-  if (!content.trim()) {
-    if (typeof msg.content === 'string') content = msg.content;
-    else if (Array.isArray(msg.content)) content = msg.content.map(p => p?.text || '').join('');
-  }
-  if (!content.trim() && typeof msg.reasoning_content === 'string') content = msg.reasoning_content;
-  core.info(`LLM raw (${content.length} chars): ${content.trim().slice(0, 200)}`);
-  core.info(`LLM raw tail: ${content.trim().slice(-300)}`);
-
-  const raw = content.trim() || '{}';
-  const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-  let parsed = null;
+async function runHarnessOnce(prompt, timeoutMs) {
+  // The prompt (context + diff) exceeds argv limits; attach it as a file.
+  const dir = mkdtempSync(join(tmpdir(), 'ai-review-harness-'));
   try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    const cand = extractJsonObject(cleaned);
-    if (cand) {
-      try {
-        parsed = JSON.parse(cand);
-      } catch {
-        parsed = null;
+    const promptFile = join(dir, 'prompt.md');
+    writeFileSync(promptFile, prompt);
+    const message = 'You are a PR review agent. The attached file contains your complete ' +
+      'review instructions, repo context, and the diff under review — follow it exactly. ' +
+      'The repository is checked out at the current working directory (the base branch — ' +
+      'trusted main, the same tree the harness itself runs from) — the attached diff, not ' +
+      'the working tree, is the source of truth for what changed. ' +
+      'Use your read-only tools to inspect surrounding code and verify cross-file claims. ' +
+      'Finish by outputting ONLY the single JSON review object the instructions specify.';
+    const args = [
+      'run', '--standalone', '--format', 'json', '--model', HARNESS_MODEL, '--file', promptFile, message,
+    ];
+    core.info(
+      `Harness: opencode ${HARNESS_MODEL} · ${prompt.length.toLocaleString()} char prompt · ` +
+      `timeout ${timeoutMs / 1000}s · ${LLM_KEY_ENV} ${LLM_API_KEY ? 'set' : 'MISSING'}`,
+    );
+    const child = spawn('opencode', args, {
+      cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      // stdin MUST be closed: the v2 CLI reads stdin to EOF before acting
+      // (an open-but-empty pipe hangs it forever — spawnSync closed stdin
+      // implicitly, async spawn does not).
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Node kills the child and reports the signal on close.
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      // Own process group: a timeout must reach descendants (the v1 runner's
+      // known "timeout kills the shell, not its children" gap, closed here).
+      detached: true,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        [LLM_KEY_ENV]: LLM_API_KEY,
+        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+        OPENCODE_CONFIG_CONTENT: HARNESS_PERMISSIONS,
+      },
+    });
+    const lines = [];
+    const counts = {};
+    let sessionError = null;
+    const rl = createInterface({ input: child.stdout });
+    // The group kill and the stream shutdown ride 'exit' — it fires the moment
+    // the process dies, while 'close' waits for stdout/stderr EOF and a
+    // lingering descendant holding the pipes suppresses it forever (the run
+    // would hang to the job's 60-minute cap instead of failing into the
+    // retry). spawn's timeout kills the direct child only; the group kill
+    // here is what reaches grandchildren.
+    let killed = false;
+    child.on('exit', (code, signal) => {
+      if (signal && !killed) {
+        killed = true;
+        try { process.kill(-child.pid, 'SIGKILL'); } catch {}
       }
+      // Stop waiting for EOF shortly after the process is gone: a descendant
+      // can hold stdout/stderr open past exit. rl.close() specifically —
+      // destroying the stream alone does not close a readline that never saw
+      // EOF (node readline does not forward a destroyed input's close).
+      setTimeout(() => { try { rl.close(); child.stdout.destroy(); child.stderr.destroy(); } catch {} }, 5000).unref();
+    });
+
+    const pumped = Promise.all([
+      new Promise((resolve, reject) => {
+        rl.on('line', (line) => {
+          lines.push(line);
+          let e;
+          try { e = JSON.parse(line); } catch { return; }
+          counts[e.type] = (counts[e.type] || 0) + 1;
+          if (e.type === 'error') {
+            sessionError = e.error?.data?.message || e.error?.message || e.error?.name;
+            if (!sessionError) {
+              // The last-ditch fallback must not throw: JSON.stringify(undefined)
+              // yields undefined (and throws on cycles), and a throw inside this
+              // readline listener is an uncaught exception that kills the run —
+              // the opposite of what this branch exists for.
+              try { sessionError = JSON.stringify(e.error ?? null).slice(0, 200); }
+              catch { sessionError = String(e.error).slice(0, 200); }
+            }
+            core.error(`Harness session error event: ${logSafe(sessionError)}`);
+          } else if (e.type === 'tool_use' || e.type === 'step_start' || e.type === 'step_finish') {
+            core.info(`  · ${summarizeEvent(e)}`);
+          }
+        });
+        rl.on('error', reject);
+        rl.on('close', resolve);
+      }),
+      new Promise((resolve) => { child.stderr.on('data', () => {}); child.stderr.on('close', resolve); }),
+      new Promise((resolve, reject) => {
+        // 'exit', not 'close': close can be suppressed by a descendant
+        // holding the stdio pipes; exit always fires, and the 5s destroy
+        // (above) bounds the stream waiters this promise is combined with.
+        child.on('exit', (code, signal) => resolve({ code, signal }));
+        child.on('error', reject);
+      }),
+    ]);
+
+    // Promise.all resolves to [stdoutResult, stderrResult, exitStatus] — the
+    // exit status is the THIRD element; the first two resolve with no value.
+    const { code, signal } = (await pumped)[2];
+    core.info(`Harness events: ${Object.entries(counts).map(([t, n]) => `${t}=${n}`).join(', ') || 'none'}`);
+    if (signal) throw new Error(`opencode timed out after ${timeoutMs}ms (signal ${signal})`);
+    if (sessionError) throw new Error(`opencode session error: ${sessionError}`);
+    if (code !== 0) throw new Error(`opencode exited ${code}: ${logSafe(lines.join('\n').slice(-500))}`);
+
+    // The model's final answer is its LAST text part (the prompt requires the
+    // review JSON alone there). parseReviewFromEvents is the production parse
+    // path — only that part reaches the verdict extractor; earlier parts and
+    // the raw event stream (tool-result events carry attacker-controlled file
+    // contents) never do. No fallback scan: a format drift must fail loudly
+    // (and retry), not parse attacker text.
+    const stdout = lines.join('\n');
+    const finalPart = harnessTextParts(stdout).pop();
+    if (finalPart) {
+      core.info(`Harness answer (${finalPart.length} chars): ${logSafe(finalPart.trim().slice(0, 200))}`);
+      core.info(`Harness answer tail: ${logSafe(finalPart.trim().slice(-300))}`);
     }
+    return parseReviewFromEvents(stdout);  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.verdict) {
-    throw new Error(`LLM response missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`);
-  }
-  return parsed;
 }
 
-// The flash model intermittently drifts into prose instead of the JSON tool
-// call, so retry a few times before failing the run.
-async function callLlm(prompt) {
+// HARNESS_TIMEOUT_MS is the TOTAL budget across attempts, so a timed-out
+// session never gets a second full leash: attempt 1 takes 60%, the retry the
+// remainder. A session that can't finish in either window is a problem run —
+// fail the job rather than burn 40 minutes.
+async function runHarness(prompt) {
+  const deadline = Date.now() + HARNESS_TIMEOUT_MS;
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 30_000) break;
+    const budget = attempt === 1 ? Math.floor(HARNESS_TIMEOUT_MS * 0.6) : remaining;
+    const startedAt = Date.now();
     try {
-      return await callLlmOnce(prompt);
+      return await runHarnessOnce(prompt, Math.min(budget, remaining));
     } catch (e) {
       lastErr = e;
-      core.warning(`LLM attempt ${attempt}/3 failed: ${e.message}`);
+      // e.message embeds untrusted content (session errors, raw model text) —
+      // escape it or a crafted failure can emit workflow commands.
+      core.warning(`Harness attempt ${attempt}/2 failed after ${Math.round((Date.now() - startedAt) / 1000)}s: ${logSafe(e.message)}`);
     }
   }
-  throw lastErr;
+  throw lastErr || new Error('harness budget exhausted');
 }
 
 // Each commit gets a NEW parent comment. Create it with all checkboxes
@@ -346,6 +448,7 @@ async function resolveFixedThreads(fixedComments) {
 }
 
 const PROGRESS_ITEMS = [
+  'Dismiss previous review',
   'Read the diff',
   'Gather context (AGENTS.md, README.md, docs/ARCHITECTURE.md)',
   'Review for BLOCKING/IMPORTANT issues',
@@ -386,6 +489,10 @@ async function main() {
     }
   }
 
+  // FIRST step of every round: retire the bot's own prior verdict, so the
+  // only review that can gate a merge is the one this run produces.
+  await dismissOwnPriorReviews();
+
   // Read the PRIOR round's notes BEFORE creating this round's tracking comment:
   // getPreviousRoundNotes takes the most recent TRACKING_MARKER comment, so
   // creating ours first would make it read the fresh, empty one and drop the
@@ -402,8 +509,9 @@ async function main() {
   const threadIndex = buildThreadIndex(existingComments, { bot, author: pr.user.login });
 
   // Create the progress comment up front so the checkboxes light up as work
-  // happens, rather than appearing fully-formed at the end.
-  await createParentComment(progressBody(0));
+  // happens, rather than appearing fully-formed at the end. The dismissal
+  // step is already done, so its box starts checked.
+  await createParentComment(progressBody(1));
 
   const diffResult = await buildDiff();
 
@@ -438,10 +546,10 @@ async function main() {
   }
 
   const diff = diffResult.diff;
-  await progress(1, `Read the diff — ${diffResult.fileCount} file(s), ~${diffResult.totalChars.toLocaleString()} chars`);
+  await progress(2, `Read the diff — ${diffResult.fileCount} file(s), ~${diffResult.totalChars.toLocaleString()} chars`);
 
   const ctx = readContextFiles();
-  await progress(2, ctx.names.length ? `Read context — ${ctx.names.join(', ')}` : 'No context files found');
+  await progress(3, ctx.names.length ? `Read context — ${ctx.names.join(', ')}` : 'No context files found');
 
   const template = readFileSync(PROMPT_FILE, 'utf8');
   // Use function replacements: String.replace interprets $&, $', $$ etc. in the
@@ -455,29 +563,13 @@ async function main() {
     .replace('{{CONTEXT_FILES}}', () => ctx.text)
     .replace('{{DIFF}}', () => diff);
 
-  const result = await callLlm(prompt);
+  const result = await runHarness(prompt);
 
-  // The weak flash model commonly stops after the first finding. Iterate:
-  // while findings exist, ask again for ADDITIONAL distinct findings until the
-  // model reports none new (capped) — so a review doesn't stop at one issue.
-  const merged = (Array.isArray(result.inline) ? result.inline : []).slice();
-  const already = () => new Set(merged.map(f => `${f.path}:${f.line}`));
-  for (let pass = 1; pass <= 3 && merged.length > 0; pass++) {
-    const foundText = merged.map(f => `- [${f.severity}] ${f.path}${typeof f.line === 'number' ? `:${f.line}` : ''}`).join('\n');
-    const followUp = `PR ${owner}/${repo} #${pull_number}\n\nThese blocking/important findings are ALREADY reported:\n${foundText}\n\nReview the diff again. Report ONLY ADDITIONAL distinct blocking/important findings you have NOT already covered above — one per file:line. If there are no more, return an empty "inline" array and verdict "MERGE-READY".\n\nDo not repeat findings already listed.\n\nDIFF:\n${diff}`;
-    let more;
-    try {
-      more = await callLlm(followUp);
-    } catch (e) {
-      core.warning(`Follow-up pass ${pass} failed: ${e.message}`);
-      break;
-    }
-    const added = (Array.isArray(more.inline) ? more.inline : []).filter(f => !already().has(`${f.path}:${f.line}`));
-    if (added.length === 0) break;
-    merged.push(...added);
-  }
-  const inline = merged;
-  await progress(3, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
+  // The harness explores iteratively by nature (it reads the repo rather than
+  // answering from one prompt), so there is no follow-up machinery: whatever
+  // it reports in `inline` is the round's finding set.
+  const inline = Array.isArray(result.inline) ? result.inline : [];
+  await progress(4, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
 
   // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
   // findings (already commented in a prior round). GitHub rewrites a prior
@@ -557,7 +649,7 @@ async function main() {
   }
   const postedReplies = repliedKeys.size;
 
-  await progress(4, `Posted ${postedInline} inline comment(s)` + (postedReplies ? ` · replied in ${postedReplies} thread(s)` : '') + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
+  await progress(5, `Posted ${postedInline} inline comment(s)` + (postedReplies ? ` · replied in ${postedReplies} thread(s)` : '') + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
 
   const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
   const loc = (c) => `\`${c.path}${typeof c.line === 'number' ? `:${c.line}` : ''}\``;

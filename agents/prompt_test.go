@@ -6,7 +6,7 @@ import (
 )
 
 func TestCPASystemPromptEmbedded(t *testing.T) {
-	if !strings.Contains(CPASystemPrompt(""), "Control Plane Agent") {
+	if !strings.Contains(CPASystemPrompt("", ""), "Control Plane Agent") {
 		t.Fatalf("CPASystemPrompt does not look like the CPA prompt")
 	}
 }
@@ -15,15 +15,28 @@ func TestCPASystemPromptEmbedded(t *testing.T) {
 // skill — the granting rules and the unifi access runbook (the env contract +
 // the live-network caution) must survive a refactor of the composition.
 func TestCPASystemPromptCarriesSkills(t *testing.T) {
-	p := CPASystemPrompt("")
+	p := CPASystemPrompt("", "")
 	for _, want := range []string{"granting skill", "access-unifi", "UNIFI_API_ADMIN"} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("CPASystemPrompt is missing %q", want)
 		}
 	}
-	// The departments do NOT carry the skills — they are the CPA's runbooks.
-	if strings.Contains(SystemPrompt("network", "", ""), "UNIFI_API_ADMIN") {
+	// The other departments do NOT carry the CPA's skills — they are the
+	// CPA's runbooks (compute carries its own create-lxc runbook instead).
+	if strings.Contains(SystemPrompt("network", "", "", ""), "UNIFI_API_ADMIN") {
 		t.Fatalf("network's prompt must not carry the CPA's unifi runbook")
+	}
+}
+
+// TestComputePromptCarriesCreateLxc: compute's composed prompt carries its
+// create-lxc runbook — the required-name rule and the door handoff must
+// survive a refactor of the composition.
+func TestComputePromptCarriesCreateLxc(t *testing.T) {
+	p := SystemPrompt("compute", "", "", "")
+	for _, want := range []string{"create-lxc", "No name, no create", "provision_runner"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("compute's prompt is missing %q", want)
+		}
 	}
 }
 
@@ -32,15 +45,15 @@ func TestCPASystemPromptCarriesSkills(t *testing.T) {
 // not — it is exempt from the repo/escalation block.
 func TestOrientationOnlyOnNonCustomPrompts(t *testing.T) {
 	const sentinel = "System orientation"
-	if got := CPASystemPrompt(""); !strings.Contains(got, sentinel) {
+	if got := CPASystemPrompt("", ""); !strings.Contains(got, sentinel) {
 		t.Errorf("CPA prompt is missing the shared orientation block")
 	}
 	for _, name := range DepartmentNames() {
-		if got := SystemPrompt(name, "", ""); !strings.Contains(got, sentinel) {
+		if got := SystemPrompt(name, "", "", ""); !strings.Contains(got, sentinel) {
 			t.Errorf("department %q prompt is missing the shared orientation block", name)
 		}
 	}
-	if got := SystemPrompt("waldo", "look after the garden", ""); strings.Contains(got, sentinel) {
+	if got := SystemPrompt("waldo", "look after the garden", "", ""); strings.Contains(got, sentinel) {
 		t.Errorf("custom agent prompt must NOT carry the system orientation block")
 	}
 	if got := AgentSystemPrompt("waldo", ""); strings.Contains(got, sentinel) {
@@ -50,16 +63,16 @@ func TestOrientationOnlyOnNonCustomPrompts(t *testing.T) {
 
 func TestOrientationRepoURLOverride(t *testing.T) {
 	const repo = "https://github.com/example/fork"
-	if got := CPASystemPrompt(repo); !strings.Contains(got, repo) {
+	if got := CPASystemPrompt(repo, ""); !strings.Contains(got, repo) {
 		t.Errorf("CPA prompt must render the supplied repo URL")
 	}
-	if got := CPASystemPrompt(""); !strings.Contains(got, UpstreamRepoURL) {
+	if got := CPASystemPrompt("", ""); !strings.Contains(got, UpstreamRepoURL) {
 		t.Errorf("CPA prompt must fall back to the upstream repo URL")
 	}
-	if got := SystemPrompt("data", "", repo); !strings.Contains(got, repo) {
+	if got := SystemPrompt("data", "", repo, ""); !strings.Contains(got, repo) {
 		t.Errorf("department prompt must render the supplied repo URL")
 	}
-	if got := SystemPrompt("data", "", ""); !strings.Contains(got, UpstreamRepoURL) {
+	if got := SystemPrompt("data", "", "", ""); !strings.Contains(got, UpstreamRepoURL) {
 		t.Errorf("department prompt must fall back to the upstream repo URL")
 	}
 }
@@ -119,7 +132,7 @@ func TestDepartmentPurposeAndChannelsCoverEveryDepartment(t *testing.T) {
 		if p, ok := DepartmentPurpose(name); !ok || strings.TrimSpace(p) == "" {
 			t.Errorf("department %q has no purpose", name)
 		}
-		want := []string{"#freehold", "#freehold-" + name}
+		want := []string{"#freehold"}
 		if got := DepartmentChannels(name); strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Errorf("DepartmentChannels(%q) = %v, want %v", name, got, want)
 		}
@@ -133,7 +146,7 @@ func TestDepartmentPurposeAndChannelsCoverEveryDepartment(t *testing.T) {
 }
 
 func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
-	got := SystemPrompt("network", "look after the garden", "")
+	got := SystemPrompt("network", "look after the garden", "", "")
 	dept, _ := DepartmentPrompt("network")
 	if !strings.Contains(got, strings.TrimRight(dept, "\n")) {
 		t.Errorf("SystemPrompt(network) must select the department prompt")
@@ -144,8 +157,30 @@ func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
 }
 
 func TestSystemPromptFallsBackToCustomTemplate(t *testing.T) {
-	got := SystemPrompt("waldo", "look after the garden", "")
+	got := SystemPrompt("waldo", "look after the garden", "", "")
 	if !strings.Contains(got, "You are waldo") || !strings.Contains(got, "look after the garden") {
 		t.Errorf("a non-department name must render the custom template: %q", got)
+	}
+}
+
+// TestOrientationOperatorTZ: the timezone note renders only when the operator
+// timezone is set — core agents learn the zone; an unset setting renders no
+// note at all (the pods-run-UTC default, unchanged shape).
+func TestOrientationOperatorTZ(t *testing.T) {
+	got := CPASystemPrompt("", "America/Chicago")
+	if !strings.Contains(got, "America/Chicago") || !strings.Contains(got, "Timezones") {
+		t.Errorf("CPASystemPrompt with a timezone lacks the timezone note: %q", got[:200])
+	}
+	plain := CPASystemPrompt("", "")
+	if strings.Contains(plain, "Timezones") || strings.Contains(plain, "America/Chicago") {
+		t.Errorf("CPASystemPrompt without a timezone must render no note")
+	}
+	dept := SystemPrompt("network", "", "", "Europe/Berlin")
+	if !strings.Contains(dept, "Europe/Berlin") {
+		t.Errorf("SystemPrompt(department) must carry the timezone note")
+	}
+	custom := AgentSystemPrompt("waldo", "")
+	if strings.Contains(custom, "Timezones") {
+		t.Errorf("custom agents carry no orientation block, timezone note included")
 	}
 }

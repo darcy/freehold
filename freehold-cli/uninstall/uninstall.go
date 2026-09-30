@@ -38,7 +38,7 @@ var uninstallCmd = &cobra.Command{
 			}
 		}
 		configPath := common.ProfileConfigPath(cmd)
-		yes, _ := cmd.Flags().GetBool("yes")
+		yes, _ := cmd.Flags().GetBool("non-interactive")
 		removeData, _ := cmd.Flags().GetBool("remove-data")
 		hostFlag, _ := cmd.Flags().GetString("host")
 
@@ -89,7 +89,7 @@ func init() {
 	uninstallCmd.Flags().String("name", "", "Profile name (resolves --host from profiles/<name>/config.toml when --host is omitted)")
 	uninstallCmd.Flags().String("host", "", "The environment address freehold reached (defaults to the profile's recorded host; informational in this path — the remote work rides the local runner)")
 	uninstallCmd.Flags().Bool("remove-data", false, "ALSO remove the durable plane (datasets + the freehold-created thin pool). Without it the plane survives so a later install re-adopts the runner identity")
-	uninstallCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (scripting/CI only)")
+	uninstallCmd.Flags().Bool("non-interactive", false, "Skip the confirmation prompt (scripting/CI only)")
 }
 
 // resolveUninstall checks the preconditions and resolves the host for DISPLAY.

@@ -56,8 +56,8 @@ Talk is unrestricted — the operator and any agent may converse with any depart
 What's bounded is *capability execution*: a capability a department owns is executed by that
 department's identity, never by a custom agent that would self-serve a second, ungoverned
 path to it. Whichever agent creates a service owns its install, config, and operation. The
-Orchestrator and departments are installed as part of the core build — a pod each, in the
-private `#freehold` plus its own private `#freehold-<department>` channel — and a rebuild reconciles them.
+Orchestrator and departments are installed as part of the core build — a pod each, all in the
+private `#freehold` channel — and a rebuild reconciles them.
 
 ## Vision, Architecture & Roadmap
 
@@ -94,8 +94,9 @@ just test     # the full gate: Rust fmt/build/test + Go build/vet/test + the acc
 Then operate the world yourself:
 
 ```sh
-freehold install --yes --name <world> --host root@<box> \
-                     --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr>  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
+freehold install --non-interactive --name <world> --host root@<box> \
+                     --relay-domain <relay.host> --cp-domain <cp.host> --proxy-ip <ip/cidr> \
+                     --operator-pubkey <64-hex> [--operator-identity <dir>]  # box one: create the CP only (door -> cp LXC + console + co-located runner), then STOP
 freehold build       # ANY box (login-gated): trigger the console's /api/world-build — the CP brings up relay/agent-tools/k3s/storage/DNS/litellm/caddy/cert through its co-located runner
 freehold teardown    # drop the WORLD (the inverse of build): relay/k3s + the CP-side
                      #  agent-tools process go, internal DNS clears — the CP, its runner,
@@ -107,15 +108,20 @@ freehold uninstall [--remove-data]  # drop the CP too (this box's doors + local 
 freehold            # the TUI dashboard
 ```
 
-`freehold install` (guided) or `install --yes` (headless) requires
+`freehold install` (guided) or `install --non-interactive` (headless) requires
 `--name` + `--host`: the profile name scopes the config + state to
 `profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; the host is
 recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
-needs the relay/CP domains + proxy IP (the guided flow prompts for them). An
+needs the relay/CP domains + proxy IP (the guided flow prompts for them) and
+the operator identity: `--operator-pubkey` (headless; `--operator-identity`
+seeds this box's login ledger from a keypair dir, verified against the
+pubkey — the guided flow pastes or mints it). The
+runner needs no name — it is the fixed `pve-ssh-root` capability — and the local
+MCP port defaults to 8787 (`--local-port` to move it). An
 existing name whose CP is absent is re-adopted (the plane keeps the runner
 identity); a **live** CP is refused — reconcile the world with `freehold build`,
-drop it with `teardown`/`uninstall`, or join it with `freehold login`. `install
---yes` is the non-interactive surface.
+drop it with `teardown`/`uninstall`, or join it with `freehold login`.
+`install --non-interactive` is the headless surface.
 
 ### The appliance: one binary, two surfaces
 
@@ -178,8 +184,9 @@ are. There is no implicit "default" profile.
   desire config (relay + CP coords, the CP's own identity, the operator pubkey
   derived from the nsec), so a fresh box recovers with nothing that lived only
   on a lost one. The operator nsec persists 0600 under the profile's
-  `control-plane/operator` dir (excluded from
-  any off-box backup/sync — it is a box-local, user-held key). The operator key
+  `control-plane/operator` dir (box-local, user-held — the CP holds only a COPY
+  sealed to the console identity, for agent-memory attestation; see the security
+  model). The operator key
   **is** the credential: the console only admits NIP-98 operators whose pubkey
   was minted into its admin whitelist at deploy, so logging in as yourself from
   any box unlocks the world. The recorded `cp_pubkey` is the CP's *own* identity
@@ -196,7 +203,9 @@ are. There is no implicit "default" profile.
   untouched, box
   identity kept). `w` then opens the web console in your browser already
   authenticated (single-use portal token — no `console-login`). Keys are scoped
-  to the active view.
+  to the active view. `s` edits the operator settings (today: the timezone
+  agent pods run) against the CP; the web console carries the same settings
+  card, and `freehold-console settings` is the CP-side CLI verb.
 
 The same session flows bootstrap → configure → running as the world converges.
 
@@ -228,7 +237,7 @@ managed = ["relay", "cp"]      # what WE operate — an invited relay wouldn't b
 [runner]                       # the provisioning door (the exec path into the host)
 addr = "127.0.0.1:8787"
 pubkey = "f7510b07…"           # the runner's own identity (filled at config-write)
-target = "proxmox-box"
+target = "pve-ssh-root"        # the fixed capability name (--target pre-0.8 worlds may differ)
 
 [lxc.relay]                    # connect/status coords only; sizing is bootstrap-time
 vmid = 100
@@ -438,7 +447,7 @@ sequenceDiagram
     OP->>PVE: bootstrap (box one) · build (ANY box): signed MCP via the runner
     PVE->>C: create + start + verify + docker (cp LXC)
     OP->>C: bootstrap deploy-cp + console + co-located runner
-    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records · trigger /api/world-build (console = the CP build executor)
+    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records (opt-in --manage-dns) · trigger /api/world-build (console = the CP build executor)
     CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · litellm · Caddy · cert
     CP-->>OP: world_build report (each stage) → Freehold is up
     OP->>C: login — own nsec (NIP-98) / w in the TUI
@@ -545,10 +554,20 @@ sequenceDiagram
 
 ### Security model (no master key)
 
-- The CP never holds a private key that decrypts anything, and never holds plaintext
-  (credentials are sealed, forgotten). The only key under the CP state dir is the console
+- The CP never holds a private key that decrypts a RUNNER's blobs, and never holds runner
+  plaintext (credentials are sealed, forgotten). The only key under the CP state dir is the console
   AGENT key — it signs readiness probes and is provably not the encryption recipient of
   any runner (G3.3 checks this).
+  One deliberate extension: the CP also holds the OPERATOR's Nostr SIGNING key, sealed to the
+  console identity at `world-secrets/operator.json` — the key that attests agent memory
+  (`contract/nipoa`), shipped by `freehold build` because only the operator box has it.
+  This is real authority, NOT a narrow attestation credential: whoever holds it signs
+  arbitrary events as the operator — NIP-98 console logins (the console admin
+  credential) and relay owner-role actions included. A CP compromise therefore yields
+  operator impersonation, the same class as losing the operator box itself. The CP holds
+  it because the attestation must be minted at every agent create/re-apply, and the
+  alternative (pre-minting on the box) cannot reach the CP's create path. Runner blobs
+  still stay sealed: nothing under the CP state dir opens one.
 - The runner holds ciphertext + its own injected private key; only that key opens its
   blobs, and a blob only opens under the secret name it was sealed with.
 - Rotation re-seals a NEW credential (the erase lever for your copies); revocation blocks
@@ -562,17 +581,14 @@ sequenceDiagram
 ```
 Cargo.toml            Rust workspace: control-plane/core, control-plane/runner,
                       control-plane/testkit, control-plane/core/harness/oracle
-agents/               freehold/agents — the agent definitions, embedded as Markdown:
-                      freehold/ (the Orchestrator prompt + skills), custom/ (the
-                      template for agents it creates), common/orientation.md, and the
-                      four departments (network/, data/, compute/, ai/). Its own Go
-                      module; the control plane imports the bytes.
 contract/             freehold/contract — the shared wire/trust leaf both the control
                       plane and the platform import: crypto/ (Go repro of the Rust
                       core, byte-exact cross-verified by the harness), wire/, client/
                       (the signed MCP client), config/, console/, relay/, identity/,
-                      worldfacts/, delegate/, version/. Its own Go module, so the edge
-                      is platform → contract ← control-plane (no module cycle).
+                      worldfacts/, delegate/, nipoa/ (the NIP-OA owner attestation
+                      behind every pod's BUZZ_AUTH_TAG), version/. Its own Go module,
+                      so the edge is platform → contract ← control-plane (no module
+                      cycle).
 control-plane/        freehold/control-plane — the stable mechanism (Go logic, Rust
                       only for runner + core):
   api/                the scoped API (agent tools + operator world actions) and
@@ -633,9 +649,17 @@ docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, POC.md, POC_CHUNK5
 
 Every PR runs two gates:
 
-- **CI** (`ci.yml`): `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on the
-  workspace (toolchain pinned to the declared `rust-version`). Green/red, no exceptions.
-- **AI review** (`ai-pr-review.yml`, "Bot Review"): reviews for real problems only. Findings
+- **CI** (`ci.yml`): rust (`cargo fmt --check`, `build`, `clippy -D warnings`, `test`, toolchain
+  pinned to the declared `rust-version`), Go (build/vet/test per module), and the review
+  harness's node tests (`ai-review` job) — fanned into a required `check`. Green/red, no
+  exceptions.
+- **AI review** (`ai-pr-review.yml`, "Bot Review"): reviews for real problems only. The reviewer
+  runs as an opencode headless session over the checked-out repo, exploring it with read-only
+  tools (no shell, no file writes, no PR-write token in its process) to verify cross-file
+  claims against the actual code. The workflow runs `pull_request_target`-only, so the YAML,
+  scripts, and deps it executes are always trusted `main`'s — a PR can never rewrite what
+  reviews it — and the explored tree is trusted main too; the diff comes via the API, so
+  nothing from an unreviewed head is ever checked out, let alone run. Findings
   are tiered in the top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER
   (named follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
   BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:

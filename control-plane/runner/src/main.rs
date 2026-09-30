@@ -19,8 +19,19 @@ struct Cli {
 enum Cmd {
     /// Manage runner identity keypairs (Nostr + X25519 encryption)
     Keys(KeysCmd),
+    /// Enroll this host's runner: ensure the identity (mint on-guest if
+    /// missing, never re-key) and print the pubkeys + the provision_runner
+    /// arguments for the control-plane enroll call.
+    Enroll(EnrollArgs),
     /// Start the MCP tool server
     Serve(ServeArgs),
+}
+
+#[derive(Args)]
+struct EnrollArgs {
+    /// State dir for identity files (the serve unit's --state-dir)
+    #[arg(long, env = "FREEHOLD_STATE_DIR", default_value = "./.freehold")]
+    state_dir: PathBuf,
 }
 
 #[derive(Parser)]
@@ -71,7 +82,13 @@ struct ServeArgs {
     /// Allow a non-loopback bind. Every privileged call is signed (audience +
     /// grant + 60s window), so a LAN bind is safe for runners agents reach over
     /// the network; off by default so a runner is never exposed by accident.
-    #[arg(long, env = "FREEHOLD_RUNNER_ALLOW_REMOTE", default_value_t = false)]
+    /// Boolish env values (1/yes/on) are accepted — the env-file convention.
+    #[arg(
+        long,
+        env = "FREEHOLD_RUNNER_ALLOW_REMOTE",
+        default_value_t = false,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     allow_remote: bool,
 }
 
@@ -102,6 +119,71 @@ fn env_shadow_note(nsec: Option<String>, enc: Option<String>, state_dir: &Path) 
         )),
         (None, None) => None,
     }
+}
+
+/// The enroll printout: whether the identity was kept or minted, the pubkeys
+/// (the ONLY thing that ever crosses the host boundary), and the exact
+/// provision_runner arguments to come back with. Pure + testable.
+fn enroll_report(id: &Identity, kept: bool) -> String {
+    let mut out = String::new();
+    if kept {
+        out.push_str(
+            "identity already present — kept (enroll never re-keys; `runner keys init --force` \
+             replaces it and orphans every grant on it)\n",
+        );
+    } else {
+        out.push_str("identity minted on this host — the private keys never leave it\n");
+    }
+    out.push_str(&format!(
+        "nostr pubkey (hex):      {}\n",
+        id.nostr_pubkey_hex()
+    ));
+    out.push_str(&format!(
+        "encryption pubkey (hex): {}\n",
+        id.enc_pubkey_hex()
+    ));
+    out.push_str("\nEnroll with the control plane (the freehold CP toolset, provision_runner):\n");
+    out.push_str("  name: <target>-local-<identity>   (e.g. freehold-dev-local-lxcadmin)\n");
+    out.push_str(
+        "  kind: local, hosted: self, host: <the PINNED NAME from Compute's report — not a raw IP>, address: <user>@<host>\n",
+    );
+    out.push_str(&format!(
+        "  pubkey: {}, enc_pubkey: {}\n",
+        id.nostr_pubkey_hex(),
+        id.enc_pubkey_hex()
+    ));
+    out.push_str("  grant_to: [the agent that works this box]\n");
+    out
+}
+
+/// The enroll identity leg: keep + load the existing identity, or mint a
+/// fresh one — and when a file EXISTS but will not load, fail loudly instead
+/// of minting over it (a re-key orphans every grant + sealed credential on
+/// the guest). Returns the identity and whether it was kept.
+fn enroll_identity(
+    state_dir: &Path,
+    env_nsec: Option<String>,
+    env_enc: Option<String>,
+) -> anyhow::Result<(Identity, bool)> {
+    // Serve gives the env identity priority — so enroll prints THAT (with no
+    // file present, an env identity still runs; no file is minted over it).
+    if let Ok(id) = Identity::load_with(state_dir, env_nsec.clone(), env_enc.clone()) {
+        return Ok((id, true));
+    }
+    // An identity file that exists but will not load: loud failure — enroll
+    // NEVER re-keys a guest (that orphans every grant + sealed credential).
+    let identity_path = state_dir.join(identity::IDENTITY_FILE);
+    if identity_path.exists() {
+        return Err(anyhow::anyhow!(
+            "identity at {} exists but is unreadable — enroll never re-keys; \
+             repair or remove it by hand, or start from a fresh guest",
+            identity_path.display()
+        ));
+    }
+    let id = Identity::generate();
+    let written = id.write_to_dir(state_dir)?;
+    println!("wrote identity to {}", written.display());
+    Ok((id, false))
 }
 
 #[tokio::main]
@@ -146,6 +228,18 @@ async fn main() -> anyhow::Result<()> {
                 std::env::var(identity::ENC_ENV).ok(),
                 &args.state_dir,
             ) {
+                println!("{note}");
+            }
+            Ok(())
+        }
+        Cmd::Enroll(args) => {
+            // Same env priority as serve: with FREEHOLD_RUNNER_NSEC/ENC set,
+            // the ENV identity is what will run, so it is what enroll prints.
+            let env_nsec = std::env::var(identity::NSEC_ENV).ok();
+            let env_enc = std::env::var(identity::ENC_ENV).ok();
+            let (id, kept) = enroll_identity(&args.state_dir, env_nsec.clone(), env_enc.clone())?;
+            println!("{}", enroll_report(&id, kept));
+            if let Some(note) = env_shadow_note(env_nsec, env_enc, &args.state_dir) {
                 println!("{note}");
             }
             Ok(())
@@ -221,6 +315,47 @@ mod tests {
             enc.map(String::from),
             &PathBuf::from("/nonexistent"),
         )
+    }
+
+    #[test]
+    fn enroll_report_minted_names_both_pubkeys() {
+        let id = Identity::generate();
+        let r = enroll_report(&id, false);
+        assert!(r.contains("minted on this host"), "got: {r}");
+        assert!(r.contains(&id.nostr_pubkey_hex()), "got: {r}");
+        assert!(r.contains(&id.enc_pubkey_hex()), "got: {r}");
+        assert!(r.contains("hosted: self"), "must name the enroll mode: {r}");
+    }
+
+    #[test]
+    fn enroll_report_kept_never_rekeys() {
+        let id = Identity::generate();
+        let r = enroll_report(&id, true);
+        assert!(r.contains("kept"), "got: {r}");
+        assert!(!r.contains("minted"), "got: {r}");
+        assert!(r.contains(&id.nostr_pubkey_hex()), "got: {r}");
+    }
+
+    #[test]
+    fn enroll_identity_mints_then_keeps_never_rekeys() {
+        let dir = std::env::temp_dir().join(format!("fh-enroll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Missing: mints.
+        let (id, kept) = enroll_identity(&dir, None, None).expect("mints when absent");
+        assert!(!kept);
+        // Present + valid: KEPT (the same identity — never re-keyed).
+        let (again, kept2) = enroll_identity(&dir, None, None).expect("keeps when present");
+        assert!(kept2);
+        assert_eq!(again.nostr_pubkey_hex(), id.nostr_pubkey_hex());
+        // Present but CORRUPT: loud failure, never a mint-over.
+        std::fs::write(dir.join(identity::IDENTITY_FILE), "{ not json").unwrap();
+        let err = enroll_identity(&dir, None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("never re-keys"),
+            "corrupt identity must fail loudly, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

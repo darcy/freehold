@@ -37,8 +37,23 @@ type Runner struct {
 	McpAddr     *string     `json:"mcp_addr"`
 	Risk        *string     `json:"risk"`
 	Secret      *SecretInfo `json:"secret"`
+	// Grants is the runner's whitelist as the console sees it. The wire shape
+	// carries the three states clients must keep distinct: null (nil slice) =
+	// the console could NOT read a list — grants_source "unavailable" (the
+	// relay roster read failed; the runner fails closed) or "" (a revoked
+	// runner whose shipped package was removed, i.e. the package-unreadable
+	// anomaly); an EMPTY non-null slice = honestly empty (fail closed — for a
+	// relay-mode runner that is a live roster with nobody on it); otherwise
+	// the members themselves. grants_source names the source: "live" (the
+	// relay-signed 39002 roster — what actually gates exec), "package" (the
+	// shipped fallback — the co-located runner's mode), "unavailable" (the
+	// read failed). Empty when no list was readable.
 	Grants      []string    `json:"grants"`
-	Readiness   interface{} `json:"readiness,omitempty"`
+	GrantsSource string       `json:"grants_source,omitempty"`
+	Readiness    interface{}  `json:"readiness,omitempty"`
+	// Colocated marks the CP's own co-located runner (the build/relay-admin
+	// hands on the CP guest) so clients can label it.
+	Colocated bool `json:"colocated,omitempty"`
 }
 
 // SecretInfo mirrors the console client SecretInfo.
@@ -67,8 +82,7 @@ type AgentInfo struct {
 	// registry so a rebuild reconciler rejoins the same channel.
 	Channel string `json:"channel,omitempty"`
 	// Channels is the FULL channel list the agent was created into (a
-	// multi-channel create, e.g. a department's #freehold + its own private
-	// #freehold-<name>), preserved by the local registry so a rebuild rejoins every
+	// multi-channel create), preserved by the local registry so a rebuild rejoins every
 	// channel, not just the primary. Empty for rows written before this carried
 	// it (reconcile then falls back to Channel). The console API does not carry
 	// it.
@@ -575,6 +589,50 @@ type DnsRecord struct {
 	IP        string `json:"ip"`
 	Source    string `json:"source"`
 	CreatedAt uint64 `json:"created_at"`
+}
+
+// Settings mirrors the CP's operator settings (state.Settings). OperatorTZ
+// empty = the pods run UTC.
+type Settings struct {
+	OperatorTZ string `json:"operator_tz,omitempty"`
+}
+
+// SettingsGet reads the CP's operator settings (GET /api/settings). Nil
+// settings (never written) read as zero values.
+func (c *Client) SettingsGet() (*Settings, error) {
+	raw, err := c.request(http.MethodGet, "/api/settings", nil)
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Settings *Settings `json:"settings"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	if v.Settings == nil {
+		v.Settings = &Settings{}
+	}
+	return v.Settings, nil
+}
+
+// SettingsSet writes the operator settings (POST /api/settings). tz is the
+// IANA timezone the agent pods run; empty clears it (pods run UTC).
+func (c *Client) SettingsSet(tz string) (*Settings, error) {
+	raw, err := c.request(http.MethodPost, "/api/settings", map[string]string{"operator_tz": tz})
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Settings *Settings `json:"settings"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	if v.Settings == nil {
+		v.Settings = &Settings{}
+	}
+	return v.Settings, nil
 }
 
 // DnsView is the console's DNS surface: records + the rendered addn-hosts.

@@ -42,13 +42,6 @@ type RunnerProfile struct {
 	Risk        *string `json:"risk,omitempty"`
 }
 
-// MemoryDTag is the deterministic 64-hex engram address for (agent pubkey,
-// memory key): sha256(agent_pk ‖ "#" ‖ key).
-func MemoryDTag(agentPK, key string) string {
-	h := sha256.Sum256([]byte(agentPK + "#" + key))
-	return hex.EncodeToString(h[:])
-}
-
 // RunnerChannelID returns the dashed UUID channel id for a runner:
 // sha256(nostr pubkey)[0..16] formatted xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.
 func RunnerChannelID(runnerNostrPubkey string) string {
@@ -82,13 +75,45 @@ func QueryGroups(relayURL string, authSecret []byte) ([]GroupMeta, error) {
 
 // QueryGroupsAuth is QueryGroups with a separate NIP-98 auth URL (the
 // pre-Caddy LAN-dial case: dial http://<host>:3000, sign the canonical https).
+//
+// The query PAGINATES: the relay clamps every query page at 1000 events
+// (newest-first), and kind-39000 is parameterized-replaceable — the relay
+// re-emits a channel's whole discovery event on every roster/metadata change,
+// so a busy relay holds many emissions per channel (a world's runner channels
+// re-stage on every build). A single page's window slides past quiet channels'
+// newest metadata as the event count grows, so page through with the relay's
+// until+before_id cursor until a short page and dedupe newest-wins by `d`.
 func QueryGroupsAuth(dialURL, authURL string, authSecret []byte) ([]GroupMeta, error) {
-	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
-		"kinds": []interface{}{wire.GroupMeta},
-		"limit": 1000,
-	}})
-	if err != nil {
-		return nil, err
+	const pageLimit = 1000
+	var events []map[string]interface{}
+	until := int64(0)
+	var beforeID string
+	for {
+		filter := map[string]interface{}{
+			"kinds": []interface{}{wire.GroupMeta},
+			"limit": pageLimit,
+		}
+		if until > 0 {
+			filter["until"] = until
+			filter["before_id"] = beforeID
+		}
+		page, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{filter})
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, page...)
+		if len(page) < pageLimit {
+			break
+		}
+		// The page is newest-first; its LAST event is the oldest — the next
+		// cursor (a same-second tie needs the id, not just the timestamp).
+		oldest := page[len(page)-1]
+		ca := intOr(oldest["created_at"])
+		id, _ := oldest["id"].(string)
+		if ca == 0 || id == "" || (ca == until && id == beforeID) {
+			break // malformed or no forward progress — keep what we have
+		}
+		until, beforeID = ca, id
 	}
 	newest := map[string]int64{}
 	name := map[string]string{}
@@ -538,14 +563,25 @@ func mergeRunnerMetas(events []map[string]interface{}, expectedAuthor string) ([
 // QueryChannelRoster reads the runner's current roster (its exec whitelist):
 // kinds [39002] filtered by #d = the runner channel. Members = the `p` tags,
 // sorted. Trust anchor = relay_pubkey (verified locally); newest wins.
+// Single-URL form: the dial and the NIP-98 auth are the same origin — only
+// correct when relayURL IS the canonical public origin.
 func QueryChannelRoster(relayURL, relayPubkey, runnerNostrPubkey string, authSecret []byte) ([]string, error) {
+	return QueryChannelRosterAuth(relayURL, relayURL, relayPubkey, runnerNostrPubkey, authSecret)
+}
+
+// QueryChannelRosterAuth is QueryChannelRoster with a separate NIP-98 auth
+// URL: the dial reaches the relay on its LAN origin (by HOSTNAME — buzz keys
+// the community to the request Host) while the auth signs the CANONICAL
+// public URL. This is the form a runtime console needs: its recorded
+// relay_url is the LAN dial, and a dial-URL-signed auth 401s "URL mismatch".
+func QueryChannelRosterAuth(dialURL, authURL, relayPubkey, runnerNostrPubkey string, authSecret []byte) ([]string, error) {
 	chanID := RunnerChannelID(runnerNostrPubkey)
 	filters := []interface{}{map[string]interface{}{
 		"kinds": []interface{}{wire.GroupMembers},
 		"#d":    []interface{}{chanID},
 		"limit": 100,
 	}}
-	events, err := QueryEvents(relayURL, authSecret, filters)
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, filters)
 	if err != nil {
 		return nil, err
 	}
@@ -637,103 +673,14 @@ func intOr(v interface{}) int64 {
 	return 0
 }
 
-// WriteMemory writes (replaces) one encrypted memory engram (kind 30174,
-// d-tag MemoryDTag, p-tag = the agent's pubkey).
-func WriteMemory(relayURL string, agentNostrSecret []byte, key, value string) error {
-	pk, _, _, err := wire.SignEvent(agentNostrSecret, 1, time.Now().Unix(), [][]string{}, "")
-	if err != nil {
-		return err
-	}
-	content, err := wire.SealMemory(agentNostrSecret, value)
-	if err != nil {
-		return err
-	}
-	dTag := MemoryDTag(pk, key)
-	ts := time.Now().Unix()
-	_, id, sig, err := wire.SignEvent(agentNostrSecret, wire.MemoryKind, ts, [][]string{{"d", dTag}, {"p", pk}}, content)
-	if err != nil {
-		return err
-	}
-	ev := map[string]interface{}{
-		"id": id, "pubkey": pk, "created_at": ts, "kind": wire.MemoryKind,
-		"tags": [][]string{{"d", dTag}, {"p", pk}}, "content": content, "sig": sig,
-	}
-	evBytes, _ := json.Marshal(ev)
-	return PublishEventJSON(relayURL, agentNostrSecret, string(evBytes))
+func JoinChannel(relayURL string, secret []byte, channelID string) error {
+	return JoinChannelAuth(relayURL, relayURL, secret, channelID)
 }
 
-// ReadMemory reads the agent's own memory value for key (kind-30174, newest
-// wins, author-verified, decrypts with the agent's enc key).
-func ReadMemory(relayURL string, agentNostrSecret []byte, key string) (string, bool, error) {
-	pk, _, _, err := wire.SignEvent(agentNostrSecret, 1, time.Now().Unix(), [][]string{}, "")
-	if err != nil {
-		return "", false, err
-	}
-	dTag := MemoryDTag(pk, key)
-	filters := []interface{}{map[string]interface{}{
-		"kinds":   []interface{}{wire.MemoryKind},
-		"#d":      []interface{}{dTag},
-		"authors": []interface{}{pk},
-		"limit":   20,
-	}}
-	url := strings.TrimSuffix(relayURL, "/") + "/query"
-	auth, err := nip98Authorization(agentNostrSecret, "POST", url)
-	if err != nil {
-		return "", false, err
-	}
-	body, _ := json.Marshal(filters)
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(body)))
-	if err != nil {
-		return "", false, fmt.Errorf("memory query request failed: %w", err)
-	}
-	// Bare-domain Host (buzz keys the community to it; a LAN :3000 dial must
-	// not present "domain:3000" — same rule as QueryEvents/PublishEventJSON).
-	req.Host = req.URL.Hostname()
-	req.Header.Set("Authorization", auth)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := agent().Do(req)
-	if err != nil {
-		return "", false, fmt.Errorf("memory query request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	rb, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", false, fmt.Errorf("memory query read: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", false, fmt.Errorf("memory query returned HTTP %d: %s", resp.StatusCode, rb)
-	}
-	var events []map[string]interface{}
-	if err := json.Unmarshal(rb, &events); err != nil {
-		return "", false, fmt.Errorf("memory query parse: %v: %s", err, rb)
-	}
-	bestTS := int64(-1)
-	bestSealed := ""
-	for _, ev := range events {
-		author, _ := ev["pubkey"].(string)
-		if author != pk {
-			continue
-		}
-		createdAt := intOr(ev["created_at"])
-		tags, _ := parseTags(ev)
-		content, _ := ev["content"].(string)
-		sig, _ := ev["sig"].(string)
-		if _, err := wire.VerifyEvent(author, createdAt, wire.MemoryKind, tags, content, sig); err != nil {
-			continue
-		}
-		if bestTS < 0 || createdAt >= bestTS {
-			bestTS = createdAt
-			bestSealed = content
-		}
-	}
-	if bestSealed == "" {
-		return "", false, nil
-	}
-	val, err := wire.OpenMemory(agentNostrSecret, bestSealed)
-	if err != nil {
-		return "", false, err
-	}
-	return val, true, nil
+// JoinChannelAuth is JoinChannel with a separate NIP-98 auth URL.
+func JoinChannelAuth(dialURL, authURL string, secret []byte, channelID string) error {
+	tags := [][]string{{"h", channelID}}
+	return publishEventAuth(dialURL, authURL, secret, 9021, tags, "")
 }
 
 // PublishProfile publishes kind-0 metadata for an identity (name/about).
@@ -755,15 +702,4 @@ func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about stri
 	}
 	evBytes, _ := json.Marshal(ev)
 	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
-}
-
-// JoinChannel requests to join a channel (kind 9021).
-func JoinChannel(relayURL string, secret []byte, channelID string) error {
-	return JoinChannelAuth(relayURL, relayURL, secret, channelID)
-}
-
-// JoinChannelAuth is JoinChannel with a separate NIP-98 auth URL.
-func JoinChannelAuth(dialURL, authURL string, secret []byte, channelID string) error {
-	tags := [][]string{{"h", channelID}}
-	return publishEventAuth(dialURL, authURL, secret, 9021, tags, "")
 }

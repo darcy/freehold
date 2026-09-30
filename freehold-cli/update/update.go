@@ -7,6 +7,8 @@ package update
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,8 +19,10 @@ import (
 
 	"freehold/contract/config"
 	"freehold/contract/console"
+	"freehold/contract/crypto"
 	"freehold/contract/version"
 	"freehold/freehold-cli/internal/artifact"
+	"freehold/freehold-cli/internal/certcred"
 	"freehold/freehold-cli/internal/common"
 	"freehold/freehold-cli/internal/stages"
 	oplogin "freehold/freehold-cli/login"
@@ -52,7 +56,7 @@ var updateCmd = &cobra.Command{
 		o.ref, _ = cmd.Flags().GetString("ref")
 		o.sha, _ = cmd.Flags().GetString("sha")
 		o.check, _ = cmd.Flags().GetBool("check")
-		o.yes, _ = cmd.Flags().GetBool("yes")
+		o.yes, _ = cmd.Flags().GetBool("non-interactive")
 		return run(cmd.Context(), o)
 	},
 }
@@ -64,7 +68,7 @@ func init() {
 	updateCmd.Flags().String("ref", "", "build + deploy an untagged git ref (e.g. main)")
 	updateCmd.Flags().String("sha", "", "build + deploy a specific commit")
 	updateCmd.Flags().Bool("check", false, "report the available version + pending migrations without changing anything")
-	updateCmd.Flags().Bool("yes", false, "do not ask for confirmation")
+	updateCmd.Flags().Bool("non-interactive", false, "do not ask for confirmation")
 }
 
 func run(ctx context.Context, o options) error {
@@ -85,7 +89,7 @@ func run(ctx context.Context, o options) error {
 		return check(ctx, cfg, channel, cacheDir, o)
 	}
 
-	unlock, err := lock()
+	unlock, err := lock(common.ConfigPath())
 	if err != nil {
 		return err
 	}
@@ -133,6 +137,18 @@ func run(ctx context.Context, o options) error {
 	fmt.Println("→ deploying binaries + copying migration scripts")
 	if err := eng.RedeployCp(bins, set.MigrationsDir); err != nil {
 		return err
+	}
+
+	// Seed the operator identity the NEW console already accepts (the deploy
+	// above shipped it): the memory-plane attestation mints every agent pod
+	// with it, and a world built before the operator secret existed fails its
+	// reconcile at create-CPA with "no owner key to attest". The build seeds
+	// the same secret; seeding here too makes `update` alone heal an old world
+	// instead of demanding a build-then-update dance. Best-effort: a failure
+	// surfaces through the reconcile's own attest error, which names the
+	// recovery.
+	if err := seedOperatorSecret(cfg); err != nil {
+		fmt.Printf("  (operator secret not seeded: %v — the reconcile names the recovery if it's needed)\n", err)
 	}
 
 	// Reconcile FIRST: the deploy stopped every freehold-runner* unit (the
@@ -332,10 +348,18 @@ func cacheDir() (string, error) {
 	return d, nil
 }
 
-// lock guards against two concurrent updates.
-func lock() (func(), error) {
+// lock guards against two concurrent updates of the SAME world. The lock is
+// PER PROFILE (keyed by the resolved config path): two profiles on one box are
+// different worlds and must be able to update concurrently — a single shared
+// lock file made an unrelated profile's stale lock block the other.
+func lock(key string) (func(), error) {
 	d, err := cacheDir()
 	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(key))
+	d = filepath.Join(d, "locks", hex.EncodeToString(sum[:8]))
+	if err := os.MkdirAll(d, 0o700); err != nil {
 		return nil, err
 	}
 	p := filepath.Join(d, "update.lock")
@@ -345,9 +369,9 @@ func lock() (func(), error) {
 			// A stale lock (> 1h) is reclaimed.
 			if fi, serr := os.Stat(p); serr == nil && time.Since(fi.ModTime()) > time.Hour {
 				_ = os.Remove(p)
-				return lock()
+				return lock(key)
 			}
-			return nil, fmt.Errorf("another update is in progress (%s); remove it if stale", p)
+			return nil, fmt.Errorf("another update of this world is in progress (%s); remove it if stale", p)
 		}
 		return nil, err
 	}
@@ -367,6 +391,51 @@ func orDash(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// seedOperatorSecret ships the operator identity (the world's owner key) to the
+// CP when absent — the same sealed record `build` seeds, needed by the
+// memory-plane attestation the reconcile's create-CPA runs. Skipped when the
+// CP already holds it (the CP is the durable owner; a build never overwrites
+// it either).
+func seedOperatorSecret(cfg *config.Config) error {
+	client, err := common.ConsoleLogin(cfg)
+	if err != nil {
+		return err
+	}
+	names, err := client.SecretNames()
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if n == "operator" {
+			return nil
+		}
+	}
+	w, err := client.World()
+	if err != nil || w.ConsoleEncPubkey == "" {
+		return fmt.Errorf("no console enc pubkey from /api/world")
+	}
+	pub, err := hex.DecodeString(w.ConsoleEncPubkey)
+	if err != nil || len(pub) != 32 {
+		return fmt.Errorf("console enc pubkey not 32-byte hex")
+	}
+	opID, err := box.LoadIdentity(oplogin.Dir())
+	if err != nil {
+		return fmt.Errorf("read the operator identity ledger: %w (run `freehold login`)", err)
+	}
+	seal := func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) }
+	blob, err := certcred.CPSecretBlob("operator", "operator", map[string]string{
+		"nostr": opID.NostrSecretHex,
+	}, seal, pub)
+	if err != nil {
+		return err
+	}
+	if err := client.PutSecret("operator", blob); err != nil {
+		return err
+	}
+	fmt.Println("  · operator identity stored on the CP (attests agent memory)")
+	return nil
 }
 
 // Command returns the update command for root registration.

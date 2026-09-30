@@ -28,10 +28,12 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/delegate"
 	"freehold/contract/identity"
+	"freehold/contract/nipoa"
 	"freehold/contract/relay"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/api/cpstate"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
 	"freehold/platform/migrations"
@@ -127,6 +129,17 @@ type Spec struct {
 	// Read by BuildCreateAgentFn to wire the pod's FREEHOLD_RUNNER_* env, and
 	// by the agent reconcile to grant the department's pubkey onto each.
 	DepartmentRunners map[string][]agent.RunnerCoords
+
+	// OwnerSecret is the OWNER key's Nostr secret — the key whose pubkey is
+	// OwnerPub (the relay's `owner`-role member: the operator identity the
+	// world was installed under). It attests each agent's memory plane,
+	// minting its BUZZ_AUTH_TAG, and it must derive OwnerPub (checked in
+	// ownerKey) because the tag's owner and the pods' BUZZ_ACP_AGENT_OWNER are
+	// one addressing scheme. Set by the composition root that holds that
+	// identity; absent, the build's own read resolves it, and an
+	// unresolvable key fails the create loudly — never a pod with a harness
+	// and silently no writable memory.
+	OwnerSecret []byte
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -433,6 +446,26 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 		MemoryMB: s.MemoryMB,
 		Bridge:   s.Bridge,
 		Mounts:   mounts,
+	}
+	// Fail LOUD on blank size/placement: a world-config without them (a
+	// world installed before persistence shipped) would otherwise reach the
+	// substrate tool as "memory 0"/"bridge=" and fail with a cryptic usage
+	// error. The operator's values live in the world's config; name the fix.
+	var missing []string
+	if spec.MemoryMB < 16 {
+		missing = append(missing, "memory_mb")
+	}
+	if spec.RootfsGB < 4 {
+		missing = append(missing, "rootfs_gb")
+	}
+	if spec.Bridge == "" {
+		missing = append(missing, "bridge")
+	}
+	if spec.Storage == "" {
+		missing = append(missing, "storage")
+	}
+	if len(missing) > 0 {
+		return 0, fmt.Errorf("the world's config carries no %s — guest creation cannot proceed; add them under [plane] in the world's config and re-run the build (worlds installed after persistence ship them)", strings.Join(missing, "/"))
 	}
 	if vmid != 0 {
 		spec.VMID = &vmid
@@ -758,6 +791,36 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	return cert.LoadCreds(path, open, secret)
 }
 
+// certSeedFromCache installs a slot's edge cert from the box-shipped seed
+// (world-secrets/cert-seed-<slot>.json — the box cert cache, sealed to the
+// console identity like the DNS creds). It is the FRESH lifecycle's escape
+// from the LE order loop: the full-destroy uninstall wipes the plane (and the
+// durable mirror with it), so the operator box carries the issued cert across
+// worlds instead. Absent/stale/wrong-host seeds report (false, nil) — the
+// caller falls through to the normal issue path; only a failed INSTALL errors
+// (the same failure the issue path would hit).
+func (s *Spec) certSeedFromCache(k3sVmid uint32, slot, host string) (bool, error) {
+	path := filepath.Join(s.StateDir, "world-secrets", "cert-seed-"+slot+".json")
+	if !cert.CredExists(path) {
+		return false, nil
+	}
+	secret, err := s.consoleEncSecret()
+	if err != nil {
+		return false, err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	fullchain, key, err := cert.LoadSeed(path, open, secret, host, time.Now(), 30*24*time.Hour)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cert %s: seed cache unusable (%v) — issuing\n", slot, err)
+		return false, nil
+	}
+	if err := s.installCaddyCertFile(k3sVmid, slot, fullchain, key); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(os.Stderr, "cert %s: seeded from the box cert cache (no LE order)\n", slot)
+	return true, nil
+}
+
 // runnerLitellmSecrets maps the CP store's litellm env keys to the secret NAMES
 // the world-build requests from the co-located runner.
 var runnerLitellmSecrets = []struct{ name, env string }{
@@ -1018,6 +1081,18 @@ func (s *Spec) worldCert() error {
 				continue
 			}
 		}
+		// Box-shipped seed: the operator box caches each slot's issued cert
+		// across builds, so a world whose plane was destroyed (the FRESH
+		// lifecycle's full-destroy uninstall) pre-seeds from it — no new LE
+		// order, no challenge, no rate-limit exposure. Absent/stale seeds fall
+		// through to the issue path.
+		seeded, serr := s.certSeedFromCache(s.K3sVmid, sl.slot, sl.host)
+		if serr != nil {
+			return fmt.Errorf("cert %s seed: %w", sl.slot, serr)
+		}
+		if seeded {
+			continue
+		}
 		// Issue path: the sealed DNS cred must be on the CP (the box build's
 		// hand-off ships it). The fresh fullchain+key pair is installed by
 		// file-transit — no restart of the serving co-located runner.
@@ -1122,6 +1197,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build relay: %w", err)
 			}
 			report = append(report, "relay booted + stack deployed")
+		}
+		// 2.4. Re-assert the CONSOLE identity's relay membership on EVERY build.
+		// A relay rebuild/reseed can drop it, and then every console-signed
+		// publish (the runner channels, agent rosters, agent-tools seeding) 403s
+		// relay_membership_required — the console is not re-membered anywhere else
+		// (install did it once, a later reconcile didn't). buzz-admin add-member
+		// is idempotent.
+		if spec.Audience != "" && spec.CpLxc != 0 {
+			if err := spec.addRelayCommunityMember(spec.Audience); err != nil {
+				return "", fmt.Errorf("world-build console relay membership: %w", err)
+			}
 		}
 		// 2.5. Deploy the operator toolset (freehold-agent-tools) once the relay
 		// it seeds its roster against is up — the console's world_build brings
@@ -1297,6 +1383,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// half is sufficient alone. That guarantee lives in migrationRunner,
 				// not here, so the world_migrate tool gets it too.
 				report = spec.appendMigrations(report)
+				report = spec.appendMemoryPlane(report)
 				report = spec.appendAgentToolsAudience(report)
 			} else {
 				// Console executor: write the files, then reload the serve process.
@@ -1320,6 +1407,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// so they need NO running serve — they run BEFORE the restart, and the
 				// process that comes up loads their result as its starting state.
 				report = spec.appendMigrations(report)
+				report = spec.appendMemoryPlane(report)
 				report = spec.appendAgentToolsAudience(report)
 				if err := spec.startAgentTools(); err != nil {
 					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
@@ -1394,7 +1482,11 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 		if err != nil {
 			return "", err
 		}
-		er := &teardown.ExecRunner{}
+		// Domain keys the world's per-world tf root (TerraformDestroy resolves
+		// /srv/data/freehold-tf-<dashed-domain>, falling back to the shared dir
+		// only for a world with no per-world root) — without it the destroy
+		// half looks at the wrong dir and skips destroying the world's state.
+		er := &teardown.ExecRunner{Domain: spec.RelayHost}
 		er.SetExec(func(cmd string) (bool, string) {
 			out, err := spec.execOut(cmd, 600)
 			if err != nil {
@@ -1506,12 +1598,16 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 		if relayAuthURL == "" {
 			relayAuthURL = s.RelayURL
 		}
+		// The script's DIAL is the relay's LAN form (the CP's dnsmasq pins the
+		// relay host to the relay LXC, where nothing listens on 443 — TLS is
+		// the edge's); the NIP-98 signature still covers the canonical https.
+		// The same dial-LAN / sign-public split every other relay client uses.
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
 			"REGISTRY="+filepath.Join(s.StateDir, "registry.json"),
 			"CONSOLE_STATE="+consoleStateDir,
 			"STATE_DIR="+s.StateDir,
-			"FREEHOLD_RELAY_URL="+s.RelayURL,
+			"FREEHOLD_RELAY_URL="+s.relayDial(),
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
 			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
@@ -1644,6 +1740,120 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 	}
 }
 
+// ownerKey resolves the OWNER key that attests the agents' memory plane: the
+// operator identity the world was installed under (OwnerPub — the relay's
+// `owner`-role member, and the same key the pods declare as
+// BUZZ_ACP_AGENT_OWNER). Resolution order: a composition root that already
+// holds the key sets OwnerSecret; else the sealed `operator` world-secret the
+// box's build hands off (the operator nsec lives ONLY on the box — the CP is
+// its durable owner the same way the DNS creds are); else, for a world where
+// the operator and console identities coincide, the console identity on disk.
+//
+// Whatever resolves MUST derive the recorded OwnerPub, checked here rather
+// than per-caller: the tag's owner field and BUZZ_ACP_AGENT_OWNER are two
+// halves of one addressing scheme, so a wrong key restored from a backup would
+// have every agent write into a store it can never read back.
+func (s *Spec) ownerKey() ([]byte, error) {
+	if s.OwnerPub == "" {
+		return nil, fmt.Errorf("no owner pubkey is recorded on the build spec")
+	}
+	if len(s.OwnerSecret) == 32 {
+		return s.validatedOwnerKey(s.OwnerSecret)
+	}
+	sealed := filepath.Join(s.StateDir, "world-secrets", "operator.json")
+	if !cert.CredExists(sealed) {
+		disk, err := cpstate.ConsoleSecret(s.consoleStateRoot())
+		if err != nil {
+			return nil, fmt.Errorf("no owner key: the operator identity is not sealed on the CP (run `freehold build` from the operator box) and the console identity under %s/console is unreadable: %w", s.consoleStateRoot(), err)
+		}
+		return s.validatedOwnerKey(disk)
+	}
+	encSec, serr := s.consoleEncSecret()
+	if serr != nil {
+		return nil, fmt.Errorf("the sealed operator identity at %s needs the console enc key: %w", sealed, serr)
+	}
+	open := func(recSecret, aad, blob []byte) ([]byte, error) { return crypto.Open(recSecret, aad, blob) }
+	_, env, err := cert.LoadCreds(sealed, open, encSec)
+	if err != nil {
+		return nil, s.staleSealedOwner(sealed, fmt.Errorf("unreadable (%w)", err))
+	}
+	if hexRaw := env["nostr"]; hexRaw != "" {
+		sec, derr := hex.DecodeString(hexRaw)
+		if derr == nil && len(sec) == 32 {
+			if _, verr := s.validatedOwnerKey(sec); verr == nil {
+				return sec, nil
+			}
+		}
+	}
+	return nil, s.staleSealedOwner(sealed, fmt.Errorf("usable for a different owner"))
+}
+
+// staleSealedOwner reports a sealed operator record that no longer serves —
+// unreadable, or sealed for a key that is not the recorded owner. The record is
+// NEVER deleted here (a CP-side delete of the only copy is a destructive act
+// the operator owns); the message names the one file to remove so the next
+// `freehold build` re-seeds it from the box's ledger.
+func (s *Spec) staleSealedOwner(path string, cause error) error {
+	return fmt.Errorf("the sealed operator identity at %s is %s — remove that file and re-run `freehold build` from the operator box to re-seed it", path, cause)
+}
+
+// validatedOwnerKey checks a candidate secret against the recorded OwnerPub —
+// the one invariant that keeps the attestation addressing the store the pods
+// actually read from.
+func (s *Spec) validatedOwnerKey(sec []byte) ([]byte, error) {
+	pk, err := crypto.PubkeyFromSecret(sec)
+	if err != nil {
+		return nil, fmt.Errorf("the owner secret is unusable: %w", err)
+	}
+	if pk != s.OwnerPub {
+		return nil, fmt.Errorf("the readable owner secret derives %s, not the recorded owner %s — attestations would address the wrong store; re-run `freehold build` from the operator box (or check %s/console/identity.json)",
+			agenttools.ShortHex(pk), agenttools.ShortHex(s.OwnerPub), s.consoleStateRoot())
+	}
+	return sec, nil
+}
+
+// mintAuthTag renders the NIP-OA attestation an agent's pod needs as
+// BUZZ_AUTH_TAG. `buzz mem` takes its owner from the tag, so without it the
+// agent boots with a working harness and NO writable long-term memory — failing
+// in a way the pod log does not show, which is precisely how this stayed broken
+// across releases. So this fails the create rather than return an empty tag: the
+// key must resolve, and the minted tag must verify against the very agent key
+// the pod boots with.
+//
+// The attesting key is the OWNER key (OwnerPub — the operator identity the
+// world was installed under, resolved by ownerKey), never the agent's own: the
+// CLI rejects self-attestation outright, and an owner-signed tag keeps every
+// agent store in the same owner namespace the respond gate already uses. It is
+// normally NOT the console identity — see ownerKey.
+func (s *Spec) mintAuthTag(agentPk, who string) (string, error) {
+	ownerSec, err := s.ownerKey()
+	if err != nil {
+		return "", fmt.Errorf("%s: no owner key to attest the agent's memory plane: %w", who, err)
+	}
+	tag, err := nipoa.MintEngram(agentPk, ownerSec)
+	if err != nil {
+		return "", fmt.Errorf("%s: minting the memory-plane attestation: %w", who, err)
+	}
+	if err := nipoa.Verify(agentPk, tag); err != nil {
+		return "", fmt.Errorf("%s: the minted attestation does not verify for its own agent key: %w", who, err)
+	}
+	return tag.JSON(), nil
+}
+
+// appendMemoryPlane appends the report line that makes the agent memory plane's
+// health visible at bring-up. It names the attesting identity rather than a bare
+// ok because the failure it covers is a silent one: a world whose agents answer
+// conversations yet persist nothing looks healthy from every other angle. Never
+// fatal — a create with an unresolvable key already fails loudly at
+// mintAuthTag — this is what keeps a converged world distinguishable from a
+// silently unattested one.
+func (s *Spec) appendMemoryPlane(report []string) []string {
+	if _, err := s.ownerKey(); err != nil {
+		return append(report, "WARN: memory plane: "+err.Error()+" — agent pods come up with NO writable `buzz mem`")
+	}
+	return append(report, "memory plane: owner "+agenttools.ShortHex(s.OwnerPub)+" attests each agent pod (kind "+strconv.Itoa(nipoa.AgentEngramKind)+")")
+}
+
 // pinRelayHost idempotently pins the relay's LAN IP to its hostname in the CP
 // guest's /etc/hosts. Always re-reads the relay's CURRENT DHCP lease: a prior
 // cycle's recorded IP can go stale (the relay LXC can come back on a different
@@ -1676,7 +1886,10 @@ func (s *Spec) pinRelayHost() error {
 		if !hostsLineRe.MatchString(s.RelayHost) || !hostsLineRe.MatchString(relayIP) {
 			return fmt.Errorf("pin relay host into cp: refusing unsafe values (host %q / ip %q must be a bare hostname and IP)", s.RelayHost, relayIP)
 		}
-		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
+		// REPLACE any existing line for this host, never merely append-if-absent:
+		// a stale entry from a prior cycle (the relay came back on a new lease)
+		// would otherwise satisfy a grep and keep resolving to the dead IP.
+		pin := fmt.Sprintf("pct exec %d -- sh -c \"sed -i '/[[:space:]]%s$/d' /etc/hosts; echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
 		if err := s.run(pin, 30); err != nil {
 			return fmt.Errorf("pin relay host into cp: %w", err)
 		}
@@ -1845,6 +2058,18 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			return "", err
 		}
 
+		// The memory-plane attestation the pod boots with. Minted HERE, before
+		// anything is mutated on the relay: an agent that cannot be attested is
+		// an agent whose memory would silently never persist, and adding it as a
+		// relay member first would leave a half-created agent behind on the
+		// failure. The tag is bound to this exact pubkey — the same identity the
+		// identity Secret ships as BUZZ_PRIVATE_KEY — so it is minted from `pub`
+		// and never re-derived.
+		authTag, terr := spec.mintAuthTag(pub, fmt.Sprintf("create-agent %q", name))
+		if terr != nil {
+			return "", terr
+		}
+
 		// Relay membership (relay-administered; the CP cannot self-add — runs
 		// buzz-admin through the co-located runner into the relay LXC). The
 		// relay vmid may be unknown (fresh world) — resolve it by hostname.
@@ -1878,7 +2103,8 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// absent) and joined; the operator is added to each. Empty list = the
 		// default freehold channel. After the channels exist the CPA is added to
 		// each so the system's main touchpoint sees every department
-		// (agents.DepartmentChannels gives a department #freehold + #freehold-<name>).
+		// (agents.DepartmentChannels gives a department #freehold only — the
+		// departments hold their conversations there).
 		type channelRef struct{ id, name string }
 		var joined []channelRef
 		for _, ch := range channelNames(channels) {
@@ -1934,9 +2160,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
 				for _, ref := range joined {
-					// Best-effort: the created agent signs, so it lands on a
-					// channel it owns (its own #freehold-<name>); the CPA is
-					// already the owner/member of #freehold — skip.
+				// Best-effort: the created agent signs, so it lands on a
+				// channel it owns (a custom channel it created); the CPA is
+				// already the owner/member of #freehold — skip.
 					if ref.id == relayFreeholdChannel {
 						continue
 					}
@@ -1962,7 +2188,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		var manifest string
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, audience)
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ())
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
@@ -1973,7 +2199,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// asker (today the operator — the CP cannot see chat threads) +
 			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)

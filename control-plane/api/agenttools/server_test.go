@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 12 {
-		t.Fatalf("expected 12 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 13 {
+		t.Fatalf("expected 13 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "grant_agent", "provision_runner", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
+	for _, name := range []string{"create_agent", "grant_agent", "provision_runner", "revoke_runner", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -431,6 +431,71 @@ func TestProvisionRunnerAgentGate(t *testing.T) {
 	}
 	if called != 1 {
 		t.Fatalf("the kill switch must stop the staging path from running (called=%d)", called)
+	}
+}
+
+// TestRevokeRunnerAgentGate pins the take-away carve-out's server gate: a
+// registry agent (the CPA) may call revoke_runner in the default confirm mode,
+// its args reach the retirement path verbatim (a silently dropped revoke_from
+// would turn a single-grantee removal into a whole-door retirement — the worst
+// possible skew between what was asked and what was done), and the SAME
+// agent_grants kill switch that denies provisioning also denies revocation.
+func TestRevokeRunnerAgentGate(t *testing.T) {
+	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	agentSec := make([]byte, 32)
+	agentSec[0] = 11
+	agentPK, err := crypto.PubkeyFromSecret(agentSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	var got agent.RetireArgs
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{agentPK}, nil },
+		Tools: &agent.Tools{
+			Revoke: func(a agent.RetireArgs) (string, error) {
+				called++
+				got = a
+				return "door retired report", nil
+			},
+		},
+		IsAgent: func(pk string) bool { return pk == agentPK },
+	}
+	call := func() string {
+		t.Helper()
+		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"revoke_runner","arguments":` +
+			`{"name":"rtx3090-ssh-root","revoke_from":["ai"]}}}`
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, agentPK)
+		req.Header.Set(SigHeader, signForTest(agentSec, aud, ts, raw))
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+
+	if body := call(); called != 1 || !strings.Contains(body, "door retired report") {
+		t.Fatalf("confirm-mode (default) must dispatch to the retirement path: called=%d body=%s", called, body)
+	}
+	if got.Name != "rtx3090-ssh-root" || len(got.RevokeFrom) != 1 || got.RevokeFrom[0] != "ai" {
+		t.Fatalf("args not plumbed verbatim (a lost revoke_from would retire the whole door): %+v", got)
+	}
+
+	// revoke_runner must NOT be operator-scoped the way grant_agent is — the CPA
+	// is the touchpoint that takes capability away, so the world-tool gate has to
+	// stay closed for it (the kill switch above is the only server-side "no").
+	if isWorldTool("revoke_runner") {
+		t.Fatal("revoke_runner must stay callable by registry agents")
+	}
+
+	srv.AgentGrants = func() string { return "off" }
+	if body := call(); !strings.Contains(body, "agent_grants is off") {
+		t.Fatalf("the kill switch must deny revoke_runner too: %s", body)
+	}
+	if called != 1 {
+		t.Fatalf("the kill switch must stop the retirement path from running (called=%d)", called)
 	}
 }
 

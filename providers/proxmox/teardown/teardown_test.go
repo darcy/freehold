@@ -572,3 +572,51 @@ func TestRemoveRunnerSubstrateResidualErrors(t *testing.T) {
 		t.Fatal("a residual key must error, not report success")
 	}
 }
+
+// TestTfRootForPicksPerWorldThenLegacy exercises each probe separately: destroy
+// runs from the world's own per-world root when it holds state + a staged
+// module; the shared legacy root is a fallback ONLY for a world with no
+// per-world root at all — never for a world whose root exists but has no state
+// (that would destroy another world's surviving shared state). A dir with a
+// state file but no scripts/tf.sh is skipped, not run.
+func TestTfRootForPicksPerWorldThenLegacy(t *testing.T) {
+	const perWorld = "/srv/data/freehold-tf-world-test"
+	const legacy = "/srv/data/freehold-tf"
+	type probe struct{ perState, perModule, perDir, legacyState, legacyModule bool }
+	cases := []struct {
+		name      string
+		p         probe
+		wantDir   string
+		wantFound bool
+	}{
+		{"per-world wins", probe{perState: true, perModule: true, perDir: true, legacyState: true, legacyModule: true}, perWorld, true},
+		{"orphaned per-world state (no module) skipped", probe{perState: true, perModule: false, perDir: true}, "", false},
+		{"legacy fallback (no per-world root)", probe{legacyState: true, legacyModule: true}, legacy, true},
+		{"orphaned legacy state (no module) skipped", probe{legacyState: true, legacyModule: false}, "", false},
+		{"per-world root exists w/o state — must NOT reach shared", probe{perDir: true, legacyState: true, legacyModule: true}, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := &ExecRunner{Domain: "world.test"}
+			r.SetExec(func(cmd string) (bool, string) {
+				switch {
+				case cmd == "test -f "+perWorld+"/terraform.tfstate":
+					return c.p.perState, ""
+				case cmd == "test -x "+perWorld+"/scripts/tf.sh":
+					return c.p.perModule, ""
+				case cmd == "test -d "+perWorld:
+					return c.p.perDir, ""
+				case cmd == "test -f "+legacy+"/terraform.tfstate":
+					return c.p.legacyState, ""
+				case cmd == "test -x "+legacy+"/scripts/tf.sh":
+					return c.p.legacyModule, ""
+				}
+				return false, ""
+			})
+			dir, ok := r.tfRootFor()
+			if ok != c.wantFound || dir != c.wantDir {
+				t.Fatalf("got (%q,%v), want (%q,%v)", dir, ok, c.wantDir, c.wantFound)
+			}
+		})
+	}
+}

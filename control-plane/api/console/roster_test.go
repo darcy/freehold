@@ -1,13 +1,18 @@
 package console
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"freehold/contract/crypto"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
@@ -87,5 +92,160 @@ func TestRotateRestartsCapabilityDoors(t *testing.T) {
 	post("unifi-api-admin")
 	if len(hooked) != 1 || hooked[0] != "unifi-api-admin:8801" {
 		t.Fatalf("the capability door's rotate must restart its unit, got %v", hooked)
+	}
+}
+
+// TestGrantSelfHostedMaintainsRosters pins the durable-grant contract: a
+// console grant onto a self-hosted door whose pubkey belongs to a REGISTRY
+// agent joins the capability record's Rosters (pod coords + the rebuild's
+// re-assertion), an unknown pubkey rides the relay roster alone, and an
+// ungrant removes the name (the rebuild would otherwise re-add the revoked
+// member). No package is touched (self-hosted doors have none).
+func TestGrantSelfHostedMaintainsRosters(t *testing.T) {
+	dir := t.TempDir()
+	reg, err := agenttools.OpenRegistry(filepath.Join(dir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.RegisterAgent("deployer", strings.Repeat("c", 64), "deployer"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.EnrollRunner(store, "dev-local-lxcadmin", "local", "lxcadmin@h",
+		strings.Repeat("a", 64), strings.Repeat("b", 64), "192.168.30.50:8800"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("dev-local-lxcadmin", state.CapabilityRecord{
+		Kind: "local", Address: "lxcadmin@h", Port: 8800, Rosters: []string{},
+		Hosted: state.HostedSelf, Host: "192.168.30.50",
+		EnrollConfirmedAt: &[]uint64{7}[0],
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Store: store, StateDir: dir, AgentToolsDir: dir}
+	grant := func(pubkey string) {
+		r := httptest.NewRequest(http.MethodPost, "/api/grant", strings.NewReader(`{"name":"dev-local-lxcadmin","pubkey":"`+pubkey+`"}`))
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, r)
+		if rec.Code != 200 {
+			t.Fatalf("grant %s: %d %s", pubkey[:8], rec.Code, rec.Body.String())
+		}
+	}
+	ungrant := func(pubkey string) {
+		r := httptest.NewRequest(http.MethodPost, "/api/revoke-grant", strings.NewReader(`{"name":"dev-local-lxcadmin","pubkey":"`+pubkey+`"}`))
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, r)
+		if rec.Code != 200 {
+			t.Fatalf("ungrant %s: %d %s", pubkey[:8], rec.Code, rec.Body.String())
+		}
+	}
+	rosters := func() []string {
+		fresh, err := state.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, _ := fresh.GetCapability("dev-local-lxcadmin")
+		return rec.Rosters
+	}
+
+	grant(strings.Repeat("c", 64)) // a registry agent: joins the durable roster
+	if got := rosters(); len(got) != 1 || got[0] != "deployer" {
+		t.Fatalf("registry-agent grant must join Rosters: %v", got)
+	}
+	grant(strings.Repeat("d", 64)) // the operator/unknown: relay-only
+	if got := rosters(); len(got) != 1 {
+		t.Fatalf("an unknown pubkey must not join Rosters: %v", got)
+	}
+	ungrant(strings.Repeat("d", 64))
+	if got := rosters(); len(got) != 1 {
+		t.Fatalf("an unknown pubkey's ungrant must not touch Rosters: %v", got)
+	}
+	ungrant(strings.Repeat("c", 64))
+	if got := rosters(); len(got) != 0 {
+		t.Fatalf("the ungrant must remove the agent from Rosters: %v", got)
+	}
+}
+
+// TestRotateSelfHostedReturnsPackage pins the fill flow for a SELF-HOSTED
+// runner: no CP-side package dir exists, so the rotate seals to the
+// presented key and RETURNS the package JSON (the caller carries it to the
+// guest and restarts the unit there) — the console restarts nothing.
+func TestRotateSelfHostedReturnsPackage(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encSecret := []byte(strings.Repeat("k", 32))
+	encPub, err := crypto.X25519PublicKey(encSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.EnrollRunner(store, "dev-local-lxcadmin", "local", "lxcadmin@h",
+		strings.Repeat("a", 64), hex.EncodeToString(encPub), "192.168.30.50:8800"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("dev-local-lxcadmin", state.CapabilityRecord{
+		Kind: "local", Address: "lxcadmin@h", Port: 8800, Rosters: []string{"deployer"},
+		Hosted: state.HostedSelf, Host: "192.168.30.50",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hooked := []string{}
+	s := &Server{Store: store, RestartDoor: func(name string, port int) error {
+		hooked = append(hooked, name)
+		return nil
+	}}
+	post := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/rotate", strings.NewReader(`{"name":"dev-local-lxcadmin","secret":"git-deploy-key"}`))
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, r)
+		return rec
+	}
+	// The fill is REFUSED until the operator confirmed the presented pubkeys
+	// on the door page (the barrier that binds the fill to the key the guest
+	// holds — not to whatever the provisioning agent presented).
+	if rec := post(); rec.Code != 400 || !strings.Contains(rec.Body.String(), "not confirmed") {
+		t.Fatalf("an unconfirmed self-hosted fill must be refused, got %d %s", rec.Code, rec.Body.String())
+	}
+	now := uint64(time.Now().Unix())
+	if err := store.ConfirmEnrollment("dev-local-lxcadmin", now); err != nil {
+		t.Fatal(err)
+	}
+	rec := post()
+	if rec.Code != 200 {
+		t.Fatalf("rotate: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(hooked) != 0 {
+		t.Fatalf("a self-hosted rotate must not restart anything CP-side: %v", hooked)
+	}
+	var out struct {
+		SelfHosted  bool   `json:"self_hosted"`
+		PackageJSON string `json:"package_json"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.SelfHosted || out.PackageJSON == "" {
+		t.Fatalf("response must carry the self-hosted package: %s", rec.Body.String())
+	}
+	// The returned package decrypts with the presented key.
+	var pkg wire.SecretPackage
+	if err := json.Unmarshal([]byte(out.PackageJSON), &pkg); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := hex.DecodeString(pkg.Secrets["dev-local-lxcadmin"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := crypto.Open(encSecret, []byte("dev-local-lxcadmin"), blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plain) != "git-deploy-key" {
+		t.Fatalf("decrypted %q, want git-deploy-key", plain)
 	}
 }

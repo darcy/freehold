@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,7 +30,7 @@ import (
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns> …")
+		fmt.Fprintln(os.Stderr, "freehold-console <serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings> …")
 		os.Exit(2)
 	}
 	var err error
@@ -56,8 +57,10 @@ func main() {
 		err = cmdServices(os.Args[2:])
 	case "dns":
 		err = cmdDNS(os.Args[2:])
+	case "settings":
+		err = cmdSettings(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -197,7 +200,7 @@ func cmdServe(args []string) error {
 	// Bind guard: unauthenticated console stays loopback-only (C3).
 	var auth *console.Auth
 	if len(admins) > 0 {
-		auth = console.NewAuth(admins)
+		auth = console.NewAuth(admins, filepath.Join(*stateDir, "sessions.json"))
 		log.Printf("console auth enabled (NIP-98, %d operators) — non-loopback bind allowed", len(admins))
 	} else {
 		if err := console.ValidateLoopbackBind(*addr); err != nil {
@@ -238,6 +241,14 @@ func cmdServe(args []string) error {
 		// producer (rebuild) doesn't know the console's run-time dir, so the
 		// serve always wins with its authoritative *stateDir.
 		builder.StateDir = *stateDir
+		// The agent memory plane's attestation key resolves through cpbuild's
+		// ownerKey at mint time — the sealed `operator` world-secret (this
+		// world's owner, shipped by the box build) first, the console identity
+		// second. The console deliberately does NOT hand its own secret over:
+		// on a world where the console identity is NOT the owner (every world
+		// where the operator's key differs from the CP's runner-signing
+		// identity — the normal case), pre-setting it would short-circuit the
+		// resolver and attest every agent with the WRONG key.
 		// The world-config carries the PUBLIC relay origin (unreachable from
 		// inside the CP guest) and may predate the relay key; the console's own
 		// serve flags are the authoritative DIAL URL + trust anchor at runtime.
@@ -454,7 +465,11 @@ func cmdDNS(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("dns <add NAME IP SOURCE|apex --apex BASE --ip PROXY> [--state-dir DIR]")
+		// Flags BEFORE the sub-verb in every usage line: Go's flag.Parse stops
+		// at the first non-flag arg, so a flag after the sub-verb is silently
+		// unparsed (a trailing --state-dir would open the DEFAULT store and
+		// still print success — a silent write to the wrong state dir).
+		return fmt.Errorf("dns [--state-dir DIR] [--domain <base>] <add NAME IP SOURCE|remove NAME|apex --apex BASE --ip PROXY>")
 	}
 	store, err := state.Open(*stateDir)
 	if err != nil {
@@ -473,7 +488,7 @@ func cmdDNS(args []string) error {
 		return syncDNS(store, *stateDir, *domain)
 	case "add":
 		if len(rest) < 4 {
-			return fmt.Errorf("dns add <name> <ip> <source> [--domain <base>] [--state-dir DIR]")
+			return fmt.Errorf("dns [--state-dir DIR] add <name> <ip> <source> (--domain must precede add: it is parsed before the sub-verb)")
 		}
 		name, ip, source := rest[1], rest[2], rest[3]
 		if _, err := console.Upsert(store, name, ip, source); err != nil {
@@ -484,8 +499,20 @@ func cmdDNS(args []string) error {
 		}
 		fmt.Printf("dns %s -> %s\n", name, ip)
 		return nil
+	case "remove":
+		if len(rest) < 2 {
+			return fmt.Errorf("dns [--state-dir DIR] remove <name>")
+		}
+		if err := console.RemoveDNSRecord(store, rest[1]); err != nil {
+			return err
+		}
+		if err := syncDNS(store, *stateDir, *domain); err != nil {
+			return err
+		}
+		fmt.Printf("dns removed %s\n", rest[1])
+		return nil
 	default:
-		return fmt.Errorf("dns: unknown verb %q (add|apex)", rest[0])
+		return fmt.Errorf("dns: unknown verb %q (add|remove|apex)", rest[0])
 	}
 }
 
@@ -512,6 +539,7 @@ func cmdProvision(args []string) error {
 	kind := fs.String("kind", "", "connector kind")
 	address := fs.String("address", "", "target address")
 	secretEnv := fs.String("secret-env", "", "read the credential from this env var")
+	keyComment := fs.String("key-comment", "", "authorized_keys comment for a generated ssh key (default: the runner name)")
 	var grants multiFlag
 	fs.Var(&grants, "grant", "agent pubkey granted to call the runner (repeatable)")
 	runnerDir := fs.String("runner-dir", "", "where the runner package lands")
@@ -550,7 +578,11 @@ func cmdProvision(args []string) error {
 		}
 		secret = []byte(v)
 	case *kind == "ssh":
-		priv, pub, err := crypto.GenerateSSHKeypair(name)
+		comment := *keyComment
+		if comment == "" {
+			comment = name
+		}
+		priv, pub, err := crypto.GenerateSSHKeypair(comment)
 		if err != nil {
 			return err
 		}
@@ -655,6 +687,61 @@ func cmdGrantsMode(args []string) error {
 		return err
 	}
 	fmt.Printf("agent-grants mode: %s\n", *mode)
+	return nil
+}
+
+// cmdSettings reads or sets the operator settings (state.Settings): the
+// timezone the agent pods run (the seed the deploy does when the setting is
+// unset, and the console/TUI edit surface's CLI twin). --operator-tz omitted
+// prints the current value; --if-empty writes only when the setting is unset
+// (an operator's edit survives re-deploys).
+func cmdSettings(args []string) error {
+	fs := flag.NewFlagSet("settings", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	tz := fs.String("operator-tz", "", "operator IANA timezone (e.g. America/Chicago); omitted = print the current value; empty (--operator-tz=) clears")
+	ifEmpty := fs.Bool("if-empty", false, "write only when the timezone setting is currently unset")
+	fs.Parse(args)
+	if *stateDir == "" {
+		return fmt.Errorf("settings --state-dir [--operator-tz ZONE] [--if-empty]")
+	}
+	store, err := state.Open(*stateDir)
+	if err != nil {
+		return err
+	}
+	cur := state.Settings{}
+	if s := store.Settings(); s != nil {
+		cur = *s
+	}
+	tzSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "operator-tz" {
+			tzSet = true
+		}
+	})
+	if !tzSet {
+		if cur.OperatorTZ == "" {
+			fmt.Println("operator timezone: unset (pods run UTC)")
+		} else {
+			fmt.Println("operator timezone:", cur.OperatorTZ)
+		}
+		return nil
+	}
+	if *ifEmpty && cur.OperatorTZ != "" {
+		fmt.Printf("operator timezone already set (%s) — kept\n", cur.OperatorTZ)
+		return nil
+	}
+	if *tz != "" && !state.ValidOperatorTZ(*tz) {
+		return fmt.Errorf("unknown timezone %s (want an IANA name, e.g. America/Chicago)", *tz)
+	}
+	cur.OperatorTZ = *tz
+	if err := store.SetSettings(&cur); err != nil {
+		return err
+	}
+	if *tz == "" {
+		fmt.Println("operator timezone cleared (pods run UTC)")
+	} else {
+		fmt.Printf("operator timezone: %s\n", *tz)
+	}
 	return nil
 }
 

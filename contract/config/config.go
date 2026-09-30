@@ -120,8 +120,19 @@ type PlaneSpec struct {
 	// only by the carve branch of the rebuild placement gate; a REUSED
 	// stock pool (pve/data) is never recorded here. Teardown --data removes
 	// exactly this pool and nothing else.
-	ThinPool *string                 `toml:"thin_pool,omitempty"`
+	ThinPool *string `toml:"thin_pool,omitempty"`
 	Mounts   map[string][]PlaneMount `toml:"mounts,omitempty"`
+	// Guest size/placement as the operator set them at install — persisted so
+	// a later world-config render (an UPDATE's) carries them: the update's
+	// own flags never do, and a blank spec made the next guest-create fail
+	// the substrate tool's parameter validation.
+	SizeGB     uint32 `toml:"size_gb,omitempty"`
+	PoolSizeGB uint32 `toml:"pool_size_gb,omitempty"`
+	RootfsGB   uint32 `toml:"rootfs_gb,omitempty"`
+	MemoryMB   uint32 `toml:"memory_mb,omitempty"`
+	Storage    string `toml:"storage,omitempty"`
+	Bridge     string `toml:"bridge,omitempty"`
+	RelayGW    string `toml:"relay_gw,omitempty"`
 }
 
 // PlaneMount is one resolved durable-plane mount (HOST source + guest path).

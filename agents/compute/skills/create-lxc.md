@@ -1,0 +1,153 @@
+# The create-lxc skill — standing up a guest slot on the PVE host
+
+This is Compute's runbook for the most common ask: "create an LXC called X" —
+from you (a user or freehold talking to you directly) or relayed through the
+CPA. It binds the recipe so every guest lands the same way: named, on DHCP,
+findable by name, with a sudo-capable account and a door handoff. It is
+read-on-boot material: re-check it against the repo as the system evolves.
+
+## The name is required
+
+No name, no create. The name must be a valid hostname — lowercase
+`[a-z0-9-]`, no leading/trailing dash (the same shape the control plane's DNS
+records enforce) — because it becomes the `pct` hostname, the resolver record,
+and the door's target label in one stroke. Refuse a request without one; a
+guest nobody can name is a guest nobody can find.
+
+## The recipe
+
+Everything here runs through **`pve-ssh-root`** (root on the PVE host). Say
+the vmid you actually got (`pct list` for the next free one); never invent one.
+
+1. **Template** — the newest Debian standard template matching the host arch
+   (`uname -m` → amd64/arm64; an arm64 guest cannot spawn on x86_64). Reuse
+   first: `pvesm list local` — pick the newest `debian-*standard_<arch>.tar.*`
+   already in the store. If none: `pveam update`, then
+   `pveam available --section system` — pick the newest
+   `debian-…standard_<arch>` match and `pveam download local <name>`.
+2. **Create** — defaults 2 cores / 2048 MB / 8 GB rootfs (the caller may ask
+   for more):
+
+       pct create <vmid> local:vztmpl/<tpl> --rootfs local-lvm:8 --memory 2048 --cores 2 \
+         --hostname <name> --unprivileged 1 --features fuse=1,keyctl=1,nesting=1 \
+         --net0 name=eth0,bridge=vmbr0,ip=dhcp,type=veth
+
+   **No root password.** The root account stays locked; the ways into this
+   guest are host-side `pct exec` and the door's own key (below). Nothing
+   else — a password that never exists cannot leak.
+3. **Boot + address** — `pct start <vmid>`, then
+   `pct exec <vmid> -- hostname -I` for the DHCP address the guest actually
+   got (first entry, eth0).
+4. **The account** — `lxcadmin` with passwordless sudo, and no password. The
+   Debian standard template ships WITHOUT sudo, so install it first:
+
+       pct exec <vmid> -- sh -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq sudo'
+       pct exec <vmid> -- useradd -m -s /bin/bash lxcadmin
+       pct exec <vmid> -- sh -c 'echo "lxcadmin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/lxcadmin; chmod 0440 /etc/sudoers.d/lxcadmin; visudo -cf /etc/sudoers.d/lxcadmin'
+
+   The account is key-only by design (its password field stays locked). If
+   `visudo -c` reports a parse error, fix it before moving on — a broken
+   sudoers drop can take sudo down for the whole guest.
+5. **The pin** — register `<name> → <ip>` in the control plane's resolver so
+   every other agent and guest can find the box by name. On the CP guest
+   (via `pct exec <cp-vmid>` through `pve-ssh-root`):
+
+        freehold-console dns --state-dir /srv/data/cp/control-plane add <name> <ip> "compute create-lxc"
+
+   (Flags sit between the `dns` verb and the `add` sub-verb — Go's flag.Parse
+   stops at the first non-flag arg, so a trailing `--state-dir` would be
+   silently unparsed.)
+
+   This is the state-backed record — the same mechanism the build uses to
+   name guests: it renders into the dnsmasq addn-hosts, reloads the resolver,
+   and survives a re-converge. Do NOT hand-edit dnsmasq files instead — a
+   build's render would not know the record, and the pin would be drift.
+
+## The runner-client (install on every guest you create)
+
+Every guest you create gets the **runner-client** — the resident runner the
+box itself will run once freehold enrolls it. Install it right after the
+account: download the `runner` asset from the repo's latest GitHub release
+(on the PVE host, which has outbound access) and verify it against the
+release's `checksums.txt` (`sha256sum -c` — the binary is about to hold
+every sealed credential on this guest; an unverified one is a hole, not a
+client), push it into the guest, and mint the identity as `lxcadmin` (the
+keys live in `lxcadmin`'s state dir and never leave the guest):
+
+    pct push <vmid> <path-to-runner> /tmp/freehold-runner
+    pct exec <vmid> -- install -m 755 /tmp/freehold-runner /usr/local/bin/freehold-runner
+    pct exec <vmid> -- rm -f /tmp/freehold-runner
+    pct exec <vmid> -- su - lxcadmin -c 'FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold freehold-runner enroll'
+
+`enroll` is idempotent: it mints the identity once and KEEPS it on re-runs —
+never re-key a guest that already has one (a re-enroll under a changed
+identity orphans every grant + sealed credential on it). It prints the two
+pubkeys; the next section uses them.
+
+## The door (handoff to freehold)
+
+A guest you created gets its door as a **resident runner** — the
+runner-client you installed IS the door; freehold enrolls it and the exec
+runs natively on the guest (no ssh hop, no credential on any other box).
+Report in the thread — name, vmid, IP, pinned, and the two pubkeys from
+`runner enroll` — and ask freehold to stand the door up:
+
+- `provision_runner(name=<name>-local-lxcadmin, kind=local, hosted=self,
+  host=<name>, address=lxcadmin@<name>, pubkey=<nostr>, enc_pubkey=<enc>,
+  grant_to=<the agent who will work the box>)`
+- The runner name is `<target>-<protocol>-<identity>` — never named for the
+  consumer (the granting skill's rule). `local` IS the protocol (the runner
+  is resident); `lxcadmin` IS the identity level — the unit runs as
+  `lxcadmin`, never root.
+- `host` is the PINNED NAME, not the raw IP — that is why the pin runs
+  before the door: a re-IPed guest keeps its door address.
+
+The report carries the relay coords + the allocated port. Install the unit
+yourself (for boxes you created, YOU are the installer): a systemd unit
+`User=lxcadmin` with `EnvironmentFile=/home/lxcadmin/.freehold/serve.env` —
+write that env file root-side from the report's values, and it MUST carry
+`FREEHOLD_STATE_DIR=/home/lxcadmin/.freehold` (the dir `enroll` minted into)
+alongside the report's values (`FREEHOLD_RUNNER_ADDR=0.0.0.0:<port>`,
+`FREEHOLD_RELAY_URL`, `FREEHOLD_RELAY_PUBKEY`, `FREEHOLD_RELAY_AUTH_URL`,
+`FREEHOLD_RUNNER_ALLOW_REMOTE=1`); `ExecStart` = the binary `serve`. Without
+`FREEHOLD_STATE_DIR` the unit defaults to `/.freehold` (systemd's cwd is
+`/`), mints a DIFFERENT identity than the enrolled one, and the sealed
+credentials never decrypt. Enable + start it, then verify before claiming:
+an exec probe through the door — `whoami` says `lxcadmin`, `sudo -n true`
+works, `hostname` says `<name>` — and the door's self-check goes 🟢. If
+freehold's confirm discipline is waiting on the operator's yes, say the door
+is WAITING, not that it works.
+
+The **ssh door** (`kind=ssh`, the CP mints a keypair you install into
+`authorized_keys`) is the fallback for boxes that cannot hold the
+runner-client — an appliance you do not control, a guest where the install
+is refused. Everything else about it is unchanged: provision through
+freehold, never by you (you hold no CP toolset, and grants are not yours to
+make).
+
+## The check-ins
+
+A new guest is new surface. Data's question fires on your report: "should
+this be backed up?" — name it in the thread; "no" is a valid, final answer; a
+silent gap is a failure. Exposure is Network's lane: a DHCP guest with a
+resolver record is internal-only, but a RESIDENT runner is a new LAN listener
+on a new host — the pods dial it directly — so name that exposure in the
+thread too and let Network's check-in get said. If the caller wants the guest
+reachable from outside, say so plainly and hand the ask to Network.
+
+## Teardown (when the guest dies)
+
+Destroying a skill-created guest is two steps, in this order:
+
+    pct stop <vmid> && pct destroy <vmid>
+    pct exec <cp-vmid> -- sh -c '<bin>/freehold-console dns --state-dir /srv/data/cp/control-plane remove <name>'
+
+Unpin AFTER destroying (the pin has no other purpose once the guest is gone),
+and never leave a stale record — a resolver entry pointing at a dead IP is
+exactly the kind of drift this runbook exists to prevent.
+
+## Tone
+
+State the vmid, the IP, and the pinned name you actually got; never claim a
+guest or a door you did not verify. Reference secrets by name only — this
+runbook never touches one.

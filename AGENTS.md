@@ -72,8 +72,10 @@ task is resumable without re-deriving where it stopped.
 - **A release is cut as a pre-release, then tested, then promoted.** `release-prepare`
   produces the candidate: annotated tag + a GitHub **pre-release** (marked `prerelease`,
   assets attached, short notes) whose body ends in a **test-status table** (one row per
-  provider × flow, seeded `⚪ Unverified`). `release-test-proxmox` runs the live lifecycle on
-  the pre-release's downloaded assets and fills the Proxmox rows (`✅`/`❌`; `⚪` when it can't
+  provider × flow, seeded `⚪ Unverified`). `release-test` orchestrates the testing — a dev
+  deploy first (`test-dev`: update dev to main, manually verify the changes with the
+  operator), then the per-provider e2e (`release-test-proxmox` runs the live lifecycle on
+  the pre-release's downloaded assets and fills the Proxmox rows `✅`/`❌`; `⚪` when it can't
   test). `release-publish` then promotes it to a full release only when **every** row is `✅`,
   with the operator's go-ahead — same tag, same commit, same assets.
 - **Release flow (trunk-first, current).** `main` is the trunk; all work lands there and
@@ -109,13 +111,16 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   design; the operator-stated mode is the only gate. `fresh` is transient (gone on
   uninstall) and is never listed.
 - **dev — build, test, sandbox.** Provision new services for agents, verify they work,
-  write the skills prod agents will use; refactor and exercise directly on the box. No PR
-  is needed to make something work in dev — the PR is only how finished code lands in
-  `main` so **other worlds** get it. When dev work exposes a fix: fix the world, then
-  reproduce it in the codebase — a fix that lives only on the box isn't done until the PR
-  merges.
+  write the skills prod agents will use; refactor and exercise directly on the box. **The
+  update flow is the only way changes reach any world — dev included:** PR → `main` →
+  `freehold update` (or a world's `freehold build`). Doing a thing by hand on a box is
+  for TESTING only — proving a fix works before it is code — never the way a change lands.
+  When dev work exposes a fix: fix the world to unblock testing, then reproduce it in the
+  codebase — a fix that lives only on the box isn't done until the PR merges and the update
+  flow delivers it.
 - **test — release e2e only**, via `release-test-proxmox` (Fresh/Rebuild/Live; Proxmox
-  now, Vultr later). Never a dev sandbox. Fresh is disposable; Rebuild/Live persist
+  now, Vultr later), reached only after the dev deploy (`test-dev`) is green. Never a dev
+  sandbox. Fresh is disposable; Rebuild/Live persist
   between releases.
 - **prod — review/debug only.** Observe, diagnose, report. No changes without the
   operator's explicit go-ahead; the fix path is always recreate on dev → PR → release.
@@ -138,7 +143,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
   Nostr/enc key), while a **live** CP is refused (reconcile with `freehold build`, drop it
   with `teardown`/`uninstall`, or join it with `freehold login`). There is no `bootstrap`
-  alias — `install --yes` is the non-interactive surface. A world with no recorded name
+  alias — `install --non-interactive` is the headless surface. A world with no recorded name
   keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
 - **GitHub Releases** (not a repo file) — the released versions, their notes, and assets; the
   version history lives there, not in the tree.
@@ -157,6 +162,13 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   **pre-release** with the built assets, short, high-level notes, and the test-status
   table — see "Releases" above. The canonical, agent-agnostic location (auto-loaded by
   opencode and any other agent that reads `~/.agents/skills/`-style external skills).
+- `.agents/skills/release-test/SKILL.md` — the `release-test` skill: the testing
+  orchestrator, in LOCKED order — the dev deploy + manual verification first (`test-dev`),
+  then the per-provider e2e; hands off to `release-publish`.
+- `.agents/skills/test-dev/SKILL.md` — the `test-dev` skill: deploy main to the dev world
+  (the profile listed under `dev:` in `.envs.yml`), diffing first and confirming with the
+  operator what to manually test, then deploying via the update flow and running those
+  checks. A NEW defect stops the release e2e.
 - `.agents/skills/release-test-proxmox/SKILL.md` — the `release-test-proxmox` skill:
   exercise a pre-release's downloaded assets through the full lifecycle (install →
   agent replies in the relay → teardown → all down → rebuild → agent replies → uninstall →
@@ -182,7 +194,14 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 - **CP = secret PROVISIONER, not a vault.** Encrypt-to-runner-key → ship ciphertext → inject
   runner private key → rotate. No master key. Runner holds only ciphertext + its own key;
   decrypts locally, uses in memory, forgets. Plaintext never on disk, never in agent context;
-  agents reference secrets by name only.
+  agents reference secrets by name only. Two deliberate CP-held secrets, both sealed to the
+  console identity: the DNS/litellm creds, and the operator's Nostr SIGNING key
+  (`world-secrets/operator.json`, shipped by the box build). The operator key is the
+  world's root credential — it attests agent memory (`contract/nipoa`) AND signs
+  arbitrary operator events (console logins, relay owner-role actions), so a CP
+  compromise yields operator impersonation; the CP holds it because the attestation is
+  minted at every agent create/re-apply. Nothing under the CP state dir opens a runner's
+  blobs.
 - **Grants are coarse**: agent ↔ runner (whitelist of Nostr pubkeys). Dedicated runner per
   service by default; sharing via grants allowed. Readiness = the runner's own self-check:
   🟢 green / 🟡 yellow / 🔴 red. The unit of grant is the runner: one runner per capability,
@@ -220,9 +239,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   the exact capability the department exists to own and audit. Service lifecycle is **not** a
   department: whichever agent created a service — a freehold-delegate or a custom agent — owns
   its install/config/operation, ad hoc and unvetted as before. The four departments are
-  **installed as part of the core build** (each a pod on the same harness as the CPA): in
-  the private `#freehold` plus its own private `#freehold-<department>` channel, with the CPA
-  a member of all. Only
+  **installed as part of the core build** (each a pod on the same harness as the CPA): all in
+  the shared private `#freehold` channel — there are no per-department channels; conversations
+  happen where they already are, with #freehold the fallback every core agent belongs to. Only
   the identity/grant separation is locked; capability tooling/secrets arrive per department
   later (Chunk 5/6). A custom agent that self-serves a department-owned capability is a
   containment failure even if a grant would technically allow it — the department's prompt is
@@ -286,7 +305,11 @@ release notes.
 - **No remote revocation of a capability already in a runner's hands.** The CP can stop
   issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
   someone else already holds still opens; re-keying after a leaked runner private key is out
-  of scope. Epoch/staleness rejection is a named follow-up.
+  of scope. Epoch/staleness rejection is a named follow-up. For a SELF-HOSTED runner the
+  same cut is narrower still: revoke removes membership/coords and blocks the CP-side flows,
+  but the guest's unit keeps running with its identity + sealed files until the box-side
+  action lands (stop the unit, remove the state dir — or destroy the guest); revoke on a
+  resident door is a feed-cut, not a stop.
 - **Backups can outlive "rotation = erase your copies."** `/srv/data` sits in the PBS +
   TrueNAS + Backblaze backup set, so a revoke that deletes the shipped `secrets.json` can
   still leave the old ciphertext in an off-site snapshot; backup retention is a named
@@ -299,8 +322,8 @@ release notes.
   without any agent hop).
 - **The agent↔runner exec surface is wired for departments; the grant unit is the runner.**
   `freehold build` creates each reserved department (`network`/`data`/`compute`/`ai`) through
-  the same audited `create_agent` (its embedded prompt, the private `#freehold` plus its own
-  `#freehold-<department>` channel, CPA added to each) and stands up the **capability runners**
+  the same audited `create_agent` (its embedded prompt, the private `#freehold` channel) and
+  stands up the **capability runners**
   (`stageDepartmentRunners`): one runner per capability, named `<target>-<protocol>-<identity>`
   (`pve-ssh-root` shared by network+compute+data, `kube-api-root`/`kube-api-caddysa`/
   `kube-api-litellmsa` SA-token kube doors, `litellm-api-admin` (master + provider keys),
@@ -325,21 +348,62 @@ release notes.
   the fly and grants the named agents onto it live — it cannot widen an existing runner's
   roster (grants onto build-time capability runners stay operator/console-issued via
   `grant_agent`, `-32003` for agents), and `agent_grants: off` on the CP state is the
-  server-side kill switch (`freehold-console grants-mode`; default `confirm`). The
+  server-side kill switch (`freehold-console grants-mode`; default `confirm`). A second
+  mode enrolls a runner RESIDENT on its own target (`hosted=self`, kind `local`): the box
+  holds the runner-client (`runner enroll` mints the identity ON the guest — Compute
+  installs the client on every guest it creates, `create-lxc` skill), presents its
+  pubkeys, and the CP records them, seals to them, starts nothing — pods dial the box's
+  LAN address directly. The
   in-thread-vs-DM confirmation discipline lives in the granting skill — the server cannot
   see Buzz threads, so a compromised CPA's only technical barrier is the new-runner-only
   boundary; the prompt is the first line of defense. Dynamic capability records make an
   on-the-fly door rebuild-safe (re-staged adopt-only every build; a record whose package
-  vanished fails loudly — the credential is not re-derivable), and the grantees' pods are
+  vanished fails loudly — the credential is not re-derivable; a self-hosted record whose
+  runner row vanished says re-enroll), and the grantees' pods are
   re-applied with coords resolved from state. **Credentials never ride chat**: an api-kind
   door provisions EMPTY (a "pending" placeholder) and the agent DMs the operator the door's
   own console page (`/runner/<name>` — the deep link opens its fill form, kind-aware: a
   unifi door takes username + password and the console composes the JSON login body); the
   console seals + restarts the door (a rotate on a capability door restarts the unit — the
-  fill goes live without any agent hop). The tool is credential-blind BY CONSTRUCTION
+  fill goes live without any agent hop); on a SELF-HOSTED door the operator first CONFIRMS
+  the enrollment on the door page (verifying the presented pubkeys against the guest's own
+  `runner enroll` output — the barrier that binds the fill to the key the guest holds, so a
+  compromised CPA cannot seal to its own key), the rotate seals to the presented key and
+  returns the package JSON, and the GRANTEE writes `secrets.json` on the guest through its
+  own door exec and restarts the unit there. The tool is credential-blind BY CONSTRUCTION
   (provision_runner takes no secret/extras field — a direct-credential mode, an agent
   relaying the credential for freehold to seal, is a named future `agent_grants` option
   that the current tool surface makes unreachable).
+- **Agent-initiated take-away exists, is verified per leg, and stops at the box
+  boundary.** The CPA's `revoke_runner` (`cpbuild.BuildRevokeRunner`) is the mirror
+  of `provision_runner` on the same audited surface and the SAME `agent_grants` kill
+  switch: with `revoke_from` it removes named grantees from the roster and from the
+  capability record's roster (both — a relay-only removal would be silently reversed
+  by the next build, which re-grants from the record) and re-applies their pods with
+  the door cut from their coords feed, leaving the door standing for the rest of its
+  roster. A grantee whose registry row is gone is still revoked: its pubkey resolves
+  from the durable identity dir the create path minted (UnregisterAgent deletes only
+  the row), so the de-escalation never stalls on a dropped agent; only a grantee with
+  neither row nor identity dir is unaddressable and reported for an operator console
+  clear. With `revoke_from` empty it retires the whole door (channel folded but KEPT
+  so the roster history + kind-48001 audit stream stay queryable, credential erased
+  through the audited revoke verb, unit stopped, record dropped). Ownership guards
+  mirror the grant side exactly: build-time capability runners, the `cloudflare-api-`
+  prefix, a missing capability record, and operator-origin records are all refused —
+  the agent surface only takes back what the agent flow gave. Each leg is checked on
+  its own terms and reported `[verified]`/`[UNVERIFIED]` (roster re-read from the
+  relay-signed 39002, sealed package re-opened via `wire.Load`, unit asked via
+  `systemctl is-active` plus a TCP probe of its port); the unit stop runs LOCAL to the
+  CP process, never through a runner — the flow is revoking exec, so it must not depend
+  on holding one. Two honest limits: the stop is claimed only where the build's own
+  substrate/relay condition held (otherwise the leg says `state-only`), and the
+  substrate credential the door carried stays authorized on its target — the report
+  hands that to Compute, and hands a box-hosted door's numbered close-out to the
+  OPERATOR, never to the agent that just lost the door. A retired name is NOT reserved
+  forever, but it is refused to the agent in both directions (`revoke_runner` again,
+  and a `provision_runner` re-mint) until an operator re-enables it by provisioning the
+  door from the console — `InsertCapability` is the single re-enable verb, deliberately
+  not a new tool, so take-away and re-grant are never the same caller's two hands.
 - **The doors are intent+audit boundaries, not hard containment on a shared
   host.** `dnsmasq-local-root` executes on the CP guest (where every runner
   package + the state store live), and `pve-ssh-root` reaches the CP guest via
@@ -358,13 +422,19 @@ release notes.
 - **The Data/Network "check in on a new service" question has no trigger yet.** The hook
   fires when an agent requests a service/compute through the CPA's provision path; that path
   is Chunk 5/6. Until then there is no provisioning request to raise the question on.
-- **Agents are told to read the repo on boot and re-check periodically, but the mechanism is
-  not wired.** Every non-custom prompt (CPA + departments) carries a shared orientation block
-  naming the repo and the read-on-boot/periodic-recheck discipline, and is honest that access
-  is not available yet. The git/GitHub grant + the read/schedule path land with Chunk 5's
-  workspace/git work.
+- **Agents can read the repo but cannot write it, and nothing schedules the re-check.** The repo is
+  public, so the shared orientation block (CPA + departments) tells every non-custom agent to clone
+  it and read from `main` — that read is real, and the prompts claim only it. Write access
+  (branches, pushes, PRs) and any scheduled re-check are unwired: the read-on-boot/periodic-recheck
+  discipline is prompt-level, enforced by the agent, not a mechanism the appliance runs. The
+  git/GitHub grant lands with Chunk 5's workspace/git work.
 - **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
   map for the process lifetime; a TTL reaper is sized but not built.
+- **The agent memory plane has no revocation story for a leaked pod env** — the
+  attestation is bounded to kind=30174 but unbounded in time, so a leaked
+  `BUZZ_AUTH_TAG` authorizes memory writes until the pod is re-applied; minting
+  with an expiry clause + a re-mint on build is the named follow-up
+  (docs/followups.md).
 - **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
   command can leave orphans running.
 - **Replay window:** a signed call can be replayed against the *same* runner within its 60s

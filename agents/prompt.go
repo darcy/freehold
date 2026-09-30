@@ -79,19 +79,23 @@ func repoURLOr(url string) string {
 }
 
 // renderOrientation renders the shared system-orientation block for a repo URL
-// (empty = the upstream default). The template is fixed at build time and its
-// only field is provided, so Execute cannot fail at runtime.
-func renderOrientation(repoURL string) string {
+// (empty = the upstream default) and the operator's timezone (empty = no
+// timezone note — pods run UTC). The template is fixed at build time and its
+// only fields are provided, so Execute cannot fail at runtime.
+func renderOrientation(repoURL, operatorTZ string) string {
 	var b strings.Builder
-	_ = orientationTmpl.Execute(&b, struct{ RepoURL string }{repoURLOr(repoURL)})
+	_ = orientationTmpl.Execute(&b, struct {
+		RepoURL    string
+		OperatorTZ string
+	}{repoURLOr(repoURL), strings.TrimSpace(operatorTZ)})
 	return strings.TrimRight(b.String(), "\n")
 }
 
 // CPASystemPrompt is the freehold named agent's full purpose: the shared system
 // orientation plus freehold/prompt.md, plus the granting skill. repoURL empty
-// = the upstream default.
-func CPASystemPrompt(repoURL string) string {
-	return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(cpaPrompt, "\n") +
+// = the upstream default; operatorTZ empty = no timezone note.
+func CPASystemPrompt(repoURL, operatorTZ string) string {
+	return renderOrientation(repoURL, operatorTZ) + "\n\n" + strings.TrimRight(cpaPrompt, "\n") +
 		"\n\n" + strings.TrimRight(grantingSkill, "\n") +
 		"\n\n" + strings.TrimRight(accessUnifiSkill, "\n")
 }
@@ -114,13 +118,21 @@ var computePrompt string
 //go:embed ai/prompt.md
 var aiPrompt string
 
+// createLxcSkill is compute's create-lxc runbook (skills/create-lxc.md): the
+// required-name rule, the template/create/bootstrap/DNS-pin recipe, and the
+// door handoff to the CPA's provision_runner. Composed onto compute's prompt
+// (the identity that executes it); the file stays the canonical text.
+//
+//go:embed compute/skills/create-lxc.md
+var createLxcSkill string
+
 // departmentPrompts maps a reserved department identity name to its embedded
 // system prompt. The names are reserved: a create_agent naming one of them
 // selects that department's prompt rather than the custom template.
 var departmentPrompts = map[string]string{
 	"network": networkPrompt,
 	"data":    dataPrompt,
-	"compute": computePrompt,
+	"compute": computePrompt + "\n\n" + strings.TrimRight(createLxcSkill, "\n"),
 	"ai":      aiPrompt,
 }
 
@@ -158,15 +170,17 @@ func DepartmentPurpose(name string) (string, bool) {
 }
 
 // DepartmentChannels returns the channels a department identity joins: the
-// shared freehold channel plus its own per-department channel, both prefixed
-// `freehold-` so they read as one system (#freehold, #freehold-network, …). Nil
-// for a non-department name. create_agent resolves each by name (creating it,
-// owned by the department, when absent) and adds the CPA to every channel.
+// shared freehold channel only — departments hold their conversations in
+// #freehold (or wherever a conversation already includes them), not in
+// per-department rooms. Non-nil for a department so a rebuild re-derives the
+// fixed list rather than falling back to stale persisted channels; nil for a
+// non-department name. create_agent resolves each by name (creating it when
+// absent) and adds the CPA to every channel it does not already hold.
 func DepartmentChannels(name string) []string {
 	if _, ok := departmentPrompts[name]; !ok {
 		return nil
 	}
-	return []string{"#freehold", "#freehold-" + name}
+	return []string{"#freehold"}
 }
 
 // SystemPrompt returns the system prompt to ship for a create: a reserved
@@ -174,10 +188,11 @@ func DepartmentChannels(name string) []string {
 // shared system orientation; any other name renders the custom template with the
 // purpose supplied at create time (and NO orientation — custom agents are exempt
 // from the repo/escalation block). This is the single selection point for which
-// definition a create uses. repoURL empty = the upstream default.
-func SystemPrompt(name, purpose, repoURL string) string {
+// definition a create uses. repoURL empty = the upstream default; operatorTZ
+// empty = no timezone note.
+func SystemPrompt(name, purpose, repoURL, operatorTZ string) string {
 	if p, ok := DepartmentPrompt(name); ok {
-		return renderOrientation(repoURL) + "\n\n" + strings.TrimRight(p, "\n")
+		return renderOrientation(repoURL, operatorTZ) + "\n\n" + strings.TrimRight(p, "\n")
 	}
 	return AgentSystemPrompt(name, purpose)
 }

@@ -49,6 +49,9 @@ type DeployCpSpec struct {
 	// yet, so a channel/registry script could only no-op and be marked done
 	// anyway. Empty = none shipped.
 	MigrationsDir *string
+	// KeyComment is the authorized_keys comment a rotated substrate key carries
+	// (freehold-<profile>-<runner>) — empty falls back to the target name.
+	KeyComment string
 }
 
 // DeployCpResult is the CP deploy outcome.
@@ -272,6 +275,36 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 	}
 	return shipFile(t, spec, *spec.AgentToolsBinary,
 		spec.BinDir+"/freehold-agent-tools", "agent-tools binary")
+}
+
+// seedOperatorTZ writes this box's timezone (the operator's, since the CLI
+// runs where the operator sits) into the CP's settings, IF the setting is
+// unset. Best-effort: a failure is a log line, never a deploy failure — the
+// operator can set the timezone in the console/TUI/CLI at any time.
+func seedOperatorTZ(t Transport, spec *DeployCpSpec) {
+	// The box's zone name: TZ env when it names a zone; else the IANA name
+	// /etc/localtime points at. time.Local.String() is always "Local" — it is
+	// NOT an IANA name, a pod cannot resolve it, and seeding it would fake
+	// success and --if-empty would preserve it forever — so it never seeds.
+	tz := os.Getenv("TZ")
+	if tz == "" || tz == "Local" {
+		if l, err := os.Readlink("/etc/localtime"); err == nil {
+			if i := strings.LastIndex(l, "/usr/share/zoneinfo/"); i >= 0 {
+				tz = l[i+len("/usr/share/zoneinfo/"):]
+			}
+		}
+	}
+	// "" / "UTC" need no setting (pods run UTC anyway).
+	if tz == "" || tz == "UTC" || tz == "Local" {
+		return
+	}
+	cmd := fmt.Sprintf("%s/freehold-console settings --state-dir %s --operator-tz %s --if-empty",
+		spec.BinDir, spec.StateDir, tz)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "seed operator timezone", 30); err != nil {
+		fmt.Fprintf(os.Stderr, "  note: could not seed the operator timezone (%s): %v — set it in the console/TUI\n", tz, err)
+		return
+	}
+	fmt.Printf("  operator timezone seeded: %s (agent pods apply it on their next create/rebuild)\n", tz)
 }
 
 // startServe launches the console serve in the guest with the given flag
@@ -510,6 +543,12 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 	if !isHexPubkey(pubkey) {
 		return nil, fmt.Errorf("console identity pubkey readback is not 64-hex: %q", pubkey)
 	}
+
+	// Seed the operator timezone (best-effort, IF-EMPTY): the box knows the
+	// operator's zone (time.Local — this process runs where the operator
+	// sits), the CP guest does not. The setting drives agent pods' TZ; an
+	// operator's later console/TUI edit survives (--if-empty).
+	seedOperatorTZ(t, spec)
 
 	// CO-LOCATED RUNNER (optional).
 	if spec.RunnerBinary != nil && spec.RunnerPackage != nil {
@@ -760,7 +799,11 @@ func rotateAdoptedSubstrate(t Transport, spec *DeployCpSpec, runnerDir string) (
 		}
 	}
 
-	newPEM, newPub, err := crypto.GenerateSSHKeypair(targetName)
+	comment := spec.KeyComment
+	if comment == "" {
+		comment = targetName
+	}
+	newPEM, newPub, err := crypto.GenerateSSHKeypair(comment)
 	if err != nil {
 		return "", "", fmt.Errorf("rotate substrate: keypair: %w", err)
 	}

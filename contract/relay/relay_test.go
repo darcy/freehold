@@ -4,6 +4,10 @@ import (
 	"encoding/json"
 
 	"encoding/hex"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"freehold/contract/crypto"
 	"testing"
 	"time"
@@ -91,20 +95,7 @@ func TestChannelIDFromName(t *testing.T) {
 
 // relayFreeholdChannelForTest mirrors cpbuild's fixed freehold channel id (the
 // derived ids must never collide with it).
-func relayFreeholdChannelForTest() string { return "00000000-0000-4000-8000-00000000f0ef" }
-
-func TestMemoryDTag(t *testing.T) {
-	d := MemoryDTag(strRepeat("a", 64), "key")
-	if len(d) != 64 {
-		t.Fatalf("d-tag must be 64 hex, got %d", len(d))
-	}
-	// Deterministic.
-	if MemoryDTag(strRepeat("a", 64), "key") != d {
-		t.Fatal("d-tag must be deterministic")
-	}
-}
-
-// --- merge_runner_metas (newest wins per channel; rogue author ignored) ---
+func relayFreeholdChannelForTest() string { return "00000000-0000-4000-8000-00000000f0ef" }// --- merge_runner_metas (newest wins per channel; rogue author ignored) ---
 
 func metaEvent(t *testing.T, who []byte, p *RunnerProfile, ts int64) map[string]interface{} {
 	content, _ := jsonMarshal(p)
@@ -273,5 +264,87 @@ func TestIsMemberFromEvents(t *testing.T) {
 	}
 	if isMemberFromEvents([]map[string]interface{}{ev(remove, 5, me), ev(add, 5, me)}, me) {
 		t.Fatal("same-second remove-then-add must tie to NOT a member")
+	}
+}
+
+// TestQueryGroupsAuthPaginatesPastThePageLimit pins the cursor loop: the relay
+// clamps a /query page at 1000 events newest-first and kind-39000 is
+// parameterized-replaceable (a busy relay holds many emissions per channel —
+// the runner channels re-stage on every build), so a single-page lookup's
+// window slides past quiet channels and find-by-name silently misses them
+// (the librem archive-migration failure). QueryGroupsAuth must page through
+// until+before_id until a short page and resolve the newest name per channel.
+func TestQueryGroupsAuthPaginatesPastThePageLimit(t *testing.T) {
+	secret := mustSecret(t, 7)
+	// 1001 channel emissions at ascending timestamps (ts 1000..2000) plus a
+	// re-emission of ch-0000 at the very top (ts 2500): served newest-first,
+	// the first 1000-event page holds the rename + ts 1002..2000, so ch-0000's
+	// superseded emission AND ch-0001 are only reachable on page 2.
+	var all []map[string]interface{}
+	for i := 0; i < 1001; i++ {
+		name := fmt.Sprintf("ch-%04d", i)
+		all = append(all, sign(t, secret, wire.GroupMeta, int64(1000+i),
+			[][]string{{"d", ChannelIDFromName(name)}, {"name", name}}, ""))
+	}
+	all = append(all, sign(t, secret, wire.GroupMeta, 2500,
+		[][]string{{"d", ChannelIDFromName("ch-0000")}, {"name", "ch-0000-renamed"}}, ""))
+
+	var cursors []map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var filters []map[string]interface{}
+		if err := json.Unmarshal(body, &filters); err != nil || len(filters) != 1 {
+			http.Error(w, "bad filter", http.StatusBadRequest)
+			return
+		}
+		f := filters[0]
+		cursors = append(cursors, f)
+		limit := int(f["limit"].(float64))
+		until, _ := f["until"].(float64)
+		// Emulate the relay: newest-first (reverse slice order), clamped at
+		// the requested limit, strictly older than the cursor timestamp (the
+		// fake data has no same-second ties, so before_id carries no weight).
+		var page []map[string]interface{}
+		for i := len(all) - 1; i >= 0 && len(page) < limit; i-- {
+			if until > 0 && int64(all[i]["created_at"].(int64)) >= int64(until) {
+				continue
+			}
+			page = append(page, all[i])
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	}))
+	defer srv.Close()
+
+	groups, err := QueryGroupsAuth(srv.URL, srv.URL, mustSecret(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cursors) != 2 {
+		t.Fatalf("expected 2 paged queries, got %d", len(cursors))
+	}
+	byName := map[string]string{}
+	for _, g := range groups {
+		byName[g.Name] = g.ID
+	}
+	// The re-emitted channel must resolve to its newest name across pages...
+	if _, ok := byName["ch-0000-renamed"]; !ok {
+		t.Fatalf("the newest name must win across pages, got %d groups", len(groups))
+	}
+	if _, ok := byName["ch-0000"]; ok {
+		t.Fatal("the superseded name must not survive the newest-wins dedupe")
+	}
+	// ...and a channel that only exists past the first page must be found —
+	// the librem failure mode.
+	if _, ok := byName["ch-0001"]; !ok {
+		t.Fatal("a channel past the 1000-event window must be found")
+	}
+	// The second page's cursor: until = the oldest timestamp of page 1, plus
+	// its event id (the relay's composite-cursor contract).
+	second := cursors[1]
+	if int64(second["until"].(float64)) != 1002 {
+		t.Fatalf("page-2 until = %v, want the oldest page-1 timestamp 1002", second["until"])
+	}
+	if second["before_id"] == "" {
+		t.Fatal("page-2 must carry before_id (the relay requires until+before_id together)")
 	}
 }

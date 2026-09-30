@@ -92,7 +92,7 @@ func stateRootFor(agentDir string) string {
 func registerSelfFlags(cmd *cobra.Command) {
 	cmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
 	cmd.Flags().String("agent-dir", box.OpsDir(), "Agent identity dir (signing)")
-	cmd.Flags().String("target", "proxmox-box", "Target runner")
+	cmd.Flags().String("target", box.RunnerTarget, "Target runner")
 	cmd.Flags().Bool("transient", false, "reach the host by direct root SSH (no served runner)")
 	cmd.Flags().String("host", "", "host to SSH into for --transient")
 }
@@ -551,6 +551,7 @@ var deployCpCmd = &cobra.Command{
 		spec.AgentToolsBinary = opt("agent-tools-binary")
 		spec.RunnerBinary = opt("runner-binary")
 		spec.RunnerPackage = opt("runner-package")
+		spec.KeyComment = mustStr(cmd, "key-comment")
 		// The version pin: install stamps it, build/teardown don't (their
 		// deploy-cp invocations pass no --version).
 		if v := mustStr(cmd, "version"); v != "" {
@@ -706,6 +707,7 @@ func init() {
 	deployCpCmd.Flags().String("agent-tools-pubkey", "", "agent-tools pubkey")
 	deployCpCmd.Flags().String("agent-tools-binary", "", "LOCAL freehold-agent-tools binary")
 	deployCpCmd.Flags().String("world-config", "", "cpbuild.Coords JSON (the console's build-executor coords)")
+	deployCpCmd.Flags().String("key-comment", "", "authorized_keys comment for a rotated substrate key (default: the runner name)")
 	deployCpCmd.Flags().String("version", "", "version to stamp (version.json); absent = don't promote")
 	deployCpCmd.Flags().String("channel", "", "release channel to stamp (default: derived from --version)")
 	deployCpCmd.Flags().String("commit", "", "commit sha to stamp")

@@ -22,6 +22,13 @@ var dnsCredCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		domain, _ := cmd.Flags().GetString("domain")
 		cfgPath, _ := cmd.Flags().GetString("config")
+		// Scope the seal to the config's own profile: the credential must land
+		// in the PROFILE's state dir (where that world's build opens it), not
+		// the base state dir a shared binary would otherwise write. Registered
+		// profiles only — a custom --config path keeps the base-state behavior.
+		if p := config.ProfileForConfigPath(cfgPath); p != nil && p.Name != "" {
+			config.SetCurrent(p)
+		}
 		slot, _ := cmd.Flags().GetString("slot")
 		provider, _ := cmd.Flags().GetString("provider")
 		envCSV, _ := cmd.Flags().GetString("env")

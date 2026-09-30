@@ -486,22 +486,47 @@ func (m *Model) readCpRunners(cfg *config.Config) {
 		} else if cfg != nil {
 			addr = cfg.Runner.Addr
 		}
+		// The grants cell keeps the API's three states distinct: nil (null on
+		// the wire) = the console could NOT read a list — the relay roster
+		// read failed ("unavailable": the runner fails closed, the whitelist
+		// is just unseen) or the package is unreadable (anomaly); an empty
+		// non-nil list = honest fail-closed; otherwise the count + source
+		// ("live" = the relay-signed roster that gates exec, "pkg" = the
+		// shipped package fallback — the co-located runner's mode).
 		grants := "—"
-		if len(r.Grants) > 0 {
-			grants = fmt.Sprintf("%d grants", len(r.Grants))
+		switch {
+		case r.Grants == nil && r.GrantsSource == "unavailable":
+			grants = "roster unavailable"
+		case r.Grants == nil && r.Status != "revoked":
+			grants = "pkg unreadable"
+		case r.Grants != nil:
+			grants = fmt.Sprintf("%d · %s", len(r.Grants), grantsSourceLabel(r.GrantsSource))
 		}
 		readiness := "—"
 		if r.Readiness != nil {
 			readiness = fmt.Sprintf("%v", r.Readiness)
 		}
+		name := r.Name
+		if r.Colocated {
+			name += " (co-located)"
+		}
 		m.Runners = append(m.Runners, RunnerRow{
-			Name: r.Name, Status: r.Status, Pubkey: r.NostrPubkey,
+			Name: name, Status: r.Status, Pubkey: r.NostrPubkey,
 			Addr: addr, Grants: grants, Readiness: readiness,
 		})
 	}
 	if len(m.Runners) == 0 {
 		m.Runners = []RunnerRow{{Name: "(no runners on the console)", Status: styleDim.Render("provision one with p")}}
 	}
+}
+
+// grantsSourceLabel renders the overview's grants_source for the runners
+// table.
+func grantsSourceLabel(src string) string {
+	if src == "live" {
+		return "live"
+	}
+	return "pkg"
 }
 
 // buildAgents fills the Agents view from the CP's /api/world — the same
@@ -597,6 +622,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "g":
 			if m.Mode == ModeRunning {
 				m.beginPrompt(flowGrant)
+			}
+		case "s":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowSettings)
+				// Prefill the current setting (best-effort sync read — the
+				// same session the form will write through).
+				if m.console != nil && m.console.client != nil {
+					if set, err := m.console.client.SettingsGet(); err == nil {
+						m.Flow.Defaults[0] = set.OperatorTZ
+						m.Flow.Field.SetValue(set.OperatorTZ)
+						m.Flow.Field.CursorEnd()
+					}
+				}
 			}
 			// Build/bootstrap/teardown/deploy are NOT run from the TUI — the TUI is
 			// a status/operating dashboard. Run `freehold build` / `freehold teardown`
@@ -739,7 +777,7 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s%s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second), op)) +
-			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · w web · build/teardown run from the shell")
+			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · s settings · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
 	case ModeBootstrap, ModeConfigure:

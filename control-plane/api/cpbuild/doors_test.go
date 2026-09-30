@@ -109,7 +109,7 @@ func TestDNSTokenKey(t *testing.T) {
 // skill's rules ship inside the CPA's system prompt (the only grant-capable
 // identity), not just as a file.
 func TestCPACarriesGrantingSkill(t *testing.T) {
-	prompt := agents.CPASystemPrompt("")
+	prompt := agents.CPASystemPrompt("", "")
 	for _, want := range []string{"The unit of grant is the RUNNER", "pve-ssh-root", "containment failure"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("CPA prompt missing granting-skill material %q", want)

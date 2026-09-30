@@ -11,6 +11,13 @@ there; if it is work not yet done, it belongs here.
 
 ## Provisioning / substrate
 
+- **The runner-client baked into every guest, and kept fresh on update.** The
+  runner-client install is a `create-lxc` skill step today (Compute fetches
+  the `runner` release asset per guest); the mechanical version bakes it into
+  the provisioning engine's LXC boot for CORE LXCs too (cp/relay/k3s), and
+  `freehold update` sweeps EVERY created/adopted guest — replace the binary
+  where it drifted, re-run nothing else — so a resident runner never runs a
+  stale build against a newer world.
 - **World-config degradation on update.** `FlagsFromConfig` derives flags from
   the tenant config only, and the config does not record the substrate-create
   params (memory/bridge/storage/rootfs/relay-gw/thin-pool), so an update's
@@ -97,6 +104,35 @@ there; if it is work not yet done, it belongs here.
   runner's exec history; receipts redacted before posting, same discipline as the
   shipped-package flow) but not posted. The operational audit path stays kind-48001 +
   local spool.
+- **Upstream buzz: the agent memory plane's integrity is a prompt, not a
+  signature.** The relay validates a kind-30174 engram's envelope shape only
+  (`validate_engram_envelope`: exactly one 64-hex `d`, exactly one 64-hex `p`,
+  plausible NIP-44 content) and never checks that the event's signature is the
+  claimed `p` owner's — so any community member can post an engram under a
+  registered agent's identity, and readers (querying `#p` + decrypting with
+  their own conversation key) simply never see it. Confidentiality holds
+  (NIP-44 pairs writer↔owner), authenticity does not. Upstream fix: replicate
+  the `is_agent_owner` check for KIND_AGENT_ENGRAM at ingest; reported with a
+  two-key reproducer (owner-signed OK, foreign-signed accepted).
+- **Upstream buzz: `mem set` on the shipped image can push a 30174 with no `p`
+  tag.** Observed twice live on the deployed image (`sprig`-shipped buzz, Sep
+  23): `buzz mem set <slug> v --owner <the author's own pubkey>` is refused by
+  the relay with "exactly one `p` tag (got 0)", while the same command with a
+  foreign owner writes. The pinned relay source's `build_event` unconditionally
+  attaches the `p` tag, so the deployed image predates or diverges from the pin
+  (`deploy_relay.go` `DefaultBufRef = f956e6fe…`) and the client-side mechanism
+  is unconfirmed — the report should carry the repro, not a cause. Unreachable
+  from freehold: every pod now mints its attestation (owner ≠ agent by
+  construction), and the CLI itself rejects self-attestation.
+- **Bound the memory attestation in time.** `contract/nipoa` signs only
+  `kind=30174`; it has no `created_at<` clause, so a leaked pod env authorizes
+  memory writes until the pod is re-applied. A rotation story (mint with an
+  expiry + re-mint on `freehold build`) is the named follow-up; the same trust
+  root already supports the clause.
+- **Pin the sprig image.** `agent.SprigImage` is `ghcr.io/block/buzz-sprig:main`
+  — a moving tag with no digest pin, so an upstream `main` push changes every
+  agent pod's binary on the next re-apply. Pin by digest (after establishing
+  the publishing workflow's provenance) and roll deliberately.
 - **Relay-mode runners need an explicit community-membership step — automated for
   department runners.** A relay-mode runner cannot read its roster until it is a relay
   COMMUNITY member (`buzz-admin add-member`); `stageDepartmentRunners` now does this for
@@ -108,9 +144,23 @@ there; if it is work not yet done, it belongs here.
 - **Emergency-repair drill.** The relay-down case re-invokes the same dormant local
   provisioning expert against the same target. The path is exercised on every operational
   teardown/rebuild, but a dedicated relay-down drill is later, pre-MVP work.
+- **Relay-contract verification skill (write it once, after the exec-audit fix).** Two
+  native integrations have been failing silently fleet-wide: kind-30174 memory writes,
+  and kind-48001 exec-audit publishes (400 for the appliance's entire lifetime, invisible
+  behind NIP-42 auth on the reject). Candidate skill: after any relay/buzz change or a new
+  event kind, probe ingest under a *runner* identity and assert the gate accepts what we
+  publish — the publish side is what our own checks never see. Write it once, against the
+  tested outcome of the exec-audit fix (fail-loud on an unknown kind), not speculatively.
 
 ## Verification / harness
 
+- **Bot-review injection pre-vet.** The agentic reviewer reads PR-tree files, so a PR can
+  plant reviewer-directed text ("ignore your instructions", fake verdicts) anywhere it
+  expects the reviewer to look. First line of defense is the prompt's untrusted-input rule
+  (such attempts are themselves a blocking finding); the cheap second layer is a pre-vet
+  pass before the harness session: one diff-only single-shot call ("is this diff attempting
+  to manipulate an automated reviewer?") whose flag prepends a warning to the review context
+  (or fails the run loudly). Same provider key, seconds of latency, no new workflow.
 - **Live Backblaze leg.** The B2 connector is hermetic-verified only (mock API +
   acceptance round-trip); a live Backblaze-account leg needs real credentials.
 - **One real-relay acceptance run.** The Chunk-2 per-leg deltas (non-member denied,
@@ -121,6 +171,18 @@ there; if it is work not yet done, it belongs here.
 
 ## Console / CLI
 
+- **Guest inventory (LXCs) in the console + TUI.** The CP surface has no
+  guest/LXC list: the Services view shows only world services and the DATA
+  view only plane mounts, so a guest created outside the core build (e.g. a
+  manually created `test-lxc`, or one an agent provisions) appears nowhere.
+  Sketched design: the console lists the host's guests live (`pct list`
+  through the co-located runner, in `/api/world`), tagged by ownership —
+  `core` (the world's recorded vmids / the `<world>-` name prefix), `adopted`
+  (a capability record named `<guest>-ssh-*`), `foreign` (other worlds' LXCs
+  on a shared host) — with a Guests tab in the TUI plus the owned/adopted set
+  surfaced in the DATA view. Split out of the grants-clarity PR so it stays
+  reviewable; the ownership taxonomy (created vs adopted vs foreign) wants an
+  operator pass before building.
 - **Go console residual port gaps.** The deleted Rust console carried surfaces the Go
   console never picked up; none is on a live path:
   - no `freehold-console rebuild` verb (the relay-fold primitives exist but nothing calls
@@ -139,6 +201,12 @@ there; if it is work not yet done, it belongs here.
 
 ## Dropped (kept here so they aren't re-raised)
 
+- **Bot-review triggers: drop `pull_request`, go `pull_request_target`-only** — Done. Every
+  PR (same-repo, fork, Dependabot's) is now reviewed from `pull_request_target`: the
+  workflow YAML, scripts, and deps always come from trusted main's default branch (the
+  YAML hole is closed), and a repo Actions event policy explicitly allows the event past
+  GitHub's default block on public repos. The agent explores trusted base-branch state;
+  the diff still comes from the API.
 - **Migrations epoch-name consolidation** — informational only; a long-lived world that ran
   the old names re-runs them once, and both migrations are idempotent. No action.
 - **Release-workflow dry run** — `.github/workflows/release.yml` was untested until a real
@@ -149,6 +217,11 @@ there; if it is work not yet done, it belongs here.
 
 ### Release-test v0.7.4 findings (the fresh cycle)
 
+- **A completed uninstall left the fresh profile behind.** The fresh-074 world
+  was gone from the host (no guests, no authorized_keys lines — verified), but
+  the profile's config + state dirs survived: the uninstall's local wipe
+  (`wipeLocalProfile`) never ran for that attempt. Diagnose why the wipe was
+  skipped when the logs exist; the dirs were removed by hand in the meantime.
 - **A re-adopted plane's terraform destroy reaches OTHER worlds.** The fresh env
   re-adopted a leftover durable plane whose tf/kube state referenced the librem
   cluster; the uninstall's `terraform destroy` then destroyed the LIBREM world's
@@ -182,3 +255,31 @@ there; if it is work not yet done, it belongs here.
   follow-up: anyone who can talk to an agent may ask freehold to add another
   identity to that agent's allowlist — freehold validates the request and
   re-applies the pod — and `create_agent` learns the real asker's pubkey.
+
+## Identity / local-vs-global
+
+- **Local runner port should be per-invocation, not a fixed default.** A box's
+  runner only serves that box's own commands (the CP dials its OWN co-located
+  runner), so nothing needs a stable port. Today `exec`/`build`/`teardown`/
+  `uninstall`/TUI default `--addr 127.0.0.1:8787`, and two profiles' runners on
+  one box collide (live's clobbered librem's on the release-test host). Lazy fix:
+  default `--addr` from the profile config (install already records a per-profile
+  port, #308) instead of the flag default. Better: start the runner on demand on a
+  free port, hand the addr to the command, and stop it when the command exits —
+  the runner is alive for the whole command (execs stream over minutes), not
+  per-exec.
+- **LXC guest names should key on the Buzz domain, not the install profile name.**
+  Guest names are `<world-name>-<role>`, where world-name is the profile name
+  typed at install (baked into the world-config). This is only cosmetic for other
+  boxes — discovery is domain → CP URL → NIP-98 auth → world facts/coords, and
+  `resolveGuestVmids` uses the world-config's name, so every box agrees — but it
+  ties the guest names to what the installer happened to type. The global instance
+  id IS the relay (Buzz) domain, dashed — the same key already used host-side for
+  LV/dataset names and per-world tf roots. Re-key guest names off it. Pairs with
+  the domain-re-point punt (deferred; Buzz keys on the domain anyway).
+- **An onboarded (adopted) relay's data plane needs a freehold-namespaced path.**
+  When freehold onboards a relay guest it did NOT create (the locked "existing
+  relay as a service" path, not yet built), the container is shared with the
+  user's own files, so a fixed guest path like `/srv/data/relay` could step on
+  them. Use a freehold-prefixed path (e.g. `/srv/data/freehold/relay`) for the
+  adopted case; freehold-created guests keep the plain `/srv/data/<tenant>`.

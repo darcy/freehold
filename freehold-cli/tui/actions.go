@@ -87,6 +87,7 @@ const (
 	flowRotate
 	flowRevoke
 	flowGrant
+	flowSettings
 	flowBootstrap
 	flowDeployRelay
 	flowDeployCp
@@ -229,6 +230,8 @@ func promptLabel(k flowKind, step int) string {
 			return "runner name"
 		}
 		return "agent pubkey (64-hex)"
+	case flowSettings:
+		return "operator timezone (IANA, e.g. America/Chicago — blank = UTC)"
 	case flowBootstrap:
 		switch step {
 		case 0:
@@ -456,15 +459,15 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 			// plane gone too is `uninstall --remove-data` (the CP + this box's
 			// doors + local state go with it). The SECOND step is the
 			// destroy confirm: anything but an explicit "yes" aborts — t+Enter
-			// must not tear down the world by accident (the CLI's own --yes
+			// must not tear down the world by accident (the CLI's own --non-interactive
 			// silent path is not reachable).
 			if !strings.EqualFold(strings.TrimSpace(f.Inputs[1]), "yes") {
 				return flowMsg{err: fmt.Errorf("teardown cancelled: type yes to confirm destroying the whole world")}
 			}
-			if strings.EqualFold(f.Inputs[0], "yes") {
-				return activityStartMsg{kind: "uninstall", title: "uninstalling (removing the CP + plane)", args: []string{"uninstall", "--remove-data", "--yes"}}
+			if strings.EqualFold(strings.TrimSpace(f.Inputs[0]), "yes") {
+				return activityStartMsg{kind: "uninstall", title: "uninstalling (removing the CP + plane)", args: []string{"uninstall", "--remove-data", "--non-interactive"}}
 			}
-			return activityStartMsg{kind: "teardown", title: "tearing down the world (CP preserved)", args: []string{"teardown", "--yes"}}
+			return activityStartMsg{kind: "teardown", title: "tearing down the world (CP preserved)", args: []string{"teardown", "--non-interactive"}}
 		case flowRebuild:
 			args, err := rebuildArgs(f)
 			if err != nil {
@@ -501,6 +504,11 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				return flowMsg{err: err}
 			}
 			return flowMsg{ok: "granted " + f.Inputs[1] + " on " + f.Inputs[0]}
+		case flowSettings:
+			if _, err := c.SettingsSet(strings.TrimSpace(f.Inputs[0])); err != nil {
+				return flowMsg{err: err}
+			}
+			return flowMsg{ok: "settings saved — agent pods pick the timezone up on their next apply"}
 		default:
 			return flowMsg{err: fmt.Errorf("unhandled flow")}
 		}
@@ -535,7 +543,7 @@ func splitLines(s string) []string {
 // doorKeyWaiting extracts rebuild's EXPECTED door-gate pause from the
 // subprocess output and returns the install instruction ("" = not the
 // pause) so the TUI renders it as a waiting state, not an error.
-// Two --yes bails produce it:
+// Two --non-interactive bails produce it:
 //   - fresh provision:  "the door needs a NEW ssh key before rebuild..."
 //   - reuse + auth fail: "the door needs its ssh key before rebuild..."
 //
@@ -705,7 +713,7 @@ func (m *Model) cpDnsStatus() (string, bool) {
 	return fmt.Sprintf("%d resolver records (CP)", len(m.DNS)), true
 }
 
-// rebuildArgs builds the `freehold rebuild --yes` args from a completed
+// rebuildArgs builds the `freehold rebuild --non-interactive` args from a completed
 // rebuild form (shared by the flow dispatcher and the DNS pre-flow).
 func rebuildArgs(f *tuiFlow) ([]string, error) {
 	op, relay := strings.TrimSpace(f.Inputs[0]), strings.TrimSpace(f.Inputs[1])
@@ -713,7 +721,7 @@ func rebuildArgs(f *tuiFlow) ([]string, error) {
 	if op == "" || relay == "" || cp == "" {
 		return nil, fmt.Errorf("rebuild needs operator pubkey, relay domain, and control-plane domain")
 	}
-	args := []string{"rebuild", "--yes",
+	args := []string{"rebuild", "--non-interactive",
 		"--operator-pubkey", op,
 		"--relay-domain", relay,
 		"--cp-domain", cp,

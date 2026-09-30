@@ -51,6 +51,9 @@ type Flags struct {
 	// the profile config beside the host.
 	AccessMode         string
 	Name               string
+	// LocalPort is the box-side runner MCP loopback port (--local-port); Addr
+	// is derived 127.0.0.1:<LocalPort> at the composition roots.
+	LocalPort          uint32
 	Addr               string
 	Target             string
 	Host               string
@@ -312,6 +315,20 @@ func StateRoot() string  { return config.StateDir() }
 func OpsDir() string     { return filepath.Join(StateDir(), "agent-ops") }
 func RunnerPkgs() string { return filepath.Join(config.StateDir(), "runner") }
 func ServeLog() string   { return filepath.Join(config.StateDir(), "installer", "serve.log") }
+
+// RunnerTarget is the provisioning runner's fixed name: the
+// ssh-as-root-to-the-PVE-host capability, `<target>-<protocol>-<identity>`.
+// Not an operator input — the build's capability-runner stage adopts this
+// same runner, so its name IS the capability's name.
+const RunnerTarget = "pve-ssh-root"
+
+// DefaultRunnerPort is the box-side runner MCP port (loopback); the CP guest's
+// co-located runner shares it (config.CoLocatedRunnerMCPAddr) — different
+// loopbacks, no conflict.
+const DefaultRunnerPort = 8787
+
+// LoopbackAddr is the runner MCP bind address for a local port.
+func LoopbackAddr(port uint16) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))) }
 
 // ---- the pipeline ---------------------------------------------------------
 
@@ -628,7 +645,10 @@ func (e *Engine) CertExpiry(cfg *config.Config, slot string) string {
 	return ""
 }
 
-// key line when a NEW door key was generated ("" on reuse).
+// stageProvision provisions the door runner (reuse keeps the package — the
+// identity — and returns no key). The generated key's authorized_keys comment
+// carries the profile so the host's authorized_keys is tell-apart-able across
+// worlds on one box.
 func (e *Engine) stageProvision(agentPK string) (string, error) {
 	runnerDir := filepath.Join(RunnerPkgs(), e.F.Target)
 	ok, out := e.RunBin(e.Bins.Console, []string{
@@ -638,6 +658,7 @@ func (e *Engine) stageProvision(agentPK string) (string, error) {
 		"--state-dir", StateDir(),
 		"--runner-dir", runnerDir,
 		"--grant", agentPK,
+		"--key-comment", "freehold-" + e.F.Name + "-" + e.F.Target,
 	})
 	if ok {
 		return extractSSHKey(out), nil
@@ -1011,19 +1032,38 @@ func (e *Engine) fromAnswers() *config.Config {
 	// supplied domain: the early writeInitialConfig lands before bootstrap's
 	// interactive prompt on the sequential path, and an empty host must merge
 	// prev's recorded value, not clobber it with the bare scheme.
+	//
+	// The runner addr derives from LocalPort when the caller did not pass one
+	// explicitly: the uninstall picks its runner path by cfg.Runner.Addr, and
+	// an empty addr forced the transient path (whose pct-destroy on a running
+	// guest is broken) instead of the box's own local runner.
+	runnerAddr := e.F.Addr
+	if runnerAddr == "" && e.F.LocalPort > 0 {
+		runnerAddr = LoopbackAddr(uint16(e.F.LocalPort))
+	}
 	cfg := &config.Config{
 		Name:           e.F.Name,
 		Host:           e.F.Host,
 		AccessMode:     e.F.AccessMode,
 		OperatorPubkey: e.F.OperatorPubkey,
 		Runner: config.RunnerRef{
-			Addr:   e.F.Addr,
+			Addr:   runnerAddr,
 			Pubkey: runnerPK,
 			Target: e.F.Target,
 		},
 		Managed: []string{"relay", "cp"},
 		CPAName: e.F.AgentName,
 	}
+	// Persist the guest size/placement: the world-config renders them from
+	// the CONFIG (not the invocation's flags — an update's flags never carry
+	// them), so every later boot sees the operator's actual values.
+	cfg.Plane.SizeGB = uint32(e.F.SizeGB)
+	cfg.Plane.PoolSizeGB = uint32(e.F.PoolSizeGB)
+	cfg.Plane.RootfsGB = e.F.RootfsGB
+	cfg.Plane.MemoryMB = e.F.MemoryMB
+	cfg.Plane.Storage = e.F.StorageName
+	cfg.Plane.Bridge = e.F.Bridge
+	cfg.Plane.RelayGW = e.F.RelayGw
 	if relayDomain != "" {
 		cfg.RelayURL = "https://" + relayDomain
 		cfg.RelayWsURL = "wss://" + relayDomain
@@ -1052,6 +1092,60 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	cfg := *ans
 	cfg.Plane = prev.Plane
+	// The runner identity never changes after install (re-adopt preserves it),
+	// and a box without the local package cannot re-derive its pubkey — keep
+	// the recorded runner whenever the answers carry none (a thin-box build
+	// would otherwise clobber [runner] with an empty pubkey).
+	if ans.Runner.Pubkey == "" {
+		cfg.Runner = prev.Runner
+	}
+	// The runner ADDR is an install-time fact too: a run whose answers carry no
+	// addr (the CP-driven reconcile, a thin-box build — no --local-port) must
+	// keep the recorded one, else every such run writes [runner] addr = '' and
+	// uninstall later falls into the broken transient path. Pubkey being
+	// non-empty (loaded from the package) means the branch above kept ans, so
+	// preserve the addr on its own.
+	if ans.Runner.Addr == "" {
+		cfg.Runner.Addr = prev.Runner.Addr
+	}
+	// Size/placement: per-field — the answers' non-zero values win, the
+	// prev's survive otherwise (an update's zero-filled answers must not
+	// wipe the persisted placement).
+	if ans.Plane.SizeGB != 0 {
+		cfg.Plane.SizeGB = ans.Plane.SizeGB
+	} else {
+		cfg.Plane.SizeGB = prev.Plane.SizeGB
+	}
+	if ans.Plane.PoolSizeGB != 0 {
+		cfg.Plane.PoolSizeGB = ans.Plane.PoolSizeGB
+	} else {
+		cfg.Plane.PoolSizeGB = prev.Plane.PoolSizeGB
+	}
+	if ans.Plane.RootfsGB != 0 {
+		cfg.Plane.RootfsGB = ans.Plane.RootfsGB
+	} else {
+		cfg.Plane.RootfsGB = prev.Plane.RootfsGB
+	}
+	if ans.Plane.MemoryMB != 0 {
+		cfg.Plane.MemoryMB = ans.Plane.MemoryMB
+	} else {
+		cfg.Plane.MemoryMB = prev.Plane.MemoryMB
+	}
+	if ans.Plane.Storage != "" {
+		cfg.Plane.Storage = ans.Plane.Storage
+	} else {
+		cfg.Plane.Storage = prev.Plane.Storage
+	}
+	if ans.Plane.Bridge != "" {
+		cfg.Plane.Bridge = ans.Plane.Bridge
+	} else {
+		cfg.Plane.Bridge = prev.Plane.Bridge
+	}
+	if ans.Plane.RelayGW != "" {
+		cfg.Plane.RelayGW = ans.Plane.RelayGW
+	} else {
+		cfg.Plane.RelayGW = prev.Plane.RelayGW
+	}
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
 	// keep them (like Plane) or it would silently erase them on every run —
@@ -1655,6 +1749,7 @@ func (e *Engine) stageDeployCp() error {
 		"--transient",
 		"--host", e.F.Host,
 		"--target", e.F.Target,
+		"--key-comment", "freehold-" + e.F.Name + "-" + e.F.Target,
 		"--lxc", strconv.FormatUint(uint64(vmid), 10),
 		"--relay-url", "https://" + e.F.RelayDomain,
 		"--binary", e.Bins.ReleaseConsole,
@@ -1759,6 +1854,16 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 	}
 	if cfg, _ := config.Load(e.F.ConfigPath); cfg != nil {
 		if wc := e.worldConfigJSON(cfg); wc != "" {
+			// The update's flags carry no size/placement fields (memory,
+			// bridge, storage, rootfs) — worldConfigJSON renders them from
+			// e.F, which is zero here. The RUNNING console's world-config is
+			// the last full render: merge it in so the redeployed console
+			// keeps a bootable spec. (A blank spec made the next
+			// guest-create after any update fail the substrate tool's
+			// parameter validation.)
+			if prior := e.runningWorldConfig(); prior != "" {
+				wc = mergeWorldConfig(prior, wc)
+			}
 			args = append(args, "--world-config", wc)
 		}
 	}
@@ -1770,6 +1875,67 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 	}
 	_, err = e.selfStage("deploy-cp", args)
 	return err
+}
+
+// runningWorldConfig reads the world-config the RUNNING console was started
+// with (its unit file's ExecStart), or "" when there is none. Read-only; the
+// value is the last FULL render (the install/bootstrap's flags were complete
+// when it was written).
+func (e *Engine) runningWorldConfig() string {
+	if e.Provider == nil {
+		return ""
+	}
+	vmid, err := e.findLxcVmidExact("cp")
+	if err != nil {
+		return ""
+	}
+	out, err := e.Provider.GuestExec(strconv.FormatUint(uint64(vmid), 10),
+		`sh -c 'cat /proc/$(pgrep -f "console serve" | head -1)/cmdline | tr "\000" "\n" | grep -A1 world-config | tail -1'`, 30)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Stdout)
+}
+
+// mergeWorldConfig fills the NEW world-config's zero/missing fields from the
+// prior one. The new render is authoritative for identity/coords (name, urls,
+// pubkeys, vmids); the prior is authoritative for the size/placement fields
+// the update's flags never carry (memory_mb, bridge, storage, rootfs_gb,
+// size_gb, pool_size_gb, relay_gw).
+func mergeWorldConfig(prior, next string) string {
+	var p, n config.Coords
+	if err := json.Unmarshal([]byte(prior), &p); err != nil {
+		return next
+	}
+	if err := json.Unmarshal([]byte(next), &n); err != nil {
+		return next
+	}
+	if n.MemoryMB == 0 {
+		n.MemoryMB = p.MemoryMB
+	}
+	if n.Bridge == "" {
+		n.Bridge = p.Bridge
+	}
+	if n.StorageName == "" {
+		n.StorageName = p.StorageName
+	}
+	if n.RootfsGB == 0 {
+		n.RootfsGB = p.RootfsGB
+	}
+	if n.SizeGB == 0 {
+		n.SizeGB = p.SizeGB
+	}
+	if n.PoolSizeGB == 0 {
+		n.PoolSizeGB = p.PoolSizeGB
+	}
+	if n.RelayGW == "" {
+		n.RelayGW = p.RelayGW
+	}
+	b, err := json.Marshal(n)
+	if err != nil {
+		return next
+	}
+	return string(b)
 }
 
 // StampVersionPin writes the CP's version pin through the self-staged
@@ -1885,13 +2051,18 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		PlanePool:      derefStrPtr(cfg.Plane.Backend),
 		PlaneKind:      derefStrPtr(cfg.Plane.BackendKind),
 		ThinPool:       derefStrPtr(cfg.Plane.ThinPool),
-		SizeGB:         e.F.SizeGB,
-		PoolSizeGB:     e.F.PoolSizeGB,
-		RootfsGB:       e.F.RootfsGB,
-		MemoryMB:       e.F.MemoryMB,
-		StorageName:    e.F.StorageName,
-		RelayGW:        e.F.RelayGw,
-		Bridge:         e.F.Bridge,
+		// Size/placement: the CONFIG is the durable source (the install
+		// persists them). A config written before persistence shipped has
+		// none — the world-config then renders blanks and the boot fails
+		// loudly; the repair is adding the fields under [plane] in that
+		// world's config (or re-running its install).
+		SizeGB:         uint64(cfg.Plane.SizeGB),
+		PoolSizeGB:     uint64(cfg.Plane.PoolSizeGB),
+		RootfsGB:       cfg.Plane.RootfsGB,
+		MemoryMB:       cfg.Plane.MemoryMB,
+		StorageName:    cfg.Plane.Storage,
+		RelayGW:        cfg.Plane.RelayGW,
+		Bridge:         cfg.Plane.Bridge,
 		RelayLxc:       derefU32(cfg.Lxc.Relay.Vmid),
 		RelayCompose:   stages.RelayComposeDir,
 		K3sVmid:        derefU32(cfg.Lxc.K3s.Vmid),

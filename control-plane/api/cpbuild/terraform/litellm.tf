@@ -89,6 +89,10 @@ resource "null_resource" "model_registration" {
   depends_on = [kubernetes_manifest.litellm_service]
   triggers = {
     deploy = yamlencode(kubernetes_manifest.litellm_deploy.object)
+    # The registered MODEL is part of the trigger: bumping the model re-runs
+    # the registration on the next apply (litellm keeps models in its DB, so a
+    # live world would otherwise never pick up the new default).
+    model = "glm-5p3-flash"
   }
   provisioner "local-exec" {
     command = <<-EOT
@@ -100,7 +104,7 @@ resource "null_resource" "model_registration" {
         curl -fsS -m 5 "http://${var.k3s_ip}:31400/health/liveliness" >/dev/null 2>&1 && break
         sleep 3
       done
-      BODY=$(printf '{"model_name":"deepseek-v4-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/deepseek-v4-flash-0731","api_key":"%s"}}' "$PROVIDER_KEY")
+      BODY=$(printf '{"model_name":"glm-5p3-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/glm-5p3-flash","api_key":"%s"}}' "$PROVIDER_KEY")
       curl -fsS -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://${var.k3s_ip}:31400/model/new"
       echo
     EOT
