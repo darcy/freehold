@@ -14,9 +14,9 @@ import (
 	"freehold/control-plane/api/agenttools"
 )
 
-// loginSession drives the challenge/login dance against s and returns the
+// loginWorldSession drives the challenge/login dance against s and returns the
 // session cookie (the same flow TestWorldBuildGating exercises).
-func loginSession(t *testing.T, s *Server, sec []byte) string {
+func loginWorldSession(t *testing.T, s *Server, sec []byte) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/challenge", nil))
@@ -61,7 +61,7 @@ func TestWorldRoutesGating(t *testing.T) {
 			t.Fatalf("%s without a session must be 401, got %d", path, code)
 		}
 	}
-	cookie := loginSession(t, s, sec)
+	cookie := loginWorldSession(t, s, sec)
 	authed := func(path string, body []byte) int {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
@@ -130,7 +130,7 @@ func TestWorldMigrateProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cookie := loginSession(t, s, sec)
+	cookie := loginWorldSession(t, s, sec)
 	r := httptest.NewRequest(http.MethodPost, "/api/world-migrate", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
 	rec := httptest.NewRecorder()
