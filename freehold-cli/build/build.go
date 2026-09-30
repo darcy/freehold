@@ -239,30 +239,35 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 	// record's durable owner; a renewed cert must replace the stale seed).
 	// A world whose plane was destroyed then pre-seeds from it with no LE
 	// order. Absent/stale caches ship nothing: the build issues as before and
-	// the cache refills after.
-	if _, boxSec, _, serr := e.certIdent(); serr != nil {
-		fmt.Fprintf(e.Out, "  · no box ops identity for the cert cache (%v) — the build will issue\n", serr)
+	// the cache refills after. The cache is BASE-scoped and HOST-keyed (see
+	// certCachePath): every profile's build on this box reads the same store,
+	// so a fresh world's run leaves its certs for the next fresh run.
+	if _, baseSec, _, serr := baseCacheIdent(); serr != nil {
+		fmt.Fprintf(e.Out, "  · no base ops identity for the cert cache (%v) — the build will issue\n", serr)
 	} else {
 		open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
-		for _, slot := range []string{"relay", "cp"} {
-			path := certCachePath(slot)
+		for _, sl := range []struct{ slot, host string }{{"relay", e.F.RelayDomain}, {"cp", e.F.CpDomain}} {
+			if sl.host == "" {
+				continue
+			}
+			path := certCachePath(sl.host)
 			if !cert.CredExists(path) {
 				continue
 			}
-			_, env, lerr := cert.LoadCreds(path, open, boxSec)
+			_, env, lerr := cert.LoadCreds(path, open, baseSec)
 			if lerr != nil {
-				fmt.Fprintf(e.Out, "  · cert cache %s unreadable (%v) — the build will issue\n", slot, lerr)
+				fmt.Fprintf(e.Out, "  · cert cache %s unreadable (%v) — the build will issue\n", sl.slot, lerr)
 				continue
 			}
 			if _, ok := cert.ReuseIfValidBytes([]byte(env["fullchain"]), time.Now(), 30*24*time.Hour); !ok {
-				fmt.Fprintf(e.Out, "  · cached %s cert under 30d remaining — the build will issue and refill the cache\n", slot)
+				fmt.Fprintf(e.Out, "  · cached %s cert under 30d remaining — the build will issue and refill the cache\n", sl.slot)
 				continue
 			}
-			blob, berr := certcred.CPSecretBlob("cert-seed-"+slot, "cert-cache", env, seal, pub)
+			blob, berr := certcred.CPSecretBlob("cert-seed-"+sl.slot, "cert-cache", env, seal, pub)
 			if berr != nil {
 				return berr
 			}
-			if err := client.PutSecret("cert-seed-"+slot, blob); err != nil {
+			if err := client.PutSecret("cert-seed-"+sl.slot, blob); err != nil {
 				// The pre-seed is an optimization, never a gate: a CP whose
 				// secret allowlist predates the cert-seed names (mixed-version
 				// skew — the box updates before the CP) just issues as before.
@@ -270,9 +275,9 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 					fmt.Fprintf(e.Out, "  · CP predates the cert cache — the build will issue\n")
 					continue
 				}
-				return fmt.Errorf("ship %s cert cache to CP: %w", slot, err)
+				return fmt.Errorf("ship %s cert cache to CP: %w", sl.slot, err)
 			}
-			fmt.Fprintf(e.Out, "  · %s cert cache shipped for pre-seed\n", slot)
+			fmt.Fprintf(e.Out, "  · %s cert cache shipped for pre-seed\n", sl.slot)
 		}
 	}
 
@@ -331,9 +336,36 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 
 // certCachePath is the box-side sealed cache of a slot's issued edge cert
 // (fullchain + key + host, SaveCreds-shaped), written after a successful
-// build so a world whose plane was destroyed pre-seeds from it.
-func certCachePath(slot string) string {
-	return filepath.Join(box.StateDir(), "cert-cache-"+slot+".json")
+// build so a world whose plane was destroyed pre-seeds from it. HOST-keyed
+// (the cert's SAN) and BASE-scoped (DefaultStateHome — the freehold state
+// root no world lifecycle touches): a profile's uninstall --remove-data wipes
+// profiles/<name>/ wholesale, so a profile-scoped cache dies with the very
+// fresh run that filled it; keying by host keeps worlds sharing a box from
+// clobbering each other's entries.
+func certCachePath(host string) string {
+	return filepath.Join(config.DefaultStateHome(), "cert-cache", host+".json")
+}
+
+// baseCacheIdent loads the box's BASE ops identity (the state root's
+// agent-ops, not the active profile's): the cert cache must be openable by
+// every future profile's build on this box, so it seals to an identity no
+// world lifecycle can wipe. Absent on a box with no base login — the cache
+// then degrades loudly to issuing.
+func baseCacheIdent() (*box.Identity, []byte, []byte, error) {
+	dir := filepath.Join(config.DefaultStateHome(), "control-plane", "agent-ops")
+	id, err := box.LoadIdentity(dir)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("no base ops identity at %s", dir)
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("base ops identity enc secret: %w", err)
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return id, secret, pub, nil
 }
 
 // cacheEdgeCerts copies each slot's issued cert off the durable mirror (read
@@ -355,7 +387,7 @@ func (e *buildEngine) cacheEdgeCerts() error {
 	if k3s == 0 {
 		return fmt.Errorf("no k3s vmid recorded")
 	}
-	_, _, pub, err := e.certIdent()
+	_, _, pub, err := baseCacheIdent()
 	if err != nil {
 		return err
 	}
@@ -384,7 +416,10 @@ func (e *buildEngine) cacheEdgeCerts() error {
 			continue
 		}
 		env := map[string]string{"host": sl.host, "fullchain": string(fc), "key": string(key)}
-		if err := cert.SaveCreds(certCachePath(sl.slot), "cert-cache", env, seal, pub, "cert-cache-"+sl.slot); err != nil {
+		if err := os.MkdirAll(filepath.Dir(certCachePath(sl.host)), 0o700); err != nil {
+			return err
+		}
+		if err := cert.SaveCreds(certCachePath(sl.host), "cert-cache", env, seal, pub, "cert-cache-"+sl.host); err != nil {
 			return err
 		}
 		fmt.Fprintf(e.Out, "  · cached the %s edge cert for pre-seed (valid until %s)\n", sl.slot, exp.UTC().Format("2006-01-02"))
