@@ -426,9 +426,6 @@ func (e *Engine) RunBootstrap() error {
 		}
 		if a := strings.TrimSpace(ans); a != "" {
 			e.F.GatewayCIDR = a
-			if _, _, perr := net.ParseCIDR(a); perr != nil {
-				return fmt.Errorf("gateway subnet must be CIDR — got %q", a)
-			}
 			v, verr := e.Prompt("VLAN tag for the internal bridge (a number, e.g. 77; blank = untagged)")
 			if verr != nil {
 				return verr
@@ -436,9 +433,10 @@ func (e *Engine) RunBootstrap() error {
 			if v = strings.TrimSpace(v); v != "" {
 				n, cerr := strconv.Atoi(v)
 				if cerr != nil || n <= 0 {
-				return fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
+					return fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
+				}
+				e.F.GatewayVlan = n
 			}
-			e.F.GatewayVlan = n
 		}
 	}
 	// Validate on BOTH paths (headless flag + interactive prompt): a malformed
@@ -447,8 +445,6 @@ func (e *Engine) RunBootstrap() error {
 		if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
 			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
 		}
-	}
-
 	}
 
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
@@ -1799,7 +1795,8 @@ echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
-systemctl enable --now nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
+systemctl enable nftables >/dev/null 2>&1 || true
+systemctl restart nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
 `, conf)
 	out, err := e.Provider.GuestExec(vmid, script, 300)
 	if err != nil {

@@ -720,7 +720,8 @@ echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
-systemctl enable --now nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
+systemctl enable nftables >/dev/null 2>&1 || true
+systemctl restart nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
 `, conf)
 	cmd := fmt.Sprintf("pct exec %d -- sh -c '%s'", s.GatewayLxc, script)
 	if err := s.run(cmd, 300); err != nil {
