@@ -1686,7 +1686,7 @@ func (e *Engine) stageBootstrap(role string) error {
 		gw := e.F.RelayGw
 		// Behind a gateway the guest rides the tagged internal bridge, its
 		// default route is the gateway's internal address, and the IP needs
-		// the subnet's prefix (pct net0 is CIDR-typed).
+		// the subnet's prefix (the net args are CIDR-typed).
 		if cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
 			gw = config.GatewayInternalIP(*cfg.Gateway.Cidr)
 			if cfg.Gateway.Vlan != nil && *cfg.Gateway.Vlan > 0 {
@@ -1713,7 +1713,7 @@ func (e *Engine) stageBootstrap(role string) error {
 }
 
 // withPrefix appends a CIDR prefix to a bare IP — pct's net args are
-// host/prefix typed (cpbuild's own comment: "pct net0 wants CIDR"), and the
+// host/prefix typed (the CP build's own comment: net0 wants CIDR), and the
 // deterministic internal addresses come out bare. bits=0 (unparseable subnet)
 // or an already-suffixed IP passes through unchanged.
 func withPrefix(ip string, bits int) string {
