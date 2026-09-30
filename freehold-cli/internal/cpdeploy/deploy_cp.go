@@ -277,15 +277,24 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 		spec.BinDir+"/freehold-agent-tools", "agent-tools binary")
 }
 
-// seedOperatorTZ writes this box's timezone (time.Local — the operator's, since
-// the CLI runs where the operator sits) into the CP's settings, IF the setting
-// is unset. Best-effort: a failure is a log line, never a deploy failure — the
+// seedOperatorTZ writes this box's timezone (the operator's, since the CLI
+// runs where the operator sits) into the CP's settings, IF the setting is
+// unset. Best-effort: a failure is a log line, never a deploy failure — the
 // operator can set the timezone in the console/TUI/CLI at any time.
 func seedOperatorTZ(t Transport, spec *DeployCpSpec) {
-	tz := time.Local.String()
-	// "" / "UTC" need no setting (pods run UTC anyway); Go's "Local" (TZ unset,
-	// the common default) is NOT an IANA name — a pod cannot resolve it, so
-	// seeding it would fake success and --if-empty would preserve it forever.
+	// The box's zone name: TZ env when it names a zone; else the IANA name
+	// /etc/localtime points at. time.Local.String() is always "Local" — it is
+	// NOT an IANA name, a pod cannot resolve it, and seeding it would fake
+	// success and --if-empty would preserve it forever — so it never seeds.
+	tz := os.Getenv("TZ")
+	if tz == "" || tz == "Local" {
+		if l, err := os.Readlink("/etc/localtime"); err == nil {
+			if i := strings.LastIndex(l, "/usr/share/zoneinfo/"); i >= 0 {
+				tz = l[i+len("/usr/share/zoneinfo/"):]
+			}
+		}
+	}
+	// "" / "UTC" need no setting (pods run UTC anyway).
 	if tz == "" || tz == "UTC" || tz == "Local" {
 		return
 	}
