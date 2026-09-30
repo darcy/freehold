@@ -179,6 +179,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   (metadata-only flip; the tag never moves).
 - `docs/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
+- `docs/NETWORK.md` — the network-plane build plan (a named build plan, not a numbered
+  chunk): the gateway guest, the freehold-subnet, Pangolin as the public-path north
+  star, and the agent-operated exposure phase.
 
 ## Locked model — do not change without an explicit user decision
 

@@ -86,6 +86,11 @@ on the fly (`provision_runner`; `docs/POC_GRANTS.md`).
 *   **Chunk 7 — remaining connectors + North Star:** Vultr and Backblaze exercised for real  
     onboarding, then portable backup & hardware migration (see below).
 
+*   **The network plane — a named build plan, not a numbered chunk** (`docs/NETWORK.md`):  
+    the gateway guest + freehold-subnet (Phase 1), VPS parity (Phase 2), Pangolin as the  
+    public-path north star (Phase 3), and agent-operated exposure (Phase 4). It runs  
+    alongside the chunk numbering and owns no number.
+
 *   **Long-standing POC acceptance:** the CPA manages an SSH machine / Vultr / Backblaze via  
     runner + installs skills (tailscale, pihole) with a readiness view; the management relay  
     is the scope. The human-facing Buzz leg is live (Chunk 4); skills + kube deploys complete  

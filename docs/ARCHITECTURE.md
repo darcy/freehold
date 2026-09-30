@@ -511,7 +511,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
     | Department | Domain |
     | --- | --- |
-    | **Network** | The network surface: access & exposure — external/public proxy, Tailscale, internal proxy, exposure verification |
+    | **Network** | The network surface: access & exposure — external/public proxy, Tailscale, internal proxy, exposure verification (`docs/NETWORK.md`) |
     | **Data** | Data plane: backup/off-site, DR planning, scheduling, restore verification |
     | **Compute** | The box itself: CPU/RAM/disk, Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning, plus the monitoring tooling it needs. Not what runs on top |
     | **AI** | LiteLLM/provider setup & aliases, local AI config, **AI hardware** (local-AI accelerators like an RTX 3090 or DGX Spark — provisioned and tuned by AI, separate from Compute's general resources), agent optimization, prompt/skill management, agent debugging |
