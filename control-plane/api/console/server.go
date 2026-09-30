@@ -544,7 +544,9 @@ func (s *Server) worldMigrate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "world-migrate: "+err.Error())
 		return
 	}
-	resp, err := mc.Call("world_migrate", map[string]interface{}{})
+	// Migrations can run for many minutes — the hop that EXECUTES them needs
+	// the long deadline, not the client-facing 30s default.
+	resp, err := mc.CallLong("world_migrate", map[string]interface{}{})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "world-migrate: "+err.Error())
 		return
