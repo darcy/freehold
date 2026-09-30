@@ -530,6 +530,59 @@ func (c *Client) WorldTeardown() (*WorldTeardownResult, error) {
 	return &v, nil
 }
 
+// WorldExec runs one command through the CP's co-located runner via the
+// console's operator-scoped /api/world-exec — the drive-through-CP surface,
+// authorized by the console session (no relay roster).
+func (c *Client) WorldExec(target, cmd string, secrets []string, timeoutS uint64) (string, error) {
+	if secrets == nil {
+		secrets = []string{}
+	}
+	raw, err := c.request(http.MethodPost, "/api/world-exec", map[string]interface{}{
+		"target": target, "cmd": cmd, "secrets": secrets, "timeout_s": timeoutS,
+	})
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", fmt.Errorf("world-exec response: %w", err)
+	}
+	return v.Text, nil
+}
+
+// WorldDoorAuthorize / WorldDoorRevoke append or remove this box's public door
+// key on the host door (DOOR_SPEC) via the console's operator-scoped route.
+func (c *Client) WorldDoorAuthorize(pubkey string) error {
+	_, err := c.request(http.MethodPost, "/api/world-door", map[string]string{"action": "authorize", "pubkey": pubkey})
+	return err
+}
+
+func (c *Client) WorldDoorRevoke(pubkey string) error {
+	_, err := c.request(http.MethodPost, "/api/world-door", map[string]string{"action": "revoke", "pubkey": pubkey})
+	return err
+}
+
+// WorldMigrate runs the CP's pending migration scripts via the console's
+// /api/world-migrate (the console proxies into the agent-tools serve — the
+// registry lock lives in that process). Migrations can run for minutes: long
+// client timeout, like WorldBuild.
+func (c *Client) WorldMigrate() (string, error) {
+	c.hc = &http.Client{Timeout: 20 * time.Minute}
+	raw, err := c.request(http.MethodPost, "/api/world-migrate", nil)
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Report string `json:"report"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", fmt.Errorf("world-migrate response: %w", err)
+	}
+	return v.Report, nil
+}
+
 // DnsRecord mirrors the console's DNS record row (C0 resolver).
 type DnsRecord struct {
 	Name      string `json:"name"`

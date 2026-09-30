@@ -270,18 +270,19 @@ func check(ctx context.Context, cfg *config.Config, channel, cacheDir string, o 
 	return nil
 }
 
-// runMigrations runs the CP's pending scripts through the agent-tools
-// world_migrate tool (the same surface the CPA uses).
+// runMigrations runs the CP's pending scripts through the console's
+// /api/world-migrate (the console proxies into the agent-tools serve — the
+// registry lock lives in that process). Session-authed; no relay roster.
 func runMigrations(cfg *config.Config) error {
-	mc, err := common.WorldMCP(cfg)
+	c, err := common.ConsoleLogin(cfg)
 	if err != nil {
 		return err
 	}
-	text, err := common.CallAgentToolsText(mc, "world_migrate", map[string]interface{}{})
+	report, err := c.WorldMigrate()
 	if err != nil {
 		return err
 	}
-	if t := strings.TrimSpace(text); t != "" {
+	if t := strings.TrimSpace(report); t != "" {
 		fmt.Println(t)
 	}
 	return nil

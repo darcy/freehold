@@ -235,8 +235,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
      The build dogfoods
      `create_agent` to bring the CPA up. It
     also carries the CP world-action surface (`world_status` / `world_teardown`
-    / `world_migrate` / `world_build` / `world_exec` / `world_register_facts` /
-    `world_authorize_door` / `world_revoke_door`, operator-scoped) so an
+    / `world_migrate` / `world_build` / `world_register_facts` — the operator
+    world verbs moved to console routes, so only `world_migrate` remains
+    operator-reachable there, via the console's proxy; the rest is now
+    unreachable surface, kept for the migration-window contract) so an
     operator box can
     "login + trigger" the world: `world_build` runs the CP's owned
     bring-up/reconcile stages (`platform/provisioning/stages`) through its
@@ -253,7 +255,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     shared teardown engine through the co-located runner — relay/k3s removed and
     the CP-side agent-tools process stopped, while the CP + its runner survive
     (`teardown` is the inverse of `build`; `uninstall` removes the CP) — so a
-    login-only box can also tear the world down. `world_exec` is the **drive-through-CP exec**
+    login-only box can also tear the world down. **`/api/world-exec`** and
+    **`/api/world-door`** complete the set: the session-authed drive-through-CP
+    exec and DOOR_SPEC authorize/revoke a thin box (and `freehold login`'s door
+    present) use — the operator's trust root is the console session, never the
+    relay roster. **`/api/world-migrate`** proxies into the agent-tools serve
+    (signed as the console — the serve's local admin peer) because the
+    migration scripts must run in THAT process to take the registry write lock.
+    `world_exec` is the **drive-through-CP exec**
     surface: a THIN login
     box (no local `[runner]`) runs commands on the CP's co-located runner via
     this tool — so a login box is functionally equivalent to the box that
@@ -266,7 +275,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     assembly** (`agenttools.WorldStatus`): the console folds it into its public
     `/api/world` (consumed by the TUI and `freehold status`), and the
     `/mcp world_status` tool shares that same assembly for direct MCP callers —
-    so the two surfaces can never diverge. `grant_agent` is
+    so the two surfaces can never diverge. The toolset's callers are the
+    relay-roster members (the AGENT surface — the CPA, membered at create)
+    plus two signature-verified LOCAL PEERS that are never roster members:
+    the console (`/api/world-migrate` proxies into the serve — the registry
+    lock lives there — so the console peer may call `world_migrate` only) and
+    the operator (`--owner-pubkey`, full operator scope as break-glass, which
+    also keeps a stale CLI's operator-signed migration sweep working across a
+    version jump). `grant_agent` is
     **operator-scoped and wired through the absorbed console-owner
     credential**: the server loads
     the console's own identity from its state dir (0600 durable plane) and
@@ -308,7 +324,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
       operator re-enables it by provisioning the door from the console. The
      `platform/migrations` queue — the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
-     semantics — runs from two entry points: the `world_migrate` tool and the
+     semantics — runs from two entry points: the `world_migrate` tool (the
+     console's `/api/world-migrate` proxies into the serve, signed as its
+     local admin peer, because the registry lock lives there) and the
      tail of `world_build`. Migrations are **versioned script files** (Omarchy's
      `<epoch>.sh` convention — one timestamped shell file per migration, shipped
      to the CP by `install`/`update`, run in ascending order with
