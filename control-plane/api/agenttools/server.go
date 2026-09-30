@@ -50,6 +50,13 @@ type Server struct {
 	// confirmation; "off" = the server denies provision_runner outright —
 	// the kill switch). nil = "confirm".
 	AgentGrants func() string
+
+	// ConsolePeer is the console identity's pubkey — the CP's session-authed
+	// operator surface, which proxies world_migrate HERE (the registry lock
+	// lives in this process). It authenticates by the same signed-header
+	// scheme but never by the roster (the console is deliberately not a
+	// channel member), and it may call world_migrate ONLY. Empty = no peer.
+	ConsolePeer string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +109,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	caller, aerr := VerifyRequest(grants, s.Audience,
 		r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
+	if aerr != nil && s.ConsolePeer != "" && r.Header.Get(PubkeyHeader) == s.ConsolePeer {
+		// The console is the local admin peer: same signature check, no roster
+		// (it is not a channel member by design). Scoped to world_migrate in
+		// dispatch; nothing else widens this path.
+		caller, aerr = VerifyRequest([]string{s.ConsolePeer}, s.Audience,
+			r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
+	}
 	if aerr != nil {
 		// Server-side detail the client error deliberately omits: WHO claimed
 		// to call and WHO this server is. An audience drift (a pod signing a
@@ -292,6 +306,13 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 	// server-side so it cannot be bypassed by calling the server directly.
 	if isWorldTool(call.Name) && s.IsAgent != nil && s.IsAgent(caller) {
 		s.rpcError(w, id, -32003, "unauthorized: registry agents cannot call "+call.Name+" (operator-scoped)")
+		return
+	}
+	// The console peer's single tool (narrow by design — it exists to proxy
+	// world_migrate, whose execution must stay in THIS process for the
+	// registry lock). A console peer reaching anything else is a bug upstream.
+	if s.ConsolePeer != "" && caller == s.ConsolePeer && call.Name != "world_migrate" {
+		s.rpcError(w, id, -32003, "unauthorized: the console peer may call world_migrate only")
 		return
 	}
 	switch call.Name {

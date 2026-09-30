@@ -8,8 +8,10 @@
 // uses (core/src/auth.rs): x-freehold-pubkey/sig/ts over
 // `audience|ts|raw_body`, BIP-340, granted-pubkey check, 60s window. The
 // audience is this server's own pubkey (the CP's agent-tools identity), and
-// the grants list is seeded at bootstrap with the operator pubkey so a build
-// can dogfood-agent-create the CPA.
+// the grants list is the relay roster of its private channel (seeded with the
+// operator during the transition — its CLI world verbs have moved to console
+// routes) plus, separately, the console as a signed local peer for
+// world_migrate.
 package agenttools
 
 import (

@@ -649,9 +649,15 @@ func (s *Spec) deployAgentTools() error {
 	relayDial := config.RelayLanDial(s.RelayHost)
 	// Seed the server's channel + the operator into its roster. The console's
 	// driving identity (s.Audience) is deliberately NOT seeded: the console
-	// never calls this MCP (it reads the registry/facts files directly), so
+	// never calls this MCP (it reads the registry/facts files directly, and
+	// since the world verbs moved to console routes it only PROXIES
+	// world_migrate as a signed local peer — no roster membership), so
 	// membering it only put an un-nameable identity in the roster. The CPA is
 	// membered separately, by this server's own identity (BuildCreateAgentFn).
+	// The operator's seed grant is TRANSITION (the CLI no longer calls this
+	// MCP — its world verbs go through the console — so the flip to --revoke
+	// is tracked in docs/followups.md, kept one release behind so a
+	// stale-binary `freehold update` mid-sweep still authorizes).
 	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
 		bin, atState, relayDial, s.OwnerPub)
 	// Revoke the console's driving identity if a PRIOR seed membered it: put-user

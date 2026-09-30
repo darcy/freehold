@@ -191,7 +191,9 @@ func serverIdentity(dir string) (*identity.Identity, string, error) {
 // bootstrap identities into it — the one-time seed that establishes the CP-side
 // roster as the durable source of truth (structurally the same as how
 // --operator-pubkey seeds the console admin whitelist). The server is the
-// channel owner, so it may member/revoke members itself going forward.
+// channel owner, so it may member/revoke members itself going forward. The
+// operator's grant is TRANSITION (its CLI world verbs moved to console
+// routes; the flip to --revoke is tracked in docs/followups.md).
 func cmdSeed(args []string) {
 	fs := flag.NewFlagSet("seed", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "durable state dir")
@@ -543,6 +545,16 @@ func cmdServe(args []string) {
 	if cerr != nil {
 		log.Printf("serve: console-owner credential unreadable at %s — grant_agent will fail closed: %v", *consoleStateDir, cerr)
 	}
+	// The console is also the local admin PEER: the operator's session-authed
+	// surface proxies world_migrate here (the registry lock lives in this
+	// process). Its pubkey derives from the same credential; a missing
+	// credential leaves the peer off (the route 503s at the console instead).
+	var consolePeer string
+	if cerr == nil {
+		if pk, perr := crypto.PubkeyFromSecret(consoleSecret); perr == nil {
+			consolePeer = pk
+		}
+	}
 	reg.RelayURL = *relayURL
 	reg.RelayAuthURL = *relayAuthURL
 	if reg.RelayAuthURL == "" {
@@ -575,10 +587,11 @@ func cmdServe(args []string) {
 	tools.DoorAuthorize = doorAuth
 	tools.DoorRevoke = doorRevoke
 	srv := &agenttools.Server{
-		Facts:    facts,
-		Audience: audience,
-		Grants:   grants,
-		Tools:    tools,
+		Facts:       facts,
+		Audience:    audience,
+		Grants:      grants,
+		Tools:       tools,
+		ConsolePeer: consolePeer,
 		// The agent-grant kill switch, read fresh per call (the operator flips
 		// it through the console; the next provision_runner call sees it).
 		AgentGrants: func() string { return cpstate.AgentGrantsMode(*consoleStateDir) },

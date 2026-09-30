@@ -541,3 +541,80 @@ func TestCreateAgentChannelsAndPrivate(t *testing.T) {
 		t.Errorf("private must default false")
 	}
 }
+
+// TestConsolePeerScope pins the local-peer path: the console (the CP's
+// session-authed operator surface, deliberately NOT a roster member) may call
+// world_migrate — whose execution must stay in this process for the registry
+// lock — and nothing else. The signature carries the authorization, not the
+// roster; an unknown caller is still denied.
+func TestConsolePeerScope(t *testing.T) {
+	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 11
+	consolePK, err := crypto.PubkeyFromSecret(consoleSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated := false
+	srv := &Server{
+		Audience:    aud,
+		Grants:      func() ([]string, error) { return []string{}, nil }, // peer is NOT on the roster
+		Tools:       &agent.Tools{Console: &fakeOps{}},
+		ConsolePeer: consolePK,
+	}
+	srv.Tools.Migrate = func() ([]migrations.Result, error) {
+		migrated = true
+		return []migrations.Result{{Name: "001-x", OK: true, Applied: true}}, nil
+	}
+	post := func(secret []byte, pk, tool, arguments string) (string, bool) {
+		t.Helper()
+		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":` + arguments + `}}`
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, pk)
+		req.Header.Set(SigHeader, signForTest(secret, aud, ts, raw))
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		var resp struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if resp.Error == nil {
+			return "", false
+		}
+		return resp.Error.Message, true
+	}
+
+	// The console peer runs world_migrate without any roster membership.
+	msg, denied := post(consoleSec, consolePK, "world_migrate", "{}")
+	if denied {
+		t.Fatalf("console peer must call world_migrate, got error: %s", msg)
+	}
+	if !migrated {
+		t.Fatal("console peer world_migrate did not invoke the bound migrator")
+	}
+
+	// ...and nothing else.
+	msg, denied = post(consoleSec, consolePK, "create_agent", `{"name":"bob"}`)
+	if !denied || !strings.Contains(msg, "world_migrate only") {
+		t.Fatalf("console peer must be denied create_agent, got denied=%v msg=%q", denied, msg)
+	}
+	msg, denied = post(consoleSec, consolePK, "world_status", "{}")
+	if !denied || !strings.Contains(msg, "world_migrate only") {
+		t.Fatalf("console peer must be denied world_status, got denied=%v msg=%q", denied, msg)
+	}
+
+	// An unknown caller (neither roster nor peer) still fails closed.
+	strangerSec := make([]byte, 32)
+	strangerSec[0] = 12
+	strangerPK, err := crypto.PubkeyFromSecret(strangerSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, denied = post(strangerSec, strangerPK, "world_migrate", "{}"); !denied {
+		t.Fatal("an ungranted non-peer caller must be denied world_migrate")
+	}
+}
