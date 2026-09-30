@@ -1529,35 +1529,48 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	// Mirror of grant: a SELF-HOSTED runner's whitelist is the live roster —
 	// no package to strip; state read fresh from disk.
+	//
+	// Records that predate the hosted field read the same way: no hosted, no
+	// package_dir — the runner is resident on its target and the CP holds no
+	// package, so there is nothing to strip and the relay remove-user is the
+	// whole revoke. The runner row (empty PackageDir) says the same thing.
 	fresh, err := state.Open(s.stateDir())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
 	var grants []string
-	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
+	cap, isCap := fresh.GetCapability(req.Name)
+	runnerOnlyNoPackage := false
+	if rec, ok := fresh.GetRunner(req.Name); ok {
+		runnerOnlyNoPackage = rec.PackageDir == ""
+	}
+	selfHosted := (isCap && cap.SelfHosted()) || runnerOnlyNoPackage
+	if selfHosted {
 		grants = []string{}
-		// Mirror of grant: a rostered agent's pubkey leaves the record's
-		// Rosters too — else the rebuild's re-assertion re-adds the member
-		// the operator just revoked. The name resolution is LOUD here (not
-		// best-effort): a registry-read failure must not silently leave the
-		// revoked member in the durable roster.
-		agentName, nameErr := agentNameForPubkey(s.AgentToolsDir, req.Pubkey)
-		if nameErr != nil {
-			writeErr(w, http.StatusInternalServerError, "revoke-grant: resolve the pubkey in the agent registry: "+nameErr.Error())
-			return
-		}
-		if agentName != "" {
-			kept := make([]string, 0, len(cap.Rosters))
-			for _, r := range cap.Rosters {
-				if r != agentName {
-					kept = append(kept, r)
-				}
-			}
-			cap.Rosters = kept
-			if err := fresh.InsertCapability(req.Name, cap); err != nil {
-				writeErr(w, statusForAction(err), err.Error())
+		if isCap {
+			// Mirror of grant: a rostered agent's pubkey leaves the record's
+			// Rosters too — else the rebuild's re-assertion re-adds the member
+			// the operator just revoked. The name resolution is LOUD here (not
+			// best-effort): a registry-read failure must not silently leave the
+			// revoked member in the durable roster.
+			agentName, nameErr := agentNameForPubkey(s.AgentToolsDir, req.Pubkey)
+			if nameErr != nil {
+				writeErr(w, http.StatusInternalServerError, "revoke-grant: resolve the pubkey in the agent registry: "+nameErr.Error())
 				return
+			}
+			if agentName != "" {
+				kept := make([]string, 0, len(cap.Rosters))
+				for _, r := range cap.Rosters {
+					if r != agentName {
+						kept = append(kept, r)
+					}
+				}
+				cap.Rosters = kept
+				if err := fresh.InsertCapability(req.Name, cap); err != nil {
+					writeErr(w, statusForAction(err), err.Error())
+					return
+				}
 			}
 		}
 	} else {
