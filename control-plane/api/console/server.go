@@ -1494,14 +1494,16 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 		// nothing prunes it, so it persists across builds without a record.
 		// Best-effort here: a registry-read failure still lands the live
 		// grant; only the durable bookkeeping is skipped.
-		if agentName, _ := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
-			rosters := cap.Rosters
-			if !containsString(rosters, agentName) {
-				rosters = append(rosters, agentName)
-				cap.Rosters = rosters
-				if err := fresh.InsertCapability(req.Name, cap); err != nil {
-					writeErr(w, statusForAction(err), err.Error())
-					return
+		if isCap {
+			if agentName, _ := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
+				rosters := cap.Rosters
+				if !containsString(rosters, agentName) {
+					rosters = append(rosters, agentName)
+					cap.Rosters = rosters
+					if err := fresh.InsertCapability(req.Name, cap); err != nil {
+						writeErr(w, statusForAction(err), err.Error())
+						return
+					}
 				}
 			}
 		}

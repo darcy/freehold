@@ -355,3 +355,33 @@ func TestGrantPreHostedRecord(t *testing.T) {
 		t.Fatalf("pre-hosted grant must join Rosters: %v", cap.Rosters)
 	}
 }
+
+// TestGrantRecordlessRunnerRow pins the crash-window shape: a runner row with
+// NO capability record (pre-hosted worlds) is roster-only for the live grant,
+// and the recordless path must NOT upsert a zero-value record (Kind "" /
+// Port 0) — the next build would read that as a CP-guest dynamic door.
+func TestGrantRecordlessRunnerRow(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisioner.EnrollRunner(store, "orphan-door", "local", "lxcadmin@h",
+		strings.Repeat("a", 64), strings.Repeat("b", 64), "192.168.30.50:8800"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Store: store, StateDir: dir, AgentToolsDir: dir}
+	r := httptest.NewRequest(http.MethodPost, "/api/grant", strings.NewReader(`{"name":"orphan-door","pubkey":"`+strings.Repeat("c", 64)+`"}`))
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("recordless grant must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	fresh, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, isCap := fresh.GetCapability("orphan-door"); isCap {
+		t.Fatal("a recordless grant must not upsert a capability record")
+	}
+}
