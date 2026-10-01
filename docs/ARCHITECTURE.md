@@ -26,7 +26,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
         ▼
    Target: pct LXC (relay/CP) | qm VM (VPS host) | k8s (MVP only)
         │
-        └──backups──► PBS (scheduled vzdump of pct/qm) | TrueNAS | Backblaze B2
+        └──backups──► freehold snapshot (the plane) · freehold export (the data bundle)
+                      · freehold backup (restic → sftp/B2/any URI) | PBS | TrueNAS
 ```
 
 *   **One control plane = exactly ONE relay scope** (relay-as-scope). The CP
@@ -90,10 +91,17 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (the business path). The k8s layer (Chunks 6–7) and everything above the
     host driver run identically regardless of substrate.
 
-*   **Backups are the load-bearing wall — and most teams won't have a PBS
-    server:** the *whole* backup chain (LXC/VZ+T pl8755, KVM+PBS) depends on
-    a PBS host. Where one doesn't exist, the durable half of the
-    `/srv/data` convention must land on TrueNAS and/or Backblaze B2.
+*   **Backups are the load-bearing wall — and no PBS VM is required for
+    them:** `freehold snapshot` (every durable-plane mount under one name,
+    guarded rollback), `freehold export` (the durable plane's
+    data + config in one gzip bundle — no guest rootfs, guests are
+    reconstructible), and `freehold backup` (restic on the substrate host to an
+    arbitrary URI — sftp to a NAS, B2 off-site) cover the chain with the
+    tools the system already runs; `docs/DATA.md` is the build plan. Where a
+    PBS server exists it stays a target, not a dependency. Snapshot is a
+    Proxmox-provider capability (ZFS / LVM-thin); export (a tar of the
+    recorded plane mounts) and restic are universal — a VPS world's
+    off-site and export are the same commands with different paths.
 
 *   **The durable half lands FIRST (Chunk 3; see `docs/POC.md`):**
     `/srv/data` — everything that survives rebuild: `/srv/data/relay` (all
@@ -123,7 +131,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `/var/lib/docker`, backed up (`backup=1`):** the relay's
     Postgres/Redis/MinIO/git data are docker *named volumes* under
     `/var/lib/docker/volumes/`, and freehold ships no buzz patch, so
-    relocating it would silently exclude the relay DBs from backup.
+    relocating it would silently exclude the relay DBs from backup. The
+    export/backup verbs still skip the daemon root's STORAGE-DRIVER dirs
+    (`fuse-overlayfs`/`overlay2` — the pulled images' unpacked layers,
+    812M of a 1.0G root live-verified): `docker compose pull` re-creates
+    them; the volumes stay in.
 
 *   **Durable PVCs are pinned under `/srv/data` — never the daemon root.**
     k3s's default `local-path` provisioner stores PVCs *under the rancher
