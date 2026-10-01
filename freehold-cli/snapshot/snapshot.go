@@ -384,6 +384,10 @@ func reviveScriptPath() string { return "/srv/data/cp/bin/revive-cp.sh" }
 // starts the guests back, and revives the CP with the deploy-staged script.
 // Everything logs to /srv/nobackup/rollback-handoff.log on the host.
 func guestHandoffRollback(exec drive.ExecFunc, cfg *config.Config, volumes []drive.PlaneVolume, to string, sourceRole map[string]string) error {
+	cpID := guestVmidOf(cfg, "cp")
+	if cpID == 0 {
+		return fmt.Errorf("no cp guest recorded — this process cannot be the CP guest; use the box path (without --guest)")
+	}
 	snaps, err := drive.SnapshotList(exec, volumes)
 	if err != nil {
 		return err
@@ -395,15 +399,7 @@ func guestHandoffRollback(exec drive.ExecFunc, cfg *config.Config, volumes []dri
 
 	// Stop the non-CP guests first, remembering what actually stopped (the
 	// script restarts exactly those).
-	roles := make([]string, 0, len(sourceRole))
-	seen := map[string]bool{}
-	for role := range sourceRole {
-		if !seen[role] && role != "cp" {
-			seen[role] = true
-			roles = append(roles, role)
-		}
-	}
-	sort.Strings(roles)
+	roles := nonCPRoles(sourceRole)
 	var toStart []uint32
 	for _, role := range roles {
 		id := guestVmidOf(cfg, role)
@@ -418,7 +414,6 @@ func guestHandoffRollback(exec drive.ExecFunc, cfg *config.Config, volumes []dri
 			toStart = append(toStart, id)
 		}
 	}
-	cpID := guestVmidOf(cfg, "cp")
 
 	// Ship the handoff script (sync), then launch it detached.
 	ship := fmt.Sprintf("echo %s | base64 -d > /srv/nobackup/rollback-handoff.sh && chmod 700 /srv/nobackup/rollback-handoff.sh",
@@ -434,15 +429,29 @@ func guestHandoffRollback(exec drive.ExecFunc, cfg *config.Config, volumes []dri
 		return fmt.Errorf("the handoff script failed to launch on the host: %w", err)
 	}
 
-	if cpID == 0 {
-		return fmt.Errorf("no cp guest recorded — this process cannot be the CP guest; use the box path (without --guest)")
-	}
 	_, _ = exec("echo \"$(date -Is) handoff: stopping the cp guest (the verb's exec ends here — the host script takes over)\" >> /srv/nobackup/rollback-handoff.log", 30)
 	// The final stop ends this process; the return below is unreachable in
 	// practice (the exec session dies), but a FAILED stop leaves the process
 	// alive with the handoff armed — say so and how to disarm.
 	_, serr := stopGuest(exec, cpID)
 	return fmt.Errorf("the cp guest failed to stop and this process survives: kill the armed handoff (`pkill -f rollback-handoff.sh` on %s) and roll back from the operator's box: %v", cfg.Host, serr)
+}
+
+// nonCPRoles is the handoff's stop set: the distinct ROLES among the
+// sourceRole map's VALUES (it maps source path → role), minus cp — the
+// guest whose stop ends this process.
+func nonCPRoles(sourceRole map[string]string) []string {
+	seen := map[string]bool{}
+	var roles []string
+	for _, role := range sourceRole {
+		if role == "cp" || seen[role] {
+			continue
+		}
+		seen[role] = true
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	return roles
 }
 
 // handoffScript renders the detached host-side rollback: wait for the CP

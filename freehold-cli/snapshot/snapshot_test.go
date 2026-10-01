@@ -230,6 +230,21 @@ func TestStartGuestsCountsFailures(t *testing.T) {
 
 var zero = 0
 
+// TestNonCPRoles pins the handoff's stop set: the map's VALUES are the roles
+// (it maps source path → role) — ranging keys would collect paths, stop no
+// guest, and roll the plane back under live writers.
+func TestNonCPRoles(t *testing.T) {
+	roles := nonCPRoles(map[string]string{
+		"/srv/data/cp":    "cp",
+		"/srv/data/relay": "relay",
+		"/srv/data/k8s-a": "k3s",
+		"/srv/data/k8s-b": "k3s", // duplicate role: deduped
+	})
+	if strings.Join(roles, ",") != "k3s,relay" {
+		t.Fatalf("nonCPRoles = %v, want [k3s relay]", roles)
+	}
+}
+
 // TestHandoffScript pins the guest-handoff rollback's script: it waits for
 // the CP guest's stop, carries the drive-rendered rollback commands, starts
 // exactly the stopped guests back, and revives the CP through the staged
@@ -243,7 +258,7 @@ func TestHandoffScript(t *testing.T) {
 	for _, want := range []string{
 		"for i in $(seq 1 120); do pct status 103 | grep -q 'status: running' || break",
 		"{ sh -c 'zfs rollback -r pve/cp@fh-123-pre'; } || {", // the seq runs in a child shell: its exit 1s trip the handler, not the script
-		"mount /srv/data/relay 2>/dev/null; true", // the LVM failure-path restore
+		"mount /srv/data/relay 2>/dev/null; true",             // the LVM failure-path restore
 		"lvchange -ay -K /dev/pve/relay_fh-123-pre",
 		"pct start 104",
 		"pct start 103",
