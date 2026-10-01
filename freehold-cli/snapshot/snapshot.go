@@ -430,11 +430,17 @@ func guestHandoffRollback(exec drive.ExecFunc, cfg *config.Config, volumes []dri
 	}
 
 	_, _ = exec("echo \"$(date -Is) handoff: stopping the cp guest (the verb's exec ends here — the host script takes over)\" >> /srv/nobackup/rollback-handoff.log", 30)
-	// The final stop ends this process; the return below is unreachable in
-	// practice (the exec session dies), but a FAILED stop leaves the process
-	// alive with the handoff armed — say so and how to disarm.
-	_, serr := stopGuest(exec, cpID)
-	return fmt.Errorf("the cp guest failed to stop and this process survives: kill the armed handoff (`pkill -f rollback-handoff.sh` on %s) and roll back from the operator's box: %v", cfg.Host, serr)
+	// The final stop: when this process IS the CP guest, it dies mid-exec
+	// and the handoff takes over — nothing to return. A stop that returns
+	// nil (an already-stopped guest, or --guest run from a machine that
+	// ISN'T the CP guest) is also success: the handoff proceeds on the
+	// host. Only a real stop error leaves the handoff armed and the guest
+	// up — say so and how to disarm (killing a HEALTHY handoff mid-rollback
+	// would strand a half-rolled plane).
+	if _, serr := stopGuest(exec, cpID); serr != nil {
+		return fmt.Errorf("the cp guest failed to stop and this process survives: kill the armed handoff (`pkill -f rollback-handoff.sh` on %s) and roll back from the operator's box: %v", cfg.Host, serr)
+	}
+	return nil
 }
 
 // nonCPRoles is the handoff's stop set: the distinct ROLES among the
