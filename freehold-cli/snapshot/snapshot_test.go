@@ -230,18 +230,30 @@ func TestStartGuestsCountsFailures(t *testing.T) {
 
 var zero = 0
 
-// TestReviveGuestCPMissingScript pins the fail-loud path: a guest without the
-// staged verb surface (an update that predates it) names the fix in the error
-// instead of failing mysteriously.
-func TestReviveGuestCPMissingScript(t *testing.T) {
-	err := reviveGuestCP()
-	if err == nil {
-		t.Fatal("expected an error on a guest without the staged script")
+// TestHandoffScript pins the guest-handoff rollback's script: it waits for
+// the CP guest's stop, carries the drive-rendered rollback commands, starts
+// exactly the stopped guests back, and revives the CP through the staged
+// script.
+func TestHandoffScript(t *testing.T) {
+	volumes := []drive.PlaneVolume{
+		{Source: "/srv/data/cp", Zfs: "pve/cp"},
+		{Source: "/srv/data/relay", VG: "pve", LV: "relay"},
 	}
-	if !strings.Contains(err.Error(), reviveScriptPath()) {
-		t.Fatalf("error should name the script path: %v", err)
+	s := handoffScript(volumes, "fh-123-pre", []uint32{104}, 103)
+	for _, want := range []string{
+		"for i in $(seq 1 120); do pct status 103 | grep -q 'status: running' || break",
+		"zfs rollback -r pve/cp@fh-123-pre",
+		"mount /srv/data/relay 2>/dev/null; true", // the LVM failure-path restore
+		"lvchange -ay -K /dev/pve/relay_fh-123-pre",
+		"pct start 104",
+		"pct start 103",
+		"pct exec 103 -- sh -c '/srv/data/cp/bin/revive-cp.sh'",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("handoff script missing %q\n---\n%s", want, s)
+		}
 	}
-	if !strings.Contains(err.Error(), "freehold update") {
-		t.Fatalf("error should name the fix (a box-side update): %v", err)
+	if !strings.Contains(s, "ROLLBACK FAILED at /srv/data/relay") {
+		t.Fatalf("handoff script should report the failing volume\n---\n%s", s)
 	}
 }

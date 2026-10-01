@@ -373,6 +373,47 @@ func SnapshotRemove(exec ExecFunc, volumes []PlaneVolume, name string) error {
 	return nil
 }
 
+// rollbackStep is one volume's rollback as a single shell command — shared
+// by SnapshotRollback (which executes it) and the guest-handoff script (which
+// carries it verbatim to a detached host-side run), so the two can never
+// drift.
+type rollbackStep struct {
+	Cmd     string
+	Step    string
+	Timeout uint64
+}
+
+// RollbackStepFor renders one volume's rollback as a single shell command
+// plus its exec label/timeout — shared by SnapshotRollback (which executes
+// it) and the snapshot verb's guest-handoff script (which carries it
+// verbatim to a detached host-side run), so the two can never drift. The
+// caller must have validated the name and confirmed the snapshot exists on
+// the volume.
+func RollbackStepFor(v PlaneVolume, name string) rollbackStep {
+	if v.Zfs != "" {
+		return rollbackStep{Cmd: "zfs rollback -r " + v.Zfs + "@" + name, Step: "zfs rollback " + v.Zfs, Timeout: 300}
+	}
+	dev := "/dev/" + v.VG + "/" + v.LV
+	snapDev := "/dev/" + v.VG + "/" + snapLVName(v.LV, name)
+	// ONE command per volume, with a RETRY around activation+dd.
+	// Live-verified on the librem world (PVE host): a freshly
+	// activated thin snapshot's /dev node can be yanked away again
+	// before dd opens it (pvestatd's sweep deactivates plane LVs of
+	// STOPPED guests; separate ssh steps widened the window and
+	// even a chained one lost twice). The retry rides it out: each
+	// attempt re-copies the identical frozen source, so a partial
+	// dd is harmlessly re-copied. The fstab-form mount (the ensure
+	// stage's pin) never chases a stale /dev symlink; the failure
+	// path best-effort-restores the mount — a guest restarting
+	// against an unmounted host path would write into the root fs.
+	seq := "umount " + v.Source + " 2>/dev/null; mountpoint -q " + v.Source + " && exit 1; " +
+		"n=0; until lvchange -ay -K " + snapDev + " && udevadm settle && " +
+		"dd if=" + snapDev + " of=" + dev + " bs=4M status=none; do " +
+		"n=$((n+1)); [ $n -ge 5 ] && exit 1; sleep 2; done; " +
+		"mount " + v.Source
+	return rollbackStep{Cmd: seq, Step: "block-copy " + snapLVName(v.LV, name) + " onto " + v.LV + " (" + v.Source + ")", Timeout: 600}
+}
+
 // SnapshotRollback rolls every volume back to the named snapshot. The caller
 // stops the guests first (their bind-mounts hold the volume busy). Rollback
 // is destructive beyond the point: ZFS `-r` destroys newer snapshots (the
@@ -405,34 +446,13 @@ func SnapshotRollback(exec ExecFunc, volumes []PlaneVolume, name string) error {
 		}
 	}
 	for _, v := range volumes {
-		switch {
-		case v.Zfs != "":
-			if _, err := execToOK(exec, "zfs rollback -r "+v.Zfs+"@"+name, "zfs rollback "+v.Zfs, 300); err != nil {
-				return err
-			}
-		default:
-			dev := "/dev/" + v.VG + "/" + v.LV
-			snapDev := "/dev/" + v.VG + "/" + snapLVName(v.LV, name)
-			// ONE command per volume, with a RETRY around activation+dd.
-			// Live-verified on the librem world (PVE host): a freshly
-			// activated thin snapshot's /dev node can be yanked away again
-			// before dd opens it (pvestatd's sweep deactivates plane LVs of
-			// STOPPED guests; separate ssh steps widened the window and
-			// even a chained one lost twice). The retry rides it out: each
-			// attempt re-copies the identical frozen source, so a partial
-			// dd is harmlessly re-copied. The fstab-form mount (the ensure
-			// stage's pin) never chases a stale /dev symlink; the failure
-			// path best-effort-restores the mount — a guest restarting
-			// against an unmounted host path would write into the root fs.
-			seq := "umount " + v.Source + " 2>/dev/null; mountpoint -q " + v.Source + " && exit 1; " +
-				"n=0; until lvchange -ay -K " + snapDev + " && udevadm settle && " +
-				"dd if=" + snapDev + " of=" + dev + " bs=4M status=none; do " +
-				"n=$((n+1)); [ $n -ge 5 ] && exit 1; sleep 2; done; " +
-				"mount " + v.Source
-			if _, err := execToOK(exec, seq, "block-copy "+snapLVName(v.LV, name)+" onto "+v.LV+" ("+v.Source+")", 600); err != nil {
+		st := RollbackStepFor(v, name)
+		if _, err := execToOK(exec, st.Cmd, st.Step, st.Timeout); err != nil {
+			if v.Zfs == "" {
 				_, _ = exec("mount "+v.Source+" 2>/dev/null; true", 120)
 				return fmt.Errorf("%w (the plane volume %s may need hand-remounting: mount %s)", err, v.Source, v.Source)
 			}
+			return err
 		}
 	}
 	return nil
