@@ -19,6 +19,7 @@ import (
 	dnscred "freehold/freehold-cli/dns-cred"
 	"freehold/freehold-cli/door"
 	"freehold/freehold-cli/exec"
+	"freehold/freehold-cli/export"
 	"freehold/freehold-cli/install"
 	"freehold/freehold-cli/internal/stages"
 	"freehold/freehold-cli/profiles"
@@ -50,6 +51,7 @@ func init() {
 		build.Command(),
 		teardown.Command(),
 		snapshot.Command(),
+		export.Command(),
 		uninstall.Command(),
 		install.InstallCommand(),
 		// The box's self-staged stages: the freehold binary re-invokes ITSELF
