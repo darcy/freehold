@@ -16,6 +16,7 @@ import (
 	"freehold/contract/console"
 	"freehold/contract/worldfacts"
 	"freehold/freehold-cli/login"
+	"freehold/providers/proxmox/drive"
 )
 
 var (
@@ -99,6 +100,10 @@ type Model struct {
 	Agents      []AgentRow
 	Runners     []RunnerRow
 	Storage     []DataRow
+	// Snapshots is the durable plane's snapshot list (newest first) — the
+	// DATA view renders it under the mounts; fetched best-effort through
+	// this binary's own `snapshot --list --json`.
+	Snapshots []drive.SnapshotInfo
 	// Facts are the deployer-side world facts (plane/certs/domains) the CP
 	// serves on world_status — the DATA + Certs views render from these on a
 	// management/login-only box that has no local config + host probes.
