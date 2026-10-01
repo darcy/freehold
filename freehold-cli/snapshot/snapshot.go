@@ -415,15 +415,19 @@ func guestHandoffRollback(exec drive.ExecFunc, cfg *config.Config, volumes []dri
 		}
 	}
 
-	// Ship the handoff script (sync), then launch it detached.
-	ship := fmt.Sprintf("echo %s | base64 -d > /srv/nobackup/rollback-handoff.sh && chmod 700 /srv/nobackup/rollback-handoff.sh",
+	// Ship the handoff script (sync), then launch it detached. /srv/nobackup
+	// exists on any world whose plane has a ZFS volume (the net pre-creates
+	// it) — an LVM-only world has no net, so mkdir here; by this point the
+	// non-CP guests are already STOPPED, so a failure must say where the
+	// world is left.
+	ship := fmt.Sprintf("mkdir -p /srv/nobackup && echo %s | base64 -d > /srv/nobackup/rollback-handoff.sh && chmod 700 /srv/nobackup/rollback-handoff.sh",
 		base64Encode(handoffScript(volumes, to, toStart, cpID)))
 	out, err := exec(ship, 60)
 	if err != nil {
 		return fmt.Errorf("the handoff script failed to ship to the host: %w", err)
 	}
 	if out.ExitCode != nil && *out.ExitCode != 0 {
-		return fmt.Errorf("the handoff script failed to ship to the host: %s", strings.TrimSpace(out.Stderr))
+		return fmt.Errorf("the handoff script failed to ship to the host: %s — the non-CP guests are STOPPED and the rollback has NOT run; start them back with `pct start <id>` or re-run the rollback from the operator's box", strings.TrimSpace(out.Stderr))
 	}
 	if _, err := exec("setsid nohup sh /srv/nobackup/rollback-handoff.sh >/dev/null 2>&1 < /dev/null & echo launched", 30); err != nil {
 		return fmt.Errorf("the handoff script failed to launch on the host: %w", err)

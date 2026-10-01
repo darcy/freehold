@@ -69,6 +69,11 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 	}
 
 	restartRunner := spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil
+	// Capture the doors' argvs BEFORE stopping them (below) — the transient
+	// units' argv exists only while they run, and the revive script re-launches
+	// the doors from it (the build's reconcile re-stages them too, but the
+	// guest-handoff revival runs between rollbacks and builds).
+	doorArgvs := captureCapabilityRunnerArgvs(t, spec)
 	if restartRunner {
 		// The capability doors (freehold-runner-<name>) execute the SAME
 		// binary — stop every one of them too (the world-build reconcile the
@@ -128,7 +133,7 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 	if err := shipVerbSurface(t, spec); err != nil {
 		return err
 	}
-	return shipReviveScript(t, spec, flags, atArgv, captureCapabilityRunnerArgvs(t, spec))
+	return shipReviveScript(t, spec, flags, atArgv, doorArgvs)
 }
 
 // agentToolsStateDir is the agent-tools durable root, a sibling of the console
@@ -174,7 +179,11 @@ func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
 // re-stages them — without this the doors stay down until the next build.
 // Returns lines of "unit\x20argv". Best-effort: nothing running = empty.
 func captureCapabilityRunnerArgvs(t Transport, spec *DeployCpSpec) []string {
-	cmd := "for u in $(systemctl list-units 'freehold-runner-*' --no-legend --plain 2>/dev/null | awk '{print $1}'); do p=$(systemctl show $u -p MainPID --value); [ -n \"$p\" ] && [ \"$p\" != 0 ] && printf '%s %s\\n' \"$u\" \"$(tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null)\"; done"
+	// Double quotes only: LxcExec single-quotes the whole payload — a single
+	// quote inside would close/reopen the wrapper (the stop command above is
+	// the pattern). The unquoted freehold-runner-* glob is a list-units
+	// PATTERN, no shell expansion wanted; cut -d" " keeps the unit column.
+	cmd := "for u in $(systemctl list-units freehold-runner-* --no-legend --plain 2>/dev/null | cut -d\" \" -f1); do p=$(systemctl show $u -p MainPID --value); [ -n \"$p\" ] && [ \"$p\" != 0 ] && printf \"%s %s\\n\" \"$u\" \"$(tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null)\"; done; true"
 	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read capability-runner argvs", 30)
 	if err != nil {
 		return nil
