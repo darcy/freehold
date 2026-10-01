@@ -257,6 +257,8 @@ func TestHandoffScript(t *testing.T) {
 	s := handoffScript(volumes, "fh-123-pre", []uint32{104}, 103)
 	for _, want := range []string{
 		"for i in $(seq 1 120); do pct status 103 | grep -q 'status: running' || break",
+		// The wait expires → fail closed (a live CP guest = no rollback).
+		"pct status 103 | grep -q 'status: running' && { echo",
 		"{ sh -c 'zfs rollback -r pve/cp@fh-123-pre'; } || {", // the seq runs in a child shell: its exit 1s trip the handler, not the script
 		"mount /srv/data/relay 2>/dev/null; true",             // the LVM failure-path restore
 		"lvchange -ay -K /dev/pve/relay_fh-123-pre",

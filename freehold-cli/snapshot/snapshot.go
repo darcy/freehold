@@ -465,6 +465,11 @@ func handoffScript(volumes []drive.PlaneVolume, to string, toStart []uint32, cpI
 	b.WriteString("echo \"$(date -Is) handoff: waiting for the cp guest to stop\"\n")
 	if cpID != 0 {
 		b.WriteString(fmt.Sprintf("for i in $(seq 1 120); do pct status %d | grep -q 'status: running' || break; sleep 2; done\n", cpID))
+		// Fail closed when the wait expires: a still-running CP guest means
+		// the verb's final stop failed or died before reaching it — rolling
+		// back under a live CP is the exact corruption every other path
+		// refuses. The verb's error names the disarm (pkill -f).
+		b.WriteString(fmt.Sprintf("pct status %d | grep -q 'status: running' && { echo \"$(date -Is) ABORTED: the cp guest is still running — the verb's stop failed; kill this script (pkill -f rollback-handoff.sh) and roll back from the operator's box\"; exit 1; }\n", cpID))
 	}
 	for _, v := range volumes {
 		st := drive.RollbackStepFor(v, to)
