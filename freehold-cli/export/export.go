@@ -98,7 +98,12 @@ var exportCmd = &cobra.Command{
 				}
 				for _, d := range export.DriverDirs {
 					duExcludes = append(duExcludes, d)
-					tarExcludes = append(tarExcludes, m.Source+"/"+d)
+					// Slashless: the tar's members are stored without the
+					// leading slash (-C / + TrimPrefix), and GNU tar matches
+					// the exclusion against the STORED name — a
+					// leading-slash pattern never matched (live-verified:
+					// 14,500 fuse-overlayfs members shipped anyway).
+					tarExcludes = append(tarExcludes, strings.TrimPrefix(m.Source, "/")+"/"+d)
 				}
 			}
 		}
@@ -209,6 +214,13 @@ var exportCmd = &cobra.Command{
 		// the seconds before the after-the-fact chmod.
 		fh, err := os.OpenFile(outfile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
+			return err
+		}
+		// O_CREATE's 0600 applies only at CREATION — a pre-existing outfile
+		// keeps its (weaker) mode through the truncation; force it before
+		// any byte lands.
+		if err := fh.Chmod(0o600); err != nil {
+			fh.Close()
 			return err
 		}
 		fh.Close()

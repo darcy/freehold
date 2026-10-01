@@ -98,12 +98,15 @@ func TestDriverExcludesRideTheCommands(t *testing.T) {
 	if !strings.Contains(cmds[0], "--exclude=fuse-overlayfs --exclude=overlay2") {
 		t.Errorf("the du must skip the driver dirs: %q", cmds[0])
 	}
+	// The excludes are SLASHLESS (the members are — tar -C / strips the
+	// operand's leading slash, and GNU tar matches the pattern against the
+	// STORED name; a leading-slash pattern never matched live).
 	_, tarCmd, err := TarCmd("/srv/nobackup/freehold-export", "x", []string{"/plane/docker-root"},
-		[]string{"/plane/docker-root/fuse-overlayfs", "/plane/docker-root/overlay2"})
+		[]string{"plane/docker-root/fuse-overlayfs", "plane/docker-root/overlay2"})
 	if err != nil {
 		t.Fatalf("tar: %v", err)
 	}
-	if !strings.Contains(tarCmd, "--exclude=/plane/docker-root/fuse-overlayfs") || !strings.Contains(tarCmd, "--exclude=/plane/docker-root/overlay2") {
-		t.Errorf("the tar must skip the driver dirs: %q", tarCmd)
+	if !strings.Contains(tarCmd, "--exclude=plane/docker-root/fuse-overlayfs") || !strings.Contains(tarCmd, "--exclude=plane/docker-root/overlay2") {
+		t.Errorf("the tar must skip the driver dirs (slashless, matching the members): %q", tarCmd)
 	}
 }
