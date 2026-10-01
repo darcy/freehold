@@ -263,7 +263,10 @@ var rollbackCmd = &cobra.Command{
 		// absent guest (a recorded VMID whose guest is gone — normal after
 		// a compute-only teardown) is skipped at stop AND at start — it is
 		// not a start failure, and it never blocks the CP's revival.
-		stopped, guestsToStart := stopAllGuests(exec, cfg, sourceRole)
+		stopped, guestsToStart, serr := stopAllGuests(exec, cfg, sourceRole)
+		if serr != nil {
+			return serr
+		}
 		if len(guestsToStart) > 0 {
 			fmt.Printf("stopped %d guest(s): %s\n", len(guestsToStart), commaU32(guestsToStart))
 		}
@@ -417,9 +420,8 @@ func commaU32(ids []uint32) string {
 // stopAllGuests stops every affected guest and reports which ones THIS run
 // actually stopped (a guest absent at stop — its VMID recorded but the
 // guest destroyed — stays absent: not restarted, never a start failure).
-func stopAllGuests(exec drive.ExecFunc, cfg *config.Config, sourceRole map[string]string) (map[string]bool, []uint32) {
-	stopped := map[string]bool{}
-	var toStart []uint32
+func stopAllGuests(exec drive.ExecFunc, cfg *config.Config, sourceRole map[string]string) (stopped map[string]bool, toStart []uint32, err error) {
+	stopped = map[string]bool{}
 	roles := make([]string, 0, len(sourceRole))
 	seen := map[string]bool{}
 	for _, role := range sourceRole {
@@ -436,15 +438,18 @@ func stopAllGuests(exec drive.ExecFunc, cfg *config.Config, sourceRole map[strin
 		}
 		wasRunning, serr := stopGuest(exec, id)
 		if serr != nil {
-			fmt.Printf("  ⚠ guest %d stop FAILED — the rollback ABORTS before any data moved (fix the guest, re-run)\n", id)
-			continue
+			// A failed stop is a REAL abort: a guest whose pct stop failed
+			// (busy/locked) is still RUNNING — the rollback must not fire
+			// under a live writer (zfs rollback -r on a mounted dataset
+			// under a live writer = corruption).
+			return nil, nil, fmt.Errorf("guest %d (%s) failed to stop — the rollback ABORTS before any data moved (fix the guest, re-run): %w", id, role, serr)
 		}
 		if wasRunning {
 			stopped[role] = true
 			toStart = append(toStart, id)
 		}
 	}
-	return stopped, toStart
+	return stopped, toStart, nil
 }
 
 // stopGuest stops one recorded guest, classifying AFFIRMATIVELY: the status

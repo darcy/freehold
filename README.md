@@ -141,6 +141,11 @@ freehold update               # update the world's CP (release assets / ref / de
 freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
                               #  --remove-data drops the durable plane); a thin box / dead CP
                               #  uninstalls over direct root SSH
+freehold snapshot [label]     # snapshot the whole durable plane under one name
+                              #  (--list / --rm / snapshot rollback — guarded,
+                              #  guests stop, the CP comes back via the update flow)
+freehold export [outfile]     # the durable plane's data + profile config into one
+                              #  gzip bundle (du estimate first, confirm; no rootfs)
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no
