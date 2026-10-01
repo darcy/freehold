@@ -128,7 +128,7 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 	if err := shipVerbSurface(t, spec); err != nil {
 		return err
 	}
-	return shipReviveScript(t, spec, flags, atArgv)
+	return shipReviveScript(t, spec, flags, atArgv, captureCapabilityRunnerArgvs(t, spec))
 }
 
 // agentToolsStateDir is the agent-tools durable root, a sibling of the console
@@ -164,6 +164,28 @@ func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
 		return ""
 	}
 	return strings.TrimSpace(out.Stdout)
+}
+
+// captureCapabilityRunnerArgvs reads every RUNNING capability-runner unit's
+// serve argv (freehold-runner-* — cp-local-root, pve-ssh-root, the kube/API
+// doors) from /proc, so the revive script can re-launch them after a
+// guest-local rollback. The transient units do not survive a guest stop
+// (--collect), and the build's reconcile is the only other thing that
+// re-stages them — without this the doors stay down until the next build.
+// Returns lines of "unit\x20argv". Best-effort: nothing running = empty.
+func captureCapabilityRunnerArgvs(t Transport, spec *DeployCpSpec) []string {
+	cmd := "for u in $(systemctl list-units 'freehold-runner-*' --no-legend --plain 2>/dev/null | awk '{print $1}'); do p=$(systemctl show $u -p MainPID --value); [ -n \"$p\" ] && [ \"$p\" != 0 ] && printf '%s %s\\n' \"$u\" \"$(tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null)\"; done"
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read capability-runner argvs", 30)
+	if err != nil {
+		return nil
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(out.Stdout), "\n") {
+		if strings.TrimSpace(l) != "" && strings.Contains(l, " serve ") {
+			lines = append(lines, strings.TrimSpace(l))
+		}
+	}
+	return lines
 }
 
 // restartAgentTools relaunches agent-tools with a captured argv and waits for

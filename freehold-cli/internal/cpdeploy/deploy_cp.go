@@ -532,7 +532,7 @@ func shipVerbSurface(t Transport, spec *DeployCpSpec) error {
 // (`freehold snapshot rollback --guest`) execs it to bring the CP back without
 // the box's update flow. Regenerated on every deploy/redeploy — the flags
 // cannot drift from what actually runs.
-func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string) string {
+func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string, capabilityRunnerArgvs []string) string {
 	serve := fmt.Sprintf(
 		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
 		spec.BinDir, spec.StateDir, spec.BindAddr, flags, spec.StateDir, spec.StateDir)
@@ -550,6 +550,16 @@ func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string) string {
 			spec.BinDir, spec.runnerDir()))
 		b.WriteString("sleep 2; systemctl is-active freehold-runner || echo 'warning: co-located runner did not come up — the next `freehold build` re-stages it' >&2\n")
 	}
+	// The capability runners (the doors): transient units die with the guest
+	// stop and only the build's reconcile re-stages them — re-launch each
+	// from its captured running argv so the doors come back WITH the world.
+	for _, line := range capabilityRunnerArgvs {
+		unit, argv, ok := strings.Cut(line, " ")
+		if !ok || !strings.HasPrefix(argv, "/") {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("systemd-run --unit=%s --collect %s >/dev/null 2>&1\n", unit, argv))
+	}
 	if strings.TrimSpace(agentToolsArgv) != "" {
 		at := agentToolsStateDir(spec)
 		b.WriteString(fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true\n", at, at))
@@ -561,10 +571,10 @@ func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string) string {
 // shipReviveScript renders + ships the revival script (0755). Called after
 // the serve (+ runner + agent-tools) are up, so the script captures the start
 // commands that just worked.
-func shipReviveScript(t Transport, spec *DeployCpSpec, flags, agentToolsArgv string) error {
+func shipReviveScript(t Transport, spec *DeployCpSpec, flags, agentToolsArgv string, capabilityRunnerArgvs []string) error {
 	final := spec.BinDir + "/revive-cp.sh"
 	cmd := fmt.Sprintf("mkdir -p %[1]s && echo %[2]s | base64 -d > %[3]s && chmod 755 %[3]s",
-		spec.BinDir, base64StdEncode([]byte(reviveScript(spec, flags, agentToolsArgv))), final)
+		spec.BinDir, base64StdEncode([]byte(reviveScript(spec, flags, agentToolsArgv, capabilityRunnerArgvs))), final)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "ship revive script", 60); err != nil {
 		return err
 	}
@@ -752,7 +762,7 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 	}
 
 	// The revive script LAST: everything it starts just came up.
-	if err := shipReviveScript(t, spec, flags, ""); err != nil {
+	if err := shipReviveScript(t, spec, flags, "", nil); err != nil {
 		return nil, err
 	}
 

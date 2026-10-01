@@ -406,11 +406,18 @@ func RollbackStepFor(v PlaneVolume, name string) rollbackStep {
 	// stage's pin) never chases a stale /dev symlink; the failure
 	// path best-effort-restores the mount — a guest restarting
 	// against an unmounted host path would write into the root fs.
-	seq := "umount " + v.Source + " 2>/dev/null; mountpoint -q " + v.Source + " && exit 1; " +
-		"n=0; until lvchange -ay -K " + snapDev + " && udevadm settle && " +
-		"dd if=" + snapDev + " of=" + dev + " bs=4M status=none; do " +
-		"n=$((n+1)); [ $n -ge 5 ] && exit 1; sleep 2; done; " +
-		"mount " + v.Source
+		// conv=sparse: the copy is FULL-DEVICE, and on a thin pool every
+		// written block allocates — zeros included. A 4×10GB set of origins
+		// fills a 40GB pool to 100% and the pool flips to out-of-data-space
+		// error-IO mode mid-rollback (LIVE-VERIFIED on the librem world:
+		// ext4 journals abort, the mounts go emergency_ro, the world's
+		// plane IO-errors until the pool is freed). Sparse seeks over zero
+		// runs: the ext4's free space (most of the device) never allocates.
+		seq := "umount " + v.Source + " 2>/dev/null; mountpoint -q " + v.Source + " && exit 1; " +
+			"n=0; until lvchange -ay -K " + snapDev + " && udevadm settle && " +
+			"dd if=" + snapDev + " of=" + dev + " bs=4M status=none conv=sparse; do " +
+			"n=$((n+1)); [ $n -ge 5 ] && exit 1; sleep 2; done; " +
+			"mount " + v.Source
 	return rollbackStep{Cmd: seq, Step: "block-copy " + snapLVName(v.LV, name) + " onto " + v.LV + " (" + v.Source + ")", Timeout: 600}
 }
 

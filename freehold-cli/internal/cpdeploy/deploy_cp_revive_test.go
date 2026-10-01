@@ -18,13 +18,15 @@ func TestReviveScript(t *testing.T) {
 		RunnerPackage:    strPtr("/box/runner/proxmox-box"),
 		AgentToolsBinary: strPtr("/x/agent-tools"),
 	}
-	s := reviveScript(spec, " --relay-url https://relay.example", "/x/freehold-agent-tools serve --state-dir /srv/data/cp/agent-tools")
+	s := reviveScript(spec, " --relay-url https://relay.example", "/x/freehold-agent-tools serve --state-dir /srv/data/cp/agent-tools",
+		[]string{"freehold-runner-cp-local-root /srv/data/cp/bin/freehold-runner serve --state-dir /srv/data/cp/control-plane/runner/cp-local-root --addr 0.0.0.0:8797"})
 	for _, want := range []string{
 		"#!/bin/sh\n",
 		bin + "/freehold-console serve --state-dir " + state + " --addr " + bind,
 		"for i in $(seq 1 15)",
 		"curl -fsS -m 3 http://" + bind + "/healthz",
 		"systemd-run --unit=freehold-runner --collect " + bin + "/freehold-runner serve --state-dir " + state + "/runner/proxmox-box",
+		"systemd-run --unit=freehold-runner-cp-local-root --collect /srv/data/cp/bin/freehold-runner serve",
 		"setsid nohup /x/freehold-agent-tools serve --state-dir /srv/data/cp/agent-tools",
 	} {
 		if !strings.Contains(s, want) {
@@ -34,7 +36,7 @@ func TestReviveScript(t *testing.T) {
 
 	// No runner shipped → no runner block; no argv → no agent-tools block.
 	bare := &DeployCpSpec{StateDir: state, BinDir: bin, BindAddr: bind}
-	s = reviveScript(bare, "", "")
+	s = reviveScript(bare, "", "", nil)
 	if strings.Contains(s, "freehold-runner serve") || strings.Contains(s, "freehold-agent-tools serve") {
 		t.Fatalf("revive script started absent components:\n%s", s)
 	}
