@@ -28,7 +28,7 @@ differ only in what the substrate can do:
 | Verb | Proxmox (ZFS / LVM-thin) | VPS (plain dirs) |
 | --- | --- | --- |
 | `snapshot` (create/list/rm/rollback) | ✅ native snapshot primitives | ❌ no cheap primitive — restic is the snapshot story |
-| `export` (vzdump bundle) | ✅ vzdump per guest | ❌ vzdump is a PVE tool |
+| `export` (the data bundle) | ✅ tar of the plane mounts | ✅ identical — plain host paths |
 | `backup` (restic) | ✅ runs on the PVE host | ✅ runs on the VPS — identical code, different host |
 
 restic is the universal leg; snapshot/export are Proxmox strengths. A
@@ -55,12 +55,25 @@ repo — which is the backend-independent format the north star wants anyway.
         agent/runner rows, arrow-select + enter — or `--to <name>`).
     2.  Risk confirmation, naming the affected guests: they stop for the
         rollback and restart after; **ZFS `rollback -r` destroys newer
-        snapshots** on every dataset; **LVM-thin merge (`lvconvert
-        --mergethin`) consumes the chosen snapshot**.
-    3.  If no snapshot was taken today, offer to take a fresh one first
-        (the pre-rollback safety net).
+        snapshots** on every dataset; **LVM-thin block-copies the chosen
+        snapshot onto the volume (`dd`)** — snapshots survive the rollback
+        there (LIVE-VERIFIED: `lvconvert --mergethin` DESTROYS the origin's
+        other thin snapshots on lvm2 2.03.31 — the escape hatch died with
+        the merge — and against the still-mounted host path it defers
+        silently; dd has neither failure mode).
+    3.  Always take the fresh pre-rollback net first (the pre-rollback LIVE
+        state — un-snapshotted divergence included — is exactly what a
+        mistaken rollback destroys; no older snapshot carries it). On ZFS
+        that net is ALSO sent to a file under `/srv/nobackup` — `rollback
+        -r` would destroy the net snapshot itself, and the file is what the
+        mistaken-rollback escape hatch rests on (`zfs receive` restores
+        it). On LVM the net LV survives the dd-copy untouched — it IS the
+        hatch.
     4.  Stop the affected guests → roll back every dataset → start them →
-        report per-dataset status.
+        report per-dataset status. The status probe is affirmative (a guest
+        whose state can't be read aborts the rollback before any data
+        moves), and the LVM branch brings each volume's HOST mount down
+        around the block copy (umount → dd → remount).
 5.  **All-or-nothing granularity:** one name applies to every dataset and
     rollback restores all of them together — the world model, not per-tenant
     surgery. Per-tenant rollback is a later flag if it's ever wanted.
@@ -81,33 +94,52 @@ rollback of a live relay with data written after the snapshot.
 *   [ ] `--rm` removes the name everywhere; snapshots survive a compute-only
     teardown/rebuild.
 
-## Phase 2 — `freehold export` (the portable bundle)
+## Phase 2 — `freehold export` (the durable plane's data bundle)
 
-1.  **Estimate, confirm, then act.** For each recorded guest
-    (`cfg.Lxc.*.Vmid` — no host discovery): used bytes of the rootfs volume +
-    every `backup=1` mount, printed per-guest with the total; the operator
-    confirms before anything runs.
-2.  **vzdump per guest** (`--dumpdir` under `/srv/nobackup` on the host,
-    `--mode snapshot`, `--compress zstd`; `suspend` fallback on
-    non-snapshot-capable storage) — the archives carry rootfs + every
-    `backup=1` mount, so the durable plane rides inside them (the CP guest's
-    `/srv/data/cp` is `backup=1`).
-3.  **Bundle:** the `.tar.zst` archives are pulled to the box and wrapped,
-    with the profile's `config.toml`, into one `tar.gz` — the portable,
-    backend-independent artifact. Host tmp is cleaned; nothing is left on the
-    guest hosts.
-4.  vzdump is Proxmox-only and the call sits in a provider-level package, so
-    the limitation is structural, not an oversight. A VPS world's export story
-    is its restic repo (Phase 3) — the same portable format, incremental.
+1.  **The bundle is the PLANE, nothing else.** The recorded mounts' data +
+    the profile's `config.toml` — no guest rootfs: guests are
+    RECONSTRUCTIBLE (the rebuild model's job; a wholesale guest capture is
+    `vzdump` by hand for anyone who wants it). LIVE-VERIFIED design
+    correction: the first cut exported per-guest vzdump archives (rootfs
+    included) — 48G of the 88G estimate was reconstructible weight, and the
+    vzdump legs (snapshot-mode storage quirks, a suspend fallback that hung
+    26 minutes on a busy guest) bought nothing the rebuild doesn't give.
+2.  **Estimate, confirm, then act.** `du -sb` per recorded mount source —
+    the REAL content bytes (bind-form mp lines carry no size attr, and a
+    thin LV's lv_size is its provisioned bound, not its content); printed
+    per-mount with the total; confirmed (or `--yes`) before anything runs.
+3.  **ONE tar on the host** — `tar -C / -czf` of all the mounts into
+    `/srv/nobackup/freehold-export` (the mounts live on the host; the
+    guests need not stop; the tar is not crash-consistent at the second
+    level — take a `freehold snapshot` first when the moment matters) —
+    pulled to the box (size-checked against the host stat) and wrapped with
+    the config into one bundle born 0600: the cp mount carries the console
+    identity + every sealed secret. Host tmp is cleaned. tar's exit 1 (the
+    LIVE world's "file changed as we read it" / "socket ignored") is
+    accepted loudly — the archive is complete, and the DBs' own crash
+    recovery (postgres WAL replay, redis AOF truncation) covers the torn
+    tail; exit 2+ (a truncated archive) fails the export. The daemon-root
+    mount (the relay's carve-out) EXCLUDES its storage-driver dirs
+    (`fuse-overlayfs`/`overlay2` — the pulled images' unpacked layers,
+    812M of a 1.0G root live-verified): `docker compose pull` re-creates
+    them; the named volumes (the DBs) stay in. The du estimate applies the
+    same excludes, so the confirmed number tells the truth.
+4.  **Restore** = untar onto a fresh host's plane paths + `freehold build`
+    (the ensure stage re-attaches the mounts) — the portable-backup north
+    star's own path.
+5.  gzip over plain tar: the data is Postgres/Redis/repos (compresses) —
+    the docker layer blobs don't, and they're the minority.
 
 **Acceptance:**
 
-*   [ ] `freehold export` prints a per-guest size estimate and waits for
-    confirmation before running vzdump.
-*   [ ] The bundle contains one `.tar.zst` per guest + the profile config;
-    host `/srv/nobackup` tmp is empty afterward.
-*   [ ] A bundle restores by hand on a fresh PVE host (vzdump's own restore
-    path) — proving "portable" without building a restore verb yet.
+*   [ ] `freehold export` prints a per-mount du estimate (the daemon root
+    WITHOUT its storage-driver dirs) and waits for confirmation before
+    anything runs.
+*   [ ] The bundle contains the mounts' data at their real paths + the
+    profile config; host `/srv/nobackup` tmp is empty afterward.
+*   [ ] A bundle untars onto a fresh host's plane paths and `freehold
+    build` re-attaches them — proving "portable" without building a
+    restore verb yet.
 
 ## Phase 3 — `freehold backup init/run` (restic, arbitrary backend)
 
@@ -120,11 +152,20 @@ rollback of a live relay with data written after the snapshot.
     mount sources either way).
 2.  **Scope = the durable plane + the profile config**, tagged per-profile so
     one repo can hold several worlds. Dedup makes the first run the expensive
-    one; increments after that are small.
+    one; increments after that are small. The daemon-root mount excludes its
+    storage-driver dirs (the same excludes the export's tar uses — the
+    pulled images re-pull; the relay DBs stay in). **Consistency limit:** restic reads
+    LIVE files over minutes — a service writing during the run can leave a
+    torn copy that only fails at restore time; the run prints the warning and
+    the consistent-point path is `freehold snapshot`/`export` first (or
+    quiesce the writer yourself).
 3.  **Password:** a 0600 `restic-password` file in the profile dir on the box,
     passed as `RESTIC_PASSWORD_FILE`. Whoever holds the profile can restore —
     the CP secret provisioner path (env injection over the runner) is a later
-    tightening, blocked on secret-env over the ssh channel.
+    tightening, blocked on secret-env over the ssh channel. A box that LOST
+    its profile copy ADOPTS the host's file (the host's copy is the repo's
+    key — it is never overwritten by a freshly generated password; a pushed
+    new one would brick the existing repo forever).
 4.  **Test matrix = two backends, one code path:** TrueNAS (sftp) and
     Backblaze B2. Both are URI + credentials; nothing in freehold differs.
 5.  **Scheduling is deliberately absent** — CLI-invoked first; a host-side
@@ -146,6 +187,9 @@ rollback of a live relay with data written after the snapshot.
 
 *   A PBS-equivalent service (daemon, scheduler, verify/QC web UI) — the verbs
     are the product; Data's department tooling drives them via exec later.
+*   Guest rootfs in the export bundle — guests are reconstructible (the
+    rebuild model's job); the bundle carries the durable plane only. A
+    wholesale guest capture is vzdump by hand for anyone who wants it.
 *   Per-tenant snapshots/rollback — one name spans the plane; granularity
     splits only if a real workflow demands it.
 *   Kube-based backup (a restic pod) — a pod can only see
@@ -160,7 +204,7 @@ rollback of a live relay with data written after the snapshot.
 
 *   `providers/proxmox/drive/` — snapshot primitives (create/list/rm/rollback)
     for both backends, fake-exec tested like `lvm_test.go`.
-*   `providers/proxmox/export/` (new) — the estimate + vzdump + bundle flow.
+*   `providers/proxmox/export/` (new) — the du estimate + the host-side tar shape.
 *   `freehold-cli/snapshot/`, `freehold-cli/export/`, `freehold-cli/backup/`
     (new verbs) — cobra commands in the one-dir-per-verb pattern; transport
     mirrors teardown's (transient SSH / door probe).

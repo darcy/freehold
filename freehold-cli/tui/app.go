@@ -395,6 +395,11 @@ func guestLocation(vmid *uint32, ip *string) string {
 // build). No local plane probe: a bootstrap box and a login box render the
 // same CP facts, so the boot check never diverges or hangs on a local exec.
 func (m *Model) refreshData(cfg *config.Config) {
+	// The plane's snapshots ride the same refresh (best-effort: a box that
+	// can't reach the host renders an empty table, never an error).
+	if snaps, ok := m.fetchSnapshots(); ok {
+		m.Snapshots = snaps
+	}
 	if m.Facts == nil || len(m.Facts.Plane.Mounts) == 0 {
 		m.DataAt = time.Now()
 		m.Storage = []DataRow{{Role: "(no plane mounts)", Source: "CP facts"}}
@@ -636,6 +641,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+		case "S":
+			if m.Mode == ModeRunning {
+				m.beginPrompt(flowSnapshotRollback)
+				// Best-effort sync fetch (the same class as the settings
+				// prefill): the newest snapshot prefills the field and the
+				// whole list renders above the prompt.
+				if snaps, ok := m.fetchSnapshots(); ok && len(snaps) > 0 {
+					names := make([]string, 0, len(snaps))
+					for _, s := range snaps {
+						names = append(names, s.Name)
+					}
+					m.Flow.SnapList = names
+					m.Flow.Defaults[0] = names[0]
+					m.Flow.Field.SetValue(names[0])
+					m.Flow.Field.CursorEnd()
+				}
+			}
 			// Build/bootstrap/teardown/deploy are NOT run from the TUI — the TUI is
 			// a status/operating dashboard. Run `freehold build` / `freehold teardown`
 			// in a terminal instead (single canonical flow).
@@ -733,6 +755,9 @@ func (m *Model) View() string {
 		b.WriteString(renderViews(m))
 	}
 	if m.Flow != nil {
+		if m.Flow.Kind == flowSnapshotRollback && len(m.Flow.SnapList) > 0 {
+			b.WriteString("\n  " + styleDim.Render("snapshots (newest first): "+strings.Join(m.Flow.SnapList, " · ")) + "\n")
+		}
 		b.WriteString("\n  " + styleYellow.Render(promptLabel(m.Flow.Kind, m.Flow.Step)) + ": " + fieldValue(m.Flow) + "\n")
 	}
 	b.WriteString("\n" + m.footer())
@@ -777,7 +802,7 @@ func (m *Model) footer() string {
 		return styleFooter.Render(fmt.Sprintf(
 			"[%s] · Tab/Shift-Tab views · r refresh · q quit · last %s%s",
 			m.ActiveView.String(), time.Since(m.LastRef).Round(time.Second), op)) +
-			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · s settings · w web · build/teardown run from the shell")
+			"   " + styleDim.Render("l log in (operator nsec) · p provision · x revoke · g grant · s settings · S snapshot rollback · w web · build/teardown run from the shell")
 	}
 	switch m.Mode {
 	case ModeBootstrap, ModeConfigure:
@@ -852,7 +877,32 @@ func renderViews(m *Model) string {
 			rows = append(rows, []string{c.Domain, c.URL, c.Expiry, c.Issuer, c.Status})
 		}
 	}
-	return b.String() + renderTable(title, headers, rows)
+	out := b.String() + renderTable(title, headers, rows)
+	if m.ActiveView == ViewData {
+		// The plane's snapshots under the mounts — the same refresh's fetch.
+		snapHeaders := []string{"snapshot", "taken", "consumed", "coverage"}
+		var snapRows [][]string
+		if len(m.Snapshots) == 0 {
+			snapRows = append(snapRows, []string{styleDim.Render("(no snapshots — `freehold snapshot [label]` takes one; S rolls back)")})
+		}
+		for _, s := range m.Snapshots {
+			taken := "—"
+			if s.Created > 0 {
+				taken = time.Unix(s.Created, 0).UTC().Format("2006-01-02 15:04Z")
+			}
+			used := s.Used
+			if used == "" {
+				used = "—"
+			}
+			coverage := fmt.Sprintf("%d/%d", s.Present, s.Volumes)
+			if s.Present < s.Volumes {
+				coverage = styleRed.Render(coverage + " PARTIAL")
+			}
+			snapRows = append(snapRows, []string{s.Name, taken, used, coverage})
+		}
+		out += renderTable("snapshots (newest first — S rolls back)", snapHeaders, snapRows)
+	}
+	return out
 }
 
 func renderTable(title string, headers []string, rows [][]string) string {
