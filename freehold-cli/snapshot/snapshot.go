@@ -250,6 +250,12 @@ var rollbackCmd = &cobra.Command{
 
 		guest, _ := cmd.Flags().GetBool("guest")
 		if guest {
+			// Fail closed like the box path: this branch never reaches the
+			// ConfirmDestructive prompt (and an agent caller can't answer
+			// one anyway) — the scripted-mode --yes is the affirmative.
+			if !yes {
+				return fmt.Errorf("--guest needs --yes: the rollback is destructive and the exec ends at the CP stop")
+			}
 			// The handoff path: this process lives ON the CP guest, whose
 			// data is among the volumes being rolled back — the process
 			// cannot survive its own guest's stop. So: the net is taken
@@ -453,8 +459,12 @@ func handoffScript(volumes []drive.PlaneVolume, to string, toStart []uint32, cpI
 	}
 	for _, v := range volumes {
 		st := drive.RollbackStepFor(v, to)
-		b.WriteString(fmt.Sprintf("echo \"rollback %s\"; { %s; } || { %s; echo \"$(date -Is) ROLLBACK FAILED at %s\"; exit 1; }\n",
-			v.Source, st.Cmd, mountRestoreOf(st.Cmd, v.Source), v.Source))
+		// sh -c: the LVM seq carries its own `exit 1`s (the mountpoint
+		// guard, the exhausted dd retry) — inside a plain group they would
+		// terminate the WHOLE script, skipping the restore/report/restarts.
+		// In a child shell they fail the group and trip the handler.
+		b.WriteString(fmt.Sprintf("echo \"rollback %s\"; { sh -c %s; } || { %s; echo \"$(date -Is) ROLLBACK FAILED at %s\"; exit 1; }\n",
+			v.Source, shQuote(st.Cmd), mountRestoreOf(st.Cmd, v.Source), v.Source))
 	}
 	for _, g := range append(toStart, cpID) {
 		if g == 0 {
