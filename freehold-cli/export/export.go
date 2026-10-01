@@ -203,6 +203,15 @@ var exportCmd = &cobra.Command{
 				return err
 			}
 		}
+		// 0600 AT BIRTH: the tar truncates the pre-created file (the mode
+		// survives) — the bundle carries the console identity + every
+		// sealed secret and must never exist world-readable, not even for
+		// the seconds before the after-the-fact chmod.
+		fh, err := os.OpenFile(outfile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		fh.Close()
 		wrap := []string{"-cf", outfile, "-C", bundleDir, filepath.Base(archive)}
 		if cfgBytes != nil {
 			wrap = append(wrap, "config.toml")
