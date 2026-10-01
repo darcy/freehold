@@ -122,7 +122,13 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 			return err
 		}
 	}
-	return nil
+
+	// The verb surface + the revive script LAST (everything it starts just
+	// came up — the script captures the agent-tools argv that just worked).
+	if err := shipVerbSurface(t, spec); err != nil {
+		return err
+	}
+	return shipReviveScript(t, spec, flags, atArgv)
 }
 
 // agentToolsStateDir is the agent-tools durable root, a sibling of the console

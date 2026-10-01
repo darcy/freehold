@@ -68,6 +68,23 @@ func TestCapabilityRunnerTable(t *testing.T) {
 	if len(pve.rosters) != 3 {
 		t.Fatalf("pve-ssh-root should carry network+compute+data, got %v", pve.rosters)
 	}
+	// The data department's local door: exec ON the cp guest (kind local),
+	// rostered to data only — the verbs deploy-cp ships run there.
+	var cpLocal *capabilityRunner
+	for i := range runners {
+		if runners[i].name == "cp-local-root" {
+			cpLocal = &runners[i]
+		}
+	}
+	if cpLocal == nil {
+		t.Fatal("cp-local-root missing from the table")
+	}
+	if cpLocal.kind != "local" {
+		t.Fatalf("cp-local-root kind = %q, want local", cpLocal.kind)
+	}
+	if len(cpLocal.rosters) != 1 || cpLocal.rosters[0] != "data" {
+		t.Fatalf("cp-local-root should carry data only, got %v", cpLocal.rosters)
+	}
 }
 
 // TestZoneOf pins the zone derivation for the per-zone DNS doors.

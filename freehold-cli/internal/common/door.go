@@ -24,18 +24,32 @@ func DoorExec(cfg *config.Config) (exec provisioning.ExecFunc, keyPath string, c
 	if err != nil {
 		return nil, "", nil, err
 	}
+	return doorExecWithKey(cfg, keyPath, cleanup)
+}
+
+// DoorExecWithKey is DoorExec with an explicit key: the CP-guest verbs pass
+// the staged cp-verb key (/srv/data/cp/verb-ssh.key — the box never derives a
+// door key there). The key file is the caller's — no temp, no cleanup.
+func DoorExecWithKey(cfg *config.Config, sshKey string) (exec provisioning.ExecFunc, keyPath string, cleanup func(), err error) {
+	if strings.TrimSpace(sshKey) != "" {
+		return doorExecWithKey(cfg, sshKey, func() {})
+	}
+	return DoorExec(cfg)
+}
+
+func doorExecWithKey(cfg *config.Config, keyPath string, cleanup func()) (exec provisioning.ExecFunc, _ string, _ func(), err error) {
 	exec = proxmox.SSHExec(strings.TrimPrefix(cfg.Host, "root@"), keyPath)
 	out, err := exec("echo freehold-door-ok", 30)
 	if err != nil {
 		cleanup()
-		return nil, "", nil, fmt.Errorf("the host door can't be verified (is this box's DOOR_SPEC key authorized on %s?): %w", cfg.Host, err)
+		return nil, "", nil, fmt.Errorf("the host door can't be verified (is the door key authorized on %s?): %w", cfg.Host, err)
 	}
 	if !strings.Contains(out.Stdout, "freehold-door-ok") {
 		// SSHExec reports exit-code failures IN the outcome (err is transport
 		// only) — the probe's stderr is the real reason (Permission denied /
 		// Connection refused / …).
 		cleanup()
-		return nil, "", nil, fmt.Errorf("the host door can't be verified (is this box's DOOR_SPEC key authorized on %s?): %s", cfg.Host, strings.TrimSpace(out.Stderr))
+		return nil, "", nil, fmt.Errorf("the host door can't be verified (is the door key authorized on %s?): %s", cfg.Host, strings.TrimSpace(out.Stderr))
 	}
 	return exec, keyPath, cleanup, nil
 }

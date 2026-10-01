@@ -64,9 +64,12 @@ func planeSources(cfg *config.Config) ([]string, map[string]string) {
 }
 
 // doorExec opens the direct-to-host transport: this box's DOOR_SPEC key over
-// root SSH (common.DoorExec — the shared transient path).
-func doorExec(cfg *config.Config) (drive.ExecFunc, func(), error) {
-	exec, _, cleanup, err := common.DoorExec(cfg)
+// root SSH (common.DoorExec — the shared transient path), or — with sshKey
+// set (the CP guest's staged cp-verb key) — that key instead, so the same
+// verbs run ON the CP guest (the cp-local-root runner execs them for the
+// data department).
+func doorExec(cfg *config.Config, sshKey string) (drive.ExecFunc, func(), error) {
+	exec, _, cleanup, err := common.DoorExecWithKey(cfg, sshKey)
 	return drive.ExecFunc(exec), cleanup, err
 }
 
@@ -110,7 +113,8 @@ var snapCmd = &cobra.Command{
 		if cfg == nil || cfg.Host == "" {
 			return fmt.Errorf("no world recorded at %s", configPath)
 		}
-		exec, cleanup, err := doorExec(cfg)
+		key, _ := cmd.Flags().GetString("ssh-key")
+		exec, cleanup, err := doorExec(cfg, key)
 		if err != nil {
 			return err
 		}
@@ -199,7 +203,8 @@ var rollbackCmd = &cobra.Command{
 		if cfg == nil || cfg.Host == "" {
 			return fmt.Errorf("no world recorded at %s", configPath)
 		}
-		exec, cleanup, err := doorExec(cfg)
+		key, _ := cmd.Flags().GetString("ssh-key")
+		exec, cleanup, err := doorExec(cfg, key)
 		if err != nil {
 			return err
 		}
@@ -301,10 +306,21 @@ var rollbackCmd = &cobra.Command{
 		// an unrelated guest's failed start must not leave the CP down.
 		// (Live-verified on the librem world: the update flow's idempotent
 		// redeploy is the sanctioned revival.)
+		// --guest swaps the revival for the staged guest-local script: this
+		// process IS on the CP guest (the data agent's cp-local-root door) —
+		// there is no box update flow to re-run.
 		if stopped["cp"] {
-			fmt.Println("the CP guest restarted — re-running the update flow to bring the control plane back (a few minutes)…")
-			if uerr := reRunUpdate(configPath); uerr != nil {
-				return fmt.Errorf("rollback complete, but the control-plane restart FAILED — run `freehold update --config %s` by hand: %w", configPath, uerr)
+			guest, _ := cmd.Flags().GetBool("guest")
+			if guest {
+				fmt.Println("the CP guest restarted — running the staged revival script…")
+				if rerr := reviveGuestCP(); rerr != nil {
+					return fmt.Errorf("rollback complete, but the control-plane revival FAILED — run `freehold update` from the operator's box: %w", rerr)
+				}
+			} else {
+				fmt.Println("the CP guest restarted — re-running the update flow to bring the control plane back (a few minutes)…")
+				if uerr := reRunUpdate(configPath); uerr != nil {
+					return fmt.Errorf("rollback complete, but the control-plane restart FAILED — run `freehold update --config %s` by hand: %w", configPath, uerr)
+				}
 			}
 		}
 		if failed > 0 {
@@ -335,6 +351,29 @@ func reRunUpdate(configPath string) error {
 	}
 	cmd := exec.Command(self, "update", "--config", configPath, "--non-interactive")
 	out, err := cmd.CombinedOutput()
+	if err != nil {
+		tail := string(out)
+		if len(tail) > 400 {
+			tail = tail[len(tail)-400:]
+		}
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(tail))
+	}
+	return nil
+}
+
+// reviveScriptPath is the deploy-staged revival script's location (the
+// BinDir convention deploy-cp ships to).
+func reviveScriptPath() string { return "/srv/data/cp/bin/revive-cp.sh" }
+
+// reviveGuestCP runs the deploy-staged guest-local revival script: the same
+// serve + runner (+ agent-tools) start lines the last deploy/redeploy ran,
+// captured in /srv/data/cp/bin/revive-cp.sh. This process IS on the CP guest
+// (--guest), so the script execs locally.
+func reviveGuestCP() error {
+	if _, err := os.Stat(reviveScriptPath()); err != nil {
+		return fmt.Errorf("no %s staged — run `freehold update` from the operator's box once to deploy the verb surface", reviveScriptPath())
+	}
+	out, err := exec.Command(reviveScriptPath()).CombinedOutput()
 	if err != nil {
 		tail := string(out)
 		if len(tail) > 400 {
@@ -535,7 +574,11 @@ func init() {
 		// reads stdin (a subprocess's /dev/null) and silently defaults to
 		// the alphabetically first profile — the wrong tenant's plane.
 		c.Flags().String("config", config.ConfigPath(), "Config path (default: the active profile's)")
+		// --ssh-key overrides the box's DOOR_SPEC derivation: the CP guest's
+		// verbs pass the staged cp-verb key (/srv/data/cp/verb-ssh.key).
+		c.Flags().String("ssh-key", "", "SSH private key for the host door (default: this box's derived DOOR_SPEC key)")
 	}
+	rollbackCmd.Flags().Bool("guest", false, "revive the CP with the staged guest-local script (the verbs run ON the CP guest)")
 	snapCmd.Flags().Bool("list", false, "list plane snapshots")
 	snapCmd.Flags().Bool("json", false, "with --list: emit JSON (the TUI picker's source)")
 	snapCmd.Flags().String("rm", "", "remove the named snapshot from every volume")

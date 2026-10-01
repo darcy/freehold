@@ -104,3 +104,35 @@ func DoorKeyPEM() ([]byte, error) {
 	host, _ := os.Hostname()
 	return crypto.SSHPrivateKeyPEMFromSeed(seed, "freehold-door-"+host)
 }
+
+// VerbSSHKey resolves this profile's cp-verb SSH key: the key deployed to the
+// CP guest (/srv/data/cp/verb-ssh.key) so the data verbs (`freehold
+// snapshot`/`export` via the cp-local-root runner) can reach the substrate
+// host from there. Generated once per profile (profiles/<name>/cp-verb-key,
+// 0600 — beside the profile's config.toml) and reused after; the authorized_keys
+// public line (comment freehold-<world>-cp-verb) is derived fresh from the PEM.
+// The deploy authorizes that line on the host — the same idempotent authorize
+// the doors use. The configPath locates the profile dir; world names the
+// key's comment (the profile name).
+func VerbSSHKey(configPath, world string) (privPath, pubLine string, err error) {
+	privPath = filepath.Join(filepath.Dir(configPath), "cp-verb-key")
+	pem, err := os.ReadFile(privPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", "", err
+		}
+		comment := "freehold-" + world + "-cp-verb"
+		pem, _, err = crypto.GenerateSSHKeypair(comment)
+		if err != nil {
+			return "", "", fmt.Errorf("generate cp-verb keypair: %w", err)
+		}
+		if werr := os.WriteFile(privPath, pem, 0o600); werr != nil {
+			return "", "", fmt.Errorf("write %s: %w", privPath, werr)
+		}
+	}
+	pub, err := crypto.ExtractED25519PublicKeyLine(pem)
+	if err != nil {
+		return "", "", fmt.Errorf("derive cp-verb public line: %w", err)
+	}
+	return privPath, pub, nil
+}

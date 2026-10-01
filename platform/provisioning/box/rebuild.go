@@ -1757,12 +1757,22 @@ func (e *Engine) stageDeployCp() error {
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", e.Bins.ReleaseAgentTools,
+		// The verb surface: the running CLI (this release's), the profile
+		// config, and the profile's cp-verb SSH key — the data verbs run ON
+		// the CP guest through the cp-local-root runner.
+		"--freehold-binary", e.Bins.Self,
+		"--freehold-config", e.F.ConfigPath,
 		// install stamps the version pin (its build identity, or the explicit
 		// --version/--channel). A rebuild/re-adopt is still an install run, so
 		// this is the promotion point; `freehold build` never reaches here.
 		"--version", installVersion(e.F),
 		"--channel", installChannel(e.F),
 		"--commit", version.Commit,
+	}
+	if priv, pub, kerr := VerbSSHKey(e.F.ConfigPath, e.F.Name); kerr != nil {
+		return fmt.Errorf("cp-verb key: %w", kerr)
+	} else {
+		args = append(args, "--verb-ssh-key", priv, "--verb-key-pub", pub)
 	}
 	// Ship the repo/release migrations dir so install records every migration
 	// done (Omarchy fresh-install rule). Absent dir = the deploy still succeeds.
@@ -1839,6 +1849,14 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", bins.ReleaseAgentTools,
+		// The verb surface (the update re-ships it idempotently).
+		"--freehold-binary", bins.Self,
+		"--freehold-config", e.F.ConfigPath,
+	}
+	if priv, pub, kerr := VerbSSHKey(e.F.ConfigPath, e.F.Name); kerr != nil {
+		return fmt.Errorf("cp-verb key: %w", kerr)
+	} else {
+		args = append(args, "--verb-ssh-key", priv, "--verb-key-pub", pub)
 	}
 	if rpk := e.relaySigningPubkey(); rpk != "" {
 		args = append(args, "--relay-pubkey", rpk)

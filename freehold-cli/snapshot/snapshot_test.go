@@ -229,3 +229,19 @@ func TestStartGuestsCountsFailures(t *testing.T) {
 }
 
 var zero = 0
+
+// TestReviveGuestCPMissingScript pins the fail-loud path: a guest without the
+// staged verb surface (an update that predates it) names the fix in the error
+// instead of failing mysteriously.
+func TestReviveGuestCPMissingScript(t *testing.T) {
+	err := reviveGuestCP()
+	if err == nil {
+		t.Fatal("expected an error on a guest without the staged script")
+	}
+	if !strings.Contains(err.Error(), reviveScriptPath()) {
+		t.Fatalf("error should name the script path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "freehold update") {
+		t.Fatalf("error should name the fix (a box-side update): %v", err)
+	}
+}
