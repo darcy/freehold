@@ -153,8 +153,9 @@ func TestStopGuestClassifiesAffirmatively(t *testing.T) {
 		}
 		return &client.ExecOutcome{Stdout: out, ExitCode: &code}, nil
 	})
-	if err := stopGuest(okStop, 101); err != nil {
-		t.Fatalf("running guest must stop cleanly: %v", err)
+	wasRunning, err := stopGuest(okStop, 101)
+	if err != nil || !wasRunning {
+		t.Fatalf("running guest must stop cleanly: stopped=%v err=%v", wasRunning, err)
 	}
 	if len(cmds) != 2 {
 		t.Errorf("status + stop expected, got %v", cmds)
@@ -171,8 +172,9 @@ func TestStopGuestClassifiesAffirmatively(t *testing.T) {
 		}
 		return &client.ExecOutcome{Stdout: out, ExitCode: &code}, nil
 	})
-	if err := stopGuest(stopped, 101); err != nil {
-		t.Errorf("a stopped guest must be a no-op success: %v", err)
+	off, err := stopGuest(stopped, 101)
+	if err != nil || off {
+		t.Errorf("a stopped guest must be (false, nil): %v %v", off, err)
 	}
 	if len(cmds) != 1 {
 		t.Errorf("no stop may run on a stopped guest: %v", cmds)
@@ -185,14 +187,14 @@ func TestStopGuestClassifiesAffirmatively(t *testing.T) {
 		code := 512
 		return &client.ExecOutcome{ExitCode: &code}, nil
 	})
-	if err := stopGuest(probeFail, 101); err != nil {
-		t.Errorf("a failed status probe means the guest is gone — skip: %v", err)
+	if off, err := stopGuest(probeFail, 101); err != nil || off {
+		t.Errorf("a failed status probe means the guest is gone — skip: %v %v", off, err)
 	}
 	unparseable := drive.ExecFunc(func(cmd string, _ uint64) (*client.ExecOutcome, error) {
 		code := 0
 		return &client.ExecOutcome{ExitCode: &code}, nil
 	})
-	if err := stopGuest(unparseable, 101); err == nil {
+	if _, err := stopGuest(unparseable, 101); err == nil {
 		t.Fatal("an unparseable status must abort, not print ✓")
 	}
 
@@ -207,8 +209,8 @@ func TestStopGuestClassifiesAffirmatively(t *testing.T) {
 		}
 		return &client.ExecOutcome{Stdout: out, ExitCode: &code}, nil
 	})
-	if err := stopGuest(failStop, 101); err == nil {
-		t.Fatal("a failed pct stop must return an error")
+	if stopped, err := stopGuest(failStop, 101); err == nil || stopped {
+		t.Fatal("a failed pct stop must return (false, err)")
 	}
 }
 

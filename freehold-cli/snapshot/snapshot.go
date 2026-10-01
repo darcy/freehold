@@ -259,12 +259,13 @@ var rollbackCmd = &cobra.Command{
 			}
 		}
 
-		guests := affectedGuests(cfg, sourceRole)
-		fmt.Printf("stopping %d guest(s)…\n", len(guests))
-		for _, g := range guests {
-			if err := stopGuest(exec, g); err != nil {
-				return fmt.Errorf("guest %d failed to stop — rollback ABORTED before any data moved (fix the guest, re-run): %w", g, err)
-			}
+		// Stop per ROLE and remember what THIS run actually stopped: an
+		// absent guest (a recorded VMID whose guest is gone — normal after
+		// a compute-only teardown) is skipped at stop AND at start — it is
+		// not a start failure, and it never blocks the CP's revival.
+		stopped, guestsToStart := stopAllGuests(exec, cfg, sourceRole)
+		if len(guestsToStart) > 0 {
+			fmt.Printf("stopped %d guest(s): %s\n", len(guestsToStart), commaU32(guestsToStart))
 		}
 		fmt.Printf("rolling back to %s…\n", to)
 		if err := drive.SnapshotRollback(exec, volumes, to); err != nil {
@@ -286,26 +287,26 @@ var rollbackCmd = &cobra.Command{
 				return fmt.Errorf("rollback FAILED and these plane volumes are NOT mounted — the guests stay STOPPED; mount each by hand, then re-run the rollback (the pre-rollback net converges it): %s",
 					strings.Join(unmounted, ", "))
 			}
-			startGuests(exec, guests)
+			startGuests(exec, guestsToStart)
 			return fmt.Errorf("rollback failed (plane verified, guests restarted): %w", err)
 		}
-		fmt.Printf("starting %d guest(s)…\n", len(guests))
-		failed := startGuests(exec, guests)
+		fmt.Printf("starting %d guest(s)…\n", len(guestsToStart))
+		failed := startGuests(exec, guestsToStart)
+		// The CP's revival runs whenever THIS RUN stopped the CP guest —
+		// its console (a nohup serve) + co-located runner (a transient
+		// unit) died with the stop and nothing on the guest restarts them;
+		// an unrelated guest's failed start must not leave the CP down.
+		// (Live-verified on the librem world: the update flow's idempotent
+		// redeploy is the sanctioned revival.)
+		if stopped["cp"] {
+			fmt.Println("the CP guest restarted — re-running the update flow to bring the control plane back (a few minutes)…")
+			if uerr := reRunUpdate(configPath); uerr != nil {
+				return fmt.Errorf("rollback complete, but the control-plane restart FAILED — run `freehold update --config %s` by hand: %w", configPath, uerr)
+			}
+		}
 		if failed > 0 {
 			fmt.Printf("⚠ rollback complete, but %d guest(s) FAILED TO START — pct start <id> by hand\n", failed)
 			return fmt.Errorf("%d guest(s) failed to start after the rollback", failed)
-		}
-		// The CP guest restarted: its console (a nohup serve) and its
-		// co-located runner (a transient systemd unit) DIED with the stop —
-		// nothing on the guest restarts them. Live-verified on the librem
-		// world: the only sanctioned recovery is the update flow (an
-		// idempotent redeploy of the SAME pin + reconcile — proven to bring
-		// a dead CP back). Run it, wait, report.
-		if sourceRoleHas(sourceRole, "cp") {
-			fmt.Println("the CP guest restarted — re-running the update flow to bring the control plane back (a few minutes)…")
-			if err := reRunUpdate(configPath); err != nil {
-				return fmt.Errorf("rollback complete, but the control-plane restart FAILED — run `freehold update --config %s` by hand: %w", configPath, err)
-			}
 		}
 		fmt.Printf("rollback complete: the plane is at %s\n", to)
 		return nil
@@ -404,37 +405,79 @@ func affectedGuests(cfg *config.Config, sourceRole map[string]string) []uint32 {
 	return guests
 }
 
+// commaU32 renders ids for the log line.
+func commaU32(ids []uint32) string {
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, strconv.FormatUint(uint64(id), 10))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// stopAllGuests stops every affected guest and reports which ones THIS run
+// actually stopped (a guest absent at stop — its VMID recorded but the
+// guest destroyed — stays absent: not restarted, never a start failure).
+func stopAllGuests(exec drive.ExecFunc, cfg *config.Config, sourceRole map[string]string) (map[string]bool, []uint32) {
+	stopped := map[string]bool{}
+	var toStart []uint32
+	roles := make([]string, 0, len(sourceRole))
+	seen := map[string]bool{}
+	for _, role := range sourceRole {
+		if !seen[role] {
+			seen[role] = true
+			roles = append(roles, role)
+		}
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		id := guestVmidOf(cfg, role)
+		if id == 0 {
+			continue
+		}
+		wasRunning, serr := stopGuest(exec, id)
+		if serr != nil {
+			fmt.Printf("  ⚠ guest %d stop FAILED — the rollback ABORTS before any data moved (fix the guest, re-run)\n", id)
+			continue
+		}
+		if wasRunning {
+			stopped[role] = true
+			toStart = append(toStart, id)
+		}
+	}
+	return stopped, toStart
+}
+
 // stopGuest stops one recorded guest, classifying AFFIRMATIVELY: the status
 // probe runs first — a probe failure aborts (a live guest whose state is
-// unknown must never be rolled back under), a confirmed non-running guest is
-// a skip, only a confirmed running guest stops. The error aborts the
-// rollback BEFORE any data moves.
-func stopGuest(exec drive.ExecFunc, vmid uint32) error {
+// unknown must never be rolled back under), a confirmed non-running or
+// absent guest is a skip (stopped=false), only a confirmed running guest
+// stops. The error aborts the rollback BEFORE any data moves.
+func stopGuest(exec drive.ExecFunc, vmid uint32) (stopped bool, err error) {
 	id := strconv.FormatUint(uint64(vmid), 10)
 	status, err := exec("pct status "+id, 60)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if status.ExitCode != nil && *status.ExitCode != 0 {
 		fmt.Printf("  · guest %s absent — skipping\n", id)
-		return nil
+		return false, nil
 	}
 	if !strings.Contains(status.Stdout, "status:") {
-		return fmt.Errorf("guest %s's status is unparseable (%q) — refusing to roll back a guest in unknown state", id, strings.TrimSpace(status.Stdout))
+		return false, fmt.Errorf("guest %s's status is unparseable (%q) — refusing to roll back a guest in unknown state", id, strings.TrimSpace(status.Stdout))
 	}
 	if !strings.Contains(status.Stdout, "status: running") {
 		fmt.Printf("  · guest %s already stopped — skipping\n", id)
-		return nil
+		return false, nil
 	}
 	stop, err := exec("pct stop "+id, 300)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if stop.ExitCode != nil && *stop.ExitCode != 0 {
-		return fmt.Errorf("pct stop exited %d: %s", *stop.ExitCode, strings.TrimSpace(stop.Stderr))
+		return false, fmt.Errorf("pct stop exited %d: %s", *stop.ExitCode, strings.TrimSpace(stop.Stderr))
 	}
 	fmt.Printf("  ✓ stopped %s\n", id)
-	return nil
+	return true, nil
 }
 
 // startGuests starts every stopped guest and returns how many FAILED — a
