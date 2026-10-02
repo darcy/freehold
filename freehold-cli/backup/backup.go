@@ -388,6 +388,15 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 		return
 	}
 	cleanup = cleanupFn
+	// The door key's temp file: THIS call owns the error paths — the
+	// callers register their defer only after setup returns nil, so every
+	// failed settle/push after this point must clean up here (the refuse
+	// verdicts are the DESIGNED outcome — the key must not ride them).
+	defer func() {
+		if err != nil {
+			cleanup()
+		}
+	}()
 	exec = drive.ExecFunc(execRaw)
 
 	// The password: generated on the box (0600, profile dir), pushed to the
