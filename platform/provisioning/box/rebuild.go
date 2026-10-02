@@ -1893,7 +1893,7 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) (GuestDirs, error) 
 		args = append(args, "--migrations-dir", migrationsDir)
 	}
 	_, err = e.selfStage("deploy-cp", args)
-	dirs := GuestDirs{StateDir: "/srv/data/cp/control-plane", BinDir: "/srv/data/cp/bin"}
+	dirs := GuestDirs{StateDir: "/srv/data/cp/control-plane", BinDir: "/srv/data/cp/bin", VMID: vmid}
 	if cpRoot != "" {
 		dirs.StateDir = cpRoot + "/control-plane"
 		dirs.BinDir = cpRoot + "/bin"
@@ -1906,6 +1906,7 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) (GuestDirs, error) 
 type GuestDirs struct {
 	StateDir string
 	BinDir   string
+	VMID     uint32
 }
 
 // runningWorldConfig reads the world-config the RUNNING console was started

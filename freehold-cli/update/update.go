@@ -172,8 +172,9 @@ func run(ctx context.Context, o options) error {
 	// script never saw). A guest-handoff rollback then revives the world
 	// with every door, not until-the-next-build ones.
 	fmt.Println("→ refreshing the CP revival script (the doors' current argvs)")
+	lxc := dirs.VMID
 	if rerr := cpdeploy.RefreshReviveScript(hostTransport{eng.HostExecFunc()}, &cpdeploy.DeployCpSpec{
-		StateDir: dirs.StateDir, BinDir: dirs.BinDir,
+		StateDir: dirs.StateDir, BinDir: dirs.BinDir, LXc: &lxc,
 	}); rerr != nil {
 		fmt.Printf("  (revival script refresh failed — the deploy-time version stands: %v)\n", rerr)
 	}
