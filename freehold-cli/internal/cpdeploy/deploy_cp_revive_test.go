@@ -40,6 +40,25 @@ func TestReviveScript(t *testing.T) {
 	if strings.Contains(s, "freehold-runner serve") || strings.Contains(s, "freehold-agent-tools serve") {
 		t.Fatalf("revive script started absent components:\n%s", s)
 	}
+
+	// The post-reconcile refresh renders from CAPTURED argvs: the serve's
+	// own --addr drives the healthz probe, every door re-launches.
+	s = reviveScriptFromArgvs(
+		&DeployCpSpec{StateDir: state, BinDir: bin},
+		bin+"/freehold-console serve --state-dir "+state+" --addr 0.0.0.0:8080",
+		"/srv/data/cp/bin/freehold-agent-tools serve --state-dir /srv/data/cp/agent-tools",
+		[]string{"freehold-runner-cp-local-root.service /srv/data/cp/bin/freehold-runner serve --state-dir " + state + "/runner/cp-local-root --addr 0.0.0.0:8797"},
+	)
+	for _, want := range []string{
+		"setsid nohup " + bin + "/freehold-console serve",
+		"curl -fsS -m 3 http://127.0.0.1:8080/healthz",
+		"systemd-run --unit=freehold-runner-cp-local-root.service --collect /srv/data/cp/bin/freehold-runner serve",
+		"setsid nohup /srv/data/cp/bin/freehold-agent-tools serve",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("refreshed script missing %q\n---\n%s", want, s)
+		}
+	}
 }
 
 func strPtr(s string) *string { return &s }
