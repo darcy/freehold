@@ -1,6 +1,7 @@
 package cpdeploy
 
 import (
+	"os"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,7 @@ func captureCapabilityRunnerArgvs(t Transport, spec *DeployCpSpec) []string {
 	cmd := "for u in $(systemctl list-units freehold-runner-* --no-legend --plain 2>/dev/null | cut -d\" \" -f1); do p=$(systemctl show $u -p MainPID --value); [ -n \"$p\" ] && [ \"$p\" != 0 ] && printf \"%s %s\\n\" \"$u\" \"$(tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null)\"; done; true"
 	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read capability-runner argvs", 30)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "  note: the capability doors' argv capture failed (the revive script revives them on the next build): %v\n", err)
 		return nil
 	}
 	var lines []string
