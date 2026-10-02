@@ -591,7 +591,12 @@ func settle(fresh, hostHasKey bool, boxPw, hostPw, uri string, accepts func(stri
 
 func init() {
 	for _, c := range []*cobra.Command{initCmd, runCmd, snapshotsCmd} {
-		c.Flags().String("r", "", "the restic repo URI (init records it; the others fall back to the recorded one)")
+		c.Flags().StringP("r", "r", "", "the restic repo URI (init records it; the others fall back to the recorded one)")
+		// The verb-level --config (the convention every verb carries — on a
+		// box with several profiles the picker reads a subprocess's /dev/null
+		// and silently defaults to the alphabetically first: the WRONG
+		// tenant's plane, backed up to the wrong repo).
+		c.Flags().String("config", config.ConfigPath(), "Config path (default: the active profile's)")
 	}
 	initCmd.Flags().String("env", "", "credentials for the host env file, KEY=VAL,KEY=VAL (e.g. B2_ACCOUNT_ID=…,B2_ACCOUNT_KEY=… / AWS_*)")
 	backupCmd.AddCommand(initCmd, runCmd, snapshotsCmd)

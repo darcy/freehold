@@ -295,3 +295,12 @@ there; if it is work not yet done, it belongs here.
   member-ungrant — a grant added by hand stays on the roster (the box's
   caller identity is now a permanent break-glass member of librem's
   `cp-local-root`).
+- **The co-located runner's crash is unreaped and unrestarted.** The
+  deploy's `systemd-run --unit=freehold-runner --collect` is a TRANSIENT
+  unit: a crash collects it (the unit is GONE — no fragment, no logs), the
+  port goes dark, and every console-side transport (world-exec, the CP
+  toolset's own calls) times out while /healthz stays green. Live-seen on
+  librem: 8787 refused, no process, only a manual `systemd-run` line
+  revived it. The revive script covers the rollback path; a plain CRASH
+  needs the unit to be real (a shipped unit file with `Restart=on-failure`)
+  or a watchdog — the transient run is the gap.
