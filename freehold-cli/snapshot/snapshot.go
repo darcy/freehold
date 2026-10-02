@@ -6,6 +6,7 @@
 package snapshot
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -64,9 +65,12 @@ func planeSources(cfg *config.Config) ([]string, map[string]string) {
 }
 
 // doorExec opens the direct-to-host transport: this box's DOOR_SPEC key over
-// root SSH (common.DoorExec — the shared transient path).
-func doorExec(cfg *config.Config) (drive.ExecFunc, func(), error) {
-	exec, _, cleanup, err := common.DoorExec(cfg)
+// root SSH (common.DoorExec — the shared transient path), or — with sshKey
+// set (the CP guest's staged cp-verb key) — that key instead, so the same
+// verbs run ON the CP guest (the cp-local-root runner execs them for the
+// data department).
+func doorExec(cfg *config.Config, sshKey string) (drive.ExecFunc, func(), error) {
+	exec, _, cleanup, err := common.DoorExecWithKey(cfg, sshKey)
 	return drive.ExecFunc(exec), cleanup, err
 }
 
@@ -110,7 +114,8 @@ var snapCmd = &cobra.Command{
 		if cfg == nil || cfg.Host == "" {
 			return fmt.Errorf("no world recorded at %s", configPath)
 		}
-		exec, cleanup, err := doorExec(cfg)
+		key, _ := cmd.Flags().GetString("ssh-key")
+		exec, cleanup, err := doorExec(cfg, key)
 		if err != nil {
 			return err
 		}
@@ -199,7 +204,8 @@ var rollbackCmd = &cobra.Command{
 		if cfg == nil || cfg.Host == "" {
 			return fmt.Errorf("no world recorded at %s", configPath)
 		}
-		exec, cleanup, err := doorExec(cfg)
+		key, _ := cmd.Flags().GetString("ssh-key")
+		exec, cleanup, err := doorExec(cfg, key)
 		if err != nil {
 			return err
 		}
@@ -236,10 +242,29 @@ var rollbackCmd = &cobra.Command{
 		// rm it (the crash-cleanup path) or pick another.
 		byName, found := findSnapshot(snaps, to)
 		if !found {
-			return fmt.Errorf("no snapshot named %s — `freehold snapshot --list` for the names", to)
+			return fmt.Errorf("no snapshot named %s — `snapshot --list` for the names", to)
 		}
 		if byName.Present < byName.Volumes {
 			return fmt.Errorf("%s is PARTIAL (%d/%d volumes) — refusing: `snapshot --rm %s` or pick a complete one", to, byName.Present, byName.Volumes, to)
+		}
+
+		guest, _ := cmd.Flags().GetBool("guest")
+		if guest {
+			// Fail closed like the box path: this branch never reaches the
+			// ConfirmDestructive prompt (and an agent caller can't answer
+			// one anyway) — the scripted-mode --yes is the affirmative.
+			if !yes {
+				return fmt.Errorf("--guest needs --yes: the rollback is destructive and the exec ends at the CP stop")
+			}
+			// The handoff path: this process lives ON the CP guest, whose
+			// data is among the volumes being rolled back — the process
+			// cannot survive its own guest's stop. So: the net is taken
+			// in-process (before any stop), a detached host-side script
+			// carries the rollback + starts + CP revival, and the CP guest
+			// stops LAST (dying with this exec). The agent re-polls once
+			// the runner is back; the handoff's log is /srv/nobackup/
+			// rollback-handoff.log on the host.
+			return guestHandoffRollback(exec, cfg, volumes, to, sourceRole)
 		}
 
 		fresh, _ := cmd.Flags().GetBool("fresh-snapshot")
@@ -344,6 +369,155 @@ func reRunUpdate(configPath string) error {
 	}
 	return nil
 }
+
+// reviveScriptPath is the deploy-staged revival script's location (the
+// BinDir convention deploy-cp ships to).
+func reviveScriptPath() string { return "/srv/data/cp/bin/revive-cp.sh" }
+
+// guestHandoffRollback rolls the plane back from a process that lives ON the
+// CP guest. The CP guest's own data is among the volumes, so the process
+// cannot survive the rollback: the pre-rollback net is taken in-process
+// (before any stop), the non-CP guests stop, a detached script on the HOST
+// carries the rollback commands (rendered by the same drive code that
+// executes them in-process — no drift), and the CP guest stops LAST — this
+// exec dies at that stop, which is the design: the host script takes over,
+// starts the guests back, and revives the CP with the deploy-staged script.
+// Everything logs to /srv/nobackup/rollback-handoff.log on the host.
+func guestHandoffRollback(exec drive.ExecFunc, cfg *config.Config, volumes []drive.PlaneVolume, to string, sourceRole map[string]string) error {
+	cpID := guestVmidOf(cfg, "cp")
+	if cpID == 0 {
+		return fmt.Errorf("no cp guest recorded — this process cannot be the CP guest; use the box path (without --guest)")
+	}
+	snaps, err := drive.SnapshotList(exec, volumes)
+	if err != nil {
+		return err
+	}
+	// The net is not optional when this process dies mid-flow.
+	if err := preRollbackSnapshot(exec, volumes, snaps, to); err != nil {
+		return err
+	}
+
+	// Stop the non-CP guests first, remembering what actually stopped (the
+	// script restarts exactly those).
+	roles := nonCPRoles(sourceRole)
+	var toStart []uint32
+	for _, role := range roles {
+		id := guestVmidOf(cfg, role)
+		if id == 0 {
+			continue
+		}
+		wasRunning, serr := stopGuest(exec, id)
+		if serr != nil {
+			return fmt.Errorf("guest %d (%s) failed to stop — the rollback ABORTS before any data moved (no handoff launched yet): %w", id, role, serr)
+		}
+		if wasRunning {
+			toStart = append(toStart, id)
+		}
+	}
+
+	// Ship the handoff script (sync), then launch it detached. /srv/nobackup
+	// exists on any world whose plane has a ZFS volume (the net pre-creates
+	// it) — an LVM-only world has no net, so mkdir here; by this point the
+	// non-CP guests are already STOPPED, so a failure must say where the
+	// world is left.
+	ship := fmt.Sprintf("mkdir -p /srv/nobackup && echo %s | base64 -d > /srv/nobackup/rollback-handoff.sh && chmod 700 /srv/nobackup/rollback-handoff.sh",
+		base64Encode(handoffScript(volumes, to, toStart, cpID)))
+	out, err := exec(ship, 60)
+	if err != nil {
+		return fmt.Errorf("the handoff script failed to ship to the host: %w", err)
+	}
+	if out.ExitCode != nil && *out.ExitCode != 0 {
+		return fmt.Errorf("the handoff script failed to ship to the host: %s — the non-CP guests are STOPPED and the rollback has NOT run; start them back with `pct start <id>` or re-run the rollback from the operator's box", strings.TrimSpace(out.Stderr))
+	}
+	if _, err := exec("setsid nohup sh /srv/nobackup/rollback-handoff.sh >/dev/null 2>&1 < /dev/null & echo launched", 30); err != nil {
+		return fmt.Errorf("the handoff script failed to launch on the host: %w", err)
+	}
+
+	_, _ = exec("echo \"$(date -Is) handoff: stopping the cp guest (the verb's exec ends here — the host script takes over)\" >> /srv/nobackup/rollback-handoff.log", 30)
+	// The final stop: when this process IS the CP guest, it dies mid-exec
+	// and the handoff takes over — nothing to return. A stop that returns
+	// nil (an already-stopped guest, or --guest run from a machine that
+	// ISN'T the CP guest) is also success: the handoff proceeds on the
+	// host. Only a real stop error leaves the handoff armed and the guest
+	// up — say so and how to disarm (killing a HEALTHY handoff mid-rollback
+	// would strand a half-rolled plane).
+	if _, serr := stopGuest(exec, cpID); serr != nil {
+		return fmt.Errorf("the cp guest failed to stop and this process survives: kill the armed handoff (`pkill -f rollback-handoff.sh` on %s) and roll back from the operator's box: %v", cfg.Host, serr)
+	}
+	return nil
+}
+
+// nonCPRoles is the handoff's stop set: the distinct ROLES among the
+// sourceRole map's VALUES (it maps source path → role), minus cp — the
+// guest whose stop ends this process.
+func nonCPRoles(sourceRole map[string]string) []string {
+	seen := map[string]bool{}
+	var roles []string
+	for _, role := range sourceRole {
+		if role == "cp" || seen[role] {
+			continue
+		}
+		seen[role] = true
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	return roles
+}
+
+// handoffScript renders the detached host-side rollback: wait for the CP
+// guest to stop, roll every volume back (the drive-rendered commands), start
+// the stopped guests back, revive the CP.
+func handoffScript(volumes []drive.PlaneVolume, to string, toStart []uint32, cpID uint32) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("# freehold guest-handoff rollback — generated on the CP guest; do not edit.\n")
+	b.WriteString("exec >> /srv/nobackup/rollback-handoff.log 2>&1\n")
+	b.WriteString("echo \"$(date -Is) handoff: waiting for the cp guest to stop\"\n")
+	if cpID != 0 {
+		b.WriteString(fmt.Sprintf("for i in $(seq 1 120); do pct status %d | grep -q 'status: running' || break; sleep 2; done\n", cpID))
+		// Fail closed when the wait expires: a still-running CP guest means
+		// the verb's final stop failed or died before reaching it — rolling
+		// back under a live CP is the exact corruption every other path
+		// refuses. The verb's error names the disarm (pkill -f).
+		b.WriteString(fmt.Sprintf("pct status %d | grep -q 'status: running' && { echo \"$(date -Is) ABORTED: the cp guest is still running — the verb's stop failed; kill this script (pkill -f rollback-handoff.sh) and roll back from the operator's box\"; exit 1; }\n", cpID))
+	}
+	for _, v := range volumes {
+		st := drive.RollbackStepFor(v, to)
+		// sh -c: the LVM seq carries its own `exit 1`s (the mountpoint
+		// guard, the exhausted dd retry) — inside a plain group they would
+		// terminate the WHOLE script, skipping the restore/report/restarts.
+		// In a child shell they fail the group and trip the handler.
+		b.WriteString(fmt.Sprintf("echo \"rollback %s\"; { sh -c %s; } || { %s; echo \"$(date -Is) ROLLBACK FAILED at %s\"; exit 1; }\n",
+			v.Source, shQuote(st.Cmd), mountRestoreOf(st.Cmd, v.Source), v.Source))
+	}
+	for _, g := range append(toStart, cpID) {
+		if g == 0 {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("echo \"$(date -Is) starting %d\"; pct start %d || echo \"$(date -Is) guest %d FAILED TO START\"\n", g, g, g))
+	}
+	if cpID != 0 {
+		b.WriteString(fmt.Sprintf("sleep 3; echo \"$(date -Is) reviving the cp\"; pct exec %d -- sh -c %s || echo \"$(date -Is) REVIVAL FAILED — run freehold update from the operator's box\"\n",
+			cpID, shQuote(reviveScriptPath())))
+	}
+	b.WriteString("echo \"$(date -Is) handoff complete\"\n")
+	return b.String()
+}
+
+// mountRestoreOf renders the failure-path mount restore for a rollback
+// command (the LVM seq unmounts; a failure must leave the mount back).
+func mountRestoreOf(cmd, source string) string {
+	if strings.Contains(cmd, "umount") {
+		return "mount " + source + " 2>/dev/null; true"
+	}
+	return "true"
+}
+
+// shQuote single-quotes a string for sh -c.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\'`) + "'" }
+
+// base64Encode encodes for a shell pipe.
+func base64Encode(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
 // findSnapshot locates a listed snapshot by name.
 func findSnapshot(snaps []drive.SnapshotInfo, name string) (drive.SnapshotInfo, bool) {
@@ -535,7 +709,11 @@ func init() {
 		// reads stdin (a subprocess's /dev/null) and silently defaults to
 		// the alphabetically first profile — the wrong tenant's plane.
 		c.Flags().String("config", config.ConfigPath(), "Config path (default: the active profile's)")
+		// --ssh-key overrides the box's DOOR_SPEC derivation: the CP guest's
+		// verbs pass the staged cp-verb key (/srv/data/cp/verb-ssh.key).
+		c.Flags().String("ssh-key", "", "SSH private key for the host door (default: this box's derived DOOR_SPEC key)")
 	}
+	rollbackCmd.Flags().Bool("guest", false, "revive the CP with the staged guest-local script (the verbs run ON the CP guest)")
 	snapCmd.Flags().Bool("list", false, "list plane snapshots")
 	snapCmd.Flags().Bool("json", false, "with --list: emit JSON (the TUI picker's source)")
 	snapCmd.Flags().String("rm", "", "remove the named snapshot from every volume")

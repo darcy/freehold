@@ -1757,12 +1757,22 @@ func (e *Engine) stageDeployCp() error {
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", e.Bins.ReleaseAgentTools,
+		// The verb surface: the running CLI (this release's), the profile
+		// config, and the profile's cp-verb SSH key — the data verbs run ON
+		// the CP guest through the cp-local-root runner.
+		"--freehold-binary", e.Bins.Self,
+		"--freehold-config", e.F.ConfigPath,
 		// install stamps the version pin (its build identity, or the explicit
 		// --version/--channel). A rebuild/re-adopt is still an install run, so
 		// this is the promotion point; `freehold build` never reaches here.
 		"--version", installVersion(e.F),
 		"--channel", installChannel(e.F),
 		"--commit", version.Commit,
+	}
+	if priv, pub, kerr := VerbSSHKey(e.F.ConfigPath, e.F.Name); kerr != nil {
+		return fmt.Errorf("cp-verb key: %w", kerr)
+	} else {
+		args = append(args, "--verb-ssh-key", priv, "--verb-key-pub", pub)
 	}
 	// Ship the repo/release migrations dir so install records every migration
 	// done (Omarchy fresh-install rule). Absent dir = the deploy still succeeds.
@@ -1808,20 +1818,21 @@ func (e *Engine) stageDeployCp() error {
 // release's migration scripts (migrationsDir), and restarts serve — the update
 // path. It reuses the deploy-cp coordinates but runs in --redeploy mode: no
 // runner identity adoption, no secret merge, no substrate rotation, and no
-// version promotion (update stamps the pin itself, LAST).
-func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
+// version promotion (update stamps the pin itself, LAST). The returned guest
+// dirs feed the post-reconcile revival-script refresh.
+func (e *Engine) RedeployCp(bins Bins, migrationsDir string) (GuestDirs, error) {
 	// Swap to the transient root-SSH provider for host ops (guest list/exec)
 	// when a factory is wired — the same swap RunBootstrap makes. Without it the
 	// default runner-based provider can't reach the host on an update (no served
 	// runner / agent-tools coords), and the guest list fails.
 	cleanup, err := e.useTransientProvider()
 	if err != nil {
-		return err
+		return GuestDirs{}, err
 	}
 	defer cleanup()
 	vmid, err := e.findLxcVmidExact("cp")
 	if err != nil {
-		return err
+		return GuestDirs{}, err
 	}
 	mounts := e.guestMounts(vmid)
 	var cpRoot string
@@ -1839,6 +1850,14 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", bins.ReleaseAgentTools,
+		// The verb surface (the update re-ships it idempotently).
+		"--freehold-binary", bins.Self,
+		"--freehold-config", e.F.ConfigPath,
+	}
+	if priv, pub, kerr := VerbSSHKey(e.F.ConfigPath, e.F.Name); kerr != nil {
+		return GuestDirs{}, fmt.Errorf("cp-verb key: %w", kerr)
+	} else {
+		args = append(args, "--verb-ssh-key", priv, "--verb-key-pub", pub)
 	}
 	if rpk := e.relaySigningPubkey(); rpk != "" {
 		args = append(args, "--relay-pubkey", rpk)
@@ -1874,7 +1893,20 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) error {
 		args = append(args, "--migrations-dir", migrationsDir)
 	}
 	_, err = e.selfStage("deploy-cp", args)
-	return err
+	dirs := GuestDirs{StateDir: "/srv/data/cp/control-plane", BinDir: "/srv/data/cp/bin", VMID: vmid}
+	if cpRoot != "" {
+		dirs.StateDir = cpRoot + "/control-plane"
+		dirs.BinDir = cpRoot + "/bin"
+	}
+	return dirs, err
+}
+
+// GuestDirs are the CP guest's deployed dirs — what a follow-up guest-local
+// render (the revival script's refresh) needs to find the state + bins.
+type GuestDirs struct {
+	StateDir string
+	BinDir   string
+	VMID     uint32
 }
 
 // runningWorldConfig reads the world-config the RUNNING console was started

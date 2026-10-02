@@ -78,7 +78,8 @@ var exportCmd = &cobra.Command{
 			return fmt.Errorf("no durable-plane mounts recorded — nothing to export")
 		}
 
-		doorExec, keyPath, cleanup, err := common.DoorExec(cfg)
+		key, _ := cmd.Flags().GetString("ssh-key")
+		doorExec, keyPath, cleanup, err := common.DoorExecWithKey(cfg, key)
 		if err != nil {
 			return err
 		}
@@ -300,4 +301,5 @@ func Command() *cobra.Command { return exportCmd }
 func init() {
 	exportCmd.Flags().String("config", config.ConfigPath(), "Config path (default: the active profile's)")
 	exportCmd.Flags().Bool("yes", false, "skip the confirm (the estimate still prints — scripting/the detached flow)")
+	exportCmd.Flags().String("ssh-key", "", "SSH private key for the host door (default: this box's derived DOOR_SPEC key)")
 }

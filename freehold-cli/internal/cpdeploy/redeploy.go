@@ -1,6 +1,7 @@
 package cpdeploy
 
 import (
+	"os"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,11 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 	}
 
 	restartRunner := spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil
+	// Capture the doors' argvs BEFORE stopping them (below) — the transient
+	// units' argv exists only while they run, and the revive script re-launches
+	// the doors from it (the build's reconcile re-stages them too, but the
+	// guest-handoff revival runs between rollbacks and builds).
+	doorArgvs := captureCapabilityRunnerArgvs(t, spec)
 	if restartRunner {
 		// The capability doors (freehold-runner-<name>) execute the SAME
 		// binary — stop every one of them too (the world-build reconcile the
@@ -122,7 +128,13 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 			return err
 		}
 	}
-	return nil
+
+	// The verb surface + the revive script LAST (everything it starts just
+	// came up — the script captures the agent-tools argv that just worked).
+	if err := shipVerbSurface(t, spec); err != nil {
+		return err
+	}
+	return shipReviveScript(t, spec, flags, atArgv, doorArgvs)
 }
 
 // agentToolsStateDir is the agent-tools durable root, a sibling of the console
@@ -158,6 +170,113 @@ func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
 		return ""
 	}
 	return strings.TrimSpace(out.Stdout)
+}
+
+// captureCapabilityRunnerArgvs reads every RUNNING capability-runner unit's
+// serve argv (freehold-runner-* — cp-local-root, pve-ssh-root, the kube/API
+// doors) from /proc, so the revive script can re-launch them after a
+// guest-local rollback. The transient units do not survive a guest stop
+// (--collect), and the build's reconcile is the only other thing that
+// re-stages them — without this the doors stay down until the next build.
+// Returns lines of "unit\x20argv". Best-effort: nothing running = empty.
+func captureCapabilityRunnerArgvs(t Transport, spec *DeployCpSpec) []string {
+	// Double quotes only: LxcExec single-quotes the whole payload — a single
+	// quote inside would close/reopen the wrapper (the stop command above is
+	// the pattern). The unquoted freehold-runner-* glob is a list-units
+	// PATTERN, no shell expansion wanted; cut -d" " keeps the unit column.
+	cmd := "for u in $(systemctl list-units freehold-runner-* --no-legend --plain 2>/dev/null | cut -d\" \" -f1); do p=$(systemctl show $u -p MainPID --value); [ -n \"$p\" ] && [ \"$p\" != 0 ] && printf \"%s %s\\n\" \"$u\" \"$(tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null)\"; done; true"
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read capability-runner argvs", 30)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  note: the capability doors' argv capture failed (the revive script revives them on the next build): %v\n", err)
+		return nil
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(out.Stdout), "\n") {
+		if strings.TrimSpace(l) != "" && strings.Contains(l, " serve ") {
+			lines = append(lines, strings.TrimSpace(l))
+		}
+	}
+	return lines
+}
+
+// captureServeArgv reads the RUNNING console serve's argv (its serve.pid) —
+// the freshest source of its own serve flags.
+func captureServeArgv(t Transport, spec *DeployCpSpec) string {
+	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null; true", spec.StateDir)
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read console serve argv", 30)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Stdout)
+}
+
+// RefreshReviveScript re-ships the guest-local revival script from the
+// CURRENTLY RUNNING processes: the console serve's argv, the co-located
+// runner + every capability door's unit argv, the agent-tools argv. The
+// deploy-time script can only capture what ran at deploy — the update's
+// reconcile re-stages the doors AFTER it, and a first build stages doors the
+// script never saw. Call after a reconcile (update's reconcileWorld, a build
+// tail); needs only the guest's state + bin dirs. Components not running
+// keep their deploy-time rendering (absent here = the deploy script's).
+func RefreshReviveScript(t Transport, spec *DeployCpSpec) error {
+	serveArgv := captureServeArgv(t, spec)
+	atArgv := captureAgentToolsArgv(t, spec)
+	doorArgvs := captureCapabilityRunnerArgvs(t, spec)
+	final := spec.BinDir + "/revive-cp.sh"
+	cmd := fmt.Sprintf("mkdir -p %[1]s && echo %[2]s | base64 -d > %[3]s && chmod 755 %[3]s",
+		spec.BinDir, base64StdEncode([]byte(reviveScriptFromArgvs(spec, serveArgv, atArgv, doorArgvs))), final)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "ship revive script", 60); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reviveScriptFromArgvs renders the revival script from captured argvs. The
+// serve's healthz port parses out of its own --addr.
+func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArgvs []string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("# freehold CP revival — generated by deploy-cp; do not edit by hand.\n")
+	b.WriteString("# Brings the console serve, the co-located runner, the capability doors\n")
+	b.WriteString("# and agent-tools back after a rollback stopped this guest.\n")
+	port := "8080"
+	if a := serveFlagValue(serveArgv, "--addr"); a != "" {
+		if _, p, ok := strings.Cut(a, ":"); ok {
+			port = p
+		}
+	}
+	if strings.TrimSpace(serveArgv) != "" {
+		b.WriteString(fmt.Sprintf("setsid nohup %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid\n",
+			serveArgv, spec.StateDir, spec.StateDir))
+		b.WriteString(fmt.Sprintf("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://127.0.0.1:%s/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n", port))
+		b.WriteString("[ \"$up\" = 1 ] || { echo 'console serve did not answer /healthz — check " + spec.StateDir + "/serve.log' >&2; exit 1; }\n")
+	} else {
+		b.WriteString("echo 'warning: no running console serve captured — the deploy-time script is the source' >&2; exit 1\n")
+	}
+	for _, line := range doorArgvs {
+		unit, argv, ok := strings.Cut(line, " ")
+		if !ok || !strings.HasPrefix(argv, "/") {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("systemd-run --unit=%s --collect %s >/dev/null 2>&1\n", unit, argv))
+	}
+	if strings.TrimSpace(atArgv) != "" {
+		at := agentToolsStateDir(spec)
+		b.WriteString(fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true\n", at, at))
+		b.WriteString(fmt.Sprintf("setsid nohup %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid\n", atArgv, at, at))
+	}
+	return b.String()
+}
+
+// serveFlagValue scans a captured argv for a flag's value.
+func serveFlagValue(argv, flag string) string {
+	fields := strings.Fields(argv)
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
 }
 
 // restartAgentTools relaunches agent-tools with a captured argv and waits for

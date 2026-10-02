@@ -99,13 +99,21 @@ func capabilityRunners() []capabilityRunner {
 			rosters: []string{"ai"}},
 		{name: "dnsmasq-local-root", kind: "local", port: 8796,
 			rosters: []string{"network"}},
+		// cp-local-root: local exec ON the cp guest as root, for the data
+		// department's verbs (freehold snapshot/export run there — the verb
+		// surface deploy-cp ships to /srv/data/cp/bin). Same kind as
+		// dnsmasq-local-root: the door IS this guest.
+		{name: "cp-local-root", kind: "local", port: 8797,
+			rosters: []string{"data"}},
 	}
 }
 
 // cloudflareRunnerPort is where the dynamic per-zone runners start, after the
 // static table's highest port. Agent-provisioned capability records start
 // above it (dynamicRunnerPortBase) so the two derivation paths never collide.
-const cloudflareRunnerPort = 8797
+// The derivation also skips any occupied port (occupiedPorts), so the static
+// table can grow past this base without a collision.
+const cloudflareRunnerPort = 8798
 
 // dynamicRunnerPortBase is where agent-provisioned capability records start
 // (the per-zone DNS doors occupy at most the cp+relay slots above 8796).
