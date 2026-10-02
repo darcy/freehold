@@ -236,15 +236,15 @@ verbs.
 
 **Acceptance:**
 
-*   [ ] The update flow ships the verb surface to a real CP guest; the
+*   [x] The update flow ships the verb surface to a real CP guest; the
     `cp-local-root` unit is active and the Data pod's coords carry it.
-*   [ ] A snapshot created by Data through the door lands on the plane and
+*   [x] A snapshot created by Data through the door lands on the plane and
     appears in the TUI's DATA view.
-*   [ ] A `--guest` rollback round-trips from inside the CP guest: the exec
+*   [x] A `--guest` rollback round-trips from inside the CP guest: the exec
     dies at the CP stop, the handoff completes, the world (console, runner,
     doors, agent-tools) comes back, and a post-snapshot marker is GONE —
     the data really moved.
-*   [ ] Data's prompt + skill compose; the agent answers a snapshot ask with
+*   [x] Data's prompt + skill compose; the agent answers a snapshot ask with
     the verb's guarded flow, not raw zfs/lvm.
 
 ## Not building
