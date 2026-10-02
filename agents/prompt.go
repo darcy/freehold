@@ -126,12 +126,21 @@ var aiPrompt string
 //go:embed compute/skills/create-lxc.md
 var createLxcSkill string
 
+// snapshotSkill is data's snapshot runbook (skills/snapshot.md): the plane
+// snapshot/export verbs ON the CP guest through the cp-local-root door, the
+// guardrails (confirmed rollbacks, partials refused), and the handoff arc.
+// Composed onto data's prompt (the identity that executes it); the file stays
+// the canonical text.
+//
+//go:embed data/skills/snapshot.md
+var snapshotSkill string
+
 // departmentPrompts maps a reserved department identity name to its embedded
 // system prompt. The names are reserved: a create_agent naming one of them
 // selects that department's prompt rather than the custom template.
 var departmentPrompts = map[string]string{
 	"network": networkPrompt,
-	"data":    dataPrompt,
+	"data":    dataPrompt + "\n\n" + strings.TrimRight(snapshotSkill, "\n"),
 	"compute": computePrompt + "\n\n" + strings.TrimRight(createLxcSkill, "\n"),
 	"ai":      aiPrompt,
 }

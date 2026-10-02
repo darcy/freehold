@@ -183,6 +183,70 @@ rollback of a live relay with data written after the snapshot.
     verb yet.
 *   [ ] Works with the CP down (SSH exec path).
 
+## Phase 4 — the Data agent's door (`cp-local-root`)
+
+The verbs become a capability the **Data department executes itself** —
+`exec` through its own build-time runner, not a box-side CLI only. The
+agent-vs-runner split is unchanged (reasoning decides, the runner's dumb
+hands do), and no semantic tool appears: the CP guest runs the SAME guarded
+verbs.
+
+1.  **The verb surface ships to the CP guest.** deploy-cp (install AND the
+    update's redeploy, idempotently) ships: the `freehold` CLI binary beside
+    the console in the guest's bin dir; the profile `config.toml` (coordinates
+    only — URLs, pubkeys, VMIDs, mount paths; the same class as the
+    world-config the console already holds) to `/srv/data/cp/profile/`; and a
+    **cp-verb SSH key** generated once per profile
+    (`profiles/<name>/cp-verb-key`, 0600 — the console-identity pattern: the
+    CP's own operational key on the durable plane), shipped to
+    `/srv/data/cp/verb-ssh.key` and authorized on the host by the same
+    idempotent authorize the doors use.
+2.  **The runner is one table entry.** `cp-local-root` — kind `local` (the
+    door IS the CP guest, the same kind as `dnsmasq-local-root`), rostered to
+    `data` only. The Data pod's bridge routes `exec`/`list` by target; the
+    verb flags (`--ssh-key`, `--guest`) are the transport overrides a
+    CP-guest-resident caller needs.
+3.  **The guest-handoff rollback.** A `--guest` rollback runs ON the CP guest
+    whose own data is among the volumes — the process cannot survive its
+    guest's stop. The pre-rollback net is taken in-process, the non-CP guests
+    stop, a detached script on the HOST carries the rollback commands
+    (rendered by the same drive code the in-process path executes — no
+    drift), and the CP guest stops LAST (the verb's exec dies at that stop by
+    design). The host script waits for the stop, rolls back, starts the
+    guests, and revives the CP — console, co-located runner, every capability
+    door, agent-tools — from argvs captured while they ran. The update
+    re-ships the script from the live processes after its reconcile (a first
+    build stages doors the deploy-time script never saw). Fail-closed
+    throughout: `--guest` requires `--yes`, a still-running CP guest aborts
+    the armed handoff, a partial snapshot is refused.
+4.  **The pool-headroom rule (live-test lesson).** The LVM rollback is a
+    full-device dd and a thin pool allocates every written block — zeros
+    included — permanently. The pool must EXCEED the origin set's full size;
+    the post-rollback `fstrim` of each mount returns the zero blocks; a
+    pool that exhausts mid-rollback goes `out-of-data-space (error IO)` —
+    recovery is free space (remove the redundant snapshots), fstrim, e2fsck
+    the journaled volumes, remount rw, restart the guests, re-run the build.
+    `conv=sparse` is NOT an option (a device destination keeps its newer
+    bytes at skipped blocks — a silently non-exact rollback).
+5.  **Data's snapshot skill** (`agents/data/skills/snapshot.md`, composed onto
+    its prompt) binds the recipes: list/create/inspect/remove + the rollback
+    discipline (confirmed, explicit target, the exec-dies-at-the-stop arc, the
+    host log). The TUI needs nothing — what Data lands appears in the DATA
+    view's snapshot table (the same plane, the same names).
+
+**Acceptance:**
+
+*   [x] The update flow ships the verb surface to a real CP guest; the
+    `cp-local-root` unit is active and the Data pod's coords carry it.
+*   [x] A snapshot created by Data through the door lands on the plane and
+    appears in the TUI's DATA view.
+*   [x] A `--guest` rollback round-trips from inside the CP guest: the exec
+    dies at the CP stop, the handoff completes, the world (console, runner,
+    doors, agent-tools) comes back, and a post-snapshot marker is GONE —
+    the data really moved.
+*   [x] Data's prompt + skill compose; the agent answers a snapshot ask with
+    the verb's guarded flow, not raw zfs/lvm.
+
 ## Not building
 
 *   A PBS-equivalent service (daemon, scheduler, verify/QC web UI) — the verbs
