@@ -156,6 +156,22 @@ func TestSystemPromptSelectsDepartmentByName(t *testing.T) {
 	}
 }
 
+// TestDataPromptComposesSnapshotSkill: data's prompt carries the snapshot
+// runbook (the verbs' door + the rollback discipline) — the identity that
+// executes the skill is the one it renders onto.
+func TestDataPromptComposesSnapshotSkill(t *testing.T) {
+	got := SystemPrompt("data", "the data plane", "", "")
+	for _, want := range []string{"cp-local-root", "snapshot rollback", "The snapshot skill"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("data's composed prompt lacks %q", want)
+		}
+	}
+	// The other departments must not carry it.
+	if other, _ := DepartmentPrompt("compute"); strings.Contains(other, "cp-local-root") {
+		t.Errorf("compute's prompt must not carry data's snapshot skill")
+	}
+}
+
 func TestSystemPromptFallsBackToCustomTemplate(t *testing.T) {
 	got := SystemPrompt("waldo", "look after the garden", "", "")
 	if !strings.Contains(got, "You are waldo") || !strings.Contains(got, "look after the garden") {

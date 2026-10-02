@@ -185,7 +185,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 - `docs/DATA.md` — the data-plane build plan (a named build plan, not a numbered
   chunk): `freehold snapshot` (durable-plane snapshots + guarded rollback),
   `freehold export` (the vzdump portable bundle), and restic off-site to an
-  arbitrary backend — the Data department's home ground without a PBS VM.
+  arbitrary backend — the Data department's home ground without a PBS VM. The
+  verbs run ON the CP guest through Data's `cp-local-root` door (the verb
+  surface deploy-cp ships); the snapshot skill composes onto Data's prompt.
 
 ## Locked model — do not change without an explicit user decision
 
