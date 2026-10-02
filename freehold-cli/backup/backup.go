@@ -148,6 +148,12 @@ func probeRepoPassword(exec drive.ExecFunc, uri, host, keyPath, candidate string
 	if _, err = sshUpload(host, keyPath, tmp.Name(), hostProbeFile, 300); err != nil {
 		return false, false, err
 	}
+	// The upload rides the host's default umask (0644 on a stock PVE host);
+	// the candidate can be the REAL repo key (the adopt path) — chmod before
+	// anything can read it.
+	if _, err = exec("chmod 600 "+hostProbeFile, 30); err != nil {
+		return false, false, err
+	}
 	defer exec("rm -f "+hostProbeFile, 30)
 	out, err := exec(". "+hostEnvFile+" 2>/dev/null; RESTIC_PASSWORD_FILE="+hostProbeFile+" restic -r "+uri+" snapshots --json", 300)
 	if err != nil {
@@ -411,8 +417,8 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 		return
 	}
 	hostHasKey := probe.ExitCode != nil && *probe.ExitCode == 0
-	// Settled by the switch below: when false, the push leg is skipped (the
-	// host's file already holds the working key).
+	// Settled by settle() below: when its push is false, the push leg is
+	// skipped (the host's file already holds the working key).
 	push := true
 	var hostPw string
 	if hostHasKey {
@@ -425,75 +431,23 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 	accepts := func(pw string) (ok, repoExists bool, perr error) {
 		return probeRepoPassword(exec, uri, host, keyPath, pw)
 	}
-	switch {
-	case fresh && hostHasKey:
-		// The box lost its copy and the host holds one: adopt it ONLY when
-		// the repo accepts it — the host file can be a wrong push's
-		// leftovers. When it doesn't unlock the repo and the box's fresh
-		// one can't either (it can't — just generated), fail loudly: the
-		// repo's key exists nowhere we can reach, and nothing was written.
-		ok, repoExists, perr := accepts(hostPw)
-		if perr != nil {
-			err = perr
-			return
-		}
-		if ok {
-			password = hostPw
-			if perr := SavePassword(password); perr != nil {
-				err = perr
-				return
-			}
-			fmt.Println("adopted the host's restic password (the repo accepts it; the profile's copy was missing)")
-		} else if repoExists {
-			err = fmt.Errorf("the host's restic password does NOT unlock the repo and this box has none — resolve by hand (restic key recover from a working copy, or re-init deliberately); nothing was written")
-			return
-		}
-		// !repoExists: a first init — the fresh password becomes the key.
+	decision, derr := settle(fresh, hostHasKey, password, hostPw, uri, accepts)
+	if derr != nil {
+		err = derr
+		return
+	}
+	password = decision.password
+	push = decision.push
+	if decision.note != "" {
+		fmt.Println(decision.note)
+	}
+	if decision.save {
 		if perr := SavePassword(password); perr != nil {
 			err = perr
 			return
-		}
-	case fresh:
-		if perr := SavePassword(password); perr != nil {
-			err = perr
-			return
-		}
-	case hostHasKey:
-		boxOK, boxExists, perr := accepts(password)
-		if perr != nil {
-			err = perr
-			return
-		}
-		if !boxExists {
-			// A deliberate re-point: the new URI has no repo yet — nothing
-			// to unlock, and init makes the box's password its key (the
-			// fresh case's semantics).
-			fmt.Println("no repo at the recorded uri yet — the box's password becomes its key")
-		} else if boxOK {
-			// The box's copy is the working key — pushing it over a stale
-			// host file is the fix, not a hazard.
-			fmt.Println("the box's restic password unlocks the repo — pushing it over the host's stale copy")
-		} else {
-			hostOK, _, perr := accepts(hostPw)
-			if perr != nil {
-				err = perr
-				return
-			}
-			if !hostOK {
-				err = fmt.Errorf("neither the box's nor the host's restic password unlocks the repo — resolve by hand; nothing was written")
-				return
-			}
-			fmt.Println("⚠ the box's restic password DIFFERS from the host's — adopting the host's copy (the repo accepts it)")
-			password = hostPw
-			if perr := SavePassword(password); perr != nil {
-				err = perr
-				return
-			}
-			// The host's file already IS the working key — the push below
-			// would only rewrite the same bytes.
-			push = false
 		}
 	}
+	// (the push leg + the credentials env file follow below)
 	passFile, perr := os.CreateTemp("", "freehold-restic-pass-*")
 	if perr != nil {
 		err = perr
@@ -544,6 +498,86 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 	}
 
 	return
+}
+
+// settleDecision is the password settlement's outcome: which password is the
+// repo's key and what to persist.
+type settleDecision struct {
+	password string
+	save     bool   // SavePassword(password) — the box's copy follows the verdict
+	push     bool   // overwrite the HOST's password file with password
+	note     string // the operator-facing line ("" = silent)
+}
+
+// refuse is the fail-closed verdict: "no repo at this URI" is also what a
+// typo'd URI, stale backend creds, or an unreachable backend produce — and a
+// host-held password may be the only surviving copy of the real key.
+func refuse(uri string) error {
+	return fmt.Errorf("the probe says no repo at %s, but the host holds a restic password — that verdict is also what a typo'd URI or an unreachable backend produce, and the host's file may be the only surviving copy of the real key; resolve by hand (check the URI/backend, or delete the host's file deliberately and re-run); nothing was written", uri)
+}
+
+// settle chooses the working password for the repo at uri from the two
+// copies — the REPO is the arbiter (`restic snapshots` accepting it), never
+// either file's word. fresh = the box generated a new password (its copy is
+// missing); hostHasKey = the host's /srv/nobackup file exists. accepts probes
+// the repo. A refused settlement writes NOTHING anywhere.
+func settle(fresh, hostHasKey bool, boxPw, hostPw, uri string, accepts func(string) (ok, repoExists bool, err error)) (settleDecision, error) {
+	switch {
+	case fresh && hostHasKey:
+		// The box lost its copy and the host holds one: adopt it ONLY when
+		// the repo accepts it — the host file can be a wrong push's
+		// leftovers. When it doesn't unlock the repo and the box's fresh
+		// one can't either (it can't — just generated), fail loudly: the
+		// repo's key exists nowhere we can reach, and nothing was written.
+		ok, repoExists, err := accepts(hostPw)
+		if err != nil {
+			return settleDecision{}, err
+		}
+		if ok {
+			return settleDecision{password: hostPw, save: true, push: false,
+				note: "adopted the host's restic password (the repo accepts it; the profile's copy was missing)"}, nil
+		}
+		if repoExists {
+			return settleDecision{}, fmt.Errorf("the host's restic password does NOT unlock the repo and this box has none — resolve by hand (restic key recover from a working copy, or re-init deliberately); nothing was written")
+		}
+		return settleDecision{}, refuse(uri)
+	case fresh:
+		// A first init: the host has no file, so the fresh password becomes
+		// the key.
+		return settleDecision{password: boxPw, save: true, push: true}, nil
+	case hostHasKey:
+		boxOK, boxExists, err := accepts(boxPw)
+		if err != nil {
+			return settleDecision{}, err
+		}
+		if !boxExists {
+			// A deliberate re-point would start here — but "no repo at
+			// this URI" is also the typo'd-URI / unreachable-backend
+			// verdict, and the host's file may be the only surviving copy
+			// of a real repo's key. Refuse; resolve by hand.
+			return settleDecision{}, refuse(uri)
+		}
+		if boxOK {
+			// The box's copy is the working key — pushing it over a stale
+			// host file is the fix, not a hazard.
+			return settleDecision{password: boxPw, save: false, push: true,
+				note: "the box's restic password unlocks the repo — pushing it over the host's stale copy"}, nil
+		}
+		hostOK, _, err := accepts(hostPw)
+		if err != nil {
+			return settleDecision{}, err
+		}
+		if !hostOK {
+			return settleDecision{}, fmt.Errorf("neither the box's nor the host's restic password unlocks the repo — resolve by hand; nothing was written")
+		}
+		return settleDecision{password: hostPw, save: true, push: false,
+			note: "⚠ the box's restic password DIFFERS from the host's — adopting the host's copy (the repo accepts it)"}, nil
+	default:
+		// !fresh && !hostHasKey: the box holds a copy and the host has no
+		// file — the box's copy is the only key in play; push it to the
+		// host (the file's birth, not an overwrite).
+		return settleDecision{password: boxPw, save: false, push: true}, nil
+	}
 }
 
 func init() {

@@ -217,3 +217,47 @@ func TestBackupArgsExcludeDriverDirs(t *testing.T) {
 		}
 	}
 }
+
+// TestSettleRefusesNoRepoWhenHostHoldsKey pins the data-loss guard: "no repo
+// at this URI" is also the typo'd-URI / unreachable-backend verdict, and the
+// host's file may be the only surviving copy of the real key — both
+// hostHasKey+no-repo paths refuse with NOTHING written, never a fresh push
+// over the host's copy.
+func TestSettleRefusesNoRepoWhenHostHoldsKey(t *testing.T) {
+	noRepo := func(string) (bool, bool, error) { return false, false, nil }
+	if _, err := settle(true, true, "fresh", "hostpw", "b2:bucket", noRepo); err == nil {
+		t.Fatal("fresh+hostKey+no-repo must refuse (a push would brick the repo)")
+	}
+	if _, err := settle(false, true, "boxpw", "hostpw", "b2:bucket", noRepo); err == nil {
+		t.Fatal("hostKey+no-repo must refuse (the same ambiguous verdict)")
+	}
+	// The box-with-no-copy + host-with-no-file case is the only no-repo green
+	// light: the fresh password becomes the key (nothing to overwrite).
+	if d, err := settle(true, false, "fresh", "", "b2:bucket", noRepo); err != nil || !d.push || !d.save {
+		t.Fatalf("fresh+no-host-file = the first init (save+push), got %v / %v", d, err)
+	}
+}
+
+// TestSettleRepoArbiter pins the repo as the arbiter: whichever copy the
+// repo ACCEPTS is the key; a neither-unlocks verdict writes nothing.
+func TestSettleRepoArbiter(t *testing.T) {
+	repo := func(pw string) (bool, bool, error) { return pw == "hostpw", true, nil }
+	d, err := settle(true, true, "fresh", "hostpw", "b2:bucket", repo)
+	if err != nil || d.password != "hostpw" || !d.save || d.push {
+		t.Fatalf("adopt: %v / %+v", err, d)
+	}
+	d, err = settle(false, true, "boxpw", "hostpw", "b2:bucket", repo)
+	if err != nil || d.password != "hostpw" || !d.save || d.push {
+		t.Fatalf("differ-adopt: %v / %+v", err, d)
+	}
+	d, err = settle(false, true, "boxpw", "hostpw", "b2:bucket", func(string) (bool, bool, error) { return false, true, nil })
+	if err == nil || !strings.Contains(err.Error(), "neither the box's nor the host's") {
+		t.Fatalf("neither unlocks must refuse: %v", err)
+	}
+	// The repo accepting the BOX's copy = the stale-host fix (the push IS
+	// the repair).
+	d, err = settle(false, true, "boxpw", "hostpw", "b2:bucket", func(string) (bool, bool, error) { return true, true, nil })
+	if err != nil || d.password != "boxpw" || !d.push {
+		t.Fatalf("stale-host push: %v / %+v", err, d)
+	}
+}
