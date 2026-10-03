@@ -10,6 +10,7 @@ package backup
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -76,9 +77,9 @@ func BackupArgs(cfg *config.Config) (string, error) {
 	if cfg.Name == "" {
 		// Pre---name worlds (domain-derived names) have nothing to tag with
 		// — a bare `--tag ` fails restic's parser.
-		return "backup " + strings.Join(sources, " ") + " " + strings.Join(excludes, " ") + " --tag freehold", nil
+		return "backup " + strings.Join(sources, " ") + " " + hostConfigFile + " " + strings.Join(excludes, " ") + " --tag freehold", nil
 	}
-	return "backup " + strings.Join(sources, " ") + " " + strings.Join(excludes, " ") + " --tag freehold --tag " + cfg.Name, nil
+	return "backup " + strings.Join(sources, " ") + " " + hostConfigFile + " " + strings.Join(excludes, " ") + " --tag freehold --tag " + cfg.Name, nil
 }
 
 // LoadPassword returns the profile-local restic password, generating a
@@ -128,6 +129,12 @@ func AdoptHostPassword(exec drive.ExecFunc, host, keyPath string) (string, error
 // it — deliberately NOT the real password file (a wrong candidate must
 // never displace the host's copy).
 const hostProbeFile = "/srv/nobackup/freehold-restic-probe"
+
+// hostConfigFile is the world's profile config shipped beside the password
+// at setup: the backup's scope includes it (the restore that boots a lost
+// world needs the domains/coords, and restic-only restores read THIS repo —
+// the export bundle is a different flow).
+const hostConfigFile = "/srv/nobackup/freehold-config.toml"
 
 // probeRepoPassword asks THE REPO: does it accept this password, and does
 // the repo exist at all? The candidate rides a 0600 probe file (never the
@@ -483,6 +490,18 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 			return
 		}
 		if _, perr := exec("chmod 600 "+hostPasswordFile, 30); perr != nil {
+			err = perr
+			return
+		}
+	}
+
+	// The world's profile config rides alongside (the restore that boots a
+	// lost world needs the domains/coords; this repo = restic-only restores
+	// read it here). Pushed EVERY setup — it is the CURRENT world's desired
+	// state, and a stale config here would restore wrong coords.
+	if raw, rerr := os.ReadFile(configPath); rerr == nil {
+		if _, perr := exec(fmt.Sprintf("mkdir -p %s && echo %s | base64 -d > %s && chmod 600 %s",
+			filepath.Dir(hostConfigFile), base64.StdEncoding.EncodeToString(raw), hostConfigFile, hostConfigFile), 60); perr != nil {
 			err = perr
 			return
 		}

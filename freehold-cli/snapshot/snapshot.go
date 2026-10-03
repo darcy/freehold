@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"freehold/contract/config"
+	"freehold/contract/version"
 	"freehold/freehold-cli/internal/common"
 	"freehold/providers/proxmox/drive"
 )
@@ -358,7 +359,15 @@ func reRunUpdate(configPath string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(self, "update", "--config", configPath, "--non-interactive")
+	// Pin THIS binary's commit: the CP is DOWN here (the rollback just
+	// stopped it), so the update's channel resolution can't read it and
+	// would fall back to stable — deploying a DIFFERENT version than the
+	// world ran. The same commit re-deploys idempotently.
+	args := []string{"update", "--config", configPath, "--non-interactive"}
+	if version.Commit != "" {
+		args = append(args, "--sha", version.Commit)
+	}
+	cmd := exec.Command(self, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		tail := string(out)
