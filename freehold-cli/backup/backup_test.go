@@ -238,6 +238,20 @@ func TestSettleRefusesNoRepoWhenHostHoldsKey(t *testing.T) {
 	}
 }
 
+// TestSettleFreshBranchStillAsksTheRepo: even the fresh+no-host-file branch
+// probes — a repo that exists and rejects the fresh password (lost box AND
+// wiped /srv/nobackup, off-site repo alive) refuses before anything
+// persists; a genuine first init (no repo) proceeds.
+func TestSettleFreshBranchStillAsksTheRepo(t *testing.T) {
+	liveRepoOtherKey := func(string) (bool, bool, error) { return false, true, nil }
+	if _, err := settle(true, false, "fresh", "", "b2:bucket", liveRepoOtherKey); err == nil {
+		t.Fatal("fresh+no-host-file over a LIVE repo must refuse (the fresh garbage would be established in both files)")
+	}
+	if d, err := settle(true, false, "fresh", "", "b2:bucket", func(string) (bool, bool, error) { return true, true, nil }); err != nil || !d.save || !d.push {
+		t.Fatalf("fresh+empty-repo probe-accepted = proceed: %v / %+v", err, d)
+	}
+}
+
 // TestSettleRepoArbiter pins the repo as the arbiter: whichever copy the
 // repo ACCEPTS is the key; a neither-unlocks verdict writes nothing.
 func TestSettleRepoArbiter(t *testing.T) {

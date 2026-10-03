@@ -599,8 +599,18 @@ func settle(fresh, hostHasKey bool, boxPw, hostPw, uri string, accepts func(stri
 		}
 		return settleDecision{}, refuse(uri)
 	case fresh:
-		// A first init: the host has no file, so the fresh password becomes
-		// the key.
+		// No copy on the box, no file on the host — the fresh password
+		// becomes the key. STILL arbiter'd: a repo that exists and rejects
+		// the fresh password (a lost box AND a wiped /srv/nobackup, off-site
+		// repo alive) must refuse — persisting here would establish garbage
+		// in both files against a repo whose key exists nowhere we reach.
+		ok, repoExists, err := accepts(boxPw)
+		if err != nil {
+			return settleDecision{}, err
+		}
+		if repoExists && !ok {
+			return settleDecision{}, fmt.Errorf("a repo exists at %s and does NOT accept a fresh password — its key exists nowhere we can reach (restic key recover from a working copy, or re-init deliberately after removing the repo); nothing was written", uri)
+		}
 		return settleDecision{password: boxPw, save: true, push: true}, nil
 	case hostHasKey:
 		boxOK, boxExists, err := accepts(boxPw)
