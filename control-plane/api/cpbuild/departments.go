@@ -686,7 +686,7 @@ func (s *Spec) grantDepartmentRunner(dept, pubkey string) error {
 }
 
 // retireRunner removes a runner retired by a rename (data-pve -> pve-ssh-root):
-// stop its unit, revoke it (the state record flips + the shipped ciphertext is
+// retire its unit, revoke it (the state record flips + the shipped ciphertext is
 // removed), and drop its authorized_keys line from the host. Idempotent; runs
 // AFTER the replacement is staged so a department never loses exec across the
 // build. Best-effort: a half-completed earlier retire (revoked, key line still
@@ -698,12 +698,8 @@ func (s *Spec) retireRunner(store *state.StateStore, name string) {
 		return
 	}
 	// The old department-runner convention named the unit after the DEPARTMENT
-	// ("freehold-runner-data"); the new one after the RUNNER. Stop both.
-	script := "systemctl stop freehold-runner-" + name + " 2>/dev/null; " +
-		"systemctl stop freehold-runner-data 2>/dev/null; " +
-		"systemctl reset-failed freehold-runner-" + name + " 2>/dev/null; " +
-		"systemctl reset-failed freehold-runner-data 2>/dev/null; true"
-	_, _ = exec.Command("sh", "-c", script).CombinedOutput()
+	// ("freehold-runner-data"); the new one after the RUNNER. Retire both.
+	_, _ = exec.Command("sh", "-c", retireUnitsScript(name)).CombinedOutput()
 	if rec.Status != state.RunnerRevoked {
 		pubLine, perr := departmentRunnerPubLine(rec.PackageDir, name)
 		if _, rerr := provisioner.RevokeRunner(store, name); rerr != nil {
@@ -714,6 +710,23 @@ func (s *Spec) retireRunner(store *state.StateStore, name string) {
 			s.deauthorizeHostKey(pubLine, name)
 		}
 	}
+}
+
+// retireUnitsScript is the close-out for the units a build's rename-retire
+// retires (above): the staged units are REAL FILES now (Restart=on-failure,
+// enabled — see startCapabilityRunner), so a bare stop would leave the unit
+// enabled and the next CP-guest boot would resurrect a runner the build just
+// retired. disable --now, remove the file, reload — the same close-out
+// unitOutcomes runs. The rm is a no-op for the legacy department-named unit,
+// which only ever existed as a --collect transient.
+func retireUnitsScript(name string) string {
+	unit := "freehold-runner-" + name
+	return fmt.Sprintf(
+		"systemctl disable --now %s freehold-runner-data 2>/dev/null; "+
+			"rm -f /etc/systemd/system/%s.service /etc/systemd/system/freehold-runner-data.service; "+
+			"systemctl daemon-reload; "+
+			"systemctl reset-failed %s freehold-runner-data 2>/dev/null; true",
+		unit, unit, unit)
 }
 
 // deauthorizeHostKey removes a retired runner's key line from the PVE host's

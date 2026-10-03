@@ -155,3 +155,21 @@ func TestDoorUnitShapePinsResilience(t *testing.T) {
 		}
 	}
 }
+
+// TestRetireScriptClosesUnits: the build's rename-retire must close out the
+// now-real unit files the way revoke_runner's retire does — disable --now +
+// file removal + reload — not just stop them (an enabled unit file survives
+// the stop and resurrects the runner at the next CP-guest boot).
+func TestRetireScriptClosesUnits(t *testing.T) {
+	script := retireUnitsScript("data-pve")
+	for _, want := range []string{
+		"systemctl disable --now freehold-runner-data-pve",
+		"rm -f /etc/systemd/system/freehold-runner-data-pve.service /etc/systemd/system/freehold-runner-data.service",
+		"systemctl daemon-reload",
+		"systemctl reset-failed freehold-runner-data-pve",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("retire script missing %q\n---\n%s", want, script)
+		}
+	}
+}
