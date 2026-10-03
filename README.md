@@ -146,6 +146,10 @@ freehold snapshot [label]     # snapshot the whole durable plane under one name
                               #  guests stop, the CP comes back via the update flow)
 freehold export [outfile]     # the durable plane's data + profile config into one
                               #  gzip bundle (du estimate first, confirm; no rootfs)
+freehold backup init/run/snapshots  # restic off-site backup of the durable plane's
+                              #  /srv/data mounts to a repo URI (init settles the
+                              #  repo password with the repo as arbiter; run also
+                              #  ships the profile config; snapshots lists them)
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no
@@ -633,9 +637,9 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
 freehold-cli/         freehold/freehold-cli — the local operator surface (never
                       imported by control-plane/): one dir per verb (install/,
                       uninstall/, build/, teardown/, status/, update/, exec/,
-                      profiles/, door/, add-relay-member/, dns-cred/), plus login/,
-                      tui/, and internal/ (artifact, certcred, common, cpdeploy,
-                      stages)
+                      profiles/, door/, add-relay-member/, dns-cred/, backup/),
+                      plus login/, tui/, and internal/ (artifact, certcred,
+                      common, cpdeploy, stages)
 providers/            freehold/providers — the substrate providers; proxmox/ holds
                       guest create/exec/list, storage, the pct stage/DNS builders,
                       and the world-destroy engine. Imports platform/ + contract/;
