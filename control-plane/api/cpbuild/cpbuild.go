@@ -520,18 +520,16 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if roleIP != "" {
 		// pct net0 wants CIDR (host/prefix); the serve/recorded values carry the
 		// bare IP (the DNS/caddy consumers expect bare), so rebuild the CIDR —
-		// the LAN defaults to /24 home-labs. Assigning relay/CP static addresses
-		// (via --relay-ip/--cp-ip) runs them OFF DHCP, which avoids exhausting a
-		// small LAN DHCP pool across repeated teardown/build cycles.
+		// the LAN defaults to /24 home-labs, the internal subnet to its OWN
+		// mask. Assigning relay/CP static addresses (via --relay-ip/--cp-ip)
+		// runs them OFF DHCP, which avoids exhausting a small LAN DHCP pool
+		// across repeated teardown/build cycles.
 		ip := roleIP
-		if !strings.Contains(ip, "/") {
-			ip += "/24"
-		}
-		// Behind the gateway the guests' default route is the gateway's
-		// INTERNAL address, and eth0 rides the internal subnet's tag — the
-		// "born on the freehold-subnet" rule (docs/NETWORK.md).
 		gw := s.RelayGW
 		if s.GatewayCIDR != "" {
+			// Behind the gateway the guests' default route is the gateway's
+			// INTERNAL address, and eth0 rides the internal subnet's tag —
+			// the "born on the freehold-subnet" rule (docs/NETWORK.md).
 			gw = config.GatewayInternalIP(s.GatewayCIDR)
 			if s.GatewayVlan > 0 {
 				spec.Tag = &s.GatewayVlan
@@ -539,6 +537,8 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 			if !strings.Contains(ip, "/") {
 				ip += "/" + strconv.Itoa(maskBits(s.GatewayCIDR))
 			}
+		} else if !strings.Contains(ip, "/") {
+			ip += "/24"
 		}
 		spec.NetIP = &ip
 		spec.NetGW = &gw
