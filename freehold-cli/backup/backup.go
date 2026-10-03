@@ -306,6 +306,13 @@ var runCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if out.TimedOut {
+			// SSHExec maps a killed/overrun command to TimedOut=true,
+			// exit -1, empty stderr — "restic backup failed:" with no
+			// reason is the report a first big-plane run would get. Name
+			// the real cause + the resume.
+			return fmt.Errorf("the restic run exceeded the command cap — a first run of a big plane can; the run is incremental, so re-running continues where this stopped")
+		}
 		if out.ExitCode == nil || *out.ExitCode != 0 {
 			return fmt.Errorf("restic backup failed:\n%s", strings.TrimSpace(out.Stderr))
 		}
@@ -326,6 +333,9 @@ var snapshotsCmd = &cobra.Command{
 		out, err := exec(ResticCmd(uri, "snapshots"), 300)
 		if err != nil {
 			return err
+		}
+		if out.TimedOut {
+			return fmt.Errorf("restic snapshots exceeded the command cap — the repo may be slow to answer; retry")
 		}
 		if out.ExitCode == nil || *out.ExitCode != 0 {
 			return fmt.Errorf("restic snapshots failed:\n%s", strings.TrimSpace(out.Stderr))
