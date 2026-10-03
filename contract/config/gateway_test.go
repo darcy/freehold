@@ -25,17 +25,23 @@ func TestNthIP(t *testing.T) {
 }
 
 func TestGatewayNftConf(t *testing.T) {
-	// Behind a gateway BOTH forwards target the k3s node's INTERNAL address —
-	// never the gateway's own LAN IP (self-DNAT is silent death).
-	conf := GatewayNftConf("10.77.0.0/24", "10.77.0.13", "10.77.0.13", "eth0")
+	// Behind a gateway ALL forwards target INTERNAL addresses — the k3s node
+	// for the edge/6443, the CP for the console — never the gateway's own LAN
+	// IP (self-DNAT is silent death).
+	conf := GatewayNftConf("10.77.0.0/24", "192.168.30.8", "10.77.0.13", "10.77.0.12", "10.77.0.11", "eth0")
 	for _, want := range []string{
-		"ip saddr 10.77.0.0/24 oifname \"eth0\" masquerade",
-		"tcp dport { 80, 443 } dnat to 10.77.0.13",
-		"tcp dport 6443 dnat to 10.77.0.13:6443",
+		"ip saddr 10.77.0.0/24 masquerade",
+		"ip daddr 192.168.30.8 tcp dport { 80, 443 } dnat to 10.77.0.13",
+		"ip daddr 192.168.30.8 tcp dport 6443 dnat to 10.77.0.13:6443",
+		"ip daddr 192.168.30.8 tcp dport 8080 dnat to 10.77.0.12:8080",
+		"ip daddr 192.168.30.8 tcp dport 3000 dnat to 10.77.0.11:3000",
 	} {
 		if !contains(conf, want) {
 			t.Fatalf("ruleset missing %q:\n%s", want, conf)
 		}
+	}
+	if contains(conf, "iifname") {
+		t.Fatal("DNATs must match either ingress (the internal guests hairpin through the gateway)")
 	}
 	if contains(conf, "'") {
 		t.Fatal("ruleset must be single-quote-free (rides sh -c verbatim)")

@@ -60,17 +60,22 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 // IP. Fresh-world installs happen before litellm exists, so a spec built from
 // the install-time world-config arrives with LitellmIP/LitellmBaseURL blank —
 // without them the agent pods get an empty OPENAI_COMPAT_BASE_URL and every
-// turn fails with "llm: transport: builder error". Idempotent.
+// turn fails with "llm: transport: builder error". Behind a gateway the
+// RECORDED litellm URL is the stale install-time render (the edge IP); the
+// pods dial the k3s node's INTERNAL NodePort directly, so the internal k3s
+// IP wins over the recording. Idempotent.
 func (s *Spec) FillEdgeURLs() {
 	node := s.k3sIP()
 	if node == "" {
 		return
 	}
-	if s.LitellmIP == "" {
+	if s.LitellmIP == "" || s.GatewayCIDR != "" {
 		s.LitellmIP = config.StripCIDR(node)
 	}
-	if s.LitellmBaseURL == "" && s.LitellmIP != "" {
-		s.LitellmBaseURL = "http://" + s.LitellmIP + ":31400/v1"
+	if s.LitellmBaseURL == "" || s.GatewayCIDR != "" {
+		if s.LitellmIP != "" {
+			s.LitellmBaseURL = "http://" + s.LitellmIP + ":31400/v1"
+		}
 	}
 }
 

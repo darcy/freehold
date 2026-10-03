@@ -266,9 +266,28 @@ func (s *Spec) guestNameserver() string {
 func (s *Spec) worldDNS() error {
 	binDir, stateDir := s.cpGuestDirs()
 	searchBase := s.guestSearchBase()
-	for _, r := range stages.DnsRecords(s.RelayHost, s.RelayIP, s.CpHost, s.CpIP, s.ProxyIP, s.LitellmIP) {
+	// Behind the gateway the BARE guest records (relay/cp -> their internal
+	// IPs) must NOT exist: dnsmasq's bare-record match shadows the FQDN's
+	// edge answer (the wildcard), so every wss/https dial to the public hosts
+	// lands on the guest's :443 — where nothing listens — and the pods die on
+	// "connection refused". The LAN dials ride the gateway's forwards instead
+	// (3000/8080 DNAT), which serve BOTH resolver answers.
+	relayIP, cpIP := s.RelayIP, s.CpIP
+	if s.GatewayCIDR != "" {
+		relayIP, cpIP = "", ""
+	}
+	for _, r := range stages.DnsRecords(s.RelayHost, relayIP, s.CpHost, cpIP, s.ProxyIP, s.LitellmIP) {
 		if err := s.run(proxmox.DnsAddCmd(s.CpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
 			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
+		}
+	}
+	if s.GatewayCIDR != "" {
+		// The prior world's bare records are already in the resolver's store —
+		// the add upsert never removes. Drop them explicitly.
+		for _, name := range []string{"relay", "cp"} {
+			if err := s.run(proxmox.DnsRemoveCmd(s.CpLxc, binDir, stateDir, name), 120); err != nil {
+				return fmt.Errorf("world-build dns drop bare %s: %w", name, err)
+			}
 		}
 	}
 	// The resolver WILDCARD: all *.apex -> the proxy (Caddy) edge, so the
@@ -290,8 +309,16 @@ func (s *Spec) worldDNS() error {
 	if err := s.pointGuestsAtResolver(); err != nil {
 		return err
 	}
+	// Behind the gateway the bare relay record is DROPPED (it shadows the
+	// FQDN's edge answer) — the verify then checks the FQDN -> the EDGE; the
+	// bare-name check stands for flat-LAN worlds.
+	relayWant := s.RelayIP
+	relayName := "relay"
+	if s.GatewayCIDR != "" {
+		relayName, relayWant = s.RelayHost, s.ProxyIP
+	}
 	for _, q := range []struct{ name, want string }{
-		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
+		{relayName, relayWant}, {"litellm", s.LitellmIP},
 	} {
 		if q.want == "" {
 			continue
@@ -509,7 +536,9 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 			if s.GatewayVlan > 0 {
 				spec.Tag = &s.GatewayVlan
 			}
-			ip = roleIP + "/" + strconv.Itoa(maskBits(s.GatewayCIDR))
+			if !strings.Contains(ip, "/") {
+				ip += "/" + strconv.Itoa(maskBits(s.GatewayCIDR))
+			}
 		}
 		spec.NetIP = &ip
 		spec.NetGW = &gw
@@ -707,22 +736,25 @@ func (s *Spec) worldGateway() error {
 		return nil
 	}
 	// Forwards: 80/443 (tcp+udp — Caddy serves h3) and 6443 (kubectl from the
-	// LAN) DNAT to the k3s node's INTERNAL address — NOT the gateway's own
-	// LAN IP (that would self-DNAT: the gateway's INPUT chain listens on
-	// nothing, and the world's public surface dies). Masquerade carries the
-	// subnet out. The ruleset is rewritten whole — never merged.
-	conf := config.GatewayNftConf(s.GatewayCIDR, kip, kip, "eth0")
+	// LAN) DNAT to the k3s node's INTERNAL address; 8080 to the CP console
+	// (the box's pre-Caddy build path — NIP-98-gated). NOT the gateway's own
+	// LAN IP (self-DNAT: the gateway's INPUT chain listens on nothing, and
+	// the world's public surface dies). Masquerade carries the subnet out.
+	// The ruleset is rewritten whole — never merged.
+	conf := config.GatewayNftConf(s.GatewayCIDR, s.ProxyIP, kip, s.CpIP, s.RelayIP, "eth0")
 	// No single quotes in the script (the heredoc delimiter is unquoted; the
 	// ruleset has none) — it rides `sh -c '...'` through the runner verbatim.
 	script := fmt.Sprintf(`set -e
-apt-get install -y -qq nftables >/dev/null 2>&1 || true
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
-systemctl enable nftables >/dev/null 2>&1 || true
-systemctl restart nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
-`, conf)
+cat > /etc/dnsmasq.d/freehold.conf <<DNS
+%sDNS
+systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
+systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
+`, conf, config.GatewayDnsmasqConf(s.RelayGW))
 	cmd := fmt.Sprintf("pct exec %d -- sh -c '%s'", s.GatewayLxc, script)
 	if err := s.run(cmd, 300); err != nil {
 		return fmt.Errorf("gateway nftables: %w", err)
@@ -2069,8 +2101,14 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
+	// The DIAL is the LAN form (relayDial — the relay guest's own :3000, which
+	// the CP reaches on-subnet; behind a gateway the public https URL would
+	// resolve through the bare-record shadowing to the relay guest's :443,
+	// where nothing listens). The NIP-98 signature covers the CANONICAL
+	// public origin — the dial-LAN / sign-public split.
+	dial := s.relayDial()
 	if strings.TrimSpace(channel) == "" {
-		if err := delegate.EnsurePrivateChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+		if err := delegate.EnsurePrivateChannelAuth(dial, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
 			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
 		}
 		return relayFreeholdChannel, "#freehold", false, nil
@@ -2080,7 +2118,7 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	// under the name-derived id, and never as open, even when a create passes
 	// private=false.
 	if strings.EqualFold(name, "#freehold") {
-		if err := delegate.EnsurePrivateChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+		if err := delegate.EnsurePrivateChannelAuth(dial, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
 			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
 		}
 		return relayFreeholdChannel, "#freehold", false, nil
@@ -2090,7 +2128,7 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	// signs as the CREATING agent (nSec), the identity that owns/joins the
 	// channel: a private channel the console identity is not a member of must
 	// still be found, or a rebuild would create a duplicate.
-	existingID, existingName, ok, err := relay.FindChannelAuth(s.RelayURL, authURL, nSec, channel)
+	existingID, existingName, ok, err := relay.FindChannelAuth(dial, authURL, nSec, channel)
 	if err != nil {
 		return "", "", false, fmt.Errorf("look up channel %q: %w", channel, err)
 	}
@@ -2102,7 +2140,7 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	if private {
 		create = delegate.EnsurePrivateChannelAuth
 	}
-	if err := create(s.RelayURL, authURL, nSec, id, name); err != nil {
+	if err := create(dial, authURL, nSec, id, name); err != nil {
 		return "", "", false, fmt.Errorf("create channel %s: %w", name, err)
 	}
 	return id, name, true, nil

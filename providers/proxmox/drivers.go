@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -318,10 +319,16 @@ func BootstrapProxmoxLxc(exec ExecFunc, spec *ProxmoxLxcSpec) (*BootstrapResult,
 	if err := Plain(spec.Bridge); err != nil {
 		return nil, err
 	}
+	// Guest IP fields are CIDR-or-bare and interpolated into the pct command —
+	// validated as ADDRESSES (stricter than Plain: it also refuses `/`-bearing
+	// non-prefixes and shell metacharacters) rather than Plain()'d.
 	for _, p := range []*string{spec.NetIP, spec.NetGW, spec.Net1IP, spec.Net1GW} {
-		if p != nil {
-			if err := Plain(*p); err != nil {
-				return nil, err
+		if p == nil {
+			continue
+		}
+		if _, err := netip.ParsePrefix(*p); err != nil {
+			if net.ParseIP(*p) == nil {
+				return nil, fmt.Errorf("invalid guest IP %q (want bare IP or CIDR)", *p)
 			}
 		}
 	}

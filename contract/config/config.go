@@ -123,10 +123,22 @@ func nthIP(cidr string, n int) string {
 
 // GatewayNftConf renders the gateway guest's nftables ruleset: masquerade for
 // the internal subnet, 80/443 (tcp+udp) DNAT to the Caddy edge, 6443 to the
-// kube-apiserver. Shared by the box boot stage and the CP build's re-assert —
-// one renderer, never two diverging rule sets. wanIf is the gateway's
-// public-side interface (eth0).
-func GatewayNftConf(cidr, edgeIP, k3sIP, wanIf string) string {
+// kube-apiserver, 8080 to the CP console (the box's pre-Caddy build path —
+// the console is NIP-98-gated; the flat-LAN world exposed it identically on
+// the CP's LAN IP), 3000 to the relay (its LAN-dial port — the CP's and the
+// pods' http://<relay-host>:3000 dials resolve through the resolver's
+// bare-record shadowing in unreliable order, so BOTH answers must work).
+// The DNATs match EITHER ingress (the internal guests hairpin through the
+// gateway — a k3s pod's wss:// to the public FQDN arrives on eth1) but ONLY
+// traffic ADDRESSED TO THE GATEWAY (edgeIP): an unconstrained dport DNAT
+// hijacks every transit :443 — the guests' own egress to the internet
+// included — and serves them the edge's TLS. The masquerade drops the
+// egress-interface pin for the same reason (the hairpin reply must NAT back
+// to the gateway, or the guest talks to itself).
+// Shared by the box boot stage and the CP build's re-assert — one renderer,
+// never two diverging rule sets. wanIf is the gateway's public-side
+// interface (eth0).
+func GatewayNftConf(cidr, edgeIP, k3sIP, cpIP, relayIP, wanIf string) string {
 	return fmt.Sprintf(`flush ruleset
 table ip freehold {
 	chain forward {
@@ -134,16 +146,32 @@ table ip freehold {
 	}
 	chain postrouting {
 		type nat hook postrouting priority srcnat;
-		ip saddr %s oifname "%s" masquerade
+		ip saddr %s masquerade
 	}
 	chain prerouting {
 		type nat hook prerouting priority dstnat;
-		iifname "%s" tcp dport { 80, 443 } dnat to %s
-		iifname "%s" udp dport { 80, 443 } dnat to %s
-		iifname "%s" tcp dport 6443 dnat to %s:6443
+		ip daddr %s tcp dport { 80, 443 } dnat to %s
+		ip daddr %s udp dport { 80, 443 } dnat to %s
+		ip daddr %s tcp dport 6443 dnat to %s:6443
+		ip daddr %s tcp dport 8080 dnat to %s:8080
+		ip daddr %s tcp dport 3000 dnat to %s:3000
 	}
 }
-`, cidr, wanIf, wanIf, edgeIP, wanIf, edgeIP, wanIf, k3sIP)
+`, cidr, edgeIP, k3sIP, edgeIP, k3sIP, edgeIP, k3sIP, edgeIP, cpIP, edgeIP, relayIP)
+}
+
+// GatewayDnsmasqConf renders the gateway's resolver config: the internal
+// subnet's forwarder (the guests' resolv.conf points at the gateway; without
+// a listener the CP's own upstream lookups — Cloudflare API, image pulls —
+// die on a refused 10.77.0.1:53). upstream is the LAN router; a public
+// fallback rides behind it.
+func GatewayDnsmasqConf(upstream string) string {
+	return fmt.Sprintf(`interface=eth1
+bind-interfaces
+no-resolv
+server=%s
+server=1.1.1.1
+`, upstream)
 }
 
 // TenantSlug is a stable filesystem/LXC slug for the world, derived from the

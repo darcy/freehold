@@ -84,8 +84,8 @@ func ConsoleLogin(cfg *config.Config) (*console.Client, error) {
 			lastErr = err
 		}
 	}
-	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		if c, err := oplogin.Login("http://"+ip+":8080", key); err == nil {
+	if ip := ConsoleLoginURL(cfg); ip != "" {
+		if c, err := oplogin.Login(ip, key); err == nil {
 			return c, nil
 		} else {
 			lastErr = err

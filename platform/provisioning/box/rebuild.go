@@ -604,7 +604,14 @@ func (e *Engine) RecordPostWorld() error {
 		cfg.AgentToolsURL = "http://" + ip + ":" + config.AgentToolsPort
 	}
 	proxyIP := config.StripCIDR(e.F.ProxyIP)
-	cfg.Litellm = config.LitellmSpec{URL: "http://" + proxyIP + ":31400", Host: proxyIP}
+	// Behind the gateway the pods' litellm dial goes straight to the k3s node's
+	// INTERNAL address (the NodePort on the node they run on) — the edge IP
+	// would need a 31400 forward for the hottest path in the world.
+	litellmIP := proxyIP
+	if e.F.GatewayCIDR != "" {
+		litellmIP = config.InternalIPFor(e.F.GatewayCIDR, "k3s")
+	}
+	cfg.Litellm = config.LitellmSpec{URL: "http://" + litellmIP + ":31400", Host: litellmIP}
 	if !containsStr(cfg.Managed, "litellm") {
 		cfg.Managed = append(cfg.Managed, "litellm")
 	}
@@ -1789,24 +1796,46 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 		vmid = strconv.FormatUint(uint64(v), 10)
 	}
 	k3sIP := config.InternalIPFor(cidr, "k3s")
-	// Both forwards target the k3s node's INTERNAL address — never the
-	// gateway's own LAN IP (self-DNAT is silent death).
-	conf := config.GatewayNftConf(cidr, k3sIP, k3sIP, "eth0")
+	cpIP := config.InternalIPFor(cidr, "cp")
+	relayIP := config.InternalIPFor(cidr, "relay")
+	// All forwards target INTERNAL addresses — the k3s node for the
+	// edge/6443, the CP for the console (the box's pre-Caddy build path), the
+	// relay for its LAN-dial port — and match ONLY traffic addressed to the
+	// gateway (an unconstrained dport DNAT hijacks the guests' own egress).
+	edgeIP := config.StripCIDR(edgeOf(e.F.ProxyIP))
+	conf := config.GatewayNftConf(cidr, edgeIP, k3sIP, cpIP, relayIP, "eth0")
 	script := fmt.Sprintf(`set -e
-apt-get install -y -qq nftables >/dev/null 2>&1 || true
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
-systemctl enable nftables >/dev/null 2>&1 || true
-systemctl restart nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
-`, conf)
+cat > /etc/dnsmasq.d/freehold.conf <<DNS
+%sDNS
+systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
+systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
+`, conf, config.GatewayDnsmasqConf(e.F.RelayGw))
 	out, err := e.Provider.GuestExec(vmid, script, 300)
 	if err != nil {
 		return fmt.Errorf("gateway nftables: %w", err)
 	}
-	return bootstrap.ExpectOK(out, "gateway nftables")
+	if err := bootstrap.ExpectOK(out, "gateway nftables"); err != nil {
+		return err
+	}
+	// The HOST route into the subnet, via the gateway (the host-side dials —
+	// terraform, pct-side probes — otherwise follow the default route to the
+	// LAN router, which has no 10.77.0.0/24 path and blackholes them).
+	route := fmt.Sprintf("ip route replace %s via %s dev %s",
+		cidr, config.StripCIDR(edgeOf(e.F.ProxyIP)), e.F.Bridge)
+	rout, rerr := e.Provider.GuestExec("", route, 30)
+	if rerr != nil {
+		return fmt.Errorf("gateway host route: %w", rerr)
+	}
+	return bootstrap.ExpectOK(rout, "gateway host route")
 }
+
+// edgeOf returns the bare IP of a CIDR-or-bare address ("" when empty).
+func edgeOf(ip string) string { return config.StripCIDR(ip) }
 
 // stageRecordLxc persists the real post-boot coordinates into the config ON
 // DISK: load FRESH, resolve vmid+ip through the runner, mutate, save, return
@@ -2234,13 +2263,17 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 	if cfg.Gateway.Vlan != nil {
 		gwVlan = *cfg.Gateway.Vlan
 	}
+	if gwCIDR != "" {
+		// Recorded/flag guest IPs are the OLD LAN ones the moment the gateway
+		// is on — the guests are born internal, so derive over them.
+		relayIP = config.InternalIPFor(gwCIDR, "relay")
+		cpIP = config.InternalIPFor(gwCIDR, "cp")
+	}
 	k3sIP := config.StripCIDR(derefStrPtr(cfg.Lxc.K3s.Ip))
-	if k3sIP == "" {
-		if gwCIDR != "" {
-			k3sIP = config.InternalIPFor(gwCIDR, "k3s")
-		} else {
-			k3sIP = config.StripCIDR(e.F.ProxyIP)
-		}
+	if gwCIDR != "" {
+		k3sIP = config.InternalIPFor(gwCIDR, "k3s")
+	} else if k3sIP == "" {
+		k3sIP = config.StripCIDR(e.F.ProxyIP)
 	}
 	c := config.Coords{
 		Name:           cfg.Name,
