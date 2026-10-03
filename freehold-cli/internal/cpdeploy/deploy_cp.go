@@ -545,20 +545,20 @@ func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string, capabilityRu
 	b.WriteString(fmt.Sprintf("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://%s/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n", spec.BindAddr))
 	b.WriteString("[ \"$up\" = 1 ] || { echo 'console serve did not answer /healthz — check " + spec.StateDir + "/serve.log' >&2; exit 1; }\n")
 	if spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil {
-		b.WriteString("systemctl reset-failed freehold-runner 2>/dev/null; true\n")
-		b.WriteString(fmt.Sprintf("systemd-run --unit=freehold-runner --collect %s/freehold-runner serve --state-dir %s >/dev/null 2>&1\n",
-			spec.BinDir, spec.runnerDir()))
-		b.WriteString("sleep 2; systemctl is-active freehold-runner || echo 'warning: co-located runner did not come up — the next `freehold build` re-stages it' >&2\n")
+		// The runner's unit is a REAL file now (Restart=on-failure, enabled):
+		// the boot re-runs it. The start is only needed when the boot's
+		// first attempt lost the race with this script.
+		b.WriteString("systemctl start freehold-runner 2>/dev/null || true\n")
 	}
-	// The capability runners (the doors): transient units die with the guest
-	// stop and only the build's reconcile re-stages them — re-launch each
-	// from its captured running argv so the doors come back WITH the world.
+	// The capability runners (the doors): their units are REAL FILES too
+	// (the build's staging installs them, Restart=on-failure, enabled) —
+	// the boot re-runs them; start = belt and suspenders.
 	for _, line := range capabilityRunnerArgvs {
-		unit, argv, ok := strings.Cut(line, " ")
-		if !ok || !strings.HasPrefix(argv, "/") {
+		unit, _, ok := strings.Cut(line, " ")
+		if !ok {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("systemd-run --unit=%s --collect %s >/dev/null 2>&1\n", unit, argv))
+		b.WriteString(fmt.Sprintf("systemctl start %s 2>/dev/null || true\n", unit))
 	}
 	if strings.TrimSpace(agentToolsArgv) != "" {
 		at := agentToolsStateDir(spec)
@@ -576,6 +576,42 @@ func shipReviveScript(t Transport, spec *DeployCpSpec, flags, agentToolsArgv str
 	cmd := fmt.Sprintf("mkdir -p %[1]s && echo %[2]s | base64 -d > %[3]s && chmod 755 %[3]s",
 		spec.BinDir, base64StdEncode([]byte(reviveScript(spec, flags, agentToolsArgv, capabilityRunnerArgvs))), final)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "ship revive script", 60); err != nil {
+		return err
+	}
+	return nil
+}
+
+// runnerUnitFile renders a REAL systemd unit for a runner serve process —
+// not a transient: a crash or a guest reboot must never remove the unit
+// itself (live-seen on librem: a --collect transient died with the world
+// untouched, 8787 went dark, and nothing but a hand-run systemd-run line
+// brought it back). Restart=on-failure + enabled = the crash and the boot
+// paths both return. cpbuild stages the capability doors' units the same
+// way (duplicated text — the module direction forbids a shared helper).
+func runnerUnitFile(description, execStart string) string {
+	return fmt.Sprintf(`[Unit]
+Description=%s
+After=network-online.target
+
+[Service]
+ExecStart=%s
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, description, execStart)
+}
+
+// startRunnerUnit installs + enables the co-located runner's unit. Idempotent:
+// every deploy rewrites the file (the args can change) and enable --now
+// starts what isn't running.
+func startRunnerUnit(t Transport, spec *DeployCpSpec, runnerDir string) error {
+	unit := runnerUnitFile("freehold co-located runner",
+		fmt.Sprintf("%s/freehold-runner serve --state-dir %s", spec.BinDir, runnerDir))
+	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-runner.service && systemctl daemon-reload && systemctl enable --now freehold-runner && sleep 1 && systemctl is-active freehold-runner",
+		base64StdEncode([]byte(unit)))
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, write), "install co-located runner unit", 90); err != nil {
 		return err
 	}
 	return nil
@@ -732,10 +768,7 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 				}
 			}
 		}
-		startRunner := fmt.Sprintf(
-			"systemctl reset-failed freehold-runner 2>/dev/null; systemd-run --unit=freehold-runner --collect %s/freehold-runner serve --state-dir %s >/dev/null 2>&1; sleep 2; systemctl is-active freehold-runner",
-			spec.BinDir, runnerDir)
-		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, startRunner), "start co-located runner", 60); err != nil {
+		if err := startRunnerUnit(t, spec, runnerDir); err != nil {
 			return nil, err
 		}
 		// The runner now holds the new key; only now drop the old host line.

@@ -798,9 +798,31 @@ func (s *Spec) addRelayCommunityMember(pubkey string) error {
 	return s.run(fmt.Sprintf("pct exec %d -- sh -c '%s'", relayLxc, cmdLine), 120)
 }
 
-// startCapabilityRunner (re)starts the runner as a transient systemd unit on
-// the CP LXC (systemctl/systemd-run run LOCALLY — the CP executor is this
-// guest). Reloads the binary + package on every build.
+// startCapabilityRunner (re)installs the runner's systemd UNIT FILE on the
+// CP LXC and (re)starts it (systemctl runs LOCALLY — the CP executor is this
+// guest). Reloads the binary + package on every build. A REAL unit file, not
+// a transient: a crash or a guest reboot must never remove the unit itself
+// (Restart=on-failure + enabled = the crash and the boot paths both return).
+// The deploy's side (cpdeploy) renders the co-located runner's unit the same
+// way — the module direction forbids a shared helper.
+// doorUnitText renders a capability door's systemd unit file — a REAL file
+// (Restart=on-failure, enabled): a crash or a guest reboot returns; a
+// --collect transient removed the unit on the first crash.
+func doorUnitText(description, name, bin, flags string) string {
+	return fmt.Sprintf(`[Unit]
+Description=%s
+After=network-online.target
+
+[Service]
+ExecStart=%s serve %s
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, description, bin, flags)
+}
+
 func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	binDir, _ := s.cpGuestDirs()
 	bin := binDir + "/freehold-runner"
@@ -813,11 +835,12 @@ func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	flags := fmt.Sprintf("--state-dir %s --addr 0.0.0.0:%d --relay-url %s --relay-pubkey %s --relay-auth-url %s --allow-remote",
 		pkgDir, r.port, s.relayDialURL(), s.RelayPK, s.relaySignURL())
 	unit := "freehold-runner-" + r.name
+	unitFile := doorUnitText("freehold capability runner "+r.name, r.name, bin, flags)
 	script := fmt.Sprintf(
-		"systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; systemd-run --unit=%s --collect %s serve %s",
-		unit, unit, unit, bin, flags)
+		"echo %s | base64 -d > /etc/systemd/system/%s.service && systemctl daemon-reload && systemctl stop %s 2>/dev/null; systemctl enable --now %s",
+		base64.StdEncoding.EncodeToString([]byte(unitFile)), unit, unit, unit)
 	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
-		return fmt.Errorf("systemd-run %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("install unit %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	// Wait for the port to listen so the next step never races a refused dial.
 	addr := fmt.Sprintf("127.0.0.1:%d", r.port)

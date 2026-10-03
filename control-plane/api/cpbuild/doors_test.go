@@ -141,3 +141,17 @@ func TestCPACarriesGrantingSkill(t *testing.T) {
 		}
 	}
 }
+
+// TestDoorUnitShapePinsResilience: the doors' staged units are REAL files —
+// Restart=on-failure + enabled (a crash or a guest reboot returns; a
+// --collect transient removed the unit on the first crash and the door's
+// port went dark with no reaper).
+func TestDoorUnitShapePinsResilience(t *testing.T) {
+	s := doorUnitText("freehold capability runner cp-local-root", "cp-local-root",
+		"/srv/data/cp/bin/freehold-runner", "--state-dir /x --addr 0.0.0.0:8797")
+	for _, want := range []string{"Restart=on-failure", "RestartSec=5", "WantedBy=multi-user.target", "ExecStart=/srv/data/cp/bin/freehold-runner serve --state-dir /x --addr 0.0.0.0:8797"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("door unit missing %q\n---\n%s", want, s)
+		}
+	}
+}
