@@ -563,7 +563,8 @@ release notes.
     go vet ./... && go test ./...`. Imports `platform/` + `contract/`; never the reverse.
   - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
     CLI + TUI, one dir-per-verb (`install/`, `uninstall/`, `build/`, `teardown/`,
-    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`)
+    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`,
+    `backup/`)
     plus `login/` + `tui/` and `internal/common/` + `internal/certcred/` +
     `internal/stages/`; the `install/` surface holds `install/cpdeploy/`; the `freehold`
     binary's main is `cmd/freehold`):

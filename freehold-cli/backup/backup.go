@@ -136,6 +136,27 @@ const hostProbeFile = "/srv/nobackup/freehold-restic-probe"
 // the export bundle is a different flow).
 const hostConfigFile = "/srv/nobackup/freehold-config.toml"
 
+// pushSecret ships one local file to the host at dest without the destination
+// ever sitting at the host's umask: the upload lands on a dest+".push" temp
+// (its rm registered BEFORE the chmod, so a failed or dropped chmod still
+// removes the 0644 copy), is chmodded 600, then renamed into place — the real
+// path is only ever mv'd over, never written at, and a dead transport leaves
+// at worst the fixed-name temp (the next push overwrites and tightens it).
+func pushSecret(exec drive.ExecFunc, host, keyPath, localPath, dest string) error {
+	tmp := dest + ".push"
+	if _, err := proxmox.SSHUpload(host, keyPath, localPath, tmp, 300); err != nil {
+		return err
+	}
+	defer exec("rm -f "+tmp, 30)
+	if _, err := exec("chmod 600 "+tmp, 30); err != nil {
+		return err
+	}
+	if _, err := exec("mv "+tmp+" "+dest, 30); err != nil {
+		return err
+	}
+	return nil
+}
+
 // probeRepoPassword asks THE REPO: does it accept this password, and does
 // the repo exist at all? The candidate rides a 0600 probe file (never the
 // host's real one, never a command line). Classification by restic's own
@@ -156,12 +177,13 @@ func probeRepoPassword(exec drive.ExecFunc, uri, host, keyPath, candidate string
 		return false, false, err
 	}
 	// The upload rides the host's default umask (0644 on a stock PVE host);
-	// the candidate can be the REAL repo key (the adopt path) — chmod before
-	// anything can read it.
+	// the candidate can be the REAL repo key (the adopt path) — the rm is
+	// registered BEFORE the chmod, so a failed (or dropped) chmod still
+	// removes the 0644 candidate; on success the rm -f is a no-op.
+	defer exec("rm -f "+hostProbeFile, 30)
 	if _, err = exec("chmod 600 "+hostProbeFile, 30); err != nil {
 		return false, false, err
 	}
-	defer exec("rm -f "+hostProbeFile, 30)
 	out, err := exec(". "+hostEnvFile+" 2>/dev/null; RESTIC_PASSWORD_FILE="+hostProbeFile+" restic -r "+uri+" snapshots --json", 300)
 	if err != nil {
 		return false, false, err
@@ -433,6 +455,35 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 		err = perr
 		return
 	}
+	// The credentials env file pushes BEFORE the settlement: probeRepoPassword
+	// sources it, so on a host that holds a password but no env file yet a
+	// b2:/s3: URI could never settle (the credentials error matched neither
+	// refuse signature — every verb refused and no CLI path could ever push
+	// the env file). The env pairs are THIS run's operator-supplied backend
+	// credentials, not the repo key — pushing them early displaces nothing
+	// the settlement protects.
+	if withEnv && len(envPairs) > 0 {
+		body, berr := EnvFileBody(envPairs)
+		if berr != nil {
+			err = berr
+			return
+		}
+		envTmp, berr := os.CreateTemp("", "freehold-restic-env-*")
+		if berr != nil {
+			err = berr
+			return
+		}
+		defer os.Remove(envTmp.Name())
+		if _, berr = envTmp.WriteString(body); berr != nil {
+			err = berr
+			return
+		}
+		envTmp.Close()
+		if berr = pushSecret(exec, host, keyPath, envTmp.Name(), hostEnvFile); berr != nil {
+			err = berr
+			return
+		}
+	}
 	// Settle the password BEFORE anything persists — and the ARBITER is the
 	// REPO, not either file: a password is only the repo's key when `restic
 	// snapshots` accepts it. Neither file's word is enough: the host's can
@@ -473,23 +524,19 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 			return
 		}
 	}
-	// (the push leg + the credentials env file follow below)
-	passFile, perr := os.CreateTemp("", "freehold-restic-pass-*")
-	if perr != nil {
-		err = perr
-		return
-	}
-	defer os.Remove(passFile.Name())
 	if push {
-		if _, perr = passFile.WriteString(password); perr == nil {
-			passFile.Close()
-			_, perr = proxmox.SSHUpload(host, keyPath, passFile.Name(), hostPasswordFile, 300)
-		}
+		passFile, perr := os.CreateTemp("", "freehold-restic-pass-*")
 		if perr != nil {
 			err = perr
 			return
 		}
-		if _, perr := exec("chmod 600 "+hostPasswordFile, 30); perr != nil {
+		defer os.Remove(passFile.Name())
+		if _, perr = passFile.WriteString(password); perr != nil {
+			err = perr
+			return
+		}
+		passFile.Close()
+		if perr = pushSecret(exec, host, keyPath, passFile.Name(), hostPasswordFile); perr != nil {
 			err = perr
 			return
 		}
@@ -503,34 +550,6 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 		if _, perr := exec(fmt.Sprintf("mkdir -p %s && echo %s | base64 -d > %s && chmod 600 %s",
 			filepath.Dir(hostConfigFile), base64.StdEncoding.EncodeToString(raw), hostConfigFile, hostConfigFile), 60); perr != nil {
 			err = perr
-			return
-		}
-	}
-
-	// The credentials env file (init's --env; a re-init with --env refreshes
-	// it — rotation is a push away).
-	if withEnv && len(envPairs) > 0 {
-		body, berr := EnvFileBody(envPairs)
-		if berr != nil {
-			err = berr
-			return
-		}
-		envTmp, berr := os.CreateTemp("", "freehold-restic-env-*")
-		if berr != nil {
-			err = berr
-			return
-		}
-		defer os.Remove(envTmp.Name())
-		if _, berr = envTmp.WriteString(body); berr == nil {
-			envTmp.Close()
-			_, berr = proxmox.SSHUpload(host, keyPath, envTmp.Name(), hostEnvFile, 300)
-		}
-		if berr != nil {
-			err = berr
-			return
-		}
-		if _, berr := exec("chmod 600 "+hostEnvFile, 30); berr != nil {
-			err = berr
 			return
 		}
 	}
@@ -551,7 +570,7 @@ type settleDecision struct {
 // typo'd URI, stale backend creds, or an unreachable backend produce — and a
 // host-held password may be the only surviving copy of the real key.
 func refuse(uri string) error {
-	return fmt.Errorf("the probe says no repo at %s, but the host holds a restic password — that verdict is also what a typo'd URI or an unreachable backend produce, and the host's file may be the only surviving copy of the real key; resolve by hand (check the URI/backend, or delete the host's file deliberately and re-run); nothing was written", uri)
+	return fmt.Errorf("the probe says no repo at %s, but the host holds a restic password — that verdict is also what a typo'd URI or an unreachable backend produce, and the host's file may be the only surviving copy of the real key; resolve by hand (check the URI/backend, or delete the host's file deliberately and re-run); the host's password file was not touched", uri)
 }
 
 // settle chooses the working password for the repo at uri from the two
