@@ -261,6 +261,9 @@ func TestRecordCoords(t *testing.T) {
 // the LXC + LV. litellm rides k3s and needs no guest carve-out.
 func TestWorldManaged(t *testing.T) {
 	// Full world (k3s + litellm on), recorded vmid / absent vmid.
+	if got := worldManaged(false, false, ptr(uint32(102)), ptr(uint32(101))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm", "gateway"}) {
+		t.Fatalf("recorded gateway must stay managed (it fronts the CP): %#v", got)
+	}
 	if got := worldManaged(false, false, ptr(uint32(102)), nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
 		t.Errorf("full world with vmid = %v, want relay/cp/k3s/litellm", got)
 	}
