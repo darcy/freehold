@@ -235,7 +235,8 @@ there; if it is work not yet done, it belongs here.
   on every verb).
 - **The console is not a systemd unit.** It runs under `setsid nohup`; a CP
   guest reboot kills it and the world is headless until a deploy re-runs. The
-  co-located runner already has `systemd-run` — give the console the same.
+  co-located runner has a real enabled unit file (`Restart=on-failure`, shipped
+  by deploy-cp) — give the console the same.
 - **All profiles' local runners collide on 127.0.0.1:8787.** A multi-profile
   box's `freehold exec` silently hits whichever profile's runner owns the port
   (fresh-074's stole every other profile's execs for an hour, with misleading
