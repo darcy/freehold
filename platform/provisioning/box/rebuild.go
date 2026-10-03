@@ -446,6 +446,16 @@ func (e *Engine) RunBootstrap() error {
 			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
 		}
 	}
+	// The interactive answer lands in e.F AFTER writeInitialConfig (step 6)
+	// snapshotted the config, and the guest births below key on the DISK
+	// config's Gateway — re-merge + save so the on-disk world IS gateway-aware
+	// before anything boots (the headless path's flags were already merged at
+	// step 6; this is a cheap idempotent re-run for both).
+	if e.F.GatewayCIDR != "" {
+		if err := e.writeInitialConfig(); err != nil {
+			return err
+		}
+	}
 	if e.F.GatewayVlan < 0 {
 		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
 	}
@@ -1744,18 +1754,13 @@ func prefixBits(cidr string) int {
 // the proxy node (--proxy-ip, or the recorded cfg.Proxy.Ip riding again);
 // relay + cp are STATIC when --relay-ip / --cp-ip are supplied (running them
 // OFF DHCP avoids exhausting a small LAN DHCP pool), else DHCP behind the
-// proxy. Behind a gateway (cfg.Gateway set) every guest is STATIC on the
-// internal subnet — no DHCP exists there — at its deterministic InternalIPFor
-// address; the flags' explicit values still win.
+// proxy. Behind a gateway (cfg.Gateway set) the DERIVATION is the single
+// source of truth — every guest (and the gateway's nftables ruleset, the
+// coords, and the CP build's worldGateway) renders from InternalIPFor; the
+// explicit flags apply only in the flat-LAN world.
 func bootstrapStaticIP(role string, f Flags, cfg *config.Config) string {
-	gwMode := cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != ""
-	if gwMode {
-		cidr := *cfg.Gateway.Cidr
-		explicit := map[string]string{"cp": f.CpIP, "relay": f.RelayIP}
-		if ip, ok := explicit[role]; ok && ip != "" {
-			return ip
-		}
-		return config.InternalIPFor(cidr, role)
+	if cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
+		return config.InternalIPFor(*cfg.Gateway.Cidr, role)
 	}
 	switch role {
 	case "cp":
