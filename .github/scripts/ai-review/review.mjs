@@ -6,7 +6,15 @@ import { createInterface } from 'readline';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { parseReviewFromEvents, harnessTextParts } from './parse.mjs';
-import { buildReviewReplies, buildThreadIndex } from './threads.mjs';
+import {
+  buildReviewReplies,
+  botFindingRoots,
+  buildOpenThreads,
+  openThreadsPrompt,
+  classifyFindings,
+  renderFindingsTable,
+  renderResolved,
+} from './threads.mjs';
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 // HARNESS_API_KEY/HARNESS_MODEL take precedence over the legacy single-shot
@@ -405,46 +413,51 @@ async function updateParentComment(body) {
   await octokit.rest.issues.updateComment({ owner, repo, comment_id: parentCommentId, body });
 }
 
-// Resolve prior review-comment threads whose finding is no longer flagged this
-// round (the finding was fixed). GraphQL-only; the token is sent explicitly.
-async function resolveFixedThreads(fixedComments) {
-  if (!fixedComments.length) return 0;
-  const gh = (query, variables) => fetch('https://api.github.com/graphql', {
+// GraphQL-only review-thread state (REST cannot see thread resolution). Maps
+// every thread-root comment id to { threadId, isResolved }; null when the
+// query fails — callers then treat every tagged root as still open (the
+// conservative side: nothing gets resolved, open threads stay listed).
+async function graphql(query, variables) {
+  const r = await fetch('https://api.github.com/graphql', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `token ${GITHUB_TOKEN}` },
     body: JSON.stringify({ query, variables }),
-  }).then(async (r) => {
-    const body = await r.json();
-    if (!r.ok || body.errors) throw new Error(JSON.stringify(body.errors || body));
-    return body.data;
   });
-  let data;
+  const body = await r.json();
+  if (!r.ok || body.errors) throw new Error(JSON.stringify(body.errors || body));
+  return body.data;
+}
+
+async function fetchThreadState() {
   try {
-    data = await gh(`query($owner:String!,$repo:String!,$pr:Int!){
-      repository(owner:$owner,name:$repo){ pullRequest(number:$pr){ reviewThreads(first:50){ nodes {
+    const data = await graphql(`query($owner:String!,$repo:String!,$pr:Int!){
+      repository(owner:$owner,name:$repo){ pullRequest(number:$pr){ reviewThreads(first:100){ nodes {
         id isResolved comments(first:20){ nodes { id databaseId } }
       } } } } }`, { owner, repo, pr: pull_number });
+    const map = new Map();
+    for (const t of data.repository.pullRequest.reviewThreads.nodes) {
+      for (const c of t.comments.nodes) map.set(c.databaseId, { threadId: t.id, isResolved: t.isResolved });
+    }
+    return map;
   } catch (e) {
     core.warning(`Could not read review threads: ${e.message}`);
-    return 0;
+    return null;
   }
-  const commentToThread = new Map();
-  for (const t of data.repository.pullRequest.reviewThreads.nodes) {
-    if (t.isResolved) continue;
-    for (const c of t.comments.nodes) commentToThread.set(c.databaseId, t.id);
-  }
-  let resolved = 0;
-  for (const c of fixedComments) {
-    const threadId = commentToThread.get(c.id);
-    if (!threadId) continue;
+}
+
+// Resolve the given { threadId } entries; returns the ones that resolved (so
+// the round's "Resolved this round" list only shows what actually closed).
+async function resolveThreads(entries) {
+  const done = [];
+  for (const entry of entries) {
     try {
-      await gh(`mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread { id } } }`, { threadId });
-      resolved += 1;
+      await graphql(`mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread { id } } }`, { threadId: entry.threadId });
+      done.push(entry);
     } catch (e) {
-      core.warning(`Could not resolve comment ${c.id}: ${e.message}`);
+      core.warning(`Could not resolve thread ${entry.threadId}: ${e.message}`);
     }
   }
-  return resolved;
+  return done;
 }
 
 const PROGRESS_ITEMS = [
@@ -501,12 +514,23 @@ async function main() {
   const previousRound = await getPreviousRoundNotes();
 
   // Fetch the PR's review comments once: the author's replies feed the prompt,
-  // the thread index lets a re-flagged finding be answered in-thread, and the
-  // re-flag/fixed/resolve logic below reuses the same list.
+  // the open-thread set drives classification/resolution, and the re-flag
+  // replies below reuse the same list.
   const bot = await getBotLogin();
   const existingComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number, per_page: 100 });
   const reviewReplies = buildReviewReplies(existingComments, { bot, author: pr.user.login });
-  const threadIndex = buildThreadIndex(existingComments, { bot, author: pr.user.login });
+
+  // The bot's still-open prior threads: severity-tagged roots that GraphQL does
+  // NOT mark resolved. These are what the model may re-flag, and what counts as
+  // "fixed this round" when the model drops them. Without thread state (query
+  // failed) every tagged root counts as open — resolve nothing, list everything.
+  const threadState = await fetchThreadState();
+  const openRoots = botFindingRoots(existingComments, { bot })
+    .filter((c) => {
+      const st = threadState?.get(c.id);
+      return !st || !st.isResolved;
+    });
+  const openThreads = buildOpenThreads(openRoots);
 
   // Create the progress comment up front so the checkboxes light up as work
   // happens, rather than appearing fully-formed at the end. The dismissal
@@ -559,59 +583,44 @@ async function main() {
     .replace('{{REPO}}', () => `${owner}/${repo}`)
     .replace('{{PR_NUMBER}}', () => String(pull_number))
     .replace('{{PREVIOUS_ROUND}}', () => previousRound)
+    .replace('{{OPEN_THREADS}}', () => openThreadsPrompt(openThreads))
     .replace('{{REVIEW_REPLIES}}', () => reviewReplies)
     .replace('{{CONTEXT_FILES}}', () => ctx.text)
     .replace('{{DIFF}}', () => diff);
 
   const result = await runHarness(prompt);
 
-  // The harness explores iteratively by nature (it reads the repo rather than
-  // answering from one prompt), so there is no follow-up machinery: whatever
-  // it reports in `inline` is the round's finding set.
-  const inline = Array.isArray(result.inline) ? result.inline : [];
+  // result.inline is the round's finding set, normalized by the parser
+  // (severity coerced, junk entries dropped). Classification: an exact
+  // location hit on an open thread is a re-flag regardless of the model's
+  // prior flag; the prior flag catches line drift; everything else is fresh.
+  const inline = result.inline;
   await progress(4, `Reviewed — ${result.verdict}${inline.length ? ` · ${inline.length} finding(s)` : ''}`);
 
-  // Distinguish NEW findings (post as child inline comments) from RE-FLAGGED
-  // findings (already commented in a prior round). GitHub rewrites a prior
-  // comment's `commit_id` to the current head when its line persists, so
-  // matching on `commit_id === headSha` reliably detects prior-round re-flags.
-  // Key on both `line` and `original_line` (like buildThreadIndex) so a finding
-  // whose line shifted is still recognised as a re-flag, not posted anew.
-  // Thread roots only — replies share path:line and would confuse the match.
-  const roots = existingComments.filter(c => !c.in_reply_to_id);
-  const locKeys = (c) => [c.line, c.original_line]
-    .filter(line => typeof line === 'number')
-    .map(line => `${c.path}:${line}`);
-  const seen = new Set(roots.filter(c => c.commit_id === headSha).flatMap(locKeys));
-  const priorSeverity = new Map();
-  for (const c of roots) {
-    const m = c.body?.match(/\[(blocking|important)\]/) || [];
-    if (m[1]) for (const k of locKeys(c)) priorSeverity.set(k, m[1]);
-  }
-  const newInline = [];
-  const reflagged = [];
-  for (const c of inline) {
-    if (seen.has(`${c.path}:${c.line}`)) reflagged.push(c);
-    else newInline.push(c);
-  }
+  const { fresh, reflagged } = classifyFindings(inline, openThreads);
 
-  // Prior blocking/important comments whose finding is no longer flagged this
-  // round are treated as fixed — resolve their threads (GraphQL-only). Only the
-  // bot's own threads are resolved (never a human reviewer's), and this is what
-  // resolves a thread when the author's reply clarified the finding away and
-  // the model dropped it.
-  const currentFindings = new Set(inline.map(c => `${c.path}:${c.line}`));
-  const fixedComments = roots.filter(c =>
-    bot && c.user?.login === bot &&
-    /\[(blocking|important)\]/.test(c.body || '') &&
-    !locKeys(c).some(k => currentFindings.has(k))
-  );
-  const resolvedCount = await resolveFixedThreads(fixedComments);
+  // Threads still open but no longer flagged this round are fixed — resolve
+  // them (GraphQL-only). Only the bot's own open threads are candidates, and
+  // only those the thread state proves are unresolved: without the bot's
+  // identity the roots can't be provenance-checked, so nothing resolves (a
+  // human reviewer's tagged thread must never be auto-resolved by the bot).
+  const attachedRootIds = new Set(reflagged.map(c => c.thread.rootId));
+  const fixedRoots = openRoots.filter(c => !attachedRootIds.has(c.id));
+  const resolveEntries = bot && threadState
+    ? fixedRoots.flatMap((c) => {
+        const st = threadState.get(c.id);
+        return st && !st.isResolved ? [{ threadId: st.threadId, root: c }] : [];
+      })
+    : [];
+  const resolved = await resolveThreads(resolveEntries);
+  const resolvedThreads = buildOpenThreads(resolved.map(e => e.root));
 
-  // Post each NEW finding as its own review comment (thread) so every finding
-  // shows up as a separate inline comment and a single bad/hallucinated line
-  // 422s only that one, not the whole batch. Track how many actually posted.
+  // Post each NEW blocking/important finding as its own review comment (thread)
+  // so every finding shows up as a separate inline comment and a single
+  // bad/hallucinated line 422s only that one, not the whole batch. Suggestions
+  // never become threads — they render in the parent table only.
   let postedInline = 0;
+  const newInline = fresh.filter(c => c.severity !== 'suggestion');
   if (newInline.length > 0) {
     for (const c of newInline) {
       try {
@@ -627,54 +636,54 @@ async function main() {
     }
   }
 
-  // A re-flagged finding whose thread the author replied to is answered
-  // in-thread (the finding's `comment` is written as a direct response). With
-  // no author reply there is nothing to answer, so it is only re-captured in
-  // the parent summary — no self-reply.
-  const repliedKeys = new Set();
+  // Every re-flagged finding is answered on its existing thread — a persistent
+  // finding keeps ONE discussion instead of growing a duplicate thread per
+  // round (the path:line shift used to re-post it as new).
+  let postedReplies = 0;
   for (const c of reflagged) {
-    const target = threadIndex.get(`${c.path}:${c.line}`);
     // Unknown bot identity → never reply on a thread we can't prove is ours.
-    if (!bot || !target?.hasAuthorReply) continue;
+    if (!bot) continue;
     try {
       await octokit.rest.pulls.createReplyForReviewComment({
         owner, repo, pull_number,
-        comment_id: target.rootId,
+        comment_id: c.thread.rootId,
         body: `**[${c.severity}]** ${c.comment}`,
       });
-      repliedKeys.add(`${c.path}:${c.line}`);
+      postedReplies += 1;
     } catch (e) {
       core.warning(`Thread reply on ${c.path}:${c.line} failed: ${e.message}`);
     }
   }
-  const postedReplies = repliedKeys.size;
 
-  await progress(5, `Posted ${postedInline} inline comment(s)` + (postedReplies ? ` · replied in ${postedReplies} thread(s)` : '') + (resolvedCount ? ` · resolved ${resolvedCount} prior thread(s)` : ''));
+  await progress(5, `Posted ${postedInline} inline comment(s)` + (postedReplies ? ` · replied in ${postedReplies} thread(s)` : '') + (resolved.length ? ` · resolved ${resolved.length} prior thread(s)` : ''));
 
-  const legend = 'Severity: **blocking** = must fix before merge · **important** = should fix in this PR · unlisted items were deferred or omitted as nits.';
-  const loc = (c) => `\`${c.path}${typeof c.line === 'number' ? `:${c.line}` : ''}\``;
-  const findingsLines = [
-    ...newInline.map(c => `- [NEW] **${c.severity}** — ${loc(c)} — ${c.comment} — inline comment posted`),
-    ...reflagged.map(c => {
-      const prior = priorSeverity.get(`${c.path}:${c.line}`);
-      const drift = prior && prior !== c.severity ? ` (prior round: ${prior})` : '';
-      const how = repliedKeys.has(`${c.path}:${c.line}`)
-        ? 'replied in-thread to the author'
-        : 're-flagged from a prior round; not re-posted inline';
-      return `- [prior round] **${c.severity}**${drift} — ${loc(c)} — ${c.comment} — ${how}`;
-    }),
-  ];
-  const summaryText = [
-    `### Bot Review — round update`,
-    result.summary || '',
-    result.readme_note ? `**README:** ${result.readme_note}` : '',
-    result.architecture_note ? `**ARCHITECTURE:** ${result.architecture_note}` : '',
-    `**Findings:** ${newInline.length} new · ${reflagged.length} re-flagged from prior rounds`,
-    ...(findingsLines.length ? findingsLines : ['(no findings this round)']),
-    ...(resolvedCount ? [`**Resolved:** ${resolvedCount} prior finding(s) — ${fixedComments.map(c => loc(c)).join(', ')}`] : []),
-    legend,
-    `**${result.verdict || 'NEEDS WORK: could not determine verdict'}**`,
-  ].filter(Boolean).join('\n\n');
+  // Permalinks for this round's freshly posted comments: anything with an id
+  // above the pre-round max is ours (commit_id is unreliable — GitHub rewrites
+  // it when a line persists). Re-flagged rows link their thread root instead.
+  const maxPriorId = existingComments.reduce((m, c) => Math.max(m, c.id), 0);
+  const discussionUrls = new Map();
+  for (const c of await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number, per_page: 100 })) {
+    if (c.id > maxPriorId) discussionUrls.set(`${c.path}:${c.line}`, c.id);
+  }
+
+  // The verdict line: word from the model (fail closed — an unparseable verdict
+  // can never read MERGE-READY), counts computed from the round's actual
+  // findings, never trusted from model text.
+  const blockingCount = inline.filter(c => c.severity === 'blocking').length;
+  const importantCount = inline.filter(c => c.severity === 'important').length;
+  const suggestionCount = inline.filter(c => c.severity === 'suggestion').length;
+  const mergeReady = /^merge-ready\b/i.test(result.verdict || '') && blockingCount + importantCount === 0;
+  const verdictLine = mergeReady ? 'MERGE-READY' : `NEEDS WORK — ${blockingCount} blocking, ${importantCount} important`;
+
+  const freshBI = newInline.length;
+  const findingsLine = `**Findings:** ${freshBI} new · ${reflagged.length} re-flagged` +
+    (suggestionCount ? ` · ${suggestionCount} suggestion${suggestionCount === 1 ? '' : 's'}` : '');
+  const tableRows = renderFindingsTable([...reflagged, ...fresh], {
+    owner, repo, prNumber: pull_number, headSha, discussionUrls,
+  });
+  const table = tableRows.length
+    ? ['| | Severity | Location | Finding |', '|---|----------|----------|---------|', ...tableRows].join('\n')
+    : '(no findings this round)';
 
   const elapsed = Math.round((Date.now() - startedAt) / 1000);
   const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
@@ -682,22 +691,23 @@ async function main() {
     TRACKING_MARKER,
     `**Bot Review finished @${pr.user.login}'s task in ${elapsed}s** — [View job](${runUrl})`,
     `---`,
-    `### Review complete`,
-    ...PROGRESS_ITEMS.map(p => `- [x] ${p}`),
-    `---`,
-    summaryText,
-  ].join('\n');
+    `### Verdict: **${verdictLine}**`,
+    result.summary || '',
+    findingsLine,
+    table,
+    ...renderResolved(resolvedThreads, { owner, repo, prNumber: pull_number }),
+    `🛑 must fix · ⚠️ should fix · 💡 suggestion · ✅ resolved`,
+  ].filter(Boolean).join('\n\n');
   await updateParentComment(finalBody);
 
-  core.info(`Posted ${newInline.length} inline comment(s). Verdict: ${result.verdict}`);
+  core.info(`Posted ${postedInline} inline comment(s). Verdict: ${verdictLine}`);
 
   // Reflect the verdict as a real PR review state rather than a red check:
-  // APPROVE when clean, REQUEST_CHANGES when blocking/important findings
-  // remain. A later round's review supersedes the previous one (so a fixed PR
-  // flips to APPROVE); the operator's override is dismissing the review.
-  // Require a positive MERGE-READY signal — "not NEEDS WORK" would fail open on
-  // an unexpected verdict.
-  const clean = inline.length === 0 && /^MERGE-READY\b/i.test(result.verdict || '');
+  // APPROVE only on a positive MERGE-READY signal AND zero blocking/important
+  // findings (suggestions never block); REQUEST_CHANGES otherwise. A later
+  // round's review supersedes the previous one; the operator's override is
+  // dismissing the review.
+  const clean = mergeReady;
   // A PR author can't approve/request changes on their own PR; fall back to
   // COMMENT so the verdict still lands on PRs opened by the bot account.
   let event = clean ? 'APPROVE' : 'REQUEST_CHANGES';
@@ -707,10 +717,9 @@ async function main() {
     await octokit.rest.pulls.createReview({
       owner, repo, pull_number,
       event,
-      // Empty body is allowed for APPROVE; REQUEST_CHANGES/COMMENT require a
-      // non-empty one — send just the one-line verdict, since the detail already
-      // lives in the parent comment and the inline findings.
-      body: event === 'APPROVE' ? undefined : (result.verdict || 'NEEDS WORK: see the findings above'),
+      // One-line verdict — the detail lives in the parent comment and the
+      // inline findings.
+      body: `${verdictLine} — details in the Bot Review comment`,
     });
     core.info(`Submitted ${event} review.`);
   } catch (e) {

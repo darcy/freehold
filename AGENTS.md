@@ -49,7 +49,7 @@ task is resumable without re-deriving where it stopped.
   `bot-review` check) — and only then open the findings:
   `gh pr view <n> --json comments` (or `gh api repos/<owner>/<repo>/pulls/<n>/comments`)
   with a timestamp cursor, and fix what's real. Addressing comments mid-review wastes
-  a round and risks editing files the review hasn't seen yet; `DEFER` items belong
+  a round and risks editing files the review hasn't seen yet; 💡 SUGGESTION items belong
   in the PR body or the `Known gaps` section below, not in re-review rounds.
 - **Commit and push; never merge.** Merging is the operator's call — do it only
   when the operator explicitly says "merge when complete" (or equivalent). Until
