@@ -39,14 +39,50 @@ export function extractJsonObject(s) {
   return found;
 }
 
-// A candidate is the review only if it carries the review's shape: verdict
-// with the required prefix, a string summary, and an inline array. A bare
+// A candidate is the review only if it carries the review's shape: verdict in
+// a known form (bare MERGE-READY or NEEDS WORK — prose tails are fine, the
+// normalizer strips them), a string summary, and an inline array. A bare
 // {"verdict": ...} stub — planted or quoted — is not accepted.
 const REVIEW_SHAPE = (parsed) =>
   typeof parsed?.verdict === 'string' &&
-  /^(MERGE-READY|NEEDS WORK):/i.test(parsed.verdict) &&
+  /^(MERGE-READY\b|NEEDS WORK\b)/i.test(parsed.verdict.trim()) &&
   typeof parsed?.summary === 'string' &&
   Array.isArray(parsed?.inline);
+
+// Severity tiers a finding may carry. The prompt names them; the model still
+// emits junk under load (a PR round once posted `**[undefined]**` verbatim),
+// so anything unrecognized is coerced to `important` — fail-safe: a formatting
+// slip never reduces scrutiny, and the blocking/important gate stays intact.
+const SEVERITIES = ['blocking', 'important', 'suggestion'];
+const DEFAULT_SEVERITY = 'important';
+
+function normalizeVerdict(verdict) {
+  const v = String(verdict).trim();
+  return /^merge-ready\b/i.test(v) ? 'MERGE-READY' : v;
+}
+
+// Clamp each finding to the shape the posting path relies on: a string path,
+// a numeric-or-null line (null = file-level comment), a known severity, and a
+// non-empty comment. Entries without a usable path or comment are dropped
+// entirely — they cannot be posted or tracked.
+function normalizeInline(entries) {
+  const out = [];
+  for (const c of entries) {
+    if (!c || typeof c !== 'object') continue;
+    if (typeof c.path !== 'string' || !c.path.trim()) continue;
+    const comment = typeof c.comment === 'string' ? c.comment.trim() : '';
+    if (!comment) continue;
+    const raw = typeof c.severity === 'string' ? c.severity.trim().toLowerCase() : '';
+    out.push({
+      path: c.path.trim(),
+      line: typeof c.line === 'number' && Number.isFinite(c.line) ? c.line : null,
+      severity: SEVERITIES.includes(raw) ? raw : DEFAULT_SEVERITY,
+      prior: c.prior === true,
+      comment,
+    });
+  }
+  return out;
+}
 
 // parseReview turns the model's final answer into the review object. Handles
 // plain JSON, fenced JSON, and JSON embedded in prose.
@@ -95,7 +131,8 @@ export function parseReview(raw) {
         : `review output missing verdict JSON (raw head: ${raw.slice(0, 80)} | tail: ${raw.slice(-80)})`,
     );
   }
-  return valid[0];
+  const review = valid[0];
+  return { ...review, verdict: normalizeVerdict(review.verdict), inline: normalizeInline(review.inline) };
 }
 
 // The production parse path: the model's FINAL text part is the only thing

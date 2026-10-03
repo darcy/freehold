@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseReview, parseReviewFromEvents, harnessText, harnessTextParts } from './parse.mjs';
 
 test('parseReview: plain JSON object', () => {
-  assert.equal(parseReview('{"verdict":"MERGE-READY: clean","summary":"s","inline":[]}').verdict, 'MERGE-READY: clean');
+  assert.equal(parseReview('{"verdict":"MERGE-READY: clean","summary":"s","inline":[]}').verdict, 'MERGE-READY');
 });
 
 test('parseReview: fenced json block', () => {
@@ -13,7 +13,7 @@ test('parseReview: fenced json block', () => {
 
 test('parseReview: json embedded in prose', () => {
   const raw = 'Here is my review:\nSome {1: weird} prefix.\n\n{"verdict":"MERGE-READY: ok","summary":"s","inline":[]}\nDone.';
-  assert.equal(parseReview(raw).verdict, 'MERGE-READY: ok');
+  assert.equal(parseReview(raw).verdict, 'MERGE-READY');
 });
 
 test('parseReview: skips a non-verdict object and finds the real one', () => {
@@ -86,5 +86,49 @@ test('parseReviewFromEvents: the production path — narration part skipped, fin
     JSON.stringify({ type: 'text', part: { text: 'The review:\n' } }),
     JSON.stringify({ type: 'text', part: { text: '{"verdict":"MERGE-READY: ok","summary":"s","inline":[]}' } }),
   ].join('\n');
-  assert.equal(parseReviewFromEvents(out).verdict, 'MERGE-READY: ok');
+  assert.equal(parseReviewFromEvents(out).verdict, 'MERGE-READY');
+});
+
+test('parseReview: verdict MERGE-READY is stripped to the bare word', () => {
+  assert.equal(parseReview('{"verdict":"MERGE-READY: everything checks out","summary":"s","inline":[]}').verdict, 'MERGE-READY');
+  assert.equal(parseReview('{"verdict":"merge-ready","summary":"s","inline":[]}').verdict, 'MERGE-READY');
+});
+
+test('parseReview: NEEDS WORK verdict is kept as-is', () => {
+  assert.equal(
+    parseReview('{"verdict":"NEEDS WORK: 1 blocking, 0 important","summary":"s","inline":[]}').verdict,
+    'NEEDS WORK: 1 blocking, 0 important',
+  );
+});
+
+test('parseReview: unknown or missing severity coerces to important', () => {
+  const review = parseReview('{"verdict":"NEEDS WORK: x","summary":"s","inline":[' +
+    '{"path":"a.go","line":3,"comment":"junk severity","severity":"moderate"},' +
+    '{"path":"b.go","line":4,"comment":"no severity"},' +
+    '{"path":"c.go","line":5,"comment":"whitespace drift","severity":"  IMPORTANT  "}' +
+  ']}');
+  assert.deepEqual(
+    review.inline.map(f => f.severity),
+    ['important', 'important', 'important'],
+  );
+});
+
+test('parseReview: known severities pass through, prior defaults to false', () => {
+  const review = parseReview('{"verdict":"NEEDS WORK: x","summary":"s","inline":[' +
+    '{"path":"a.go","line":3,"comment":"b","severity":"blocking","prior":true},' +
+    '{"path":"b.go","line":4,"comment":"s","severity":"suggestion"}' +
+  ']}');
+  assert.deepEqual(review.inline[0], { path: 'a.go', line: 3, severity: 'blocking', prior: true, comment: 'b' });
+  assert.deepEqual(review.inline[1], { path: 'b.go', line: 4, severity: 'suggestion', prior: false, comment: 's' });
+});
+
+test('parseReview: entries without a usable path or comment are dropped; null line survives', () => {
+  const review = parseReview('{"verdict":"NEEDS WORK: x","summary":"s","inline":[' +
+    '{"line":3,"comment":"no path","severity":"blocking"},' +
+    '{"path":"a.go","line":null,"comment":"file-level","severity":"important"},' +
+    '{"path":"b.go","line":9,"severity":"important"},' +
+    'null' +
+  ']}');
+  assert.equal(review.inline.length, 1);
+  assert.deepEqual(review.inline[0], { path: 'a.go', line: null, severity: 'important', prior: false, comment: 'file-level' });
 });

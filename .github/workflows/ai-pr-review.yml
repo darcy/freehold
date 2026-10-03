@@ -18,6 +18,16 @@ on:
   pull_request_target:
     types: [opened, synchronize, ready_for_review, reopened, review_requested]
 
+concurrency:
+  # One review per PR at a time, latest event wins: overlapping runs each post
+  # their own verdict review (and a run's dismissal step executes before the
+  # other run has posted, so two contradictory APPROVED/REQUEST_CHANGES can
+  # coexist). Multiple events fire for a single push, and back-to-back pushes
+  # overlap runs (each takes ~5 min) — without this group the PR can end on an
+  # approval posted right under a NEEDS WORK summary from the same head.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
