@@ -601,10 +601,12 @@ async function main() {
 
   // Threads still open but no longer flagged this round are fixed — resolve
   // them (GraphQL-only). Only the bot's own open threads are candidates, and
-  // only those the thread state proves are unresolved.
+  // only those the thread state proves are unresolved: without the bot's
+  // identity the roots can't be provenance-checked, so nothing resolves (a
+  // human reviewer's tagged thread must never be auto-resolved by the bot).
   const attachedRootIds = new Set(reflagged.map(c => c.thread.rootId));
   const fixedRoots = openRoots.filter(c => !attachedRootIds.has(c.id));
-  const resolveEntries = threadState
+  const resolveEntries = bot && threadState
     ? fixedRoots.flatMap((c) => {
         const st = threadState.get(c.id);
         return st && !st.isResolved ? [{ threadId: st.threadId, root: c }] : [];
