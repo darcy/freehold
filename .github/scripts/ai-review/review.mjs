@@ -10,6 +10,7 @@ import {
   buildReviewReplies,
   botFindingRoots,
   buildOpenThreads,
+  stillOpen,
   openThreadsPrompt,
   classifyFindings,
   renderFindingsTable,
@@ -525,11 +526,7 @@ async function main() {
   // "fixed this round" when the model drops them. Without thread state (query
   // failed) every tagged root counts as open — resolve nothing, list everything.
   const threadState = await fetchThreadState();
-  const openRoots = botFindingRoots(existingComments, { bot })
-    .filter((c) => {
-      const st = threadState?.get(c.id);
-      return !st || !st.isResolved;
-    });
+  const openRoots = stillOpen(botFindingRoots(existingComments, { bot }), threadState);
   const openThreads = buildOpenThreads(openRoots);
 
   // Create the progress comment up front so the checkboxes light up as work

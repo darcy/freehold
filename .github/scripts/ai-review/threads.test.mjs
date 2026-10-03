@@ -4,6 +4,7 @@ import {
   buildReviewReplies,
   botFindingRoots,
   buildOpenThreads,
+  stillOpen,
   openThreadsPrompt,
   classifyFindings,
   renderFindingsTable,
@@ -125,4 +126,18 @@ test('renderResolved: ✅ bullets under a count header, empty when nothing resol
   assert.equal(out[0], '**Resolved this round: 1**');
   assert.match(out[1], /^- ✅ `a\.mjs:10` — boom — \[thread\]\(https:\/\/github\.com\/o\/r\/pull\/7#discussion_r1\)/);
   assert.deepEqual(renderResolved([], LINKS), []);
+});
+
+test('stillOpen: drops roots proven resolved, keeps the rest, keeps everything without state', () => {
+  const roots = [
+    { id: 1, path: 'a.mjs', line: 1, body: '**[important]** x', user: { login: BOT } },
+    { id: 2, path: 'b.mjs', line: 2, body: '**[important]** y', user: { login: BOT } },
+    { id: 3, path: 'c.mjs', line: 3, body: '**[important]** z', user: { login: BOT } },
+  ];
+  const state = new Map([
+    [1, { threadId: 'T1', isResolved: true }],
+    [2, { threadId: 'T2', isResolved: false }],
+  ]);
+  assert.deepEqual(stillOpen(roots, state).map(r => r.id), [2, 3]);
+  assert.deepEqual(stillOpen(roots, null).map(r => r.id), [1, 2, 3]);
 });

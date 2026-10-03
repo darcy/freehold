@@ -50,6 +50,19 @@ export function botFindingRoots(comments, { bot } = {}) {
   );
 }
 
+// The bot's still-open finding roots: severity-tagged roots the thread state
+// does NOT prove resolved. Without state (GraphQL failed), every tagged root
+// counts as open — the conservative side: nothing resolves, everything stays
+// listed. This filter is also what keeps the "Resolved this round" list from
+// repeating: a thread closed in an earlier round is proven resolved here and
+// can never be resolved (or re-listed) again.
+export function stillOpen(roots, threadState) {
+  return roots.filter((c) => {
+    const st = threadState?.get(c.id);
+    return !st || !st.isResolved;
+  });
+}
+
 // Still-open prior findings as plain objects: what the prompt lists and what
 // classification matches against. title is the first body line minus the tag.
 export function buildOpenThreads(openRoots) {
