@@ -114,12 +114,10 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 
 	// Restart the co-located runner so the new binary takes effect. Its
 	// identity + sealed secrets are untouched: the unit re-reads them from its
-	// own dir. No adoption, no substrate rotation.
+	// own dir. No adoption, no substrate rotation. A REAL unit file (not a
+	// transient): the restart rewrites it + restarts it.
 	if restartRunner {
-		startRunner := fmt.Sprintf(
-			"systemctl reset-failed freehold-runner 2>/dev/null; systemd-run --unit=freehold-runner --collect %s/freehold-runner serve --state-dir %s >/dev/null 2>&1; sleep 2; systemctl is-active freehold-runner",
-			spec.BinDir, spec.runnerDir())
-		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, startRunner), "start co-located runner", 60); err != nil {
+		if err := startRunnerUnit(t, spec, spec.runnerDir()); err != nil {
 			return err
 		}
 	}
@@ -254,11 +252,14 @@ func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArg
 		b.WriteString("echo 'warning: no running console serve captured — the deploy-time script is the source' >&2; exit 1\n")
 	}
 	for _, line := range doorArgvs {
-		unit, argv, ok := strings.Cut(line, " ")
-		if !ok || !strings.HasPrefix(argv, "/") {
+		// The doors' units are REAL FILES now (Restart=on-failure, enabled —
+		// the boot re-runs them): the script only needs the START, not the
+		// argv. The captured line's first field = the unit name.
+		unit, _, ok := strings.Cut(line, " ")
+		if !ok {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("systemd-run --unit=%s --collect %s >/dev/null 2>&1\n", unit, argv))
+		b.WriteString(fmt.Sprintf("systemctl start %s 2>/dev/null || true\n", unit))
 	}
 	if strings.TrimSpace(atArgv) != "" {
 		at := agentToolsStateDir(spec)

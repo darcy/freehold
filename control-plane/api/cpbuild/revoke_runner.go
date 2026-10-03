@@ -605,7 +605,12 @@ func credentialOutcome(pkgDir string) revokeOutcome {
 // no report. When it IS in play it gets its own leg, so the stop is visible.
 func unitOutcomes(name string, port int, legacyUnit string) []revokeOutcome {
 	unit := "freehold-runner-" + name
-	script := fmt.Sprintf("systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; true", unit, unit)
+	// The units are REAL FILES now (Restart=on-failure, enabled — see
+	// startCapabilityRunner): a bare stop would leave the unit enabled, and
+	// the next CP-guest boot would resurrect a door the flow just retired.
+	// The close-out = the same advice the report gives a box-hosted door:
+	// disable --now, remove the file, reload.
+	script := fmt.Sprintf("systemctl disable --now %s 2>/dev/null; rm -f /etc/systemd/system/%s.service; systemctl daemon-reload; systemctl reset-failed %s 2>/dev/null; true", unit, unit, unit)
 	stopOut, _ := exec.Command("sh", "-c", script).CombinedOutput()
 	// systemd releases the transient unit's cgroup synchronously, so a short settle
 	// is the whole grace the probe needs: longer than that is a real residue.

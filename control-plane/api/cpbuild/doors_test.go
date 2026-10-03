@@ -141,3 +141,35 @@ func TestCPACarriesGrantingSkill(t *testing.T) {
 		}
 	}
 }
+
+// TestDoorUnitShapePinsResilience: the doors' staged units are REAL files —
+// Restart=on-failure + enabled (a crash or a guest reboot returns; a
+// --collect transient removed the unit on the first crash and the door's
+// port went dark with no reaper).
+func TestDoorUnitShapePinsResilience(t *testing.T) {
+	s := doorUnitText("freehold capability runner cp-local-root", "cp-local-root",
+		"/srv/data/cp/bin/freehold-runner", "--state-dir /x --addr 0.0.0.0:8797")
+	for _, want := range []string{"Restart=on-failure", "RestartSec=5", "WantedBy=multi-user.target", "ExecStart=/srv/data/cp/bin/freehold-runner serve --state-dir /x --addr 0.0.0.0:8797"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("door unit missing %q\n---\n%s", want, s)
+		}
+	}
+}
+
+// TestRetireScriptClosesUnits: the build's rename-retire must close out the
+// now-real unit files the way revoke_runner's retire does — disable --now +
+// file removal + reload — not just stop them (an enabled unit file survives
+// the stop and resurrects the runner at the next CP-guest boot).
+func TestRetireScriptClosesUnits(t *testing.T) {
+	script := retireUnitsScript("data-pve")
+	for _, want := range []string{
+		"systemctl disable --now freehold-runner-data-pve",
+		"rm -f /etc/systemd/system/freehold-runner-data-pve.service /etc/systemd/system/freehold-runner-data.service",
+		"systemctl daemon-reload",
+		"systemctl reset-failed freehold-runner-data-pve",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("retire script missing %q\n---\n%s", want, script)
+		}
+	}
+}

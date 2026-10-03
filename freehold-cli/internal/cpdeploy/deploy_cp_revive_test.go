@@ -25,8 +25,8 @@ func TestReviveScript(t *testing.T) {
 		bin + "/freehold-console serve --state-dir " + state + " --addr " + bind,
 		"for i in $(seq 1 15)",
 		"curl -fsS -m 3 http://" + bind + "/healthz",
-		"systemd-run --unit=freehold-runner --collect " + bin + "/freehold-runner serve --state-dir " + state + "/runner/proxmox-box",
-		"systemd-run --unit=freehold-runner-cp-local-root --collect /srv/data/cp/bin/freehold-runner serve",
+		"systemctl start freehold-runner 2>/dev/null || true",
+		"systemctl start freehold-runner-cp-local-root 2>/dev/null || true",
 		"setsid nohup /x/freehold-agent-tools serve --state-dir /srv/data/cp/agent-tools",
 	} {
 		if !strings.Contains(s, want) {
@@ -52,7 +52,7 @@ func TestReviveScript(t *testing.T) {
 	for _, want := range []string{
 		"setsid nohup " + bin + "/freehold-console serve",
 		"curl -fsS -m 3 http://127.0.0.1:8080/healthz",
-		"systemd-run --unit=freehold-runner-cp-local-root.service --collect /srv/data/cp/bin/freehold-runner serve",
+		"systemctl start freehold-runner-cp-local-root.service 2>/dev/null || true",
 		"setsid nohup /srv/data/cp/bin/freehold-agent-tools serve",
 	} {
 		if !strings.Contains(s, want) {
@@ -62,3 +62,19 @@ func TestReviveScript(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestRunnerUnitFilePinsResilience: the runner's unit is a REAL file —
+// Restart=on-failure (a crash returns) + WantedBy=multi-user (enabled = a
+// guest reboot returns). A transient (--collect) removed the unit on the
+// first crash and the world's control path went dark with /healthz green.
+func TestRunnerUnitFilePinsResilience(t *testing.T) {
+	s := runnerUnitFile("freehold co-located runner", "/srv/data/cp/bin/freehold-runner serve --state-dir /x")
+	for _, want := range []string{"Restart=on-failure", "RestartSec=5", "WantedBy=multi-user.target", "ExecStart=/srv/data/cp/bin/freehold-runner serve --state-dir /x"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("runner unit missing %q\n---\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "--collect") {
+		t.Fatalf("runner unit must not be a transient:\n%s", s)
+	}
+}
