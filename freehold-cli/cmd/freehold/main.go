@@ -44,6 +44,8 @@ CLI:
                        "snapshot rollback" — guests stop, newer snapshots go)
     freehold export    the durable plane's data + profile config into one
                        gzip bundle (du estimate first, confirm; no rootfs)
+    freehold backup    restic off-site to any backend (init/run/snapshots;
+                       -r <uri> is the backend: sftp://, b2:, s3:, local:)
     freehold uninstall remove the control plane + world (data kept by default)
     freehold status    show the world inventory from the CP
     freehold update    update the world's CP (release assets / ref / dev), run

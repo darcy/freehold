@@ -320,9 +320,20 @@ release notes.
   action lands (stop the unit, remove the state dir — or destroy the guest); revoke on a
   resident door is a feed-cut, not a stop.
 - **Backups can outlive "rotation = erase your copies."** `/srv/data` sits in the PBS +
-  TrueNAS + Backblaze backup set, so a revoke that deletes the shipped `secrets.json` can
-  still leave the old ciphertext in an off-site snapshot; backup retention is a named
-  follow-up.
+  TrueNAS + Backblaze backup set (and a `freehold backup` restic repo holds the same
+  bytes again), so a revoke that deletes the shipped `secrets.json` can still leave the
+  old ciphertext in an off-site snapshot; backup retention is a named follow-up.
+- **Snapshot is a Proxmox-provider capability; export and restic are universal.**
+  `freehold snapshot` rides ZFS/LVM-thin snapshot primitives (Proxmox-only by nature); a
+  VPS world's point-in-time + off-site story is `freehold backup` (restic) and its export
+  is the same tar of the recorded plane mounts — plain host paths either way
+  (`docs/DATA.md`'s substrate table). There is no VPS snapshot provider yet.
+- **`freehold backup` holds no scheduling and no restore verb.** Backup runs are
+  CLI-invoked; a host-side timer and a `freehold restore` (world bootstrap from backup —
+  the portable-backup north star's own path) are unwired. The restic password lives in
+  the profile dir on the box (0600) + the host's /srv/nobackup — whoever holds the
+  profile can restore; secret-env injection over the runner (the ssh-connector gap
+  above) is the later tightening.
 - **Rotate/re-grant don't reach an already-running runner.** A runner holds its package in
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
@@ -552,7 +563,8 @@ release notes.
     go vet ./... && go test ./...`. Imports `platform/` + `contract/`; never the reverse.
   - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
     CLI + TUI, one dir-per-verb (`install/`, `uninstall/`, `build/`, `teardown/`,
-    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`)
+    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`,
+    `backup/`)
     plus `login/` + `tui/` and `internal/common/` + `internal/certcred/` +
     `internal/stages/`; the `install/` surface holds `install/cpdeploy/`; the `freehold`
     binary's main is `cmd/freehold`):

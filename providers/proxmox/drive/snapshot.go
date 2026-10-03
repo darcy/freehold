@@ -423,7 +423,11 @@ func RollbackStepFor(v PlaneVolume, name string) rollbackStep {
 			"dd if=" + snapDev + " of=" + dev + " bs=4M status=none; do " +
 			"n=$((n+1)); [ $n -ge 5 ] && exit 1; sleep 2; done; " +
 			"mount " + v.Source
-	return rollbackStep{Cmd: seq, Step: "block-copy " + snapLVName(v.LV, name) + " onto " + v.LV + " (" + v.Source + ")", Timeout: 600}
+	// NO deadline (Timeout 0): the copy reads the WHOLE device — time scales
+	// with LV size, not used data, and a killed dd leaves the origin
+	// PARTIALLY overwritten (head = snapshot, tail = newer) — the one state
+	// worse than a slow rollback. The pre-rollback net exists for this.
+	return rollbackStep{Cmd: seq, Step: "block-copy " + snapLVName(v.LV, name) + " onto " + v.LV + " (" + v.Source + ")", Timeout: 0}
 }
 
 // SnapshotRollback rolls every volume back to the named snapshot. The caller
