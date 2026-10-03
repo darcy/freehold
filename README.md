@@ -667,18 +667,23 @@ Every PR runs two gates:
   claims against the actual code. The workflow runs `pull_request_target`-only, so the YAML,
   scripts, and deps it executes are always trusted `main`'s — a PR can never rewrite what
   reviews it — and the explored tree is trusted main too; the diff comes via the API, so
-  nothing from an unreviewed head is ever checked out, let alone run. Findings
-  are tiered in the top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER
-  (named follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
-  BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
-  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`, and submits that as a
-  PR review state — `APPROVE` when clean, `REQUEST_CHANGES` with findings — so branch
-  protection gates a merge rather than a red check. The operator overrides a `REQUEST_CHANGES`
-  by dismissing the review.
-- **README / ARCHITECTURE drift**: when a PR changes something those docs document (or drifts
-  from a locked decision in `docs/ARCHITECTURE.md`), the reviewer adds one `README:` /
-  `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a
-  blocker, never nitpicked.
+  nothing from an unreviewed head is ever checked out, let alone run. One review runs per PR
+  at a time (per-PR concurrency group, cancel-in-progress): a newer push or re-request
+  cancels the in-flight run, so the PR's standing review state is always one round's verdict,
+  never a race between two. Findings are tiered in the top-level comment — 🛑 BLOCKING (must
+  fix) / ⚠️ IMPORTANT (should fix) / 💡 SUGGESTION (real but fine to defer; listed in the
+  findings table without a thread) / NIT (stays silent). Inline comments appear only for
+  BLOCKING/IMPORTANT, on the exact lines; a finding still open from a prior round is replied
+  on its existing thread, and a round that no longer flags one resolves it (✅ in the
+  comment's resolved list). Every review ends with a computed verdict — bare `MERGE-READY` or
+  `NEEDS WORK — <n> BLOCKING, <m> IMPORTANT` — and submits that as a PR review state:
+  `APPROVE` when clean, `REQUEST_CHANGES` with findings — so branch protection gates a merge
+  rather than a red check. The operator overrides a `REQUEST_CHANGES` by dismissing the
+  review.
+- **README / ARCHITECTURE drift**: rated like any other finding — drift that would mislead
+  (documented behavior the code doesn't have, a shipped command missing from the docs) is
+  IMPORTANT, cosmetic drift is a SUGGESTION — pinned to the doc hunk or the code line that
+  caused it.
 
 Read `AGENTS.md` before changing code: the locked model (relay-as-scope, generic exec, no
 master key, host flexibility) is not open for reinterpretation. Never commit secrets,
