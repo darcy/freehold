@@ -71,7 +71,9 @@ OPEN PRIOR THREADS. For each `inline` entry set `"prior"` to true when it is
 the same problem as one of those threads (match by file and the actual
 problem — the line number may have shifted), or false when it is a new
 finding. Do not re-raise a resolved thread's problem as a new finding unless
-it genuinely reappears in this diff.
+it genuinely reappears in this diff. Findings already resolved in earlier
+rounds are closed — never re-mention them in the summary either; the parent
+comment's resolved list covers only threads closed THIS round.
 
 Author replies (see AUTHOR REPLIES below, if present): judge each reply on the
 merits. If it fixes the problem or convincingly shows the finding was not real,
