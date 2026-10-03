@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,14 @@ type ProxmoxLxcSpec struct {
 	// LXC veths. Nil = dhcp (the LAN/home default).
 	NetIP *string
 	NetGW *string
+	// Tag is the VLAN tag on `bridge` for eth0 (the freehold-subnet's tagged
+	// internal bridge; docs/NETWORK.md). Nil/0 = untagged.
+	Tag *int
+	// Net1IP/Net1GW/Net1Tag are the optional SECOND NIC (eth1 on `bridge`,
+	// tagged with Net1Tag): the gateway guest's internal side. Nil = none.
+	Net1IP  *string
+	Net1GW  *string
+	Net1Tag *int
 	// Durable-plane reference MOUNTS baked into pct create (--mpN): each
 	// dataset is bound to its guest path at FIRST creation — the locked
 	// "born on the plane, never pct set post-hoc" rule. Empty = no mounts.
@@ -95,6 +104,32 @@ func LxcMpArgs(specs []planebase.MountSpec) []string {
 	out := make([]string, 0, len(specs))
 	for i, m := range specs {
 		out = append(out, fmt.Sprintf("--mp%d=%s,mp=%s,backup=%d", i, m.Source, m.GuestPath, planebase.BackupFlag(m.GuestPath)))
+	}
+	return out
+}
+
+// netArgs renders the pct --net0/--net1 args from a spec: eth0 on Bridge
+// (DHCP unless NetIP/NetGW, tagged with Tag>0); optional eth1 (Net1IP, gw,
+// Net1Tag) — the gateway guest's internal side (docs/NETWORK.md).
+func netArgs(spec *ProxmoxLxcSpec) string {
+	net0 := fmt.Sprintf("name=eth0,bridge=%s,ip=dhcp,type=veth", spec.Bridge)
+	if spec.NetIP != nil && spec.NetGW != nil {
+		net0 = fmt.Sprintf("name=eth0,bridge=%s,ip=%s,gw=%s,type=veth", spec.Bridge, *spec.NetIP, *spec.NetGW)
+	}
+	if spec.Tag != nil && *spec.Tag > 0 {
+		net0 += fmt.Sprintf(",tag=%d", *spec.Tag)
+	}
+	out := " --net0 " + net0
+	if spec.Net1IP != nil {
+		net1 := fmt.Sprintf("name=eth1,bridge=%s,ip=%s", spec.Bridge, *spec.Net1IP)
+		if spec.Net1GW != nil {
+			net1 += ",gw=" + *spec.Net1GW
+		}
+		if spec.Net1Tag != nil && *spec.Net1Tag > 0 {
+			net1 += fmt.Sprintf(",tag=%d", *spec.Net1Tag)
+		}
+		net1 += ",type=veth"
+		out += " --net1 " + net1
 	}
 	return out
 }
@@ -284,6 +319,19 @@ func BootstrapProxmoxLxc(exec ExecFunc, spec *ProxmoxLxcSpec) (*BootstrapResult,
 	if err := Plain(spec.Bridge); err != nil {
 		return nil, err
 	}
+	// Guest IP fields are CIDR-or-bare and interpolated into the pct command —
+	// validated as ADDRESSES (stricter than Plain: it also refuses `/`-bearing
+	// non-prefixes and shell metacharacters) rather than Plain()'d.
+	for _, p := range []*string{spec.NetIP, spec.NetGW, spec.Net1IP, spec.Net1GW} {
+		if p == nil {
+			continue
+		}
+		if _, err := netip.ParsePrefix(*p); err != nil {
+			if net.ParseIP(*p) == nil {
+				return nil, fmt.Errorf("invalid guest IP %q (want bare IP or CIDR)", *p)
+			}
+		}
+	}
 
 	// Explicit vmid must be in the PVE system range; an omitted one is
 	// picked cluster-wide (pvesh get /cluster/nextid) — and a same-name
@@ -334,13 +382,10 @@ func BootstrapProxmoxLxc(exec ExecFunc, spec *ProxmoxLxcSpec) (*BootstrapResult,
 	if len(mpArgs) > 0 {
 		mp = " " + strings.Join(mpArgs, " ")
 	}
-	net0 := fmt.Sprintf("name=eth0,bridge=%s,ip=dhcp,type=veth", spec.Bridge)
-	if spec.NetIP != nil && spec.NetGW != nil {
-		net0 = fmt.Sprintf("name=eth0,bridge=%s,ip=%s,gw=%s,type=veth", spec.Bridge, *spec.NetIP, *spec.NetGW)
-	}
+	netArgs := netArgs(spec)
 	create := fmt.Sprintf(
-		"pct create %d local:vztmpl/%s --rootfs %s:%d --memory %d --hostname %s --unprivileged 1 --features fuse=1,keyctl=1,nesting=1 --net0 %s%s",
-		vmid, tpl, spec.Storage, spec.RootfsGB, spec.MemoryMB, spec.Hostname, net0, mp,
+		"pct create %d local:vztmpl/%s --rootfs %s:%d --memory %d --hostname %s --unprivileged 1 --features fuse=1,keyctl=1,nesting=1%s%s",
+		vmid, tpl, spec.Storage, spec.RootfsGB, spec.MemoryMB, spec.Hostname, netArgs, mp,
 	)
 	if !reuse {
 		out, err := exec(create, 120)

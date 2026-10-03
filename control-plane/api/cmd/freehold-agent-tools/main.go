@@ -425,7 +425,13 @@ func cmdServe(args []string) {
 	cpIP := fs.String("cp-ip", "", "cp LXC LAN IP (Caddy upstream), CIDR ok")
 	var cpLxc uint
 	fs.UintVar(&cpLxc, "cp-lxc", 0, "cp LXC vmid (the dnsmasq resolver lives here)")
-	proxyIP := fs.String("proxy-ip", "", "proxy/k3s node static IP (CIDR ok) the public hosts resolve to")
+	proxyIP := fs.String("proxy-ip", "", "the EDGE the public hosts resolve to (gateway LAN IP behind a gateway; the k3s node otherwise)")
+	k3sIP := fs.String("k3s-ip", "", "k3s node address (the internal one behind a gateway)")
+	gatewayCIDR := fs.String("gateway-cidr", "", "internal subnet CIDR when the world rides a gateway (e.g. 10.77.0.0/24)")
+	var gatewayVlan uint
+	fs.UintVar(&gatewayVlan, "gateway-vlan", 0, "in-host bridge VLAN tag for the internal subnet (0 = untagged)")
+	var gatewayLxc uint
+	fs.UintVar(&gatewayLxc, "gateway-lxc", 0, "gateway guest vmid")
 	litellmIP := fs.String("litellm-ip", "", "litellm gateway node IP (k3s node), CIDR ok")
 	planePool := fs.String("plane-pool", "", "durable-plane backend pool (VG or zpool), e.g. pve")
 	planeKind := fs.String("plane-kind", "", "recorded backend kind (zfs|lvmth); detect when empty")
@@ -519,6 +525,10 @@ func cmdServe(args []string) {
 		RelayLxc:       uint32(relayLxc),
 		RelayCompose:   *relayCompose,
 		K3sVmid:        uint32(k3sVmid),
+		GatewayCIDR:    strings.TrimSpace(*gatewayCIDR),
+		GatewayVlan:    int(gatewayVlan),
+		GatewayLxc:     uint32(gatewayLxc),
+		K3sIP:          strings.TrimSpace(config.StripCIDR(*k3sIP)),
 		RunnerAddr:     *runnerAddr,
 		RunnerPK:       *runnerPK,
 		RunnerTarget:   *runnerTarget,

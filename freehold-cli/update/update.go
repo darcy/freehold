@@ -330,10 +330,7 @@ func reconcileWorld(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	loginURL := cfg.CPURL
-	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		loginURL = "http://" + ip + ":8080"
-	}
+	loginURL := common.ConsoleLoginURL(cfg)
 	c, err := oplogin.Login(loginURL, key)
 	if err != nil {
 		return fmt.Errorf("console login at %s: %v", loginURL, err)

@@ -45,6 +45,10 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 		OwnerPub:       c.OwnerPub,
 		LitellmBaseURL: c.LitellmBaseURL,
 		SelfURL:        c.SelfURL,
+		GatewayCIDR:    c.GatewayCIDR,
+		GatewayVlan:    c.GatewayVlan,
+		GatewayLxc:     c.GatewayLxc,
+		K3sIP:          c.K3sIP,
 		Sec:            sec,
 		Audience:       audience,
 	}
@@ -56,16 +60,22 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 // IP. Fresh-world installs happen before litellm exists, so a spec built from
 // the install-time world-config arrives with LitellmIP/LitellmBaseURL blank —
 // without them the agent pods get an empty OPENAI_COMPAT_BASE_URL and every
-// turn fails with "llm: transport: builder error". Idempotent.
+// turn fails with "llm: transport: builder error". Behind a gateway the
+// RECORDED litellm URL is the stale install-time render (the edge IP); the
+// pods dial the k3s node's INTERNAL NodePort directly, so the internal k3s
+// IP wins over the recording. Idempotent.
 func (s *Spec) FillEdgeURLs() {
-	if s.ProxyIP == "" {
+	node := s.k3sIP()
+	if node == "" {
 		return
 	}
-	if s.LitellmIP == "" {
-		s.LitellmIP = config.StripCIDR(s.ProxyIP)
+	if s.LitellmIP == "" || s.GatewayCIDR != "" {
+		s.LitellmIP = config.StripCIDR(node)
 	}
-	if s.LitellmBaseURL == "" && s.LitellmIP != "" {
-		s.LitellmBaseURL = "http://" + s.LitellmIP + ":31400/v1"
+	if s.LitellmBaseURL == "" || s.GatewayCIDR != "" {
+		if s.LitellmIP != "" {
+			s.LitellmBaseURL = "http://" + s.LitellmIP + ":31400/v1"
+		}
 	}
 }
 
@@ -82,5 +92,7 @@ func (s *Spec) Coords() Coords {
 		RelayCompose: s.RelayCompose, K3sVmid: s.K3sVmid, RunnerAddr: s.RunnerAddr,
 		RunnerPK: s.RunnerPK, RunnerTarget: s.RunnerTarget, CpaName: s.CpaName,
 		OwnerPub: s.OwnerPub, LitellmBaseURL: s.LitellmBaseURL, SelfURL: s.SelfURL,
+		GatewayCIDR: s.GatewayCIDR, GatewayVlan: s.GatewayVlan, GatewayLxc: s.GatewayLxc,
+		K3sIP: s.K3sIP,
 	}
 }

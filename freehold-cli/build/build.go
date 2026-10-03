@@ -503,10 +503,7 @@ func (e *buildEngine) runBuild() error {
 	if cfg == nil || cfg.CPURL == "" {
 		return fmt.Errorf("no CP configured — run `freehold install` first (an operator box only), then `freehold login` here")
 	}
-	loginURL := cfg.CPURL
-	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		loginURL = "http://" + ip + ":8080"
-	}
+	loginURL := common.ConsoleLoginURL(cfg)
 	client, err := e.consoleLogin(loginURL)
 	if err != nil {
 		return err

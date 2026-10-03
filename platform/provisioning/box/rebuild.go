@@ -80,7 +80,14 @@ type Flags struct {
 	RelayGw            string
 	StorageName        string
 	Bridge             string
-	ConfigPath         string
+	// The freehold-subnet gateway (docs/NETWORK.md Phase 1): GatewayCIDR is
+	// the internal subnet ("" = no gateway — the flat-LAN world), GatewayVlan
+	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
+	// internal subnet (InternalIPFor) and a gateway guest owns the one
+	// LAN-facing address (the proxy IP).
+	GatewayCIDR string
+	GatewayVlan int
+	ConfigPath  string
 	ConfirmStorage     bool
 	ResetDNS           bool
 	// ManageDNSExplicit records whether --manage-dns was EXPLICITLY passed (a
@@ -407,6 +414,42 @@ func (e *Engine) RunBootstrap() error {
 		return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", e.F.ProxyIP)
 	}
 
+	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
+	// + its in-host VLAN tag. Blank = the flat-LAN world (no gateway — today's
+	// behavior, and how existing worlds keep reconciling). The proxy IP above
+	// becomes the gateway's ONE LAN address; the internal guests derive their
+	// static addresses from the CIDR.
+	if e.F.GatewayCIDR == "" && !e.F.Yes {
+		ans, err := e.Prompt("internal subnet CIDR for the freehold-subnet (e.g. 10.77.0.0/24) — blank = flat LAN (no gateway); the PVE bridge must be VLAN-aware for a tag")
+		if err != nil {
+			return err
+		}
+		if a := strings.TrimSpace(ans); a != "" {
+			e.F.GatewayCIDR = a
+			v, verr := e.Prompt("VLAN tag for the internal bridge (a number, e.g. 77; blank = untagged)")
+			if verr != nil {
+				return verr
+			}
+			if v = strings.TrimSpace(v); v != "" {
+				n, cerr := strconv.Atoi(v)
+				if cerr != nil || n <= 0 {
+					return fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
+				}
+				e.F.GatewayVlan = n
+			}
+		}
+	}
+	// Validate on BOTH paths (headless flag + interactive prompt): a malformed
+	// CIDR would otherwise fail far later, at the first guest's net args.
+	if e.F.GatewayCIDR != "" {
+		if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
+			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
+		}
+	}
+	if e.F.GatewayVlan < 0 {
+		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
+	}
+
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
 	// relay/k3s datasets are re-ensured by world_build, idempotently).
 	placement, err := e.stagePlacement()
@@ -421,6 +464,17 @@ func (e *Engine) RunBootstrap() error {
 	// 9. boot the CP LXC + record its coordinates, then boot + deploy the RELAY
 	// (its IP must be recorded BEFORE deploy-cp so the CP guest's /etc/hosts
 	// pin reaches it; the agent-tools roster also needs the relay live).
+	// 9.0. the gateway boots FIRST — the CP (and every later guest) takes its
+	// default route from it; torn down last by the world teardown.
+	if e.F.GatewayCIDR != "" {
+		if err := e.stageBootstrap("gateway"); err != nil {
+			return err
+		}
+		if _, err := e.stageRecordLxc("gateway"); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.Out, "  ✓ gateway LXC booted + recorded")
+	}
 	fmt.Fprintln(e.Out, "  · booting the cp LXC (create → docker; can take minutes)…")
 	if err := e.stageBootstrap("cp"); err != nil {
 		return err
@@ -550,7 +604,14 @@ func (e *Engine) RecordPostWorld() error {
 		cfg.AgentToolsURL = "http://" + ip + ":" + config.AgentToolsPort
 	}
 	proxyIP := config.StripCIDR(e.F.ProxyIP)
-	cfg.Litellm = config.LitellmSpec{URL: "http://" + proxyIP + ":31400", Host: proxyIP}
+	// Behind the gateway the pods' litellm dial goes straight to the k3s node's
+	// INTERNAL address (the NodePort on the node they run on) — the edge IP
+	// would need a 31400 forward for the hottest path in the world.
+	litellmIP := proxyIP
+	if e.F.GatewayCIDR != "" {
+		litellmIP = config.InternalIPFor(e.F.GatewayCIDR, "k3s")
+	}
+	cfg.Litellm = config.LitellmSpec{URL: "http://" + litellmIP + ":31400", Host: litellmIP}
 	if !containsStr(cfg.Managed, "litellm") {
 		cfg.Managed = append(cfg.Managed, "litellm")
 	}
@@ -1075,6 +1136,13 @@ func (e *Engine) fromAnswers() *config.Config {
 		p := e.F.ProxyIP
 		cfg.Proxy = config.ProxySpec{Ip: &p}
 	}
+	// The freehold-subnet gateway: recorded as-is (empty = no gateway — the
+	// flat-LAN world). mergeFromAnswers keeps a prior one on updates.
+	if e.F.GatewayCIDR != "" {
+		c := e.F.GatewayCIDR
+		v := e.F.GatewayVlan
+		cfg.Gateway = config.GatewaySpec{Cidr: &c, Vlan: &v}
+	}
 	if e.F.OperatorIdentity != "" {
 		v := e.F.OperatorIdentity
 		cfg.OperatorIdentity = &v
@@ -1145,6 +1213,14 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 		cfg.Plane.RelayGW = ans.Plane.RelayGW
 	} else {
 		cfg.Plane.RelayGW = prev.Plane.RelayGW
+	}
+	// The gateway is an install-time fact like the plane: an update's zero
+	// answers keep the recorded one (a gateway world updated from a box whose
+	// flags never carry it must not silently drop to flat-LAN).
+	if ans.Gateway.Cidr != nil {
+		cfg.Gateway = ans.Gateway
+	} else {
+		cfg.Gateway = prev.Gateway
 	}
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
@@ -1236,11 +1312,15 @@ func managedForFlags(noK3s, noLitellm bool) []string {
 // run recorded (vmid present) stays in the manifest even when this run opted
 // it out --no-k3s, so teardown still owns it. litellm needs no such carve-out —
 // it is a kube workload with no guest of its own; its pods ride the k3s
-// guest's teardown.
-func worldManaged(noK3s, noLitellm bool, k3sVmid *uint32) []string {
+// guest's teardown. A gateway LXC recorded by a prior run is likewise always
+// managed (it fronts the CP; its teardown ordering is last).
+func worldManaged(noK3s, noLitellm bool, k3sVmid, gwVmid *uint32) []string {
 	m := managedForFlags(noK3s, noLitellm)
 	if noK3s && k3sVmid != nil && !containsStr(m, "k3s") {
 		m = append(m, "k3s")
+	}
+	if gwVmid != nil && !containsStr(m, "gateway") {
+		m = append(m, "gateway")
 	}
 	return m
 }
@@ -1277,7 +1357,7 @@ func (e *Engine) FinalSave() error {
 	// down even when this run opted it out (`--no-k3s`) — dropping it
 	// would make teardown say "skipped k3s LXC (not managed)" and leak the
 	// guest + its thin LV forever.
-	cfg.Managed = worldManaged(e.F.NoK3s, e.F.NoLitellm, cfg.Lxc.K3s.Vmid)
+	cfg.Managed = worldManaged(e.F.NoK3s, e.F.NoLitellm, cfg.Lxc.K3s.Vmid, cfg.Lxc.Gateway.Vmid)
 	if rpk, ok := e.relayPubkeyNip11(); ok {
 		cfg.RelayPubkey = &rpk
 	}
@@ -1582,14 +1662,51 @@ func (e *Engine) stageBootstrap(role string) error {
 		"--operator-pubkey", e.F.OperatorPubkey,
 	}
 	cfg, _ := config.Load(e.F.ConfigPath)
+	if role == "gateway" {
+		// The gateway: a small two-NIC guest — eth0 on the LAN bridge (the
+		// ONE address the world resolves to = the proxy IP), eth1 the tagged
+		// internal side. Smaller footprint than a service guest. pct's net
+		// args are CIDR-typed: the LAN IP takes the /24 home-lab default,
+		// the internal NIC takes the subnet's own prefix.
+		cidr := e.F.GatewayCIDR
+		if cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
+			cidr = *cfg.Gateway.Cidr
+		}
+		lan := e.F.ProxyIP
+		if cfg != nil && cfg.Proxy.Ip != nil && *cfg.Proxy.Ip != "" {
+			lan = *cfg.Proxy.Ip
+		}
+		args = append(args, "--rootfs-gb", "4", "--memory-mb", "512",
+			"--lxc-ip", withPrefix(lan, 24), "--lxc-gw", e.F.RelayGw,
+			"--net1-ip", withPrefix(config.GatewayInternalIP(cidr), prefixBits(cidr)), "--net1-tag", strconv.Itoa(e.F.GatewayVlan))
+		if cfg != nil && cfg.Lxc.Gateway.Vmid != nil {
+			args = append(args, "--vmid", strconv.FormatUint(uint64(*cfg.Lxc.Gateway.Vmid), 10))
+		}
+		_, err = e.selfStage("booting the gateway LXC", args)
+		if err != nil {
+			return err
+		}
+		return e.stageGatewayNft(cidr, cfg)
+	}
 	if ip := bootstrapStaticIP(role, e.F, cfg); ip != "" {
-		args = append(args, "--lxc-ip", ip, "--lxc-gw", e.F.RelayGw)
+		gw := e.F.RelayGw
+		// Behind a gateway the guest rides the tagged internal bridge, its
+		// default route is the gateway's internal address, and the IP needs
+		// the subnet's prefix (the net args are CIDR-typed).
+		if cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
+			gw = config.GatewayInternalIP(*cfg.Gateway.Cidr)
+			if cfg.Gateway.Vlan != nil && *cfg.Gateway.Vlan > 0 {
+				args = append(args, "--tag", strconv.Itoa(*cfg.Gateway.Vlan))
+			}
+			ip = withPrefix(ip, prefixBits(*cfg.Gateway.Cidr))
+		}
+		args = append(args, "--lxc-ip", ip, "--lxc-gw", gw)
 	}
 	if cfg != nil {
 		// A RECORDED vmid rides on resume: the driver's reuse path then finds
 		// the existing guest (hostname match) instead of picking a new id and
 		// refusing the collision — Rust rebuild re-booted the SAME vmid.
-		g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s}[role]
+		g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s, "gateway": cfg.Lxc.Gateway}[role]
 		if g.Vmid != nil {
 			args = append(args, "--vmid", strconv.FormatUint(uint64(*g.Vmid), 10))
 		}
@@ -1601,12 +1718,45 @@ func (e *Engine) stageBootstrap(role string) error {
 	return err
 }
 
+// withPrefix appends a CIDR prefix to a bare IP — pct's net args are
+// host/prefix typed (the CP build's own comment: net0 wants CIDR), and the
+// deterministic internal addresses come out bare. bits=0 (unparseable subnet)
+// or an already-suffixed IP passes through unchanged.
+func withPrefix(ip string, bits int) string {
+	if bits == 0 || strings.Contains(ip, "/") {
+		return ip
+	}
+	return ip + "/" + strconv.Itoa(bits)
+}
+
+// prefixBits returns the prefix length of a CIDR, 0 when it does not parse.
+func prefixBits(cidr string) int {
+	_, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return 0
+	}
+	_, bits, _ := net.ParseCIDR(cidr)
+	n, _ := bits.Mask.Size()
+	return n
+}
+
 // bootstrapStaticIP returns the role's STATIC address, or "" = DHCP. k3s is
 // the proxy node (--proxy-ip, or the recorded cfg.Proxy.Ip riding again);
 // relay + cp are STATIC when --relay-ip / --cp-ip are supplied (running them
 // OFF DHCP avoids exhausting a small LAN DHCP pool), else DHCP behind the
-// proxy.
+// proxy. Behind a gateway (cfg.Gateway set) every guest is STATIC on the
+// internal subnet — no DHCP exists there — at its deterministic InternalIPFor
+// address; the flags' explicit values still win.
 func bootstrapStaticIP(role string, f Flags, cfg *config.Config) string {
+	gwMode := cfg != nil && cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != ""
+	if gwMode {
+		cidr := *cfg.Gateway.Cidr
+		explicit := map[string]string{"cp": f.CpIP, "relay": f.RelayIP}
+		if ip, ok := explicit[role]; ok && ip != "" {
+			return ip
+		}
+		return config.InternalIPFor(cidr, role)
+	}
 	switch role {
 	case "cp":
 		return f.CpIP
@@ -1622,6 +1772,70 @@ func bootstrapStaticIP(role string, f Flags, cfg *config.Config) string {
 	}
 	return ""
 }
+
+// stageGatewayNft applies the gateway's nftables ruleset on the box side —
+// the guests' default route + image pulls depend on it the moment the next
+// guest boots, so it cannot wait for the CP build's re-assert. Uses the SHARED
+// renderer (config.GatewayNftConf) so box and CP write one ruleset.
+func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
+	if e.Provider == nil {
+		return fmt.Errorf("no provisioning provider wired — cannot configure the gateway")
+	}
+	vmid := ""
+	if cfg != nil && cfg.Lxc.Gateway.Vmid != nil {
+		vmid = strconv.FormatUint(uint64(*cfg.Lxc.Gateway.Vmid), 10)
+	} else {
+		name, err := lxcName(e.F.Name, e.F.RelayDomain, "gateway")
+		if err != nil {
+			return err
+		}
+		v, err := e.findLxcVmidExact("gateway")
+		if err != nil {
+			return fmt.Errorf("gateway guest %q not found: %w", name, err)
+		}
+		vmid = strconv.FormatUint(uint64(v), 10)
+	}
+	k3sIP := config.InternalIPFor(cidr, "k3s")
+	cpIP := config.InternalIPFor(cidr, "cp")
+	relayIP := config.InternalIPFor(cidr, "relay")
+	// All forwards target INTERNAL addresses — the k3s node for the
+	// edge/6443, the CP for the console (the box's pre-Caddy build path), the
+	// relay for its LAN-dial port — and match ONLY traffic addressed to the
+	// gateway (an unconstrained dport DNAT hijacks the guests' own egress).
+	edgeIP := config.StripCIDR(edgeOf(e.F.ProxyIP))
+	conf := config.GatewayNftConf(cidr, edgeIP, k3sIP, cpIP, relayIP, "eth0")
+	script := fmt.Sprintf(`set -e
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
+sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
+cat > /etc/nftables.conf <<NFT
+%sNFT
+cat > /etc/dnsmasq.d/freehold.conf <<DNS
+%sDNS
+systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
+systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
+`, conf, config.GatewayDnsmasqConf(e.F.RelayGw))
+	out, err := e.Provider.GuestExec(vmid, script, 300)
+	if err != nil {
+		return fmt.Errorf("gateway nftables: %w", err)
+	}
+	if err := bootstrap.ExpectOK(out, "gateway nftables"); err != nil {
+		return err
+	}
+	// The HOST route into the subnet, via the gateway (the host-side dials —
+	// terraform, pct-side probes — otherwise follow the default route to the
+	// LAN router, which has no 10.77.0.0/24 path and blackholes them).
+	route := fmt.Sprintf("ip route replace %s via %s dev %s",
+		cidr, config.StripCIDR(edgeOf(e.F.ProxyIP)), e.F.Bridge)
+	rout, rerr := e.Provider.GuestExec("", route, 30)
+	if rerr != nil {
+		return fmt.Errorf("gateway host route: %w", rerr)
+	}
+	return bootstrap.ExpectOK(rout, "gateway host route")
+}
+
+// edgeOf returns the bare IP of a CIDR-or-bare address ("" when empty).
+func edgeOf(ip string) string { return config.StripCIDR(ip) }
 
 // stageRecordLxc persists the real post-boot coordinates into the config ON
 // DISK: load FRESH, resolve vmid+ip through the runner, mutate, save, return
@@ -1670,6 +1884,8 @@ func applyLxcCoords(cfg *config.Config, role string, vmid uint32, ip string) {
 		guest = &cfg.Lxc.Relay
 	case "k3s":
 		guest = &cfg.Lxc.K3s
+	case "gateway":
+		guest = &cfg.Lxc.Gateway
 	default:
 		guest = &cfg.Lxc.Cp
 	}
@@ -1677,6 +1893,9 @@ func applyLxcCoords(cfg *config.Config, role string, vmid uint32, ip string) {
 	guest.Ip = &ip
 	if role == "k3s" && !containsStr(cfg.Managed, "k3s") {
 		cfg.Managed = append(cfg.Managed, "k3s")
+	}
+	if role == "gateway" && !containsStr(cfg.Managed, "gateway") {
+		cfg.Managed = append(cfg.Managed, "gateway")
 	}
 }
 
@@ -2066,6 +2285,28 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 	if relayIP == "" {
 		relayIP = config.StripCIDR(e.F.RelayIP)
 	}
+	// Behind a gateway the guests' coords are internal (deterministic from the
+	// CIDR until a post-boot record exists); the proxy IP stays the edge.
+	gwCIDR := ""
+	gwVlan := 0
+	if cfg.Gateway.Cidr != nil {
+		gwCIDR = *cfg.Gateway.Cidr
+	}
+	if cfg.Gateway.Vlan != nil {
+		gwVlan = *cfg.Gateway.Vlan
+	}
+	if gwCIDR != "" {
+		// Recorded/flag guest IPs are the OLD LAN ones the moment the gateway
+		// is on — the guests are born internal, so derive over them.
+		relayIP = config.InternalIPFor(gwCIDR, "relay")
+		cpIP = config.InternalIPFor(gwCIDR, "cp")
+	}
+	k3sIP := config.StripCIDR(derefStrPtr(cfg.Lxc.K3s.Ip))
+	if gwCIDR != "" {
+		k3sIP = config.InternalIPFor(gwCIDR, "k3s")
+	} else if k3sIP == "" {
+		k3sIP = config.StripCIDR(e.F.ProxyIP)
+	}
 	c := config.Coords{
 		Name:           cfg.Name,
 		StateDir:       "",
@@ -2098,6 +2339,10 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		RelayLxc:       derefU32(cfg.Lxc.Relay.Vmid),
 		RelayCompose:   stages.RelayComposeDir,
 		K3sVmid:        derefU32(cfg.Lxc.K3s.Vmid),
+		K3sIP:          k3sIP,
+		GatewayCIDR:    gwCIDR,
+		GatewayVlan:    gwVlan,
+		GatewayLxc:     derefU32(cfg.Lxc.Gateway.Vmid),
 		RunnerAddr:     config.CoLocatedRunnerMCPAddr,
 		RunnerPK:       cfg.Runner.Pubkey,
 		RunnerTarget:   cfg.Runner.Target,
