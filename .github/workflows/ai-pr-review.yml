@@ -98,7 +98,7 @@ jobs:
           HARNESS_MODEL: "fireworks-ai/accounts/fireworks/models/glm-5p3-flash"
           LLM_KEY_ENV: "FIREWORKS_API_KEY"
           # TOTAL harness budget across both attempts (60/40 split).
-          HARNESS_TIMEOUT_MS: "900000"
+          HARNESS_TIMEOUT_MS: "1800000"
 
           # Shared review config (the legacy single-shot-reviewer vars are
           # gone — main's script is the harness script now): PROMPT_FILE,
