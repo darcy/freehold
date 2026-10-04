@@ -28,6 +28,14 @@ func DnsAddCmd(cpLxc uint32, binDir, stateDir, name, ip, source, searchBase stri
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }
 
+// DnsRemoveCmd is the pct exec that removes one resolver record by bare name
+// (the resolver's own view — never the provider's zone).
+func DnsRemoveCmd(cpLxc uint32, binDir, stateDir, name string) string {
+	inner := fmt.Sprintf("%s dns --state-dir %s remove %s",
+		dq(binDir+"/freehold-console"), dq(stateDir), dq(name))
+	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
+}
+
 // DnsApexCmd is the pct exec that runs `freehold-console dns` with --state-dir/
 // --apex/--ip and the `apex` verb. It puts the FLAGS BEFORE the verb (Go's
 // flag.Parse stops at the first non-flag arg, so a --state-dir after the verb

@@ -32,12 +32,14 @@ its siblings, and Newt (Phase 3) runs in the same slot in both worlds.
 ```
         surrounding network (LAN / VPS public) — untouched
                           │
-               ONE address: the gateway (nftables)
+               ONE address: the gateway (nftables + dnsmasq)
                 │ masquerade out (guests get internet)
                 │ 80  → k3s Caddy (redirects to 443)
                 │ 443 → k3s Caddy (relay, CP console, /mcp,
                 │       per-guest vhosts)
-                │ runner port → CP (TUI, updates, thin boxes)
+                │ 8080 → CP console (the pre-Caddy build path)
+                │ 6443 → kube-apiserver (kubectl)
+                │ 3000 → relay (its LAN-dial port)
                 │ (forward list is config — extensible)
                 │ Newt (Phase 3): dials OUT to the Pangolin VPS
        ─────────┼──────────────────────────────────────
@@ -73,8 +75,13 @@ Two paths to everything, by design:
 5.  **Gateway payload:** masquerade out for the subnet; 80 → k3s (Caddy
     redirects); 443 → k3s (Caddy: relay, CP console, `/mcp`, per-guest
     vhosts like `litellm.freehold.local` — name-keyed, a real domain later);
-    the runner port → CP (so `freehold build`/`update`, the TUI, and thin
-    boxes keep working unchanged). The forward list is a config list —
+    8080 → the CP console (the pre-Caddy build path — `freehold
+    build`/`update`, the TUI, and thin boxes dial it through the gateway);
+    6443 → the kube-apiserver (kubectl); 3000 → the relay (its LAN-dial
+    port). The gateway is ALSO the subnet's resolver (dnsmasq forwarding to
+    the LAN router + a public fallback). All DNATs match only traffic
+    addressed to the gateway itself — an unconstrained dport DNAT would
+    hijack the guests' own egress. The forward list is a config list —
     extending it is an edit, not code.
 6.  **Wizard:** one new prompt — the gateway's public-side IP + the internal
     subnet CIDR. Rebuild/re-adopt reuse the recorded values.

@@ -261,21 +261,24 @@ func TestRecordCoords(t *testing.T) {
 // the LXC + LV. litellm rides k3s and needs no guest carve-out.
 func TestWorldManaged(t *testing.T) {
 	// Full world (k3s + litellm on), recorded vmid / absent vmid.
-	if got := worldManaged(false, false, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+	if got := worldManaged(false, false, ptr(uint32(102)), ptr(uint32(101))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm", "gateway"}) {
+		t.Fatalf("recorded gateway must stay managed (it fronts the CP): %#v", got)
+	}
+	if got := worldManaged(false, false, ptr(uint32(102)), nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
 		t.Errorf("full world with vmid = %v, want relay/cp/k3s/litellm", got)
 	}
-	if got := worldManaged(false, false, nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
+	if got := worldManaged(false, false, nil, nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s", "litellm"}) {
 		t.Errorf("full world with no vmid = %v, want relay/cp/k3s/litellm", got)
 	}
 	// k3s on, litellm opted out.
-	if got := worldManaged(false, true, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+	if got := worldManaged(false, true, ptr(uint32(102)), nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
 		t.Errorf("k3s-only world = %v, want relay/cp/k3s", got)
 	}
 	// k3s opted out but a recorded guest exists: it stays owned for teardown.
-	if got := worldManaged(true, false, ptr(uint32(102))); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
+	if got := worldManaged(true, false, ptr(uint32(102)), nil); !reflect.DeepEqual(got, []string{"relay", "cp", "k3s"}) {
 		t.Errorf("skipped k3s with recorded vmid = %v, want relay/cp/k3s", got)
 	}
-	if got := worldManaged(true, true, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
+	if got := worldManaged(true, true, nil, nil); !reflect.DeepEqual(got, []string{"relay", "cp"}) {
 		t.Errorf("k3s+litellm opted out, no vmid = %v, want relay/cp", got)
 	}
 }
