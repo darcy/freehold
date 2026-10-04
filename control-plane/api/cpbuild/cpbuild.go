@@ -747,6 +747,11 @@ func (s *Spec) worldGateway() error {
 	script := fmt.Sprintf(`set -e
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
+# A router with BOTH nics on one bridge (the untagged freehold-subnet) must
+# not answer ARP for an IP on the other interface — the flux reads as MAC
+# flapping on the LAN (UniFi: "multiple machines claiming IPs").
+echo net.ipv4.conf.all.arp_ignore=1 >> /etc/sysctl.d/90-freehold-gateway.conf
+echo net.ipv4.conf.all.arp_announce=2 >> /etc/sysctl.d/90-freehold-gateway.conf
 sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
