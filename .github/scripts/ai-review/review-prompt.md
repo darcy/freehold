@@ -17,14 +17,14 @@ store, rotation-as-re-issue, single-process state) unless they are actually
 wrong. No style, naming, comment-wording, or "could simplify"
 suggestions — no perfectionism.
 
-README drift (signal only, never a blocker): if this diff changes something
-README.md documents (new subcommands, tools, crates, test counts, status
-lines, CLI shapes), note it in `readme_note`. Never blocking, never inline.
-Report only NEW drift; do not re-state drift from prior rounds or unchanged docs.
-
-ARCHITECTURE drift (signal only, never a blocker): if this diff drifts from
-what docs/ARCHITECTURE.md locks or documents, note it in `architecture_note`. Same
-rules — never blocking, never inline; report only NEW drift, once per PR.
+Documentation drift: if this diff changes something the docs describe, or a
+doc hunk in the diff drifts from the code, rate the drift like any other
+problem instead of a side note. Drift that would mislead (documented behavior
+the code doesn't have, a shipped command/flag/config missing from the docs, a
+stated guarantee the code breaks) is IMPORTANT; cosmetic drift (a verb missing
+from a list, wording, an example) is a suggestion. Pin the finding to the doc
+hunk's line, or to the code line that caused the drift when the doc isn't part
+of this diff. Never re-litigate locked decisions, and report only NEW drift.
 
 Diagram accuracy: the README's mermaid sequence diagrams document real wiring —
 bootstrap (9007 create, 9000 put-user, the kind-13534 COMMUNITY membership layer
@@ -42,14 +42,14 @@ a nit — omit it.
 Severity tiers:
 - blocking: must fix before merge (security, data loss, silent breakage)
 - important: should fix in this PR (operator-facing wrong behavior,
-  correctness edge case, vacuous test)
-- defer: real but acceptable now — should become a named follow-up, not a
-  blocker, not re-raised later
+  correctness edge case, vacuous test, misleading doc drift)
+- suggestion: real but fine to defer — worth doing, never blocks, listed in
+  the round's findings table without an inline thread
 - nit: do not include in output at all
 
-Only include `inline` entries for blocking and important severities, each
-pinned to an exact line number that appears in the diff below. Defer items go
-only in the summary, never inline.
+Only blocking and important findings become inline comments. Suggestions must
+still be pinned to an exact line number that appears in the diff below — they
+are listed in the summary table, never posted inline.
 
 Report EVERY real blocking/important issue you find in the diff — do not stop
 after the first finding. Each distinct problem gets its own `inline` entry (one
@@ -61,10 +61,19 @@ lines or bullet points separated by newlines (`\n`), never one long paragraph
 that wraps. Keep it specific and actionable.
 
 Re-review discipline: this diff may include changes from a previous review
-round (see PREVIOUS ROUND NOTES below, if present). Focus on whether prior
-blocking/important items are actually closed, and on genuine regressions from
-the fix. Do not keep finding marginal new issues once the real problems are
-resolved.
+round (see PREVIOUS ROUND NOTES and OPEN PRIOR THREADS below, if present).
+Focus on whether prior blocking/important items are actually closed, and on
+genuine regressions from the fix. Do not keep finding marginal new issues once
+the real problems are resolved.
+
+Prior threads: every still-open finding from earlier rounds is listed under
+OPEN PRIOR THREADS. For each `inline` entry set `"prior"` to true when it is
+the same problem as one of those threads (match by file and the actual
+problem — the line number may have shifted), or false when it is a new
+finding. Do not re-raise a resolved thread's problem as a new finding unless
+it genuinely reappears in this diff. Findings already resolved in earlier
+rounds are closed — never re-mention them in the summary either; the parent
+comment's resolved list covers only threads closed THIS round.
 
 Author replies (see AUTHOR REPLIES below, if present): judge each reply on the
 merits. If it fixes the problem or convincingly shows the finding was not real,
@@ -76,6 +85,9 @@ Never re-flag a finding whose reply you accept.
 
 PREVIOUS ROUND NOTES:
 {{PREVIOUS_ROUND}}
+
+OPEN PRIOR THREADS (still-unresolved findings from earlier rounds):
+{{OPEN_THREADS}}
 
 AUTHOR REPLIES TO YOUR PRIOR INLINE FINDINGS:
 {{REVIEW_REPLIES}}
@@ -90,11 +102,12 @@ Respond with ONLY a single JSON object, no markdown fences, no prose outside
 the JSON:
 
 {
-  "verdict": "MERGE-READY: <reason>" | "NEEDS WORK: <n> blocking, <m> important",
-  "summary": "<2-6 sentence prose summary of the review>",
-  "readme_note": "<one line, or empty string if no drift>",
-  "architecture_note": "<one line, or empty string if no drift>",
+  "verdict": "MERGE-READY" | "NEEDS WORK: <n> blocking, <m> important",
+  "summary": "<at most 4 short sentences. Do NOT restate the findings — each already has its own entry/thread>",
   "inline": [
-    { "path": "<file path exactly as given>", "line": <int>, "severity": "blocking" | "important", "comment": "<specific, actionable>" }
+    { "path": "<file path exactly as given>", "line": <int>, "severity": "blocking" | "important" | "suggestion", "prior": true | false, "comment": "<specific, actionable>" }
   ]
 }
+
+The verdict is one of the two exact forms above — no reason after "MERGE-READY"
+(the summary carries the reasoning).

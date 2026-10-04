@@ -67,6 +67,9 @@ private `#freehold` channel — and a rebuild reconciles them.
   plan and current scope, with the current chunk's plan alongside them
   (`docs/POC_CHUNK5.md`). [`docs/followups.md`](docs/followups.md) is the grab bag of
   deferred work.
+- [`docs/NETWORK.md`](docs/NETWORK.md) and [`docs/DATA.md`](docs/DATA.md) — the named
+  build plans (gateway + freehold-subnet + Pangolin; snapshots + export + restic off-site)
+  that run alongside the chunked work.
 - [GitHub Releases](https://github.com/darcy/freehold/releases) — the released versions,
   their notes, and assets.
 
@@ -138,6 +141,15 @@ freehold update               # update the world's CP (release assets / ref / de
 freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
                               #  --remove-data drops the durable plane); a thin box / dead CP
                               #  uninstalls over direct root SSH
+freehold snapshot [label]     # snapshot the whole durable plane under one name
+                              #  (--list / --rm / snapshot rollback — guarded,
+                              #  guests stop, the CP comes back via the update flow)
+freehold export [outfile]     # the durable plane's data + profile config into one
+                              #  gzip bundle (du estimate first, confirm; no rootfs)
+freehold backup init/run/snapshots  # restic off-site backup of the durable plane's
+                              #  /srv/data mounts to a repo URI (init settles the
+                              #  repo password with the repo as arbiter; run also
+                              #  ships the profile config; snapshots lists them)
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no
@@ -625,9 +637,9 @@ control-plane/        freehold/control-plane — the stable mechanism (Go logic,
 freehold-cli/         freehold/freehold-cli — the local operator surface (never
                       imported by control-plane/): one dir per verb (install/,
                       uninstall/, build/, teardown/, status/, update/, exec/,
-                      profiles/, door/, add-relay-member/, dns-cred/), plus login/,
-                      tui/, and internal/ (artifact, certcred, common, cpdeploy,
-                      stages)
+                      profiles/, door/, add-relay-member/, dns-cred/, backup/),
+                      plus login/, tui/, and internal/ (artifact, certcred,
+                      common, cpdeploy, stages)
 providers/            freehold/providers — the substrate providers; proxmox/ holds
                       guest create/exec/list, storage, the pct stage/DNS builders,
                       and the world-destroy engine. Imports platform/ + contract/;
@@ -642,7 +654,7 @@ platform/             freehold/platform — the provider-independent world the m
 migrations/           the box-applied migration scripts
 AGENTS.md             agent guidance: locked model, conventions, known gaps
 docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, POC.md, POC_CHUNK5.md,
-                      BUZZ_SURFACE.md, DOOR_SPEC.md, followups.md
+                      NETWORK.md, DATA.md, BUZZ_SURFACE.md, DOOR_SPEC.md, followups.md
 ```
 
 ## Contributing / review
@@ -659,18 +671,23 @@ Every PR runs two gates:
   claims against the actual code. The workflow runs `pull_request_target`-only, so the YAML,
   scripts, and deps it executes are always trusted `main`'s — a PR can never rewrite what
   reviews it — and the explored tree is trusted main too; the diff comes via the API, so
-  nothing from an unreviewed head is ever checked out, let alone run. Findings
-  are tiered in the top-level comment — BLOCKING (must fix) / IMPORTANT (should fix) / DEFER
-  (named follow-up, never re-raised) / NIT (stays silent). Inline comments appear only for
-  BLOCKING/IMPORTANT, on the exact lines. Every review ends with a one-line verdict:
-  `MERGE-READY: <reason>` or `NEEDS WORK: <n> BLOCKING, <m> IMPORTANT`, and submits that as a
-  PR review state — `APPROVE` when clean, `REQUEST_CHANGES` with findings — so branch
-  protection gates a merge rather than a red check. The operator overrides a `REQUEST_CHANGES`
-  by dismissing the review.
-- **README / ARCHITECTURE drift**: when a PR changes something those docs document (or drifts
-  from a locked decision in `docs/ARCHITECTURE.md`), the reviewer adds one `README:` /
-  `ARCHITECTURE:` line to the top-level comment — a signal to update it or ignore, never a
-  blocker, never nitpicked.
+  nothing from an unreviewed head is ever checked out, let alone run. One review runs per PR
+  at a time (per-PR concurrency group, cancel-in-progress): a newer push or re-request
+  cancels the in-flight run, so the PR's standing review state is always one round's verdict,
+  never a race between two. Findings are tiered in the top-level comment — 🛑 BLOCKING (must
+  fix) / ⚠️ IMPORTANT (should fix) / 💡 SUGGESTION (real but fine to defer; listed in the
+  findings table without a thread) / NIT (stays silent). Inline comments appear only for
+  BLOCKING/IMPORTANT, on the exact lines; a finding still open from a prior round is replied
+  on its existing thread, and a round that no longer flags one resolves it (✅ in the
+  comment's resolved list). Every review ends with a computed verdict — bare `MERGE-READY` or
+  `NEEDS WORK — <n> BLOCKING, <m> IMPORTANT` — and submits that as a PR review state:
+  `APPROVE` when clean, `REQUEST_CHANGES` with findings — so branch protection gates a merge
+  rather than a red check. The operator overrides a `REQUEST_CHANGES` by dismissing the
+  review.
+- **README / ARCHITECTURE drift**: rated like any other finding — drift that would mislead
+  (documented behavior the code doesn't have, a shipped command missing from the docs) is
+  IMPORTANT, cosmetic drift is a SUGGESTION — pinned to the doc hunk or the code line that
+  caused it.
 
 Read `AGENTS.md` before changing code: the locked model (relay-as-scope, generic exec, no
 master key, host flexibility) is not open for reinterpretation. Never commit secrets,

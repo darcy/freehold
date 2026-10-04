@@ -50,6 +50,23 @@ type Server struct {
 	// confirmation; "off" = the server denies provision_runner outright —
 	// the kill switch). nil = "confirm".
 	AgentGrants func() string
+
+	// ConsolePeer is the console identity's pubkey — the CP's session-authed
+	// operator surface, which proxies world_migrate HERE (the registry lock
+	// lives in this process). It authenticates by the same signed-header
+	// scheme but never by the roster (the console is deliberately not a
+	// channel member), and it may call world_migrate ONLY. Empty = no peer.
+	ConsolePeer string
+
+	// OperatorPeer is the operator identity's pubkey (--owner-pubkey): the
+	// seed's break-glass caller, full operator scope (the dispatch gates a
+	// roster-member operator gets — create/grant/manage + the world tools,
+	// the IsAgent check still denying registry agents). Peer, not member: the
+	// roster is the agent surface (the CPA), while the CP's own identities
+	// authenticate by signature at boot — which also keeps a stale CLI's
+	// operator-signed migration sweep working across a version jump. Empty =
+	// no peer.
+	OperatorPeer string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +119,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	caller, aerr := VerifyRequest(grants, s.Audience,
 		r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
+	if aerr != nil {
+		// Local peers authenticate by signature, never by roster: the console
+		// (the world_migrate proxy) and the operator (the seed's break-glass
+		// caller — a stale CLI's sweep must survive a version jump). Each
+		// verifies with itself as the grant, so the signature check is
+		// unchanged; the peer's IDENTITY is the authorization.
+		self := ""
+		if s.ConsolePeer != "" && r.Header.Get(PubkeyHeader) == s.ConsolePeer {
+			self = s.ConsolePeer
+		} else if s.OperatorPeer != "" && r.Header.Get(PubkeyHeader) == s.OperatorPeer {
+			self = s.OperatorPeer
+		}
+		if self != "" {
+			caller, aerr = VerifyRequest([]string{self}, s.Audience,
+				r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
+		}
+	}
 	if aerr != nil {
 		// Server-side detail the client error deliberately omits: WHO claimed
 		// to call and WHO this server is. An audience drift (a pod signing a
@@ -313,6 +347,13 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 	// server-side so it cannot be bypassed by calling the server directly.
 	if isWorldTool(call.Name) && s.IsAgent != nil && s.IsAgent(caller) {
 		s.rpcError(w, id, -32003, "unauthorized: registry agents cannot call "+call.Name+" (operator-scoped)")
+		return
+	}
+	// The console peer's single tool (narrow by design — it exists to proxy
+	// world_migrate, whose execution must stay in THIS process for the
+	// registry lock). A console peer reaching anything else is a bug upstream.
+	if s.ConsolePeer != "" && caller == s.ConsolePeer && call.Name != "world_migrate" {
+		s.rpcError(w, id, -32003, "unauthorized: the console peer may call world_migrate only")
 		return
 	}
 	switch call.Name {

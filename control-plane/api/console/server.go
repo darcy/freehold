@@ -120,6 +120,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.worldBuild(w, r)
 	case path == "/api/world-teardown" && method == http.MethodPost:
 		s.worldTeardown(w, r)
+	case path == "/api/world-exec" && method == http.MethodPost:
+		s.worldExec(w, r)
+	case path == "/api/world-migrate" && method == http.MethodPost:
+		s.worldMigrate(w, r)
+	case path == "/api/world-door" && method == http.MethodPost:
+		s.worldDoor(w, r)
 	case path == "/api/teardown" && method == http.MethodPost:
 		s.teardown(w, r)
 	case path == "/api/provision" && method == http.MethodPost:
@@ -469,6 +475,142 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "report": report,
 		"runners_removed": res.Runners, "agents_removed": res.Agents, "dns_removed": res.DNS,
 	})
+}
+
+// worldExec runs one command through the CP's co-located runner — the
+// drive-through-CP exec a thin login box uses, now session-authed here instead
+// of operator-signed on the agent-tools MCP (no relay roster). Operator-scoped
+// like worldBuild: requireSession only admits an admin-whitelisted operator.
+func (s *Server) worldExec(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Builder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "world-exec: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
+		return
+	}
+	var req struct {
+		Target   string   `json:"target"`
+		Cmd      string   `json:"cmd"`
+		TimeoutS uint64   `json:"timeout_s"`
+		Secrets  []string `json:"secrets"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Cmd == "" {
+		writeErr(w, http.StatusBadRequest, "world-exec: cmd required")
+		return
+	}
+	exec := cpbuild.BuildWorldExec(s.Builder)
+	out, err := exec(req.Target, req.Cmd, req.TimeoutS, req.Secrets...)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-exec: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "text": out})
+}
+
+// worldMigrate proxies into the agent-tools serve's world_migrate tool: the
+// scripts must run in THAT process to take Registry.WithRegistryLocked (the
+// registry-write race — see the migration window), so the console cannot
+// execute them itself. It signs as the console identity — the serve's local
+// admin peer — over the same signed-header scheme, no relay roster.
+func (s *Server) worldMigrate(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	snap := s.Store.Snapshot()
+	var atURL, atPK string
+	if snap.AgentToolsURL != nil {
+		atURL = *snap.AgentToolsURL
+	}
+	if snap.AgentToolsPubkey != nil {
+		atPK = *snap.AgentToolsPubkey
+	}
+	if atURL == "" || len(atPK) != 64 {
+		writeErr(w, http.StatusServiceUnavailable, "world-migrate: no agent-tools coords recorded (the CP predates the world toolset)")
+		return
+	}
+	if len(s.ConsoleSecret) != 32 {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: console identity unreadable")
+		return
+	}
+	auth := &client.AgentAuth{Pubkey: s.ConsolePubkey}
+	copy(auth.Secret[:], s.ConsoleSecret)
+	mc, err := client.New(client.ConnectURL(atURL), auth, atPK)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: "+err.Error())
+		return
+	}
+	// Migrations can run for many minutes — the hop that EXECUTES them needs
+	// the long deadline, not the client-facing 30s default.
+	resp, err := mc.CallLong("world_migrate", map[string]interface{}{})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: "+err.Error())
+		return
+	}
+	var envelope struct {
+		Result *struct {
+			Content []map[string]any `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil || envelope.Result == nil || len(envelope.Result.Content) == 0 {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: bad tool envelope")
+		return
+	}
+	text, _ := envelope.Result.Content[0]["text"].(string)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": text})
+}
+
+// worldDoor authorizes or removes an operator box's public door key on the
+// host door (DOOR_SPEC) through the co-located runner — the session-authed
+// mirror of the toolset's world_authorize_door/world_revoke_door.
+func (s *Server) worldDoor(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Builder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "world-door: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+		Pubkey string `json:"pubkey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Pubkey == "" {
+		writeErr(w, http.StatusBadRequest, "world-door: pubkey required")
+		return
+	}
+	authorize, revoke := cpbuild.BuildWorldDoor(s.Builder)
+	switch req.Action {
+	case "authorize":
+		if err := authorize(req.Pubkey); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case "revoke":
+		if err := revoke(req.Pubkey); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "world-door: action must be authorize or revoke")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
 // worldInventory opens the authoritative agent registry + world facts (the
@@ -1315,13 +1457,24 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 	// shipped package exists to append grants to) — the grant is a pure
 	// put-user; state read fresh from disk (the capability was recorded by
 	// the agent-tools process, out-of-band from this serve).
+	//
+	// Records that predate the hosted field read the same way (no hosted,
+	// empty package_dir — the runner is resident on its target and the CP
+	// holds no package to append to); the runner row says the same thing.
+	// Mirror of revoke-grant's fallback.
 	fresh, err := state.Open(s.stateDir())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
 	var grants []string
-	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
+	cap, isCap := fresh.GetCapability(req.Name)
+	runnerOnlyNoPackage := false
+	if rec, ok := fresh.GetRunner(req.Name); ok {
+		runnerOnlyNoPackage = rec.PackageDir == ""
+	}
+	selfHosted := (isCap && cap.SelfHosted()) || runnerOnlyNoPackage
+	if selfHosted {
 		if !provisioner.IsPubkey(req.Pubkey) {
 			writeErr(w, http.StatusBadRequest, "invalid pubkey")
 			return
@@ -1341,14 +1494,16 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 		// nothing prunes it, so it persists across builds without a record.
 		// Best-effort here: a registry-read failure still lands the live
 		// grant; only the durable bookkeeping is skipped.
-		if agentName, _ := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
-			rosters := cap.Rosters
-			if !containsString(rosters, agentName) {
-				rosters = append(rosters, agentName)
-				cap.Rosters = rosters
-				if err := fresh.InsertCapability(req.Name, cap); err != nil {
-					writeErr(w, statusForAction(err), err.Error())
-					return
+		if isCap {
+			if agentName, _ := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
+				rosters := cap.Rosters
+				if !containsString(rosters, agentName) {
+					rosters = append(rosters, agentName)
+					cap.Rosters = rosters
+					if err := fresh.InsertCapability(req.Name, cap); err != nil {
+						writeErr(w, statusForAction(err), err.Error())
+						return
+					}
 				}
 			}
 		}
@@ -1387,35 +1542,48 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	// Mirror of grant: a SELF-HOSTED runner's whitelist is the live roster —
 	// no package to strip; state read fresh from disk.
+	//
+	// Records that predate the hosted field read the same way: no hosted, no
+	// package_dir — the runner is resident on its target and the CP holds no
+	// package, so there is nothing to strip and the relay remove-user is the
+	// whole revoke. The runner row (empty PackageDir) says the same thing.
 	fresh, err := state.Open(s.stateDir())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
 	var grants []string
-	if cap, isCap := fresh.GetCapability(req.Name); isCap && cap.SelfHosted() {
+	cap, isCap := fresh.GetCapability(req.Name)
+	runnerOnlyNoPackage := false
+	if rec, ok := fresh.GetRunner(req.Name); ok {
+		runnerOnlyNoPackage = rec.PackageDir == ""
+	}
+	selfHosted := (isCap && cap.SelfHosted()) || runnerOnlyNoPackage
+	if selfHosted {
 		grants = []string{}
-		// Mirror of grant: a rostered agent's pubkey leaves the record's
-		// Rosters too — else the rebuild's re-assertion re-adds the member
-		// the operator just revoked. The name resolution is LOUD here (not
-		// best-effort): a registry-read failure must not silently leave the
-		// revoked member in the durable roster.
-		agentName, nameErr := agentNameForPubkey(s.AgentToolsDir, req.Pubkey)
-		if nameErr != nil {
-			writeErr(w, http.StatusInternalServerError, "revoke-grant: resolve the pubkey in the agent registry: "+nameErr.Error())
-			return
-		}
-		if agentName != "" {
-			kept := make([]string, 0, len(cap.Rosters))
-			for _, r := range cap.Rosters {
-				if r != agentName {
-					kept = append(kept, r)
-				}
-			}
-			cap.Rosters = kept
-			if err := fresh.InsertCapability(req.Name, cap); err != nil {
-				writeErr(w, statusForAction(err), err.Error())
+		if isCap {
+			// Mirror of grant: a rostered agent's pubkey leaves the record's
+			// Rosters too — else the rebuild's re-assertion re-adds the member
+			// the operator just revoked. The name resolution is LOUD here (not
+			// best-effort): a registry-read failure must not silently leave the
+			// revoked member in the durable roster.
+			agentName, nameErr := agentNameForPubkey(s.AgentToolsDir, req.Pubkey)
+			if nameErr != nil {
+				writeErr(w, http.StatusInternalServerError, "revoke-grant: resolve the pubkey in the agent registry: "+nameErr.Error())
 				return
+			}
+			if agentName != "" {
+				kept := make([]string, 0, len(cap.Rosters))
+				for _, r := range cap.Rosters {
+					if r != agentName {
+						kept = append(kept, r)
+					}
+				}
+				cap.Rosters = kept
+				if err := fresh.InsertCapability(req.Name, cap); err != nil {
+					writeErr(w, statusForAction(err), err.Error())
+					return
+				}
 			}
 		}
 	} else {

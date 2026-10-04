@@ -235,7 +235,8 @@ there; if it is work not yet done, it belongs here.
   on every verb).
 - **The console is not a systemd unit.** It runs under `setsid nohup`; a CP
   guest reboot kills it and the world is headless until a deploy re-runs. The
-  co-located runner already has `systemd-run` — give the console the same.
+  co-located runner has a real enabled unit file (`Restart=on-failure`, shipped
+  by deploy-cp) — give the console the same.
 - **All profiles' local runners collide on 127.0.0.1:8787.** A multi-profile
   box's `freehold exec` silently hits whichever profile's runner owns the port
   (fresh-074's stole every other profile's execs for an hour, with misleading
@@ -283,3 +284,24 @@ there; if it is work not yet done, it belongs here.
   user's own files, so a fixed guest path like `/srv/data/relay` could step on
   them. Use a freehold-prefixed path (e.g. `/srv/data/freehold/relay`) for the
   adopted case; freehold-created guests keep the plain `/srv/data/<tenant>`.
+- **A live-issued grant did not reach a running capability door's roster.**
+  Live-tested on librem (the data-plane phase-4 acceptance): the console's
+  `grant <runner> --pubkey …` published ("grants: 1") but the runner kept
+  denying the pubkey with `-32001 not granted` for 15+ minutes — through a
+  runner restart — and the relay's signed 39002 roster event never carried
+  the new member. Build-time grants land (the data identity is rostered);
+  the mid-flight grant → roster re-publication chain is where the break is
+  (the relay not re-signing 39002 on the put-user, or the console's grant
+  flow not triggering the re-sign). Related: the console has no
+  member-ungrant — a grant added by hand stays on the roster (the box's
+  caller identity is now a permanent break-glass member of librem's
+  `cp-local-root`).
+- **The co-located runner's crash is unreaped and unrestarted.** The
+  deploy's `systemd-run --unit=freehold-runner --collect` is a TRANSIENT
+  unit: a crash collects it (the unit is GONE — no fragment, no logs), the
+  port goes dark, and every console-side transport (world-exec, the CP
+  toolset's own calls) times out while /healthz stays green. Live-seen on
+  librem: 8787 refused, no process, only a manual `systemd-run` line
+  revived it. The revive script covers the rollback path; a plain CRASH
+  needs the unit to be real (a shipped unit file with `Restart=on-failure`)
+  or a watchdog — the transient run is the gap.

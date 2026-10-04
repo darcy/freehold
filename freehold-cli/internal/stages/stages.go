@@ -574,6 +574,10 @@ var deployCpCmd = &cobra.Command{
 		spec.AgentToolsBinary = opt("agent-tools-binary")
 		spec.RunnerBinary = opt("runner-binary")
 		spec.RunnerPackage = opt("runner-package")
+		spec.FreeholdBinary = opt("freehold-binary")
+		spec.FreeholdConfig = opt("freehold-config")
+		spec.VerbSSHKey = opt("verb-ssh-key")
+		spec.VerbKeyPub = opt("verb-key-pub")
 		spec.KeyComment = mustStr(cmd, "key-comment")
 		// The version pin: install stamps it, build/teardown don't (their
 		// deploy-cp invocations pass no --version).
@@ -741,6 +745,10 @@ func init() {
 	deployCpCmd.Flags().String("commit", "", "commit sha to stamp")
 	deployCpCmd.Flags().String("migrations-dir", "", "LOCAL dir of <epoch>.sh migration scripts (shipped unmarked; the queue runs at the end of world bring-up)")
 	deployCpCmd.Flags().Bool("redeploy", false, "replace binaries in an EXISTING plane (update): no adoption/rotation/promotion")
+	deployCpCmd.Flags().String("freehold-binary", "", "LOCAL freehold CLI binary (the data verbs' surface on the CP guest)")
+	deployCpCmd.Flags().String("freehold-config", "", "LOCAL profile config.toml (the verbs' coordinates)")
+	deployCpCmd.Flags().String("verb-ssh-key", "", "LOCAL cp-verb SSH private key (shipped 0600; its pub line authorizes on the host)")
+	deployCpCmd.Flags().String("verb-key-pub", "", "the cp-verb key's authorized_keys public line")
 
 	registerSelfFlags(stampVersionCmd)
 	stampVersionCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "remote state dir")

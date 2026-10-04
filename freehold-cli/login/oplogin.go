@@ -21,7 +21,6 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
-	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
@@ -289,7 +288,7 @@ func Interactive() error {
 	// this box can drive CP-lifecycle work (bootstrap-cp / teardown-cp). Best-
 	// effort — login's primary outcome is the operator session + identity; a CP
 	// that predates the world toolset still allows login, with the miss surfaced.
-	if err := AuthorizeDoor(cfg); err != nil {
+	if err := AuthorizeDoor(c); err != nil {
 		fmt.Fprintf(os.Stderr, "  (note: door not authorized — %v)\n", err)
 	} else {
 		fmt.Fprintf(os.Stderr, "  door key authorized on the host (build/teardown enabled)\n")
@@ -356,14 +355,17 @@ func SelectProfile(what string) (*config.Profile, error) {
 	}
 }
 
-// AuthorizeDoor presents THIS box's door key to the host through the CP's world
-// toolset (world_authorize_door, DOOR_SPEC): it derives the door SSH public line
-// deterministically from the box's agent-ops identity seed (idempotent — the CP
-// grep-before-appends, so re-login is safe) and authorizes it signed as the
-// OPERATOR identity (the console-admin / toolset-roster credential), so a fresh
-// box can drive CP-lifecycle verbs (bootstrap-cp / teardown-cp). The private
-// half never leaves the box; only the public line is presented.
-func AuthorizeDoor(cfg *config.Config) error {
+// AuthorizeDoor presents the box's public door key to the host through the
+// console's operator-scoped /api/world-door (session-authed; no relay roster,
+// no agent-tools coords) — the same DOOR_SPEC append, driven by the session
+// the login flow just established. The door SSH public line derives
+// deterministically from the box's agent-ops identity seed (idempotent — the
+// CP grep-before-appends, so re-login is safe). The private half never leaves
+// the box; only the public line is presented.
+func AuthorizeDoor(c *console.Client) error {
+	if c == nil {
+		return fmt.Errorf("no console session (login first)")
+	}
 	id, err := identity.Load(OpsDir())
 	if err != nil {
 		return fmt.Errorf("no ops identity at %s: %v", OpsDir(), err)
@@ -377,19 +379,8 @@ func AuthorizeDoor(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("derive door pubkey: %v", err)
 	}
-	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
-		return fmt.Errorf("no freehold-agent-tools coords recorded (the CP predates the world toolset)")
-	}
-	auth, err := identity.AgentAuth(Dir())
-	if err != nil {
-		return fmt.Errorf("operator identity for the toolset: %v", err)
-	}
-	mc, err := client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
-	if err != nil {
-		return err
-	}
-	if _, err := mc.Call("world_authorize_door", map[string]interface{}{"pubkey": pubkey}); err != nil {
-		return fmt.Errorf("world_authorize_door: %w", err)
+	if err := c.WorldDoorAuthorize(pubkey); err != nil {
+		return fmt.Errorf("world door authorize: %w", err)
 	}
 	return nil
 }

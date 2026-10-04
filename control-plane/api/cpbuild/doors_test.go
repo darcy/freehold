@@ -68,6 +68,23 @@ func TestCapabilityRunnerTable(t *testing.T) {
 	if len(pve.rosters) != 3 {
 		t.Fatalf("pve-ssh-root should carry network+compute+data, got %v", pve.rosters)
 	}
+	// The data department's local door: exec ON the cp guest (kind local),
+	// rostered to data only — the verbs deploy-cp ships run there.
+	var cpLocal *capabilityRunner
+	for i := range runners {
+		if runners[i].name == "cp-local-root" {
+			cpLocal = &runners[i]
+		}
+	}
+	if cpLocal == nil {
+		t.Fatal("cp-local-root missing from the table")
+	}
+	if cpLocal.kind != "local" {
+		t.Fatalf("cp-local-root kind = %q, want local", cpLocal.kind)
+	}
+	if len(cpLocal.rosters) != 1 || cpLocal.rosters[0] != "data" {
+		t.Fatalf("cp-local-root should carry data only, got %v", cpLocal.rosters)
+	}
 }
 
 // TestZoneOf pins the zone derivation for the per-zone DNS doors.
@@ -121,6 +138,38 @@ func TestCPACarriesGrantingSkill(t *testing.T) {
 		p, _ := agents.DepartmentPrompt(dept)
 		if strings.Contains(p, "unit of grant is the RUNNER") {
 			t.Fatalf("department %s must not carry the granting skill", dept)
+		}
+	}
+}
+
+// TestDoorUnitShapePinsResilience: the doors' staged units are REAL files —
+// Restart=on-failure + enabled (a crash or a guest reboot returns; a
+// --collect transient removed the unit on the first crash and the door's
+// port went dark with no reaper).
+func TestDoorUnitShapePinsResilience(t *testing.T) {
+	s := doorUnitText("freehold capability runner cp-local-root", "cp-local-root",
+		"/srv/data/cp/bin/freehold-runner", "--state-dir /x --addr 0.0.0.0:8797")
+	for _, want := range []string{"Restart=on-failure", "RestartSec=5", "WantedBy=multi-user.target", "ExecStart=/srv/data/cp/bin/freehold-runner serve --state-dir /x --addr 0.0.0.0:8797"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("door unit missing %q\n---\n%s", want, s)
+		}
+	}
+}
+
+// TestRetireScriptClosesUnits: the build's rename-retire must close out the
+// now-real unit files the way revoke_runner's retire does — disable --now +
+// file removal + reload — not just stop them (an enabled unit file survives
+// the stop and resurrects the runner at the next CP-guest boot).
+func TestRetireScriptClosesUnits(t *testing.T) {
+	script := retireUnitsScript("data-pve")
+	for _, want := range []string{
+		"systemctl disable --now freehold-runner-data-pve",
+		"rm -f /etc/systemd/system/freehold-runner-data-pve.service /etc/systemd/system/freehold-runner-data.service",
+		"systemctl daemon-reload",
+		"systemctl reset-failed freehold-runner-data-pve",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("retire script missing %q\n---\n%s", want, script)
 		}
 	}
 }

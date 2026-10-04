@@ -49,7 +49,7 @@ task is resumable without re-deriving where it stopped.
   `bot-review` check) — and only then open the findings:
   `gh pr view <n> --json comments` (or `gh api repos/<owner>/<repo>/pulls/<n>/comments`)
   with a timestamp cursor, and fix what's real. Addressing comments mid-review wastes
-  a round and risks editing files the review hasn't seen yet; `DEFER` items belong
+  a round and risks editing files the review hasn't seen yet; 💡 SUGGESTION items belong
   in the PR body or the `Known gaps` section below, not in re-review rounds.
 - **Commit and push; never merge.** Merging is the operator's call — do it only
   when the operator explicitly says "merge when complete" (or equivalent). Until
@@ -182,6 +182,12 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 - `docs/NETWORK.md` — the network-plane build plan (a named build plan, not a numbered
   chunk): the gateway guest, the freehold-subnet, Pangolin as the public-path north
   star, and the agent-operated exposure phase.
+- `docs/DATA.md` — the data-plane build plan (a named build plan, not a numbered
+  chunk): `freehold snapshot` (durable-plane snapshots + guarded rollback),
+  `freehold export` (the vzdump portable bundle), and restic off-site to an
+  arbitrary backend — the Data department's home ground without a PBS VM. The
+  verbs run ON the CP guest through Data's `cp-local-root` door (the verb
+  surface deploy-cp ships); the snapshot skill composes onto Data's prompt.
 
 ## Locked model — do not change without an explicit user decision
 
@@ -284,7 +290,8 @@ release notes.
   retries only *pending* work.
 - **The console executor's migration window still has a live writer.** Where the queue runs
   *inside* the agent-tools serve — the tail of `world_build` and the `world_migrate` tool
-  that `freehold update` drives alike — it runs under `Registry.WithRegistryLocked`, so no
+  (which `freehold update` drives through the console's `/api/world-migrate` proxy, the
+  serve's signed local peer) — it runs under `Registry.WithRegistryLocked`, so no
   roster write can interleave with the scripts' out-of-band edit of `registry.json`. The
   console-executor branch cannot get the same
   guarantee — the serve it writes through is a different process, and stopping it for
@@ -313,9 +320,20 @@ release notes.
   action lands (stop the unit, remove the state dir — or destroy the guest); revoke on a
   resident door is a feed-cut, not a stop.
 - **Backups can outlive "rotation = erase your copies."** `/srv/data` sits in the PBS +
-  TrueNAS + Backblaze backup set, so a revoke that deletes the shipped `secrets.json` can
-  still leave the old ciphertext in an off-site snapshot; backup retention is a named
-  follow-up.
+  TrueNAS + Backblaze backup set (and a `freehold backup` restic repo holds the same
+  bytes again), so a revoke that deletes the shipped `secrets.json` can still leave the
+  old ciphertext in an off-site snapshot; backup retention is a named follow-up.
+- **Snapshot is a Proxmox-provider capability; export and restic are universal.**
+  `freehold snapshot` rides ZFS/LVM-thin snapshot primitives (Proxmox-only by nature); a
+  VPS world's point-in-time + off-site story is `freehold backup` (restic) and its export
+  is the same tar of the recorded plane mounts — plain host paths either way
+  (`docs/DATA.md`'s substrate table). There is no VPS snapshot provider yet.
+- **`freehold backup` holds no scheduling and no restore verb.** Backup runs are
+  CLI-invoked; a host-side timer and a `freehold restore` (world bootstrap from backup —
+  the portable-backup north star's own path) are unwired. The restic password lives in
+  the profile dir on the box (0600) + the host's /srv/nobackup — whoever holds the
+  profile can restore; secret-env injection over the runner (the ssh-connector gap
+  above) is the later tightening.
 - **Rotate/re-grant don't reach an already-running runner.** A runner holds its package in
   memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
   a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
@@ -466,7 +484,13 @@ release notes.
   (`control-plane/api/agent/tools.go`) are served by a dedicated CP-side binary
   (`control-plane/api/cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
   shared signed-header scheme and authorized against the server's own relay roster (its
-  NIP-29 channel + 39002 membership, read fresh per call, fail-closed).   Seeded at bootstrap;
+  NIP-29 channel + 39002 membership, read fresh per call, fail-closed) — the AGENT
+  surface (the CPA, membered at create; the seed members nobody else and revokes any
+  prior operator/console rows). The CP's own identities are LOCAL PEERS, verified by
+  signature alone and never roster members: the console for `world_migrate` only (the
+  `/api/world-migrate` proxy — the registry lock lives in the serve) and the operator
+  (`--owner-pubkey`) with full operator scope as break-glass (which also keeps a stale
+  CLI's operator-signed migration sweep working across a version jump). Seeded at bootstrap;
   the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
   the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
   via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
@@ -539,7 +563,8 @@ release notes.
     go vet ./... && go test ./...`. Imports `platform/` + `contract/`; never the reverse.
   - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
     CLI + TUI, one dir-per-verb (`install/`, `uninstall/`, `build/`, `teardown/`,
-    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`)
+    `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`,
+    `backup/`)
     plus `login/` + `tui/` and `internal/common/` + `internal/certcred/` +
     `internal/stages/`; the `install/` surface holds `install/cpdeploy/`; the `freehold`
     binary's main is `cmd/freehold`):
