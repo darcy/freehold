@@ -63,6 +63,10 @@ type ProxmoxLxcSpec struct {
 	Net1IP  *string
 	Net1GW  *string
 	Net1Tag *int
+	// NoDocker skips the guest docker+compose install (the gateway guest
+	// routes; dockerd's iptables-nft FORWARD chain ships `policy drop`, which
+	// strangles the gateway's own forwarding).
+	NoDocker bool
 	// Durable-plane reference MOUNTS baked into pct create (--mpN): each
 	// dataset is bound to its guest path at FIRST creation — the locked
 	// "born on the plane, never pct set post-hoc" rule. Empty = no mounts.
@@ -426,9 +430,13 @@ func BootstrapProxmoxLxc(exec ExecFunc, spec *ProxmoxLxcSpec) (*BootstrapResult,
 	}
 
 	// Get ahead of docker-in-LXC: the guest hosts the relay, so it needs
-	// docker + compose BEFORE deploy's docker gate runs.
-	if err := EnsureGuestDocker(exec, vmid); err != nil {
-		return nil, err
+	// docker + compose BEFORE deploy's docker gate runs. The gateway guest
+	// (NoDocker) is a router: dockerd's iptables-nft FORWARD `policy drop`
+	// would strangle its own forwarding.
+	if !spec.NoDocker {
+		if err := EnsureGuestDocker(exec, vmid); err != nil {
+			return nil, err
+		}
 	}
 
 	// A4 support — the domain gate needs the guest's IP so the install can

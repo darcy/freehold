@@ -1287,6 +1287,7 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 		{&cfg.Lxc.Relay, &prev.Lxc.Relay},
 		{&cfg.Lxc.Cp, &prev.Lxc.Cp},
 		{&cfg.Lxc.K3s, &prev.Lxc.K3s},
+		{&cfg.Lxc.Gateway, &prev.Lxc.Gateway},
 	} {
 		if pair[0].Vmid == nil {
 			pair[0].Vmid = pair[1].Vmid
@@ -1686,11 +1687,17 @@ func (e *Engine) stageBootstrap(role string) error {
 		if cfg != nil && cfg.Proxy.Ip != nil && *cfg.Proxy.Ip != "" {
 			lan = *cfg.Proxy.Ip
 		}
-		args = append(args, "--rootfs-gb", "4", "--memory-mb", "512",
+		args = append(args, "--rootfs-gb", "4", "--memory-mb", "512", "--no-docker",
 			"--lxc-ip", withPrefix(lan, 24), "--lxc-gw", e.F.RelayGw,
 			"--net1-ip", withPrefix(config.GatewayInternalIP(cidr), prefixBits(cidr)), "--net1-tag", strconv.Itoa(e.F.GatewayVlan))
 		if cfg != nil && cfg.Lxc.Gateway.Vmid != nil {
 			args = append(args, "--vmid", strconv.FormatUint(uint64(*cfg.Lxc.Gateway.Vmid), 10))
+		} else if v, perr := e.pickFreeVmidSkippingRecorded(cfg); perr != nil {
+			return perr
+		} else if v != 0 {
+			// The driver's own pick takes the LOWEST free id — which on a
+			// re-adopt is a recorded role vmid the later births re-create.
+			args = append(args, "--vmid", strconv.FormatUint(uint64(v), 10))
 		}
 		_, err = e.selfStage("booting the gateway LXC", args)
 		if err != nil {
@@ -1748,6 +1755,37 @@ func prefixBits(cidr string) int {
 	_, bits, _ := net.ParseCIDR(cidr)
 	n, _ := bits.Mask.Size()
 	return n
+}
+
+// pickFreeVmidSkippingRecorded returns the lowest free VMID that is neither a
+// live guest nor a RECORDED role vmid (cp/relay/k3s — kept intact by an
+// uninstall and re-created at those coordinates by the later births), nor the
+// other roles' recorded ids. 0 = let the driver pick (nothing recorded).
+func (e *Engine) pickFreeVmidSkippingRecorded(cfg *config.Config) (uint32, error) {
+	if e.Provider == nil {
+		return 0, nil
+	}
+	skip := map[uint32]bool{}
+	for _, g := range []config.LxcGuest{cfg.Lxc.Cp, cfg.Lxc.Relay, cfg.Lxc.K3s} {
+		if g.Vmid != nil {
+			skip[*g.Vmid] = true
+		}
+	}
+	guests, err := e.Provider.ListGuests()
+	if err != nil {
+		return 0, fmt.Errorf("gateway vmid pick: %w", err)
+	}
+	for _, g := range guests {
+		if n, perr := strconv.ParseUint(g.ID, 10, 32); perr == nil {
+			skip[uint32(n)] = true
+		}
+	}
+	for id := uint32(100); id < 10000; id++ {
+		if !skip[id] {
+			return id, nil
+		}
+	}
+	return 0, fmt.Errorf("no free vmid for the gateway")
 }
 
 // bootstrapStaticIP returns the role's STATIC address, or "" = DHCP. k3s is

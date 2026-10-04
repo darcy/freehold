@@ -443,6 +443,7 @@ func applyInstallDefaults(f *box.Flags) {
 func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f := box.Flags{}
 	f.Name, _ = cmd.Flags().GetString("name")
+	f.Target, _ = cmd.Flags().GetString("target")
 	f.LocalPort, _ = cmd.Flags().GetUint32("local-port")
 	f.Addr = box.LoopbackAddr(uint16(f.LocalPort))
 	f.Host, _ = cmd.Flags().GetString("host")
@@ -504,6 +505,10 @@ func init() {
 func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("name", "", "World/profile name (REQUIRED — isolates config + state under profiles/<name>)")
 	cmd.Flags().String("host", "", "Host address freehold reaches (REQUIRED, e.g. root@192.168.30.224)")
+	// The runner NAME is usually the default (box.RunnerTarget), but a world
+	// installed under a named runner (e.g. freehold-live-install) re-adopts
+	// THAT one — the flag records it instead of forcing the default.
+	cmd.Flags().String("target", "", "Provisioning runner name (default: the standard substrate runner)")
 	cmd.Flags().Uint32("local-port", box.DefaultRunnerPort, "Runner MCP port on the box's loopback (127.0.0.1:<port>)")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host (REQUIRED on a fresh plane)")

@@ -175,6 +175,7 @@ func provisionProxmoxLxc(exec proxmox.ExecFunc, cmd *cobra.Command) error {
 		MemoryMB: mustU32(cmd, "memory-mb"), Bridge: mustStr(cmd, "bridge"),
 		NetIP: ip, NetGW: gw, Tag: tag,
 		Net1IP: net1IP, Net1GW: net1GW, Net1Tag: net1Tag,
+		NoDocker: mustBool(cmd, "no-docker"),
 		Mounts: mounts,
 	}
 	res, err := proxmox.BootstrapProxmoxLxc(exec, spec)
@@ -687,6 +688,7 @@ func init() {
 	provisionCmd.Flags().String("net1-ip", "", "second NIC (eth1) static IPv4 (CIDR)")
 	provisionCmd.Flags().String("net1-gw", "", "gateway for the second NIC")
 	provisionCmd.Flags().String("net1-tag", "", "VLAN tag for the second NIC")
+	provisionCmd.Flags().Bool("no-docker", false, "skip the guest docker+compose install (the gateway guest)")
 	provisionCmd.Flags().String("vmid", "", "VMID (auto when empty)")
 	provisionCmd.Flags().StringArray("mount", nil, "durable mount <source>:<guest>")
 	provisionCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (accepted for symmetry; unused by proxmox-lxc)")
