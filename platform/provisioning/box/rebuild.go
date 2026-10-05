@@ -1871,12 +1871,13 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 	// gateway (an unconstrained dport DNAT hijacks the guests' own egress).
 	edgeIP := config.StripCIDR(edgeOf(e.F.ProxyIP))
 	conf := config.GatewayNftConf(cidr, edgeIP, k3sIP, cpIP, relayIP, "eth0")
+	// Bootstrap DNS BEFORE apt: the template inherits the HOST resolv.conf
+	// (Tailscale MagicDNS on this box — 100.100.100.100), which is not
+	// routable from inside the guest, and a LAN resolver is not guaranteed to
+	// answer either — apt then hangs to the watchdog. Public resolvers, like
+	// EnsureGuestDocker; the CP build re-writes guest DNS later anyway. The
+	// script rides a single-quoted sh -c: APOSTROPHES ARE FORBIDDEN in it.
 	script := fmt.Sprintf(`set -e
-# Bootstrap DNS BEFORE apt: the template's resolv.conf inherits the host's
-# (Tailscale MagicDNS on this box's host — 100.100.100.100), which is not
-# routable from inside the guest, and a LAN resolver is not guaranteed to
-# answer either — apt then hangs to the watchdog. Public resolvers, like
-# EnsureGuestDocker; the CP build re-writes the guest's DNS later anyway.
 echo nameserver 1.1.1.1 > /etc/resolv.conf
 echo nameserver 8.8.8.8 >> /etc/resolv.conf
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
