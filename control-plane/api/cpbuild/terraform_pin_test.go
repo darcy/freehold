@@ -123,3 +123,60 @@ func TestPinTfNoSecretVars(t *testing.T) {
 		}
 	}
 }
+
+// TestTfVarsCarryRecordedPlane: the module's plane.sh defaults ("pve"/8GB) are
+// the AUTHORS' host — a world whose box-side ensure chose another VG must have
+// terraform ride the RECORDED plane, not carve a second one in the wrong VG.
+// Unrecorded (old) worlds pass neither var and the module defaults hold.
+func TestTfVarsCarryRecordedPlane(t *testing.T) {
+	withPlane := &Spec{
+		Name: "demo", RelayHost: "chat.example.net", CpHost: "home.example.net",
+		PlanePool: "vg-fast", ThinPool: "demo-data", SizeGB: 12,
+		CpLxc: 107, RelayLxc: 108, K3sVmid: 109, ProxyIP: "192.0.2.5",
+	}
+	vars, err := withPlane.tfVars()
+	if err != nil {
+		t.Fatalf("tfVars: %v", err)
+	}
+	joined := strings.Join(vars, "\x00")
+	if !strings.Contains(joined, "vg=vg-fast") || !strings.Contains(joined, "lv_size_gb=12") {
+		t.Errorf("recorded plane not passed: %v", vars)
+	}
+	bare := &Spec{Name: "demo", RelayHost: "chat.example.net", CpHost: "home.example.net", ThinPool: "demo-data"}
+	vars, err = bare.tfVars()
+	if err != nil {
+		t.Fatalf("tfVars (unrecorded): %v", err)
+	}
+	joined = strings.Join(vars, "\x00")
+	if strings.Contains(joined, "vg=") || strings.Contains(joined, "lv_size_gb=") {
+		t.Errorf("unrecorded plane must ride the module defaults: %v", vars)
+	}
+}
+
+// TestPlaneShArgsQuoted: plane.sh's interpolated args ride the sh -c
+// single-quote wrapper through the runner — an EMPTY vg/thin_pool/lv_size_gb
+// must arrive as a quoted-empty positional (""), not vanish (an unquoted
+// empty var collapses the argv and every positional shifts by one).
+func TestPlaneShArgsQuoted(t *testing.T) {
+	mainB, err := terraformFS.ReadFile("terraform/main.tf")
+	if err != nil {
+		t.Fatalf("read main.tf: %v", err)
+	}
+	main := string(mainB)
+	for _, role := range []string{"cp", "relay", "k3s"} {
+		line := "lxc.sh ${var.vmid_" + role + "}"
+		i := strings.Index(main, line)
+		if i < 0 {
+			t.Fatalf("lxc.sh command for %s not found", role)
+		}
+		seg := main[i : i+300]
+		if !strings.Contains(seg, `\"${var.template}\"`) {
+			t.Errorf("%s: template var unquoted — an empty default collapses plane/lxc argv", role)
+		}
+	}
+	plane := strings.Index(main, "plane.sh ${var.domain_dash}")
+	if plane < 0 || !strings.Contains(main[plane:plane+200], `\"${var.vg}\"`) {
+		t.Error("plane.sh: vg var unquoted — an empty value shifts every positional")
+	}
+}
+

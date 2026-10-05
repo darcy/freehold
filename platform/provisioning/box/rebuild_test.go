@@ -5,6 +5,8 @@ import "reflect"
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -819,11 +821,13 @@ func TestApplyConfigDefaults(t *testing.T) {
 // engine's provider seam is exercised without a real host.
 type fakeProvider struct {
 	guests    []provisioning.Guest
+	nextID    uint32
 	ips       map[string]string
 	mounts    map[string][]string
 	pool      string
 	riders    int
 	repointed string
+	destroyed []string
 }
 
 func (f *fakeProvider) GuestExec(guest, cmd string, timeoutS uint64) (*client.ExecOutcome, error) {
@@ -831,6 +835,8 @@ func (f *fakeProvider) GuestExec(guest, cmd string, timeoutS uint64) (*client.Ex
 }
 
 func (f *fakeProvider) ListGuests() ([]provisioning.Guest, error) { return f.guests, nil }
+
+func (f *fakeProvider) NextFreeVMID() (uint32, error) { return f.nextID, nil }
 
 func (f *fakeProvider) GuestIPv4(guest string) (string, error) {
 	ip, ok := f.ips[guest]
@@ -842,7 +848,12 @@ func (f *fakeProvider) GuestIPv4(guest string) (string, error) {
 
 func (f *fakeProvider) GuestMounts(guest string) ([]string, error) { return f.mounts[guest], nil }
 
-func (f *fakeProvider) DestroyGuest(guest string) error { return nil }
+func (f *fakeProvider) DestroyGuest(guest string) error {
+	f.destroyed = append(f.destroyed, guest)
+	return nil
+}
+
+func (f *fakeProvider) StopGuestCmd(id uint32) string { return fmt.Sprintf("stop %d", id) }
 
 func (f *fakeProvider) LocalLvmStatus() (string, int, error) { return f.pool, f.riders, nil }
 
@@ -862,5 +873,109 @@ func TestCPGuestLive(t *testing.T) {
 	}
 	if _, err := CPGuestLive(nil, "x", ""); err == nil {
 		t.Error("nil provider must error")
+	}
+}
+
+// ---- the gateway vmid pick + the derived defaults ---------------------------
+
+func TestPickFreeVmidSkippingRecorded(t *testing.T) {
+	vmid := func(n uint32) *uint32 { return &n }
+	tests := []struct {
+		name   string
+		nextID uint32
+		cfg    *config.Config
+		want   uint32
+	}{
+		{"no provider — the driver picks", 0, nil, 0},
+		{"canonical nextid wins untouched", 103, &config.Config{}, 103},
+		{"recorded cp AT nextid — bump past", 101,
+			&config.Config{Lxc: config.LxcSpec{Cp: config.LxcGuest{Vmid: vmid(101)}}}, 102},
+		{"recorded run — bump past all of them", 102,
+			&config.Config{Lxc: config.LxcSpec{
+				Cp:    config.LxcGuest{Vmid: vmid(102)},
+				Relay: config.LxcGuest{Vmid: vmid(103)},
+				K3s:   config.LxcGuest{Vmid: vmid(105)},
+			}}, 104},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{Provider: &fakeProvider{nextID: tc.nextID}}
+			got, err := e.pickFreeVmidSkippingRecorded(tc.cfg)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("vmid = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultGatewayCIDR(t *testing.T) {
+	tests := []struct {
+		lan, want string
+	}{
+		{"192.168.30.8/24", "10.77.0.0/24"},
+		{"10.77.200.5/24", "10.77.0.0/24"}, // disjoint /24s — no conflict
+		{"10.77.0.0/16", "10.78.0.0/24"},   // the /16 contains 10.77.0.0/24
+		{"10.78.0.0/16", "10.77.0.0/24"},
+		{"10.78.0.0/24", "10.77.0.0/24"},
+		{"10.0.0.0/8", "10.77.0.0/24"}, // pathological — exhausted, base returned
+		{"", ""},                       // unparseable — caller errors
+		{"nonsense", ""},
+	}
+	for _, tc := range tests {
+		if got := DefaultGatewayCIDR(tc.lan); got != tc.want {
+			t.Errorf("DefaultGatewayCIDR(%q) = %q, want %q", tc.lan, got, tc.want)
+		}
+	}
+}
+
+func TestPickFreeLoopbackPort(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	busy := uint32(l.Addr().(*net.TCPAddr).Port)
+	if PickFreeLoopbackPort(busy) == busy {
+		t.Errorf("busy port %d returned as free", busy)
+	}
+	if got := PickFreeLoopbackPort(busy + 1); got != busy+1 {
+		t.Errorf("free port %d moved to %d", busy+1, got)
+	}
+}
+
+// ---- the erase-fresh path (transient destroy args + the leaked-guest drop) --
+
+// TestEraseDestroyArgs: the destroy self-stage MUST ride the transient flags —
+// without them it dials e.F.Addr, where no serve exists on the install path
+// (connection-refused, the erase dies after the operator said erase).
+func TestEraseDestroyArgs(t *testing.T) {
+	args := eraseDestroyArgs("127.0.0.1:8787", "/agent-dir", "pve-ssh-root", "root@host",
+		"cp", "chat-example-net", "vg-fast", "lvmth")
+	want := []string{"storage", "destroy", "--addr", "127.0.0.1:8787", "--agent-dir", "/agent-dir",
+		"--target", "pve-ssh-root", "--transient", "--host", "root@host",
+		"--tenant", "cp", "--domain", "chat-example-net", "--pool", "vg-fast", "--kind", "lvmth"}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("erase args = %v, want %v", args, want)
+	}
+}
+
+// TestDropLeakedGuests: erase-fresh drops THIS world's role guests (by exact
+// hostname) and skips roles with no live guest — a leaked guest from a crashed
+// run holds the tenant LVs mounted and lvremove refuses.
+func TestDropLeakedGuests(t *testing.T) {
+	p := &fakeProvider{guests: []provisioning.Guest{
+		{ID: "104", Name: "demo-gateway"},
+		{ID: "107", Name: "demo-cp"},
+		{ID: "110", Name: "other-world-cp"}, // foreign — never touched
+	}}
+	e := &Engine{Out: &bytes.Buffer{}, Provider: p, F: Flags{Name: "demo", RelayDomain: "chat.example.net"}}
+	if err := e.dropLeakedGuests(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(p.destroyed) != 2 || p.destroyed[0] != "104" || p.destroyed[1] != "107" {
+		t.Errorf("destroyed = %v, want [104 107] (the world's own leaked guests)", p.destroyed)
 	}
 }
