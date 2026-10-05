@@ -2,12 +2,13 @@
 
 Product: an open-source "box + install script" (Omarchy-style) that lands a
 Proxmox VE / VPS + Kubernetes stack with Buzz Relay as the control plane and
-a skill framework that installs and configures self-hosted OSS. For the
-current chunk numbering (Chunks 1–4 done — the engine room, relay scope, the
-durable plane, the Rust→Go refactor, and a real reasoning CPA in Buzz; Chunk 5
-= agent workspaces + git/GitHub; Kubernetes arrives with Chunks 6–7), see
-`docs/ROADMAP.md` and `docs/POC.md`. Narrative: "reclaim the future we
-were promised" — the full rationale lives in `VISION.md`.
+a skill framework that installs and configures self-hosted OSS. This doc is the
+current architecture of the core platform: the trust model, the control plane,
+the operator surface, and the agent org. Each department's architecture, known
+gaps, and plans are in its own doc (`docs/AI.md`, `docs/NETWORK.md`,
+`docs/DATA.md`, `docs/COMPUTE.md`); the core's gaps and plans are in
+`docs/FREEHOLD.md`; the ordered view is `docs/ROADMAP.md`. Narrative: "reclaim
+the future we were promised" — the full rationale lives in `VISION.md`.
 
 ## System layout
 
@@ -36,115 +37,42 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     assumed. A user's existing relay is onboarded as a service (via a relay
     runner), not a nested scope. No "control plane of control planes."
 
-*   **Agent pods are bare v1 Pods in the k3s LXC's `agents` namespace** — the
-    CPA (Chunk 4) and every agent it creates. Each agent owns distinct objects
-    named from its sanitized display name (`<pod>`, `<pod>-identity`,
-    `app: <pod>`), so a second agent never applies over the first. The harness
-    is the `ghcr.io/block/buzz-sprig` image (moving `:main` tag today; a
-    build-time digest pin is a named follow-up); identity rides a
-    first-run-wins `<pod>-identity` Secret via `secretKeyRef` (the nsec never
-    rides the manifest); `restartPolicy: Never` keeps an intentional exit
-    terminal (I5); no mgmt channel by design; no PVC — agent memory is
-    relay-persisted (kind 30174). The pod's workspace (its `/home/agent`
-    working directory) mounts a name-keyed dir on the durable plane
-    (`/srv/data/k8s-volumes/agent-home/<pod>` on the k3s guest via hostPath),
-    so files an agent creates survive pod re-applies and a rebuilt k3s guest;
-    the deploy stage re-creates + chowns the dir before every apply.
+*   **Agent pods are bare v1 Pods in the k3s LXC's `agents` namespace** — the CPA
+    and every agent it creates, plus the four departments — running Buzz's
+    `buzz-acp` remote-agent harness. Identity, workspace, prompt, memory, and the
+    tool bridge are described in `docs/AI.md` (the agent runtime). Runners are
+    separate — see the Runners section below.
 
-*   **Agent placement:** every agent (CPA and created alike) runs on Buzz's
-    `buzz-acp` remote-agent harness as a k3s pod (see `docs/POC.md`).
-    Runners are separate — see the Runners section below.
-
-*   **Runner identity** = Nostr keypair (membership/signing) + a *separate*
-    encryption keypair (env-injected / mounted secret, never committed).
-    Agents connect with their *own* keypair; secrets are encrypted for the
-    runner's encryption key.
-
-*   **CP = secret PROVISIONER, not a vault:** encrypt to runner-key → ship
-    ciphertext → inject the runner private key → rotate. No master key.
-    Runner holds only ciphertext + its own key; decrypts in its own memory,
-    uses in memory, forgets. Plaintext never on disk, never in agent context.
-    Two deliberate CP-held secrets, both sealed to the console identity: the
-    DNS/litellm creds (world-secrets, opened in memory at build), and the
-    OPERATOR's Nostr SIGNING key (`world-secrets/operator.json`, shipped by
-    the box build) — it attests agent memory (`contract/nipoa`) and, as the
-    operator's full signing key, also authorizes console logins and relay
-    owner-role actions: a CP compromise yields operator impersonation (the
-    same class as losing the operator box). Runner blobs still stay sealed:
-    nothing under the CP state dir opens one.
-
-*   **Grants are coarse:** agent ↔ runner (whitelist of Nostr pubkeys);
-    dedicated runner per service by default. Readiness = the runner's own
-    self-check (🟢 all checked / 🟡 some checks missing / 🔴 none).
-
-*   **The runner lifecycle rides native Nostr kinds, not custom ones:** a
-    runner is a private NIP-29 channel; grant/revoke is channel membership
-    (kinds 9000/9001); the runner's live whitelist is the relay's own signed
-    roster (**kind 39002**), read fresh per call, fail-closed on relay
-    outage. No relay fork, no custom 30073/30078.
+*   **Agents never hold secrets — the runner flow makes that enforceable, not a policy.**
+    An agent reasons; a runner (no LLM, no vault) owns the connection, executes commands
+    verbatim, injects credentials per attempt, and is audited. The CP provisions secrets
+    (encrypt to a runner's key, ship ciphertext, rotate) — it is not a vault, and agents
+    reference credentials by name only. Grants are coarse (agent ↔ runner, one runner per
+    capability), ride native Nostr kinds, and the full model — including grants on the fly —
+    is the AI architecture: `docs/AI.md`.
 
 *   **CPA + experts live in Buzz:** the CPA is a real reasoning agent (the
     system's main user touchpoint); experts are deterministic or
     reasoning-class. The CPA gets its purpose from `agents/freehold/prompt.md`.
 
 *   **Host-flexible:** Proxmox is the lead/default; VPS/cloud are first-class
-    (the business path). The k8s layer (Chunks 6–7) and everything above the
+    (the business path). The k8s layer and everything above the
     host driver run identically regardless of substrate.
 
-*   **Backups are the load-bearing wall — and no PBS VM is required for
-    them:** `freehold snapshot` (every durable-plane mount under one name,
-    guarded rollback), `freehold export` (the durable plane's
-    data + config in one gzip bundle — no guest rootfs, guests are
-    reconstructible), and `freehold backup` (restic on the substrate host to an
-    arbitrary URI — sftp to a NAS, B2 off-site) cover the chain with the
-    tools the system already runs; `docs/DATA.md` is the build plan. Where a
-    PBS server exists it stays a target, not a dependency. Snapshot is a
-    Proxmox-provider capability (ZFS / LVM-thin); export (a tar of the
-    recorded plane mounts) and restic are universal — a VPS world's
-    off-site and export are the same commands with different paths.
+*   **Backups are the load-bearing wall — and no PBS VM is required for them:**
+    `freehold snapshot`, `freehold export`, and `freehold backup` (restic to an
+    arbitrary URI) cover the chain with the tools the system already runs; where a
+    PBS server exists it stays a target, not a dependency (`docs/DATA.md`).
 
-*   **The durable half lands FIRST (Chunk 3; see `docs/POC.md`):**
-    `/srv/data` — everything that survives rebuild: `/srv/data/relay` (all
-    relay deploy data: config, CA, keypairs), `/srv/data/cp`
-    (`secrets.json` + `providers.json`), `/srv/data/k8s-volumes` (k8s
-    storage, Chunks 6–7). **Nothing in the POC needs a cluster**
-    (`docs/ROADMAP.md`), and even in MVP most services aren't k8s
-    workloads: the relay/CP are LXCs, with LiteLLM/Postgres as k8s
-    Deployments only in v1.
-
-*   **The backup rule is the split, implemented as MOUNT POINTS with explicit
-    flags.** `/srv/data` (and its tenants) and `/srv/nobackup` are `mpN:`
-    volume mounts, never plain rootfs directories — and the flag must be set
-    on EVERY entry, because vzdump's default excludes volume mount points.
-    freehold lands each tenant dataset as its own mount (`mp0: …,
-    mp=/var/lib/docker,backup=1`, `mp1: …,mp=/srv/data/relay,backup=1`,
-    `mp2: …,mp=/srv/data/cp,backup=1`, …), which is the same rule applied per
-    tenant rather than as one shared `/srv/data` mount; a future reproducible
-    half gets `mpN: …,mp=/srv/nobackup,backup=0` (never in the PBS job). On
-    a box that can't add a second mount point, `vzdump --exclude-path
-    /srv/nobackup` is the rootfs fallback.
-
-*   **Container stores relocate under `/srv/nobackup`**
-    (`docker`/`containerd`/`rancher` daemon roots), mirroring the existing
-    "exclude `/var/lib/docker`" Docker-host LXC pattern — but by layout, not
-    by config list. **Carve-out — the buzz relay keeps its daemon root at
-    `/var/lib/docker`, backed up (`backup=1`):** the relay's
-    Postgres/Redis/MinIO/git data are docker *named volumes* under
-    `/var/lib/docker/volumes/`, and freehold ships no buzz patch, so
-    relocating it would silently exclude the relay DBs from backup. The
-    export/backup verbs still skip the daemon root's STORAGE-DRIVER dirs
-    (`fuse-overlayfs`/`overlay2` — the pulled images' unpacked layers,
-    812M of a 1.0G root live-verified): `docker compose pull` re-creates
-    them; the volumes stay in.
-
-*   **Durable PVCs are pinned under `/srv/data` — never the daemon root.**
-    k3s's default `local-path` provisioner stores PVCs *under the rancher
-    root* (`/var/lib/rancher/k3s/storage/…`); relocating that whole root
-    would drag the control_plane Postgres PVC — the thing every
-    "reconstructible from" claim depends on — into the excluded half,
-    silently. Configure provisioner roots explicitly: durable ones
-    (`control_plane`) pin to `/srv/data/k8s-volumes`; disposable ones ride
-    the `nobackup`-rooted storage class.
+*   **Filesystem layout convention (the `/srv/data` convention).** State that must
+    survive a rebuild lives on dedicated mount points, never plain rootfs dirs:
+    `/srv/data/relay` (relay deploy data), `/srv/data/cp` (CP state: sealed secrets,
+    `providers.json`, console + agent-tools identity), `/srv/data/k8s-volumes` (durable
+    PVCs and agent workspaces), and the relay's `/var/lib/docker` (its databases) —
+    each born at `pct create` with an explicit `backup=1`. Nothing in the POC needs a
+    cluster to be durable. The mount layout, the backup flag rule, the relay
+    carve-out, and the pinned PVC roots are specified in `docs/DATA.md`; how the
+    volumes come to exist is in `docs/COMPUTE.md`.
 
 *   **The CP host itself must be reconstructible, not durable:** booting a
     fresh target on *different* hardware (and even a different distro) from
@@ -200,7 +128,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (provision/rotate/revoke/grant), `state/` (the CP store), and the Rust
     crates `core/` (the byte-exact contract oracle + the `harness/` Go
     byte-gate), `runner/`, and `testkit/` (the runner's hermetic fixtures). The
-    Chunk-1/2 acceptance gate is Go under `acceptance/`, driving the real
+    acceptance gate is Go under `acceptance/`, driving the real
     `runner` binary as a subprocess. The local operator interface (`freehold`
     CLI + TUI, `login/`, `flows/`, install) lives in the sibling
     `freehold-cli/` module; the server never imports it.
@@ -301,40 +229,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     publishes the kind-9000 put-user to the runner's channel in-process — the
     runner re-reads its signed 39002 roster per call, so the grant lands
       without a restart (missing credential fails closed; agents are denied with
-      `-32003`, since a grant hands direct exec access to the runner). The
-      carve-out is the CPA's capability pair: `provision_runner` (grants on the fly): it
-      stages a NEW capability runner — keypair + sealed credential + private
-      channel + a systemd unit on the CP guest — records it as a dynamic
-      capability (re-staged adopt-only on every build; fixed port so pod
-      coords stay stable), grants the named agents onto its roster live, and
-      re-applies the grantees' pods with coords resolved from state. It also
-      ENROLLS a runner resident on its own target (`hosted=self`, kind
-      `local`): the target box holds the runner-client and `runner enroll`
-      minted its identity ON the box — the CP records the presented pubkeys,
-      seals credentials to them, starts nothing, and pods dial the box's LAN
-      address directly; a re-provision must present the same pubkeys. It never
-      widens an existing runner, `agent_grants: off` on the CP state is the
-      server-side kill switch (`freehold-console grants-mode`), and the
-      in-thread-vs-DM confirmation discipline lives in the granting skill
-      (`docs/POC_GRANTS.md`). An api-kind door provisions EMPTY — the agent
-      DMs the operator the door's own console page (`/runner/<name>`), whose
-      kind-aware fill form seals the credential via `/api/rotate` and
-      restarts the door's unit (a self-hosted runner instead returns the
-      package JSON — the grantee writes `secrets.json` on the guest through
-      its own door and restarts the unit there); no credential ever transits
-      agent chat. Its counterpart is the CPA's `revoke_runner` (take-away on
-      the fly), gated by the SAME `agent_grants` switch: with `revoke_from` it
-      drops named grantees from a door's roster AND from the dynamic capability
-      record that the build re-grants from (a relay-only removal would be
-      silently undone by the next build), then re-applies their pods without
-      it; with it empty it retires the whole door — channel folded but kept
-      (its audit stream stays queryable), the CP's sealed credential erased and
-      re-opened to prove it, the unit stopped where the build hosts it, the
-      record dropped. Each leg self-reports `[verified]` or `[UNVERIFIED]`, and
-      the substrate credential is handed to Compute rather than touched. A
-      retired name is refused to the agent in both directions until an
-      operator re-enables it by provisioning the door from the console. The
-     `platform/migrations` queue — the CP's repair/catch-up scripts for
+      `-32003`, since a grant hands direct exec access to the runner). The CPA's
+      carve-outs are `provision_runner` / `revoke_runner` — the full model is in
+      `docs/AI.md` ("Runners and secrets"). The `platform/migrations` queue —
+    the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
      semantics — runs from two entry points: the `world_migrate` tool (the
      console's `/api/world-migrate` proxies into the serve, signed as its
@@ -542,9 +440,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     | Department | Domain |
     | --- | --- |
     | **Network** | The network surface: access & exposure — external/public proxy, Tailscale, internal proxy, exposure verification (`docs/NETWORK.md`) |
-    | **Data** | Data plane: backup/off-site, DR planning, scheduling, restore verification |
-    | **Compute** | The box itself: CPU/RAM/disk, Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning, plus the monitoring tooling it needs. Not what runs on top |
-    | **AI** | LiteLLM/provider setup & aliases, local AI config, **AI hardware** (local-AI accelerators like an RTX 3090 or DGX Spark — provisioned and tuned by AI, separate from Compute's general resources), agent optimization, prompt/skill management, agent debugging |
+    | **Data** | Data plane: backup/off-site, DR planning, scheduling, restore verification (`docs/DATA.md`) |
+    | **Compute** | The box itself: CPU/RAM/disk, Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning, plus the monitoring tooling it needs. Not what runs on top (`docs/COMPUTE.md`) |
+    | **AI** | LiteLLM/provider setup & aliases, local AI config, **AI hardware** (local-AI accelerators like an RTX 3090 or DGX Spark — provisioned and tuned by AI, separate from Compute's general resources), agent optimization, prompt/skill management, agent debugging (`docs/AI.md`) |
 
 *   **Service lifecycle is not a department.** Whichever agent created a service
     — a freehold-delegate or a custom agent — owns its install/config/operation,
@@ -568,56 +466,53 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     NEW capability doors it stages — the department that gets the grant is
     named in the flow itself.
 
-*   **The four departments are installed as part of the core build** — each a
-    pod on the same harness as the CPA, created through the same audited
-    `create_agent`. All join the private `#freehold` channel (there are no
-    per-department channels; conversations happen where they already are,
-    with #freehold the fallback every core agent belongs to). The build also
-    owns the first-run surface: it publishes the operator's kind:0 profile
-    (name from install) — which makes the Buzz desktop app skip its stock
-    onboarding (no starter channels, no private Welcome, no built-in
-    welcome-team agents) — stands up the open `#general` channel (CPA-owned;
-    operator + CPA) and posts a one-time marker-guarded welcome in
-    `#freehold`. Each
-    department also holds **capability runners** (`stageDepartmentRunners`):
-    one runner per capability its role needs — named
-    `<target>-<protocol>-<identity>` (`pve-ssh-root` shared by
-    network+compute+data, `kube-api-root`/`kube-api-caddysa`/`kube-api-litellmsa`
-    SA-token kube doors, `litellm-api-admin`, `cloudflare-api-<zone>`,
-    `dnsmasq-local-root`) — each in its own private NIP-29 channel/audit
-    stream, bound LAN-reachable with the relay roster. The pod receives the
-    runners' coords (`FREEHOLD_RUNNER_*`) and its bridge advertises a scoped
-    `exec`/`list` that routes by target to the pinned runner+credential,
-    signing as the agent's own nsec — so the department's capability grants
-    attach to the department identity, and the CPA/custom agents (with no
-    coords) never see exec. A capability a department doesn't hold yet ships
-    as its runner when the capability lands — never by widening a runner's
-    package; the CPA's `provision_runner` stages such a door on the fly (a
-    package; the CPA's `provision_runner` stages such a door on the fly (a
-    dynamic capability record re-staged adopt-only every build), or enrolls a
-    runner RESIDENT on the box itself (`hosted=self`) when the box holds the
-    runner-client — the exec is native on that guest — and its `revoke_runner`
-    retires one again. Status
-    language is
-    language is
-    uniform, runner → service → department: 🟢 all checked / 🟡 some checks
-    missing / 🔴 none.
+*   **The four departments are installed as part of the core build** — each a pod
+    on the same harness as the CPA, created through the same audited
+    `create_agent` (`docs/AI.md`, the agent runtime). All join the private
+    `#freehold` channel (there are no per-department channels; conversations
+    happen where they already are, with #freehold the fallback every core agent
+    belongs to).
 
-*   **Departments check in rather than wait to be asked.** When a new
+*   **The first-run surface the operator meets is freehold's, not the Buzz
+    desktop app's.** The build publishes the operator's kind:0 profile (the
+    display name asked at install, `--display-name`) — the event the app checks
+    to skip its stock onboarding (no starter channels, no private Welcome, no
+    built-in welcome-team agents) — stands up the open `#general` channel
+    (CPA-owned; operator + CPA), and posts a one-time marker-guarded welcome in
+    `#freehold`. Every stage is an idempotent ensure (existing worlds pick the
+    surface up on their next build; a missed kind:0 or welcome degrades to a
+    WARN, never a failed build).
+
+*   **Each department holds capability runners** — one per capability, grant-scoped,
+    rostered over native Nostr kinds, named for the target (`pve-ssh-root`,
+    `litellm-api-admin`, …). The table, the grant model, and grants on the fly are in
+    `docs/AI.md` ("Runners and secrets").
+
+*   **Departments check in rather than wait to be asked.** The intent: when a new
     service/compute is requested through the CPA's provision path, the relevant
     department raises the question itself (Data: "back this up?"; Network:
-    "reachable outside your network?"). A "no" is final — the point is that the
-    gap is a visible choice, not a silent one.
+    "reachable outside your network?"), and a "no" is final — the gap is a visible
+    choice, not a silent one. The trigger is unbuilt (`docs/FREEHOLD.md`).
 
 *   **Every non-custom agent is oriented the same way.** The CPA and the four
-    departments are prefixed with a shared system-orientation block: the source
-    repo URL (configurable; upstream default) with **real read access** (the repo
-    is public — clone and read from `main`; write access is unwired, so agents
-    consult but never push), read-it-on-boot + keep a memory + re-check
-    periodically because the repo is active, the VISION-is-the-why /
-    ARCHITECTURE-is-the-how pairing, and the "be loud" rule — surface problems
-    and missing access to freehold and the operator, never silently. Custom
-    agents (those the CPA creates on the fly) are exempt.
+    departments are prefixed with a shared system-orientation block: the source repo
+    URL (configurable; upstream default) with **real read access** (the repo is
+    public — clone and read from `main`; write access is unwired, so agents consult
+    but never push), read-it-on-boot + keep a memory + re-check periodically, the
+    VISION-is-the-why / ARCHITECTURE-is-the-how pairing, and the "be loud" rule —
+    surface problems and missing access to freehold and the operator, never
+    silently. Custom agents (those the CPA creates on the fly) are exempt.
+
+### Grants on the fly (agent-initiated capability)
+
+The operator asks in conversation, the department interviews, and the CPA stages the
+runner: `provision_runner` mints a NEW capability door (never widens one), grants the
+requester onto it live, and re-applies the pod; `revoke_runner` takes it back, leg by leg,
+`[verified]` or `[UNVERIFIED]`. Credentials never ride chat — an api door provisions empty
+and the operator fills it on the door's console page. Governed by the `agent_grants` switch
+(`confirm` / `auto` / `off`) and guarded so the agent surface can only take back what the
+agent flow gave. The full model — the trust reasoning, the credential handling, the
+resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners and secrets").
 
 ### `agents/freehold/prompt.md` (the CPA's purpose)
 
@@ -710,107 +605,79 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 **A runner is a dumb privileged machine** — it runs commands; it isn't an
 agent; it is *never* the brain (that's the CPA).
 
-| Step | Action |
+1.  `run_call` validates signature (roster), audience, expiry, and nonce, and
+    selects the connector.
+2.  `runShell` executes the command **verbatim**, streaming output.
+3.  Results (`//> …` / `<! …`) return to the calling agent.
 
-|---|---|
-
-| 1 | `run_call` validates signature (roster), audience, expiry, nonce;
-selects the connector |
-
-| 2 | `runShell` executes the command **verbatim**, streaming output |
-
-| 3 | Results (`//> …` / `<! …`) return to the calling agent |
-
-**No MCP, no REST, no LLM, no router, no key vault.** A connector MUST NOT
-cache plaintext credentials, hold a "master key," or consult the router —
-credentials are injected per attempt via `envFrom`/`env` and the router
-(`litellm.rs`) is an **API connector** whose `baseUrl` and `apiKey` ride as
-env vars (`LITELLM_HOST`, `LITELLM_API_KEY`).
+**No MCP, no REST, no LLM, no router, no key vault in the runner.** A connector
+MUST NOT cache plaintext credentials, hold a "master key," or consult the router
+— credentials are injected per attempt via `envFrom`/`env`, and the LiteLLM
+router is an **API connector** whose `baseUrl` and `apiKey` ride as env vars
+(`LITELLM_HOST`, `LITELLM_API_KEY`).
 
 ### Transient access (install/uninstall before the runner exists)
 
 A box reaches the Proxmox host **as root over SSH** before (or without) the CP's
 co-located runner, using a DOOR_SPEC key it derives deterministically from its
-agent-ops identity seed (`crypto.SSHPrivateKeyPEMFromSeed`). `providers/proxmox.SSHExec`
-is the `ExecFunc` transport; install's `provision`/`storage`/`deploy-cp` stages and
-`uninstall`'s dead-CP / thin-box path ride it, and `install`'s host-side fail-if-live
-probe uses it to refuse re-deploying over a live `<name>-cp`. The CP's co-located runner
-remains the durable hands once it is up; the transient key is the door that gets it there
-(and removes it). A box's own `Box.Engine` never imports the provider — the composition
+agent-ops identity seed (`crypto.SSHPrivateKeyPEMFromSeed`).
+`providers/proxmox.SSHExec` is the `ExecFunc` transport; install's
+`provision`/`storage`/`deploy-cp` stages and `uninstall`'s dead-CP / thin-box path
+ride it, and `install`'s host-side fail-if-live probe uses it to refuse
+re-deploying over a live `<name>-cp`. The CP's co-located runner remains the
+durable hands once it is up; the transient key is the door that gets it there (and
+removes it). A box's own `Box.Engine` never imports the provider — the composition
 root injects the transport through the `Provider`/`ProviderFactory` seam.
 
-**A `pct` or `qm` command is simply a command.** The `exec` tool is the
-single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
-`lxc.*`, `vm.*`, `vm_snapshot`, `vm_restore`, `snapshot.*`, and `backup.*`
-(all illustrative; nothing here is a semantic tool).
+**A `pct` or `qm` command is simply a command.** The `exec` tool is the single
+funnel for substrate and service work (`pct`, `qm`, `zfs`, `lvm`, `systemctl`,
+`kubectl`, …); nothing here is a semantic tool.
 
 ### Targets (where the work lands)
 
 | Kind | Example target | Connector | State |
-
-|---|---|---|---|
-
-| `pct` LXC | relay (`relay-…-<nn>`) | `pve` | `lxc.<role>` |
-
-| `qm` KVM | VPS host (Vultr, `vps:<id>`) | `ssh` (KeyPath) | `vm.<id>` |
-
-| `pct` LXC | K3s (`k3s-…-<nn>`) | `k8s` | `lxc.k3s` |
-
+| --- | --- | --- | --- |
+| `pct` LXC | relay (`<name>-relay`) | `pve` | `lxc.<role>` |
+| `qm` KVM | VPS host (`vps:<id>`) | `ssh` (KeyPath) | `vm.<id>` |
+| `pct` LXC | k3s (`<name>-k3s`) | `k8s` | `lxc.k3s` |
 | `pct` LXC | control plane | `local` | `cp.<role>` |
-
 | `vm` | … | `api` | `provider.<name>` |
 
 *   **A `TargetId`** is `pct`, `qm`, `pve`, `k8s`, `local`, `ssh`, `api`, or
-    `proxy` (full grammar in `control-plane/runner`; `TargetId::parse` lives in
-    `control-plane/runner`).
-
-*   **`pve.<verb>` and `container.<verb>` are gone:** `pct`/`qm` are `exec`
-    on the PVE host or a VPS.
-
-*   **`exec` is the one tool**; `local` is a generic exec on the runner
-    itself (used by `provision`/`rotate` for `zfs` and `vzdump`), *not* a
-    proxy, delegate-peer, or "executes in the control plane LXC."
-
-*   **`<id>` (VMID),** not an LXC ID.
-
-*   **`<nn>`:** `managedStore{root}` at `/srv/data/cp`, **not**
-    `managed: false`.
+    `proxy` (full grammar in `control-plane/runner`; `TargetId::parse` lives
+    there).
+*   **`exec` is the one tool;** `local` is a generic exec on the runner itself
+    (used by `provision`/`rotate` for `zfs` and `vzdump`), *not* a proxy,
+    delegate-peer, or "executes in the control plane LXC."
+*   **`<id>` is the VMID,** not an LXC ID. **`<nn>`:** `managedStore{root}` at
+    `/srv/data/cp`, **not** `managed: false`.
 
 ### The single control plane (CP)
 
-*   **One host, many connectors.** The CP is the only instance (no "CP of
-    CPs"); it reads `providers.json`/`secrets.json` from `/srv/data/cp` and
-    never re-derives them.
-
-*   **A crash dump** (`coredumptl`) proves something
-    broke; it is not a recovery path.
-
-*   **No dashboard** while an op is active; **no secret dumps** in output;
-    no secrets in `logs/` or the activity window; **no LLM in the CP**
-    (that's the CPA's job).
+*   **One host, many connectors.** The CP is the only instance (no "CP of CPs"); it
+    reads `providers.json`/`secrets.json` from `/srv/data/cp` and never re-derives
+    them.
+*   **A crash dump** (`coredumpctl`) proves something broke; it is not a recovery
+    path.
+*   **No dashboard** while an op is active; **no secret dumps** in output; no
+    secrets in `logs/` or the activity window; **no LLM in the CP** (that's the
+    CPA's job).
 
 ### Skills
 
-*   **A skill is a directory** (e.g. `/skills/<id>/SKILL.md`) with YAML
-    frontmatter (`name`, `description`, `metadata.openclaw.*`); the
-    `metadata` key holds **`openclaw`** (or **`omarchy`**), and *all*
-    supported values live under it.
-
-*   **One skill = one host = one `SKILL.md`.**
-
-*   **`freehold <verb>`** — there is no `freehold skill run`, no `skill run`,
-    and no `freehold skill <verb>` subcommand; and *nothing* that re-proves
-    the crypto with a `python3 scripts/convert_agents_opencode.py`.
-
-*   **Never encode `sk-…`, `nsec…`, or `nenc…`.**
-
-*   **The skill is the doc for one `SKILL.md`.** A long op uses
-    `run_call`/`RunCallWithDial`; there is no `freehold skill` CLI, and a
-    "Managed by freehold" dataset must never be re-`create`d.
-
-*   **The agent MUST verify every `SKILL.md` command** on loopback (e.g.
-    `127.0.0.1:3000`) against the `go test ./...` suite before it
-    documents that command; **don't guess from prose** — probe first.
+*   **A skill is a directory** (`SKILL.md`) with YAML frontmatter (`name`,
+    `description`, `metadata.openclaw.*`); the `metadata` key holds **`openclaw`**
+    (or **`omarchy`**), and *all* supported values live under it. **One skill = one
+    host = one `SKILL.md`.**
+*   **Skills are composed onto an agent's prompt** (`agents/<name>/skills/*.md`,
+    through `agents/prompt.go`): the CPA carries `granting` and `access-unifi`, Data
+    `snapshot`, Compute `create-lxc`. There is no `freehold skill` CLI.
+*   **Never encode `sk-…`, `nsec…`, or `nenc…`** in a skill.
+*   **The agent MUST verify every `SKILL.md` command** against the real thing
+    (e.g. loopback `127.0.0.1:3000`) before documenting it; **don't guess from
+    prose** — probe first.
+*   The skill schema's growth (`target:` hints, `verify:` postconditions) is a plan,
+    not current state — `docs/FREEHOLD.md`.
 
 ### Versions, channels, and updates
 
@@ -847,116 +714,47 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     k3s and the agent org exist for the scripts to act on. There are no
     reverse migrations (a named gap).
 
-## Build plan (chunked)
+## Where the rest lives
 
-**POC (pre-MVP, Kubernetes arrives with Chunks 6–7 — see `docs/POC.md`):**
+The department-owned architecture and the plans each domain carries:
 
-1.  **Chunk 1 — Local control plane + runners + secrets + connectors:**
-    local web UI (localhost) → one `exec` tool → per-service runners
-    (dedicated per service by default) → provisioner model
-    (`secrets.json`, `providers.json`, `identity.json`) → connectors
-    (PVE/Vultr/Backblaze). **POC done =** a CPA that creates agents and
-    manages an SSH machine / Vultr / Backblaze **via a runner** (the CPA in
-    Buzz is Chunk 4).
-
-2.  **Chunk 2 — The durable volume plane (the `/srv/data` convention):**
-    `managedStore` at `/srv/data/cp` (`secrets.json`, `providers.json`) →
-    `resolve` → `ensure` → `run_call` → `Run` → `runReconstruct` (fresh
-    host, no state dir).
-
-3.  **Chunk 3 — Rust→Go refactor + the modular Go tree:** the operator
-    surface is Go across modules — `contract/` (`freehold/contract`, the
-    shared wire/trust leaf), `platform/` (`freehold/platform`, the evolving world),
-    `agents/` (`freehold/agents`, the agent definitions),
-    `freehold-cli/` (`freehold/freehold-cli`, the local operator CLI + install),
-    and `control-plane/`
-    (`freehold/control-plane`, the stable mechanism) — with the Rust
-    `core`/`runner` kept as a byte-exact reference oracle; the local CLI
-    drives the shared box engine directly
-    (`eng.stdin = ui.in`); teardown keeps the config intact (`PruneLxcCoords`
-    is never written to disk); the plane stage is never skipped
-    (`TestManagedForFlags`, `TestWorldManaged`, `TestParsePctGateway`,
-    `TestPlaneStageNeverSkipped`, `TestParseDnsList`);
-    `TestDestroyLvmTenantUmountSedPrecedesLvremove` anchors the LVM path at
-    `drive/lvm_test.go:463`.
-
-4.  **Chunk 4 — A resilient CPA that creates agents and lives in Buzz:**
-    the CPA runs on the `buzz-acp`/`goose-class` harness as a k3s pod, with the
-    CP's `freehold-agent-tools` toolset
-    and the durable-plane identity/memory guarantees; `freehold-teardown`
-    destroys LXCs but keeps the **recorded coordinates**; `freehold install`
-    drives the shared box engine for CP bootstrap.
-
-5.  **Chunk 5 — Agent workspaces + git/GitHub:** one workspace at
-    `/srv/data/<agent>/` (`.freehold/config.json` + `SKILL.md`);
-    `freehold/teardown.go` (never `…/workspace.go`) keeps
-    `DestroyLvmTenantUmount` and `SedPrecedesLvremove`.
-
-**MVP (public release — ADDS k8s):**
-
-6.  **Chunk 6 — Kubernetes substrate:** deterministic k8s pods, LiteLLM as
-    a Deployment, **`freehold/deploy`** (the `Deploy` config, `parse.go`),
-    `managed: true`, `TestManagedForFlags` / `TestWorldManaged` (see this
-    file's "Pieces" above); `freehold/deploy/…` (a **Go** module — not
-    Rust).
-
-7.  **Chunk 7 — Remaining connectors (Vultr, Backblaze, Terraform) + the
-    North Star:** portable `TargetId`, single `exec`, and the durable-path
-    conventions from this file; the Go acceptance gate
-    (`control-plane/acceptance/`) reproduces **Chunk 1**'s acceptance criteria
-    hermetically on loopback.
+*   `docs/AI.md` — the LiteLLM gateway, the agent runtime, AI hardware.
+*   `docs/NETWORK.md` — the freehold-subnet, the gateway, the edge, the public path.
+*   `docs/DATA.md` — the durable plane, snapshot/export/backup, the North Star.
+*   `docs/COMPUTE.md` — the provider seam, guests, storage, k3s, teardown.
+*   `docs/FREEHOLD.md` — the core platform's known gaps, plans, and UI/UX.
+*   `docs/ROADMAP.md` — the ordered view across all of them.
 
 ## Locked decisions
 
-*   **Deterministic agent pods** (public release); connections as env vars;
-    secrets via the provisioner model (a runner holds ciphertext + an
-    injected key; an agent uses, never reads).
-
-*   **Agent placement:** every agent (CPA and created alike) runs on the
-    `buzz-acp` harness as a bare k3s pod. The four departments are agents on the
-    same harness class, installed as part of the core build.
-
+*   **Buzz is required; the management relay is created by the install; one relay
+    per control plane** (relay-as-scope).
+*   **Agent = brain, runner = dumb privileged hands.** `exec(cmd, target, stream?)`
+    and `run_call` are the only tools; one `exec` tool per runner; `//>`/`<!`
+    frames stream the result. No semantic tools.
+*   **Secrets via the provisioner model** — a runner holds ciphertext + an injected
+    key; an agent uses, never reads.
+*   **Deterministic agent pods:** every agent (the CPA and created ones alike) runs
+    on the `buzz-acp` harness as a bare k3s pod; the four departments are agents on
+    the same harness class, installed as part of the core build.
 *   **The agent org is two tiers: the CPA and four departments.** The CPA is the
-    sole user touchpoint; Network / Data / Compute / AI
-    are its direct reports, each a distinct identity scoped to one
-    domain. Communication is unrestricted; capability execution is bounded — a
-    department-owned capability is executed by that department's identity and
-    its raw grant attaches there, never to a custom agent. Service lifecycle is
-    not a department — the agent that created a service owns it. The four are installed
-    at build, all in the private `#freehold` channel; only the identity/grant separation is
-    locked.
-
-*   **Buzz required; the management relay is created by the install; one
-    relay per control plane.**
-
-*   **LiteLLM** as a k8s Deployment (replicas), config mounted, state in
-    Postgres.
-
-*   **Storage**: ZFS now → Ceph on 2nd box. Layered reliability.
-
-*   **Buzz Relay headless**; the first-party **console** is the admin/ops
+    sole user touchpoint; Network / Data / Compute / AI are its direct reports, each
+    a distinct identity scoped to one domain. Communication is unrestricted;
+    capability execution is bounded — a department-owned capability is executed by
+    that department's identity and its raw grant attaches there, never to a custom
+    agent. Service lifecycle is not a department — the agent that created a service
+    owns it. The four are installed at build, all in the private `#freehold`
+    channel; only the identity/grant separation is locked.
+*   **LiteLLM** as a k8s Deployment, config via env, state in Postgres.
+*   **Storage:** ZFS / LVM-thin now → Ceph on a second box. Layered reliability.
+*   **Buzz relay is headless;** the first-party **console** is the admin/ops
     surface.
-
-*   **K8s arrives with Chunks 6–7 — the public release (MVP), not before.**
-    `docs/POC.md` anchors both halves of that claim.
-
-*   **Generic exec runner** (an agent writes commands; a runner owns the
-    connection and streams + audits them).
-
-*   **`exec(cmd, target, stream?)` and `run_call` are the only tools**; one
-    `exec` tool per runner; `//>`/`<!` frames stream the result.
-
-*   **Nothing in the POC needs a cluster**; POC = a CPA that **lives in
-    Buzz** + skills.
-
-*   **The `/srv/data` convention** (durable state) and `freehold-cli/tui`'s
-    single activity view (**ALWAYS** the top line).
-
-*   **`<n>` is a chunk number and `<module>/<pkg>`** is the module path for
-    every Go package above.
+*   **The `/srv/data` convention** (durable state) and `freehold-cli/tui`'s single
+    activity view (**ALWAYS** the top line).
 
 ## Verification
 
-- Everything under `docs/` (this file, `VISION.md`, `ROADMAP.md`, `POC.md`,
-  `BUZZ_SURFACE.md`, `followups.md`) plus the root docs (`README.md`,
-  `AGENTS.md`) describe the current state; the decisions above are current.
+Everything under `docs/` (this file, `VISION.md`, `ROADMAP.md`, `FREEHOLD.md`,
+`AI.md`, `NETWORK.md`, `DATA.md`, `COMPUTE.md`, `BUZZ_SURFACE.md`, `DOOR_SPEC.md`)
+plus the root docs (`README.md`, `AGENTS.md`) describe the current state; the
+decisions above are current.

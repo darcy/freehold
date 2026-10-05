@@ -1,4 +1,4 @@
-# Buzz Surface — Phase 0 deliverable (Chunk 2)
+# Buzz Surface
 
 Facts from the primary source (`github.com/block/buzz`, Apache 2.0, Block Inc.), read
 2026-08-17 against `main`. This note is the input D1's event-kind schema and E2's delegation
@@ -172,7 +172,7 @@ agent key, counterparty = owner; the relay only ever stores ciphertext); the own
 writer encrypts against comes from the NIP-OA `auth` attestation (§7), so a pod's
 writes land in the owner namespace its harness already reads. The envelope is
 shape-checked only — the relay does NOT bind the event signature to the claimed
-`p` owner (integrity gap recorded in docs/followups.md); confidentiality is
+`p` owner (integrity gap recorded in docs/AI.md); confidentiality is
 cryptographic and unaffected.
 
 ## 9.7 Delegation wire (found live, Phase E)

@@ -66,13 +66,15 @@ one-time welcome in `#freehold`.
 
 - [`docs/VISION.md`](docs/VISION.md) — the narrative and the "why".
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the system design and the locked decisions.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/POC.md`](docs/POC.md) — the chunked
-  plan and current scope, with the current chunk's plan alongside them
-  (`docs/POC_CHUNK5.md`). [`docs/followups.md`](docs/followups.md) is the grab bag of
-  deferred work.
-- [`docs/NETWORK.md`](docs/NETWORK.md) and [`docs/DATA.md`](docs/DATA.md) — the named
-  build plans (gateway + freehold-subnet + Pangolin; snapshots + export + restic off-site)
-  that run alongside the chunked work.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — the ordered view: Now / Next / Later, the
+  cross-domain milestones, and the MVP definition.
+- One doc per domain (the same buckets as the agents): current architecture, known gaps,
+  and future work —
+  [`docs/AI.md`](docs/AI.md) (LiteLLM, the agent runtime),
+  [`docs/NETWORK.md`](docs/NETWORK.md) (gateway, edge, public path),
+  [`docs/DATA.md`](docs/DATA.md) (durable plane, snapshot/export/backup),
+  [`docs/COMPUTE.md`](docs/COMPUTE.md) (providers, guests, storage, k3s), and
+  [`docs/FREEHOLD.md`](docs/FREEHOLD.md) (the core platform's gaps, plans, and UI/UX).
 - [GitHub Releases](https://github.com/darcy/freehold/releases) — the released versions,
   their notes, and assets.
 
@@ -660,8 +662,8 @@ platform/             freehold/platform — the provider-independent world the m
                       this module — never control-plane/.
 migrations/           the box-applied migration scripts
 AGENTS.md             agent guidance: locked model, conventions, known gaps
-docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, POC.md, POC_CHUNK5.md,
-                      NETWORK.md, DATA.md, BUZZ_SURFACE.md, DOOR_SPEC.md, followups.md
+docs/                 VISION.md, ARCHITECTURE.md, ROADMAP.md, FREEHOLD.md, AI.md,
+                      NETWORK.md, DATA.md, COMPUTE.md, BUZZ_SURFACE.md, DOOR_SPEC.md
 ```
 
 ## Contributing / review
