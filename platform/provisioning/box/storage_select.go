@@ -323,6 +323,25 @@ func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 	if opt.Kind == planebase.KindReuseZpool {
 		kind = "zfs"
 	}
+	// Erase-fresh means FRESH — and a birth that crashed before its record
+	// (the record lands only after the whole role stage succeeds) leaves a
+	// LEAKED guest holding the tenant LVs mounted: lvremove fails on a
+	// filesystem in use. Drop THIS world's guests first; they are re-born
+	// below on the fresh plane (a recorded vmid is re-created at its
+	// coordinates, as the teardown→rebuild contract already does).
+	for _, role := range []string{"gateway", "relay", "cp", "k3s"} {
+		vmid, gerr := e.findLxcVmidExact(role)
+		if gerr != nil {
+			continue // nothing leaked at this role
+		}
+		if _, serr := e.Provider.GuestExec("", fmt.Sprintf("pct stop %d || true", vmid), 120); serr != nil {
+			return fmt.Errorf("erase-fresh could not stop the leaked %s guest (%d): %w", role, vmid, serr)
+		}
+		if derr := e.Provider.DestroyGuest(strconv.FormatUint(uint64(vmid), 10)); derr != nil {
+			return fmt.Errorf("erase-fresh could not drop the leaked %s guest (%d): %w", role, vmid, derr)
+		}
+		fmt.Fprintf(e.Out, "  dropped the leaked %s guest (%d)\n", role, vmid)
+	}
 	// Erase ONLY this world's domain. Other worlds on this backend keep theirs.
 	// The stage runs TRANSIENT (direct root SSH with the substrate key) like
 	// every other self-stage on this path — there is no served runner yet
