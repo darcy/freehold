@@ -410,7 +410,7 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	// The runner MCP port (an implementation detail — picked free, not asked)
 	// and the gateway subnet (derived; --gateway-cidr/--gateway-vlan override)
 	// are filled by the caller.
-	return box.Flags{
+	f := box.Flags{
 		Host:               host,
 		RelayDomain:        relayDomain,
 		CpDomain:           cpDomain,
@@ -426,7 +426,21 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 		LitellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
 		ConfigPath:         installConfigPath(),
 		ConfirmStorage:     consent,
-	}, nil
+	}
+	// The flag fields the prompts don't cover ride through verbatim — dropping
+	// them here would make --local-port/--gateway-cidr/--gateway-vlan vanish
+	// on the guided path (the sentinel -1 included; RunBootstrap rejects it).
+	if flags.LocalPort != 0 {
+		f.LocalPort = flags.LocalPort
+		f.Addr = flags.Addr
+	}
+	if flags.GatewayCIDR != "" {
+		f.GatewayCIDR = flags.GatewayCIDR
+	}
+	if flags.GatewayVlan != 0 {
+		f.GatewayVlan = flags.GatewayVlan
+	}
+	return f, nil
 }
 
 // applyInstallDefaults fills the static defaults install's own answers would

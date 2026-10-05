@@ -115,7 +115,7 @@ resource "null_resource" "plane" {
     lv_size = var.lv_size_gb
   }
   provisioner "local-exec" {
-    command = "${path.module}/scripts/plane.sh ${var.domain_dash} ${var.vg} ${var.thin_pool} ${var.lv_size_gb}"
+    command = "${path.module}/scripts/plane.sh ${var.domain_dash} \"${var.vg}\" \"${var.thin_pool}\" \"${var.lv_size_gb}\""
   }
   # no destroy: the durable plane survives teardown by design (--data path).
 }

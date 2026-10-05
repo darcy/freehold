@@ -136,14 +136,19 @@ func (s *Spec) tfVars() ([]string, error) {
 		// The recorded plane rides through: plane.sh's vg/lv_size defaults
 		// ("pve"/8) are the AUTHORS' host — a world whose box-side ensure
 		// chose another VG (pve-fast) would have terraform carve a SECOND
-		// plane in the wrong VG (or die on its space). Empty keeps the
-		// defaults (old worlds whose recording predates the field).
-		"-var", "vg=" + s.PlanePool,
-		"-var", "lv_size_gb=" + strconv.FormatUint(s.SizeGB, 10),
-		// The provider's kubeconfig rides the WORLD's own tf root — the
-		// variables.tf default is the LEGACY shared path.
+		// plane in the wrong VG (or die on its space). Passed ONLY when
+		// recorded: an explicit empty -var would defeat the variable's own
+		// default (and the quoted-empty arg lands as "" — plane.sh's
+		// ${2:-pve}-style defaults recover it either way).
 		"-var", "kubeconfig_path=" + s.tfRoot() + "/kubeconfig",
-	}, nil
+	}
+	if s.PlanePool != "" {
+		vars = append(vars, "-var", "vg="+s.PlanePool)
+	}
+	if s.SizeGB > 0 {
+		vars = append(vars, "-var", "lv_size_gb="+strconv.FormatUint(s.SizeGB, 10))
+	}
+	return vars, nil
 }
 
 // tfRun drives the terraform module on the provisioning box for `action`
