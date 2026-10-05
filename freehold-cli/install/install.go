@@ -161,6 +161,17 @@ func seedFromProfile(f *box.Flags, cfg *config.Config) {
 	if f.GatewayVlan == 0 && cfg.Gateway.Vlan != nil && *cfg.Gateway.Vlan >= 0 {
 		f.GatewayVlan = *cfg.Gateway.Vlan
 	}
+	// The recorded Vultr instance: the re-adopt verifies + reuses it (a gone
+	// instance re-creates in the host stage). Without this, a re-adopt would
+	// mint a SECOND instance while the first keeps billing with the plane on
+	// it.
+	if cfg.AccessMode == "api-vultr" {
+		f.AccessMode = "api-vultr"
+		f.VultrRegion = cfg.Vultr.Region
+		f.VultrPlan = cfg.Vultr.Plan
+		f.VultrOsID = cfg.Vultr.OsID
+		f.VultrInstance = cfg.Vultr.Instance
+	}
 	if f.OperatorPubkey == "" {
 		f.OperatorPubkey = cfg.OperatorPubkey
 	}

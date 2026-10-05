@@ -68,14 +68,16 @@ func HostCapacity(exec ExecFunc, kind planebase.BackendKind, pool string) string
 		out, err := exec("df -B1 "+DirPlaneBase+" 2>/dev/null | tail -1", 60)
 		var size, used *uint64
 		if err == nil && out.ExitCode != nil && *out.ExitCode == 0 {
+			// df -B1's last row: Filesystem 1B-blocks Used Available Use% …
+			// — three numeric columns, size first.
 			var nums []uint64
 			for _, f := range strings.Fields(out.Stdout) {
 				if n, err := strconv.ParseUint(f, 10, 64); err == nil {
 					nums = append(nums, n)
 				}
 			}
-			if len(nums) >= 4 {
-				used, size = &nums[2], &nums[1]
+			if len(nums) >= 3 {
+				size, used = &nums[0], &nums[1]
 			}
 		}
 		if size != nil && used != nil {

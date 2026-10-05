@@ -465,8 +465,12 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 			ms, err = drive.ResolveTenantMounts(drive.ClientExec(mc, s.RunnerTarget), s.PlanePool, s.RelayHost, tenant)
 		case planebase.KindLvmThin:
 			ms, err = drive.ResolveLvmMounts(drive.ClientExec(mc, s.RunnerTarget), s.PlanePool, s.RelayHost, tenant, s.SizeGB, s.PoolSizeGB, s.ThinPool)
+		case planebase.KindDir:
+			// The VPS hosts: domain-keyed host dirs bind-mounted into the
+			// guests (the box's ensure made them; this re-asserts idempotently).
+			ms, err = drive.ResolveDirMounts(drive.ClientExec(mc, s.RunnerTarget), s.RelayHost, tenant)
 		default:
-			return nil, fmt.Errorf("unknown storage backend kind %q (zfs|lvmth)", kind)
+			return nil, fmt.Errorf("unknown storage backend kind %q (zfs|lvmth|dir)", kind)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("storage ensure %s: %w", tenant, err)

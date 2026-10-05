@@ -195,9 +195,10 @@ func (c *Client) Destroy(ctx context.Context, id string) error {
 		if err == nil {
 			return nil
 		}
-		// Transient states retry; a 404-style answer is the API's way of
-		// saying it is already gone.
-		if strings.Contains(err.Error(), "HTTP 404") || strings.Contains(err.Error(), "HTTP 412") {
+		// A 404-style answer is the API's way of saying it is already gone.
+		// Any other error (409/412 included — a still-settling or locked
+		// instance EXISTS and bills) retries, then fails loudly.
+		if strings.Contains(err.Error(), "HTTP 404") {
 			return nil
 		}
 		if attempt >= 4 || ctx.Err() != nil {
