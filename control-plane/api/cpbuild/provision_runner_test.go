@@ -3,10 +3,13 @@ package cpbuild
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	cert "freehold/platform/services/certificates/letsencrypt"
 
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
@@ -368,6 +371,51 @@ func TestAgentRunnerCoordsResolvesFromState(t *testing.T) {
 	}
 	if got := spec.agentRunnerCoords(store, "nobody"); len(got) != 0 {
 		t.Fatalf("nobody holds nothing, got %v", got)
+	}
+}
+
+// TestAgentRunnerCoordsFindsDNSDoorsFromConsoleRoot pins the re-apply coord
+// feed on the agent-tools server (the live failure behind a network pod that
+// lost its cloudflare door): the Spec anchors on the agent-tools state dir,
+// but the DNS creds the build handed off live under the CONSOLE root —
+// world-secrets and the unsealing console identity both. The per-zone door
+// must resolve from there, not from the Spec's own StateDir.
+func TestAgentRunnerCoordsFindsDNSDoorsFromConsoleRoot(t *testing.T) {
+	root := t.TempDir()
+	consoleRoot := filepath.Join(root, "control-plane")
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpIP: "10.0.0.9",
+		CpHost: "cp.example.com", RelayHost: "chat.example.com",
+	}
+	if err := os.MkdirAll(filepath.Join(consoleRoot, "console"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := make([]byte, 32)
+	secret[0] = 7
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf(`{"enc_secret_hex":%q}`, hex.EncodeToString(secret))
+	if err := os.WriteFile(filepath.Join(consoleRoot, "console", "identity.json"), []byte(id), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.SaveCreds(filepath.Join(consoleRoot, "world-secrets", "dns-cp.json"), "cloudflare",
+		map[string]string{"CF_DNS_API_TOKEN": "tok"}, crypto.Seal, pub, "dns-cp"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(consoleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.InsertRunner("cloudflare-api-example-com", state.RunnerRecord{
+		NostrPubkey: strings.Repeat("c", 64), Status: state.RunnerActive,
+	})
+
+	net := spec.agentRunnerCoords(store, "network")
+	if len(net) != 1 || net[0].Target != "cloudflare-api-example-com" ||
+		net[0].Pubkey != strings.Repeat("c", 64) || net[0].URL != "http://10.0.0.9:8798" {
+		t.Fatalf("network coords must carry the per-zone DNS door from the console root, got: %+v", net)
 	}
 }
 

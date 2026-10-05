@@ -905,17 +905,20 @@ echo DURABLE_SEED_OK
 }
 
 // dnsCredFromStore opens the operator's DNS-01 provider credential for a slot
-// from the CP's durable sealed store (<stateDir>/world-secrets/dns-<slot>.json)
-// via the established cert.LoadCreds record (sealed to the agent-tools
-// identity — written by the box build's hand-off). Errors loudly when no copy
-// has been handed off yet (the ISSUE path needs it; the durable-reuse path
-// does not).
+// from the CP's durable sealed store (<console root>/world-secrets/dns-<slot>.json)
+// via the established cert.LoadCreds record (sealed to the console
+// identity — written by the box build's hand-off). Rooted at the CONSOLE state
+// dir, never the Spec's own StateDir: the two differ on the agent-tools server,
+// whose re-apply coord feed (agentRunnerCoords -> cloudflareRunners) must find
+// the same creds the build staged from. Errors loudly when no copy has been
+// handed off yet (the ISSUE path needs it; the durable-reuse path does not).
 func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) {
-	path := filepath.Join(s.StateDir, "world-secrets", "dns-"+slot+".json")
+	root := s.consoleStateRoot()
+	path := filepath.Join(root, "world-secrets", "dns-"+slot+".json")
 	if !cert.CredExists(path) {
 		return "", nil, fmt.Errorf("no DNS provider credential on the CP at %s — run `freehold build` to hand it off (or the durable-reuse path serves an existing cert)", path)
 	}
-	secret, err := s.consoleEncSecret()
+	secret, err := s.consoleEncSecretAt(root)
 	if err != nil {
 		return "", nil, err
 	}
