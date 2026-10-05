@@ -97,7 +97,7 @@ type Spec struct {
 	RelayLxc       uint32
 	RelayCompose   string
 	K3sVmid        uint32
-	// The freehold-subnet gateway (docs/NETWORK.md Phase 1). GatewayCIDR is
+	// The freehold-subnet gateway (docs/NETWORK.md). GatewayCIDR is
 	// the internal subnet ("" = no gateway — guests ride the LAN bridge as
 	// before); GatewayVlan the in-host bridge tag; GatewayLxc the gateway
 	// guest's vmid. K3sIP is the k3s node's address — with a gateway the

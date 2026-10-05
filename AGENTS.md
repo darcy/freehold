@@ -6,16 +6,16 @@ configures self-hosted OSS. Narrative: "reclaim the future we were promised."
 
 The current *released* version is the latest GitHub Release; the newest `v*` tag may
 still be a pre-release awaiting e2e validation and promotion (see "Releases") — this file
-deliberately never restates a version number, so it can't go stale. Chunks 1–4 are
-implemented and live-verified against real infrastructure (a real PVE host, a real relay/CP
-pair under a real domain): the engine room and relay scope, the durable volume plane, the
-Rust→Go refactor, and Chunk 4's real, reasoning CPA that lives in Buzz — it holds
-conversations, survives a full rebuild, and creates new agents itself when asked. The
-department capability runners are live, and the CPA can provision capability on the fly
-(`provision_runner`; `docs/POC_GRANTS.md`). Chunk 5 (agent workspaces + git/GitHub) is
-next; see `docs/POC.md`. Open deferrals are tracked in `docs/followups.md`. For how we got
-here, see the repository's GitHub Releases; this file describes the current state and the
-rules for working in this repo, not the history.
+deliberately never restates a version number, so it can't go stale. The engine room, the relay
+scope, the durable volume plane, the Rust→Go refactor, and the real, reasoning CPA that lives in
+Buzz are implemented and live-verified against real infrastructure (a real PVE host, a real
+relay/CP pair under a real domain): the CPA holds conversations, survives a full rebuild, and
+creates new agents itself when asked. The department capability runners are live, the CPA can
+provision capability on the fly (`provision_runner`), and the freehold-subnet gateway and the data
+plane (snapshot, export, restic backup) ship. Agent workspaces + git/GitHub are next; see
+`docs/ROADMAP.md`. Open gaps and plans live in the domain docs (see "Navigation" and "Known
+gaps"). For how we got here, see the repository's GitHub Releases; this file describes the
+current state and the rules for working in this repo, not the history.
 
 ## Todo tracking (always)
 
@@ -29,9 +29,9 @@ task is resumable without re-deriving where it stopped.
 
 ## Documentation hygiene (locked) — a primary job of this file
 
-**Docs describe current-world state only.** `docs/ROADMAP.md`, `docs/POC.md`,
-`docs/ARCHITECTURE.md`, `docs/BUZZ_SURFACE.md`, `README.md`, and this file say what's true
-*now* — never "formerly X,"
+**Docs describe current-world state only.** `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`,
+`docs/FREEHOLD.md`, `docs/AI.md`, `docs/NETWORK.md`, `docs/DATA.md`, `docs/COMPUTE.md`,
+`docs/BUZZ_SURFACE.md`, `README.md`, and this file say what's true *now* — never "formerly X,"
 "SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
 
 1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
@@ -129,7 +129,22 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 ## Navigation
 
 - `docs/VISION.md` — narrative, single source of truth for the "why".
-- `docs/ARCHITECTURE.md` — system design, locked decisions, build plan.
+- `docs/ARCHITECTURE.md` — the core platform's current architecture: trust model, control
+  plane, operator surface, the agent org, grants on the fly, locked decisions.
+- **One doc per domain — the same buckets as `agents/`.** Each states the domain's current
+  architecture, its known gaps, and its future work; this is where a gap or a plan is
+  recorded:
+  - `docs/AI.md` — the LiteLLM gateway, the agent runtime (pods, identity, prompts, memory),
+    AI hardware.
+  - `docs/NETWORK.md` — the freehold-subnet, the gateway guest, the Caddy/cert/DNS edge,
+    Pangolin as the public-path north star.
+  - `docs/DATA.md` — the durable plane, `freehold snapshot`/`export`/`backup`, Data's
+    `cp-local-root` door, the North Star.
+  - `docs/COMPUTE.md` — the provider seam, the world's guests, storage, k3s + the terraform
+    module, teardown/rebuild.
+  - `docs/FREEHOLD.md` — everything that isn't a department: the core platform's known gaps
+    (runners/grants/secrets, migrations, the relay, the console/CLI/TUI, CI), plans, UI/UX,
+    and product direction.
 - `freehold-cli/` — the local operator surface (top-level Go module): the `freehold` CLI
   + TUI, `login`/profiles, and the `install` surface. It gets a control plane up in an
   environment (Proxmox today; Vultr/Hetzner providers come later) and a door to it; the
@@ -147,15 +162,8 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
 - **GitHub Releases** (not a repo file) — the released versions, their notes, and assets; the
   version history lives there, not in the tree.
-- `docs/ROADMAP.md` — chunked roadmap: POC chunks 1–7, MVP definition, North Star.
-- `docs/POC.md` — POC scope, goal, chunk-by-chunk plan, acceptance, test/promote flow.
-- `docs/POC_GRANTS.md` — the grants-on-the-fly build plan (the CPA's
-  `provision_runner` flow): the model, the confirmation discipline, and the
-  live acceptance checkboxes for the current work.
-- `docs/POC_CHUNK5.md` — the plan for the next chunk (agent
-  workspaces + git/GitHub); Chunks 1–4 are shipped and their build plans retired.
-- `docs/followups.md` — the grab bag of deferred work pulled from retired plans. Current
-  limitations of shipped code live in "Known gaps" below, not here.
+- `docs/ROADMAP.md` — the ordered view across domains: Now / Next / Later, the cross-domain
+  milestones, the MVP definition, the North Star. It points at the domain docs for detail.
 - `.agents/skills/release-prepare/SKILL.md` — the `release-prepare` skill: cut a versioned
   candidate by generating the release notes from git history since the previous release,
   getting the operator's approval, then tagging the `main` commit and publishing a GitHub
@@ -179,15 +187,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   (metadata-only flip; the tag never moves).
 - `docs/BUZZ_SURFACE.md` — the Buzz relay's actual surfaces and per-capability port
   decisions (native kinds vs. custom kinds).
-- `docs/NETWORK.md` — the network-plane build plan (a named build plan, not a numbered
-  chunk): the gateway guest, the freehold-subnet, Pangolin as the public-path north
-  star, and the agent-operated exposure phase.
-- `docs/DATA.md` — the data-plane build plan (a named build plan, not a numbered
-  chunk): `freehold snapshot` (durable-plane snapshots + guarded rollback),
-  `freehold export` (the vzdump portable bundle), and restic off-site to an
-  arbitrary backend — the Data department's home ground without a PBS VM. The
-  verbs run ON the CP guest through Data's `cp-local-root` door (the verb
-  surface deploy-cp ships); the snapshot skill composes onto Data's prompt.
+- `docs/DOOR_SPEC.md` — the login-authorized door's security spec.
 
 ## Locked model — do not change without an explicit user decision
 
@@ -252,7 +252,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   the shared private `#freehold` channel — there are no per-department channels; conversations
   happen where they already are, with #freehold the fallback every core agent belongs to. Only
   the identity/grant separation is locked; capability tooling/secrets arrive per department
-  later (Chunk 5/6). A custom agent that self-serves a department-owned capability is a
+  later. A custom agent that self-serves a department-owned capability is a
   containment failure even if a grant would technically allow it — the department's prompt is
   the first line of defense, the grant the second.
 - **Host-flexible — not locked to Proxmox.** Proxmox is the lead/default; VPS/cloud are
@@ -269,268 +269,26 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   skipped — `ensure` is idempotent and runs every converge, because a skipped ensure after a
   compute-only teardown/rebuild would boot against stale recorded mounts.
 
-## Known gaps (current, maintained here — not in release notes)
+## Known gaps — recorded in the domain docs
 
-These are open limitations in the shipped code today, not history. Update this list as gaps
-close or new ones surface; it's current-state, so it belongs here rather than in the
-release notes.
+Open limitations in the shipped code are current-state, not history, and each lives in the
+domain doc that owns it — update it there as gaps close or new ones surface:
 
-- **The co-located runner starts with package grants, not the relay roster.**
-  `deploy-cp` starts the CP's runner with only `--state-dir` (install and
-  update alike), so it reads its whitelist from the shipped package grants — the
-  console's self-grant — rather than the relay-signed 39002 roster. That is
-  fine while the only caller is the console (the agent↔runner exec surface is
-  still unwired, below); moving the co-located runner to the relay roster must
-  land together with publishing the console's grant to the relay, as one change.
-- **No reverse migrations.** Migrations are one-way `<epoch>.sh` scripts and
-  completion markers are never un-marked, so re-deploying an older version runs
-  old code against config a newer migration may have rewritten and cannot undo
-  it. There is no downgrade verb; rolling back below the highest applied
-  migration needs the snapshot escape hatch (out of scope); re-running `update`
-  retries only *pending* work.
-- **The console executor's migration window still has a live writer.** Where the queue runs
-  *inside* the agent-tools serve — the tail of `world_build` and the `world_migrate` tool
-  (which `freehold update` drives through the console's `/api/world-migrate` proxy, the
-  serve's signed local peer) — it runs under `Registry.WithRegistryLocked`, so no
-  roster write can interleave with the scripts' out-of-band edit of `registry.json`. The
-  console-executor branch cannot get the same
-  guarantee — the serve it writes through is a different process, and stopping it for
-  the window is not available either, because the agent pods fetch their stdio bridge
-  binary from that server's `/freehold-agent-tools-binary` at container start and a
-  failed fetch silently degrades a pod to plain `buzz-dev-mcp` with no `create_agent`.
-  It is instead closed by order: the scripts run before `startAgentTools`, so the
-  process that comes up loads their result as its starting state. A `create_agent`
-  that lands on the still-running old serve *during* that window can save stale rows
-  over the scripts' edit; routing the scripts' registry write through the serve (so it
-  takes the same lock) is the named follow-up.
-- **Unshipped migration scripts are invisible, not missing.** `install` resolves its
-  scripts with `ResolveMigrationsDir`, which looks for a `migrations/` dir beside the
-  running binary (release-asset layout) or up to two parents above it (a repo build)
-  and yields `""` when it finds none — the deploy then ships **no** scripts rather than
-  failing. An unshipped script is therefore indistinguishable from a converged world:
-  no marker, no pending count, and no error. The `migrations:` report line that names
-  the pending count on every bring-up is what makes a zero-because-never-shipped world
-  detectable rather than silently healthy.
-- **No remote revocation of a capability already in a runner's hands.** The CP can stop
-  issuing (revoke blocks provision/rotate) and erase its own copies, but a ciphertext blob
-  someone else already holds still opens; re-keying after a leaked runner private key is out
-  of scope. Epoch/staleness rejection is a named follow-up. For a SELF-HOSTED runner the
-  same cut is narrower still: revoke removes membership/coords and blocks the CP-side flows,
-  but the guest's unit keeps running with its identity + sealed files until the box-side
-  action lands (stop the unit, remove the state dir — or destroy the guest); revoke on a
-  resident door is a feed-cut, not a stop.
-- **Backups can outlive "rotation = erase your copies."** `/srv/data` sits in the PBS +
-  TrueNAS + Backblaze backup set (and a `freehold backup` restic repo holds the same
-  bytes again), so a revoke that deletes the shipped `secrets.json` can still leave the
-  old ciphertext in an off-site snapshot; backup retention is a named follow-up.
-- **Snapshot is a Proxmox-provider capability; export and restic are universal.**
-  `freehold snapshot` rides ZFS/LVM-thin snapshot primitives (Proxmox-only by nature); a
-  VPS world's point-in-time + off-site story is `freehold backup` (restic) and its export
-  is the same tar of the recorded plane mounts — plain host paths either way
-  (`docs/DATA.md`'s substrate table). There is no VPS snapshot provider yet.
-- **`freehold backup` holds no scheduling and no restore verb.** Backup runs are
-  CLI-invoked; a host-side timer and a `freehold restore` (world bootstrap from backup —
-  the portable-backup north star's own path) are unwired. The restic password lives in
-  the profile dir on the box (0600) + the host's /srv/nobackup — whoever holds the
-  profile can restore; secret-env injection over the runner (the ssh-connector gap
-  above) is the later tightening.
-- **Rotate/re-grant don't reach an already-running runner.** A runner holds its package in
-  memory from boot; only grants are re-read from disk per call. A rotate re-ships ciphertext
-  a *restarted* runner will decrypt, but a live runner keeps serving the old in-memory
-  credential until restart. ONE exception: the console's rotate on a RECORDED CAPABILITY door
-  restarts the unit itself (the fill flow — the credential the operator pastes goes live
-  without any agent hop).
-- **The agent↔runner exec surface is wired for departments; the grant unit is the runner.**
-  `freehold build` creates each reserved department (`network`/`data`/`compute`/`ai`) through
-  the same audited `create_agent` (its embedded prompt, the private `#freehold` channel) and
-  stands up the **capability runners**
-  (`stageDepartmentRunners`): one runner per capability, named `<target>-<protocol>-<identity>`
-  (`pve-ssh-root` shared by network+compute+data, `kube-api-root`/`kube-api-caddysa`/
-  `kube-api-litellmsa` SA-token kube doors, `litellm-api-admin` (master + provider keys),
-  `cloudflare-api-<zone>` per stored DNS zone, `dnsmasq-local-root` local on the CP guest) —
-  each with its own key/package/channel/audit stream, bound LAN-reachable and started with the
-  relay roster (`--relay-url/--relay-pubkey/--relay-auth-url --allow-remote`). The kube-door SA
-  tokens re-read from the k3s guest + re-seal EVERY build (a k3s rebuild rotates the CA); the
-  consumer-named `data-pve` is retired by the build (stop + revoke + deauthorize). A
-  department's pod gets aligned `FREEHOLD_RUNNER_*` comma lists and its bridge advertises one
-  `exec`/`list` that ROUTES by target to the pinned runner+credential (fail-closed on an
-  unlisted target), signing as the agent's own nsec; the runner re-reads its relay-signed 39002
-  roster per call. Grants are operator/console-issued (`grant_agent` / the build reconcile)
-  and land live — EXCEPT the CPA's provision_runner carve-out (next gap). The CPA and custom
-  agents carry no runner coords, so their bridge never advertises
-  exec — the raw grant attaches only to department identities. The granting rules are captured
-  in the CPA's first skill (`agents/freehold/skills/granting.md`, composed into its prompt).
-  Remaining capability tooling (backup
-  scheduling, monitoring dashboards, AI hardware) is still unbuilt; runners' audits are
-  local-spool only (kind-48001 relay publish is rejected by stock buzz as an unknown kind).
-- **Agent-initiated grants exist, but only as new doors, and only in confirm mode.** The
-  CPA's `provision_runner` (0.7.4, `docs/POC_GRANTS.md`) stages a NEW capability runner on
-  the fly and grants the named agents onto it live — it cannot widen an existing runner's
-  roster (grants onto build-time capability runners stay operator/console-issued via
-  `grant_agent`, `-32003` for agents), and `agent_grants: off` on the CP state is the
-  server-side kill switch (`freehold-console grants-mode`; default `confirm`). A second
-  mode enrolls a runner RESIDENT on its own target (`hosted=self`, kind `local`): the box
-  holds the runner-client (`runner enroll` mints the identity ON the guest — Compute
-  installs the client on every guest it creates, `create-lxc` skill), presents its
-  pubkeys, and the CP records them, seals to them, starts nothing — pods dial the box's
-  LAN address directly. The
-  in-thread-vs-DM confirmation discipline lives in the granting skill — the server cannot
-  see Buzz threads, so a compromised CPA's only technical barrier is the new-runner-only
-  boundary; the prompt is the first line of defense. Dynamic capability records make an
-  on-the-fly door rebuild-safe (re-staged adopt-only every build; a record whose package
-  vanished fails loudly — the credential is not re-derivable; a self-hosted record whose
-  runner row vanished says re-enroll), and the grantees' pods are
-  re-applied with coords resolved from state. **Credentials never ride chat**: an api-kind
-  door provisions EMPTY (a "pending" placeholder) and the agent DMs the operator the door's
-  own console page (`/runner/<name>` — the deep link opens its fill form, kind-aware: a
-  unifi door takes username + password and the console composes the JSON login body); the
-  console seals + restarts the door (a rotate on a capability door restarts the unit — the
-  fill goes live without any agent hop); on a SELF-HOSTED door the operator first CONFIRMS
-  the enrollment on the door page (verifying the presented pubkeys against the guest's own
-  `runner enroll` output — the barrier that binds the fill to the key the guest holds, so a
-  compromised CPA cannot seal to its own key), the rotate seals to the presented key and
-  returns the package JSON, and the GRANTEE writes `secrets.json` on the guest through its
-  own door exec and restarts the unit there. The tool is credential-blind BY CONSTRUCTION
-  (provision_runner takes no secret/extras field — a direct-credential mode, an agent
-  relaying the credential for freehold to seal, is a named future `agent_grants` option
-  that the current tool surface makes unreachable).
-- **Agent-initiated take-away exists, is verified per leg, and stops at the box
-  boundary.** The CPA's `revoke_runner` (`cpbuild.BuildRevokeRunner`) is the mirror
-  of `provision_runner` on the same audited surface and the SAME `agent_grants` kill
-  switch: with `revoke_from` it removes named grantees from the roster and from the
-  capability record's roster (both — a relay-only removal would be silently reversed
-  by the next build, which re-grants from the record) and re-applies their pods with
-  the door cut from their coords feed, leaving the door standing for the rest of its
-  roster. A grantee whose registry row is gone is still revoked: its pubkey resolves
-  from the durable identity dir the create path minted (UnregisterAgent deletes only
-  the row), so the de-escalation never stalls on a dropped agent; only a grantee with
-  neither row nor identity dir is unaddressable and reported for an operator console
-  clear. With `revoke_from` empty it retires the whole door (channel folded but KEPT
-  so the roster history + kind-48001 audit stream stay queryable, credential erased
-  through the audited revoke verb, unit stopped, record dropped). Ownership guards
-  mirror the grant side exactly: build-time capability runners, the `cloudflare-api-`
-  prefix, a missing capability record, and operator-origin records are all refused —
-  the agent surface only takes back what the agent flow gave. Each leg is checked on
-  its own terms and reported `[verified]`/`[UNVERIFIED]` (roster re-read from the
-  relay-signed 39002, sealed package re-opened via `wire.Load`, unit asked via
-  `systemctl is-active` plus a TCP probe of its port); the unit stop runs LOCAL to the
-  CP process, never through a runner — the flow is revoking exec, so it must not depend
-  on holding one. Two honest limits: the stop is claimed only where the build's own
-  substrate/relay condition held (otherwise the leg says `state-only`), and the
-  substrate credential the door carried stays authorized on its target — the report
-  hands that to Compute, and hands a box-hosted door's numbered close-out to the
-  OPERATOR, never to the agent that just lost the door. A retired name is NOT reserved
-  forever, but it is refused to the agent in both directions (`revoke_runner` again,
-  and a `provision_runner` re-mint) until an operator re-enables it by provisioning the
-  door from the console — `InsertCapability` is the single re-enable verb, deliberately
-  not a new tool, so take-away and re-grant are never the same caller's two hands.
-- **The doors are intent+audit boundaries, not hard containment on a shared
-  host.** `dnsmasq-local-root` executes on the CP guest (where every runner
-  package + the state store live), and `pve-ssh-root` reaches the CP guest via
-  `pct exec` — so a fully compromised department can widen from a door to
-  CP-guest root. This mirrors Data's deliberate full-host root (0.7.2): the
-  prompt is the first line of defense, the runner's roster+audit the second;
-  hard per-department containment on shared hosts is out of scope until
-  capability-scoped exec exists.
-- **A rebuild of a world built before a department rename leaves stale agents.** The
-  retired reserved names `gatekeeper`/`provisioner`/`services` (and, after the latest rename,
-  `security`/`vault`/`agent-ops`) are no longer reserved, so on a
-  rebuild `reconcileCreatedAgents` re-creates any surviving registry rows as custom-template
-  agents in their old `#gatekeeper`/`#provisioner`/`#services` (or `#security`/`#vault`/
-  `#agent-ops`) channels; nothing removes them.
-  Fresh builds are clean. A retired-name cleanup on reconcile is a named follow-up.
-- **The Data/Network "check in on a new service" question has no trigger yet.** The hook
-  fires when an agent requests a service/compute through the CPA's provision path; that path
-  is Chunk 5/6. Until then there is no provisioning request to raise the question on.
-- **Agents can read the repo but cannot write it, and nothing schedules the re-check.** The repo is
-  public, so the shared orientation block (CPA + departments) tells every non-custom agent to clone
-  it and read from `main` — that read is real, and the prompts claim only it. Write access
-  (branches, pushes, PRs) and any scheduled re-check are unwired: the read-on-boot/periodic-recheck
-  discipline is prompt-level, enforced by the agent, not a mechanism the appliance runs. The
-  git/GitHub grant lands with Chunk 5's workspace/git work.
-- **Abandoned streaming sessions are never reaped** — decrypted values stay in the session
-  map for the process lifetime; a TTL reaper is sized but not built.
-- **The agent memory plane has no revocation story for a leaked pod env** — the
-  attestation is bounded to kind=30174 but unbounded in time, so a leaked
-  `BUZZ_AUTH_TAG` authorizes memory writes until the pod is re-applied; minting
-  with an expiry clause + a re-mint on build is the named follow-up
-  (docs/followups.md).
-- **`timeout_s` kills the shell, not its descendants** (no setsid/killpg) — a timed-out
-  command can leave orphans running.
-- **Replay window:** a signed call can be replayed against the *same* runner within its 60s
-  validity window; audience + runner binding closes cross-runner replay, but a per-runner
-  replay cache is still open.
-- **SSH connector:** capped at 2 pooled connections per target (the rationale predates a
-  rollback and is now stale); a wedged connection stays pooled past a timeout; ssh timeouts
-  return empty output where local execs return partial; no IPv6 in target parsing; pooled
-  connections aren't re-authenticated after a rotate; no secret env injection over the ssh
-  channel yet (extra requested secrets are rejected explicitly rather than silently ignored).
-- **API connectors:** streamed exec on an API target redacts the injected secret value but
-  not the (non-secret) base-URL env var — cosmetic, fix is a separate redaction list.
-- **State store is single-process** — not cross-process atomic; planned Postgres swap at MVP
-  addresses this.
-- **Agent-tools audience drift is detected, not repaired.** Every bring-up's report
-  compares the live agent-tools identity against the pubkey the console state recorded
-  from the box's profile; a drift (the durable identity re-minted under the fleet — e.g. a
-  serve boot against an unmounted `/srv/data`) means every existing agent pod still signs
-  the dead audience and every CP tool call fails `-32001 signature does not verify` while
-  the world otherwise looks healthy. The repair — restore `/srv/data/cp/agent-tools` from
-  backup, or deliberately re-point the profile and re-create the pods — is an operator
-  call; nothing auto-writes either side.
-- **Console:** a secret posted to `/api/provision` or `/api/rotate` exists briefly as
-  unzeroized body bytes (loopback, TLS-free — same exposure class as the CLI's stdin path).
-- **The freehold CP toolset (create-agent / provision-runner / grant-agent / manage-agent)
-  is a real MCP surface on the CP (`freehold-agent-tools`), not chat.** The Go methods
-  (`control-plane/api/agent/tools.go`) are served by a dedicated CP-side binary
-  (`control-plane/api/cmd/freehold-agent-tools`) whose handlers call them in-process, authenticated with the
-  shared signed-header scheme and authorized against the server's own relay roster (its
-  NIP-29 channel + 39002 membership, read fresh per call, fail-closed) — the AGENT
-  surface (the CPA, membered at create; the seed members nobody else and revokes any
-  prior operator/console rows). The CP's own identities are LOCAL PEERS, verified by
-  signature alone and never roster members: the console for `world_migrate` only (the
-  `/api/world-migrate` proxy — the registry lock lives in the serve) and the operator
-  (`--owner-pubkey`) with full operator scope as break-glass (which also keeps a stale
-  CLI's operator-signed migration sweep working across a version jump). Seeded at bootstrap;
-  the build dogfoods `create_agent` to bring the CPA up and reconcile re-creates any agent
-  the CP registry holds. The CPA pod's harness attaches this toolset as callable MCP tools
-  via a stdio bridge (`freehold-agent-tools mcp`, fetched into the pod at boot): it
-  aggregates buzz-dev-mcp's message tools with create/provision/manage, signed as the agent
-  and authorized by the server's roster. **`grant_agent` is wired through the absorbed
-  console-owner credential and is OPERATOR-scoped** (not reachable by the CPA's
-  conversation+create-only harness): the server loads the console's own identity from the
-  console's state dir (`/srv/data/cp/control-plane/console`, 0600 durable plane) and
-  publishes the kind-9000 put-user to the runner's channel in-process — the runner
-  re-reads its signed 39002 roster per call, so the grant lands without a restart. A
-  missing console credential fails closed ("no relay/console-owner wiring") rather than
-  silently succeeding. An agent granting onto an arbitrary runner would hand direct exec
-  access to that runner's MCP surface, so grants onto EXISTING runners are the operator's
-  call (server-enforced, `-32003` for agents); the CPA's `provision_runner` is the narrow
-  carve-out — NEW capability runners only, kill-switchable with `agent_grants: off`
-  (see the agent-initiated-grants gap above).
-- **Every agent pod holds the litellm gateway's admin master key today.** `stageLitellm` seeds
-  the `<pod>-litellm-key` Secret with the gateway's master (litellm's `/key/generate` needs a
-  bootstrap *virtual* `sk-` key before scoped per-agent keys can be minted), so the CPA — and
-  any Phase E-created agent reusing `AgentLiteLLMKeyScript` — can register/remove any model and
-  mint keys until scoped keys are wired. Minting a bootstrap virtual key and switching agent
-  pods to scoped per-agent keys is the named follow-up.
-- **`uninstall --remove-data` needs a box with a local provisioning runner.** The
-  whole-world `teardown`, and `uninstall`'s world + door + substrate-key removal, work from
-  a thin login-only box or against a dead CP through the transient root-SSH path (the box's
-  DOOR_SPEC key). `--remove-data` still reaches the durable plane's storage through a LOCAL
-  runner, so it needs the build box; `teardown --tenant` likewise needs the build box.
-- **Re-adopt rotates the runner's substrate SSH key (same-host only).** deploy-cp
-  regenerates it, authorizes it on the host, re-seals it into the plane's package (runner
-  identity + grants preserved), restarts the runner, and drops the old `authorized_keys`
-  line. Repointing a target to a **new host** still needs a target-repoint step on top of
-  this (`install --restore`, out of scope).
-- **Whole-world `teardown --data` is refused** — data removal is `uninstall --remove-data`.
-  Per-tenant `teardown --tenant --data` still works (needs the build box).
-- **`install`'s live-CP refusal is profile-based *and* host-side.** It probes a profile's
-  recorded `cp_url` (`/healthz`) and, when the box holds an authorized DOOR_SPEC key (a prior
-  `login`), also lists the host's guests for the `<name>-cp` guest and refuses. A box with no
-  ops identity or an unreachable host falls back to the profile probe; re-adopt is already
-  identity-preserving, so the exposure is only the un-requested re-deploy, not orphaned
-  grants.
+- **AI** (`docs/AI.md`): every pod holds the gateway master key; the sprig image is a moving
+  tag; the memory attestation is unbounded in time; the respond-to allowlist is fixed at
+  deploy; agents read the repo but cannot write it; AI hardware has no tooling.
+- **Network** (`docs/NETWORK.md`): the gateway host route is not persisted; no per-guest
+  vhosts; no tailscale/pihole skills; flat-LAN guests are DHCP.
+- **Data** (`docs/DATA.md`): snapshot is Proxmox-only; backup has no scheduling or restore
+  verb; backups can outlive rotation.
+- **Compute** (`docs/COMPUTE.md`): no VPS provider; core guests carry no runner-client;
+  world-config degradation on update; terraform destroy can reach other worlds.
+- **Core** (`docs/FREEHOLD.md`): runners/grants/secrets (no remote revocation, rotate
+  doesn't reach a running runner, replay window), migrations/update (no reverse migrations,
+  the console-executor window), the relay (post-redeploy 403s), the console/CLI/TUI, and CI.
+
+Anything a doc must restate about a gap (e.g. an agent prompt) points at that section rather
+than copying it.
 
 ## Build / test
 
@@ -566,7 +324,7 @@ release notes.
     `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`,
     `backup/`)
     plus `login/` + `tui/` and `internal/common/` + `internal/certcred/` +
-    `internal/stages/`; the `install/` surface holds `install/cpdeploy/`; the `freehold`
+    `internal/stages/`; the `install/` surface holds `internal/cpdeploy/`; the `freehold`
     binary's main is `cmd/freehold`):
     `cd freehold-cli && go build ./... && go vet ./... && go test ./...`. **It never
     imports `control-plane/`** (an import-graph guard enforces it).
@@ -593,9 +351,9 @@ release notes.
   resolve as siblings of the running binary — a box doing world bring-up needs all
   five present.
 - No formatter/linter config beyond rustfmt + clippy defaults.
-- `docs/POC_GRANTS.md` carries the live acceptance checkboxes for the grants-on-the-fly
-  work; `docs/POC.md` and `docs/POC_CHUNK5.md` carry them for the numbered chunks — tick
-  as work lands. The Chunk-1/2 acceptance gate is Go now
+- Open verification legs and acceptance for in-flight work are tracked in the domain doc
+  that owns the work (`docs/FREEHOLD.md` for grants-on-the-fly); tick them as work lands.
+  The acceptance gate is Go
   (`control-plane/acceptance/`, run by
   `go test ./...`): the CP provisioner lifecycle, the console HTTP surface, and the
   relay-channel fold against a hermetic fake relay — the connector/relay behaviors the

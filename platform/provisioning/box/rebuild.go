@@ -80,7 +80,7 @@ type Flags struct {
 	RelayGw            string
 	StorageName        string
 	Bridge             string
-	// The freehold-subnet gateway (docs/NETWORK.md Phase 1): GatewayCIDR is
+	// The freehold-subnet gateway (docs/NETWORK.md): GatewayCIDR is
 	// the internal subnet ("" = no gateway — the flat-LAN world), GatewayVlan
 	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
 	// internal subnet (InternalIPFor) and a gateway guest owns the one
