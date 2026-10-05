@@ -155,9 +155,10 @@ func TestResolveOperatorIdentityReAdopt(t *testing.T) {
 	}
 	recorded := dir
 	ui := newEOFUI()
-	pk, opDir, err := resolveOperatorIdentity(ui, &config.Config{OperatorPubkey: "abc",
+	pk, opDir, err := resolveOperatorIdentity(ui, &config.Config{
+		OperatorPubkey:   "abc",
 		OperatorIdentity: &recorded,
-	})
+	}, box.Flags{})
 	if err != nil || pk != "abc" || opDir != dir {
 		t.Fatalf("re-adopt must ride the recorded identity: pk=%q dir=%q err=%v", pk, opDir, err)
 	}

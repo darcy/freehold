@@ -182,10 +182,12 @@ func runInstallCmd(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 
 	// A fresh plane has nothing to resolve from, so headless needs the full
-	// answer set; with gaps (and no --non-interactive), fall back to the guided flow.
+	// answer set; with gaps (and no --non-interactive), fall back to the guided
+	// flow — the parsed flags ride in: what the operator already answered is a
+	// prompt default, never silently dropped.
 	if !f.Yes && (name == "" || f.Host == "" || f.RelayDomain == "" || f.CpDomain == "" ||
 		f.ProxyIP == "" || f.OperatorPubkey == "") {
-		return runInstall(cmd.InOrStdin(), out, name)
+		return runInstall(cmd.InOrStdin(), out, f, cmd)
 	}
 	if name == "" {
 		return fmt.Errorf("install needs --name (the world/profile name — isolates this world's config and state)")
@@ -255,9 +257,14 @@ var installBanner = `
   ╰──────────────────────────────────────────────────────────────╯
 `
 
-func runInstall(in io.Reader, out io.Writer, name string) error {
+// runInstall is the guided flow. flagIn carries the ALREADY-PARSED flags: what
+// the operator set explicitly is honored here too (as the prompt defaults and,
+// for port/gateway, without re-derivation) — the guided surface is not a place
+// where flags silently vanish.
+func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Command) error {
 	ui := &installerUI{out: out, raw: in, in: bufio.NewReader(in)}
 	fmt.Fprint(out, installBanner)
+	name := flagIn.Name
 	if name == "" {
 		var err error
 		name, err = ui.ask("World name (profile — isolates this world's config + state)", "")
@@ -279,7 +286,7 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 			fmt.Fprintf(out, "  re-adopting profile %q (control plane absent) — the plane keeps the runner identity\n", name)
 		}
 	}
-	f, err := collectAnswers(ui, seed)
+	f, err := collectAnswers(ui, seed, flagIn)
 	if err != nil {
 		return err
 	}
@@ -288,10 +295,13 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 		// The plane's recorded facts (gateway, runner addr) survive a
 		// re-adopt — only the substrate door rotates.
 		seedFromProfile(&f, seed)
-		if seed != nil && seed.Runner.Addr != "" {
+		if seed != nil && seed.Runner.Addr != "" && !cmd.Flags().Changed("local-port") {
 			f.Addr = seed.Runner.Addr
 		}
-	} else {
+	}
+	// The port is picked, not asked: the default unless busy — unless the
+	// operator pinned it (--local-port), here as much as headless.
+	if action == lifecycleMint && !cmd.Flags().Changed("local-port") {
 		pickRunnerPort(&f)
 	}
 	applyInstallDefaults(&f, action == lifecycleMint)
@@ -332,9 +342,9 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 
 // collectAnswers gathers the install inputs (host, runner, domains, identity,
 // storage) into ready-to-run box.Flags. seed is the surviving profile config on
-// a re-adopt (nil when minting) — its recorded facts become the prompt defaults,
-// so a re-install does not re-ask what the plane already knows.
-func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
+// a re-adopt (nil when minting); flags are what the operator already answered
+// on the command line — a set flag is the prompt's default (Enter keeps it).
+func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.Flags, error) {
 	fmt.Fprintln(ui.out, "  A few details about your world. Defaults in [brackets].")
 	hostDef := "root@192.168.30.224"
 	relayDef, cpDef, proxyDef := "", "", ""
@@ -346,6 +356,18 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 		if seed.Proxy.Ip != nil {
 			proxyDef = *seed.Proxy.Ip
 		}
+	}
+	if flags.Host != "" {
+		hostDef = flags.Host
+	}
+	if flags.RelayDomain != "" {
+		relayDef = flags.RelayDomain
+	}
+	if flags.CpDomain != "" {
+		cpDef = flags.CpDomain
+	}
+	if flags.ProxyIP != "" {
+		proxyDef = flags.ProxyIP
 	}
 	host, err := ui.ask("Host (address the runner will SSH into)", hostDef)
 	if err != nil {
@@ -377,7 +399,7 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if !strings.Contains(proxyIP, "/") {
 		return box.Flags{}, fmt.Errorf("proxy static IP must be CIDR (host/prefix) — got %q", proxyIP)
 	}
-	pk, opDir, err := resolveOperatorIdentity(ui, seed)
+	pk, opDir, err := resolveOperatorIdentity(ui, seed, flags)
 	if err != nil {
 		return box.Flags{}, err
 	}
@@ -560,10 +582,10 @@ func operatorDir() string { return filepath.Join(box.StateDir(), "operator") }
 // resolveOperatorIdentity answers the operator block. A re-adopt rides the
 // RECORDED identity — the dir exists from the prior install and the profile
 // records its pubkey — so it is not asked at all (re-asking would error on
-// the existing dir or mint a pointless second identity). A mint prompts
-// (paste/match/generate). A re-adopt whose recorded dir has vanished falls
-// through to the prompts.
-func resolveOperatorIdentity(ui *installerUI, seed *config.Config) (string, string, error) {
+// the existing dir or mint a pointless second identity). An explicit
+// --operator-pubkey over a live ledger rides too. A mint prompts
+// (paste/match/generate); a vanished dir falls through to the prompts.
+func resolveOperatorIdentity(ui *installerUI, seed *config.Config, flags box.Flags) (string, string, error) {
 	if seed != nil && seed.OperatorPubkey != "" {
 		dir := operatorDir()
 		if seed.OperatorIdentity != nil && *seed.OperatorIdentity != "" {
@@ -571,6 +593,11 @@ func resolveOperatorIdentity(ui *installerUI, seed *config.Config) (string, stri
 		}
 		if _, err := os.Stat(filepath.Join(dir, "identity.json")); err == nil {
 			return seed.OperatorPubkey, dir, nil
+		}
+	}
+	if flags.OperatorPubkey != "" {
+		if _, err := os.Stat(filepath.Join(operatorDir(), "identity.json")); err == nil {
+			return flags.OperatorPubkey, operatorDir(), nil
 		}
 	}
 	return collectOperatorIdentity(ui)

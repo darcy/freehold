@@ -612,8 +612,11 @@ WantedBy=multi-user.target
 // failure this check reports.)
 func checkRunnerRuns(t Transport, spec *DeployCpSpec) error {
 	bin := spec.BinDir + "/freehold-runner"
+	// The message rides the single-quoted sh -c payload (LxcExec): double
+	// quotes only, no parens, no substitutions — the detailed recipe lives in
+	// AGENTS.md's build section.
 	check := fmt.Sprintf(
-		"if ! %s --help >/dev/null 2>/tmp/.fh-glibc; then if grep -q GLIBC /tmp/.fh-glibc; then cat /tmp/.fh-glibc; echo the shipped runner does not run on this guest: its glibc is older than the binary needs — build the runner against the guest distro (e.g. docker run --dns 1.1.1.1 -u $(id -u):$(id -g) -v <repo>:/src -w /src rust:1.98-bookworm cargo build --bin runner) or deploy release assets; exit 1; fi; fi; rm -f /tmp/.fh-glibc",
+		"if ! %s --help >/dev/null 2>/tmp/.fh-glibc; then if grep -q GLIBC /tmp/.fh-glibc; then cat /tmp/.fh-glibc; echo \"the shipped runner does not run on this guest: its glibc is older than the binary needs. Build the runner against the guest distro - see the AGENTS.md build section - or deploy release assets\"; exit 1; fi; fi; rm -f /tmp/.fh-glibc",
 		bin)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, check), "runner binary runs on this guest", 60); err != nil {
 		return err
