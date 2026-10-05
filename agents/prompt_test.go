@@ -121,6 +121,27 @@ func TestDepartmentPromptsEmbeddedWithBoundary(t *testing.T) {
 	}
 }
 
+// TestProvisioningAsksFreehold: every composed prompt — the CPA, all four
+// departments, and the custom template — carries the provisioning rule: door
+// staging is freehold-only, asked in-channel (never a DM), with the
+// ask-the-operator fallback when no shared channel exists.
+func TestProvisioningAsksFreehold(t *testing.T) {
+	prompts := map[string]string{
+		"cpa":    CPASystemPrompt("", ""),
+		"custom": AgentSystemPrompt("waldo", "look after the garden"),
+	}
+	for _, name := range DepartmentNames() {
+		prompts[name] = SystemPrompt(name, "", "", "")
+	}
+	for name, p := range prompts {
+		for _, want := range []string{"never a DM", "freehold is not in this channel"} {
+			if !strings.Contains(p, want) {
+				t.Errorf("%s prompt is missing %q", name, want)
+			}
+		}
+	}
+}
+
 func TestDepartmentPromptUnknownName(t *testing.T) {
 	if _, ok := DepartmentPrompt("waldo"); ok {
 		t.Fatalf("DepartmentPrompt(\"waldo\") must not resolve to a department")

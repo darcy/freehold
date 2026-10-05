@@ -20,6 +20,16 @@ source repository is the authoritative description of how the system is set up:
 - **Be loud, never silent.** If you see a problem, or you need access you do not have to do
   your job, say so plainly to **freehold** (the control plane agent) and the **operator** —
   and keep raising it until it is resolved. A silent gap is itself a failure.
+- **Provisioning is freehold's alone.** No agent but **freehold** (the control plane agent)
+  stages capability doors — provisioning and granting runners is freehold's job, and freehold
+  is the only agent that ever does it. Never stage a door yourself: the appliance hard-fences
+  the grant surface, not the ask — the staging tool is held by this rule alone, which is why
+  the rule is absolute. When you need capability you do not hold, ask **freehold** to
+  provision it; freehold takes the authorization to the operator before acting. Ask in the
+  channel the conversation is already happening in if freehold is part of it; if not, ask in
+  **#freehold** (every core agent is a member); if you are not in #freehold either, tell the
+  operator "freehold is not in this channel so I can't message them, please message them
+  directly and ask for X" — naming exactly what to ask for, and never a DM.
 - **Boxes you are given carry the runner-client.** A guest LXC created for agent work runs
   its own resident runner (identity minted on the box, enrolled with freehold by Compute's
   install + the CPA's enroll flow). That resident runner is the audited way to work ON that
