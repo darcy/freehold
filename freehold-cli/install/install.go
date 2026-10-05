@@ -218,6 +218,9 @@ func runInstallCmd(cmd *cobra.Command) error {
 		seedFromProfile(&f, prev)
 		fmt.Fprintf(out, "  re-adopting profile %q (control plane absent) — the plane keeps the runner identity; only the substrate door rotates\n", name)
 	}
+	if action == lifecycleMint && !cmd.Flags().Changed("local-port") {
+		pickRunnerPort(&f)
+	}
 	applyInstallDefaults(&f)
 	f.ConfigPath = installConfigPath()
 	if err := seedOperatorLedger(&f); err != nil {
@@ -281,6 +284,16 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 		return err
 	}
 	f.Name = name
+	if action == lifecycleReAdopt {
+		// The plane's recorded facts (gateway, runner addr) survive a
+		// re-adopt — only the substrate door rotates.
+		seedFromProfile(&f, seed)
+		if seed != nil && seed.Runner.Addr != "" {
+			f.Addr = seed.Runner.Addr
+		}
+	} else {
+		pickRunnerPort(&f)
+	}
 	applyInstallDefaults(&f)
 	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
@@ -289,8 +302,12 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 	if f.ConfirmStorage {
 		consent = "yes"
 	}
-	fmt.Fprintf(out, "  host: %s\n  runner: %s\n  domain: %s\n  operator pk: %s\n  storage consent: %s\n",
-		f.Host, f.Target, f.RelayDomain, f.OperatorPubkey, consent)
+	vlan := "untagged"
+	if f.GatewayVlan > 0 {
+		vlan = fmt.Sprintf("vlan %d", f.GatewayVlan)
+	}
+	fmt.Fprintf(out, "  host: %s\n  runner: %s\n  domain: %s\n  gateway: %s (%s)\n  operator pk: %s\n  storage consent: %s\n",
+		f.Host, f.Target, f.RelayDomain, f.GatewayCIDR, vlan, f.OperatorPubkey, consent)
 	if proceed, err := ui.confirm("Proceed?", true); err != nil || !proceed {
 		if err != nil {
 			return err
@@ -334,10 +351,6 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if err != nil {
 		return box.Flags{}, err
 	}
-	port, err := ui.askUint32("Runner MCP port (local loopback)", box.DefaultRunnerPort)
-	if err != nil {
-		return box.Flags{}, err
-	}
 	relayDomain, err := ui.ask("Relay domain (must resolve to your host)", relayDef)
 	if err != nil {
 		return box.Flags{}, err
@@ -349,24 +362,6 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	proxyIP, err := ui.ask("the ONE LAN address — the gateway's (CIDR, e.g. 192.168.30.8/24) — REQUIRED; everything public resolves here", proxyDef)
 	if err != nil {
 		return box.Flags{}, err
-	}
-	gatewayCIDR, err := ui.ask("internal subnet CIDR for the freehold-subnet (e.g. 10.77.0.0/24) — blank = flat LAN (no gateway); the PVE bridge must be VLAN-aware for a tag", "")
-	if err != nil {
-		return box.Flags{}, err
-	}
-	gatewayVlan := 0
-	if gatewayCIDR != "" {
-		v, err := ui.ask("VLAN tag for the internal bridge (a number, e.g. 77; blank = untagged)", "")
-		if err != nil {
-			return box.Flags{}, err
-		}
-		if v != "" {
-			n, cerr := strconv.Atoi(v)
-			if cerr != nil || n <= 0 {
-				return box.Flags{}, fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
-			}
-			gatewayVlan = n
-		}
 	}
 	rootfs, err := ui.askUint32("LXC rootfs size (GB)", 16)
 	if err != nil {
@@ -390,14 +385,14 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if err != nil {
 		return box.Flags{}, err
 	}
+	// The runner MCP port (an implementation detail — picked free, not asked)
+	// and the gateway subnet (derived; --gateway-cidr/--gateway-vlan override)
+	// are filled by the caller.
 	return box.Flags{
-		Addr:               box.LoopbackAddr(uint16(port)),
 		Host:               host,
 		RelayDomain:        relayDomain,
 		CpDomain:           cpDomain,
 		ProxyIP:            proxyIP,
-		GatewayCIDR:        gatewayCIDR,
-		GatewayVlan:        gatewayVlan,
 		OperatorPubkey:     pk,
 		OperatorIdentity:   opDir,
 		SizeGB:             drive.TenantLVSizeGB,
@@ -432,11 +427,28 @@ func applyInstallDefaults(f *box.Flags) {
 	if f.Target == "" {
 		f.Target = box.RunnerTarget
 	}
+	// The gateway is FORCED: every fresh world gets one. The subnet is derived
+	// (10.77.0.0/24, bumped past LAN overlap); --gateway-cidr/--gateway-vlan
+	// override, and a re-adopt's recorded gateway was seeded before this runs.
+	// RunBootstrap re-validates.
+	if f.GatewayCIDR == "" && f.ProxyIP != "" {
+		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
+	}
 	// Proxmox-over-root-SSH is the only implemented access mode today;
 	// provider-API modes (api-vultr) arrive with the Access seam (PR3).
 	if f.AccessMode == "" {
 		f.AccessMode = "ssh-root-proxmox"
 	}
+}
+
+// pickRunnerPort pins the runner MCP bind for a MINT: the default port unless
+// it is taken, then the next free loopback port — the port is an
+// implementation detail, never an operator decision. A re-adopt keeps its
+// recorded addr (killServeOn reclaims the port), and an explicit --local-port
+// stays (a busy explicit port fails the serve, loudly).
+func pickRunnerPort(f *box.Flags) {
+	f.LocalPort = box.PickFreeLoopbackPort(box.DefaultRunnerPort)
+	f.Addr = box.LoopbackAddr(uint16(f.LocalPort))
 }
 
 // flagsFromCmd maps the bootstrap command's flags into box.Flags.
@@ -509,11 +521,11 @@ func addInstallFlags(cmd *cobra.Command) {
 	// installed under a named runner (e.g. freehold-live-install) re-adopts
 	// THAT one — the flag records it instead of forcing the default.
 	cmd.Flags().String("target", "", "Provisioning runner name (default: the standard substrate runner)")
-	cmd.Flags().Uint32("local-port", box.DefaultRunnerPort, "Runner MCP port on the box's loopback (127.0.0.1:<port>)")
+	cmd.Flags().Uint32("local-port", box.DefaultRunnerPort, "Runner MCP port on the box's loopback (default: 8787, next free port when busy)")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("proxy-ip", "", "the ONE LAN address (CIDR) — REQUIRED on a fresh plane; the gateway's when a subnet is set, the k3s/proxy node otherwise")
-	cmd.Flags().String("gateway-cidr", "", "internal subnet CIDR for the freehold-subnet gateway (e.g. 10.77.0.0/24); empty = flat LAN")
+	cmd.Flags().String("gateway-cidr", "", "override the internal subnet CIDR for the freehold-subnet gateway (default: derived, e.g. 10.77.0.0/24)")
 	cmd.Flags().String("gateway-vlan", "", "in-host bridge VLAN tag for the internal subnet (0/blank = untagged)")
 	cmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — REQUIRED")
 	cmd.Flags().String("operator-identity", "", "Operator identity dir to record (optional)")

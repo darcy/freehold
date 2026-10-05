@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -337,6 +338,38 @@ const DefaultRunnerPort = 8787
 // LoopbackAddr is the runner MCP bind address for a local port.
 func LoopbackAddr(port uint16) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))) }
 
+// PickFreeLoopbackPort returns preferred when nothing listens on it, else the
+// next free loopback port — the runner MCP bind is an implementation detail
+// (127.0.0.1:<port>), never an operator decision. An explicitly requested
+// port that is busy is the caller's problem (it fails the serve, loudly).
+func PickFreeLoopbackPort(preferred uint32) uint32 {
+	for p := preferred; p < 65536; p++ {
+		if !portOpenDefault(LoopbackAddr(uint16(p))) {
+			return p
+		}
+	}
+	return preferred
+}
+
+// DefaultGatewayCIDR derives the freehold-subnet's internal subnet: 10.77.0.0/24,
+// bumped past any overlap with the LAN (the proxy IP's network) — a made-up
+// subnet is always safe to assume (untagged, no bridge config), only a
+// collision would route wrongly. Returns "" when lanIP does not parse.
+func DefaultGatewayCIDR(lanIP string) string {
+	lan, err := netip.ParsePrefix(lanIP)
+	if err != nil {
+		return ""
+	}
+	gw := netip.MustParsePrefix("10.77.0.0/24")
+	for octet := 78; octet <= 255; octet++ {
+		if !lan.Overlaps(gw) {
+			return gw.String()
+		}
+		gw = netip.MustParsePrefix(fmt.Sprintf("10.%d.0.0/24", octet))
+	}
+	return "10.77.0.0/24"
+}
+
 // ---- the pipeline ---------------------------------------------------------
 
 func (e *Engine) RunBootstrap() error {
@@ -415,46 +448,26 @@ func (e *Engine) RunBootstrap() error {
 	}
 
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
-	// + its in-host VLAN tag. Blank = the flat-LAN world (no gateway — today's
-	// behavior, and how existing worlds keep reconciling). The proxy IP above
-	// becomes the gateway's ONE LAN address; the internal guests derive their
-	// static addresses from the CIDR.
-	if e.F.GatewayCIDR == "" && !e.F.Yes {
-		ans, err := e.Prompt("internal subnet CIDR for the freehold-subnet (e.g. 10.77.0.0/24) — blank = flat LAN (no gateway); the PVE bridge must be VLAN-aware for a tag")
-		if err != nil {
-			return err
-		}
-		if a := strings.TrimSpace(ans); a != "" {
-			e.F.GatewayCIDR = a
-			v, verr := e.Prompt("VLAN tag for the internal bridge (a number, e.g. 77; blank = untagged)")
-			if verr != nil {
-				return verr
-			}
-			if v = strings.TrimSpace(v); v != "" {
-				n, cerr := strconv.Atoi(v)
-				if cerr != nil || n <= 0 {
-					return fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
-				}
-				e.F.GatewayVlan = n
-			}
+	// + its in-host VLAN tag. The gateway is FORCED — every fresh world gets
+	// one; the subnet is derived (10.77.0.0/24, bumped past LAN overlap),
+	// untagged by default. --gateway-cidr/--gateway-vlan override.
+	if e.F.GatewayCIDR == "" {
+		e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
+		if e.F.GatewayCIDR == "" {
+			return fmt.Errorf("--proxy-ip %q does not parse as CIDR — cannot derive the internal subnet", e.F.ProxyIP)
 		}
 	}
-	// Validate on BOTH paths (headless flag + interactive prompt): a malformed
+	// Validate on BOTH paths (headless flag + derived): a malformed
 	// CIDR would otherwise fail far later, at the first guest's net args.
-	if e.F.GatewayCIDR != "" {
-		if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
-			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
-		}
+	if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
+		return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
 	}
-	// The interactive answer lands in e.F AFTER writeInitialConfig (step 6)
-	// snapshotted the config, and the guest births below key on the DISK
-	// config's Gateway — re-merge + save so the on-disk world IS gateway-aware
-	// before anything boots (the headless path's flags were already merged at
-	// step 6; this is a cheap idempotent re-run for both).
-	if e.F.GatewayCIDR != "" {
-		if err := e.writeInitialConfig(); err != nil {
-			return err
-		}
+	// The answer lands in e.F AFTER writeInitialConfig (step 6) snapshotted
+	// the config, and the guest births below key on the DISK config's Gateway
+	// — re-merge + save so the on-disk world IS gateway-aware before anything
+	// boots (a cheap idempotent re-run for both paths).
+	if err := e.writeInitialConfig(); err != nil {
+		return err
 	}
 	if e.F.GatewayVlan < 0 {
 		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
@@ -1757,13 +1770,22 @@ func prefixBits(cidr string) int {
 	return n
 }
 
-// pickFreeVmidSkippingRecorded returns the lowest free VMID that is neither a
-// live guest nor a RECORDED role vmid (cp/relay/k3s — kept intact by an
-// uninstall and re-created at those coordinates by the later births), nor the
-// other roles' recorded ids. 0 = let the driver pick (nothing recorded).
+// pickFreeVmidSkippingRecorded returns the lowest free VMID that is not a
+// RECORDED role vmid (cp/relay/k3s — kept intact by an uninstall and
+// re-created at those coordinates by the later births), nor the other roles'
+// recorded ids. The free-id source is `pvesh get /cluster/nextid` (via the
+// provider seam) — CLUSTER-CANONICAL and VM-aware: the VMID namespace is
+// shared with QEMU VMs, which a container-list scan misses (a VM at 102 would
+// be handed out and the create would die on "VM 102 already exists"). The
+// bump past the recorded set covers the ids nextid may legitimately return
+// while the recorded role is torn down (free, but about to be re-born there).
+// 0 = let the driver pick (no provider).
 func (e *Engine) pickFreeVmidSkippingRecorded(cfg *config.Config) (uint32, error) {
 	if e.Provider == nil {
 		return 0, nil
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
 	}
 	skip := map[uint32]bool{}
 	for _, g := range []config.LxcGuest{cfg.Lxc.Cp, cfg.Lxc.Relay, cfg.Lxc.K3s} {
@@ -1771,21 +1793,17 @@ func (e *Engine) pickFreeVmidSkippingRecorded(cfg *config.Config) (uint32, error
 			skip[*g.Vmid] = true
 		}
 	}
-	guests, err := e.Provider.ListGuests()
+	next, err := e.Provider.NextFreeVMID()
 	if err != nil {
 		return 0, fmt.Errorf("gateway vmid pick: %w", err)
 	}
-	for _, g := range guests {
-		if n, perr := strconv.ParseUint(g.ID, 10, 32); perr == nil {
-			skip[uint32(n)] = true
-		}
+	for skip[next] && next < 10000 {
+		next++
 	}
-	for id := uint32(100); id < 10000; id++ {
-		if !skip[id] {
-			return id, nil
-		}
+	if next >= 10000 {
+		return 0, fmt.Errorf("no free vmid for the gateway")
 	}
-	return 0, fmt.Errorf("no free vmid for the gateway")
+	return next, nil
 }
 
 // bootstrapStaticIP returns the role's STATIC address, or "" = DHCP. k3s is

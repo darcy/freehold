@@ -31,6 +31,10 @@ type Provider interface {
 	GuestExec(guest string, cmd string, timeoutS uint64) (*client.ExecOutcome, error)
 	// ListGuests returns every guest as (id, name).
 	ListGuests() ([]Guest, error)
+	// NextFreeVMID returns the substrate's next free VMID — the canonical
+	// cluster-wide pick, VM-aware (the VMID namespace is shared between
+	// containers and VMs).
+	NextFreeVMID() (uint32, error)
 	// GuestIPv4 returns the guest's first non-loopback IPv4 (CIDR).
 	GuestIPv4(guest string) (string, error)
 	// GuestMounts returns the guest's mount guest-paths, in order.

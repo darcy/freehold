@@ -120,7 +120,11 @@ the operator identity: `--operator-pubkey` (headless; `--operator-identity`
 seeds this box's login ledger from a keypair dir, verified against the
 pubkey — the guided flow pastes or mints it). The
 runner needs no name — it is the fixed `pve-ssh-root` capability — and the local
-MCP port defaults to 8787 (`--local-port` to move it). An
+MCP port needs no answer either: it binds 8787, or the next free loopback port
+when that is taken (`--local-port` to pin it). Every install builds the
+freehold-subnet gateway: the internal subnet is derived (10.77.0.0/24, bumped
+past any overlap with the LAN; untagged unless `--gateway-vlan` says a tag) —
+`--gateway-cidr`/`--gateway-vlan` override. An
 existing name whose CP is absent is re-adopted (the plane keeps the runner
 identity); a **live** CP is refused — reconcile the world with `freehold build`,
 drop it with `teardown`/`uninstall`, or join it with `freehold login`.

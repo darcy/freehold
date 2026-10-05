@@ -83,8 +83,11 @@ Two paths to everything, by design:
     addressed to the gateway itself — an unconstrained dport DNAT would
     hijack the guests' own egress. The forward list is a config list —
     extending it is an edit, not code.
-6.  **Wizard:** one new prompt — the gateway's public-side IP + the internal
-    subnet CIDR. Rebuild/re-adopt reuse the recorded values.
+6.  **No wizard question:** every install builds the gateway; the internal
+    subnet is derived (10.77.0.0/24, bumped past any overlap with the LAN)
+    and the bridge rides untagged unless `--gateway-vlan` says a tag —
+    `--gateway-cidr` overrides the derivation. Rebuild/re-adopt reuse the
+    recorded values.
 
 **Verification gate before calling this done:** `freehold build`, the TUI,
 and a thin-box flow exercised from a SECOND box against a subnet world — the
