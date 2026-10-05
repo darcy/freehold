@@ -599,6 +599,50 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     master key). `providers.json` (control-plane only) holds opaque `params`
     per connector the system never parses.
 
+*   **The command surface** (the console runs as the CP's service — the
+    operator reaches it through the web UI or the TUI's `w`; the verbs below
+    are the CP-side/box-side CLI forms the stages and operators use):
+
+    ```sh
+    freehold-console serve --state-dir /srv/data/cp/control-plane
+    # open http://127.0.0.1:8080 — admin/ops only (chat is Buzz's job)
+
+    # provision a service runner: the console ships the runner package,
+    # registers the runner's MCP address, and the overview shows the runner's
+    # OWN self-check per target — 🟢/🟡/🔴 — probed through the same signed
+    # MCP channel an agent uses
+    freehold-console provision vultr \
+      --kind vultr --address api.vultr.com --secret-env VULTR_KEY \
+      --state-dir /srv/data/cp/control-plane
+
+    # grant the console/ops identity (or an agent) so it may call the runner
+    # (everything else fails closed); omit --pubkey for the state dir's own identity:
+    freehold-console grant vultr --state-dir /srv/data/cp/control-plane
+    # with a relay: grant publishes a put-user to the runner's channel; the
+    # runner re-reads its relay-signed roster per call (revoke-grant is the
+    # /api/revoke-grant web action)
+
+    # rotate the credential (web/API-only: POST /api/rotate — re-seals to the
+    # same runner key); revoke: blocks provision/rotate, deletes the shipped
+    # secrets.json; service-at-a-glance: GET /api/overview (no plaintext in
+    # output, ever)
+    freehold-console revoke vultr --state-dir /srv/data/cp/control-plane
+
+    # the agent-grants kill switch (governs provision_runner/revoke_runner):
+    freehold-console grants-mode --state-dir /srv/data/cp/control-plane            # current mode
+    freehold-console grants-mode --mode off --state-dir /srv/data/cp/control-plane # deny the flow
+    ```
+
+    Provision refuses to clobber: a name that exists, or a `--runner-dir` that
+    already holds a package, errors instead of destroying a runner's key.
+
+    **The no-master-key recipe** — verify the property yourself: grep the CP's
+    `state.json` (`/srv/data/cp/control-plane/state.json`) for a credential and
+    for `nostr_secret`/`enc_secret` — **zero matches**; the state holds only
+    ciphertext and pubkeys. (The runner's own `identity.json` is the deliberate
+    exception — its injected private keys, 0600. The full walk-through:
+    `docs/AI.md`, "Runners and secrets".)
+
 *   **The Go toolchain mirrors the surfaces it drives:**
     `control-plane/secret-management/` reproduces the full provisioner
     (provision/rotate/revoke/grant/adopt/add-secret + the relay channel sync);
@@ -615,6 +659,32 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
 
 **A runner is a dumb privileged machine** — it runs commands; it isn't an
 agent; it is *never* the brain (that's the CPA).
+
+```sh
+# the runner binary (shipped as a release asset; in the build tree: cargo run -p freehold-runner):
+runner keys init --state-dir ./.freehold/runner/my-runner   # writes identity.json (0600)
+runner serve --state-dir ./.freehold/runner/my-runner       # MCP over HTTP, default 127.0.0.1:8787
+                                                            # (FREEHOLD_RUNNER_ADDR, loopback only)
+```
+
+Refuse non-loopback binds unless `--allow-remote` is passed (signed calls are
+the boundary); refuse non-loopback Origins (DNS-rebinding guard). A
+relay-configured runner verifies its roster against the relay's pubkey:
+
+```sh
+runner serve --state-dir ./.freehold/runner/my-runner \
+  --relay-url https://<relay-domain> --relay-pubkey <relay-signing-pubkey> \
+  [--relay-auth-url …] [--allow-remote]
+```
+
+The operator drives a RUNNING runner with signed calls (or, on a thin box,
+through the CP's runner via `world_exec`):
+
+```sh
+freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"' \
+  --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
+  --runner-pubkey <runner-nostr>
+```
 
 1.  `run_call` validates signature (roster), audience, expiry, and nonce, and
     selects the connector.

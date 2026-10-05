@@ -21,8 +21,14 @@ AI owns the gateway directly; the runtime is what all agents share.
 
 *   **The gateway.** LiteLLM and its Postgres run as Deployments in the `litellm` namespace,
     configured by env only. The provider key is operator-supplied, sealed by the CP, and
-    reaches the gateway via the runner — never in argv or Terraform state. One model is
-    seeded at build.
+    reaches the gateway via the runner — never in argv or Terraform state. One base model is
+    registered at build, and the build then ensures the default ALIAS set on the gateway
+    (`stageLitellmAliases`, each alias cloning the base registration):
+    `Code` (coding agents), `General` (the default for custom agents), `Freehold` (the core
+    agents — the CPA + departments, pinned), `ExtraThinking` (complex architecture / deep
+    thinking). A pod's model resolves by class (`litellmModelFor`): core identities run the
+    core alias; a custom agent runs its persisted choice, defaulting to `General` — and an
+    agent's choice rides its registry row, so a rebuild re-applies the same alias.
 *   **The pod.** A bare Pod in the `agents` namespace: its own Nostr identity (Secret), a
     workspace on the durable plane (`/srv/data/k8s-volumes/agent-home/<pod>`), a prompt
     mounted from a ConfigMap and re-read on every spawn, and a tool bridge fetched from the
@@ -179,7 +185,10 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 ## Known gaps
 
 *   Every pod holds the gateway's **master key** — no scoped per-agent keys.
-*   One hard-coded model for all agents; one provider.
+*   One base model (`glm-5p3-flash`) — the aliases all clone it, so every alias routes to
+    the same underlying model today; per-provider/model variety is the follow-up. Aliases
+    are ensured only for the default set; managing an agent's choice beyond the registry row
+    is not built.
 *   AI's prompt says the provider key rides each exec; the bridge doesn't inject it.
 *   The sprig image is a moving tag (no digest pin).
 *   Memory attestation has no expiry; upstream buzz doesn't verify engram authorship.
@@ -192,7 +201,8 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 
 ## Future
 
-*   Scoped per-agent LiteLLM keys and budgets; multi-model and alias management.
+*   Scoped per-agent LiteLLM keys and budgets; multi-model management (the default
+    alias set exists; variety behind the aliases does not).
 *   **Local AI hosting:** a GPU box (RTX 3090, DGX Spark) as a LiteLLM upstream, provisioned
     and tuned by AI through a door, with telemetry.
 *   **Agent workspaces + git/GitHub:** a workspace LXC per agent, commits verified durable in
