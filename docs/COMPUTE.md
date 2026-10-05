@@ -70,7 +70,7 @@ deliberate and the rules below hold regardless of it.
 *   **Teardown / rebuild:** `teardown` is CP-preserving — it removes relay and k3s and keeps
     the CP, gateway, plane, config, and data. `uninstall` removes the CP and gateway too, and
     `--remove-data` the datasets. Both work from a thin box or against a dead CP over a
-    transient root-SSH door.
+    transient root-SSH door — except `--remove-data`, which needs the build box.
 *   **Compute's grants:** raw host access (`pve-ssh-root` today) and cluster-admin kube access.
     Its `create-lxc` skill creates a guest, installs a runner-client on it, and hands the door
     to the CPA to provision.

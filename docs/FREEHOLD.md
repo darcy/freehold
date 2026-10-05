@@ -42,7 +42,9 @@ the ordering across all of them is `docs/ROADMAP.md`.
 
 **Console, CLI, TUI**
 *   The console isn't a systemd unit; the runner's crash isn't restarted.
-*   All profiles' local runners default to `127.0.0.1:8787` and collide.
+*   Every box-side command (`exec`/`build`/`teardown`/`uninstall`, the TUI) dials its
+    profile's runner at the same `--addr` default, `127.0.0.1:8787` — on a multi-profile box
+    a command silently hits whichever profile's runner owns the port.
 *   Go-console port gaps: no `rebuild` verb, a few missing CLI verbs, no request-body cap,
     dropped env-var flag bindings; secrets in `/api/provision` live briefly in memory.
 
