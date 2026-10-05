@@ -162,6 +162,55 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 	if got := f2.published(); len(got) != 0 {
 		t.Fatalf("a marker hit must not re-post, got %d events", len(got))
 	}
+
+	// No recorded name: the mention comes from the operator's own kind:0 —
+	// the name they're known by on the relay (an updated world's case).
+	f3 := newFakeFirstRunRelay(t, []map[string]interface{}{
+		{"id": "p", "kind": float64(0), "content": `{"name":"Darcy Smith"}`},
+	})
+	s3 := specFor(f3)
+	s3.OperatorName = "" // an updated world has no recorded name
+	if err := s3.postFreeholdWelcome(sec); err != nil {
+		t.Fatal(err)
+	}
+	var ev3 struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(f3.published()[0]), &ev3); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ev3.Content, "@Darcy Smith") || strings.Contains(ev3.Content, "@Operator") {
+		t.Fatalf("the mention must use the profile name, got %q", ev3.Content)
+	}
+
+	// A profile with no usable name falls back to the default.
+	f4 := newFakeFirstRunRelay(t, []map[string]interface{}{
+		{"id": "p", "kind": float64(0), "content": `{"about":"nameless"}`},
+	})
+	s4 := specFor(f4)
+	s4.OperatorName = ""
+	if err := s4.postFreeholdWelcome(sec); err != nil {
+		t.Fatal(err)
+	}
+	var ev4 struct {
+		Content string `json:"content"`
+	}
+	_ = json.Unmarshal([]byte(f4.published()[0]), &ev4)
+	if !strings.Contains(ev4.Content, "@Operator") {
+		t.Fatalf("a nameless profile must fall back to the default, got %q", ev4.Content)
+	}
+
+	// A marker hit mixed with a profile event still guards.
+	f5 := newFakeFirstRunRelay(t, []map[string]interface{}{
+		{"id": "m", "kind": float64(delegate.StreamMsgKind), "content": "welcome"},
+		{"id": "p", "kind": float64(0), "content": `{"name":"Darcy"}`},
+	})
+	if err := specFor(f5).postFreeholdWelcome(sec); err != nil {
+		t.Fatal(err)
+	}
+	if got := f5.published(); len(got) != 0 {
+		t.Fatalf("a marker hit must guard even alongside a profile, got %d events", len(got))
+	}
 }
 
 // TestStageOperatorProfile: the kind:0 publishes once with the operator's
