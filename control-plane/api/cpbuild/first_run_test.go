@@ -114,8 +114,9 @@ func TestAgentToolsServeFlagsOperatorName(t *testing.T) {
 	}
 }
 
-// TestPostFreeholdWelcomeMarkerGuard: an empty marker read posts once (kind 9,
-// h+p+t tags, operator mentioned); a marker hit posts nothing.
+// TestPostFreeholdWelcomeMarkerGuard: an empty #freehold posts once (kind 9,
+// h+p+t tags, operator mentioned); ANY prior #freehold message — welcome tag
+// or not — posts nothing (the guard is history, never a tag lookup).
 func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 	ownerPub := strings.Repeat("ab", 32)
 	s := &Spec{
@@ -143,7 +144,7 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 	}
 	pub := f.published()
 	if len(pub) != 1 {
-		t.Fatalf("an absent marker must post exactly one message, got %d events", len(pub))
+		t.Fatalf("an empty #freehold must post exactly one message, got %d events", len(pub))
 	}
 	var ev struct {
 		Kind    int        `json:"kind"`

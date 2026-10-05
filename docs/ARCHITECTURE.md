@@ -478,8 +478,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     display name asked at install, `--display-name`) — the event the app checks
     to skip its stock onboarding (no starter channels, no private Welcome, no
     built-in welcome-team agents) — stands up the open `#general` channel
-    (CPA-owned; operator + CPA), and posts a one-time marker-guarded welcome in
-    `#freehold`. Every stage is an idempotent ensure (existing worlds pick the
+    (CPA-owned; operator + CPA), and posts a one-time welcome in `#freehold`
+    (guarded by any prior message there — a world with history is not a first
+    run). Every stage is an idempotent ensure (existing worlds pick the
     surface up on their next build; a missed kind:0 or welcome degrades to a
     WARN, never a failed build).
 

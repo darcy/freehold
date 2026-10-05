@@ -2032,10 +2032,12 @@ func (s *Spec) appendMemoryPlane(report []string) []string {
 	return append(report, "memory plane: owner "+agenttools.ShortHex(s.OwnerPub)+" attests each agent pod (kind "+strconv.Itoa(nipoa.AgentEngramKind)+")")
 }
 
-// freeholdWelcomeMarker is the #t tag on the CPA's one-time #freehold welcome
-// message; its presence on the relay is the whole idempotence state (the relay
-// DB is durable across rebuild/adopt, so the marker read is enough — no
-// fresh-vs-adopt flag).
+// freeholdWelcomeMarker is the #t tag carried by the CPA's one-time #freehold
+// welcome message — provenance only. The guard is ANY prior #freehold message
+// (a tag lookup re-posts once anything else lands in the channel: the relay
+// applies its SQL limit before post-filtering tag constraints), so the relay
+// DB being durable across rebuild/adopt is what keeps the welcome one-time —
+// no fresh-vs-adopt flag.
 const freeholdWelcomeMarker = "fh-welcome"
 
 // operatorDisplayName resolves the operator's display name (OperatorName or
