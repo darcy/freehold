@@ -2087,9 +2087,10 @@ func operatorProfileName(ev map[string]interface{}) string {
 
 // postFreeholdWelcome posts the CPA's one-time welcome message in #freehold,
 // mentioning the operator (so it files into their Inbox on a first connect).
-// Marker-guarded: a #freehold message carrying freeholdWelcomeMarker means it
-// already ran — a rebuild/re-adopt never re-posts. Best-effort: the caller
-// warns on error (the next build's marker read self-heals a transient miss).
+// Guarded by ANY prior #freehold message: a world with history is not a first
+// run — a rebuild/re-adopt never re-posts. Best-effort: the caller warns on
+// error (the next build re-checks the still-empty channel and self-heals a
+// transient miss).
 func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if s.OwnerPub == "" {
 		return nil
@@ -2098,13 +2099,17 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
-	// Marker first — the welcome is one-time. Two single-filter reads, the
-	// pattern every relay caller uses (the bridge honors body[0] only; a
-	// multi-filter request would silently drop the second).
+	// The first-run guard is ANY kind-9 message in #freehold — NOT a tag
+	// lookup. The relay applies the SQL limit BEFORE post-filtering tag
+	// constraints (buzz-relay bridge Phase 2/3), so a #t+limit:1 read means
+	// "is the NEWEST #freehold message the welcome" — false the moment
+	// anyone chats, and every build re-posts. Any history at all = the world
+	// has run before; the welcome is a first-run surface. (The posted event
+	// still carries the fh-welcome tag as provenance; the guard just never
+	// reads it.)
 	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
 		"kinds": []interface{}{delegate.StreamMsgKind},
 		"#h":    []interface{}{relayFreeholdChannel},
-		"#t":    []interface{}{freeholdWelcomeMarker},
 		"limit": 1,
 	}})
 	if err != nil {
