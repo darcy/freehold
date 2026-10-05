@@ -1872,6 +1872,13 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 	edgeIP := config.StripCIDR(edgeOf(e.F.ProxyIP))
 	conf := config.GatewayNftConf(cidr, edgeIP, k3sIP, cpIP, relayIP, "eth0")
 	script := fmt.Sprintf(`set -e
+# Bootstrap DNS BEFORE apt: the template's resolv.conf inherits the host's
+# (Tailscale MagicDNS on this box's host — 100.100.100.100), which is not
+# routable from inside the guest, and a LAN resolver is not guaranteed to
+# answer either — apt then hangs to the watchdog. Public resolvers, like
+# EnsureGuestDocker; the CP build re-writes the guest's DNS later anyway.
+echo nameserver 1.1.1.1 > /etc/resolv.conf
+echo nameserver 8.8.8.8 >> /etc/resolv.conf
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 # A router with BOTH nics on one bridge (the untagged freehold-subnet) must
