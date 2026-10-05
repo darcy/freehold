@@ -119,6 +119,13 @@ func TestApplyInstallDefaultsGatewayForcing(t *testing.T) {
 	if f.GatewayCIDR != "10.99.0.0/24" {
 		t.Errorf("explicit cidr = %q, want 10.99.0.0/24", f.GatewayCIDR)
 	}
+	// Mint with --gateway-vlan but no cidr: the MINT flag still rides (the
+	// pipeline derives unprobed for a tagged L2 — never a silent flat world).
+	f = box.Flags{ProxyIP: "192.168.30.8/24", GatewayVlan: 5}
+	applyInstallDefaults(&f, true)
+	if !f.Mint || f.GatewayCIDR != "" {
+		t.Errorf("mint+vlan = mint:%v cidr:%q, want true/empty (the pipeline derives)", f.Mint, f.GatewayCIDR)
+	}
 	// Re-adopt of a pre-gateway world: NOTHING is derived (no mid-life
 	// gateway colliding with the live LAN guests) and no mint flag.
 	f = box.Flags{ProxyIP: "192.168.30.8/24"}

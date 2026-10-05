@@ -475,14 +475,18 @@ func (e *Engine) RunBootstrap() error {
 	// (two boxes both derived 10.77.0.0/24 untagged — their guests
 	// ARP-collided and each world's CP dialed the OTHER's litellm). The
 	// derive bumps to the next clean /24; --gateway-cidr is honored
-	// untouched and --gateway-vlan skips the probe (a tagged L2 is its own
-	// domain — nothing to collide with).
-	if e.F.Mint && e.F.GatewayCIDR == "" && e.F.GatewayVlan == 0 {
-		cidr, err := e.deriveGatewayCIDR()
-		if err != nil {
-			return err
+	// untouched; --gateway-vlan skips only the PROBE (a tagged L2 is its
+	// own domain — nothing to collide with), the derive itself still runs.
+	if e.F.Mint && e.F.GatewayCIDR == "" {
+		if e.F.GatewayVlan == 0 {
+			cidr, err := e.deriveGatewayCIDR()
+			if err != nil {
+				return err
+			}
+			e.F.GatewayCIDR = cidr
+		} else {
+			e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
 		}
-		e.F.GatewayCIDR = cidr
 	}
 
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
