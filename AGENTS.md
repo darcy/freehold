@@ -528,9 +528,15 @@ release notes.
 - **Uninstall leaves the cp-verb key's host line behind.** `RunnerKeyRefs` collects the
   substrate + co-located runner keys, never the data-verbs `cp-verb` key
   (`freehold-<world>-cp-verb` in the host's `authorized_keys`), so `uninstall` removes the
-  guests + the door but not that line. Its private half (`profiles/<name>/cp-verb-key`) is
-  wiped with the profile, so the leftover public line is an unusable orphan — hygiene only,
-  no access path. Adding the cp-verb key to the uninstall's key refs is the cleanup.
+  guests + the door but not that line. The private half lives in TWO places: the box's
+  `profiles/<name>/cp-verb-key` (wiped with the profile) AND the CP guest's durable plane
+  (`/srv/data/cp/verb-ssh.key`, shipped at deploy) — which a default uninstall KEEPS
+  (only `--remove-data` drops it) and the off-site backup set covers. So on a default
+  uninstall the host line + its private key both survive in the world's own records —
+  a working credential pair, not an orphan; the exposure is a leaked backup yielding
+  host root SSH. Only after `uninstall --remove-data` is the leftover line a true
+  orphan (its private halves both gone). Adding the cp-verb key to the uninstall's
+  key refs is the cleanup — and it is security-relevant, not hygiene.
 - **`install`'s live-CP refusal is profile-based *and* host-side.** It probes a profile's
   recorded `cp_url` (`/healthz`) and, when the box holds an authorized DOOR_SPEC key (a prior
   `login`), also lists the host's guests for the `<name>-cp` guest and refuses. A box with no
