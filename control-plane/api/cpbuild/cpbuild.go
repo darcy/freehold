@@ -1043,7 +1043,15 @@ func (s *Spec) reseedCoLocatedRunner() error {
 // which the box seals the DNS/world secrets (handoffDNS) it opens in-memory for
 // cert issuance. The console's world_build owns this path (not agent-tools).
 func (s *Spec) consoleEncSecret() ([]byte, error) {
-	file := filepath.Join(s.StateDir, "console", "identity.json")
+	return s.consoleEncSecretAt(s.StateDir)
+}
+
+// consoleEncSecretAt is the consoleEncSecret read at an explicit dir — the
+// CONSOLE-ROOTED form the owner-key path needs: the sealed operator record
+// lives at the console root too, and on the agent-tools serve (StateDir = the
+// agent-tools root) no console identity exists to unseal it with.
+func (s *Spec) consoleEncSecretAt(dir string) ([]byte, error) {
+	file := filepath.Join(dir, "console", "identity.json")
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
@@ -1924,7 +1932,7 @@ func (s *Spec) ownerKey() ([]byte, error) {
 		}
 		return s.validatedOwnerKey(disk)
 	}
-	encSec, serr := s.consoleEncSecret()
+	encSec, serr := s.consoleEncSecretAt(s.consoleStateRoot())
 	if serr != nil {
 		return nil, fmt.Errorf("the sealed operator identity at %s needs the console enc key: %w", sealed, serr)
 	}
