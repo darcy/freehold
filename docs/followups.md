@@ -11,6 +11,30 @@ there; if it is work not yet done, it belongs here.
 
 ## Provisioning / substrate
 
+- **The re-adopt door: uninstall removes the host's authorized_keys line and
+  the provision-REUSE path never re-prints it.** An uninstall
+  (RemoveRunnerSubstrate + the door deauthorize) strips the box's substrate
+  line from the host; a re-install then reuses the runner package
+  ("already exists" — no fresh key printed, no door gate) and fails the
+  transient door check with an EMPTY message (that path lacks the
+  served-runner path's recover/print affordance). Live-proven three times on
+  the gateway reinstall round. Fix: the reuse path re-derives + prints the
+  door line and the transient verify carries the same recover/print affordance.
+- **The fresh-install CP package is a wholesale clone of the box's runner
+  package — so a later re-adopt's substrate rotation drops the BOX's own
+  line as "the old one"** (the same key body in both packages; the
+  box's door dies mid-reinstall, the adopt fails on the dead transport).
+  Happened on every first gateway re-adopt (librem/live/rebuild). Fix: ship
+  a FRESH sealed substrate credential to the CP at first deploy (or exempt
+  the box's own line from the rotation's deauthorize).
+- **The gateway guest skips docker — the DNAT/forward ruleset is asserted
+  after docker's** (`docker` iptables-nft ships FORWARD `policy drop`,
+  which strangles the gateway's forwarding when its tables load after the
+  freehold ones). The shipped stages run the freehold ruleset LAST + the
+  gateway no longer installs docker; what remains is a reconciliation pass
+  that re-asserts the freehold table if docker's ever re-appears (a guest
+  created by an older build).
+
 - **The runner-client baked into every guest, and kept fresh on update.** The
   runner-client install is a `create-lxc` skill step today (Compute fetches
   the `runner` release asset per guest); the mechanical version bakes it into

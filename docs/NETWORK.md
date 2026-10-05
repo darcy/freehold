@@ -94,15 +94,24 @@ Two paths to everything, by design:
 and a thin-box flow exercised from a SECOND box against a subnet world — the
 runner-port forward must prove itself, not be assumed.
 
+**Live-verified (three worlds on one shared host):** librem (10.77.0.0/24,
+edge .8), live (10.77.1.0/24, edge .7), rebuild (10.77.2.0/24, edge .6) —
+full uninstall → gateway install → build → agents connected → edges served
+from a LAN box → teardown/build cycles. The remaining unticked box (the
+second-box/thin-box flow) is the Phase-1 tail; the host route
+(`10.77.x.0/24 via <gateway>`) is asserted by the box gateway stage — a
+switch reboot lost it once and the world kept serving (only the box-side
+verbs went dark until the route returned).
+
 **Acceptance:**
 
-*   [ ] Fresh install on PVE: gateway + relay/CP/k3s on the internal subnet;
+*   [x] Fresh install on PVE: gateway + relay/CP/k3s on the internal subnet;
     nothing but the gateway is LAN-addressable.
 *   [ ] From a second box: `freehold build`, `freehold update`, the TUI, and
     a thin-box login all work through the gateway unchanged.
-*   [ ] Agent pods reply in the relay (agents dial runners inside the subnet);
+*   [x] Agent pods reply in the relay (agents dial runners inside the subnet);
     `pct exec` still reaches every guest via the PVE host.
-*   [ ] Teardown → rebuild → all down: lifecycle identical to today's; the
+*   [x] Teardown → rebuild → all down: lifecycle identical to today's; the
     gateway is recreated with its recorded IP every time.
 *   [ ] Existing non-gateway worlds (and VPS deployments without the role)
     still build and reconcile untouched.
