@@ -120,7 +120,7 @@ identity); a **live** CP is refused — reconcile the world with `freehold build
 drop it with `teardown`/`uninstall`, or join it with `freehold login`.
 `install --non-interactive` is the headless surface. (The gateway, subnet, and
 runner port need no answers — derived or picked; `docs/NETWORK.md`,
-`docs/COMPUTE.md`.)
+`docs/FREEHOLD.md`.)
 
 ### The appliance: one binary, two surfaces
 
@@ -264,10 +264,11 @@ freehold-console provision vultr \
 freehold-console grant vultr --state-dir /srv/data/cp/control-plane
 ```
 
-Verify the no-master-key property yourself: grep the state dir
-(`/srv/data/cp/control-plane/state.json`, `…/runner/vultr/…`) for the API key and for
-`nostr_secret`/`enc_secret` — **zero matches**; only ciphertext and pubkeys land on disk.
-(The full walk-through: `docs/AI.md`, "Runners and secrets".)
+Verify the no-master-key property yourself: grep the CP's `state.json`
+(`/srv/data/cp/control-plane/state.json`) for the API key and for
+`nostr_secret`/`enc_secret` — **zero matches**; the state holds only ciphertext and
+pubkeys. (The runner's own `identity.json` is the deliberate exception — its injected
+private keys, 0600. The full walk-through: `docs/AI.md`, "Runners and secrets".)
 
 ```sh
 # rotate the credential (web/API-only: POST /api/rotate — re-seals to the same runner key)
@@ -301,6 +302,8 @@ freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer
 # add-relay-member) run INSIDE the engines — freehold install / freehold build
 # drive them; you never type them by hand. The rebuild/fold path and the
 # relay-configured runner flags are described in docs/ARCHITECTURE.md.
+```
+
 ## How it works
 
 Three roles, one primitive. **Agents** are the brain; **runners** are dumb privileged
