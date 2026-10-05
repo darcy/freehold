@@ -198,15 +198,17 @@ func runInstallCmd(cmd *cobra.Command) error {
 	// A fresh plane has nothing to resolve from, so headless needs the full
 	// answer set; with gaps (and no --non-interactive), fall back to the guided
 	// flow — the parsed flags ride in: what the operator already answered is a
-	// prompt default, never silently dropped.
-	if !f.Yes && (name == "" || f.Host == "" || f.RelayDomain == "" || f.CpDomain == "" ||
-		f.ProxyIP == "" || f.OperatorPubkey == "") {
+	// prompt default, never silently dropped. A vultr mint derives Host and
+	// ProxyIP from the instance it creates, so neither is required.
+	isVultr := f.AccessMode == "api-vultr"
+	if !f.Yes && (name == "" || f.RelayDomain == "" || f.CpDomain == "" || f.OperatorPubkey == "" ||
+		(!isVultr && (f.Host == "" || f.ProxyIP == ""))) {
 		return runInstall(cmd.InOrStdin(), out, f, cmd)
 	}
 	if name == "" {
 		return fmt.Errorf("install needs --name (the world/profile name — isolates this world's config and state)")
 	}
-	if f.Host == "" {
+	if !isVultr && f.Host == "" {
 		return fmt.Errorf("install needs --host (the environment freehold reaches, e.g. root@192.168.30.224)")
 	}
 	action, err := gateInstall(name)
@@ -820,6 +822,11 @@ func ensureVultrHost(f *box.Flags, out io.Writer) error {
 		return fmt.Errorf("vultr create: %w", err)
 	}
 	f.VultrInstance = id
+	// Record the id NOW: every later step (the IP wait, SSH, the ~30-min PVE
+	// install, the door) can fail, and a stranded billed instance with no
+	// profile record is un-destroyable by tooling. The full config write
+	// happens later in the pipeline; this is the handle that survives it.
+	recordVultrInstance(f, id, "")
 	fmt.Fprintf(out, "  instance %s — waiting for an address…\n", id)
 	ip, err := c.WaitActive(ctx, id, 8*time.Minute)
 	if err != nil {
@@ -827,6 +834,9 @@ func ensureVultrHost(f *box.Flags, out io.Writer) error {
 	}
 	f.Host = "root@" + ip
 	f.ProxyIP = ip + "/32"
+	if err := recordVultrInstance(f, id, f.Host); err != nil {
+		fmt.Fprintf(out, "  (could not record the instance handle yet: %v — the final config write covers it)\n", err)
+	}
 	if f.GatewayCIDR == "" {
 		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
 	}
@@ -835,6 +845,27 @@ func ensureVultrHost(f *box.Flags, out io.Writer) error {
 		return err
 	}
 	return installPVEOnHost(ip)
+}
+
+// recordVultrInstance persists the instance handle (and, once known, the
+// host) into the profile config without disturbing anything else on disk —
+// the pipeline's own merges keep prev's fields; this only ever fills the
+// vultr block. bestEffort: a failed write is reported, not fatal (the run
+// continues; the final save records it again).
+func recordVultrInstance(f *box.Flags, id, host string) error {
+	cfg, err := config.Load(f.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &config.Config{Name: f.Name, AccessMode: f.AccessMode}
+	}
+	cfg.AccessMode = f.AccessMode
+	cfg.Vultr = config.VultrSpec{Region: f.VultrRegion, Plan: f.VultrPlan, OsID: f.VultrOsID, Instance: id}
+	if host != "" {
+		cfg.Host = host
+	}
+	return cfg.Save(f.ConfigPath)
 }
 
 // waitSSH polls until the host answers over SSH with ANY key (cloud-init

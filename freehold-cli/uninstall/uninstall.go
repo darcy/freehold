@@ -17,8 +17,8 @@ import (
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
-	"freehold/providers/vultr"
 	worldteardown "freehold/providers/proxmox/teardown"
+	"freehold/providers/vultr"
 )
 
 var uninstallCmd = &cobra.Command{
@@ -76,19 +76,31 @@ var uninstallCmd = &cobra.Command{
 			if err := runUninstallTransient(cfg, host, removeData); err != nil {
 				return err
 			}
-			if err := destroyVultrHost(cfg, yes, destroyHost); err != nil {
-				return err
+			instanceRunning, derr := destroyVultrHost(cfg, yes, destroyHost)
+			if derr != nil {
+				return derr
 			}
-			wipeLocalProfile(configPath, config.Current())
+			if instanceRunning {
+				// The profile is the ONLY handle to a still-billing instance —
+				// wiping it makes the printed recovery command a dead end.
+				fmt.Println("  profile kept: it holds the vultr instance handle (the instance is still running)")
+			} else {
+				wipeLocalProfile(configPath, config.Current())
+			}
 			return nil
 		}
 		if err := runUninstall(cfg, configPath, host, removeData); err != nil {
 			return err
 		}
-		if err := destroyVultrHost(cfg, yes, destroyHost); err != nil {
-			return err
+		instanceRunning, derr := destroyVultrHost(cfg, yes, destroyHost)
+		if derr != nil {
+			return derr
 		}
-		wipeLocalProfile(configPath, config.Current())
+		if instanceRunning {
+			fmt.Println("  profile kept: it holds the vultr instance handle (the instance is still running)")
+		} else {
+			wipeLocalProfile(configPath, config.Current())
+		}
 		return nil
 	},
 }
@@ -97,35 +109,37 @@ var uninstallCmd = &cobra.Command{
 // opted in (--destroy-host). DEFAULT OFF on purpose: the instance bills by
 // the hour, so a default uninstall leaves it RUNNING and says so loudly —
 // the operator decides when the bill stops, exactly like the durable plane
-// survives a default uninstall. Requires VULTR_API_KEY (never persisted).
-func destroyVultrHost(cfg *config.Config, yes, destroy bool) error {
+// survives a default uninstall. Returns whether an instance is still
+// running (the caller keeps the profile — it is the only handle). Requires
+// VULTR_API_KEY (never persisted).
+func destroyVultrHost(cfg *config.Config, yes, destroy bool) (bool, error) {
 	if cfg.AccessMode != "api-vultr" || cfg.Vultr.Instance == "" {
-		return nil
+		return false, nil
 	}
 	if !destroy {
 		fmt.Printf("  NOTE: the Vultr instance %s (%s %s) is still RUNNING and billing — destroy it with:\n    VULTR_API_KEY=... freehold uninstall --destroy-host\n",
 			cfg.Vultr.Instance, cfg.Vultr.Region, cfg.Vultr.Plan)
-		return nil
+		return true, nil
 	}
 	if !yes {
 		if err := common.ConfirmDestructive("destroy the Vultr instance (its data dies with it)"); err != nil {
 			fmt.Println("  instance left running — destroy it later with --destroy-host")
-			return nil
+			return true, nil
 		}
 	}
 	tok := strings.TrimSpace(os.Getenv("VULTR_API_KEY"))
 	if tok == "" {
-		return fmt.Errorf("--destroy-host needs VULTR_API_KEY in the environment (the key is never stored)")
+		return true, fmt.Errorf("--destroy-host needs VULTR_API_KEY in the environment (the key is never stored)")
 	}
 	fmt.Printf("  destroying the vultr instance %s…\n", cfg.Vultr.Instance)
 	c := &vultr.Client{Token: tok}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if err := c.Destroy(ctx, cfg.Vultr.Instance); err != nil {
-		return err
+		return true, err
 	}
 	fmt.Println("  ✓ vultr instance destroyed")
-	return nil
+	return false, nil
 }
 
 func init() {
