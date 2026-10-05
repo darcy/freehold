@@ -2157,7 +2157,7 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	// The mention carries the name the operator is known by on the relay —
 	// their own kind:0 (an updated world has no recorded name; the profile
 	// is where it lives). A failed read errors out rather than posting the
-	// default: the marker is still absent, so the next build re-runs this
+	// default: the channel is still empty, so the next build re-runs this
 	// path — nothing is ever posted wrong.
 	pevs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
 		"kinds":   []interface{}{0},

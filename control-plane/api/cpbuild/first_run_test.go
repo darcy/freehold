@@ -170,7 +170,7 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 		}
 	}
 	if !h || !p || !m {
-		t.Fatalf("tags must carry h(channel)/p(operator)/t(marker), got %v", ev.Tags)
+		t.Fatalf("tags must carry h(channel)/p(operator)/t(fh-welcome), got %v", ev.Tags)
 	}
 	if !strings.Contains(ev.Content, "@Darcy") {
 		t.Fatalf("the welcome must mention the operator by name, got %q", ev.Content)
@@ -186,7 +186,7 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := f2.published(); len(got) != 0 {
-		t.Fatalf("a marker hit must not re-post, got %d events", len(got))
+		t.Fatalf("existing #freehold history (no tag) must not re-post, got %d events", len(got))
 	}
 
 	// No recorded name: the mention comes from the operator's own kind:0 —
@@ -226,8 +226,8 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 		t.Fatalf("a nameless profile must fall back to the default, got %q", ev4.Content)
 	}
 
-	// The two reads: the marker (any kind-9) first; the profile read fires
-	// only when there is no history.
+	// The two reads: the history guard (any kind-9) first; the profile read
+	// fires only when there is no history.
 	f5 := newFakeFirstRunRelay(t, []map[string]interface{}{
 		{"id": "m", "kind": float64(delegate.StreamMsgKind), "content": "welcome"},
 		{"id": "p", "kind": float64(0), "content": `{"name":"Darcy"}`},
