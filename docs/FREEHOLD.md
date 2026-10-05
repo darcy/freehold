@@ -42,6 +42,28 @@ the ordering across all of them is `docs/ROADMAP.md`.
 
 **Console, CLI, TUI**
 *   The console isn't a systemd unit; the runner's crash isn't restarted.
+*   A box's local runner binds 8787 — or the next free loopback port when that is taken
+    (`--local-port` pins it; a re-adopt keeps its recorded addr and reclaims the port) — so
+    multi-profile mints no longer collide on 8787. Residual: `exec`'s `--addr` still defaults
+    literally to `127.0.0.1:8787` instead of the profile's recorded `[runner] addr`
+    (`build`/`teardown`/`uninstall` dial the recorded addr) — a runner picked onto another
+    port needs `--addr`.
+
+**Migrations and update**
+*   No reverse migrations or downgrade verb.
+*   The console executor's migration window can race a `create_agent` on the old serve.
+*   Unshipped migration scripts look like a converged world (only the report line shows it).
+*   Agent-tools audience drift is detected, not repaired.
+
+**The relay (Buzz)**
+*   After a redeploy, private-channel publishes 403 until channel rosters are reconciled,
+    and the console's relay membership goes stale — the build should reconcile and re-member.
+*   Non-department relay runners need a manual community-membership step.
+*   Exec receipts as channel messages are designed, not built; no relay-down drill;
+    no relay-contract verification skill.
+
+**Console, CLI, TUI**
+*   The console isn't a systemd unit; the runner's crash isn't restarted.
 *   A multi-profile box's local runners can share one port: `install --local-port`
     defaults to `8787` for every profile, and each runner serves on the port it was started
     with — two profiles installed on the default silently share `127.0.0.1:8787`, and

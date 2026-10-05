@@ -616,6 +616,71 @@ MUST NOT cache plaintext credentials, hold a "master key," or consult the router
 router is an **API connector** whose `baseUrl` and `apiKey` ride as env vars
 (`LITELLM_HOST`, `LITELLM_API_KEY`).
 
+**The whitelist has two sources.** With a relay configured (`--relay-url` +
+`--relay-pubkey`, plus `--relay-auth-url` when the dial is a LAN origin — the
+runner dials `http://<domain>:3000` but NIP-98-signs the canonical public URL),
+grants ARE channel membership, read live per call from the relay-signed
+kind-39002 snapshot, so a revoke lands without a restart. Without a relay, the
+runner reads its grants from the shipped package (`secrets.json`), re-read per
+call. Refuse non-loopback binds unless `--allow-remote` (signed calls are the
+boundary); refuse non-loopback Origins (DNS-rebinding guard).
+
+**One exec call, end to end:**
+
+```mermaid
+sequenceDiagram
+    participant AG as agent
+    participant R as runner
+    participant REL as buzz relay
+    participant T as target
+
+    AG->>R: tools/call — signed (runner|ts|body)
+    R->>R: verify signature + audience
+    alt whitelist: relay roster (--relay-url + --relay-pubkey + --relay-auth-url)
+        R->>REL: read own channel roster (kind 39002, #d)
+        REL-->>R: members — relay-signed
+    else whitelist: shipped package (no relay)
+        R->>R: grants from secrets.json — re-read per call
+    end
+    alt not granted
+        R-->>AG: denied (-32001) — fail closed
+    else granted
+        R->>R: resolve secret by name · decrypt in memory · forget
+        R->>T: exec(cmd) — credential injected, output redacted
+        T-->>R: output
+        R-->>AG: result
+        R--)REL: audit 48001 (detached)
+    end
+```
+
+**The bootstrap sequence** (box one → a live world; `install` creates the CP,
+`build` converges it — any box): signed MCP calls reach the runner, which
+executes them over SSH on the host; the CP's world-build stages drive the same
+runner.
+
+```mermaid
+sequenceDiagram
+    participant OP as operator
+    participant PVE as "PVE host (runner)"
+    participant R as "relay LXC (new-relay only)<br/>attach flow reuses an existing relay"
+    participant C as cp LXC
+    participant CP as "CP (world_build)"
+
+    OP->>PVE: bootstrap (box one) · build (ANY box): signed MCP via the runner
+    PVE->>C: create + start + verify + docker (cp LXC)
+    OP->>C: bootstrap deploy-cp + console + co-located runner
+    OP->>CP: build → ensure CP-owned secrets (ask only when missing) · public A records (opt-in --manage-dns) · trigger /api/world-build (console = the CP build executor)
+    CP->>PVE: (co-located runner) relay · agent-tools · k3s boot+install · litellm · Caddy · cert
+    CP-->>OP: world_build report (each stage) → Freehold is up
+    OP->>C: login — own nsec (NIP-98) / w in the TUI
+    C-->>OP: live world: relay + console + CPA wired
+```
+
+The reload path folds a respawned/rebuild CP from the relay's runner-profile
+channel messages (kind 9, `t=fh-profile`) — deterministic, idempotent, and
+author-gated. The fold primitives are `relay.QueryRunnerMetas` +
+`StateStore.RebuildFrom`, exercised by the Go acceptance gate.
+
 ### Transient access (install/uninstall before the runner exists)
 
 A box reaches the Proxmox host **as root over SSH** before (or without) the CP's

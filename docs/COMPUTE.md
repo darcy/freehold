@@ -52,10 +52,12 @@ deliberate and the rules below hold regardless of it.
     snapshot primitive exists on ZFS/LVM-thin but not on a plain VPS disk — so verbs declare
     what they need, and fall back (restic) where a substrate can't (`docs/DATA.md`).
 *   **Where it is narrow today:** the formal `Provider` interface covers guest exec, list,
-    address, mounts, and destroy; the create, storage, snapshot, and teardown engines live in
-    the provider package and are reached by the composition roots directly. Folding them behind
-    the interface, and shedding the two Proxmox-flavored methods it still carries
-    (`local-lvm` status/repoint), is part of landing the second provider.
+    address, mounts, destroy, the VM-aware next-vmid pick (`NextFreeVMID` — the VMID
+    namespace is shared between containers and VMs), and the stop command the erase path
+    needs; the create, storage, snapshot, and teardown engines live in the provider package
+    and are reached by the composition roots directly. Folding them behind the interface, and
+    shedding the two Proxmox-flavored methods it still carries (`local-lvm`
+    status/repoint), is part of landing the second provider.
 
 ## How a world is built
 

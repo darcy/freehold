@@ -117,6 +117,61 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     re-opened to prove it, unit stopped, record dropped), every leg reporting
     `[verified]`/`[UNVERIFIED]`. A retired name is refused to the agent in both directions
     until an operator re-enables it from the console.
+*   **Setting a runner up and granting onto it** (a new capability door, operator- or
+    agent-provisioned alike): the CP generates the runner's identity, seals the credential
+    TO the runner's key, ships a package with ciphertext + the runner's private key
+    (recording only pubkeys + ciphertext — no plaintext, no master key), creates the
+    runner's private NIP-29 channel in the relay and members the runner. A grant **adds the
+    agent to that channel**; the runner's whitelist is its own relay-signed roster, read per
+    call.
+
+    ```mermaid
+    sequenceDiagram
+        participant OP as operator
+        participant CP as control plane
+        participant RUN as "runner box (my-runner)"
+        participant BR as "box runner (proxmox-box)"
+        participant REL as buzz relay
+        participant AG as agent
+
+        OP->>CP: provision my-runner --kind ssh<br/>--address root@host (credential pasted)
+        CP->>CP: generate runner identity<br/>(Nostr + encryption keypairs)
+        CP->>CP: seal credential to the runner's<br/>encryption pubkey — ciphertext only
+        CP->>RUN: write the package onto the runner's box<br/>(identity.json + secrets.json — ciphertext, targets)
+        CP->>CP: record pubkeys + ciphertext in state.json<br/>(no plaintext, no private keys)
+        CP->>REL: create the runner's private channel (9007)<br/>h = sha256(runner pk)[0:16] (uuid form) — owner = the console
+        CP->>REL: member the runner itself (9000 put-user)<br/>— the channel layer
+        CP->>BR: relay-member add — the runner's pubkey<br/>(community layer)
+        BR->>REL: buzz-admin add-member (kind 13534) —<br/>without it, roster reads 403
+        CP->>REL: publish the runner profile<br/>(kind-9 fh-profile message)
+        RUN->>RUN: runner serve --relay-url<br/>(+ --relay-auth-url / --allow-remote as needed;<br/>whitelist = its own channel roster)
+        CP->>RUN: readiness probe (signed MCP)
+        RUN-->>CP: green
+        OP->>CP: grant my-runner agent-pubkey
+        alt relay configured (the channel flow)
+            CP->>REL: add the agent to the channel (9000 put-user)
+            REL->>REL: re-mint the roster (39002, relay-signed)
+            RUN->>REL: read own roster — agent is a member (per call)
+        else no relay (shipped-package grants)
+            CP->>RUN: re-ship the package with the new grant
+            RUN->>RUN: re-reads grants from the package (per call)
+        end
+        AG->>RUN: tools/call (signed) — first exec
+        RUN-->>AG: result (credential injected, output redacted)
+    ```
+
+    Without a relay the grant is a package re-ship instead of a channel write — both land
+    without a runner restart, and revoke is the inverse (`remove-user` / re-ship minus the
+    grant). Membership is TWO layers: the channel (9000) grants the whitelist, but the
+    runner also needs COMMUNITY membership (relay-member → `buzz-admin`, kind 13534) before
+    ANY of its relay reads work — non-members get `403 relay_membership_required` and the
+    runner fails closed. The community add is driven through the box's provisioning runner
+    (the relay-admin runner that holds the credential into the relay LXC), not by the new
+    runner itself. What lands on disk proves the model:
+    `/srv/data/cp/control-plane/runner/<name>/identity.json` (the runner's injected private
+    keys, 0600), `…/secrets.json` (the credential as sealed ciphertext only), and the CP's
+    `state.json` (pubkeys + ciphertext only — grep for the API key and for
+    `nostr_secret`/`enc_secret`: zero matches).
 *   **The runner mechanism itself** (call validation, connectors, the Rust runner) is in
     `docs/ARCHITECTURE.md` ("Runners"); the open gaps in the mechanics (replay window,
     rotate reach, revocation) are in `docs/FREEHOLD.md`.
