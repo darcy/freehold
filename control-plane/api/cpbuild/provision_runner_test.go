@@ -41,7 +41,8 @@ func TestProvisionRunnerValidation(t *testing.T) {
 		{"bad name", args("RTX_BOT", "ssh", "a@h", "ai"), "kebab-case"},
 		{"leading dash", args("-rtx", "ssh", "a@h", "ai"), "kebab-case"},
 		{"missing kind", args("rtx-ssh-root", "", "a@h", "ai"), "kind"},
-		{"unknown kind", args("rtx-ssh-root", "smtp", "a@h", "ai"), "unsupported kind"},
+		{"api kind without probe", args("rtx-smtp-root", "smtp", "https://smtp.local", "ai"), "require a probe"},
+		{"reserved kind", args("rtx-kube-root", "kubernetes", "https://k", "ai"), "reserved"},
 		{"reserved dns prefix", args("cloudflare-api-example-com", "unifi", "https://u", "ai"), "reserved"},
 		{"no grantee", args("rtx-ssh-root", "ssh", "a@h"), "grant_to is required"},
 		{"grants to the CPA", args("rtx-ssh-root", "ssh", "a@h", "freehold"), "the CPA holds no exec"},
@@ -161,7 +162,9 @@ func TestProvisionRunnerEmptyDoor(t *testing.T) {
 	}
 	reg, _ := testRegistry(t)
 	fn := BuildProvisionRunner(spec, reg)
-	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai"))
+	unifiArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai")
+	unifiArgs.Probe = "POST /api/auth/login json-body"
+	_, _ = fn(unifiArgs)
 	// The placeholder sealed (the disk is the truth).
 	st, err := state.Open(cpState)
 	if err != nil {
@@ -245,7 +248,9 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	reg, _ := testRegistry(t)
 	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
 	fn := BuildProvisionRunner(spec, reg)
-	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai"))
+	reArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai")
+	reArgs.Probe = "POST /api/auth/login json-body"
+	_, _ = fn(reArgs)
 	// The flow writes through its own store handle; re-open (the disk is the
 	// truth) before asserting.
 	disk, err := state.Open(cpState)
@@ -267,7 +272,9 @@ func TestProvisionRunnerUnknownGranteeFailsFirst(t *testing.T) {
 	reg, _ := testRegistry(t)
 	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
 	fn := BuildProvisionRunner(spec, reg)
-	if _, err := fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai", "nobody")); err == nil ||
+	gArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai", "nobody")
+	gArgs.Probe = "POST /api/auth/login json-body"
+	if _, err := fn(gArgs); err == nil ||
 		!strings.Contains(err.Error(), "unknown agent") {
 		t.Fatalf("unknown grantee must fail fast, got %v", err)
 	}

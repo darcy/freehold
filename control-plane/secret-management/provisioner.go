@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -42,6 +43,70 @@ type ProvisionRequest struct {
 	RunnerDir string
 	Grants    []string
 	RiskLevel *string
+	// Probe is the parameterized verify arm — "<METHOD> <path> [auth] [want]"
+	// (e.g. "GET /user/tokens/verify bearer"). Empty = legacy (the runner's
+	// built-in kind match). ProbeBody is an optional literal request body.
+	Probe     string
+	ProbeBody string
+}
+
+// probeAuthStyles are the credential-attachment styles a probe may name.
+var probeAuthStyles = map[string]bool{"bearer": true, "basic": true, "json-body": true, "none": true}
+
+// probePathRe constrains the probe path: `-` prefixed, URL-safe charset
+// (query strings allowed), no whitespace/shell metacharacters — the runner
+// composes the curl from validated parts, so nothing here reaches a shell.
+var probePathRe = regexp.MustCompile(`^/[A-Za-z0-9/._~?&=:-]{0,255}$`)
+
+// probeWantRe is the expected HTTP status code (3 digits).
+var probeWantRe = regexp.MustCompile(`^\d{3}$`)
+
+// ValidateProbe checks a probe spec string: "<METHOD> <path> [auth] [want]" —
+// method GET|POST, path per probePathRe, auth one of probeAuthStyles
+// (default bearer), want a 3-digit code (default 200). Returns the
+// normalized spec (upper-cased method). The API-boundary guard: a probe that
+// fails this never reaches state, a package, or a shell.
+func ValidateProbe(probe string) (string, error) {
+	probe = strings.TrimSpace(probe)
+	fields := strings.Fields(probe)
+	if len(fields) < 2 || len(fields) > 4 {
+		return "", fmt.Errorf("invalid probe %q: want \"<METHOD> <path> [auth] [want]\" (e.g. \"GET /user/tokens/verify bearer\")", probe)
+	}
+	method := strings.ToUpper(fields[0])
+	if method != "GET" && method != "POST" {
+		return "", fmt.Errorf("invalid probe method %q: GET or POST", fields[0])
+	}
+	if !probePathRe.MatchString(fields[1]) {
+		return "", fmt.Errorf("invalid probe path %q: must start with '/', URL-safe chars only, max 256", fields[1])
+	}
+	auth := "bearer"
+	if len(fields) > 2 {
+		auth = fields[2]
+		if !probeAuthStyles[auth] {
+			return "", fmt.Errorf("invalid probe auth %q: bearer, basic, json-body or none", fields[2])
+		}
+	}
+	want := "200"
+	if len(fields) > 3 {
+		want = fields[3]
+		if !probeWantRe.MatchString(want) {
+			return "", fmt.Errorf("invalid probe want %q: 3-digit HTTP status", fields[3])
+		}
+	}
+	return strings.Join([]string{method, fields[1], auth, want}, " "), nil
+}
+
+// ValidateProbeBody checks a literal probe request body: must parse as JSON
+// and stay shell-safe (the runner injects it single-quoted) — no single
+// quotes, backticks, dollar signs, or newlines.
+func ValidateProbeBody(body string) error {
+	if !json.Valid([]byte(body)) {
+		return fmt.Errorf("invalid probe body: must be JSON")
+	}
+	if strings.ContainsAny(body, "'`$\n\r") {
+		return fmt.Errorf("invalid probe body: single quotes, backticks, $ and newlines are refused")
+	}
+	return nil
 }
 
 // defaultRisk is the kind-based risk default.
@@ -98,6 +163,25 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 			return nil, fmt.Errorf("invalid agent pubkey %q: must be 64 hex chars", g)
 		}
 	}
+	probe := ""
+	probeBody := ""
+	if p := strings.TrimSpace(req.Probe); p != "" {
+		if req.Kind == "ssh" || req.Kind == "local" {
+			return nil, fmt.Errorf("probe is an api-class field — kind %q verifies itself", req.Kind)
+		}
+		var err error
+		if probe, err = ValidateProbe(p); err != nil {
+			return nil, fmt.Errorf("runner %s: %w", req.Name, err)
+		}
+		if req.ProbeBody != "" {
+			if err := ValidateProbeBody(req.ProbeBody); err != nil {
+				return nil, fmt.Errorf("runner %s: %w", req.Name, err)
+			}
+			probeBody = req.ProbeBody
+		}
+	} else if req.ProbeBody != "" {
+		return nil, fmt.Errorf("runner %s: probe_body requires probe", req.Name)
+	}
 	if r, ok := store.GetRunner(req.Name); ok {
 		if r.Status == state.RunnerRevoked {
 			return nil, fmt.Errorf("runner %s is revoked — provision a new service or restore it", req.Name)
@@ -140,7 +224,8 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 	// Ship the package: secrets.json holds ciphertext only.
 	pkg := wire.New(
 		map[string]string{req.Name: ciphertextHex},
-		map[string]wire.TargetMeta{req.Name: {Kind: req.Kind, Address: req.Address, Secret: req.Name}},
+		map[string]wire.TargetMeta{req.Name: {Kind: req.Kind, Address: req.Address, Secret: req.Name,
+			Probe: probe, ProbeBody: probeBody}},
 		req.Grants,
 	)
 	if err := pkg.WriteToDir(req.RunnerDir); err != nil {
@@ -167,6 +252,8 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		Runner:        req.Name,
 		Kind:          req.Kind,
 		Address:       req.Address,
+		Probe:         probe,
+		ProbeBody:     probeBody,
 		CiphertextHex: ciphertextHex,
 		CreatedAt:     now,
 	})

@@ -224,6 +224,8 @@ async fn mcp_exec_routes_to_ssh_target_over_the_wire() {
                 kind: "ssh".to_string(),
                 address: format!("testuser@127.0.0.1:{}", addr.port()),
                 secret: "ssh-laptop".to_string(),
+                probe: None,
+                probe_body: None,
             },
         )]),
         grants: vec![common::agent_pubkey()],

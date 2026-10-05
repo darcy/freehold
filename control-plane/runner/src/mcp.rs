@@ -485,11 +485,12 @@ async fn handle_api_exec(
 }
 
 /// The api-class probe command per kind: a curl one-liner with the credential
-/// in `${cred}` and the base address in `${url_env}`. Returns None for kinds
-/// with no probe arm (they report red — the door is unsupported until someone
+/// in `${cred}` and the base address in `${url_env}`. LEGACY FALLBACK — used
+/// only for packages predating the parameterized probe (TargetMeta.probe);
+/// every staged door carries its arm as data now. Returns None for kinds with
+/// no probe arm (they report red — the door is unsupported until someone
 /// writes its arm), and "local" is handled by the caller.
-/// Pure + unit-tested: the Go side seals an api-class runner's credential and
-/// the probe is what turns the runner's self-check green.
+/// Pure + unit-tested.
 fn api_probe_cmd(kind: &str, cred: &str, url_env: &str) -> Option<String> {
     Some(match kind {
         "vultr" => format!(
@@ -545,9 +546,79 @@ fn api_probe_cmd(kind: &str, cred: &str, url_env: &str) -> Option<String> {
     })
 }
 
+/// The parameterized verify arm: "<METHOD> <path> [auth] [want]" plus an
+/// optional literal request body — data, not code, so a new api kind needs no
+/// runner rebuild. The CP validated every part before shipping it
+/// (secret-management::ValidateProbe); this parse is fail-closed anyway (a
+/// malformed spec reports red, never runs).
+#[derive(Debug, Clone, PartialEq)]
+struct ProbeSpec {
+    method: String,
+    path: String,
+    auth: String,
+    want: String,
+    body: Option<String>,
+}
+
+fn parse_probe(probe: &str, probe_body: Option<&str>) -> Option<ProbeSpec> {
+    let fields: Vec<&str> = probe.split_whitespace().collect();
+    if fields.len() < 2 || fields.len() > 4 {
+        return None;
+    }
+    let method = fields[0].to_ascii_uppercase();
+    if method != "GET" && method != "POST" {
+        return None;
+    }
+    let path = fields[1];
+    if !path.starts_with('/') {
+        return None;
+    }
+    let auth = fields.get(2).copied().unwrap_or("bearer").to_string();
+    if !["bearer", "basic", "json-body", "none"].contains(&auth.as_str()) {
+        return None;
+    }
+    let want = fields.get(3).copied().unwrap_or("200").to_string();
+    if want.len() != 3 || !want.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(ProbeSpec {
+        method,
+        path: path.to_string(),
+        auth,
+        want,
+        body: probe_body.filter(|b| !b.is_empty()).map(String::from),
+    })
+}
+
+/// Compose the curl one-liner: fixed prefix, the credential per auth style,
+/// the optional literal body, then the URL last. The credential and base
+/// address ride env (`${CRED}`/`${URL}`) — their values never enter the
+/// command string.
+fn compose_probe(spec: &ProbeSpec, cred: &str, url_env: &str) -> String {
+    let mut cmd = "curl -sS -o /dev/null -w '%{http_code}'".to_string();
+    if spec.method == "POST" {
+        cmd.push_str(" -X POST");
+    }
+    match spec.auth.as_str() {
+        "bearer" => cmd.push_str(&format!(" -H \"Authorization: Bearer ${{{cred}}}\"")),
+        "basic" => cmd.push_str(&format!(" -u \"${{{cred}}}\"")),
+        "json-body" => cmd.push_str(&format!(
+            " -H 'Content-Type: application/json' -d \"${{{cred}}}\""
+        )),
+        _ => {}
+    }
+    if let Some(body) = &spec.body {
+        cmd.push_str(&format!(" -d '{body}'"));
+    }
+    format!("{cmd} \"${{{url_env}}}{}\"", spec.path)
+}
+
 /// Runner's OWN self-check against an API connector: a curl probe with the
-/// credential in env; HTTP 200 = green. Never reports red for the whole
-/// report — every failure folds into the string.
+/// credential in env; the door's expected status = green. The probe comes
+/// from the door's parameterized verify arm when the package carries one,
+/// else the legacy per-kind match. Probe output is redacted against the
+/// injected envs before it lands in the report. Never reports red for the
+/// whole report — every failure folds into the string.
 async fn api_status(
     state: &RunnerState,
     meta: &freehold_core::secrets::TargetMeta,
@@ -566,23 +637,29 @@ async fn api_status(
             zeroize::Zeroizing::new(meta.address.clone()),
         ),
     ];
-    let cmd = match api_probe_cmd(meta.kind.as_str(), &cred, &url_env) {
-        Some(cmd) => cmd,
+    let (cmd, want) = match &meta.probe {
+        Some(p) => match parse_probe(p, meta.probe_body.as_deref()) {
+            Some(spec) => (compose_probe(&spec, &cred, &url_env), spec.want),
+            None => return Ok(format!("red(malformed probe spec {p:?})")),
+        },
         None => match meta.kind.as_str() {
             // a local door IS the runner's own host — alive iff this runner is.
             "local" => return Ok("green".into()),
-            k => return Ok(format!("red(unsupported api kind {k})")),
+            k => match api_probe_cmd(k, &cred, &url_env) {
+                Some(cmd) => (
+                    cmd,
+                    (if k == "kubernetes" { "201" } else { "200" }).to_string(),
+                ),
+                None => return Ok(format!("red(unsupported api kind {k})")),
+            },
         },
-    };
-    // kubernetes answers a SelfSubjectReview with 201; every other probe 200s.
-    let want = if meta.kind == "kubernetes" {
-        "201"
-    } else {
-        "200"
     };
     match state.exec.probe_env(&cmd, &envs).await {
         Ok(r) if r.stdout.trim() == want => Ok("green".into()),
-        Ok(r) => Ok(format!("yellow(probe {})", r.stdout.trim())),
+        Ok(mut r) => {
+            exec::redact(&mut r.stdout, &envs);
+            Ok(format!("yellow(probe {})", r.stdout.trim()))
+        }
         Err(e) => Ok(format!("red({e})")),
     }
 }
@@ -1026,6 +1103,66 @@ mod tests {
         assert!(api_probe_cmd("nosuchkind", "C", "U").is_none());
     }
 
+    #[test]
+    fn probe_spec_defaults_and_normalization() {
+        let s = parse_probe("GET /user/tokens/verify", None).unwrap();
+        assert_eq!(s.auth, "bearer");
+        assert_eq!(s.want, "200");
+        assert_eq!(s.method, "GET");
+        assert_eq!(s.body, None);
+        let s = parse_probe("post /api/auth/login json-body", None).unwrap();
+        assert_eq!(s.method, "POST");
+        assert_eq!(s.auth, "json-body");
+        let s = parse_probe(
+            "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201",
+            Some("{\"kind\":\"SelfSubjectReview\"}"),
+        )
+        .unwrap();
+        assert_eq!(s.want, "201");
+        assert_eq!(s.body.as_deref(), Some("{\"kind\":\"SelfSubjectReview\"}"));
+        // malformed specs fail closed
+        assert!(parse_probe("GET", None).is_none());
+        assert!(parse_probe("GET /p bearer 200 extra", None).is_none());
+        assert!(parse_probe("DELETE /p", None).is_none());
+        assert!(parse_probe("GET p", None).is_none());
+        assert!(parse_probe("GET /p hmac", None).is_none());
+        assert!(parse_probe("GET /p bearer 20", None).is_none());
+        assert!(parse_probe("GET /p bearer 2a0", None).is_none());
+    }
+
+    #[test]
+    fn compose_probe_builds_each_auth_style() {
+        // cloudflare-equivalent door: bearer + path
+        let s = parse_probe("GET /user/tokens/verify", None).unwrap();
+        let cmd = compose_probe(&s, "CF_TOKEN", "CF_TOKEN_URL");
+        assert!(cmd.starts_with("curl -sS -o /dev/null -w '%{http_code}'"));
+        assert!(cmd.contains("\"${CF_TOKEN_URL}/user/tokens/verify\""));
+        assert!(cmd.contains("-H \"Authorization: Bearer ${CF_TOKEN}\""));
+        assert!(!cmd.contains("-X POST"));
+        // unifi-equivalent: POST + json-body cred
+        let s = parse_probe("POST /api/auth/login json-body", None).unwrap();
+        let cmd = compose_probe(&s, "UNIFI_AUTH", "UNIFI_AUTH_URL");
+        assert!(cmd.contains("-X POST"));
+        assert!(cmd.contains("-d \"${UNIFI_AUTH}\""));
+        assert!(cmd.contains("\"${UNIFI_AUTH_URL}/api/auth/login\""));
+        // basic auth (b2) + literal body (kubernetes)
+        let s = parse_probe("GET /b2api/v3/b2_authorize_account basic", None).unwrap();
+        assert!(compose_probe(&s, "B2", "B2_URL").contains("-u \"${B2}\""));
+        let s = parse_probe(
+            "POST /apis/a.k8s.io/v1/selfsubjectreviews bearer 201",
+            Some("{\"k\":1}"),
+        )
+        .unwrap();
+        let cmd = compose_probe(&s, "KUBE", "KUBE_URL");
+        assert!(cmd.contains("-d '{\"k\":1}'"));
+        assert!(cmd.contains("\"${KUBE_URL}/apis/a.k8s.io/v1/selfsubjectreviews\""));
+        // none: no credential flag at all
+        let s = parse_probe("GET /health none", None).unwrap();
+        let cmd = compose_probe(&s, "C", "C_URL");
+        assert!(!cmd.contains("Bearer"));
+        assert!(!cmd.contains("-u "));
+    }
+
     /// Sign + POST an MCP tools/call (`list`) as `agent` against the runner.
     fn mcp_list(url: &str, agent: &Identity, runner_pk: &str) -> Result<(), String> {
         let body = json!({
@@ -1221,6 +1358,8 @@ mod tests {
                     kind: "litellm".into(),
                     address: api_url.clone(),
                     secret: "litellm".into(),
+                    probe: None,
+                    probe_body: None,
                 },
             )]),
             grants: vec![grant_pk.clone()],

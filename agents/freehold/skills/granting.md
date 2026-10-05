@@ -117,6 +117,17 @@ of questions up front:
   console web UI (the console seals it to the door's key and restarts the
   door). You reference the credential by env name only, after the fact. The
   TOOL enforces this: provision_runner takes no credential field at all.
+- **Bring the verify arm.** An api-class door REQUIRES `probe` at first
+  provision — the door's verify arm as data, because you know the API and the
+  runner does not: `"<METHOD> <path> [auth] [want]"`, e.g. `GET
+  /user/tokens/verify bearer` (cloudflare), `POST /api/auth/login json-body`
+  (unifi — the credential IS the POST body). auth: `bearer` (default) |
+  `basic` | `json-body` | `none`; want: the expected status, default 200;
+  `probe_body`: a literal JSON request body when the API needs one alongside
+  the credential (kubernetes' SelfSubjectReview). Pick the cheapest endpoint
+  that proves the credential (a token-verify beats a list beats a health
+  check); the runner composes the curl itself and reports its self-check from
+  it. A new service kind is a probe, never a rebuild.
 - Know the SHAPE of what the operator filled — it is in the tool's
   description per kind. Unifi doors: the exec env carries UNIFI_API_ADMIN as
   a JSON object with the keys username and password; authenticate with

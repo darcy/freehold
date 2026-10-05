@@ -315,14 +315,24 @@ func TestNip44MatchesOracle(t *testing.T) {
 func TestSecretPackageMatchesOracle(t *testing.T) {
 	pkgIn := map[string]interface{}{
 		"secrets": map[string]interface{}{"z-pw": "00aabb", "a-pw": "001122"},
-		"targets": map[string]interface{}{"t1": map[string]interface{}{"kind": "ssh", "address": "root@h:22", "secret": "z-pw"}},
-		"grants":  []interface{}{"55aa", "11bb"},
+		"targets": map[string]interface{}{
+			"t1": map[string]interface{}{"kind": "ssh", "address": "root@h:22", "secret": "z-pw"},
+			"t2": map[string]interface{}{"kind": "kubernetes", "address": "https://k", "secret": "a-pw",
+				"probe":      "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201",
+				"probe_body": `{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`},
+		},
+		"grants": []interface{}{"55aa", "11bb"},
 	}
 	rustJSON := oracle(t, map[string]interface{}{"op": "secretpackage_new", "package": pkgIn})["json"].(string)
 
 	pkg := wire.New(
 		map[string]string{"z-pw": "00aabb", "a-pw": "001122"},
-		map[string]wire.TargetMeta{"t1": {Kind: "ssh", Address: "root@h:22", Secret: "z-pw"}},
+		map[string]wire.TargetMeta{
+			"t1": {Kind: "ssh", Address: "root@h:22", Secret: "z-pw"},
+			"t2": {Kind: "kubernetes", Address: "https://k", Secret: "a-pw",
+				Probe:     "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201",
+				ProbeBody: `{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`},
+		},
 		[]string{"55aa", "11bb"},
 	)
 	goJSON, err := pkg.Bytes()

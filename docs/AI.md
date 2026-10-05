@@ -100,7 +100,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     | `dnsmasq-local-root` | local (CP guest) | 8796 | network |
     | `cp-local-root` | local (CP guest) | 8797 | data |
     | `cloudflare-api-<zone>` | api, one per stored DNS zone | from 8798 | network |
-    | dynamic (`provision_runner`) | ssh / unifi / local | from 8800 | per grant |
+    | dynamic (`provision_runner`) | ssh / any api kind (verify arm as data) / local | from 8800 | per grant |
 
 *   **Grants on the fly.** The CPA can provision capability mid-conversation:
     `provision_runner` stages a NEW runner (keypair, sealed credential, private audit
@@ -114,7 +114,11 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     **Credentials never ride chat:** an ssh door mints its own keypair (the operator
     installs the returned public key once); an api door provisions EMPTY and the agent DMs
     the operator the door's console page, whose kind-aware form seals the credential and
-    restarts the door. Confirmation is governed by `agent_grants` on the CP state —
+    restarts the door. The api door's **verify arm is data, not code**: the requesting
+    agent names the probe (`"<METHOD> <path> [auth] [want]"`, e.g. `GET /user/tokens/verify
+    bearer`), it ships in the door's package, and the runner composes its self-check curl
+    from it — a new service kind is a probe, never a rebuild. Confirmation is governed by
+    `agent_grants` on the CP state —
     `confirm` (default: in-thread yes, or a DM), `auto`, or `off` (the server-side kill
     switch, `freehold-console grants-mode`) — but the discipline itself is the granting
     skill's, since the server cannot see Buzz threads. `revoke_runner` is the mirror:
