@@ -324,10 +324,15 @@ func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 		kind = "zfs"
 	}
 	// Erase ONLY this world's domain. Other worlds on this backend keep theirs.
+	// The stage runs TRANSIENT (direct root SSH with the substrate key) like
+	// every other self-stage on this path — there is no served runner yet
+	// (the serve comes later, if at all), so dialing e.F.Addr is always
+	// connection-refused here.
 	for _, tenant := range []string{"relay", "cp", "k3s-volumes"} {
 		ok, out := e.RunBin(e.Bins.Self, []string{
 			"storage", "destroy",
 			"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
+			"--transient", "--host", e.F.Host,
 			"--tenant", tenant, "--domain", matched, "--pool", opt.Backend, "--kind", kind,
 		})
 		if !ok {
