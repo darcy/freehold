@@ -2059,6 +2059,9 @@ func (s *Spec) stageOperatorProfile(report []string) []string {
 		return append(report, "WARN: operator profile: relay read failed: "+err.Error()+degraded)
 	}
 	if len(evs) > 0 {
+		if name := operatorProfileName(evs[0]); name != "" {
+			return append(report, "operator profile already present ("+name+")")
+		}
 		return append(report, "operator profile already present")
 	}
 	name := s.operatorDisplayName()
@@ -2066,6 +2069,20 @@ func (s *Spec) stageOperatorProfile(report []string) []string {
 		return append(report, "WARN: operator profile publish failed: "+err.Error()+degraded)
 	}
 	return append(report, "operator profile published ("+name+") — the Buzz desktop app skips its first-run onboarding")
+}
+
+// operatorProfileName pulls the display name out of a kind:0 profile event —
+// the name the operator chose on the Buzz side, the one mentions render
+// against. Empty when the event is missing or malformed.
+func operatorProfileName(ev map[string]interface{}) string {
+	content, _ := ev["content"].(string)
+	var p struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal([]byte(content), &p) == nil {
+		return strings.TrimSpace(p.Name)
+	}
+	return ""
 }
 
 // postFreeholdWelcome posts the CPA's one-time welcome message in #freehold,
@@ -2081,6 +2098,9 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
+	// Marker first — the welcome is one-time. Two single-filter reads, the
+	// pattern every relay caller uses (the bridge honors body[0] only; a
+	// multi-filter request would silently drop the second).
 	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
 		"kinds": []interface{}{delegate.StreamMsgKind},
 		"#h":    []interface{}{relayFreeholdChannel},
@@ -2093,7 +2113,26 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if len(evs) > 0 {
 		return nil
 	}
-	content := "Welcome to your freehold, @" + s.operatorDisplayName() +
+	// The mention carries the name the operator is known by on the relay —
+	// their own kind:0 (an updated world has no recorded name; the profile
+	// is where it lives). A failed read errors out rather than posting the
+	// default: the marker is still absent, so the next build re-runs this
+	// path — nothing is ever posted wrong.
+	pevs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
+		"kinds":   []interface{}{0},
+		"authors": []interface{}{s.OwnerPub},
+		"limit":   1,
+	}})
+	if err != nil {
+		return err
+	}
+	name := s.operatorDisplayName()
+	if len(pevs) > 0 {
+		if n := operatorProfileName(pevs[0]); n != "" {
+			name = n
+		}
+	}
+	content := "Welcome to your freehold, @" + name +
 		" — I'm @freehold, your main touchpoint. Ask here and I'll bring in network, data, compute, or ai when their hands are needed. This channel is where the core agents coordinate; #general is open for anything."
 	return delegate.PostTaggedMessageAuth(s.relayDial(), authURL, nSec, relayFreeholdChannel, s.OwnerPub, [][]string{{"t", freeholdWelcomeMarker}}, content)
 }
