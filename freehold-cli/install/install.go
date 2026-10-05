@@ -377,7 +377,7 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if !strings.Contains(proxyIP, "/") {
 		return box.Flags{}, fmt.Errorf("proxy static IP must be CIDR (host/prefix) — got %q", proxyIP)
 	}
-	pk, opDir, err := collectOperatorIdentity(ui)
+	pk, opDir, err := resolveOperatorIdentity(ui, seed)
 	if err != nil {
 		return box.Flags{}, err
 	}
@@ -557,6 +557,25 @@ func addInstallFlags(cmd *cobra.Command) {
 // operator — the same path oplogin + the TUI read (installer operator_dir).
 func operatorDir() string { return filepath.Join(box.StateDir(), "operator") }
 
+// resolveOperatorIdentity answers the operator block. A re-adopt rides the
+// RECORDED identity — the dir exists from the prior install and the profile
+// records its pubkey — so it is not asked at all (re-asking would error on
+// the existing dir or mint a pointless second identity). A mint prompts
+// (paste/match/generate). A re-adopt whose recorded dir has vanished falls
+// through to the prompts.
+func resolveOperatorIdentity(ui *installerUI, seed *config.Config) (string, string, error) {
+	if seed != nil && seed.OperatorPubkey != "" {
+		dir := operatorDir()
+		if seed.OperatorIdentity != nil && *seed.OperatorIdentity != "" {
+			dir = *seed.OperatorIdentity
+		}
+		if _, err := os.Stat(filepath.Join(dir, "identity.json")); err == nil {
+			return seed.OperatorPubkey, dir, nil
+		}
+	}
+	return collectOperatorIdentity(ui)
+}
+
 func collectOperatorIdentity(ui *installerUI) (pubkey, opDir string, err error) {
 	fmt.Fprintln(ui.out, "  Operator identity:")
 	fmt.Fprintln(ui.out, "    1) I have a Nostr key already (paste npub or hex)")
@@ -582,7 +601,17 @@ func collectHaveKey(ui *installerUI) (string, string, error) {
 	}
 	opDir := operatorDir()
 	if _, err := os.Stat(filepath.Join(opDir, "identity.json")); err == nil {
-		return "", "", fmt.Errorf("an operator identity already exists at %s — remove it or reuse that key", opDir)
+		// Pasting the SAME key as the stored identity is a reuse, not a
+		// conflict — only a DIFFERENT key is.
+		stored, lerr := box.LoadPubkey(opDir)
+		if lerr != nil {
+			return "", "", fmt.Errorf("an operator identity exists at %s but is unreadable: %w", opDir, lerr)
+		}
+		if stored == pk {
+			fmt.Fprintf(ui.out, "  reused: %s\n", opDir)
+			return pk, opDir, nil
+		}
+		return "", "", fmt.Errorf("an operator identity already exists at %s with a different key — remove it or paste that key", opDir)
 	}
 	// The pubkey alone cannot operate the world — capture the matching nsec
 	// now (no-echo on a TTY), verify it derives to the pasted pubkey, and

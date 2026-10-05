@@ -1,6 +1,8 @@
 package install
 
 import (
+	"bufio"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,12 @@ import (
 	"freehold/contract/config"
 	"freehold/platform/provisioning/box"
 )
+
+// newEOFUI is an installerUI whose every read hits EOF — a prompt would fail,
+// so passing with this ui proves no prompt fired.
+func newEOFUI() *installerUI {
+	return &installerUI{out: io.Discard, raw: strings.NewReader(""), in: bufio.NewReader(strings.NewReader(""))}
+}
 
 // writeProfile registers a named profile with the given config body.
 func writeProfile(t *testing.T, name, body string) {
@@ -130,5 +138,56 @@ func TestSeedFromProfileSkipsVlanSentinel(t *testing.T) {
 	seedFromProfile(&f, &config.Config{Gateway: config.GatewaySpec{Vlan: &seven}})
 	if f.GatewayVlan != 7 {
 		t.Errorf("recorded tag not seeded: %d", f.GatewayVlan)
+	}
+}
+
+// TestResolveOperatorIdentityReAdopt: a re-adopt rides the RECORDED identity
+// — no prompts (the EOF reader proves it: any prompt would die on EOF), the
+// recorded dir + pubkey come back untouched.
+func TestResolveOperatorIdentityReAdopt(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	config.SetCurrent(nil)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "identity.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorded := dir
+	ui := newEOFUI()
+	pk, opDir, err := resolveOperatorIdentity(ui, &config.Config{OperatorPubkey: "abc",
+		OperatorIdentity: &recorded,
+	})
+	if err != nil || pk != "abc" || opDir != dir {
+		t.Fatalf("re-adopt must ride the recorded identity: pk=%q dir=%q err=%v", pk, opDir, err)
+	}
+}
+
+// TestCollectHaveKeyReusesStoredKey: pasting the SAME key as the stored
+// identity reuses it (a re-paste is not a conflict); a DIFFERENT key still
+// errors.
+func TestCollectHaveKeyReusesStoredKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	config.SetCurrent(nil)
+	if err := selectProfile("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := box.MintIdentity(operatorDir()); err != nil {
+		t.Fatal(err)
+	}
+	pk, err := box.LoadPubkey(operatorDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := &installerUI{out: io.Discard, raw: strings.NewReader(pk + "\n"), in: bufio.NewReader(strings.NewReader(pk + "\n"))}
+	gotPk, gotDir, err := collectHaveKey(ui)
+	if err != nil || gotPk != pk || gotDir != operatorDir() {
+		t.Fatalf("same-key paste must reuse: pk=%q dir=%q err=%v", gotPk, gotDir, err)
+	}
+	foreign := strings.Repeat("ab", 32)
+	ui2 := &installerUI{out: io.Discard, raw: strings.NewReader(foreign + "\n"), in: bufio.NewReader(strings.NewReader(foreign + "\n"))}
+	if _, _, err := collectHaveKey(ui2); err == nil || !strings.Contains(err.Error(), "different key") {
+		t.Fatalf("a different key must conflict, got %v", err)
 	}
 }
