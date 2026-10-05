@@ -1742,9 +1742,18 @@ func (e *Engine) stageBootstrap(role string) error {
 		// A RECORDED vmid rides on resume: the driver's reuse path then finds
 		// the existing guest (hostname match) instead of picking a new id and
 		// refusing the collision — Rust rebuild re-booted the SAME vmid.
+		// Nothing recorded adopts the role's LIVE guest by hostname instead:
+		// a birth that crashed before its record (the record lands only after
+		// the whole role stage succeeds) must be REUSED, not duplicated —
+		// re-deriving a fresh id leaked one guest per crashed run.
 		g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s, "gateway": cfg.Lxc.Gateway}[role]
-		if g.Vmid != nil {
+		switch {
+		case g.Vmid != nil:
 			args = append(args, "--vmid", strconv.FormatUint(uint64(*g.Vmid), 10))
+		case e.Provider != nil:
+			if v, aerr := e.findLxcVmidExact(role); aerr == nil {
+				args = append(args, "--vmid", strconv.FormatUint(uint64(v), 10))
+			}
 		}
 		for _, m := range cfg.Plane.Mounts[role] {
 			args = append(args, "--mount", m.Source+":"+m.GuestPath)
