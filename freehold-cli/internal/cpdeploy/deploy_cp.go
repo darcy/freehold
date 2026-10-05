@@ -603,11 +603,28 @@ WantedBy=multi-user.target
 `, description, execStart)
 }
 
+// checkRunnerRuns executes the JUST-SHIPPED runner once on the guest before
+// anything depends on it. A runner built against a NEWER glibc than the
+// guest's (a local build on a current box, deployed to a Debian bookworm
+// guest) fails the loader with "version `GLIBC_X.YY' not found" — which as a
+// systemd unit is a silent activating loop. Fail here, actionably, instead.
+// (--help exits via clap without serving; the loader failure is the only
+// failure this check reports.)
+func checkRunnerRuns(t Transport, spec *DeployCpSpec) error {
+	bin := spec.BinDir + "/freehold-runner"
+	check := fmt.Sprintf(
+		"if ! %s --help >/dev/null 2>/tmp/.fh-glibc; then if grep -q GLIBC /tmp/.fh-glibc; then cat /tmp/.fh-glibc; echo the shipped runner does not run on this guest: its glibc is older than the binary needs — build the runner against the guest distro (e.g. docker run --dns 1.1.1.1 -u $(id -u):$(id -g) -v <repo>:/src -w /src rust:1.98-bookworm cargo build --bin runner) or deploy release assets; exit 1; fi; fi; rm -f /tmp/.fh-glibc",
+		bin)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, check), "runner binary runs on this guest", 60); err != nil {
+		return err
+	}
+	return nil
+}
+
 // startRunnerUnit installs + enables the co-located runner's unit. Idempotent:
 // every deploy rewrites the file (the args can change) and enable --now
 // starts what isn't running.
-func startRunnerUnit(t Transport, spec *DeployCpSpec, runnerDir string) error {
-	unit := runnerUnitFile("freehold co-located runner",
+func startRunnerUnit(t Transport, spec *DeployCpSpec, runnerDir string) error {	unit := runnerUnitFile("freehold co-located runner",
 		fmt.Sprintf("%s/freehold-runner serve --state-dir %s", spec.BinDir, runnerDir))
 	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-runner.service && systemctl daemon-reload && systemctl enable --now freehold-runner && sleep 1 && systemctl is-active freehold-runner",
 		base64StdEncode([]byte(unit)))
@@ -711,6 +728,9 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		}
 		if err := shipFile(t, spec, *spec.RunnerBinary,
 			spec.BinDir+"/freehold-runner", "runner binary"); err != nil {
+			return nil, err
+		}
+		if err := checkRunnerRuns(t, spec); err != nil {
 			return nil, err
 		}
 		// ADOPT, never overwrite: when the plane already carries the runner
