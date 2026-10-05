@@ -2,6 +2,7 @@ package cpdeploy
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"freehold/contract/wire"
@@ -83,5 +84,28 @@ func TestMergeRunnerSecrets(t *testing.T) {
 	_ = json.Unmarshal(alone, &only)
 	if len(only.Secrets) != 1 || only.Secrets["proxmox-box"] != "NEWBOX" {
 		t.Errorf("nil remote should yield the box package alone, got %+v", only.Secrets)
+	}
+}
+
+// TestRunnerRunsCheckPayload: the probe rides LxcExec's single-quoted sh -c —
+// a single apostrophe inside it terminates the wrapper and the payload dies as
+// a shell syntax error BEFORE the probe runs (which once aborted every
+// deploy-cp). The payload must therefore be single-quote-free, and the failure
+// message must stay double-quoted with no substitutions or parens.
+func TestRunnerRunsCheckPayload(t *testing.T) {
+	payload := runnerRunsCheck("/srv/data/cp/bin/freehold-runner")
+	if strings.Contains(payload, "'") {
+		t.Error("payload contains a single quote — it dies inside the LxcExec single-quoted wrapper")
+	}
+	if strings.Contains(payload, "$(") {
+		t.Error("payload contains a substitution — it would expand in the wrong shell")
+	}
+	if strings.Contains(payload, "docker run") {
+		t.Error("the build recipe belongs in AGENTS.md, not in a guest-side echo")
+	}
+	// The failure path must exit non-zero (execToOK fails the deploy) and name
+	// the actual failure (the glibc loader error is catted through).
+	if !strings.Contains(payload, "exit 1") || !strings.Contains(payload, "cat /tmp/.fh-glibc") {
+		t.Error("probe failure must exit 1 after printing the loader error")
 	}
 }

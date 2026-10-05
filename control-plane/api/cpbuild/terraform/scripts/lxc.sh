@@ -22,6 +22,20 @@ if pct status "$VMID" >/dev/null 2>&1; then
   echo "lxc $VMID ($HOSTNAME) already exists — adopted"; exit 0
 fi
 
+# An empty template resolves to the newest Debian standard template ALREADY in
+# the store — the same rule the box's own births use (EnsureDebianTemplate), so
+# a tf-created guest rides the SAME distro as its siblings on any host (a
+# hard-coded ref dies when the host's PVE predates it: 8.4.5 cannot create
+# trixie guests). Arch-filtered: the store mixes amd64/arm64 rows and an arm64
+# guest cannot spawn on x86_64.
+ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+[ "$ARCH" = "x86_64" ] && ARCH=amd64
+[ "$ARCH" = "aarch64" ] && ARCH=arm64
+if [ -z "$TPL" ]; then
+  TPL=$(pvesm list local 2>/dev/null | awk -v a="_${ARCH}.tar." '$1 ~ /local:vztmpl\/debian-/ && $0 ~ /standard_/ && index($1, a) {print $1}' | sed 's|local:vztmpl/||' | sort -V | tail -1)
+  [ -n "$TPL" ] || { echo "no debian-${ARCH} template in the local store — pveam download one" >&2; exit 1; }
+fi
+
 NET="name=eth0,bridge=vmbr0,ip=dhcp,type=veth"
 if [ "$IP" != "-" ] && [ "$GW" != "-" ]; then NET="name=eth0,bridge=vmbr0,ip=${IP},gw=${GW},type=veth"; fi
 [ -n "$MP" ] && MP=" $MP" || MP=""
@@ -29,4 +43,9 @@ pct create "$VMID" "local:vztmpl/${TPL}" \
   --rootfs "local-lvm:${ROOTFS}" --memory "$MEM" --hostname "$HOSTNAME" \
   --unprivileged 1 --features fuse=1,keyctl=1,nesting=1 \
   --net0 "$NET"${MP} 2>&1 | tail -1
+# Pods (runc sandboxes) write net sysctls through /proc/sys — read-only in a
+# stock unprivileged LXC, and every sandbox init dies on "open sysctl
+# net.ipv4.ip_unprivileged_port_start: permission denied" (seen live on PVE
+# 8.4.5). sys:mixed mounts /proc/sys writable before the guest's first boot.
+echo "lxc.mount.auto: proc:mixed sys:mixed" >> "/etc/pve/lxc/${VMID}.conf"
 echo "lxc $VMID ($HOSTNAME) created"

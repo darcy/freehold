@@ -17,7 +17,21 @@
 # works without injected secrets.
 set -euo pipefail
 CMD="${1:-plan}"; shift || true
-[ -x "$(command -v terraform)" ] || { echo "terraform missing on the provisioning box" >&2; exit 1; }
+# Self-install: terraform is a single static binary; a fresh CP guest does not
+# have it and nothing else ships it. Pinned version; the kubernetes provider
+# download at init is already an accepted online step. The resolved path (not
+# `terraform`) below: the runner's non-login sh PATH often lacks
+# /usr/local/bin.
+TF_BIN="$(command -v terraform || true)"
+if [ -z "$TF_BIN" ]; then
+  TF_VERSION="${TF_VERSION:-1.9.8}"
+  echo "terraform missing on the provisioning box — installing v$TF_VERSION"
+  apt-get install -y -qq unzip >/dev/null 2>&1 || true
+  curl -fsSL --retry 3 -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+  unzip -oq /tmp/terraform.zip -d /tmp && install -m 0755 /tmp/terraform /usr/local/bin/terraform && rm -f /tmp/terraform.zip /tmp/terraform
+  TF_BIN=/usr/local/bin/terraform
+  [ -x "$TF_BIN" ] || { echo "terraform self-install failed" >&2; exit 1; }
+fi
 ROOT="${TF_ROOT:-/srv/data/freehold-tf}"
 mkdir -p "$ROOT"
 cd "$ROOT"
@@ -45,6 +59,6 @@ export TF_VAR_postgres_password="${POSTGRES_PW:-}"
 # refuse the apply ("Backend initialization required"). With the record gone the
 # default local backend takes effect and state lives in $ROOT (per world).
 rm -f "$ROOT/.terraform/terraform.tfstate"
-terraform init -input=false >/dev/null
+"$TF_BIN" init -input=false >/dev/null
 case "$CMD" in apply|destroy) set -- "$@" -auto-approve;; esac
-exec terraform "$CMD" -input=false "$@"
+exec "$TF_BIN" "$CMD" -input=false "$@"

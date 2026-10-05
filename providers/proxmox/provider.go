@@ -52,6 +52,27 @@ func (p *Provider) ListGuests() ([]provisioning.Guest, error) {
 	return guests, nil
 }
 
+// NextFreeVMID asks the cluster for the next free id — `pvesh get
+// /cluster/nextid`, the canonical VM-aware pick (the VMID namespace is SHARED
+// with QEMU VMs, which `pct list` misses; see PickFreeVMID in drivers.go).
+func (p *Provider) NextFreeVMID() (uint32, error) {
+	out, err := p.exec("pvesh get /cluster/nextid", 120)
+	if err != nil {
+		return 0, err
+	}
+	if err := bootstrap.ExpectOK(out, "cluster nextid"); err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(out.Stdout), 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("pvesh nextid did not yield a number: %q", out.Stdout)
+	}
+	if n < 100 {
+		return 0, fmt.Errorf("pvesh nextid returned a vmid below the PVE system range: %d", n)
+	}
+	return uint32(n), nil
+}
+
 func (p *Provider) GuestIPv4(guest string) (string, error) {
 	out, err := p.exec(fmt.Sprintf("pct exec %s -- ip -4 -o addr show eth0", guest), 30)
 	if err != nil {
@@ -176,6 +197,12 @@ func countLines(s string) int {
 
 // DestroyGuest destroys a guest and its rootfs (idempotent: an absent guest is
 // a no-op). Used by the transient uninstall path when no runner is available.
+// StopGuestCmd renders the host-level stop (tolerates an already-stopped
+// guest; the caller execs it host-wide through GuestExec).
+func (p *Provider) StopGuestCmd(id uint32) string {
+	return fmt.Sprintf("pct stop %d || true", id)
+}
+
 func (p *Provider) DestroyGuest(guest string) error {
 	out, err := p.exec(fmt.Sprintf("pct status %s >/dev/null 2>&1 || exit 0; pct destroy %s --purge", guest, guest), 300)
 	if err != nil {

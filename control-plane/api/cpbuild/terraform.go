@@ -122,7 +122,7 @@ func (s *Spec) tfVars() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{
+	vars := []string{
 		"-var", "domain_dash=" + s.dashedDomain(),
 		"-var", "vmid_cp=" + strconv.FormatUint(uint64(s.CpLxc), 10),
 		"-var", "vmid_relay=" + strconv.FormatUint(uint64(s.RelayLxc), 10),
@@ -133,10 +133,22 @@ func (s *Spec) tfVars() ([]string, error) {
 		"-var", "k3s_ip=" + config.StripCIDR(s.k3sIP()),
 		"-var", "k3s_gw=" + s.k3sGW(),
 		"-var", "thin_pool=" + s.ThinPool,
-		// The provider's kubeconfig rides the WORLD's own tf root — the
-		// variables.tf default is the LEGACY shared path.
+		// The recorded plane rides through: plane.sh's vg/lv_size defaults
+		// ("pve"/8) are the AUTHORS' host — a world whose box-side ensure
+		// chose another VG would have terraform carve a SECOND plane in the
+		// wrong VG (or die on its space). Passed ONLY when recorded: an
+		// explicit empty -var would defeat the variable's own default (and
+		// the quoted-empty arg lands as "" — plane.sh's ${2:-pve}-style
+		// defaults recover it either way).
 		"-var", "kubeconfig_path=" + s.tfRoot() + "/kubeconfig",
-	}, nil
+	}
+	if s.PlanePool != "" {
+		vars = append(vars, "-var", "vg="+s.PlanePool)
+	}
+	if s.SizeGB > 0 {
+		vars = append(vars, "-var", "lv_size_gb="+strconv.FormatUint(s.SizeGB, 10))
+	}
+	return vars, nil
 }
 
 // tfRun drives the terraform module on the provisioning box for `action`

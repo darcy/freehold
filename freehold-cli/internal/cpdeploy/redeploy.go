@@ -1,8 +1,8 @@
 package cpdeploy
 
 import (
-	"os"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 

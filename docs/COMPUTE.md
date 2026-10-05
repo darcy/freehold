@@ -84,12 +84,30 @@ deliberate and the rules below hold regardless of it.
     at guest creation.
 *   Pre-terraform kube workloads can't be adopted; a re-adopted plane's `terraform destroy`
     can reach another world's cluster (needs a cluster-identity guard).
-*   `uninstall` leaves the cp-verb host key authorized: the key cleanup collects the
-    substrate + co-located runner keys but not the data-verbs `cp-verb` line
-    (`freehold-<world>-cp-verb` in the host's `authorized_keys`), so after a default
-    uninstall the host line plus the private half at `/srv/data/cp/verb-ssh.key` survive
-    as a working root-SSH credential pair — security-relevant, not hygiene. Only
-    `--remove-data` removes the private half.
+*   `uninstall` leaves the cp-verb key's host line behind: the key cleanup collects the
+    substrate + co-located runner keys, never the data-verbs `cp-verb` key
+    (`freehold-<world>-cp-verb` in the host's `authorized_keys`). The private half lives in
+    TWO places — the box's `profiles/<name>/cp-verb-key` (wiped with the profile) and the CP
+    guest's durable plane (`/srv/data/cp/verb-ssh.key`, shipped at deploy), which a default
+    uninstall KEEPS (only `--remove-data` drops it) and the off-site backup set covers. So on
+    a default uninstall the host line + its private key both survive in the world's own
+    records — a working credential pair, not an orphan; the exposure is a leaked backup
+    yielding host root SSH. Only after `uninstall --remove-data` is the leftover line a true
+    orphan. Adding the cp-verb key to the uninstall's key refs is the cleanup —
+    security-relevant, not hygiene.
+*   **The re-adopt door: uninstall removes the host's `authorized_keys` line and the
+    provision-REUSE path never re-prints it.** An uninstall strips the box's substrate line
+    from the host; a re-install then reuses the runner package ("already exists" — no fresh
+    key printed, no door gate) and fails the transient door check with an EMPTY message (that
+    path lacks the served-runner path's recover/print affordance). Live-proven three times on
+    the gateway reinstall round. Fix: the reuse path re-derives + prints the door line, and
+    the transient verify carries the same recover/print affordance.
+*   **The fresh-install CP package is a wholesale clone of the box's runner package** — so a
+    later re-adopt's substrate rotation drops the BOX's own line as "the old one" (the same
+    key body in both packages; the box's door dies mid-reinstall, the adopt fails on the dead
+    transport). Happened on every first gateway re-adopt. Fix: ship a FRESH sealed substrate
+    credential to the CP at first deploy (or exempt the box's own line from the rotation's
+    deauthorize).
 *   The transient uninstall can't destroy running guests (no stop-first).
 *   No per-guest or per-pod resource bounds (no `--cores`, no requests/limits, no quota).
 *   Create-device storage is deferred; "kube slot" provisioning is a prompt claim with no code.

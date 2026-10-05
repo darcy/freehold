@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,8 +50,8 @@ type Flags struct {
 	// AccessMode names the install access strategy that reaches Host
 	// ("ssh-root-proxmox" today, provider-API modes later) and is recorded in
 	// the profile config beside the host.
-	AccessMode         string
-	Name               string
+	AccessMode string
+	Name       string
 	// LocalPort is the box-side runner MCP loopback port (--local-port); Addr
 	// is derived 127.0.0.1:<LocalPort> at the composition roots.
 	LocalPort          uint32
@@ -85,11 +86,11 @@ type Flags struct {
 	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
 	// internal subnet (InternalIPFor) and a gateway guest owns the one
 	// LAN-facing address (the proxy IP).
-	GatewayCIDR string
-	GatewayVlan int
-	ConfigPath  string
-	ConfirmStorage     bool
-	ResetDNS           bool
+	GatewayCIDR    string
+	GatewayVlan    int
+	ConfigPath     string
+	ConfirmStorage bool
+	ResetDNS       bool
 	// ManageDNSExplicit records whether --manage-dns was EXPLICITLY passed (a
 	// bool flag reads false for both omitted and --manage-dns=false; the config
 	// seed must only fill the omitted case so an operator can still opt out).
@@ -337,10 +338,57 @@ const DefaultRunnerPort = 8787
 // LoopbackAddr is the runner MCP bind address for a local port.
 func LoopbackAddr(port uint16) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))) }
 
+// PickFreeLoopbackPort returns preferred when nothing listens on it, else the
+// next free loopback port — the runner MCP bind is an implementation detail
+// (127.0.0.1:<port>), never an operator decision. An explicitly requested
+// port that is busy is the caller's problem (it fails the serve, loudly).
+func PickFreeLoopbackPort(preferred uint32) uint32 {
+	for p := preferred; p < 65536; p++ {
+		if !portOpenDefault(LoopbackAddr(uint16(p))) {
+			return p
+		}
+	}
+	return preferred
+}
+
+// DefaultGatewayCIDR derives the freehold-subnet's internal subnet: 10.77.0.0/24,
+// bumped past any overlap with the LAN (the proxy IP's network) — a made-up
+// subnet is always safe to assume (untagged, no bridge config), only a
+// collision would route wrongly. Returns "" when lanIP does not parse.
+func DefaultGatewayCIDR(lanIP string) string {
+	lan, err := netip.ParsePrefix(lanIP)
+	if err != nil {
+		return ""
+	}
+	gw := netip.MustParsePrefix("10.77.0.0/24")
+	for octet := 78; octet <= 255; octet++ {
+		if !lan.Overlaps(gw) {
+			return gw.String()
+		}
+		gw = netip.MustParsePrefix(fmt.Sprintf("10.%d.0.0/24", octet))
+	}
+	return "10.77.0.0/24"
+}
+
 // ---- the pipeline ---------------------------------------------------------
 
 func (e *Engine) RunBootstrap() error {
 	fmt.Fprintf(e.Out, "creating the CP at %s (door -> cp LXC + console + co-located runner + DNS creds; then run `freehold build` from any box)\n", e.F.RelayDomain)
+
+	// The gateway flags validate BEFORE any config write: the gateway merge
+	// persists {cidr, vlan} wholesale, so a malformed --gateway-cidr or the
+	// --gateway-vlan sentinel (-1, set at parse for a non-numeric/negative
+	// value) must never reach the disk — a recorded -1 would resurrect itself
+	// on every later re-adopt seed and the "blank (untagged)" recovery could
+	// never succeed.
+	if e.F.GatewayVlan < 0 {
+		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
+	}
+	if e.F.GatewayCIDR != "" {
+		if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
+			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
+		}
+	}
 
 	// 1. the ops agent identity + the door (same as run()).
 	EnsureIdentity(OpsDir())
@@ -415,49 +463,20 @@ func (e *Engine) RunBootstrap() error {
 	}
 
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
-	// + its in-host VLAN tag. Blank = the flat-LAN world (no gateway — today's
-	// behavior, and how existing worlds keep reconciling). The proxy IP above
-	// becomes the gateway's ONE LAN address; the internal guests derive their
-	// static addresses from the CIDR.
-	if e.F.GatewayCIDR == "" && !e.F.Yes {
-		ans, err := e.Prompt("internal subnet CIDR for the freehold-subnet (e.g. 10.77.0.0/24) — blank = flat LAN (no gateway); the PVE bridge must be VLAN-aware for a tag")
-		if err != nil {
-			return err
-		}
-		if a := strings.TrimSpace(ans); a != "" {
-			e.F.GatewayCIDR = a
-			v, verr := e.Prompt("VLAN tag for the internal bridge (a number, e.g. 77; blank = untagged)")
-			if verr != nil {
-				return verr
-			}
-			if v = strings.TrimSpace(v); v != "" {
-				n, cerr := strconv.Atoi(v)
-				if cerr != nil || n <= 0 {
-					return fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
-				}
-				e.F.GatewayVlan = n
-			}
-		}
-	}
-	// Validate on BOTH paths (headless flag + interactive prompt): a malformed
-	// CIDR would otherwise fail far later, at the first guest's net args.
+	// + its in-host VLAN tag. Install decides (see applyInstallDefaults): a
+	// MINT derives the subnet — the gateway is forced, every fresh world gets
+	// one — and a RE-ADOPT rides the recorded gateway (a pre-gateway world
+	// stays flat: forcing one mid-life would collide with its live LAN
+	// guests). Validation happened at the top, before any config write.
 	if e.F.GatewayCIDR != "" {
-		if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
-			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
-		}
-	}
-	// The interactive answer lands in e.F AFTER writeInitialConfig (step 6)
-	// snapshotted the config, and the guest births below key on the DISK
-	// config's Gateway — re-merge + save so the on-disk world IS gateway-aware
-	// before anything boots (the headless path's flags were already merged at
-	// step 6; this is a cheap idempotent re-run for both).
-	if e.F.GatewayCIDR != "" {
+		// The answer lands in e.F AFTER writeInitialConfig (step 6)
+		// snapshotted the config, and the guest births below key on the DISK
+		// config's Gateway — re-merge + save so the on-disk world IS
+		// gateway-aware before anything boots (a cheap idempotent re-run for
+		// both paths).
 		if err := e.writeInitialConfig(); err != nil {
 			return err
 		}
-	}
-	if e.F.GatewayVlan < 0 {
-		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
 	}
 
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
@@ -1723,9 +1742,18 @@ func (e *Engine) stageBootstrap(role string) error {
 		// A RECORDED vmid rides on resume: the driver's reuse path then finds
 		// the existing guest (hostname match) instead of picking a new id and
 		// refusing the collision — Rust rebuild re-booted the SAME vmid.
+		// Nothing recorded adopts the role's LIVE guest by hostname instead:
+		// a birth that crashed before its record (the record lands only after
+		// the whole role stage succeeds) must be REUSED, not duplicated —
+		// re-deriving a fresh id leaked one guest per crashed run.
 		g := map[string]config.LxcGuest{"relay": cfg.Lxc.Relay, "cp": cfg.Lxc.Cp, "k3s": cfg.Lxc.K3s, "gateway": cfg.Lxc.Gateway}[role]
-		if g.Vmid != nil {
+		switch {
+		case g.Vmid != nil:
 			args = append(args, "--vmid", strconv.FormatUint(uint64(*g.Vmid), 10))
+		case e.Provider != nil:
+			if v, aerr := e.findLxcVmidExact(role); aerr == nil {
+				args = append(args, "--vmid", strconv.FormatUint(uint64(v), 10))
+			}
 		}
 		for _, m := range cfg.Plane.Mounts[role] {
 			args = append(args, "--mount", m.Source+":"+m.GuestPath)
@@ -1757,13 +1785,22 @@ func prefixBits(cidr string) int {
 	return n
 }
 
-// pickFreeVmidSkippingRecorded returns the lowest free VMID that is neither a
-// live guest nor a RECORDED role vmid (cp/relay/k3s — kept intact by an
-// uninstall and re-created at those coordinates by the later births), nor the
-// other roles' recorded ids. 0 = let the driver pick (nothing recorded).
+// pickFreeVmidSkippingRecorded returns the lowest free VMID that is not a
+// RECORDED role vmid (cp/relay/k3s — kept intact by an uninstall and
+// re-created at those coordinates by the later births), nor the other roles'
+// recorded ids. The free-id source is `pvesh get /cluster/nextid` (via the
+// provider seam) — CLUSTER-CANONICAL and VM-aware: the VMID namespace is
+// shared with QEMU VMs, which a container-list scan misses (a VM at 102 would
+// be handed out and the create would die on "VM 102 already exists"). The
+// bump past the recorded set covers the ids nextid may legitimately return
+// while the recorded role is torn down (free, but about to be re-born there).
+// 0 = let the driver pick (no provider).
 func (e *Engine) pickFreeVmidSkippingRecorded(cfg *config.Config) (uint32, error) {
 	if e.Provider == nil {
 		return 0, nil
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
 	}
 	skip := map[uint32]bool{}
 	for _, g := range []config.LxcGuest{cfg.Lxc.Cp, cfg.Lxc.Relay, cfg.Lxc.K3s} {
@@ -1771,21 +1808,17 @@ func (e *Engine) pickFreeVmidSkippingRecorded(cfg *config.Config) (uint32, error
 			skip[*g.Vmid] = true
 		}
 	}
-	guests, err := e.Provider.ListGuests()
+	next, err := e.Provider.NextFreeVMID()
 	if err != nil {
 		return 0, fmt.Errorf("gateway vmid pick: %w", err)
 	}
-	for _, g := range guests {
-		if n, perr := strconv.ParseUint(g.ID, 10, 32); perr == nil {
-			skip[uint32(n)] = true
-		}
+	for skip[next] && next < 10000 {
+		next++
 	}
-	for id := uint32(100); id < 10000; id++ {
-		if !skip[id] {
-			return id, nil
-		}
+	if next >= 10000 {
+		return 0, fmt.Errorf("no free vmid for the gateway")
 	}
-	return 0, fmt.Errorf("no free vmid for the gateway")
+	return next, nil
 }
 
 // bootstrapStaticIP returns the role's STATIC address, or "" = DHCP. k3s is
@@ -1847,8 +1880,20 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 	// gateway (an unconstrained dport DNAT hijacks the guests' own egress).
 	edgeIP := config.StripCIDR(edgeOf(e.F.ProxyIP))
 	conf := config.GatewayNftConf(cidr, edgeIP, k3sIP, cpIP, relayIP, "eth0")
+	// Bootstrap DNS BEFORE apt: the template inherits the HOST resolv.conf
+	// (Tailscale MagicDNS on this box — 100.100.100.100), which is not
+	// routable from inside the guest, and a LAN resolver is not guaranteed to
+	// answer either — apt then hangs to the watchdog. Public resolvers, like
+	// EnsureGuestDocker; the CP build re-writes guest DNS later anyway. The
+	// script rides a single-quoted sh -c: APOSTROPHES ARE FORBIDDEN in it.
 	script := fmt.Sprintf(`set -e
-apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+echo nameserver 1.1.1.1 > /etc/resolv.conf
+echo nameserver 8.8.8.8 >> /etc/resolv.conf
+# The template's apt index ages past the mirror's retention (404 on current
+# versions) — refresh before the install, like EnsureGuestDocker's retry does.
+apt-get update -qq >/dev/null 2>&1 || true
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+mkdir -p /etc/dnsmasq.d
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 # A router with BOTH nics on one bridge (the untagged freehold-subnet) must
 # not answer ARP for an IP on the other interface — the flux reads as MAC
@@ -2356,22 +2401,22 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		k3sIP = config.StripCIDR(e.F.ProxyIP)
 	}
 	c := config.Coords{
-		Name:           cfg.Name,
-		StateDir:       "",
-		RelayURL:       cfg.RelayURL,
-		RelayAuthURL:   cfg.RelayURL,
-		RelayPK:        derefStrPtr(cfg.RelayPubkey),
-		RelayWS:        cfg.RelayWsURL,
-		RelayHost:      cfg.RelayHost(),
-		RelayIP:        relayIP,
-		CpHost:         cfg.CPHost(),
-		CpIP:           cpIP,
-		CpLxc:          derefU32(cfg.Lxc.Cp.Vmid),
-		ProxyIP:        config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
-		LitellmIP:      cfg.Litellm.Host,
-		PlanePool:      derefStrPtr(cfg.Plane.Backend),
-		PlaneKind:      derefStrPtr(cfg.Plane.BackendKind),
-		ThinPool:       derefStrPtr(cfg.Plane.ThinPool),
+		Name:         cfg.Name,
+		StateDir:     "",
+		RelayURL:     cfg.RelayURL,
+		RelayAuthURL: cfg.RelayURL,
+		RelayPK:      derefStrPtr(cfg.RelayPubkey),
+		RelayWS:      cfg.RelayWsURL,
+		RelayHost:    cfg.RelayHost(),
+		RelayIP:      relayIP,
+		CpHost:       cfg.CPHost(),
+		CpIP:         cpIP,
+		CpLxc:        derefU32(cfg.Lxc.Cp.Vmid),
+		ProxyIP:      config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
+		LitellmIP:    cfg.Litellm.Host,
+		PlanePool:    derefStrPtr(cfg.Plane.Backend),
+		PlaneKind:    derefStrPtr(cfg.Plane.BackendKind),
+		ThinPool:     derefStrPtr(cfg.Plane.ThinPool),
 		// Size/placement: the CONFIG is the durable source (the install
 		// persists them). A config written before persistence shipped has
 		// none — the world-config then renders blanks and the boot fails

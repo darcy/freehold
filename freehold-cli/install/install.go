@@ -155,7 +155,7 @@ func seedFromProfile(f *box.Flags, cfg *config.Config) {
 	if f.GatewayCIDR == "" && cfg.Gateway.Cidr != nil {
 		f.GatewayCIDR = *cfg.Gateway.Cidr
 	}
-	if f.GatewayVlan == 0 && cfg.Gateway.Vlan != nil {
+	if f.GatewayVlan == 0 && cfg.Gateway.Vlan != nil && *cfg.Gateway.Vlan >= 0 {
 		f.GatewayVlan = *cfg.Gateway.Vlan
 	}
 	if f.OperatorPubkey == "" {
@@ -182,10 +182,12 @@ func runInstallCmd(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 
 	// A fresh plane has nothing to resolve from, so headless needs the full
-	// answer set; with gaps (and no --non-interactive), fall back to the guided flow.
+	// answer set; with gaps (and no --non-interactive), fall back to the guided
+	// flow — the parsed flags ride in: what the operator already answered is a
+	// prompt default, never silently dropped.
 	if !f.Yes && (name == "" || f.Host == "" || f.RelayDomain == "" || f.CpDomain == "" ||
 		f.ProxyIP == "" || f.OperatorPubkey == "") {
-		return runInstall(cmd.InOrStdin(), out, name)
+		return runInstall(cmd.InOrStdin(), out, f, cmd)
 	}
 	if name == "" {
 		return fmt.Errorf("install needs --name (the world/profile name — isolates this world's config and state)")
@@ -218,7 +220,10 @@ func runInstallCmd(cmd *cobra.Command) error {
 		seedFromProfile(&f, prev)
 		fmt.Fprintf(out, "  re-adopting profile %q (control plane absent) — the plane keeps the runner identity; only the substrate door rotates\n", name)
 	}
-	applyInstallDefaults(&f)
+	if action == lifecycleMint && !cmd.Flags().Changed("local-port") {
+		pickRunnerPort(&f)
+	}
+	applyInstallDefaults(&f, action == lifecycleMint)
 	f.ConfigPath = installConfigPath()
 	if err := seedOperatorLedger(&f); err != nil {
 		return err
@@ -252,9 +257,14 @@ var installBanner = `
   ╰──────────────────────────────────────────────────────────────╯
 `
 
-func runInstall(in io.Reader, out io.Writer, name string) error {
+// runInstall is the guided flow. flagIn carries the ALREADY-PARSED flags: what
+// the operator set explicitly is honored here too (as the prompt defaults and,
+// for port/gateway, without re-derivation) — the guided surface is not a place
+// where flags silently vanish.
+func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Command) error {
 	ui := &installerUI{out: out, raw: in, in: bufio.NewReader(in)}
 	fmt.Fprint(out, installBanner)
+	name := flagIn.Name
 	if name == "" {
 		var err error
 		name, err = ui.ask("World name (profile — isolates this world's config + state)", "")
@@ -276,12 +286,25 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 			fmt.Fprintf(out, "  re-adopting profile %q (control plane absent) — the plane keeps the runner identity\n", name)
 		}
 	}
-	f, err := collectAnswers(ui, seed)
+	f, err := collectAnswers(ui, seed, flagIn)
 	if err != nil {
 		return err
 	}
 	f.Name = name
-	applyInstallDefaults(&f)
+	if action == lifecycleReAdopt {
+		// The plane's recorded facts (gateway, runner addr) survive a
+		// re-adopt — only the substrate door rotates.
+		seedFromProfile(&f, seed)
+		if seed != nil && seed.Runner.Addr != "" && !cmd.Flags().Changed("local-port") {
+			f.Addr = seed.Runner.Addr
+		}
+	}
+	// The port is picked, not asked: the default unless busy — unless the
+	// operator pinned it (--local-port), here as much as headless.
+	if action == lifecycleMint && !cmd.Flags().Changed("local-port") {
+		pickRunnerPort(&f)
+	}
+	applyInstallDefaults(&f, action == lifecycleMint)
 	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
 	}
@@ -289,8 +312,12 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 	if f.ConfirmStorage {
 		consent = "yes"
 	}
-	fmt.Fprintf(out, "  host: %s\n  runner: %s\n  domain: %s\n  operator pk: %s\n  storage consent: %s\n",
-		f.Host, f.Target, f.RelayDomain, f.OperatorPubkey, consent)
+	vlan := "untagged"
+	if f.GatewayVlan > 0 {
+		vlan = fmt.Sprintf("vlan %d", f.GatewayVlan)
+	}
+	fmt.Fprintf(out, "  host: %s\n  runner: %s\n  domain: %s\n  gateway: %s (%s)\n  operator pk: %s\n  storage consent: %s\n",
+		f.Host, f.Target, f.RelayDomain, f.GatewayCIDR, vlan, f.OperatorPubkey, consent)
 	if proceed, err := ui.confirm("Proceed?", true); err != nil || !proceed {
 		if err != nil {
 			return err
@@ -315,9 +342,9 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 
 // collectAnswers gathers the install inputs (host, runner, domains, identity,
 // storage) into ready-to-run box.Flags. seed is the surviving profile config on
-// a re-adopt (nil when minting) — its recorded facts become the prompt defaults,
-// so a re-install does not re-ask what the plane already knows.
-func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
+// a re-adopt (nil when minting); flags are what the operator already answered
+// on the command line — a set flag is the prompt's default (Enter keeps it).
+func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.Flags, error) {
 	fmt.Fprintln(ui.out, "  A few details about your world. Defaults in [brackets].")
 	hostDef := "root@192.168.30.224"
 	relayDef, cpDef, proxyDef := "", "", ""
@@ -330,11 +357,19 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 			proxyDef = *seed.Proxy.Ip
 		}
 	}
-	host, err := ui.ask("Host (address the runner will SSH into)", hostDef)
-	if err != nil {
-		return box.Flags{}, err
+	if flags.Host != "" {
+		hostDef = flags.Host
 	}
-	port, err := ui.askUint32("Runner MCP port (local loopback)", box.DefaultRunnerPort)
+	if flags.RelayDomain != "" {
+		relayDef = flags.RelayDomain
+	}
+	if flags.CpDomain != "" {
+		cpDef = flags.CpDomain
+	}
+	if flags.ProxyIP != "" {
+		proxyDef = flags.ProxyIP
+	}
+	host, err := ui.ask("Host (address the runner will SSH into)", hostDef)
 	if err != nil {
 		return box.Flags{}, err
 	}
@@ -350,24 +385,6 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if err != nil {
 		return box.Flags{}, err
 	}
-	gatewayCIDR, err := ui.ask("internal subnet CIDR for the freehold-subnet (e.g. 10.77.0.0/24) — blank = flat LAN (no gateway); the PVE bridge must be VLAN-aware for a tag", "")
-	if err != nil {
-		return box.Flags{}, err
-	}
-	gatewayVlan := 0
-	if gatewayCIDR != "" {
-		v, err := ui.ask("VLAN tag for the internal bridge (a number, e.g. 77; blank = untagged)", "")
-		if err != nil {
-			return box.Flags{}, err
-		}
-		if v != "" {
-			n, cerr := strconv.Atoi(v)
-			if cerr != nil || n <= 0 {
-				return box.Flags{}, fmt.Errorf("gateway VLAN tag must be a positive number — got %q", v)
-			}
-			gatewayVlan = n
-		}
-	}
 	rootfs, err := ui.askUint32("LXC rootfs size (GB)", 16)
 	if err != nil {
 		return box.Flags{}, err
@@ -382,7 +399,7 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if !strings.Contains(proxyIP, "/") {
 		return box.Flags{}, fmt.Errorf("proxy static IP must be CIDR (host/prefix) — got %q", proxyIP)
 	}
-	pk, opDir, err := collectOperatorIdentity(ui)
+	pk, opDir, err := resolveOperatorIdentity(ui, seed, flags)
 	if err != nil {
 		return box.Flags{}, err
 	}
@@ -390,14 +407,14 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 	if err != nil {
 		return box.Flags{}, err
 	}
-	return box.Flags{
-		Addr:               box.LoopbackAddr(uint16(port)),
+	// The runner MCP port (an implementation detail — picked free, not asked)
+	// and the gateway subnet (derived; --gateway-cidr/--gateway-vlan override)
+	// are filled by the caller.
+	f := box.Flags{
 		Host:               host,
 		RelayDomain:        relayDomain,
 		CpDomain:           cpDomain,
 		ProxyIP:            proxyIP,
-		GatewayCIDR:        gatewayCIDR,
-		GatewayVlan:        gatewayVlan,
 		OperatorPubkey:     pk,
 		OperatorIdentity:   opDir,
 		SizeGB:             drive.TenantLVSizeGB,
@@ -409,14 +426,31 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 		LitellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
 		ConfigPath:         installConfigPath(),
 		ConfirmStorage:     consent,
-	}, nil
+	}
+	// The flag fields the prompts don't cover ride through verbatim — dropping
+	// them here would make --local-port/--gateway-cidr/--gateway-vlan vanish
+	// on the guided path (the sentinel -1 included; RunBootstrap rejects it).
+	if flags.LocalPort != 0 {
+		f.LocalPort = flags.LocalPort
+		f.Addr = flags.Addr
+	}
+	if flags.GatewayCIDR != "" {
+		f.GatewayCIDR = flags.GatewayCIDR
+	}
+	if flags.GatewayVlan != 0 {
+		f.GatewayVlan = flags.GatewayVlan
+	}
+	return f, nil
 }
 
 // applyInstallDefaults fills the static defaults install's own answers would
 // otherwise leave empty (flag-layer defaults apply to bootstrap; install owns
 // its answers). Empty storage/bridge/agent-name/runner boot the CP LXC
-// malformed.
-func applyInstallDefaults(f *box.Flags) {
+// malformed. mint gates the FORCED gateway: a fresh world derives its
+// freehold-subnet (a re-adopt rides the recorded gateway — a pre-gateway
+// world stays flat; forcing one mid-life would collide with its live LAN
+// guests).
+func applyInstallDefaults(f *box.Flags, mint bool) {
 	if f.StorageName == "" {
 		f.StorageName = "local-lvm"
 	}
@@ -432,11 +466,28 @@ func applyInstallDefaults(f *box.Flags) {
 	if f.Target == "" {
 		f.Target = box.RunnerTarget
 	}
+	// The gateway is FORCED on mint: the subnet is derived (10.77.0.0/24,
+	// bumped past LAN overlap); --gateway-cidr/--gateway-vlan override, and a
+	// re-adopt's recorded gateway was seeded before this runs. RunBootstrap
+	// re-validates before any config write.
+	if mint && f.GatewayCIDR == "" && f.ProxyIP != "" {
+		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
+	}
 	// Proxmox-over-root-SSH is the only implemented access mode today;
 	// provider-API modes (api-vultr) arrive with the Access seam (PR3).
 	if f.AccessMode == "" {
 		f.AccessMode = "ssh-root-proxmox"
 	}
+}
+
+// pickRunnerPort pins the runner MCP bind for a MINT: the default port unless
+// it is taken, then the next free loopback port — the port is an
+// implementation detail, never an operator decision. A re-adopt keeps its
+// recorded addr (killServeOn reclaims the port), and an explicit --local-port
+// stays (a busy explicit port fails the serve, loudly).
+func pickRunnerPort(f *box.Flags) {
+	f.LocalPort = box.PickFreeLoopbackPort(box.DefaultRunnerPort)
+	f.Addr = box.LoopbackAddr(uint16(f.LocalPort))
 }
 
 // flagsFromCmd maps the bootstrap command's flags into box.Flags.
@@ -509,11 +560,11 @@ func addInstallFlags(cmd *cobra.Command) {
 	// installed under a named runner (e.g. freehold-live-install) re-adopts
 	// THAT one — the flag records it instead of forcing the default.
 	cmd.Flags().String("target", "", "Provisioning runner name (default: the standard substrate runner)")
-	cmd.Flags().Uint32("local-port", box.DefaultRunnerPort, "Runner MCP port on the box's loopback (127.0.0.1:<port>)")
+	cmd.Flags().Uint32("local-port", box.DefaultRunnerPort, "Runner MCP port on the box's loopback (default: 8787, next free port when busy)")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host (REQUIRED on a fresh plane)")
 	cmd.Flags().String("proxy-ip", "", "the ONE LAN address (CIDR) — REQUIRED on a fresh plane; the gateway's when a subnet is set, the k3s/proxy node otherwise")
-	cmd.Flags().String("gateway-cidr", "", "internal subnet CIDR for the freehold-subnet gateway (e.g. 10.77.0.0/24); empty = flat LAN")
+	cmd.Flags().String("gateway-cidr", "", "override the internal subnet CIDR for the freehold-subnet gateway (default: derived, e.g. 10.77.0.0/24)")
 	cmd.Flags().String("gateway-vlan", "", "in-host bridge VLAN tag for the internal subnet (0/blank = untagged)")
 	cmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — REQUIRED")
 	cmd.Flags().String("operator-identity", "", "Operator identity dir to record (optional)")
@@ -542,6 +593,30 @@ func addInstallFlags(cmd *cobra.Command) {
 // operator — the same path oplogin + the TUI read (installer operator_dir).
 func operatorDir() string { return filepath.Join(box.StateDir(), "operator") }
 
+// resolveOperatorIdentity answers the operator block. A re-adopt rides the
+// RECORDED identity — the dir exists from the prior install and the profile
+// records its pubkey — so it is not asked at all (re-asking would error on
+// the existing dir or mint a pointless second identity). An explicit
+// --operator-pubkey over a live ledger rides too. A mint prompts
+// (paste/match/generate); a vanished dir falls through to the prompts.
+func resolveOperatorIdentity(ui *installerUI, seed *config.Config, flags box.Flags) (string, string, error) {
+	if seed != nil && seed.OperatorPubkey != "" {
+		dir := operatorDir()
+		if seed.OperatorIdentity != nil && *seed.OperatorIdentity != "" {
+			dir = *seed.OperatorIdentity
+		}
+		if _, err := os.Stat(filepath.Join(dir, "identity.json")); err == nil {
+			return seed.OperatorPubkey, dir, nil
+		}
+	}
+	if flags.OperatorPubkey != "" {
+		if _, err := os.Stat(filepath.Join(operatorDir(), "identity.json")); err == nil {
+			return flags.OperatorPubkey, operatorDir(), nil
+		}
+	}
+	return collectOperatorIdentity(ui)
+}
+
 func collectOperatorIdentity(ui *installerUI) (pubkey, opDir string, err error) {
 	fmt.Fprintln(ui.out, "  Operator identity:")
 	fmt.Fprintln(ui.out, "    1) I have a Nostr key already (paste npub or hex)")
@@ -567,7 +642,17 @@ func collectHaveKey(ui *installerUI) (string, string, error) {
 	}
 	opDir := operatorDir()
 	if _, err := os.Stat(filepath.Join(opDir, "identity.json")); err == nil {
-		return "", "", fmt.Errorf("an operator identity already exists at %s — remove it or reuse that key", opDir)
+		// Pasting the SAME key as the stored identity is a reuse, not a
+		// conflict — only a DIFFERENT key is.
+		stored, lerr := box.LoadPubkey(opDir)
+		if lerr != nil {
+			return "", "", fmt.Errorf("an operator identity exists at %s but is unreadable: %w", opDir, lerr)
+		}
+		if stored == pk {
+			fmt.Fprintf(ui.out, "  reused: %s\n", opDir)
+			return pk, opDir, nil
+		}
+		return "", "", fmt.Errorf("an operator identity already exists at %s with a different key — remove it or paste that key", opDir)
 	}
 	// The pubkey alone cannot operate the world — capture the matching nsec
 	// now (no-echo on a TTY), verify it derives to the pasted pubkey, and
