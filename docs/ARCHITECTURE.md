@@ -572,7 +572,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     pod on the same harness as the CPA, created through the same audited
     `create_agent`. All join the private `#freehold` channel (there are no
     per-department channels; conversations happen where they already are,
-    with #freehold the fallback every core agent belongs to). Each
+    with #freehold the fallback every core agent belongs to). The build also
+    owns the first-run surface: it publishes the operator's kind:0 profile
+    (name from install) — which makes the Buzz desktop app skip its stock
+    onboarding (no starter channels, no private Welcome, no built-in
+    welcome-team agents) — stands up the open `#general` channel (CPA-owned;
+    operator + CPA) and posts a one-time marker-guarded welcome in
+    `#freehold`. Each
     department also holds **capability runners** (`stageDepartmentRunners`):
     one runner per capability its role needs — named
     `<target>-<protocol>-<identity>` (`pve-ssh-root` shared by

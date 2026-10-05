@@ -100,6 +100,16 @@ func PostMessage(relayURL string, secret []byte, channelID, mentionPubkey, conte
 	}, content)
 }
 
+// PostTaggedMessageAuth is PostMessage with extra tags appended (e.g. a
+// ["t", marker] idempotence marker) and a separate NIP-98 auth URL.
+func PostTaggedMessageAuth(dialURL, authURL string, secret []byte, channelID, mentionPubkey string, extra [][]string, content string) error {
+	tags := append([][]string{
+		{"h", channelID},
+		{"p", mentionPubkey},
+	}, extra...)
+	return publishSignedAuth(dialURL, authURL, secret, StreamMsgKind, tags, content)
+}
+
 // PollResult is one verified stream message (created_at, content, author).
 type PollResult struct {
 	CreatedAt int64
