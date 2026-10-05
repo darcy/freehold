@@ -86,8 +86,12 @@ type Flags struct {
 	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
 	// internal subnet (InternalIPFor) and a gateway guest owns the one
 	// LAN-facing address (the proxy IP).
-	GatewayCIDR    string
-	GatewayVlan    int
+	GatewayCIDR string
+	GatewayVlan int
+	// Mint is true when this bootstrap CREATES a world (fresh install) —
+	// the mint derives (and L2-probes) its freehold-subnet; a re-adopt rides
+	// the recorded gateway.
+	Mint           bool
 	ConfigPath     string
 	ConfirmStorage bool
 	ResetDNS       bool
@@ -464,6 +468,21 @@ func (e *Engine) RunBootstrap() error {
 	}
 	if !strings.Contains(e.F.ProxyIP, "/") {
 		return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", e.F.ProxyIP)
+	}
+
+	// 5.65. the MINT's derived subnet probes the LAN's L2 first: another
+	// world's freehold-subnet on this LAN is the live-verified collision
+	// (two boxes both derived 10.77.0.0/24 untagged — their guests
+	// ARP-collided and each world's CP dialed the OTHER's litellm). The
+	// derive bumps to the next clean /24; --gateway-cidr is honored
+	// untouched and --gateway-vlan skips the probe (a tagged L2 is its own
+	// domain — nothing to collide with).
+	if e.F.Mint && e.F.GatewayCIDR == "" && e.F.GatewayVlan == 0 {
+		cidr, err := e.deriveGatewayCIDR()
+		if err != nil {
+			return err
+		}
+		e.F.GatewayCIDR = cidr
 	}
 
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet

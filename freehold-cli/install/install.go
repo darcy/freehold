@@ -316,8 +316,15 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 	if f.GatewayVlan > 0 {
 		vlan = fmt.Sprintf("vlan %d", f.GatewayVlan)
 	}
+	// Display candidate: the pipeline's authoritative derive (+ its L2
+	// collision probe) runs after the confirm and prints any bump — this is
+	// the LAN-overlap-safe candidate the probe starts from.
+	gwDisplay := f.GatewayCIDR
+	if f.Mint && gwDisplay == "" && f.ProxyIP != "" {
+		gwDisplay = box.DefaultGatewayCIDR(f.ProxyIP)
+	}
 	fmt.Fprintf(out, "  host: %s\n  runner: %s\n  domain: %s\n  gateway: %s (%s)\n  operator pk: %s\n  storage consent: %s\n",
-		f.Host, f.Target, f.RelayDomain, f.GatewayCIDR, vlan, f.OperatorPubkey, consent)
+		f.Host, f.Target, f.RelayDomain, gwDisplay, vlan, f.OperatorPubkey, consent)
 	if proceed, err := ui.confirm("Proceed?", true); err != nil || !proceed {
 		if err != nil {
 			return err
@@ -481,13 +488,13 @@ func applyInstallDefaults(f *box.Flags, mint bool) {
 	if f.Target == "" {
 		f.Target = box.RunnerTarget
 	}
-	// The gateway is FORCED on mint: the subnet is derived (10.77.0.0/24,
-	// bumped past LAN overlap); --gateway-cidr/--gateway-vlan override, and a
-	// re-adopt's recorded gateway was seeded before this runs. RunBootstrap
-	// re-validates before any config write.
-	if mint && f.GatewayCIDR == "" && f.ProxyIP != "" {
-		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
-	}
+	// The gateway is FORCED on mint: the subnet is derived in the PIPELINE
+	// (RunBootstrap — the collision probe needs the host SSH, live-verified:
+	// two boxes on one LAN both derived 10.77.0.0/24 and their guests
+	// ARP-collided); --gateway-cidr/--gateway-vlan override, and a re-adopt's
+	// recorded gateway was seeded before this runs. RunBootstrap re-validates
+	// before any config write.
+	f.Mint = mint
 	// Proxmox-over-root-SSH is the only implemented access mode today;
 	// provider-API modes (api-vultr) arrive with the Access seam (PR3).
 	if f.AccessMode == "" {
