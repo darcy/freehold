@@ -286,7 +286,7 @@ func serveFlagValue(argv, flag string) string {
 func restartAgentTools(t Transport, spec *DeployCpSpec, argv string) error {
 	if strings.TrimSpace(argv) != "" {
 		unit := runnerUnitFile("freehold agent-tools", argv)
-		write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-agent-tools.service && systemctl daemon-reload",
+		write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-agent-tools.service && systemctl daemon-reload && systemctl enable freehold-agent-tools >/dev/null 2>&1",
 			base64StdEncode([]byte(unit)))
 		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, write), "install agent-tools unit", 90); err != nil {
 			return err
