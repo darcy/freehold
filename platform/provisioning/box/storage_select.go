@@ -329,18 +329,8 @@ func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 	// filesystem in use. Drop THIS world's guests first; they are re-born
 	// below on the fresh plane (a recorded vmid is re-created at its
 	// coordinates, as the teardown→rebuild contract already does).
-	for _, role := range []string{"gateway", "relay", "cp", "k3s"} {
-		vmid, gerr := e.findLxcVmidExact(role)
-		if gerr != nil {
-			continue // nothing leaked at this role
-		}
-		if _, serr := e.Provider.GuestExec("", fmt.Sprintf("pct stop %d || true", vmid), 120); serr != nil {
-			return fmt.Errorf("erase-fresh could not stop the leaked %s guest (%d): %w", role, vmid, serr)
-		}
-		if derr := e.Provider.DestroyGuest(strconv.FormatUint(uint64(vmid), 10)); derr != nil {
-			return fmt.Errorf("erase-fresh could not drop the leaked %s guest (%d): %w", role, vmid, derr)
-		}
-		fmt.Fprintf(e.Out, "  dropped the leaked %s guest (%d)\n", role, vmid)
+	if err := e.dropLeakedGuests(); err != nil {
+		return err
 	}
 	// Erase ONLY this world's domain. Other worlds on this backend keep theirs.
 	// The stage runs TRANSIENT (direct root SSH with the substrate key) like
@@ -348,18 +338,50 @@ func (e *Engine) resolveFreeholdData(opt planebase.Option) error {
 	// (the serve comes later, if at all), so dialing e.F.Addr is always
 	// connection-refused here.
 	for _, tenant := range []string{"relay", "cp", "k3s-volumes"} {
-		ok, out := e.RunBin(e.Bins.Self, []string{
-			"storage", "destroy",
-			"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
-			"--transient", "--host", e.F.Host,
-			"--tenant", tenant, "--domain", matched, "--pool", opt.Backend, "--kind", kind,
-		})
+		ok, out := e.RunBin(e.Bins.Self, eraseDestroyArgs(e.F.Addr, OpsDir(), e.F.Target, e.F.Host, tenant, matched, opt.Backend, kind))
 		if !ok {
 			return fmt.Errorf("erasing previous freehold data (%s/%s) failed:\n%s", matched, tenant, out)
 		}
 	}
 	fmt.Fprintf(e.Out, "  erased previous freehold data for %s\n", matched)
 	return nil
+}
+
+// dropLeakedGuests stops + destroys THIS world's role guests (by hostname) —
+// the erase path's pre-flight so the tenant LVs are unmounted when lvremove
+// runs. Roles without a live guest are a no-op.
+func (e *Engine) dropLeakedGuests() error {
+	if e.Provider == nil {
+		return nil
+	}
+	for _, role := range []string{"gateway", "relay", "cp", "k3s"} {
+		vmid, gerr := e.findLxcVmidExact(role)
+		if gerr != nil {
+			continue // nothing leaked at this role
+		}
+		// The stop rides the provider's host exec; the runner's own stop
+		// wrapper tolerates an already-stopped guest.
+		if _, serr := e.Provider.GuestExec("", e.Provider.StopGuestCmd(vmid), 120); serr != nil {
+			return fmt.Errorf("erase-fresh could not stop the leaked %s guest (%d): %w", role, vmid, serr)
+		}
+		if derr := e.Provider.DestroyGuest(strconv.FormatUint(uint64(vmid), 10)); derr != nil {
+			return fmt.Errorf("erase-fresh could not drop the leaked %s guest (%d): %w", role, vmid, derr)
+		}
+		fmt.Fprintf(e.Out, "  dropped the leaked %s guest (%d)\n", role, vmid)
+	}
+	return nil
+}
+
+// eraseDestroyArgs renders the `storage destroy` self-stage invocation for one
+// tenant (extracted for the flag test: the transient flags are load-bearing —
+// without them the destroy dials a serve that does not exist on this path).
+func eraseDestroyArgs(addr, agentDir, target, host, tenant, domain, pool, kind string) []string {
+	return []string{
+		"storage", "destroy",
+		"--addr", addr, "--agent-dir", agentDir, "--target", target,
+		"--transient", "--host", host,
+		"--tenant", tenant, "--domain", domain, "--pool", pool, "--kind", kind,
+	}
 }
 
 // requireShare is the share-word gate: used when a choice would share storage

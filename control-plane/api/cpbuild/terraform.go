@@ -122,7 +122,7 @@ func (s *Spec) tfVars() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{
+	vars := []string{
 		"-var", "domain_dash=" + s.dashedDomain(),
 		"-var", "vmid_cp=" + strconv.FormatUint(uint64(s.CpLxc), 10),
 		"-var", "vmid_relay=" + strconv.FormatUint(uint64(s.RelayLxc), 10),
@@ -135,11 +135,11 @@ func (s *Spec) tfVars() ([]string, error) {
 		"-var", "thin_pool=" + s.ThinPool,
 		// The recorded plane rides through: plane.sh's vg/lv_size defaults
 		// ("pve"/8) are the AUTHORS' host — a world whose box-side ensure
-		// chose another VG (pve-fast) would have terraform carve a SECOND
-		// plane in the wrong VG (or die on its space). Passed ONLY when
-		// recorded: an explicit empty -var would defeat the variable's own
-		// default (and the quoted-empty arg lands as "" — plane.sh's
-		// ${2:-pve}-style defaults recover it either way).
+		// chose another VG would have terraform carve a SECOND plane in the
+		// wrong VG (or die on its space). Passed ONLY when recorded: an
+		// explicit empty -var would defeat the variable's own default (and
+		// the quoted-empty arg lands as "" — plane.sh's ${2:-pve}-style
+		// defaults recover it either way).
 		"-var", "kubeconfig_path=" + s.tfRoot() + "/kubeconfig",
 	}
 	if s.PlanePool != "" {

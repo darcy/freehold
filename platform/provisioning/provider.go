@@ -41,6 +41,10 @@ type Provider interface {
 	GuestMounts(guest string) ([]string, error)
 	// DestroyGuest destroys a guest (and its rootfs), best-effort.
 	DestroyGuest(guest string) error
+	// StopGuestCmd renders the host-level stop command for a guest id (the
+	// erase path stops leaked guests before destroying them; the command
+	// tolerates an already-stopped guest).
+	StopGuestCmd(id uint32) string
 	// LocalLvmStatus returns the pool PVE's local-lvm currently points at and
 	// how many LVs ride it (the stranding guard's input).
 	LocalLvmStatus() (pool string, riders int, err error)

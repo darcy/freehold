@@ -192,3 +192,51 @@ func TestCollectHaveKeyReusesStoredKey(t *testing.T) {
 		t.Fatalf("a different key must conflict, got %v", err)
 	}
 }
+
+// TestCollectAnswersCarriesFlags: the guided flow's prompt answers plus the
+// operator's explicit flags must BOTH land in the result — a flag field
+// dropped by the return (port/gateway) made --local-port/--gateway-cidr
+// silently vanish on the guided path.
+func TestCollectAnswersCarriesFlags(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("FREEHOLD_HOME", t.TempDir())
+	config.SetCurrent(nil)
+	if err := selectProfile("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := box.MintIdentity(operatorDir()); err != nil {
+		t.Fatal(err)
+	}
+	pk, err := box.LoadPubkey(operatorDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prompts answered with bare Enters (defaults): host, relay, cp, proxy
+	// (required — answered), rootfs, memory, storage consent. The operator
+	// block is short-circuited by the pubkey flag over the live ledger.
+	stdin := strings.Repeat("\n", 3) + "192.0.2.8/24\n" + strings.Repeat("\n", 3)
+	ui := &installerUI{out: io.Discard, raw: strings.NewReader(stdin), in: bufio.NewReader(strings.NewReader(stdin))}
+	flags := box.Flags{
+		OperatorPubkey: pk,
+		Host:           "root@192.0.2.10",
+		RelayDomain:    "chat.example.net",
+		CpDomain:       "home.example.net",
+		LocalPort:      9100,
+		Addr:           "127.0.0.1:9100",
+		GatewayCIDR:    "10.99.0.0/24",
+		GatewayVlan:    7,
+	}
+	got, err := collectAnswers(ui, nil, flags)
+	if err != nil {
+		t.Fatalf("collectAnswers: %v", err)
+	}
+	if got.LocalPort != 9100 || got.Addr != "127.0.0.1:9100" {
+		t.Errorf("--local-port dropped: port=%d addr=%q", got.LocalPort, got.Addr)
+	}
+	if got.GatewayCIDR != "10.99.0.0/24" || got.GatewayVlan != 7 {
+		t.Errorf("gateway flags dropped: cidr=%q vlan=%d", got.GatewayCIDR, got.GatewayVlan)
+	}
+	if got.Host == "" || got.RelayDomain == "" || got.ProxyIP == "" {
+		t.Errorf("prompt answers missing: %+v", got)
+	}
+}

@@ -5,6 +5,7 @@ import "reflect"
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -826,6 +827,7 @@ type fakeProvider struct {
 	pool      string
 	riders    int
 	repointed string
+	destroyed []string
 }
 
 func (f *fakeProvider) GuestExec(guest, cmd string, timeoutS uint64) (*client.ExecOutcome, error) {
@@ -846,7 +848,12 @@ func (f *fakeProvider) GuestIPv4(guest string) (string, error) {
 
 func (f *fakeProvider) GuestMounts(guest string) ([]string, error) { return f.mounts[guest], nil }
 
-func (f *fakeProvider) DestroyGuest(guest string) error { return nil }
+func (f *fakeProvider) DestroyGuest(guest string) error {
+	f.destroyed = append(f.destroyed, guest)
+	return nil
+}
+
+func (f *fakeProvider) StopGuestCmd(id uint32) string { return fmt.Sprintf("stop %d", id) }
 
 func (f *fakeProvider) LocalLvmStatus() (string, int, error) { return f.pool, f.riders, nil }
 
@@ -936,5 +943,39 @@ func TestPickFreeLoopbackPort(t *testing.T) {
 	}
 	if got := PickFreeLoopbackPort(busy + 1); got != busy+1 {
 		t.Errorf("free port %d moved to %d", busy+1, got)
+	}
+}
+
+// ---- the erase-fresh path (transient destroy args + the leaked-guest drop) --
+
+// TestEraseDestroyArgs: the destroy self-stage MUST ride the transient flags —
+// without them it dials e.F.Addr, where no serve exists on the install path
+// (connection-refused, the erase dies after the operator said erase).
+func TestEraseDestroyArgs(t *testing.T) {
+	args := eraseDestroyArgs("127.0.0.1:8787", "/agent-dir", "pve-ssh-root", "root@host",
+		"cp", "chat-example-net", "vg-fast", "lvmth")
+	want := []string{"storage", "destroy", "--addr", "127.0.0.1:8787", "--agent-dir", "/agent-dir",
+		"--target", "pve-ssh-root", "--transient", "--host", "root@host",
+		"--tenant", "cp", "--domain", "chat-example-net", "--pool", "vg-fast", "--kind", "lvmth"}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("erase args = %v, want %v", args, want)
+	}
+}
+
+// TestDropLeakedGuests: erase-fresh drops THIS world's role guests (by exact
+// hostname) and skips roles with no live guest — a leaked guest from a crashed
+// run holds the tenant LVs mounted and lvremove refuses.
+func TestDropLeakedGuests(t *testing.T) {
+	p := &fakeProvider{guests: []provisioning.Guest{
+		{ID: "104", Name: "demo-gateway"},
+		{ID: "107", Name: "demo-cp"},
+		{ID: "110", Name: "other-world-cp"}, // foreign — never touched
+	}}
+	e := &Engine{Out: &bytes.Buffer{}, Provider: p, F: Flags{Name: "demo", RelayDomain: "chat.example.net"}}
+	if err := e.dropLeakedGuests(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(p.destroyed) != 2 || p.destroyed[0] != "104" || p.destroyed[1] != "107" {
+		t.Errorf("destroyed = %v, want [104 107] (the world's own leaked guests)", p.destroyed)
 	}
 }
