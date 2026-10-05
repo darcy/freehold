@@ -95,6 +95,9 @@ resource "null_resource" "model_registration" {
     model = "glm-5p3-flash"
   }
   provisioner "local-exec" {
+    # bash explicitly: the script uses pipefail, and the PVE host's /bin/sh is
+    # dash (local-exec defaults to /bin/sh -c — "Illegal option -o pipefail").
+    interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
       set -euo pipefail
       # Wait for the freshly-rolled gateway to listen (its pod is created just

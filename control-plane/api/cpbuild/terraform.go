@@ -133,6 +133,13 @@ func (s *Spec) tfVars() ([]string, error) {
 		"-var", "k3s_ip=" + config.StripCIDR(s.k3sIP()),
 		"-var", "k3s_gw=" + s.k3sGW(),
 		"-var", "thin_pool=" + s.ThinPool,
+		// The recorded plane rides through: plane.sh's vg/lv_size defaults
+		// ("pve"/8) are the AUTHORS' host — a world whose box-side ensure
+		// chose another VG (pve-fast) would have terraform carve a SECOND
+		// plane in the wrong VG (or die on its space). Empty keeps the
+		// defaults (old worlds whose recording predates the field).
+		"-var", "vg=" + s.PlanePool,
+		"-var", "lv_size_gb=" + strconv.FormatUint(s.SizeGB, 10),
 		// The provider's kubeconfig rides the WORLD's own tf root — the
 		// variables.tf default is the LEGACY shared path.
 		"-var", "kubeconfig_path=" + s.tfRoot() + "/kubeconfig",

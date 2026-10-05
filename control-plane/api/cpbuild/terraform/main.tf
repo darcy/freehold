@@ -35,7 +35,7 @@ variable "node_name" {
 }
 variable "template" {
   type    = string
-  default = "debian-13-standard_13.6-1_amd64.tar.zst"
+  default = "" # empty = resolve the newest Debian template in the store (lxc.sh)
 }
 variable "memory_mb" {
   type    = number
