@@ -43,4 +43,9 @@ pct create "$VMID" "local:vztmpl/${TPL}" \
   --rootfs "local-lvm:${ROOTFS}" --memory "$MEM" --hostname "$HOSTNAME" \
   --unprivileged 1 --features fuse=1,keyctl=1,nesting=1 \
   --net0 "$NET"${MP} 2>&1 | tail -1
+# Pods (runc sandboxes) write net sysctls through /proc/sys — read-only in a
+# stock unprivileged LXC, and every sandbox init dies on "open sysctl
+# net.ipv4.ip_unprivileged_port_start: permission denied" (seen live on PVE
+# 8.4.5). sys:mixed mounts /proc/sys writable before the guest's first boot.
+echo "lxc.mount.auto: proc:mixed sys:mixed" >> "/etc/pve/lxc/${VMID}.conf"
 echo "lxc $VMID ($HOSTNAME) created"
