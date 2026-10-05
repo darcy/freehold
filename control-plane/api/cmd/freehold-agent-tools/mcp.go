@@ -55,6 +55,11 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"address":  map[string]interface{}{"type": "string"},
 				"grant_to": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 			}, []string{"name", "kind", "address", "grant_to"})},
+		{"name": "revoke_runner", "description": "Take a capability away — the counterpart of provision_runner. With revoke_from set, those agent NAMES lose their grant on the door while it keeps serving the rest of its roster; with revoke_from empty the WHOLE door is retired (roster cleared, credential erased from the CP, its unit stopped where freehold hosts it, its record dropped). Every leg says whether it was VERIFIED (the roster is re-read from the relay, the unit is asked whether it is still active and its port probed, the sealed package is re-opened). Relay the unverified legs to the operator verbatim rather than claiming a clean teardown: a revoked door that is still running is a known state, never a silent one. The door's audit channel is KEPT read-only. Only doors provision_runner gave are touchable — build-time, cloudflare-api-, and console-provisioned doors stay operator-scoped.",
+			"inputSchema": i(map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"})},
 	}
 	if hasRunner {
 		execDesc := "Run a shell command VERBATIM on a capability runner's target through the runner-owned connection (the credential is fixed per target by this pod's config). Pass no secrets. Returns {stdout, stderr, exit_code, timed_out}."
@@ -84,7 +89,11 @@ func isFreeholdTool(name string) bool {
 	// harness must not advertise or call it. provision_runner IS the CPA's
 	// narrow grant-giving carve-out: it stages NEW capability runners only —
 	// grants onto the build-time capability runners stay operator-only.
-	case "create_agent", "manage_agent", "provision_runner":
+	// revoke_runner is its take-away twin and is advertised for the same reason:
+	// the half that hands capability out is not governable without the half that
+	// takes it back, and it is bounded by the same ownership guards (only doors
+	// the agent flow gave) and the same agent_grants kill switch.
+	case "create_agent", "manage_agent", "provision_runner", "revoke_runner":
 		return true
 	}
 	return false

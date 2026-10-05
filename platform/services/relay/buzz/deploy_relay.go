@@ -183,7 +183,7 @@ func DeployRelay(exec provisioning.GuestExecFunc, spec *RelayDeploySpec) (*Relay
 		return nil, err
 	}
 
-	dl := fmt.Sprintf("set -e; mkdir -p %s && ok=0; for i in 1 2 3; do if curl -fsSL --retry 2 https://github.com/block/buzz/archive/%s.tar.gz -o %s/buzz.tar.gz; then ok=1; break; fi; sleep 3; done; [ \"$ok\" = 1 ]",
+	dl := fmt.Sprintf("set -e; mkdir -p %s && ok=0; for i in 1 2 3; do if curl -fsSL --max-time 180 --retry 2 https://github.com/block/buzz/archive/%s.tar.gz -o %s/buzz.tar.gz; then ok=1; break; fi; sleep 3; done; [ \"$ok\" = 1 ]",
 		spec.DeployDir, spec.BuzzRef, spec.DeployDir)
 	if err := runToOK("download bundle", dl, 600); err != nil {
 		return nil, err

@@ -10,16 +10,17 @@
 # runner-injected env var (TF_VAR_* mapped in tf.sh) - NEVER argv/tfvars. The
 # kubeconfig leg (rewritten to the k3s node IP, staged by cpbuild before apply)
 # lets the kubernetes provider reach the k3s API. State + kubeconfig are
-# sensitive: kept under /srv/data/freehold-tf at 0600.
+# sensitive: kept under the world's OWN tf root (/srv/data/freehold-tf-<domain>)
+# at 0600. There is NO explicit `backend` block: the DEFAULT local backend
+# writes state to $PWD/terraform.tfstate, and tf.sh cd's into the world's tf
+# root (TF_ROOT) — so each world's state is its own. A pinned backend path (the
+# old shared /srv/data/freehold-tf) clobbered every world's state on one host.
 terraform {
   required_providers {
     kubernetes = {
       source  = "hashicorp/kubernetes"
       version = "~> 2.30"
     }
-  }
-  backend "local" {
-    path = "/srv/data/freehold-tf/terraform.tfstate"
   }
 }
 

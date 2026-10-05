@@ -38,8 +38,8 @@ Kubernetes arrives with Chunks 6–7.
     CPA); capability execution is bounded — a department-owned capability is executed by   
     that department's identity, and its raw grant attaches there, never to a custom agent. Service lifecycle is  
     not a department: whichever agent created a service owns it, ad hoc and unvetted. The four  
-    are installed as part of the core build (`freehold build`): each in the private `#freehold` plus its  
-    own private `#freehold-<department>` channel, with the CPA a member of all. Only the  
+    are installed as part of the core build (`freehold build`): all in the shared private  
+    `#freehold` channel — there are no per-department channels. Only the  
     identity/grant separation is locked; capability tooling/secrets arrive per department  
     later (Chunk 5/6).
     

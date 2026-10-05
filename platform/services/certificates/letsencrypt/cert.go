@@ -256,6 +256,15 @@ func leafNotAfter(chain []byte) time.Time {
 
 // LoadExpiryFromBytes parses the first PEM certificate's NotAfter.
 func LoadExpiryFromBytes(chain []byte) (time.Time, error) {
+	leaf, err := parseLeaf(chain)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return leaf.NotAfter, nil
+}
+
+// parseLeaf parses the first PEM CERTIFICATE block in chain.
+func parseLeaf(chain []byte) (*x509.Certificate, error) {
 	b := chain
 	for len(b) > 0 {
 		var blk *pem.Block
@@ -270,9 +279,9 @@ func LoadExpiryFromBytes(chain []byte) (time.Time, error) {
 		if err != nil {
 			continue
 		}
-		return cert.NotAfter, nil
+		return cert, nil
 	}
-	return time.Time{}, fmt.Errorf("no certificate in chain")
+	return nil, fmt.Errorf("no certificate in chain")
 }
 
 // ReuseIfValid reports whether the durable cert exists with at least
@@ -300,4 +309,58 @@ func reuse(exp time.Time, now time.Time, minLifetime time.Duration) (time.Time, 
 		return time.Time{}, false
 	}
 	return exp, true
+}
+
+// LoadDNSNames parses the first PEM certificate's DNS SANs.
+func LoadDNSNames(chain []byte) ([]string, error) {
+	leaf, err := parseLeaf(chain)
+	if err != nil {
+		return nil, err
+	}
+	return leaf.DNSNames, nil
+}
+
+// CoversHost reports whether a SAN list covers host — exact match or a
+// `*.<zone>` wildcard one label deep (`*.a.b` covers `x.a.b`, not `y.x.a.b`).
+func CoversHost(names []string, host string) bool {
+	for _, n := range names {
+		if n == host {
+			return true
+		}
+		if zone, ok := strings.CutPrefix(n, "*."); ok {
+			if labels := strings.SplitN(host, ".", 2); len(labels) == 2 && labels[1] == zone {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// LoadSeed validates a box-shipped cert-seed record (a SaveCreds record whose
+// env carries host/fullchain/key) for a slot: it must open, cover the expected
+// host, and hold at least minLifetime. Returns the fullchain + key ready to
+// install.
+func LoadSeed(path string, open Opener, secret []byte, host string, now time.Time, minLifetime time.Duration) (fullchain, key []byte, err error) {
+	_, env, err := LoadCreds(path, open, secret)
+	if err != nil {
+		return nil, nil, err
+	}
+	fullchain, key = []byte(env["fullchain"]), []byte(env["key"])
+	if len(fullchain) == 0 || len(key) == 0 {
+		return nil, nil, fmt.Errorf("seed record has no cert material")
+	}
+	if env["host"] != host {
+		return nil, nil, fmt.Errorf("seed is for %q, not %q", env["host"], host)
+	}
+	if _, ok := ReuseIfValidBytes(fullchain, now, minLifetime); !ok {
+		return nil, nil, fmt.Errorf("seed cert has under %s remaining", minLifetime)
+	}
+	names, err := LoadDNSNames(fullchain)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !CoversHost(names, host) {
+		return nil, nil, fmt.Errorf("seed cert SANs %v do not cover %s", names, host)
+	}
+	return fullchain, key, nil
 }

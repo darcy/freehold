@@ -81,12 +81,7 @@ func RunWholeWorldTeardown(cfg *config.Config, configPath string, removeDNS, yes
 	if err != nil {
 		return err
 	}
-	// Reach the console over its LAN IP when this box knows it: teardown
-	// destroys the k3s LXC, which hosts the Caddy edge fronting cfg.CPURL.
-	loginURL := cfg.CPURL
-	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		loginURL = "http://" + ip + ":8080"
-	}
+	loginURL := ConsoleLoginURL(cfg)
 	c, err := oplogin.Login(loginURL, secret)
 	if err != nil {
 		return fmt.Errorf("login to %s failed: %w", loginURL, err)
@@ -107,4 +102,24 @@ func RunWholeWorldTeardown(cfg *config.Config, configPath string, removeDNS, yes
 	}
 	fmt.Println("cleared recorded relay/k3s coordinates (vmid + ip) — the next build re-creates them")
 	return nil
+}
+
+// ConsoleLoginURL is the console HTTP base a box dials for the world verbs
+// (build/teardown/update/world): behind the gateway the CP's own address is
+// INTERNAL — the dial rides the gateway's 8080 DNAT (the NIP-98-gated
+// console; the flat-LAN world exposed it identically on the CP's LAN IP).
+// Elsewhere the CP's recorded LAN IP wins over the public URL: teardown
+// destroys the k3s LXC that hosts the Caddy edge fronting cfg.CPURL, so the
+// edge is not always there.
+func ConsoleLoginURL(cfg *config.Config) string {
+	if cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
+		if cfg.Proxy.Ip != nil && cfg.Lxc.Cp.Ip != nil {
+			return "http://" + config.StripCIDR(*cfg.Proxy.Ip) + ":8080"
+		}
+		return cfg.CPURL
+	}
+	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
+		return "http://" + ip + ":8080"
+	}
+	return cfg.CPURL
 }

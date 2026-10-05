@@ -23,6 +23,9 @@ func ApplyConfigDefaults(f *Flags, cfgPath string) error {
 	if f.Target == "" && cfg.Runner.Target != "" {
 		f.Target = cfg.Runner.Target
 	}
+	if f.Addr == "" && cfg.Runner.Addr != "" {
+		f.Addr = cfg.Runner.Addr
+	}
 	if f.RelayDomain == "" {
 		f.RelayDomain = cfg.RelayHost()
 	}

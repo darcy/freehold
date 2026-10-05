@@ -391,3 +391,179 @@ func TestDynamicRecordWithoutPackageFailsLoudly(t *testing.T) {
 		t.Fatalf("error should name the re-provision path: %v", err)
 	}
 }
+
+// TestSelfHostedRecordWithoutRunnerRowFailsLoudly pins the rebuild contract
+// for a self-hosted capability that lost its runner row: the identity lives
+// ON the target (nothing to re-derive CP-side) — staging says re-enroll,
+// never re-keys.
+func TestSelfHostedRecordWithoutRunnerRowFailsLoudly(t *testing.T) {
+	spec := &Spec{StateDir: t.TempDir()}
+	store := openTestStore(t)
+	if err := store.InsertCapability("dev-local-lxcadmin", state.CapabilityRecord{
+		Kind: "local", Address: "lxcadmin@192.168.30.50", Port: 8800,
+		Rosters: []string{"deployer"}, Hosted: state.HostedSelf, Host: "192.168.30.50",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := capabilityRunner{name: "dev-local-lxcadmin", kind: "local", port: 8800,
+		rosters: []string{"deployer"}, dynamic: true, selfHosted: true, host: "192.168.30.50"}
+	if err := spec.ensureCapabilityRunner(store, filepath.Join(spec.StateDir, "cp"), r, ""); err == nil {
+		t.Fatal("a self-hosted record without its runner row must fail loudly")
+	} else if !strings.Contains(err.Error(), "re-enroll") {
+		t.Fatalf("error should name the re-enroll path: %v", err)
+	}
+}
+
+// TestProvisionRunnerSelfHostedValidation pins the self-hosted guardrails:
+// hosted=self means kind=local, a LAN host for the pods to dial, and the
+// presented pubkeys from `runner enroll`; hosted is a two-valued field.
+func TestProvisionRunnerSelfHostedValidation(t *testing.T) {
+	spec := &Spec{CpaName: "freehold"}
+	fn := BuildProvisionRunner(spec, nil) // registry never reached by invalid args
+	nostr, enc := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	for _, tc := range []struct {
+		name string
+		args agent.ProvisionArgs
+		want string
+	}{
+		{"bad hosted value", agent.ProvisionArgs{Name: "dev-local-lxcadmin", Kind: "local",
+			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "cluster"}, "hosted must be"},
+		{"self needs kind local", agent.ProvisionArgs{Name: "dev-ssh-lxcadmin", Kind: "ssh",
+			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "self", Host: "192.168.30.50",
+			Pubkey: nostr, EncPubkey: enc}, `kind must be "local"`},
+		{"self needs host", agent.ProvisionArgs{Name: "dev-local-lxcadmin", Kind: "local",
+			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "self",
+			Pubkey: nostr, EncPubkey: enc}, "host is required"},
+		{"self needs pubkeys", agent.ProvisionArgs{Name: "dev-local-lxcadmin", Kind: "local",
+			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "self", Host: "192.168.30.50"},
+			"pubkey and enc_pubkey"},
+		{"self needs 64-hex pubkeys", agent.ProvisionArgs{Name: "dev-local-lxcadmin", Kind: "local",
+			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "self", Host: "192.168.30.50",
+			Pubkey: "nope", EncPubkey: enc}, "pubkey and enc_pubkey"},
+		{"self host must be bare (no port)", agent.ProvisionArgs{Name: "dev-local-lxcadmin", Kind: "local",
+			Address: "lxcadmin@h", GrantTo: []string{"deployer"}, Hosted: "self", Host: "192.168.30.50:8800",
+			Pubkey: nostr, EncPubkey: enc}, "BARE host"},
+		{"host is self-hosted-only", agent.ProvisionArgs{Name: "rtx-ssh-root", Kind: "ssh",
+			Address: "darcy@10.0.0.5", GrantTo: []string{"ai"}, Host: "10.0.0.99"}, "hosted=self field"},
+	} {
+		if _, err := fn(tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: want error %q, got %v", tc.name, tc.want, err)
+		}
+	}
+}
+
+// TestProvisionRunnerSelfHostedEnroll pins the enroll flow: the presented
+// pubkeys become the runner's record (NO CP-side package, no keypair minted),
+// a "pending" placeholder seals TO the presented key, the capability record
+// carries hosted/host, and the flow's hermetic failure comes at the relay
+// sync — everything before it is already on disk. A re-provision must present
+// the SAME pubkeys (the guest's identity IS the runner).
+func TestProvisionRunnerSelfHostedEnroll(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	reg, _ := testRegistry(t)
+	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
+	fn := BuildProvisionRunner(spec, reg)
+
+	encSecret := []byte(strings.Repeat("k", 32))
+	encPubRaw, err := crypto.X25519PublicKey(encSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encPub, nostrPK := hex.EncodeToString(encPubRaw), strings.Repeat("a", 64)
+	enroll := func(pk, enc string) (string, error) {
+		return fn(agent.ProvisionArgs{
+			Name: "dev-local-lxcadmin", Kind: "local", Address: "lxcadmin@192.168.30.50",
+			GrantTo: []string{"deployer"}, Hosted: "self", Host: "192.168.30.50",
+			Pubkey: pk, EncPubkey: enc,
+		})
+	}
+	if _, err := enroll(nostrPK, encPub); err == nil || !strings.Contains(err.Error(), "sync relay channel") {
+		t.Fatalf("the flow must reach the relay sync (hermetic fail), got %v", err)
+	}
+
+	// Everything before the sync landed on disk.
+	disk, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := disk.GetRunner("dev-local-lxcadmin")
+	if !ok {
+		t.Fatal("the enrolled runner must be recorded")
+	}
+	if rec.NostrPubkey != nostrPK || rec.EncPubkey != encPub || rec.PackageDir != "" || rec.McpAddr == nil ||
+		*rec.McpAddr != "192.168.30.50:8800" {
+		t.Fatalf("enrolled runner record: %+v", rec)
+	}
+	capability, ok := disk.GetCapability("dev-local-lxcadmin")
+	if !ok || !capability.SelfHosted() || capability.Host != "192.168.30.50" ||
+		capability.Kind != "local" || capability.Origin != state.OriginAgent {
+		t.Fatalf("capability record: %+v", capability)
+	}
+	// The placeholder seals TO THE PRESENTED key (aad = the name) — the CP
+	// never held a private half.
+	sec, ok := disk.GetSecret("dev-local-lxcadmin")
+	if !ok || sec.CiphertextHex == "" {
+		t.Fatal("the enroll must seal its placeholder")
+	}
+	blob, err := hex.DecodeString(sec.CiphertextHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := crypto.Open(encSecret, []byte("dev-local-lxcadmin"), blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plain) != "pending" {
+		t.Fatalf("placeholder = %q, want pending", plain)
+	}
+
+	// Re-provision, same pubkeys: adopts (reaches the sync again, no
+	// identity error). Mismatched pubkeys: refused — a different process
+	// claiming the name.
+	if _, err := enroll(nostrPK, encPub); err == nil || !strings.Contains(err.Error(), "sync relay channel") {
+		t.Fatalf("a same-key re-provision must adopt, got %v", err)
+	}
+	other := strings.Repeat("f", 64)
+	if _, err := enroll(other, encPub); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("a pubkey mismatch must be refused, got %v", err)
+	}
+}
+
+// TestAgentRunnerCoordsSelfHostedDialsTarget pins the coord dial host: a
+// self-hosted record's pods dial the record's Host, not the CP IP.
+func TestAgentRunnerCoordsSelfHostedDialsTarget(t *testing.T) {
+	spec := &Spec{StateDir: t.TempDir(), CpIP: "10.0.0.9"}
+	store := openTestStore(t)
+	store.InsertRunner("dev-local-lxcadmin", state.RunnerRecord{NostrPubkey: strings.Repeat("c", 64), Status: state.RunnerActive})
+	if err := store.InsertCapability("dev-local-lxcadmin", state.CapabilityRecord{
+		Kind: "local", Address: "lxcadmin@192.168.30.50", Port: 8800,
+		Rosters: []string{"deployer"}, Hosted: state.HostedSelf, Host: "192.168.30.50",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	coords := spec.agentRunnerCoords(store, "deployer")
+	if len(coords) != 1 {
+		t.Fatalf("deployer holds 1 door, got %v", coords)
+	}
+	if coords[0].URL != "http://192.168.30.50:8800" {
+		t.Fatalf("self-hosted coords must dial the record's host: %+v", coords[0])
+	}
+}
+
+// TestDynamicRunnersSelfHostedFromRecords pins the record → staging-table
+// mapping for self-hosted doors: selfHosted + host ride along so the rebuild
+// never starts a CP-side unit for them.
+func TestDynamicRunnersSelfHostedFromRecords(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.InsertCapability("dev-local-lxcadmin", state.CapabilityRecord{
+		Kind: "local", Address: "lxcadmin@192.168.30.50", Port: 8800,
+		Rosters: []string{"deployer"}, Hosted: state.HostedSelf, Host: "192.168.30.50",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runners := dynamicRunners(store)
+	if len(runners) != 1 || !runners[0].selfHosted || runners[0].host != "192.168.30.50" {
+		t.Fatalf("self-hosted mapping: %+v", runners)
+	}
+}

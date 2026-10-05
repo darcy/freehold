@@ -7,6 +7,8 @@ package update
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,13 +17,18 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
+	"freehold/contract/crypto"
 	"freehold/contract/version"
 	"freehold/freehold-cli/internal/artifact"
+	"freehold/freehold-cli/internal/certcred"
 	"freehold/freehold-cli/internal/common"
+	"freehold/freehold-cli/internal/cpdeploy"
 	"freehold/freehold-cli/internal/stages"
 	oplogin "freehold/freehold-cli/login"
+	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 )
@@ -85,7 +92,7 @@ func run(ctx context.Context, o options) error {
 		return check(ctx, cfg, channel, cacheDir, o)
 	}
 
-	unlock, err := lock()
+	unlock, err := lock(common.ConfigPath())
 	if err != nil {
 		return err
 	}
@@ -131,8 +138,21 @@ func run(ctx context.Context, o options) error {
 	eng.Stdin = bufio.NewReader(os.Stdin)
 
 	fmt.Println("→ deploying binaries + copying migration scripts")
-	if err := eng.RedeployCp(bins, set.MigrationsDir); err != nil {
+	dirs, err := eng.RedeployCp(bins, set.MigrationsDir)
+	if err != nil {
 		return err
+	}
+
+	// Seed the operator identity the NEW console already accepts (the deploy
+	// above shipped it): the memory-plane attestation mints every agent pod
+	// with it, and a world built before the operator secret existed fails its
+	// reconcile at create-CPA with "no owner key to attest". The build seeds
+	// the same secret; seeding here too makes `update` alone heal an old world
+	// instead of demanding a build-then-update dance. Best-effort: a failure
+	// surfaces through the reconcile's own attest error, which names the
+	// recovery.
+	if err := seedOperatorSecret(cfg); err != nil {
+		fmt.Printf("  (operator secret not seeded: %v — the reconcile names the recovery if it's needed)\n", err)
 	}
 
 	// Reconcile FIRST: the deploy stopped every freehold-runner* unit (the
@@ -144,6 +164,19 @@ func run(ctx context.Context, o options) error {
 	fmt.Println("→ reconciling the world (doors re-stage, migrations run in the build tail)")
 	if err := reconcileWorld(cfg); err != nil {
 		return fmt.Errorf("world reconcile failed (the deploy landed; run `freehold build` then `freehold update` to finish): %w", err)
+	}
+
+	// Refresh the guest-local revival script from the LIVE processes: the
+	// deploy-time script can only capture what ran at deploy — the reconcile
+	// just re-staged the doors (and a first build stages doors the deploy
+	// script never saw). A guest-handoff rollback then revives the world
+	// with every door, not until-the-next-build ones.
+	fmt.Println("→ refreshing the CP revival script (the doors' current argvs)")
+	lxc := dirs.VMID
+	if rerr := cpdeploy.RefreshReviveScript(hostTransport{eng.HostExecFunc()}, &cpdeploy.DeployCpSpec{
+		StateDir: dirs.StateDir, BinDir: dirs.BinDir, LXc: &lxc,
+	}); rerr != nil {
+		fmt.Printf("  (revival script refresh failed — the deploy-time version stands: %v)\n", rerr)
 	}
 
 	// A final migration sweep through the now-up agent-tools (the reconcile's
@@ -254,21 +287,34 @@ func check(ctx context.Context, cfg *config.Config, channel, cacheDir string, o 
 	return nil
 }
 
-// runMigrations runs the CP's pending scripts through the agent-tools
-// world_migrate tool (the same surface the CPA uses).
+// runMigrations runs the CP's pending scripts through the console's
+// /api/world-migrate (the console proxies into the agent-tools serve — the
+// registry lock lives in that process). Session-authed; no relay roster.
 func runMigrations(cfg *config.Config) error {
-	mc, err := common.WorldMCP(cfg)
+	c, err := common.ConsoleLogin(cfg)
 	if err != nil {
 		return err
 	}
-	text, err := common.CallAgentToolsText(mc, "world_migrate", map[string]interface{}{})
+	report, err := c.WorldMigrate()
 	if err != nil {
 		return err
 	}
-	if t := strings.TrimSpace(text); t != "" {
+	if t := strings.TrimSpace(report); t != "" {
 		fmt.Println(t)
 	}
 	return nil
+}
+
+// hostTransport adapts the engine's host exec to cpdeploy's transport (the
+// refresh re-ships the revival script with execs only — no uploads).
+type hostTransport struct{ fn provisioning.ExecFunc }
+
+func (t hostTransport) Exec(cmd string, timeoutS uint64) (*client.ExecOutcome, error) {
+	return t.fn(cmd, timeoutS)
+}
+
+func (t hostTransport) Upload(string, string, uint64) (uint64, error) {
+	return 0, fmt.Errorf("upload: not used by the revival-script refresh")
 }
 
 // reconcileWorld triggers the console's /api/world-build (the same trigger
@@ -284,10 +330,7 @@ func reconcileWorld(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	loginURL := cfg.CPURL
-	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		loginURL = "http://" + ip + ":8080"
-	}
+	loginURL := common.ConsoleLoginURL(cfg)
 	c, err := oplogin.Login(loginURL, key)
 	if err != nil {
 		return fmt.Errorf("console login at %s: %v", loginURL, err)
@@ -331,10 +374,18 @@ func cacheDir() (string, error) {
 	return d, nil
 }
 
-// lock guards against two concurrent updates.
-func lock() (func(), error) {
+// lock guards against two concurrent updates of the SAME world. The lock is
+// PER PROFILE (keyed by the resolved config path): two profiles on one box are
+// different worlds and must be able to update concurrently — a single shared
+// lock file made an unrelated profile's stale lock block the other.
+func lock(key string) (func(), error) {
 	d, err := cacheDir()
 	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(key))
+	d = filepath.Join(d, "locks", hex.EncodeToString(sum[:8]))
+	if err := os.MkdirAll(d, 0o700); err != nil {
 		return nil, err
 	}
 	p := filepath.Join(d, "update.lock")
@@ -344,9 +395,9 @@ func lock() (func(), error) {
 			// A stale lock (> 1h) is reclaimed.
 			if fi, serr := os.Stat(p); serr == nil && time.Since(fi.ModTime()) > time.Hour {
 				_ = os.Remove(p)
-				return lock()
+				return lock(key)
 			}
-			return nil, fmt.Errorf("another update is in progress (%s); remove it if stale", p)
+			return nil, fmt.Errorf("another update of this world is in progress (%s); remove it if stale", p)
 		}
 		return nil, err
 	}
@@ -366,6 +417,51 @@ func orDash(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// seedOperatorSecret ships the operator identity (the world's owner key) to the
+// CP when absent — the same sealed record `build` seeds, needed by the
+// memory-plane attestation the reconcile's create-CPA runs. Skipped when the
+// CP already holds it (the CP is the durable owner; a build never overwrites
+// it either).
+func seedOperatorSecret(cfg *config.Config) error {
+	client, err := common.ConsoleLogin(cfg)
+	if err != nil {
+		return err
+	}
+	names, err := client.SecretNames()
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if n == "operator" {
+			return nil
+		}
+	}
+	w, err := client.World()
+	if err != nil || w.ConsoleEncPubkey == "" {
+		return fmt.Errorf("no console enc pubkey from /api/world")
+	}
+	pub, err := hex.DecodeString(w.ConsoleEncPubkey)
+	if err != nil || len(pub) != 32 {
+		return fmt.Errorf("console enc pubkey not 32-byte hex")
+	}
+	opID, err := box.LoadIdentity(oplogin.Dir())
+	if err != nil {
+		return fmt.Errorf("read the operator identity ledger: %w (run `freehold login`)", err)
+	}
+	seal := func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) }
+	blob, err := certcred.CPSecretBlob("operator", "operator", map[string]string{
+		"nostr": opID.NostrSecretHex,
+	}, seal, pub)
+	if err != nil {
+		return err
+	}
+	if err := client.PutSecret("operator", blob); err != nil {
+		return err
+	}
+	fmt.Println("  · operator identity stored on the CP (attests agent memory)")
+	return nil
 }
 
 // Command returns the update command for root registration.

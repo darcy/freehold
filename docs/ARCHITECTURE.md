@@ -26,7 +26,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
         ▼
    Target: pct LXC (relay/CP) | qm VM (VPS host) | k8s (MVP only)
         │
-        └──backups──► PBS (scheduled vzdump of pct/qm) | TrueNAS | Backblaze B2
+        └──backups──► freehold snapshot (the plane) · freehold export (the data bundle)
+                      · freehold backup (restic → sftp/B2/any URI) | PBS | TrueNAS
 ```
 
 *   **One control plane = exactly ONE relay scope** (relay-as-scope). The CP
@@ -44,7 +45,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     first-run-wins `<pod>-identity` Secret via `secretKeyRef` (the nsec never
     rides the manifest); `restartPolicy: Never` keeps an intentional exit
     terminal (I5); no mgmt channel by design; no PVC — agent memory is
-    relay-persisted (kind 30174).
+    relay-persisted (kind 30174). The pod's workspace (its `/home/agent`
+    working directory) mounts a name-keyed dir on the durable plane
+    (`/srv/data/k8s-volumes/agent-home/<pod>` on the k3s guest via hostPath),
+    so files an agent creates survive pod re-applies and a rebuilt k3s guest;
+    the deploy stage re-creates + chowns the dir before every apply.
 
 *   **Agent placement:** every agent (CPA and created alike) runs on Buzz's
     `buzz-acp` remote-agent harness as a k3s pod (see `docs/POC.md`).
@@ -59,6 +64,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     ciphertext → inject the runner private key → rotate. No master key.
     Runner holds only ciphertext + its own key; decrypts in its own memory,
     uses in memory, forgets. Plaintext never on disk, never in agent context.
+    Two deliberate CP-held secrets, both sealed to the console identity: the
+    DNS/litellm creds (world-secrets, opened in memory at build), and the
+    OPERATOR's Nostr SIGNING key (`world-secrets/operator.json`, shipped by
+    the box build) — it attests agent memory (`contract/nipoa`) and, as the
+    operator's full signing key, also authorizes console logins and relay
+    owner-role actions: a CP compromise yields operator impersonation (the
+    same class as losing the operator box). Runner blobs still stay sealed:
+    nothing under the CP state dir opens one.
 
 *   **Grants are coarse:** agent ↔ runner (whitelist of Nostr pubkeys);
     dedicated runner per service by default. Readiness = the runner's own
@@ -78,10 +91,17 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (the business path). The k8s layer (Chunks 6–7) and everything above the
     host driver run identically regardless of substrate.
 
-*   **Backups are the load-bearing wall — and most teams won't have a PBS
-    server:** the *whole* backup chain (LXC/VZ+T pl8755, KVM+PBS) depends on
-    a PBS host. Where one doesn't exist, the durable half of the
-    `/srv/data` convention must land on TrueNAS and/or Backblaze B2.
+*   **Backups are the load-bearing wall — and no PBS VM is required for
+    them:** `freehold snapshot` (every durable-plane mount under one name,
+    guarded rollback), `freehold export` (the durable plane's
+    data + config in one gzip bundle — no guest rootfs, guests are
+    reconstructible), and `freehold backup` (restic on the substrate host to an
+    arbitrary URI — sftp to a NAS, B2 off-site) cover the chain with the
+    tools the system already runs; `docs/DATA.md` is the build plan. Where a
+    PBS server exists it stays a target, not a dependency. Snapshot is a
+    Proxmox-provider capability (ZFS / LVM-thin); export (a tar of the
+    recorded plane mounts) and restic are universal — a VPS world's
+    off-site and export are the same commands with different paths.
 
 *   **The durable half lands FIRST (Chunk 3; see `docs/POC.md`):**
     `/srv/data` — everything that survives rebuild: `/srv/data/relay` (all
@@ -111,7 +131,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `/var/lib/docker`, backed up (`backup=1`):** the relay's
     Postgres/Redis/MinIO/git data are docker *named volumes* under
     `/var/lib/docker/volumes/`, and freehold ships no buzz patch, so
-    relocating it would silently exclude the relay DBs from backup.
+    relocating it would silently exclude the relay DBs from backup. The
+    export/backup verbs still skip the daemon root's STORAGE-DRIVER dirs
+    (`fuse-overlayfs`/`overlay2` — the pulled images' unpacked layers,
+    812M of a 1.0G root live-verified): `docker compose pull` re-creates
+    them; the volumes stay in.
 
 *   **Durable PVCs are pinned under `/srv/data` — never the daemon root.**
     k3s's default `local-path` provisioner stores PVCs *under the rancher
@@ -138,8 +162,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
   repro of the Rust `core`), `wire/` (envelopes), `client/` (the signed MCP
   client), `config/`, `console/` (the console client), `relay/` (the relay HTTP
   client), `delegate/` (the kind-9 delegation envelopes), `identity/` (the
-  identity.json format loader), and `worldfacts/` (the world-inventory wire
-  shape). The CP's `state/` store lives in `control-plane/` (server-only).
+  identity.json format loader), `nipoa/` (the NIP-OA owner attestation — the
+  `["auth", owner, conditions, sig]` tag that rides every agent pod as
+  `BUZZ_AUTH_TAG` and gives the agent's `buzz mem` its owner; conditions
+  bounded to `kind=30174`, self-attestation refused), and `worldfacts/` (the
+  world-inventory wire shape). The CP's `state/` store lives in
+  `control-plane/` (server-only).
 
 * **Contents:** NIP-44 v2 encryption (chacha20poly1305, bech32, hkdf-sha256,
   sha256, hex) and the signer (`CryptoProvider` over `CryptoDyn` —
@@ -199,13 +227,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`freehold-agent-tools` is a distinct SEMANTIC surface on the CP**, not
     the runner's `exec`. Its Go methods (`control-plane/api/agent/tools.go`,
-    `create_agent`/`provision_runner`/`grant_agent`/`manage_agent`) are served
+    `create_agent`/`provision_runner`/`revoke_runner`/`grant_agent`/`manage_agent`) are served
     in-process by
      `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
      authorized per call against the server's own relay roster (NIP-29 channel
      + 39002, fail-closed) **and scoped by caller class**: a pubkey in the CP's
-     agent registry is an AGENT (create/manage + the `provision_runner`
-     carve-out — the world_* actions AND `grant_agent` are denied server-side,
+     agent registry is an AGENT (create/manage + the `provision_runner` and
+     `revoke_runner` carve-outs — the world_* actions AND `grant_agent` are denied server-side,
      so the CPA's boundary cannot be bypassed by calling the server directly);
      a roster
      member not in the registry is an OPERATOR (full toolset incl. world_* and
@@ -219,8 +247,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
      The build dogfoods
      `create_agent` to bring the CPA up. It
     also carries the CP world-action surface (`world_status` / `world_teardown`
-    / `world_migrate` / `world_build` / `world_exec` / `world_register_facts` /
-    `world_authorize_door` / `world_revoke_door`, operator-scoped) so an
+    / `world_migrate` / `world_build` / `world_register_facts` — the operator
+    world verbs moved to console routes, so only `world_migrate` remains
+    operator-reachable there, via the console's proxy; the rest is now
+    unreachable surface, kept for the migration-window contract) so an
     operator box can
     "login + trigger" the world: `world_build` runs the CP's owned
     bring-up/reconcile stages (`platform/provisioning/stages`) through its
@@ -237,7 +267,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     shared teardown engine through the co-located runner — relay/k3s removed and
     the CP-side agent-tools process stopped, while the CP + its runner survive
     (`teardown` is the inverse of `build`; `uninstall` removes the CP) — so a
-    login-only box can also tear the world down. `world_exec` is the **drive-through-CP exec**
+    login-only box can also tear the world down. **`/api/world-exec`** and
+    **`/api/world-door`** complete the set: the session-authed drive-through-CP
+    exec and DOOR_SPEC authorize/revoke a thin box (and `freehold login`'s door
+    present) use — the operator's trust root is the console session, never the
+    relay roster. **`/api/world-migrate`** proxies into the agent-tools serve
+    (signed as the console — the serve's local admin peer) because the
+    migration scripts must run in THAT process to take the registry write lock.
+    `world_exec` is the **drive-through-CP exec**
     surface: a THIN login
     box (no local `[runner]`) runs commands on the CP's co-located runner via
     this tool — so a login box is functionally equivalent to the box that
@@ -250,7 +287,14 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     assembly** (`agenttools.WorldStatus`): the console folds it into its public
     `/api/world` (consumed by the TUI and `freehold status`), and the
     `/mcp world_status` tool shares that same assembly for direct MCP callers —
-    so the two surfaces can never diverge. `grant_agent` is
+    so the two surfaces can never diverge. The toolset's callers are the
+    relay-roster members (the AGENT surface — the CPA, membered at create)
+    plus two signature-verified LOCAL PEERS that are never roster members:
+    the console (`/api/world-migrate` proxies into the serve — the registry
+    lock lives there — so the console peer may call `world_migrate` only) and
+    the operator (`--owner-pubkey`, full operator scope as break-glass, which
+    also keeps a stale CLI's operator-signed migration sweep working across a
+    version jump). `grant_agent` is
     **operator-scoped and wired through the absorbed console-owner
     credential**: the server loads
     the console's own identity from its state dir (0600 durable plane) and
@@ -258,22 +302,43 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     runner re-reads its signed 39002 roster per call, so the grant lands
       without a restart (missing credential fails closed; agents are denied with
       `-32003`, since a grant hands direct exec access to the runner). The
-      ONE carve-out is the CPA's `provision_runner` (grants on the fly): it
+      carve-out is the CPA's capability pair: `provision_runner` (grants on the fly): it
       stages a NEW capability runner — keypair + sealed credential + private
       channel + a systemd unit on the CP guest — records it as a dynamic
       capability (re-staged adopt-only on every build; fixed port so pod
       coords stay stable), grants the named agents onto its roster live, and
-      re-applies the grantees' pods with coords resolved from state. It never
+      re-applies the grantees' pods with coords resolved from state. It also
+      ENROLLS a runner resident on its own target (`hosted=self`, kind
+      `local`): the target box holds the runner-client and `runner enroll`
+      minted its identity ON the box — the CP records the presented pubkeys,
+      seals credentials to them, starts nothing, and pods dial the box's LAN
+      address directly; a re-provision must present the same pubkeys. It never
       widens an existing runner, `agent_grants: off` on the CP state is the
       server-side kill switch (`freehold-console grants-mode`), and the
       in-thread-vs-DM confirmation discipline lives in the granting skill
       (`docs/POC_GRANTS.md`). An api-kind door provisions EMPTY — the agent
       DMs the operator the door's own console page (`/runner/<name>`), whose
       kind-aware fill form seals the credential via `/api/rotate` and
-      restarts the door's unit; no credential ever transits agent chat. The
+      restarts the door's unit (a self-hosted runner instead returns the
+      package JSON — the grantee writes `secrets.json` on the guest through
+      its own door and restarts the unit there); no credential ever transits
+      agent chat. Its counterpart is the CPA's `revoke_runner` (take-away on
+      the fly), gated by the SAME `agent_grants` switch: with `revoke_from` it
+      drops named grantees from a door's roster AND from the dynamic capability
+      record that the build re-grants from (a relay-only removal would be
+      silently undone by the next build), then re-applies their pods without
+      it; with it empty it retires the whole door — channel folded but kept
+      (its audit stream stays queryable), the CP's sealed credential erased and
+      re-opened to prove it, the unit stopped where the build hosts it, the
+      record dropped. Each leg self-reports `[verified]` or `[UNVERIFIED]`, and
+      the substrate credential is handed to Compute rather than touched. A
+      retired name is refused to the agent in both directions until an
+      operator re-enables it by provisioning the door from the console. The
      `platform/migrations` queue — the CP's repair/catch-up scripts for
      versioned config/prompt/repair changes that don't have clean desired-state
-     semantics — runs from two entry points: the `world_migrate` tool and the
+     semantics — runs from two entry points: the `world_migrate` tool (the
+     console's `/api/world-migrate` proxies into the serve, signed as its
+     local admin peer, because the registry lock lives there) and the
      tail of `world_build`. Migrations are **versioned script files** (Omarchy's
      `<epoch>.sh` convention — one timestamped shell file per migration, shipped
      to the CP by `install`/`update`, run in ascending order with
@@ -338,7 +403,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
     Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
     recheck the world, `w` open the web console, `l` log in with the operator nsec,
-    `p`/`x`/`g` provision/revoke/grant. Build/teardown run from the shell.
+    `p`/`x`/`g` provision/revoke/grant, `s` edit the operator settings
+    (today: the agent pods' timezone). Build/teardown run from the shell.
     (The `s` Runners-source toggle is gone: the box-local `state.json` mirror
     is deleted — the Runners view reads the console `/api/overview` only. The
     CP-lifecycle door model — implemented as `world_authorize_door` /
@@ -447,7 +513,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     ascending via `bash`; the CP-owned
     build's IaC is the Terraform module embedded in
     **`control-plane/api/cpbuild/terraform/`** (shipped by the console to the
-    box at `/srv/data/freehold-tf`): the substrate (durable plane + cp/relay/k3s
+    box at the world's own root `/srv/data/freehold-tf-<dashed-domain>`, with its
+    state beside it — the shared `/srv/data/freehold-tf` survives only as a
+    legacy-adoption source): the substrate (durable plane + cp/relay/k3s
     LXCs + k3s bring-up) is exec-first `null_resource` shell, while the SERVICE
     definitions (`postgres.tf` / `litellm.tf` / `caddy.tf`) are real
     `kubernetes`-provider resources — the deterministic static files that define
@@ -473,7 +541,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
     | Department | Domain |
     | --- | --- |
-    | **Network** | The network surface: access & exposure — external/public proxy, Tailscale, internal proxy, exposure verification |
+    | **Network** | The network surface: access & exposure — external/public proxy, Tailscale, internal proxy, exposure verification (`docs/NETWORK.md`) |
     | **Data** | Data plane: backup/off-site, DR planning, scheduling, restore verification |
     | **Compute** | The box itself: CPU/RAM/disk, Proxmox LXC/Kube provisioning, remote (Vultr-type) provisioning, plus the monitoring tooling it needs. Not what runs on top |
     | **AI** | LiteLLM/provider setup & aliases, local AI config, **AI hardware** (local-AI accelerators like an RTX 3090 or DGX Spark — provisioned and tuned by AI, separate from Compute's general resources), agent optimization, prompt/skill management, agent debugging |
@@ -502,8 +570,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **The four departments are installed as part of the core build** — each a
     pod on the same harness as the CPA, created through the same audited
-    `create_agent`. Each joins the private `#freehold` plus its own **private**
-    `#freehold-<department>` channel, and the CPA is added to every channel. Each
+    `create_agent`. All join the private `#freehold` channel (there are no
+    per-department channels; conversations happen where they already are,
+    with #freehold the fallback every core agent belongs to). Each
     department also holds **capability runners** (`stageDepartmentRunners`):
     one runner per capability its role needs — named
     `<target>-<protocol>-<identity>` (`pve-ssh-root` shared by
@@ -518,7 +587,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     coords) never see exec. A capability a department doesn't hold yet ships
     as its runner when the capability lands — never by widening a runner's
     package; the CPA's `provision_runner` stages such a door on the fly (a
-    dynamic capability record re-staged adopt-only every build). Status
+    package; the CPA's `provision_runner` stages such a door on the fly (a
+    dynamic capability record re-staged adopt-only every build), or enrolls a
+    runner RESIDENT on the box itself (`hosted=self`) when the box holds the
+    runner-client — the exec is native on that guest — and its `revoke_runner`
+    retires one again. Status
+    language is
     language is
     uniform, runner → service → department: 🟢 all checked / 🟡 some checks
     missing / 🔴 none.
@@ -531,10 +605,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **Every non-custom agent is oriented the same way.** The CPA and the four
     departments are prefixed with a shared system-orientation block: the source
-    repo URL (configurable; upstream default), read-it-on-boot + keep a memory +
-    re-check periodically because the repo is active, and the "be loud" rule —
-    surface problems and missing access to freehold and the operator, never
-    silently. Custom agents (those the CPA creates on the fly) are exempt.
+    repo URL (configurable; upstream default) with **real read access** (the repo
+    is public — clone and read from `main`; write access is unwired, so agents
+    consult but never push), read-it-on-boot + keep a memory + re-check
+    periodically because the repo is active, the VISION-is-the-why /
+    ARCHITECTURE-is-the-how pairing, and the "be loud" rule — surface problems
+    and missing access to freehold and the operator, never silently. Custom
+    agents (those the CPA creates on the fly) are exempt.
 
 ### `agents/freehold/prompt.md` (the CPA's purpose)
 
@@ -556,14 +633,18 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     departments are reachable by anyone; what the CPA routes is capability work,
     not conversation.
 
-*   It is **conversation + agent-creation + grant-giving** in this phase: it
-    calls the CP toolset's `create_agent` / `provision_runner` /
+*   It is **conversation + agent-creation + capability governance** in this phase: it
+    calls the CP toolset's `create_agent` / `provision_runner` / `revoke_runner` /
     `manage_agent` (through the
     `freehold-agent-tools mcp` stdio bridge, signed as its own nsec and
     authorized by the server's roster). `provision_runner` stages a NEW
     capability runner and grants agents onto it under the granting skill's
     rules (`agents/freehold/skills/granting.md`, composed into its prompt);
-    grants onto runners it did not provision stay operator-scoped. It does not
+    `revoke_runner` is its counterpart — it removes named grantees from a door's
+    roster or retires a door the agent flow provisioned outright, each leg
+    reporting whether it was verified, and a retired name stays refused to the
+    agent until an operator re-enables it from the console. Grants (and take-backs)
+    on runners it did not provision stay operator-scoped. It does not
     run arbitrary `exec` or
     provision targets itself — that boundary is unchanged: reasoning decides
     *what* to do, the deterministic runner/CP layer does it auditably.
@@ -590,6 +671,17 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     shipped) that signs readiness probes against each runner — no side door,
     the runner still fails closed. `contract/console` is the Go client that
     talks to it.
+
+*   **Operator settings live in CP state** (`state.Settings`, edited via
+    `GET/POST /api/settings` — the console web's settings card, the TUI's `s`
+    form, and `freehold-console settings`; the deploy seeds the box's own
+    timezone if-empty). The first setting is `operator_tz`: the IANA timezone
+    agent pods run (`TZ` env, the node's zoneinfo mounted read-only, and an init
+    container that copies the zone file to an emptyDir the main container mounts
+    over `/etc/localtime` — buzz's harness env-clears before spawning the MCP
+    servers, so the env alone never reaches a tool shell; the file does. A node
+    without the zone's file degrades to UTC; empty = pods run UTC). The build
+    reads it fresh per pod apply, so an edit lands on the next create/rebuild.
 
 *   **`secrets.json` holds ciphertext only** (pubkeys + sealed blobs; no
     master key). `providers.json` (control-plane only) holds opaque `params`
@@ -825,8 +917,8 @@ single funnel for `pve.<verb>`, `container.<verb>`, `storage.*`, `service.*`,
     department-owned capability is executed by that department's identity and
     its raw grant attaches there, never to a custom agent. Service lifecycle is
     not a department — the agent that created a service owns it. The four are installed
-    at build, in the private `#freehold` plus a private `#freehold-<department>` channel with the CPA
-    in all; only the identity/grant separation is locked.
+    at build, all in the private `#freehold` channel; only the identity/grant separation is
+    locked.
 
 *   **Buzz required; the management relay is created by the install; one
     relay per control plane.**

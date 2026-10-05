@@ -111,19 +111,81 @@ type CapabilityRecord struct {
 	// only records the agent flow may re-provision/grant onto) or "operator"
 	// (the console's rosters path — rebuild-safe but agent-untouchable). ""
 	// reads as "agent" (records predate the field).
-	Origin    string `json:"origin,omitempty"`
-	CreatedAt uint64 `json:"created_at"`
+	Origin string `json:"origin,omitempty"`
+	// Hosted is where the runner process lives: "" (the CP guest — the CP
+	// stages and restarts its systemd unit) or "self" (resident on the
+	// target: the runner was installed ON the target box — e.g. a sandbox
+	// LXC — and enrolled with presented pubkeys; the CP never holds its
+	// identity, ships no package, and starts nothing for it).
+	Hosted string `json:"hosted,omitempty"`
+	// Host is a self-hosted runner's dial target — the box's pinned name (a
+	// bare host; the CP allocates the port) so a re-IPed guest keeps its
+	// coords. Pod coords dial it instead of the CP IP.
+	Host string `json:"host,omitempty"`
+	// EnrollConfirmedAt is when the operator CONFIRMED the presented pubkeys
+	// on the door page (against the guest's own `runner enroll` output /
+	// Compute's audited report). Until then the console refuses the
+	// credential fill — the barrier that keeps a compromised provisioning
+	// agent from sealing to its own key.
+	EnrollConfirmedAt *uint64 `json:"enroll_confirmed_at,omitempty"`
+	CreatedAt         uint64  `json:"created_at"`
 }
 
 // Capability origins.
 const (
 	OriginAgent    = "agent"
 	OriginOperator = "operator"
+	// HostedSelf marks a runner resident on its own target (the runner-client
+	// enroll flow); "" is the CP-guest hosting.
+	HostedSelf = "self"
 )
 
-// AgentProvisioned reports whether the CPA's flow owns this record.
+// AgentProvisioned reports whether the CPA's flow owns this record. Strict:
+// only an explicit "agent" counts. An empty Origin reads as operator — the
+// safe direction — because the console stamps "operator" and the agent flow
+// stamps "agent", so a record WITHOUT one predates the field and its
+// provenance is unprovable; an unset provenance must never widen what the
+// agent surface may grant onto or take away. The cost lands on worlds with
+// records from before the field existed: those doors are operator-owned now,
+// and the console's ordinary re-provision re-enables them.
 func (r CapabilityRecord) AgentProvisioned() bool {
-	return r.Origin == "" || r.Origin == OriginAgent
+	return r.Origin == OriginAgent
+}
+
+// RetiredCapability is the guard note a capability door leaves when it is
+// retired: when it went away, who retired it, and who held the roster. It
+// makes the retirement auditable AND keeps the name out of provision_runner's
+// reach until an operator clears it — an agent may not re-mint a door it was
+// just told to take away. It is deliberately NOT a permanent tombstone:
+// re-provisioning the name clears the note, so a retired capability is
+// re-enablable by the ordinary provision flow.
+type RetiredCapability struct {
+	// RevokedAt is when the retirement happened (unix seconds).
+	RevokedAt uint64 `json:"revoked_at"`
+	// RetiredBy is the provenance of the take-down: "agent" (the CPA's
+	// revoke_runner) or "operator" (the console).
+	RetiredBy string `json:"retired_by,omitempty"`
+	// LastRoster is the roster the door carried at retirement — the record of
+	// which agents the capability was taken away from.
+	LastRoster []string `json:"last_roster,omitempty"`
+}
+
+// SelfHosted reports whether the runner process lives on the target itself
+// (the CP holds no identity, ships no package, starts no unit for it).
+func (r CapabilityRecord) SelfHosted() bool {
+	return r.Hosted == HostedSelf
+}
+
+// Settings is the operator-editable control-plane configuration (the console
+// web / TUI / `freehold-console settings` all write it; the build reads it).
+// Typed fields, not a map: a new setting is a field with a known JSON shape.
+// The group is a pointer in ControlPlaneState, so old state files (no key)
+// unmarshal to nil and read as zero values — no migration needed.
+type Settings struct {
+	// OperatorTZ is the IANA timezone the operator lives in (e.g.
+	// "America/Chicago"). Agent pods get it as TZ (+ the node's zoneinfo
+	// mounted) so their clocks report local time; empty = pods run UTC.
+	OperatorTZ string `json:"operator_tz,omitempty"`
 }
 
 // ControlPlaneState mirrors the Rust ControlPlaneState serde repr.
@@ -133,23 +195,29 @@ type ControlPlaneState struct {
 	DNS     map[string]DnsRecord    `json:"dns"`
 	// Services is the world-services health registry (k3s/litellm/caddy coords),
 	// recorded at build and served on /api/world for management boxes.
-	Services         map[string]WorldService `json:"services,omitempty"`
+	Services map[string]WorldService `json:"services,omitempty"`
 	// Capabilities is the dynamic capability-runner table (the provision_runner
 	// flow's records; the static half lives in cpbuild.capabilityRunners).
-	Capabilities     map[string]CapabilityRecord `json:"capabilities,omitempty"`
+	Capabilities map[string]CapabilityRecord `json:"capabilities,omitempty"`
+	// RetiredCapabilities holds the guard notes for doors the CPA's
+	// revoke_runner retired (see RetiredCapability). The name stays refused by
+	// provision_runner until an operator clears the note — by re-provisioning
+	// the name, or by the console's "re-enable" action.
+	RetiredCapabilities map[string]RetiredCapability `json:"retired_capabilities,omitempty"`
 	// AgentGrants is the agent-grant mode: "confirm" (default — the CPA grants
 	// when the operator's ask is in its own thread, else DMs for a yes), "auto"
 	// (grants land unconfirmed), "off" (server-denies agent provisioning).
-	AgentGrants      *string                 `json:"agent_grants,omitempty"`
-	ResolverDomain   *string                 `json:"resolver_domain,omitempty"`
-	ResolverWildcard *DnsWildcard            `json:"resolver_wildcard,omitempty"`
-	Agents           map[string]AgentRecord  `json:"agents"`
-	RelayHost        *string                 `json:"relay_host,omitempty"`
-	Admins           []string                `json:"admins"`
-	RelayURL         *string                 `json:"relay_url,omitempty"`
-	RelayPubkey      *string                 `json:"relay_pubkey,omitempty"`
-	AgentToolsURL    *string                 `json:"agent_tools_url,omitempty"`
-	AgentToolsPubkey *string                 `json:"agent_tools_pubkey,omitempty"`
+	AgentGrants      *string                `json:"agent_grants,omitempty"`
+	Settings         *Settings              `json:"settings,omitempty"`
+	ResolverDomain   *string                `json:"resolver_domain,omitempty"`
+	ResolverWildcard *DnsWildcard           `json:"resolver_wildcard,omitempty"`
+	Agents           map[string]AgentRecord `json:"agents"`
+	RelayHost        *string                `json:"relay_host,omitempty"`
+	Admins           []string               `json:"admins"`
+	RelayURL         *string                `json:"relay_url,omitempty"`
+	RelayPubkey      *string                `json:"relay_pubkey,omitempty"`
+	AgentToolsURL    *string                `json:"agent_tools_url,omitempty"`
+	AgentToolsPubkey *string                `json:"agent_tools_pubkey,omitempty"`
 }
 
 // StateStore wraps the in-memory control-plane state with atomic-0600 save.
@@ -207,6 +275,9 @@ func ensureMaps(cp *ControlPlaneState) {
 	}
 	if cp.Capabilities == nil {
 		cp.Capabilities = map[string]CapabilityRecord{}
+	}
+	if cp.RetiredCapabilities == nil {
+		cp.RetiredCapabilities = map[string]RetiredCapability{}
 	}
 	if cp.Agents == nil {
 		cp.Agents = map[string]AgentRecord{}
@@ -360,12 +431,48 @@ func (s *StateStore) InsertCapability(name string, rec CapabilityRecord) error {
 		s.state.Capabilities = map[string]CapabilityRecord{}
 	}
 	s.state.Capabilities[name] = rec
+	// Re-enabling the name (a re-provision of a retired door, by the operator's
+	// console path) drops its retirement guard — see RetiredCapability.
+	delete(s.state.RetiredCapabilities, name)
 	return s.Save()
 }
 
 // RemoveCapability drops a dynamic capability-runner spec + saves.
 func (s *StateStore) RemoveCapability(name string) error {
 	delete(s.state.Capabilities, name)
+	return s.Save()
+}
+
+// GetRetired returns a retired capability's guard note.
+func (s *StateStore) GetRetired(name string) (RetiredCapability, bool) {
+	r, ok := s.state.RetiredCapabilities[name]
+	return r, ok
+}
+
+// InsertRetired records a retirement guard note + saves: from here the name is
+// refused to the agent surface in BOTH directions (revoke_runner and
+// provision_runner), until an operator's record write clears it.
+func (s *StateStore) InsertRetired(name string, rec RetiredCapability) error {
+	if s.state.RetiredCapabilities == nil {
+		s.state.RetiredCapabilities = map[string]RetiredCapability{}
+	}
+	s.state.RetiredCapabilities[name] = rec
+	return s.Save()
+}
+
+// ConfirmEnrollment stamps the operator's pubkey confirmation on a
+// self-hosted capability record (the door page's confirm — the barrier that
+// binds the credential fill to the guest's own `runner enroll` output).
+func (s *StateStore) ConfirmEnrollment(name string, at uint64) error {
+	rec, ok := s.state.Capabilities[name]
+	if !ok {
+		return fmt.Errorf("capability %s not found", name)
+	}
+	if !rec.SelfHosted() {
+		return fmt.Errorf("capability %s is not self-hosted — nothing to confirm", name)
+	}
+	rec.EnrollConfirmedAt = &at
+	s.state.Capabilities[name] = rec
 	return s.Save()
 }
 
@@ -417,6 +524,47 @@ func (s *StateStore) AgentToolsPubkey() *string { return s.state.AgentToolsPubke
 func (s *StateStore) SetAgentToolsPubkey(p *string) error {
 	s.state.AgentToolsPubkey = p
 	return s.Save()
+}
+
+// Settings returns the operator settings (nil = all defaults).
+func (s *StateStore) Settings() *Settings { return s.state.Settings }
+
+// SetSettings replaces the operator settings + saves.
+func (s *StateStore) SetSettings(set *Settings) error {
+	s.state.Settings = set
+	return s.Save()
+}
+
+// ValidOperatorTZ reports whether tz is a settings-writable operator
+// timezone: empty (= unset, pods run UTC) or an IANA zone name. Go's "Local"
+// special case is refused — it loads fine but no musl/glibc pod resolves it,
+// so it would silently read as UTC while looking like a setting (and the
+// deploy's seed would preserve it forever via --if-empty).
+func ValidOperatorTZ(tz string) bool {
+	if tz == "" {
+		return true
+	}
+	if tz == "Local" {
+		return false
+	}
+	_, err := time.LoadLocation(tz)
+	return err == nil
+}
+
+// LoadReadOnly reads state.json from dir WITHOUT opening a writable store —
+// the read a second process (the agent-tools serve) does per build so a
+// console-side settings edit is visible without a serve restart. The state
+// store is single-writer by design; this never writes.
+func LoadReadOnly(dir string) (*ControlPlaneState, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, StateFile))
+	if err != nil {
+		return nil, err
+	}
+	var cp ControlPlaneState
+	if err := json.Unmarshal(raw, &cp); err != nil {
+		return nil, fmt.Errorf("malformed state json: %w", err)
+	}
+	return &cp, nil
 }
 
 // Dir returns the state dir.

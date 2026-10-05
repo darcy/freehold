@@ -60,7 +60,9 @@ func defaultRisk(kind string) *string {
 	return &v
 }
 
-func isPubkey(s string) bool {
+// IsPubkey reports whether s is a 64-char lowercase/mixed hex string (a
+// pubkey presented by an enrolling runner or an agent grant).
+func IsPubkey(s string) bool {
 	if len(s) != 64 {
 		return false
 	}
@@ -92,7 +94,7 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		return nil, fmt.Errorf("invalid runner name %q: must be a bare name (no '/', no leading '.')", req.Name)
 	}
 	for _, g := range req.Grants {
-		if !isPubkey(g) {
+		if !IsPubkey(g) {
 			return nil, fmt.Errorf("invalid agent pubkey %q: must be 64 hex chars", g)
 		}
 	}
@@ -181,6 +183,66 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		EncPubkey:   encPubkeyHex,
 		PackageDir:  req.RunnerDir,
 	}, nil
+}
+
+// EnrollRunner registers a SELF-HOSTED runner — one whose identity was minted
+// ON its own host (the runner-client's `runner enroll`) and whose pubkeys were
+// presented through an audited surface (provision_runner hosted=self). The CP
+// records the pubkeys and seals credentials TO them; it never sees a private
+// key, ships no package (no PackageDir), and starts no unit — the target runs
+// its own process. mcpAddr (host:port, optional) feeds the console's readiness
+// probe across the LAN.
+func EnrollRunner(store *state.StateStore, name, kind, address, nostrPubkey, encPubkey, mcpAddr string) (*state.RunnerRecord, error) {
+	if req := name; req == "" || strings.Contains(req, "/") || strings.HasPrefix(req, ".") || req == "local" {
+		return nil, fmt.Errorf("invalid runner name %q: must be a bare name (no '/', no leading '.')", req)
+	}
+	if !IsPubkey(nostrPubkey) {
+		return nil, fmt.Errorf("invalid nostr pubkey %q: must be 64 hex chars", nostrPubkey)
+	}
+	if !IsPubkey(encPubkey) {
+		return nil, fmt.Errorf("invalid enc pubkey %q: must be 64 hex chars", encPubkey)
+	}
+	if r, ok := store.GetRunner(name); ok {
+		if r.Status == state.RunnerRevoked {
+			return nil, fmt.Errorf("runner %s is revoked — enroll under a new name", name)
+		}
+		return nil, fmt.Errorf("runner %s already exists", name)
+	}
+	// A "pending" placeholder sealed to the PRESENTED key — the same empty
+	// shell an api door ships; the console's fill replaces it with the real
+	// credential (RotateSecretSelfHosted).
+	encPub, err := hexToArr(encPubkey)
+	if err != nil {
+		return nil, err
+	}
+	sealed, err := crypto.Seal(encPub[:], []byte(name), []byte("pending"))
+	if err != nil {
+		return nil, err
+	}
+	ciphertextHex := hex.EncodeToString(sealed)
+	now := uint64(time.Now().Unix())
+	rec := state.RunnerRecord{
+		NostrPubkey: nostrPubkey,
+		EncPubkey:   encPubkey,
+		Status:      state.RunnerActive,
+		CreatedAt:   now,
+		RiskLevel:   defaultRisk(kind),
+	}
+	if mcpAddr != "" {
+		a := mcpAddr
+		rec.McpAddr = &a
+	}
+	store.InsertRunner(name, rec)
+	store.InsertSecret(name, state.SecretRecord{
+		Runner: name, Kind: kind, Address: address,
+		CiphertextHex: ciphertextHex, CreatedAt: now,
+	})
+	if err := store.Save(); err != nil {
+		store.RemoveRunner(name)
+		store.RemoveSecret(name)
+		return nil, err
+	}
+	return &rec, nil
 }
 
 // identityGenerate writes a fresh identity.json into dir and returns the

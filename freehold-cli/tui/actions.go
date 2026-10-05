@@ -11,6 +11,7 @@ package tui
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +27,7 @@ import (
 	"freehold/contract/identity"
 	"freehold/freehold-cli/login"
 	"freehold/platform/services/certificates/letsencrypt"
+	"freehold/providers/proxmox/drive"
 )
 
 type consoleClient struct {
@@ -87,11 +89,13 @@ const (
 	flowRotate
 	flowRevoke
 	flowGrant
+	flowSettings
 	flowBootstrap
 	flowDeployRelay
 	flowDeployCp
 	flowTeardown
 	flowRebuild
+	flowSnapshotRollback
 )
 
 type tuiFlow struct {
@@ -103,6 +107,10 @@ type tuiFlow struct {
 	// recorded config when one exists (see flowDefaults). Blank = no
 	// recorded value; the prompt's own "(blank = N)" semantics apply.
 	Defaults [11]string
+	// SnapList is the snapshot-rollback flow's live picker source: the
+	// plane's snapshot names (newest first), fetched at `S`. Rendered above
+	// the prompt so picking means reading, not remembering.
+	SnapList []string
 }
 
 type flowMsg struct {
@@ -198,6 +206,8 @@ func ncols(k flowKind) int {
 		return 4
 	case flowTeardown:
 		return 2
+	case flowSnapshotRollback:
+		return 2
 	case flowRebuild:
 		return 11
 	default:
@@ -229,6 +239,8 @@ func promptLabel(k flowKind, step int) string {
 			return "runner name"
 		}
 		return "agent pubkey (64-hex)"
+	case flowSettings:
+		return "operator timezone (IANA, e.g. America/Chicago — blank = UTC)"
 	case flowBootstrap:
 		switch step {
 		case 0:
@@ -264,6 +276,13 @@ func promptLabel(k flowKind, step int) string {
 			return "destroy tenant data too? (yes | no)"
 		default:
 			return "CONFIRM destroying the whole world (all LXCs, door key KEPT)? type yes"
+		}
+	case flowSnapshotRollback:
+		switch step {
+		case 0:
+			return "snapshot to roll back to (blank = newest — names listed above)"
+		default:
+			return "CONFIRM rolling back ALL durable-plane data (guests stop; ZFS destroys newer snapshots; LVM block-copies)? type yes"
 		}
 	case flowRebuild:
 		switch step {
@@ -355,7 +374,16 @@ func selfBin() (string, error) {
 
 // runSelf runs the freehold binary with the given subcommand args and
 // returns combined stdout/stderr.
+//
+// GUARDED: inside a `go test` binary, os.Executable() IS THE TEST BINARY —
+// re-running it with CLI args runs the whole suite again, and any test
+// path that reaches here (refreshData → fetchSnapshots) forks a bomb:
+// every generation spawns more test binaries until the box is dead (this
+// crashed the operator box twice). In tests this refuses, loudly.
 func runSelf(args ...string) (string, error) {
+	if strings.HasSuffix(os.Args[0], ".test") || strings.Contains(os.Args[0], "go-build") {
+		return "", fmt.Errorf("runSelf: no subprocess re-exec inside tests (args %v)", args)
+	}
 	bin, err := selfBin()
 	if err != nil {
 		return "", err
@@ -366,6 +394,39 @@ func runSelf(args ...string) (string, error) {
 	cmd.Stderr = &buf
 	err = cmd.Run()
 	return buf.String(), err
+}
+
+// fetchSnapshots lists the plane's snapshots (newest first, with each
+// backend's consumption label) through this binary's own
+// `snapshot --list --json` — the Data view's table AND the rollback picker's
+// source. Ok=false when the CLI can't answer (no profiles, host down): the
+// form still opens, blank = newest. The explicit --config skips
+// NegotiateProfile's profile picker — it prints to stderr unconditionally
+// when several profiles are registered, and runSelf merges stderr into the
+// buffer, so the JSON would never parse.
+func (m *Model) fetchSnapshots() ([]drive.SnapshotInfo, bool) {
+	args := []string{"snapshot"}
+	if m.CfgPath != "" {
+		args = append(args, "--config", m.CfgPath)
+	}
+	args = append(args, "--list", "--json")
+	out, err := runSelf(args...)
+	if err != nil {
+		return nil, false
+	}
+	return parseSnapshotList(out)
+}
+
+// parseSnapshotList decodes the CLI's --json payload (lowercase keys —
+// SnapshotInfo's tags).
+func parseSnapshotList(out string) ([]drive.SnapshotInfo, bool) {
+	var l struct {
+		Snapshots []drive.SnapshotInfo `json:"snapshots"`
+	}
+	if err := json.Unmarshal([]byte(out), &l); err != nil {
+		return nil, false
+	}
+	return l.Snapshots, true
 }
 
 func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
@@ -471,6 +532,27 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				return flowMsg{err: err}
 			}
 			return activityStartMsg{kind: "rebuild", title: "rebuilding " + strings.TrimSpace(f.Inputs[1]), args: args}
+		case flowSnapshotRollback:
+			// The same confirm-or-abort discipline as teardown: anything
+			// but an explicit "yes" aborts. Blank name = newest (the CLI's
+			// --yes semantics); the safety pre-rollback snapshot rides the
+			// CLI's default (a rollback without an escape hatch is never
+			// the plan).
+			if !strings.EqualFold(strings.TrimSpace(f.Inputs[1]), "yes") {
+				return flowMsg{err: fmt.Errorf("rollback cancelled: type yes to confirm")}
+			}
+			name := strings.TrimSpace(f.Inputs[0])
+			if name == "" {
+				name = "(newest)"
+			}
+			args := []string{"snapshot", "rollback", "--to", strings.TrimSpace(f.Inputs[0]), "--yes"}
+			if m.CfgPath != "" {
+				// Pin the profile: NegotiateProfile's picker reads stdin (a
+				// subprocess's /dev/null) and silently defaults to the
+				// alphabetically first profile — the wrong tenant's plane.
+				args = append(args, "--config", m.CfgPath)
+			}
+			return activityStartMsg{kind: "snapshot", title: "rolling back to " + name, args: args}
 		}
 		if m.console == nil || m.console.client == nil {
 			return flowMsg{err: fmt.Errorf("not logged into a console — press l first")}
@@ -501,6 +583,11 @@ func runFlowAction(m *Model, f *tuiFlow) tea.Cmd {
 				return flowMsg{err: err}
 			}
 			return flowMsg{ok: "granted " + f.Inputs[1] + " on " + f.Inputs[0]}
+		case flowSettings:
+			if _, err := c.SettingsSet(strings.TrimSpace(f.Inputs[0])); err != nil {
+				return flowMsg{err: err}
+			}
+			return flowMsg{ok: "settings saved — agent pods pick the timezone up on their next apply"}
 		default:
 			return flowMsg{err: fmt.Errorf("unhandled flow")}
 		}

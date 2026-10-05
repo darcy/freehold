@@ -146,22 +146,30 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 	if cfg.Plane.BackendKind != nil {
 		kind = *cfg.Plane.BackendKind
 	}
+	managed := []string{"relay", "cp", "k3s"}
+	vmid := map[string]*uint32{
+		"relay": cfg.Lxc.Relay.Vmid,
+		"cp":    cfg.Lxc.Cp.Vmid,
+		"k3s":   cfg.Lxc.K3s.Vmid,
+	}
+	if cfg.Lxc.Gateway.Vmid != nil {
+		// The gateway is destroyed LAST (after the guests it routes for) —
+		// the role iteration is ordered, so it rides at the end.
+		managed = append(managed, "gateway")
+		vmid["gateway"] = cfg.Lxc.Gateway.Vmid
+	}
 	tcfg := &worldteardown.Cfg{
 		Domain:        cfg.TenantSlug(),
 		RunNTarget:    cfg.Runner.Target,
 		RunnerKeyRefs: common.RunnerKeyRefs(cfg, runner),
-		Managed:       []string{"relay", "cp", "k3s"},
+		Managed:       managed,
 		WorldHome:     common.FreeholdHome(),
 		ConfigPath:    configPath,
 		Pool:          pool,
 		BackendKind:   kind,
 		Data:          removeData,
-		Vmid: map[string]*uint32{
-			"relay": cfg.Lxc.Relay.Vmid,
-			"cp":    cfg.Lxc.Cp.Vmid,
-			"k3s":   cfg.Lxc.K3s.Vmid,
-		},
-		ThinPool: common.ThinPoolOf(cfg),
+		Vmid:          vmid,
+		ThinPool:      common.ThinPoolOf(cfg),
 	}
 	tcfg.Live = func(line string) { fmt.Println("  " + line) }
 	if _, err := worldteardown.Run(runner, tcfg, worldteardown.ScopeWholeWorld, true); err != nil {
@@ -237,7 +245,7 @@ func runUninstallTransient(cfg *config.Config, host string, removeData bool) err
 	for _, g := range guests {
 		byName[g.Name] = g.ID
 	}
-	for _, role := range []string{"relay", "k3s", "cp"} {
+	for _, role := range []string{"relay", "k3s", "cp", "gateway"} {
 		name, nerr := bootstrap.LXCName(cfg.Name, cfg.TenantSlug(), role)
 		if nerr != nil {
 			return nerr

@@ -4,10 +4,13 @@
 package build
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -72,8 +75,8 @@ func init() {
 }
 
 func registerBuildFlags(cmd *cobra.Command) {
-	cmd.Flags().String("addr", "127.0.0.1:8787", "Runner MCP address (loopback)")
-	cmd.Flags().String("target", "proxmox-box", "Runner name (the package + grant + target name)")
+	cmd.Flags().String("addr", "", "Runner MCP address (loopback; default: the config's [runner] addr, else 127.0.0.1:8787)")
+	cmd.Flags().String("target", "", "Runner name (default: the config's [runner] target, else proxmox-box)")
 	cmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
 	cmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
@@ -134,8 +137,16 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	f.ResetDNS, _ = cmd.Flags().GetBool("reset-dns")
 	f.ManageDNS, _ = cmd.Flags().GetBool("manage-dns")
 	f.ManageDNSExplicit = cmd.Flags().Changed("manage-dns")
+	f.Addr, _ = cmd.Flags().GetString("addr")
+	f.Target, _ = cmd.Flags().GetString("target")
 	if err := box.ApplyConfigDefaults(&f, f.ConfigPath); err != nil {
 		return nil, err
+	}
+	if f.Addr == "" {
+		f.Addr = "127.0.0.1:8787"
+	}
+	if f.Target == "" {
+		f.Target = "proxmox-box"
 	}
 	if f.ResetDNS {
 		certcred.ClearStoredDNSCreds()
@@ -223,6 +234,53 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		fmt.Fprintf(e.Out, "  · %s DNS credential stored on the CP\n", slot)
 	}
 
+	// The cert PRE-SEED ships whenever the box cache is fresh — and it
+	// OVERWRITES (unlike the CP-owned secrets below, the box cache is this
+	// record's durable owner; a renewed cert must replace the stale seed).
+	// A world whose plane was destroyed then pre-seeds from it with no LE
+	// order. Absent/stale caches ship nothing: the build issues as before and
+	// the cache refills after. The cache is BASE-scoped and HOST-keyed (see
+	// certCachePath): every profile's build on this box reads the same store,
+	// so a fresh world's run leaves its certs for the next fresh run.
+	if _, baseSec, _, serr := baseCacheIdent(); serr != nil {
+		fmt.Fprintf(e.Out, "  · no base ops identity for the cert cache (%v) — the build will issue\n", serr)
+	} else {
+		open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+		for _, sl := range []struct{ slot, host string }{{"relay", e.F.RelayDomain}, {"cp", e.F.CpDomain}} {
+			if sl.host == "" {
+				continue
+			}
+			path := certCachePath(sl.host)
+			if !cert.CredExists(path) {
+				continue
+			}
+			_, env, lerr := cert.LoadCreds(path, open, baseSec)
+			if lerr != nil {
+				fmt.Fprintf(e.Out, "  · cert cache %s unreadable (%v) — the build will issue\n", sl.slot, lerr)
+				continue
+			}
+			if _, ok := cert.ReuseIfValidBytes([]byte(env["fullchain"]), time.Now(), 30*24*time.Hour); !ok {
+				fmt.Fprintf(e.Out, "  · cached %s cert under 30d remaining — the build will issue and refill the cache\n", sl.slot)
+				continue
+			}
+			blob, berr := certcred.CPSecretBlob("cert-seed-"+sl.slot, "cert-cache", env, seal, pub)
+			if berr != nil {
+				return berr
+			}
+			if err := client.PutSecret("cert-seed-"+sl.slot, blob); err != nil {
+				// The pre-seed is an optimization, never a gate: a CP whose
+				// secret allowlist predates the cert-seed names (mixed-version
+				// skew — the box updates before the CP) just issues as before.
+				if strings.Contains(err.Error(), "refusing secret name") {
+					fmt.Fprintf(e.Out, "  · CP predates the cert cache — the build will issue\n")
+					continue
+				}
+				return fmt.Errorf("ship %s cert cache to CP: %w", sl.slot, err)
+			}
+			fmt.Fprintf(e.Out, "  · %s cert cache shipped for pre-seed\n", sl.slot)
+		}
+	}
+
 	if !have["litellm"] {
 		master, pg, providerKey, err := e.litellmSecretMaterial(cfg)
 		if err != nil {
@@ -239,11 +297,151 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		}
 		fmt.Fprintln(e.Out, "  · litellm secrets stored on the CP")
 	}
+
+	// The owner identity (the world's operator key, the relay's owner-role
+	// member) ships sealed alongside the creds the CP owns: the CP mints every
+	// agent pod's memory-plane attestation with it, and an unshipped key is a
+	// world whose agents boot with no writable memory — the exact silent shape
+	// this fixes. Sealed to the console identity like the rest, opened only
+	// in-memory at mint time; the raw secret never appears in the report, a
+	// command, or the audit. Only the NOSTR half ships: it is all the mint
+	// needs, and the operator's X25519 enc key buys a reader nothing but risk.
+	//
+	// Seeded only when absent — a PRESENT record is never overwritten by a
+	// build (the CP is the durable owner; a box-side blind overwrite could
+	// clobber a deliberate rotate). When the sealed record no longer serves
+	// (operator key rotated, wrong restore), ownerKey fails the create with a
+	// message naming the one file to remove; the next build then re-seeds it.
+	if !have["operator"] {
+		opID, err := box.LoadIdentity(oplogin.Dir())
+		if err != nil {
+			return fmt.Errorf("read the operator identity ledger: %w (the CP needs it to attest agent memory — run `freehold login`)", err)
+		}
+		blob, err := certcred.CPSecretBlob("operator", "operator", map[string]string{
+			"nostr": opID.NostrSecretHex,
+		}, seal, pub)
+		if err != nil {
+			return err
+		}
+		if err := client.PutSecret("operator", blob); err != nil {
+			if strings.Contains(err.Error(), "refusing secret name") {
+				return fmt.Errorf("seed the operator identity on CP: %w — the CP predates this release (it rejects the operator secret the memory plane needs); run `freehold update` first (it ships the current console), then re-run `freehold build`", err)
+			}
+			return fmt.Errorf("seed the operator identity on CP: %w", err)
+		}
+		fmt.Fprintln(e.Out, "  · operator identity stored on the CP (attests agent memory)")
+	}
 	return nil
 }
 
-func (e *buildEngine) litellmMasterKey(k3sVmid uint32) string {
-	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
+// certCachePath is the box-side sealed cache of a slot's issued edge cert
+// (fullchain + key + host, SaveCreds-shaped), written after a successful
+// build so a world whose plane was destroyed pre-seeds from it. HOST-keyed
+// (the cert's SAN) and BASE-scoped (DefaultStateHome — the freehold state
+// root no world lifecycle touches): a profile's uninstall --remove-data wipes
+// profiles/<name>/ wholesale, so a profile-scoped cache dies with the very
+// fresh run that filled it; keying by host keeps worlds sharing a box from
+// clobbering each other's entries.
+func certCachePath(host string) string {
+	return filepath.Join(config.DefaultStateHome(), "cert-cache", host+".json")
+}
+
+// baseCacheIdent loads (minting on first use) the box's BASE ops identity —
+// the state root's agent-ops, not the active profile's: the cert cache must
+// be openable by every future profile's build on this box, so it seals to an
+// identity no world lifecycle can wipe. No flow mints it today (login and
+// install both pin a profile before their ops mint) — the FIRST fill creates
+// it; a box where the mint fails degrades loudly to issuing.
+func baseCacheIdent() (*box.Identity, []byte, []byte, error) {
+	dir := filepath.Join(config.DefaultStateHome(), "control-plane", "agent-ops")
+	if err := box.EnsureIdentity(dir); err != nil {
+		return nil, nil, nil, fmt.Errorf("no base ops identity at %s: %w", dir, err)
+	}
+	id, err := box.LoadIdentity(dir)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("no base ops identity at %s", dir)
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("base ops identity enc secret: %w", err)
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return id, secret, pub, nil
+}
+
+// cacheEdgeCerts copies each slot's issued cert off the durable mirror (read
+// through the runner) into the box's sealed cache. A mirror that is missing,
+// stale (<30d left), or whose leaf does not cover the slot's host (renamed
+// domains) is skipped loudly — the next issue refills the cache.
+func (e *buildEngine) cacheEdgeCerts() error {
+	if !e.WorldHasEdge() {
+		return nil
+	}
+	cfg, err := config.Load(e.F.ConfigPath)
+	if err != nil || cfg == nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	k3s := uint32(0)
+	if cfg.Lxc.K3s.Vmid != nil {
+		k3s = *cfg.Lxc.K3s.Vmid
+	}
+	if k3s == 0 {
+		return fmt.Errorf("no k3s vmid recorded")
+	}
+	_, _, pub, err := baseCacheIdent()
+	if err != nil {
+		return err
+	}
+	seal := func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) }
+	for _, sl := range []struct{ slot, host string }{
+		{"relay", e.F.RelayDomain}, {"cp", e.F.CpDomain},
+	} {
+		if sl.host == "" {
+			continue
+		}
+		dir := stages.CaddyEdgeDurableDir(sl.slot)
+		fc, ferr := e.readGuestFileB64(k3s, dir+"/fullchain.pem")
+		key, kerr := e.readGuestFileB64(k3s, dir+"/key.pem")
+		if ferr != nil || kerr != nil {
+			fmt.Fprintf(e.Out, "  · no %s edge cert on the durable mirror yet — cache skips\n", sl.slot)
+			continue
+		}
+		exp, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour)
+		if !ok {
+			fmt.Fprintf(e.Out, "  · %s edge cert under 30d remaining — cache skips (the next issue refills it)\n", sl.slot)
+			continue
+		}
+		names, nerr := cert.LoadDNSNames(fc)
+		if nerr != nil || !cert.CoversHost(names, sl.host) {
+			fmt.Fprintf(e.Out, "  · %s mirror cert does not cover %s — cache skips\n", sl.slot, sl.host)
+			continue
+		}
+		env := map[string]string{"host": sl.host, "fullchain": string(fc), "key": string(key)}
+		if err := os.MkdirAll(filepath.Dir(certCachePath(sl.host)), 0o700); err != nil {
+			return err
+		}
+		if err := cert.SaveCreds(certCachePath(sl.host), "cert-cache", env, seal, pub, "cert-cache-"+sl.host); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.Out, "  · cached the %s edge cert for pre-seed (valid until %s)\n", sl.slot, exp.UTC().Format("2006-01-02"))
+	}
+	return nil
+}
+
+// readGuestFileB64 reads a guest file through the runner (base64 on the wire).
+func (e *buildEngine) readGuestFileB64(k3s uint32, path string) ([]byte, error) {
+	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(fmt.Sprintf(
+		"pct exec %d -- bash -c 'test -s %s 2>/dev/null && base64 -w0 < %s'", k3s, path, path), 60))
+	if !ok {
+		return nil, fmt.Errorf("unreadable: %s", path)
+	}
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+}
+
+func (e *buildEngine) litellmMasterKey(k3sVmid uint32) string {	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
 		k3sVmid)
 	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(cmd, 30))
 	if !ok {
@@ -305,10 +503,7 @@ func (e *buildEngine) runBuild() error {
 	if cfg == nil || cfg.CPURL == "" {
 		return fmt.Errorf("no CP configured — run `freehold install` first (an operator box only), then `freehold login` here")
 	}
-	loginURL := cfg.CPURL
-	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		loginURL = "http://" + ip + ":8080"
-	}
+	loginURL := common.ConsoleLoginURL(cfg)
 	client, err := e.consoleLogin(loginURL)
 	if err != nil {
 		return err
@@ -329,6 +524,12 @@ func (e *buildEngine) runBuild() error {
 	// next uninstall reports "never created (no vmid recorded)" and leaks them.
 	if err := e.RecordCoords(res.Coords); err != nil {
 		return err
+	}
+	// Cache each slot's issued edge cert box-side (best-effort): the FRESH
+	// lifecycle's full-destroy uninstall wipes the plane — this sealed copy is
+	// what pre-seeds the next world without a new LE order.
+	if err := e.cacheEdgeCerts(); err != nil {
+		fmt.Fprintf(e.Out, "  (cert cache update skipped: %v)\n", err)
 	}
 	if err := e.FinalSave(); err != nil {
 		return err

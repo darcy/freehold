@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,10 +29,12 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/delegate"
 	"freehold/contract/identity"
+	"freehold/contract/nipoa"
 	"freehold/contract/relay"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/api/cpstate"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
 	"freehold/platform/migrations"
@@ -94,6 +97,16 @@ type Spec struct {
 	RelayLxc       uint32
 	RelayCompose   string
 	K3sVmid        uint32
+	// The freehold-subnet gateway (docs/NETWORK.md Phase 1). GatewayCIDR is
+	// the internal subnet ("" = no gateway — guests ride the LAN bridge as
+	// before); GatewayVlan the in-host bridge tag; GatewayLxc the gateway
+	// guest's vmid. K3sIP is the k3s node's address — with a gateway the
+	// INTERNAL one (ProxyIP is then the gateway's LAN address, the edge);
+	// without one it mirrors ProxyIP.
+	GatewayCIDR string
+	GatewayVlan int
+	GatewayLxc  uint32
+	K3sIP       string
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
@@ -127,6 +140,17 @@ type Spec struct {
 	// Read by BuildCreateAgentFn to wire the pod's FREEHOLD_RUNNER_* env, and
 	// by the agent reconcile to grant the department's pubkey onto each.
 	DepartmentRunners map[string][]agent.RunnerCoords
+
+	// OwnerSecret is the OWNER key's Nostr secret — the key whose pubkey is
+	// OwnerPub (the relay's `owner`-role member: the operator identity the
+	// world was installed under). It attests each agent's memory plane,
+	// minting its BUZZ_AUTH_TAG, and it must derive OwnerPub (checked in
+	// ownerKey) because the tag's owner and the pods' BUZZ_ACP_AGENT_OWNER are
+	// one addressing scheme. Set by the composition root that holds that
+	// identity; absent, the build's own read resolves it, and an
+	// unresolvable key fails the create loudly — never a pod with a harness
+	// and silently no writable memory.
+	OwnerSecret []byte
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -242,9 +266,28 @@ func (s *Spec) guestNameserver() string {
 func (s *Spec) worldDNS() error {
 	binDir, stateDir := s.cpGuestDirs()
 	searchBase := s.guestSearchBase()
-	for _, r := range stages.DnsRecords(s.RelayHost, s.RelayIP, s.CpHost, s.CpIP, s.ProxyIP, s.LitellmIP) {
+	// Behind the gateway the BARE guest records (relay/cp -> their internal
+	// IPs) must NOT exist: dnsmasq's bare-record match shadows the FQDN's
+	// edge answer (the wildcard), so every wss/https dial to the public hosts
+	// lands on the guest's :443 — where nothing listens — and the pods die on
+	// "connection refused". The LAN dials ride the gateway's forwards instead
+	// (3000/8080 DNAT), which serve BOTH resolver answers.
+	relayIP, cpIP := s.RelayIP, s.CpIP
+	if s.GatewayCIDR != "" {
+		relayIP, cpIP = "", ""
+	}
+	for _, r := range stages.DnsRecords(s.RelayHost, relayIP, s.CpHost, cpIP, s.ProxyIP, s.LitellmIP) {
 		if err := s.run(proxmox.DnsAddCmd(s.CpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
 			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
+		}
+	}
+	if s.GatewayCIDR != "" {
+		// The prior world's bare records are already in the resolver's store —
+		// the add upsert never removes. Drop them explicitly.
+		for _, name := range []string{"relay", "cp"} {
+			if err := s.run(proxmox.DnsRemoveCmd(s.CpLxc, binDir, stateDir, name), 120); err != nil {
+				return fmt.Errorf("world-build dns drop bare %s: %w", name, err)
+			}
 		}
 	}
 	// The resolver WILDCARD: all *.apex -> the proxy (Caddy) edge, so the
@@ -266,8 +309,16 @@ func (s *Spec) worldDNS() error {
 	if err := s.pointGuestsAtResolver(); err != nil {
 		return err
 	}
+	// Behind the gateway the bare relay record is DROPPED (it shadows the
+	// FQDN's edge answer) — the verify then checks the FQDN -> the EDGE; the
+	// bare-name check stands for flat-LAN worlds.
+	relayWant := s.RelayIP
+	relayName := "relay"
+	if s.GatewayCIDR != "" {
+		relayName, relayWant = s.RelayHost, s.ProxyIP
+	}
 	for _, q := range []struct{ name, want string }{
-		{"relay", s.RelayIP}, {"litellm", s.LitellmIP},
+		{relayName, relayWant}, {"litellm", s.LitellmIP},
 	} {
 		if q.want == "" {
 			continue
@@ -434,13 +485,33 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 		Bridge:   s.Bridge,
 		Mounts:   mounts,
 	}
+	// Fail LOUD on blank size/placement: a world-config without them (a
+	// world installed before persistence shipped) would otherwise reach the
+	// substrate tool as "memory 0"/"bridge=" and fail with a cryptic usage
+	// error. The operator's values live in the world's config; name the fix.
+	var missing []string
+	if spec.MemoryMB < 16 {
+		missing = append(missing, "memory_mb")
+	}
+	if spec.RootfsGB < 4 {
+		missing = append(missing, "rootfs_gb")
+	}
+	if spec.Bridge == "" {
+		missing = append(missing, "bridge")
+	}
+	if spec.Storage == "" {
+		missing = append(missing, "storage")
+	}
+	if len(missing) > 0 {
+		return 0, fmt.Errorf("the world's config carries no %s — guest creation cannot proceed; add them under [plane] in the world's config and re-run the build (worlds installed after persistence ship them)", strings.Join(missing, "/"))
+	}
 	if vmid != 0 {
 		spec.VMID = &vmid
 	}
 	roleIP := ""
 	switch role {
 	case "k3s":
-		roleIP = s.ProxyIP
+		roleIP = s.k3sIP()
 	case "relay":
 		roleIP = s.RelayIP
 	case "cp":
@@ -449,14 +520,26 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 	if roleIP != "" {
 		// pct net0 wants CIDR (host/prefix); the serve/recorded values carry the
 		// bare IP (the DNS/caddy consumers expect bare), so rebuild the CIDR —
-		// the LAN defaults to /24 home-labs. Assigning relay/CP static addresses
-		// (via --relay-ip/--cp-ip) runs them OFF DHCP, which avoids exhausting a
-		// small LAN DHCP pool across repeated teardown/build cycles.
+		// the LAN defaults to /24 home-labs, the internal subnet to its OWN
+		// mask. Assigning relay/CP static addresses (via --relay-ip/--cp-ip)
+		// runs them OFF DHCP, which avoids exhausting a small LAN DHCP pool
+		// across repeated teardown/build cycles.
 		ip := roleIP
-		if !strings.Contains(ip, "/") {
+		gw := s.RelayGW
+		if s.GatewayCIDR != "" {
+			// Behind the gateway the guests' default route is the gateway's
+			// INTERNAL address, and eth0 rides the internal subnet's tag —
+			// the "born on the freehold-subnet" rule (docs/NETWORK.md).
+			gw = config.GatewayInternalIP(s.GatewayCIDR)
+			if s.GatewayVlan > 0 {
+				spec.Tag = &s.GatewayVlan
+			}
+			if !strings.Contains(ip, "/") {
+				ip += "/" + strconv.Itoa(maskBits(s.GatewayCIDR))
+			}
+		} else if !strings.Contains(ip, "/") {
 			ip += "/24"
 		}
-		gw := s.RelayGW
 		spec.NetIP = &ip
 		spec.NetGW = &gw
 	}
@@ -485,12 +568,41 @@ func (s *Spec) bootLxc(role string, vmid uint32, mounts []planebase.MountSpec) (
 // vmids world_build just booted. An invalid world name is a config error and
 // fails the build; a transient `pct list` failure stays best-effort (the
 // recorded vmid, if any, is used).
+// k3sIP is the k3s node's address: the recorded internal one behind a
+// gateway, else the proxy IP (the legacy flat-LAN world, where the k3s node
+// IS the proxy).
+func (s *Spec) k3sIP() string {
+	if s.K3sIP != "" {
+		return s.K3sIP
+	}
+	return s.ProxyIP
+}
+
+// k3sGW is the k3s node's default route: the gateway's internal address
+// behind a gateway, else the LAN gateway the world was installed with.
+func (s *Spec) k3sGW() string {
+	if s.GatewayCIDR != "" {
+		return config.GatewayInternalIP(s.GatewayCIDR)
+	}
+	return s.RelayGW
+}
+
+// maskBits returns the prefix length of a CIDR (24 for 10.77.0.0/24), 0 when
+// it does not parse.
+func maskBits(cidr string) int {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return 0
+	}
+	return p.Bits()
+}
+
 func (s *Spec) resolveGuestVmids() error {
 	for _, r := range []struct {
 		role string
 		vmid *uint32
 	}{
-		{"relay", &s.RelayLxc}, {"cp", &s.CpLxc}, {"k3s", &s.K3sVmid},
+		{"relay", &s.RelayLxc}, {"cp", &s.CpLxc}, {"k3s", &s.K3sVmid}, {"gateway", &s.GatewayLxc},
 	} {
 		if *r.vmid != 0 {
 			continue
@@ -527,7 +639,10 @@ func (s *Spec) refreshGuestIPs() {
 	for _, r := range []role{
 		{s.RelayLxc, &s.RelayIP},
 		{s.CpLxc, &s.CpIP},
-		{s.K3sVmid, &s.ProxyIP},
+		// The k3s node address lands in K3sIP: behind a gateway that is the
+		// INTERNAL address (ProxyIP is the gateway edge; clobbering it would
+		// repoint the DNS records at a guest).
+		{s.K3sVmid, &s.K3sIP},
 	} {
 		if r.vmid == 0 {
 			continue
@@ -607,6 +722,51 @@ func (s *Spec) worldBootK3s(mounts []planebase.MountSpec) error {
 	return nil
 }
 
+// worldGateway (re)writes the gateway guest's nftables ruleset — a pure
+// function of the recorded coords, so every build re-asserts it (a rebuilt
+// k3s with a new internal IP must not leave a stale DNAT). The gateway guest
+// is created by the BOX install (before the CP, whose default route it
+// becomes); the CP build only owns the config. No-op without one.
+func (s *Spec) worldGateway() error {
+	if s.GatewayLxc == 0 || s.GatewayCIDR == "" {
+		return nil
+	}
+	kip := s.k3sIP()
+	if kip == "" {
+		return nil
+	}
+	// Forwards: 80/443 (tcp+udp — Caddy serves h3) and 6443 (kubectl from the
+	// LAN) DNAT to the k3s node's INTERNAL address; 8080 to the CP console
+	// (the box's pre-Caddy build path — NIP-98-gated). NOT the gateway's own
+	// LAN IP (self-DNAT: the gateway's INPUT chain listens on nothing, and
+	// the world's public surface dies). Masquerade carries the subnet out.
+	// The ruleset is rewritten whole — never merged.
+	conf := config.GatewayNftConf(s.GatewayCIDR, s.ProxyIP, kip, s.CpIP, s.RelayIP, "eth0")
+	// No single quotes in the script (the heredoc delimiter is unquoted; the
+	// ruleset has none) — it rides `sh -c '...'` through the runner verbatim.
+	script := fmt.Sprintf(`set -e
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
+# A router with BOTH nics on one bridge (the untagged freehold-subnet) must
+# not answer ARP for an IP on the other interface — the flux reads as MAC
+# flapping on the LAN (UniFi: "multiple machines claiming IPs").
+echo net.ipv4.conf.all.arp_ignore=1 >> /etc/sysctl.d/90-freehold-gateway.conf
+echo net.ipv4.conf.all.arp_announce=2 >> /etc/sysctl.d/90-freehold-gateway.conf
+sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
+cat > /etc/nftables.conf <<NFT
+%sNFT
+cat > /etc/dnsmasq.d/freehold.conf <<DNS
+%sDNS
+systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
+systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
+`, conf, config.GatewayDnsmasqConf(s.RelayGW))
+	cmd := fmt.Sprintf("pct exec %d -- sh -c '%s'", s.GatewayLxc, script)
+	if err := s.run(cmd, 300); err != nil {
+		return fmt.Errorf("gateway nftables: %w", err)
+	}
+	return nil
+}
+
 // deployAgentTools ships + seeds + launches the CP's freehold-agent-tools
 // server IN the cp guest, so the console's world_build can bring up the
 // operator toolset itself (the robin-relay comes up first; the roster seed
@@ -647,13 +807,21 @@ func (s *Spec) deployAgentTools() error {
 		return err
 	}
 	relayDial := config.RelayLanDial(s.RelayHost)
-	// Seed the server's channel + the operator into its roster. The console's
-	// driving identity (s.Audience) is deliberately NOT seeded: the console
-	// never calls this MCP (it reads the registry/facts files directly), so
-	// membering it only put an un-nameable identity in the roster. The CPA is
-	// membered separately, by this server's own identity (BuildCreateAgentFn).
-	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --granted %s --name agent-tools",
-		bin, atState, relayDial, s.OwnerPub)
+	// Seed the server's channel. The roster is the AGENT surface: the CPA is
+	// membered by this server's own identity (BuildCreateAgentFn). The
+	// console's driving identity (s.Audience) was deliberately never seeded —
+	// the console never calls this MCP (it reads the registry/facts files
+	// directly, and its world_migrate trigger is a signed local peer). The
+	// OPERATOR is likewise a peer (--owner-pubkey, full operator scope) and is
+	// REVOKED from the channel here: its CLI world verbs live on console
+	// routes, and its signature authenticates via the peer rule regardless of
+	// membership — a stale CLI's migration sweep must survive this flip.
+	seedFlags := fmt.Sprintf("%s seed --state-dir %s --relay-url %s --name agent-tools",
+		bin, atState, relayDial)
+	// Heal any prior membership (put-user is additive; only --revoke drops).
+	if s.OwnerPub != "" {
+		seedFlags += " --revoke " + s.OwnerPub
+	}
 	// Revoke the console's driving identity if a PRIOR seed membered it: put-user
 	// is additive, so dropping it from --granted alone doesn't heal a world that
 	// already has it. The console never calls this MCP.
@@ -748,6 +916,36 @@ func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) 
 	}
 	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
 	return cert.LoadCreds(path, open, secret)
+}
+
+// certSeedFromCache installs a slot's edge cert from the box-shipped seed
+// (world-secrets/cert-seed-<slot>.json — the box cert cache, sealed to the
+// console identity like the DNS creds). It is the FRESH lifecycle's escape
+// from the LE order loop: the full-destroy uninstall wipes the plane (and the
+// durable mirror with it), so the operator box carries the issued cert across
+// worlds instead. Absent/stale/wrong-host seeds report (false, nil) — the
+// caller falls through to the normal issue path; only a failed INSTALL errors
+// (the same failure the issue path would hit).
+func (s *Spec) certSeedFromCache(k3sVmid uint32, slot, host string) (bool, error) {
+	path := filepath.Join(s.StateDir, "world-secrets", "cert-seed-"+slot+".json")
+	if !cert.CredExists(path) {
+		return false, nil
+	}
+	secret, err := s.consoleEncSecret()
+	if err != nil {
+		return false, err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	fullchain, key, err := cert.LoadSeed(path, open, secret, host, time.Now(), 30*24*time.Hour)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cert %s: seed cache unusable (%v) — issuing\n", slot, err)
+		return false, nil
+	}
+	if err := s.installCaddyCertFile(k3sVmid, slot, fullchain, key); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(os.Stderr, "cert %s: seeded from the box cert cache (no LE order)\n", slot)
+	return true, nil
 }
 
 // runnerLitellmSecrets maps the CP store's litellm env keys to the secret NAMES
@@ -1010,6 +1208,18 @@ func (s *Spec) worldCert() error {
 				continue
 			}
 		}
+		// Box-shipped seed: the operator box caches each slot's issued cert
+		// across builds, so a world whose plane was destroyed (the FRESH
+		// lifecycle's full-destroy uninstall) pre-seeds from it — no new LE
+		// order, no challenge, no rate-limit exposure. Absent/stale seeds fall
+		// through to the issue path.
+		seeded, serr := s.certSeedFromCache(s.K3sVmid, sl.slot, sl.host)
+		if serr != nil {
+			return fmt.Errorf("cert %s seed: %w", sl.slot, serr)
+		}
+		if seeded {
+			continue
+		}
 		// Issue path: the sealed DNS cred must be on the CP (the box build's
 		// hand-off ships it). The fresh fullchain+key pair is installed by
 		// file-transit — no restart of the serving co-located runner.
@@ -1115,6 +1325,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "relay booted + stack deployed")
 		}
+		// 2.4. Re-assert the CONSOLE identity's relay membership on EVERY build.
+		// A relay rebuild/reseed can drop it, and then every console-signed
+		// publish (the runner channels, agent rosters, agent-tools seeding) 403s
+		// relay_membership_required — the console is not re-membered anywhere else
+		// (install did it once, a later reconcile didn't). buzz-admin add-member
+		// is idempotent.
+		if spec.Audience != "" && spec.CpLxc != 0 {
+			if err := spec.addRelayCommunityMember(spec.Audience); err != nil {
+				return "", fmt.Errorf("world-build console relay membership: %w", err)
+			}
+		}
 		// 2.5. Deploy the operator toolset (freehold-agent-tools) once the relay
 		// it seeds its roster against is up — the console's world_build brings
 		// up agent-tools itself (no box-one / deploy-cp dependency).
@@ -1161,6 +1382,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// Pointing guests at a CP whose dnsmasq is not yet installed would leave
 		// them with no resolver at all, so the point and the install ship as one
 		// step.
+		// 3.5a0. The gateway's nftables (re)assert — after the k3s boot (its
+		// DNAT target is the recorded internal IP), before anything dials the
+		// edge through it. No-op without a gateway.
+		if err := spec.worldGateway(); err != nil {
+			return "", fmt.Errorf("world-build gateway: %w", err)
+		}
+		if spec.GatewayLxc != 0 && spec.GatewayCIDR != "" {
+			report = append(report, "gateway nftables asserted")
+		}
 		if spec.CpLxc != 0 && spec.CpIP != "" {
 			if err := spec.worldDNS(); err != nil {
 				return "", fmt.Errorf("world-build dns: %w", err)
@@ -1192,8 +1422,8 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// pairUpstream: the pair-relay pod binds 5000 on the k3s node
 				// itself (hostNetwork, same node as the caddy edge).
 				pairUpstream := ""
-				if spec.ProxyIP != "" {
-					pairUpstream = fmt.Sprintf("%s:5000", spec.ProxyIP)
+				if kip := spec.k3sIP(); kip != "" {
+					pairUpstream = fmt.Sprintf("%s:5000", kip)
 				}
 				caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, pairUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
 				extra = append(extra, "-var",
@@ -1289,6 +1519,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// half is sufficient alone. That guarantee lives in migrationRunner,
 				// not here, so the world_migrate tool gets it too.
 				report = spec.appendMigrations(report)
+				report = spec.appendMemoryPlane(report)
 				report = spec.appendAgentToolsAudience(report)
 			} else {
 				// Console executor: write the files, then reload the serve process.
@@ -1312,6 +1543,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// so they need NO running serve — they run BEFORE the restart, and the
 				// process that comes up loads their result as its starting state.
 				report = spec.appendMigrations(report)
+				report = spec.appendMemoryPlane(report)
 				report = spec.appendAgentToolsAudience(report)
 				if err := spec.startAgentTools(); err != nil {
 					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
@@ -1386,7 +1618,11 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 		if err != nil {
 			return "", err
 		}
-		er := &teardown.ExecRunner{}
+		// Domain keys the world's per-world tf root (TerraformDestroy resolves
+		// /srv/data/freehold-tf-<dashed-domain>, falling back to the shared dir
+		// only for a world with no per-world root) — without it the destroy
+		// half looks at the wrong dir and skips destroying the world's state.
+		er := &teardown.ExecRunner{Domain: spec.RelayHost}
 		er.SetExec(func(cmd string) (bool, string) {
 			out, err := spec.execOut(cmd, 600)
 			if err != nil {
@@ -1498,12 +1734,16 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 		if relayAuthURL == "" {
 			relayAuthURL = s.RelayURL
 		}
+		// The script's DIAL is the relay's LAN form (the CP's dnsmasq pins the
+		// relay host to the relay LXC, where nothing listens on 443 — TLS is
+		// the edge's); the NIP-98 signature still covers the canonical https.
+		// The same dial-LAN / sign-public split every other relay client uses.
 		runEnv := append(os.Environ(),
 			"FREEHOLD_AGENT_TOOLS="+filepath.Join(binDir, "freehold-agent-tools"),
 			"REGISTRY="+filepath.Join(s.StateDir, "registry.json"),
 			"CONSOLE_STATE="+consoleStateDir,
 			"STATE_DIR="+s.StateDir,
-			"FREEHOLD_RELAY_URL="+s.RelayURL,
+			"FREEHOLD_RELAY_URL="+s.relayDial(),
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
 			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
@@ -1636,6 +1876,120 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 	}
 }
 
+// ownerKey resolves the OWNER key that attests the agents' memory plane: the
+// operator identity the world was installed under (OwnerPub — the relay's
+// `owner`-role member, and the same key the pods declare as
+// BUZZ_ACP_AGENT_OWNER). Resolution order: a composition root that already
+// holds the key sets OwnerSecret; else the sealed `operator` world-secret the
+// box's build hands off (the operator nsec lives ONLY on the box — the CP is
+// its durable owner the same way the DNS creds are); else, for a world where
+// the operator and console identities coincide, the console identity on disk.
+//
+// Whatever resolves MUST derive the recorded OwnerPub, checked here rather
+// than per-caller: the tag's owner field and BUZZ_ACP_AGENT_OWNER are two
+// halves of one addressing scheme, so a wrong key restored from a backup would
+// have every agent write into a store it can never read back.
+func (s *Spec) ownerKey() ([]byte, error) {
+	if s.OwnerPub == "" {
+		return nil, fmt.Errorf("no owner pubkey is recorded on the build spec")
+	}
+	if len(s.OwnerSecret) == 32 {
+		return s.validatedOwnerKey(s.OwnerSecret)
+	}
+	sealed := filepath.Join(s.StateDir, "world-secrets", "operator.json")
+	if !cert.CredExists(sealed) {
+		disk, err := cpstate.ConsoleSecret(s.consoleStateRoot())
+		if err != nil {
+			return nil, fmt.Errorf("no owner key: the operator identity is not sealed on the CP (run `freehold build` from the operator box) and the console identity under %s/console is unreadable: %w", s.consoleStateRoot(), err)
+		}
+		return s.validatedOwnerKey(disk)
+	}
+	encSec, serr := s.consoleEncSecret()
+	if serr != nil {
+		return nil, fmt.Errorf("the sealed operator identity at %s needs the console enc key: %w", sealed, serr)
+	}
+	open := func(recSecret, aad, blob []byte) ([]byte, error) { return crypto.Open(recSecret, aad, blob) }
+	_, env, err := cert.LoadCreds(sealed, open, encSec)
+	if err != nil {
+		return nil, s.staleSealedOwner(sealed, fmt.Errorf("unreadable (%w)", err))
+	}
+	if hexRaw := env["nostr"]; hexRaw != "" {
+		sec, derr := hex.DecodeString(hexRaw)
+		if derr == nil && len(sec) == 32 {
+			if _, verr := s.validatedOwnerKey(sec); verr == nil {
+				return sec, nil
+			}
+		}
+	}
+	return nil, s.staleSealedOwner(sealed, fmt.Errorf("usable for a different owner"))
+}
+
+// staleSealedOwner reports a sealed operator record that no longer serves —
+// unreadable, or sealed for a key that is not the recorded owner. The record is
+// NEVER deleted here (a CP-side delete of the only copy is a destructive act
+// the operator owns); the message names the one file to remove so the next
+// `freehold build` re-seeds it from the box's ledger.
+func (s *Spec) staleSealedOwner(path string, cause error) error {
+	return fmt.Errorf("the sealed operator identity at %s is %s — remove that file and re-run `freehold build` from the operator box to re-seed it", path, cause)
+}
+
+// validatedOwnerKey checks a candidate secret against the recorded OwnerPub —
+// the one invariant that keeps the attestation addressing the store the pods
+// actually read from.
+func (s *Spec) validatedOwnerKey(sec []byte) ([]byte, error) {
+	pk, err := crypto.PubkeyFromSecret(sec)
+	if err != nil {
+		return nil, fmt.Errorf("the owner secret is unusable: %w", err)
+	}
+	if pk != s.OwnerPub {
+		return nil, fmt.Errorf("the readable owner secret derives %s, not the recorded owner %s — attestations would address the wrong store; re-run `freehold build` from the operator box (or check %s/console/identity.json)",
+			agenttools.ShortHex(pk), agenttools.ShortHex(s.OwnerPub), s.consoleStateRoot())
+	}
+	return sec, nil
+}
+
+// mintAuthTag renders the NIP-OA attestation an agent's pod needs as
+// BUZZ_AUTH_TAG. `buzz mem` takes its owner from the tag, so without it the
+// agent boots with a working harness and NO writable long-term memory — failing
+// in a way the pod log does not show, which is precisely how this stayed broken
+// across releases. So this fails the create rather than return an empty tag: the
+// key must resolve, and the minted tag must verify against the very agent key
+// the pod boots with.
+//
+// The attesting key is the OWNER key (OwnerPub — the operator identity the
+// world was installed under, resolved by ownerKey), never the agent's own: the
+// CLI rejects self-attestation outright, and an owner-signed tag keeps every
+// agent store in the same owner namespace the respond gate already uses. It is
+// normally NOT the console identity — see ownerKey.
+func (s *Spec) mintAuthTag(agentPk, who string) (string, error) {
+	ownerSec, err := s.ownerKey()
+	if err != nil {
+		return "", fmt.Errorf("%s: no owner key to attest the agent's memory plane: %w", who, err)
+	}
+	tag, err := nipoa.MintEngram(agentPk, ownerSec)
+	if err != nil {
+		return "", fmt.Errorf("%s: minting the memory-plane attestation: %w", who, err)
+	}
+	if err := nipoa.Verify(agentPk, tag); err != nil {
+		return "", fmt.Errorf("%s: the minted attestation does not verify for its own agent key: %w", who, err)
+	}
+	return tag.JSON(), nil
+}
+
+// appendMemoryPlane appends the report line that makes the agent memory plane's
+// health visible at bring-up. It names the attesting identity rather than a bare
+// ok because the failure it covers is a silent one: a world whose agents answer
+// conversations yet persist nothing looks healthy from every other angle. Never
+// fatal — a create with an unresolvable key already fails loudly at
+// mintAuthTag — this is what keeps a converged world distinguishable from a
+// silently unattested one.
+func (s *Spec) appendMemoryPlane(report []string) []string {
+	if _, err := s.ownerKey(); err != nil {
+		return append(report, "WARN: memory plane: "+err.Error()+" — agent pods come up with NO writable `buzz mem`")
+	}
+	return append(report, "memory plane: owner "+agenttools.ShortHex(s.OwnerPub)+" attests each agent pod (kind "+strconv.Itoa(nipoa.AgentEngramKind)+")")
+}
+
 // pinRelayHost idempotently pins the relay's LAN IP to its hostname in the CP
 // guest's /etc/hosts. Always re-reads the relay's CURRENT DHCP lease: a prior
 // cycle's recorded IP can go stale (the relay LXC can come back on a different
@@ -1668,7 +2022,10 @@ func (s *Spec) pinRelayHost() error {
 		if !hostsLineRe.MatchString(s.RelayHost) || !hostsLineRe.MatchString(relayIP) {
 			return fmt.Errorf("pin relay host into cp: refusing unsafe values (host %q / ip %q must be a bare hostname and IP)", s.RelayHost, relayIP)
 		}
-		pin := fmt.Sprintf("pct exec %d -- sh -c \"grep -Fq '%s' /etc/hosts 2>/dev/null || echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
+		// REPLACE any existing line for this host, never merely append-if-absent:
+		// a stale entry from a prior cycle (the relay came back on a new lease)
+		// would otherwise satisfy a grep and keep resolving to the dead IP.
+		pin := fmt.Sprintf("pct exec %d -- sh -c \"sed -i '/[[:space:]]%s$/d' /etc/hosts; echo '%s %s' >> /etc/hosts\"", s.CpLxc, s.RelayHost, relayIP, s.RelayHost)
 		if err := s.run(pin, 30); err != nil {
 			return fmt.Errorf("pin relay host into cp: %w", err)
 		}
@@ -1757,8 +2114,14 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
+	// The DIAL is the LAN form (relayDial — the relay guest's own :3000, which
+	// the CP reaches on-subnet; behind a gateway the public https URL would
+	// resolve through the bare-record shadowing to the relay guest's :443,
+	// where nothing listens). The NIP-98 signature covers the CANONICAL
+	// public origin — the dial-LAN / sign-public split.
+	dial := s.relayDial()
 	if strings.TrimSpace(channel) == "" {
-		if err := delegate.EnsurePrivateChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+		if err := delegate.EnsurePrivateChannelAuth(dial, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
 			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
 		}
 		return relayFreeholdChannel, "#freehold", false, nil
@@ -1768,7 +2131,7 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	// under the name-derived id, and never as open, even when a create passes
 	// private=false.
 	if strings.EqualFold(name, "#freehold") {
-		if err := delegate.EnsurePrivateChannelAuth(s.RelayURL, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
+		if err := delegate.EnsurePrivateChannelAuth(dial, authURL, nSec, relayFreeholdChannel, "#freehold"); err != nil {
 			return "", "", false, fmt.Errorf("ensure #freehold channel: %w", err)
 		}
 		return relayFreeholdChannel, "#freehold", false, nil
@@ -1778,7 +2141,7 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	// signs as the CREATING agent (nSec), the identity that owns/joins the
 	// channel: a private channel the console identity is not a member of must
 	// still be found, or a rebuild would create a duplicate.
-	existingID, existingName, ok, err := relay.FindChannelAuth(s.RelayURL, authURL, nSec, channel)
+	existingID, existingName, ok, err := relay.FindChannelAuth(dial, authURL, nSec, channel)
 	if err != nil {
 		return "", "", false, fmt.Errorf("look up channel %q: %w", channel, err)
 	}
@@ -1790,7 +2153,7 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	if private {
 		create = delegate.EnsurePrivateChannelAuth
 	}
-	if err := create(s.RelayURL, authURL, nSec, id, name); err != nil {
+	if err := create(dial, authURL, nSec, id, name); err != nil {
 		return "", "", false, fmt.Errorf("create channel %s: %w", name, err)
 	}
 	return id, name, true, nil
@@ -1837,6 +2200,18 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			return "", err
 		}
 
+		// The memory-plane attestation the pod boots with. Minted HERE, before
+		// anything is mutated on the relay: an agent that cannot be attested is
+		// an agent whose memory would silently never persist, and adding it as a
+		// relay member first would leave a half-created agent behind on the
+		// failure. The tag is bound to this exact pubkey — the same identity the
+		// identity Secret ships as BUZZ_PRIVATE_KEY — so it is minted from `pub`
+		// and never re-derived.
+		authTag, terr := spec.mintAuthTag(pub, fmt.Sprintf("create-agent %q", name))
+		if terr != nil {
+			return "", terr
+		}
+
 		// Relay membership (relay-administered; the CP cannot self-add — runs
 		// buzz-admin through the co-located runner into the relay LXC). The
 		// relay vmid may be unknown (fresh world) — resolve it by hostname.
@@ -1870,7 +2245,8 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// absent) and joined; the operator is added to each. Empty list = the
 		// default freehold channel. After the channels exist the CPA is added to
 		// each so the system's main touchpoint sees every department
-		// (agents.DepartmentChannels gives a department #freehold + #freehold-<name>).
+		// (agents.DepartmentChannels gives a department #freehold only — the
+		// departments hold their conversations there).
 		type channelRef struct{ id, name string }
 		var joined []channelRef
 		for _, ch := range channelNames(channels) {
@@ -1926,9 +2302,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
 				for _, ref := range joined {
-					// Best-effort: the created agent signs, so it lands on a
-					// channel it owns (its own #freehold-<name>); the CPA is
-					// already the owner/member of #freehold — skip.
+				// Best-effort: the created agent signs, so it lands on a
+				// channel it owns (a custom channel it created); the CPA is
+				// already the owner/member of #freehold — skip.
 					if ref.id == relayFreeholdChannel {
 						continue
 					}
@@ -1954,7 +2330,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		var manifest string
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL), name, spec.LitellmBaseURL, "", spec.SelfURL, audience)
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ())
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
@@ -1965,7 +2341,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// asker (today the operator — the CP cannot see chat threads) +
 			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)

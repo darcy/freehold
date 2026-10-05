@@ -40,7 +40,7 @@
 </style>
 </head>
 <body>
-<h1>freehold <span>·</span> control plane</h1>
+<h1>freehold <span>·</span> control plane <span class="muted" id="cp-version"></span></h1>
 <div class="muted" id="console-line">console agent: loading…</div>
 
 <div class="card">
@@ -62,6 +62,15 @@
 
 <div id="err" class="muted"></div>
 
+<div class="card">
+  <b>settings</b>
+  <div class="row" style="margin-top:8px">
+    <input id="set-tz" placeholder="timezone (IANA name, e.g. America/Chicago — blank = UTC)">
+    <button id="set-save">save settings</button>
+  </div>
+  <div class="small">Applies to agent pods on their next apply (a rebuild or agent create). Blank = pods run UTC.</div>
+</div>
+
 <div id="fill-overlay" style="display:none;position:fixed;inset:0;z-index:8;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
   <div style="max-width:30rem;padding:2rem;width:100%">
     <h2 id="fill-title">fill credential</h2>
@@ -77,6 +86,18 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
+
+// The CP's own version pin (public /healthz, no session needed) — the header
+// stays quiet when the pin is unstamped ("dev" / absent) rather than lying.
+(async () => {
+  try {
+    const h = await (await fetch("/healthz")).json();
+    if (h.version && h.version !== "dev") {
+      const c = h.commit && h.commit !== "unknown" ? "@" + String(h.commit).slice(0, 7) : "";
+      $("#cp-version").textContent = " cp " + h.version + c;
+    }
+  } catch (e) { /* unstamped / unreachable — no version line */ }
+})();
 
 // The door a /runner/<name> deep link points at ("" on the dashboard root) —
 // the agents hand the operator this link for the credential fill; the login
@@ -132,22 +153,34 @@ async function refresh() {
             ? '<span class="chip gray">' + esc(t + ": " + s) + "</span>"
             : esc(t) + " " + chip(s)).join(" ")
       : '<span class="muted">—</span>';
-    // grants null = package UNREADABLE (a real anomaly), distinct from an
-    // honest empty list. r.grants[i] comes from the API only after validate
-    // (64-hex or console) — still escaped.
+    // grants null = the console could NOT read a list — either the roster
+    // read failed (grants_source "unavailable": the runner fails closed but
+    // the whitelist is simply unseen) or the package is unreadable (a real
+    // anomaly). An EMPTY non-null list is an honest fail-closed. The chip
+    // names WHERE a readable list came from: "live" = the relay-signed
+    // roster (what gates exec), "package" = the shipped fallback (the
+    // co-located runner's mode). r.grants[i] comes from the API only after
+    // validate (64-hex or console) — still escaped.
+    const src = r.grants_source === "live"
+      ? '<span class="chip green">live roster</span> '
+      : r.grants_source === "package"
+        ? '<span class="chip gray">package</span> '
+        : "";
     const grants = r.grants === null
       ? (r.status === "revoked"
           ? '<span class="muted">revoked — secrets.json removed (B3)</span>'
-          : '<span class="chip red">package unreadable — check the runner dir</span>')
+          : r.grants_source === "unavailable"
+            ? '<span class="chip yellow">roster unavailable — the relay read failed; the runner fails closed</span>'
+            : '<span class="chip red">package unreadable — check the runner dir</span>')
       : r.grants.length
-        ? r.grants.map((g) => '<div class="muted">' + esc(g) + "</div>").join("")
-        : '<span class="muted">nobody (fail closed)</span>';
+        ? src + r.grants.map((g) => '<div class="muted">' + esc(g) + "</div>").join("")
+        : src + '<span class="muted">nobody (fail closed)</span>';
     const secret = r.secret
       ? esc(r.secret.name) + " · " + esc(r.secret.kind) + " · " + esc(r.secret.address) +
         (r.secret.rotated_at ? " · rotated" : "")
       : '<span class="muted">—</span>';
     return `<tr ${r.name === doorName ? 'class="door-focus"' : ""}>
-      <td><b>${esc(r.name)}</b><div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
+      <td><b>${esc(r.name)}</b>${r.colocated ? ' <span class="chip gray">co-located</span>' : ""}<div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
       <td>${r.status === "revoked" ? chip("red(revoked)") : chip("green(active)")}</td>
       <td>${r.risk ? chip(esc(r.risk)) : '<span class="muted">?</span>'}</td>
       <td>${secret}</td>
@@ -160,6 +193,7 @@ async function refresh() {
           <button data-act="rotate" data-name="${esc(r.name)}">rotate</button>
           <button data-act="grant" data-name="${esc(r.name)}">grant</button>
           <button data-act="ungrant" data-name="${esc(r.name)}">ungrant</button>
+          ${r.self_hosted && !r.enroll_confirmed ? '<button class="danger" data-act="confirm-enroll" data-name="' + esc(r.name) + '">confirm enroll</button>' : ""}
           ${r.status === "revoked" ? "" : '<button class="danger" data-act="revoke" data-name="' + esc(r.name) + '">revoke</button>'}
         </div>
       </td>
@@ -178,7 +212,7 @@ async function refresh() {
 
 async function act(kind, payload) {
   const path = { rotate: "/api/rotate", grant: "/api/grant", ungrant: "/api/revoke-grant",
-                 revoke: "/api/revoke", addr: "/api/runner-addr" }[kind];
+                 revoke: "/api/revoke", addr: "/api/runner-addr", "confirm-enroll": "/api/enroll-confirm" }[kind];
   await api(path, payload);
   await refresh();
 }
@@ -189,7 +223,12 @@ function bindActions() {
       try {
         const name = b.dataset.name;
         if (b.dataset.act === "revoke" && !confirm("revoke " + name + "? removes its credential capability")) return;
-        if (b.dataset.act === "grant") {
+        if (b.dataset.act === "confirm-enroll") {
+          const r = RUNNERS.find((x) => x.name === name);
+          const msg = "confirm the enrollment of " + name + "?\n\nVerify these pubkeys against the guest's own `runner enroll` output (Compute's report in the thread) FIRST — confirming binds the credential fill to the key this box actually holds:\n\nnostr: " + (r ? r.nostr_pubkey : "?") + "\nenc:   " + (r ? r.enc_pubkey : "?");
+          if (!confirm(msg)) return;
+          await act("confirm-enroll", { name });
+        } else if (b.dataset.act === "grant") {
           const pk = prompt("agent pubkey to grant (64 hex)");
           if (!pk) return;
           await act("grant", { name, pubkey: pk });
@@ -221,6 +260,22 @@ $("#provision-form").onsubmit = async (ev) => {
   } catch (e) { $("#err").textContent = "error: " + e.message; }
 };
 
+// Settings: prefill from the CP (best-effort — before login this 401s and
+// the fields stay empty), save on click.
+async function loadSettings() {
+  try {
+    const res = await api("/api/settings");
+    if (res.settings) $("#set-tz").value = res.settings.operator_tz || "";
+  } catch (e) { /* not logged in yet — the save button surfaces errors */ }
+}
+$("#set-save").onclick = async () => {
+  try {
+    await api("/api/settings", { operator_tz: $("#set-tz").value.trim() });
+    $("#err").textContent = "";
+    $("#set-tz").value = $("#set-tz").value.trim();
+  } catch (e) { $("#err").textContent = "error: " + e.message; }
+};
+
 // The credential fill: the OPERATOR types the door's credential here — it is
 // sealed to the door's key by /api/rotate and never reaches any agent. Kind
 // aware: a unifi door takes username + password and the console composes the
@@ -230,10 +285,14 @@ let fillName = "";
 function openFill(name) {
   fillName = name;
   const kind = runnerKind(name);
+  const row = RUNNERS.find((x) => x.name === name);
   $("#fill-title").textContent = "fill credential — " + name;
   const fields = $("#fill-fields");
   fields.innerHTML = "";
-  if (kind === "ssh") {
+  if (row && row.self_hosted && !row.enroll_confirmed) {
+    $("#fill-note").textContent = "This is a SELF-HOSTED door and its enrollment is not confirmed yet: verify the presented pubkeys (the row above, or Compute's report in the thread) against the guest's own `runner enroll` output, then press \"confirm enroll\" — the fill unlocks after that. Confirming is what binds the credential to the key the guest actually holds.";
+    $("#fill-submit").style.display = "none";
+  } else if (kind === "ssh") {
     $("#fill-note").textContent = "ssh doors carry their own minted keypair — no credential to fill. Install the runner's public key on the target (it rode the provisioning report); the door's self-check goes green after that.";
     $("#fill-submit").style.display = "none";
   } else {
@@ -265,12 +324,20 @@ $("#fill-submit").onclick = async () => {
   try {
     const res = await api("/api/rotate", { name: fillName, secret });
     if (res.restart_error) $("#err").textContent = "sealed, but the door restart failed: " + res.restart_error;
+    if (res.self_hosted && res.package_json) {
+      // A self-hosted door runs on its own box — the console sealed to the
+      // runner's own key but cannot restart anything. The GRANTEE (it holds
+      // exec on that guest through this very door) carries the package JSON
+      // over: secrets.json beside identity.json, then a unit restart there.
+      $("#err").textContent = "sealed for a self-hosted door — hand this package JSON to the granted agent (it writes it on the guest and restarts the unit): " + res.package_json;
+    }
     $("#fill-overlay").style.display = "none";
     await refresh();
   } catch (e) { $("#fill-err").textContent = "error: " + e.message; }
 };
 
 refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
+loadSettings();
 </script>
 <div id="login-overlay" style="display:none;position:fixed;inset:0;z-index:9;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
   <div style="max-width:36rem;padding:2rem">

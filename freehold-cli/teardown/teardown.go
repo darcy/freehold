@@ -92,9 +92,10 @@ var teardownCmd = &cobra.Command{
 			TenantRole:    worldteardown.TenantLxcRole(tenant),
 			Data:          data,
 			Vmid: map[string]*uint32{
-				"relay": cfg.Lxc.Relay.Vmid,
-				"cp":    cfg.Lxc.Cp.Vmid,
-				"k3s":   cfg.Lxc.K3s.Vmid,
+				"relay":   cfg.Lxc.Relay.Vmid,
+				"cp":      cfg.Lxc.Cp.Vmid,
+				"k3s":     cfg.Lxc.K3s.Vmid,
+				"gateway": cfg.Lxc.Gateway.Vmid,
 			},
 			ThinPool: common.ThinPoolOf(cfg),
 		}

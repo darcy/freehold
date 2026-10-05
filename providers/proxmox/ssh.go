@@ -80,6 +80,35 @@ func SSHUpload(host, keyPath, localPath, remotePath string, timeoutS uint64) (ui
 	return uint64(info.Size()), nil
 }
 
+// SSHDownload copies remotePath on the host to localPath over scp with the
+// same transient key (export's pull leg). It returns the LOCAL size on
+// success; callers compare against the host-side size to catch a truncated
+// pull.
+func SSHDownload(host, keyPath, remotePath, localPath string, timeoutS uint64) (uint64, error) {
+	ctx := context.Background()
+	if timeoutS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutS)*time.Second)
+		defer cancel()
+	}
+	args := []string{
+		"-i", keyPath,
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ConnectTimeout=15",
+		"root@" + host + ":" + remotePath,
+		localPath,
+	}
+	if out, err := exec.CommandContext(ctx, "scp", args...).CombinedOutput(); err != nil {
+		return 0, fmt.Errorf("scp %s -> %s: %w: %s", remotePath, localPath, err, strings.TrimSpace(string(out)))
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return 0, err
+	}
+	return uint64(info.Size()), nil
+}
+
 // sshArgs is the exact ssh invocation (kept separate so it is testable).
 // BatchMode fails closed instead of prompting; accept-new pins the host key on
 // first contact and refuses a changed one thereafter.

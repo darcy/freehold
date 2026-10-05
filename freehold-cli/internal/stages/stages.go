@@ -141,6 +141,26 @@ func provisionProxmoxLxc(exec proxmox.ExecFunc, cmd *cobra.Command) error {
 	if v := mustStr(cmd, "lxc-gw"); v != "" {
 		gw = &v
 	}
+	// The freehold-subnet gateway's second NIC (eth1, tagged): the internal
+	// side. tag applies to eth0's bridge.
+	var tag, net1Tag *int
+	if v := mustStr(cmd, "tag"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			tag = &n
+		}
+	}
+	var net1IP, net1GW *string
+	if v := mustStr(cmd, "net1-ip"); v != "" {
+		net1IP = &v
+	}
+	if v := mustStr(cmd, "net1-gw"); v != "" {
+		net1GW = &v
+	}
+	if v := mustStr(cmd, "net1-tag"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			net1Tag = &n
+		}
+	}
 	mounts := []planebase.MountSpec{}
 	for _, m := range mustArr(cmd, "mount") {
 		ms, err := bootstrap.ParseMount(m)
@@ -153,7 +173,10 @@ func provisionProxmoxLxc(exec proxmox.ExecFunc, cmd *cobra.Command) error {
 		Hostname: hostname, VMID: vmid,
 		Storage: mustStr(cmd, "storage"), RootfsGB: mustU32(cmd, "rootfs-gb"),
 		MemoryMB: mustU32(cmd, "memory-mb"), Bridge: mustStr(cmd, "bridge"),
-		NetIP: ip, NetGW: gw, Mounts: mounts,
+		NetIP: ip, NetGW: gw, Tag: tag,
+		Net1IP: net1IP, Net1GW: net1GW, Net1Tag: net1Tag,
+		NoDocker: mustBool(cmd, "no-docker"),
+		Mounts: mounts,
 	}
 	res, err := proxmox.BootstrapProxmoxLxc(exec, spec)
 	if err != nil {
@@ -551,6 +574,10 @@ var deployCpCmd = &cobra.Command{
 		spec.AgentToolsBinary = opt("agent-tools-binary")
 		spec.RunnerBinary = opt("runner-binary")
 		spec.RunnerPackage = opt("runner-package")
+		spec.FreeholdBinary = opt("freehold-binary")
+		spec.FreeholdConfig = opt("freehold-config")
+		spec.VerbSSHKey = opt("verb-ssh-key")
+		spec.VerbKeyPub = opt("verb-key-pub")
 		spec.KeyComment = mustStr(cmd, "key-comment")
 		// The version pin: install stamps it, build/teardown don't (their
 		// deploy-cp invocations pass no --version).
@@ -661,6 +688,11 @@ func init() {
 	provisionCmd.Flags().String("bridge", "vmbr0", "network bridge")
 	provisionCmd.Flags().String("lxc-ip", "", "static IPv4 (CIDR)")
 	provisionCmd.Flags().String("lxc-gw", "", "gateway for static IP")
+	provisionCmd.Flags().String("tag", "", "VLAN tag on the bridge for eth0")
+	provisionCmd.Flags().String("net1-ip", "", "second NIC (eth1) static IPv4 (CIDR)")
+	provisionCmd.Flags().String("net1-gw", "", "gateway for the second NIC")
+	provisionCmd.Flags().String("net1-tag", "", "VLAN tag for the second NIC")
+	provisionCmd.Flags().Bool("no-docker", false, "skip the guest docker+compose install (the gateway guest)")
 	provisionCmd.Flags().String("vmid", "", "VMID (auto when empty)")
 	provisionCmd.Flags().StringArray("mount", nil, "durable mount <source>:<guest>")
 	provisionCmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (accepted for symmetry; unused by proxmox-lxc)")
@@ -713,6 +745,10 @@ func init() {
 	deployCpCmd.Flags().String("commit", "", "commit sha to stamp")
 	deployCpCmd.Flags().String("migrations-dir", "", "LOCAL dir of <epoch>.sh migration scripts (shipped unmarked; the queue runs at the end of world bring-up)")
 	deployCpCmd.Flags().Bool("redeploy", false, "replace binaries in an EXISTING plane (update): no adoption/rotation/promotion")
+	deployCpCmd.Flags().String("freehold-binary", "", "LOCAL freehold CLI binary (the data verbs' surface on the CP guest)")
+	deployCpCmd.Flags().String("freehold-config", "", "LOCAL profile config.toml (the verbs' coordinates)")
+	deployCpCmd.Flags().String("verb-ssh-key", "", "LOCAL cp-verb SSH private key (shipped 0600; its pub line authorizes on the host)")
+	deployCpCmd.Flags().String("verb-key-pub", "", "the cp-verb key's authorized_keys public line")
 
 	registerSelfFlags(stampVersionCmd)
 	stampVersionCmd.Flags().String("state-dir", cpdeploy.DefaultCPStateDir(), "remote state dir")

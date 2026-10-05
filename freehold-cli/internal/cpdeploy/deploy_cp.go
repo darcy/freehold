@@ -39,6 +39,13 @@ type DeployCpSpec struct {
 	AgentToolsPubkey *string
 	WorldConfig      *string // cpbuild.Coords JSON (bounds the console as the CP build executor)
 	AgentToolsBinary *string // local freehold-agent-tools binary, shipped so the console's world_build can deploy it
+	// The VERB SURFACE: the freehold CLI + the profile config + a cp-verb SSH
+	// key, shipped so the data verbs (`freehold snapshot`/`export`) run ON the
+	// CP guest — the cp-local-root runner execs them for the data department.
+	FreeholdBinary *string // local freehold CLI binary → <BinDir>/freehold
+	FreeholdConfig *string // local profile config.toml → DefaultCPProfileConfig()
+	VerbSSHKey     *string // local cp-verb private key PEM → DefaultCPVerbKey() (0600)
+	VerbKeyPub     *string // the cp-verb key's authorized_keys line — authorized on the host
 	// Pin is the version identity to stamp after a successful deploy (install
 	// only). nil on a rebuild/redeploy: build/teardown never promote.
 	Pin *version.Pin
@@ -277,6 +284,36 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 		spec.BinDir+"/freehold-agent-tools", "agent-tools binary")
 }
 
+// seedOperatorTZ writes this box's timezone (the operator's, since the CLI
+// runs where the operator sits) into the CP's settings, IF the setting is
+// unset. Best-effort: a failure is a log line, never a deploy failure — the
+// operator can set the timezone in the console/TUI/CLI at any time.
+func seedOperatorTZ(t Transport, spec *DeployCpSpec) {
+	// The box's zone name: TZ env when it names a zone; else the IANA name
+	// /etc/localtime points at. time.Local.String() is always "Local" — it is
+	// NOT an IANA name, a pod cannot resolve it, and seeding it would fake
+	// success and --if-empty would preserve it forever — so it never seeds.
+	tz := os.Getenv("TZ")
+	if tz == "" || tz == "Local" {
+		if l, err := os.Readlink("/etc/localtime"); err == nil {
+			if i := strings.LastIndex(l, "/usr/share/zoneinfo/"); i >= 0 {
+				tz = l[i+len("/usr/share/zoneinfo/"):]
+			}
+		}
+	}
+	// "" / "UTC" need no setting (pods run UTC anyway).
+	if tz == "" || tz == "UTC" || tz == "Local" {
+		return
+	}
+	cmd := fmt.Sprintf("%s/freehold-console settings --state-dir %s --operator-tz %s --if-empty",
+		spec.BinDir, spec.StateDir, tz)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "seed operator timezone", 30); err != nil {
+		fmt.Fprintf(os.Stderr, "  note: could not seed the operator timezone (%s): %v — set it in the console/TUI\n", tz, err)
+		return
+	}
+	fmt.Printf("  operator timezone seeded: %s (agent pods apply it on their next create/rebuild)\n", tz)
+}
+
 // startServe launches the console serve in the guest with the given flag
 // string, waits for /healthz, then confirms the started pid is still alive.
 // Shared by the full deploy and update's lighter redeploy.
@@ -451,6 +488,135 @@ func mergeRunnerSecrets(boxRaw, cpRaw []byte) ([]byte, error) {
 	return json.Marshal(box)
 }
 
+// DefaultCPProfileConfig is the guest path the profile config ships to (the
+// verbs' --config on the CP guest).
+func DefaultCPProfileConfig() string { return "/srv/data/cp/profile/config.toml" }
+
+// DefaultCPVerbKey is the guest path the cp-verb SSH private key ships to
+// (0600). The verbs' --ssh-key points here when running on the guest.
+func DefaultCPVerbKey() string { return "/srv/data/cp/verb-ssh.key" }
+
+// shipVerbSurface ships the verb surface (the freehold CLI binary, the
+// profile config, the cp-verb SSH key) and authorizes the key's public line
+// on the host — idempotent, so both the full deploy and the update's
+// redeploy call it. A nil field skips that piece (a world can ship the verbs
+// without the key; the verbs then fail their door probe with a clear reason).
+func shipVerbSurface(t Transport, spec *DeployCpSpec) error {
+	if spec.FreeholdBinary != nil && *spec.FreeholdBinary != "" {
+		if err := shipFile(t, spec, *spec.FreeholdBinary, spec.BinDir+"/freehold", "freehold CLI binary"); err != nil {
+			return err
+		}
+	}
+	if spec.FreeholdConfig != nil && *spec.FreeholdConfig != "" {
+		if err := shipSmallFile(t, spec, *spec.FreeholdConfig, DefaultCPProfileConfig(), "profile config"); err != nil {
+			return err
+		}
+	}
+	if spec.VerbSSHKey != nil && *spec.VerbSSHKey != "" {
+		if spec.VerbKeyPub == nil || *spec.VerbKeyPub == "" {
+			return fmt.Errorf("verb-ssh-key needs its public line (verb-key-pub) to authorize on the host")
+		}
+		if err := shipSmallFile(t, spec, *spec.VerbSSHKey, DefaultCPVerbKey(), "cp-verb ssh key"); err != nil {
+			return err
+		}
+		if err := hostAuthorizeKey(t, *spec.VerbKeyPub); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reviveScript renders the guest-local CP revival script: the same serve +
+// runner (+ agent-tools, when its argv is known) start lines this deploy just
+// ran, written to <BinDir>/revive-cp.sh. A rollback run ON the guest
+// (`freehold snapshot rollback --guest`) execs it to bring the CP back without
+// the box's update flow. Regenerated on every deploy/redeploy — the flags
+// cannot drift from what actually runs.
+func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string, capabilityRunnerArgvs []string) string {
+	serve := fmt.Sprintf(
+		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
+		spec.BinDir, spec.StateDir, spec.BindAddr, flags, spec.StateDir, spec.StateDir)
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("# freehold CP revival — generated by deploy-cp; do not edit by hand.\n")
+	b.WriteString("# Brings the console serve + co-located runner back after a rollback\n")
+	b.WriteString("# stopped this guest. agent-tools returns on the next `freehold build`.\n")
+	b.WriteString(serve + "\n")
+	b.WriteString(fmt.Sprintf("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://%s/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n", spec.BindAddr))
+	b.WriteString("[ \"$up\" = 1 ] || { echo 'console serve did not answer /healthz — check " + spec.StateDir + "/serve.log' >&2; exit 1; }\n")
+	if spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil {
+		// The runner's unit is a REAL file now (Restart=on-failure, enabled):
+		// the boot re-runs it. The start is only needed when the boot's
+		// first attempt lost the race with this script.
+		b.WriteString("systemctl start freehold-runner 2>/dev/null || true\n")
+	}
+	// The capability runners (the doors): their units are REAL FILES too
+	// (the build's staging installs them, Restart=on-failure, enabled) —
+	// the boot re-runs them; start = belt and suspenders.
+	for _, line := range capabilityRunnerArgvs {
+		unit, _, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("systemctl start %s 2>/dev/null || true\n", unit))
+	}
+	if strings.TrimSpace(agentToolsArgv) != "" {
+		at := agentToolsStateDir(spec)
+		b.WriteString(fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true\n", at, at))
+		b.WriteString(fmt.Sprintf("setsid nohup %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid\n", agentToolsArgv, at, at))
+	}
+	return b.String()
+}
+
+// shipReviveScript renders + ships the revival script (0755). Called after
+// the serve (+ runner + agent-tools) are up, so the script captures the start
+// commands that just worked.
+func shipReviveScript(t Transport, spec *DeployCpSpec, flags, agentToolsArgv string, capabilityRunnerArgvs []string) error {
+	final := spec.BinDir + "/revive-cp.sh"
+	cmd := fmt.Sprintf("mkdir -p %[1]s && echo %[2]s | base64 -d > %[3]s && chmod 755 %[3]s",
+		spec.BinDir, base64StdEncode([]byte(reviveScript(spec, flags, agentToolsArgv, capabilityRunnerArgvs))), final)
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "ship revive script", 60); err != nil {
+		return err
+	}
+	return nil
+}
+
+// runnerUnitFile renders a REAL systemd unit for a runner serve process —
+// not a transient: a crash or a guest reboot must never remove the unit
+// itself (live-seen on librem: a --collect transient died with the world
+// untouched, 8787 went dark, and nothing but a hand-run systemd-run line
+// brought it back). Restart=on-failure + enabled = the crash and the boot
+// paths both return. cpbuild stages the capability doors' units the same
+// way (duplicated text — the module direction forbids a shared helper).
+func runnerUnitFile(description, execStart string) string {
+	return fmt.Sprintf(`[Unit]
+Description=%s
+After=network-online.target
+
+[Service]
+ExecStart=%s
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, description, execStart)
+}
+
+// startRunnerUnit installs + enables the co-located runner's unit. Idempotent:
+// every deploy rewrites the file (the args can change) and enable --now
+// starts what isn't running.
+func startRunnerUnit(t Transport, spec *DeployCpSpec, runnerDir string) error {
+	unit := runnerUnitFile("freehold co-located runner",
+		fmt.Sprintf("%s/freehold-runner serve --state-dir %s", spec.BinDir, runnerDir))
+	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-runner.service && systemctl daemon-reload && systemctl enable --now freehold-runner && sleep 1 && systemctl is-active freehold-runner",
+		base64StdEncode([]byte(unit)))
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, write), "install co-located runner unit", 90); err != nil {
+		return err
+	}
+	return nil
+}
+
 // DeployCp reproduces the CP deploy driver (OPERATE mode).
 func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 	if err := bootstrap.PlainPath(spec.StateDir); err != nil {
@@ -486,6 +652,10 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 	if err := shipConsoleBins(t, spec); err != nil {
 		return nil, err
 	}
+	// Ship the verb surface (the freehold CLI + profile config + cp-verb key).
+	if err := shipVerbSurface(t, spec); err != nil {
+		return nil, err
+	}
 
 	flags, domain := serveFlags(spec)
 	// Pin the relay host into the guest's /etc/hosts. grep -Fq (fixed string):
@@ -513,6 +683,12 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 	if !isHexPubkey(pubkey) {
 		return nil, fmt.Errorf("console identity pubkey readback is not 64-hex: %q", pubkey)
 	}
+
+	// Seed the operator timezone (best-effort, IF-EMPTY): the box knows the
+	// operator's zone (time.Local — this process runs where the operator
+	// sits), the CP guest does not. The setting drives agent pods' TZ; an
+	// operator's later console/TUI edit survives (--if-empty).
+	seedOperatorTZ(t, spec)
 
 	// CO-LOCATED RUNNER (optional).
 	if spec.RunnerBinary != nil && spec.RunnerPackage != nil {
@@ -592,10 +768,7 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 				}
 			}
 		}
-		startRunner := fmt.Sprintf(
-			"systemctl reset-failed freehold-runner 2>/dev/null; systemd-run --unit=freehold-runner --collect %s/freehold-runner serve --state-dir %s >/dev/null 2>&1; sleep 2; systemctl is-active freehold-runner",
-			spec.BinDir, runnerDir)
-		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, startRunner), "start co-located runner", 60); err != nil {
+		if err := startRunnerUnit(t, spec, runnerDir); err != nil {
 			return nil, err
 		}
 		// The runner now holds the new key; only now drop the old host line.
@@ -619,6 +792,11 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, grant), "self-grant console to co-located runner", 60); err != nil {
 			return nil, err
 		}
+	}
+
+	// The revive script LAST: everything it starts just came up.
+	if err := shipReviveScript(t, spec, flags, "", nil); err != nil {
+		return nil, err
 	}
 
 	// Ship the migration scripts UNMARKED, then stamp the version pin. Order:

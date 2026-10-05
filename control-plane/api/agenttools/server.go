@@ -50,6 +50,23 @@ type Server struct {
 	// confirmation; "off" = the server denies provision_runner outright —
 	// the kill switch). nil = "confirm".
 	AgentGrants func() string
+
+	// ConsolePeer is the console identity's pubkey — the CP's session-authed
+	// operator surface, which proxies world_migrate HERE (the registry lock
+	// lives in this process). It authenticates by the same signed-header
+	// scheme but never by the roster (the console is deliberately not a
+	// channel member), and it may call world_migrate ONLY. Empty = no peer.
+	ConsolePeer string
+
+	// OperatorPeer is the operator identity's pubkey (--owner-pubkey): the
+	// seed's break-glass caller, full operator scope (the dispatch gates a
+	// roster-member operator gets — create/grant/manage + the world tools,
+	// the IsAgent check still denying registry agents). Peer, not member: the
+	// roster is the agent surface (the CPA), while the CP's own identities
+	// authenticate by signature at boot — which also keeps a stale CLI's
+	// operator-signed migration sweep working across a version jump. Empty =
+	// no peer.
+	OperatorPeer string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -103,6 +120,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	caller, aerr := VerifyRequest(grants, s.Audience,
 		r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
 	if aerr != nil {
+		// Local peers authenticate by signature, never by roster: the console
+		// (the world_migrate proxy) and the operator (the seed's break-glass
+		// caller — a stale CLI's sweep must survive a version jump). Each
+		// verifies with itself as the grant, so the signature check is
+		// unchanged; the peer's IDENTITY is the authorization.
+		self := ""
+		if s.ConsolePeer != "" && r.Header.Get(PubkeyHeader) == s.ConsolePeer {
+			self = s.ConsolePeer
+		} else if s.OperatorPeer != "" && r.Header.Get(PubkeyHeader) == s.OperatorPeer {
+			self = s.OperatorPeer
+		}
+		if self != "" {
+			caller, aerr = VerifyRequest([]string{self}, s.Audience,
+				r.Header.Get(PubkeyHeader), r.Header.Get(SigHeader), r.Header.Get(TSHeader), raw)
+		}
+	}
+	if aerr != nil {
 		// Server-side detail the client error deliberately omits: WHO claimed
 		// to call and WHO this server is. An audience drift (a pod signing a
 		// stale agent-tools identity after a durable-state re-mint) reads here
@@ -146,13 +180,24 @@ func (s *Server) toolList() []map[string]interface{} {
 			}, []string{"runner", "pubkeys"}),
 		},
 		{
-			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door. Grants land live; the grantees' pods are re-applied with the new coords.",
+			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door. hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. Grants land live; the grantees' pods are re-applied with the new coords.",
 			"inputSchema": i(map[string]interface{}{
-				"name":     map[string]interface{}{"type": "string"},
-				"kind":     map[string]interface{}{"type": "string"},
-				"address":  map[string]interface{}{"type": "string"},
-				"grant_to": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"name":       map[string]interface{}{"type": "string"},
+				"kind":       map[string]interface{}{"type": "string"},
+				"address":    map[string]interface{}{"type": "string"},
+				"grant_to":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"hosted":     map[string]interface{}{"type": "string"},
+				"host":       map[string]interface{}{"type": "string"},
+				"pubkey":     map[string]interface{}{"type": "string"},
+				"enc_pubkey": map[string]interface{}{"type": "string"},
 			}, []string{"name", "kind", "address", "grant_to"}),
+		},
+		{
+			"name": "revoke_runner", "description": "Take a capability away — the counterpart of provision_runner. With revoke_from set, those agent NAMES lose their grant on the door while it keeps serving the rest of its roster; with revoke_from empty the WHOLE door is retired (roster cleared, credential erased from the CP, its unit stopped where freehold hosts it, its record dropped). Every leg reports whether it was VERIFIED: the roster is re-read from the relay (what the runner checks per call), the unit is asked if it is still active and its port probed, the sealed package is re-opened. Anything unverified is named — a revoked door that is still running is a known state, never a silent one, so relay the unverified legs to the operator instead of claiming a clean teardown. The door's audit channel is KEPT read-only so the revocation stays auditable. Only doors provision_runner gave are touchable: build-time capability runners, the cloudflare-api- doors, and console-provisioned ones stay operator-scoped.",
+			"inputSchema": i(map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"}),
 		},
 		{
 			"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
@@ -210,12 +255,12 @@ type createAgentArgs struct {
 	Name    string `json:"name"`
 	Purpose string `json:"purpose"`
 	// Channel is the single-channel form (the CPA's toolset); Channels is the
-	// multi-channel form (a department joins #freehold + its own #freehold-<name>). Both
+	// multi-channel form (a custom agent created into several channels). Both
 	// are accepted; Channel is prepended to Channels when both are present.
 	Channel  string   `json:"channel"`
 	Channels []string `json:"channels"`
-	// Private makes an explicitly created channel visibility=private (the
-	// per-department channels). The default freehold channel is always private.
+	// Private makes an explicitly created channel visibility=private. The
+	// default freehold channel is always private.
 	Private bool `json:"private"`
 }
 type grantAgentArgs struct {
@@ -227,6 +272,16 @@ type provisionRunnerArgs struct {
 	Kind    string   `json:"kind"`
 	Address string   `json:"address"`
 	GrantTo []string `json:"grant_to"`
+	Hosted  string   `json:"hosted"`
+	Host    string   `json:"host"`
+	Pubkey  string   `json:"pubkey"`
+	EncPub  string   `json:"enc_pubkey"`
+}
+type revokeRunnerArgs struct {
+	Name string `json:"name"`
+	// RevokeFrom are the agent NAMES to drop from the door's roster; empty =
+	// retire the whole door. The server never interprets it — the flow does.
+	RevokeFrom []string `json:"revoke_from"`
 }
 type manageAgentArgs struct {
 	Remove string `json:"remove"`
@@ -294,6 +349,13 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		s.rpcError(w, id, -32003, "unauthorized: registry agents cannot call "+call.Name+" (operator-scoped)")
 		return
 	}
+	// The console peer's single tool (narrow by design — it exists to proxy
+	// world_migrate, whose execution must stay in THIS process for the
+	// registry lock). A console peer reaching anything else is a bug upstream.
+	if s.ConsolePeer != "" && caller == s.ConsolePeer && call.Name != "world_migrate" {
+		s.rpcError(w, id, -32003, "unauthorized: the console peer may call world_migrate only")
+		return
+	}
 	switch call.Name {
 	case "create_agent":
 		var a createAgentArgs
@@ -341,7 +403,27 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		}
 		report, err := s.Tools.ProvisionRunner(agent.ProvisionArgs{
 			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
+			Hosted: a.Hosted, Host: a.Host, Pubkey: a.Pubkey, EncPubkey: a.EncPub,
 		})
+		s.textResult(w, id, err, report)
+	case "revoke_runner":
+		// The take-away carve-out, governed by the SAME kill switch as the
+		// grant-giving one: an operator who turns agent grants off has said the
+		// agent may neither hand capability out nor take it back — the console is
+		// then the only revocation surface. Deliberately shared rather than a
+		// second knob: a world where the agent can provision but not revoke (or
+		// the reverse) is a half-governed capability plane, and two independent
+		// switches is how a half-governed plane stays that way.
+		if mode := s.agentGrantsMode(); mode == "off" {
+			s.rpcError(w, id, -32003, "unauthorized: agent_grants is off — revoke_runner is disabled (the operator revokes via the console)")
+			return
+		}
+		var a revokeRunnerArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "revoke_runner arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.RevokeRunner(agent.RetireArgs{Name: a.Name, RevokeFrom: a.RevokeFrom})
 		s.textResult(w, id, err, report)
 	case "manage_agent":
 		var a manageAgentArgs

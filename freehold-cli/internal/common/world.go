@@ -2,13 +2,11 @@ package common
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"time"
 
-	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
@@ -17,51 +15,26 @@ import (
 	"freehold/platform/provisioning/box"
 )
 
-// WorldMCP builds the agent-tools MCP client for the world verbs. It signs as
-// the OPERATOR identity (the persisted nsec — a console-admin in the toolset
-// roster), NOT the box's agent-ops identity. It refreshes the recorded
-// agent-tools coords from the console FIRST, so a --data rebuild's fresh
-// agent-tools pubkey does not stale every signed call.
-func WorldMCP(cfg *config.Config) (*client.McpClient, error) {
-	RefreshAgentToolsCoords(cfg)
-	if cfg == nil || cfg.AgentToolsURL == "" || cfg.AgentToolsPubkey == "" {
-		return nil, fmt.Errorf("no freehold-agent-tools coords recorded (run `freehold login` against the CP)")
-	}
-	auth, err := identity.AgentAuth(oplogin.Dir())
+// WorldExecThroughCP runs cmd on the CP's co-located runner via the console's
+// operator-scoped /api/world-exec (the drive-through-CP exec surface a thin
+// login box has) — session-authed, no relay roster.
+func WorldExecThroughCP(target, cmd string, secrets []string, timeoutS uint64) error {
+	cfg, err := config.Load(ConfigPath())
 	if err != nil {
-		return nil, fmt.Errorf("this box has no operator identity at %s (run `freehold login` to materialize it): %v", oplogin.Dir(), err)
+		return fmt.Errorf("load config: %w", err)
 	}
-	return client.New(client.ConnectURL(cfg.AgentToolsURL), auth, cfg.AgentToolsPubkey)
-}
-
-// CallAgentToolsText issues one agent-tools tool call and returns the text
-// content. world_build runs its stages synchronously for minutes, so it uses
-// the long deadline (calling exactly ONE path).
-func CallAgentToolsText(mc *client.McpClient, tool string, args map[string]interface{}) (string, error) {
-	long := map[string]bool{"world_build": true}
-	var raw json.RawMessage
-	var err error
-	if long[tool] {
-		raw, err = mc.CallLong(tool, args)
-	} else {
-		raw, err = mc.Call(tool, args)
-	}
+	c, err := ConsoleLogin(cfg)
 	if err != nil {
-		return "", err
+		return err
 	}
-	var env struct {
-		Result *struct {
-			Content []map[string]any `json:"content"`
-		} `json:"result"`
+	text, err := c.WorldExec(target, cmd, secrets, timeoutS)
+	if err != nil {
+		return fmt.Errorf("world_exec: %w", err)
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return "", fmt.Errorf("agent-tools %s: bad envelope: %w", tool, err)
+	if text != "" {
+		fmt.Print(text)
 	}
-	if env.Result == nil || len(env.Result.Content) == 0 {
-		return "", fmt.Errorf("agent-tools %s: empty result", tool)
-	}
-	t, _ := env.Result.Content[0]["text"].(string)
-	return t, nil
+	return nil
 }
 
 // ConsoleLogin logs the operator in to the CP, preferring the https CPURL — a
@@ -84,8 +57,8 @@ func ConsoleLogin(cfg *config.Config) (*console.Client, error) {
 			lastErr = err
 		}
 	}
-	if ip := config.LxcIP(cfg.Lxc.Cp); ip != "" {
-		if c, err := oplogin.Login("http://"+ip+":8080", key); err == nil {
+	if ip := ConsoleLoginURL(cfg); ip != "" {
+		if c, err := oplogin.Login(ip, key); err == nil {
 			return c, nil
 		} else {
 			lastErr = err
@@ -95,43 +68,6 @@ func ConsoleLogin(cfg *config.Config) (*console.Client, error) {
 		lastErr = fmt.Errorf("no CP URL configured")
 	}
 	return nil, lastErr
-}
-
-// RefreshAgentToolsCoords re-reads the CP's live agent-tools URL + pubkey from
-// the console's /api/world and adopts them into cfg. Best effort.
-func RefreshAgentToolsCoords(cfg *config.Config) {
-	if cfg == nil || cfg.CPURL == "" {
-		return
-	}
-	c, err := ConsoleLogin(cfg)
-	if err != nil {
-		return
-	}
-	w, err := c.World()
-	if err != nil {
-		return
-	}
-	if AdoptAgentToolsCoords(cfg, w) {
-		_ = cfg.Save(ConfigPath())
-	}
-}
-
-// AdoptAgentToolsCoords copies the CP-reported agent-tools URL + pubkey into
-// cfg and reports whether anything changed.
-func AdoptAgentToolsCoords(cfg *config.Config, w *console.WorldSummary) bool {
-	if cfg == nil || w == nil || w.AgentToolsPubkey == "" {
-		return false
-	}
-	changed := false
-	if w.AgentToolsPubkey != cfg.AgentToolsPubkey {
-		cfg.AgentToolsPubkey = w.AgentToolsPubkey
-		changed = true
-	}
-	if w.AgentToolsURL != "" && w.AgentToolsURL != cfg.AgentToolsURL {
-		cfg.AgentToolsURL = w.AgentToolsURL
-		changed = true
-	}
-	return changed
 }
 
 // NoLocalRunner reports whether this box is THIN: such a box drives the world —
@@ -155,35 +91,6 @@ func AddrReachable(addr string) bool {
 	return true
 }
 
-// WorldExecThroughCP runs cmd on the CP's co-located runner via the world_exec
-// tool, so a thin login box has the build box's exec capability. Signed as the
-// operator.
-func WorldExecThroughCP(target, cmd string, secrets []string, timeoutS uint64) error {
-	cfg, err := config.Load(ConfigPath())
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	mc, err := WorldMCP(cfg)
-	if err != nil {
-		return err
-	}
-	args := map[string]interface{}{"target": target, "cmd": cmd}
-	if timeoutS > 0 {
-		args["timeout_s"] = timeoutS
-	}
-	if len(secrets) > 0 {
-		args["secrets"] = secrets
-	}
-	text, err := CallAgentToolsText(mc, "world_exec", args)
-	if err != nil {
-		return fmt.Errorf("world_exec: %w", err)
-	}
-	if text != "" {
-		fmt.Print(text)
-	}
-	return nil
-}
-
 // DoorPubkey derives the box's deterministic SSH door public line from its
 // agent-ops identity NOSTR secret seed — the SAME key that signs its world API
 // calls. The private half never leaves the box.
@@ -201,7 +108,8 @@ func DoorPubkey() (string, error) {
 }
 
 // DoorAction authorizes or revokes this box's public door key on the host door
-// through the CP's co-located runner.
+// through the console's operator-scoped /api/world-door (session-authed, no
+// relay roster).
 func DoorAction(action string) error {
 	if action != "authorize" && action != "revoke" {
 		return fmt.Errorf("unknown door action %q (authorize|revoke)", action)
@@ -214,19 +122,18 @@ func DoorAction(action string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	mc, err := WorldMCP(cfg)
+	c, err := ConsoleLogin(cfg)
 	if err != nil {
 		return err
 	}
-	tool := "world_revoke_door"
-	verb := "revoked"
 	if action == "authorize" {
-		tool = "world_authorize_door"
-		verb = "authorized"
+		err = c.WorldDoorAuthorize(pubkey)
+	} else {
+		err = c.WorldDoorRevoke(pubkey)
 	}
-	if _, err := CallAgentToolsText(mc, tool, map[string]interface{}{"pubkey": pubkey}); err != nil {
-		return fmt.Errorf("%s: %w", tool, err)
+	if err != nil {
+		return fmt.Errorf("world door %s: %w", action, err)
 	}
-	fmt.Printf("door key %s on the host door (%s)\n", verb, pubkey)
+	fmt.Printf("door key %s on the host door (%s)\n", action+"d", pubkey)
 	return nil
 }

@@ -61,20 +61,18 @@ func TestNsecToSecret(t *testing.T) {
 	}
 }
 
-// TestAuthorizeDoorNeedsToolsetCoords guards the door flow's guard rails: with
-// an agent-ops identity minted but no agent-tools coords recorded (a CP that
-// predates the world toolset), AuthorizeDoor must fail cleanly and name the
-// miss rather than attempt a network call or panic.
-func TestAuthorizeDoorNeedsToolsetCoords(t *testing.T) {
+// TestAuthorizeDoorNeedsConsoleSession guards the door flow's guard rails:
+// with an agent-ops identity minted but no console session, AuthorizeDoor must
+// fail cleanly and name the miss rather than attempt a network call or panic.
+func TestAuthorizeDoorNeedsConsoleSession(t *testing.T) {
 	t.Setenv("FREEHOLD_HOME", t.TempDir())
 	if _, err := EnsureOpsIdentity(); err != nil {
 		t.Fatal(err)
 	}
-	c := &config.Config{}
-	if err := AuthorizeDoor(c); err == nil {
-		t.Fatal("AuthorizeDoor with no agent-tools coords must error")
-	} else if !strings.Contains(err.Error(), "freehold-agent-tools") {
-		t.Fatalf("error should name the missing coords, got: %v", err)
+	if err := AuthorizeDoor(nil); err == nil {
+		t.Fatal("AuthorizeDoor with no console session must error")
+	} else if !strings.Contains(err.Error(), "console session") {
+		t.Fatalf("error should name the missing session, got: %v", err)
 	}
 }
 
@@ -351,6 +349,8 @@ func mockCP(t *testing.T, cpPubkey string) *httptest.Server {
 				"agent_tools_url":    "http://10.0.0.5:8089",
 				"agent_tools_pubkey": "22222",
 			})
+		case "/api/world-door":
+			writeJSON(w, map[string]string{"ok": "true"})
 		default:
 			http.NotFound(w, r)
 		}

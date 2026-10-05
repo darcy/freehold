@@ -6,6 +6,7 @@ package config
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
+	"net/netip"
 )
 
 // Config is the connection profile / desired world state.
@@ -54,6 +56,7 @@ type Config struct {
 	Dns              DnsSpec     `toml:"dns,omitempty"`
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
 	Caddy            CaddySpec   `toml:"caddy,omitempty"`
+	Gateway          GatewaySpec `toml:"gateway,omitempty"`
 	CPAName          string      `toml:"cpa_name,omitempty"`
 	Managed          []string    `toml:"managed"`
 	// AgentTools is the CP's freehold-agent-tools MCP server (create/grant/
@@ -63,10 +66,112 @@ type Config struct {
 	AgentToolsPubkey string `toml:"agent_tools_pubkey,omitempty"`
 }
 
-// ProxySpec is the single static address in the world: the proxy (Caddy) node,
-// which the relay + CP hosts resolve to and which Caddy binds for TLS. CIDR form.
+// ProxySpec is the single static address in the world: the EDGE every public
+// host resolves to. With a gateway (GatewaySpec set) that is the gateway
+// guest's LAN address; without one it is the proxy (Caddy) node itself.
+// CIDR form.
 type ProxySpec struct {
 	Ip *string `toml:"ip,omitempty"`
+}
+
+// GatewaySpec is the freehold-subnet gateway (docs/NETWORK.md Phase 1): the
+// one guest the surrounding network sees. Set (non-nil Cidr), the world's
+// other guests are born on an internal subnet behind it — static IPs off
+// InternalIPFor, default route through GatewayInternalIP, outbound NAT and
+// 80/443/6443 forwards on the gateway. Cidr is the internal subnet (e.g.
+// 10.77.0.0/24); Vlan is the tag on the PVE bridge (stays in-host — the
+// router never sees it; 0/absent = untagged bridge).
+type GatewaySpec struct {
+	Cidr *string `toml:"cidr,omitempty"`
+	Vlan *int    `toml:"vlan,omitempty"`
+}
+
+// GatewayInternalIP returns the gateway guest's INTERNAL address: the first
+// usable host of the internal CIDR (x.x.x.1).
+func GatewayInternalIP(cidr string) string { return nthIP(cidr, 1) }
+
+// InternalIPFor returns the deterministic internal address for a guest role
+// on the internal CIDR: relay .11, cp .12, k3s .13.
+func InternalIPFor(cidr, role string) string {
+	switch role {
+	case "relay":
+		return nthIP(cidr, 11)
+	case "cp":
+		return nthIP(cidr, 12)
+	case "k3s":
+		return nthIP(cidr, 13)
+	}
+	return ""
+}
+
+// nthIP returns the nth usable host address of a CIDR (n=1 = the address
+// right after the network address). "" when the CIDR does not parse.
+func nthIP(cidr string, n int) string {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil || !p.Addr().Is4() {
+		return ""
+	}
+	network, perr := netip.AddrFrom4(p.Addr().As4()).Prefix(p.Bits())
+	if perr != nil {
+		return ""
+	}
+	b := network.Addr().As4()
+	sum := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+	sum += uint32(n)
+	return netip.AddrFrom4([4]byte{byte(sum >> 24), byte(sum >> 16), byte(sum >> 8), byte(sum)}).String()
+}
+
+// GatewayNftConf renders the gateway guest's nftables ruleset: masquerade for
+// the internal subnet, 80/443 (tcp+udp) DNAT to the Caddy edge, 6443 to the
+// kube-apiserver, 8080 to the CP console (the box's pre-Caddy build path —
+// the console is NIP-98-gated; the flat-LAN world exposed it identically on
+// the CP's LAN IP), 3000 to the relay (its LAN-dial port — the CP's and the
+// pods' http://<relay-host>:3000 dials resolve through the resolver's
+// bare-record shadowing in unreliable order, so BOTH answers must work).
+// The DNATs match EITHER ingress (the internal guests hairpin through the
+// gateway — a k3s pod's wss:// to the public FQDN arrives on eth1) but ONLY
+// traffic ADDRESSED TO THE GATEWAY (edgeIP): an unconstrained dport DNAT
+// hijacks every transit :443 — the guests' own egress to the internet
+// included — and serves them the edge's TLS. The masquerade drops the
+// egress-interface pin for the same reason (the hairpin reply must NAT back
+// to the gateway, or the guest talks to itself).
+// Shared by the box boot stage and the CP build's re-assert — one renderer,
+// never two diverging rule sets. wanIf is the gateway's public-side
+// interface (eth0).
+func GatewayNftConf(cidr, edgeIP, k3sIP, cpIP, relayIP, wanIf string) string {
+	return fmt.Sprintf(`flush ruleset
+table ip freehold {
+	chain forward {
+		type filter hook forward priority 0; accept;
+	}
+	chain postrouting {
+		type nat hook postrouting priority srcnat;
+		ip saddr %s masquerade
+	}
+	chain prerouting {
+		type nat hook prerouting priority dstnat;
+		ip daddr %s tcp dport { 80, 443 } dnat to %s
+		ip daddr %s udp dport { 80, 443 } dnat to %s
+		ip daddr %s tcp dport 6443 dnat to %s:6443
+		ip daddr %s tcp dport 8080 dnat to %s:8080
+		ip daddr %s tcp dport 3000 dnat to %s:3000
+	}
+}
+`, cidr, edgeIP, k3sIP, edgeIP, k3sIP, edgeIP, k3sIP, edgeIP, cpIP, edgeIP, relayIP)
+}
+
+// GatewayDnsmasqConf renders the gateway's resolver config: the internal
+// subnet's forwarder (the guests' resolv.conf points at the gateway; without
+// a listener the CP's own upstream lookups — Cloudflare API, image pulls —
+// die on a refused 10.77.0.1:53). upstream is the LAN router; a public
+// fallback rides behind it.
+func GatewayDnsmasqConf(upstream string) string {
+	return fmt.Sprintf(`interface=eth1
+bind-interfaces
+no-resolv
+server=%s
+server=1.1.1.1
+`, upstream)
 }
 
 // TenantSlug is a stable filesystem/LXC slug for the world, derived from the
@@ -120,8 +225,19 @@ type PlaneSpec struct {
 	// only by the carve branch of the rebuild placement gate; a REUSED
 	// stock pool (pve/data) is never recorded here. Teardown --data removes
 	// exactly this pool and nothing else.
-	ThinPool *string                 `toml:"thin_pool,omitempty"`
+	ThinPool *string `toml:"thin_pool,omitempty"`
 	Mounts   map[string][]PlaneMount `toml:"mounts,omitempty"`
+	// Guest size/placement as the operator set them at install — persisted so
+	// a later world-config render (an UPDATE's) carries them: the update's
+	// own flags never do, and a blank spec made the next guest-create fail
+	// the substrate tool's parameter validation.
+	SizeGB     uint32 `toml:"size_gb,omitempty"`
+	PoolSizeGB uint32 `toml:"pool_size_gb,omitempty"`
+	RootfsGB   uint32 `toml:"rootfs_gb,omitempty"`
+	MemoryMB   uint32 `toml:"memory_mb,omitempty"`
+	Storage    string `toml:"storage,omitempty"`
+	Bridge     string `toml:"bridge,omitempty"`
+	RelayGW    string `toml:"relay_gw,omitempty"`
 }
 
 // PlaneMount is one resolved durable-plane mount (HOST source + guest path).
@@ -184,10 +300,14 @@ func urlHost(u string) string {
 // LxcSpec holds the managed LXC coordinates. Relay/Cp are DHCP (their Ip is
 // the DISCOVERED address, populated after boot — the static is Proxy.Ip); K3s
 // carries no Ip because the k3s node's address IS Proxy.Ip (the one static).
+// With a gateway (GatewaySpec set) all four are STATIC on the internal subnet
+// instead, and Gateway records the gateway guest (its Vmid for teardown; its
+// LAN address IS Proxy.Ip, its internal address is GatewayInternalIP).
 type LxcSpec struct {
-	Relay LxcGuest `toml:"relay"`
-	Cp    LxcGuest `toml:"cp"`
-	K3s   LxcGuest `toml:"k3s,omitempty"`
+	Relay   LxcGuest `toml:"relay"`
+	Cp      LxcGuest `toml:"cp"`
+	K3s     LxcGuest `toml:"k3s,omitempty"`
+	Gateway LxcGuest `toml:"gateway,omitempty"`
 }
 
 // DnsSpec is the CP-owned resolver's explicit records (name -> IP), the
@@ -405,8 +525,16 @@ func LxcIP(g LxcGuest) string {
 // ResolveTarget returns the bare LAN IP an install/build/teardown step should
 // connect to for a service BEFORE the world's public DNS resolves (or the
 // Caddy edge exists). role is one of "relay", "cp", "proxy". "" = no recorded
-// IP — the caller falls back to the hostname/URL.
+// IP — the caller falls back to the hostname/URL. With a gateway the world's
+// guests are internal — the dialable address is the gateway (the edge), whose
+// DNAT fronts everything the domain would.
 func (c *Config) ResolveTarget(role string) string {
+	if c.Gateway.Cidr != nil && *c.Gateway.Cidr != "" {
+		if c.Proxy.Ip != nil {
+			return StripCIDR(*c.Proxy.Ip)
+		}
+		return ""
+	}
 	switch role {
 	case "relay":
 		return LxcIP(c.Lxc.Relay)

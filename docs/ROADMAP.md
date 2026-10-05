@@ -47,8 +47,8 @@ runners, and memory are scoped to a single relay.
     registration, AI hardware) is executed by that department's identity, and its raw grant  
     attaches there, never to a custom agent that would self-serve a second, ungoverned path.  
     Service lifecycle is not a department — whichever agent created a service owns it, ad hoc  
-    and unvetted. The four are installed as part of the core build — each in the private `#freehold` plus  
-    its own private `#freehold-<department>` channel, with the CPA a member of all; only the  
+    and unvetted. The four are installed as part of the core build — all in the shared private
+    `#freehold` channel (there are no per-department channels); only the  
     identity/grant separation is locked (capability tooling arrives per department later).
     
 *   **Runner identity = Nostr membership + separate encryption keypair (env-injected).**  
@@ -85,6 +85,11 @@ on the fly (`provision_runner`; `docs/POC_GRANTS.md`).
     
 *   **Chunk 7 — remaining connectors + North Star:** Vultr and Backblaze exercised for real  
     onboarding, then portable backup & hardware migration (see below).
+
+*   **The network plane — a named build plan, not a numbered chunk** (`docs/NETWORK.md`):  
+    the gateway guest + freehold-subnet (Phase 1), VPS parity (Phase 2), Pangolin as the  
+    public-path north star (Phase 3), and agent-operated exposure (Phase 4). It runs  
+    alongside the chunk numbering and owns no number.
 
 *   **Long-standing POC acceptance:** the CPA manages an SSH machine / Vultr / Backblaze via  
     runner + installs skills (tailscale, pihole) with a readiness view; the management relay  

@@ -316,7 +316,9 @@ func BuildTree(ctx context.Context, ref, sha, localDir, dest string) (Set, error
 		if target == "" {
 			target = ref
 		}
-		if out, err := run(ctx, tree, "git", "fetch", "--quiet", "origin", target); err != nil {
+		// --tags: a cached clone's tag set is frozen at first clone; without
+		// this, git describe stamps stale base tags (v0.7.4-41-g… for v0.7.6).
+		if out, err := run(ctx, tree, "git", "fetch", "--quiet", "--tags", "--force", "origin", target); err != nil {
 			return Set{}, fmt.Errorf("fetch %s: %w: %s", target, err, out)
 		}
 		if out, err := run(ctx, tree, "git", "checkout", "--quiet", "FETCH_HEAD"); err != nil {

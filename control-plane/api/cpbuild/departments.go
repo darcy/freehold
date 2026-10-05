@@ -64,6 +64,14 @@ type capabilityRunner struct {
 	// no build-time source to re-seal from, and the ssh pubkey is installed on
 	// the TARGET box (by the operator), never on the PVE host.
 	dynamic bool
+	// selfHosted marks a runner RESIDENT on its own target (the runner-client
+	// enroll flow): the CP holds no identity, ships no package, and starts no
+	// unit — the target runs its own process; the rebuild only re-syncs the
+	// channel + rosters and records the coords.
+	selfHosted bool
+	// host is a self-hosted runner's LAN address — pod coords dial it instead
+	// of the CP IP.
+	host string
 }
 
 // kubernetesVersion is the kubectl build installed on the CP LXC (the kube
@@ -91,13 +99,21 @@ func capabilityRunners() []capabilityRunner {
 			rosters: []string{"ai"}},
 		{name: "dnsmasq-local-root", kind: "local", port: 8796,
 			rosters: []string{"network"}},
+		// cp-local-root: local exec ON the cp guest as root, for the data
+		// department's verbs (freehold snapshot/export run there — the verb
+		// surface deploy-cp ships to /srv/data/cp/bin). Same kind as
+		// dnsmasq-local-root: the door IS this guest.
+		{name: "cp-local-root", kind: "local", port: 8797,
+			rosters: []string{"data"}},
 	}
 }
 
 // cloudflareRunnerPort is where the dynamic per-zone runners start, after the
 // static table's highest port. Agent-provisioned capability records start
 // above it (dynamicRunnerPortBase) so the two derivation paths never collide.
-const cloudflareRunnerPort = 8797
+// The derivation also skips any occupied port (occupiedPorts), so the static
+// table can grow past this base without a collision.
+const cloudflareRunnerPort = 8798
 
 // dynamicRunnerPortBase is where agent-provisioned capability records start
 // (the per-zone DNS doors occupy at most the cp+relay slots above 8796).
@@ -237,6 +253,7 @@ func dynamicRunners(store *state.StateStore) []capabilityRunner {
 		out = append(out, capabilityRunner{
 			name: name, kind: rec.Kind, port: rec.Port,
 			rosters: rosters, addr: rec.Address, dynamic: true,
+			selfHosted: rec.SelfHosted(), host: rec.Host,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
@@ -299,9 +316,13 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	rec, exists := store.GetRunner(r.name)
 	if !exists {
 		if r.dynamic {
-			// An agent-provisioned runner whose package vanished: its
-			// credential came from the operator and cannot be re-derived —
-			// fail loudly (the door waits) instead of silently re-keying.
+			// An agent-provisioned runner whose record lost its runner row:
+			// fail loudly. For a CP-guest door the credential came from the
+			// operator and cannot be re-derived; for a self-hosted one the
+			// identity lives on the target — re-enroll it there.
+			if r.selfHosted {
+				return fmt.Errorf("capability record %s is self-hosted but has no runner row — re-enroll it on the target (`runner enroll` + provision_runner hosted=self)", r.name)
+			}
 			return fmt.Errorf("capability record %s has no runner package — re-provision it (the credential is not re-derivable)", r.name)
 		}
 		c, err := s.runnerCredential(r, hostAddr)
@@ -331,7 +352,9 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	} else if r.dynamic {
 		// Adopt-only: the record is the spec, the package holds the operator's
 		// credential, and no build-time source exists to re-seal from. The
-		// channel sync + (re)start below are the re-assert.
+		// channel sync + (re)start below are the re-assert. A self-hosted
+		// runner has no package here at all — its identity lives on the
+		// target; the sync below re-asserts its rosters the same way.
 	} else {
 		// ssh credentials are the runner's identity — stable; re-authorize the
 		// SAME key if the host lost it. Everything else rotates (a k3s rebuild
@@ -386,14 +409,26 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	if err := s.addRelayCommunityMember(rec.NostrPubkey); err != nil {
 		return fmt.Errorf("relay community membership: %w", err)
 	}
-	if err := s.startCapabilityRunner(r, pkgDir); err != nil {
-		return fmt.Errorf("start runner: %w", err)
+	// A SELF-HOSTED runner runs its own unit on its own target — the CP
+	// starts nothing (the enroll flow / the owning agent did); the rebuild
+	// only re-asserted its channel + rosters above.
+	if !r.selfHosted {
+		if err := s.startCapabilityRunner(r, pkgDir); err != nil {
+			return fmt.Errorf("start runner: %w", err)
+		}
 	}
 	if s.DepartmentRunners == nil {
 		s.DepartmentRunners = map[string][]agent.RunnerCoords{}
 	}
+	// A self-hosted runner's pods dial the TARGET's LAN address, not the CP
+	// IP (the record carries the host) — gated on the mode, never on the
+	// field being merely non-empty.
+	dialHost := s.CpIP
+	if r.selfHosted && r.host != "" {
+		dialHost = r.host
+	}
 	coords := agent.RunnerCoords{
-		URL:    fmt.Sprintf("http://%s:%d", s.CpIP, r.port),
+		URL:    fmt.Sprintf("http://%s:%d", dialHost, r.port),
 		Pubkey: rec.NostrPubkey,
 		Target: r.name,
 		Secret: r.name,
@@ -651,7 +686,7 @@ func (s *Spec) grantDepartmentRunner(dept, pubkey string) error {
 }
 
 // retireRunner removes a runner retired by a rename (data-pve -> pve-ssh-root):
-// stop its unit, revoke it (the state record flips + the shipped ciphertext is
+// retire its unit, revoke it (the state record flips + the shipped ciphertext is
 // removed), and drop its authorized_keys line from the host. Idempotent; runs
 // AFTER the replacement is staged so a department never loses exec across the
 // build. Best-effort: a half-completed earlier retire (revoked, key line still
@@ -663,12 +698,8 @@ func (s *Spec) retireRunner(store *state.StateStore, name string) {
 		return
 	}
 	// The old department-runner convention named the unit after the DEPARTMENT
-	// ("freehold-runner-data"); the new one after the RUNNER. Stop both.
-	script := "systemctl stop freehold-runner-" + name + " 2>/dev/null; " +
-		"systemctl stop freehold-runner-data 2>/dev/null; " +
-		"systemctl reset-failed freehold-runner-" + name + " 2>/dev/null; " +
-		"systemctl reset-failed freehold-runner-data 2>/dev/null; true"
-	_, _ = exec.Command("sh", "-c", script).CombinedOutput()
+	// ("freehold-runner-data"); the new one after the RUNNER. Retire both.
+	_, _ = exec.Command("sh", "-c", retireUnitsScript(name)).CombinedOutput()
 	if rec.Status != state.RunnerRevoked {
 		pubLine, perr := departmentRunnerPubLine(rec.PackageDir, name)
 		if _, rerr := provisioner.RevokeRunner(store, name); rerr != nil {
@@ -679,6 +710,23 @@ func (s *Spec) retireRunner(store *state.StateStore, name string) {
 			s.deauthorizeHostKey(pubLine, name)
 		}
 	}
+}
+
+// retireUnitsScript is the close-out for the units a build's rename-retire
+// retires (above): the staged units are REAL FILES now (Restart=on-failure,
+// enabled — see startCapabilityRunner), so a bare stop would leave the unit
+// enabled and the next CP-guest boot would resurrect a runner the build just
+// retired. disable --now, remove the file, reload — the same close-out
+// unitOutcomes runs. The rm is a no-op for the legacy department-named unit,
+// which only ever existed as a --collect transient.
+func retireUnitsScript(name string) string {
+	unit := "freehold-runner-" + name
+	return fmt.Sprintf(
+		"systemctl disable --now %s freehold-runner-data 2>/dev/null; "+
+			"rm -f /etc/systemd/system/%s.service /etc/systemd/system/freehold-runner-data.service; "+
+			"systemctl daemon-reload; "+
+			"systemctl reset-failed %s freehold-runner-data 2>/dev/null; true",
+		unit, unit, unit)
 }
 
 // deauthorizeHostKey removes a retired runner's key line from the PVE host's
@@ -763,9 +811,31 @@ func (s *Spec) addRelayCommunityMember(pubkey string) error {
 	return s.run(fmt.Sprintf("pct exec %d -- sh -c '%s'", relayLxc, cmdLine), 120)
 }
 
-// startCapabilityRunner (re)starts the runner as a transient systemd unit on
-// the CP LXC (systemctl/systemd-run run LOCALLY — the CP executor is this
-// guest). Reloads the binary + package on every build.
+// startCapabilityRunner (re)installs the runner's systemd UNIT FILE on the
+// CP LXC and (re)starts it (systemctl runs LOCALLY — the CP executor is this
+// guest). Reloads the binary + package on every build. A REAL unit file, not
+// a transient: a crash or a guest reboot must never remove the unit itself
+// (Restart=on-failure + enabled = the crash and the boot paths both return).
+// The deploy's side (cpdeploy) renders the co-located runner's unit the same
+// way — the module direction forbids a shared helper.
+// doorUnitText renders a capability door's systemd unit file — a REAL file
+// (Restart=on-failure, enabled): a crash or a guest reboot returns; a
+// --collect transient removed the unit on the first crash.
+func doorUnitText(description, name, bin, flags string) string {
+	return fmt.Sprintf(`[Unit]
+Description=%s
+After=network-online.target
+
+[Service]
+ExecStart=%s serve %s
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, description, bin, flags)
+}
+
 func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	binDir, _ := s.cpGuestDirs()
 	bin := binDir + "/freehold-runner"
@@ -778,11 +848,12 @@ func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	flags := fmt.Sprintf("--state-dir %s --addr 0.0.0.0:%d --relay-url %s --relay-pubkey %s --relay-auth-url %s --allow-remote",
 		pkgDir, r.port, s.relayDialURL(), s.RelayPK, s.relaySignURL())
 	unit := "freehold-runner-" + r.name
+	unitFile := doorUnitText("freehold capability runner "+r.name, r.name, bin, flags)
 	script := fmt.Sprintf(
-		"systemctl stop %s 2>/dev/null; systemctl reset-failed %s 2>/dev/null; systemd-run --unit=%s --collect %s serve %s",
-		unit, unit, unit, bin, flags)
+		"echo %s | base64 -d > /etc/systemd/system/%s.service && systemctl daemon-reload && systemctl stop %s 2>/dev/null; systemctl enable --now %s",
+		base64.StdEncoding.EncodeToString([]byte(unitFile)), unit, unit, unit)
 	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
-		return fmt.Errorf("systemd-run %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("install unit %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	// Wait for the port to listen so the next step never races a refused dial.
 	addr := fmt.Sprintf("127.0.0.1:%d", r.port)

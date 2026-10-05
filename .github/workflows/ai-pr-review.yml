@@ -1,16 +1,32 @@
 name: Bot Review
 
 on:
-  # Dependabot PRs MUST NOT be reviewed from the `pull_request` event: a
-  # dependabot-initiated `pull_request` run gets a read-only GITHUB_TOKEN and no
-  # repo secrets, so `review.mjs` would die on `Missing required env var:
-  # GITHUB_TOKEN`. They are reviewed from `pull_request_target` instead (below),
-  # which runs in the base repo's context with secrets and a writable token. The
-  # two clauses are mutually exclusive, so a PR revision is reviewed exactly once.
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened, review_requested]
+  # `pull_request_target` ONLY — for every PR (same-repo, fork, Dependabot's;
+  # no routing `if:`). Under this event the workflow YAML that runs always
+  # comes from the base repo's default branch, so a PR can never rewrite the
+  # `run:` blocks that review it — a `pull_request` trigger would re-open
+  # exactly that hole (its YAML is the PR's merge-ref copy). The event context
+  # carries the base repo's secrets, which review.mjs needs to post; a
+  # fork/Dependabot-initiated `pull_request` run would get a read-only token
+  # and no secrets, so there is nothing to route back to it for.
+  # The event checkout below is the default branch (trusted main) — the
+  # scripts, npm deps, and prompt template all run from it, and the agent
+  # explores that same tree with read-only tools. The reviewed diff is fetched
+  # over the API (`pulls.listFiles`). Nothing from an unreviewed head is ever
+  # checked out, let alone executed; the only untrusted inputs are the diff
+  # and prior comments, which reach the agent as prompt data.
   pull_request_target:
     types: [opened, synchronize, ready_for_review, reopened, review_requested]
+
+concurrency:
+  # One review per PR at a time, latest event wins: overlapping runs each post
+  # their own verdict review (and a run's dismissal step executes before the
+  # other run has posted, so two contradictory APPROVED/REQUEST_CHANGES can
+  # coexist). Multiple events fire for a single push, and back-to-back pushes
+  # overlap runs (each takes ~5 min) — without this group the PR can end on an
+  # approval posted right under a NEEDS WORK summary from the same head.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -22,24 +38,23 @@ jobs:
   bot-review:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Exactly one branch of the `on:` fires per PR revision: a human PR is reviewed
-    # from `pull_request`, a Dependabot PR from `pull_request_target`. Both keyed on
-    # the PR author, not `github.actor` — Dependabot PRs also get re-synced by an
-    # operator's "Update branch" click (actor = the operator), and those re-reviews
-    # must still run. `pull_request_target` runs in the base repo's context, so the
-    # bot token and the Fireworks key are present; here the base ref is `main`, never
-    # a Dependabot-created ref, which is the one case the docs flag as still restricted.
-    if: (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]') || (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]')
-    # No `ref:` on the checkout below: on `pull_request_target` checkout resolves to
-    # the base branch, which is what this job wants — the review scripts and the
-    # context files come from trusted main, never from the PR head, and
-    # `allow-unsafe-pr-checkout` is deliberately NOT set. The reviewed diff is
-    # fetched over the API (`pulls.listFiles`), so nothing from an unreviewed head
-    # is ever checked out or executed.
+    # The auto GITHUB_TOKEN is only used by the checkout (fetch). The review
+    # posts through the bot PAT, so the auto token gets read-only contents and
+    # nothing else — minimal blast radius if any executed code were ever
+    # compromised.
+    permissions:
+      contents: read
     steps:
+      # The explored repo AND the executed code — under `pull_request_target`
+      # this checkout IS the base repo's default branch (trusted main). No
+      # second checkout exists: there is nothing to separate it from.
+      # persist-credentials: false — the default writes the token into this
+      # tree's .git/config, a file inside the harness's read scope; the rule
+      # holds regardless of what is checked out.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - uses: actions/setup-node@v6
         with:
@@ -51,6 +66,18 @@ jobs:
         working-directory: .github/scripts/ai-review
         run: npm ci
 
+      # The review harness (opencode v2). Pinned version: a floating agent
+      # binary inside a job that reviews untrusted PRs is a supply-chain
+      # surface. The package's postinstall downloads the platform binary —
+      # npm's allowScripts gate must permit it or the shim exits 1 with no
+      # binary behind it.
+      # working-directory is the checked-out default branch: npm reads
+      # ./.npmrc from the cwd, so the checkout this runs against must stay a
+      # trusted-main checkout (it is — see the checkout step above).
+      - name: Install opencode
+        working-directory: .github/scripts/ai-review
+        run: npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18
+
       - name: Run AI review
         working-directory: .github/scripts/ai-review
         env:
@@ -61,15 +88,21 @@ jobs:
           # account named 'Bot Review'. Reviews also author as that account.
           GITHUB_TOKEN: ${{ secrets.AI_REVIEW_BOT_TOKEN }}
 
-          # ---- provider config: this is the only provider-specific part ----
-          LLM_BASE_URL: "https://api.fireworks.ai/inference/v1"
-          LLM_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
-          LLM_MODEL: "accounts/fireworks/models/glm-5p3-flash"
-          # Abort a single stalled LLM request after 10 min so callLlm retries
-          # instead of hanging to the job's 60-minute cap.
-          LLM_TIMEOUT_MS: "600000"
-          # --------------------------------------------------------------------
+          # ---- review harness config: this is the only provider-specific part ----
+          # review.mjs runs opencode headless over the checked-out repo with
+          # read-only tools (bash/edit/write denied in the harness process,
+          # which never sees GITHUB_TOKEN). HARNESS_MODEL is the FULL opencode
+          # model id (`<provider>/<model>`); LLM_KEY_ENV names the provider's
+          # key env var and HARNESS_API_KEY its value.
+          HARNESS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          HARNESS_MODEL: "fireworks-ai/accounts/fireworks/models/glm-5p3-flash"
+          LLM_KEY_ENV: "FIREWORKS_API_KEY"
+          # TOTAL harness budget across both attempts (60/40 split).
+          HARNESS_TIMEOUT_MS: "1800000"
 
+          # Shared review config (the legacy single-shot-reviewer vars are
+          # gone — main's script is the harness script now): PROMPT_FILE,
+          # CONTEXT_FILES, EXCLUDE_PATTERNS and the MAX_* limits below.
           PROMPT_FILE: "review-prompt.md"
           CONTEXT_FILES: "AGENTS.md,README.md,docs/ARCHITECTURE.md"
           EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,**/dist/**,**/vendor/**"

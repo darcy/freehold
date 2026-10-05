@@ -14,6 +14,7 @@ import (
 	"freehold/contract/identity"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/state"
 	"freehold/platform/provisioning/planebase"
 	dnsman "freehold/platform/services/externaldns/cloudflare"
 )
@@ -22,6 +23,30 @@ import (
 // facts.json), a sibling of the console state dir. Mirrors deployAgentTools.
 func (s *Spec) agentToolsRoot() string {
 	return filepath.Join(filepath.Dir(s.StateDir), "agent-tools")
+}
+
+// cpStateDir resolves the CP state root (the dir holding state.json): the
+// Spec's own StateDir when it IS the CP root (the console executor's shape),
+// or the sibling control-plane dir when the build runs INSIDE the agent-tools
+// serve (whose StateDir is <root>/agent-tools) — the same layout
+// agentToolsRoot() infers in reverse.
+func (s *Spec) cpStateDir() string {
+	if filepath.Base(s.StateDir) == "agent-tools" {
+		return filepath.Join(filepath.Dir(s.StateDir), "control-plane")
+	}
+	return s.StateDir
+}
+
+// operatorTZ reads the operator settings' timezone from state.json FRESH per
+// call (read-only — never a second writer): a console-side settings edit lands
+// on the next pod apply in EITHER executor, with no serve restart and no
+// serve-start flag to go stale. Empty/unreadable = pods run UTC.
+func (s *Spec) operatorTZ() string {
+	snap, err := state.LoadReadOnly(s.cpStateDir())
+	if err != nil || snap.Settings == nil {
+		return ""
+	}
+	return snap.Settings.OperatorTZ
 }
 
 // agentToolsAudience resolves the pubkey the agent pods' stdio bridge signs
@@ -125,6 +150,14 @@ func (s *Spec) agentToolsServeFlags() string {
 	}
 	if s.ProxyIP != "" {
 		serveFlags += " --proxy-ip " + s.ProxyIP
+	}
+	if s.K3sIP != "" {
+		serveFlags += " --k3s-ip " + s.K3sIP
+	}
+	if s.GatewayCIDR != "" {
+		serveFlags += " --gateway-cidr " + s.GatewayCIDR
+		serveFlags += fmt.Sprintf(" --gateway-vlan %d", s.GatewayVlan)
+		serveFlags += fmt.Sprintf(" --gateway-lxc %d", s.GatewayLxc)
 	}
 	if s.LitellmIP != "" {
 		serveFlags += " --litellm-ip " + s.LitellmIP

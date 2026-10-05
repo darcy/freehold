@@ -31,10 +31,20 @@ fi
 # Keep a stale staged kubeconfig from a prior build from satisfying a validate
 # against a k3s that was torn down: always point the provider at the durable one.
 export KUBECONFIG="${KUBECONFIG:-$ROOT/kubeconfig}"
+# The kubernetes provider reads var.kubeconfig_path (passed as -var on apply);
+# DESTROY passes no vars, so default the var to the world's own root here or the
+# provider falls back to the legacy shared default and destroy dies with
+# "cannot create discovery client: no client config". A -var on apply still wins.
+export TF_VAR_kubeconfig_path="${TF_VAR_kubeconfig_path:-$ROOT/kubeconfig}"
 
 export TF_VAR_litellm_master_key="${LITELLM:-}"
 export TF_VAR_postgres_password="${POSTGRES_PW:-}"
 
+# Drop any backend record left by the old pinned shared-backend config: TF 1.9's
+# `-reconfigure` does NOT handle UNSETTING a backend, so init would otherwise
+# refuse the apply ("Backend initialization required"). With the record gone the
+# default local backend takes effect and state lives in $ROOT (per world).
+rm -f "$ROOT/.terraform/terraform.tfstate"
 terraform init -input=false >/dev/null
 case "$CMD" in apply|destroy) set -- "$@" -auto-approve;; esac
 exec terraform "$CMD" -input=false "$@"

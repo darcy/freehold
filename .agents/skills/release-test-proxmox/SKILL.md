@@ -2,7 +2,7 @@
 name: release-test-proxmox
 description: Use when validating a freehold pre-release on a real Proxmox host (e.g. "test the release", "run the Proxmox release tests"). Restores the pre-release's own downloaded assets and runs three envs on a real PVE host — Fresh (the full install→uninstall lifecycle on a disposable world), Rebuild (teardown→build on the persistent env, left running), and Live (`freehold update` against the always-running env) — then updates the release's test-status table rows for Proxmox.
 metadata:
-  version: 2.1.0
+  version: 2.4.0
   author: freehold
   license: MIT
 ---
@@ -33,7 +33,9 @@ row per provider × env × test. When every row is ✅, it hands off to `release
 
 ## When to use
 
-After `release-prepare` published a pre-release, to validate it on Proxmox. Destructive on
+After `release-prepare` published a pre-release, to validate it on Proxmox — invoked by
+`release-test` (the orchestrator) once the dev deploy (`test-dev`) is green; do not start the
+e2e on a red or untested dev. Destructive on
 the Fresh env (creates and destroys a real world) and mutating on Rebuild/Live — run only
 against the disposable test host, with the operator's go-ahead.
 
@@ -63,9 +65,13 @@ against the disposable test host, with the operator's go-ahead.
   storage at all.
 - The hermetic gates are green (`just test`) — run them first so a live failure isn't a
   known-broken unit.
-- Time: a fresh world's DNS-01 cert issuance can take a long time (observed ~45 min on a
-  Cloudflare zone); budget for it. Run long commands in the background with a log and poll
-  (a coding-agent shell often caps a single command at ~2 min).
+- Time: the FIRST build on a test zone (no box cert cache yet) pays DNS-01 cert
+  issuance — observed ~45 min on a Cloudflare zone; budget for it. Later builds
+  pre-seed from the box's sealed cert cache (`build` prints "cert cache shipped
+  for pre-seed"; the world's log says "seeded from the box cert cache (no LE
+  order)") — only a cache-expiry run (~60d) pays the pole again. Run long
+  commands in the background with a log and poll (a coding-agent shell often
+  caps a single command at ~2 min).
 
 If the host or credentials aren't available, do **not** fake it: leave the Proxmox rows
 `⚪ Unverified` and report that you couldn't test.
@@ -88,15 +94,37 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 ## Workflow
 
-> **Order the tests around the CF gate.** The Fresh env's first build waits on DNS-01
+> **Order of operations (LOCKED) — start Fresh FIRST, then run Rebuild + Live, then
+> finish Fresh.** The Fresh env's first build MAY be gated on Cloudflare DNS-01
 > propagation — the long pole (~10–45 min: the provider API accepts the challenge TXT
-> immediately while the authoritative NS keeps answering NXDOMAIN). Start Fresh's
-> install + first build FIRST (detached, retrying — the resumable order reuses the
-> challenge), and while the NS is still NXDOMAIN, move on to Rebuild and Live:
-> neither needs the DNS gate (the rebuild env's cert is already issued; the live
-> update issues nothing). Circle back to Fresh when the TXT resolves — re-run
-> `build`, it installs the cert and continues — and finish the Fresh rows last.
-> Never let the Fresh wait idle the whole run: the other tests are not blocked by it.
+> immediately while the authoritative NS keeps answering NXDOMAIN) — but only when the
+> box has no valid cert cache (first-ever run on the zone, or cache expiry); a cached
+> run pre-seeds and skips it entirely. Rebuild and Live do NOT need that gate
+> (the rebuild env's cert is already issued; the live update issues nothing), so they run
+> WHILE Fresh waits — never after it. Concretely, in this order:
+>   1. **Fresh install**, then its **first build**, DETACHED (log + poll). Do not sit on it.
+>   2. **Rebuild - Teardown** → **Rebuild - Build** → **Live - Update** — the whole point
+>      of starting Fresh first is that these run during the Fresh DNS wait.
+>   3. **Return to Fresh** once the challenge TXT serves at the authoritative NS: re-run
+>      the resumable `build` (it installs the cert and continues), then Fresh - Teardown,
+>      Fresh - Build, Fresh - Uninstall.
+> Every Fresh-side stall (cert propagation, a docker-pull flake, a slow image) is handled
+> the same way: the moment Fresh is blocked on something that does not need the operator,
+> start/continue Rebuild and Live and let Fresh's detached loop retry — a stall in one
+> world is never a reason to idle the others.
+>
+> **The same rule covers EVERY fresh-side stall** — a docker-pull auth/rate-limit flake, a
+> slow image download, a waiting-on-a-service loop: the moment Fresh is blocked on
+> something that does not need the operator, START (or continue) Rebuild and Live and let
+> Fresh's detached loop retry. The tests are independent worlds; a stall in one is never
+> a reason to idle the others. Come back when the blocker clears (a retry of the resumable
+> build usually just continues).
+>
+> **Update the release table AS EACH ROW'S EVIDENCE LANDS** — green when the row's
+> evidence is captured, red the moment a row fails — not in a batch at the end. The table
+> is the operator's live progress bar; a run that dies mid-way still leaves an honest,
+> current table. (The disposition step below still gates the FINAL state before
+> release-publish.)
 >
 > **Never probe the challenge name through a caching resolver while it is negative.**
 > An NXDOMAIN answer is cached (negative TTL — minutes to an hour) by 1.1.1.1/8.8.8.8
@@ -104,10 +132,12 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 > propagation — poisoning later checks and (in principle) the ACME validation path.
 > While the record is negative, check either the provider's API (the record exists?)
 > or the AUTHORITATIVE NS directly (`@<zone NS>`, uncached); the build's own
-> propagation check already targets the authoritative NS. Hold the fresh build's
-> next retry until the other tests' rows are done, so its first ACME-triggering
-> attempt runs on a settled box instead of interleaved with the other builds'
-> terraform work (the host-side tf dir locks — concurrent builds contest it).
+> propagation check already targets the authoritative NS.
+>
+> **Concurrent builds: safe since per-world tf roots (v0.7.5) — except a world whose CP
+> predates them.** A current CP builds in its OWN tf root (no contention); a CP on an
+> older build still uses the legacy shared `/srv/data/freehold-tf` — never run two such
+> worlds' builds concurrently (their terraform states clobber each other).
 >
 > **Track the run as a todo list** — one item per prep step + per table row, in the
 > order they run: assets restored → Fresh install → Fresh build (waiting on CF) →
@@ -140,7 +170,9 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    ```
 
 2. **Fresh test — full lifecycle on a disposable world, with a NEW operator.**
-   Domains: `relay.fresh.freehold.technology` / `cp.fresh.freehold.technology`. Fresh
+   Domains: `relay.fresh.freehold.technology` / `cp.fresh.freehold.technology` — PINNED
+   names, never rotated (relay5-style renames defeat the SAN-bound box cert cache and put
+   every run back on the ~45-min DNS-01 pole + the LE duplicate-cert budget). Fresh
    profile name, freshly minted operator identity (see Preconditions). Run `install`/`build`
    in the background (`nohup … > log 2>&1 &`) and poll the log — they run for minutes.
    ```bash
@@ -176,6 +208,18 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    - **Fresh - Uninstall**: `"$fh" uninstall --name "$name" --non-interactive`; ✅ iff the CP, runner,
      door, and every guest are removed (no `<name>-*` guests remain, the DOOR_SPEC key is
      gone).
+
+   **The second Fresh run — cert-cache proof (evidence only, until the box cert cache has
+   shipped in a release).** After the first lifecycle completes, run the ENTIRE Fresh
+   lifecycle once more (new profile name, new operator, same pinned domains): the first run
+   paid the ~45-min DNS-01 pole and filled the box's sealed cert cache; the second run's
+   install + build must pre-seed from it instead of minting LE orders. Evidence: the build
+   prints `cert cache shipped for pre-seed` (box side) and the world's log says `seeded from
+   the box cert cache (no LE order)` — capture both, and check the build time (no 45-min
+   pole). A second run that falls back to a fresh DNS-01 issue is a FAILED cache proof —
+   disposition it as a defect, not a pass. The second run fills NO table rows (the first
+   run's verdicts stand); its logs are the cache evidence in the report. From the first
+   release that ships the cache onward, this second run can be dropped.
 
 3. **Rebuild test — teardown + build the persistent env; it stays running.**
    The env (`relay/cp.rebuild.freehold.technology`) is left running by the previous
@@ -223,7 +267,25 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
      replies in the relay. Already-on-target is fine: the run must report up-to-date
      cleanly — that still proves the flow.
 
-6. **Update the release table** — change only the Proxmox rows' Status cells, leave every
+6. **Disposition the run's findings BEFORE updating the table — the release must be CLEAN
+   except for known issues.** Every defect the run surfaced (a crash, a data-clobbering
+   path, a broken flow, a wrong default) is classified against AGENTS.md's "Known gaps":
+   - **Already a known gap** → the row may pass if the tested flow itself works; the gap
+     stays recorded.
+   - **NEW (undocumented) defect** → the run STOPS here: the affected rows stay ⚪/❌, and
+     the report to the operator names the defect and says the release needs a fix + re-cut
+     (release-prepare's re-cut path). Do NOT paper a new defect over with a green cell, do
+     NOT reclassify it as a followup on your own authority, and do NOT leave the candidate
+     published-and-green while a fix is pending — un-gold it (the operator's call) or leave
+     the table honestly red.
+   - **Operator-accepted** → the operator's explicit "ship it with that" in so many words;
+     record the acceptance in the PR/report, and the defect lands in AGENTS.md's "Known
+     gaps" (an accepted defect is a known gap the moment it ships).
+   A defect that ONLY the test procedure triggers (e.g. an interaction unique to running
+   several worlds on one host) is still a defect: file it, and the disposition decides
+   whether it blocks.
+
+7. **Update the release table** — change only the Proxmox rows' Status cells, leave every
    other row, the Env/Test columns, the title, assets, and the prerelease flag untouched:
    ```bash
    gh release view "$tag" --json body -q .body > /tmp/opencode/body.md
@@ -232,7 +294,7 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    gh release view "$tag" --json body -q .body | sed -n '/^## Test status/,$p'
    ```
 
-7. **If every row you filled is ✅, run `release-publish`** — the next step of this
+8. **If every row you filled is ✅ AND the disposition is clean, run `release-publish`** — the next step of this
    release's flow, not an optional extra. Invoke the skill; it re-gates on the table, gets
    the operator's go-ahead, and flips the release to final (with the Latest badge). A
    fully-green table left unpromoted is how a release gets stranded behind a stale Latest
@@ -303,6 +365,65 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 - **The version ping is `freehold update --check`** — `CP version:` + pending migrations;
   run it after every step that leaves the world running.
 
+### Per-world terraform state (the shared-root clobber)
+
+- **A world's terraform state is pinned per world ONLY when the module drops its
+  `backend` block.** Pre-fix, `main.tf` pinned `backend "local" { path =
+  "/srv/data/freehold-tf/terraform.tfstate" }`, so every world on a host wrote the
+  SAME state file — one world's build clobbered another's (fresh's build destroyed
+  librem's state). The fix removes the block (default local backend → state lands in
+  `$ROOT/terraform.tfstate`, and `tf.sh` cd's to the world's per-world root via
+  `TF_ROOT`) and `tf.sh` drops a stale `.terraform/terraform.tfstate` before init —
+  TF 1.9's `-reconfigure` does NOT handle UNSETTING a backend, so the recorded
+  backend must be removed or the apply refuses with "Backend initialization
+  required". Diagnose: `ls /srv/data/freehold-tf*/` — every world should have its own
+  `freehold-tf-<dashed-domain>/terraform.tfstate`; the shared `/srv/data/freehold-tf`
+  should stay empty.
+- **A world built under the old shared backend is adopted, keyed by its k3s IP.**
+  `stageDeployTf` moves a legacy `/srv/data/freehold-tf` state (or the whole dir)
+  into the per-world root when its k3s node IP appears in the legacy state/kubeconfig
+  — each world has a unique k3s IP. A world whose state was CLOBBERED (its objects
+  exist but no state names them) is repaired once by deleting the orphaned
+  terraform-managed k8s objects (namespaces `caddy`/`litellm`, the
+  `freehold-compute-door` ClusterRoleBinding + `compute-door` SA) and re-running
+  `build` — the state re-populates.
+- **A deployed CP binary only takes effect once the console process restarts.**
+  `update` replaces `/srv/data/cp/bin/freehold-console` AND restarts the serve, so a
+  post-update build runs the new code; verify with the console's process start time
+  vs the binary mtime (`ps -o lstart,cmd -C freehold-console`). A STALE running
+  console is the trap: the on-disk binary contains the fix but the world still
+  behaves old.
+- **A pre-persistence world's config lacks the `[plane]` size fields.** `[plane]` must
+  carry `size_gb`/`pool_size_gb`/`rootfs_gb`/`memory_mb`/`storage`/`bridge`/`relay_gw`;
+  the new binary LOUD-FAILS the build without them ("the world's config carries no
+  memory_mb/…"). Add them to the profile config and re-run `update`, which re-renders
+  the console's `--world-config` (a build alone reads the console's copy, not the
+  operator's file).
+
+### Fresh-world prerequisites (make the run deterministic)
+
+- **Side-load the Buzz relay images before the first fresh build.** Each fresh
+  test mints a NEW relay LXC that must pull `ghcr.io/block/buzz:main`,
+  `postgres:17-alpine`, `redis:7-alpine`, `quay.io/minio/minio:*`, and
+  `quay.io/minio/mc:*` — and anonymous pulls are rate-limited per-IP
+  (`unauthorized: access to the requested resource is not authorized` → the
+  relay deploy dies at `run.sh start`). Copy them from a running world's relay
+  (the dev env's) into the fresh relay on the host:
+  ```bash
+  for img in ghcr.io/block/buzz:main postgres:17-alpine \
+      quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
+      quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z redis:7-alpine; do
+    pct exec <dev-relay-vmid> -- docker save "$img" | pct exec <fresh-relay-vmid> -- docker load
+  done
+  ```
+  Run it detached (the buzz image is large — a single `pct exec` pipe can exceed
+  the runner's call timeout; background it on the host and poll a marker file).
+- **A profile whose `[runner] addr` is empty forces `uninstall --remove-data`
+  onto the broken transient path** ("needs the build box"). `install` records the
+  addr; a profile that predates that, or whose addr was cleared by an older
+  build, needs `addr = '127.0.0.1:<port>'` written under `[runner]` (and the
+  matching runner started there) before the Fresh - Uninstall step.
+
 ### Earlier notes (v0.7.0)
 
 - **`gh release download` drops the execute bit** — `chmod +x` the binaries before the
@@ -334,13 +455,13 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   `world_build`; rebuilds hid it. Fixed in `74b0875` (install the resolver before pointing
   guests at it). If a fresh build 500s at `terraform services`, check
   `ss -lunp | grep :53` inside the CP LXC (empty = not installed).
-- **The PVE host's terraform workdir is shared host state, not world state.**
-  `/srv/data/freehold-tf` keeps `terraform.tfstate` across a world's life. If you destroy
+- **Terraform state is per world (see "Per-world terraform state" above).** Each world's
+  state lives at `/srv/data/freehold-tf-<dashed-domain>/terraform.tfstate`. If you destroy
   the world out-of-band (manual `pct destroy`, a killed install) and re-build, terraform
   still believes `k3s_bringup` etc. ran and SKIPS them — the rebuild then dies at
-  `tf kubeconfig: cat /etc/rancher/k3s/k3s.yaml: No such file`. Clear that dir (or run the
-  product's own `teardown`) before a fresh build. The rebuild env's teardown → build is the
-  product's own teardown, so its state stays coherent.
+  `tf kubeconfig: cat /etc/rancher/k3s/k3s.yaml: No such file`. Clear that world's root (or
+  run the product's own `teardown`) before a fresh build. The rebuild env's teardown → build
+  is the product's own teardown, so its state stays coherent.
 - **Thin-box lifecycle asymmetries.** From a thin box with no local runner:
   `teardown` works (the CP drives its own runner); `uninstall` does **not** — it needs a
   local runner, and its transient fallback runs `pct destroy` on a still-running guest and

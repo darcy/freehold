@@ -47,4 +47,13 @@ type Coords struct {
 	OwnerPub       string `json:"owner_pubkey,omitempty"`
 	LitellmBaseURL string `json:"litellm_base,omitempty"`
 	SelfURL        string `json:"self_url,omitempty"`
+	// The freehold-subnet gateway (docs/NETWORK.md Phase 1). GatewayCIDR is
+	// the internal subnet; GatewayVlan the in-host bridge tag (0 = untagged);
+	// GatewayLxc the gateway guest's vmid. K3sIP is the k3s node's address —
+	// with a gateway the INTERNAL one (ProxyIP is then the gateway's LAN
+	// address, the edge); without one it mirrors ProxyIP.
+	GatewayCIDR string `json:"gateway_cidr,omitempty"`
+	GatewayVlan int    `json:"gateway_vlan,omitempty"`
+	GatewayLxc  uint32 `json:"gateway_lxc,omitempty"`
+	K3sIP       string `json:"k3s_ip,omitempty"`
 }

@@ -120,12 +120,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.worldBuild(w, r)
 	case path == "/api/world-teardown" && method == http.MethodPost:
 		s.worldTeardown(w, r)
+	case path == "/api/world-exec" && method == http.MethodPost:
+		s.worldExec(w, r)
+	case path == "/api/world-migrate" && method == http.MethodPost:
+		s.worldMigrate(w, r)
+	case path == "/api/world-door" && method == http.MethodPost:
+		s.worldDoor(w, r)
 	case path == "/api/teardown" && method == http.MethodPost:
 		s.teardown(w, r)
 	case path == "/api/provision" && method == http.MethodPost:
 		s.provision(w, r)
 	case path == "/api/rotate" && method == http.MethodPost:
 		s.rotate(w, r)
+	case path == "/api/enroll-confirm" && method == http.MethodPost:
+		s.enrollConfirm(w, r)
 	case path == "/api/revoke" && method == http.MethodPost:
 		s.revoke(w, r)
 	case path == "/api/grant" && method == http.MethodPost:
@@ -153,6 +161,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.secretsList(w, r)
 	case path == "/api/secrets" && method == http.MethodPost:
 		s.secretsWrite(w, r)
+	case path == "/api/settings" && method == http.MethodGet:
+		s.settingsGet(w, r)
+	case path == "/api/settings" && method == http.MethodPost:
+		s.settingsSet(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "no such route: "+method+" "+path)
 	}
@@ -465,6 +477,142 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// worldExec runs one command through the CP's co-located runner — the
+// drive-through-CP exec a thin login box uses, now session-authed here instead
+// of operator-signed on the agent-tools MCP (no relay roster). Operator-scoped
+// like worldBuild: requireSession only admits an admin-whitelisted operator.
+func (s *Server) worldExec(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Builder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "world-exec: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
+		return
+	}
+	var req struct {
+		Target   string   `json:"target"`
+		Cmd      string   `json:"cmd"`
+		TimeoutS uint64   `json:"timeout_s"`
+		Secrets  []string `json:"secrets"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Cmd == "" {
+		writeErr(w, http.StatusBadRequest, "world-exec: cmd required")
+		return
+	}
+	exec := cpbuild.BuildWorldExec(s.Builder)
+	out, err := exec(req.Target, req.Cmd, req.TimeoutS, req.Secrets...)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-exec: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "text": out})
+}
+
+// worldMigrate proxies into the agent-tools serve's world_migrate tool: the
+// scripts must run in THAT process to take Registry.WithRegistryLocked (the
+// registry-write race — see the migration window), so the console cannot
+// execute them itself. It signs as the console identity — the serve's local
+// admin peer — over the same signed-header scheme, no relay roster.
+func (s *Server) worldMigrate(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	snap := s.Store.Snapshot()
+	var atURL, atPK string
+	if snap.AgentToolsURL != nil {
+		atURL = *snap.AgentToolsURL
+	}
+	if snap.AgentToolsPubkey != nil {
+		atPK = *snap.AgentToolsPubkey
+	}
+	if atURL == "" || len(atPK) != 64 {
+		writeErr(w, http.StatusServiceUnavailable, "world-migrate: no agent-tools coords recorded (the CP predates the world toolset)")
+		return
+	}
+	if len(s.ConsoleSecret) != 32 {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: console identity unreadable")
+		return
+	}
+	auth := &client.AgentAuth{Pubkey: s.ConsolePubkey}
+	copy(auth.Secret[:], s.ConsoleSecret)
+	mc, err := client.New(client.ConnectURL(atURL), auth, atPK)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: "+err.Error())
+		return
+	}
+	// Migrations can run for many minutes — the hop that EXECUTES them needs
+	// the long deadline, not the client-facing 30s default.
+	resp, err := mc.CallLong("world_migrate", map[string]interface{}{})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: "+err.Error())
+		return
+	}
+	var envelope struct {
+		Result *struct {
+			Content []map[string]any `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil || envelope.Result == nil || len(envelope.Result.Content) == 0 {
+		writeErr(w, http.StatusInternalServerError, "world-migrate: bad tool envelope")
+		return
+	}
+	text, _ := envelope.Result.Content[0]["text"].(string)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": text})
+}
+
+// worldDoor authorizes or removes an operator box's public door key on the
+// host door (DOOR_SPEC) through the co-located runner — the session-authed
+// mirror of the toolset's world_authorize_door/world_revoke_door.
+func (s *Server) worldDoor(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Builder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "world-door: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+		Pubkey string `json:"pubkey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Pubkey == "" {
+		writeErr(w, http.StatusBadRequest, "world-door: pubkey required")
+		return
+	}
+	authorize, revoke := cpbuild.BuildWorldDoor(s.Builder)
+	switch req.Action {
+	case "authorize":
+		if err := authorize(req.Pubkey); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case "revoke":
+		if err := revoke(req.Pubkey); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "world-door: action must be authorize or revoke")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+}
+
 // worldInventory opens the authoritative agent registry + world facts (the
 // toolset's durable state, readable from the co-located content plane) and
 // returns the single-inventory status the console serves on /api/world and the
@@ -485,7 +633,13 @@ func (s *Server) worldInventory() (map[string]interface{}, error) {
 }
 
 // stdSecrets are the CP-owned secret names the build ensures idempotently.
-var stdSecrets = []string{"dns-relay", "dns-cp", "litellm"}
+// "operator" is the box's operator identity ledger (the world's owner): the
+// memory plane attests agent pods with it, so it ships sealed to the console
+// identity alongside the DNS/litellm creds. The cert-seed pair is the box cert
+// cache shipped for the worldCert pre-seed gate — the box OVERWRITES it on
+// every build it ships (the box cache is that record's durable owner, unlike
+// the secrets above, which the CP owns).
+var stdSecrets = []string{"dns-relay", "dns-cp", "litellm", "operator", "cert-seed-relay", "cert-seed-cp"}
 
 // secretsList reports which CP-owned secrets are present on disk (the idempotent
 // inventory `build` uses to ask the operator only for what's missing).
@@ -590,15 +744,36 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		Risk      *string     `json:"risk"`
 		Secret    interface{} `json:"secret"`
 		Grants    interface{} `json:"grants"`
-		Readiness interface{} `json:"readiness,omitempty"`
+		// grants_source: "live" (the relay-signed 39002 roster — what actually
+		// gates exec) or "package" (the shipped fallback — the co-located
+		// runner's mode). Empty when neither was readable (grants = null).
+		GrantsSource string `json:"grants_source,omitempty"`
+		Readiness    interface{} `json:"readiness,omitempty"`
+		// colocated marks the CP's own co-located runner.
+		Colocated bool `json:"colocated,omitempty"`
+		// Self-hosted (a resident runner) + whether the operator confirmed its
+		// presented pubkeys (the fill unlocks on confirm).
+		SelfHosted      bool `json:"self_hosted,omitempty"`
+		EnrollConfirmed bool `json:"enroll_confirmed,omitempty"`
 	}
 	runners := make([]runnerOut, 0, len(snap.Runners))
+	// Per-runner package state, kept by slice index so the roster results can
+	// fall back to it after the concurrent collects.
+	pkgGrants := make([][]string, 0, len(snap.Runners))
+	pkgReadable := make([]bool, 0, len(snap.Runners))
 	type probe struct {
 		name  string
 		value interface{}
 	}
 	probes := make(chan probe, len(snap.Runners))
 	probeCount := 0
+	rosters := make(chan probe, len(snap.Runners))
+	rosterCount := 0
+	// Roster reads need the relay coords (the runner's channel lives there)
+	// and the console's own secret (it is every channel's owner).
+	relayDial, relayAuth := s.relayDialAuth(snap)
+	canReadRoster := relayDial != "" &&
+		snap.RelayPubkey != nil && *snap.RelayPubkey != "" && len(s.ConsoleSecret) == 32
 	for name, rec := range snap.Runners {
 		var secret interface{}
 		if sc, ok := snap.Secrets[name]; ok {
@@ -607,14 +782,26 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 				"rotated_at": sc.RotatedAt, "created_at": sc.CreatedAt,
 			}
 		}
-		var grants interface{}
-		if pkg, err := wire.Load(rec.PackageDir); err == nil {
-			grants = pkg.Grants
+		var pkg []string
+		readable := false
+		if p, err := wire.Load(rec.PackageDir); err == nil {
+			pkg, readable = p.Grants, true
 		}
+		pkgGrants = append(pkgGrants, pkg)
+		pkgReadable = append(pkgReadable, readable)
+		colocated := s.Builder != nil && name == s.Builder.RunnerTarget
 		out := runnerOut{
 			Name: name, Status: string(rec.Status), NostrPub: rec.NostrPubkey,
 			EncPub: rec.EncPubkey, McpAddr: rec.McpAddr, Risk: rec.RiskLevel,
-			Secret: secret, Grants: grants,
+			Secret: secret, Colocated: colocated,
+		}
+		// The package result rides in upfront (it is the final answer for a
+		// package-mode runner); a live roster result below overwrites it for
+		// relay-mode runners.
+		out.Grants, out.GrantsSource = grantsFor(nil, nil, pkg, readable, false)
+		if capability, ok := snap.Capabilities[name]; ok && capability.SelfHosted() {
+			out.SelfHosted = true
+			out.EnrollConfirmed = capability.EnrollConfirmedAt != nil
 		}
 		// Live readiness probe (the console signs a status call as its own
 		// identity — the runner still fails closed).
@@ -623,6 +810,18 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			go func(name string, addr, rpk string) {
 				probes <- probe{name, s.probeReadiness(addr, rpk)}
 			}(name, *rec.McpAddr, rec.NostrPubkey)
+		}
+		// Live grants: the relay-signed 39002 roster, read fresh per call (the
+		// same source the runner itself authorizes against, same dial/auth
+		// split). Relay-mode only — the co-located runner has no channel (its
+		// package IS its whitelist), and a revoked runner's channel is moot
+		// (its package is gone; the report must stay null).
+		if canReadRoster && rec.Status == state.RunnerActive && !colocated {
+			rosterCount++
+			go func(name string, rpk, runnerPK string) {
+				members, rerr := relay.QueryChannelRosterAuth(relayDial, relayAuth, rpk, runnerPK, s.ConsoleSecret)
+				rosters <- probe{name, rosterResult{members, rerr}}
+			}(name, *snap.RelayPubkey, rec.NostrPubkey)
 		}
 		runners = append(runners, out)
 	}
@@ -634,10 +833,85 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	for i := 0; i < rosterCount; i++ {
+		p := <-rosters
+		for j := range runners {
+			if runners[j].Name == p.name {
+				res := p.value.(rosterResult)
+				runners[j].Grants, runners[j].GrantsSource = grantsFor(res.members, res.err, pkgGrants[j], pkgReadable[j], true)
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"console_pubkey": s.ConsolePubkey,
 		"runners":        runners,
 	})
+}
+
+// rosterResult is one concurrent roster read's outcome.
+type rosterResult struct {
+	members []string
+	err     error
+}
+
+// relayDialAuth derives the relay DIAL + CANONICAL NIP-98 auth URLs for the
+// console's own relay reads: the LAN dial by HOSTNAME (buzz keys the
+// community to the request Host — an IP dial presents a Host no community is
+// configured for — and the /etc/hosts pin re-resolves it), the auth against
+// the canonical public origin (a dial-URL-signed auth 401s "URL mismatch").
+// Mirrors world()'s relay probe and the build's dial/sign split; the single
+// recorded relay_url (the raw LAN IP:port) is the last fallback for both.
+func (s *Server) relayDialAuth(snap state.ControlPlaneState) (dial, auth string) {
+	relayHost := ""
+	if snap.RelayHost != nil {
+		relayHost = *snap.RelayHost
+	}
+	if relayHost == "" && s.Builder != nil {
+		relayHost = s.Builder.RelayHost
+	}
+	if relayHost != "" {
+		dial = config.RelayLanDial(relayHost)
+		auth = "https://" + relayHost
+	}
+	if dial == "" && snap.RelayURL != nil {
+		dial = *snap.RelayURL
+	}
+	if auth == "" && snap.RelayURL != nil {
+		auth = *snap.RelayURL
+	}
+	return dial, auth
+}
+
+// grantsFor picks a runner's reported grants + source. queryLive marks a
+// RELAY-MODE runner whose roster was actually read: the roster is the ONLY
+// gate on its exec, so a successful read is reported verbatim — an EMPTY
+// roster is an honest fail-closed (never masked by the stale package
+// fallback) — and a failed read is "unavailable" (the console cannot see the
+// whitelist; the runner itself still fails closed on the same outage).
+// !queryLive (the co-located runner — no relay channel — or a CP with no
+// relay coords) reports the shipped package grants, and an unreadable
+// package stays nil so clients keep rendering the anomaly. A readable
+// package always yields a NON-nil slice: null on the wire is reserved for
+// "unreadable / unavailable".
+func grantsFor(live []string, liveErr error, pkg []string, pkgReadable bool, queryLive bool) (grants []string, source string) {
+	if queryLive {
+		if liveErr == nil {
+			return nonNil(live), "live"
+		}
+		return nil, "unavailable"
+	}
+	if pkgReadable {
+		return nonNil(pkg), "package"
+	}
+	return nil, ""
+}
+
+// nonNil keeps an honest empty list marshaling as [] (never null).
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // probeReadiness signs a status call as the console and returns the runner's
@@ -929,6 +1203,38 @@ func resolveAgentRoster(agentToolsDir string, names []string) ([]string, error) 
 	return out, nil
 }
 
+// agentNameForPubkey resolves a registry agent's pubkey back to its NAME (the
+// reverse of resolveAgentRoster) — "" when the pubkey is not a registry agent
+// (the operator's, an external identity's). err != nil is a REGISTRY READ
+// failure (callers that must not silently skip the durable bookkeeping fail
+// on it; best-effort callers may ignore it).
+func agentNameForPubkey(agentToolsDir, pubkey string) (string, error) {
+	reg, err := agenttools.OpenRegistry(filepath.Join(agentToolsDir, "registry.json"))
+	if err != nil {
+		return "", fmt.Errorf("open agent registry: %w", err)
+	}
+	rows, err := reg.Agents()
+	if err != nil {
+		return "", fmt.Errorf("read agent registry: %w", err)
+	}
+	for _, a := range rows {
+		if a.Pubkey == pubkey {
+			return a.Name, nil
+		}
+	}
+	return "", nil
+}
+
+// containsString reports whether s is in list.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // capabilityPortAbove allocates the first free MCP port above the dynamic
 // base. With a build Spec, the SAME allocator cpbuild uses runs (it also
 // skips the per-zone DNS doors' derived ports — two allocators must never
@@ -960,15 +1266,66 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad rotate body")
 		return
 	}
-	if _, err := provisioner.RotateSecret(s.Store, req.Name, []byte(req.Secret)); err != nil {
+	// A SELF-HOSTED runner has no CP-side package dir to re-ship: seal to its
+	// presented key and return the package JSON — the grantee carries it to
+	// the guest through its own door (writes secrets.json beside the runner's
+	// identity.json) and restarts the unit there. Ciphertext in an agent's
+	// context is the system's normal trust level (the runner's key decrypts
+	// it, nothing else). The fill is refused until the operator CONFIRMED the
+	// presented pubkeys on this page — the barrier that keeps a compromised
+	// provisioning agent from sealing the credential to its own key.
+	//
+	// State is read FRESH from disk (not the startup memory snapshot): the
+	// capability record was written by the agent-tools PROCESS (the
+	// provision_runner flow), out-of-band from this serve — the same reason
+	// overview() re-opens.
+	fresh, err := state.Open(s.stateDir())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
+		return
+	}
+	// Self-hosted-ness routes on the RUNNER record too (PackageDir empty =
+	// resident): a failure between EnrollRunner and the record write must
+	// never drop a self-hosted runner into the CP-guest path below (whose
+	// seal assumes a package dir to re-ship).
+	runnerRec, hasRunner := fresh.GetRunner(req.Name)
+	cap, isCap := fresh.GetCapability(req.Name)
+	isSelfHosted := (hasRunner && runnerRec.PackageDir == "") || (isCap && cap.SelfHosted())
+	if isSelfHosted {
+		if !isCap || cap.EnrollConfirmedAt == nil {
+			writeErr(w, http.StatusBadRequest, "self-hosted door not confirmed — verify the presented pubkeys on this page against the guest's own `runner enroll` output (Compute's report), then confirm the enrollment; the fill unlocks after that")
+			return
+		}
+		rec, pkgJSON, err := provisioner.RotateSecretSelfHosted(fresh, req.Name, []byte(req.Secret))
+		if err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+		if dial := s.relayDialFor(fresh.Snapshot().RelayURL); dial != "" {
+			if err := provisioner.SyncRunnerChannel(fresh, dial, s.relayAuthFor(), req.Name, fresh.Dir()); err != nil {
+				writeErr(w, statusForAction(err), err.Error())
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok": true, "name": req.Name, "self_hosted": true,
+			"package_json": string(pkgJSON), "rotated_at": rec.RotatedAt,
+			"restarted": false,
+		})
+		return
+	}
+	// The CP-guest path rotates through the FRESH store too: the runner (and
+	// its secret) may have been provisioned by the agent-tools process after
+	// this serve started.
+	if _, err := provisioner.RotateSecret(fresh, req.Name, []byte(req.Secret)); err != nil {
 		writeErr(w, statusForAction(err), err.Error())
 		return
 	}
 	var relayURL *string
-	snap := s.Store.Snapshot()
+	snap := fresh.Snapshot()
 	relayURL = snap.RelayURL
 	if dial := s.relayDialFor(snap.RelayURL); dial != "" {
-		if err := provisioner.SyncRunnerChannel(s.Store, dial, s.relayAuthFor(), req.Name, s.Store.Dir()); err != nil {
+		if err := provisioner.SyncRunnerChannel(fresh, dial, s.relayAuthFor(), req.Name, fresh.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -979,7 +1336,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	// even when the restart fails (soft: reported, never blocks the rotate).
 	restarted := false
 	restartErr := ""
-	if rec, ok := s.Store.GetCapability(req.Name); ok {
+	if rec, ok := fresh.GetCapability(req.Name); ok {
 		if err := s.restartDoor(req.Name, rec.Port); err != nil {
 			restartErr = err.Error()
 		} else {
@@ -990,6 +1347,41 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "name": req.Name, "relay": relayURL,
 		"restarted": restarted, "restart_error": restartErr,
 	})
+}
+
+// enrollConfirm records the operator's confirmation of a self-hosted door's
+// presented pubkeys. The operator verifies them against the guest's own
+// `runner enroll` output (Compute's audited report in the thread) BEFORE
+// confirming — this is what binds the later credential fill to the key the
+// guest actually holds, not to whatever the provisioning agent presented.
+// State is read fresh from disk: the capability was recorded by the
+// agent-tools process (out-of-band from this serve's startup snapshot).
+func (s *Server) enrollConfirm(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireSession(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	fresh, err := state.Open(s.stateDir())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
+		return
+	}
+	if err := fresh.ConfirmEnrollment(req.Name, uint64(time.Now().Unix())); err != nil {
+		writeErr(w, statusForAction(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "name": req.Name, "confirmed": true})
 }
 
 // restartDoor restarts a capability door's runner unit on THIS guest (the
@@ -1061,16 +1453,72 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad grant body")
 		return
 	}
-	grants, err := provisioner.GrantAgent(s.Store, req.Name, req.Pubkey)
+	// A SELF-HOSTED runner's whitelist is the LIVE relay roster only (no
+	// shipped package exists to append grants to) — the grant is a pure
+	// put-user; state read fresh from disk (the capability was recorded by
+	// the agent-tools process, out-of-band from this serve).
+	//
+	// Records that predate the hosted field read the same way (no hosted,
+	// empty package_dir — the runner is resident on its target and the CP
+	// holds no package to append to); the runner row says the same thing.
+	// Mirror of revoke-grant's fallback.
+	fresh, err := state.Open(s.stateDir())
 	if err != nil {
-		writeErr(w, statusForAction(err), err.Error())
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
+	var grants []string
+	cap, isCap := fresh.GetCapability(req.Name)
+	runnerOnlyNoPackage := false
+	if rec, ok := fresh.GetRunner(req.Name); ok {
+		runnerOnlyNoPackage = rec.PackageDir == ""
+	}
+	selfHosted := (isCap && cap.SelfHosted()) || runnerOnlyNoPackage
+	if selfHosted {
+		if !provisioner.IsPubkey(req.Pubkey) {
+			writeErr(w, http.StatusBadRequest, "invalid pubkey")
+			return
+		}
+		// The door's runner row must exist + be active: the record alone (a
+		// runner row that vanished) yields coords that can never resolve —
+		// grant the re-enroll, not a ghost.
+		if rec, ok := fresh.GetRunner(req.Name); !ok || rec.Status == state.RunnerRevoked {
+			writeErr(w, http.StatusBadRequest, "runner "+req.Name+" is not active — re-enroll it on the target first")
+			return
+		}
+		grants = []string{req.Pubkey}
+		// A pubkey that belongs to a REGISTRY agent joins the record's
+		// Rosters: that list drives the pod coords (the grantee's exec
+		// surface) AND the rebuild's grant re-assertion. An unknown pubkey
+		// (the operator, an external identity) rides the relay roster alone —
+		// nothing prunes it, so it persists across builds without a record.
+		// Best-effort here: a registry-read failure still lands the live
+		// grant; only the durable bookkeeping is skipped.
+		if isCap {
+			if agentName, _ := agentNameForPubkey(s.AgentToolsDir, req.Pubkey); agentName != "" {
+				rosters := cap.Rosters
+				if !containsString(rosters, agentName) {
+					rosters = append(rosters, agentName)
+					cap.Rosters = rosters
+					if err := fresh.InsertCapability(req.Name, cap); err != nil {
+						writeErr(w, statusForAction(err), err.Error())
+						return
+					}
+				}
+			}
+		}
+	} else {
+		grants, err = provisioner.GrantAgent(fresh, req.Name, req.Pubkey)
+		if err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+	}
 	var relayURL *string
-	snap := s.Store.Snapshot()
+	snap := fresh.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.PutUserMembership(s.Store, *relayURL, s.relayAuthFor(), req.Name, req.Pubkey, s.Store.Dir()); err != nil {
+		if err := provisioner.PutUserMembership(fresh, s.relayDialFor(relayURL), s.relayAuthFor(), req.Name, req.Pubkey, fresh.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -1092,16 +1540,64 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad revoke-grant body")
 		return
 	}
-	grants, err := provisioner.RevokeGrant(s.Store, req.Name, req.Pubkey)
+	// Mirror of grant: a SELF-HOSTED runner's whitelist is the live roster —
+	// no package to strip; state read fresh from disk.
+	//
+	// Records that predate the hosted field read the same way: no hosted, no
+	// package_dir — the runner is resident on its target and the CP holds no
+	// package, so there is nothing to strip and the relay remove-user is the
+	// whole revoke. The runner row (empty PackageDir) says the same thing.
+	fresh, err := state.Open(s.stateDir())
 	if err != nil {
-		writeErr(w, statusForAction(err), err.Error())
+		writeErr(w, http.StatusInternalServerError, "read CP state: "+err.Error())
 		return
 	}
+	var grants []string
+	cap, isCap := fresh.GetCapability(req.Name)
+	runnerOnlyNoPackage := false
+	if rec, ok := fresh.GetRunner(req.Name); ok {
+		runnerOnlyNoPackage = rec.PackageDir == ""
+	}
+	selfHosted := (isCap && cap.SelfHosted()) || runnerOnlyNoPackage
+	if selfHosted {
+		grants = []string{}
+		if isCap {
+			// Mirror of grant: a rostered agent's pubkey leaves the record's
+			// Rosters too — else the rebuild's re-assertion re-adds the member
+			// the operator just revoked. The name resolution is LOUD here (not
+			// best-effort): a registry-read failure must not silently leave the
+			// revoked member in the durable roster.
+			agentName, nameErr := agentNameForPubkey(s.AgentToolsDir, req.Pubkey)
+			if nameErr != nil {
+				writeErr(w, http.StatusInternalServerError, "revoke-grant: resolve the pubkey in the agent registry: "+nameErr.Error())
+				return
+			}
+			if agentName != "" {
+				kept := make([]string, 0, len(cap.Rosters))
+				for _, r := range cap.Rosters {
+					if r != agentName {
+						kept = append(kept, r)
+					}
+				}
+				cap.Rosters = kept
+				if err := fresh.InsertCapability(req.Name, cap); err != nil {
+					writeErr(w, statusForAction(err), err.Error())
+					return
+				}
+			}
+		}
+	} else {
+		grants, err = provisioner.RevokeGrant(fresh, req.Name, req.Pubkey)
+		if err != nil {
+			writeErr(w, statusForAction(err), err.Error())
+			return
+		}
+	}
 	var relayURL *string
-	snap := s.Store.Snapshot()
+	snap := fresh.Snapshot()
 	relayURL = snap.RelayURL
 	if relayURL != nil {
-		if err := provisioner.RemoveUserMembership(s.Store, *relayURL, s.relayAuthFor(), req.Name, req.Pubkey, s.Store.Dir()); err != nil {
+		if err := provisioner.RemoveUserMembership(fresh, s.relayDialFor(relayURL), s.relayAuthFor(), req.Name, req.Pubkey, fresh.Dir()); err != nil {
 			writeErr(w, statusForAction(err), err.Error())
 			return
 		}
@@ -1275,7 +1771,8 @@ func (s *Server) runnerChannel(w http.ResponseWriter, r *http.Request, name stri
 		return
 	}
 	channelID := relay.RunnerChannelID(rec.NostrPubkey)
-	members, err := relay.QueryChannelRoster(*snap.RelayURL, *snap.RelayPubkey, rec.NostrPubkey, s.ConsoleSecret)
+	dial, auth := s.relayDialAuth(snap)
+	members, err := relay.QueryChannelRosterAuth(dial, auth, *snap.RelayPubkey, rec.NostrPubkey, s.ConsoleSecret)
 	var membersJSON interface{}
 	if err != nil {
 		membersJSON = map[string]interface{}{"error": err.Error()}
