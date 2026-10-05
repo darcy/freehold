@@ -43,6 +43,7 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 		RunnerTarget:   c.RunnerTarget,
 		CpaName:        c.CpaName,
 		OwnerPub:       c.OwnerPub,
+		OperatorName:   c.OperatorName,
 		LitellmBaseURL: c.LitellmBaseURL,
 		SelfURL:        c.SelfURL,
 		GatewayCIDR:    c.GatewayCIDR,
@@ -91,7 +92,7 @@ func (s *Spec) Coords() Coords {
 		StorageName: s.StorageName, RelayGW: s.RelayGW, Bridge: s.Bridge, RelayLxc: s.RelayLxc,
 		RelayCompose: s.RelayCompose, K3sVmid: s.K3sVmid, RunnerAddr: s.RunnerAddr,
 		RunnerPK: s.RunnerPK, RunnerTarget: s.RunnerTarget, CpaName: s.CpaName,
-		OwnerPub: s.OwnerPub, LitellmBaseURL: s.LitellmBaseURL, SelfURL: s.SelfURL,
+		OwnerPub: s.OwnerPub, OperatorName: s.OperatorName, LitellmBaseURL: s.LitellmBaseURL, SelfURL: s.SelfURL,
 		GatewayCIDR: s.GatewayCIDR, GatewayVlan: s.GatewayVlan, GatewayLxc: s.GatewayLxc,
 		K3sIP: s.K3sIP,
 	}

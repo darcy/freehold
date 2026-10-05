@@ -57,7 +57,10 @@ What's bounded is *capability execution*: a capability a department owns is exec
 department's identity, never by a custom agent that would self-serve a second, ungoverned
 path to it. Whichever agent creates a service owns its install, config, and operation. The
 Orchestrator and departments are installed as part of the core build — a pod each, all in the
-private `#freehold` channel — and a rebuild reconciles them.
+private `#freehold` channel — and a rebuild reconciles them. The build also owns the first
+run: it publishes the operator's Buzz profile (name asked at install), which makes the
+desktop app skip its stock onboarding, stands up the open `#general` channel, and posts a
+one-time welcome in `#freehold`.
 
 ## Vision, Architecture & Roadmap
 

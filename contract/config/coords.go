@@ -56,4 +56,8 @@ type Coords struct {
 	GatewayVlan int    `json:"gateway_vlan,omitempty"`
 	GatewayLxc  uint32 `json:"gateway_lxc,omitempty"`
 	K3sIP       string `json:"k3s_ip,omitempty"`
+	// OperatorName is the operator's display name in Buzz — published as the
+	// operator's kind:0 profile at build (which is what makes the Buzz desktop
+	// app skip its first-run onboarding). Empty renders "Operator".
+	OperatorName string `json:"operator_name,omitempty"`
 }

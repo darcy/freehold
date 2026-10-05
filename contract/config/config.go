@@ -58,6 +58,9 @@ type Config struct {
 	Caddy            CaddySpec   `toml:"caddy,omitempty"`
 	Gateway          GatewaySpec `toml:"gateway,omitempty"`
 	CPAName          string      `toml:"cpa_name,omitempty"`
+	// OperatorName is the operator's display name in Buzz (asked at install);
+	// published as the operator's kind:0 profile at build.
+	OperatorName     string      `toml:"operator_name,omitempty"`
 	Managed          []string    `toml:"managed"`
 	// AgentTools is the CP's freehold-agent-tools MCP server (create/grant/
 	// manage-agent), recorded once deployed so the build (stageCpa + reconcile)

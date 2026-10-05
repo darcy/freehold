@@ -212,9 +212,10 @@ func TestCollectAnswersCarriesFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Prompts answered with bare Enters (defaults): host, relay, cp, proxy
-	// (required — answered), rootfs, memory, storage consent. The operator
-	// block is short-circuited by the pubkey flag over the live ledger.
-	stdin := strings.Repeat("\n", 3) + "192.0.2.8/24\n" + strings.Repeat("\n", 3)
+	// (required — answered), rootfs, memory, display name, storage consent.
+	// The operator block is short-circuited by the pubkey flag over the live
+	// ledger.
+	stdin := strings.Repeat("\n", 3) + "192.0.2.8/24\n" + strings.Repeat("\n", 4)
 	ui := &installerUI{out: io.Discard, raw: strings.NewReader(stdin), in: bufio.NewReader(strings.NewReader(stdin))}
 	flags := box.Flags{
 		OperatorPubkey: pk,
@@ -238,5 +239,8 @@ func TestCollectAnswersCarriesFlags(t *testing.T) {
 	}
 	if got.Host == "" || got.RelayDomain == "" || got.ProxyIP == "" {
 		t.Errorf("prompt answers missing: %+v", got)
+	}
+	if got.OperatorName != "Operator" {
+		t.Errorf("the display-name prompt default missing: %q", got.OperatorName)
 	}
 }
