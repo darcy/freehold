@@ -25,7 +25,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
         │  signed, addressable, audited
         │  NO LLM, NO router, NO key vault in either
         ▼
-   Target: pct LXC (relay/CP) | qm VM (VPS host) | k8s (MVP only)
+   Target: pct LXC (relay/CP/gateway) | pct LXC on a VPS host | k8s (MVP only)
         │
         └──backups──► freehold snapshot (the plane) · freehold export (the data bundle)
                       · freehold backup (restic → sftp/B2/any URI) | PBS | TrueNAS
@@ -784,7 +784,6 @@ funnel for substrate and service work (`pct`, `qm`, `zfs`, `lvm`, `systemctl`,
 | Kind | Example target | Connector | State |
 | --- | --- | --- | --- |
 | `pct` LXC | relay (`<name>-relay`) | `pve` | `lxc.<role>` |
-| `qm` KVM | VPS host (`vps:<id>`) | `ssh` (KeyPath) | `vm.<id>` |
 | `pct` LXC | k3s (`<name>-k3s`) | `k8s` | `lxc.k3s` |
 | `pct` LXC | control plane | `local` | `cp.<role>` |
 | `vm` | … | `api` | `provider.<name>` |

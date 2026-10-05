@@ -8,6 +8,7 @@ package install
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
@@ -28,6 +30,7 @@ import (
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 	"freehold/providers/proxmox/drive"
+	"freehold/providers/vultr"
 )
 
 // installConfigPath is the config path the install writes: the selected
@@ -228,6 +231,9 @@ func runInstallCmd(cmd *cobra.Command) error {
 	if err := seedOperatorLedger(&f); err != nil {
 		return err
 	}
+	if err := ensureVultrHost(&f, out); err != nil {
+		return err
+	}
 	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
 	}
@@ -241,6 +247,7 @@ func runInstallCmd(cmd *cobra.Command) error {
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
 	eng.ProviderFactory = stages.TransientFactory(eng)
+	eng.InstallDoorKey = func(key string) error { return installDoorKeyOnVultr(f.Host, key) }
 	eng.Out = out
 	eng.Stdin = bufio.NewReader(cmd.InOrStdin())
 	return eng.RunBootstrap()
@@ -305,9 +312,6 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 		pickRunnerPort(&f)
 	}
 	applyInstallDefaults(&f, action == lifecycleMint)
-	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
-		return err
-	}
 	consent := "no"
 	if f.ConfirmStorage {
 		consent = "yes"
@@ -325,6 +329,13 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 		fmt.Fprintln(out, "aborted.")
 		return nil
 	}
+	// AFTER consent: on a vultr mint the next step creates a BILLED instance.
+	if err := ensureVultrHost(&f, out); err != nil {
+		return err
+	}
+	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
+		return err
+	}
 	bins, err := defaultBins()
 	if err != nil {
 		return err
@@ -335,6 +346,7 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
 	eng.ProviderFactory = stages.TransientFactory(eng)
+	eng.InstallDoorKey = func(key string) error { return installDoorKeyOnVultr(f.Host, key) }
 	eng.Out = out
 	eng.Stdin = ui.in
 	return eng.RunBootstrap()
@@ -346,6 +358,18 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 // on the command line — a set flag is the prompt's default (Enter keeps it).
 func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.Flags, error) {
 	fmt.Fprintln(ui.out, "  A few details about your world. Defaults in [brackets].")
+	isVultr := flags.AccessMode == "api-vultr"
+	if !isVultr && flags.Host == "" {
+		// The substrate is chosen up front: the answers (and the asks) diverge
+		// — a Vultr mint creates its host, a Proxmox install reaches one.
+		provider, err := ui.ask("Provider (proxmox | vultr)", "proxmox")
+		if err != nil {
+			return box.Flags{}, err
+		}
+		if strings.TrimSpace(provider) == "vultr" {
+			isVultr = true
+		}
+	}
 	hostDef := "root@192.168.30.224"
 	relayDef, cpDef, proxyDef := "", "", ""
 	if seed != nil {
@@ -369,9 +393,45 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if flags.ProxyIP != "" {
 		proxyDef = flags.ProxyIP
 	}
-	host, err := ui.ask("Host (address the runner will SSH into)", hostDef)
-	if err != nil {
-		return box.Flags{}, err
+	var region, plan string
+	var osID uint32
+	var host string
+	if isVultr {
+		var regionDef, planDef string
+		var osDef uint32
+		regionDef, planDef, osDef = "ewr", "vc2-4c-8gb", vultr.DefaultOsID
+		if seed != nil && seed.Vultr.Region != "" {
+			regionDef, planDef = seed.Vultr.Region, seed.Vultr.Plan
+			if seed.Vultr.OsID != 0 {
+				osDef = seed.Vultr.OsID
+			}
+		}
+		if flags.VultrRegion != "" {
+			regionDef = flags.VultrRegion
+		}
+		if flags.VultrPlan != "" {
+			planDef = flags.VultrPlan
+		}
+		if flags.VultrOsID != 0 {
+			osDef = flags.VultrOsID
+		}
+		var err error
+		region, err = ui.ask("Vultr region", regionDef)
+		if err != nil {
+			return box.Flags{}, err
+		}
+		plan, err = ui.ask("Vultr plan (the whole world lives on this host)", planDef)
+		if err != nil {
+			return box.Flags{}, err
+		}
+		osID = osDef
+		host = ""
+	} else {
+		var err error
+		host, err = ui.ask("Host (address the runner will SSH into)", hostDef)
+		if err != nil {
+			return box.Flags{}, err
+		}
 	}
 	relayDomain, err := ui.ask("Relay domain (must resolve to your host)", relayDef)
 	if err != nil {
@@ -381,9 +441,12 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if err != nil {
 		return box.Flags{}, err
 	}
-	proxyIP, err := ui.ask("the ONE LAN address — the gateway's (CIDR, e.g. 192.168.30.8/24) — REQUIRED; everything public resolves here", proxyDef)
-	if err != nil {
-		return box.Flags{}, err
+	var proxyIP string
+	if !isVultr {
+		proxyIP, err = ui.ask("the ONE LAN address — the gateway's (CIDR, e.g. 192.168.30.8/24) — REQUIRED; everything public resolves here", proxyDef)
+		if err != nil {
+			return box.Flags{}, err
+		}
 	}
 	rootfs, err := ui.askUint32("LXC rootfs size (GB)", 16)
 	if err != nil {
@@ -393,11 +456,16 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if err != nil {
 		return box.Flags{}, err
 	}
-	if relayDomain == "" || cpDomain == "" || proxyIP == "" {
-		return box.Flags{}, fmt.Errorf("relay/CP domains and the proxy IP are required")
+	if relayDomain == "" || cpDomain == "" {
+		return box.Flags{}, fmt.Errorf("relay/CP domains are required")
 	}
-	if !strings.Contains(proxyIP, "/") {
-		return box.Flags{}, fmt.Errorf("proxy static IP must be CIDR (host/prefix) — got %q", proxyIP)
+	if !isVultr {
+		if proxyIP == "" {
+			return box.Flags{}, fmt.Errorf("the proxy IP is required")
+		}
+		if !strings.Contains(proxyIP, "/") {
+			return box.Flags{}, fmt.Errorf("proxy static IP must be CIDR (host/prefix) — got %q", proxyIP)
+		}
 	}
 	pk, opDir, err := resolveOperatorIdentity(ui, seed, flags)
 	if err != nil {
@@ -441,6 +509,10 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 		LitellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
 		ConfigPath:         installConfigPath(),
 		ConfirmStorage:     consent,
+	}
+	if isVultr {
+		f.AccessMode = "api-vultr"
+		f.VultrRegion, f.VultrPlan, f.VultrOsID = region, plan, osID
 	}
 	// The flag fields the prompts don't cover ride through verbatim — dropping
 	// them here would make --local-port/--gateway-cidr/--gateway-vlan vanish
@@ -488,10 +560,28 @@ func applyInstallDefaults(f *box.Flags, mint bool) {
 	if mint && f.GatewayCIDR == "" && f.ProxyIP != "" {
 		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
 	}
-	// Proxmox-over-root-SSH is the only implemented access mode today;
-	// provider-API modes (api-vultr) arrive with the Access seam (PR3).
+	// Proxmox-over-root-SSH is the default access mode; --provider vultr
+	// switches to the API mode (the host is created, not reached) and rides
+	// the dir storage backend (no local-lvm on a cloud VPS).
 	if f.AccessMode == "" {
 		f.AccessMode = "ssh-root-proxmox"
+	}
+	if f.AccessMode == "api-vultr" && (f.StorageName == "" || f.StorageName == "local-lvm") {
+		// A cloud VPS has no local-lvm; the dir storage `local` hosts the
+		// rootfs (an explicit --storage passes through, e.g. an attached
+		// block volume's PVE id).
+		f.StorageName = "local"
+	}
+	if f.AccessMode == "api-vultr" && f.VultrOsID == 0 {
+		f.VultrOsID = vultr.DefaultOsID
+	}
+	if f.AccessMode == "api-vultr" {
+		if f.VultrRegion == "" {
+			f.VultrRegion = "ewr"
+		}
+		if f.VultrPlan == "" {
+			f.VultrPlan = "vc2-4c-8gb"
+		}
 	}
 }
 
@@ -547,6 +637,14 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
 		f.LitellmProviderKey = v
 	}
+	if v, _ := cmd.Flags().GetString("provider"); v == "vultr" {
+		f.AccessMode = "api-vultr"
+	}
+	f.VultrRegion, _ = cmd.Flags().GetString("vultr-region")
+	f.VultrPlan, _ = cmd.Flags().GetString("vultr-plan")
+	if v, _ := cmd.Flags().GetUint32("vultr-os-id"); v != 0 {
+		f.VultrOsID = v
+	}
 	return f
 }
 
@@ -601,6 +699,195 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().Bool("non-interactive", false, "Run headless: fail actionably instead of prompting")
+	cmd.Flags().String("provider", "", "Substrate provider: proxmox (default) | vultr (creates a cloud instance and installs PVE on it)")
+	cmd.Flags().String("vultr-region", "", "Vultr region for a --provider vultr host (default: ewr)")
+	cmd.Flags().String("vultr-plan", "", "Vultr plan for a --provider vultr host (default: vc2-4c-8gb — the whole world lives on this host)")
+	cmd.Flags().Uint32("vultr-os-id", vultr.DefaultOsID, "Vultr os_id (default: Debian 12 x64)")
+}
+
+// ---- vultr: the created-host lifecycle --------------------------------------
+
+// vultrToken reads the Vultr API key from the environment. It is NEVER
+// persisted: the verbs that need it (install create, uninstall destroy) read
+// it fresh, like the DNS/litellm secrets.
+func vultrToken() (string, error) {
+	tok := strings.TrimSpace(os.Getenv("VULTR_API_KEY"))
+	if tok == "" {
+		return "", fmt.Errorf("VULTR_API_KEY is not set — export the Vultr API key (it is never stored)")
+	}
+	return tok, nil
+}
+
+// vultrClient builds a client from the environment token.
+func vultrClient() (*vultr.Client, error) {
+	tok, err := vultrToken()
+	if err != nil {
+		return nil, err
+	}
+	return &vultr.Client{Token: tok}, nil
+}
+
+// doorPubkeyLine renders this box's DOOR key's authorized_keys line — the
+// key the Vultr instance is born with (stable across re-adopts, so the
+// data verbs + live check keep working).
+func doorPubkeyLine() (string, error) {
+	if err := box.EnsureIdentity(box.OpsDir()); err != nil {
+		return "", err
+	}
+	pem, err := box.DoorKeyPEM()
+	if err != nil {
+		return "", err
+	}
+	return crypto.ExtractED25519PublicKeyLine(pem)
+}
+
+// ensureVultrHost is the api-vultr mint/re-adopt host stage: make sure a
+// live Vultr instance exists and is a PVE host, deriving Host (root@ip) and
+// ProxyIP (ip/32) from it. A mint creates (region/plan/os from the flags, a
+// re-adopt's from the profile); a re-adopt reuses a surviving instance and
+// re-creates a destroyed one (the door key is re-authorized at birth, so the
+// substrate door rotates transparently). After create: wait for the IP,
+// wait for SSH, and run the PVE-on-Debian install (the spike recipe).
+func ensureVultrHost(f *box.Flags, out io.Writer) error {
+	if f.AccessMode != "api-vultr" {
+		return nil
+	}
+	verified := false
+	if f.Host != "" && f.VultrInstance != "" {
+		// A re-adopt with a recorded instance: verify it still exists and
+		// holds the recorded shape; a gone instance re-creates (below).
+		c, err := vultrClient()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if _, ip, gerr := c.Instance(ctx, f.VultrInstance); gerr == nil && ip != "" && ip != "0.0.0.0" {
+			f.Host = "root@" + ip
+			f.ProxyIP = ip + "/32"
+			if f.GatewayCIDR == "" {
+				f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
+			}
+			fmt.Fprintf(out, "  vultr instance %s alive at %s — re-adopting it\n", f.VultrInstance, ip)
+			verified = true
+		}
+	}
+	if verified {
+		return nil
+	}
+	// A mint (or a re-adopt whose instance is gone): the recorded/flag shape
+	// is re-created, so the flow below always ends with a live IP.
+	key, err := doorPubkeyLine()
+	if err != nil {
+		return fmt.Errorf("door key: %w", err)
+	}
+	c, err := vultrClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	fmt.Fprintf(out, "  creating the vultr host (%s %s)…\n", f.VultrRegion, f.VultrPlan)
+	keyID, err := c.EnsureSSHKey(ctx, "freehold-door", key)
+	if err != nil {
+		return fmt.Errorf("vultr ssh-key: %w", err)
+	}
+	label := "freehold-" + f.Name
+	id, err := c.CreateInstance(ctx, f.VultrRegion, f.VultrPlan, f.VultrOsID, label, keyID)
+	if err != nil {
+		return fmt.Errorf("vultr create: %w", err)
+	}
+	f.VultrInstance = id
+	fmt.Fprintf(out, "  instance %s — waiting for an address…\n", id)
+	ip, err := c.WaitActive(ctx, id, 8*time.Minute)
+	if err != nil {
+		return err
+	}
+	f.Host = "root@" + ip
+	f.ProxyIP = ip + "/32"
+	if f.GatewayCIDR == "" {
+		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
+	}
+	fmt.Fprintf(out, "  instance live at %s — installing PVE (apt route; this takes minutes)…\n", ip)
+	if err := waitSSH(ip, 10*time.Minute); err != nil {
+		return err
+	}
+	return installPVEOnHost(ip)
+}
+
+// waitSSH polls until the host answers over SSH with ANY key (cloud-init
+// writes the authorized key at boot; the door key is pre-authorized via the
+// create call).
+func waitSSH(ip string, timeout time.Duration) error {
+	keyPath, cleanup, err := tempDoorKey()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	deadline := time.Now().Add(timeout)
+	for {
+		if out, err := proxmox.SSHExec(ip, keyPath)("echo ssh-ok", 30); err == nil &&
+			out.ExitCode != nil && *out.ExitCode == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s never answered SSH within %s (is the door key authorized?)", ip, timeout)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// tempDoorKey writes the DOOR private key to a 0600 temp file.
+func tempDoorKey() (string, func(), error) {
+	pem, err := box.DoorKeyPEM()
+	if err != nil {
+		return "", nil, err
+	}
+	return proxmox.WriteTempKey(pem)
+}
+
+// installPVEOnHost runs the PVE-on-Debian install over the door key. The
+// script is the spike's recipe (providers/vultr); the long timeout covers
+// apt full-upgrade + proxmox-ve on a small plan.
+func installPVEOnHost(ip string) error {
+	keyPath, cleanup, err := tempDoorKey()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	out, err := proxmox.SSHExec(ip, keyPath)(vultr.PVEInstallScript(), 1800)
+	if err != nil {
+		return fmt.Errorf("pve install: %w", err)
+	}
+	if out.ExitCode == nil || *out.ExitCode != 0 {
+		return fmt.Errorf("pve install failed: %s", strings.TrimSpace(out.Stderr))
+	}
+	if !strings.Contains(out.Stdout, "pve-install-ok") {
+		return fmt.Errorf("pve install did not complete: %s", strings.TrimSpace(out.Stdout+"\n"+out.Stderr))
+	}
+	return nil
+}
+
+// installDoorKeyOnVultr appends a door public line to the host's
+// authorized_keys over the DOOR key (the engine's api-vultr door stage —
+// the paste gate is impossible on a headless cloud host). Idempotent.
+func installDoorKeyOnVultr(host, key string) error {
+	ip := strings.TrimPrefix(host, "root@")
+	keyPath, cleanup, err := tempDoorKey()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	// grep -F the exact line before appending: a re-run must not duplicate.
+	cmd := fmt.Sprintf(`mkdir -p /root/.ssh && chmod 700 /root/.ssh && touch /root/.ssh/authorized_keys && (grep -qF '%s' /root/.ssh/authorized_keys || echo '%s' >> /root/.ssh/authorized_keys)`, key, key)
+	out, err := proxmox.SSHExec(ip, keyPath)(cmd, 60)
+	if err != nil {
+		return fmt.Errorf("door install: %w", err)
+	}
+	if out.ExitCode == nil || *out.ExitCode != 0 {
+		return fmt.Errorf("door install failed: %s", strings.TrimSpace(out.Stderr))
+	}
+	return nil
 }
 
 // ---- operator identity + storage (shared helpers install needs) -------------

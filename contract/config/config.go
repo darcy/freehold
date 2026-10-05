@@ -57,6 +57,7 @@ type Config struct {
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
 	Caddy            CaddySpec   `toml:"caddy,omitempty"`
 	Gateway          GatewaySpec `toml:"gateway,omitempty"`
+	Vultr            VultrSpec   `toml:"vultr,omitempty"`
 	CPAName          string      `toml:"cpa_name,omitempty"`
 	// OperatorName is the operator's display name in Buzz (asked at install);
 	// published as the operator's kind:0 profile at build.

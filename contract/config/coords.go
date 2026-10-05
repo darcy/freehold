@@ -55,7 +55,11 @@ type Coords struct {
 	GatewayCIDR string `json:"gateway_cidr,omitempty"`
 	GatewayVlan int    `json:"gateway_vlan,omitempty"`
 	GatewayLxc  uint32 `json:"gateway_lxc,omitempty"`
-	K3sIP       string `json:"k3s_ip,omitempty"`
+	// HostedGateway: the HOST itself is the gateway (the api-vultr world) —
+	// no gateway guest exists, the ruleset is asserted host-side, and the
+	// bridge carries the subnet. GatewayLxc is then 0.
+	HostedGateway bool   `json:"hosted_gateway,omitempty"`
+	K3sIP         string `json:"k3s_ip,omitempty"`
 	// OperatorName is the operator's display name in Buzz — published as the
 	// operator's kind:0 profile at build (which is what makes the Buzz desktop
 	// app skip its first-run onboarding). Empty renders "Operator".

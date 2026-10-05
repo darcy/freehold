@@ -79,8 +79,12 @@ deliberate and the rules below hold regardless of it.
 
 ## Known gaps
 
-*   Only one provider ships; the Vultr/Hetzner drivers exist but are unwired, so the seam is
-    untested against a second substrate.
+*   Only the Proxmox-on-plain-Debian host (Vultr first) is the second provider;
+    the Hetzner driver is still unwired. The VPS world's storage is the dir
+    backend (no ZFS/VG to detect), so the formal interface still carries the
+    two Proxmox-flavored methods (`local-lvm` status/repoint), and the create,
+    snapshot, and teardown engines remain reached by the composition roots
+    directly.
 *   Core guests (relay, k3s, gateway) have no runner-client.
 *   World-config can lose create params after an update; a later teardown → rebuild may fail
     at guest creation.
@@ -117,9 +121,9 @@ deliberate and the rules below hold regardless of it.
 
 ## Future
 
-*   **A second provider** — a VPS (Vultr first, then Hetzner) — the proof that the seam holds:
-    same orchestration, new `providers/<substrate>/`, and the formal interface widened to cover
-    create, storage, snapshot, and teardown.
+*   **Hetzner, the third substrate** — the same driver shape as Vultr (an
+    `api-hetzner` access mode); the seam already held once, this is the
+    second proof.
 *   **Runner-client in every guest**, kept fresh by `freehold update`.
 *   **Kube slots** (namespace + ResourceQuota) via the CPA's peer-fulfillment pattern, with
     postcondition-gated readiness and budget-exceeded-as-escalation.
@@ -132,5 +136,7 @@ deliberate and the rules below hold regardless of it.
 ## Where the code is
 
 `platform/provisioning/` (seam, plane math, shared box engine), `providers/proxmox/`
-(create, storage, `drive/`, `teardown/`), `control-plane/api/cpbuild/` (build stages +
-`terraform/`), `freehold-cli/{install,uninstall,teardown}/`, `agents/compute/`.
+(create, storage, `drive/`, `teardown/`), `providers/vultr/` (the api-vultr
+host lifecycle: create/destroy + the PVE-on-Debian install), `freehold-cli/{install,uninstall,teardown}/`,
+`control-plane/api/cpbuild/` (build stages +
+`terraform/`), `agents/compute/`.

@@ -100,7 +100,7 @@ task is resumable without re-deriving where it stopped.
 
 `.envs.yml` at the repo root (gitignored — it maps this operator box's profiles) is the
 source of truth for what each world is. Role keys — `dev`, `test-<provider>-<env>`
-(`test-proxmox-rebuild`, `test-proxmox-live`; Vultr slots in later), `prod` — each hold a
+(`test-proxmox-rebuild`, `test-proxmox-live`; Vultr slots in when its e2e lands), `prod` — each hold a
 list of profile names (`freehold profiles`). A world is reached through the agent's own
 shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the file governs
 *which* worlds, not *how*.
@@ -119,7 +119,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   codebase — a fix that lives only on the box isn't done until the PR merges and the update
   flow delivers it.
 - **test — release e2e only**, via `release-test-proxmox` (Fresh/Rebuild/Live; Proxmox
-  now, Vultr later), reached only after the dev deploy (`test-dev`) is green. Never a dev
+  now; the Vultr e2e is next), reached only after the dev deploy (`test-dev`) is green. Never a dev
   sandbox. Fresh is disposable; Rebuild/Live persist
   between releases.
 - **prod — review/debug only.** Observe, diagnose, report. No changes without the
@@ -149,7 +149,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
     and product direction.
 - `freehold-cli/` — the local operator surface (top-level Go module): the `freehold` CLI
   + TUI, `login`/profiles, and the `install` surface. It gets a control plane up in an
-  environment (Proxmox today; Vultr/Hetzner providers come later) and a door to it; the
+  environment (Proxmox or a Vultr VPS today; Hetzner next) and a door to it; the
   shared provisioning engine lives in `platform/provisioning/box`. It drives the server
   only through the CP API or sibling binaries — it never links `control-plane/`. World
   bring-up after install is `freehold build` from any box via the CP. `install` **requires `--name`

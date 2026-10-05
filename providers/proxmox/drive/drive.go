@@ -64,6 +64,24 @@ func HostCapacity(exec ExecFunc, kind planebase.BackendKind, pool string) string
 			return fmt.Sprintf("zpool %s · %s alloc of %s · %s free", pool, HumanBytes(nums[1]), HumanBytes(nums[0]), HumanBytes(nums[2]))
 		}
 		return "zpool capacity unreadable"
+	case planebase.KindDir:
+		out, err := exec("df -B1 "+DirPlaneBase+" 2>/dev/null | tail -1", 60)
+		var size, used *uint64
+		if err == nil && out.ExitCode != nil && *out.ExitCode == 0 {
+			var nums []uint64
+			for _, f := range strings.Fields(out.Stdout) {
+				if n, err := strconv.ParseUint(f, 10, 64); err == nil {
+					nums = append(nums, n)
+				}
+			}
+			if len(nums) >= 4 {
+				used, size = &nums[2], &nums[1]
+			}
+		}
+		if size != nil && used != nil {
+			return fmt.Sprintf("dir plane %s · %s used of %s · %s free", DirPlaneBase, HumanBytes(*used), HumanBytes(*size), HumanBytes(*size-*used))
+		}
+		return "dir plane capacity unreadable"
 	case planebase.KindLvmThin:
 		out, err := exec("vgs --noheadings --units b -o vg_size,vg_free "+pool+" 2>/dev/null || true", 60)
 		var size, free *uint64
@@ -247,7 +265,7 @@ func ProbeStorage(exec ExecFunc, kind planebase.BackendKind, pool string, mounts
 
 // ExecHost runs the host source probe (zfs used/avail or df).
 func ExecHost(exec ExecFunc, srcList string) (string, error) {
-	cmd := `for p in ` + srcList + `; do if zfs list -H "$p" >/dev/null 2>&1; then echo "H $p $(zfs list -H -p -o used,avail "$p" | awk '{print $1+$2 " " $1}')"; elif mountpoint -q "$p" 2>/dev/null; then echo "H $p $(df -B1 "$p" | tail -1 | awk '{print $2 " " $3}')"; else echo "H $p - -"; fi; done`
+	cmd := `for p in ` + srcList + `; do if zfs list -H "$p" >/dev/null 2>&1; then echo "H $p $(zfs list -H -p -o used,avail "$p" | awk '{print $1+$2 " " $1}')"; elif mountpoint -q "$p" 2>/dev/null; then echo "H $p $(df -B1 "$p" | tail -1 | awk '{print $2 " " $3}')"; elif [ -d "$p" ]; then echo "H $p $(df -B1 "$p" | tail -1 | awk '{print $2 " " $3}')"; else echo "H $p - -"; fi; done`
 	out, err := exec(cmd, 120)
 	if err != nil {
 		return "", err

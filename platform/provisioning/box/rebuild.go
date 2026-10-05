@@ -101,9 +101,16 @@ type Flags struct {
 	// Empty = this build's own (version.Version + derived channel).
 	Version string
 	Channel string
-	// OperatorName is the operator's display name in Buzz (asked at install,
-	// published as their kind:0 profile at build). Empty renders "Operator".
+	// OperatorName is the operator's display name in Buzz — published as their
+	// kind:0 profile at build. Empty renders "Operator".
 	OperatorName string
+	// VultrHost records the created Vultr instance (install --provider
+	// vultr): recorded in the profile so `uninstall` can destroy what it
+	// bills, and a re-adopt can re-create the same shape of host.
+	VultrRegion   string
+	VultrPlan     string
+	VultrOsID     uint32
+	VultrInstance string
 }
 
 // Bins are the resolved sibling binary paths. Go has no
@@ -190,7 +197,20 @@ type Engine struct {
 	// installed (direct root SSH). When set, RunBootstrap swaps Provider for
 	// it and verifies over SSH instead of serving a local runner.
 	ProviderFactory func() (provisioning.Provider, func(), error)
+
+	// InstallDoorKey authorizes a door ssh public line on the host WITHOUT
+	// the interactive paste (the api-vultr mode: the installer owns the host
+	// and appends the line itself over the key the instance was born with).
+	// nil = the classic doorGate prompt. The composition root sets it.
+	InstallDoorKey func(key string) error
 }
+
+// HostedGateway reports whether the HOST itself is the gateway (the
+// api-vultr mode): no gateway guest, the internal bridge rides the host,
+// and the nftables ruleset is asserted host-side. The recorded AccessMode
+// is the single source of truth — build/update/teardown reconstruct it from
+// the profile, never from flags.
+func HostedGateway(accessMode string) bool { return accessMode == "api-vultr" }
 
 // HostExecFunc adapts the engine's self-exec transport into the provider's
 // host-command seam (used by the composition root to build the provider).
@@ -213,6 +233,7 @@ func FlagsFromConfig(cfg *config.Config) Flags {
 	f := Flags{
 		Name:           cfg.Name,
 		Host:           cfg.Host,
+		AccessMode:     cfg.AccessMode,
 		Target:         cfg.Runner.Target,
 		Addr:           cfg.Runner.Addr,
 		OperatorPubkey: cfg.OperatorPubkey,
@@ -221,6 +242,12 @@ func FlagsFromConfig(cfg *config.Config) Flags {
 		ConfigPath:     config.ConfigPath(),
 		RelayDomain:    cfg.RelayHost(),
 		CpDomain:       cfg.CPHost(),
+	}
+	if cfg.Vultr.Instance != "" {
+		f.VultrRegion = cfg.Vultr.Region
+		f.VultrPlan = cfg.Vultr.Plan
+		f.VultrOsID = cfg.Vultr.OsID
+		f.VultrInstance = cfg.Vultr.Instance
 	}
 	if cfg.Proxy.Ip != nil {
 		f.ProxyIP = *cfg.Proxy.Ip
@@ -404,7 +431,25 @@ func (e *Engine) RunBootstrap() error {
 	if err != nil {
 		return err
 	}
-	if doorKey != "" {
+	if HostedGateway(e.F.AccessMode) {
+		// The installer owns the host (it created it): the door line is
+		// appended over the key the instance was born with — no interactive
+		// paste is possible on a headless cloud host. A re-adopt with a
+		// reused package carries no fresh key; the package's line rides.
+		key := doorKey
+		if key == "" {
+			key = e.recoverDoorKey()
+		}
+		if key == "" {
+			return fmt.Errorf("no door key for the vultr host (provision produced none and the runner package holds none)")
+		}
+		if e.InstallDoorKey == nil {
+			return fmt.Errorf("api-vultr install requires the door installer (wired by the composition root)")
+		}
+		if err := e.InstallDoorKey(key); err != nil {
+			return err
+		}
+	} else if doorKey != "" {
 		if err := e.doorGate(doorKey); err != nil {
 			return err
 		}
@@ -498,15 +543,25 @@ func (e *Engine) RunBootstrap() error {
 	// (its IP must be recorded BEFORE deploy-cp so the CP guest's /etc/hosts
 	// pin reaches it; the agent-tools roster also needs the relay live).
 	// 9.0. the gateway boots FIRST — the CP (and every later guest) takes its
-	// default route from it; torn down last by the world teardown.
+	// default route from it; torn down last by the world teardown. On a
+	// hosted gateway (api-vultr) there is no guest: the host itself is
+	// asserted into the shape (bridge + nftables + resolver), needing no
+	// record — `uninstall` destroys the instance through the API instead.
 	if e.F.GatewayCIDR != "" {
-		if err := e.stageBootstrap("gateway"); err != nil {
-			return err
+		if HostedGateway(e.F.AccessMode) {
+			if err := e.stageHostGateway(); err != nil {
+				return err
+			}
+			fmt.Fprintf(e.Out, "  ✓ host is the gateway — subnet %s behind the public edge\n", e.F.GatewayCIDR)
+		} else {
+			if err := e.stageBootstrap("gateway"); err != nil {
+				return err
+			}
+			if _, err := e.stageRecordLxc("gateway"); err != nil {
+				return err
+			}
+			fmt.Fprintln(e.Out, "  ✓ gateway LXC booted + recorded")
 		}
-		if _, err := e.stageRecordLxc("gateway"); err != nil {
-			return err
-		}
-		fmt.Fprintln(e.Out, "  ✓ gateway LXC booted + recorded")
 	}
 	fmt.Fprintln(e.Out, "  · booting the cp LXC (create → docker; can take minutes)…")
 	if err := e.stageBootstrap("cp"); err != nil {
@@ -1184,6 +1239,17 @@ func (e *Engine) fromAnswers() *config.Config {
 		v := e.F.OperatorIdentity
 		cfg.OperatorIdentity = &v
 	}
+	// The Vultr host instance: recorded at install so `uninstall` destroys
+	// what it bills. mergeFromAnswers keeps a prior one when the answers
+	// carry none (an update's flags never re-create).
+	if e.F.VultrInstance != "" || e.F.VultrRegion != "" {
+		cfg.Vultr = config.VultrSpec{
+			Region:   e.F.VultrRegion,
+			Plan:     e.F.VultrPlan,
+			OsID:     e.F.VultrOsID,
+			Instance: e.F.VultrInstance,
+		}
+	}
 	return cfg
 }
 
@@ -1197,6 +1263,20 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	cfg := *ans
 	cfg.Plane = prev.Plane
+	// The access mode is an install-time fact: an update's zero answers keep
+	// the recorded one (a hosted-gateway world updated from flags that never
+	// carry it must not silently drop to ssh-root-proxmox).
+	if ans.AccessMode != "" {
+		cfg.AccessMode = ans.AccessMode
+	} else {
+		cfg.AccessMode = prev.AccessMode
+	}
+	// The Vultr host instance is the same kind of durable fact.
+	if ans.Vultr.Instance != "" || ans.Vultr.Region != "" {
+		cfg.Vultr = ans.Vultr
+	} else {
+		cfg.Vultr = prev.Vultr
+	}
 	// The runner identity never changes after install (re-adopt preserves it),
 	// and a box without the local package cannot re-derive its pubkey — keep
 	// the recorded runner whenever the answers carry none (a thin-box build
@@ -1411,6 +1491,12 @@ func (e *Engine) FinalSave() error {
 // without it the interactive pipeline prompts, and --yes takes the
 // reuse-detected / carve-default path.
 func (e *Engine) stagePlacement() (*placement, error) {
+	// A hosted-gateway world is a cloud VPS: no ZFS, no VG, nothing to
+	// detect or carve — the dir backend IS the plane (host dirs under
+	// /srv/data/planes bind-mounted into the guests; restic backs them up).
+	if HostedGateway(e.F.AccessMode) {
+		return &placement{pool: "local", kind: planebase.KindDir}, nil
+	}
 	resolveArgs := []string{"storage", "resolve",
 		"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
 		"--transient", "--host", e.F.Host,
@@ -1938,6 +2024,40 @@ systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
 // edgeOf returns the bare IP of a CIDR-or-bare address ("" when empty).
 func edgeOf(ip string) string { return config.StripCIDR(ip) }
 
+// stageHostGateway asserts the hosted-gateway shape on the host itself (the
+// api-vultr mode): the internal bridge (the host owns the subnet's .1 — the
+// guests' default route), ip_forward, the nftables ruleset with its input
+// policy, and the subnet resolver. Persisted via /etc/network/interfaces.d +
+// enabled units — a reboot keeps the world served (the LAN world's
+// unpersisted host-route gap does not exist here: the host IS the router).
+// The public NIC is never touched, so there is no bridge-move lockout.
+func (e *Engine) stageHostGateway() error {
+	if e.Provider == nil {
+		return fmt.Errorf("no provisioning provider wired — cannot configure the host gateway")
+	}
+	cidr := e.F.GatewayCIDR
+	bridge := e.F.Bridge
+	if cfg, _ := config.Load(e.F.ConfigPath); cfg != nil {
+		if cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
+			cidr = *cfg.Gateway.Cidr
+		}
+		if cfg.Plane.Bridge != "" {
+			bridge = cfg.Plane.Bridge
+		}
+	}
+	if bridge == "" {
+		bridge = "vmbr0"
+	}
+	script := config.HostGatewayScript(cidr, edgeOf(e.F.ProxyIP),
+		config.InternalIPFor(cidr, "k3s"), config.InternalIPFor(cidr, "cp"),
+		config.InternalIPFor(cidr, "relay"), bridge)
+	out, err := e.Provider.GuestExec("", script, 300)
+	if err != nil {
+		return fmt.Errorf("host gateway: %w", err)
+	}
+	return bootstrap.ExpectOK(out, "host gateway")
+}
+
 // stageRecordLxc persists the real post-boot coordinates into the config ON
 // DISK: load FRESH, resolve vmid+ip through the runner, mutate, save, return
 // the merged result (Rust record_lxc's fresh-load discipline).
@@ -2444,6 +2564,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		GatewayCIDR:    gwCIDR,
 		GatewayVlan:    gwVlan,
 		GatewayLxc:     derefU32(cfg.Lxc.Gateway.Vmid),
+		HostedGateway:  HostedGateway(cfg.AccessMode),
 		RunnerAddr:     config.CoLocatedRunnerMCPAddr,
 		RunnerPK:       cfg.Runner.Pubkey,
 		RunnerTarget:   cfg.Runner.Target,
