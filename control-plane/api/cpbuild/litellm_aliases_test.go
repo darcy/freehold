@@ -149,6 +149,28 @@ func TestStageLitellmAliases(t *testing.T) {
 	}
 }
 
+// TestParseLitellmModelsBothShapes: /model/info returns a bare list on older
+// litellm and {"data": [...]} on newer ones (the main-stable tag floats) —
+// both decode, and neither-neither is an error.
+func TestParseLitellmModelsBothShapes(t *testing.T) {
+	entry := `{"model_name":"m","litellm_params":{"model":"upstream/m"}}`
+	for name, body := range map[string]string{
+		"bare list":      `[` + entry + `]`,
+		"wrapped in data": `{"data":[` + entry + `]}`,
+	} {
+		models, err := parseLitellmModels([]byte(body))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(models) != 1 || models[0].ModelName != "m" || models[0].LitellmParams.Model != "upstream/m" {
+			t.Errorf("%s: bad parse: %+v", name, models)
+		}
+	}
+	if _, err := parseLitellmModels([]byte(`{"unexpected": true}`)); err == nil {
+		t.Error("a body of neither shape must error")
+	}
+}
+
 // TestStageLitellmAliasesSingleModelFallback clones the ONLY registered model
 // when the base const's name is absent (the base was renamed upstream).
 func TestStageLitellmAliasesSingleModelFallback(t *testing.T) {

@@ -637,6 +637,32 @@ func (s *Spec) litellmDoorKeys() (master, provider []byte, err error) {
 	return []byte(m), []byte(p), nil
 }
 
+// litellmModel is one registration on the gateway: its name and the
+// underlying model litellm_params points at.
+type litellmModel struct {
+	ModelName     string `json:"model_name"`
+	LitellmParams struct {
+		Model string `json:"model"`
+	} `json:"litellm_params"`
+}
+
+// parseLitellmModels decodes /model/info's body: a bare list on older
+// litellm, {"data": [...]} on newer ones (the main-stable tag floats —
+// litellm.tf). Neither shape fails loudly (the build retries next run).
+func parseLitellmModels(body []byte) ([]litellmModel, error) {
+	var models []litellmModel
+	if err := json.Unmarshal(body, &models); err == nil {
+		return models, nil
+	}
+	var wrapped struct {
+		Data *[]litellmModel `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err != nil || wrapped.Data == nil {
+		return nil, fmt.Errorf("unrecognized /model/info shape: neither a list nor {\"data\": [...]}")
+	}
+	return *wrapped.Data, nil
+}
+
 // stageLitellmAliases ensures the gateway carries the default alias set
 // (agent.LiteLLMAliases — Code/General/Freehold/ExtraThinking), each a clone
 // of the base registration pointing at the same underlying model. Every pod's
@@ -679,13 +705,15 @@ func (s *Spec) stageLitellmAliases() error {
 		return json.Unmarshal(body, out)
 	}
 	// Registered models: name + the underlying litellm_params.model string.
-	var models []struct {
-		ModelName     string `json:"model_name"`
-		LitellmParams struct {
-			Model string `json:"model"`
-		} `json:"litellm_params"`
+	// /model/info returns a bare list on older litellm and {"data": [...]}
+	// on newer ones (the main-stable tag floats — see litellm.tf); parse
+	// both shapes.
+	var raw json.RawMessage
+	if err := get("/model/info", &raw); err != nil {
+		return fmt.Errorf("list gateway models: %w", err)
 	}
-	if err := get("/model/info", &models); err != nil {
+	models, err := parseLitellmModels(raw)
+	if err != nil {
 		return fmt.Errorf("list gateway models: %w", err)
 	}
 	under := ""
