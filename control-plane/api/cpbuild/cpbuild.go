@@ -1723,6 +1723,18 @@ func (s *Spec) consoleStateRoot() string {
 	return stateDir
 }
 
+// sealedOwnerPath is the sealed operator identity's ONE home: the CONSOLE's
+// world-secrets (the build's PutSecret lands there), never the Spec's own
+// StateDir. The two differ on the agent-tools server (its StateDir is its own
+// state root — under which nothing stages world-secrets), and a StateDir-keyed
+// lookup there silently misses the record and falls back to the console
+// identity — refusing every create with a derives-mismatch (seen live: a
+// CPA-created agent blocked on "the readable owner secret derives <console>,
+// not the recorded owner").
+func (s *Spec) sealedOwnerPath() string {
+	return filepath.Join(s.consoleStateRoot(), "world-secrets", "operator.json")
+}
+
 // migrationRunner returns the queue closure: every pending script under root,
 // ascending, each with the durable-plane paths + relay coords in its env.
 //
@@ -1904,7 +1916,7 @@ func (s *Spec) ownerKey() ([]byte, error) {
 	if len(s.OwnerSecret) == 32 {
 		return s.validatedOwnerKey(s.OwnerSecret)
 	}
-	sealed := filepath.Join(s.StateDir, "world-secrets", "operator.json")
+	sealed := s.sealedOwnerPath()
 	if !cert.CredExists(sealed) {
 		disk, err := cpstate.ConsoleSecret(s.consoleStateRoot())
 		if err != nil {
