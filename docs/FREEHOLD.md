@@ -42,15 +42,26 @@ the ordering across all of them is `docs/ROADMAP.md`.
 
 **Console, CLI, TUI**
 *   The console isn't a systemd unit; the runner's crash isn't restarted.
-*   Every box-side command (`exec`/`build`/`teardown`/`uninstall`, the TUI) dials its
-    profile's runner at the same `--addr` default, `127.0.0.1:8787` — on a multi-profile box
-    a command silently hits whichever profile's runner owns the port.
+*   A multi-profile box's local runners can share one port: `install --local-port`
+    defaults to `8787` for every profile, and each runner serves on the port it was started
+    with — two profiles installed on the default silently share `127.0.0.1:8787`, and
+    whichever runner owns it answers. The dial side prefers each profile's own recorded
+    `[runner] addr` (`build`/`teardown`/`uninstall`); `exec`'s `--addr` still defaults
+    literally to `127.0.0.1:8787`. Distinct `--local-port` per profile avoids it; a
+    per-invocation runner (started on a free port for the command's lifetime) is the
+    cleaner fix.
 *   Go-console port gaps: no `rebuild` verb, a few missing CLI verbs, no request-body cap,
     dropped env-var flag bindings; secrets in `/api/provision` live briefly in memory.
 
 **Verification and CI**
-*   No bot-review injection pre-vet; no single real-relay acceptance run; two live legs for
-    on-the-fly grants (revoke, empty ssh/unifi doors) await a release test run.
+*   No bot-review injection pre-vet; no single real-relay acceptance run.
+*   Grants on the fly — live legs awaiting a release test run (tick as they pass):
+    *   [ ] The CPA revokes a door it provisioned: the roster re-reads empty from the
+        relay, the unit is verified down, its port unanswered, the grantees' pods
+        re-applied without it.
+    *   [ ] The CPA provisions an empty ssh door (for AI) and an empty unifi door (for
+        Network) on a real box; the operator fills both via the door pages; the agents
+        verify by exec.
 
 ## Plans
 

@@ -84,6 +84,12 @@ deliberate and the rules below hold regardless of it.
     at guest creation.
 *   Pre-terraform kube workloads can't be adopted; a re-adopted plane's `terraform destroy`
     can reach another world's cluster (needs a cluster-identity guard).
+*   `uninstall` leaves the cp-verb host key authorized: the key cleanup collects the
+    substrate + co-located runner keys but not the data-verbs `cp-verb` line
+    (`freehold-<world>-cp-verb` in the host's `authorized_keys`), so after a default
+    uninstall the host line plus the private half at `/srv/data/cp/verb-ssh.key` survive
+    as a working root-SSH credential pair — security-relevant, not hygiene. Only
+    `--remove-data` removes the private half.
 *   The transient uninstall can't destroy running guests (no stop-first).
 *   No per-guest or per-pod resource bounds (no `--cores`, no requests/limits, no quota).
 *   Create-device storage is deferred; "kube slot" provisioning is a prompt claim with no code.
