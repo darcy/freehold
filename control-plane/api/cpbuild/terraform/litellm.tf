@@ -1,10 +1,12 @@
 # litellm.tf — the litellm model-gateway proxy, declared as kubernetes_manifest
 # (server-side apply) resources for the same reason as postgres.tf (the local-path
 # PVC deadlock). The gateway master key arrives as TF_VAR_litellm_master_key
-# (runner-injected env, never argv/tfvars). Model registration is an EVENT (a
-# curl to the gateway API, idempotent on re-apply) kept as a null_resource
-# local-exec that reads the runner-injected PROVIDER_KEY directly - it never
-# rides terraform state.
+# (runner-injected env, never argv/tfvars). Model REGISTRATION is not here —
+# stageLitellmAliases registers the alias set on the gateway straight from the
+# CP's litellm store (provider choice + key), so no provider key ever rides
+# terraform. The deployment's hostAliases pin api.fireworks.ai for the
+# fireworks egress path (the freehold default provider); other providers
+# resolve normally and the pin is inert for them.
 
 resource "kubernetes_manifest" "litellm_secret" {
   depends_on = [kubernetes_manifest.litellm_namespace]
@@ -71,45 +73,5 @@ resource "kubernetes_manifest" "litellm_service" {
         nodePort   = 31400
       }]
     }
-  }
-}
-
-# Model registration - an EVENT, not a resource: idempotent on re-apply; the
-# provider key rides the runner-injected env (PROVIDER_KEY) directly so it NEVER
-# transits terraform state. Triggers on the service so a bare apply re-registers
-# only when the gateway changes. This registers the model by the EXACT name the
-# CPA requests (CpaLiteLLMModel, no provider-name alias). The gateway is reached
-# at the k3s NODE IP (k3s_ip), NOT 127.0.0.1 - terraform drives this via
-# local-exec on the provisioning box, a DIFFERENT LXC from where litellm runs. A
-# non-zero curl exit (e.g. connection refused / gateway not yet ready) now FAILS
-# the apply instead of being swallowed, so a lost registration surfaces instead
-# of silently leaving the CPA with no model. The litellm Deployment gates only on
-# readiness; model_registration waits for /health/liveliness before registering.
-resource "null_resource" "model_registration" {
-  depends_on = [kubernetes_manifest.litellm_service]
-  triggers = {
-    deploy = yamlencode(kubernetes_manifest.litellm_deploy.object)
-    # The registered MODEL is part of the trigger: bumping the model re-runs
-    # the registration on the next apply (litellm keeps models in its DB, so a
-    # live world would otherwise never pick up the new default).
-    model = "glm-5p3-flash"
-  }
-  provisioner "local-exec" {
-    # bash explicitly: the script uses pipefail, and the PVE host's /bin/sh is
-    # dash (local-exec defaults to /bin/sh -c — "Illegal option -o pipefail").
-    interpreter = ["/bin/bash", "-c"]
-    command = <<-EOT
-      set -euo pipefail
-      # Wait for the freshly-rolled gateway to listen (its pod is created just
-      # now; a Service apply does not imply the NodePort answers yet, and the
-      # first boot pulls the litellm image + runs DB migration - up to minutes).
-      for i in $(seq 1 100); do
-        curl -fsS -m 5 "http://${var.k3s_ip}:31400/health/liveliness" >/dev/null 2>&1 && break
-        sleep 3
-      done
-      BODY=$(printf '{"model_name":"glm-5p3-flash","litellm_params":{"model":"fireworks_ai/accounts/fireworks/models/glm-5p3-flash","api_key":"%s"}}' "$PROVIDER_KEY")
-      curl -fsS -m 30 -X POST -H "Authorization: Bearer $LITELLM" -H "Content-Type: application/json" -d "$BODY" "http://${var.k3s_ip}:31400/model/new"
-      echo
-    EOT
   }
 }

@@ -124,16 +124,11 @@ func AgentWorkspaceDir(podName string) string {
 // reasoning model (D1 wiring) routes here.
 const LiteLLMServiceURL = "http://litellm.litellm:4000/v1"
 
-// BaseLiteLLMModel is the model registered on the gateway at deploy time
-// (litellm.tf model_registration) — the underlying entry the default aliases
-// below are cloned from by cpbuild.stageLitellmAliases. Keep it equal to
-// litellm.tf's registered model_name; bumping one means bumping both.
-const BaseLiteLLMModel = "glm-5p3-flash"
-
-// The default litellm alias set (the names agents actually request; each is
-// registered on the gateway pointing at BaseLiteLLMModel's underlying model
-// for now). CoreLiteLLMModel is pinned to the core identities (the CPA + the
-// departments); the other three are what a created custom agent may run,
+// The default litellm alias set (the names agents actually request). Each is
+// registered on the gateway by cpbuild.stageLitellmAliases pointing at the
+// operator's first-build provider choice (the litellm store's provider-prefix/
+// provider-model). CoreLiteLLMModel is pinned to the core identities (the CPA
+// + the departments); the other three are what a created custom agent may run,
 // General being the default.
 const (
 	CodeLiteLLMModel          = "Code"          // coding agents

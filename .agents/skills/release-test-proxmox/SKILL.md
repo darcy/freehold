@@ -43,7 +43,8 @@ against the disposable test host, with the operator's go-ahead.
 
 - A pre-release exists (`isPrerelease: true`, not a draft) with all six assets.
 - **Secrets live in `@.env.test`** (repo root, gitignored, never committed): the DNS API
-  token (`CLOUDFLARE_API_KEY`), the litellm provider key (`FIREWORKS_API_KEY`), and the
+  token (`CLOUDFLARE_API_KEY`), an AI provider API key (typed at the build's interactive
+  gateway picker — there is no flag; fireworks_ai is the pre-selected default), and the
   operator npub (`OPERATOR_NPUB` — the persistent envs' operator), plus the PVE host and
   proxy IP. Source values from there; never paste them into logs, evidence, or the release
   body.
@@ -182,20 +183,20 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
    "$fh" install --name "$name" --host root@<pve-host> \
      --relay-domain relay.fresh.freehold.technology --cp-domain cp.fresh.freehold.technology \
      --proxy-ip <ip/cidr> --operator-pubkey <new-64-hex> \
-     --operator-identity <new-dir> --litellm-provider-key <key> \
+     --operator-identity <new-dir> \
      --confirm-shared-pool --non-interactive
    #   (drop --confirm-shared-pool if the host's pool is empty; add --confirm-storage
    #    only when the host has no usable storage)
    # On the host: echo '<printed ssh-ed25519 line>' >> /root/.ssh/authorized_keys
-   "$fh" build --config <profile-config> --manage-dns \
-     --litellm-provider-key <key> --non-interactive     # install lands CP-only; build brings the world up
+   "$fh" build --config <profile-config> --manage-dns   # FIRST build is INTERACTIVE (a pane/pty):
+   #   the gateway provider picker (provider -> key -> model) and the DNS-01 prompts run here;
+   #   both seed the CP first-run-wins, so every later build is --non-interactive
    ```
    `build` needs a DNS-01 credential stored *for the profile*. The shipped `dns-cred`
    writes to the **base** state dir (and seals to the base ops identity), not the profile's,
-   so for a profile-scoped world it is not usable as-is — either run `build` once WITHOUT
-   `--non-interactive` and let its prompt store the credential in the profile state dir, or place the
-   sealed `dns-provider-{relay,cp}.json` under `<profile-state>/control-plane/`. See field
-   notes.
+   so for a profile-scoped world it is not usable as-is — the first build's interactive run
+   stores it in the profile state dir (or place the sealed `dns-provider-{relay,cp}.json`
+   under `<profile-state>/control-plane/`). See field notes.
 
    Per-row verdicts:
    - **Fresh - Install** ✅ iff install + build complete, the CP is healthy, and the CPA

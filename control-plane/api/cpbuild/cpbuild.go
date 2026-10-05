@@ -209,8 +209,7 @@ func (s *Spec) run(cmd string, timeoutS uint64) error {
 }
 
 // runSecrets runs cmd through the co-located runner requesting extra secret
-// names by name (e.g. the litellm master + provider key the register curl
-// reads from $LITELLM / $PROVIDER_KEY).
+// names by name (e.g. the litellm master + postgres pw tf.sh maps to TF_VAR_*).
 func (s *Spec) runSecrets(cmd string, timeoutS uint64, extra ...string) error {
 	_, err := s.execOut(cmd, timeoutS, extra...)
 	return err

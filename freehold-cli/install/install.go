@@ -438,7 +438,6 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 		MemoryMB:           memory,
 		RelayGw:            "192.168.30.1",
 		Bridge:             "vmbr0",
-		LitellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
 		ConfigPath:         installConfigPath(),
 		ConfirmStorage:     consent,
 	}
@@ -543,10 +542,6 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.Channel, _ = cmd.Flags().GetString("channel")
 	f.SizeGB, _ = cmd.Flags().GetUint64("size-gb")
 	f.PoolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
-	f.LitellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
-	if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
-		f.LitellmProviderKey = v
-	}
 	return f
 }
 
@@ -596,7 +591,6 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("erase-freehold", false, "Erase a detected previous freehold data plane on the chosen backend and start fresh")
 	cmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	cmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
-	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key (or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version). Install deploys the LOCAL build; it does not fetch")
