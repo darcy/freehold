@@ -82,11 +82,3 @@ terminator.
 `contract/config/` (gateway spec, nft/dnsmasq renderers), `platform/provisioning/box/`
 (gateway boot), `control-plane/api/cpbuild/` (DNS, certs, gateway re-assert, `terraform/caddy.tf`),
 `providers/proxmox/` (guest networking), `agents/network/`.
-=======
-*   New guest role `gateway` in the boot/teardown ordering (born first, torn
-    last) — the same per-role path as relay/cp/k3s.
-*   `ProxmoxLxcSpec` net0 for the internal bridge/tag (the plumbing path is
-    verified: `drivers.go` net0 string; `cpbuild.go` static-IP threading).
-*   `proxy_ip` split in `contract/config` + `cpbuild.Spec` + `DnsRecords`.
-*   The gateway stage: nftables config deployed like any other stage.
-*   Phase 2's VPS driver path; Phase 3's provisioner stage + the Newt unit.

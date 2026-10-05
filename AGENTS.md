@@ -133,7 +133,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   plane, operator surface, the agent org, grants on the fly, locked decisions.
 - **One doc per domain — the same buckets as `agents/`.** Each states the domain's current
   architecture, its known gaps, and its future work; this is where a gap or a plan is
-  recorded:
+  recorded. The retired plan docs (`docs/POC.md`, `docs/POC_CHUNK5.md`, `docs/POC_GRANTS.md`,
+  `docs/followups.md`) were absorbed into them — no checkboxes live outside the domain docs,
+  and the retired docs' history is git's. The five:
   - `docs/AI.md` — the LiteLLM gateway, the agent runtime (pods, identity, prompts, memory),
     AI hardware.
   - `docs/NETWORK.md` — the freehold-subnet, the gateway guest, the Caddy/cert/DNS edge,
