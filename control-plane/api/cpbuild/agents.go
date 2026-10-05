@@ -268,7 +268,7 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 	// The CPA holds #freehold + the open #general first-run channel (the
 	// desktop app's stock onboarding is skipped — stageOperatorProfile — so
 	// #general is OURS to create; the CPA owns it and add-users the operator).
-	if _, err := tools.CreateAgent(cpa, cpaPurpose, []string{"#freehold", "#general"}, false); err != nil {
+	if _, err := tools.CreateAgent(cpa, cpaPurpose, []string{"#freehold", "#general"}, false, agent.CoreLiteLLMModel); err != nil {
 		return fmt.Errorf("create CPA over the registry: %w", err)
 	}
 	if err := reg.SetPurpose(cpa, cpaPurpose); err != nil {
@@ -278,7 +278,7 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 	for _, name := range agents.DepartmentNames() {
 		purpose, _ := agents.DepartmentPurpose(name)
 		channels := agents.DepartmentChannels(name)
-		pub, err := tools.CreateAgent(name, purpose, channels, true)
+		pub, err := tools.CreateAgent(name, purpose, channels, true, agent.CoreLiteLLMModel)
 		if err != nil {
 			return fmt.Errorf("create department %s: %w", name, err)
 		}
@@ -301,10 +301,14 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 			continue
 		}
 		channels, private := reconciledChannels(a)
-		if _, err := tools.CreateAgent(a.Name, a.Purpose, channels, private); err != nil {
+		if _, err := tools.CreateAgent(a.Name, a.Purpose, channels, private, a.Model); err != nil {
 			return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
 		}
 		_ = reg.SetChannels(a.Name, channels, private)
+		// Re-assert the model choice: RegisterAgent resets the row, so the
+		// persisted alias has to ride back on (the pod was just re-applied
+		// with it).
+		_ = reg.SetModel(a.Name, a.Model)
 		// Re-assert grants for agents holding capability runners (the
 		// agent-provisioned dynamic doors re-assert alongside the departments';
 		// a no-op when the agent holds none).

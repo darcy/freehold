@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 
 	"freehold/control-plane/api/agent"
@@ -162,16 +163,17 @@ func (s *Server) toolList() []map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	return []map[string]interface{}{
-		{
-			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). Returns the new agent's pubkey.",
-			"inputSchema": i(map[string]interface{}{
-				"name":     map[string]interface{}{"type": "string"},
-				"purpose":  map[string]interface{}{"type": "string"},
-				"channel":  map[string]interface{}{"type": "string"},
-				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-				"private":  map[string]interface{}{"type": "boolean"},
-			}, []string{"name"}),
-		},
+	{
+		"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
+		"inputSchema": i(map[string]interface{}{
+			"name":     map[string]interface{}{"type": "string"},
+			"purpose":  map[string]interface{}{"type": "string"},
+			"channel":  map[string]interface{}{"type": "string"},
+			"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"private":  map[string]interface{}{"type": "boolean"},
+			"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
+		}, []string{"name"}),
+	},
 		{
 			"name": "grant_agent", "description": "Bind agent pubkeys to a runner's whitelist.",
 			"inputSchema": i(map[string]interface{}{
@@ -262,6 +264,11 @@ type createAgentArgs struct {
 	// Private makes an explicitly created channel visibility=private. The
 	// default freehold channel is always private.
 	Private bool `json:"private"`
+	// Model is the optional litellm alias the agent's harness reasons on (one
+	// of the agent package's CustomLiteLLMModels; empty = the General
+	// default). Freehold is core-only — the deploy path pins it for the CPA +
+	// departments regardless of what arrives here.
+	Model string `json:"model"`
 }
 type grantAgentArgs struct {
 	Runner  string   `json:"runner"`
@@ -363,11 +370,15 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			s.rpcError(w, id, -32602, "create_agent arguments: "+err.Error())
 			return
 		}
+		if a.Model != "" && !slices.Contains(agent.CustomLiteLLMModels, a.Model) {
+			s.rpcError(w, id, -32602, fmt.Sprintf("create_agent model must be one of [%s]", strings.Join(agent.CustomLiteLLMModels, ", ")))
+			return
+		}
 		channels := append([]string(nil), a.Channels...)
 		if strings.TrimSpace(a.Channel) != "" {
 			channels = append([]string{a.Channel}, channels...)
 		}
-		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose, channels, a.Private)
+		pub, err := s.Tools.CreateAgent(a.Name, a.Purpose, channels, a.Private, a.Model)
 		// Persist the purpose + the full channel list/private flag on the created
 		// agent's registry row so a rebuild reconciler recreates its system prompt
 		// verbatim and rejoins every channel (not just the primary) with the
@@ -376,6 +387,9 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			if reg, ok := s.Tools.Console.(*Registry); ok {
 				_ = reg.SetPurpose(a.Name, a.Purpose)
 				_ = reg.SetChannels(a.Name, channels, a.Private)
+				if a.Model != "" {
+					_ = reg.SetModel(a.Name, a.Model)
+				}
 			}
 		}
 		s.textResult(w, id, err, pub)

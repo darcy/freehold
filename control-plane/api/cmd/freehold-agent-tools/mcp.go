@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"freehold/contract/crypto"
+	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 )
 
@@ -38,13 +39,14 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	defs := []map[string]interface{}{
-		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). Returns the new agent's pubkey.",
+		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
 				"name":     map[string]interface{}{"type": "string"},
 				"purpose":  map[string]interface{}{"type": "string"},
 				"channel":  map[string]interface{}{"type": "string"},
 				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 				"private":  map[string]interface{}{"type": "boolean"},
+				"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
 			}, []string{"name"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},

@@ -264,6 +264,12 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   later. A custom agent that self-serves a department-owned capability is a
   containment failure even if a grant would technically allow it — the department's prompt is
   the first line of defense, the grant the second.
+- **Every agent reasons through the LiteLLM gateway by alias.** The build ensures the default
+  alias set on the gateway before pods apply (`stageLitellmAliases`, each a clone of the base
+  `litellm.tf` registration): `Code` (coding agents), `General` (the default for custom
+  agents), `Freehold` (the core agents — the CPA + departments, pinned), `ExtraThinking`
+  (complex architecture / deep thinking). A created agent's choice rides its registry row, so
+  a rebuild re-applies the same alias.
 - **Host-flexible — not locked to Proxmox.** Proxmox is the lead/default; VPS/cloud are
   first-class (the business path). The k8s layer and everything above the host driver run
   identically regardless of substrate. Installer/runner must target a VPS as easily as

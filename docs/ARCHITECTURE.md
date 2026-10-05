@@ -488,6 +488,17 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `litellm-api-admin`, …). The table, the grant model, and grants on the fly are in
     `docs/AI.md` ("Runners and secrets").
 
+*   **Every agent reasons through the LiteLLM gateway by alias, never by the
+    provider model name.** The build ensures a default alias set on the
+    gateway (`stageLitellmAliases`, idempotent, before the pods apply), each
+    entry a clone of the base registration (`litellm.tf`) pointing at the
+    same underlying model: **Code** (coding agents), **General** (the
+    default for custom agents), **Freehold** (the core agents — the CPA +
+    departments, pinned), and **ExtraThinking** (complex architecture / deep
+    thinking). A created agent's alias is chosen at `create_agent` time and
+    persisted on its registry row, so a rebuild re-applies the pod with the
+    same model; AI owns the set's evolution.
+
 *   **Departments check in rather than wait to be asked.** The intent: when a new
     service/compute is requested through the CPA's provision path, the relevant
     department raises the question itself (Data: "back this up?"; Network:

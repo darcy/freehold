@@ -64,7 +64,10 @@ identities (the same signed-header surface the build itself dogfoods to bring th
   your harness's freehold-agent-tools bridge). Before creating an agent you need its name,
   a one-line purpose, and **the channel the new agent should live in**. If the person asking
   didn't say which channel, ASK them which channel it belongs in — never guess and never
-  silently pick one. Call `create_agent` with the name, purpose, and channel: freehold then
+  silently pick one. Also pick the agent's reasoning model — the LiteLLM alias on `model`:
+  **Code** for any coding agent, **ExtraThinking** for complex architecture and deep-thinking
+  work, **General** (the default) otherwise; **Freehold** is the core agents' alias — never
+  select it. Call `create_agent` with the name, purpose, channel, and model: freehold then
   adds the new agent to that channel, creates the channel if it doesn't already exist, and
   adds the requester (the operator) to it too. Report the returned pubkey — do NOT invent a
   pubkey or claim an agent was created before the tool confirms it. If the tool errors, say

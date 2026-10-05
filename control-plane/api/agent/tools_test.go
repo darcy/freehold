@@ -55,11 +55,11 @@ func TestToolsSet(t *testing.T) {
 	srv, read := fakeConsole(t)
 	defer srv.Close()
 	c := console.WithCookie(srv.URL, "abc")
-	tools := &Tools{Console: c, Create: func(name, purpose string, channels []string, private bool) (string, error) {
+	tools := &Tools{Console: c, Create: func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		return strings.Repeat("b", 64), nil
 	}}
 
-	pub, err := tools.CreateAgent("helper", "help with installs", []string{"ops"}, false)
+	pub, err := tools.CreateAgent("helper", "help with installs", []string{"ops"}, false, DefaultAgentLiteLLMModel)
 	if err != nil {
 		t.Fatalf("create-agent: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestPrimaryChannel(t *testing.T) {
 // TestToolsNilGuards: the toolset refuses cleanly when the console isn't bound.
 func TestToolsNilGuards(t *testing.T) {
 	var tools Tools
-	if _, err := tools.CreateAgent("x", "", nil, false); err == nil {
+	if _, err := tools.CreateAgent("x", "", nil, false, ""); err == nil {
 		t.Error("create-agent with nil console must fail")
 	}
 	if err := tools.GrantAgent("r", []string{strings.Repeat("a", 64)}); err == nil {

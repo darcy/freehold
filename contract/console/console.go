@@ -90,6 +90,11 @@ type AgentInfo struct {
 	// Private records that the agent's own channel(s) were created
 	// visibility=private, so a rebuild recreates them private rather than open.
 	Private bool `json:"private,omitempty"`
+	// Model is the litellm alias the agent's harness reasons on (one of the
+	// agent package's CustomLiteLLMModels; empty = the General default),
+	// preserved by freehold-agent-tools' local registry so a rebuild
+	// reconciler re-applies the pod with the same model.
+	Model string `json:"model,omitempty"`
 }
 
 // ProvisionReq mirrors the console client ProvisionReq.
