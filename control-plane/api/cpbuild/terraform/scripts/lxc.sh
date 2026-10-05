@@ -19,6 +19,9 @@ if [ "$ACTION" = "destroy" ]; then
 fi
 
 if pct status "$VMID" >/dev/null 2>&1; then
+  # Heal-on-adopt: guests created before --onboot shipped (or by hand) come
+  # back with the host (idempotent; the apply runs on every build).
+  pct set "$VMID" --onboot 1 2>/dev/null || true
   echo "lxc $VMID ($HOSTNAME) already exists — adopted"; exit 0
 fi
 
@@ -41,7 +44,7 @@ if [ "$IP" != "-" ] && [ "$GW" != "-" ]; then NET="name=eth0,bridge=vmbr0,ip=${I
 [ -n "$MP" ] && MP=" $MP" || MP=""
 pct create "$VMID" "local:vztmpl/${TPL}" \
   --rootfs "local-lvm:${ROOTFS}" --memory "$MEM" --hostname "$HOSTNAME" \
-  --unprivileged 1 --features fuse=1,keyctl=1,nesting=1 \
+  --unprivileged 1 --onboot 1 --features fuse=1,keyctl=1,nesting=1 \
   --net0 "$NET"${MP} 2>&1 | tail -1
 # Pods (runc sandboxes) write net sysctls through /proc/sys — read-only in a
 # stock unprivileged LXC, and every sandbox init dies on "open sysctl
