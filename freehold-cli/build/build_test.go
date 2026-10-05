@@ -57,3 +57,18 @@ func TestCertCacheRoundtripThroughBaseIdentity(t *testing.T) {
 		t.Fatalf("roundtrip mismatch: %v", got)
 	}
 }
+
+// TestBuildHostFlagDefaultsEmpty: a NON-EMPTY --host default (the example
+// value) rode every build's fromAnswers as a real answer and overwrote the
+// recorded host on any box whose host differs — the world config then pointed
+// at the example machine and `freehold update` SSHed the wrong host (seen
+// live). The flag must default empty; the merge preserves the recorded host.
+func TestBuildHostFlagDefaultsEmpty(t *testing.T) {
+	f := buildCmd.Flags().Lookup("host")
+	if f == nil {
+		t.Fatal("build has no --host flag")
+	}
+	if f.DefValue != "" {
+		t.Errorf("--host defaults to %q — every build persists it over the recorded host", f.DefValue)
+	}
+}

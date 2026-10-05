@@ -1044,7 +1044,15 @@ func (s *Spec) reseedCoLocatedRunner() error {
 // which the box seals the DNS/world secrets (handoffDNS) it opens in-memory for
 // cert issuance. The console's world_build owns this path (not agent-tools).
 func (s *Spec) consoleEncSecret() ([]byte, error) {
-	file := filepath.Join(s.StateDir, "console", "identity.json")
+	return s.consoleEncSecretAt(s.StateDir)
+}
+
+// consoleEncSecretAt is the consoleEncSecret read at an explicit dir — the
+// CONSOLE-ROOTED form the owner-key path needs: the sealed operator record
+// lives at the console root too, and on the agent-tools serve (StateDir = the
+// agent-tools root) no console identity exists to unseal it with.
+func (s *Spec) consoleEncSecretAt(dir string) ([]byte, error) {
+	file := filepath.Join(dir, "console", "identity.json")
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
@@ -1734,6 +1742,18 @@ func (s *Spec) consoleStateRoot() string {
 	return stateDir
 }
 
+// sealedOwnerPath is the sealed operator identity's ONE home: the CONSOLE's
+// world-secrets (the build's PutSecret lands there), never the Spec's own
+// StateDir. The two differ on the agent-tools server (its StateDir is its own
+// state root — under which nothing stages world-secrets), and a StateDir-keyed
+// lookup there silently misses the record and falls back to the console
+// identity — refusing every create with a derives-mismatch (seen live: a
+// CPA-created agent blocked on "the readable owner secret derives <console>,
+// not the recorded owner").
+func (s *Spec) sealedOwnerPath() string {
+	return filepath.Join(s.consoleStateRoot(), "world-secrets", "operator.json")
+}
+
 // migrationRunner returns the queue closure: every pending script under root,
 // ascending, each with the durable-plane paths + relay coords in its env.
 //
@@ -1915,7 +1935,7 @@ func (s *Spec) ownerKey() ([]byte, error) {
 	if len(s.OwnerSecret) == 32 {
 		return s.validatedOwnerKey(s.OwnerSecret)
 	}
-	sealed := filepath.Join(s.StateDir, "world-secrets", "operator.json")
+	sealed := s.sealedOwnerPath()
 	if !cert.CredExists(sealed) {
 		disk, err := cpstate.ConsoleSecret(s.consoleStateRoot())
 		if err != nil {
@@ -1923,7 +1943,7 @@ func (s *Spec) ownerKey() ([]byte, error) {
 		}
 		return s.validatedOwnerKey(disk)
 	}
-	encSec, serr := s.consoleEncSecret()
+	encSec, serr := s.consoleEncSecretAt(s.consoleStateRoot())
 	if serr != nil {
 		return nil, fmt.Errorf("the sealed operator identity at %s needs the console enc key: %w", sealed, serr)
 	}
