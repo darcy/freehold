@@ -39,14 +39,15 @@ func TestReviveScript(t *testing.T) {
 	}
 
 	// The post-reconcile refresh renders the same unit-start contract from
-	// the captured door list.
+	// the captured door list; the healthz port rides spec.BindAddr.
 	s = reviveScriptFromArgvs(
-		&DeployCpSpec{StateDir: state, BinDir: bin},
+		&DeployCpSpec{StateDir: state, BinDir: bin, BindAddr: "127.0.0.1:8080"},
 		bin+"/freehold-console serve --state-dir "+state+" --addr 0.0.0.0:8080",
 		"/srv/data/cp/bin/freehold-agent-tools serve --state-dir /srv/data/cp/agent-tools",
 		[]string{"freehold-runner-cp-local-root.service /srv/data/cp/bin/freehold-runner serve --state-dir " + state + "/runner/cp-local-root --addr 0.0.0.0:8797"},
 	)
 	for _, want := range []string{
+		"systemctl start freehold-runner 2>/dev/null || true",
 		"systemctl start freehold-console 2>/dev/null || true",
 		"curl -fsS -m 3 http://127.0.0.1:8080/healthz",
 		"systemctl start freehold-runner-cp-local-root.service 2>/dev/null || true",

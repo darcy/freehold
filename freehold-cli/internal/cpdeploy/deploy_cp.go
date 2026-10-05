@@ -242,7 +242,9 @@ func StampPin(t Transport, spec *DeployCpSpec, pin version.Pin) error {
 // stopPriorServe kills a previously started serve (if any) and clears its pid
 // so the binary can be overwritten and a fresh instance started.
 func stopPriorServe(t Transport, spec *DeployCpSpec, step string) error {
-	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
+	// The unit stop FIRST (a clean unit stop leaves Restart=on-failure idle —
+	// no restart loop); the pid kill + the exe scan cover a pre-unit world.
+	cmd := fmt.Sprintf("systemctl stop freehold-console 2>/dev/null; p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
 		spec.StateDir, spec.StateDir)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), step, 30); err != nil {
 		return err
@@ -325,7 +327,9 @@ func startServe(t Transport, spec *DeployCpSpec, flags string) (uint32, error) {
 	unit := runnerUnitFile("freehold control plane (console serve)",
 		fmt.Sprintf("%s/freehold-console serve --state-dir %s --addr %s%s",
 			spec.BinDir, spec.StateDir, spec.BindAddr, flags))
-	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-console.service && systemctl daemon-reload && systemctl enable --now freehold-console && sleep 1 && systemctl is-active freehold-console",
+	// restart, not enable --now: a unit RUNNING with last deploy's flags must
+	// reload the new ones (enable --now leaves it untouched).
+	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-console.service && systemctl daemon-reload && systemctl enable freehold-console >/dev/null 2>&1 && systemctl restart freehold-console && sleep 1 && systemctl is-active freehold-console",
 		base64StdEncode([]byte(unit)))
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, write), "install console unit", 90); err != nil {
 		return 0, err

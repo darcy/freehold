@@ -141,10 +141,12 @@ func agentToolsStateDir(spec *DeployCpSpec) string {
 	return filepath.Join(spec.StateDir, "..", "agent-tools")
 }
 
-// stopAgentTools kills a running agent-tools serve (if any) and clears its pid.
+// stopAgentTools stops a running agent-tools serve (if any) and clears its
+// pid. The unit stop FIRST (a clean unit stop leaves Restart=on-failure idle —
+// no restart loop); the pid kill + the exe scan cover a pre-unit world.
 func stopAgentTools(t Transport, spec *DeployCpSpec) error {
 	at := agentToolsStateDir(spec)
-	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", at, at)
+	cmd := fmt.Sprintf("systemctl stop freehold-agent-tools 2>/dev/null; p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", at, at)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "stop prior agent-tools", 30); err != nil {
 		return err
 	}
@@ -161,8 +163,9 @@ func captureAgentToolsArgv(t Transport, spec *DeployCpSpec) string {
 	at := agentToolsStateDir(spec)
 	// Double quotes, not single: LxcExec wraps the whole payload in single
 	// quotes, so a single quote inside would break the command. tr understands
-	// \000 in double quotes.
-	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null; true", at)
+	// \000 in double quotes. The UNIT's MainPID is the primary source (units
+	// never write serve.pid); the pid file is the pre-unit fallback.
+	cmd := fmt.Sprintf("p=$(systemctl show -p MainPID --value freehold-agent-tools 2>/dev/null); [ -z \"$p\" ] || [ \"$p\" = 0 ] && p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null; true", at)
 	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read agent-tools argv", 30)
 	if err != nil {
 		return ""
@@ -197,10 +200,11 @@ func captureCapabilityRunnerArgvs(t Transport, spec *DeployCpSpec) []string {
 	return lines
 }
 
-// captureServeArgv reads the RUNNING console serve's argv (its serve.pid) —
-// the freshest source of its own serve flags.
+// captureServeArgv reads the RUNNING console serve's argv — the unit's
+// MainPID (units never write serve.pid), else the legacy pid file (a pre-unit
+// world) — the freshest source of its own serve flags.
 func captureServeArgv(t Transport, spec *DeployCpSpec) string {
-	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null; true", spec.StateDir)
+	cmd := fmt.Sprintf("p=$(systemctl show -p MainPID --value freehold-console 2>/dev/null); [ -z \"$p\" ] || [ \"$p\" = 0 ] && p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && tr \"\\000\" \" \" < /proc/$p/cmdline 2>/dev/null; true", spec.StateDir)
 	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "read console serve argv", 30)
 	if err != nil {
 		return ""
@@ -231,7 +235,9 @@ func RefreshReviveScript(t Transport, spec *DeployCpSpec) error {
 
 // reviveScriptFromArgvs renders the revival script from captured argvs —
 // kept for the door-unit NAMES (the console and agent-tools are real enabled
-// units now: the script only ever STARTS them).
+// units now: the script only ever STARTS them). The healthz port rides
+// spec.BindAddr (the bind is operator-configurable; the deploy-time script
+// uses the same source).
 func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArgvs []string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
@@ -240,8 +246,13 @@ func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArg
 	b.WriteString("# and agent-tools back after a rollback stopped this guest. All are\n")
 	b.WriteString("# enabled units: the boot re-runs them, these starts are belt and\n")
 	b.WriteString("# suspenders.\n")
+	port := "8080"
+	if _, p, ok := strings.Cut(spec.BindAddr, ":"); ok {
+		port = p
+	}
+	b.WriteString("systemctl start freehold-runner 2>/dev/null || true\n")
 	b.WriteString("systemctl start freehold-console 2>/dev/null || true\n")
-	b.WriteString("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://127.0.0.1:8080/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n")
+	b.WriteString(fmt.Sprintf("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://127.0.0.1:%s/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n", port))
 	b.WriteString("[ \"$up\" = 1 ] || { echo 'console serve did not answer /healthz — journalctl -u freehold-console' >&2; exit 1; }\n")
 	for _, line := range doorArgvs {
 		unit, _, ok := strings.Cut(line, " ")
@@ -257,19 +268,29 @@ func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArg
 // restartAgentTools installs the agent-tools REAL systemd unit (the captured
 // argv is its ExecStart — a guest reboot brings it back with the console)
 // and restarts it, so the immediately-following world_migrate doesn't race
-// bind. The restart is also how a registry/facts rewrite reloads.
+// bind. The restart is also how a registry/facts rewrite reloads. When the
+// argv capture is empty the unit may still exist (a capture miss, not a
+// stopped world) — restart it anyway; stopAgentTools's clean SIGTERM leaves
+// Restart=on-failure idle, and world_migrate needs the process up.
 func restartAgentTools(t Transport, spec *DeployCpSpec, argv string) error {
-	if strings.TrimSpace(argv) == "" {
-		return nil // nothing was running; nothing to restart
+	if strings.TrimSpace(argv) != "" {
+		unit := runnerUnitFile("freehold agent-tools", argv)
+		write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-agent-tools.service && systemctl daemon-reload",
+			base64StdEncode([]byte(unit)))
+		if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, write), "install agent-tools unit", 90); err != nil {
+			return err
+		}
 	}
-	unit := runnerUnitFile("freehold agent-tools", argv)
-	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-agent-tools.service && systemctl daemon-reload && systemctl enable --now freehold-agent-tools && sleep 1 && systemctl is-active freehold-agent-tools",
-		base64StdEncode([]byte(unit)))
-	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, write), "install agent-tools unit", 90); err != nil {
+	start := "systemctl cat freehold-agent-tools >/dev/null 2>&1 && systemctl restart freehold-agent-tools && sleep 1 && systemctl is-active freehold-agent-tools || echo agent-tools-unit-absent"
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "restart agent-tools", 90)
+	if err != nil {
 		return err
+	}
+	if strings.Contains(out.Stdout, "agent-tools-unit-absent") {
+		return nil // a world that never had agent-tools: nothing to bring up
 	}
 	probe := "for i in $(seq 1 15); do curl -s -m 3 -o /dev/null http://127.0.0.1:8089/mcp && exit 0; sleep 2; done; exit 1"
 	// The loop can run ~75s; give execToOK headroom so it isn't cut off.
-	_, err := execToOK(t, proxmox.LxcCmd(spec.LXc, probe), "agent-tools healthz", 120)
+	_, err = execToOK(t, proxmox.LxcCmd(spec.LXc, probe), "agent-tools healthz", 120)
 	return err
 }

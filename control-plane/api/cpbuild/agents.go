@@ -223,7 +223,7 @@ RestartSec=5
 WantedBy=multi-user.target
 `, bin, s.agentToolsServeFlags())
 	start := fmt.Sprintf(
-		"pct exec %d -- sh -c 'echo %s | base64 -d > /etc/systemd/system/freehold-agent-tools.service && systemctl daemon-reload && systemctl enable --now freehold-agent-tools && sleep 1 && systemctl is-active freehold-agent-tools'",
+		"pct exec %d -- sh -c 'echo %s | base64 -d > /etc/systemd/system/freehold-agent-tools.service && systemctl daemon-reload && systemctl enable freehold-agent-tools >/dev/null 2>&1 && systemctl restart freehold-agent-tools && sleep 1 && systemctl is-active freehold-agent-tools'",
 		s.CpLxc, base64.StdEncoding.EncodeToString([]byte(unit)))
 	if err := s.run(start, 60); err != nil {
 		return fmt.Errorf("start agent-tools: %w", err)
