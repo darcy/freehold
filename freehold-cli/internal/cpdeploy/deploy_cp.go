@@ -603,6 +603,31 @@ WantedBy=multi-user.target
 `, description, execStart)
 }
 
+// checkRunnerRuns executes the JUST-SHIPPED runner once on the guest before
+// anything depends on it. A runner built against a NEWER glibc than the
+// guest's (a local build on a current box, deployed to a Debian bookworm
+// guest) fails the loader with "version `GLIBC_X.YY' not found" — which as a
+// systemd unit is a silent activating loop. Fail here, actionably, instead.
+// (--help exits via clap without serving; the loader failure is the only
+// failure this check reports.)
+// runnerRunsCheck renders the guest-side probe payload for the shipped runner
+// binary (extracted for the payload test: the message rides LxcExec's
+// single-quoted sh -c, so the payload MUST stay metacharacter-free — the
+// single round-trip through parens/substitutions is what broke every deploy
+// once already).
+func runnerRunsCheck(bin string) string {
+	return fmt.Sprintf(
+		"if ! %s --help >/dev/null 2>/tmp/.fh-glibc; then if grep -q GLIBC /tmp/.fh-glibc; then cat /tmp/.fh-glibc; echo \"the shipped runner does not run on this guest: its glibc is older than the binary needs. Build the runner against the guest distro - see the AGENTS.md build section - or deploy release assets\"; exit 1; fi; fi; rm -f /tmp/.fh-glibc",
+		bin)
+}
+
+func checkRunnerRuns(t Transport, spec *DeployCpSpec) error {
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, runnerRunsCheck(spec.BinDir+"/freehold-runner")), "runner binary runs on this guest", 60); err != nil {
+		return err
+	}
+	return nil
+}
+
 // startRunnerUnit installs + enables the co-located runner's unit. Idempotent:
 // every deploy rewrites the file (the args can change) and enable --now
 // starts what isn't running.
@@ -711,6 +736,9 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		}
 		if err := shipFile(t, spec, *spec.RunnerBinary,
 			spec.BinDir+"/freehold-runner", "runner binary"); err != nil {
+			return nil, err
+		}
+		if err := checkRunnerRuns(t, spec); err != nil {
 			return nil, err
 		}
 		// ADOPT, never overwrite: when the plane already carries the runner

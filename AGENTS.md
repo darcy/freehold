@@ -593,7 +593,13 @@ release notes.
   - `target/debug/freehold-console` **and** `target/release/freehold-console` (the Go CP CLI
     the box-side provision/grant/adopt/add-secret/revoke stages call, and what `deploy-cp`
     ships) — `go build -C control-plane -o target/{debug,release}/freehold-console ./api/cmd/freehold-console`
-  - `target/{debug,release}/runner` (Rust) — `cargo build --bin runner && cargo build --release --bin runner`
+  - `target/{debug,release}/runner` (Rust) — `cargo build --bin runner && cargo build --release --bin runner`.
+    **On a box whose glibc is newer than the guests' Debian, build against the guest's glibc in a
+    container** — a runner linked against a newer glibc crash-loops the co-located unit on the CP
+    guest (`version 'GLIBC_2.39' not found`, systemd stuck in `activating`):
+    `docker run --rm --dns 1.1.1.1 -u $(id -u):$(id -g) -e HOME=/tmp/c -e CARGO_HOME=/tmp/c -v <repo>:/src -w /src rust:1.98-bookworm cargo build --bin runner` (and `--release`); deploy-cp fails
+    the deploy with the same message up front when the just-shipped binary cannot load (the
+    preflight), so the mismatch surfaces in the step log, not the guest's journal.
   - `target/release/freehold-agent-tools` (static, above)
   This is the same set `freehold build`/`freehold teardown`/`freehold install`
   resolve as siblings of the running binary — a box doing world bring-up needs all

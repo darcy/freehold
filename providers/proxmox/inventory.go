@@ -340,7 +340,7 @@ func classifyDisk(d *planebase.DeviceInfo, disk lsblkNode, env *deviceState) {
 	if len(disk.Children) > 0 && len(reasons) == 0 {
 		reasons = append(reasons, "it already has partitions on it")
 	}
-	d.Content = strings.Join(reasons, "; ")
+	d.Content = joinUnique(reasons, "; ")
 	d.Clean = len(reasons) == 0 && d.Importable == ""
 }
 
@@ -434,4 +434,19 @@ func parseHumanGB(s string) uint64 {
 func parseFloat(s string) float64 {
 	v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	return v
+}
+
+// joinUnique joins with sep, collapsing repeats — a disk with 18 ext4
+// partitions reads "it already has data on it (ext4)" once, not 18 times.
+func joinUnique(reasons []string, sep string) string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range reasons {
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	return strings.Join(out, sep)
 }
