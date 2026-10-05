@@ -99,7 +99,11 @@ func (s *Spec) agentToolsServeFlags() string {
 		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
 		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
 	if n := strings.TrimSpace(s.OperatorName); n != "" {
-		serveFlags += " --operator-name " + n
+		// B64, never raw: the name is operator free-form ("Darcy Smith",
+		// "O'Brien") and this argv rides a root `sh -c '...'` — a raw space
+		// silently eats every flag after it, a quote breaks the shell. B64
+		// is one argv-safe token for any unicode.
+		serveFlags += " --operator-name-b64 " + operatorNameArg(n)
 	}
 	if s.RelayPK != "" {
 		serveFlags += " --relay-pubkey " + s.RelayPK

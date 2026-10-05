@@ -55,6 +55,41 @@ func (f *fakeFirstRunRelay) published() []string {
 	return append([]string(nil), f.events...)
 }
 
+// TestOperatorNameArgRoundTrip: the argv hop is base64 — one token, safe for
+// any unicode (a raw space would silently eat the flags after it on the
+// serve's argv; a quote would break the root sh -c wrapping).
+func TestOperatorNameArgRoundTrip(t *testing.T) {
+	for _, name := range []string{"Darcy", "Darcy Smith", "O'Brien", "Ana $HOME `id` \"x\"", "李雷"} {
+		arg := operatorNameArg(name)
+		if strings.ContainsAny(arg, " \t'\"$`") {
+			t.Fatalf("%q encodes to argv-unsafe token %q", name, arg)
+		}
+		got, err := OperatorNameFromArg(arg)
+		if err != nil || got != name {
+			t.Fatalf("round trip %q: got %q err %v", name, got, err)
+		}
+	}
+	if _, err := OperatorNameFromArg("!!!not base64!!!"); err == nil {
+		t.Fatal("garbage must error, not silently render Operator")
+	}
+}
+
+// TestAgentToolsServeFlagsOperatorName: the name rides b64 and never raw.
+func TestAgentToolsServeFlagsOperatorName(t *testing.T) {
+	s := &Spec{OperatorName: "Darcy Smith", AgentIdentityDir: "/tmp/x"}
+	flags := s.agentToolsServeFlags()
+	if !strings.Contains(flags, " --operator-name-b64 ") {
+		t.Fatalf("serve flags must carry the b64 name, got %s", flags)
+	}
+	if strings.Contains(flags, "--operator-name ") {
+		t.Fatalf("the raw name must never ride the argv, got %s", flags)
+	}
+	s2 := &Spec{AgentIdentityDir: "/tmp/x"}
+	if strings.Contains(s2.agentToolsServeFlags(), "operator-name") {
+		t.Fatalf("no name set: no flag, got %s", s2.agentToolsServeFlags())
+	}
+}
+
 // TestPostFreeholdWelcomeMarkerGuard: an empty marker read posts once (kind 9,
 // h+p+t tags, operator mentioned); a marker hit posts nothing.
 func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {

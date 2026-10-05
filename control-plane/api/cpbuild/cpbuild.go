@@ -2013,6 +2013,22 @@ func (s *Spec) operatorDisplayName() string {
 	return "Operator"
 }
 
+// operatorNameArg encodes the operator display name for a serve argv hop
+// (base64: one token, any unicode, no shell/flag metacharacters).
+func operatorNameArg(name string) string {
+	return base64.StdEncoding.EncodeToString([]byte(name))
+}
+
+// OperatorNameFromArg decodes what operatorNameArg encoded. Exported for the
+// serve (the argv consumer).
+func OperatorNameFromArg(arg string) (string, error) {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(arg))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // stageOperatorProfile publishes the operator's kind:0 profile on the relay
 // (name = OperatorName) — the event that makes the Buzz desktop app SKIP its
 // first-run onboarding (its starter channels, its private Welcome channel, and
