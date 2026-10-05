@@ -265,6 +265,17 @@ func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArg
 	return b.String()
 }
 
+// serveFlagValue scans a captured argv for a flag's value.
+func serveFlagValue(argv, flag string) string {
+	fields := strings.Fields(argv)
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
 // restartAgentTools installs the agent-tools REAL systemd unit (the captured
 // argv is its ExecStart — a guest reboot brings it back with the console)
 // and restarts it, so the immediately-following world_migrate doesn't race
