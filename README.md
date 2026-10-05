@@ -19,10 +19,7 @@ answered, built, hosted, and delivered.
 - [Getting started](#getting-started)
   - [The appliance: one binary, two surfaces](#the-appliance-one-binary-two-surfaces)
   - [The config](#the-config)
-  - [Runner: identity + MCP server](#runner-identity--mcp-server)
-  - [The console: provision a service, watch it go green](#the-console-provision-a-service-watch-it-go-green)
-  - [Control plane CLI: provision a service](#control-plane-cli-provision-a-service)
-  - [freehold: the CLI](#freehold-the-cli)
+  - [The other binaries](#the-other-binaries)
 - [How it works](#how-it-works)
 - [Repository layout (what things do in the code)](#repository-layout-what-things-do-in-the-code)
 - [Contributing / review](#contributing--review)
@@ -215,94 +212,14 @@ vmid = 101
 ip = "192.168.30.9/24"
 ```
 
-### Runner: identity + MCP server
+### The other binaries
 
-```sh
-cargo run -p freehold-runner -- keys init     # writes ./.freehold/identity.json (0600)
-cargo run -p freehold-runner -- serve         # MCP over HTTP, default 127.0.0.1:8787
-                                              # (FREEHOLD_RUNNER_ADDR, loopback only)
-```
-
-The runner refuses non-loopback binds unless `--allow-remote` is passed, and every call
-must be signed by a GRANTED agent pubkey or it fails closed. Grants are channel membership
-(read live per call from the relay-signed roster — a revoke lands without a restart), or the
-shipped package when no relay is configured. The mechanics: `docs/ARCHITECTURE.md` (Runners),
-`docs/AI.md` (Runners and secrets).
-
-### The console: provision a service, watch it go green
-
-```sh
-freehold-console serve --state-dir /srv/data/cp/control-plane
-# open http://127.0.0.1:8080 — admin/ops only (chat is Buzz's job)
-```
-
-Paste a credential into the provision form (or `POST /api/provision`). The console ships the
-runner package, registers the runner's MCP address, and the overview shows the runner's OWN
-self-check per target — 🟢/🟡/🔴 — probed through the same signed MCP channel an agent
-uses. Manage: rotate, revoke, grant/revoke-grant, set MCP addr.
-
-Every runner has its own page: `/runner/<name>` — the deep link opens that door's fill
-form (kind-aware: a `unifi` door takes username + password and the console composes the
-login body). Agents provisioning doors on the fly ship them EMPTY and hand the operator
-this link — the console seals the credential and restarts the door; no credential ever
-transits agent chat. The freehold agent stages capability runners itself
-(`provision_runner`) under the granting skill's confirmation discipline; the kill switch:
-
-```sh
-freehold-console grants-mode --state-dir /srv/data/cp/control-plane            # current mode
-freehold-console grants-mode --mode off --state-dir /srv/data/cp/control-plane # deny the flow
-```
-
-### Control plane CLI: provision a service
-
-```sh
-freehold-console provision vultr \
-  --kind vultr --address api.vultr.com --secret-env VULTR_KEY --state-dir /srv/data/cp/control-plane
-
-# grant the console/ops identity (or an agent) so it may call the runner
-# (everything else fails closed); omit --pubkey for the state dir's own identity:
-freehold-console grant vultr --state-dir /srv/data/cp/control-plane
-```
-
-Verify the no-master-key property yourself: grep the CP's `state.json`
-(`/srv/data/cp/control-plane/state.json`) for the API key and for
-`nostr_secret`/`enc_secret` — **zero matches**; the state holds only ciphertext and
-pubkeys. (The runner's own `identity.json` is the deliberate exception — its injected
-private keys, 0600. The full walk-through: `docs/AI.md`, "Runners and secrets".)
-
-```sh
-# rotate the credential (web/API-only: POST /api/rotate — re-seals to the same runner key)
-
-# revoke a runner: blocks provision/rotate, deletes the shipped secrets.json
-freehold-console revoke vultr --state-dir /srv/data/cp/control-plane
-
-# service-at-a-glance: GET /api/overview (no plaintext in output, ever)
-```
-
-Provision refuses to clobber: a name that exists, or a `--runner-dir` that already holds a
-package, errors instead of destroying a runner's key.
-
-### freehold: the CLI
-
-The CLI binary is `freehold`, built from the `freehold-cli/` Go module (one binary, two
-surfaces):
-
-```sh
-go build -C freehold-cli -o ../target/debug/freehold ./cmd/freehold
-freehold --help
-```
-
-```sh
-# drive a RUNNING runner with signed calls:
-freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer $VULTR"' \
-  --addr 127.0.0.1:8787 --agent-dir ./.freehold/control-plane/agent-my-agent \
-  --runner-pubkey <runner-nostr>
-
-# the staged bring-up verbs (provision / deploy-cp / deploy-relay /
-# add-relay-member) run INSIDE the engines — freehold install / freehold build
-# drive them; you never type them by hand. The rebuild/fold path and the
-# relay-configured runner flags are described in docs/ARCHITECTURE.md.
-```
+`freehold-console` (the CP's admin/ops web surface + its CLI verbs),
+`freehold-agent-tools` (the CP toolset the agent pods bridge), and `runner`
+(the privileged exec connector) run **inside the world or its engines** — you
+never type them to operate a world. Their command surfaces, flags, and the
+state-dir layout are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+(The console; Runners) and [`docs/AI.md`](docs/AI.md) (Runners and secrets).
 
 ## How it works
 
