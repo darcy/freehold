@@ -24,10 +24,12 @@ type ConsoleOps interface {
 // CreateAgentFn deploys a named agent's sprig pod + mints its identity and
 // returns the new agent's pubkey. `channels` are the channel NAMES to add it to
 // (empty = the default freehold channel); the CPA is added to each. An explicit
-// channel created with private set gets visibility=private. Supplied by the
-// caller (the harness runtime wired to the runner); the tool invokes it and
-// records the registry row.
-type CreateAgentFn func(name, purpose string, channels []string, private bool) (pubkey string, err error)
+// channel created with private set gets visibility=private. `model` is the
+// litellm alias the agent's harness reasons on (one of CustomLiteLLMModels;
+// empty = the General default) — the deploy path pins the core alias for the
+// CPA + departments regardless. Supplied by the caller (the harness runtime
+// wired to the runner); the tool invokes it and records the registry row.
+type CreateAgentFn func(name, purpose string, channels []string, private bool, model string) (pubkey string, err error)
 
 // ProvisionArgs is one provision_runner call: a NEW capability runner's spec
 // plus the agents to grant it to. The tool is CREDENTIAL-BLIND by construction
@@ -215,14 +217,14 @@ func (t *Tools) WorldBuild() (string, error) {
 
 // CreateAgent stands up a new named agent: deploys its sprig pod via Create,
 // then registers the registry row with the minted pubkey. Returns the pubkey.
-func (t *Tools) CreateAgent(name, purpose string, channels []string, private bool) (string, error) {
+func (t *Tools) CreateAgent(name, purpose string, channels []string, private bool, model string) (string, error) {
 	if t.Console == nil {
 		return "", fmt.Errorf("create-agent: no console client bound")
 	}
 	if t.Create == nil {
 		return "", fmt.Errorf("create-agent: no deploy path bound")
 	}
-	pubkey, err := t.Create(name, purpose, channels, private)
+	pubkey, err := t.Create(name, purpose, channels, private, model)
 	if err != nil {
 		return "", fmt.Errorf("create-agent deploy %s: %w", name, err)
 	}

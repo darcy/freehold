@@ -284,7 +284,7 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			}
 			spec.DepartmentRunners[g] = cutCoord(spec.agentRunnerCoords(store, g), name)
 			channels, private := reconciledChannels(row)
-			if _, err := create(g, row.Purpose, channels, private); err != nil {
+			if _, err := create(g, row.Purpose, channels, private, row.Model); err != nil {
 				unverified = append(unverified, g)
 				cut = append(cut, fmt.Sprintf("%s: pod re-apply FAILED (%v) — it may still carry the revoked door in its env until the next build", g, err))
 				continue

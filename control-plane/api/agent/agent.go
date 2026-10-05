@@ -124,10 +124,30 @@ func AgentWorkspaceDir(podName string) string {
 // reasoning model (D1 wiring) routes here.
 const LiteLLMServiceURL = "http://litellm.litellm:4000/v1"
 
-// CpaLiteLLMModel is the litellm model name the CPA talks to. It must equal the
-// model registered at deploy time (litellm.tf model_registration) — no alias:
-// the CPA either routes or it 400s.
-const CpaLiteLLMModel = "glm-5p3-flash"
+// BaseLiteLLMModel is the model registered on the gateway at deploy time
+// (litellm.tf model_registration) — the underlying entry the default aliases
+// below are cloned from by cpbuild.stageLitellmAliases. Keep it equal to
+// litellm.tf's registered model_name; bumping one means bumping both.
+const BaseLiteLLMModel = "glm-5p3-flash"
+
+// The default litellm alias set (the names agents actually request; each is
+// registered on the gateway pointing at BaseLiteLLMModel's underlying model
+// for now). CoreLiteLLMModel is pinned to the core identities (the CPA + the
+// departments); the other three are what a created custom agent may run,
+// General being the default.
+const (
+	CodeLiteLLMModel          = "Code"          // coding agents
+	DefaultAgentLiteLLMModel  = "General"       // default for custom agents
+	CoreLiteLLMModel          = "Freehold"      // the CPA + departments
+	ExtraThinkingLiteLLMModel = "ExtraThinking" // complex architecture / deep thinking
+)
+
+// LiteLLMAliases is the full alias set the build stage ensures on the gateway.
+var LiteLLMAliases = []string{CodeLiteLLMModel, DefaultAgentLiteLLMModel, CoreLiteLLMModel, ExtraThinkingLiteLLMModel}
+
+// CustomLiteLLMModels are the aliases a create_agent may pick for a custom
+// agent — CoreLiteLLMModel is reserved for the core identities.
+var CustomLiteLLMModels = []string{CodeLiteLLMModel, DefaultAgentLiteLLMModel, ExtraThinkingLiteLLMModel}
 
 // AgentLiteLLMKeySecretKey is the k8s Secret literal that carries the pod's
 // minted litellm key (referenced by secretKeyRef, never in the manifest).
@@ -489,7 +509,7 @@ func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmB
 	if keySec == "" {
 		keySec = sanitizePodName(cpaName) + "-litellm-key"
 	}
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CpaLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag, operatorTZ)
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CoreLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag, operatorTZ)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in

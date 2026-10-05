@@ -51,7 +51,7 @@ func TestCPAPodManifestBasics(t *testing.T) {
 		// hostNetwork: the CPA cannot see the in-kube service name — the
 		// deploy passes the recorded NodePort URL (the caller's arg above).
 		"http://192.168.30.8:31400/v1",
-		CpaLiteLLMModel,
+		CoreLiteLLMModel,
 		"BUZZ_ACP_AGENT_COMMAND",
 		`value: "buzz-agent"`,
 		"restartPolicy: Never",

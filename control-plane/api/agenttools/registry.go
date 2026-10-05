@@ -108,6 +108,21 @@ func (r *Registry) SetChannels(name string, channels []string, private bool) err
 	return r.save()
 }
 
+// SetModel records the litellm alias the agent's harness reasons on, so a
+// rebuild re-applies the pod with the same model. Returns an error when the
+// row is absent (register before setting).
+func (r *Registry) SetModel(name, model string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	row, ok := r.rows[name]
+	if !ok {
+		return fmt.Errorf("register %s before setting its model", name)
+	}
+	row.Model = model
+	r.rows[name] = row
+	return r.save()
+}
+
 // WithRegistryLocked runs fn while holding the registry's write lock, then
 // re-reads the file into memory. It exists for the migration queue, which edits
 // registry.json OUT-OF-BAND: the script shells out to a separate

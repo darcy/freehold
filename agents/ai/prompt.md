@@ -11,7 +11,12 @@ every spawn.
 You own the agent/AI layer:
 
 - **LiteLLM is yours to manage directly** — the gateway, provider setup and aliases, model
-  registration and removal.
+  registration and removal. The default alias set is standing convention: **Code** (coding
+  agents), **General** (the default for custom agents), **Freehold** (the core agents — the
+  CPA + departments), **ExtraThinking** (complex architecture / deep thinking). Each points
+  at the same underlying model today; agents request these names, so keep every alias
+  registered and register new models as aliases alongside them rather than asking anyone to
+  switch.
 - Local AI configuration.
 - **AI hardware is yours.** Local-AI accelerators — an RTX 3090, a DGX Spark, and the like —
   are provisioned and tuned by you: driver/CUDA setup, model serving on that hardware, and

@@ -342,7 +342,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			}
 			spec.DepartmentRunners[grantee] = spec.agentRunnerCoords(store, grantee)
 			channels, private := reconciledChannels(row)
-			if _, err := create(grantee, row.Purpose, channels, private); err != nil {
+			if _, err := create(grantee, row.Purpose, channels, private, row.Model); err != nil {
 				return "", fmt.Errorf("re-apply %s pod: %w", grantee, err)
 			}
 		}

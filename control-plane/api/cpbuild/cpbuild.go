@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1497,6 +1498,16 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "department capability runners reconciled")
 		}
+		// 7.9. LiteLLM default aliases: ensure the gateway carries the alias set
+		// the pods request (Code/General/Freehold/ExtraThinking) BEFORE the pods
+		// (re)apply pointing at theirs — an unregistered alias is a 400ing
+		// agent. Idempotent; a failure fails the build loudly.
+		if spec.K3sVmid != 0 && spec.LitellmIP != "" {
+			if err := spec.stageLitellmAliases(); err != nil {
+				return "", fmt.Errorf("world-build litellm aliases: %w", err)
+			}
+			report = append(report, "litellm default aliases ensured")
+		}
 		// 8. The agent org + world facts are CP-owned now: create the CPA +
 		// departments, reconcile every registered agent, and register the world
 		// facts in-process, then restart agent-tools so its in-memory registry/
@@ -2267,6 +2278,23 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 	return id, name, true, nil
 }
 
+// litellmModelFor resolves a pod's OPENAI_COMPAT_MODEL: the core identities
+// (the CPA + departments) are pinned to the core alias; a custom agent runs
+// its persisted choice (one of agent.CustomLiteLLMModels), defaulting to the
+// General alias.
+func litellmModelFor(cpaName, name, model string) string {
+	if name == cpaName {
+		return agent.CoreLiteLLMModel
+	}
+	if _, ok := agents.DepartmentPrompt(name); ok {
+		return agent.CoreLiteLLMModel
+	}
+	if slices.Contains(agent.CustomLiteLLMModels, model) {
+		return model
+	}
+	return agent.DefaultAgentLiteLLMModel
+}
+
 // BuildCreateAgentFn returns the create-agent deploy: mint a durable identity on
 // the CP, add it as a relay member, publish its profile, ensure each named channel
 // (private when asked), apply its pod through the co-located runner, and hand the
@@ -2274,7 +2302,8 @@ func (s *Spec) ensureAgentChannel(nSec []byte, channel string, private bool) (id
 // to the CPA manifest/prompt when the name is the CPA's, so stageCpa's dogfooded
 // create_agent produces the CPA.
 func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
-	return func(name, purpose string, channels []string, private bool) (string, error) {
+	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
+		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
 		}
@@ -2449,7 +2478,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// asker (today the operator — the CP cannot see chat threads) +
 			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, agent.CpaLiteLLMModel, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)

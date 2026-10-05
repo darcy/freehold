@@ -1,11 +1,14 @@
 package cpbuild
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -632,6 +635,104 @@ func (s *Spec) litellmDoorKeys() (master, provider []byte, err error) {
 		return nil, nil, fmt.Errorf("CP litellm store is missing the provider key")
 	}
 	return []byte(m), []byte(p), nil
+}
+
+// stageLitellmAliases ensures the gateway carries the default alias set
+// (agent.LiteLLMAliases — Code/General/Freehold/ExtraThinking), each a clone
+// of the base registration pointing at the same underlying model. Every pod's
+// OPENAI_COMPAT_MODEL names one of these, so this runs BEFORE the pods
+// (re)apply (an unregistered alias is a 400ing agent) and is idempotent: a
+// name already on the gateway is never re-POSTed, so a deliberate retarget is
+// an explicit code change, not a build side effect. The base entry (what the
+// aliases clone) is discovered from /model/info — the base const's name when
+// present, else the single registered model. The master/provider keys come
+// from the CP's durable litellm store, opened in memory only; the gateway is
+// the recorded NodePort origin. A failure fails the build loudly and retries
+// next run.
+func (s *Spec) stageLitellmAliases() error {
+	if s.LitellmBaseURL == "" {
+		return nil
+	}
+	master, provider, err := s.litellmDoorKeys()
+	if err != nil {
+		return err
+	}
+	// The admin API lives at the origin (litellm.tf dials /model/new the same
+	// way); the recorded base URL is the OpenAI-compat /v1 form.
+	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
+	client := &http.Client{Timeout: 30 * time.Second}
+	get := func(path string, out interface{}) error {
+		req, rerr := http.NewRequest(http.MethodGet, origin+path, nil)
+		if rerr != nil {
+			return rerr
+		}
+		req.Header.Set("Authorization", "Bearer "+string(master))
+		resp, rerr := client.Do(req)
+		if rerr != nil {
+			return rerr
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return json.Unmarshal(body, out)
+	}
+	// Registered models: name + the underlying litellm_params.model string.
+	var models []struct {
+		ModelName     string `json:"model_name"`
+		LitellmParams struct {
+			Model string `json:"model"`
+		} `json:"litellm_params"`
+	}
+	if err := get("/model/info", &models); err != nil {
+		return fmt.Errorf("list gateway models: %w", err)
+	}
+	under := ""
+	registered := map[string]bool{}
+	for _, m := range models {
+		registered[m.ModelName] = true
+		if m.ModelName == agent.BaseLiteLLMModel {
+			under = m.LitellmParams.Model
+		}
+	}
+	if under == "" {
+		if len(models) != 1 {
+			return fmt.Errorf("base model %q not registered on the gateway (%d models present) — the alias set has nothing to clone", agent.BaseLiteLLMModel, len(models))
+		}
+		under = models[0].LitellmParams.Model
+	}
+	for _, alias := range agent.LiteLLMAliases {
+		if registered[alias] {
+			continue
+		}
+		body, aerr := json.Marshal(map[string]interface{}{
+			"model_name": alias,
+			"litellm_params": map[string]string{
+				"model":   under,
+				"api_key": string(provider),
+			},
+		})
+		if aerr != nil {
+			return aerr
+		}
+		req, rerr := http.NewRequest(http.MethodPost, origin+"/model/new", bytes.NewReader(body))
+		if rerr != nil {
+			return rerr
+		}
+		req.Header.Set("Authorization", "Bearer "+string(master))
+		req.Header.Set("Content-Type", "application/json")
+		resp, rerr := client.Do(req)
+		if rerr != nil {
+			return fmt.Errorf("register alias %s: %w", alias, rerr)
+		}
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("register alias %s: HTTP %d: %s", alias, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		}
+	}
+	return nil
 }
 
 // ensureKubectl installs kubectl on the CP LXC (the kube doors' exec target)

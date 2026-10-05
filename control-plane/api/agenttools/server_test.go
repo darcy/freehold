@@ -570,11 +570,12 @@ func TestCreateAgentChannelsAndPrivate(t *testing.T) {
 	}
 	var gotChannels []string
 	var gotPrivate bool
+	var gotModel string
 	srv := &Server{
 		Audience: aud,
 		Grants:   func() ([]string, error) { return []string{pk}, nil },
-		Tools: &agent.Tools{Console: &fakeOps{}, Create: func(name, purpose string, channels []string, private bool) (string, error) {
-			gotChannels, gotPrivate = channels, private
+		Tools: &agent.Tools{Console: &fakeOps{}, Create: func(name, purpose string, channels []string, private bool, model string) (string, error) {
+			gotChannels, gotPrivate, gotModel = channels, private, model
 			return strings.Repeat("c", 64), nil
 		}},
 	}
@@ -598,12 +599,60 @@ func TestCreateAgentChannelsAndPrivate(t *testing.T) {
 	if !gotPrivate {
 		t.Errorf("private not passed through")
 	}
+	if gotModel != "" {
+		t.Errorf("model must default empty (the deploy path resolves the alias), got %q", gotModel)
+	}
 	post(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"helper","channel":"ops","channels":["#freehold"]}}}`)
 	if strings.Join(gotChannels, ",") != "ops,#freehold" {
 		t.Errorf("single channel must prepend the list: %v", gotChannels)
 	}
 	if gotPrivate {
 		t.Errorf("private must default false")
+	}
+}
+
+// TestCreateAgentModelPins: the optional model reaches the deploy path, an
+// unknown alias is refused, and the core-only alias (Freehold) is not
+// selectable for a custom agent.
+func TestCreateAgentModelPins(t *testing.T) {
+	aud := strings.Repeat("cd", 32)
+	secret := make([]byte, 32)
+	secret[0] = 10
+	pk, err := crypto.PubkeyFromSecret(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotModel string
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{pk}, nil },
+		Tools: &agent.Tools{Console: &fakeOps{}, Create: func(name, purpose string, channels []string, private bool, model string) (string, error) {
+			gotModel = model
+			return strings.Repeat("d", 64), nil
+		}},
+	}
+	call := func(raw string) string {
+		t.Helper()
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, pk)
+		req.Header.Set(SigHeader, signForTest(secret, aud, ts, raw))
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+	if body := call(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"coder","model":"Code"}}}`); strings.Contains(body, `"error"`) {
+		t.Fatalf("create_agent with model=Code failed: %s", body)
+	}
+	if gotModel != agent.CodeLiteLLMModel {
+		t.Errorf("model not passed through: %q", gotModel)
+	}
+	if body := call(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"x","model":"Turbo"}}}`); !strings.Contains(body, "model must be one of") {
+		t.Errorf("unknown alias must be refused, got: %s", body)
+	}
+	if body := call(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_agent","arguments":{"name":"x","model":"Freehold"}}}`); !strings.Contains(body, "model must be one of") {
+		t.Errorf("the core alias must not be selectable for a custom agent, got: %s", body)
 	}
 }
 
