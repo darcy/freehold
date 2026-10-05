@@ -2581,7 +2581,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		// The one-time #freehold welcome — the operator's first-run surface now
 		// that the desktop app's own onboarding is skipped (stageOperatorProfile).
-		// Best-effort: a transient miss self-heals on the next build's marker read.
+		// Best-effort: a transient miss self-heals on the next build's history read.
 		if name == spec.CpaName {
 			if err := spec.postFreeholdWelcome(nSec); err != nil {
 				fmt.Fprintln(os.Stderr, "WARN: the #freehold welcome message was not posted:", err)
