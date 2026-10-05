@@ -33,7 +33,22 @@ func newFakeFirstRunRelay(t *testing.T, query []map[string]interface{}) *fakeFir
 		case strings.HasSuffix(r.URL.Path, "/query"):
 			f.mu.Lock()
 			f.queries = append(f.queries, string(body))
-			out := f.query
+			// The real bridge honors body[0] only — model that exactly, so a
+			// caller leaning on extra filters fails here the way it would
+			// live. Match the first filter's kinds against the result set.
+			var filters []struct {
+				Kinds []float64 `json:"kinds"`
+			}
+			_ = json.Unmarshal(body, &filters)
+			var out []map[string]interface{}
+			if len(filters) > 0 && len(filters[0].Kinds) > 0 {
+				want := int(filters[0].Kinds[0])
+				for _, ev := range f.query {
+					if int(ev["kind"].(float64)) == want {
+						out = append(out, ev)
+					}
+				}
+			}
 			f.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(out)
 		case strings.HasSuffix(r.URL.Path, "/events"):

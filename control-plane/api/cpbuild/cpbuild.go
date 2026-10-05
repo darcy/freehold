@@ -2098,40 +2098,39 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
-	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{
-		map[string]interface{}{
-			"kinds": []interface{}{delegate.StreamMsgKind},
-			"#h":    []interface{}{relayFreeholdChannel},
-			"#t":    []interface{}{freeholdWelcomeMarker},
-			"limit": 1,
-		},
-		map[string]interface{}{
-			// The operator's actual profile: the mention should carry the
-			// name they're known by on the relay (an updated world has no
-			// recorded name — the profile is where it lives).
-			"kinds":   []interface{}{0},
-			"authors": []interface{}{s.OwnerPub},
-			"limit":   1,
-		},
-	})
+	// Marker first — the welcome is one-time. Two single-filter reads, the
+	// pattern every relay caller uses (the bridge honors body[0] only; a
+	// multi-filter request would silently drop the second).
+	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{delegate.StreamMsgKind},
+		"#h":    []interface{}{relayFreeholdChannel},
+		"#t":    []interface{}{freeholdWelcomeMarker},
+		"limit": 1,
+	}})
 	if err != nil {
 		return err
 	}
-	marker := false
-	name := s.operatorDisplayName()
-	for _, ev := range evs {
-		kind, _ := ev["kind"].(float64)
-		if int(kind) == delegate.StreamMsgKind {
-			marker = true
-		}
-		if int(kind) == 0 {
-			if n := operatorProfileName(ev); n != "" {
-				name = n
-			}
-		}
-	}
-	if marker {
+	if len(evs) > 0 {
 		return nil
+	}
+	// The mention carries the name the operator is known by on the relay —
+	// their own kind:0 (an updated world has no recorded name; the profile
+	// is where it lives). A failed read errors out rather than posting the
+	// default: the marker is still absent, so the next build re-runs this
+	// path — nothing is ever posted wrong.
+	pevs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
+		"kinds":   []interface{}{0},
+		"authors": []interface{}{s.OwnerPub},
+		"limit":   1,
+	}})
+	if err != nil {
+		return err
+	}
+	name := s.operatorDisplayName()
+	if len(pevs) > 0 {
+		if n := operatorProfileName(pevs[0]); n != "" {
+			name = n
+		}
 	}
 	content := "Welcome to your freehold, @" + name +
 		" — I'm @freehold, your main touchpoint. Ask here and I'll bring in network, data, compute, or ai when their hands are needed. This channel is where the core agents coordinate; #general is open for anything."
