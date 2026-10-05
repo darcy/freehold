@@ -119,12 +119,14 @@ of questions up front:
   TOOL enforces this: provision_runner takes no credential field at all.
 - **Bring the verify arm.** An api-class door REQUIRES `probe` at first
   provision — the door's verify arm as data, because you know the API and the
-  runner does not: `"<METHOD> <path> [auth] [want]"`, e.g. `GET
+  runner does not: `"<METHOD> <path> [auth] [want] [insecure]"`, e.g. `GET
   /user/tokens/verify bearer` (cloudflare), `POST /api/auth/login json-body`
   (unifi — the credential IS the POST body). auth: `bearer` (default) |
   `basic` | `json-body` | `none`; want: the expected status, default 200;
-  `probe_body`: a literal JSON request body when the API needs one alongside
-  the credential (kubernetes' SelfSubjectReview). Pick the cheapest endpoint
+  `insecure`: the literal token when the target presents a private CA the CP
+  does not trust (a k3s API); `probe_body`: a literal JSON request body when
+  the API needs one alongside the credential (kubernetes' SelfSubjectReview).
+  Pick the cheapest endpoint
   that proves the credential (a token-verify beats a list beats a health
   check); the runner composes the curl itself and reports its self-check from
   it. A new service kind is a probe, never a rebuild.

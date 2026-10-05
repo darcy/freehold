@@ -258,8 +258,10 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 				if probe, err = provisioner.ValidateProbe(probe); err != nil {
 					return "", fmt.Errorf("provision_runner %s: %w", name, err)
 				}
-				if err := provisioner.ValidateProbeBody(probeBody); err != nil {
-					return "", fmt.Errorf("provision_runner %s: %w", name, err)
+				if probeBody != "" {
+					if err := provisioner.ValidateProbeBody(probeBody); err != nil {
+						return "", fmt.Errorf("provision_runner %s: %w", name, err)
+					}
 				}
 			}
 			if before, ok := store.GetSecret(name); ok {

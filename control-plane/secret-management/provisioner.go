@@ -61,16 +61,18 @@ var probePathRe = regexp.MustCompile(`^/[A-Za-z0-9/._~?&=:-]{0,255}$`)
 // probeWantRe is the expected HTTP status code (3 digits).
 var probeWantRe = regexp.MustCompile(`^\d{3}$`)
 
-// ValidateProbe checks a probe spec string: "<METHOD> <path> [auth] [want]" —
-// method GET|POST, path per probePathRe, auth one of probeAuthStyles
-// (default bearer), want a 3-digit code (default 200). Returns the
-// normalized spec (upper-cased method). The API-boundary guard: a probe that
-// fails this never reaches state, a package, or a shell.
+// ValidateProbe checks a probe spec string: "<METHOD> <path> [auth] [want]
+// [insecure]" — method GET|POST, path per probePathRe, auth one of
+// probeAuthStyles (default bearer), want a 3-digit code (default 200), and an
+// optional literal "insecure" (curl -k — private-CA targets like a k3s API).
+// Returns the normalized spec (upper-cased method, defaults filled). The
+// API-boundary guard: a probe that fails this never reaches state, a package,
+// or a shell.
 func ValidateProbe(probe string) (string, error) {
 	probe = strings.TrimSpace(probe)
 	fields := strings.Fields(probe)
-	if len(fields) < 2 || len(fields) > 4 {
-		return "", fmt.Errorf("invalid probe %q: want \"<METHOD> <path> [auth] [want]\" (e.g. \"GET /user/tokens/verify bearer\")", probe)
+	if len(fields) < 2 || len(fields) > 5 {
+		return "", fmt.Errorf("invalid probe %q: want \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\")", probe)
 	}
 	method := strings.ToUpper(fields[0])
 	if method != "GET" && method != "POST" {
@@ -93,7 +95,18 @@ func ValidateProbe(probe string) (string, error) {
 			return "", fmt.Errorf("invalid probe want %q: 3-digit HTTP status", fields[3])
 		}
 	}
-	return strings.Join([]string{method, fields[1], auth, want}, " "), nil
+	insecure := ""
+	if len(fields) > 4 {
+		if fields[4] != "insecure" {
+			return "", fmt.Errorf("invalid probe flag %q: only \"insecure\" (curl -k for a private-CA target)", fields[4])
+		}
+		insecure = "insecure"
+	}
+	out := []string{method, fields[1], auth, want}
+	if insecure != "" {
+		out = append(out, insecure)
+	}
+	return strings.Join(out, " "), nil
 }
 
 // ValidateProbeBody checks a literal probe request body: must parse as JSON

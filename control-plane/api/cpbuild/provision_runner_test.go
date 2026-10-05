@@ -239,6 +239,7 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	}
 	if err := store.InsertCapability("unifi-api-admin", state.CapabilityRecord{
 		Kind: "unifi", Address: "https://unifi.local", Port: 8800, Rosters: []string{"ai"},
+		Origin: state.OriginAgent,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +254,11 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	fn := BuildProvisionRunner(spec, reg)
 	reArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai")
 	reArgs.Probe = "POST /api/auth/login json-body"
-	_, _ = fn(reArgs)
+	if _, err := fn(reArgs); err != nil && strings.Contains(err.Error(), "invalid probe") {
+		// The flow may fail hermetically later (relay sync), but a BODYLESS
+		// probe restatement must never trip the body validation.
+		t.Fatalf("a bodyless probe restatement must validate: %v", err)
+	}
 	// The flow writes through its own store handle; re-open (the disk is the
 	// truth) before asserting.
 	disk, err := state.Open(cpState)
@@ -263,6 +268,10 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	after, _ := disk.GetSecret("unifi-api-admin")
 	if after.CiphertextHex != filled.CiphertextHex {
 		t.Fatal("a re-provision must keep the operator's filled credential (only the console rotates)")
+	}
+	// The restated verify arm landed (bodyless, normalized).
+	if after.Probe != "POST /api/auth/login json-body 200" {
+		t.Fatalf("re-provision probe = %q", after.Probe)
 	}
 }
 

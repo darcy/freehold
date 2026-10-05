@@ -91,9 +91,9 @@ const kubernetesVersion = "v1.36.4"
 const cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
 
 // kubernetesProbe is the kube doors' verify arm: a SelfSubjectReview — 201
-// proves BOTH reachability and that the door's token survived a CA rotation
-// (-k because the CA is not trusted CP-side lives runner-side).
-const kubernetesProbe = "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201"
+// proves BOTH reachability and that the door's token survived a CA rotation.
+// "insecure" composes curl -k: the k3s CA is not trusted on the CP guest.
+const kubernetesProbe = "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201 insecure"
 const kubernetesProbeBody = `{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`
 
 // capabilityRunners is the static capability-runner table. Dynamic entries

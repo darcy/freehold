@@ -25,10 +25,13 @@ func TestValidateProbe(t *testing.T) {
 	if _, err := ValidateProbe("GET /b2api/v3/b2_authorize_account basic"); err != nil {
 		t.Fatalf("basic auth: %v", err)
 	}
+	if got, _ := ValidateProbe("POST /p bearer 201 insecure"); got != "POST /p bearer 201 insecure" {
+		t.Fatalf("insecure = %q", got)
+	}
 	for _, bad := range []string{
 		"", "GET", "GET /p bearer 200 extra", "DELETE /p", "TRACE /p",
 		"GET p", "GET /p hmac", "GET /p bearer 20", "GET /p bearer 2a0",
-		"GET /p;ls bearer", "curl http://evil",
+		"GET /p;ls bearer", "curl http://evil", "GET /p bearer 200 bogus",
 	} {
 		if _, err := ValidateProbe(bad); err == nil {
 			t.Fatalf("ValidateProbe(%q): want error", bad)

@@ -557,12 +557,15 @@ struct ProbeSpec {
     path: String,
     auth: String,
     want: String,
+    /// literal "insecure" token → curl -k (private-CA targets: a k3s API
+    /// whose CA the CP guest does not trust).
+    insecure: bool,
     body: Option<String>,
 }
 
 fn parse_probe(probe: &str, probe_body: Option<&str>) -> Option<ProbeSpec> {
     let fields: Vec<&str> = probe.split_whitespace().collect();
-    if fields.len() < 2 || fields.len() > 4 {
+    if fields.len() < 2 || fields.len() > 5 {
         return None;
     }
     let method = fields[0].to_ascii_uppercase();
@@ -581,11 +584,17 @@ fn parse_probe(probe: &str, probe_body: Option<&str>) -> Option<ProbeSpec> {
     if want.len() != 3 || !want.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
+    let insecure = match fields.get(4).copied() {
+        None => false,
+        Some("insecure") => true,
+        Some(_) => return None,
+    };
     Some(ProbeSpec {
         method,
         path: path.to_string(),
         auth,
         want,
+        insecure,
         body: probe_body.filter(|b| !b.is_empty()).map(String::from),
     })
 }
@@ -595,7 +604,11 @@ fn parse_probe(probe: &str, probe_body: Option<&str>) -> Option<ProbeSpec> {
 /// address ride env (`${CRED}`/`${URL}`) — their values never enter the
 /// command string.
 fn compose_probe(spec: &ProbeSpec, cred: &str, url_env: &str) -> String {
-    let mut cmd = "curl -sS -o /dev/null -w '%{http_code}'".to_string();
+    let mut cmd = if spec.insecure {
+        "curl -skS -o /dev/null -w '%{http_code}'".to_string()
+    } else {
+        "curl -sS -o /dev/null -w '%{http_code}'".to_string()
+    };
     if spec.method == "POST" {
         cmd.push_str(" -X POST");
     }
@@ -1113,21 +1126,27 @@ mod tests {
         let s = parse_probe("post /api/auth/login json-body", None).unwrap();
         assert_eq!(s.method, "POST");
         assert_eq!(s.auth, "json-body");
+        let s = parse_probe("GET /x none", None).unwrap();
+        assert_eq!(s.want, "200");
+        assert!(!s.insecure);
         let s = parse_probe(
-            "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201",
+            "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201 insecure",
             Some("{\"kind\":\"SelfSubjectReview\"}"),
         )
         .unwrap();
         assert_eq!(s.want, "201");
+        assert!(s.insecure);
         assert_eq!(s.body.as_deref(), Some("{\"kind\":\"SelfSubjectReview\"}"));
         // malformed specs fail closed
         assert!(parse_probe("GET", None).is_none());
         assert!(parse_probe("GET /p bearer 200 extra", None).is_none());
+        assert!(parse_probe("GET /p bearer 200 extra more", None).is_none());
         assert!(parse_probe("DELETE /p", None).is_none());
         assert!(parse_probe("GET p", None).is_none());
         assert!(parse_probe("GET /p hmac", None).is_none());
         assert!(parse_probe("GET /p bearer 20", None).is_none());
         assert!(parse_probe("GET /p bearer 2a0", None).is_none());
+        assert!(parse_probe("GET /p bearer 200 follow-redirects", None).is_none());
     }
 
     #[test]
@@ -1148,12 +1167,14 @@ mod tests {
         // basic auth (b2) + literal body (kubernetes)
         let s = parse_probe("GET /b2api/v3/b2_authorize_account basic", None).unwrap();
         assert!(compose_probe(&s, "B2", "B2_URL").contains("-u \"${B2}\""));
+        // insecure composes -skS (the k3s CA is not trusted CP-side)
         let s = parse_probe(
-            "POST /apis/a.k8s.io/v1/selfsubjectreviews bearer 201",
+            "POST /apis/a.k8s.io/v1/selfsubjectreviews bearer 201 insecure",
             Some("{\"k\":1}"),
         )
         .unwrap();
         let cmd = compose_probe(&s, "KUBE", "KUBE_URL");
+        assert!(cmd.starts_with("curl -skS"));
         assert!(cmd.contains("-d '{\"k\":1}'"));
         assert!(cmd.contains("\"${KUBE_URL}/apis/a.k8s.io/v1/selfsubjectreviews\""));
         // none: no credential flag at all
