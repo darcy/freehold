@@ -234,10 +234,10 @@ func RefreshReviveScript(t Transport, spec *DeployCpSpec) error {
 }
 
 // reviveScriptFromArgvs renders the revival script from captured argvs —
-// kept for the door-unit NAMES (the console and agent-tools are real enabled
-// units now: the script only ever STARTS them). The healthz port rides
-// spec.BindAddr (the bind is operator-configurable; the deploy-time script
-// uses the same source).
+// kept for the door-unit NAMES and the console's REAL bind (the healthz
+// gate polls the captured serve's own --addr: the bind is
+// operator-configurable and the refresh spec carries no BindAddr — the
+// captured argv is the only source that can't drift).
 func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArgvs []string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
@@ -246,13 +246,13 @@ func reviveScriptFromArgvs(spec *DeployCpSpec, serveArgv, atArgv string, doorArg
 	b.WriteString("# and agent-tools back after a rollback stopped this guest. All are\n")
 	b.WriteString("# enabled units: the boot re-runs them, these starts are belt and\n")
 	b.WriteString("# suspenders.\n")
-	port := "8080"
-	if _, p, ok := strings.Cut(spec.BindAddr, ":"); ok {
-		port = p
+	addr := serveFlagValue(serveArgv, "--addr")
+	if addr == "" {
+		addr = "127.0.0.1:8080"
 	}
 	b.WriteString("systemctl start freehold-runner 2>/dev/null || true\n")
 	b.WriteString("systemctl start freehold-console 2>/dev/null || true\n")
-	b.WriteString(fmt.Sprintf("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://127.0.0.1:%s/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n", port))
+	b.WriteString(fmt.Sprintf("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://%s/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n", addr))
 	b.WriteString("[ \"$up\" = 1 ] || { echo 'console serve did not answer /healthz — journalctl -u freehold-console' >&2; exit 1; }\n")
 	for _, line := range doorArgvs {
 		unit, _, ok := strings.Cut(line, " ")
@@ -281,13 +281,20 @@ func restartAgentTools(t Transport, spec *DeployCpSpec, argv string) error {
 			return err
 		}
 	}
-	start := "systemctl cat freehold-agent-tools >/dev/null 2>&1 && systemctl restart freehold-agent-tools && sleep 1 && systemctl is-active freehold-agent-tools || echo agent-tools-unit-absent"
-	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "restart agent-tools", 90)
+	start := "systemctl cat freehold-agent-tools >/dev/null 2>&1 && echo unit-present || echo unit-absent"
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "agent-tools unit exists", 30)
 	if err != nil {
 		return err
 	}
-	if strings.Contains(out.Stdout, "agent-tools-unit-absent") {
+	if strings.Contains(out.Stdout, "unit-absent") {
 		return nil // a world that never had agent-tools: nothing to bring up
+	}
+	// Restart LOUDLY (no marker to hide behind): a restart that never comes
+	// up — or a unit stuck in activating (the glibc-mismatch shape) — must
+	// fail the update here, not surface later as a world_build error.
+	start = "systemctl restart freehold-agent-tools && sleep 1 && systemctl is-active freehold-agent-tools"
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "restart agent-tools", 90); err != nil {
+		return err
 	}
 	probe := "for i in $(seq 1 15); do curl -s -m 3 -o /dev/null http://127.0.0.1:8089/mcp && exit 0; sleep 2; done; exit 1"
 	// The loop can run ~75s; give execToOK headroom so it isn't cut off.
