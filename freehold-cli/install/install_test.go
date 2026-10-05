@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"freehold/contract/config"
+	"freehold/platform/provisioning/box"
 )
 
 // writeProfile registers a named profile with the given config body.
@@ -86,5 +87,48 @@ func TestGateInstallMatrix(t *testing.T) {
 	writeProfile(t, "demo", "cp_url = 'http://127.0.0.1:1'\n")
 	if a, err := gateInstall("demo"); err != nil || a != lifecycleReAdopt {
 		t.Fatalf("a dead CP must re-adopt: a=%v err=%v", a, err)
+	}
+}
+
+// TestApplyInstallDefaultsGatewayForcing: the forced gateway derives ONLY on a
+// mint — a re-adopt rides the recorded gateway (a pre-gateway world stays
+// flat), and a recorded vlan sentinel (-1) is never re-seeded.
+func TestApplyInstallDefaultsGatewayForcing(t *testing.T) {
+	// Mint: the subnet is derived from the proxy IP's network.
+	f := box.Flags{ProxyIP: "192.168.30.8/24"}
+	applyInstallDefaults(&f, true)
+	if f.GatewayCIDR != "10.77.0.0/24" {
+		t.Errorf("mint derivation = %q, want 10.77.0.0/24", f.GatewayCIDR)
+	}
+	// Mint with an explicit --gateway-cidr: the flag wins.
+	f = box.Flags{ProxyIP: "192.168.30.8/24", GatewayCIDR: "10.99.0.0/24"}
+	applyInstallDefaults(&f, true)
+	if f.GatewayCIDR != "10.99.0.0/24" {
+		t.Errorf("explicit cidr = %q, want 10.99.0.0/24", f.GatewayCIDR)
+	}
+	// Re-adopt of a pre-gateway world: NOTHING is derived (no mid-life
+	// gateway colliding with the live LAN guests).
+	f = box.Flags{ProxyIP: "192.168.30.8/24"}
+	applyInstallDefaults(&f, false)
+	if f.GatewayCIDR != "" {
+		t.Errorf("re-adopt derived a gateway: %q", f.GatewayCIDR)
+	}
+}
+
+// TestSeedFromProfileSkipsVlanSentinel: a recorded vlan of -1 (the parse
+// sentinel of a poisoned profile) must not resurrect through the re-adopt
+// seed — an explicit --gateway-vlan 0 recovery must stay untagged.
+func TestSeedFromProfileSkipsVlanSentinel(t *testing.T) {
+	minus1 := -1
+	f := box.Flags{}
+	seedFromProfile(&f, &config.Config{Gateway: config.GatewaySpec{Vlan: &minus1}})
+	if f.GatewayVlan != 0 {
+		t.Errorf("sentinel seeded: %d", f.GatewayVlan)
+	}
+	seven := 7
+	f = box.Flags{}
+	seedFromProfile(&f, &config.Config{Gateway: config.GatewaySpec{Vlan: &seven}})
+	if f.GatewayVlan != 7 {
+		t.Errorf("recorded tag not seeded: %d", f.GatewayVlan)
 	}
 }

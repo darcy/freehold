@@ -50,8 +50,8 @@ type Flags struct {
 	// AccessMode names the install access strategy that reaches Host
 	// ("ssh-root-proxmox" today, provider-API modes later) and is recorded in
 	// the profile config beside the host.
-	AccessMode         string
-	Name               string
+	AccessMode string
+	Name       string
 	// LocalPort is the box-side runner MCP loopback port (--local-port); Addr
 	// is derived 127.0.0.1:<LocalPort> at the composition roots.
 	LocalPort          uint32
@@ -86,11 +86,11 @@ type Flags struct {
 	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
 	// internal subnet (InternalIPFor) and a gateway guest owns the one
 	// LAN-facing address (the proxy IP).
-	GatewayCIDR string
-	GatewayVlan int
-	ConfigPath  string
-	ConfirmStorage     bool
-	ResetDNS           bool
+	GatewayCIDR    string
+	GatewayVlan    int
+	ConfigPath     string
+	ConfirmStorage bool
+	ResetDNS       bool
 	// ManageDNSExplicit records whether --manage-dns was EXPLICITLY passed (a
 	// bool flag reads false for both omitted and --manage-dns=false; the config
 	// seed must only fill the omitted case so an operator can still opt out).
@@ -375,6 +375,21 @@ func DefaultGatewayCIDR(lanIP string) string {
 func (e *Engine) RunBootstrap() error {
 	fmt.Fprintf(e.Out, "creating the CP at %s (door -> cp LXC + console + co-located runner + DNS creds; then run `freehold build` from any box)\n", e.F.RelayDomain)
 
+	// The gateway flags validate BEFORE any config write: the gateway merge
+	// persists {cidr, vlan} wholesale, so a malformed --gateway-cidr or the
+	// --gateway-vlan sentinel (-1, set at parse for a non-numeric/negative
+	// value) must never reach the disk — a recorded -1 would resurrect itself
+	// on every later re-adopt seed and the "blank (untagged)" recovery could
+	// never succeed.
+	if e.F.GatewayVlan < 0 {
+		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
+	}
+	if e.F.GatewayCIDR != "" {
+		if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
+			return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
+		}
+	}
+
 	// 1. the ops agent identity + the door (same as run()).
 	EnsureIdentity(OpsDir())
 	agentPK, err := LoadPubkey(OpsDir())
@@ -448,29 +463,20 @@ func (e *Engine) RunBootstrap() error {
 	}
 
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
-	// + its in-host VLAN tag. The gateway is FORCED — every fresh world gets
-	// one; the subnet is derived (10.77.0.0/24, bumped past LAN overlap),
-	// untagged by default. --gateway-cidr/--gateway-vlan override.
-	if e.F.GatewayCIDR == "" {
-		e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
-		if e.F.GatewayCIDR == "" {
-			return fmt.Errorf("--proxy-ip %q does not parse as CIDR — cannot derive the internal subnet", e.F.ProxyIP)
+	// + its in-host VLAN tag. Install decides (see applyInstallDefaults): a
+	// MINT derives the subnet — the gateway is forced, every fresh world gets
+	// one — and a RE-ADOPT rides the recorded gateway (a pre-gateway world
+	// stays flat: forcing one mid-life would collide with its live LAN
+	// guests). Validation happened at the top, before any config write.
+	if e.F.GatewayCIDR != "" {
+		// The answer lands in e.F AFTER writeInitialConfig (step 6)
+		// snapshotted the config, and the guest births below key on the DISK
+		// config's Gateway — re-merge + save so the on-disk world IS
+		// gateway-aware before anything boots (a cheap idempotent re-run for
+		// both paths).
+		if err := e.writeInitialConfig(); err != nil {
+			return err
 		}
-	}
-	// Validate on BOTH paths (headless flag + derived): a malformed
-	// CIDR would otherwise fail far later, at the first guest's net args.
-	if _, _, err := net.ParseCIDR(e.F.GatewayCIDR); err != nil {
-		return fmt.Errorf("--gateway-cidr must be CIDR (e.g. 10.77.0.0/24) — got %q", e.F.GatewayCIDR)
-	}
-	// The answer lands in e.F AFTER writeInitialConfig (step 6) snapshotted
-	// the config, and the guest births below key on the DISK config's Gateway
-	// — re-merge + save so the on-disk world IS gateway-aware before anything
-	// boots (a cheap idempotent re-run for both paths).
-	if err := e.writeInitialConfig(); err != nil {
-		return err
-	}
-	if e.F.GatewayVlan < 0 {
-		return fmt.Errorf("--gateway-vlan must be a positive number or blank (untagged)")
 	}
 
 	// 7. the durable volume plane (the CP boot needs the cp dataset; the
@@ -2374,22 +2380,22 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		k3sIP = config.StripCIDR(e.F.ProxyIP)
 	}
 	c := config.Coords{
-		Name:           cfg.Name,
-		StateDir:       "",
-		RelayURL:       cfg.RelayURL,
-		RelayAuthURL:   cfg.RelayURL,
-		RelayPK:        derefStrPtr(cfg.RelayPubkey),
-		RelayWS:        cfg.RelayWsURL,
-		RelayHost:      cfg.RelayHost(),
-		RelayIP:        relayIP,
-		CpHost:         cfg.CPHost(),
-		CpIP:           cpIP,
-		CpLxc:          derefU32(cfg.Lxc.Cp.Vmid),
-		ProxyIP:        config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
-		LitellmIP:      cfg.Litellm.Host,
-		PlanePool:      derefStrPtr(cfg.Plane.Backend),
-		PlaneKind:      derefStrPtr(cfg.Plane.BackendKind),
-		ThinPool:       derefStrPtr(cfg.Plane.ThinPool),
+		Name:         cfg.Name,
+		StateDir:     "",
+		RelayURL:     cfg.RelayURL,
+		RelayAuthURL: cfg.RelayURL,
+		RelayPK:      derefStrPtr(cfg.RelayPubkey),
+		RelayWS:      cfg.RelayWsURL,
+		RelayHost:    cfg.RelayHost(),
+		RelayIP:      relayIP,
+		CpHost:       cfg.CPHost(),
+		CpIP:         cpIP,
+		CpLxc:        derefU32(cfg.Lxc.Cp.Vmid),
+		ProxyIP:      config.StripCIDR(derefStrPtr(cfg.Proxy.Ip)),
+		LitellmIP:    cfg.Litellm.Host,
+		PlanePool:    derefStrPtr(cfg.Plane.Backend),
+		PlaneKind:    derefStrPtr(cfg.Plane.BackendKind),
+		ThinPool:     derefStrPtr(cfg.Plane.ThinPool),
 		// Size/placement: the CONFIG is the durable source (the install
 		// persists them). A config written before persistence shipped has
 		// none — the world-config then renders blanks and the boot fails

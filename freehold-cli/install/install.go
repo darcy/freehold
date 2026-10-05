@@ -155,7 +155,7 @@ func seedFromProfile(f *box.Flags, cfg *config.Config) {
 	if f.GatewayCIDR == "" && cfg.Gateway.Cidr != nil {
 		f.GatewayCIDR = *cfg.Gateway.Cidr
 	}
-	if f.GatewayVlan == 0 && cfg.Gateway.Vlan != nil {
+	if f.GatewayVlan == 0 && cfg.Gateway.Vlan != nil && *cfg.Gateway.Vlan >= 0 {
 		f.GatewayVlan = *cfg.Gateway.Vlan
 	}
 	if f.OperatorPubkey == "" {
@@ -221,7 +221,7 @@ func runInstallCmd(cmd *cobra.Command) error {
 	if action == lifecycleMint && !cmd.Flags().Changed("local-port") {
 		pickRunnerPort(&f)
 	}
-	applyInstallDefaults(&f)
+	applyInstallDefaults(&f, action == lifecycleMint)
 	f.ConfigPath = installConfigPath()
 	if err := seedOperatorLedger(&f); err != nil {
 		return err
@@ -294,7 +294,7 @@ func runInstall(in io.Reader, out io.Writer, name string) error {
 	} else {
 		pickRunnerPort(&f)
 	}
-	applyInstallDefaults(&f)
+	applyInstallDefaults(&f, action == lifecycleMint)
 	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
 	}
@@ -410,8 +410,11 @@ func collectAnswers(ui *installerUI, seed *config.Config) (box.Flags, error) {
 // applyInstallDefaults fills the static defaults install's own answers would
 // otherwise leave empty (flag-layer defaults apply to bootstrap; install owns
 // its answers). Empty storage/bridge/agent-name/runner boot the CP LXC
-// malformed.
-func applyInstallDefaults(f *box.Flags) {
+// malformed. mint gates the FORCED gateway: a fresh world derives its
+// freehold-subnet (a re-adopt rides the recorded gateway — a pre-gateway
+// world stays flat; forcing one mid-life would collide with its live LAN
+// guests).
+func applyInstallDefaults(f *box.Flags, mint bool) {
 	if f.StorageName == "" {
 		f.StorageName = "local-lvm"
 	}
@@ -427,11 +430,11 @@ func applyInstallDefaults(f *box.Flags) {
 	if f.Target == "" {
 		f.Target = box.RunnerTarget
 	}
-	// The gateway is FORCED: every fresh world gets one. The subnet is derived
-	// (10.77.0.0/24, bumped past LAN overlap); --gateway-cidr/--gateway-vlan
-	// override, and a re-adopt's recorded gateway was seeded before this runs.
-	// RunBootstrap re-validates.
-	if f.GatewayCIDR == "" && f.ProxyIP != "" {
+	// The gateway is FORCED on mint: the subnet is derived (10.77.0.0/24,
+	// bumped past LAN overlap); --gateway-cidr/--gateway-vlan override, and a
+	// re-adopt's recorded gateway was seeded before this runs. RunBootstrap
+	// re-validates before any config write.
+	if mint && f.GatewayCIDR == "" && f.ProxyIP != "" {
 		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
 	}
 	// Proxmox-over-root-SSH is the only implemented access mode today;

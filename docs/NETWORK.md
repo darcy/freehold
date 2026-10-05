@@ -83,11 +83,12 @@ Two paths to everything, by design:
     addressed to the gateway itself — an unconstrained dport DNAT would
     hijack the guests' own egress. The forward list is a config list —
     extending it is an edit, not code.
-6.  **No wizard question:** every install builds the gateway; the internal
-    subnet is derived (10.77.0.0/24, bumped past any overlap with the LAN)
-    and the bridge rides untagged unless `--gateway-vlan` says a tag —
-    `--gateway-cidr` overrides the derivation. Rebuild/re-adopt reuse the
-    recorded values.
+6.  **No wizard question:** every fresh install builds the gateway; the
+    internal subnet is derived (10.77.0.0/24, bumped past any overlap with
+    the LAN) and the bridge rides untagged unless `--gateway-vlan` says a
+    tag — `--gateway-cidr` overrides the derivation. Rebuild/re-adopt reuse
+    the recorded values; a pre-gateway world re-adopts flat (no gateway is
+    force-built mid-life — its live guests hold the LAN addresses).
 
 **Verification gate before calling this done:** `freehold build`, the TUI,
 and a thin-box flow exercised from a SECOND box against a subnet world — the
@@ -182,5 +183,4 @@ locked. Pangolin has a real API, so the dashboard is never required.
     verified: `drivers.go` net0 string; `cpbuild.go` static-IP threading).
 *   `proxy_ip` split in `contract/config` + `cpbuild.Spec` + `DnsRecords`.
 *   The gateway stage: nftables config deployed like any other stage.
-*   Wizard prompts (gateway IP + subnet); Phase 2's VPS driver path; Phase 3's
-    provisioner stage + the Newt unit.
+*   Phase 2's VPS driver path; Phase 3's provisioner stage + the Newt unit.
