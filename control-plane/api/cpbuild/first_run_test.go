@@ -36,16 +36,25 @@ func newFakeFirstRunRelay(t *testing.T, query []map[string]interface{}) *fakeFir
 			// The real bridge honors body[0] only — model that exactly, so a
 			// caller leaning on extra filters fails here the way it would
 			// live. Match the first filter's kinds against the result set.
-			var filters []struct {
-				Kinds []float64 `json:"kinds"`
-			}
+			var filters []map[string]interface{}
 			_ = json.Unmarshal(body, &filters)
+			// The first-run guard reads ANY #freehold message — a #t in its
+			// filter is the re-post bug (the relay applies the SQL limit
+			// before post-filtering tags), so fail the moment it reappears.
+			for _, fl := range filters {
+				if _, has := fl["#t"]; has {
+					t.Errorf("the guard filter must not constrain #t, got %s", body)
+					break
+				}
+			}
 			var out []map[string]interface{}
-			if len(filters) > 0 && len(filters[0].Kinds) > 0 {
-				want := int(filters[0].Kinds[0])
-				for _, ev := range f.query {
-					if int(ev["kind"].(float64)) == want {
-						out = append(out, ev)
+			if len(filters) > 0 {
+				if ks, ok := filters[0]["kinds"].([]interface{}); ok && len(ks) > 0 {
+					want := int(ks[0].(float64))
+					for _, ev := range f.query {
+						if int(ev["kind"].(float64)) == want {
+							out = append(out, ev)
+						}
 					}
 				}
 			}
@@ -169,7 +178,8 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 		t.Fatalf("the welcome should point at #general, got %q", ev.Content)
 	}
 
-	// A marker hit: the query returns one event, nothing is published.
+	// A #freehold that already has ANY message — welcome tag or not — must
+	// not re-post (the guard is history, not a tag lookup).
 	f2 := newFakeFirstRunRelay(t, []map[string]interface{}{{"id": "x", "kind": float64(wire.ChannelMessage)}})
 	if err := specFor(f2).postFreeholdWelcome(sec); err != nil {
 		t.Fatal(err)
@@ -215,7 +225,8 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 		t.Fatalf("a nameless profile must fall back to the default, got %q", ev4.Content)
 	}
 
-	// A marker hit mixed with a profile event still guards.
+	// The two reads: the marker (any kind-9) first; the profile read fires
+	// only when there is no history.
 	f5 := newFakeFirstRunRelay(t, []map[string]interface{}{
 		{"id": "m", "kind": float64(delegate.StreamMsgKind), "content": "welcome"},
 		{"id": "p", "kind": float64(0), "content": `{"name":"Darcy"}`},
@@ -224,7 +235,7 @@ func TestPostFreeholdWelcomeMarkerGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := f5.published(); len(got) != 0 {
-		t.Fatalf("a marker hit must guard even alongside a profile, got %d events", len(got))
+		t.Fatalf("existing #freehold history must guard even alongside a profile, got %d events", len(got))
 	}
 }
 
