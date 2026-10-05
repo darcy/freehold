@@ -77,7 +77,7 @@ func init() {
 func registerBuildFlags(cmd *cobra.Command) {
 	cmd.Flags().String("addr", "", "Runner MCP address (loopback; default: the config's [runner] addr, else 127.0.0.1:8787)")
 	cmd.Flags().String("target", "", "Runner name (default: the config's [runner] target, else proxmox-box)")
-	cmd.Flags().String("host", "root@192.168.30.224", "Proxmox host address the runner SSH's into")
+	cmd.Flags().String("host", "", "Proxmox host address the runner SSH's into (default: the recorded one; only update --dev's binary ship needs it)")
 	cmd.Flags().String("domain", "", "DEPRECATED - use --relay-domain. Kept for old scripts.")
 	cmd.Flags().String("relay-domain", "", "The RELAY's own public host (its Buzz origin) — REQUIRED, never derived")
 	cmd.Flags().String("cp-domain", "", "The CONTROL PLANE's public host — REQUIRED, never derived")
@@ -441,7 +441,8 @@ func (e *buildEngine) readGuestFileB64(k3s uint32, path string) ([]byte, error) 
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 }
 
-func (e *buildEngine) litellmMasterKey(k3sVmid uint32) string {	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
+func (e *buildEngine) litellmMasterKey(k3sVmid uint32) string {
+	cmd := fmt.Sprintf(`pct exec %d -- /usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get secret litellm-keys -n litellm -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d`,
 		k3sVmid)
 	ok, out := e.RunBin(e.Bins.Self, e.ExecArgs(cmd, 30))
 	if !ok {

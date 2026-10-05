@@ -21,11 +21,25 @@ build:
     @cd control-plane && mise exec go@1.25.0 -- go build -ldflags "{{ldflags}}" -o ../target/debug/freehold-console ./api/cmd/freehold-console
     @cd control-plane && mise exec go@1.25.0 -- go build -ldflags "{{ldflags}}" -o ../target/release/freehold-console ./api/cmd/freehold-console
     @echo "→ runner (Rust — debug + release)"
-    @FREEHOLD_VERSION="{{version}}" FREEHOLD_COMMIT="{{commit}}" mise exec rust@1.98.0 -- cargo build --bin runner
-    @FREEHOLD_VERSION="{{version}}" FREEHOLD_COMMIT="{{commit}}" mise exec rust@1.98.0 -- cargo build --release --bin runner
+    @just build-runner "{{version}}" "{{commit}}"
     @echo "→ freehold-agent-tools (static release — the CP ships it to agent pods)"
     @cd control-plane && mise exec go@1.25.0 -- sh -c 'CGO_ENABLED=0 go build -ldflags "{{ldflags}}" -o ../target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools'
     @echo "✓ all binaries built"
+
+# The runner builds against BOOKWORM's glibc when docker is available: a runner
+# built on THIS box (newer glibc) crash-loops the co-located unit on the Debian
+# 12 guests (`GLIBC_2.39 not found`, systemd stuck activating). No docker →
+# local cargo (the box's own glibc — fine when it is not newer than the guests').
+build-runner version commit:
+    @if command -v docker >/dev/null 2>&1; then \
+        docker run --rm --dns 1.1.1.1 -u $(id -u):$(id -g) -e HOME=/tmp/c -e CARGO_HOME=/tmp/c \
+          -e FREEHOLD_VERSION="{{version}}" -e FREEHOLD_COMMIT="{{commit}}" \
+          -v {{justfile_directory()}}:/src -w /src rust:1.98-bookworm \
+          sh -c 'cargo build --bin runner && cargo build --release --bin runner'; \
+    else \
+        FREEHOLD_VERSION="{{version}}" FREEHOLD_COMMIT="{{commit}}" mise exec rust@1.98.0 -- cargo build --bin runner; \
+        FREEHOLD_VERSION="{{version}}" FREEHOLD_COMMIT="{{commit}}" mise exec rust@1.98.0 -- cargo build --release --bin runner; \
+    fi
 
 # Install the freehold CLI + ALL its siblings onto PATH (~/.cargo/bin) so the
 # installed binaries resolve the sibling binaries (ResolveBins looks for them
