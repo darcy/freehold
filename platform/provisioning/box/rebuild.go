@@ -1880,7 +1880,8 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 	script := fmt.Sprintf(`set -e
 echo nameserver 1.1.1.1 > /etc/resolv.conf
 echo nameserver 8.8.8.8 >> /etc/resolv.conf
-apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+mkdir -p /etc/dnsmasq.d
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 # A router with BOTH nics on one bridge (the untagged freehold-subnet) must
 # not answer ARP for an IP on the other interface — the flux reads as MAC
