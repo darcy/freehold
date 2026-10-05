@@ -12,8 +12,10 @@ the ordering across all of them is `docs/ROADMAP.md`.
 *   Revocation is a feed-cut: a credential someone already holds still opens, and a
     self-hosted runner keeps running until the box-side stop.
 *   Rotate doesn't reach a live runner until it restarts (except the console's fill flow).
-*   A live-issued grant didn't reach a running door's relay roster in one live test; the
-    console has no member-ungrant.
+*   A live-issued grant didn't reach a running door's relay roster in one live test —
+    the relay never re-signed the 39002 roster on the put-user. (The console's
+    `/api/revoke-grant` does remove a relay membership; the put-user → re-sign chain is
+    the part that flaked.)
 *   Replay within a call's 60 s window; `timeout_s` leaves orphans; abandoned streaming
     sessions are never reaped; the SSH and API connectors have a handful of edge cases;
     the state store is single-process.
