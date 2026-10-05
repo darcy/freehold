@@ -624,7 +624,8 @@ func checkRunnerRuns(t Transport, spec *DeployCpSpec) error {
 // startRunnerUnit installs + enables the co-located runner's unit. Idempotent:
 // every deploy rewrites the file (the args can change) and enable --now
 // starts what isn't running.
-func startRunnerUnit(t Transport, spec *DeployCpSpec, runnerDir string) error {	unit := runnerUnitFile("freehold co-located runner",
+func startRunnerUnit(t Transport, spec *DeployCpSpec, runnerDir string) error {
+	unit := runnerUnitFile("freehold co-located runner",
 		fmt.Sprintf("%s/freehold-runner serve --state-dir %s", spec.BinDir, runnerDir))
 	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-runner.service && systemctl daemon-reload && systemctl enable --now freehold-runner && sleep 1 && systemctl is-active freehold-runner",
 		base64StdEncode([]byte(unit)))
