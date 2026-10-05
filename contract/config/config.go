@@ -77,7 +77,7 @@ type ProxySpec struct {
 	Ip *string `toml:"ip,omitempty"`
 }
 
-// GatewaySpec is the freehold-subnet gateway (docs/NETWORK.md Phase 1): the
+// GatewaySpec is the freehold-subnet gateway (docs/NETWORK.md): the
 // one guest the surrounding network sees. Set (non-nil Cidr), the world's
 // other guests are born on an internal subnet behind it — static IPs off
 // InternalIPFor, default route through GatewayInternalIP, outbound NAT and

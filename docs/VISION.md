@@ -26,10 +26,10 @@ run software for you; it **gives you back the agency** that complexity and lock-
 
 **Status:** the appliance is up and live on a real PVE host under a real domain — relay,
 control plane, k3s, the litellm gateway, and a Caddy TLS edge all converge on one
-`freehold build`. Chunk 4's CPA is live in Buzz: it holds real conversations, survives a
-full teardown+rebuild with its identity and relay-persisted memory intact, and creates new
-agents itself when asked. Chunks 5–7 (agent workspaces + git/GitHub, Kubernetes deploys,
-and hardware portability) build from here.
+`freehold build`. The CPA is live in Buzz: it holds real conversations, survives a full
+teardown+rebuild with its identity and relay-persisted memory intact, and creates new agents
+itself when asked. Agent workspaces + git/GitHub, Kubernetes deploys, and hardware
+portability build from here (`docs/ROADMAP.md`).
 
 ## The "break down the wall" feeling
 
