@@ -403,6 +403,20 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if err != nil {
 		return box.Flags{}, err
 	}
+	// The operator's display name in Buzz: published as their kind:0 profile
+	// at build, which is what makes the desktop app skip its first-run
+	// onboarding (starter channels, private Welcome, built-in welcome team).
+	nameDef := "Operator"
+	if seed != nil && seed.OperatorName != "" {
+		nameDef = seed.OperatorName
+	}
+	if flags.OperatorName != "" {
+		nameDef = flags.OperatorName
+	}
+	displayName, err := ui.ask("Your display name in Buzz (how agents address you)", nameDef)
+	if err != nil {
+		return box.Flags{}, err
+	}
 	consent, err := ui.confirm("If this host has no usable storage, may freehold create a new one? (freehold never erases existing data)", false)
 	if err != nil {
 		return box.Flags{}, err
@@ -417,6 +431,7 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 		ProxyIP:            proxyIP,
 		OperatorPubkey:     pk,
 		OperatorIdentity:   opDir,
+		OperatorName:       displayName,
 		SizeGB:             drive.TenantLVSizeGB,
 		PoolSizeGB:         drive.FreshPoolSizeGB,
 		RootfsGB:           rootfs,
@@ -512,6 +527,7 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	}
 	f.OperatorPubkey, _ = cmd.Flags().GetString("operator-pubkey")
 	f.OperatorIdentity, _ = cmd.Flags().GetString("operator-identity")
+	f.OperatorName, _ = cmd.Flags().GetString("display-name")
 	f.RootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
 	f.MemoryMB, _ = cmd.Flags().GetUint32("memory-mb")
 	f.RelayGw, _ = cmd.Flags().GetString("relay-gw")
@@ -568,6 +584,7 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("gateway-vlan", "", "in-host bridge VLAN tag for the internal subnet (0/blank = untagged)")
 	cmd.Flags().String("operator-pubkey", "", "Operator Nostr pubkey (64-hex) — REQUIRED")
 	cmd.Flags().String("operator-identity", "", "Operator identity dir to record (optional)")
+	cmd.Flags().String("display-name", "", "Operator display name in Buzz (default \"Operator\"; published as the kind:0 profile that skips the desktop app's first-run onboarding)")
 	cmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	cmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
 	cmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for static guest IPs")

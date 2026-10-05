@@ -473,6 +473,16 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     happen where they already are, with #freehold the fallback every core agent
     belongs to).
 
+*   **The first-run surface the operator meets is freehold's, not the Buzz
+    desktop app's.** The build publishes the operator's kind:0 profile (the
+    display name asked at install, `--display-name`) — the event the app checks
+    to skip its stock onboarding (no starter channels, no private Welcome, no
+    built-in welcome-team agents) — stands up the open `#general` channel
+    (CPA-owned; operator + CPA), and posts a one-time marker-guarded welcome in
+    `#freehold`. Every stage is an idempotent ensure (existing worlds pick the
+    surface up on their next build; a missed kind:0 or welcome degrades to a
+    WARN, never a failed build).
+
 *   **Each department holds capability runners** — one per capability, grant-scoped,
     rostered over native Nostr kinds, named for the target (`pve-ssh-root`,
     `litellm-api-admin`, …). The table, the grant model, and grants on the fly are in

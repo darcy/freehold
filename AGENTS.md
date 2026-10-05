@@ -154,7 +154,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   + `--host`**: the profile name scopes config + state to `profiles/<name>/` and prefixes
   the guest LXCs `<name>-<role>`; the host is recorded in the profile (so a later
   `uninstall --name` resolves it without the flag). A fresh plane also needs the relay/CP
-  domains + the proxy IP (the guided flow prompts). Re-running an existing name whose CP is
+  domains + the proxy IP (the guided flow prompts), plus the operator's Buzz display name
+  (`--display-name`) — the kind:0 profile the build publishes from it is what makes the
+  desktop app skip its stock first-run onboarding. Re-running an existing name whose CP is
   **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
   Nostr/enc key), while a **live** CP is refused (reconcile with `freehold build`, drop it
   with `teardown`/`uninstall`, or join it with `freehold login`). There is no `bootstrap`
@@ -250,7 +252,12 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   its install/config/operation, ad hoc and unvetted as before. The four departments are
   **installed as part of the core build** (each a pod on the same harness as the CPA): all in
   the shared private `#freehold` channel — there are no per-department channels; conversations
-  happen where they already are, with #freehold the fallback every core agent belongs to. Only
+  happen where they already are, with #freehold the fallback every core agent belongs to. The
+  **first-run surface** the operator meets is freehold's, not the Buzz desktop app's: the build
+  publishes the operator's kind:0 profile (name asked at install, `--display-name`), which makes
+  the desktop app SKIP its stock onboarding (no starter channels, no private Welcome, no
+  built-in welcome-team agents); the build instead stands up the open `#general` channel
+  (CPA-owned, operator + CPA) and posts a one-time marker-guarded welcome in `#freehold`. Only
   the identity/grant separation is locked; capability tooling/secrets arrive per department
   later. A custom agent that self-serves a department-owned capability is a
   containment failure even if a grant would technically allow it — the department's prompt is

@@ -116,6 +116,10 @@ type Spec struct {
 	Sec            []byte
 	Audience       string
 	SelfURL        string
+	// OperatorName is the operator's display name in Buzz (the kind:0 the
+	// build publishes for them — what makes the desktop app skip its
+	// first-run onboarding). Empty renders "Operator".
+	OperatorName string
 	// RepoURL is the source repository the shared system-orientation block
 	// points agents at. Empty = the agents package's upstream default.
 	RepoURL string
@@ -1550,6 +1554,10 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				}
 			}
 		}
+		// 8.5. The operator's Buzz profile (kind 0) — the event that makes the
+		// desktop app skip its first-run onboarding (starter channels, private
+		// Welcome, built-in welcome-team agents). Reads first; never overwrites.
+		report = spec.stageOperatorProfile(report)
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")
 		}
@@ -1990,6 +1998,106 @@ func (s *Spec) appendMemoryPlane(report []string) []string {
 	return append(report, "memory plane: owner "+agenttools.ShortHex(s.OwnerPub)+" attests each agent pod (kind "+strconv.Itoa(nipoa.AgentEngramKind)+")")
 }
 
+// freeholdWelcomeMarker is the #t tag on the CPA's one-time #freehold welcome
+// message; its presence on the relay is the whole idempotence state (the relay
+// DB is durable across rebuild/adopt, so the marker read is enough — no
+// fresh-vs-adopt flag).
+const freeholdWelcomeMarker = "fh-welcome"
+
+// operatorDisplayName resolves the operator's display name (OperatorName or
+// "Operator").
+func (s *Spec) operatorDisplayName() string {
+	if name := strings.TrimSpace(s.OperatorName); name != "" {
+		return name
+	}
+	return "Operator"
+}
+
+// operatorNameArg encodes the operator display name for a serve argv hop
+// (base64: one token, any unicode, no shell/flag metacharacters).
+func operatorNameArg(name string) string {
+	return base64.StdEncoding.EncodeToString([]byte(name))
+}
+
+// OperatorNameFromArg decodes what operatorNameArg encoded. Exported for the
+// serve (the argv consumer).
+func OperatorNameFromArg(arg string) (string, error) {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(arg))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// stageOperatorProfile publishes the operator's kind:0 profile on the relay
+// (name = OperatorName) — the event that makes the Buzz desktop app SKIP its
+// first-run onboarding (its starter channels, its private Welcome channel, and
+// its built-in welcome-team agents) and land straight in the workspace, where
+// #freehold + #general are the first-run surface. Guarded by a read: an
+// existing profile — the operator's own edits included — is never overwritten.
+// WARN-only: a missed publish degrades to the stock onboarding, never a failed
+// build.
+func (s *Spec) stageOperatorProfile(report []string) []string {
+	if s.OwnerPub == "" || s.RelayHost == "" {
+		return report
+	}
+	degraded := " — the Buzz desktop app runs its stock first-run onboarding"
+	sec, err := s.ownerKey()
+	if err != nil {
+		return append(report, "WARN: operator profile: "+err.Error()+degraded)
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, sec, []interface{}{map[string]interface{}{
+		"kinds":   []interface{}{0},
+		"authors": []interface{}{s.OwnerPub},
+		"limit":   1,
+	}})
+	if err != nil {
+		return append(report, "WARN: operator profile: relay read failed: "+err.Error()+degraded)
+	}
+	if len(evs) > 0 {
+		return append(report, "operator profile already present")
+	}
+	name := s.operatorDisplayName()
+	if err := relay.PublishProfileAuth(s.relayDial(), authURL, sec, name, "freehold operator"); err != nil {
+		return append(report, "WARN: operator profile publish failed: "+err.Error()+degraded)
+	}
+	return append(report, "operator profile published ("+name+") — the Buzz desktop app skips its first-run onboarding")
+}
+
+// postFreeholdWelcome posts the CPA's one-time welcome message in #freehold,
+// mentioning the operator (so it files into their Inbox on a first connect).
+// Marker-guarded: a #freehold message carrying freeholdWelcomeMarker means it
+// already ran — a rebuild/re-adopt never re-posts. Best-effort: the caller
+// warns on error (the next build's marker read self-heals a transient miss).
+func (s *Spec) postFreeholdWelcome(nSec []byte) error {
+	if s.OwnerPub == "" {
+		return nil
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{delegate.StreamMsgKind},
+		"#h":    []interface{}{relayFreeholdChannel},
+		"#t":    []interface{}{freeholdWelcomeMarker},
+		"limit": 1,
+	}})
+	if err != nil {
+		return err
+	}
+	if len(evs) > 0 {
+		return nil
+	}
+	content := "Welcome to your freehold, @" + s.operatorDisplayName() +
+		" — I'm @freehold, your main touchpoint. Ask here and I'll bring in network, data, compute, or ai when their hands are needed. This channel is where the core agents coordinate; #general is open for anything."
+	return delegate.PostTaggedMessageAuth(s.relayDial(), authURL, nSec, relayFreeholdChannel, s.OwnerPub, [][]string{{"t", freeholdWelcomeMarker}}, content)
+}
+
 // pinRelayHost idempotently pins the relay's LAN IP to its hostname in the CP
 // guest's /etc/hosts. Always re-reads the relay's CURRENT DHCP lease: a prior
 // cycle's recorded IP can go stale (the relay LXC can come back on a different
@@ -2371,6 +2479,14 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			}
 			if err := relay.PutUserAuth(spec.relayDial(), authURL, sec, self, pub); err != nil {
 				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
+			}
+		}
+		// The one-time #freehold welcome — the operator's first-run surface now
+		// that the desktop app's own onboarding is skipped (stageOperatorProfile).
+		// Best-effort: a transient miss self-heals on the next build's marker read.
+		if name == spec.CpaName {
+			if err := spec.postFreeholdWelcome(nSec); err != nil {
+				fmt.Fprintln(os.Stderr, "WARN: the #freehold welcome message was not posted:", err)
 			}
 		}
 		return pub, nil

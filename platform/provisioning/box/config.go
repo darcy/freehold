@@ -38,6 +38,9 @@ func ApplyConfigDefaults(f *Flags, cfgPath string) error {
 	if f.AgentName == "" && cfg.CPAName != "" {
 		f.AgentName = cfg.CPAName
 	}
+	if f.OperatorName == "" && cfg.OperatorName != "" {
+		f.OperatorName = cfg.OperatorName
+	}
 	if f.ProxyIP == "" && cfg.Proxy.Ip != nil {
 		f.ProxyIP = *cfg.Proxy.Ip
 	}

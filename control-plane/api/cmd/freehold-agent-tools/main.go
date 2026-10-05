@@ -448,6 +448,9 @@ func cmdServe(args []string) {
 	runnerPK := fs.String("runner-pubkey", "", "runner pubkey (deploy exec audience)")
 	runnerTarget := fs.String("runner-target", "", "runner target that reaches the box")
 	cpaName := fs.String("cpa-name", agent.DefaultCPAName, "CPA display name")
+	// The operator display name rides B64 (operatorNameArg) — free-form text
+	// on a root-executed argv must never carry shell/flag metacharacters.
+	operatorNameB64 := fs.String("operator-name-b64", "", "operator display name in Buzz, base64 (the kind:0 profile the build publishes; default \"Operator\")")
 	ownerPub := fs.String("owner-pubkey", "", "operator pubkey (agent identity secret owner)")
 	litellmBase := fs.String("litellm-base", "", "litellm gateway base URL for agent pods")
 	selfURL := fs.String("self-url", "", "this server's reachable HTTP base URL (e.g. http://<cpIP>:8089) the CPA pod bootstraps its mcp bridge from")
@@ -498,6 +501,13 @@ func cmdServe(args []string) {
 	if litellmBaseURL != "" {
 		litellmBaseURL = strings.TrimSuffix(litellmBaseURL, "/") + "/v1"
 	}
+	operatorName := ""
+	if arg := strings.TrimSpace(*operatorNameB64); arg != "" {
+		var derr error
+		if operatorName, derr = cpbuild.OperatorNameFromArg(arg); derr != nil {
+			log.Fatalf("--operator-name-b64 is not valid base64: %v", derr)
+		}
+	}
 
 	spec := &cpbuild.Spec{
 		StateDir:       *stateDir,
@@ -534,6 +544,7 @@ func cmdServe(args []string) {
 		RunnerTarget:   *runnerTarget,
 		CpaName:        *cpaName,
 		OwnerPub:       *ownerPub,
+		OperatorName:   operatorName,
 		LitellmBaseURL: litellmBaseURL,
 		Sec:            secBytes,
 		Audience:       audience,

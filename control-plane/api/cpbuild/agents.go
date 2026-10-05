@@ -98,6 +98,13 @@ func (s *Spec) agentToolsServeFlags() string {
 		"--state-dir %s --addr 0.0.0.0:"+AgentToolsPort+" --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
 		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
 		s.RunnerAddr, s.RunnerPK, s.RunnerTarget, s.CpaName, s.OwnerPub, s.SelfURL)
+	if n := strings.TrimSpace(s.OperatorName); n != "" {
+		// B64, never raw: the name is operator free-form ("Darcy Smith",
+		// "O'Brien") and this argv rides a root `sh -c '...'` — a raw space
+		// silently eats every flag after it, a quote breaks the shell. B64
+		// is one argv-safe token for any unicode.
+		serveFlags += " --operator-name-b64 " + operatorNameArg(n)
+	}
 	if s.RelayPK != "" {
 		serveFlags += " --relay-pubkey " + s.RelayPK
 	}
@@ -258,7 +265,10 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 		}
 	}
 	cpaPurpose := "the control plane agent — freehold's main reasoning touchpoint"
-	if _, err := tools.CreateAgent(cpa, cpaPurpose, nil, false); err != nil {
+	// The CPA holds #freehold + the open #general first-run channel (the
+	// desktop app's stock onboarding is skipped — stageOperatorProfile — so
+	// #general is OURS to create; the CPA owns it and add-users the operator).
+	if _, err := tools.CreateAgent(cpa, cpaPurpose, []string{"#freehold", "#general"}, false); err != nil {
 		return fmt.Errorf("create CPA over the registry: %w", err)
 	}
 	if err := reg.SetPurpose(cpa, cpaPurpose); err != nil {

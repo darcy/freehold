@@ -101,6 +101,9 @@ type Flags struct {
 	// Empty = this build's own (version.Version + derived channel).
 	Version string
 	Channel string
+	// OperatorName is the operator's display name in Buzz (asked at install,
+	// published as their kind:0 profile at build). Empty renders "Operator".
+	OperatorName string
 }
 
 // Bins are the resolved sibling binary paths. Go has no
@@ -214,6 +217,7 @@ func FlagsFromConfig(cfg *config.Config) Flags {
 		Addr:           cfg.Runner.Addr,
 		OperatorPubkey: cfg.OperatorPubkey,
 		AgentName:      cfg.CPAName,
+		OperatorName:   cfg.OperatorName,
 		ConfigPath:     config.ConfigPath(),
 		RelayDomain:    cfg.RelayHost(),
 		CpDomain:       cfg.CPHost(),
@@ -1143,6 +1147,10 @@ func (e *Engine) fromAnswers() *config.Config {
 		},
 		Managed: []string{"relay", "cp"},
 		CPAName: e.F.AgentName,
+		// The operator's display name in Buzz — published as their kind:0
+		// profile at build. Only set on MINT (a re-adopt keeps the plane's
+		// recorded value, same as every other durable fact).
+		OperatorName: e.F.OperatorName,
 	}
 	// Persist the guest size/placement: the world-config renders them from
 	// the CONFIG (not the invocation's flags — an update's flags never carry
@@ -2441,6 +2449,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		RunnerTarget:   cfg.Runner.Target,
 		CpaName:        cpaNameOrDefault(e.F.AgentName),
 		OwnerPub:       e.F.OperatorPubkey,
+		OperatorName:   firstNonBlank(e.F.OperatorName, cfg.OperatorName),
 		LitellmBaseURL: cfg.Litellm.URL,
 		// The agent-tools server's reachable URL, NOT the console's: this is the
 		// `--self-url` the server reports AND the URL the CPA pod curls its
@@ -2624,6 +2633,15 @@ func derefStrPtr(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// firstNonBlank returns the first string that is not empty (config wins over
+// flag, flag fills a blank).
+func firstNonBlank(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
 }
 
 func derefU32(p *uint32) uint32 {
