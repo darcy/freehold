@@ -764,16 +764,21 @@ func ensureVultrHost(f *box.Flags, out io.Writer) error {
 		return nil
 	}
 	verified := false
-	if f.Host != "" && f.VultrInstance != "" {
+	if f.VultrInstance != "" {
 		// A re-adopt with a recorded instance: verify it still exists and
-		// holds the recorded shape; a gone instance re-creates (below).
+		// holds the recorded shape. ONLY a definitive 404 re-creates — a
+		// rate-limit, a timeout, or a still-settling IP all mean the
+		// instance EXISTS and billing, and minting a second one beside it
+		// strands the plane. Fail loudly instead; the operator decides.
 		c, err := vultrClient()
 		if err != nil {
 			return err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		if _, ip, gerr := c.Instance(ctx, f.VultrInstance); gerr == nil && ip != "" && ip != "0.0.0.0" {
+		_, ip, gerr := c.Instance(ctx, f.VultrInstance)
+		switch {
+		case gerr == nil && ip != "" && ip != "0.0.0.0":
 			f.Host = "root@" + ip
 			f.ProxyIP = ip + "/32"
 			if f.GatewayCIDR == "" {
@@ -781,6 +786,12 @@ func ensureVultrHost(f *box.Flags, out io.Writer) error {
 			}
 			fmt.Fprintf(out, "  vultr instance %s alive at %s — re-adopting it\n", f.VultrInstance, ip)
 			verified = true
+		case gerr != nil && strings.Contains(gerr.Error(), "HTTP 404"):
+			fmt.Fprintf(out, "  vultr instance %s is gone — re-creating it\n", f.VultrInstance)
+		case gerr != nil:
+			return fmt.Errorf("cannot verify the recorded vultr instance %s: %w — refusing to mint a second one beside it; retry when the API answers (VULTR_API_KEY)", f.VultrInstance, gerr)
+		default:
+			return fmt.Errorf("vultr instance %s exists but has no address yet (still settling) — retry in a minute", f.VultrInstance)
 		}
 	}
 	if verified {
