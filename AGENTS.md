@@ -525,6 +525,12 @@ release notes.
   this (`install --restore`, out of scope).
 - **Whole-world `teardown --data` is refused** — data removal is `uninstall --remove-data`.
   Per-tenant `teardown --tenant --data` still works (needs the build box).
+- **Uninstall leaves the cp-verb key's host line behind.** `RunnerKeyRefs` collects the
+  substrate + co-located runner keys, never the data-verbs `cp-verb` key
+  (`freehold-<world>-cp-verb` in the host's `authorized_keys`), so `uninstall` removes the
+  guests + the door but not that line. Its private half (`profiles/<name>/cp-verb-key`) is
+  wiped with the profile, so the leftover public line is an unusable orphan — hygiene only,
+  no access path. Adding the cp-verb key to the uninstall's key refs is the cleanup.
 - **`install`'s live-CP refusal is profile-based *and* host-side.** It probes a profile's
   recorded `cp_url` (`/healthz`) and, when the box holds an authorized DOOR_SPEC key (a prior
   `login`), also lists the host's guests for the `<name>-cp` guest and refuses. A box with no
