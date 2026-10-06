@@ -155,7 +155,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`freehold-agent-tools` is a distinct SEMANTIC surface on the CP**, not
     the runner's `exec`. Its Go methods (`control-plane/api/agent/tools.go`,
-    `create_agent`/`provision_runner`/`revoke_runner`/`grant_agent`/`manage_agent`) are served
+    `create_agent`/`update_agent`/`provision_runner`/`revoke_runner`/`grant_agent`/`manage_agent`) are served
     in-process by
      `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
      authorized per call against the server's own relay roster (NIP-29 channel
@@ -548,10 +548,13 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     not conversation.
 
 *   It is **conversation + agent-creation + capability governance** in this phase: it
-    calls the CP toolset's `create_agent` / `provision_runner` / `revoke_runner` /
-    `manage_agent` (through the
+    calls the CP toolset's `create_agent` / `update_agent` / `provision_runner` /
+    `revoke_runner` / `manage_agent` (through the
     `freehold-agent-tools mcp` stdio bridge, signed as its own nsec and
-    authorized by the server's roster). `provision_runner` stages a NEW
+    authorized by the server's roster). `update_agent` edits an agent it created —
+    purpose, model, channels, or a rename that keeps the pubkey (chat history, grants,
+    and memory follow); core identities are refused, the repo is their source.
+    `provision_runner` stages a NEW
     capability runner and grants agents onto it under the granting skill's
     rules (`agents/freehold/skills/granting.md`, composed into its prompt);
     `revoke_runner` is its counterpart — it removes named grantees from a door's

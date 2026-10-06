@@ -165,17 +165,17 @@ func ToolList() []map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	return []map[string]interface{}{
-	{
-		"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
-		"inputSchema": i(map[string]interface{}{
-			"name":     map[string]interface{}{"type": "string"},
-			"purpose":  map[string]interface{}{"type": "string"},
-			"channel":  map[string]interface{}{"type": "string"},
-			"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-			"private":  map[string]interface{}{"type": "boolean"},
-			"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
-		}, []string{"name"}),
-	},
+		{
+			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
+			"inputSchema": i(map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"purpose":  map[string]interface{}{"type": "string"},
+				"channel":  map[string]interface{}{"type": "string"},
+				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"private":  map[string]interface{}{"type": "boolean"},
+				"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
+			}, []string{"name"}),
+		},
 		{
 			"name": "grant_agent", "description": "Bind agent pubkeys to a runner's whitelist.",
 			"inputSchema": i(map[string]interface{}{
@@ -206,7 +206,19 @@ func ToolList() []map[string]interface{} {
 			}, []string{"name"}),
 		},
 		{
-			"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
+			"name": "update_agent", "description": "Update an existing agent you created: replace its purpose (the one-liner its system prompt is rendered from — live on the agent's next spawn), switch its litellm model, replace its channel list (private applies only then), or rename it. A rename moves the durable identity dir, workspace, pod objects and registry row to the new name while KEEPING the agent's pubkey — chat history, grants and memory follow. Absent fields keep the row's current values. Core identities (the CPA and the four departments) are refused — their prompts live in the repo.",
+			"inputSchema": i(map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"rename":   map[string]interface{}{"type": "string"},
+				"purpose":  map[string]interface{}{"type": "string"},
+				"channel":  map[string]interface{}{"type": "string"},
+				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"private":  map[string]interface{}{"type": "boolean"},
+				"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
+			}, []string{"name"}),
+		},
+		{
+			"name": "manage_agent", "description": "List registered agents, or (remove=<name>) retire one's pod + derived k8s objects and drop its registry row (the durable workspace dir is kept — it is data).",
 			"inputSchema": i(map[string]interface{}{
 				"remove": map[string]interface{}{"type": "string"},
 			}, []string{}),
@@ -299,6 +311,18 @@ type revokeRunnerArgs struct {
 }
 type manageAgentArgs struct {
 	Remove string `json:"remove"`
+}
+
+// updateAgentArgs mirrors createAgentArgs' shapes, with every field but name
+// optional (absent = keep the row's current value). Rename is the new name.
+type updateAgentArgs struct {
+	Name     string   `json:"name"`
+	Rename   string   `json:"rename"`
+	Purpose  string   `json:"purpose"`
+	Channel  string   `json:"channel"`
+	Channels []string `json:"channels"`
+	Private  bool     `json:"private"`
+	Model    string   `json:"model"`
 }
 
 // isWorldTool reports whether a tool is an operator-scoped action: granting an
@@ -446,6 +470,21 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		report, err := s.Tools.RevokeRunner(agent.RetireArgs{Name: a.Name, RevokeFrom: a.RevokeFrom})
+		s.textResult(w, id, err, report)
+	case "update_agent":
+		var a updateAgentArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "update_agent arguments: "+err.Error())
+			return
+		}
+		if a.Model != "" && !slices.Contains(agent.CustomLiteLLMModels, a.Model) {
+			s.rpcError(w, id, -32602, fmt.Sprintf("update_agent model must be one of [%s]", strings.Join(agent.CustomLiteLLMModels, ", ")))
+			return
+		}
+		report, err := s.Tools.UpdateAgent(agent.UpdateArgs{
+			Name: a.Name, Rename: a.Rename, Purpose: a.Purpose,
+			Channel: a.Channel, Channels: a.Channels, Private: a.Private, Model: a.Model,
+		})
 		s.textResult(w, id, err, report)
 	case "manage_agent":
 		var a manageAgentArgs

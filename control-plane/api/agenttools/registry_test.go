@@ -79,6 +79,72 @@ func TestRegistryChannelsSurvive(t *testing.T) {
 	}
 }
 
+// TestRegistryRenamePreservesRow pins the rename primitive update_agent leans
+// on: the row moves with every field — the pubkey especially, since a rename
+// must never re-roll an identity — and the refusals keep a rename from
+// colliding with or dropping another agent.
+func TestRegistryRenamePreservesRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	r, err := OpenRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RegisterAgent("helper", "aa55", "#ops"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetPurpose("helper", "helps with installs"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetChannels("helper", []string{"#ops", "#extra"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetModel("helper", "Code"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A rename onto the same name is a no-op; a missing source and a taken
+	// destination are refused.
+	if err := r.RenameAgent("helper", "helper"); err != nil {
+		t.Fatalf("same-name rename should be a no-op: %v", err)
+	}
+	if err := r.RenameAgent("ghost", "x"); err == nil {
+		t.Fatal("renaming a missing row should error")
+	}
+	if _, err := r.RegisterAgent("other", "bb66", "#ops"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RenameAgent("helper", "other"); err == nil {
+		t.Fatal("renaming onto a taken name should error")
+	}
+
+	if err := r.RenameAgent("helper", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := OpenRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents, err := r2.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, a := range agents {
+		if a.Name == "helper" {
+			t.Fatalf("the old row survived the rename: %+v", agents)
+		}
+		if a.Name == "renamed" {
+			found = true
+			if a.Pubkey != "aa55" || a.Purpose != "helps with installs" || a.Model != "Code" || len(a.Channels) != 2 || !a.Private {
+				t.Fatalf("the renamed row lost fields: %+v", a)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the renamed row is missing: %+v", agents)
+	}
+}
+
 // TestWithRegistryLockedExcludesConcurrentRosterWrite pins the property the migration
 // queue actually depends on, and which a plain re-read does NOT give: while the
 // out-of-band scripts are editing registry.json, no roster write may land. A migration
