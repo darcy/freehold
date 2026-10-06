@@ -61,6 +61,9 @@ the ordering across all of them is `docs/ROADMAP.md`.
     *   [ ] The CPA provisions an empty ssh door (for AI) and an empty unifi door (for
         Network) on a real box; the operator fills both via the door pages; the agents
         verify by exec.
+    *   [ ] The CPA provisions a kube slot for a custom agent (Compute carves through
+        `kube-api-root`, the CP seals the token); the agent execs kubectl against its
+        namespace and is refused cluster scope; a rebuild re-seals the door.
 
 ## Plans
 

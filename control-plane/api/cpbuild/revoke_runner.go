@@ -405,6 +405,14 @@ func BuildRevokeRunner(spec *Spec, reg *agenttools.Registry) agent.RevokeRunnerF
 			rep.notes = append(rep.notes, fmt.Sprintf(
 				"the door's substrate credential stays authorized on its target (%s). Dropping it is a Compute-domain action — the same fold the build's teardown does (its authorized_keys line + the deploy/known_hosts entry); hand %s to Compute instead of reaching for it yourself",
 				orNone([]string{rec.Address}), name))
+			if rec.Kind == "kubernetes" && rec.NS != "" {
+				// The slot outlives its door: the namespace holds the grantee's
+				// workloads, and deleting it cascades them — never an automatic
+				// side effect of retiring a door.
+				rep.notes = append(rep.notes, fmt.Sprintf(
+					"the slot namespace %s STAYS (its workloads are the grantee's). Deleting it is a Compute-domain action — kubectl delete ns %s cascades every workload in it; hand it to Compute, never to the agent that just lost the door",
+					rec.NS, rec.NS))
+			}
 		}
 		if extra := stillHeld(store, targets, name); extra != "" {
 			rep.notes = append(rep.notes, "other doors the affected agents legitimately keep: "+extra+" — revoked doors are gone from their coords feed; these remain theirs")

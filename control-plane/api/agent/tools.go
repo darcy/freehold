@@ -77,6 +77,17 @@ type ProvisionArgs struct {
 	// ProbeBody is the probe's optional literal request body (JSON — e.g.
 	// kubernetes' SelfSubjectReview) alongside the credential.
 	ProbeBody string `json:"probe_body,omitempty"`
+	// NS is a kube-slot door's namespace (kind=kubernetes): the slot carved
+	// for the grantee's workloads — full access within it, no cluster scope.
+	// The slot itself (Namespace, ServiceAccount, ns-admin Role, Binding,
+	// optional ResourceQuota, token Secret) is carved by COMPUTE through its
+	// kube-api-root door in conversation; this flow verifies, reads the SA
+	// token, and seals it. Required at first provision; fixed thereafter.
+	NS string `json:"ns,omitempty"`
+	// Quota is the slot's optional ResourceQuota hard spec as
+	// "key=value,key=value" (e.g. "cpu=4,memory=8Gi,pods=32"). Empty = no
+	// quota. Restated on a re-provision to resize the slot.
+	Quota string `json:"quota,omitempty"`
 }
 
 // ProvisionRunnerFn stages a NEW capability runner on the fly (the CPA's
