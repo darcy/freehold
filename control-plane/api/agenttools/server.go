@@ -105,7 +105,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// tools/list is public (listing tool names reveals nothing), like the runner.
 	if req.Method == "tools/list" {
-		s.rpcResult(w, req.ID, map[string]interface{}{"tools": s.toolList()})
+		s.rpcResult(w, req.ID, map[string]interface{}{"tools": ToolList()})
 		return
 	}
 
@@ -156,9 +156,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// toolList is the semantic toolset — create/grant/manage. Deliberately NOT
-// exec: exec stays the runner's funnel.
-func (s *Server) toolList() []map[string]interface{} {
+// ToolList is the semantic toolset — create/grant/manage. Deliberately NOT
+// exec: exec stays the runner's funnel. Package-level (it uses no server
+// state) so the pod-side stdio bridge can pin its mirrored schemas against
+// this one — the drift guard lives in cmd/freehold-agent-tools.
+func ToolList() []map[string]interface{} {
 	i := func(props map[string]interface{}, req []string) map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
@@ -285,6 +287,9 @@ type provisionRunnerArgs struct {
 	Host    string   `json:"host"`
 	Pubkey  string   `json:"pubkey"`
 	EncPub  string   `json:"enc_pubkey"`
+	Probe   string   `json:"probe"`
+	// ProbeBody is the probe's optional literal JSON request body.
+	ProbeBody string `json:"probe_body"`
 }
 type revokeRunnerArgs struct {
 	Name string `json:"name"`
@@ -420,6 +425,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		report, err := s.Tools.ProvisionRunner(agent.ProvisionArgs{
 			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
 			Hosted: a.Hosted, Host: a.Host, Pubkey: a.Pubkey, EncPubkey: a.EncPub,
+			Probe: a.Probe, ProbeBody: a.ProbeBody,
 		})
 		s.textResult(w, id, err, report)
 	case "revoke_runner":

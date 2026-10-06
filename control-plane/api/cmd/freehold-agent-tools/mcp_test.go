@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"freehold/control-plane/api/agenttools"
 )
 
 // fakeDevSrc is a stdlib-only fake buzz-dev-mcp: respond to requests with a
@@ -390,5 +392,45 @@ func TestRouteRunnerFailClosed(t *testing.T) {
 	}{Arguments: map[string]interface{}{}})
 	if err != nil || rc.target != "pve-ssh-root" {
 		t.Fatalf("single-runner pod must pin its one target: %v (err %v)", rc, err)
+	}
+}
+
+// TestFreeholdToolSchemasMatchServer pins the bridge's mirrored tool schemas
+// against the agent-tools server's ToolList. The failure mode this prevents:
+// a new tool argument ships in the server's schema + handler but a stale
+// bridge def never advertises it, so the agent's calls arrive without it and
+// are refused at the server (the probe parameter shipped exactly this way).
+func TestFreeholdToolSchemasMatchServer(t *testing.T) {
+	propKeys := func(schema map[string]interface{}) map[string]bool {
+		out := map[string]bool{}
+		schemaMap, _ := schema["inputSchema"].(map[string]interface{})
+		props, _ := schemaMap["properties"].(map[string]interface{})
+		for k := range props {
+			out[k] = true
+		}
+		return out
+	}
+	server := map[string]map[string]bool{}
+	for _, tool := range agenttools.ToolList() {
+		name, _ := tool["name"].(string)
+		server[name] = propKeys(tool)
+	}
+	for _, tool := range freeholdToolDefs(false, nil) {
+		name, _ := tool["name"].(string)
+		bridge := propKeys(tool)
+		want, ok := server[name]
+		if !ok {
+			t.Fatalf("bridge advertises %q but the server's ToolList does not", name)
+		}
+		for k := range bridge {
+			if !want[k] {
+				t.Fatalf("tool %s: bridge schema advertises %q — the server's ToolList does not (drift)", name, k)
+			}
+		}
+		for k := range want {
+			if !bridge[k] {
+				t.Fatalf("tool %s: server ToolList advertises %q — the bridge schema does not (drift)", name, k)
+			}
+		}
 	}
 }
