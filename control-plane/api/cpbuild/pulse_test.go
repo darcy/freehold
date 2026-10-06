@@ -91,7 +91,6 @@ func TestStageReleasePulseStable(t *testing.T) {
 	if !strings.Contains(strings.Join(report, "\n"), "release pulse posted (v0.8.1)") {
 		t.Fatalf("report must name the post, got %v", report)
 	}
-
 	// Same release again: the marker in history suppresses the re-post.
 	report = s.stageReleasePulse(report)
 	if got := f.published(); len(got) != 1 {
@@ -190,6 +189,27 @@ func TestStageReleasePulseSkipsSilently(t *testing.T) {
 	s := &Spec{CpaName: "freehold"}
 	if report := s.stageReleasePulse(nil); len(report) != 0 {
 		t.Fatalf("no relay coords must skip silently, got %v", report)
+	}
+}
+
+// TestPulseNotesStripsTestStatus: the release body's trailing test-status
+// table (and any legend) is release bookkeeping — the pulse keeps only what
+// precedes it, intact when the heading is absent, capped at 8000 chars.
+func TestPulseNotesStripsTestStatus(t *testing.T) {
+	body := "Headline work.\n\n- one\n- two\n\n## Test status\n\n| Provider | Env | Test | Status |\n" +
+		"| --- | --- | --- | --- |\n| Proxmox | live | Live - Update | ⚪ Unverified |\n\n" +
+		"Legend: ⚪ Unverified · ✅ Passed · ❌ Failed\n"
+	if got := pulseNotes(body); got != "Headline work.\n\n- one\n- two" {
+		t.Fatalf("the test-status section must be stripped, got %q", got)
+	}
+	if got := pulseNotes("Just notes."); got != "Just notes." {
+		t.Fatalf("a body without the heading passes through, got %q", got)
+	}
+	if got := pulseNotes("- x\n## Test status trailing-line noise"); got != "- x" {
+		t.Fatalf("the cut anchors on a heading line, got %q", got)
+	}
+	if got := pulseNotes(strings.Repeat("a", 9000)); got != strings.Repeat("a", 8000)+"…" {
+		t.Fatalf("an oversized body must truncate at 8000 bytes + ellipsis, got len %d", len(got))
 	}
 }
 

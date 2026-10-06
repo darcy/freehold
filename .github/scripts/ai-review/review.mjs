@@ -693,7 +693,6 @@ async function main() {
     findingsLine,
     table,
     ...renderResolved(resolvedThreads, { owner, repo, prNumber: pull_number }),
-    `🛑 must fix · ⚠️ should fix · 💡 suggestion · ✅ resolved`,
   ].filter(Boolean).join('\n\n');
   await updateParentComment(finalBody);
 
