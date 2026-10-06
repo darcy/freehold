@@ -39,6 +39,15 @@ diagram or changes behavior a diagram depicts, verify the diagram's claims
 an inline comment on the diagram lines. Diagram layout, styling, or wording is
 a nit — omit it.
 
+Lockfile-only hunks (Cargo.lock, package-lock.json): a dependency bump legitimately
+re-points sibling locked refs to other in-range versions — the resolver re-resolves the
+affected subgraph, and an older-looking line (e.g. a transitive dep dropping from
+windows-sys 0.61 to 0.52) can be exactly what a real cargo run picks. Do not call that a
+hand-edit or claim the state is not cargo-producible: you cannot run cargo here. Flag a
+lock hunk only for supply-chain red flags — a checksum that cannot belong to the named
+version, a version with no matching manifest requirement in the diff, or source/receipt
+changes on an untouched package.
+
 Severity tiers:
 - blocking: must fix before merge (security, data loss, silent breakage)
 - important: should fix in this PR (operator-facing wrong behavior,

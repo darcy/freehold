@@ -17,7 +17,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use russh::client;
 use russh::keys::ssh_key::PublicKey;
-use russh::keys::{self, PrivateKeyWithHashAlg, decode_secret_key};
+use russh::keys::{self, PrivateKeyWithHashAlg, PublicKeyOrCertificate, decode_secret_key};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -182,8 +182,17 @@ struct HostKeyHandler {
 impl client::Handler for HostKeyHandler {
     type Error = SshError;
 
-    async fn check_server_key(&mut self, public: &PublicKey) -> Result<bool, Self::Error> {
-        self.store.verify_or_add(&self.key, public)
+    async fn check_server_key(
+        &mut self,
+        public: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        match public {
+            PublicKeyOrCertificate::PublicKey { key, .. } => {
+                self.store.verify_or_add(&self.key, key)
+            }
+            // Certificate host keys are not a supported trust surface — reject.
+            PublicKeyOrCertificate::Certificate(_) => Ok(false),
+        }
     }
 }
 
