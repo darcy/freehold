@@ -1882,6 +1882,36 @@ func bootstrapStaticIP(role string, f Flags, cfg *config.Config) string {
 	return ""
 }
 
+// gatewayNftScript renders the box-side gateway bootstrap: pinned resolvers,
+// an apt refresh (the template index ages past the mirror retention — 404 on
+// current packages), nftables + dnsmasq, and the rendered ruleset + resolver
+// config. It rides a single-quoted sh -c (LxcExec), so it must stay
+// apostrophe-free — TestGatewayNftScriptQuotes guards that.
+func gatewayNftScript(conf, dnsmasq string) string {
+	return fmt.Sprintf(`set -e
+echo nameserver 1.1.1.1 > /etc/resolv.conf
+echo nameserver 8.8.8.8 >> /etc/resolv.conf
+# The template apt index ages past the mirror retention (404 on current
+# versions) — refresh before the install, like the EnsureGuestDocker retry.
+apt-get update -qq >/dev/null 2>&1 || true
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+mkdir -p /etc/dnsmasq.d
+echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
+# A router with BOTH nics on one bridge (the untagged freehold-subnet) must
+# not answer ARP for an IP on the other interface — the flux reads as MAC
+# flapping on the LAN (UniFi: "multiple machines claiming IPs").
+echo net.ipv4.conf.all.arp_ignore=1 >> /etc/sysctl.d/90-freehold-gateway.conf
+echo net.ipv4.conf.all.arp_announce=2 >> /etc/sysctl.d/90-freehold-gateway.conf
+sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
+cat > /etc/nftables.conf <<NFT
+%sNFT
+cat > /etc/dnsmasq.d/freehold.conf <<DNS
+%sDNS
+systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
+systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
+`, conf, dnsmasq)
+}
+
 // stageGatewayNft applies the gateway's nftables ruleset on the box side —
 // the guests' default route + image pulls depend on it the moment the next
 // guest boots, so it cannot wait for the CP build's re-assert. Uses the SHARED
@@ -1919,28 +1949,7 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 	// answer either — apt then hangs to the watchdog. Public resolvers, like
 	// EnsureGuestDocker; the CP build re-writes guest DNS later anyway. The
 	// script rides a single-quoted sh -c: APOSTROPHES ARE FORBIDDEN in it.
-	script := fmt.Sprintf(`set -e
-echo nameserver 1.1.1.1 > /etc/resolv.conf
-echo nameserver 8.8.8.8 >> /etc/resolv.conf
-# The template's apt index ages past the mirror's retention (404 on current
-# versions) — refresh before the install, like EnsureGuestDocker's retry does.
-apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
-mkdir -p /etc/dnsmasq.d
-echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
-# A router with BOTH nics on one bridge (the untagged freehold-subnet) must
-# not answer ARP for an IP on the other interface — the flux reads as MAC
-# flapping on the LAN (UniFi: "multiple machines claiming IPs").
-echo net.ipv4.conf.all.arp_ignore=1 >> /etc/sysctl.d/90-freehold-gateway.conf
-echo net.ipv4.conf.all.arp_announce=2 >> /etc/sysctl.d/90-freehold-gateway.conf
-sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
-cat > /etc/nftables.conf <<NFT
-%sNFT
-cat > /etc/dnsmasq.d/freehold.conf <<DNS
-%sDNS
-systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
-systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
-`, conf, config.GatewayDnsmasqConf(e.F.RelayGw))
+	script := gatewayNftScript(conf, config.GatewayDnsmasqConf(e.F.RelayGw))
 	out, err := e.Provider.GuestExec(vmid, script, 300)
 	if err != nil {
 		return fmt.Errorf("gateway nftables: %w", err)

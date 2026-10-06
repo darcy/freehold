@@ -1,20 +1,20 @@
 package box
 
-import "reflect"
-
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"errors"
 
-	"freehold/contract/client"
 	"freehold/contract/config"
+
+	"freehold/contract/client"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/platform/provisioning"
@@ -977,5 +977,23 @@ func TestDropLeakedGuests(t *testing.T) {
 	}
 	if len(p.destroyed) != 2 || p.destroyed[0] != "104" || p.destroyed[1] != "107" {
 		t.Errorf("destroyed = %v, want [104 107] (the world's own leaked guests)", p.destroyed)
+	}
+}
+
+// TestGatewayNftScriptQuotes: the box-side gateway bootstrap rides LxcExec's
+// single-quoted sh -c — an apostrophe anywhere in it is a syntax error that
+// fails every fresh install at the gateway step (seen live on the v0.7.9 e2e:
+// a comment said "template's"). The rendered ruleset + resolver config ride
+// heredocs inside the script, so they are guarded too.
+func TestGatewayNftScriptQuotes(t *testing.T) {
+	conf := config.GatewayNftConf("10.77.0.0/24", "192.168.30.8", "10.77.0.5", "10.77.0.12", "10.77.0.11", "eth0")
+	dns := config.GatewayDnsmasqConf("192.168.30.1")
+	script := gatewayNftScript(conf, dns)
+	if strings.Contains(script, "'") {
+		for i, line := range strings.Split(script, "\n") {
+			if strings.Contains(line, "'") {
+				t.Fatalf("apostrophe in gateway script line %d: %q", i+1, line)
+			}
+		}
 	}
 }
