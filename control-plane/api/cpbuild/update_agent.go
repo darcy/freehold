@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"freehold/agents"
+	"freehold/contract/console"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 )
@@ -40,8 +41,8 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 			return "", fmt.Errorf("%s: name is required", verb)
 		}
 		newName := strings.TrimSpace(args.Rename)
-		finalModel := strings.TrimSpace(args.Model)
-		if finalModel != "" && !slices.Contains(agent.CustomLiteLLMModels, finalModel) {
+		requestedModel := strings.TrimSpace(args.Model)
+		if requestedModel != "" && !slices.Contains(agent.CustomLiteLLMModels, requestedModel) {
 			return "", fmt.Errorf("%s: model must be one of [%s]", verb, strings.Join(agent.CustomLiteLLMModels, ", "))
 		}
 		if err := coreAgentRefused(spec, name, verb); err != nil {
@@ -52,22 +53,8 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 			return "", fmt.Errorf("%s %s: %w", verb, name, err)
 		}
 
-		// Final field set: absent fields keep the row's current values. The
-		// channel list overrides only when one was given (Private applies
-		// only then — a bare private:true with no list is ignored).
-		finalName, finalPurpose := name, row.Purpose
-		if strings.TrimSpace(args.Purpose) != "" {
-			finalPurpose = strings.TrimSpace(args.Purpose)
-		}
-		channels, private := reconciledChannels(row)
-		if len(args.Channels) > 0 || strings.TrimSpace(args.Channel) != "" {
-			channels = append([]string{}, args.Channels...)
-			if strings.TrimSpace(args.Channel) != "" {
-				channels = append([]string{args.Channel}, channels...)
-			}
-			channels = channelNames(channels)
-			private = args.Private
-		}
+		// Final field set: absent fields keep the row's current values.
+		finalName, finalPurpose, channels, private, finalModel := resolvedUpdate(row, args)
 
 		var legs []string
 		renamed := newName != "" && newName != name
@@ -194,6 +181,37 @@ func podMovedPhrase(podMoved bool) string {
 		return ", identity dir, workspace and pod objects"
 	}
 	return ""
+}
+
+// resolvedUpdate merges an update_agent call's args over its registry row —
+// the absent-means-keep contract in one pure place: purpose and model fall
+// back to the row (a purpose edit must never silently re-resolve a Code or
+// ExtraThinking agent onto General), the channel list overrides only when one
+// was given, and Private applies only then (a bare private:true with no list
+// is ignored). Rename resolves to the row's own name when absent.
+func resolvedUpdate(row console.AgentInfo, args agent.UpdateArgs) (name, purpose string, channels []string, private bool, model string) {
+	name = row.Name
+	if r := strings.TrimSpace(args.Rename); r != "" {
+		name = r
+	}
+	purpose = row.Purpose
+	if p := strings.TrimSpace(args.Purpose); p != "" {
+		purpose = p
+	}
+	channels, private = reconciledChannels(row)
+	if len(args.Channels) > 0 || strings.TrimSpace(args.Channel) != "" {
+		channels = append([]string{}, args.Channels...)
+		if strings.TrimSpace(args.Channel) != "" {
+			channels = append([]string{args.Channel}, channels...)
+		}
+		channels = channelNames(channels)
+		private = args.Private
+	}
+	model = row.Model
+	if m := strings.TrimSpace(args.Model); m != "" {
+		model = m
+	}
+	return
 }
 
 // BuildRemoveAgentFn binds the pod-retire half of manage_agent remove: the

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"freehold/agents"
+	"freehold/contract/console"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 )
@@ -64,5 +65,40 @@ func TestUpdateAgentRowGuards(t *testing.T) {
 		if _, err := fn(tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: want error %q, got %v", tc.label, tc.want, err)
 		}
+	}
+}
+
+// TestResolvedUpdateKeepsAbsentFields pins the absent-means-keep contract in
+// its pure form: a purpose/channel edit must not silently re-resolve a
+// Code/ExtraThinking agent onto General (the row's model rides through), and
+// a field edit keeps the row's channel list + visibility.
+func TestResolvedUpdateKeepsAbsentFields(t *testing.T) {
+	row := console.AgentInfo{
+		Name: "helper", Pubkey: "aa", Purpose: "helps",
+		Channels: []string{"#ops", "#extra"}, Private: true, Model: "Code",
+	}
+	name, purpose, channels, private, model := resolvedUpdate(row, agent.UpdateArgs{Name: "helper"})
+	if name != "helper" || purpose != "helps" || model != "Code" || private != true || len(channels) != 2 {
+		t.Fatalf("absent args must keep the row: %q %q model=%s private=%v channels=%v", name, purpose, model, private, channels)
+	}
+	// A purpose edit keeps the model.
+	_, purpose, _, _, model = resolvedUpdate(row, agent.UpdateArgs{Name: "helper", Purpose: "new purpose"})
+	if purpose != "new purpose" || model != "Code" {
+		t.Fatalf("a purpose edit must keep the row's model: purpose=%q model=%s", purpose, model)
+	}
+	// A model switch keeps the purpose.
+	_, purpose, _, _, model = resolvedUpdate(row, agent.UpdateArgs{Name: "helper", Model: "ExtraThinking"})
+	if purpose != "helps" || model != "ExtraThinking" {
+		t.Fatalf("a model switch must keep the row's purpose: purpose=%q model=%s", purpose, model)
+	}
+	// A channel replace takes the new list (Private applies only then).
+	_, _, channels, private, _ = resolvedUpdate(row, agent.UpdateArgs{Name: "helper", Channels: []string{"#solo"}})
+	if len(channels) != 1 || channels[0] != "#solo" || private != false {
+		t.Fatalf("a channel replace must take the new list: %v private=%v", channels, private)
+	}
+	// And a rename resolves the new name through the same merge.
+	name, _, _, _, _ = resolvedUpdate(row, agent.UpdateArgs{Name: "helper", Rename: "renamed"})
+	if name != "renamed" {
+		t.Fatalf("rename must resolve the new name: %q", name)
 	}
 }
