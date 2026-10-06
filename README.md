@@ -107,15 +107,15 @@ freehold            # the TUI dashboard
 ```
 
 `freehold install` (guided) or `install --non-interactive` (headless) requires
-`--name`, and `--host` unless the mint creates the host: the profile name scopes
-the config + state to `profiles/<name>/` and prefixes the guest LXCs
+`--name`, and `--host` unless the host provider creates it: the profile name
+scopes the config + state to `profiles/<name>/` and prefixes the guest LXCs
 `<name>-<role>`; the host is recorded in the profile so `uninstall --name` can
-resolve it. A Proxmox install points `--host` at the box; a `--provider vultr`
-install creates the host itself (a Vultr instance running PVE — needs
-`VULTR_API_KEY`, `--vultr-region`/`--vultr-plan`, defaulting to `ewr` /
-`vc2-4c-8gb`) and derives `--host` and the proxy IP from it. A fresh plane also
-needs the relay/CP domains (the proxy IP too, except a vultr mint — the guided
-flow prompts for them) and
+resolve it. The PROVIDER owns its needs and asks them in the guided flow —
+proxmox (the default) names your box and the edge's LAN address; `--provider
+vultr` prompts for the API key (no-echo, never stored) + region/plan, creates
+the instance, and derives the host + edge IP from it (headless: the key and
+answers ride the env / `--host-answer name=value`). A fresh plane also
+needs the relay/CP domains (the guided flow prompts for them) and
 the operator identity: `--operator-pubkey` (headless; `--operator-identity`
 seeds this box's login ledger from a keypair dir, verified against the
 pubkey — the guided flow pastes or mints it). An

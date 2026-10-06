@@ -14,11 +14,12 @@ import (
 
 	"freehold/contract/config"
 	"freehold/freehold-cli/internal/common"
+	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/bootstrap"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 	worldteardown "freehold/providers/proxmox/teardown"
-	"freehold/providers/vultr"
+	"freehold/providers/registry"
 )
 
 var uninstallCmd = &cobra.Command{
@@ -67,8 +68,8 @@ var uninstallCmd = &cobra.Command{
 				cpLxc = fmt.Sprintf("%d", *cfg.Lxc.Cp.Vmid)
 			}
 			keeps := "nothing local (config + state are wiped)"
-			if cfg.AccessMode == "api-vultr" && cfg.Vultr.Instance != "" && !destroyHost {
-				keeps = "the vultr instance (STILL RUNNING AND BILLING) + its profile handle"
+			if cfg.HostProvider.ID != "" && !destroyHost {
+				keeps = "the " + cfg.HostProvider.Provider + " instance (STILL RUNNING AND BILLING) + its profile handle"
 			}
 			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %s + the world + this box's door + the runner key%s\n  keeps:   %s\n",
 				cfg.Name, displayHost(host, cfg.Runner.Target), cpLxc, extra, keeps)
@@ -80,14 +81,14 @@ var uninstallCmd = &cobra.Command{
 			if err := runUninstallTransient(cfg, host, removeData); err != nil {
 				return err
 			}
-			instanceRunning, derr := destroyVultrHost(cfg, yes, destroyHost)
+			instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
 			if derr != nil {
 				return derr
 			}
 			if instanceRunning {
 				// The profile is the ONLY handle to a still-billing instance —
 				// wiping it makes the printed recovery command a dead end.
-				fmt.Println("  profile kept: it holds the vultr instance handle (the instance is still running)")
+				fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
 			} else {
 				wipeLocalProfile(configPath, config.Current())
 			}
@@ -96,12 +97,12 @@ var uninstallCmd = &cobra.Command{
 		if err := runUninstall(cfg, configPath, host, removeData); err != nil {
 			return err
 		}
-		instanceRunning, derr := destroyVultrHost(cfg, yes, destroyHost)
+		instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
 		if derr != nil {
 			return derr
 		}
 		if instanceRunning {
-			fmt.Println("  profile kept: it holds the vultr instance handle (the instance is still running)")
+			fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
 		} else {
 			wipeLocalProfile(configPath, config.Current())
 		}
@@ -109,41 +110,64 @@ var uninstallCmd = &cobra.Command{
 	},
 }
 
-// destroyVultrHost destroys the world's Vultr instance when the operator
-// opted in (--destroy-host). DEFAULT OFF on purpose: the instance bills by
-// the hour, so a default uninstall leaves it RUNNING and says so loudly —
-// the operator decides when the bill stops, exactly like the durable plane
-// survives a default uninstall. Returns whether an instance is still
-// running (the caller keeps the profile — it is the only handle). Requires
-// VULTR_API_KEY (never persisted).
-func destroyVultrHost(cfg *config.Config, yes, destroy bool) (bool, error) {
-	if cfg.AccessMode != "api-vultr" || cfg.Vultr.Instance == "" {
+// destroyHostViaProvider destroys the world's CREATED host when the
+// operator opted in (--destroy-host). DEFAULT OFF on purpose: a created
+// host bills by the hour, so a default uninstall leaves it RUNNING and says
+// so loudly — the operator decides when the bill stops, exactly like the
+// durable plane survives a default uninstall. Returns whether an instance
+// is still running (the caller keeps the profile — it is the only handle).
+// The provider's secret needs ride the env (never persisted).
+func destroyHostViaProvider(cfg *config.Config, yes, destroy bool) (bool, error) {
+	if cfg.HostProvider.Provider == "" || cfg.HostProvider.ID == "" {
 		return false, nil
 	}
+	prov, err := registry.ByName(cfg.HostProvider.Provider)
+	if err != nil {
+		return false, err
+	}
 	if !destroy {
-		fmt.Printf("  NOTE: the Vultr instance %s (%s %s) is still RUNNING and billing — destroy it with:\n    VULTR_API_KEY=... freehold uninstall --destroy-host\n",
-			cfg.Vultr.Instance, cfg.Vultr.Region, cfg.Vultr.Plan)
+		fmt.Printf("  NOTE: the %s instance %s is still RUNNING and billing — destroy it with:\n    %s freehold uninstall --destroy-host\n",
+			prov.Name(), cfg.HostProvider.ID, secretEnvHint(prov))
 		return true, nil
 	}
 	if !yes {
-		if err := common.ConfirmDestructive("destroy the Vultr instance (its data dies with it)"); err != nil {
+		if err := common.ConfirmDestructive("destroy the " + prov.Name() + " instance (its data dies with it)"); err != nil {
 			fmt.Println("  instance left running — destroy it later with --destroy-host")
 			return true, nil
 		}
 	}
-	tok := strings.TrimSpace(os.Getenv("VULTR_API_KEY"))
-	if tok == "" {
-		return true, fmt.Errorf("--destroy-host needs VULTR_API_KEY in the environment (the key is never stored)")
+	answers := map[string]string{}
+	for k, v := range cfg.HostProvider.Answers {
+		answers[k] = v
 	}
-	fmt.Printf("  destroying the vultr instance %s…\n", cfg.Vultr.Instance)
-	c := &vultr.Client{Token: tok}
+	for _, need := range prov.Needs() {
+		if !need.Secret {
+			continue
+		}
+		if v := strings.TrimSpace(os.Getenv(need.Name)); v != "" {
+			answers[need.Name] = v
+		}
+	}
+	session := &provisioning.HostSession{Answers: answers}
+	fmt.Printf("  destroying the %s instance %s…\n", prov.Name(), cfg.HostProvider.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := c.Destroy(ctx, cfg.Vultr.Instance); err != nil {
+	if err := prov.Destroy(ctx, session, cfg.HostProvider.ID); err != nil {
 		return true, err
 	}
-	fmt.Println("  ✓ vultr instance destroyed")
+	fmt.Println("  ✓ instance destroyed")
 	return false, nil
+}
+
+// secretEnvHint names the env vars the provider's secrets ride.
+func secretEnvHint(prov provisioning.HostProvider) string {
+	var names []string
+	for _, n := range prov.Needs() {
+		if n.Secret {
+			names = append(names, n.Name+"=...")
+		}
+	}
+	return strings.Join(names, " ")
 }
 
 func init() {
@@ -152,7 +176,7 @@ func init() {
 	uninstallCmd.Flags().String("name", "", "Profile name (resolves --host from profiles/<name>/config.toml when --host is omitted)")
 	uninstallCmd.Flags().String("host", "", "The environment address freehold reached (defaults to the profile's recorded host; informational in this path — the remote work rides the local runner)")
 	uninstallCmd.Flags().Bool("remove-data", false, "ALSO remove the durable plane (datasets + the freehold-created thin pool). Without it the plane survives so a later install re-adopts the runner identity")
-	uninstallCmd.Flags().Bool("destroy-host", false, "ALSO destroy the Vultr instance (api-vultr worlds; needs VULTR_API_KEY). Without it the instance keeps running and billing")
+	uninstallCmd.Flags().Bool("destroy-host", false, "ALSO destroy a CREATED host (e.g. a vultr world's instance; its secret needs ride the env). Without it the instance keeps running and billing")
 	uninstallCmd.Flags().Bool("non-interactive", false, "Skip the confirmation prompt (scripting/CI only)")
 }
 

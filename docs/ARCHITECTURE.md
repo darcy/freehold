@@ -255,7 +255,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (CP bootstrap); `freehold build` runs the world through the CP:
     door → runner → durable plane → boot the CP LXC → **`install`** (box one)
     = the CP only (console + co-located runner) — no secrets are collected.
-    `freehold install` requires **`--name` + `--host`**: it scopes the
+    `freehold install` requires **`--name`**, and **`--host` unless the host
+    provider creates it**: it scopes the
     config + state to `profiles/<name>/` instead of the base home, records the
     host + access mode in that profile, and names the guest LXCs
     `<name>-<relay|cp|k3s>`. A life-cycle gate **mints** when no profile exists,
@@ -401,9 +402,20 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `providers/proxmox/` is the Proxmox VE substrate: guest create/exec/list,
     LVM/ZFS/thin-pool storage, the PVE `local-lvm` pointer discipline, and the
     pct stage/DNS command builders (`providers/proxmox/drive/` holds the
-    storage driver). A provider is substrate ops, not a lifecycle — there is no
-    `provider.Install()`; the composition roots (`freehold-cli/`,
+    storage driver). `providers/vultr/` is the created-host substrate: the
+    Vultr API client + the PVE-on-Debian install (a cloud instance has no
+    nested virt — LXC-only). A provider is substrate ops, not a lifecycle —
+    there is no `provider.Install()`; the composition roots (`freehold-cli/`,
     `control-plane/`) decide the sequence and inject the provider.
+*   **The HOST-provisioner seam** (`platform/provisioning` + `providers/registry`):
+    each substrate declares what its host needs from the operator (`Needs()` —
+    the credential prompted no-echo, the plain answers, the substrate
+    defaults) and owns the host lifecycle (`Prepare`/`InstallDoorKey`/
+    `Destroy`) — the reached-host shape (proxmox: the operator's box, the
+    paste-gate door) and the created-host shape (vultr: the instance born
+    with the door key + PVE installed, destroyed via the API) are the two
+    implementations. The installer asks the registry's provider generically —
+    no substrate names or asks live there.
 
 *   **`platform/migrations/`** enumerates the CP's shipped migration scripts
     (`<stateDir>/migrations/scripts/<epoch>.sh`) and tracks completion with

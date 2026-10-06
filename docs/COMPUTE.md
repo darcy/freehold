@@ -11,8 +11,9 @@ and rebuildable without touching durable data. All of that orchestration is
 **substrate-independent**: it says "create a guest with these mounts and this network,"
 never "run `pct create`." Everything substrate-specific sits behind a **provider seam**
 (`providers/`), so a new substrate — a VPS, a cloud, another hypervisor — is a new provider,
-not a rewrite. Proxmox is the leading provider today and the only one shipped; the seam is
-deliberate and the rules below hold regardless of it.
+not a rewrite. Proxmox is the lead/default and Vultr is the second (the created-host
+shape: a cloud instance running PVE); the seam is deliberate and the rules below hold
+regardless of it.
 
 ```
    freehold CLI · CP build engine       ← composition roots: own the sequence
@@ -31,6 +32,36 @@ deliberate and the rules below hold regardless of it.
 
 ## The abstraction
 
+*   **Two seams, one rule.** The formal `Provider` interface is the GUEST
+    engine's substrate (guest exec/list/address/mounts/destroy, the VM-aware
+    next-vmid pick, the stop command the erase path needs); the
+    `HostProvider` interface is the HOST-provisioning seam — how a world's
+    host comes to exist and what the operator must supply for it. Both live
+    in `platform/provisioning`; the create, storage, snapshot, and teardown
+    engines remain in the provider package, reached by the composition roots
+    directly (folding them behind the interface, and shedding the two
+    Proxmox-flavored methods it still carries — `local-lvm` status/repoint —
+    is part of landing the third substrate).
+*   **The host provider owns its needs.** `Needs()` declares EVERYTHING the
+    operator must supply — the credential (secret: prompted no-echo in the
+    guided flow, env-var fallback headless, never stored), the plain answers
+    (region/plan/os), and which of the installer's core inputs it consumes
+    (proxmox: the host address, the edge's LAN address, the storage-create
+    consent; vultr: none of those — it derives the address and the edge IP
+    from the instance it creates). The installer asks exactly `Needs()`
+    against the registry (`providers/registry`) — no substrate names, asks,
+    or defaults live in the installer. `Defaults()` supplies the substrate
+    defaults the flags may override (storage/bridge/relay-gw).
+*   **The provider owns the door and the lifecycle of ITS host.**
+    `Prepare` mints (vultr: the instance born with the door key authorized +
+    the PVE-on-Debian install) or re-adopts (verify the recorded instance;
+    only a definitive 404 re-creates — anything else fails loudly rather
+    than minting a second billed instance beside the plane).
+    `InstallDoorKey` gets the substrate key onto the host (vultr: appended
+    over the key the instance was born with; proxmox: the paste gate).
+    `Destroy` removes a created host (vultr: the API destroy behind
+    `uninstall --destroy-host`; proxmox: a no-op — the host is the
+    operator's).
 *   **What a provider owns** — the classes of command that differ per substrate:
     *   **Guest lifecycle:** create (with its durable mounts and network attached at birth),
         list, destroy, and allocate identity (ids, names).
@@ -40,7 +71,9 @@ deliberate and the rules below hold regardless of it.
     *   **Storage:** inventory what's available, classify it for safety, create and mount
         the durable volumes, snapshot and roll back, export.
     *   **Networking:** a guest's interfaces, tags, and addressing — what lets the gateway
-        and internal subnet exist.
+        and internal subnet exist; and (host provider) whether the HOST itself is the
+        gateway (`HostsGateway` — a created cloud host is, a reached LAN host runs the
+        gateway guest).
     *   **World removal:** the teardown engine, ordered and verified.
 *   **What a provider never owns:** sequencing. There is no `provider.Install()`; install,
     build, teardown, and uninstall are orchestrators that decide the order and inject the
@@ -51,13 +84,6 @@ deliberate and the rules below hold regardless of it.
 *   **Capability is explicit, not assumed.** Substrates differ in what they can do — a cheap
     snapshot primitive exists on ZFS/LVM-thin but not on a plain VPS disk — so verbs declare
     what they need, and fall back (restic) where a substrate can't (`docs/DATA.md`).
-*   **Where it is narrow today:** the formal `Provider` interface covers guest exec, list,
-    address, mounts, destroy, the VM-aware next-vmid pick (`NextFreeVMID` — the VMID
-    namespace is shared between containers and VMs), and the stop command the erase path
-    needs; the create, storage, snapshot, and teardown engines live in the provider package
-    and are reached by the composition roots directly. Folding them behind the interface, and
-    shedding the two Proxmox-flavored methods it still carries (`local-lvm`
-    status/repoint), is part of landing the second provider.
 
 ## How a world is built
 
@@ -79,12 +105,12 @@ deliberate and the rules below hold regardless of it.
 
 ## Known gaps
 
-*   Only the Proxmox-on-plain-Debian host (Vultr first) is the second provider;
-    the Hetzner driver is still unwired. The VPS world's storage is the dir
-    backend (no ZFS/VG to detect), so the formal interface still carries the
-    two Proxmox-flavored methods (`local-lvm` status/repoint), and the create,
-    snapshot, and teardown engines remain reached by the composition roots
-    directly.
+*   Hetzner is unwired (the third substrate); the created-host seam has one
+    implementation so far. The VPS world's storage is the dir backend (no
+    ZFS/VG to detect), so the formal guest `Provider` interface still carries
+    the two Proxmox-flavored methods (`local-lvm` status/repoint), and the
+    create, snapshot, and teardown engines remain reached by the composition
+    roots directly.
 *   Core guests (relay, k3s, gateway) have no runner-client.
 *   World-config can lose create params after an update; a later teardown → rebuild may fail
     at guest creation.
@@ -135,8 +161,9 @@ deliberate and the rules below hold regardless of it.
 
 ## Where the code is
 
-`platform/provisioning/` (seam, plane math, shared box engine), `providers/proxmox/`
-(create, storage, `drive/`, `teardown/`), `providers/vultr/` (the api-vultr
-host lifecycle: create/destroy + the PVE-on-Debian install), `freehold-cli/{install,uninstall,teardown}/`,
-`control-plane/api/cpbuild/` (build stages +
-`terraform/`), `agents/compute/`.
+`platform/provisioning/` (both seams, plane math, shared box engine),
+`providers/proxmox/` (create, storage, `drive/`, `teardown/`, the reached-host
+provider), `providers/vultr/` (the created-host provider: instance lifecycle +
+the PVE-on-Debian install), `providers/registry/` (name → provider),
+`freehold-cli/{install,uninstall,teardown}/`, `control-plane/api/cpbuild/`
+(build stages + `terraform/`), `agents/compute/`.

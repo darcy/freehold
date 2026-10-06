@@ -5,17 +5,18 @@ import (
 	"net"
 )
 
-// VultrSpec records the Vultr cloud instance a world's HOST is: created by
-// `install --provider vultr`, destroyed by `uninstall` (the box bills by the
-// hour — an unrecorded instance is a leaked bill). Region/Plan/OsID are the
-// create parameters a re-adopt needs to re-create the same shape of host.
-// The API key is NEVER here: it rides VULTR_API_KEY (env), read at the verbs
-// that need it (install create, uninstall destroy).
-type VultrSpec struct {
-	Region   string `toml:"region,omitempty"`
-	Plan     string `toml:"plan,omitempty"`
-	OsID     uint32 `toml:"os_id,omitempty"`
-	Instance string `toml:"instance,omitempty"`
+// HostSpec records the world's HOST and the provider that owns it: which
+// HostProvider (providers/registry) created/reaches it, its instance handle
+// ("" when the host predates the world — a reached proxmox box), whether the
+// HOST itself is the gateway (the hosted shape — no gateway guest), and the
+// provider's non-secret answers (region/plan for a re-adopt re-create).
+// Secrets are NEVER here: the guided flow prompts no-echo and headless
+// reads the env; both keep them in memory for the call they serve.
+type HostSpec struct {
+	Provider string            `toml:"provider,omitempty"`
+	ID       string            `toml:"id,omitempty"`
+	Gateway  bool              `toml:"gateway,omitempty"`
+	Answers  map[string]string `toml:"answers,omitempty"`
 }
 
 // HostGatewayNftConf renders the HOST-as-gateway ruleset (a Vultr world: the

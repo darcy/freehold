@@ -154,11 +154,14 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   only through the CP API or sibling binaries — it never links `control-plane/`. World
   bring-up after install is `freehold build` from any box via the CP. `install` **requires
   `--name`** (the profile name scopes config + state to `profiles/<name>/` and prefixes
-  the guest LXCs `<name>-<role>`), and `--host` **unless the mint creates the host** —
+  the guest LXCs `<name>-<role>`), and `--host` **unless the host provider creates it** —
   a `--provider vultr` install derives it from the instance it creates (the profile
-  records it, so a later `uninstall --name` resolves it without the flag). A fresh
+  records it, so a later `uninstall --name` resolves it without the flag). The provider
+  owns its needs and the guided flow prompts for them (a created host's API key pasted
+  no-echo, never stored; headless reads the env / `--host-answer`); the substrate
+  defaults (storage/bridge/relay-gw) are the provider's too. A fresh
   plane also needs the relay/CP
-  domains + the proxy IP (the guided flow prompts), plus the operator's Buzz display name
+  domains + the proxy IP where the provider doesn't derive it (the guided flow prompts), plus the operator's Buzz display name
   (`--display-name`) — the kind:0 profile the build publishes from it is what makes the
   desktop app skip its stock first-run onboarding. Re-running an existing name whose CP is
   **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
