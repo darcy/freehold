@@ -66,8 +66,12 @@ var uninstallCmd = &cobra.Command{
 			if cfg.Lxc.Cp.Vmid != nil {
 				cpLxc = fmt.Sprintf("%d", *cfg.Lxc.Cp.Vmid)
 			}
-			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %s + the world + this box's door + the runner key%s\n  keeps:   nothing local (config + state are wiped)\n",
-				cfg.Name, displayHost(host, cfg.Runner.Target), cpLxc, extra)
+			keeps := "nothing local (config + state are wiped)"
+			if cfg.AccessMode == "api-vultr" && cfg.Vultr.Instance != "" && !destroyHost {
+				keeps = "the vultr instance (STILL RUNNING AND BILLING) + its profile handle"
+			}
+			fmt.Printf("uninstall profile %q (host %s):\n  removes: control plane LXC %s + the world + this box's door + the runner key%s\n  keeps:   %s\n",
+				cfg.Name, displayHost(host, cfg.Runner.Target), cpLxc, extra, keeps)
 			if err := common.ConfirmDestructive("uninstall"); err != nil {
 				return err
 			}

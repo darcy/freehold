@@ -163,7 +163,10 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   desktop app skip its stock first-run onboarding. Re-running an existing name whose CP is
   **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
   Nostr/enc key), while a **live** CP is refused (reconcile with `freehold build`, drop it
-  with `teardown`/`uninstall`, or join it with `freehold login`). There is no `bootstrap`
+  with `teardown`/`uninstall`, or join it with `freehold login`). On an api-vultr world a
+  default uninstall leaves the instance RUNNING AND BILLING — the profile is kept as its
+  handle; `VULTR_API_KEY=... freehold uninstall --destroy-host` stops the bill. There is no
+  `bootstrap`
   alias — `install --non-interactive` is the headless surface. A world with no recorded name
   keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
 - **GitHub Releases** (not a repo file) — the released versions, their notes, and assets; the

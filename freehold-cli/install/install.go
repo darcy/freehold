@@ -371,7 +371,9 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 // on the command line — a set flag is the prompt's default (Enter keeps it).
 func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.Flags, error) {
 	fmt.Fprintln(ui.out, "  A few details about your world. Defaults in [brackets].")
-	isVultr := flags.AccessMode == "api-vultr"
+	// A re-adopt rides the recorded substrate — asking would offer a default
+	// ("proxmox") that silently contradicts the profile.
+	isVultr := flags.AccessMode == "api-vultr" || (seed != nil && seed.AccessMode == "api-vultr")
 	if !isVultr && flags.Host == "" {
 		// The substrate is chosen up front: the answers (and the asks) diverge
 		// — a Vultr mint creates its host, a Proxmox install reaches one.
