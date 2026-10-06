@@ -291,7 +291,8 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 Open limitations in the shipped code are current-state, not history, and each lives in the
 domain doc that owns it — update it there as gaps close or new ones surface:
 
-- **AI** (`docs/AI.md`): every pod holds the gateway master key; the sprig image is a moving
+- **AI** (`docs/AI.md`): a wiped gateway Postgres invalidates the minted
+  agent keys; the sprig image is a moving
   tag; the memory attestation is unbounded in time; the respond-to allowlist is fixed at
   deploy; agents read the repo but cannot write it; AI hardware has no tooling.
 - **Network** (`docs/NETWORK.md`): the gateway host route is not persisted; no per-guest

@@ -531,3 +531,32 @@ func TestAgentPodTimezone(t *testing.T) {
 		t.Errorf("no-setting manifest mounts tz bits; want no TZ bits at all")
 	}
 }
+
+// TestAgentLiteLLMKeyScript pins the per-agent key seed: the agent's own
+// minted virtual key rides the script as a shell literal (the nsec's
+// generated-material shape), and the Secret is ENSURED to match the CP
+// store's key — created when absent, rotated when it holds anything else
+// (the legacy gateway master, a dead key after a gateway-DB wipe, a revoked
+// key after an aborted remove). A match is a no-op.
+func TestAgentLiteLLMKeyScript(t *testing.T) {
+	s := AgentLiteLLMKeyScript(105, "Waldo", "sk-virtual")
+	for _, want := range []string{
+		"waldo-litellm-key",
+		"-o jsonpath='{.data.key}'",
+		`[ "$cur" != 'sk-virtual' ]`,
+		"--from-literal=key='sk-virtual'",
+		"base64 -d",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("seed script missing %q", want)
+		}
+	}
+	if !strings.Contains(s, "delete secret waldo-litellm-key -n agents --ignore-not-found=true") {
+		t.Errorf("the rotation path must delete before re-create: %s", s)
+	}
+	// The script embeds only the agent's OWN key — no master ever crosses
+	// the audited command (the compare is against the store's key literal).
+	if strings.Contains(s, "$LITELLM") {
+		t.Errorf("script must not reference the runner-injected master env: %s", s)
+	}
+}

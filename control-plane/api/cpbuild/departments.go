@@ -824,6 +824,204 @@ func (s *Spec) stageLitellmAliases() error {
 	return nil
 }
 
+// litellmAgentKeyEnvKey is the CP litellm store's env key holding one agent's
+// minted virtual key, keyed by the agent's sanitized pod name — the same
+// derived name the agent's k8s Secret and the gateway's key_alias use.
+func litellmAgentKeyEnvKey(pod string) string {
+	return "agentkey-" + pod
+}
+
+// litellmStoreEnv opens the CP's durable litellm store in memory and returns
+// its path, the console sealing secret, and the env map, so callers can add
+// entries (per-agent keys) and re-seal. Plaintext lives in memory only.
+func (s *Spec) litellmStoreEnv() (path string, secret []byte, env map[string]string, err error) {
+	path = filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	if !cert.CredExists(path) {
+		return "", nil, nil, fmt.Errorf("no CP litellm store at %s yet", path)
+	}
+	if secret, err = s.consoleEncSecret(); err != nil {
+		return "", nil, nil, err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	if _, env, err = cert.LoadCreds(path, open, secret); err != nil {
+		return "", nil, nil, fmt.Errorf("open CP litellm store: %w", err)
+	}
+	return path, secret, env, nil
+}
+
+// saveLitellmStoreEnv re-seals the store's env map to the console identity
+// (the mirror of litellmStoreEnv — the CP is the durable owner; only
+// ciphertext lands on disk). The read-modify-write is not cross-process
+// locked, matching state.json's own last-write-wins: a concurrent writer can
+// orphan at worst one mint, and the seed's ensure-matches-store-key
+// semantics rotate the pod onto the store's key on the next reconcile.
+func (s *Spec) saveLitellmStoreEnv(path string, secret []byte, env map[string]string) error {
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	return cert.SaveCreds(path, "litellm", env, crypto.Seal, pub, "litellm")
+}
+
+// ensureAgentLitellmKey returns the agent's own gateway virtual key: the
+// minted, pod-aliased credential its pod's OPENAI_COMPAT_API_KEY Secret
+// holds, minted on first use (POST /key/generate with key_alias = the pod
+// name and models restricted to the alias set — a compromised pod cannot
+// call the raw upstream, and an update_agent model switch stays inside the
+// set) and persisted in the CP's litellm store so a rebuild re-seeds the SAME
+// key instead of minting orphans. The gateway returns the raw token only
+// once, so the store is the single source: an entry present is returned
+// verbatim, never re-minted. A world without a litellm base URL returns ""
+// (the caller skips the seed); a gateway refusal fails the create loudly —
+// a pod referencing a missing Secret never comes Ready.
+func (s *Spec) ensureAgentLitellmKey(name string) (string, error) {
+	if s.LitellmBaseURL == "" {
+		return "", nil
+	}
+	pod := agent.PodName(name)
+	path, secret, env, err := s.litellmStoreEnv()
+	if err != nil {
+		return "", err
+	}
+	envKey := litellmAgentKeyEnvKey(pod)
+	if k := env[envKey]; k != "" {
+		return k, nil
+	}
+	master := env["master"]
+	if master == "" {
+		return "", fmt.Errorf("CP litellm store is missing the master key")
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"key_alias": pod,
+		"models":    agent.LiteLLMAliases,
+		"metadata":  map[string]string{"agent": name},
+	})
+	if err != nil {
+		return "", err
+	}
+	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
+	req, err := http.NewRequest(http.MethodPost, origin+"/key/generate", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+master)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("mint litellm key for %s: %w", name, err)
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("mint litellm key for %s: HTTP %d: %s", name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	key, err := parseLitellmKey(respBody)
+	if err != nil {
+		return "", fmt.Errorf("mint litellm key for %s: %w", name, err)
+	}
+	env[envKey] = key
+	if err := s.saveLitellmStoreEnv(path, secret, env); err != nil {
+		return "", fmt.Errorf("persist %s litellm key: %w", pod, err)
+	}
+	return key, nil
+}
+
+// revokeAgentLitellmKey deletes the agent's gateway virtual key — by its
+// stored TOKEN (the record holds the raw sk- value; the gateway's key_alias
+// drifts stale after a rename, so the alias is not a reliable delete
+// handle) — and drops the store record. Treated as ensure-revoked: 200 or
+// 404 both clear the record, so a gateway that lost its DB cannot wedge a
+// remove. A world without litellm, or a key never minted, is a no-op.
+func (s *Spec) revokeAgentLitellmKey(name string) error {
+	if s.LitellmBaseURL == "" {
+		return nil
+	}
+	pod := agent.PodName(name)
+	path, secret, env, err := s.litellmStoreEnv()
+	if err != nil {
+		return err
+	}
+	envKey := litellmAgentKeyEnvKey(pod)
+	token := env[envKey]
+	if token == "" {
+		return nil
+	}
+	master := env["master"]
+	if master == "" {
+		return fmt.Errorf("CP litellm store is missing the master key")
+	}
+	body, err := json.Marshal(map[string]interface{}{"keys": []string{token}})
+	if err != nil {
+		return err
+	}
+	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
+	req, err := http.NewRequest(http.MethodPost, origin+"/key/delete", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+master)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("revoke litellm key for %s: %w", name, err)
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("revoke litellm key for %s: HTTP %d: %s", name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	delete(env, envKey)
+	return s.saveLitellmStoreEnv(path, secret, env)
+}
+
+// moveLitellmKeyRecord re-keys a renamed agent's minted-key record to the new
+// pod's derived name — the same key (and its spend history) follows the
+// rename, since the identity (pubkey) does. The gateway-side key_alias keeps
+// the OLD pod name (a cosmetic /key/update the AI department can run; spend
+// follows the token, and revoke deletes by the stored token, so nothing
+// functional drifts). A world without a store, or a key never minted, is a
+// no-op (the create under the new name mints fresh).
+func (s *Spec) moveLitellmKeyRecord(oldPod, newPod string) error {
+	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	if !cert.CredExists(path) {
+		return nil
+	}
+	_, secret, env, err := s.litellmStoreEnv()
+	if err != nil {
+		return err
+	}
+	oldKey, newKey := litellmAgentKeyEnvKey(oldPod), litellmAgentKeyEnvKey(newPod)
+	v, ok := env[oldKey]
+	if !ok || v == "" {
+		return nil
+	}
+	delete(env, oldKey)
+	env[newKey] = v
+	return s.saveLitellmStoreEnv(path, secret, env)
+}
+
+// parseLitellmKey decodes /key/generate's body: {"key": "sk-…"} on all
+// current shapes, with {"data": {"key": …}} accepted for the floating
+// main-stable tag (the same both-shapes tolerance parseLitellmModels applies
+// to /model/info).
+func parseLitellmKey(body []byte) (string, error) {
+	var direct struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(body, &direct); err == nil && direct.Key != "" {
+		return direct.Key, nil
+	}
+	var wrapped struct {
+		Data struct {
+			Key string `json:"key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Data.Key != "" {
+		return wrapped.Data.Key, nil
+	}
+	return "", fmt.Errorf("unrecognized /key/generate shape: neither {\"key\": …} nor {\"data\": {\"key\": …}}")
+}
+
 // litellmGet issues an authenticated GET against the gateway's admin origin
 // and decodes the body into out.
 func (s *Spec) litellmGet(client *http.Client, origin string, master []byte, path string, out interface{}) error {

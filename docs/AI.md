@@ -32,12 +32,24 @@ AI owns the gateway directly; the runtime is what all agents share.
     (`stageLitellmAliases`, straight from the store — terraform deploys the gateway but
     registers no model): `Code` (coding agents), `General` (the default for custom
     agents), `Freehold` (the core agents — the CPA + departments, pinned),
-    `ExtraThinking` (complex architecture / deep thinking). A pod's model resolves by
+    `ExtraThinking`     (complex architecture / deep thinking). A pod's model resolves by
     class (`litellmModelFor`): core identities run the core alias; a custom agent runs
     its persisted choice, defaulting to `General` — and an agent's choice rides its
     registry row, so a rebuild re-applies the same alias. Retargeting the aliases or
     adding providers is the AI department's `litellm-api-admin` work, never a build side
     effect.
+*   **Keys and spend.** Every agent rides its OWN gateway virtual key —
+    `key_alias` = its pod name, `models` restricted to the alias set — minted
+    by the create flow at first apply and persisted sealed in the CP's
+    litellm store (`agentkey-<pod>`), so a rebuild re-seeds the same key
+    instead of minting orphans; no pod holds the gateway master key. A
+    removed agent's key is revoked by its stored token (the gateway's
+    key_alias drifts stale after a rename; spend follows the token); a
+    rename re-keys the record
+    under the new pod name, so the same key — and its spend history —
+    follows the identity. The gateway logs spend per key in its Postgres;
+    per-agent spend is visible through the `litellm-api-admin` door
+    (`GET /spend/keys`, `GET /key/info`).
 *   **The pod.** A bare Pod in the `agents` namespace: its own Nostr identity (Secret), a
     workspace on the durable plane (`/srv/data/k8s-volumes/agent-home/<pod>`), a prompt
     mounted from a ConfigMap and re-read on every spawn, and a tool bridge fetched from the
@@ -204,7 +216,11 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 
 ## Known gaps
 
-*   Every pod holds the gateway's **master key** — no scoped per-agent keys.
+*   A gateway whose Postgres was wiped (a full teardown of the k3s state)
+    invalidates every minted agent key: the pods 401 until the CP store's
+    `agentkey-<pod>` records are cleared — the next reconcile then mints
+    fresh and the seed rotates every pod's Secret onto the new key, no
+    hand-deleted Secrets.
 *   One model — the aliases all point at the operator's first-build provider
     choice, so every alias routes to the same underlying model today; adding providers or
     per-alias variety is AI's `litellm-api-admin` work. Aliases are ensured only for the
@@ -221,8 +237,9 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 
 ## Future
 
-*   Scoped per-agent LiteLLM keys and budgets; multi-model management (the default
-    alias set exists; variety behind the aliases does not).
+*   Per-agent LiteLLM **budgets** (the per-agent keys and spend tracking are
+    live; a `max_budget` cap and rotation policy are not); multi-model
+    management (the default alias set exists; variety behind the aliases does not).
 *   **Local AI hosting:** a GPU box (RTX 3090, DGX Spark) as a LiteLLM upstream, provisioned
     and tuned by AI through a door, with telemetry.
 *   **Agent workspaces + git/GitHub:** a workspace LXC per agent, commits verified durable in

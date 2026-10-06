@@ -1348,18 +1348,6 @@ func (s *Spec) worldCert() error {
 	return nil
 }
 
-// worldLiteLLM seeds the CPA pod's litellm key CP-side. The kube workloads
-// (postgres + gateway manifests) and model registration are OWNED by the
-// terraform module now (worldTerraform "apply" → kube-apply.sh); this leg only
-// mints the CPA's gateway master-key Secret first-run-wins from the injected
-// env. Runs after the terraform step so the gateway is already reachable.
-func (s *Spec) worldLiteLLM() error {
-	if err := s.runSecrets(agent.AgentLiteLLMKeyScript(s.K3sVmid, s.CpaName), 60, "litellm"); err != nil {
-		return fmt.Errorf("seed CPA litellm key: %w", err)
-	}
-	return nil
-}
-
 // BuildWorldApply returns the CP's world-build/reconcile driver: it runs the
 // shared stage commands (internal/stages) through the co-located runner, so the
 // box can "login + trigger" the CP to (re)assert the world. Each step is
@@ -1511,15 +1499,6 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build terraform services: %w", err)
 			}
 			report = append(report, "terraform services applied (postgres/litellm/caddy)")
-		}
-		// 5. The litellm gateway — the CPA pod's litellm key seed (the kube
-		// workloads + model registration are owned by the terraform services
-		// phase above); the operator's provider key rides the runner, never argv.
-		if spec.K3sVmid != 0 && spec.LitellmIP != "" {
-			if err := spec.worldLiteLLM(); err != nil {
-				return "", fmt.Errorf("world-build litellm: %w", err)
-			}
-			report = append(report, "litellm gateway live")
 		}
 		// 7. The edge certs: durable-reuse gate (no LE order when the durable
 		// mirror has a valid cert) else an in-process resumable DNS-01 issue,
@@ -2603,6 +2582,22 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if aerr != nil {
 			return "", fmt.Errorf("create-agent %q: %w", name, aerr)
 		}
+		// The agent's own minted gateway virtual key: looked up (or minted,
+		// key_alias = the pod name) and seeded into the <pod>-litellm-key
+		// Secret BEFORE the pod applies — a pod referencing a missing Secret
+		// never comes Ready. The seed ensures the Secret matches the store's
+		// key, so a re-mint (a wiped gateway DB, an aborted remove's revoke)
+		// reaches the pod on the next reconcile. Skipped without a litellm
+		// base URL (a world without the gateway).
+		key, kerr := spec.ensureAgentLitellmKey(name)
+		if kerr != nil {
+			return "", fmt.Errorf("create-agent %q: %w", name, kerr)
+		}
+		if key != "" {
+			if err := spec.run(agent.AgentLiteLLMKeyScript(spec.K3sVmid, name, key), 60); err != nil {
+				return "", fmt.Errorf("%s litellm key secret: %w", name, err)
+			}
+		}
 		var manifest string
 		if name == spec.CpaName {
 			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ())
@@ -2616,7 +2611,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// asker (today the operator — the CP cannot see chat threads) +
 			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
