@@ -42,6 +42,12 @@ AI owns the gateway directly; the runtime is what all agents share.
     attestation scoped to memory writes. It survives pod re-applies and full rebuilds.
 *   **Creation.** `create_agent` mints identity, joins the relay, applies the pod; the build
     reconciles the whole registry (CPA, then departments, then custom agents) every time.
+*   **Editing.** `update_agent` rewrites a created agent's purpose (its system prompt re-renders
+    from the registry row and lands on the next spawn), switches its litellm model, replaces its
+    channel list, or renames it. A rename moves the durable identity dir, workspace, pod objects
+    and registry row to the new name while keeping the pubkey — chat history, grants, and memory
+    follow. Core identities (the CPA + departments) are repo-defined and refused; `manage_agent
+    remove` retires the pod and drops the row (the durable workspace dir is kept).
 *   **AI's grants:** `litellm-api-admin` (model registration, key minting) and
     `kube-api-litellmsa` (a `litellm`-namespace kube door, no Secrets). Machines such as a
     GPU box arrive through a door the CPA provisions on the fly.
@@ -198,7 +204,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 *   The sprig image is a moving tag (no digest pin).
 *   Memory attestation has no expiry; upstream buzz doesn't verify engram authorship.
 *   Prompt edits in the CP's durable copy don't survive a rebuild (re-seeded from embedded bytes).
-*   The respond-to allowlist is fixed at deploy; `manage_agent remove` only drops the registry row.
+*   The respond-to allowlist is fixed at deploy.
 *   Stale agents survive a department rename on rebuild.
 *   Agents read the repo but can't write it; nothing schedules the re-check.
 *   AI hardware, local AI, optimization dashboards, and eval harnesses are prompt claims

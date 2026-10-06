@@ -48,7 +48,17 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"private":  map[string]interface{}{"type": "boolean"},
 				"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
 			}, []string{"name"})},
-		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
+		{"name": "update_agent", "description": "Update an existing agent you created: replace its purpose (the one-liner its system prompt is rendered from — live on the agent's next spawn), switch its litellm model, replace its channel list (private applies only then), or rename it. A rename moves the durable identity dir, workspace, pod objects and registry row to the new name while KEEPING the agent's pubkey — chat history, grants and memory follow. Absent fields keep the row's current values. Core identities (the CPA and the four departments) are refused — their prompts live in the repo.",
+			"inputSchema": i(map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"rename":   map[string]interface{}{"type": "string"},
+				"purpose":  map[string]interface{}{"type": "string"},
+				"channel":  map[string]interface{}{"type": "string"},
+				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"private":  map[string]interface{}{"type": "boolean"},
+				"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
+			}, []string{"name"})},
+		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) retire one's pod + derived k8s objects and drop its registry row (the durable workspace dir is kept — it is data).",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},
 		{"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. Grants land live; the grantees' pods are re-applied with the new coords.",
 			"inputSchema": i(map[string]interface{}{
@@ -101,7 +111,7 @@ func isFreeholdTool(name string) bool {
 	// the half that hands capability out is not governable without the half that
 	// takes it back, and it is bounded by the same ownership guards (only doors
 	// the agent flow gave) and the same agent_grants kill switch.
-	case "create_agent", "manage_agent", "provision_runner", "revoke_runner":
+	case "create_agent", "update_agent", "manage_agent", "provision_runner", "revoke_runner":
 		return true
 	}
 	return false

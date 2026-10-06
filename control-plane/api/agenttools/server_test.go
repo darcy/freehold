@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 13 {
-		t.Fatalf("expected 13 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 14 {
+		t.Fatalf("expected 14 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "grant_agent", "provision_runner", "revoke_runner", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
+	for _, name := range []string{"create_agent", "update_agent", "grant_agent", "provision_runner", "revoke_runner", "manage_agent", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -106,6 +106,52 @@ func TestServerToolList(t *testing.T) {
 		if !found {
 			t.Errorf("missing tool %s", name)
 		}
+	}
+}
+
+// TestServerUpdateAgentValidation pins the dispatch wiring for update_agent:
+// the model allowlist is enforced server-side before the flow is invoked, and
+// a valid call reaches the bound flow (nil here, so the error names it).
+func TestServerUpdateAgentValidation(t *testing.T) {
+	aud := "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	secret := make([]byte, 32)
+	secret[0] = 1
+	pk, err := crypto.PubkeyFromSecret(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{pk}, nil },
+		Tools:    &agent.Tools{},
+	}
+	call := func(args string) string {
+		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"update_agent","arguments":` + args + `}}`
+		ts := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+		req.Header.Set(PubkeyHeader, pk)
+		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+		req.Header.Set(SigHeader, signForTest(secret, aud, ts, raw))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		var resp struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("bad response for %s: %s", args, rec.Body.String())
+		}
+		if resp.Error == nil {
+			t.Fatalf("expected an error for %s: %s", args, rec.Body.String())
+		}
+		return resp.Error.Message
+	}
+	if msg := call(`{"name":"bob","model":"Bogus"}`); !strings.Contains(msg, "model must be one of") {
+		t.Fatalf("bad model not refused: %s", msg)
+	}
+	if msg := call(`{"name":"bob"}`); !strings.Contains(msg, "no update path bound") {
+		t.Fatalf("the call did not reach the bound flow: %s", msg)
 	}
 }
 

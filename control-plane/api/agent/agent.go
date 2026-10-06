@@ -552,6 +552,25 @@ echo AGENT_LITELLM_KEY_OK`,
 		k3sVmid, secret, secret)
 }
 
+// AgentRetireScript deletes an agent's derived k8s objects (pod, service,
+// prompt ConfigMap, identity + litellm-key secrets) inside the k3s LXC — the
+// object half of taking an agent away (update_agent's rename and manage_agent's
+// remove). The durable workspace dir is deliberately NOT touched: it is data,
+// not an object. --ignore-not-found keeps every line idempotent, and a missing
+// litellm-key secret is expected (custom agents share the CPA's).
+func AgentRetireScript(k3sVmid uint32, agentName string) string {
+	pod := sanitizePodName(agentName)
+	return fmt.Sprintf(`set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+EX="pct exec %d -- sh -c"
+$EX "$K delete pod %s -n agents --ignore-not-found=true --wait=false"
+$EX "$K delete service %s -n agents --ignore-not-found=true"
+$EX "$K delete configmap %s-prompt -n agents --ignore-not-found=true"
+$EX "$K delete secret %s-identity -n agents --ignore-not-found=true"
+$EX "$K delete secret %s-litellm-key -n agents --ignore-not-found=true"
+echo AGENT_RETIRE_OK`, k3sVmid, pod, pod, pod, pod, pod)
+}
+
 // shQ single-quotes a value for a shell-embedded literal (no embedded quotes
 // in the values we pass — 64-hex nsec and owner pubkey).
 func shQ(s string) string {
