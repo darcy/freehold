@@ -112,12 +112,22 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 				// sealed store, is idempotent (a re-run no-ops when already
 				// re-keyed), and its failure must leave NOTHING moved — a
 				// record re-keyed after the row rename would strand the row on
-				// an identity dir that no longer matches it.
+				// an identity dir that no longer matches it. If a LATER leg
+				// fails, the record re-keys BACK (rekeyBack) — a half-aborted
+				// rename must not strand the live key on the destination pod
+				// name, where the next reconcile would mint a second,
+				// untracked key.
 				if err := spec.moveLitellmKeyRecord(oldPod, newPod); err != nil {
 					return "", fmt.Errorf("%s: move the litellm key record: %w", verb, err)
 				}
+				rekeyBack := func() string {
+					if rerr := spec.moveLitellmKeyRecord(newPod, oldPod); rerr != nil {
+						return fmt.Sprintf(" [UNVERIFIED] the minted-key record could not be re-keyed back (%v) — the store still holds agentkey-%s under the un-applied destination name; re-run the rename to converge it", rerr, newPod)
+					}
+					return ""
+				}
 				if err := os.Rename(oldDir, newDir); err != nil {
-					return "", fmt.Errorf("%s: move the identity dir %s → %s: %w", verb, oldDir, newDir, err)
+					return "", fmt.Errorf("%s: move the identity dir %s → %s: %w%s", verb, oldDir, newDir, err, rekeyBack())
 				}
 				rollback := func() {
 					if rerr := os.Rename(newDir, oldDir); rerr != nil {
@@ -126,11 +136,11 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 				}
 				if err := spec.moveWorkspace(oldPod, newPod); err != nil {
 					rollback()
-					return "", fmt.Errorf("%s: move the workspace dir: %w", verb, err)
+					return "", fmt.Errorf("%s: move the workspace dir: %w%s", verb, err, rekeyBack())
 				}
 				if err := reg.RenameAgent(name, newName); err != nil {
 					rollback()
-					return "", fmt.Errorf("%s: move the registry row: %w", verb, err)
+					return "", fmt.Errorf("%s: move the registry row: %w%s", verb, err, rekeyBack())
 				}
 				legs = append(legs,
 					fmt.Sprintf("[verified] identity dir moved (%s → %s) — the same nsec re-applies under the new name", sanitizeDir(name), sanitizeDir(newName)),
