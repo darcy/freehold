@@ -307,8 +307,11 @@ func TestRenderBackupScriptEmbedsTheVerbsOwnLine(t *testing.T) {
 // holds nothing is a failed leg, not a passing one).
 func TestRenderVerifyScriptRoundTrip(t *testing.T) {
 	script := renderVerifyScript("b2:bucket:p")
-	if !strings.Contains(script, `restic -r b2:bucket:p snapshots --json`) {
-		t.Fatalf("the round-trip is a snapshots probe:\n%s", script)
+	// The full ResticCmd shape — b2:/s3: repos need the env file sourced
+	// (the backend credentials), not just the password file.
+	want := ResticCmd("b2:bucket:p", "snapshots --json")
+	if !strings.Contains(script, want) {
+		t.Fatalf("the round-trip must source the env + probe snapshots:\n%s", script)
 	}
 	for _, want := range []string{`grep -q '"time"'`, "holds no snapshots", "did not answer"} {
 		if !strings.Contains(script, want) {

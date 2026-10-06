@@ -296,7 +296,7 @@ domain doc that owns it — update it there as gaps close or new ones surface:
   deploy; agents read the repo but cannot write it; AI hardware has no tooling.
 - **Network** (`docs/NETWORK.md`): the gateway host route is not persisted; no per-guest
   vhosts; no tailscale/pihole skills; flat-LAN guests are DHCP.
-- **Data** (`docs/DATA.md`): snapshot is Proxmox-only; backup has no scheduling or restore
+- **Data** (`docs/DATA.md`): snapshot is Proxmox-only; backup has no restore
   verb; backups can outlive rotation.
 - **Compute** (`docs/COMPUTE.md`): no VPS provider; core guests carry no runner-client;
   world-config degradation on update; terraform destroy can reach other worlds.
