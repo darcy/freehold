@@ -152,10 +152,12 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   environment (Proxmox or a Vultr VPS today; Hetzner next) and a door to it; the
   shared provisioning engine lives in `platform/provisioning/box`. It drives the server
   only through the CP API or sibling binaries — it never links `control-plane/`. World
-  bring-up after install is `freehold build` from any box via the CP. `install` **requires `--name`
-  + `--host`**: the profile name scopes config + state to `profiles/<name>/` and prefixes
-  the guest LXCs `<name>-<role>`; the host is recorded in the profile (so a later
-  `uninstall --name` resolves it without the flag). A fresh plane also needs the relay/CP
+  bring-up after install is `freehold build` from any box via the CP. `install` **requires
+  `--name`** (the profile name scopes config + state to `profiles/<name>/` and prefixes
+  the guest LXCs `<name>-<role>`), and `--host` **unless the mint creates the host** —
+  a `--provider vultr` install derives it from the instance it creates (the profile
+  records it, so a later `uninstall --name` resolves it without the flag). A fresh
+  plane also needs the relay/CP
   domains + the proxy IP (the guided flow prompts), plus the operator's Buzz display name
   (`--display-name`) — the kind:0 profile the build publishes from it is what makes the
   desktop app skip its stock first-run onboarding. Re-running an existing name whose CP is

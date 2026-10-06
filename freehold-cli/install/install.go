@@ -826,7 +826,11 @@ func ensureVultrHost(f *box.Flags, out io.Writer) error {
 	// install, the door) can fail, and a stranded billed instance with no
 	// profile record is un-destroyable by tooling. The full config write
 	// happens later in the pipeline; this is the handle that survives it.
-	recordVultrInstance(f, id, "")
+	// A failed record aborts loudly — the id is in the message, the only
+	// place the operator can recover it from.
+	if err := recordVultrInstance(f, id, ""); err != nil {
+		return fmt.Errorf("vultr instance %s is LIVE AND BILLING but its handle could not be recorded to %s (%w) — record it by hand before re-running, or destroy it in the console", id, f.ConfigPath, err)
+	}
 	fmt.Fprintf(out, "  instance %s — waiting for an address…\n", id)
 	ip, err := c.WaitActive(ctx, id, 8*time.Minute)
 	if err != nil {
