@@ -39,12 +39,13 @@ diagram or changes behavior a diagram depicts, verify the diagram's claims
 an inline comment on the diagram lines. Diagram layout, styling, or wording is
 a nit — omit it.
 
-Severity tiers:
-- blocking: must fix before merge (security, data loss, silent breakage)
+Severity tiers (the renderer pairs each with its icon — no legend is posted
+in the review body; this is the one place the mapping lives):
+- blocking: must fix before merge (security, data loss, silent breakage) — 🛑
 - important: should fix in this PR (operator-facing wrong behavior,
-  correctness edge case, vacuous test, misleading doc drift)
+  correctness edge case, vacuous test, misleading doc drift) — ⚠️
 - suggestion: real but fine to defer — worth doing, never blocks, listed in
-  the round's findings table without an inline thread
+  the round's findings table without an inline thread — 💡
 - nit: do not include in output at all
 
 Only blocking and important findings become inline comments. Suggestions must

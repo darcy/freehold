@@ -70,15 +70,14 @@ func (s *Spec) stageReleasePulse(report []string) []string {
 			return append(report, "WARN: release pulse: "+err.Error())
 		}
 		key = tag
-		body := rel.Body
-		if len(body) > 8000 {
-			body = body[:8000] + "…"
-		}
 		content = "freehold " + tag
 		if rel.Name != "" && rel.Name != tag {
 			content += " — " + rel.Name
 		}
-		content += "\n\n" + body + "\n\n" + rel.URL
+		if body := pulseNotes(rel.Body); body != "" {
+			content += "\n\n" + body
+		}
+		content += "\n\n" + rel.URL
 	} else {
 		key = version.Commit
 		if key == "" || key == "unknown" {
@@ -93,6 +92,19 @@ func (s *Spec) stageReleasePulse(report []string) []string {
 		return append(report, "WARN: release pulse: "+err.Error())
 	}
 	return append(report, "release pulse posted ("+key+")")
+}
+
+// pulseNotes strips the release body down to what reads well in a Pulse note:
+// the high-level bullets. The release's trailing `## Test status` table (and
+// anything after it) is release-testing bookkeeping, not reading material —
+// the release page renders it; the pulse doesn't.
+func pulseNotes(body string) string {
+	cut := strings.SplitN("\n"+body, "\n## Test status", 2)[0]
+	cut = strings.TrimPrefix(strings.TrimRight(cut, "\n \t"), "\n") // drop the split sentinel
+	if len(cut) > 8000 {
+		cut = cut[:8000] + "…"
+	}
+	return cut
 }
 
 // postPulseOnce publishes the pulse note unless a recent note already carries
