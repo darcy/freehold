@@ -799,6 +799,9 @@ func (s *Spec) stageLitellmAliases() error {
 		if !isFreshGatewayNoModels(err) {
 			return fmt.Errorf("list gateway models: %w", err)
 		}
+		// The 500 means zero registered: parse an empty list, not the nil
+		// body (litellmGet returned before decoding).
+		raw = json.RawMessage("[]")
 	}
 	models, err := parseLitellmModels(raw)
 	if err != nil {
