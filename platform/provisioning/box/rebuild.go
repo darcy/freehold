@@ -568,8 +568,9 @@ func (e *Engine) RunBootstrap() error {
 // first-run-wins values; the provider + model come from the build's picker,
 // see the build package's gateway.go). The CP is now the durable owner: the
 // caller seeds these to the CP (ensureCpSecrets); world_build re-seeds the
-// co-located runner from the CP store so the existing $LITELLM/$PROVIDER_KEY
-// injection path is unchanged.
+// co-located runner's master + postgres from that store (its tfRun TF_VAR
+// inputs), while the provider key stays store-only — the alias stage reads it
+// there and the AI department's door package is its only other copy.
 
 // ensureCpSecrets asks the operator ONLY for the CP secrets the CP does not
 // already hold (DNS creds + litellm), seeding each as the CP's durable owner via
