@@ -257,12 +257,16 @@ func (s *Server) isRelayMember(snap state.ControlPlaneState, pubkey string) (boo
 }
 
 func (s *Server) portalToken(w http.ResponseWriter, r *http.Request) {
+	if s.Auth == nil {
+		writeErr(w, statusFor(errAuthNotConfigured), errAuthNotConfigured.Error())
+		return
+	}
 	pk, role, err := s.sessionFor(r)
-	if err != nil || (s.Auth != nil && pk == "") {
+	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if s.Auth != nil && role == "" {
+	if role == "" {
 		role = RoleOperator
 	}
 	token, err := s.Auth.IssuePortalRole(pk, role)
