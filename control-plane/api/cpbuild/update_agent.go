@@ -124,9 +124,18 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 					rollback()
 					return "", fmt.Errorf("%s: move the registry row: %w", verb, err)
 				}
+				// The minted gateway key is POD-keyed (its alias, its Secret,
+				// its store record): re-key the record so the same key — and
+				// its spend history — follows the renamed identity instead of
+				// minting an orphan.
+				if err := spec.moveLitellmKeyRecord(oldPod, newPod); err != nil {
+					rollback()
+					return "", fmt.Errorf("%s: move the litellm key record: %w", verb, err)
+				}
 				legs = append(legs,
 					fmt.Sprintf("[verified] identity dir moved (%s → %s) — the same nsec re-applies under the new name", sanitizeDir(name), sanitizeDir(newName)),
 					fmt.Sprintf("[verified] workspace moved (%s/%s → %s/%s) — the agent's files follow the rename", agent.AgentWorkspaceRoot, oldPod, agent.AgentWorkspaceRoot, newPod),
+					fmt.Sprintf("[verified] litellm key follows the rename (pod %s → %s) — same minted key, spend history intact", oldPod, newPod),
 					"[verified] registry row moved, identity (pubkey) preserved — chat history, grants and memory follow")
 			} else if err := reg.RenameAgent(name, newName); err != nil {
 				return "", fmt.Errorf("%s: move the registry row: %w", verb, err)
@@ -224,6 +233,14 @@ func BuildRemoveAgentFn(spec *Spec) agent.RemoveAgentFn {
 		name = strings.TrimSpace(name)
 		if err := coreAgentRefused(spec, name, verb); err != nil {
 			return "", err
+		}
+		// The minted gateway key must not outlive the row: revoke it (and drop
+		// the store record) BEFORE retiring the pod objects — a failure leaves
+		// the verb unfinished with the agent intact, the same loud-retry shape
+		// as the retire itself. A world without litellm, or a key never
+		// minted, is a no-op.
+		if err := spec.revokeAgentLitellmKey(name); err != nil {
+			return "", fmt.Errorf("%s %s: revoking the litellm key FAILED (%v) — the registry row is untouched; retry once the gateway answers", verb, name, err)
 		}
 		if err := spec.resolveK3sVmid(verb, name); err != nil {
 			return "", err
