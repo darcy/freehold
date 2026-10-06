@@ -347,6 +347,94 @@ func TestAppendMigrationsRunsOnceAndReports(t *testing.T) {
 	}
 }
 
+// TestBuildMigratorStagesKubeconfigForPendingScripts pins the cluster-script
+// contract: while scripts are pending, the runner stages the k3s admin
+// kubeconfig 0600 beside them and hands the scripts KUBECONFIG with the server
+// REWRITTEN to the k3s node IP (the CP cannot dial 127.0.0.1). A converged
+// world must stage nothing — the env only appears for a pending queue.
+func TestBuildMigratorStagesKubeconfigForPendingScripts(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "agent-tools")
+	consoleDir := filepath.Join(dir, "control-plane")
+	for _, d := range []string{stateDir, consoleDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := "apiVersion: v1\nkind: Config\nclusters:\n- cluster:\n    server: https://127.0.0.1:6443\n"
+	spec := &Spec{
+		StateDir: stateDir, RunnerAddr: "127.0.0.1:8790", RunnerTarget: "proxmox-box",
+		K3sVmid: 102, K3sIP: "10.77.0.42/24",
+		kubeconfigFetch: func(uint32) (string, error) { return raw, nil },
+	}
+	root := filepath.Join(consoleDir, "migrations")
+	scriptsDir := migrations.ScriptsRoot(root)
+	if err := os.MkdirAll(scriptsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := `[ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ] || { echo "no staged KUBECONFIG"; exit 1; }
+grep -q "server: https://10.77.0.42:6443" "$KUBECONFIG" || { echo "kubeconfig server not rewritten"; exit 1; }
+`
+	if err := os.WriteFile(filepath.Join(scriptsDir, "1799960000.sh"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if results, err := BuildMigrator(spec, consoleDir)(); err != nil || len(results) != 1 || !results[0].OK {
+		t.Fatalf("expected the kubeconfig migration to run OK, got %+v / %v", results, err)
+	}
+	kc := filepath.Join(root, "kubeconfig")
+	info, err := os.Stat(kc)
+	if err != nil {
+		t.Fatalf("staged kubeconfig missing: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("staged kubeconfig mode = %o, want 600", info.Mode().Perm())
+	}
+
+	// Converged: a second run stages nothing (the file would still exist from
+	// the first, but a fresh root proves the env is what gates the staging).
+	root2 := filepath.Join(consoleDir, "migrations2")
+	if err := os.MkdirAll(migrations.ScriptsRoot(root2), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if results, err := BuildMigrator(spec, filepath.Join(consoleDir, "m2"))(); err != nil || len(results) != 0 {
+		t.Fatalf("converged run must be a no-op, got %+v / %v", results, err)
+	}
+	if _, err := os.Stat(filepath.Join(root2, "kubeconfig")); !os.IsNotExist(err) {
+		t.Fatal("a converged world must not stage a kubeconfig")
+	}
+}
+
+// TestBuildMigratorCarriesKubeconfigStagingFailure pins the best-effort
+// contract: when the kubeconfig cannot be staged (no runner), the queue still
+// runs and the script sees the CAUSE in FREEHOLD_KUBECONFIG_ERROR instead of a
+// bare missing env it could only guess at.
+func TestBuildMigratorCarriesKubeconfigStagingFailure(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "agent-tools")
+	consoleDir := filepath.Join(dir, "control-plane")
+	for _, d := range []string{stateDir, consoleDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := filepath.Join(consoleDir, "migrations")
+	scriptsDir := migrations.ScriptsRoot(root)
+	if err := os.MkdirAll(scriptsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := `[ -n "${FREEHOLD_KUBECONFIG_ERROR:-}" ] || { echo "expected the staging failure to ride FREEHOLD_KUBECONFIG_ERROR"; exit 1; }
+`
+	if err := os.WriteFile(filepath.Join(scriptsDir, "1799960000.sh"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := BuildMigrator(&Spec{StateDir: stateDir}, consoleDir)()
+	if err != nil || len(results) != 1 || !results[0].OK {
+		t.Fatalf("expected the script to run OK against the carried error, got %+v / %v", results, err)
+	}
+}
+
 // TestAppendMigrationsFailsLoudlyWithoutWedging pins the other half: a script
 // that fails must stay unmarked so the next bring-up retries it, and must surface
 // as a WARN so it cannot be mistaken for a converged world.
