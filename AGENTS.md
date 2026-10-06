@@ -259,7 +259,8 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   publishes the operator's kind:0 profile (name asked at install, `--display-name`), which makes
   the desktop app SKIP its stock onboarding (no starter channels, no private Welcome, no
   built-in welcome-team agents); the build instead stands up the open `#general` channel
-  (CPA-owned, operator + CPA) and posts a one-time marker-guarded welcome in `#freehold`. Only
+  (CPA-owned, operator + CPA) and posts a one-time welcome in `#freehold` (guarded by any
+  prior message there — a world with history is not a first run). Only
   the identity/grant separation is locked; capability tooling/secrets arrive per department
   later. A custom agent that self-serves a department-owned capability is a
   containment failure even if a grant would technically allow it — the department's prompt is

@@ -2032,10 +2032,12 @@ func (s *Spec) appendMemoryPlane(report []string) []string {
 	return append(report, "memory plane: owner "+agenttools.ShortHex(s.OwnerPub)+" attests each agent pod (kind "+strconv.Itoa(nipoa.AgentEngramKind)+")")
 }
 
-// freeholdWelcomeMarker is the #t tag on the CPA's one-time #freehold welcome
-// message; its presence on the relay is the whole idempotence state (the relay
-// DB is durable across rebuild/adopt, so the marker read is enough — no
-// fresh-vs-adopt flag).
+// freeholdWelcomeMarker is the #t tag carried by the CPA's one-time #freehold
+// welcome message — provenance only. The guard is ANY prior #freehold message
+// (a tag lookup re-posts once anything else lands in the channel: the relay
+// applies its SQL limit before post-filtering tag constraints), so the relay
+// DB being durable across rebuild/adopt is what keeps the welcome one-time —
+// no fresh-vs-adopt flag.
 const freeholdWelcomeMarker = "fh-welcome"
 
 // operatorDisplayName resolves the operator's display name (OperatorName or
@@ -2121,9 +2123,10 @@ func operatorProfileName(ev map[string]interface{}) string {
 
 // postFreeholdWelcome posts the CPA's one-time welcome message in #freehold,
 // mentioning the operator (so it files into their Inbox on a first connect).
-// Marker-guarded: a #freehold message carrying freeholdWelcomeMarker means it
-// already ran — a rebuild/re-adopt never re-posts. Best-effort: the caller
-// warns on error (the next build's marker read self-heals a transient miss).
+// Guarded by ANY prior #freehold message: a world with history is not a first
+// run — a rebuild/re-adopt never re-posts. Best-effort: the caller warns on
+// error (the next build re-checks the still-empty channel and self-heals a
+// transient miss).
 func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if s.OwnerPub == "" {
 		return nil
@@ -2132,13 +2135,17 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
-	// Marker first — the welcome is one-time. Two single-filter reads, the
-	// pattern every relay caller uses (the bridge honors body[0] only; a
-	// multi-filter request would silently drop the second).
+	// The first-run guard is ANY kind-9 message in #freehold — NOT a tag
+	// lookup. The relay applies the SQL limit BEFORE post-filtering tag
+	// constraints (buzz-relay bridge Phase 2/3), so a #t+limit:1 read means
+	// "is the NEWEST #freehold message the welcome" — false the moment
+	// anyone chats, and every build re-posts. Any history at all = the world
+	// has run before; the welcome is a first-run surface. (The posted event
+	// still carries the fh-welcome tag as provenance; the guard just never
+	// reads it.)
 	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
 		"kinds": []interface{}{delegate.StreamMsgKind},
 		"#h":    []interface{}{relayFreeholdChannel},
-		"#t":    []interface{}{freeholdWelcomeMarker},
 		"limit": 1,
 	}})
 	if err != nil {
@@ -2150,7 +2157,7 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	// The mention carries the name the operator is known by on the relay —
 	// their own kind:0 (an updated world has no recorded name; the profile
 	// is where it lives). A failed read errors out rather than posting the
-	// default: the marker is still absent, so the next build re-runs this
+	// default: the channel is still empty, so the next build re-runs this
 	// path — nothing is ever posted wrong.
 	pevs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
 		"kinds":   []interface{}{0},
@@ -2574,7 +2581,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		// The one-time #freehold welcome — the operator's first-run surface now
 		// that the desktop app's own onboarding is skipped (stageOperatorProfile).
-		// Best-effort: a transient miss self-heals on the next build's marker read.
+		// Best-effort: a transient miss self-heals on the next build's history read.
 		if name == spec.CpaName {
 			if err := spec.postFreeholdWelcome(nSec); err != nil {
 				fmt.Fprintln(os.Stderr, "WARN: the #freehold welcome message was not posted:", err)
