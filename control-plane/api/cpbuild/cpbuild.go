@@ -63,6 +63,24 @@ const (
 	migrationWaitDelay     = 5 * time.Second
 )
 
+// longMigrations lifts the bound for named data-mover scripts whose healthy
+// path legitimately exceeds the 5m lock budget — a pg_dump/restore over
+// kubectl exec scales with the gateway's request history, not with a handful
+// of curls. The lock-hold cost is accepted for these entries only; a hang
+// still dies at the lifted bound, and the script's own retry contract makes a
+// killed-but-healthy run resumable.
+var longMigrations = map[string]time.Duration{
+	"1799960000.sh": 20 * time.Minute,
+}
+
+// scriptMigrationTimeout resolves the bound for one script.
+func scriptMigrationTimeout(name string) time.Duration {
+	if t, ok := longMigrations[name]; ok {
+		return t
+	}
+	return migrationScriptTimeout
+}
+
 // AgentToolsPort is the CP's freehold-agent-tools MCP bind port. Any URL the
 // CPA pod bootstraps its stdio bridge from (the agent-tools `--self-url`, and
 // the CPA/agent manifests' bridge URL) MUST use this port — the pod curls
@@ -1854,9 +1872,16 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 			}
 		}
 		run := func() ([]migrations.Result, error) {
-			return migrations.Run(root, func(_, path string) error {
-				return s.runMigrationScript(path, runEnv, migrationScriptTimeout, migrationWaitDelay)
+			res, err := migrations.Run(root, func(name, path string) error {
+				return s.runMigrationScript(path, runEnv, scriptMigrationTimeout(name), migrationWaitDelay)
 			})
+			// The staged admin kubeconfig is plaintext cluster-admin at rest on
+			// the backup=1 plane: it lives only for the duration of a pending
+			// queue and is re-staged (one runner round-trip) on the next
+			// pending run, so remove it now that the queue has drained or
+			// stopped. The markers and captures stay, of course.
+			os.Remove(filepath.Join(root, "kubeconfig"))
+			return res, err
 		}
 		if s.AgentRegistry == nil {
 			// No in-process registry to keep aligned (the console-executor build path,

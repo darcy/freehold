@@ -374,6 +374,7 @@ func TestBuildMigratorStagesKubeconfigForPendingScripts(t *testing.T) {
 	}
 	script := `[ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ] || { echo "no staged KUBECONFIG"; exit 1; }
 grep -q "server: https://10.77.0.42:6443" "$KUBECONFIG" || { echo "kubeconfig server not rewritten"; exit 1; }
+[ "$(stat -c %a "$KUBECONFIG")" = "600" ] || { echo "staged kubeconfig mode $(stat -c %a "$KUBECONFIG"), want 600"; exit 1; }
 `
 	if err := os.WriteFile(filepath.Join(scriptsDir, "1799960000.sh"), []byte(script), 0o644); err != nil {
 		t.Fatal(err)
@@ -382,25 +383,20 @@ grep -q "server: https://10.77.0.42:6443" "$KUBECONFIG" || { echo "kubeconfig se
 	if results, err := BuildMigrator(spec, consoleDir)(); err != nil || len(results) != 1 || !results[0].OK {
 		t.Fatalf("expected the kubeconfig migration to run OK, got %+v / %v", results, err)
 	}
+	// The staged admin credential is for the queue run only — the file the
+	// script just verified is removed once the queue returns, so it never
+	// rests on the backup=1 plane between runs.
 	kc := filepath.Join(root, "kubeconfig")
-	info, err := os.Stat(kc)
-	if err != nil {
-		t.Fatalf("staged kubeconfig missing: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("staged kubeconfig mode = %o, want 600", info.Mode().Perm())
+	if _, err := os.Stat(kc); !os.IsNotExist(err) {
+		t.Fatal("the staged kubeconfig must be removed once the queue returns")
 	}
 
-	// Converged: a second run stages nothing (the file would still exist from
-	// the first, but a fresh root proves the env is what gates the staging).
-	root2 := filepath.Join(consoleDir, "migrations2")
-	if err := os.MkdirAll(migrations.ScriptsRoot(root2), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if results, err := BuildMigrator(spec, filepath.Join(consoleDir, "m2"))(); err != nil || len(results) != 0 {
+	// Converged: the SAME consoleDir re-runs with the marker set — zero
+	// pending, zero staging, no kubeconfig re-created.
+	if results, err := BuildMigrator(spec, consoleDir)(); err != nil || len(results) != 0 {
 		t.Fatalf("converged run must be a no-op, got %+v / %v", results, err)
 	}
-	if _, err := os.Stat(filepath.Join(root2, "kubeconfig")); !os.IsNotExist(err) {
+	if _, err := os.Stat(kc); !os.IsNotExist(err) {
 		t.Fatal("a converged world must not stage a kubeconfig")
 	}
 }
