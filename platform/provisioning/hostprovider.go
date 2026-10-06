@@ -43,6 +43,13 @@ type HostSession struct {
 	DoorLine string
 	// Host is "root@<ip>" — set before ExecOnHost may run.
 	Host string
+	// CreatedID is the instance handle the provider set the MOMENT its
+	// create call succeeded — before any later step (the address wait, the
+	// host's SSH, the PVE install) can fail. A Prepare error with
+	// CreatedID set means a host EXISTS and bills: the caller records the
+	// handle before surfacing the failure, so the stranded instance is
+	// always recoverable by tooling.
+	CreatedID string
 	// ExecOnHost runs a script on the session's host over the DOOR key
 	// (the installer wires root SSH; ExecOnHost fails when the host does
 	// not answer). Never carries secrets other than the door key.

@@ -83,13 +83,15 @@ func TestWaitActiveTimesOut(t *testing.T) {
 }
 
 func TestDestroyIdempotentAndRetries(t *testing.T) {
-	n := 0
+	// Only the DELETEs count: this box's port-watcher probes new listeners
+	// with a GET / (observed live) — environment noise, not the client.
+	deletes := 0
 	c, srv := testClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Errorf("method %s", r.Method)
+		if r.Method != http.MethodDelete || r.URL.Path != "/v2/instances/i-1" {
+			return
 		}
-		n++
-		if n == 1 {
+		deletes++
+		if deletes == 1 {
 			w.WriteHeader(http.StatusConflict)
 			w.Write([]byte(`{"error":"still settling"}`))
 			return
@@ -100,8 +102,8 @@ func TestDestroyIdempotentAndRetries(t *testing.T) {
 	if err := c.Destroy(context.Background(), "i-1"); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("expected retry after 409, calls=%d", n)
+	if deletes != 2 {
+		t.Fatalf("expected retry after 409, deletes=%d", deletes)
 	}
 }
 

@@ -2,10 +2,12 @@ package vultr
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"freehold/platform/provisioning"
 )
@@ -26,7 +28,7 @@ func stubClientFor(t *testing.T, h http.Handler) {
 func recordingSession(printed *[]string) (*provisioning.HostSession, *[]string) {
 	var scripts []string
 	s := &provisioning.HostSession{
-		Answers: map[string]string{"VULTR_API_KEY": "tok", "region": "ewr", "plan": "vc2-4c-8gb", "label": "freehold-demo"},
+		Answers:  map[string]string{"VULTR_API_KEY": "tok", "region": "ewr", "plan": "vc2-4c-8gb", "label": "freehold-demo"},
 		DoorLine: "ssh-ed25519 AAA door",
 		Host:     "",
 		ExecOnHost: func(script string, timeoutSecs uint64) error {
@@ -99,8 +101,12 @@ func TestVultrPrepareMintRunsPVEInstall(t *testing.T) {
 	if creates != 1 {
 		t.Fatalf("expected one instance create, got %d", creates)
 	}
-	if len(*scripts) != 1 || !strings.Contains((*scripts)[0], "pve-install-ok") {
+	// The sshd wait + the PVE install both ride the session transport.
+	if len(*scripts) != 2 || !strings.Contains((*scripts)[1], "pve-install-ok") {
 		t.Fatalf("the PVE install must run through the session transport: %v", *scripts)
+	}
+	if s.CreatedID != "i-9" {
+		t.Fatalf("the created handle must ride the session the moment create succeeds: %q", s.CreatedID)
 	}
 }
 
@@ -137,6 +143,44 @@ func TestVultrPrepareRefusesOnLookupFailure(t *testing.T) {
 	s, _ := recordingSession(nil)
 	if _, err := (HostProvider{}).Prepare(context.Background(), s, "i-x"); err == nil {
 		t.Fatal("a rate-limited verify must fail loudly, not mint a second instance")
+	}
+}
+
+func TestVultrPreparePostCreateFailureCarriesHandle(t *testing.T) {
+	// The instance is created, then the PVE install fails (the transport
+	// refuses): the session must STILL carry the created handle — the
+	// caller records it, so a failed first mint never strands the bill.
+	old := sshdWaitTimeout
+	sshdWaitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { sshdWaitTimeout = old })
+	stubClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"ssh_keys":[]}`))
+		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodPost:
+			w.Write([]byte(`{"ssh_key":{"id":"k1"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
+			w.Write([]byte(`{"instance":{"id":"i-stranded"}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/instances/i-stranded"):
+			w.Write([]byte(`{"instance":{"status":"active","main_ip":"203.0.113.11"}}`))
+		default:
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	s, scripts := recordingSession(nil)
+	s.ExecOnHost = func(script string, timeoutSecs uint64) error {
+		*scripts = append(*scripts, script)
+		return errors.New("ssh: connection refused")
+	}
+	_, err := (HostProvider{}).Prepare(context.Background(), s, "")
+	if err == nil {
+		t.Fatal("a failing transport must fail the PVE install")
+	}
+	if !strings.Contains(err.Error(), "i-stranded") {
+		t.Fatalf("the failure must name the billed instance: %v", err)
+	}
+	if s.CreatedID != "i-stranded" {
+		t.Fatalf("the handle must survive the failure: %q", s.CreatedID)
 	}
 }
 

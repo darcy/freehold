@@ -105,17 +105,49 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 	if err != nil {
 		return nil, fmt.Errorf("vultr create: %w", err)
 	}
+	// The handle rides the session NOW — every later step can fail, and a
+	// billed instance with an unrecorded id is the one unrecoverable state.
+	s.CreatedID = id
 	s.Print("  instance %s — waiting for an address…\n", id)
 	ip, err := c.WaitActive(ctx, id, 8*time.Minute)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("instance %s: %w", id, err)
 	}
 	s.Host = "root@" + ip
-	s.Print("  instance live at %s — installing PVE (apt route; this takes minutes)…\n", ip)
+	s.Print("  instance live at %s — waiting for sshd, then installing PVE (apt route; this takes minutes)…\n", ip)
+	// Vultr reports "active" before sshd answers its first boot (and
+	// ExecOnHost does one dial, no retry) — poll until the host answers,
+	// and fail the Prepare (naming the id) when it never does: limping
+	// into the install would just fail there.
+	if err := waitSSH(ctx, s, sshdWaitTimeout); err != nil {
+		return nil, fmt.Errorf("instance %s: %w", id, err)
+	}
 	if err := s.ExecOnHost(PVEInstallScript(), 1800); err != nil {
-		return nil, fmt.Errorf("pve install: %w", err)
+		return nil, fmt.Errorf("pve install on instance %s: %w", id, err)
 	}
 	return &provisioning.Host{ID: id, IP: ip}, nil
+}
+
+// sshdWaitTimeout is how long Prepare waits for the host's first sshd
+// answer; a package var so the hermetic tests shrink it.
+var sshdWaitTimeout = 10 * time.Minute
+
+// waitSSH polls until the session's host answers over the door transport.
+func waitSSH(ctx context.Context, s *provisioning.HostSession, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if s.ExecOnHost("echo ssh-ok", 30) == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the host never answered SSH within %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
 }
 
 // InstallDoorKey appends the substrate door line over the DOOR key (the

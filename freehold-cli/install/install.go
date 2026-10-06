@@ -961,7 +961,19 @@ func ensureHost(f *box.Flags, out io.Writer, ui *installerUI) (*provisioning.Hos
 	defer cancel()
 	host, err := prov.Prepare(ctx, session, f.HostID)
 	if err != nil {
-		return nil, err
+		// A post-create failure (the address wait, the PVE install) still
+		// leaves a BILLED instance — the session carries its handle the
+		// moment the create succeeded; record it before surfacing the
+		// failure, so the stranded host is always recoverable by tooling.
+		if session.CreatedID != "" {
+			f.Host = session.Host
+			f.HostID = session.CreatedID
+			if rerr := recordHostHandle(f, &provisioning.Host{ID: session.CreatedID}, out); rerr != nil {
+				return session, fmt.Errorf("%w\n  (AND the handle could not be recorded: %v — note the id %s by hand)", err, rerr, session.CreatedID)
+			}
+			return session, fmt.Errorf("%w\n  (the instance's handle is recorded in the profile — a re-run re-adopts it instead of minting a second one)", err)
+		}
+		return session, err
 	}
 	if host == nil {
 		return nil, fmt.Errorf("provider %q prepared no host", prov.Name())
