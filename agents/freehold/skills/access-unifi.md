@@ -25,8 +25,9 @@ improvised.
    application, nothing more than the job needs.
 2. **Provision the door EMPTY** through `provision_runner`:
    `name=unifi-api-admin, kind=unifi, address=<controller URL>,
-   grant_to=[network]`. The tool is credential-blind — it takes no secret;
-   never accept one and never put a credential in chat.
+   probe="POST /api/auth/login json-body", grant_to=[network]`. The tool is
+   credential-blind — it takes no secret; never accept one and never put a
+   credential in chat.
 3. **DM the operator the door page link** the tool returns
    (`https://cp.<domain>/runner/unifi-api-admin`). They fill **username +
    password**; the console seals it to the door's key and restarts the door.

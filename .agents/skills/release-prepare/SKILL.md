@@ -114,10 +114,11 @@ history. Promotion of an already-cut pre-release is `release-publish`, not this.
    | Proxmox | rebuild.freehold.technology | Rebuild - Teardown | ⚪ Unverified |
    | Proxmox | rebuild.freehold.technology | Rebuild - Build | ⚪ Unverified |
    | Proxmox | live | Live - Update | ⚪ Unverified |
-
-   Legend: ⚪ Unverified · ✅ Passed · ❌ Failed — `release-test` updates this
-   table; `release-publish` requires every row ✅.
    ```
+   No legend line under the table — the icons' meaning (⚪ Unverified ·
+   ✅ Passed · ❌ Failed) lives here in the skill, which keeps it consistent
+   across releases; readers don't need the explanation repeated in every
+   release body.
 
 6. **Stop — do not promote.** Leave it a pre-release and tell the operator that
    `release-test` fills the status table (dev first, then the per-provider e2e) and

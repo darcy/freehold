@@ -242,7 +242,9 @@ func StampPin(t Transport, spec *DeployCpSpec, pin version.Pin) error {
 // stopPriorServe kills a previously started serve (if any) and clears its pid
 // so the binary can be overwritten and a fresh instance started.
 func stopPriorServe(t Transport, spec *DeployCpSpec, step string) error {
-	cmd := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
+	// The unit stop FIRST (a clean unit stop leaves Restart=on-failure idle —
+	// no restart loop); the pid kill + the exe scan cover a pre-unit world.
+	cmd := fmt.Sprintf("systemctl stop freehold-console 2>/dev/null; p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true",
 		spec.StateDir, spec.StateDir)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), step, 30); err != nil {
 		return err
@@ -273,7 +275,10 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 		return nil
 	}
 	atState := filepath.Join(spec.StateDir, "..", "agent-tools")
-	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
+	// The unit stop FIRST (same shape as stopPriorServe) — a unit-managed
+	// serve ignores the pid kill; the pid kill + the exe scan cover a
+	// pre-unit world.
+	stop := fmt.Sprintf("systemctl stop freehold-agent-tools 2>/dev/null; p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
 		return err
 	}
@@ -314,21 +319,23 @@ func seedOperatorTZ(t Transport, spec *DeployCpSpec) {
 	fmt.Printf("  operator timezone seeded: %s (agent pods apply it on their next create/rebuild)\n", tz)
 }
 
-// startServe launches the console serve in the guest with the given flag
-// string, waits for /healthz, then confirms the started pid is still alive.
-// Shared by the full deploy and update's lighter redeploy.
+// startServe installs the console as a REAL systemd unit and (re)starts it,
+// then waits for /healthz. Not a nohup transient: a guest reboot or a host
+// crash must bring the control plane back (the nohup shape died with the
+// guest and stayed dead — the crash-restart gap). Every deploy rewrites the
+// unit (the flags can change) and enable --now starts what isn't running
+// (the deploy stopped the prior serve first). Shared by the full deploy and
+// update's redeploy.
 func startServe(t Transport, spec *DeployCpSpec, flags string) (uint32, error) {
-	start := fmt.Sprintf(
-		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
-		spec.BinDir, spec.StateDir, spec.BindAddr, flags, spec.StateDir, spec.StateDir)
-	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, start), "start control plane", 30)
-	if err != nil {
+	unit := runnerUnitFile("freehold control plane (console serve)",
+		fmt.Sprintf("%s/freehold-console serve --state-dir %s --addr %s%s",
+			spec.BinDir, spec.StateDir, spec.BindAddr, flags))
+	// restart, not enable --now: a unit RUNNING with last deploy's flags must
+	// reload the new ones (enable --now leaves it untouched).
+	write := fmt.Sprintf("echo %s | base64 -d > /etc/systemd/system/freehold-console.service && systemctl daemon-reload && systemctl enable freehold-console >/dev/null 2>&1 && systemctl restart freehold-console && sleep 1 && systemctl is-active freehold-console",
+		base64StdEncode([]byte(unit)))
+	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, write), "install console unit", 90); err != nil {
 		return 0, err
-	}
-	pidStr := strings.TrimSpace(out.Stdout)
-	var pid uint32
-	if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil || pid == 0 {
-		return 0, fmt.Errorf("start did not yield a pid: %q", out.Stdout)
 	}
 	healthy := false
 	var lastErr error
@@ -343,15 +350,10 @@ func startServe(t Transport, spec *DeployCpSpec, flags string) (uint32, error) {
 		time.Sleep(2 * time.Second)
 	}
 	if !healthy {
-		return pid, fmt.Errorf("control plane did not answer /healthz on %s within the poll window (last probe error: %v)",
+		return 0, fmt.Errorf("control plane did not answer /healthz on %s within the poll window (last probe error: %v — journalctl -u freehold-console on the guest)",
 			spec.BindAddr, lastErr)
 	}
-	alive := fmt.Sprintf("kill -0 %d >/dev/null 2>&1", pid)
-	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, alive), "control plane still alive", 10); err != nil {
-		return pid, fmt.Errorf("control plane answered /healthz but the started process (pid %d) is gone — check %s/serve.log (e.g. address already in use)",
-			pid, spec.StateDir)
-	}
-	return pid, nil
+	return 0, nil
 }
 
 // relayDomain strips the scheme and trailing slash from a relay URL.
@@ -526,33 +528,25 @@ func shipVerbSurface(t Transport, spec *DeployCpSpec) error {
 	return nil
 }
 
-// reviveScript renders the guest-local CP revival script: the same serve +
-// runner (+ agent-tools, when its argv is known) start lines this deploy just
-// ran, written to <BinDir>/revive-cp.sh. A rollback run ON the guest
-// (`freehold snapshot rollback --guest`) execs it to bring the CP back without
-// the box's update flow. Regenerated on every deploy/redeploy — the flags
-// cannot drift from what actually runs.
+// reviveScript renders the guest-local CP revival script. The console,
+// co-located runner, capability doors and agent-tools are all REAL enabled
+// systemd units (the boot re-runs them); the starts here are belt and
+// suspenders — and cover a pre-unit world whose processes only ever existed
+// as pid files. Regenerated on every deploy/redeploy — what it starts cannot
+// drift from what actually runs.
 func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string, capabilityRunnerArgvs []string) string {
-	serve := fmt.Sprintf(
-		"setsid nohup %s/freehold-console serve --state-dir %s --addr %s%s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid",
-		spec.BinDir, spec.StateDir, spec.BindAddr, flags, spec.StateDir, spec.StateDir)
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("# freehold CP revival — generated by deploy-cp; do not edit by hand.\n")
 	b.WriteString("# Brings the console serve + co-located runner back after a rollback\n")
-	b.WriteString("# stopped this guest. agent-tools returns on the next `freehold build`.\n")
-	b.WriteString(serve + "\n")
+	b.WriteString("# stopped this guest. All pieces are enabled units: the boot re-runs\n")
+	b.WriteString("# them, these starts are belt and suspenders.\n")
+	b.WriteString("systemctl start freehold-console 2>/dev/null || true\n")
 	b.WriteString(fmt.Sprintf("up=0\nfor i in $(seq 1 15); do curl -fsS -m 3 http://%s/healthz >/dev/null 2>&1 && { up=1; break; }; sleep 2; done\n", spec.BindAddr))
-	b.WriteString("[ \"$up\" = 1 ] || { echo 'console serve did not answer /healthz — check " + spec.StateDir + "/serve.log' >&2; exit 1; }\n")
+	b.WriteString("[ \"$up\" = 1 ] || { echo 'console serve did not answer /healthz — journalctl -u freehold-console' >&2; exit 1; }\n")
 	if spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil {
-		// The runner's unit is a REAL file now (Restart=on-failure, enabled):
-		// the boot re-runs it. The start is only needed when the boot's
-		// first attempt lost the race with this script.
 		b.WriteString("systemctl start freehold-runner 2>/dev/null || true\n")
 	}
-	// The capability runners (the doors): their units are REAL FILES too
-	// (the build's staging installs them, Restart=on-failure, enabled) —
-	// the boot re-runs them; start = belt and suspenders.
 	for _, line := range capabilityRunnerArgvs {
 		unit, _, ok := strings.Cut(line, " ")
 		if !ok {
@@ -560,11 +554,7 @@ func reviveScript(spec *DeployCpSpec, flags, agentToolsArgv string, capabilityRu
 		}
 		b.WriteString(fmt.Sprintf("systemctl start %s 2>/dev/null || true\n", unit))
 	}
-	if strings.TrimSpace(agentToolsArgv) != "" {
-		at := agentToolsStateDir(spec)
-		b.WriteString(fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true\n", at, at))
-		b.WriteString(fmt.Sprintf("setsid nohup %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid\n", agentToolsArgv, at, at))
-	}
+	b.WriteString("systemctl start freehold-agent-tools 2>/dev/null || true\n")
 	return b.String()
 }
 
@@ -763,8 +753,8 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		}
 		// secrets.json MERGES instead of overwriting: the box package carries
 		// only its OWN target credential (proxmox-box), but the CP's co-located
-		// runner also holds the litellm/postgres-pw/provider-key secrets the
-		// build added (freehold-console add-secret). Overwriting wipes them, and
+		// runner also holds the litellm master + postgres-pw secrets the build
+		// added (freehold-console add-secret). Overwriting wipes them, and
 		// the box cannot re-derive them (the CP is the durable owner), so a
 		// rebuild would never get them back — the world-build's litellm stage
 		// then dies "requested secret \"litellm\" is not in this runner's

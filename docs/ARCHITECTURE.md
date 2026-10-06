@@ -140,7 +140,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     server through the CP API (console HTTP / agent-tools MCP) or by invoking
     its binaries, never by linking its packages. An import-graph guard test in
     each module enforces both directions. Anything both sides genuinely need
-    (crypto/wire/client/config/console, the relay + delegation protocol
+    (crypto/wire/client/config/console/litellm, the relay + delegation protocol
     clients, the identity loader, the world-facts shape) lives in the
     `contract/` leaf. The build engine (world bring-up/teardown) is server-side
     (`api/cpbuild`); local `build`/`teardown` are thin CP triggers, and CP
@@ -155,7 +155,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`freehold-agent-tools` is a distinct SEMANTIC surface on the CP**, not
     the runner's `exec`. Its Go methods (`control-plane/api/agent/tools.go`,
-    `create_agent`/`provision_runner`/`revoke_runner`/`grant_agent`/`manage_agent`) are served
+    `create_agent`/`update_agent`/`provision_runner`/`revoke_runner`/`grant_agent`/`manage_agent`) are served
     in-process by
      `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
      authorized per call against the server's own relay roster (NIP-29 channel
@@ -478,10 +478,18 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     display name asked at install, `--display-name`) — the event the app checks
     to skip its stock onboarding (no starter channels, no private Welcome, no
     built-in welcome-team agents) — stands up the open `#general` channel
-    (CPA-owned; operator + CPA), and posts a one-time marker-guarded welcome in
-    `#freehold`. Every stage is an idempotent ensure (existing worlds pick the
+    (CPA-owned; operator + CPA), and posts a one-time welcome in `#freehold`
+    (guarded by any prior message there — a world with history is not a first
+    run). Every stage is an idempotent ensure (existing worlds pick the
     surface up on their next build; a missed kind:0 or welcome degrades to a
     WARN, never a failed build).
+
+    Every build and update also posts the world's running version to the Buzz
+    desktop app's **Pulse** feed as the CPA (a kind:1 note): a stable build
+    posts its own release's notes and link, a dev build a short "Version
+    updated to &lt;sha&gt;" with the commit link — deduped by marker tag, so
+    repeated same-version builds stay quiet; a missed post degrades to a WARN
+    the next build retries.
 
 *   **Each department holds capability runners** — one per capability, grant-scoped,
     rostered over native Nostr kinds, named for the target (`pve-ssh-root`,
@@ -491,8 +499,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **Every agent reasons through the LiteLLM gateway by alias, never by the
     provider model name.** The build ensures a default alias set on the
     gateway (`stageLitellmAliases`, idempotent, before the pods apply), each
-    entry a clone of the base registration (`litellm.tf`) pointing at the
-    same underlying model: **Code** (coding agents), **General** (the
+    pointing at the operator's first-build provider choice — registered
+    straight from the CP's litellm store (terraform deploys the gateway but
+    registers no model): **Code** (coding agents), **General** (the
     default for custom agents), **Freehold** (the core agents — the CPA +
     departments, pinned), and **ExtraThinking** (complex architecture / deep
     thinking). A created agent's alias is chosen at `create_agent` time and
@@ -546,10 +555,13 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     not conversation.
 
 *   It is **conversation + agent-creation + capability governance** in this phase: it
-    calls the CP toolset's `create_agent` / `provision_runner` / `revoke_runner` /
-    `manage_agent` (through the
+    calls the CP toolset's `create_agent` / `update_agent` / `provision_runner` /
+    `revoke_runner` / `manage_agent` (through the
     `freehold-agent-tools mcp` stdio bridge, signed as its own nsec and
-    authorized by the server's roster). `provision_runner` stages a NEW
+    authorized by the server's roster). `update_agent` edits an agent it created —
+    purpose, model, channels, or a rename that keeps the pubkey (chat history, grants,
+    and memory follow); core identities are refused, the repo is their source.
+    `provision_runner` stages a NEW
     capability runner and grants agents onto it under the granting skill's
     rules (`agents/freehold/skills/granting.md`, composed into its prompt);
     `revoke_runner` is its counterpart — it removes named grantees from a door's

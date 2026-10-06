@@ -11,7 +11,7 @@ same Buzz `buzz-acp` harness, and every model call goes through one **LiteLLM ga
 AI owns the gateway directly; the runtime is what all agents share.
 
 ```
-   agent pod (buzz-acp)  ──OpenAI-compatible──►  LiteLLM (k3s, NodePort)  ──►  provider (Fireworks)
+   agent pod (buzz-acp)  ──OpenAI-compatible──►  LiteLLM (k3s, NodePort)  ──►  provider (operator-chosen)
      │  identity · workspace · prompt                 │
      │  memory (relay, kind 30174)                    └─ Postgres (models, keys)
      └─ tool bridge ─► CP toolset (create_agent, …)  ·  department runners (exec)
@@ -20,15 +20,24 @@ AI owns the gateway directly; the runtime is what all agents share.
 ## How it works
 
 *   **The gateway.** LiteLLM and its Postgres run as Deployments in the `litellm` namespace,
-    configured by env only. The provider key is operator-supplied, sealed by the CP, and
-    reaches the gateway via the runner — never in argv or Terraform state. One base model is
-    registered at build, and the build then ensures the default ALIAS set on the gateway
-    (`stageLitellmAliases`, each alias cloning the base registration):
-    `Code` (coding agents), `General` (the default for custom agents), `Freehold` (the core
-    agents — the CPA + departments, pinned), `ExtraThinking` (complex architecture / deep
-    thinking). A pod's model resolves by class (`litellmModelFor`): core identities run the
-    core alias; a custom agent runs its persisted choice, defaulting to `General` — and an
-    agent's choice rides its registry row, so a rebuild re-applies the same alias.
+    configured by env only. The provider key is operator-supplied and sealed in the CP's
+    litellm store — never in argv or Terraform state; the build registers the aliases from
+    that store over the gateway's admin API directly, and only the AI department's
+    `litellm-api-admin` runner carries the key (for retargeting), injecting it per exec. At
+    first provision the build's picker collects ONE provider (from a curated single-key
+    table — fireworks_ai, openai, anthropic, gemini, groq, deepseek, mistral, together_ai,
+    openrouter, xai) and a model id (the provider's default, editable); the choice rides
+    the CP's litellm store (`provider` / `provider-prefix` / `provider-model`) and the
+    build registers the default ALIAS set on the gateway, ALL pointing at it
+    (`stageLitellmAliases`, straight from the store — terraform deploys the gateway but
+    registers no model): `Code` (coding agents), `General` (the default for custom
+    agents), `Freehold` (the core agents — the CPA + departments, pinned),
+    `ExtraThinking` (complex architecture / deep thinking). A pod's model resolves by
+    class (`litellmModelFor`): core identities run the core alias; a custom agent runs
+    its persisted choice, defaulting to `General` — and an agent's choice rides its
+    registry row, so a rebuild re-applies the same alias. Retargeting the aliases or
+    adding providers is the AI department's `litellm-api-admin` work, never a build side
+    effect.
 *   **The pod.** A bare Pod in the `agents` namespace: its own Nostr identity (Secret), a
     workspace on the durable plane (`/srv/data/k8s-volumes/agent-home/<pod>`), a prompt
     mounted from a ConfigMap and re-read on every spawn, and a tool bridge fetched from the
@@ -42,6 +51,12 @@ AI owns the gateway directly; the runtime is what all agents share.
     attestation scoped to memory writes. It survives pod re-applies and full rebuilds.
 *   **Creation.** `create_agent` mints identity, joins the relay, applies the pod; the build
     reconciles the whole registry (CPA, then departments, then custom agents) every time.
+*   **Editing.** `update_agent` rewrites a created agent's purpose (its system prompt re-renders
+    from the registry row and lands on the next spawn), switches its litellm model, replaces its
+    channel list, or renames it. A rename moves the durable identity dir, workspace, pod objects
+    and registry row to the new name while keeping the pubkey — chat history, grants, and memory
+    follow. Core identities (the CPA + departments) are repo-defined and refused; `manage_agent
+    remove` retires the pod and drops the row (the durable workspace dir is kept).
 *   **AI's grants:** `litellm-api-admin` (model registration, key minting) and
     `kube-api-litellmsa` (a `litellm`-namespace kube door, no Secrets). Machines such as a
     GPU box arrive through a door the CPA provisions on the fly.
@@ -100,7 +115,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     | `dnsmasq-local-root` | local (CP guest) | 8796 | network |
     | `cp-local-root` | local (CP guest) | 8797 | data |
     | `cloudflare-api-<zone>` | api, one per stored DNS zone | from 8798 | network |
-    | dynamic (`provision_runner`) | ssh / unifi / local | from 8800 | per grant |
+    | dynamic (`provision_runner`) | ssh / any api kind (verify arm as data) / local | from 8800 | per grant |
 
 *   **Grants on the fly.** The CPA can provision capability mid-conversation:
     `provision_runner` stages a NEW runner (keypair, sealed credential, private audit
@@ -114,7 +129,12 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     **Credentials never ride chat:** an ssh door mints its own keypair (the operator
     installs the returned public key once); an api door provisions EMPTY and the agent DMs
     the operator the door's console page, whose kind-aware form seals the credential and
-    restarts the door. Confirmation is governed by `agent_grants` on the CP state —
+    restarts the door. The api door's **verify arm is data, not code**: the requesting
+    agent names the probe (`"<METHOD> <path> [auth] [want] [insecure]"`, e.g. `GET
+    /user/tokens/verify bearer`), it ships in the door's package (with its optional
+    `probe_body`), and the runner composes its self-check curl
+    from it — a new service kind is a probe, never a rebuild. Confirmation is governed by
+    `agent_grants` on the CP state —
     `confirm` (default: in-thread yes, or a DM), `auto`, or `off` (the server-side kill
     switch, `freehold-console grants-mode`) — but the discipline itself is the granting
     skill's, since the server cannot see Buzz threads. `revoke_runner` is the mirror:
@@ -185,15 +205,15 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 ## Known gaps
 
 *   Every pod holds the gateway's **master key** — no scoped per-agent keys.
-*   One base model (`glm-5p3-flash`) — the aliases all clone it, so every alias routes to
-    the same underlying model today; per-provider/model variety is the follow-up. Aliases
-    are ensured only for the default set; managing an agent's choice beyond the registry row
-    is not built.
+*   One model — the aliases all point at the operator's first-build provider
+    choice, so every alias routes to the same underlying model today; adding providers or
+    per-alias variety is AI's `litellm-api-admin` work. Aliases are ensured only for the
+    default set; managing an agent's choice beyond the registry row is not built.
 *   AI's prompt says the provider key rides each exec; the bridge doesn't inject it.
 *   The sprig image is a moving tag (no digest pin).
 *   Memory attestation has no expiry; upstream buzz doesn't verify engram authorship.
 *   Prompt edits in the CP's durable copy don't survive a rebuild (re-seeded from embedded bytes).
-*   The respond-to allowlist is fixed at deploy; `manage_agent remove` only drops the registry row.
+*   The respond-to allowlist is fixed at deploy.
 *   Stale agents survive a department rename on rebuild.
 *   Agents read the repo but can't write it; nothing schedules the re-check.
 *   AI hardware, local AI, optimization dashboards, and eval harnesses are prompt claims

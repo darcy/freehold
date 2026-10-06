@@ -20,6 +20,7 @@ import (
 
 	"freehold/contract/config"
 	"freehold/contract/crypto"
+	"freehold/contract/litellm"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/secret-management"
@@ -75,6 +76,12 @@ type capabilityRunner struct {
 	// host is a self-hosted runner's LAN address — pod coords dial it instead
 	// of the CP IP.
 	host string
+	// probe is the door's parameterized verify arm ("<METHOD> <path> [auth]
+	// [want]") + optional literal body — shipped in the package's TargetMeta
+	// so the runner's self-check is data, not code. Empty = legacy (the
+	// runner's built-in kind match).
+	probe     string
+	probeBody string
 }
 
 // kubernetesVersion is the kubectl build installed on the CP LXC (the kube
@@ -83,6 +90,12 @@ const kubernetesVersion = "v1.36.4"
 
 // cloudflareAPIBase is the cloudflare API v4 root (the door's address env).
 const cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
+
+// kubernetesProbe is the kube doors' verify arm: a SelfSubjectReview — 201
+// proves BOTH reachability and that the door's token survived a CA rotation.
+// "insecure" composes curl -k: the k3s CA is not trusted on the CP guest.
+const kubernetesProbe = "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201 insecure"
+const kubernetesProbeBody = `{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`
 
 // capabilityRunners is the static capability-runner table. Dynamic entries
 // (one cloudflare-api-<domain> runner per stored DNS zone, and one runner per
@@ -93,13 +106,16 @@ func capabilityRunners() []capabilityRunner {
 		{name: "pve-ssh-root", kind: "ssh", port: 8791,
 			rosters: []string{"network", "compute", "data"}},
 		{name: "kube-api-root", kind: "kubernetes", port: 8792,
-			rosters: []string{"compute"}, tokenSecret: "compute-door-token", tokenNS: "kube-system"},
+			rosters: []string{"compute"}, tokenSecret: "compute-door-token", tokenNS: "kube-system",
+			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "kube-api-caddysa", kind: "kubernetes", port: 8793,
-			rosters: []string{"network"}, tokenSecret: "caddy-door-token", tokenNS: "caddy"},
+			rosters: []string{"network"}, tokenSecret: "caddy-door-token", tokenNS: "caddy",
+			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "kube-api-litellmsa", kind: "kubernetes", port: 8794,
-			rosters: []string{"ai"}, tokenSecret: "litellm-door-token", tokenNS: "litellm"},
+			rosters: []string{"ai"}, tokenSecret: "litellm-door-token", tokenNS: "litellm",
+			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "litellm-api-admin", kind: "litellm", port: 8795,
-			rosters: []string{"ai"}},
+			rosters: []string{"ai"}, probe: "GET /health/liveliness bearer"},
 		{name: "dnsmasq-local-root", kind: "local", port: 8796,
 			rosters: []string{"network"}},
 		// cp-local-root: local exec ON the cp guest as root, for the data
@@ -234,14 +250,18 @@ func (s *Spec) cloudflareRunners(store *state.StateStore) []capabilityRunner {
 		for occupied[port] {
 			port++
 		}
-		out = append(out, capabilityRunner{
+		r := capabilityRunner{
 			name:    "cloudflare-api-" + strings.ReplaceAll(zone, ".", "-"),
 			kind:    strings.ToLower(provider),
 			port:    port,
 			rosters: []string{"network"},
 			dnsZone: zone,
 			dnsEnv:  env,
-		})
+		}
+		if r.kind == "cloudflare" {
+			r.probe = "GET /user/tokens/verify bearer"
+		}
+		out = append(out, r)
 		port++
 	}
 	return out
@@ -334,6 +354,7 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 		}
 		res, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
 			Name: r.name, Kind: r.kind, Address: c.addr, Secret: c.secret, RunnerDir: pkgDir,
+			Probe: r.probe, ProbeBody: r.probeBody,
 		})
 		if err != nil {
 			return fmt.Errorf("provision: %w", err)
@@ -386,6 +407,15 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 			if rec, ok := store.GetSecret(r.name); ok {
 				rec.Kind = before.Kind
 				rec.Address = c.addr
+				if r.probe != "" && rec.Probe != r.probe {
+					// The table is the operator's truth: a door predating the
+					// parameterized probe (or a moved arm) re-stamps on build.
+					rec.Probe = r.probe
+					rec.ProbeBody = r.probeBody
+					if err := setTargetProbe(store, r.name, r.probe, r.probeBody); err != nil {
+						return fmt.Errorf("stage %s verify arm: %w", r.name, err)
+					}
+				}
 				store.InsertSecret(r.name, rec)
 				if err := store.Save(); err != nil {
 					return err
@@ -479,7 +509,7 @@ func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred
 		}
 		return runnerCred{addr: "https://" + config.StripCIDR(s.ProxyIP) + ":6443", secret: token}, nil
 	case "litellm":
-		master, provider, err := s.litellmDoorKeys()
+		master, provider, _, _, err := s.litellmDoorKeys()
 		if err != nil {
 			return runnerCred{}, err
 		}
@@ -591,6 +621,36 @@ func setTargetAddress(store *state.StateStore, name, addr string) error {
 	return store.Save()
 }
 
+// setTargetProbe updates a runner's shipped TargetMeta verify arm + its state
+// record — the same update-and-ship shape as setTargetAddress (AddSecret
+// touches only secrets; a full rotate would drop the extras). Callers
+// validate the probe (secret-management::ValidateProbe) before this ships it.
+func setTargetProbe(store *state.StateStore, name, probe, probeBody string) error {
+	rec, ok := store.GetRunner(name)
+	if !ok {
+		return fmt.Errorf("runner %s not found", name)
+	}
+	pkg, err := wire.Load(rec.PackageDir)
+	if err != nil {
+		return err
+	}
+	meta, ok := pkg.Targets[name]
+	if !ok {
+		return fmt.Errorf("runner %s has no target metadata", name)
+	}
+	meta.Probe = probe
+	meta.ProbeBody = probeBody
+	pkg.Targets[name] = meta
+	if err := pkg.WriteToDir(rec.PackageDir); err != nil {
+		return err
+	}
+	secretRec, _ := store.GetSecret(name)
+	secretRec.Probe = probe
+	secretRec.ProbeBody = probeBody
+	store.InsertSecret(name, secretRec)
+	return store.Save()
+}
+
 // doorToken reads a door's SA token back from the k3s guest (kubectl on the
 // guest through the co-located runner) and decodes it. The token passes
 // through CP memory only — it is sealed into the runner's package, never
@@ -610,31 +670,41 @@ func (s *Spec) doorToken(secret, ns string) ([]byte, error) {
 }
 
 // litellmDoorKeys opens the CP's durable litellm store in memory and returns
-// the gateway master key + the provider (fireworks) key. Plaintext lives in
-// memory only long enough to seal into the door runner's package.
-func (s *Spec) litellmDoorKeys() (master, provider []byte, err error) {
+// the gateway master key, the provider key, and the operator's first-build
+// provider choice (prefix + model — the build's picker recorded them as
+// provider-prefix/provider-model). Plaintext lives in memory only long enough
+// to seal into the door runner's package / register on the gateway. A store
+// that predates the choice rode the freehold default (fireworks glm), which
+// the curated table recovers.
+func (s *Spec) litellmDoorKeys() (master, provider []byte, prefix, model string, err error) {
 	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
 	if !cert.CredExists(path) {
-		return nil, nil, fmt.Errorf("no CP litellm store at %s yet — the litellm-api-admin door waits for the services phase", path)
+		return nil, nil, "", "", fmt.Errorf("no CP litellm store at %s yet — the litellm-api-admin door waits for the services phase", path)
 	}
 	secret, err := s.consoleEncSecret()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", "", err
 	}
 	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
 	_, env, err := cert.LoadCreds(path, open, secret)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open CP litellm store: %w", err)
+		return nil, nil, "", "", fmt.Errorf("open CP litellm store: %w", err)
 	}
 	m, ok := env["master"]
 	if !ok || m == "" {
-		return nil, nil, fmt.Errorf("CP litellm store is missing the master key")
+		return nil, nil, "", "", fmt.Errorf("CP litellm store is missing the master key")
 	}
 	p, ok := env["provider"]
 	if !ok || p == "" {
-		return nil, nil, fmt.Errorf("CP litellm store is missing the provider key")
+		return nil, nil, "", "", fmt.Errorf("CP litellm store is missing the provider key")
 	}
-	return []byte(m), []byte(p), nil
+	prefix, model = env["provider-prefix"], env["provider-model"]
+	if prefix == "" || model == "" {
+		if d := litellm.Get("fireworks_ai"); d != nil {
+			prefix, model = d.Prefix, d.DefaultModel
+		}
+	}
+	return []byte(m), []byte(p), prefix, model, nil
 }
 
 // litellmModel is one registration on the gateway: its name and the
@@ -664,71 +734,62 @@ func parseLitellmModels(body []byte) ([]litellmModel, error) {
 }
 
 // stageLitellmAliases ensures the gateway carries the default alias set
-// (agent.LiteLLMAliases — Code/General/Freehold/ExtraThinking), each a clone
-// of the base registration pointing at the same underlying model. Every pod's
-// OPENAI_COMPAT_MODEL names one of these, so this runs BEFORE the pods
-// (re)apply (an unregistered alias is a 400ing agent) and is idempotent: a
-// name already on the gateway is never re-POSTed, so a deliberate retarget is
-// an explicit code change, not a build side effect. The base entry (what the
-// aliases clone) is discovered from /model/info — the base const's name when
-// present, else the single registered model. The master/provider keys come
-// from the CP's durable litellm store, opened in memory only; the gateway is
-// the recorded NodePort origin. A failure fails the build loudly and retries
-// next run.
+// (agent.LiteLLMAliases — Code/General/Freehold/ExtraThinking), ALL pointing
+// at the operator's first-build provider choice: the litellm store's
+// provider-prefix/provider-model with the provider key. This is the only
+// registration path (litellm.tf deploys the gateway but registers no model).
+// Every pod's OPENAI_COMPAT_MODEL names one of the aliases, so this runs
+// BEFORE the pods (re)apply (an unregistered alias is a 400ing agent) and is
+// idempotent: a name already on the gateway is never re-POSTed, so a
+// deliberate retarget is the AI department's litellm-api-admin work, not a
+// build side effect. A bounded readiness wait covers a freshly-rolled
+// gateway's first boot (image pull + DB migration — up to minutes). A failure
+// fails the build loudly and retries next run.
 func (s *Spec) stageLitellmAliases() error {
 	if s.LitellmBaseURL == "" {
 		return nil
 	}
-	master, provider, err := s.litellmDoorKeys()
+	master, provider, prefix, model, err := s.litellmDoorKeys()
 	if err != nil {
 		return err
 	}
-	// The admin API lives at the origin (litellm.tf dials /model/new the same
-	// way); the recorded base URL is the OpenAI-compat /v1 form.
+	under := prefix + "/" + model
+	// The admin API lives at the origin (the OpenAI-compat /v1 form is the
+	// recorded base URL).
 	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
 	client := &http.Client{Timeout: 30 * time.Second}
-	get := func(path string, out interface{}) error {
-		req, rerr := http.NewRequest(http.MethodGet, origin+path, nil)
-		if rerr != nil {
-			return rerr
+
+	// Wait for the gateway to listen: the litellm Deployment gates only on its
+	// own readiness probe, and a first boot pulls the image + runs DB
+	// migration — up to minutes — before the NodePort answers.
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		resp, rerr := client.Get(origin + "/health/liveliness")
+		if rerr == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
 		}
-		req.Header.Set("Authorization", "Bearer "+string(master))
-		resp, rerr := client.Do(req)
-		if rerr != nil {
-			return rerr
+		if time.Now().After(deadline) {
+			return fmt.Errorf("litellm gateway never answered /health/liveliness at %s", origin)
 		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-		return json.Unmarshal(body, out)
+		time.Sleep(3 * time.Second)
 	}
-	// Registered models: name + the underlying litellm_params.model string.
-	// /model/info returns a bare list on older litellm and {"data": [...]}
-	// on newer ones (the main-stable tag floats — see litellm.tf); parse
-	// both shapes.
+
+	// Registered names: /model/info returns a bare list on older litellm and
+	// {"data": [...]} on newer ones (the main-stable tag floats); parse both.
 	var raw json.RawMessage
-	if err := get("/model/info", &raw); err != nil {
+	if err := s.litellmGet(client, origin, master, "/model/info", &raw); err != nil {
 		return fmt.Errorf("list gateway models: %w", err)
 	}
 	models, err := parseLitellmModels(raw)
 	if err != nil {
 		return fmt.Errorf("list gateway models: %w", err)
 	}
-	under := ""
 	registered := map[string]bool{}
 	for _, m := range models {
 		registered[m.ModelName] = true
-		if m.ModelName == agent.BaseLiteLLMModel {
-			under = m.LitellmParams.Model
-		}
-	}
-	if under == "" {
-		if len(models) != 1 {
-			return fmt.Errorf("base model %q not registered on the gateway (%d models present) — the alias set has nothing to clone", agent.BaseLiteLLMModel, len(models))
-		}
-		under = models[0].LitellmParams.Model
 	}
 	for _, alias := range agent.LiteLLMAliases {
 		if registered[alias] {
@@ -761,6 +822,26 @@ func (s *Spec) stageLitellmAliases() error {
 		}
 	}
 	return nil
+}
+
+// litellmGet issues an authenticated GET against the gateway's admin origin
+// and decodes the body into out.
+func (s *Spec) litellmGet(client *http.Client, origin string, master []byte, path string, out interface{}) error {
+	req, err := http.NewRequest(http.MethodGet, origin+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+string(master))
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return json.Unmarshal(body, out)
 }
 
 // ensureKubectl installs kubectl on the CP LXC (the kube doors' exec target)

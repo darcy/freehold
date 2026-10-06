@@ -98,28 +98,40 @@ func TestGateInstallMatrix(t *testing.T) {
 	}
 }
 
-// TestApplyInstallDefaultsGatewayForcing: the forced gateway derives ONLY on a
-// mint — a re-adopt rides the recorded gateway (a pre-gateway world stays
-// flat), and a recorded vlan sentinel (-1) is never re-seeded.
+// TestApplyInstallDefaultsGatewayForcing: the mint flags itself for the
+// pipeline's derive (the CIDR is derived + L2-probed in RunBootstrap, which
+// owns the host SSH the probe needs) — a re-adopt rides the recorded gateway
+// (a pre-gateway world stays flat), and a recorded vlan sentinel (-1) is
+// never re-seeded.
 func TestApplyInstallDefaultsGatewayForcing(t *testing.T) {
-	// Mint: the subnet is derived from the proxy IP's network.
+	// Mint: no CIDR is derived here — the pipeline derives + probes.
 	f := box.Flags{ProxyIP: "192.168.30.8/24"}
 	applyInstallDefaults(&f, true)
-	if f.GatewayCIDR != "10.77.0.0/24" {
-		t.Errorf("mint derivation = %q, want 10.77.0.0/24", f.GatewayCIDR)
+	if !f.Mint {
+		t.Error("mint did not flag itself for the pipeline's subnet derive")
 	}
-	// Mint with an explicit --gateway-cidr: the flag wins.
+	if f.GatewayCIDR != "" {
+		t.Errorf("CLI-side derivation ran: %q (the pipeline owns the derive)", f.GatewayCIDR)
+	}
+	// Mint with an explicit --gateway-cidr: the flag wins untouched.
 	f = box.Flags{ProxyIP: "192.168.30.8/24", GatewayCIDR: "10.99.0.0/24"}
 	applyInstallDefaults(&f, true)
 	if f.GatewayCIDR != "10.99.0.0/24" {
 		t.Errorf("explicit cidr = %q, want 10.99.0.0/24", f.GatewayCIDR)
 	}
+	// Mint with --gateway-vlan but no cidr: the MINT flag still rides (the
+	// pipeline derives unprobed for a tagged L2 — never a silent flat world).
+	f = box.Flags{ProxyIP: "192.168.30.8/24", GatewayVlan: 5}
+	applyInstallDefaults(&f, true)
+	if !f.Mint || f.GatewayCIDR != "" {
+		t.Errorf("mint+vlan = mint:%v cidr:%q, want true/empty (the pipeline derives)", f.Mint, f.GatewayCIDR)
+	}
 	// Re-adopt of a pre-gateway world: NOTHING is derived (no mid-life
-	// gateway colliding with the live LAN guests).
+	// gateway colliding with the live LAN guests) and no mint flag.
 	f = box.Flags{ProxyIP: "192.168.30.8/24"}
 	applyInstallDefaults(&f, false)
-	if f.GatewayCIDR != "" {
-		t.Errorf("re-adopt derived a gateway: %q", f.GatewayCIDR)
+	if f.GatewayCIDR != "" || f.Mint {
+		t.Errorf("re-adopt derived a gateway or flagged mint: %q %v", f.GatewayCIDR, f.Mint)
 	}
 }
 

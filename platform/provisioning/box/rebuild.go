@@ -75,7 +75,6 @@ type Flags struct {
 	EraseFreehold      bool   // headless consent to erase a detected freehold plane
 	NoK3s              bool
 	NoLitellm          bool
-	LitellmProviderKey string
 	RootfsGB           uint32
 	MemoryMB           uint32
 	RelayGw            string
@@ -86,8 +85,12 @@ type Flags struct {
 	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
 	// internal subnet (InternalIPFor) and a gateway guest owns the one
 	// LAN-facing address (the proxy IP).
-	GatewayCIDR    string
-	GatewayVlan    int
+	GatewayCIDR string
+	GatewayVlan int
+	// Mint is true when this bootstrap CREATES a world (fresh install) —
+	// the mint derives (and L2-probes) its freehold-subnet; a re-adopt rides
+	// the recorded gateway.
+	Mint           bool
 	ConfigPath     string
 	ConfirmStorage bool
 	ResetDNS       bool
@@ -511,6 +514,25 @@ func (e *Engine) RunBootstrap() error {
 		return fmt.Errorf("--proxy-ip must be CIDR (host/prefix) — got %q", e.F.ProxyIP)
 	}
 
+	// 5.65. the MINT's derived subnet probes the LAN's L2 first: another
+	// world's freehold-subnet on this LAN is the live-verified collision
+	// (two boxes both derived 10.77.0.0/24 untagged — their guests
+	// ARP-collided and each world's CP dialed the OTHER's litellm). The
+	// derive bumps to the next clean /24; --gateway-cidr is honored
+	// untouched; --gateway-vlan skips only the PROBE (a tagged L2 is its
+	// own domain — nothing to collide with), the derive itself still runs.
+	if e.F.Mint && e.F.GatewayCIDR == "" {
+		if e.F.GatewayVlan == 0 {
+			cidr, err := e.deriveGatewayCIDR()
+			if err != nil {
+				return err
+			}
+			e.F.GatewayCIDR = cidr
+		} else {
+			e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
+		}
+	}
+
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
 	// + its in-host VLAN tag. Install decides (see applyInstallDefaults): a
 	// MINT derives the subnet — the gateway is forced, every fresh world gets
@@ -620,11 +642,13 @@ func (e *Engine) RunBootstrap() error {
 // caddy + cert all come up HERE, CP-side; bootstrap only created the CP.
 
 // litellmSecretMaterial returns the litellm master key, postgres password, and
-// provider key (minting/reusing the canonical first-run-wins values), prompting
-// for the provider key on first provision. The CP is now the durable owner: the
+// the operator's gateway provider choice (minting/reusing the canonical
+// first-run-wins values; the provider + model come from the build's picker,
+// see the build package's gateway.go). The CP is now the durable owner: the
 // caller seeds these to the CP (ensureCpSecrets); world_build re-seeds the
-// co-located runner from the CP store so the existing $LITELLM/$PROVIDER_KEY
-// injection path is unchanged.
+// co-located runner's master + postgres from that store (its tfRun TF_VAR
+// inputs), while the provider key stays store-only — the alias stage reads it
+// there and the AI department's door package is its only other copy.
 
 // ensureCpSecrets asks the operator ONLY for the CP secrets the CP does not
 // already hold (DNS creds + litellm), seeding each as the CP's durable owner via
@@ -632,11 +656,12 @@ func (e *Engine) RunBootstrap() error {
 // never re-asked. The box also keeps its own sealed DNS copy (promptDNSCred
 // reuses it), which the DNS-record management step reads.
 
-// seedCpRunnerSecrets writes the litellm master / postgres pw / provider key
+// seedCpRunnerSecrets writes the litellm master / postgres pw
 // into the CP's co-located runner package (freehold-console add-secret on the
 // CP) and restarts the freehold-runner unit so the live runner loads them. This
-// is what lets the existing $LITELLM/$PROVIDER_KEY injection path serve the
-// CP-owned litellm store the world-build reads.
+// is what keeps the $LITELLM/$POSTGRES_PW env injection serving the CP-owned
+// litellm store the world-build reads (the provider key is not in the package —
+// it lives in the store and the AI department's door).
 
 // cpSecretBlob renders a cert.SaveCreds-style sealed record ({provider,sealed,
 // aad}) as raw JSON, for upload to the CP via /api/secrets.
@@ -1943,6 +1968,36 @@ func bootstrapStaticIP(role string, f Flags, cfg *config.Config) string {
 	return ""
 }
 
+// gatewayNftScript renders the box-side gateway bootstrap: pinned resolvers,
+// an apt refresh (the template index ages past the mirror retention — 404 on
+// current packages), nftables + dnsmasq, and the rendered ruleset + resolver
+// config. It rides a single-quoted sh -c (LxcExec), so it must stay
+// apostrophe-free — TestGatewayNftScriptQuotes guards that.
+func gatewayNftScript(conf, dnsmasq string) string {
+	return fmt.Sprintf(`set -e
+echo nameserver 1.1.1.1 > /etc/resolv.conf
+echo nameserver 8.8.8.8 >> /etc/resolv.conf
+# The template apt index ages past the mirror retention (404 on current
+# versions) — refresh before the install, like the EnsureGuestDocker retry.
+apt-get update -qq >/dev/null 2>&1 || true
+apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+mkdir -p /etc/dnsmasq.d
+echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
+# A router with BOTH nics on one bridge (the untagged freehold-subnet) must
+# not answer ARP for an IP on the other interface — the flux reads as MAC
+# flapping on the LAN (UniFi: "multiple machines claiming IPs").
+echo net.ipv4.conf.all.arp_ignore=1 >> /etc/sysctl.d/90-freehold-gateway.conf
+echo net.ipv4.conf.all.arp_announce=2 >> /etc/sysctl.d/90-freehold-gateway.conf
+sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
+cat > /etc/nftables.conf <<NFT
+%sNFT
+cat > /etc/dnsmasq.d/freehold.conf <<DNS
+%sDNS
+systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
+systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
+`, conf, dnsmasq)
+}
+
 // stageGatewayNft applies the gateway's nftables ruleset on the box side —
 // the guests' default route + image pulls depend on it the moment the next
 // guest boots, so it cannot wait for the CP build's re-assert. Uses the SHARED
@@ -1980,28 +2035,7 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 	// answer either — apt then hangs to the watchdog. Public resolvers, like
 	// EnsureGuestDocker; the CP build re-writes guest DNS later anyway. The
 	// script rides a single-quoted sh -c: APOSTROPHES ARE FORBIDDEN in it.
-	script := fmt.Sprintf(`set -e
-echo nameserver 1.1.1.1 > /etc/resolv.conf
-echo nameserver 8.8.8.8 >> /etc/resolv.conf
-# The template's apt index ages past the mirror's retention (404 on current
-# versions) — refresh before the install, like EnsureGuestDocker's retry does.
-apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
-mkdir -p /etc/dnsmasq.d
-echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
-# A router with BOTH nics on one bridge (the untagged freehold-subnet) must
-# not answer ARP for an IP on the other interface — the flux reads as MAC
-# flapping on the LAN (UniFi: "multiple machines claiming IPs").
-echo net.ipv4.conf.all.arp_ignore=1 >> /etc/sysctl.d/90-freehold-gateway.conf
-echo net.ipv4.conf.all.arp_announce=2 >> /etc/sysctl.d/90-freehold-gateway.conf
-sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
-cat > /etc/nftables.conf <<NFT
-%sNFT
-cat > /etc/dnsmasq.d/freehold.conf <<DNS
-%sDNS
-systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
-systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
-`, conf, config.GatewayDnsmasqConf(e.F.RelayGw))
+	script := gatewayNftScript(conf, config.GatewayDnsmasqConf(e.F.RelayGw))
 	out, err := e.Provider.GuestExec(vmid, script, 300)
 	if err != nil {
 		return fmt.Errorf("gateway nftables: %w", err)
@@ -2618,16 +2652,6 @@ func shellQuote(s string) string {
 	return "'" + s + "'"
 }
 
-// litellmHasProviderKey reports whether the litellm runner package already
-// carries a sealed provider-key (so a rebuild can reuse it instead of demanding
-// a fresh supply). It inspects only the ciphertext map's secret NAMES — never
-// any value.
-
-// certIdent returns the ops identity's encryption secret (raw bytes), the
-// identity, or an error. The ops identity is freehold's own — the only key that
-// must be able to reopen the sealed DNS token (the DNS-cred collection + the
-// hand-off seal the relay/cp creds to it).
-
 // litellmPostgresPw reads back the CANONICAL postgres password from the k8s
 // litellm-pg Secret so a rebuild REUSES it (first-run-wins): Postgres initializes
 // PGDATA against the first password, so a re-mint + SSA re-apply would rotate it
@@ -2638,7 +2662,7 @@ func shellQuote(s string) string {
 // loopback 127.0.0.1:8788, target "litellm"), injecting the named secrets by
 // env. This is where the litellm admin calls run: the runner host is this
 // machine — from which the gateway URL is reachable — and the secrets
-// (litellm = master, provider-key) are the litellm runner package's own
+// (litellm = master, postgres-pw) are the litellm runner package's own
 // ciphertext. (Not the main proxmox-box runner, and not a nested
 // "exec --target …" prefix — that prefix is a shell no-op the old code leaned
 // on and never injected the secrets at all.)

@@ -105,7 +105,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// tools/list is public (listing tool names reveals nothing), like the runner.
 	if req.Method == "tools/list" {
-		s.rpcResult(w, req.ID, map[string]interface{}{"tools": s.toolList()})
+		s.rpcResult(w, req.ID, map[string]interface{}{"tools": ToolList()})
 		return
 	}
 
@@ -156,24 +156,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// toolList is the semantic toolset — create/grant/manage. Deliberately NOT
-// exec: exec stays the runner's funnel.
-func (s *Server) toolList() []map[string]interface{} {
+// ToolList is the semantic toolset — create/grant/manage. Deliberately NOT
+// exec: exec stays the runner's funnel. Package-level (it uses no server
+// state) so the pod-side stdio bridge can pin its mirrored schemas against
+// this one — the drift guard lives in cmd/freehold-agent-tools.
+func ToolList() []map[string]interface{} {
 	i := func(props map[string]interface{}, req []string) map[string]interface{} {
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	return []map[string]interface{}{
-	{
-		"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
-		"inputSchema": i(map[string]interface{}{
-			"name":     map[string]interface{}{"type": "string"},
-			"purpose":  map[string]interface{}{"type": "string"},
-			"channel":  map[string]interface{}{"type": "string"},
-			"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-			"private":  map[string]interface{}{"type": "boolean"},
-			"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
-		}, []string{"name"}),
-	},
+		{
+			"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
+			"inputSchema": i(map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"purpose":  map[string]interface{}{"type": "string"},
+				"channel":  map[string]interface{}{"type": "string"},
+				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"private":  map[string]interface{}{"type": "boolean"},
+				"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
+			}, []string{"name"}),
+		},
 		{
 			"name": "grant_agent", "description": "Bind agent pubkeys to a runner's whitelist.",
 			"inputSchema": i(map[string]interface{}{
@@ -182,12 +184,14 @@ func (s *Server) toolList() []map[string]interface{} {
 			}, []string{"runner", "pubkeys"}),
 		},
 		{
-			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door. hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. Grants land live; the grantees' pods are re-applied with the new coords.",
+			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. Grants land live; the grantees' pods are re-applied with the new coords.",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
 				"kind":       map[string]interface{}{"type": "string"},
 				"address":    map[string]interface{}{"type": "string"},
 				"grant_to":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"probe":      map[string]interface{}{"type": "string"},
+				"probe_body": map[string]interface{}{"type": "string"},
 				"hosted":     map[string]interface{}{"type": "string"},
 				"host":       map[string]interface{}{"type": "string"},
 				"pubkey":     map[string]interface{}{"type": "string"},
@@ -202,7 +206,19 @@ func (s *Server) toolList() []map[string]interface{} {
 			}, []string{"name"}),
 		},
 		{
-			"name": "manage_agent", "description": "List registered agents, or (remove=<name>) drop one's registry row.",
+			"name": "update_agent", "description": "Update an existing agent you created: replace its purpose (the one-liner its system prompt is rendered from — live on the agent's next spawn), switch its litellm model, replace its channel list (private applies only then), or rename it. A rename moves the durable identity dir, workspace, pod objects and registry row to the new name while KEEPING the agent's pubkey — chat history, grants and memory follow. Absent fields keep the row's current values. Core identities (the CPA and the four departments) are refused — their prompts live in the repo.",
+			"inputSchema": i(map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"rename":   map[string]interface{}{"type": "string"},
+				"purpose":  map[string]interface{}{"type": "string"},
+				"channel":  map[string]interface{}{"type": "string"},
+				"channels": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"private":  map[string]interface{}{"type": "boolean"},
+				"model":    map[string]interface{}{"type": "string", "enum": agent.CustomLiteLLMModels},
+			}, []string{"name"}),
+		},
+		{
+			"name": "manage_agent", "description": "List registered agents, or (remove=<name>) retire one's pod + derived k8s objects and drop its registry row (the durable workspace dir is kept — it is data).",
 			"inputSchema": i(map[string]interface{}{
 				"remove": map[string]interface{}{"type": "string"},
 			}, []string{}),
@@ -283,6 +299,9 @@ type provisionRunnerArgs struct {
 	Host    string   `json:"host"`
 	Pubkey  string   `json:"pubkey"`
 	EncPub  string   `json:"enc_pubkey"`
+	Probe   string   `json:"probe"`
+	// ProbeBody is the probe's optional literal JSON request body.
+	ProbeBody string `json:"probe_body"`
 }
 type revokeRunnerArgs struct {
 	Name string `json:"name"`
@@ -292,6 +311,18 @@ type revokeRunnerArgs struct {
 }
 type manageAgentArgs struct {
 	Remove string `json:"remove"`
+}
+
+// updateAgentArgs mirrors createAgentArgs' shapes, with every field but name
+// optional (absent = keep the row's current value). Rename is the new name.
+type updateAgentArgs struct {
+	Name     string   `json:"name"`
+	Rename   string   `json:"rename"`
+	Purpose  string   `json:"purpose"`
+	Channel  string   `json:"channel"`
+	Channels []string `json:"channels"`
+	Private  bool     `json:"private"`
+	Model    string   `json:"model"`
 }
 
 // isWorldTool reports whether a tool is an operator-scoped action: granting an
@@ -418,6 +449,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		report, err := s.Tools.ProvisionRunner(agent.ProvisionArgs{
 			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
 			Hosted: a.Hosted, Host: a.Host, Pubkey: a.Pubkey, EncPubkey: a.EncPub,
+			Probe: a.Probe, ProbeBody: a.ProbeBody,
 		})
 		s.textResult(w, id, err, report)
 	case "revoke_runner":
@@ -438,6 +470,21 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		report, err := s.Tools.RevokeRunner(agent.RetireArgs{Name: a.Name, RevokeFrom: a.RevokeFrom})
+		s.textResult(w, id, err, report)
+	case "update_agent":
+		var a updateAgentArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "update_agent arguments: "+err.Error())
+			return
+		}
+		if a.Model != "" && !slices.Contains(agent.CustomLiteLLMModels, a.Model) {
+			s.rpcError(w, id, -32602, fmt.Sprintf("update_agent model must be one of [%s]", strings.Join(agent.CustomLiteLLMModels, ", ")))
+			return
+		}
+		report, err := s.Tools.UpdateAgent(agent.UpdateArgs{
+			Name: a.Name, Rename: a.Rename, Purpose: a.Purpose,
+			Channel: a.Channel, Channels: a.Channels, Private: a.Private, Model: a.Model,
+		})
 		s.textResult(w, id, err, report)
 	case "manage_agent":
 		var a manageAgentArgs

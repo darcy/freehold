@@ -159,6 +159,10 @@ type Spec struct {
 	// unresolvable key fails the create loudly — never a pod with a harness
 	// and silently no writable memory.
 	OwnerSecret []byte
+
+	// latestRelease, when set, replaces the GitHub release fetch the release
+	// pulse stage makes (tests). It receives the running version tag.
+	latestRelease func(tag string) (*ghRelease, error)
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -212,8 +216,7 @@ func (s *Spec) run(cmd string, timeoutS uint64) error {
 }
 
 // runSecrets runs cmd through the co-located runner requesting extra secret
-// names by name (e.g. the litellm master + provider key the register curl
-// reads from $LITELLM / $PROVIDER_KEY).
+// names by name (e.g. the litellm master + postgres pw tf.sh maps to TF_VAR_*).
 func (s *Spec) runSecrets(cmd string, timeoutS uint64, extra ...string) error {
 	_, err := s.execOut(cmd, timeoutS, extra...)
 	return err
@@ -924,17 +927,20 @@ echo DURABLE_SEED_OK
 }
 
 // dnsCredFromStore opens the operator's DNS-01 provider credential for a slot
-// from the CP's durable sealed store (<stateDir>/world-secrets/dns-<slot>.json)
-// via the established cert.LoadCreds record (sealed to the agent-tools
-// identity — written by the box build's hand-off). Errors loudly when no copy
-// has been handed off yet (the ISSUE path needs it; the durable-reuse path
-// does not).
+// from the CP's durable sealed store (<console root>/world-secrets/dns-<slot>.json)
+// via the established cert.LoadCreds record (sealed to the console
+// identity — written by the box build's hand-off). Rooted at the CONSOLE state
+// dir, never the Spec's own StateDir: the two differ on the agent-tools server,
+// whose re-apply coord feed (agentRunnerCoords -> cloudflareRunners) must find
+// the same creds the build staged from. Errors loudly when no copy has been
+// handed off yet (the ISSUE path needs it; the durable-reuse path does not).
 func (s *Spec) dnsCredFromStore(slot string) (string, map[string]string, error) {
-	path := filepath.Join(s.StateDir, "world-secrets", "dns-"+slot+".json")
+	root := s.consoleStateRoot()
+	path := filepath.Join(root, "world-secrets", "dns-"+slot+".json")
 	if !cert.CredExists(path) {
 		return "", nil, fmt.Errorf("no DNS provider credential on the CP at %s — run `freehold build` to hand it off (or the durable-reuse path serves an existing cert)", path)
 	}
-	secret, err := s.consoleEncSecret()
+	secret, err := s.consoleEncSecretAt(root)
 	if err != nil {
 		return "", nil, err
 	}
@@ -972,12 +978,35 @@ func (s *Spec) certSeedFromCache(k3sVmid uint32, slot, host string) (bool, error
 	return true, nil
 }
 
-// runnerLitellmSecrets maps the CP store's litellm env keys to the secret NAMES
-// the world-build requests from the co-located runner.
+// runnerLitellmSecrets maps the CP store's litellm env keys to the secret
+// NAMES the world-build requests from the co-located runner: the gateway
+// master + postgres password only (tf.sh's TF_VAR_ inputs). The provider key
+// never rides the co-located (pve provisioning) runner package — it lives in
+// the CP's durable store, read by the alias stage directly, and is sealed only
+// into the AI department's litellm-api-admin door package (for retargeting).
 var runnerLitellmSecrets = []struct{ name, env string }{
 	{"litellm", "master"},
 	{"postgres-pw", "pg"},
-	{"provider-key", "provider"},
+}
+
+// runnerLitellmRetiredSecrets are names an older build shipped to the
+// co-located runner package that current builds no longer request — the
+// reseed drops them so an updated world's package converges with a fresh
+// one (the provider key lives only in the CP store + the AI department's
+// door package; nothing requests it from the provisioning runner anymore).
+var runnerLitellmRetiredSecrets = []string{"provider-key"}
+
+// dropRetiredRunnerSecrets removes runnerLitellmRetiredSecrets entries from
+// the package in memory; the caller writes it back. Returns the names dropped.
+func dropRetiredRunnerSecrets(pkg *wire.SecretPackage) []string {
+	var dropped []string
+	for _, name := range runnerLitellmRetiredSecrets {
+		if _, ok := pkg.Secrets[name]; ok {
+			delete(pkg.Secrets, name)
+			dropped = append(dropped, name)
+		}
+	}
+	return dropped
 }
 
 // reseedCoLocatedRunner re-provisions the CP's co-located runner from the CP's
@@ -985,8 +1014,10 @@ var runnerLitellmSecrets = []struct{ name, env string }{
 // install, so a package created before the litellm secrets (or wiped by a prior
 // deploy) lacks them; the box cannot re-derive them (the CP is the durable
 // owner) and the runner reads its package only at boot. Re-seal from the store
-// and restart. A no-op when the runner already holds every name, or when the
-// store has no litellm secret yet (the first build seeds store + runner
+// and restart. Also drops retired secret names (runnerLitellmRetiredSecrets)
+// so a package an older build shipped converges with a fresh one. A no-op when
+// the runner already holds every requested name and nothing to drop, or when
+// the store has no litellm secret yet (the first build seeds store + runner
 // together, box-side).
 func (s *Spec) reseedCoLocatedRunner() error {
 	store, err := state.Open(s.StateDir)
@@ -1007,29 +1038,63 @@ func (s *Spec) reseedCoLocatedRunner() error {
 			need = true
 		}
 	}
-	if !need {
+	dropped := dropRetiredRunnerSecrets(pkg)
+	writePruned := func() error {
+		if err := pkg.WriteToDir(rec.PackageDir); err != nil {
+			return fmt.Errorf("write runner package: %w", err)
+		}
 		return nil
 	}
-	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
-	if !cert.CredExists(path) {
-		return nil // first build: the box seeds the store + runner together
-	}
-	secret, err := s.consoleEncSecret()
-	if err != nil {
-		return err
-	}
-	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
-	_, env, err := cert.LoadCreds(path, open, secret)
-	if err != nil {
-		return fmt.Errorf("open CP litellm store: %w", err)
-	}
-	for _, m := range runnerLitellmSecrets {
-		v := env[m.env]
-		if v == "" {
-			return fmt.Errorf("CP litellm store is missing the %q value", m.env)
+	if !need {
+		if len(dropped) == 0 {
+			return nil
 		}
-		if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, []byte(v)); err != nil {
-			return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
+		if err := writePruned(); err != nil {
+			return err
+		}
+		// fall through to the restart: the runner holds the dropped name in
+		// its in-memory keyring until it reloads.
+	} else {
+		path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+		if !cert.CredExists(path) {
+			// First build: the box seeds the store + runner together. The
+			// prune is the only pending change — ship it, else no-op.
+			if len(dropped) == 0 {
+				return nil
+			}
+			if err := writePruned(); err != nil {
+				return err
+			}
+		} else {
+			secret, err := s.consoleEncSecret()
+			if err != nil {
+				return err
+			}
+			open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+			_, env, err := cert.LoadCreds(path, open, secret)
+			if err != nil {
+				return fmt.Errorf("open CP litellm store: %w", err)
+			}
+			for _, m := range runnerLitellmSecrets {
+				v := env[m.env]
+				if v == "" {
+					return fmt.Errorf("CP litellm store is missing the %q value", m.env)
+				}
+				if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, []byte(v)); err != nil {
+					return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
+				}
+			}
+			// AddSecret reloaded + rewrote the package file; the prune must be
+			// re-applied to the fresh on-disk package or the retired name rides.
+			pkg, err = wire.Load(rec.PackageDir)
+			if err != nil {
+				return fmt.Errorf("reload runner package: %w", err)
+			}
+			if len(dropRetiredRunnerSecrets(pkg)) > 0 {
+				if err := writePruned(); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	// The runner loads its package at boot (in-memory keyring), so restart it.
@@ -1596,6 +1661,10 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// desktop app skip its first-run onboarding (starter channels, private
 		// Welcome, built-in welcome-team agents). Reads first; never overwrites.
 		report = spec.stageOperatorProfile(report)
+		// 9. The release pulse: the CPA posts the world's RUNNING version to
+		// Pulse — a stable build its own release's notes + link, a dev build
+		// the updated sha. Deduped; best-effort.
+		report = spec.stageReleasePulse(report)
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")
 		}
@@ -1706,15 +1775,18 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 	}
 }
 
-// stopAgentTools stops the CP-side freehold-agent-tools serve process in the cp
-// guest. Its durable state dir stays on the CP plane; build step 2.5 re-launches
-// it (killing any prior serve first) with the same identity.
+// stopAgentTools stops the CP-side freehold-agent-tools serve process in the
+// cp guest. Its durable state dir stays on the CP plane; build step 2.5
+// re-launches it (as its unit) with the same identity. The unit stop comes
+// FIRST — a unit-managed serve ignores the pid kill, and even a successful
+// kill is resurrected by the enabled Restart=on-failure unit; the pid kill
+// stays for a pre-unit world.
 func (s *Spec) stopAgentTools() error {
 	if s.CpLxc == 0 {
 		return nil
 	}
 	atState := filepath.Join(filepath.Dir(s.StateDir), "agent-tools")
-	cmd := fmt.Sprintf("pct exec %d -- sh -c 'p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'",
+	cmd := fmt.Sprintf("pct exec %d -- sh -c 'systemctl stop freehold-agent-tools 2>/dev/null; p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'",
 		s.CpLxc, atState, atState)
 	if err := s.run(cmd, 30); err != nil {
 		return fmt.Errorf("world-teardown stop agent-tools: %w", err)
@@ -2048,10 +2120,12 @@ func (s *Spec) appendMemoryPlane(report []string) []string {
 	return append(report, "memory plane: owner "+agenttools.ShortHex(s.OwnerPub)+" attests each agent pod (kind "+strconv.Itoa(nipoa.AgentEngramKind)+")")
 }
 
-// freeholdWelcomeMarker is the #t tag on the CPA's one-time #freehold welcome
-// message; its presence on the relay is the whole idempotence state (the relay
-// DB is durable across rebuild/adopt, so the marker read is enough — no
-// fresh-vs-adopt flag).
+// freeholdWelcomeMarker is the #t tag carried by the CPA's one-time #freehold
+// welcome message — provenance only. The guard is ANY prior #freehold message
+// (a tag lookup re-posts once anything else lands in the channel: the relay
+// applies its SQL limit before post-filtering tag constraints), so the relay
+// DB being durable across rebuild/adopt is what keeps the welcome one-time —
+// no fresh-vs-adopt flag.
 const freeholdWelcomeMarker = "fh-welcome"
 
 // operatorDisplayName resolves the operator's display name (OperatorName or
@@ -2137,9 +2211,10 @@ func operatorProfileName(ev map[string]interface{}) string {
 
 // postFreeholdWelcome posts the CPA's one-time welcome message in #freehold,
 // mentioning the operator (so it files into their Inbox on a first connect).
-// Marker-guarded: a #freehold message carrying freeholdWelcomeMarker means it
-// already ran — a rebuild/re-adopt never re-posts. Best-effort: the caller
-// warns on error (the next build's marker read self-heals a transient miss).
+// Guarded by ANY prior #freehold message: a world with history is not a first
+// run — a rebuild/re-adopt never re-posts. Best-effort: the caller warns on
+// error (the next build re-checks the still-empty channel and self-heals a
+// transient miss).
 func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if s.OwnerPub == "" {
 		return nil
@@ -2148,13 +2223,17 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	if authURL == "" {
 		authURL = s.RelayURL
 	}
-	// Marker first — the welcome is one-time. Two single-filter reads, the
-	// pattern every relay caller uses (the bridge honors body[0] only; a
-	// multi-filter request would silently drop the second).
+	// The first-run guard is ANY kind-9 message in #freehold — NOT a tag
+	// lookup. The relay applies the SQL limit BEFORE post-filtering tag
+	// constraints (buzz-relay bridge Phase 2/3), so a #t+limit:1 read means
+	// "is the NEWEST #freehold message the welcome" — false the moment
+	// anyone chats, and every build re-posts. Any history at all = the world
+	// has run before; the welcome is a first-run surface. (The posted event
+	// still carries the fh-welcome tag as provenance; the guard just never
+	// reads it.)
 	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
 		"kinds": []interface{}{delegate.StreamMsgKind},
 		"#h":    []interface{}{relayFreeholdChannel},
-		"#t":    []interface{}{freeholdWelcomeMarker},
 		"limit": 1,
 	}})
 	if err != nil {
@@ -2166,7 +2245,7 @@ func (s *Spec) postFreeholdWelcome(nSec []byte) error {
 	// The mention carries the name the operator is known by on the relay —
 	// their own kind:0 (an updated world has no recorded name; the profile
 	// is where it lives). A failed read errors out rather than posting the
-	// default: the marker is still absent, so the next build re-runs this
+	// default: the channel is still empty, so the next build re-runs this
 	// path — nothing is ever posted wrong.
 	pevs, err := relay.QueryEventsAuth(s.relayDial(), authURL, nSec, []interface{}{map[string]interface{}{
 		"kinds":   []interface{}{0},
@@ -2590,7 +2669,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		// The one-time #freehold welcome — the operator's first-run surface now
 		// that the desktop app's own onboarding is skipped (stageOperatorProfile).
-		// Best-effort: a transient miss self-heals on the next build's marker read.
+		// Best-effort: a transient miss self-heals on the next build's history read.
 		if name == spec.CpaName {
 			if err := spec.postFreeholdWelcome(nSec); err != nil {
 				fmt.Fprintln(os.Stderr, "WARN: the #freehold welcome message was not posted:", err)

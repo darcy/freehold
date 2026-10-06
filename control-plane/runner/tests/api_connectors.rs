@@ -48,6 +48,8 @@ fn api_runner_dir(vultr_url: &str, b2_url: &str) -> (tempfile::TempDir, Identity
                     kind: "vultr".into(),
                     address: vultr_url.to_string(),
                     secret: "vultr".into(),
+                    probe: None,
+                    probe_body: None,
                 },
             ),
             (
@@ -56,6 +58,8 @@ fn api_runner_dir(vultr_url: &str, b2_url: &str) -> (tempfile::TempDir, Identity
                     kind: "b2".into(),
                     address: b2_url.to_string(),
                     secret: "b2".into(),
+                    probe: None,
+                    probe_body: None,
                 },
             ),
         ]),

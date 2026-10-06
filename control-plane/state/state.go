@@ -86,6 +86,12 @@ type SecretRecord struct {
 	CiphertextHex string  `json:"ciphertext_hex"`
 	CreatedAt     uint64  `json:"created_at"`
 	RotatedAt     *uint64 `json:"rotated_at,omitempty"`
+	// Probe is the parameterized verify arm ("<METHOD> <path> [auth] [want]")
+	// shipped in the package's TargetMeta; empty = legacy (the runner's
+	// built-in kind match). ProbeBody is its optional literal request body.
+	// Additive omitempty fields — records predating them load unchanged.
+	Probe     string `json:"probe,omitempty"`
+	ProbeBody string `json:"probe_body,omitempty"`
 }
 
 // CapabilityRecord is an agent-provisioned capability runner's spec (the

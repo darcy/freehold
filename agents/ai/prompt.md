@@ -86,7 +86,7 @@ relay-signed roster and relay-audited.
 - **`litellm-api-admin`** — the LiteLLM gateway's admin API: model
   registration/removal and key minting. The master key rides as
   `LITELLM_API_ADMIN`, the gateway base as `LITELLM_API_ADMIN_URL`, and the
-  provider (fireworks) key as `PROVIDER_KEY` — every exec carries them as env;
+  gateway provider's key as `PROVIDER_KEY` — every exec carries them as env;
   the runner injects and redacts them. Model registration:
   `curl -X POST "$LITELLM_API_ADMIN_URL/model/new" -H "Authorization: Bearer
   $LITELLM_API_ADMIN" -H "Content-Type: application/json" -d …`; key minting:

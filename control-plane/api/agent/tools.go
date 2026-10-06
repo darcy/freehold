@@ -66,6 +66,17 @@ type ProvisionArgs struct {
 	// (64-hex each, from `runner enroll` on the target).
 	Pubkey    string `json:"pubkey,omitempty"`
 	EncPubkey string `json:"enc_pubkey,omitempty"`
+	// Probe is the door's verify arm — "<METHOD> <path> [auth] [want]" (e.g.
+	// "GET /user/tokens/verify bearer"; auth one of bearer (default), basic,
+	// json-body (the credential IS the POST body — unifi), none; want a
+	// 3-digit status, default 200). Required for api-class kinds at first
+	// provision: it is what turns the runner's self-check green, and the
+	// requesting agent knows the API. Optional on re-provision ("" keeps the
+	// door's existing probe). CP-validated; never a free-form shell string.
+	Probe string `json:"probe,omitempty"`
+	// ProbeBody is the probe's optional literal request body (JSON — e.g.
+	// kubernetes' SelfSubjectReview) alongside the credential.
+	ProbeBody string `json:"probe_body,omitempty"`
 }
 
 // ProvisionRunnerFn stages a NEW capability runner on the fly (the CPA's
@@ -100,6 +111,39 @@ type RetireArgs struct {
 // for it. Built by cpbuild.BuildRevokeRunner; nil = unsupported.
 type RevokeRunnerFn func(args RetireArgs) (report string, err error)
 
+// UpdateArgs is one update_agent call. Name is the agent to touch; every other
+// field is optional and absent-means-keep-current, resolved against the agent's
+// registry row. Rename moves the agent to a new name (identity preserved).
+type UpdateArgs struct {
+	// Name is the agent's CURRENT registry name.
+	Name string `json:"name"`
+	// Rename is the agent's NEW name; empty = no rename. The durable identity
+	// dir, workspace, pod, and registry row all move; the pubkey (and so chat
+	// history, grants, and memory) stays.
+	Rename string `json:"rename"`
+	// Purpose replaces the one-liner the agent's system prompt is rendered
+	// from (custom agents; core prompts are repo-embedded). Empty = keep.
+	Purpose string `json:"purpose"`
+	// Channel/Channels replace the channel list (the create_agent shapes).
+	// Empty/absent = keep the row's current list.
+	Channel  string   `json:"channel"`
+	Channels []string `json:"channels"`
+	// Private applies only when a channel list is given.
+	Private bool `json:"private"`
+	// Model switches the litellm alias (one of CustomLiteLLMModels). Empty = keep.
+	Model string `json:"model"`
+}
+
+// UpdateAgentFn applies an update_agent call and returns a leg-by-leg report.
+// Built by cpbuild.BuildUpdateAgentFn; nil = unsupported.
+type UpdateAgentFn func(args UpdateArgs) (report string, err error)
+
+// RemoveAgentFn retires an agent's pod + derived k8s objects — the infra half
+// of manage_agent remove (the registry row drop stays Console-side). The
+// durable workspace dir is deliberately kept: it is data, not an object. Built
+// by cpbuild.BuildRemoveAgentFn; nil = remove drops the row only.
+type RemoveAgentFn func(name string) (report string, err error)
+
 // Tools is the CPA's dedicated agent-management toolset (A4): create-agent,
 // grant-agent, manage-agent. These are what the CPA's reasoning calls (via its
 // MCP layer → console client) — the "dedicated create/grant/manage-agent
@@ -132,6 +176,13 @@ type Tools struct {
 	// Revoke retires a capability door on the fly (revoke_runner — the CPA's
 	// take-away flow; the counterpart of Provision above). nil = unsupported.
 	Revoke RevokeRunnerFn
+	// Update applies update_agent (purpose/model/channels/rename). nil =
+	// unsupported.
+	Update UpdateAgentFn
+	// Remove retires an agent's pod + objects before manage_agent drops the
+	// row. nil = remove drops the row only (the pod lingers — the pre-retire
+	// shape).
+	Remove RemoveAgentFn
 	// Status builds the single inventory world_status returns (agents + the
 	// console's runners/DNS read underneath). nil = agents only.
 	Status WorldStatusFunc
@@ -283,13 +334,26 @@ func (t *Tools) RevokeRunner(args RetireArgs) (string, error) {
 	return t.Revoke(args)
 }
 
-// ManageAgent lists registered agents, or (with remove) drops one's registry
-// row. Returns the current agents.
+// UpdateAgent applies an update_agent call (purpose/model/channels/rename).
+func (t *Tools) UpdateAgent(args UpdateArgs) (string, error) {
+	if t.Update == nil {
+		return "", fmt.Errorf("update_agent: no update path bound")
+	}
+	return t.Update(args)
+}
+
+// ManageAgent lists registered agents, or (with remove) retires one's pod and
+// drops its registry row. Returns the current agents.
 func (t *Tools) ManageAgent(remove string) ([]console.AgentInfo, error) {
 	if t.Console == nil {
 		return nil, fmt.Errorf("manage-agent: no console client bound")
 	}
 	if remove != "" {
+		if t.Remove != nil {
+			if _, err := t.Remove(remove); err != nil {
+				return nil, fmt.Errorf("manage-agent remove %s: %w", remove, err)
+			}
+		}
 		if _, err := t.Console.UnregisterAgent(remove); err != nil {
 			return nil, fmt.Errorf("manage-agent remove %s: %w", remove, err)
 		}

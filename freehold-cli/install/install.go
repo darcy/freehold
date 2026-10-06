@@ -333,8 +333,15 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 	if f.GatewayVlan > 0 {
 		vlan = fmt.Sprintf("vlan %d", f.GatewayVlan)
 	}
+	// Display candidate: the pipeline's authoritative derive (+ its L2
+	// collision probe) runs after the confirm and prints any bump — this is
+	// the LAN-overlap-safe candidate the probe starts from.
+	gwDisplay := f.GatewayCIDR
+	if f.Mint && gwDisplay == "" && f.ProxyIP != "" {
+		gwDisplay = box.DefaultGatewayCIDR(f.ProxyIP)
+	}
 	fmt.Fprintf(out, "  host: %s\n  runner: %s\n  domain: %s\n  gateway: %s (%s)\n  operator pk: %s\n  storage consent: %s\n",
-		f.Host, f.Target, f.RelayDomain, f.GatewayCIDR, vlan, f.OperatorPubkey, consent)
+		f.Host, f.Target, f.RelayDomain, gwDisplay, vlan, f.OperatorPubkey, consent)
 	if proceed, err := ui.confirm("Proceed?", true); err != nil || !proceed {
 		if err != nil {
 			return err
@@ -521,7 +528,6 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 		MemoryMB:           memory,
 		RelayGw:            "192.168.30.1",
 		Bridge:             "vmbr0",
-		LitellmProviderKey: os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY"),
 		ConfigPath:         installConfigPath(),
 		ConfirmStorage:     consent,
 	}
@@ -568,16 +574,16 @@ func applyInstallDefaults(f *box.Flags, mint bool) {
 	if f.Target == "" {
 		f.Target = box.RunnerTarget
 	}
-	// The gateway is FORCED on mint: the subnet is derived (10.77.0.0/24,
-	// bumped past LAN overlap); --gateway-cidr/--gateway-vlan override, and a
-	// re-adopt's recorded gateway was seeded before this runs. RunBootstrap
-	// re-validates before any config write.
-	if mint && f.GatewayCIDR == "" && f.ProxyIP != "" {
-		f.GatewayCIDR = box.DefaultGatewayCIDR(f.ProxyIP)
-	}
-	// Proxmox-over-root-SSH is the default access mode; --provider vultr
-	// switches to the API mode (the host is created, not reached) and rides
-	// the dir storage backend (no local-lvm on a cloud VPS).
+	// The gateway is FORCED on mint: the subnet is derived in the PIPELINE
+	// (RunBootstrap — the collision probe needs the host SSH, live-verified:
+	// two boxes on one LAN both derived 10.77.0.0/24 and their guests
+	// ARP-collided); --gateway-cidr/--gateway-vlan override, and a re-adopt's
+	// recorded gateway was seeded before this runs. RunBootstrap re-validates
+	// before any config write.
+	f.Mint = mint
+	// The access mode is the provider's call (proxmox = reached over root
+	// SSH; --provider vultr = the API mode — the host is created, not
+	// reached).
 	if f.AccessMode == "" {
 		f.AccessMode = "ssh-root-proxmox"
 	}
@@ -652,13 +658,18 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
 		f.LitellmProviderKey = v
 	}
-	if v, _ := cmd.Flags().GetString("provider"); v == "vultr" {
-		f.AccessMode = "api-vultr"
+	if v, _ := cmd.Flags().GetString("provider"); v != "" {
+		f.Provider = v
 	}
-	f.VultrRegion, _ = cmd.Flags().GetString("vultr-region")
-	f.VultrPlan, _ = cmd.Flags().GetString("vultr-plan")
-	if v, _ := cmd.Flags().GetUint32("vultr-os-id"); v != 0 {
-		f.VultrOsID = v
+	if ha, _ := cmd.Flags().GetStringArray("host-answer"); len(ha) > 0 {
+		f.HostAnswers = map[string]string{}
+		for _, a := range ha {
+			name, val, ok := strings.Cut(a, "=")
+			if !ok || name == "" || val == "" {
+				continue
+			}
+			f.HostAnswers[name] = val
+		}
 	}
 	return f
 }
@@ -709,7 +720,6 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("erase-freehold", false, "Erase a detected previous freehold data plane on the chosen backend and start fresh")
 	cmd.Flags().Uint64("size-gb", drive.TenantLVSizeGB, "Per-tenant thin LV size in GiB (LVM-thin backend)")
 	cmd.Flags().Uint64("pool-size-gb", drive.FreshPoolSizeGB, "Thin-pool size in GiB when a NEW pool is carved")
-	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key (or FREEHOLD_LITELLM_PROVIDER_KEY)")
 	cmd.Flags().Bool("confirm-storage", false, "Operator consent to CREATE a storage backend when none is detected")
 	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version). Install deploys the LOCAL build; it does not fetch")

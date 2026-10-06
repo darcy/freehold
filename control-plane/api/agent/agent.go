@@ -124,16 +124,11 @@ func AgentWorkspaceDir(podName string) string {
 // reasoning model (D1 wiring) routes here.
 const LiteLLMServiceURL = "http://litellm.litellm:4000/v1"
 
-// BaseLiteLLMModel is the model registered on the gateway at deploy time
-// (litellm.tf model_registration) — the underlying entry the default aliases
-// below are cloned from by cpbuild.stageLitellmAliases. Keep it equal to
-// litellm.tf's registered model_name; bumping one means bumping both.
-const BaseLiteLLMModel = "glm-5p3-flash"
-
-// The default litellm alias set (the names agents actually request; each is
-// registered on the gateway pointing at BaseLiteLLMModel's underlying model
-// for now). CoreLiteLLMModel is pinned to the core identities (the CPA + the
-// departments); the other three are what a created custom agent may run,
+// The default litellm alias set (the names agents actually request). Each is
+// registered on the gateway by cpbuild.stageLitellmAliases pointing at the
+// operator's first-build provider choice (the litellm store's provider-prefix/
+// provider-model). CoreLiteLLMModel is pinned to the core identities (the CPA
+// + the departments); the other three are what a created custom agent may run,
 // General being the default.
 const (
 	CodeLiteLLMModel          = "Code"          // coding agents
@@ -550,6 +545,25 @@ $EX "$K create ns agents 2>/dev/null || true"
 $EX "$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=\"$LITELLM\""
 echo AGENT_LITELLM_KEY_OK`,
 		k3sVmid, secret, secret)
+}
+
+// AgentRetireScript deletes an agent's derived k8s objects (pod, service,
+// prompt ConfigMap, identity + litellm-key secrets) inside the k3s LXC — the
+// object half of taking an agent away (update_agent's rename and manage_agent's
+// remove). The durable workspace dir is deliberately NOT touched: it is data,
+// not an object. --ignore-not-found keeps every line idempotent, and a missing
+// litellm-key secret is expected (custom agents share the CPA's).
+func AgentRetireScript(k3sVmid uint32, agentName string) string {
+	pod := sanitizePodName(agentName)
+	return fmt.Sprintf(`set -euo pipefail
+K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
+EX="pct exec %d -- sh -c"
+$EX "$K delete pod %s -n agents --ignore-not-found=true --wait=false"
+$EX "$K delete service %s -n agents --ignore-not-found=true"
+$EX "$K delete configmap %s-prompt -n agents --ignore-not-found=true"
+$EX "$K delete secret %s-identity -n agents --ignore-not-found=true"
+$EX "$K delete secret %s-litellm-key -n agents --ignore-not-found=true"
+echo AGENT_RETIRE_OK`, k3sVmid, pod, pod, pod, pod, pod)
 }
 
 // shQ single-quotes a value for a shell-embedded literal (no embedded quotes

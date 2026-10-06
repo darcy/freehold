@@ -165,10 +165,11 @@ func (s *Spec) tfVars() ([]string, error) {
 // `-target`. requiresSecrets toggles the tf.sh secret-gate: the SUBSTRATE phase
 // (plane/LXCs/k3s) runs before k3s is up, so it needs neither the secret values
 // nor a kubeconfig (TF_NO_SECRETS=1). The SERVICES phase requests the litellm
-// master + postgres pw + provider key BY NAME so the runner injects + redacts
-// them as env (LITELLM / POSTGRES_PW / PROVIDER_KEY); tf.sh maps the two
-// service credentials to TF_VAR_* (env, never argv). Long timeout: apply rolls
-// out litellm + waits for the API.
+// master + postgres pw BY NAME so the runner injects + redacts them as env
+// (LITELLM / POSTGRES_PW); tf.sh maps them to TF_VAR_* (env, never argv).
+// Model registration is NOT terraform's — stageLitellmAliases registers the
+// aliases straight from the CP's litellm store. Long timeout: apply rolls out
+// litellm + waits for the API.
 func (s *Spec) tfRun(action string, targets, extraVars []string, requiresSecrets bool) error {
 	if err := s.resolveGuestVmids(); err != nil {
 		return fmt.Errorf("tf %s: %w", action, err)
@@ -191,7 +192,7 @@ func (s *Spec) tfRun(action string, targets, extraVars []string, requiresSecrets
 	// the staged kubeconfig are this world's, never another world's.
 	cmdline := "TF_ROOT=" + s.tfRoot() + " " + script + " " + strings.Join(args, " ")
 	if requiresSecrets {
-		if err := s.runSecrets(cmdline, 900, "litellm", "postgres-pw", "provider-key"); err != nil {
+		if err := s.runSecrets(cmdline, 900, "litellm", "postgres-pw"); err != nil {
 			return fmt.Errorf("tf %s: %w", action, err)
 		}
 		return nil

@@ -1056,6 +1056,12 @@ type provisionReq struct {
 	// starts on the next build/world_build reconcile.
 	Rosters []string `json:"rosters"`
 	Port    int      `json:"port"`
+	// Probe (optional) is the door's verify arm — "<METHOD> <path> [auth]
+	// [want]" — shipped in the package so the self-check is data; empty kind
+	// arms fall back to the runner's built-in match. ProbeBody is its
+	// optional literal JSON request body.
+	Probe     string `json:"probe"`
+	ProbeBody string `json:"probe_body"`
 }
 
 // relayAuthFor returns the NIP-98 canonical URL for relay writes: the relay's
@@ -1109,6 +1115,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, Kind: req.Kind, Address: req.Address,
 		Secret: []byte(req.Secret), RunnerDir: runnerDir,
 		Grants: []string{s.ConsolePubkey}, RiskLevel: req.Risk,
+		Probe: req.Probe, ProbeBody: req.ProbeBody,
 	})
 	if err != nil {
 		writeErr(w, statusForAction(err), err.Error())

@@ -45,9 +45,13 @@ The gateway has TWO shapes, one per substrate:
     the one LAN address, masquerades the subnet out, and DNATs a fixed set of ports to the
     right guest. Guests get derived static addresses (`.11` relay, `.12` cp, `.13` k3s).
     **Every fresh install builds one** — the internal subnet is derived (`10.77.0.0/24`,
-    bumped past any overlap with the LAN; `--gateway-cidr` overrides) and the bridge rides
-    untagged unless `--gateway-vlan` says a tag. A pre-gateway world re-adopts flat (no
-    gateway is force-built mid-life — its live guests hold the LAN addresses).
+    bumped past any overlap with the LAN and past any subnet another world on this LAN
+    already claims: the mint L2-probes the candidate's world addresses before settling —
+    two boxes on one LAN both deriving `10.77.0.0/24` untagged ARP-collide their guests);
+    `--gateway-cidr` overrides untouched, and `--gateway-vlan` skips the probe (a tagged L2
+    is its own domain). The bridge rides untagged unless `--gateway-vlan` says a tag. A
+    pre-gateway world re-adopts flat (no gateway is force-built mid-life — its live guests
+    hold the LAN addresses).
 *   **The edge is Caddy on k3s**, permanently the internal edge: a relay vhost and a CP vhost
     (the CP also serves `/mcp` publicly). Certificates are issued in-process (lego, DNS-01)
     and written into Caddy's volume.
@@ -66,6 +70,10 @@ The gateway has TWO shapes, one per substrate:
 *   Port 80 reaches Caddy but nothing redirects to 443; no per-guest vhosts; the DNAT list
     is hard-coded.
 *   Pre-gateway worlds' guests are DHCP, so a reboot can strand recorded addresses.
+*   The subnet collision probe is ping/ARP-based: a DOWN guest (a crashed second host) or a
+    non-ICMP squatter evades it, and the collision returns undetected — `--gateway-cidr` /
+    `--gateway-vlan` is the override. Permanent ARP pins set by hand on the guests are
+    runtime state: a guest reboot drops them.
 *   The gateway's forwarding rides nftables ordering: the freehold ruleset is asserted LAST
     and the gateway installs no docker, so docker's iptables-nft (FORWARD policy drop) can't
     strangle it — but no reconciliation pass re-asserts the freehold table if docker ever

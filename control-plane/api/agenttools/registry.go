@@ -75,6 +75,30 @@ func (r *Registry) RegisterAgent(name, pubkey, channel string) (json.RawMessage,
 	return json.RawMessage(`{}`), nil
 }
 
+// RenameAgent moves an agent's registry row from oldName to newName, preserving
+// every field — the pubkey especially: a rename must never re-roll an identity
+// (the durable identity dir is renamed by the caller, so rebuilds re-apply the
+// same key under the new name). Refuses a missing source row or a taken
+// destination; a rename onto the same name is a no-op.
+func (r *Registry) RenameAgent(oldName, newName string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if oldName == newName {
+		return nil
+	}
+	row, ok := r.rows[oldName]
+	if !ok {
+		return fmt.Errorf("rename %s: no such agent row", oldName)
+	}
+	if _, taken := r.rows[newName]; taken {
+		return fmt.Errorf("rename %s → %s: the destination name is already registered", oldName, newName)
+	}
+	delete(r.rows, oldName)
+	row.Name = newName
+	r.rows[newName] = row
+	return r.save()
+}
+
 // SetPurpose records an agent's one-line purpose on its registry row (the tool
 // knows it at create time; threading it separately keeps ConsoleOps mirroring
 // the console client, which has no purpose field). Saved with the row so a
