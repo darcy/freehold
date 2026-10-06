@@ -61,8 +61,13 @@ func newFakeFirstRunRelay(t *testing.T, query []map[string]interface{}) *fakeFir
 			f.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(out)
 		case strings.HasSuffix(r.URL.Path, "/events"):
+			var published map[string]interface{}
+			_ = json.Unmarshal(body, &published)
 			f.mu.Lock()
 			f.events = append(f.events, string(body))
+			// A relay serves what was published: published events join the
+			// query result set, so a later dedupe read sees them.
+			f.query = append(f.query, published)
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		default:

@@ -484,6 +484,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     surface up on their next build; a missed kind:0 or welcome degrades to a
     WARN, never a failed build).
 
+    Every build and update also posts the world's running version to the Buzz
+    desktop app's **Pulse** feed as the CPA (a kind:1 note): a stable build
+    posts its own release's notes and link, a dev build a short "Version
+    updated to &lt;sha&gt;" with the commit link — deduped by marker tag, so
+    repeated same-version builds stay quiet; a missed post degrades to a WARN
+    the next build retries.
+
 *   **Each department holds capability runners** — one per capability, grant-scoped,
     rostered over native Nostr kinds, named for the target (`pve-ssh-root`,
     `litellm-api-admin`, …). The table, the grant model, and grants on the fly are in
