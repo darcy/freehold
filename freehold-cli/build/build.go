@@ -276,7 +276,11 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		}
 	}
 
-	if !have["litellm"] && !e.F.NoLitellm {
+	// The CP's services phase applies litellm.tf and requests the master from
+	// the co-located runner unconditionally, so the store seeds EVEN under
+	// --no-litellm (main behavior — the opt-out only affects the recorded
+	// Managed list). The provider choice is the only interactive part.
+	if !have["litellm"] {
 		master, pg, gw, err := e.litellmSecretMaterial(cfg)
 		if err != nil {
 			return err
@@ -465,8 +469,10 @@ func (e *buildEngine) litellmPostgresPw(k3sVmid uint32) string {
 // litellmSecretMaterial returns the litellm master key, postgres password, and
 // the operator's gateway provider choice (prompting for all three on first
 // provision). The CP is now the durable owner: the caller seeds these to the
-// CP (ensureCpSecrets); world_build re-seeds the co-located runner from the CP
-// store so the existing $LITELLM/$PROVIDER_KEY injection path is unchanged.
+// CP (ensureCpSecrets); world_build re-seeds the co-located runner's master +
+// postgres from the CP store (the tfRun TF_VAR inputs), while the provider key
+// stays store-only — the alias stage reads it there and the AI department's
+// door package is its only other copy.
 func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string, gatewaySetup, error) {
 	k3sVmid := uint32(0)
 	if cfg != nil && cfg.Lxc.K3s.Vmid != nil {
