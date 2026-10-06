@@ -121,7 +121,11 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 			return err
 		}
 	}
-	if atArgv != "" {
+	// Restart whenever the binary shipped — a CAPTURE MISS must not skip it
+	// (a stopped unit captures empty too, and the enabled unit would sit
+	// inactive through world_migrate). The function no-ops via the
+	// unit-absent check when agent-tools genuinely never ran.
+	if spec.AgentToolsBinary != nil && *spec.AgentToolsBinary != "" {
 		if err := restartAgentTools(t, spec, atArgv); err != nil {
 			return err
 		}
