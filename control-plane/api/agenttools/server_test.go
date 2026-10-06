@@ -407,7 +407,7 @@ func TestProvisionRunnerAgentGate(t *testing.T) {
 		t.Helper()
 		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"provision_runner","arguments":` +
 			`{"name":"rtx3090-ssh-root","kind":"ssh","address":"darcy@192.168.1.50","grant_to":["ai"],` +
-			`"probe":"GET /v2/account bearer","probe_body":""}}}`
+			`"probe":"GET /v2/account bearer","probe_body":"{\"kind\":\"SelfSubjectReview\"}"}}}`
 		ts := time.Now().Unix()
 		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
 		req.Header.Set(PubkeyHeader, agentPK)
@@ -425,11 +425,11 @@ func TestProvisionRunnerAgentGate(t *testing.T) {
 		len(got.GrantTo) != 1 || got.GrantTo[0] != "ai" {
 		t.Fatalf("args not plumbed verbatim: %+v", got)
 	}
-	// The probe plumbs verbatim too — the MCP handler is where a dropped
+	// The probe + body plumb verbatim — the MCP handler is where a dropped
 	// probe refuses every agent-provisioned api door (the args struct and the
 	// bridge schema are the two agent-facing copies of the contract).
-	if got.Probe != "GET /v2/account bearer" || got.ProbeBody != "" {
-		t.Fatalf("probe not plumbed verbatim: %+v", got)
+	if got.Probe != "GET /v2/account bearer" || got.ProbeBody != `{"kind":"SelfSubjectReview"}` {
+		t.Fatalf("probe/probe_body not plumbed verbatim: %+v", got)
 	}
 
 	srv.AgentGrants = func() string { return "off" }
