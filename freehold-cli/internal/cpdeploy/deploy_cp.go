@@ -275,7 +275,10 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 		return nil
 	}
 	atState := filepath.Join(spec.StateDir, "..", "agent-tools")
-	stop := fmt.Sprintf("p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
+	// The unit stop FIRST (same shape as stopPriorServe) — a unit-managed
+	// serve ignores the pid kill; the pid kill + the exe scan cover a
+	// pre-unit world.
+	stop := fmt.Sprintf("systemctl stop freehold-agent-tools 2>/dev/null; p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true", atState, atState)
 	if _, err := execToOK(t, proxmox.LxcCmd(spec.LXc, stop), "stop prior agent-tools", 30); err != nil {
 		return err
 	}
