@@ -127,12 +127,13 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     | `dnsmasq-local-root` | local (CP guest) | 8796 | network |
     | `cp-local-root` | local (CP guest) | 8797 | data |
     | `cloudflare-api-<zone>` | api, one per stored DNS zone | from 8798 | network |
-    | dynamic (`provision_runner`) | ssh / any api kind (verify arm as data) / local | from 8800 | per grant |
+    | dynamic (`provision_runner`) | ssh / any api kind (verify arm as data) / kube slots (`kube-api-<slot>`) / local | from 8800 | per grant |
 
 *   **Grants on the fly.** The CPA can provision capability mid-conversation:
     `provision_runner` stages a NEW runner (keypair, sealed credential, private audit
     channel, a systemd unit on the CP guest), records it as a dynamic capability
-    (re-staged adopt-only on every build), grants the named agents onto its roster live,
+    (re-staged on every build — adopt-only, except a kube slot's record, whose slot is
+    re-created and whose token is re-sealed), grants the named agents onto its roster live,
     and re-applies the grantees' pods with the new coords. It can also enroll a runner
     RESIDENT on a target the agent itself provisioned (`hosted=self`: the guest holds the
     runner-client, `runner enroll` mints the identity ON the guest, pods dial its LAN
@@ -145,7 +146,14 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     agent names the probe (`"<METHOD> <path> [auth] [want] [insecure]"`, e.g. `GET
     /user/tokens/verify bearer`), it ships in the door's package (with its optional
     `probe_body`), and the runner composes its self-check curl
-    from it — a new service kind is a probe, never a rebuild. Confirmation is governed by
+    from it — a new service kind is a probe, never a rebuild. A **kube slot**
+    (`kind=kubernetes`, named `kube-api-<slot>`) is the exception that still holds the
+    rule: the slot (a namespace, its ns-admin ServiceAccount + Role, an optional quota,
+    the token Secret) is carved by COMPUTE through `kube-api-root` — the department's
+    audited leg, never the CPA's — and the CP then reads the SA token from the slot and
+    seals it CP-side, so the door is live with no console fill; the record re-creates the
+    slot and re-seals the token on every rebuild, the same role `doors.tf` plays for the
+    static kube doors. Confirmation is governed by
     `agent_grants` on the CP state —
     `confirm` (default: in-thread yes, or a DM), `auto`, or `off` (the server-side kill
     switch, `freehold-console grants-mode`) — but the discipline itself is the granting

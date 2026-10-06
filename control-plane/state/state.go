@@ -130,11 +130,20 @@ type CapabilityRecord struct {
 	Host string `json:"host,omitempty"`
 	// EnrollConfirmedAt is when the operator CONFIRMED the presented pubkeys
 	// on the door page (against the guest's own `runner enroll` output /
-	// Compute's audited report). Until then the console refuses the
+	// Compute's report). Until then the console refuses the
 	// credential fill — the barrier that keeps a compromised provisioning
 	// agent from sealing to its own key.
 	EnrollConfirmedAt *uint64 `json:"enroll_confirmed_at,omitempty"`
-	CreatedAt         uint64  `json:"created_at"`
+	// NS is a kube-slot record's namespace (kind=kubernetes): the slot the
+	// door's ServiceAccount lives in. The record is the spec the build
+	// re-creates the slot from at every rebuild — the same role doors.tf
+	// plays for the build-time kube doors (a k3s rebuild wipes the cluster;
+	// the slot and its token are re-derived, the door re-sealed).
+	NS string `json:"ns,omitempty"`
+	// Quota is the slot's optional ResourceQuota hard spec
+	// ("key=value,key=value"), re-applied from the record on every rebuild.
+	Quota     string `json:"quota,omitempty"`
+	CreatedAt uint64 `json:"created_at"`
 }
 
 // Capability origins.

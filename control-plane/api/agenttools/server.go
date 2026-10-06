@@ -184,7 +184,7 @@ func ToolList() []map[string]interface{} {
 			}, []string{"runner", "pubkeys"}),
 		},
 		{
-			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. Grants land live; the grantees' pods are re-applied with the new coords.",
+			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview; kind=kubernetes injects its own verify arm — never send a probe or probe_body on a kube door). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. kind=kubernetes is a KUBE SLOT — a namespace-scoped door for an agent's own workloads, NEVER cluster scope (the cluster itself is Compute's, kube-api-root): name it kube-api-<slot>, pass ns (the slot's namespace — a fresh DNS label, not a platform namespace) and optionally quota (\"cpu=4,memory=8Gi,pods=32\"), and the slot must be CARVED FIRST by Compute through kube-api-root — ask Compute in conversation to apply the slot manifest (a missing slot's error carries it) — then this tool verifies the slot, reads its SA token and seals it CP-side: the door is live immediately, no console fill, no door page. The record re-creates the slot and re-seals the token on every rebuild (a k3s rebuild rotates the CA); the ns is fixed at first provision, and one slot per namespace — share the door via grant_to instead of re-slicing it. Grants land live; the grantees' pods are re-applied with the new coords.",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
 				"kind":       map[string]interface{}{"type": "string"},
@@ -196,7 +196,9 @@ func ToolList() []map[string]interface{} {
 				"host":       map[string]interface{}{"type": "string"},
 				"pubkey":     map[string]interface{}{"type": "string"},
 				"enc_pubkey": map[string]interface{}{"type": "string"},
-			}, []string{"name", "kind", "address", "grant_to"}),
+				"ns":         map[string]interface{}{"type": "string"},
+				"quota":      map[string]interface{}{"type": "string"},
+			}, []string{"name", "kind", "grant_to"}),
 		},
 		{
 			"name": "revoke_runner", "description": "Take a capability away — the counterpart of provision_runner. With revoke_from set, those agent NAMES lose their grant on the door while it keeps serving the rest of its roster; with revoke_from empty the WHOLE door is retired (roster cleared, credential erased from the CP, its unit stopped where freehold hosts it, its record dropped). Every leg reports whether it was VERIFIED: the roster is re-read from the relay (what the runner checks per call), the unit is asked if it is still active and its port probed, the sealed package is re-opened. Anything unverified is named — a revoked door that is still running is a known state, never a silent one, so relay the unverified legs to the operator instead of claiming a clean teardown. The door's audit channel is KEPT read-only so the revocation stays auditable. Only doors provision_runner gave are touchable: build-time capability runners, the cloudflare-api- doors, and console-provisioned ones stay operator-scoped.",
@@ -302,6 +304,11 @@ type provisionRunnerArgs struct {
 	Probe   string   `json:"probe"`
 	// ProbeBody is the probe's optional literal JSON request body.
 	ProbeBody string `json:"probe_body"`
+	// NS/Quota are the kube-slot fields (kind=kubernetes): the slot's
+	// namespace (Compute carved it through kube-api-root) and its optional
+	// ResourceQuota hard spec.
+	NS    string `json:"ns"`
+	Quota string `json:"quota"`
 }
 type revokeRunnerArgs struct {
 	Name string `json:"name"`
@@ -450,6 +457,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
 			Hosted: a.Hosted, Host: a.Host, Pubkey: a.Pubkey, EncPubkey: a.EncPub,
 			Probe: a.Probe, ProbeBody: a.ProbeBody,
+			NS: a.NS, Quota: a.Quota,
 		})
 		s.textResult(w, id, err, report)
 	case "revoke_runner":

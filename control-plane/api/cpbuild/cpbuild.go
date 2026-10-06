@@ -72,42 +72,42 @@ const (
 const AgentToolsPort = config.AgentToolsPort
 
 type Spec struct {
-	Name           string
-	StateDir       string
-	RelayURL       string
-	RelayAuthURL   string
-	RelayWS        string
-	RelayPK        string
-	RelayHost      string
-	RelayIP        string
-	CpHost         string
-	CpIP           string
-	CpLxc          uint32
-	ProxyIP        string
-	LitellmIP      string
-	PlanePool      string
-	PlaneKind      string
-	ThinPool       string
-	SizeGB         uint64
-	PoolSizeGB     uint64
-	RootfsGB       uint32
-	MemoryMB       uint32
-	StorageName    string
-	RelayGW        string
-	Bridge         string
-	RelayLxc       uint32
-	RelayCompose   string
-	K3sVmid        uint32
+	Name         string
+	StateDir     string
+	RelayURL     string
+	RelayAuthURL string
+	RelayWS      string
+	RelayPK      string
+	RelayHost    string
+	RelayIP      string
+	CpHost       string
+	CpIP         string
+	CpLxc        uint32
+	ProxyIP      string
+	LitellmIP    string
+	PlanePool    string
+	PlaneKind    string
+	ThinPool     string
+	SizeGB       uint64
+	PoolSizeGB   uint64
+	RootfsGB     uint32
+	MemoryMB     uint32
+	StorageName  string
+	RelayGW      string
+	Bridge       string
+	RelayLxc     uint32
+	RelayCompose string
+	K3sVmid      uint32
 	// The freehold-subnet gateway (docs/NETWORK.md). GatewayCIDR is
 	// the internal subnet ("" = no gateway — guests ride the LAN bridge as
 	// before); GatewayVlan the in-host bridge tag; GatewayLxc the gateway
 	// guest's vmid. K3sIP is the k3s node's address — with a gateway the
 	// INTERNAL one (ProxyIP is then the gateway's LAN address, the edge);
 	// without one it mirrors ProxyIP.
-	GatewayCIDR string
-	GatewayVlan int
-	GatewayLxc  uint32
-	K3sIP       string
+	GatewayCIDR    string
+	GatewayVlan    int
+	GatewayLxc     uint32
+	K3sIP          string
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
@@ -160,6 +160,11 @@ type Spec struct {
 	// latestRelease, when set, replaces the GitHub release fetch the release
 	// pulse stage makes (tests). It receives the running version tag.
 	latestRelease func(tag string) (*ghRelease, error)
+
+	// execHook, when set, replaces the co-located-runner exec for every
+	// execOut call (tests: the kube-slot carve + token read are hermetically
+	// fakeable). Same shape as execOut; nil = the real path.
+	execHook func(cmd string, timeoutS uint64, extraSecrets ...string) (string, error)
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -184,6 +189,9 @@ func (s *Spec) client() (*client.McpClient, error) {
 // so the target name is always first; extraSecrets add requested secrets by
 // name (the runner injects each as an env var + redacts it).
 func (s *Spec) execOut(cmd string, timeoutS uint64, extraSecrets ...string) (string, error) {
+	if s.execHook != nil {
+		return s.execHook(cmd, timeoutS, extraSecrets...)
+	}
 	mc, err := s.client()
 	if err != nil {
 		return "", err
@@ -2556,9 +2564,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
 				for _, ref := range joined {
-				// Best-effort: the created agent signs, so it lands on a
-				// channel it owns (a custom channel it created); the CPA is
-				// already the owner/member of #freehold — skip.
+					// Best-effort: the created agent signs, so it lands on a
+					// channel it owns (a custom channel it created); the CPA is
+					// already the owner/member of #freehold — skip.
 					if ref.id == relayFreeholdChannel {
 						continue
 					}

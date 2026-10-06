@@ -60,6 +60,12 @@ type capabilityRunner struct {
 	// (the credential fields seal as extra named secrets).
 	dnsZone string
 	dnsEnv  map[string]string
+	// kube-slot doors only (dynamic, kind=kubernetes): the slot's namespace
+	// + its optional ResourceQuota. The record IS the spec — the build
+	// re-creates the slot from it every rebuild (the same role doors.tf plays
+	// for the static kube doors; a k3s rebuild wipes the cluster).
+	ns    string
+	quota string
 	// addr overrides the ssh target address (dynamic runners: the operator's
 	// box, not the PVE host the co-located runner owns).
 	addr string
@@ -273,11 +279,22 @@ func dynamicRunners(store *state.StateStore) []capabilityRunner {
 	var out []capabilityRunner
 	for name, rec := range store.Capabilities() {
 		rosters := append([]string(nil), rec.Rosters...)
-		out = append(out, capabilityRunner{
+		r := capabilityRunner{
 			name: name, kind: rec.Kind, port: rec.Port,
 			rosters: rosters, addr: rec.Address, dynamic: true,
 			selfHosted: rec.SelfHosted(), host: rec.Host,
-		})
+			ns: rec.NS, quota: rec.Quota,
+		}
+		if rec.Kind == "kubernetes" {
+			// A dynamic kube slot carries the same derived coords as a static
+			// one: token Secret from the ns, the standard SelfSubjectReview
+			// verify arm (the record's own spec rides the record fields).
+			r.tokenSecret = kubeDoorToken(rec.NS)
+			r.tokenNS = rec.NS
+			r.probe = kubernetesProbe
+			r.probeBody = kubernetesProbeBody
+		}
+		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out
@@ -374,11 +391,26 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 			}
 		}
 	} else if r.dynamic {
-		// Adopt-only: the record is the spec, the package holds the operator's
-		// credential, and no build-time source exists to re-seal from. The
-		// channel sync + (re)start below are the re-assert. A self-hosted
-		// runner has no package here at all — its identity lives on the
-		// target; the sync below re-asserts its rosters the same way.
+		if r.kind == "kubernetes" {
+			// A dynamic kube slot's record IS its build-time source: the build
+			// re-creates the slot from the record (the same role doors.tf
+			// plays for the static kube doors — a k3s rebuild wipes the
+			// cluster AND rotates the CA) and re-seals the fresh token.
+			// Adopt-only would strand the door on a dead CA.
+			if err := s.applyKubeSlot(r.ns, r.quota); err != nil {
+				return err
+			}
+			if err := s.reSealRotating(store, pkgDir, r, hostAddr); err != nil {
+				return err
+			}
+		} else {
+			// Adopt-only: the record is the spec, the package holds the
+			// operator's credential, and no build-time source exists to
+			// re-seal from. The channel sync + (re)start below are the
+			// re-assert. A self-hosted runner has no package here at all —
+			// its identity lives on the target; the sync below re-asserts its
+			// rosters the same way.
+		}
 	} else {
 		// ssh credentials are the runner's identity — stable; re-authorize the
 		// SAME key if the host lost it. Everything else rotates (a k3s rebuild
@@ -394,42 +426,8 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 				return err
 			}
 		} else {
-			c, err := s.runnerCredential(r, hostAddr)
-			if err != nil {
+			if err := s.reSealRotating(store, pkgDir, r, hostAddr); err != nil {
 				return err
-			}
-			// Preserve the primary record's kind/address (AddSecret stamps
-			// "extra"); the package is the truth, the record mirrors it.
-			before, _ := store.GetSecret(r.name)
-			if _, err := provisioner.AddSecret(store, r.name, r.name, c.secret); err != nil {
-				return fmt.Errorf("re-seal credential: %w", err)
-			}
-			if rec, ok := store.GetSecret(r.name); ok {
-				rec.Kind = before.Kind
-				rec.Address = c.addr
-				if r.probe != "" && rec.Probe != r.probe {
-					// The table is the operator's truth: a door predating the
-					// parameterized probe (or a moved arm) re-stamps on build.
-					rec.Probe = r.probe
-					rec.ProbeBody = r.probeBody
-					if err := setTargetProbe(store, r.name, r.probe, r.probeBody); err != nil {
-						return fmt.Errorf("stage %s verify arm: %w", r.name, err)
-					}
-				}
-				store.InsertSecret(r.name, rec)
-				if err := store.Save(); err != nil {
-					return err
-				}
-			}
-			if c.addr != pkgTargetAddr(pkgDir, r.name) {
-				if err := setTargetAddress(store, r.name, c.addr); err != nil {
-					return fmt.Errorf("move target address: %w", err)
-				}
-			}
-			for _, name := range sortedNames(c.extras) {
-				if _, err := provisioner.AddSecret(store, r.name, name, c.extras[name]); err != nil {
-					return fmt.Errorf("re-seal extra %s: %w", name, err)
-				}
 			}
 		}
 	}
@@ -472,6 +470,52 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	return nil
 }
 
+// reSealRotating is the build-time re-seal for every rotating-credential door
+// (non-ssh): the credential is sourced fresh (kube tokens from the cluster,
+// API keys from their source) and sealed again — the runner restarts below
+// and loads it. Extracted so the static table and dynamic kube slots share
+// the exact path.
+func (s *Spec) reSealRotating(store *state.StateStore, pkgDir string, r capabilityRunner, hostAddr string) error {
+	c, err := s.runnerCredential(r, hostAddr)
+	if err != nil {
+		return err
+	}
+	// Preserve the primary record's kind/address (AddSecret stamps
+	// "extra"); the package is the truth, the record mirrors it.
+	before, _ := store.GetSecret(r.name)
+	if _, err := provisioner.AddSecret(store, r.name, r.name, c.secret); err != nil {
+		return fmt.Errorf("re-seal credential: %w", err)
+	}
+	if rec, ok := store.GetSecret(r.name); ok {
+		rec.Kind = before.Kind
+		rec.Address = c.addr
+		if r.probe != "" && rec.Probe != r.probe {
+			// The table is the operator's truth: a door predating the
+			// parameterized probe (or a moved arm) re-stamps on build.
+			rec.Probe = r.probe
+			rec.ProbeBody = r.probeBody
+			if err := setTargetProbe(store, r.name, r.probe, r.probeBody); err != nil {
+				return fmt.Errorf("stage %s verify arm: %w", r.name, err)
+			}
+		}
+		store.InsertSecret(r.name, rec)
+		if err := store.Save(); err != nil {
+			return err
+		}
+	}
+	if c.addr != pkgTargetAddr(pkgDir, r.name) {
+		if err := setTargetAddress(store, r.name, c.addr); err != nil {
+			return fmt.Errorf("move target address: %w", err)
+		}
+	}
+	for _, name := range sortedNames(c.extras) {
+		if _, err := provisioner.AddSecret(store, r.name, name, c.extras[name]); err != nil {
+			return fmt.Errorf("re-seal extra %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // runnerCred is a capability runner's resolved credential material.
 type runnerCred struct {
 	addr    string
@@ -507,7 +551,14 @@ func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred
 		if err != nil {
 			return runnerCred{}, err
 		}
-		return runnerCred{addr: "https://" + config.StripCIDR(s.ProxyIP) + ":6443", secret: token}, nil
+		addr := "https://" + config.StripCIDR(s.ProxyIP) + ":6443"
+		if r.addr != "" {
+			// A dynamic kube slot's recorded address wins (a remote-cluster
+			// door states its own endpoint; a same-cluster one derives the
+			// gateway route).
+			addr = r.addr
+		}
+		return runnerCred{addr: addr, secret: token}, nil
 	case "litellm":
 		master, provider, _, _, err := s.litellmDoorKeys()
 		if err != nil {
