@@ -156,6 +156,10 @@ type Spec struct {
 	// unresolvable key fails the create loudly — never a pod with a harness
 	// and silently no writable memory.
 	OwnerSecret []byte
+
+	// latestRelease, when set, replaces the GitHub release fetch the release
+	// pulse stage makes (tests). It receives the running version tag.
+	latestRelease func(tag string) (*ghRelease, error)
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -1582,6 +1586,10 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// desktop app skip its first-run onboarding (starter channels, private
 		// Welcome, built-in welcome-team agents). Reads first; never overwrites.
 		report = spec.stageOperatorProfile(report)
+		// 9. The release pulse: the CPA posts the world's RUNNING version to
+		// Pulse — a stable build its own release's notes + link, a dev build
+		// the updated sha. Deduped; best-effort.
+		report = spec.stageReleasePulse(report)
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")
 		}

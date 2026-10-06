@@ -110,6 +110,13 @@ func PostTaggedMessageAuth(dialURL, authURL string, secret []byte, channelID, me
 	return publishSignedAuth(dialURL, authURL, secret, StreamMsgKind, tags, content)
 }
 
+// PostNoteAuth publishes a bare kind:1 note (NIP-01) — the Buzz Pulse surface
+// (its global feed reads kinds:[1]; channel messages are kind 9 and never show
+// there). Extra tags ride for provenance/idempotence markers.
+func PostNoteAuth(dialURL, authURL string, secret []byte, extra [][]string, content string) error {
+	return publishSignedAuth(dialURL, authURL, secret, 1, extra, content)
+}
+
 // PollResult is one verified stream message (created_at, content, author).
 type PollResult struct {
 	CreatedAt int64
