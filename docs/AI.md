@@ -20,10 +20,12 @@ AI owns the gateway directly; the runtime is what all agents share.
 ## How it works
 
 *   **The gateway.** LiteLLM and its Postgres run as Deployments in the `litellm` namespace,
-    configured by env only. The provider key is operator-supplied, sealed by the CP, and
-    reaches the gateway via the runner — never in argv or Terraform state. At first
-    provision the build's picker collects ONE provider (from a curated single-key table —
-    fireworks_ai, openai, anthropic, gemini, groq, deepseek, mistral, together_ai,
+    configured by env only. The provider key is operator-supplied and sealed in the CP's
+    litellm store — never in argv or Terraform state; the build registers the aliases from
+    that store over the gateway's admin API directly, and only the AI department's
+    `litellm-api-admin` runner carries the key (for retargeting), injecting it per exec. At
+    first provision the build's picker collects ONE provider (from a curated single-key
+    table — fireworks_ai, openai, anthropic, gemini, groq, deepseek, mistral, together_ai,
     openrouter, xai) and a model id (the provider's default, editable); the choice rides
     the CP's litellm store (`provider` / `provider-prefix` / `provider-model`) and the
     build registers the default ALIAS set on the gateway, ALL pointing at it

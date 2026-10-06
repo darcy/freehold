@@ -140,7 +140,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     server through the CP API (console HTTP / agent-tools MCP) or by invoking
     its binaries, never by linking its packages. An import-graph guard test in
     each module enforces both directions. Anything both sides genuinely need
-    (crypto/wire/client/config/console, the relay + delegation protocol
+    (crypto/wire/client/config/console/litellm, the relay + delegation protocol
     clients, the identity loader, the world-facts shape) lives in the
     `contract/` leaf. The build engine (world bring-up/teardown) is server-side
     (`api/cpbuild`); local `build`/`teardown` are thin CP triggers, and CP
@@ -491,8 +491,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **Every agent reasons through the LiteLLM gateway by alias, never by the
     provider model name.** The build ensures a default alias set on the
     gateway (`stageLitellmAliases`, idempotent, before the pods apply), each
-    entry a clone of the base registration (`litellm.tf`) pointing at the
-    same underlying model: **Code** (coding agents), **General** (the
+    pointing at the operator's first-build provider choice — registered
+    straight from the CP's litellm store (terraform deploys the gateway but
+    registers no model): **Code** (coding agents), **General** (the
     default for custom agents), **Freehold** (the core agents — the CPA +
     departments, pinned), and **ExtraThinking** (complex architecture / deep
     thinking). A created agent's alias is chosen at `create_agent` time and

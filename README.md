@@ -242,7 +242,8 @@ Cargo.toml            Rust workspace: control-plane/core, control-plane/runner,
                       control-plane/testkit, control-plane/core/harness/oracle
 contract/             freehold/contract — the shared wire/trust leaf: crypto/ (Go repro
                       of the Rust core, byte-exact cross-verified), wire/, client/,
-                      config/, console/, relay/, identity/, worldfacts/, delegate/,
+                      config/, console/, litellm/ (the curated gateway-provider
+                      table), relay/, identity/, worldfacts/, delegate/,
                       nipoa/, version/. Its own Go module — the edge is
                       platform → contract ← control-plane (no module cycle).
 control-plane/        freehold/control-plane — the stable mechanism (Go, plus Rust for

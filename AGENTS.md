@@ -265,8 +265,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   containment failure even if a grant would technically allow it — the department's prompt is
   the first line of defense, the grant the second.
 - **Every agent reasons through the LiteLLM gateway by alias.** The build ensures the default
-  alias set on the gateway before pods apply (`stageLitellmAliases`, each a clone of the base
-  `litellm.tf` registration): `Code` (coding agents), `General` (the default for custom
+  alias set on the gateway before pods apply (`stageLitellmAliases`, registered straight
+  from the CP's litellm store — the operator's first-build provider choice; terraform
+  deploys the gateway but registers no model): `Code` (coding agents), `General` (the default for custom
   agents), `Freehold` (the core agents — the CPA + departments, pinned), `ExtraThinking`
   (complex architecture / deep thinking). A created agent's choice rides its registry row, so
   a rebuild re-applies the same alias.
@@ -321,7 +322,7 @@ than copying it.
     embeds its Markdown as Go values):
     `cd agents && go build ./... && go vet ./... && go test ./...`
   - `contract/` (`freehold/contract` — the shared wire/trust/protocol leaf: crypto/wire/client/
-    config/console/relay/delegate/identity/worldfacts): `cd contract && go build ./... && go vet ./... && go test ./...`
+    config/console/litellm/relay/delegate/identity/worldfacts): `cd contract && go build ./... && go vet ./... && go test ./...`
   - `platform/` (`freehold/platform` — the evolving world: services/provisioning/
     migrations/terraform): `cd platform && go build ./... && go vet ./... && go test ./...`;
     `provisioning/box` holds the SHARED provisioning engine (LXC boot, storage plane,
