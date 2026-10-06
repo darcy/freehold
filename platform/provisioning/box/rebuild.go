@@ -580,8 +580,9 @@ func (e *Engine) RunBootstrap() error {
 // seedCpRunnerSecrets writes the litellm master / postgres pw
 // into the CP's co-located runner package (freehold-console add-secret on the
 // CP) and restarts the freehold-runner unit so the live runner loads them. This
-// is what lets the existing $LITELLM/$PROVIDER_KEY injection path serve the
-// CP-owned litellm store the world-build reads.
+// is what keeps the $LITELLM/$POSTGRES_PW env injection serving the CP-owned
+// litellm store the world-build reads (the provider key is not in the package —
+// it lives in the store and the AI department's door).
 
 // cpSecretBlob renders a cert.SaveCreds-style sealed record ({provider,sealed,
 // aad}) as raw JSON, for upload to the CP via /api/secrets.
