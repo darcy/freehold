@@ -55,6 +55,7 @@ type View int
 const (
 	ViewServices View = iota
 	ViewAgents
+	ViewJobs
 	ViewRunners
 	ViewData
 	ViewDNS
@@ -65,6 +66,8 @@ func (v View) String() string {
 	switch v {
 	case ViewAgents:
 		return "Agents"
+	case ViewJobs:
+		return "Jobs"
 	case ViewRunners:
 		return "Runners"
 	case ViewData:
@@ -77,6 +80,9 @@ func (v View) String() string {
 		return "Services"
 	}
 }
+
+// viewCount is the number of running views the Tab cycle walks.
+const viewCount = 7
 
 // Model is the bubbletea model for the whole dashboard.
 type Model struct {
@@ -98,6 +104,7 @@ type Model struct {
 	DNS         []DnsRow
 	Certs       []CertRow
 	Agents      []AgentRow
+	Jobs        []JobRow
 	Runners     []RunnerRow
 	Storage     []DataRow
 	// Snapshots is the durable plane's snapshot list (newest first) — the
@@ -170,6 +177,17 @@ type AgentRow struct {
 	Pubkey    string
 	Created   string
 	Available string
+}
+
+// JobRow is one scheduled job (metadata-only — the TUI logs in as the
+// operator, and the operator's view never carries a prompt).
+type JobRow struct {
+	ID       string
+	Owner    string
+	Agent    string
+	Schedule string
+	LastRun  string
+	Created  string
 }
 
 // RunnerRow is a runner from the console overview or the local list.

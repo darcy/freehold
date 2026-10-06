@@ -622,6 +622,28 @@ func cmdServe(args []string) {
 	spec.AgentRegistry = reg
 	spec.FactsStore = facts
 
+	// The scheduled-jobs store (this process's own durable file) + its
+	// scheduler: fires due jobs as kind-9 mentions from the CONSOLE identity
+	// (the pods wake through their ordinary @mention path; the console
+	// credential is the same one grant writes sign with). Disabled — loudly —
+	// when the console credential is unreadable, like grant_agent.
+	jobs, jerr := agenttools.OpenJobs(filepath.Join(*stateDir, agenttools.JobsFile))
+	if jerr != nil {
+		log.Fatalf("open jobs: %v", jerr)
+	}
+	authURL := *relayAuthURL
+	if authURL == "" {
+		authURL = *relayURL
+	}
+	sched := &agenttools.Scheduler{
+		Jobs:    jobs,
+		Agents:  reg.Agents,
+		DialURL: *relayURL,
+		AuthURL: authURL,
+		Secret:  consoleSecret,
+	}
+	go sched.Run(context.Background())
+
 	tools := &agent.Tools{
 		Console:         reg,
 		Create:          cpbuild.BuildCreateAgentFn(spec),
@@ -651,6 +673,19 @@ func cmdServe(args []string) {
 		Tools:        tools,
 		ConsolePeer:  consolePeer,
 		OperatorPeer: operatorPeer,
+		Jobs:         jobs,
+		// Channel resolution signs as the console identity — the credential
+		// the fire will use — so what resolves here is exactly what can post.
+		ResolveChannel: func(name string) (string, error) {
+			chID, _, ok, err := relay.FindChannelAuth(*relayURL, authURL, consoleSecret, name)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return "", fmt.Errorf("channel %q not found", name)
+			}
+			return chID, nil
+		},
 		// The agent-grant kill switch, read fresh per call (the operator flips
 		// it through the console; the next provision_runner call sees it).
 		AgentGrants: func() string { return cpstate.AgentGrantsMode(*consoleStateDir) },

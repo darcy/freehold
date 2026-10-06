@@ -61,6 +61,46 @@ AI owns the gateway directly; the runtime is what all agents share.
     `kube-api-litellmsa` (a `litellm`-namespace kube door, no Secrets). Machines such as a
     GPU box arrive through a door the CPA provisions on the fly.
 
+## Scheduled jobs
+
+Any agent can have a job: a prompt fired on a schedule. "@ai, review the latest local-AI
+news daily and post a briefing here at 7am" is a conversation first — the agent confirms
+the schedule and channel, then calls `create_job` — and a `jobs.json` row after.
+
+*   **The scheduler lives in the agent-tools process** (the CP's own MCP server, beside the
+    agent registry): a `jobs.json` store (0600, durable plane) and one tick loop. The
+    console **folds the file read-only** for `/api/jobs` — the same split as the registry
+    (agent-writable authoritative store; console read-only view). The console never writes
+    jobs.
+*   **The fire path is the ordinary mention path.** A due job is a kind-9 mention posted by
+    the **console identity** into the job's channel, p-tagging the agent — the pod wakes
+    exactly as it does for any member, and its in-channel reply IS the delivery. The
+    console identity rides every pod's respond-to allowlist for this (see "Who may talk to
+    whom"). Open channels work unconditionally; a private channel needs its owner to add
+    the console identity — `create_job` resolves the channel as the console identity, so a
+    channel it cannot see is refused at creation with that remedy.
+*   **Ownership is the privacy boundary.** A job carries the asker's npub as its owner.
+    `/api/jobs` serves an owner's own rows with the prompt and label; every other row is
+    metadata only (owner npub, agent npub, channel, schedule, last run, created date) —
+    **the operator included**. A **member role** (any relay community member, verified
+    against the relay's kind-13534 list at login) may hold a console session that reaches
+    exactly this route and sees only their own rows.
+*   **Reliability invariants** (each guards a real failure mode, learned from OpenClaw's
+    automations and Hermes' cron):
+    *   *At-most-once*: `next_run_at` is advanced and persisted **before** dispatch, so a
+        crash mid-fire skips a slot rather than double-firing.
+    *   *No silent drops*: a missed slot (past the catch-up window — half the period,
+        clamped 2m–2h) is recorded as a `missed` run with a reason; a skipped one (the
+        agent still has an open run — the busy-pod protection) is recorded as `skipped`.
+    *   *Liveness*: a fired run closes `ok` the moment the agent posts in the channel;
+        after a 10-minute silence it closes `timeout` and the owner gets an in-channel
+        failure note. A long-but-chatty run is never cut short.
+    *   *A one-shot reminder that lands on a busy agent re-queues* (2 minutes) until the
+        agent is free — a mini-queue, not a lost reminder.
+*   **Schedules** are standard 5-field cron (or `@every` descriptors) with an explicit
+    IANA timezone per job — the resolving agent asks the asker's clock first. One-shots
+    are a unix `at` timestamp.
+
 ## Runners and secrets — how agents touch the world
 
 The reason this architecture is safe to point at real infrastructure is that the
@@ -213,9 +253,18 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 *   The sprig image is a moving tag (no digest pin).
 *   Memory attestation has no expiry; upstream buzz doesn't verify engram authorship.
 *   Prompt edits in the CP's durable copy don't survive a rebuild (re-seeded from embedded bytes).
-*   The respond-to allowlist is fixed at deploy.
+*   The respond-to allowlist is fixed at deploy (re-applies deliver changes). The console
+    identity rides every allowlist — it is the scheduled-jobs fire identity.
 *   Stale agents survive a department rename on rebuild.
-*   Agents read the repo but can't write it; nothing schedules the re-check.
+*   Job **prompts sit in plaintext** in the agent-tools' `jobs.json` (0600, durable plane)
+    — the scheduler must read them to fire. The privacy boundary is the console API's
+    owner redaction, not encryption.
+*   Job fires and **failure notes are best-effort**: a relay outage during a fire records
+    the run as `error` (a one-shot consumes itself on a failed post — at-most-once); a
+    failure note the channel refuses is logged, not retried.
+*   **Console jobs management is read-only**: pause/delete run through agents
+    (`pause_job`/`delete_job`), since jobs.json is the agent-tools process's own store.
+*   Agents read the repo but can't write it.
 *   AI hardware, local AI, optimization dashboards, and eval harnesses are prompt claims
     with no tooling. No resource baseline per agent exists.
 
@@ -228,11 +277,13 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 *   **Agent workspaces + git/GitHub:** a workspace LXC per agent, commits verified durable in
     Buzz's git, GitHub pushes via a grant; GitHub and web-search runners as their own
     capabilities.
-*   Sleep/wake for ad-hoc agents; a scheduled repo re-check; secondary-relay onboarding.
+*   Sleep/wake for ad-hoc agents; secondary-relay onboarding. (The scheduled repo
+    re-check is built — it is now just a `create_job` the AI department schedules for
+    itself.)
 
 ## Where the code is
 
 `control-plane/api/agent/` (pod, identity, tools), `control-plane/api/cpbuild/` (LiteLLM
 seeding, create/reconcile, department runners, `terraform/litellm.tf`), `control-plane/api/agenttools/`
-(registry), `contract/nipoa/`, `contract/client/` (the signed MCP client), `secret-management/`
+(registry, scheduled jobs), `contract/nipoa/`, `contract/client/` (the signed MCP client), `secret-management/`
 (the provisioner), `control-plane/runner/` (Rust), `agents/`.

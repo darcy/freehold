@@ -51,6 +51,13 @@ the ordering across all of them is `docs/ROADMAP.md`.
     port needs `--addr`.
 *   Go-console port gaps: no `rebuild` verb, a few missing CLI verbs, no request-body cap,
     dropped env-var flag bindings; secrets in `/api/provision` live briefly in memory.
+*   Scheduled jobs are **read-only in the console**: pause/delete run through agents
+    (jobs.json is the agent-tools process's own store; the console folds it read-only),
+    and a member session reaches exactly one route (`GET /api/jobs`). A member login
+    needs the relay reachable — the membership check fails closed when it is not.
+*   Job fire access follows channel visibility: open channels always work; a **private**
+    channel needs its owner to add the console identity, and `create_job` refuses with
+    that remedy when the console identity cannot resolve the channel.
 
 **Verification and CI**
 *   No bot-review injection pre-vet; no single real-relay acceptance run.

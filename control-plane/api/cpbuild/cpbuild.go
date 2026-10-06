@@ -2704,10 +2704,12 @@ func (s *Spec) identityPubkey(name string) string {
 // author gate accepts (the manifest's BUZZ_ACP_RESPOND_TO_ALLOWLIST). A
 // reserved department wakes for the operator + every core identity (the CPA +
 // the four departments — itself included; buzz-acp ignores self-events); a
-// custom agent wakes for its asker + the CPA. The asker is the operator today:
-// create_agent is called by the CPA's harness and the CP cannot see chat
-// threads. A missing core identity is skipped — reconcileAgentsInto pre-mints
-// them, so a fresh first build still has them all.
+// custom agent wakes for its asker + the CPA. The CONSOLE identity is always
+// included: it is the scheduled-jobs fire path — every job lands as a
+// console-signed mention. The asker is the operator today: create_agent is
+// called by the CPA's harness and the CP cannot see chat threads. A missing
+// core identity is skipped — reconcileAgentsInto pre-mints them, so a fresh
+// first build still has them all.
 func (s *Spec) respondAllowlist(name string) string {
 	isDepartment := false
 	for _, dep := range agents.DepartmentNames() {
@@ -2716,7 +2718,7 @@ func (s *Spec) respondAllowlist(name string) string {
 			break
 		}
 	}
-	pubkeys := []string{s.OwnerPub, s.cpaPubkey()}
+	pubkeys := []string{s.OwnerPub, s.cpaPubkey(), s.consolePubkey()}
 	if isDepartment {
 		for _, dep := range agents.DepartmentNames() {
 			pubkeys = append(pubkeys, s.identityPubkey(dep))
@@ -2732,6 +2734,22 @@ func (s *Spec) respondAllowlist(name string) string {
 		out = append(out, pk)
 	}
 	return strings.Join(out, ",")
+}
+
+// consolePubkey derives the CONSOLE identity's pubkey (the scheduled-jobs
+// fire identity, nested at <StateDir>/console/identity.json). "" when the
+// identity is absent/unreadable — the allowlist then just omits it (the same
+// skip rule the core identities follow).
+func (s *Spec) consolePubkey() string {
+	sec, err := cpstate.ConsoleSecret(s.consoleStateRoot())
+	if err != nil {
+		return ""
+	}
+	pk, err := crypto.PubkeyFromSecret(sec)
+	if err != nil {
+		return ""
+	}
+	return pk
 }
 
 // cpaSecret returns the CPA's Nostr secret (32 bytes), or nil when its identity

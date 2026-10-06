@@ -60,6 +60,23 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 			}, []string{"name"})},
 		{"name": "manage_agent", "description": "List registered agents, or (remove=<name>) retire one's pod + derived k8s objects and drop its registry row (the durable workspace dir is kept — it is data).",
 			"inputSchema": i(map[string]interface{}{"remove": map[string]interface{}{"type": "string"}}, []string{})},
+		{"name": "create_job", "description": "Schedule a job: at its schedule, the control plane posts prompt as a mention to agent in channel, and agent's in-channel reply is the delivery (the job runs on the named agent — usually you; pass another agent's name to run it there). cron is a standard 5-field expression or an @every/@hourly descriptor; tz the IANA zone (default UTC) — resolve the asker's actual clock before writing either; or pass at (a unix timestamp) INSTEAD of cron/at for a one-shot reminder. owner is the npub of the person who asked (omit for your own job). label is a short human name for it. The prompt is REDACTED from every console viewer who is not the owner — including the operator. Confirm the schedule with the asker before creating.",
+			"inputSchema": i(map[string]interface{}{
+				"prompt":  map[string]interface{}{"type": "string"},
+				"cron":    map[string]interface{}{"type": "string"},
+				"at":      map[string]interface{}{"type": "integer"},
+				"tz":      map[string]interface{}{"type": "string"},
+				"channel": map[string]interface{}{"type": "string"},
+				"agent":   map[string]interface{}{"type": "string"},
+				"owner":   map[string]interface{}{"type": "string"},
+				"label":   map[string]interface{}{"type": "string"},
+			}, []string{"prompt", "channel"})},
+		{"name": "list_jobs", "description": "List scheduled jobs. With owner set, only that npub's jobs (what to show a user who asks about their own); without, all jobs. Returns id, owner, agent, channel, schedule, next run, last run status — and the prompt only on jobs you created or that name you as agent.",
+			"inputSchema": i(map[string]interface{}{"owner": map[string]interface{}{"type": "string"}}, []string{})},
+		{"name": "delete_job", "description": "Delete a scheduled job by id (the way a user stops a job).",
+			"inputSchema": i(map[string]interface{}{"id": map[string]interface{}{"type": "string"}}, []string{"id"})},
+		{"name": "pause_job", "description": "Pause or resume a scheduled job by id (paused=true pauses, false resumes).",
+			"inputSchema": i(map[string]interface{}{"id": map[string]interface{}{"type": "string"}, "paused": map[string]interface{}{"type": "boolean"}}, []string{"id", "paused"})},
 		{"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. Grants land live; the grantees' pods are re-applied with the new coords.",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
@@ -111,7 +128,8 @@ func isFreeholdTool(name string) bool {
 	// the half that hands capability out is not governable without the half that
 	// takes it back, and it is bounded by the same ownership guards (only doors
 	// the agent flow gave) and the same agent_grants kill switch.
-	case "create_agent", "update_agent", "manage_agent", "provision_runner", "revoke_runner":
+	case "create_agent", "update_agent", "manage_agent", "provision_runner", "revoke_runner",
+		"create_job", "list_jobs", "delete_job", "pause_job":
 		return true
 	}
 	return false

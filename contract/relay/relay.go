@@ -703,3 +703,25 @@ func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about stri
 	evBytes, _ := json.Marshal(ev)
 	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
 }
+
+// IsCommunityMember reports whether pubkey is a member of the relay's
+// community, by querying the relay-signed NIP-43 membership list events
+// (kind 13534) p-tagging them — the same list `buzz-admin add-member`
+// publishes. Console-login's member role uses it: any relay member may hold a
+// jobs-scoped session; the admin whitelist stays the operator gate.
+func IsCommunityMember(relayURL string, authSecret []byte, relayPubkey, memberPubkey string) (bool, error) {
+	if relayPubkey == "" || memberPubkey == "" {
+		return false, fmt.Errorf("relay pubkey or member pubkey missing")
+	}
+	filter := map[string]interface{}{
+		"kinds":   []interface{}{13534},
+		"authors": []interface{}{relayPubkey},
+		"#p":      []interface{}{memberPubkey},
+		"limit":   1,
+	}
+	events, err := QueryEvents(relayURL, authSecret, []interface{}{filter})
+	if err != nil {
+		return false, err
+	}
+	return len(events) > 0, nil
+}

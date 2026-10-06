@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/state"
 )
 
@@ -62,20 +64,20 @@ func TestAuthChallengeSessionPortal(t *testing.T) {
 	if err != nil || tok == "" {
 		t.Fatal(err)
 	}
-	if pk, ok := a.SessionIdentity(tok); !ok || pk != "pk1" {
+	if pk, role, ok := a.SessionIdentity(tok); !ok || pk != "pk1" || role != RoleOperator {
 		t.Fatalf("session identity: %v %v", pk, ok)
 	}
-	if _, ok := a.SessionIdentity("nope"); ok {
+	if _, _, ok := a.SessionIdentity("nope"); ok {
 		t.Fatal("unknown session must fail")
 	}
 	pt, err := a.IssuePortal("pk1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pk, ok := a.ConsumePortal(pt); !ok || pk != "pk1" {
+	if pk, _, ok := a.ConsumePortal(pt); !ok || pk != "pk1" {
 		t.Fatalf("portal consume: %v %v", pk, ok)
 	}
-	if _, ok := a.ConsumePortal(pt); ok {
+	if _, _, ok := a.ConsumePortal(pt); ok {
 		t.Fatal("single-use portal must not consume twice")
 	}
 }
@@ -277,8 +279,152 @@ func TestLoginRejects(t *testing.T) {
 	})
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
+	// A non-admin is refused; with no relay on record the membership check
+	// cannot even run, so the refusal is a server error naming it.
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("non-admin login without a relay must 500 (membership unverifiable), got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMemberLoginAndJobRedaction pins the member-role boundary end to end
+// against a fake relay: a relay member logs in, sees ONLY their own job rows
+// (with the prompt), the operator sees every row metadata-only (never a
+// prompt), and a member session is refused the admin surface.
+func TestMemberLoginAndJobRedaction(t *testing.T) {
+	// Fake relay: /query answers with a relay-signed-shaped 13534 event array
+	// (the client only checks the array; the member npub is in the request's
+	// #p filter, which we echo).
+	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var filters []map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&filters)
+		want := ""
+		if len(filters) > 0 {
+			if ps, ok := filters[0]["#p"].([]interface{}); ok && len(ps) > 0 {
+				want, _ = ps[0].(string)
+			}
+		}
+		var events []map[string]interface{}
+		if want != "" {
+			events = append(events, map[string]interface{}{
+				"id": strings.Repeat("ab", 32), "pubkey": strings.Repeat("cd", 32),
+				"created_at": time.Now().Unix(), "kind": 13534, "tags": [][]string{{"p", want}}, "content": "", "sig": strings.Repeat("ef", 96),
+			})
+		}
+		_ = json.NewEncoder(w).Encode(events)
+	}))
+	defer relaySrv.Close()
+
+	adminSec := adminSecret()
+	adminPK, _ := crypto.PubkeyFromSecret(adminSec)
+	memberSec := make([]byte, 32)
+	memberSec[0] = 0x99
+	memberPK, _ := crypto.PubkeyFromSecret(memberSec)
+
+	dir := t.TempDir()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.SetRelayURL(&relaySrv.URL)
+	rpk := strings.Repeat("cd", 32)
+	_ = store.SetRelayPubkey(&rpk)
+	_ = store.Save()
+
+	// Two jobs on disk: one the member owns (with a prompt), one owned by
+	// nobody the member knows.
+	agentDir := t.TempDir()
+	jraw := `{"j-member":{"id":"j-member","owner":"` + memberPK + `","agent":"cpa","channel":"ch","cron":"0 7 * * *","prompt":"the member secret prompt","created_at":100,"next_run_at":200},"j-other":{"id":"j-other","owner":"` + strings.Repeat("ee", 32) + `","agent":"cpa","channel":"ch","cron":"@daily","prompt":"someone else secret","created_at":100,"next_run_at":200}}`
+	if err := os.WriteFile(filepath.Join(agentDir, agenttools.JobsFile), []byte(jraw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x77
+	s := &Server{Store: store, Auth: NewAuth([]string{adminPK}, ""), ConsoleSecret: consoleSec, AgentToolsDir: agentDir}
+
+	login := func(sec []byte) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/challenge", nil))
+		var chal struct {
+			Nonce string `json:"nonce"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &chal)
+		pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+		body, _ := json.Marshal(map[string]interface{}{
+			"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+		})
+		rec = httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
+		return rec
+	}
+
+	// The member logs in (relay membership verified against the fake relay).
+	rec := login(memberSec)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member login must succeed, got %d %s", rec.Code, rec.Body.String())
+	}
+	var loginBody struct {
+		Role string `json:"role"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &loginBody)
+	if loginBody.Role != RoleMember {
+		t.Fatalf("member login role = %q", loginBody.Role)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	for _, c := range rec.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member /api/jobs = %d %s", rec.Code, rec.Body.String())
+	}
+	var jobsResp struct {
+		Jobs []map[string]interface{} `json:"jobs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &jobsResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobsResp.Jobs) != 1 || jobsResp.Jobs[0]["id"] != "j-member" {
+		t.Fatalf("member jobs = %+v, want only their own row", jobsResp.Jobs)
+	}
+	if jobsResp.Jobs[0]["prompt"] != "the member secret prompt" {
+		t.Error("an owner's own row must carry the prompt")
+	}
+
+	// The operator sees every row, metadata only — never a prompt.
+	rec = login(adminSec)
+	req = httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	for _, c := range rec.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	var opResp struct {
+		Jobs []map[string]interface{} `json:"jobs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &opResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(opResp.Jobs) != 2 {
+		t.Fatalf("operator jobs = %d rows, want 2: %s", len(jobsResp.Jobs), rec.Body.String())
+	}
+	for _, row := range opResp.Jobs {
+		if _, has := row["prompt"]; has {
+			t.Errorf("row %v leaked the prompt to the operator: %s", row["id"], rec.Body.String())
+		}
+	}
+
+	// A member session is refused the admin surface.
+	rec = login(memberSec)
+	req = httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	for _, c := range rec.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("non-admin login must 403, got %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("member /api/overview = %d, want 403", rec.Code)
 	}
 }
 
@@ -481,7 +627,7 @@ func TestSessionsSurviveRestart(t *testing.T) {
 	}
 
 	b := NewAuth([]string{adminPK}, file)
-	if pk, ok := b.SessionIdentity(tok); !ok || pk != adminPK {
+	if pk, role, ok := b.SessionIdentity(tok); !ok || pk != adminPK || role != RoleOperator {
 		t.Fatalf("restarted auth lost the session: %v %v", pk, ok)
 	}
 }
@@ -498,7 +644,7 @@ func TestSessionsDroppedWhenPubkeyLeavesWhitelist(t *testing.T) {
 	}
 
 	b := NewAuth([]string{}, file)
-	if _, ok := b.SessionIdentity(tok); ok {
+	if _, _, ok := b.SessionIdentity(tok); ok {
 		t.Fatal("a session for a pubkey no longer on the whitelist must not resurrect")
 	}
 }
@@ -532,7 +678,7 @@ func TestSessionsPruneExpiredOnLoad(t *testing.T) {
 	a.mu.Unlock()
 
 	b := NewAuth([]string{adminPK}, file)
-	if _, ok := b.SessionIdentity(tok); ok {
+	if _, _, ok := b.SessionIdentity(tok); ok {
 		t.Fatal("an expired session must be pruned, not resurrected")
 	}
 }
