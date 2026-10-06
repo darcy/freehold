@@ -104,8 +104,13 @@ func LoadPassword() (password string, fresh bool, err error) {
 	return hex.EncodeToString(raw), true, nil
 }
 
-// SavePassword persists the settled password (0600, profile dir).
+// SavePassword persists the settled password (0600, profile dir). The home
+// is mkdir'd like RecordRepo — a first state write on a bare CP guest has
+// no ~/.freehold yet.
 func SavePassword(password string) error {
+	if err := os.MkdirAll(common.FreeholdHome(), 0o700); err != nil {
+		return err
+	}
 	return os.WriteFile(common.FreeholdHome()+"/restic-password", []byte(password+"\n"), 0o600)
 }
 
@@ -247,6 +252,12 @@ func EnvFileBody(pairs []string) (string, error) {
 // RecordRepo / RecordedRepo persist the last-initialized repo URI in the
 // profile dir, so `backup run`/`snapshots` resolve it without retyping.
 func RecordRepo(uri string) error {
+	// The state home may not exist yet (a first record on the CP guest's
+	// verb surface writes /root/.freehold — live finding on casaq: the
+	// verb's first-ever state write there failed with ENOENT).
+	if err := os.MkdirAll(common.FreeholdHome(), 0o700); err != nil {
+		return err
+	}
 	return os.WriteFile(common.FreeholdHome()+"/restic-repo", []byte(uri+"\n"), 0o600)
 }
 

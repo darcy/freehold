@@ -3,6 +3,7 @@ package backup
 import (
 	"encoding/base64"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -347,5 +348,24 @@ func TestPushFileOverExecShape(t *testing.T) {
 	dec, err := base64.StdEncoding.DecodeString(strings.SplitN(strings.SplitN(got, "echo ", 2)[1], " | base64 -d", 2)[0])
 	if err != nil || string(dec) != "content" {
 		t.Fatalf("payload not round-trippable: %q %v", dec, err)
+	}
+}
+
+// TestRecordRepoCreatesTheStateHome: a first state write on a bare CP guest
+// (no ~/.freehold yet) must mkdir the home, not die with ENOENT — live
+// finding on casaq's verb surface.
+func TestRecordRepoCreatesTheStateHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "state")
+	t.Setenv("FREEHOLD_HOME", home)
+	if err := RecordRepo("b2:bucket:p"); err != nil {
+		t.Fatalf("record failed: %v", err)
+	}
+	b, err := os.ReadFile(home + "/restic-repo")
+	if err != nil || strings.TrimSpace(string(b)) != "b2:bucket:p" {
+		t.Fatalf("record missing/wrong: %q %v", b, err)
+	}
+	info, _ := os.Stat(home)
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("home not 0700: %v", info.Mode().Perm())
 	}
 }
