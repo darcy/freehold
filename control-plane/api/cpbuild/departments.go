@@ -707,6 +707,17 @@ func (s *Spec) litellmDoorKeys() (master, provider []byte, prefix, model string,
 	return []byte(m), []byte(p), prefix, model, nil
 }
 
+// freshGatewayNoModels is the error litellm's /model/info answers with when
+// the gateway has no models registered at all — the fresh-world shape this
+// stage exists to fill.
+const freshGatewayNoModels = "LLM Model List not loaded"
+
+// isFreshGatewayNoModels reports whether err is litellm's empty-model 500
+// (the body rides litellmGet's error text).
+func isFreshGatewayNoModels(err error) bool {
+	return err != nil && strings.Contains(err.Error(), freshGatewayNoModels)
+}
+
 // litellmModel is one registration on the gateway: its name and the
 // underlying model litellm_params points at.
 type litellmModel struct {
@@ -779,9 +790,18 @@ func (s *Spec) stageLitellmAliases() error {
 
 	// Registered names: /model/info returns a bare list on older litellm and
 	// {"data": [...]} on newer ones (the main-stable tag floats); parse both.
+	// A FRESH gateway has zero models and answers 500 with the "LLM Model
+	// List not loaded" error — that is an empty registry, not a failure: this
+	// stage is the only registration path, so the first build rides through
+	// it. Any other /model/info failure stays loud.
 	var raw json.RawMessage
 	if err := s.litellmGet(client, origin, master, "/model/info", &raw); err != nil {
-		return fmt.Errorf("list gateway models: %w", err)
+		if !isFreshGatewayNoModels(err) {
+			return fmt.Errorf("list gateway models: %w", err)
+		}
+		// The 500 means zero registered: parse an empty list, not the nil
+		// body (litellmGet returned before decoding).
+		raw = json.RawMessage("[]")
 	}
 	models, err := parseLitellmModels(raw)
 	if err != nil {
