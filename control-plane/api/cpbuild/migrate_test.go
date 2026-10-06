@@ -362,10 +362,11 @@ func TestBuildMigratorStagesKubeconfigForPendingScripts(t *testing.T) {
 		}
 	}
 	raw := "apiVersion: v1\nkind: Config\nclusters:\n- cluster:\n    server: https://127.0.0.1:6443\n"
+	fetches := 0
 	spec := &Spec{
 		StateDir: stateDir, RunnerAddr: "127.0.0.1:8790", RunnerTarget: "proxmox-box",
 		K3sVmid: 102, K3sIP: "10.77.0.42/24",
-		kubeconfigFetch: func(uint32) (string, error) { return raw, nil },
+		kubeconfigFetch: func(uint32) (string, error) { fetches++; return raw, nil },
 	}
 	root := filepath.Join(consoleDir, "migrations")
 	scriptsDir := migrations.ScriptsRoot(root)
@@ -383,6 +384,9 @@ grep -q "server: https://10.77.0.42:6443" "$KUBECONFIG" || { echo "kubeconfig se
 	if results, err := BuildMigrator(spec, consoleDir)(); err != nil || len(results) != 1 || !results[0].OK {
 		t.Fatalf("expected the kubeconfig migration to run OK, got %+v / %v", results, err)
 	}
+	if fetches != 1 {
+		t.Fatalf("kubeconfig fetched %d times for one pending script, want 1", fetches)
+	}
 	// The staged admin credential is for the queue run only — the file the
 	// script just verified is removed once the queue returns, so it never
 	// rests on the backup=1 plane between runs.
@@ -392,9 +396,15 @@ grep -q "server: https://10.77.0.42:6443" "$KUBECONFIG" || { echo "kubeconfig se
 	}
 
 	// Converged: the SAME consoleDir re-runs with the marker set — zero
-	// pending, zero staging, no kubeconfig re-created.
+	// pending, zero staging, no kubeconfig re-created. The fetch counter is
+	// the observable: a pending-gate bug would stage (and fetch) again here,
+	// and no file check can see it (the runner removes the file after every
+	// run, converged or not).
 	if results, err := BuildMigrator(spec, consoleDir)(); err != nil || len(results) != 0 {
 		t.Fatalf("converged run must be a no-op, got %+v / %v", results, err)
+	}
+	if fetches != 1 {
+		t.Fatalf("kubeconfig fetched %d times after the converged run, want still 1", fetches)
 	}
 	if _, err := os.Stat(kc); !os.IsNotExist(err) {
 		t.Fatal("a converged world must not stage a kubeconfig")

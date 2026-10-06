@@ -11,8 +11,9 @@ echo "Migrate pre-carve-out local-path PVs onto the durable plane"
 #   litellm-pg-data — pg_dump to the CP's durable plane, scale-0, PVC
 #     delete/recreate (the provisioner lands the new dir under the carve-out),
 #     scale back, restore, verify.
-#   caddy-data — tar /data out, swap, scale back, write back, restart the
-#     edge. The TLS material is the state that matters (the mirror at
+#   caddy-data — tar /data out, swap, scale-0, write the capture back through
+#     a helper pod that mounts the claim, then bring the edge up. The TLS
+#     material is the state that matters (the mirror at
 #     /srv/data/k8s-volumes/caddy-edge is a copy; this is the live one).
 #
 # The captures stay on the CP's durable plane as the permanent safety net.
@@ -24,7 +25,8 @@ echo "Migrate pre-carve-out local-path PVs onto the durable plane"
 #     PVC delete and the recreate — the claim is re-applied at its
 #     terraform-pinned size and the tail finishes from the capture;
 #   - a durable claim finishes its interrupted tail from the surviving
-#     capture: an empty db re-restores, a /data/tls-less caddy re-writes;
+#     capture: an empty db re-restores (--clean converges a partial), the
+#     caddy capture re-extracts (tar overwrite is idempotent);
 #   - a deployment left at 0 is scaled back up before anything needs a pod.
 # Any OTHER claim stranded outside the carve-out is reported, not touched:
 # it gets its own migration, not a surprise inside this one.
@@ -209,21 +211,44 @@ else
   echo "litellm-pg-data: claim absent and no capture — nothing to do"
 fi
 
-# ---- caddy-data: tar out -> swap -> write back -----------------------------
+# ---- caddy-data: tar out -> swap -> helper-pod write back -> edge up -------
 
 NS=caddy; CLAIM=caddy-data; SEL=app=caddy; DEPLOY=caddy; SIZE=1Gi
 CAP_CADDY="$CAP/caddy-data.tgz"
 
-finish_caddy() { # pod — write back the certs if owed, restart the edge
-  local pod="$1"
-  # the fresh caddy writes its own storage dirs on start; /data/tls is where
-  # the certs live — absent means the write-back is still owed
-  if kubectl exec -n "$NS" "$pod" -- sh -c '[ ! -d /data/tls ]' && [ -s "$CAP_CADDY" ]; then
-    echo "writing caddy certs back from $CAP_CADDY"
-    kubectl exec -i -n "$NS" "$pod" -- sh -c 'tar -xzf - -C /data' < "$CAP_CADDY"
-    kubectl -n "$NS" rollout restart deploy caddy >/dev/null
-    echo "caddy-data: certs written back, edge restarted"
-  fi
+# The write-back goes through a helper pod that mounts the claim: the shipped
+# Caddyfile statically requires /data/tls/*, so an emptied PVC cannot boot
+# the edge and there may be no healthy caddy pod to exec into (and no
+# readinessProbe to trust one by). caddy:2.8 is already on the node — no new
+# image. Tar overwrites are idempotent, so every retry re-extracts the whole
+# capture and a mid-stream kill converges.
+write_back_caddy() {
+  [ -s "$CAP_CADDY" ] || return 0
+  kubectl -n "$NS" delete pod pv-migrate-caddy --force --grace-period=0 --ignore-not-found >/dev/null 2>&1 || true
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pv-migrate-caddy
+  namespace: $NS
+spec:
+  restartPolicy: Never
+  containers:
+  - name: mover
+    image: caddy:2.8
+    command: ["sleep", "600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: $CLAIM
+EOF
+  kubectl -n "$NS" wait --for=condition=Ready pod/pv-migrate-caddy --timeout=180s >/dev/null
+  kubectl exec -i -n "$NS" pv-migrate-caddy -- sh -c 'tar -xzf - -C /data' < "$CAP_CADDY"
+  kubectl -n "$NS" delete pod pv-migrate-caddy --force --grace-period=0 --ignore-not-found >/dev/null 2>&1 || true
+  echo "caddy-data: capture written back via helper pod"
 }
 
 if claim_exists "$NS" "$CLAIM"; then
@@ -244,14 +269,14 @@ if claim_exists "$NS" "$CLAIM"; then
       swap_claim "$NS" "$CLAIM"
       ;;
   esac
-  POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
-  finish_caddy "$POD"
+  write_back_caddy
+  ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
   assert_durable "$NS" "$CLAIM"
 elif [ -s "$CAP_CADDY" ]; then
   echo "caddy-data: claim absent but a capture survives — a prior run died mid-swap; recreating"
   recreate_claim "$NS" "$CLAIM" "$SIZE"
-  POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
-  finish_caddy "$POD"
+  write_back_caddy
+  ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
   assert_durable "$NS" "$CLAIM"
 else
   echo "caddy-data: claim absent and no capture — nothing to do"
