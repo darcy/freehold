@@ -1690,15 +1690,18 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 	}
 }
 
-// stopAgentTools stops the CP-side freehold-agent-tools serve process in the cp
-// guest. Its durable state dir stays on the CP plane; build step 2.5 re-launches
-// it (killing any prior serve first) with the same identity.
+// stopAgentTools stops the CP-side freehold-agent-tools serve process in the
+// cp guest. Its durable state dir stays on the CP plane; build step 2.5
+// re-launches it (as its unit) with the same identity. The unit stop comes
+// FIRST — a unit-managed serve ignores the pid kill, and even a successful
+// kill is resurrected by the enabled Restart=on-failure unit; the pid kill
+// stays for a pre-unit world.
 func (s *Spec) stopAgentTools() error {
 	if s.CpLxc == 0 {
 		return nil
 	}
 	atState := filepath.Join(filepath.Dir(s.StateDir), "agent-tools")
-	cmd := fmt.Sprintf("pct exec %d -- sh -c 'p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'",
+	cmd := fmt.Sprintf("pct exec %d -- sh -c 'systemctl stop freehold-agent-tools 2>/dev/null; p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'",
 		s.CpLxc, atState, atState)
 	if err := s.run(cmd, 30); err != nil {
 		return fmt.Errorf("world-teardown stop agent-tools: %w", err)

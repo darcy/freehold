@@ -400,6 +400,15 @@ func BootstrapProxmoxLxc(exec ExecFunc, spec *ProxmoxLxcSpec) (*BootstrapResult,
 			return nil, err
 		}
 	}
+	// Boot with the host: a crashed/rebooted PVE host must bring its plane
+	// guests back (live-verified gap — a host crash left every LXC down).
+	// Runs for BOTH paths: pct set is idempotent, so a reused guest is
+	// healed too.
+	if out, err := exec(fmt.Sprintf("pct set %d --onboot 1", vmid), 30); err != nil {
+		return nil, err
+	} else if err := ExpectOK(out, "pct set --onboot"); err != nil {
+		return nil, err
+	}
 
 	vid := strconv.FormatUint(uint64(vmid), 10)
 	status, err := exec("pct status "+vid, 30)

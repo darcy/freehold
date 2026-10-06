@@ -41,7 +41,8 @@ the ordering across all of them is `docs/ROADMAP.md`.
     no relay-contract verification skill.
 
 **Console, CLI, TUI**
-*   The console isn't a systemd unit; the runner's crash isn't restarted.
+*   The console, co-located runner, capability doors and agent-tools are real enabled
+    `Restart=on-failure` units — a guest reboot or a crash returns the whole CP.
 *   A box's local runner binds 8787 — or the next free loopback port when that is taken
     (`--local-port` pins it; a re-adopt keeps its recorded addr and reclaims the port) — so
     multi-profile mints no longer collide on 8787. Residual: `exec`'s `--addr` still defaults

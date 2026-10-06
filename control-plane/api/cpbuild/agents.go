@@ -2,6 +2,7 @@ package cpbuild
 
 import (
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"path/filepath"
@@ -184,10 +185,13 @@ func (s *Spec) agentToolsServeFlags() string {
 	return serveFlags
 }
 
-// startAgentTools (re)launches the CP-side agent-tools serve process in the cp
-// guest and waits for it to answer. The process loads its registry.json /
-// facts.json at startup, so a restart is how a CP-side registry/facts write
-// becomes visible to the running server (its rows live in memory).
+// startAgentTools (re)starts the CP-side agent-tools serve as a REAL systemd
+// unit and waits for it to answer. The unit (enabled, Restart=on-failure)
+// means a CP guest reboot brings agent-tools back with the console — the
+// nohup shape died with the guest and stayed dead (the crash-restart gap).
+// Every converge rewrites the unit (the flags can change); the restart is
+// how a CP-side registry/facts write becomes visible to the running server
+// (its rows live in memory, loaded at startup).
 func (s *Spec) startAgentTools() error {
 	// Re-assert the relay-host pin EVERY converge: /etc/hosts is PVE-ephemeral
 	// (a rebuilt CP guest loses it), the full-deploy path that drops the pin
@@ -200,13 +204,28 @@ func (s *Spec) startAgentTools() error {
 	binDir, _ := s.cpGuestDirs()
 	bin := binDir + "/freehold-agent-tools"
 	atState := s.agentToolsRoot()
+	// The pid-kill of a PRE-UNIT nohup process (older worlds): its serve.pid
+	// is the only handle; once the unit runs, the file is absent and this is
+	// a no-op.
 	if err := s.run(fmt.Sprintf("pct exec %d -- sh -c 'p=$(cat %s/serve.pid 2>/dev/null); [ -n \"$p\" ] && kill \"$p\" >/dev/null 2>&1; rm -f %s/serve.pid; true'", s.CpLxc, atState, atState), 30); err != nil {
 		return fmt.Errorf("agent-tools stop prior: %w", err)
 	}
+	unit := fmt.Sprintf(`[Unit]
+Description=freehold agent-tools
+After=network-online.target
+
+[Service]
+ExecStart=%s serve %s
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, bin, s.agentToolsServeFlags())
 	start := fmt.Sprintf(
-		"pct exec %d -- sh -c 'setsid nohup %s serve %s >> %s/serve.log 2>&1 < /dev/null & echo $! | tee %s/serve.pid'",
-		s.CpLxc, bin, s.agentToolsServeFlags(), atState, atState)
-	if err := s.run(start, 30); err != nil {
+		"pct exec %d -- sh -c 'echo %s | base64 -d > /etc/systemd/system/freehold-agent-tools.service && systemctl daemon-reload && systemctl enable freehold-agent-tools >/dev/null 2>&1 && systemctl restart freehold-agent-tools && sleep 1 && systemctl is-active freehold-agent-tools'",
+		s.CpLxc, base64.StdEncoding.EncodeToString([]byte(unit)))
+	if err := s.run(start, 60); err != nil {
 		return fmt.Errorf("start agent-tools: %w", err)
 	}
 	up := false
@@ -219,7 +238,7 @@ func (s *Spec) startAgentTools() error {
 		time.Sleep(2 * time.Second)
 	}
 	if !up {
-		return fmt.Errorf("agent-tools serve did not answer within the poll window — check %s/serve.log", atState)
+		return fmt.Errorf("agent-tools serve did not answer within the poll window — journalctl -u freehold-agent-tools on the guest")
 	}
 	return nil
 }
