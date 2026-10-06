@@ -654,6 +654,25 @@ func TestSessionsDroppedWhenPubkeyLeavesWhitelist(t *testing.T) {
 
 // A broken state dir fails the login loudly — silent persistence loss would be
 // exactly the logout-on-restart the session file exists to prevent.
+func TestMemberSessionPersistsRoleAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "sessions.json")
+	memberSec := make([]byte, 32)
+	memberSec[0] = 0x99
+	memberPK, _ := crypto.PubkeyFromSecret(memberSec)
+	a := NewAuth([]string{}, file) // no admins: a member-only world
+	tok, err := a.IssueSessionRole(memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fresh Auth over the same file (the serve restart) must restore the
+	// member role, not map the row to operator and drop it.
+	b := NewAuth([]string{}, file)
+	if pk, role, ok := b.SessionIdentity(tok); !ok || pk != memberPK || role != RoleMember {
+		t.Fatalf("member session after restart = (%v, %v, %v), want the member role kept", pk, role, ok)
+	}
+}
+
 func TestIssueSessionFailsWhenStateDirBroken(t *testing.T) {
 	dir := t.TempDir() + "/sessions.json"
 	if err := os.Mkdir(dir, 0o700); err != nil {

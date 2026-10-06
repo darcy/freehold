@@ -157,7 +157,7 @@ func (a *Auth) saveSessions() error {
 	}
 	rows := make(map[string]sessionRow, len(a.sessions))
 	for tok, s := range a.sessions {
-		rows[tok] = sessionRow{Pubkey: s.pubkey, Expires: s.expires.Unix()}
+		rows[tok] = sessionRow{Pubkey: s.pubkey, Role: s.role, Expires: s.expires.Unix()}
 	}
 	raw, err := json.Marshal(rows)
 	if err != nil {
