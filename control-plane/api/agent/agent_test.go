@@ -534,16 +534,16 @@ func TestAgentPodTimezone(t *testing.T) {
 
 // TestAgentLiteLLMKeyScript pins the per-agent key seed: the agent's own
 // minted virtual key rides the script as a shell literal (the nsec's
-// generated-material shape), the Secret is created when absent, and a Secret
-// still holding the gateway MASTER (the pre-virtual-key shape, read against
-// the runner-injected $LITELLM) is rotated — the auto-migration for worlds
-// predating per-agent keys. Any other established value stays first-run-wins.
+// generated-material shape), and the Secret is ENSURED to match the CP
+// store's key — created when absent, rotated when it holds anything else
+// (the legacy gateway master, a dead key after a gateway-DB wipe, a revoked
+// key after an aborted remove). A match is a no-op.
 func TestAgentLiteLLMKeyScript(t *testing.T) {
 	s := AgentLiteLLMKeyScript(105, "Waldo", "sk-virtual")
 	for _, want := range []string{
 		"waldo-litellm-key",
 		"-o jsonpath='{.data.key}'",
-		`[ "$cur" = "${LITELLM:-}" ]`,
+		`[ "$cur" != 'sk-virtual' ]`,
 		"--from-literal=key='sk-virtual'",
 		"base64 -d",
 	} {
@@ -554,10 +554,9 @@ func TestAgentLiteLLMKeyScript(t *testing.T) {
 	if !strings.Contains(s, "delete secret waldo-litellm-key -n agents --ignore-not-found=true") {
 		t.Errorf("the rotation path must delete before re-create: %s", s)
 	}
-	// The script never embeds the MASTER — the comparison references the
-	// runner-injected env by name, so no secret crosses the audited command
-	// except the agent's own minted key.
-	if !strings.Contains(s, "${LITELLM:-}") || strings.Contains(s, `"key=\"$LITELLM\"`) {
-		t.Errorf("script must compare via the LITELLM env name, not embed it: %s", s)
+	// The script embeds only the agent's OWN key — no master ever crosses
+	// the audited command (the compare is against the store's key literal).
+	if strings.Contains(s, "$LITELLM") {
+		t.Errorf("script must not reference the runner-injected master env: %s", s)
 	}
 }

@@ -108,6 +108,14 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 				if err := spec.resolveK3sVmid(verb, name); err != nil {
 					return "", err
 				}
+				// The minted-key record moves FIRST: it only touches the CP's
+				// sealed store, is idempotent (a re-run no-ops when already
+				// re-keyed), and its failure must leave NOTHING moved — a
+				// record re-keyed after the row rename would strand the row on
+				// an identity dir that no longer matches it.
+				if err := spec.moveLitellmKeyRecord(oldPod, newPod); err != nil {
+					return "", fmt.Errorf("%s: move the litellm key record: %w", verb, err)
+				}
 				if err := os.Rename(oldDir, newDir); err != nil {
 					return "", fmt.Errorf("%s: move the identity dir %s → %s: %w", verb, oldDir, newDir, err)
 				}
@@ -123,14 +131,6 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 				if err := reg.RenameAgent(name, newName); err != nil {
 					rollback()
 					return "", fmt.Errorf("%s: move the registry row: %w", verb, err)
-				}
-				// The minted gateway key is POD-keyed (its alias, its Secret,
-				// its store record): re-key the record so the same key — and
-				// its spend history — follows the renamed identity instead of
-				// minting an orphan.
-				if err := spec.moveLitellmKeyRecord(oldPod, newPod); err != nil {
-					rollback()
-					return "", fmt.Errorf("%s: move the litellm key record: %w", verb, err)
 				}
 				legs = append(legs,
 					fmt.Sprintf("[verified] identity dir moved (%s → %s) — the same nsec re-applies under the new name", sanitizeDir(name), sanitizeDir(newName)),
@@ -234,19 +234,18 @@ func BuildRemoveAgentFn(spec *Spec) agent.RemoveAgentFn {
 		if err := coreAgentRefused(spec, name, verb); err != nil {
 			return "", err
 		}
-		// The minted gateway key must not outlive the row: revoke it (and drop
-		// the store record) BEFORE retiring the pod objects — a failure leaves
-		// the verb unfinished with the agent intact, the same loud-retry shape
-		// as the retire itself. A world without litellm, or a key never
+		// Every cheap precondition resolves BEFORE the revoke, so only the
+		// retire itself can fail after the key is dead (the same loud-retry
+		// shape as the retire). A world without litellm, or a key never
 		// minted, is a no-op.
-		if err := spec.revokeAgentLitellmKey(name); err != nil {
-			return "", fmt.Errorf("%s %s: revoking the litellm key FAILED (%v) — the registry row is untouched; retry once the gateway answers", verb, name, err)
-		}
 		if err := spec.resolveK3sVmid(verb, name); err != nil {
 			return "", err
 		}
+		if err := spec.revokeAgentLitellmKey(name); err != nil {
+			return "", fmt.Errorf("%s %s: revoking the litellm key FAILED (%v) — the registry row is untouched; retry once the gateway answers", verb, name, err)
+		}
 		if err := spec.run(agent.AgentRetireScript(spec.K3sVmid, name), 120); err != nil {
-			return "", fmt.Errorf("%s %s: retiring the pod FAILED (%v) — the registry row is untouched; fix the k3s guest and retry, or drop the row from the console if the pod is already gone", verb, name, err)
+			return "", fmt.Errorf("%s %s: retiring the pod FAILED (%v) — the registry row is untouched; its gateway key is already revoked, and a later reconcile mints fresh and heals the pod's Secret; fix the k3s guest and retry, or drop the row from the console if the pod is already gone", verb, name, err)
 		}
 		return fmt.Sprintf("%s %s: pod %q retired (pod, service, prompt configmap, identity secret); the durable workspace dir %s is kept — it is data", verb, name, agent.PodName(name), agent.AgentWorkspaceDir(agent.PodName(name))), nil
 	}

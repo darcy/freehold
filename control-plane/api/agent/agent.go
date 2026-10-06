@@ -534,11 +534,12 @@ func CPAIdentityScript(k3sVmid uint32, nsecSecretHex, ownerPub string) string {
 // virtual key (generated CP-side at create time — the caller passes it, and
 // it rides this script as a shell literal, the same generated-material shape
 // as the identity Secret's nsec; it never rides the persisted manifest).
-// Established values are first-run-wins, EXCEPT the pre-virtual-key shape —
-// a Secret still holding the gateway MASTER (runner-injected as $LITELLM,
-// requested by name in the exec) — which is rotated onto the minted key: the
-// auto-migration for worlds predating per-agent keys. The exec must request
-// the "litellm" secret so the comparison sees the master.
+// The CP's sealed store is the single source for the key, so the Secret is
+// ENSURED to match it: created when absent, left alone when it already holds
+// the store's key, and rotated when it holds anything else — the gateway
+// master (worlds predating per-agent keys), or a key dead at the gateway
+// (a wiped Postgres, an aborted remove's revoke). Rotation is what makes a
+// re-mint reach the pod without hand-deleting Secrets.
 func AgentLiteLLMKeyScript(k3sVmid uint32, agentName, litellmKey string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-litellm-key"
@@ -546,15 +547,15 @@ func AgentLiteLLMKeyScript(k3sVmid uint32, agentName, litellmKey string) string 
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec %d -- sh -c"
 $EX "$K create ns agents 2>/dev/null || true"
-# Absent => create; still the gateway master ($LITELLM) => rotate onto the
-# agent's own minted key; any other established value => first-run-wins.
+# Anything but the CP store's current key (absent, the legacy gateway
+# master, a dead/revoked key) is replaced; a match is a no-op.
 cur=$($EX "$K get secret %s -n agents -o jsonpath='{.data.key}'" 2>/dev/null | base64 -d || true)
-if [ -z "$cur" ] || [ "$cur" = "${LITELLM:-}" ]; then
+if [ "$cur" != %s ]; then
   $EX "$K delete secret %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
   $EX "$K create secret generic %s -n agents --from-literal=key=%s"
 fi
 echo AGENT_LITELLM_KEY_OK`,
-		k3sVmid, secret, secret, secret, shQ(litellmKey))
+		k3sVmid, secret, shQ(litellmKey), secret, secret, shQ(litellmKey))
 }
 
 // AgentRetireScript deletes an agent's derived k8s objects (pod, service,

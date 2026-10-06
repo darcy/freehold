@@ -214,10 +214,11 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 
 ## Known gaps
 
-*   A gateway whose Postgres was wiped (full `teardown`/rebuild of the k3s
-    state) invalidates every minted agent key: the pods 401 until the CP
-    store's `agentkey-<pod>` records are cleared, which the next reconcile
-    turns into fresh mints.
+*   A gateway whose Postgres was wiped (a full teardown of the k3s state)
+    invalidates every minted agent key: the pods 401 until the CP store's
+    `agentkey-<pod>` records are cleared — the next reconcile then mints
+    fresh and the seed rotates every pod's Secret onto the new key, no
+    hand-deleted Secrets.
 *   One model — the aliases all point at the operator's first-build provider
     choice, so every alias routes to the same underlying model today; adding providers or
     per-alias variety is AI's `litellm-api-admin` work. Aliases are ensured only for the

@@ -2521,16 +2521,16 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		// The agent's own minted gateway virtual key: looked up (or minted,
 		// key_alias = the pod name) and seeded into the <pod>-litellm-key
 		// Secret BEFORE the pod applies — a pod referencing a missing Secret
-		// never comes Ready. The seed exec requests the "litellm" master so
-		// the seed can rotate a pre-virtual-key Secret off it (the auto-
-		// migration for worlds that predate per-agent keys). Skipped without
-		// a litellm base URL (a world without the gateway).
+		// never comes Ready. The seed ensures the Secret matches the store's
+		// key, so a re-mint (a wiped gateway DB, an aborted remove's revoke)
+		// reaches the pod on the next reconcile. Skipped without a litellm
+		// base URL (a world without the gateway).
 		key, kerr := spec.ensureAgentLitellmKey(name)
 		if kerr != nil {
 			return "", fmt.Errorf("create-agent %q: %w", name, kerr)
 		}
 		if key != "" {
-			if err := spec.runSecrets(agent.AgentLiteLLMKeyScript(spec.K3sVmid, name, key), 60, "litellm"); err != nil {
+			if err := spec.run(agent.AgentLiteLLMKeyScript(spec.K3sVmid, name, key), 60); err != nil {
 				return "", fmt.Errorf("%s litellm key secret: %w", name, err)
 			}
 		}
