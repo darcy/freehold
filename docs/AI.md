@@ -43,7 +43,9 @@ AI owns the gateway directly; the runtime is what all agents share.
     by the create flow at first apply and persisted sealed in the CP's
     litellm store (`agentkey-<pod>`), so a rebuild re-seeds the same key
     instead of minting orphans; no pod holds the gateway master key. A
-    removed agent's key is revoked by alias; a rename re-keys the record
+    removed agent's key is revoked by its stored token (the gateway's
+    key_alias drifts stale after a rename; spend follows the token); a
+    rename re-keys the record
     under the new pod name, so the same key — and its spend history —
     follows the identity. The gateway logs spend per key in its Postgres;
     per-agent spend is visible through the `litellm-api-admin` door

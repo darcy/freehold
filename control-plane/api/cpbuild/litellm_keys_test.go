@@ -176,8 +176,10 @@ func TestEnsureAgentLitellmKeyFailsLoudly(t *testing.T) {
 	})
 }
 
-// TestRevokeAgentLitellmKey deletes by alias and drops the store record; a
-// never-minted key and a second revoke are no-ops (idempotent ensure-revoked).
+// TestRevokeAgentLitellmKey deletes by the stored TOKEN (the gateway's
+// key_alias drifts stale after a rename, so the alias is not a reliable
+// delete handle) and drops the store record; a never-minted key and a second
+// revoke are no-ops (idempotent ensure-revoked).
 func TestRevokeAgentLitellmKey(t *testing.T) {
 	srv, st := fakeKeyGateway(t, http.StatusOK)
 	stateDir := t.TempDir()
@@ -190,8 +192,8 @@ func TestRevokeAgentLitellmKey(t *testing.T) {
 	if err := spec.revokeAgentLitellmKey("waldo"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if len(st.delBodies) != 1 || !strings.Contains(st.delBodies[0], `"key_aliases":["waldo"]`) {
-		t.Fatalf("expected one alias-keyed /key/delete, got %v", st.delBodies)
+	if len(st.delBodies) != 1 || !strings.Contains(st.delBodies[0], `"keys":["sk-1"]`) {
+		t.Fatalf("expected one token-keyed /key/delete, got %v", st.delBodies)
 	}
 	if env := storeEnvForTest(t, stateDir); env[litellmAgentKeyEnvKey("waldo")] != "" {
 		t.Errorf("the store record must be dropped: %v", env)

@@ -129,18 +129,24 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 				if err := os.Rename(oldDir, newDir); err != nil {
 					return "", fmt.Errorf("%s: move the identity dir %s → %s: %w%s", verb, oldDir, newDir, err, rekeyBack())
 				}
-				rollback := func() {
-					if rerr := os.Rename(newDir, oldDir); rerr != nil {
-						legs = append(legs, fmt.Sprintf("[UNVERIFIED] identity-dir rollback failed (%v) — %s must be moved back by hand", rerr, newDir))
+				// rollback reverses the workspace + identity dir moves; its
+				// note rides the failure error (the operator's recovery
+				// surface), the same way rekeyBack reports the record.
+				rollback := func() string {
+					note := ""
+					if rerr := spec.moveWorkspace(newPod, oldPod); rerr != nil {
+						note += fmt.Sprintf(" [UNVERIFIED] the workspace dir could not be moved back (%v) — %s/%s may sit under the un-applied destination name", rerr, agent.AgentWorkspaceRoot, newPod)
 					}
+					if rerr := os.Rename(newDir, oldDir); rerr != nil {
+						note += fmt.Sprintf(" [UNVERIFIED] identity-dir rollback failed (%v) — %s must be moved back by hand", rerr, newDir)
+					}
+					return note
 				}
 				if err := spec.moveWorkspace(oldPod, newPod); err != nil {
-					rollback()
-					return "", fmt.Errorf("%s: move the workspace dir: %w%s", verb, err, rekeyBack())
+					return "", fmt.Errorf("%s: move the workspace dir: %w%s%s", verb, err, rollback(), rekeyBack())
 				}
 				if err := reg.RenameAgent(name, newName); err != nil {
-					rollback()
-					return "", fmt.Errorf("%s: move the registry row: %w%s", verb, err, rekeyBack())
+					return "", fmt.Errorf("%s: move the registry row: %w%s%s", verb, err, rollback(), rekeyBack())
 				}
 				legs = append(legs,
 					fmt.Sprintf("[verified] identity dir moved (%s → %s) — the same nsec re-applies under the new name", sanitizeDir(name), sanitizeDir(newName)),

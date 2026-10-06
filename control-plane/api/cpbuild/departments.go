@@ -851,7 +851,10 @@ func (s *Spec) litellmStoreEnv() (path string, secret []byte, env map[string]str
 
 // saveLitellmStoreEnv re-seals the store's env map to the console identity
 // (the mirror of litellmStoreEnv — the CP is the durable owner; only
-// ciphertext lands on disk).
+// ciphertext lands on disk). The read-modify-write is not cross-process
+// locked, matching state.json's own last-write-wins: a concurrent writer can
+// orphan at worst one mint, and the seed's ensure-matches-store-key
+// semantics rotate the pod onto the store's key on the next reconcile.
 func (s *Spec) saveLitellmStoreEnv(path string, secret []byte, env map[string]string) error {
 	pub, err := crypto.X25519PublicKey(secret)
 	if err != nil {
@@ -923,11 +926,12 @@ func (s *Spec) ensureAgentLitellmKey(name string) (string, error) {
 	return key, nil
 }
 
-// revokeAgentLitellmKey deletes the agent's gateway virtual key — by alias
-// (the pod name; no token needed) — and drops the store record. Treated as
-// ensure-revoked: 200 or 404 both clear the record, so a gateway that lost
-// its DB cannot wedge a remove. A world without litellm, or a key never
-// minted, is a no-op.
+// revokeAgentLitellmKey deletes the agent's gateway virtual key — by its
+// stored TOKEN (the record holds the raw sk- value; the gateway's key_alias
+// drifts stale after a rename, so the alias is not a reliable delete
+// handle) — and drops the store record. Treated as ensure-revoked: 200 or
+// 404 both clear the record, so a gateway that lost its DB cannot wedge a
+// remove. A world without litellm, or a key never minted, is a no-op.
 func (s *Spec) revokeAgentLitellmKey(name string) error {
 	if s.LitellmBaseURL == "" {
 		return nil
@@ -938,14 +942,15 @@ func (s *Spec) revokeAgentLitellmKey(name string) error {
 		return err
 	}
 	envKey := litellmAgentKeyEnvKey(pod)
-	if env[envKey] == "" {
+	token := env[envKey]
+	if token == "" {
 		return nil
 	}
 	master := env["master"]
 	if master == "" {
 		return fmt.Errorf("CP litellm store is missing the master key")
 	}
-	body, err := json.Marshal(map[string]interface{}{"key_aliases": []string{pod}})
+	body, err := json.Marshal(map[string]interface{}{"keys": []string{token}})
 	if err != nil {
 		return err
 	}
@@ -971,8 +976,11 @@ func (s *Spec) revokeAgentLitellmKey(name string) error {
 
 // moveLitellmKeyRecord re-keys a renamed agent's minted-key record to the new
 // pod's derived name — the same key (and its spend history) follows the
-// rename, since the identity (pubkey) does. A world without a store, or a
-// key never minted, is a no-op (the create under the new name mints fresh).
+// rename, since the identity (pubkey) does. The gateway-side key_alias keeps
+// the OLD pod name (a cosmetic /key/update the AI department can run; spend
+// follows the token, and revoke deletes by the stored token, so nothing
+// functional drifts). A world without a store, or a key never minted, is a
+// no-op (the create under the new name mints fresh).
 func (s *Spec) moveLitellmKeyRecord(oldPod, newPod string) error {
 	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
 	if !cert.CredExists(path) {
