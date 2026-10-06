@@ -49,9 +49,11 @@ repo check, both Persistent):
   the operator's box-side init, not anything you can do.
 
 **Restore drill** — the proof the leg works. Read-only against the plane (restores to
-a scratch dir on the host, then cleans up): via `pve-ssh-root`,
+a scratch dir on the host, then cleans up): via `pve-ssh-root`, restic's own shape
+(the env sourced first, the password riding the command — an assignment before the
+`.` builtin does not survive bash):
 
-    exec("RESTIC_PASSWORD_FILE=/srv/nobackup/freehold-restic-password . /srv/nobackup/freehold-restic.env 2>/dev/null; restic -r <uri> restore latest --target /srv/nobackup/restore-drill --host <world>", "pve-ssh-root")
+    exec(". /srv/nobackup/freehold-restic.env 2>/dev/null; RESTIC_PASSWORD_FILE=/srv/nobackup/freehold-restic-password restic -r <uri> restore latest --target /srv/nobackup/restore-drill", "pve-ssh-root")
 
 then check the planted proof landed, then `rm -rf /srv/nobackup/restore-drill`. A
 backup leg that has never been restored is a rumor, not a backup — run the drill
