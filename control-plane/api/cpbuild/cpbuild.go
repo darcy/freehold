@@ -970,13 +970,35 @@ var runnerLitellmSecrets = []struct{ name, env string }{
 	{"postgres-pw", "pg"},
 }
 
+// runnerLitellmRetiredSecrets are names an older build shipped to the
+// co-located runner package that current builds no longer request — the
+// reseed drops them so an updated world's package converges with a fresh
+// one (the provider key lives only in the CP store + the AI department's
+// door package; nothing requests it from the provisioning runner anymore).
+var runnerLitellmRetiredSecrets = []string{"provider-key"}
+
+// dropRetiredRunnerSecrets removes runnerLitellmRetiredSecrets entries from
+// the package in memory; the caller writes it back. Returns the names dropped.
+func dropRetiredRunnerSecrets(pkg *wire.SecretPackage) []string {
+	var dropped []string
+	for _, name := range runnerLitellmRetiredSecrets {
+		if _, ok := pkg.Secrets[name]; ok {
+			delete(pkg.Secrets, name)
+			dropped = append(dropped, name)
+		}
+	}
+	return dropped
+}
+
 // reseedCoLocatedRunner re-provisions the CP's co-located runner from the CP's
 // own durable litellm store. deploy-cp re-ships the box runner package on every
 // install, so a package created before the litellm secrets (or wiped by a prior
 // deploy) lacks them; the box cannot re-derive them (the CP is the durable
 // owner) and the runner reads its package only at boot. Re-seal from the store
-// and restart. A no-op when the runner already holds every name, or when the
-// store has no litellm secret yet (the first build seeds store + runner
+// and restart. Also drops retired secret names (runnerLitellmRetiredSecrets)
+// so a package an older build shipped converges with a fresh one. A no-op when
+// the runner already holds every requested name and nothing to drop, or when
+// the store has no litellm secret yet (the first build seeds store + runner
 // together, box-side).
 func (s *Spec) reseedCoLocatedRunner() error {
 	store, err := state.Open(s.StateDir)
@@ -997,29 +1019,63 @@ func (s *Spec) reseedCoLocatedRunner() error {
 			need = true
 		}
 	}
-	if !need {
+	dropped := dropRetiredRunnerSecrets(pkg)
+	writePruned := func() error {
+		if err := pkg.WriteToDir(rec.PackageDir); err != nil {
+			return fmt.Errorf("write runner package: %w", err)
+		}
 		return nil
 	}
-	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
-	if !cert.CredExists(path) {
-		return nil // first build: the box seeds the store + runner together
-	}
-	secret, err := s.consoleEncSecret()
-	if err != nil {
-		return err
-	}
-	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
-	_, env, err := cert.LoadCreds(path, open, secret)
-	if err != nil {
-		return fmt.Errorf("open CP litellm store: %w", err)
-	}
-	for _, m := range runnerLitellmSecrets {
-		v := env[m.env]
-		if v == "" {
-			return fmt.Errorf("CP litellm store is missing the %q value", m.env)
+	if !need {
+		if len(dropped) == 0 {
+			return nil
 		}
-		if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, []byte(v)); err != nil {
-			return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
+		if err := writePruned(); err != nil {
+			return err
+		}
+		// fall through to the restart: the runner holds the dropped name in
+		// its in-memory keyring until it reloads.
+	} else {
+		path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+		if !cert.CredExists(path) {
+			// First build: the box seeds the store + runner together. The
+			// prune is the only pending change — ship it, else no-op.
+			if len(dropped) == 0 {
+				return nil
+			}
+			if err := writePruned(); err != nil {
+				return err
+			}
+		} else {
+			secret, err := s.consoleEncSecret()
+			if err != nil {
+				return err
+			}
+			open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+			_, env, err := cert.LoadCreds(path, open, secret)
+			if err != nil {
+				return fmt.Errorf("open CP litellm store: %w", err)
+			}
+			for _, m := range runnerLitellmSecrets {
+				v := env[m.env]
+				if v == "" {
+					return fmt.Errorf("CP litellm store is missing the %q value", m.env)
+				}
+				if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, []byte(v)); err != nil {
+					return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
+				}
+			}
+			// AddSecret reloaded + rewrote the package file; the prune must be
+			// re-applied to the fresh on-disk package or the retired name rides.
+			pkg, err = wire.Load(rec.PackageDir)
+			if err != nil {
+				return fmt.Errorf("reload runner package: %w", err)
+			}
+			if len(dropRetiredRunnerSecrets(pkg)) > 0 {
+				if err := writePruned(); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	// The runner loads its package at boot (in-memory keyring), so restart it.
