@@ -36,24 +36,12 @@ import (
 // (the name flows into the unit name, the package dir, and the channel name).
 var runnerNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// agentProvisionKinds are the kinds an on-the-fly runner may use: ssh (a box
-// on the network) and the api-class kinds whose exec runs locally with the
-// credential + address injected as env (unifi today; a new kind needs a
-// runner-side verify arm to report green). kind=local is reserved for
-// SELF-HOSTED runners (the runner-client enroll flow): a local door on the
-// CP guest would hand its caller the guest itself, so it never provisions
-// hosted on the CP.
-var agentProvisionKinds = map[string]bool{
-	"ssh": true, "unifi": true,
-}
-
-func supportedProvisionKinds() []string {
-	out := make([]string, 0, len(agentProvisionKinds))
-	for k := range agentProvisionKinds {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+// reservedProvisionKinds are NOT agent-provisionable: kind=local is the
+// self-hosted enroll flow (hosted=self only), and kubernetes doors are
+// build-time static (their token is sourced fresh per build — an agent
+// shadowing one would go stale at the next rebuild).
+var reservedProvisionKinds = map[string]bool{
+	"local": true, "kubernetes": true,
 }
 
 // BuildProvisionRunner binds the provision_runner flow to a Spec + the
@@ -70,6 +58,9 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			return "", fmt.Errorf("provision_runner: name must be kebab-case [a-z0-9-] (got %q) — <target>-<protocol>-<identity>", args.Name)
 		}
 		kind := strings.ToLower(strings.TrimSpace(args.Kind))
+		if kind == "" {
+			return "", fmt.Errorf("provision_runner %s: kind is required (ssh, or an api-class kind with a probe)", name)
+		}
 		hosted := strings.ToLower(strings.TrimSpace(args.Hosted))
 		if hosted != "" && hosted != state.HostedSelf {
 			return "", fmt.Errorf("provision_runner %s: hosted must be \"\" (CP guest) or %q (resident on the target)", name, state.HostedSelf)
@@ -90,8 +81,8 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 				return "", fmt.Errorf("provision_runner %s: hosted=self enrolls the target's own identity — pubkey and enc_pubkey (64-hex each, from `runner enroll` on the guest) are required", name)
 			}
 		} else {
-			if !agentProvisionKinds[kind] {
-				return "", fmt.Errorf("provision_runner %s: unsupported kind %q (supported: %s; or hosted=self with kind=local)", name, args.Kind, strings.Join(supportedProvisionKinds(), ", "))
+			if reservedProvisionKinds[kind] {
+				return "", fmt.Errorf("provision_runner %s: kind %q is reserved (local = the hosted=self enroll flow; kubernetes doors are build-time static)", name, kind)
 			}
 			// host is a self-hosted-only field: accepted on a CP-guest door it
 			// would silently repoint the granted pods' exec surface elsewhere
@@ -133,18 +124,6 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			return "", fmt.Errorf("provision_runner %s: the cloudflare-api- prefix is reserved (per-zone DNS doors are operator-owned)", name)
 		}
 
-		// Resolve EVERY grantee up front (a re-provision may shrink the roster
-		// or rename it — the whole list must be resolvable BEFORE any side
-		// effect, or a typo'd name would leave a live runner + record behind).
-		granteeRows := map[string]console.AgentInfo{}
-		for _, g := range grantTo {
-			row, err := registryRow(reg, g)
-			if err != nil {
-				return "", fmt.Errorf("provision_runner %s: %w", name, err)
-			}
-			granteeRows[g] = row
-		}
-
 		cpState := spec.consoleStateDir()
 		store, err := state.Open(cpState)
 		if err != nil {
@@ -166,6 +145,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// provisioned by the operator/console — grants onto it stay
 		// operator-scoped. A record with operator provenance likewise.
 		prevRecord, hasPrevRecord := store.GetCapability(name)
+		_, runnerExists := store.GetRunner(name)
 		if rec, ok := store.GetRunner(name); ok {
 			if rec.Status == state.RunnerRevoked {
 				return "", fmt.Errorf("provision_runner %s: runner is revoked — pick a new name", name)
@@ -176,6 +156,25 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		}
 		if hasPrevRecord && !prevRecord.AgentProvisioned() {
 			return "", fmt.Errorf("provision_runner %s: this door was provisioned by the operator — grants onto it stay operator-scoped (the console)", name)
+		}
+		if !selfHosted && kind != "ssh" && !runnerExists && strings.TrimSpace(args.Probe) == "" {
+			// The verify arm is data, not code: the requesting agent knows the
+			// API and names the probe that proves the credential works (the
+			// runner's self-check needs it to report honest status). Re-provisions
+			// may omit it ("" keeps the door's existing arm).
+			return "", fmt.Errorf("provision_runner %s: api-class doors require a probe — \"<METHOD> <path> [auth] [want]\" (e.g. \"GET /user/tokens/verify bearer\"; auth: bearer (default) | basic | json-body | none)", name)
+		}
+
+		// Resolve EVERY grantee up front (a re-provision may shrink the roster
+		// or rename it — the whole list must be resolvable BEFORE any side
+		// effect, or a typo'd name would leave a live runner + record behind).
+		granteeRows := map[string]console.AgentInfo{}
+		for _, g := range grantTo {
+			row, err := registryRow(reg, g)
+			if err != nil {
+				return "", fmt.Errorf("provision_runner %s: %w", name, err)
+			}
+			granteeRows[g] = row
 		}
 
 		port := spec.NextCapabilityPort(store)
@@ -193,7 +192,6 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// minted on the guest and is presented here — a re-provision must
 		// present the SAME pubkeys (a mismatch is a different process claiming
 		// the name — refuse loudly).
-		_, runnerExists := store.GetRunner(name)
 		adopted := false // self-hosted: the record carries a CONFIRMED enrollment only on the adopt path
 		var pubLine string
 		if selfHosted {
@@ -241,12 +239,43 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
 				Name: name, Kind: kind, Address: strings.TrimSpace(args.Address),
 				Secret: secret, RunnerDir: pkgDir,
+				Probe: args.Probe, ProbeBody: args.ProbeBody,
 			}); err != nil {
 				return "", fmt.Errorf("provision %s: %w", name, err)
 			}
 		} else if addr := strings.TrimSpace(args.Address); addr != pkgTargetAddr(pkgDir, name) {
 			if err := setTargetAddress(store, name, addr); err != nil {
 				return "", fmt.Errorf("move %s target address: %w", name, err)
+			}
+		}
+		// A re-provision may restate the verify arm ("" keeps the door's
+		// existing probe): same update-and-ship path as an address move, and
+		// the restart below loads it.
+		if kind != "ssh" && !selfHosted && runnerExists {
+			if strings.TrimSpace(args.Probe) == "" && args.ProbeBody != "" {
+				return "", fmt.Errorf("provision_runner %s: probe_body requires probe (a blank probe keeps the door's existing arm — send both to restate it)", name)
+			}
+			probe, probeBody := args.Probe, args.ProbeBody
+			if strings.TrimSpace(probe) != "" {
+				var err error
+				if probe, err = provisioner.ValidateProbe(probe); err != nil {
+					return "", fmt.Errorf("provision_runner %s: %w", name, err)
+				}
+				if probeBody != "" {
+					if err := provisioner.ValidateProbeBody(probeBody); err != nil {
+						return "", fmt.Errorf("provision_runner %s: %w", name, err)
+					}
+				}
+			}
+			if before, ok := store.GetSecret(name); ok {
+				if strings.TrimSpace(probe) == "" {
+					probe, probeBody = before.Probe, before.ProbeBody
+				}
+				if probe != before.Probe || probeBody != before.ProbeBody {
+					if err := setTargetProbe(store, name, probe, probeBody); err != nil {
+						return "", fmt.Errorf("restate %s verify arm: %w", name, err)
+					}
+				}
 			}
 		}
 		if kind == "ssh" && !selfHosted {

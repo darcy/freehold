@@ -20,6 +20,14 @@ type TargetMeta struct {
 	Kind    string `json:"kind"`
 	Address string `json:"address"`
 	Secret  string `json:"secret"`
+	// Probe is the parameterized verify arm — "<METHOD> <path> [auth] [want]"
+	// (e.g. "GET /user/tokens/verify bearer"). Empty = the runner's built-in
+	// kind match (legacy doors). ProbeBody is an optional literal request
+	// body (JSON-validated, shell-safe) for probes that need one alongside
+	// the credential (kubernetes). Field order + omitempty matter: the
+	// harness oracle gates package JSON byte-identity against the Rust side.
+	Probe     string `json:"probe,omitempty"`
+	ProbeBody string `json:"probe_body,omitempty"`
 }
 
 // SecretPackage is the control plane's shipped package: secret name -> sealed

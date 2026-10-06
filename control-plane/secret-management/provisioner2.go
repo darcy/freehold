@@ -49,7 +49,8 @@ func RotateSecret(store *state.StateStore, name string, newSecret []byte) (*stat
 	}
 	pkg := wire.New(
 		map[string]string{name: ciphertextHex},
-		map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name}},
+		map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name,
+			Probe: before.Probe, ProbeBody: before.ProbeBody}},
 		grants,
 	)
 	if err := pkg.WriteToDir(runnerRec.PackageDir); err != nil {
@@ -63,7 +64,8 @@ func RotateSecret(store *state.StateStore, name string, newSecret []byte) (*stat
 		_ = store.SetSecretCiphertext(name, before.CiphertextHex, before.RotatedAt)
 		old := wire.New(
 			map[string]string{name: before.CiphertextHex},
-			map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name}},
+			map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name,
+				Probe: before.Probe, ProbeBody: before.ProbeBody}},
 			currentGrantsOrEmpty(runnerRec.PackageDir),
 		)
 		_ = old.WriteToDir(runnerRec.PackageDir)
@@ -112,7 +114,8 @@ func RotateSecretSelfHosted(store *state.StateStore, name string, newSecret []by
 	ciphertextHex := fmt.Sprintf("%x", sealed)
 	pkgJSON, err := wire.New(
 		map[string]string{name: ciphertextHex},
-		map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name}},
+		map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name,
+			Probe: before.Probe, ProbeBody: before.ProbeBody}},
 		nil,
 	).Bytes()
 	if err != nil {

@@ -23,6 +23,15 @@ pub struct TargetMeta {
     pub address: String,
     /// Which entry in `secrets` holds this target's credential.
     pub secret: String,
+    /// Parameterized verify arm: "<METHOD> <path> [auth] [want]" (e.g.
+    /// "GET /user/tokens/verify bearer"). None = the runner's built-in kind
+    /// match (legacy doors). Validated CP-side before it is ever shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
+    /// Optional literal request body (JSON, shell-safe) for probes that need
+    /// one alongside the credential (kubernetes' SelfSubjectReview).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +80,8 @@ mod tests {
                     kind: "vultr".into(),
                     address: "api.vultr.com".into(),
                     secret: "vultr".into(),
+                    probe: Some("GET /v2/account".into()),
+                    probe_body: None,
                 },
             )]),
             grants: vec!["agent-pubkey".into()],

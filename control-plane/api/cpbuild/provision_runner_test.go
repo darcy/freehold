@@ -44,7 +44,8 @@ func TestProvisionRunnerValidation(t *testing.T) {
 		{"bad name", args("RTX_BOT", "ssh", "a@h", "ai"), "kebab-case"},
 		{"leading dash", args("-rtx", "ssh", "a@h", "ai"), "kebab-case"},
 		{"missing kind", args("rtx-ssh-root", "", "a@h", "ai"), "kind"},
-		{"unknown kind", args("rtx-ssh-root", "smtp", "a@h", "ai"), "unsupported kind"},
+		{"api kind without probe", args("rtx-smtp-root", "smtp", "https://smtp.local", "ai"), "require a probe"},
+		{"reserved kind", args("rtx-kube-root", "kubernetes", "https://k", "ai"), "reserved"},
 		{"reserved dns prefix", args("cloudflare-api-example-com", "unifi", "https://u", "ai"), "reserved"},
 		{"no grantee", args("rtx-ssh-root", "ssh", "a@h"), "grant_to is required"},
 		{"grants to the CPA", args("rtx-ssh-root", "ssh", "a@h", "freehold"), "the CPA holds no exec"},
@@ -164,7 +165,9 @@ func TestProvisionRunnerEmptyDoor(t *testing.T) {
 	}
 	reg, _ := testRegistry(t)
 	fn := BuildProvisionRunner(spec, reg)
-	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai"))
+	unifiArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai")
+	unifiArgs.Probe = "POST /api/auth/login json-body"
+	_, _ = fn(unifiArgs)
 	// The placeholder sealed (the disk is the truth).
 	st, err := state.Open(cpState)
 	if err != nil {
@@ -236,6 +239,7 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	}
 	if err := store.InsertCapability("unifi-api-admin", state.CapabilityRecord{
 		Kind: "unifi", Address: "https://unifi.local", Port: 8800, Rosters: []string{"ai"},
+		Origin: state.OriginAgent,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +252,13 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	reg, _ := testRegistry(t)
 	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
 	fn := BuildProvisionRunner(spec, reg)
-	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai"))
+	reArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai")
+	reArgs.Probe = "POST /api/auth/login json-body"
+	if _, err := fn(reArgs); err != nil && strings.Contains(err.Error(), "invalid probe") {
+		// The flow may fail hermetically later (relay sync), but a BODYLESS
+		// probe restatement must never trip the body validation.
+		t.Fatalf("a bodyless probe restatement must validate: %v", err)
+	}
 	// The flow writes through its own store handle; re-open (the disk is the
 	// truth) before asserting.
 	disk, err := state.Open(cpState)
@@ -258,6 +268,10 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	after, _ := disk.GetSecret("unifi-api-admin")
 	if after.CiphertextHex != filled.CiphertextHex {
 		t.Fatal("a re-provision must keep the operator's filled credential (only the console rotates)")
+	}
+	// The restated verify arm landed (bodyless, normalized).
+	if after.Probe != "POST /api/auth/login json-body 200" {
+		t.Fatalf("re-provision probe = %q", after.Probe)
 	}
 }
 
@@ -270,7 +284,9 @@ func TestProvisionRunnerUnknownGranteeFailsFirst(t *testing.T) {
 	reg, _ := testRegistry(t)
 	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
 	fn := BuildProvisionRunner(spec, reg)
-	if _, err := fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai", "nobody")); err == nil ||
+	gArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai", "nobody")
+	gArgs.Probe = "POST /api/auth/login json-body"
+	if _, err := fn(gArgs); err == nil ||
 		!strings.Contains(err.Error(), "unknown agent") {
 		t.Fatalf("unknown grantee must fail fast, got %v", err)
 	}
