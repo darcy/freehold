@@ -493,12 +493,15 @@ func TestPortalSingleUse(t *testing.T) {
 }
 
 func TestWorldRequiresAuthWhenConfigured(t *testing.T) {
+	// The loopback posture (no auth configured) serves every route open —
+	// world included; the caller is on the box (the C3 bind guard is the
+	// boundary there). A CONFIGURED console gates world behind the operator
+	// role: a member session gets 403 (asserted in the member-role test).
 	s, _ := testServer(t, nil)
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/world", nil))
-	// Auth NOT configured -> the portal/world routes 404.
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("world with no auth configured must 404, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("world in the loopback posture must be served, got %d", rec.Code)
 	}
 }
 

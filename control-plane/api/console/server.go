@@ -300,7 +300,7 @@ func (s *Server) portalLand(w http.ResponseWriter, r *http.Request, token string
 // ---- world / overview ----
 
 func (s *Server) world(w http.ResponseWriter, r *http.Request) {
-	operator, err := s.requireSessionPubkey(r)
+	operator, err := s.requireAdmin(r)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
@@ -472,8 +472,8 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 // container goes. The CP's managed state (runners + secrets, agent registry,
 // DNS store) is cleared AFTER the runner-driven teardown — clearing it first
 // would remove the very co-located runner this runs through. Operator-scoped:
-// requireSession only admits a pubkey from the console's admin whitelist
-// (server.go login's isAdmin gate), i.e. an operator. Compute-only.
+// requireAdmin only admits a session stamped with the operator role (the
+// login's admin whitelist), i.e. an operator. Compute-only.
 func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -511,7 +511,7 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 // worldExec runs one command through the CP's co-located runner — the
 // drive-through-CP exec a thin login box uses, now session-authed here instead
 // of operator-signed on the agent-tools MCP (no relay roster). Operator-scoped
-// like worldBuild: requireSession only admits an admin-whitelisted operator.
+// like worldBuild: requireAdmin only admits an operator-role session.
 func (s *Server) worldExec(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -675,7 +675,7 @@ var stdSecrets = []string{"dns-relay", "dns-cp", "litellm", "operator", "cert-se
 // secretsList reports which CP-owned secrets are present on disk (the idempotent
 // inventory `build` uses to ask the operator only for what's missing).
 func (s *Server) secretsList(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSessionPubkey(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -698,7 +698,7 @@ func (s *Server) secretsList(w http.ResponseWriter, r *http.Request) {
 // writable; the blob is written verbatim (never opened here — the cert /
 // litellm steps open it in memory at build).
 func (s *Server) secretsWrite(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSessionPubkey(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
