@@ -276,7 +276,7 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		}
 	}
 
-	if !have["litellm"] {
+	if !have["litellm"] && !e.F.NoLitellm {
 		master, pg, gw, err := e.litellmSecretMaterial(cfg)
 		if err != nil {
 			return err

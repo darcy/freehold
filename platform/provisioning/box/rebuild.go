@@ -577,7 +577,7 @@ func (e *Engine) RunBootstrap() error {
 // never re-asked. The box also keeps its own sealed DNS copy (promptDNSCred
 // reuses it), which the DNS-record management step reads.
 
-// seedCpRunnerSecrets writes the litellm master / postgres pw / provider key
+// seedCpRunnerSecrets writes the litellm master / postgres pw
 // into the CP's co-located runner package (freehold-console add-secret on the
 // CP) and restarts the freehold-runner unit so the live runner loads them. This
 // is what lets the existing $LITELLM/$PROVIDER_KEY injection path serve the
@@ -2507,7 +2507,7 @@ func shellQuote(s string) string {
 // loopback 127.0.0.1:8788, target "litellm"), injecting the named secrets by
 // env. This is where the litellm admin calls run: the runner host is this
 // machine — from which the gateway URL is reachable — and the secrets
-// (litellm = master, provider-key) are the litellm runner package's own
+// (litellm = master, postgres-pw) are the litellm runner package's own
 // ciphertext. (Not the main proxmox-box runner, and not a nested
 // "exec --target …" prefix — that prefix is a shell no-op the old code leaned
 // on and never injected the secrets at all.)

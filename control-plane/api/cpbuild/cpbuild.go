@@ -955,12 +955,15 @@ func (s *Spec) certSeedFromCache(k3sVmid uint32, slot, host string) (bool, error
 	return true, nil
 }
 
-// runnerLitellmSecrets maps the CP store's litellm env keys to the secret NAMES
-// the world-build requests from the co-located runner.
+// runnerLitellmSecrets maps the CP store's litellm env keys to the secret
+// NAMES the world-build requests from the co-located runner: the gateway
+// master + postgres password only (tf.sh's TF_VAR_ inputs). The provider key
+// never rides the co-located (pve provisioning) runner package — it lives in
+// the CP's durable store, read by the alias stage directly, and is sealed only
+// into the AI department's litellm-api-admin door package (for retargeting).
 var runnerLitellmSecrets = []struct{ name, env string }{
 	{"litellm", "master"},
 	{"postgres-pw", "pg"},
-	{"provider-key", "provider"},
 }
 
 // reseedCoLocatedRunner re-provisions the CP's co-located runner from the CP's
