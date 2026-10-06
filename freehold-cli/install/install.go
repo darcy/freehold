@@ -202,6 +202,17 @@ func runInstallCmd(cmd *cobra.Command) error {
 	name := f.Name
 	out := cmd.OutOrStdout()
 
+	// The provider resolves from the RECORDED profile first: the headless
+	// re-adopt gate must gate against the RIGHT provider's needs (a vultr
+	// world without --provider would otherwise be demanded --host/--proxy-ip
+	// — needs it does not declare), and the recorded answers must beat the
+	// provider's defaults (a 404 re-create re-creates the recorded SHAPE).
+	if p := config.Resolve(name); p != nil {
+		if prev, _ := config.Load(p.ConfigPath); prev != nil {
+			seedFromProfile(&f, prev)
+		}
+	}
+
 	// The provider gates the headless answer set: its Needs() decide what
 	// install cannot derive (proxmox: the host + the edge address; a
 	// created-host provider: its key + answers). Gaps (and no

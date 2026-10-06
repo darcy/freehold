@@ -77,8 +77,30 @@ var uninstallCmd = &cobra.Command{
 				return err
 			}
 		}
+		// --destroy-host on a created-host world whose door is ALREADY dead
+		// (a prior uninstall that kept the profile): the world teardown
+		// already ran; skip it and go straight to the destroy — stopping
+		// the bill needs the API, never host access.
+		if destroyHost && cfg.HostProvider.ID != "" && !doorAlive(cfg, host) {
+			fmt.Println("  the host door is dead (a prior uninstall?) — skipping the world teardown; destroying the instance removes everything on it")
+			running, derr := destroyHostViaProvider(cfg, yes, true)
+			if derr != nil {
+				return derr
+			}
+			if !running {
+				wipeLocalProfile(configPath, config.Current())
+			} else {
+				fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
+			}
+			return nil
+		}
+		// A default uninstall on a created-host world KEEPS the profile as
+		// the instance's handle — so the box's door + substrate keys stay
+		// authorized: the kept profile's whole value is that a re-adopt or
+		// a --destroy-host re-entry still works.
+		keepHostAccess := cfg.HostProvider.ID != "" && !destroyHost
 		if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
-			if err := runUninstallTransient(cfg, host, removeData); err != nil {
+			if err := runUninstallTransient(cfg, host, removeData, keepHostAccess); err != nil {
 				return err
 			}
 			instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
@@ -94,7 +116,7 @@ var uninstallCmd = &cobra.Command{
 			}
 			return nil
 		}
-		if err := runUninstall(cfg, configPath, host, removeData); err != nil {
+		if err := runUninstall(cfg, configPath, host, removeData, keepHostAccess); err != nil {
 			return err
 		}
 		instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
@@ -198,7 +220,31 @@ func resolveUninstall(cfg *config.Config, hostFlag string) (string, error) {
 	return host, nil
 }
 
-func runUninstall(cfg *config.Config, configPath, host string, removeData bool) error {
+// doorAlive quietly probes the box's access to the host (the same probe
+// runUninstall gates on) — a dead door means a prior uninstall kept the
+// profile as the instance's handle.
+func doorAlive(cfg *config.Config, host string) bool {
+	agentDir := filepath.Join(common.FreeholdHome(), "control-plane", "agent-ops")
+	out, err := common.ExecDirect(cfg.Runner.Addr, agentDir, cfg.Runner.Pubkey, cfg.Runner.Target, "echo freehold-door-ok", []string{cfg.Runner.Target}, 30)
+	if err == nil && strings.Contains(out.Stdout, "freehold-door-ok") {
+		return true
+	}
+	// The served-runner path may be dead where the transient door is not.
+	keyPath, cleanup, derr := proxmox.WriteTempKey(mustDoorPEM())
+	if derr != nil {
+		return false
+	}
+	defer cleanup()
+	tout, terr := proxmox.SSHExec(strings.TrimPrefix(host, "root@"), keyPath)("echo freehold-door-ok", 30)
+	return terr == nil && tout.ExitCode != nil && *tout.ExitCode == 0 && strings.Contains(tout.Stdout, "freehold-door-ok")
+}
+
+func mustDoorPEM() []byte {
+	pem, _ := box.DoorKeyPEM()
+	return pem
+}
+
+func runUninstall(cfg *config.Config, configPath, host string, removeData, keepHostAccess bool) error {
 	fmt.Printf("uninstalling %q (host %s)…\n", cfg.Name, displayHost(host, cfg.Runner.Target))
 	self, err := os.Executable()
 	if err != nil {
@@ -222,7 +268,11 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 		return fmt.Errorf("uninstall won't touch the host: the door probe did not answer (got %q)", strings.TrimSpace(out.Stdout))
 	}
 
-	if err := common.DoorAction("revoke"); err != nil {
+	if keepHostAccess {
+		// The profile is the created host's handle — the box's keys stay
+		// authorized so the handle is worth something (a re-adopt, or a
+		// --destroy-host re-entry without host access).
+	} else if err := common.DoorAction("revoke"); err != nil {
 		fmt.Printf("  (warning: door revoke skipped — %v)\n", err)
 	}
 
@@ -263,7 +313,7 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 	if _, err := worldteardown.Run(runner, tcfg, worldteardown.ScopeWholeWorld, true); err != nil {
 		return err
 	}
-	if !removeData {
+	if !removeData && !keepHostAccess {
 		if err := removeRunnerKeys(runner, cfg); err != nil {
 			return err
 		}
@@ -309,7 +359,7 @@ func wipeLocalProfile(configPath string, p *config.Profile) {
 
 // runUninstallTransient removes the CP + world from a thin box by direct root
 // SSH. --remove-data is refused.
-func runUninstallTransient(cfg *config.Config, host string, removeData bool) error {
+func runUninstallTransient(cfg *config.Config, host string, removeData, keepHostAccess bool) error {
 	if removeData {
 		return fmt.Errorf("--remove-data needs the build box (a thin box cannot reach the durable plane's storage); re-run without it, or uninstall from the build box")
 	}
@@ -356,12 +406,14 @@ func runUninstallTransient(cfg *config.Config, host string, removeData bool) err
 		ok := out.ExitCode == nil || *out.ExitCode == 0
 		return ok, out.Stdout
 	}}
-	if err := worldteardown.RemoveRunnerSubstrate(adapter, common.RunnerKeyRefs(cfg, adapter), cfg.Runner.Target); err != nil {
-		return err
-	}
-	if door, derr := common.DoorPubkey(); derr == nil {
-		if err := worldteardown.RemoveAuthorizedKey(adapter, door); err != nil {
+	if !keepHostAccess {
+		if err := worldteardown.RemoveRunnerSubstrate(adapter, common.RunnerKeyRefs(cfg, adapter), cfg.Runner.Target); err != nil {
 			return err
+		}
+		if door, derr := common.DoorPubkey(); derr == nil {
+			if err := worldteardown.RemoveAuthorizedKey(adapter, door); err != nil {
+				return err
+			}
 		}
 	}
 	common.WarnOtherDoors(adapter)
