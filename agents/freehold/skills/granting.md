@@ -154,9 +154,10 @@ Role — never cluster scope. The shape:
 
 - **Name it `kube-api-<slot>`** (the flow enforces the prefix) and pick the
   namespace with the interview: a fresh DNS label, never a platform namespace
-  (kube-*, default, caddy, litellm). One slot per namespace — a second agent
-  needing the same namespace shares the door via `grant_to`, it does not
-  re-slice it.
+  (kube-*, default, caddy, litellm, agents — a slot beside the pods would read
+  their identity Secrets). One slot per
+  namespace — a second agent needing the same namespace shares the door via
+  `grant_to`, it does not re-slice it.
 - **The carve is Compute's audited leg — in conversation, before you call the
   tool.** Ask Compute to apply the slot manifest through `kube-api-root`
   (`kubectl apply -f -`): a Namespace, a ServiceAccount `<ns>-door`, a Role of

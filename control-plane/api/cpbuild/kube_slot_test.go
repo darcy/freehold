@@ -15,7 +15,7 @@ func TestValidateKubeNS(t *testing.T) {
 		}
 	}
 	for _, ns := range []string{"Yuvomi", "-bad", "bad-", "a_b", "",
-		"kube-system", "kube-public", "default", "caddy", "litellm"} {
+		"kube-system", "kube-public", "kube-node-lease", "default", "caddy", "litellm", "agents"} {
 		if err := validateKubeNS(ns); err == nil {
 			t.Fatalf("ns %q must be refused", ns)
 		}

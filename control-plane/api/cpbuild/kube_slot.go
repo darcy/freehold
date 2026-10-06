@@ -26,11 +26,12 @@ import (
 const kubeDoorNamePrefix = "kube-api-"
 
 // reservedKubeNamespaces are refused as slot namespaces: the control-plane
-// namespaces (kube-*), the default, and the platform's own service
-// namespaces. A slot is a tenant slice, never a platform namespace.
+// namespaces (kube-*), the default, and the platform's own service namespaces
+// — caddy, litellm, and agents (the pods' namespace: a slot's ns-admin Role
+// would read every pod's identity Secret out of it).
 var reservedKubeNamespaces = map[string]bool{
 	"kube-system": true, "kube-public": true, "kube-node-lease": true,
-	"default": true, "caddy": true, "litellm": true,
+	"default": true, "caddy": true, "litellm": true, "agents": true,
 }
 
 // kubeNSRe is a DNS-1123 label — the strictest form a namespace name takes.
