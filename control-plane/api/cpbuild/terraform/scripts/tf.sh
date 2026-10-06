@@ -7,8 +7,8 @@
 # SECRET mapping (option A): the runner-injected env gives LITELLM (gateway
 # master) + POSTGRES_PW at these names (secret-name -> UPPER_ env). This script
 # maps them to TF_VAR_* IN ENV (never argv/tfvars), so they ride 0600 state.
-# PROVIDER_KEY is intentionally NOT mapped: the model-registration local-exec
-# reads it directly, so the provider key never transits terraform state.
+# No provider key is requested: model registration is stageLitellmAliases'
+# (it reads the CP's litellm store directly), never a terraform local-exec.
 # Everything non-secret rides -var argv.
 #
 # Destroy needs neither the secret VALUES (they live in state) nor an early

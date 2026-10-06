@@ -753,8 +753,8 @@ func DeployCp(t Transport, spec *DeployCpSpec) (*DeployCpResult, error) {
 		}
 		// secrets.json MERGES instead of overwriting: the box package carries
 		// only its OWN target credential (proxmox-box), but the CP's co-located
-		// runner also holds the litellm/postgres-pw/provider-key secrets the
-		// build added (freehold-console add-secret). Overwriting wipes them, and
+		// runner also holds the litellm master + postgres-pw secrets the build
+		// added (freehold-console add-secret). Overwriting wipes them, and
 		// the box cannot re-derive them (the CP is the durable owner), so a
 		// rebuild would never get them back — the world-build's litellm stage
 		// then dies "requested secret \"litellm\" is not in this runner's

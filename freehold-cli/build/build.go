@@ -94,7 +94,6 @@ func registerBuildFlags(cmd *cobra.Command) {
 	cmd.Flags().String("storage", "local-lvm", "PVE LXC storage (relay/k3s boots)")
 	cmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge (relay/k3s boots)")
 	cmd.Flags().Bool("no-litellm", false, "Opt-out: do NOT deploy the litellm gateway")
-	cmd.Flags().String("litellm-provider-key", "", "Fireworks/upstream provider API key for litellm's model")
 	cmd.Flags().String("proxy-ip", "", "STATIC proxy (Caddy/k3s node) IP (CIDR, e.g. 192.168.30.7/24)")
 	cmd.Flags().String("relay-ip", "", "STATIC relay LXC IP (CIDR)")
 	cmd.Flags().String("cp-ip", "", "STATIC CP LXC IP (CIDR)")
@@ -119,10 +118,6 @@ func setupBuild(cmd *cobra.Command) (*buildEngine, error) {
 	f.ThinPool, _ = cmd.Flags().GetString("thin-pool")
 	f.NoK3s, _ = cmd.Flags().GetBool("no-k3s")
 	f.NoLitellm, _ = cmd.Flags().GetBool("no-litellm")
-	f.LitellmProviderKey = os.Getenv("FREEHOLD_LITELLM_PROVIDER_KEY")
-	if v, _ := cmd.Flags().GetString("litellm-provider-key"); v != "" {
-		f.LitellmProviderKey = v
-	}
 	f.RootfsGB, _ = cmd.Flags().GetUint32("rootfs-gb")
 	f.MemoryMB, _ = cmd.Flags().GetUint32("memory-mb")
 	f.RelayGw, _ = cmd.Flags().GetString("relay-gw")
@@ -281,13 +276,20 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 		}
 	}
 
+	// The CP's services phase applies litellm.tf and requests the master from
+	// the co-located runner unconditionally, so the store seeds EVEN under
+	// --no-litellm (main behavior — the opt-out only affects the recorded
+	// Managed list). The provider choice is the only interactive part.
 	if !have["litellm"] {
-		master, pg, providerKey, err := e.litellmSecretMaterial(cfg)
+		master, pg, gw, err := e.litellmSecretMaterial(cfg)
 		if err != nil {
 			return err
 		}
 		blob, err := certcred.CPSecretBlob("litellm", "litellm", map[string]string{
-			"master": master, "pg": pg, "provider": providerKey,
+			"master": master, "pg": pg,
+			"provider":        gw.Key,
+			"provider-prefix": gw.Provider,
+			"provider-model":  gw.Model,
 		}, seal, pub)
 		if err != nil {
 			return err
@@ -296,6 +298,7 @@ func (e *buildEngine) ensureCpSecrets(client *console.Client, cfg *config.Config
 			return fmt.Errorf("seed litellm on CP: %w", err)
 		}
 		fmt.Fprintln(e.Out, "  · litellm secrets stored on the CP")
+		fmt.Fprintf(e.Out, "  · gateway provider: %s/%s (all aliases)\n", gw.Provider, gw.Model)
 	}
 
 	// The owner identity (the world's operator key, the relay's owner-role
@@ -461,7 +464,16 @@ func (e *buildEngine) litellmPostgresPw(k3sVmid uint32) string {
 	return strings.TrimSpace(out)
 }
 
-func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string, string, error) {
+// gatewaySetup is one collected provider choice (gateway.go).
+
+// litellmSecretMaterial returns the litellm master key, postgres password, and
+// the operator's gateway provider choice (prompting for all three on first
+// provision). The CP is now the durable owner: the caller seeds these to the
+// CP (ensureCpSecrets); world_build re-seeds the co-located runner's master +
+// postgres from the CP store (the tfRun TF_VAR inputs), while the provider key
+// stays store-only — the alias stage reads it there and the AI department's
+// door package is its only other copy.
+func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string, gatewaySetup, error) {
 	k3sVmid := uint32(0)
 	if cfg != nil && cfg.Lxc.K3s.Vmid != nil {
 		k3sVmid = *cfg.Lxc.K3s.Vmid
@@ -479,21 +491,14 @@ func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string,
 			postgresPw = pw
 		}
 	}
-	providerKey := e.F.LitellmProviderKey
-	if providerKey == "" {
-		if e.F.Yes {
-			return "", "", "", fmt.Errorf("litellm needs the provider key: --litellm-provider-key or FREEHOLD_LITELLM_PROVIDER_KEY (headless --non-interactive)")
-		}
-		answer, err := e.cc().PromptSecret("litellm first provision: the provider (fireworks) API key")
-		if err != nil {
-			return "", "", "", err
-		}
-		providerKey = strings.TrimSpace(answer)
-		if providerKey == "" {
-			return "", "", "", fmt.Errorf("no litellm provider key supplied")
-		}
+	if e.F.Yes {
+		return "", "", gatewaySetup{}, fmt.Errorf("the litellm gateway needs a provider + model, collected interactively — run `freehold build` once without --non-interactive (the AI department retargets it later through litellm-api-admin)")
 	}
-	return masterKey, postgresPw, providerKey, nil
+	gw, err := e.collectGatewaySetup()
+	if err != nil {
+		return "", "", gatewaySetup{}, err
+	}
+	return masterKey, postgresPw, gw, nil
 }
 
 func (e *buildEngine) runBuild() error {

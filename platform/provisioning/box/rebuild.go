@@ -75,7 +75,6 @@ type Flags struct {
 	EraseFreehold      bool   // headless consent to erase a detected freehold plane
 	NoK3s              bool
 	NoLitellm          bool
-	LitellmProviderKey string
 	RootfsGB           uint32
 	MemoryMB           uint32
 	RelayGw            string
@@ -588,11 +587,13 @@ func (e *Engine) RunBootstrap() error {
 // caddy + cert all come up HERE, CP-side; bootstrap only created the CP.
 
 // litellmSecretMaterial returns the litellm master key, postgres password, and
-// provider key (minting/reusing the canonical first-run-wins values), prompting
-// for the provider key on first provision. The CP is now the durable owner: the
+// the operator's gateway provider choice (minting/reusing the canonical
+// first-run-wins values; the provider + model come from the build's picker,
+// see the build package's gateway.go). The CP is now the durable owner: the
 // caller seeds these to the CP (ensureCpSecrets); world_build re-seeds the
-// co-located runner from the CP store so the existing $LITELLM/$PROVIDER_KEY
-// injection path is unchanged.
+// co-located runner's master + postgres from that store (its tfRun TF_VAR
+// inputs), while the provider key stays store-only — the alias stage reads it
+// there and the AI department's door package is its only other copy.
 
 // ensureCpSecrets asks the operator ONLY for the CP secrets the CP does not
 // already hold (DNS creds + litellm), seeding each as the CP's durable owner via
@@ -600,11 +601,12 @@ func (e *Engine) RunBootstrap() error {
 // never re-asked. The box also keeps its own sealed DNS copy (promptDNSCred
 // reuses it), which the DNS-record management step reads.
 
-// seedCpRunnerSecrets writes the litellm master / postgres pw / provider key
+// seedCpRunnerSecrets writes the litellm master / postgres pw
 // into the CP's co-located runner package (freehold-console add-secret on the
 // CP) and restarts the freehold-runner unit so the live runner loads them. This
-// is what lets the existing $LITELLM/$PROVIDER_KEY injection path serve the
-// CP-owned litellm store the world-build reads.
+// is what keeps the $LITELLM/$POSTGRES_PW env injection serving the CP-owned
+// litellm store the world-build reads (the provider key is not in the package —
+// it lives in the store and the AI department's door).
 
 // cpSecretBlob renders a cert.SaveCreds-style sealed record ({provider,sealed,
 // aad}) as raw JSON, for upload to the CP via /api/secrets.
@@ -2520,16 +2522,6 @@ func shellQuote(s string) string {
 	return "'" + s + "'"
 }
 
-// litellmHasProviderKey reports whether the litellm runner package already
-// carries a sealed provider-key (so a rebuild can reuse it instead of demanding
-// a fresh supply). It inspects only the ciphertext map's secret NAMES — never
-// any value.
-
-// certIdent returns the ops identity's encryption secret (raw bytes), the
-// identity, or an error. The ops identity is freehold's own — the only key that
-// must be able to reopen the sealed DNS token (the DNS-cred collection + the
-// hand-off seal the relay/cp creds to it).
-
 // litellmPostgresPw reads back the CANONICAL postgres password from the k8s
 // litellm-pg Secret so a rebuild REUSES it (first-run-wins): Postgres initializes
 // PGDATA against the first password, so a re-mint + SSA re-apply would rotate it
@@ -2540,7 +2532,7 @@ func shellQuote(s string) string {
 // loopback 127.0.0.1:8788, target "litellm"), injecting the named secrets by
 // env. This is where the litellm admin calls run: the runner host is this
 // machine — from which the gateway URL is reachable — and the secrets
-// (litellm = master, provider-key) are the litellm runner package's own
+// (litellm = master, postgres-pw) are the litellm runner package's own
 // ciphertext. (Not the main proxmox-box runner, and not a nested
 // "exec --target …" prefix — that prefix is a shell no-op the old code leaned
 // on and never injected the secrets at all.)
