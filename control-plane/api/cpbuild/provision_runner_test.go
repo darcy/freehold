@@ -738,6 +738,16 @@ func TestProvisionRunnerKubeSlotSealsTheToken(t *testing.T) {
 	spec.execHook = fakeKubeExec("fake-slot-token")
 	fn := BuildProvisionRunner(spec, reg)
 
+	// A kube door takes no address: the endpoint is CP-derived — an
+	// agent-stated one would hand the CP-sealed token to a server the agent
+	// controls.
+	if _, err := fn(agent.ProvisionArgs{
+		Name: "kube-api-yuvomi", Kind: "kubernetes", Address: "https://evil.example:6443",
+		GrantTo: []string{"deployer"}, NS: "yuvomi",
+	}); err == nil || !strings.Contains(err.Error(), "take no address") {
+		t.Fatalf("an explicit address must be refused on a kube door, got %v", err)
+	}
+
 	// A first provision must name the ns.
 	if _, err := fn(agent.ProvisionArgs{
 		Name: "kube-api-yuvomi", Kind: "kubernetes", GrantTo: []string{"deployer"},
@@ -830,5 +840,63 @@ func TestDynamicKubeSlotRestagesFromRecord(t *testing.T) {
 	}
 	if plain := openDoorSecret(t, cpState, "kube-api-yuvomi"); string(plain) != "fresh-ca-token" {
 		t.Fatalf("the rebuild must re-seal the fresh token, got %q", plain)
+	}
+}
+
+// TestOperatorKubeDoorAdoptsWithoutSlotStaging pins the provenance split in
+// the re-stage: an OPERATOR-provisioned kubernetes door (a console-filled
+// token, no slot spec on the record) keeps the adopt-only path — the build
+// never runs the slot apply or the token read against it, because its
+// credential has no build-time source to re-seal from.
+func TestOperatorKubeDoorAdoptsWithoutSlotStaging(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := runnerPackageDir(cpState, "ops-kube-door")
+	if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
+		Name: "ops-kube-door", Kind: "kubernetes", Address: "https://192.168.30.5:6443",
+		Secret: []byte("operator-filled-token"), RunnerDir: pkgDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("ops-kube-door", state.CapabilityRecord{
+		Kind: "kubernetes", Address: "https://192.168.30.5:6443", Port: 8800,
+		Rosters: []string{"deployer"}, Origin: state.OriginOperator, CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold",
+		CpIP: "10.0.0.9", ProxyIP: "192.168.30.5", K3sVmid: 105,
+	}
+	var execs []string
+	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		execs = append(execs, cmd)
+		return "", fmt.Errorf("no exec may run against an adopt-only door")
+	}
+	var r capabilityRunner
+	for _, cand := range dynamicRunners(store) {
+		if cand.name == "ops-kube-door" {
+			r = cand
+		}
+	}
+	if r.name == "" || r.tokenSecret != "" || r.tokenNS != "" {
+		t.Fatalf("an NS-less kube record must map WITHOUT derived token coords: %+v", r)
+	}
+	if err := spec.ensureCapabilityRunner(store, filepath.Join(spec.StateDir, "cp"), r, ""); err != nil &&
+		!strings.Contains(err.Error(), "sync relay channel") {
+		t.Fatalf("the adopt-only re-stage must reach the relay sync, got %v", err)
+	}
+	for _, cmd := range execs {
+		if strings.Contains(cmd, "apply -f -") || strings.Contains(cmd, "get secret") {
+			t.Fatalf("an operator kube door must not be slot-staged: %s", cmd)
+		}
+	}
+	if plain := openDoorSecret(t, cpState, "ops-kube-door"); string(plain) != "operator-filled-token" {
+		t.Fatalf("the operator's filled token must survive the re-stage, got %q", plain)
 	}
 }

@@ -285,10 +285,12 @@ func dynamicRunners(store *state.StateStore) []capabilityRunner {
 			selfHosted: rec.SelfHosted(), host: rec.Host,
 			ns: rec.NS, quota: rec.Quota,
 		}
-		if rec.Kind == "kubernetes" {
-			// A dynamic kube slot carries the same derived coords as a static
-			// one: token Secret from the ns, the standard SelfSubjectReview
-			// verify arm (the record's own spec rides the record fields).
+		if rec.Kind == "kubernetes" && rec.NS != "" {
+			// A kube record that CARRIES a slot is a kube slot (the
+			// agent-provisioned flow is the only writer of NS): its derived
+			// coords match a static door's. An operator-provisioned
+			// kubernetes door (console-filled token, no slot spec) keeps the
+			// adopt-only path — its credential has no build-time source.
 			r.tokenSecret = kubeDoorToken(rec.NS)
 			r.tokenNS = rec.NS
 			r.probe = kubernetesProbe
@@ -391,12 +393,14 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 			}
 		}
 	} else if r.dynamic {
-		if r.kind == "kubernetes" {
-			// A dynamic kube slot's record IS its build-time source: the build
+		if r.kind == "kubernetes" && r.ns != "" {
+			// A kube SLOT's record IS its build-time source: the build
 			// re-creates the slot from the record (the same role doors.tf
 			// plays for the static kube doors — a k3s rebuild wipes the
 			// cluster AND rotates the CA) and re-seals the fresh token.
-			// Adopt-only would strand the door on a dead CA.
+			// Adopt-only would strand the door on a dead CA. An operator-
+			// provisioned kubernetes door (no ns) keeps the adopt-only path
+			// below — its token has no build-time source to re-seal from.
 			if err := s.applyKubeSlot(r.ns, r.quota); err != nil {
 				return err
 			}

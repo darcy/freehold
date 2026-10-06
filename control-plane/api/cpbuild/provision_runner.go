@@ -126,11 +126,13 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			// Never agent-supplied for kube: the CP knows the API.
 			args.Probe = kubernetesProbe
 			args.ProbeBody = kubernetesProbeBody
-			if strings.TrimSpace(args.Address) == "" {
-				// The same derivation the static kube doors get (the gateway's
-				// route to the k3s API).
-				args.Address = "https://" + config.StripCIDR(spec.ProxyIP) + ":6443"
+			// The endpoint is CP-derived, never agent-stated: the CP seals the
+			// token it read from the cluster, so an agent-chosen address would
+			// be a door that hands that token to a server the agent controls.
+			if strings.TrimSpace(args.Address) != "" {
+				return "", fmt.Errorf("provision_runner %s: kube doors take no address — the CP derives the k3s API route (https://<proxy>:6443)", name)
 			}
+			args.Address = "https://" + config.StripCIDR(spec.ProxyIP) + ":6443"
 		}
 		if strings.TrimSpace(args.Address) == "" {
 			return "", fmt.Errorf("provision_runner %s: address is required (user@host[:port] for ssh, the base URL for %s)", name, kind)

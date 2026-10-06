@@ -168,10 +168,10 @@ Role — never cluster scope. The shape:
   carved, its error carries the rendered manifest to hand Compute.
 - **Then the flow seals, live:** `provision_runner(name=kube-api-<slot>,
   kind=kubernetes, ns=<ns>, quota=<budget|"" for none>, grant_to=[...])`. No
-  probe, no address (the CP derives the k3s API route), no console fill — the
-  CP reads the SA token from the slot and seals it CP-side, so the door is
-  live the moment the call lands. Verify with the runner's self-check before
-  claiming it works.
+  probe, no address (an address is refused — the CP derives the k3s API
+  route), no console fill — the CP reads the SA token from the slot and seals
+  it CP-side, so the door is live the moment the call lands. Verify with the
+  runner's self-check before claiming it works.
 - **The ns is fixed at creation**; a resized budget is a restated quota on a
   re-provision (the record is what the build re-creates the slot from after a
   k3s rebuild — the cluster-side re-apply of a resize is again Compute's).
