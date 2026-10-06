@@ -3,10 +3,13 @@ package cpbuild
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	cert "freehold/platform/services/certificates/letsencrypt"
 
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
@@ -41,7 +44,8 @@ func TestProvisionRunnerValidation(t *testing.T) {
 		{"bad name", args("RTX_BOT", "ssh", "a@h", "ai"), "kebab-case"},
 		{"leading dash", args("-rtx", "ssh", "a@h", "ai"), "kebab-case"},
 		{"missing kind", args("rtx-ssh-root", "", "a@h", "ai"), "kind"},
-		{"unknown kind", args("rtx-ssh-root", "smtp", "a@h", "ai"), "unsupported kind"},
+		{"api kind without probe", args("rtx-smtp-root", "smtp", "https://smtp.local", "ai"), "require a probe"},
+		{"reserved kind", args("rtx-kube-root", "kubernetes", "https://k", "ai"), "reserved"},
 		{"reserved dns prefix", args("cloudflare-api-example-com", "unifi", "https://u", "ai"), "reserved"},
 		{"no grantee", args("rtx-ssh-root", "ssh", "a@h"), "grant_to is required"},
 		{"grants to the CPA", args("rtx-ssh-root", "ssh", "a@h", "freehold"), "the CPA holds no exec"},
@@ -161,7 +165,9 @@ func TestProvisionRunnerEmptyDoor(t *testing.T) {
 	}
 	reg, _ := testRegistry(t)
 	fn := BuildProvisionRunner(spec, reg)
-	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai"))
+	unifiArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai")
+	unifiArgs.Probe = "POST /api/auth/login json-body"
+	_, _ = fn(unifiArgs)
 	// The placeholder sealed (the disk is the truth).
 	st, err := state.Open(cpState)
 	if err != nil {
@@ -233,6 +239,7 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	}
 	if err := store.InsertCapability("unifi-api-admin", state.CapabilityRecord{
 		Kind: "unifi", Address: "https://unifi.local", Port: 8800, Rosters: []string{"ai"},
+		Origin: state.OriginAgent,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +252,13 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	reg, _ := testRegistry(t)
 	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
 	fn := BuildProvisionRunner(spec, reg)
-	_, _ = fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai"))
+	reArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai")
+	reArgs.Probe = "POST /api/auth/login json-body"
+	if _, err := fn(reArgs); err != nil && strings.Contains(err.Error(), "invalid probe") {
+		// The flow may fail hermetically later (relay sync), but a BODYLESS
+		// probe restatement must never trip the body validation.
+		t.Fatalf("a bodyless probe restatement must validate: %v", err)
+	}
 	// The flow writes through its own store handle; re-open (the disk is the
 	// truth) before asserting.
 	disk, err := state.Open(cpState)
@@ -255,6 +268,10 @@ func TestProvisionRunnerSecretlessAdoptKeepsFilled(t *testing.T) {
 	after, _ := disk.GetSecret("unifi-api-admin")
 	if after.CiphertextHex != filled.CiphertextHex {
 		t.Fatal("a re-provision must keep the operator's filled credential (only the console rotates)")
+	}
+	// The restated verify arm landed (bodyless, normalized).
+	if after.Probe != "POST /api/auth/login json-body 200" {
+		t.Fatalf("re-provision probe = %q", after.Probe)
 	}
 }
 
@@ -267,7 +284,9 @@ func TestProvisionRunnerUnknownGranteeFailsFirst(t *testing.T) {
 	reg, _ := testRegistry(t)
 	spec := &Spec{StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold", CpIP: "10.0.0.9"}
 	fn := BuildProvisionRunner(spec, reg)
-	if _, err := fn(args("unifi-api-admin", "unifi", "https://unifi.local", "ai", "nobody")); err == nil ||
+	gArgs := args("unifi-api-admin", "unifi", "https://unifi.local", "ai", "nobody")
+	gArgs.Probe = "POST /api/auth/login json-body"
+	if _, err := fn(gArgs); err == nil ||
 		!strings.Contains(err.Error(), "unknown agent") {
 		t.Fatalf("unknown grantee must fail fast, got %v", err)
 	}
@@ -368,6 +387,51 @@ func TestAgentRunnerCoordsResolvesFromState(t *testing.T) {
 	}
 	if got := spec.agentRunnerCoords(store, "nobody"); len(got) != 0 {
 		t.Fatalf("nobody holds nothing, got %v", got)
+	}
+}
+
+// TestAgentRunnerCoordsFindsDNSDoorsFromConsoleRoot pins the re-apply coord
+// feed on the agent-tools server (the live failure behind a network pod that
+// lost its cloudflare door): the Spec anchors on the agent-tools state dir,
+// but the DNS creds the build handed off live under the CONSOLE root —
+// world-secrets and the unsealing console identity both. The per-zone door
+// must resolve from there, not from the Spec's own StateDir.
+func TestAgentRunnerCoordsFindsDNSDoorsFromConsoleRoot(t *testing.T) {
+	root := t.TempDir()
+	consoleRoot := filepath.Join(root, "control-plane")
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpIP: "10.0.0.9",
+		CpHost: "cp.example.com", RelayHost: "chat.example.com",
+	}
+	if err := os.MkdirAll(filepath.Join(consoleRoot, "console"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := make([]byte, 32)
+	secret[0] = 7
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf(`{"enc_secret_hex":%q}`, hex.EncodeToString(secret))
+	if err := os.WriteFile(filepath.Join(consoleRoot, "console", "identity.json"), []byte(id), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.SaveCreds(filepath.Join(consoleRoot, "world-secrets", "dns-cp.json"), "cloudflare",
+		map[string]string{"CF_DNS_API_TOKEN": "tok"}, crypto.Seal, pub, "dns-cp"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(consoleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.InsertRunner("cloudflare-api-example-com", state.RunnerRecord{
+		NostrPubkey: strings.Repeat("c", 64), Status: state.RunnerActive,
+	})
+
+	net := spec.agentRunnerCoords(store, "network")
+	if len(net) != 1 || net[0].Target != "cloudflare-api-example-com" ||
+		net[0].Pubkey != strings.Repeat("c", 64) || net[0].URL != "http://10.0.0.9:8798" {
+		t.Fatalf("network coords must carry the per-zone DNS door from the console root, got: %+v", net)
 	}
 }
 

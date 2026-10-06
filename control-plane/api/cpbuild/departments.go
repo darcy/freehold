@@ -76,6 +76,12 @@ type capabilityRunner struct {
 	// host is a self-hosted runner's LAN address — pod coords dial it instead
 	// of the CP IP.
 	host string
+	// probe is the door's parameterized verify arm ("<METHOD> <path> [auth]
+	// [want]") + optional literal body — shipped in the package's TargetMeta
+	// so the runner's self-check is data, not code. Empty = legacy (the
+	// runner's built-in kind match).
+	probe     string
+	probeBody string
 }
 
 // kubernetesVersion is the kubectl build installed on the CP LXC (the kube
@@ -84,6 +90,12 @@ const kubernetesVersion = "v1.36.4"
 
 // cloudflareAPIBase is the cloudflare API v4 root (the door's address env).
 const cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
+
+// kubernetesProbe is the kube doors' verify arm: a SelfSubjectReview — 201
+// proves BOTH reachability and that the door's token survived a CA rotation.
+// "insecure" composes curl -k: the k3s CA is not trusted on the CP guest.
+const kubernetesProbe = "POST /apis/authentication.k8s.io/v1/selfsubjectreviews bearer 201 insecure"
+const kubernetesProbeBody = `{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`
 
 // capabilityRunners is the static capability-runner table. Dynamic entries
 // (one cloudflare-api-<domain> runner per stored DNS zone, and one runner per
@@ -94,13 +106,16 @@ func capabilityRunners() []capabilityRunner {
 		{name: "pve-ssh-root", kind: "ssh", port: 8791,
 			rosters: []string{"network", "compute", "data"}},
 		{name: "kube-api-root", kind: "kubernetes", port: 8792,
-			rosters: []string{"compute"}, tokenSecret: "compute-door-token", tokenNS: "kube-system"},
+			rosters: []string{"compute"}, tokenSecret: "compute-door-token", tokenNS: "kube-system",
+			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "kube-api-caddysa", kind: "kubernetes", port: 8793,
-			rosters: []string{"network"}, tokenSecret: "caddy-door-token", tokenNS: "caddy"},
+			rosters: []string{"network"}, tokenSecret: "caddy-door-token", tokenNS: "caddy",
+			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "kube-api-litellmsa", kind: "kubernetes", port: 8794,
-			rosters: []string{"ai"}, tokenSecret: "litellm-door-token", tokenNS: "litellm"},
+			rosters: []string{"ai"}, tokenSecret: "litellm-door-token", tokenNS: "litellm",
+			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "litellm-api-admin", kind: "litellm", port: 8795,
-			rosters: []string{"ai"}},
+			rosters: []string{"ai"}, probe: "GET /health/liveliness bearer"},
 		{name: "dnsmasq-local-root", kind: "local", port: 8796,
 			rosters: []string{"network"}},
 		// cp-local-root: local exec ON the cp guest as root, for the data
@@ -235,14 +250,18 @@ func (s *Spec) cloudflareRunners(store *state.StateStore) []capabilityRunner {
 		for occupied[port] {
 			port++
 		}
-		out = append(out, capabilityRunner{
+		r := capabilityRunner{
 			name:    "cloudflare-api-" + strings.ReplaceAll(zone, ".", "-"),
 			kind:    strings.ToLower(provider),
 			port:    port,
 			rosters: []string{"network"},
 			dnsZone: zone,
 			dnsEnv:  env,
-		})
+		}
+		if r.kind == "cloudflare" {
+			r.probe = "GET /user/tokens/verify bearer"
+		}
+		out = append(out, r)
 		port++
 	}
 	return out
@@ -335,6 +354,7 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 		}
 		res, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
 			Name: r.name, Kind: r.kind, Address: c.addr, Secret: c.secret, RunnerDir: pkgDir,
+			Probe: r.probe, ProbeBody: r.probeBody,
 		})
 		if err != nil {
 			return fmt.Errorf("provision: %w", err)
@@ -387,6 +407,15 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 			if rec, ok := store.GetSecret(r.name); ok {
 				rec.Kind = before.Kind
 				rec.Address = c.addr
+				if r.probe != "" && rec.Probe != r.probe {
+					// The table is the operator's truth: a door predating the
+					// parameterized probe (or a moved arm) re-stamps on build.
+					rec.Probe = r.probe
+					rec.ProbeBody = r.probeBody
+					if err := setTargetProbe(store, r.name, r.probe, r.probeBody); err != nil {
+						return fmt.Errorf("stage %s verify arm: %w", r.name, err)
+					}
+				}
 				store.InsertSecret(r.name, rec)
 				if err := store.Save(); err != nil {
 					return err
@@ -588,6 +617,36 @@ func setTargetAddress(store *state.StateStore, name, addr string) error {
 	}
 	secretRec, _ := store.GetSecret(name)
 	secretRec.Address = addr
+	store.InsertSecret(name, secretRec)
+	return store.Save()
+}
+
+// setTargetProbe updates a runner's shipped TargetMeta verify arm + its state
+// record — the same update-and-ship shape as setTargetAddress (AddSecret
+// touches only secrets; a full rotate would drop the extras). Callers
+// validate the probe (secret-management::ValidateProbe) before this ships it.
+func setTargetProbe(store *state.StateStore, name, probe, probeBody string) error {
+	rec, ok := store.GetRunner(name)
+	if !ok {
+		return fmt.Errorf("runner %s not found", name)
+	}
+	pkg, err := wire.Load(rec.PackageDir)
+	if err != nil {
+		return err
+	}
+	meta, ok := pkg.Targets[name]
+	if !ok {
+		return fmt.Errorf("runner %s has no target metadata", name)
+	}
+	meta.Probe = probe
+	meta.ProbeBody = probeBody
+	pkg.Targets[name] = meta
+	if err := pkg.WriteToDir(rec.PackageDir); err != nil {
+		return err
+	}
+	secretRec, _ := store.GetSecret(name)
+	secretRec.Probe = probe
+	secretRec.ProbeBody = probeBody
 	store.InsertSecret(name, secretRec)
 	return store.Save()
 }

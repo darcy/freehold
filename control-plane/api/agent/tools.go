@@ -66,6 +66,17 @@ type ProvisionArgs struct {
 	// (64-hex each, from `runner enroll` on the target).
 	Pubkey    string `json:"pubkey,omitempty"`
 	EncPubkey string `json:"enc_pubkey,omitempty"`
+	// Probe is the door's verify arm — "<METHOD> <path> [auth] [want]" (e.g.
+	// "GET /user/tokens/verify bearer"; auth one of bearer (default), basic,
+	// json-body (the credential IS the POST body — unifi), none; want a
+	// 3-digit status, default 200). Required for api-class kinds at first
+	// provision: it is what turns the runner's self-check green, and the
+	// requesting agent knows the API. Optional on re-provision ("" keeps the
+	// door's existing probe). CP-validated; never a free-form shell string.
+	Probe string `json:"probe,omitempty"`
+	// ProbeBody is the probe's optional literal request body (JSON — e.g.
+	// kubernetes' SelfSubjectReview) alongside the credential.
+	ProbeBody string `json:"probe_body,omitempty"`
 }
 
 // ProvisionRunnerFn stages a NEW capability runner on the fly (the CPA's
