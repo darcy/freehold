@@ -252,6 +252,9 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// existing probe): same update-and-ship path as an address move, and
 		// the restart below loads it.
 		if kind != "ssh" && !selfHosted && runnerExists {
+			if strings.TrimSpace(args.Probe) == "" && args.ProbeBody != "" {
+				return "", fmt.Errorf("provision_runner %s: probe_body requires probe (a blank probe keeps the door's existing arm — send both to restate it)", name)
+			}
 			probe, probeBody := args.Probe, args.ProbeBody
 			if strings.TrimSpace(probe) != "" {
 				var err error

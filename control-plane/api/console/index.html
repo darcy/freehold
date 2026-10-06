@@ -52,7 +52,9 @@
     <button type="submit">provision</button>
     <input name="secret" placeholder="credential (pasted once, sealed, never stored)" required
            style="grid-column: 1 / -1">
-    <input name="probe" placeholder='verify arm — "<METHOD> <path> [auth] [want]", e.g. "GET /user/tokens/verify bearer" (optional for the built-in kinds)'
+    <input name="probe" placeholder='verify arm — "<METHOD> <path> [auth] [want] [insecure]", e.g. "GET /user/tokens/verify bearer" (optional for the built-in kinds)'
+           style="grid-column: 1 / -1">
+    <input name="probe_body" placeholder='probe request body — literal JSON, e.g. {"apiVersion":...} (optional; needs a probe that POSTs it)'
            style="grid-column: 1 / -1">
   </form>
 </div>
@@ -257,6 +259,7 @@ $("#provision-form").onsubmit = async (ev) => {
       name: f.get("name"), kind: f.get("kind"), address: f.get("address"), secret: f.get("secret"),
       risk: f.get("risk") || undefined,
       probe: f.get("probe") || undefined,
+      probe_body: f.get("probe_body") || undefined,
     });
     ev.target.reset();
     await refresh();

@@ -621,6 +621,9 @@ fn compose_probe(spec: &ProbeSpec, cred: &str, url_env: &str) -> String {
         _ => {}
     }
     if let Some(body) = &spec.body {
+        // The CP only accepts JSON bodies (ValidateProbeBody) — a literal
+        // body posts as JSON, never curl's form-urlencoded default.
+        cmd.push_str(" -H 'Content-Type: application/json'");
         cmd.push_str(&format!(" -d '{body}'"));
     }
     format!("{cmd} \"${{{url_env}}}{}\"", spec.path)
@@ -1175,6 +1178,7 @@ mod tests {
         .unwrap();
         let cmd = compose_probe(&s, "KUBE", "KUBE_URL");
         assert!(cmd.starts_with("curl -skS"));
+        assert!(cmd.contains("-H 'Content-Type: application/json'"));
         assert!(cmd.contains("-d '{\"k\":1}'"));
         assert!(cmd.contains("\"${KUBE_URL}/apis/a.k8s.io/v1/selfsubjectreviews\""));
         // none: no credential flag at all
