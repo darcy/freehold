@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -377,15 +378,19 @@ var snapshotsCmd = &cobra.Command{
 // setup is the shared prologue: profile, transport, password push, env push,
 // repo URI. withEnv gates the --env handling (init only — the env file is
 // written once; later runs source it).
-func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg *config.Config, exec drive.ExecFunc, cleanup func(), err error) {
+// setupTransport is the shared prologue: profile negotiation, config load,
+// the -r record/fallback, and the door transport (this box's DOOR_SPEC key,
+// or --ssh-key — the CP guest's staged cp-verb key, so the data department
+// runs these verbs through cp-local-root). The credential-carrying verbs go
+// on to setup()'s settle/push dance; install-timer stops here — it must NOT
+// mint+push a password on a pre-init host (its guard fails loudly instead).
+func setupTransport(cmd *cobra.Command) (uri string, cfg *config.Config, exec drive.ExecFunc, host, keyPath string, cleanup func(), err error) {
 	ok, nerr := common.NegotiateProfile(cmd, "backup")
 	if nerr != nil {
-		err = nerr
-		return
+		return uri, cfg, exec, host, keyPath, cleanup, fmt.Errorf("backup: %w", nerr)
 	}
 	if !ok {
-		err = fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
-		return
+		return uri, cfg, exec, host, keyPath, cleanup, fmt.Errorf("no tenant profiles — run `freehold login` to add the world's profile first")
 	}
 	configPath := common.ProfileConfigPath(cmd)
 	cfg, err = config.Load(configPath)
@@ -397,40 +402,32 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 		return
 	}
 
-	if withEnv {
-		if env, eerr := cmd.Flags().GetString("env"); eerr == nil && env != "" {
-			envPairs = strings.Split(env, ",")
-		}
-	}
-
 	// The URI resolves FIRST — the password settlement's arbiter probes
 	// `restic -r <uri>`, and an unresolved uri probed nothing (live finding:
 	// every probe ran against an empty repo arg and misclassified).
 	rflag, _ := cmd.Flags().GetString("r")
 	if rflag != "" {
 		if rerr := RecordRepo(rflag); rerr != nil {
-			err = rerr
-			return
+			return uri, cfg, exec, host, keyPath, cleanup, rerr
 		}
 		uri = rflag
 	} else {
 		uri = RecordedRepo()
 	}
 	if uri == "" {
-		err = fmt.Errorf("no restic repo — give -r <uri> (sftp://nas/srv/restic/freehold, b2:bucket:path, s3:https://s3.<region>.backblazeb2.com/bucket, …)")
-		return
+		return uri, cfg, exec, host, keyPath, cleanup, fmt.Errorf("no restic repo — give -r <uri> (sftp://nas/srv/restic/freehold, b2:bucket:path, s3:https://s3.<region>.backblazeb2.com/bucket, …)")
 	}
 
-	execRaw, keyPath, cleanupFn, derr := common.DoorExec(cfg)
+	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	execRaw, kPath, cleanupFn, derr := common.DoorExecWithKey(cfg, sshKey)
 	if derr != nil {
-		err = derr
-		return
+		return uri, cfg, exec, host, keyPath, cleanup, derr
 	}
+	keyPath = kPath
 	cleanup = cleanupFn
-	// The door key's temp file: THIS call owns the error paths — the
-	// callers register their defer only after setup returns nil, so every
-	// failed settle/push after this point must clean up here (the refuse
-	// verdicts are the DESIGNED outcome — the key must not ride them).
+	// The door key's temp file: the CALLER owns the success-path release
+	// (defer cleanup()) and its own error paths after the nil check; the
+	// failures INSIDE this function must not leak the key.
 	defer func() {
 		if err != nil {
 			cleanup()
@@ -438,20 +435,41 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 	}()
 	exec = drive.ExecFunc(execRaw)
 
+	// Trim a root@-prefixed recorded host (SSHUpload prepends its own
+	// root@), and make sure the drop dir exists before any push lands.
+	host = strings.TrimPrefix(cfg.Host, "root@")
+	if _, perr := exec("mkdir -p "+filepath.Dir(hostPasswordFile), 60); perr != nil {
+		return uri, cfg, exec, host, keyPath, cleanup, perr
+	}
+	return
+}
+
+func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg *config.Config, exec drive.ExecFunc, cleanup func(), err error) {
+	uri, cfg, exec, host, keyPath, cleanup, terr := setupTransport(cmd)
+	if terr != nil {
+		err = terr
+		return
+	}
+	// From here the key's temp file is alive: every error path below must
+	// release it (the refuse verdicts are the DESIGNED outcome — the key
+	// must not ride them).
+	defer func() {
+		if err != nil {
+			cleanup()
+		}
+	}()
+
+	if withEnv {
+		if env, eerr := cmd.Flags().GetString("env"); eerr == nil && env != "" {
+			envPairs = strings.Split(env, ",")
+		}
+	}
+
 	// The password: generated on the box (0600, profile dir), pushed to the
 	// host's /srv/nobackup (0600) — never inside a snapshot, never on a
 	// command line.
 	password, fresh, perr := LoadPassword()
 	if perr != nil {
-		err = perr
-		return
-	}
-	// The host drop dir: nothing in a freehold world creates /srv/nobackup
-	// (it's a mount convention, not a guarantee) — mkdir -p it before the
-	// pushes, and trim a root@-prefixed recorded host (SSHUpload prepends
-	// its own root@ — the export pull leg's same trap).
-	host := strings.TrimPrefix(cfg.Host, "root@")
-	if _, perr := exec("mkdir -p "+filepath.Dir(hostPasswordFile), 60); perr != nil {
 		err = perr
 		return
 	}
@@ -546,7 +564,7 @@ func setup(cmd *cobra.Command, withEnv bool) (uri string, envPairs []string, cfg
 	// lost world needs the domains/coords; this repo = restic-only restores
 	// read it here). Pushed EVERY setup — it is the CURRENT world's desired
 	// state, and a stale config here would restore wrong coords.
-	if raw, rerr := os.ReadFile(configPath); rerr == nil {
+	if raw, rerr := os.ReadFile(common.ProfileConfigPath(cmd)); rerr == nil {
 		if _, perr := exec(fmt.Sprintf("mkdir -p %s && echo %s | base64 -d > %s && chmod 600 %s",
 			filepath.Dir(hostConfigFile), base64.StdEncoding.EncodeToString(raw), hostConfigFile, hostConfigFile), 60); perr != nil {
 			err = perr
@@ -647,17 +665,143 @@ func settle(fresh, hostHasKey bool, boxPw, hostPw, uri string, accepts func(stri
 	}
 }
 
+var installTimerCmd = &cobra.Command{
+	Use:   "install-timer [--at 04:00] [--verify-at 'Sun *-*-* 05:00:00'] [-r <uri>]",
+	Short: "install the host-side systemd timers (nightly backup + weekly repo check), rendered from this verb's own restic line — re-run after plane/profile changes",
+	Long: "install the host-side systemd timers (nightly backup + weekly repo check), rendered from this verb's own restic line — re-run after plane/profile changes.\n\n" +
+		"The scripts embed the exact restic command `freehold backup run` builds\n" +
+		"(BackupArgs) — the timer is a render, never a fork: when the plane's\n" +
+		"mounts or the verb's scope change, re-run this verb and the host's\n" +
+		"timer follows. The scripts carry no credentials — they reference the\n" +
+		"0600 files `backup init` pushed and fail loudly (named reason) until\n" +
+		"those exist. Runs on the PVE host, so the 04:00 push needs neither\n" +
+		"the box nor the CP. Works through --ssh-key too (the data department\n" +
+		"re-renders it via its cp-local-root door).",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		uri, cfg, exec, host, _, cleanup, err := setupTransport(cmd)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		bargs, err := BackupArgs(cfg)
+		if err != nil {
+			return err
+		}
+		at, _ := cmd.Flags().GetString("at")
+		verifyAt, _ := cmd.Flags().GetString("verify-at")
+		if !atRe.MatchString(at) {
+			return fmt.Errorf("--at wants HH:MM (the host's local clock), got %q", at)
+		}
+		files := []struct{ dest, content, mode string }{
+			{"/srv/nobackup/freehold-backup.sh", renderBackupScript(uri, bargs), "700"},
+			{"/srv/nobackup/freehold-backup-verify.sh", renderVerifyScript(uri), "700"},
+			{"/etc/systemd/system/freehold-backup.service", renderService("freehold restic backup of the durable plane (generated by freehold backup install-timer — do not edit; re-run the verb)", "/srv/nobackup/freehold-backup.sh"), "644"},
+			{"/etc/systemd/system/freehold-backup.timer", renderTimer("nightly freehold restic backup of the durable plane", "*-*-* "+at+":00"), "644"},
+			{"/etc/systemd/system/freehold-backup-verify.service", renderService("freehold restic repo round-trip check (generated by freehold backup install-timer)", "/srv/nobackup/freehold-backup-verify.sh"), "644"},
+			{"/etc/systemd/system/freehold-backup-verify.timer", renderTimer("weekly freehold restic repo round-trip check", verifyAt), "644"},
+		}
+		for _, f := range files {
+			if perr := pushFileOverExec(exec, f.content, f.dest, f.mode); perr != nil {
+				return fmt.Errorf("%s: %w", f.dest, perr)
+			}
+		}
+		if out, eerr := exec("systemctl daemon-reload && systemctl enable --now freehold-backup.timer freehold-backup-verify.timer", 60); eerr != nil || (out.ExitCode != nil && *out.ExitCode != 0) {
+			return fmt.Errorf("enabling the timers failed:\n%s", strings.TrimSpace(out.Stderr))
+		}
+		fmt.Println("installed on " + host + ": freehold-backup.timer (daily " + at + " host-local) + freehold-backup-verify.timer (repo round-trip, " + verifyAt + "), Persistent")
+		fmt.Println("  scope = the backup verb's own: " + strings.TrimSpace(bargs))
+		out, lerr := exec("systemctl list-timers freehold-backup.timer freehold-backup-verify.timer --no-pager", 30)
+		if lerr == nil && out.ExitCode != nil && *out.ExitCode == 0 {
+			fmt.Println(strings.TrimSpace(out.Stdout))
+		}
+		return nil
+	},
+}
+
+var atRe = regexp.MustCompile(`^\d{1,2}:\d{2}$`)
+
+// pushFileOverExec ships one generated file to the host over the exec
+// channel (base64 — no SSHUpload key juggling; the same pattern the profile
+// config push uses). The contents here are never secrets: they reference
+// the credential paths, they don't contain them.
+func pushFileOverExec(exec drive.ExecFunc, content, dest, mode string) error {
+	if _, err := exec(fmt.Sprintf("mkdir -p %s && echo %s | base64 -d > %s && chmod %s %s",
+		filepath.Dir(dest), base64.StdEncoding.EncodeToString([]byte(content)), dest, mode, dest), 60); err != nil {
+		return err
+	}
+	return nil
+}
+
+// renderBackupScript embeds the backup verb's OWN restic line (ResticCmd of
+// BackupArgs) — the timer renders the verb, never forks it. No set -e: the
+// guards exit explicitly with named reasons, and the last line is restic's
+// own (its exit code becomes the unit's result). The `. env 2>/dev/null`
+// prefix (ResticCmd) is silent-but-continuing here — a repo whose backend
+// needs credentials fails with restic's own named error otherwise.
+func renderBackupScript(uri, args string) string {
+	return `#!/bin/sh
+# Generated by 'freehold backup install-timer' — the backup verb's own restic
+# line; do not hand-edit. Re-run the verb after plane/profile changes and the
+# timer follows.
+command -v restic >/dev/null || { echo "freehold-backup: restic is not installed on this host (apt install restic / the static binary from restic.net)" >&2; exit 1; }
+[ -r ` + hostPasswordFile + ` ] || { echo "freehold-backup: no ` + hostPasswordFile + ` on this host — run 'freehold backup init' (from the box) first" >&2; exit 1; }
+` + ResticCmd(uri, args) + `
+`
+}
+
+// renderVerifyScript is the weekly round-trip: does the repo answer, and
+// does it hold snapshots? restic's stderr rides into the failure message.
+func renderVerifyScript(uri string) string {
+	return `#!/bin/sh
+# Generated by 'freehold backup install-timer' — the weekly repo round-trip
+# check: the repo answers and holds snapshots.
+command -v restic >/dev/null || { echo "freehold-backup-verify: restic is not installed on this host" >&2; exit 1; }
+[ -r ` + hostPasswordFile + ` ] || { echo "freehold-backup-verify: no ` + hostPasswordFile + ` on this host — run 'freehold backup init' (from the box) first" >&2; exit 1; }
+out=$(RESTIC_PASSWORD_FILE=` + hostPasswordFile + ` restic -r ` + uri + ` snapshots --json 2>&1) || { echo "freehold-backup-verify: the repo did not answer: $out" >&2; exit 1; }
+echo "$out" | grep -q '"time"' || { echo "freehold-backup-verify: the repo answered but holds no snapshots: $out" >&2; exit 1; }
+`
+}
+
+func renderService(desc, script string) string {
+	return `[Unit]
+Description=` + desc + `
+
+[Service]
+Type=oneshot
+ExecStart=` + script + `
+`
+}
+
+func renderTimer(desc, onCalendar string) string {
+	return `[Unit]
+Description=` + desc + `
+
+[Timer]
+OnCalendar=` + onCalendar + `
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`
+}
+
 func init() {
-	for _, c := range []*cobra.Command{initCmd, runCmd, snapshotsCmd} {
+	for _, c := range []*cobra.Command{initCmd, runCmd, snapshotsCmd, installTimerCmd} {
 		c.Flags().StringP("r", "r", "", "the restic repo URI (init records it; the others fall back to the recorded one)")
 		// The verb-level --config (the convention every verb carries — on a
 		// box with several profiles the picker reads a subprocess's /dev/null
 		// and silently defaults to the alphabetically first: the WRONG
 		// tenant's plane, backed up to the wrong repo).
 		c.Flags().String("config", config.ConfigPath(), "Config path (default: the active profile's)")
+		// The CP guest's verbs pass the staged cp-verb key
+		// (/srv/data/cp/verb-ssh.key) — the data department runs the backup
+		// through its cp-local-root door, the same shape snapshot/export got.
+		c.Flags().String("ssh-key", "", "SSH private key for the host door (default: this box's derived DOOR_SPEC key)")
 	}
 	initCmd.Flags().String("env", "", "credentials for the host env file, KEY=VAL,KEY=VAL (e.g. B2_ACCOUNT_ID=…,B2_ACCOUNT_KEY=… / AWS_*)")
-	backupCmd.AddCommand(initCmd, runCmd, snapshotsCmd)
+	installTimerCmd.Flags().String("at", "04:00", "the nightly backup time, HH:MM on the host's local clock")
+	installTimerCmd.Flags().String("verify-at", "Sun *-*-* 05:00:00", "the weekly repo-check timer, a systemd OnCalendar expression")
+	backupCmd.AddCommand(initCmd, runCmd, snapshotsCmd, installTimerCmd)
 }
 
 // Command is the cobra command root.go registers.
