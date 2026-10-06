@@ -265,6 +265,29 @@ func TestTickMissingAgentPausesJob(t *testing.T) {
 	}
 }
 
+func TestTickRenameFollowsPubkey(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	// The job routes by pubkey; the registry later renames the agent.
+	if err := store.Create(&Job{ID: "j1", Agent: "old-name", AgentPubkey: "aabb", Channel: "ch1",
+		Cron: "@daily", Prompt: "p", NextRunAt: uint64(now.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	s, fired, _ := mkSched(t, store, map[string]string{"new-name": "aabb"})
+	s.Now = func() time.Time { return now }
+	s.TickNow()
+	if len(*fired) != 1 {
+		t.Fatalf("fired %d, want 1 — a rename must not break the job", len(*fired))
+	}
+	j, _ := store.Get("j1")
+	if j.Agent != "new-name" {
+		t.Errorf("display name = %q, want refreshed to new-name", j.Agent)
+	}
+	if last := j.LastRun(); last == nil || last.Status != RunFired {
+		t.Errorf("last run = %+v, want fired", last)
+	}
+}
+
 func TestCreateValidation(t *testing.T) {
 	store := mkStore(t)
 	base := Job{ID: "x", Agent: "cpa", Channel: "ch", Prompt: "p", Cron: "@daily"}

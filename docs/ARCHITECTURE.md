@@ -298,8 +298,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     alt-screen (`tea.NewProgram(m, WithAltScreen(), …)`); `freehold` with no
     args enters it, a subcommand routes to the CLI.
 
-*   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
-    Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
+*   **Seven views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
+    Jobs · Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
     recheck the world, `w` open the web console, `l` log in with the operator nsec,
     `p`/`x`/`g` provision/revoke/grant, `s` edit the operator settings
     (today: the agent pods' timezone). Build/teardown run from the shell.

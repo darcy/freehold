@@ -4,7 +4,8 @@
 //
 // Modes auto-detected from the config's presence + liveness (installer
 // probe_mode): bootstrap / configure / running.
-// Running views cycled with Tab/Shift-Tab: Services · Agents · Runners · DATA.
+// Running views cycled with Tab/Shift-Tab: Services · Agents · Jobs ·
+// Runners · Data · DNS · Certs.
 package tui
 
 import (

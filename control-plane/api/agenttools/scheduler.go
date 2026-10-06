@@ -158,37 +158,43 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// agentPubkeys resolves agent names to pubkeys fresh per tick (renames follow).
-func (s *Scheduler) agentPubkeys() map[string]string {
-	out := map[string]string{}
+// agentMaps resolves the registry fresh per tick into both directions:
+// name→pubkey (legacy rows route by name) and pubkey→name (display names
+// refresh, so a rename keeps the job working without a rewrite).
+func (s *Scheduler) agentMaps() (byName, byPK map[string]string) {
+	byName, byPK = map[string]string{}, map[string]string{}
 	if s.Agents == nil {
-		return out
+		return byName, byPK
 	}
 	agents, err := s.Agents()
 	if err != nil {
 		log.Printf("scheduled jobs: registry unreadable, no fires this tick: %v", err)
-		return out
+		return byName, byPK
 	}
 	for _, a := range agents {
-		out[a.Name] = a.Pubkey
+		byName[a.Name] = a.Pubkey
+		if a.Pubkey != "" {
+			byPK[a.Pubkey] = a.Name
+		}
 	}
-	return out
+	return byName, byPK
 }
 
 // TickNow runs one pass: fire due jobs, resolve open runs, record misses.
 func (s *Scheduler) TickNow() {
 	now := s.now()
 	nowUnix := uint64(now.Unix())
-	pks := s.agentPubkeys()
+	byName, byPK := s.agentMaps()
 
 	// The in-flight gate: an agent with an open run gets no second mention —
 	// a busy pod would just drop it (the bot-not-responding failure mode).
 	// Seeded from open runs, then updated AS this tick fires (two jobs for the
-	// same agent, both due now, fire one).
+	// same agent, both due now, fire one). Keyed by ROUTING key (pubkey when
+	// known, name otherwise) so a renamed agent keeps its gate.
 	inflight := map[string]bool{}
 	for _, j := range s.Jobs.Snapshot() {
 		if open := j.OpenRun(); open != nil {
-			inflight[j.Agent] = true
+			inflight[j.routeKey()] = true
 		}
 	}
 
@@ -196,21 +202,35 @@ func (s *Scheduler) TickNow() {
 		if j.Paused {
 			continue
 		}
-		dueAt := j.NextRunAt
-		if j.At != 0 {
-			dueAt = j.At
+		// Resolve the agent: by stored pubkey (rename-proof) or, on legacy
+		// rows, by stored name. Either way the row's display name refreshes.
+		pk := j.AgentPubkey
+		if pk == "" {
+			pk = byName[j.Agent]
+		} else if name, ok := byPK[pk]; ok {
+			if name != j.Agent {
+				_ = s.Jobs.Update(j.ID, func(j *Job) bool { j.Agent = name; return true })
+				j.Agent = name
+			}
 		}
-		if dueAt == 0 || dueAt > nowUnix {
-			continue
-		}
-
-		pk, ok := pks[j.Agent]
-		if !ok {
+		if pk == "" {
 			// The agent row is gone (removed, not renamed): pause the job with
 			// a recorded error instead of erroring every tick forever.
 			_ = s.Jobs.recordRun(j.ID, JobRun{FiredAt: nowUnix, Status: RunError,
 				Detail: "agent " + j.Agent + " is not in the registry — job paused"})
 			_ = s.Jobs.SetPaused(j.ID, true)
+			continue
+		}
+		route := pk
+		if j.AgentPubkey == "" {
+			route = j.Agent // legacy row: the gate keys on the name it stored
+		}
+
+		dueAt := j.NextRunAt
+		if j.At != 0 {
+			dueAt = j.At
+		}
+		if dueAt == 0 || dueAt > nowUnix {
 			continue
 		}
 
@@ -232,7 +252,7 @@ func (s *Scheduler) TickNow() {
 			}
 		}
 
-		if inflight[j.Agent] {
+		if inflight[route] {
 			if j.At != 0 {
 				// One-shot + busy agent: re-queue shortly rather than lose it.
 				_ = s.Jobs.Update(j.ID, func(j *Job) bool {
@@ -277,7 +297,7 @@ func (s *Scheduler) TickNow() {
 			log.Printf("scheduled jobs: persist %s before dispatch failed: %v", j.ID, err)
 			continue
 		}
-		inflight[j.Agent] = true
+		inflight[route] = true
 
 		content := fmt.Sprintf("[scheduled job %q]\n\n%s", jobLabel(j), j.Prompt)
 		if err := s.post(j.Channel, pk, content); err != nil {
@@ -292,7 +312,7 @@ func (s *Scheduler) TickNow() {
 		log.Printf("scheduled jobs: fired %s (%s) at agent %s in %s", j.ID, jobLabel(j), j.Agent, j.Channel)
 	}
 
-	s.resolveOpenRuns(now, pks)
+	s.resolveOpenRuns(now, byPK)
 }
 
 // advanceRecurring moves a recurring job's NextRunAt strictly past now
@@ -316,7 +336,9 @@ func (s *Scheduler) advanceJobLocked(j *Job, now time.Time) {
 
 // resolveOpenRuns closes fired runs: any agent message in the job's channel
 // after the fire closes it ok; past the timeout it closes + notifies the owner.
-func (s *Scheduler) resolveOpenRuns(now time.Time, pks map[string]string) {
+// byPK is the fresh registry pubkey→name map — the reply check matches the
+// job's stored routing pubkey (falling back to the stored name on legacy rows).
+func (s *Scheduler) resolveOpenRuns(now time.Time, byPK map[string]string) {
 	nowUnix := now.Unix()
 	for _, j := range s.Jobs.Snapshot() {
 		open := j.OpenRun()
@@ -324,13 +346,17 @@ func (s *Scheduler) resolveOpenRuns(now time.Time, pks map[string]string) {
 			continue
 		}
 		firedAt := int64(open.FiredAt)
+		agentPK := j.AgentPubkey
+		if agentPK == "" {
+			agentPK = byNameOf(byPK, j.Agent)
+		}
 		if nowUnix-firedAt < int64(runTimeout.Seconds()) {
 			// Still inside the window — but an early reply closes it now.
 			msgs, err := s.poll(j.Channel, firedAt)
 			if err != nil {
 				continue // transient; the next tick re-checks
 			}
-			if agentReplied(msgs, pks[j.Agent], firedAt) {
+			if agentReplied(msgs, agentPK, firedAt) {
 				_ = s.Jobs.Update(j.ID, func(j *Job) bool {
 					if last := j.LastRun(); last != nil && last.Status == RunFired && int64(last.FiredAt) == firedAt {
 						last.Status = RunOK
@@ -373,6 +399,16 @@ func agentReplied(msgs []delegate.PollResult, agentPK string, after int64) bool 
 		}
 	}
 	return false
+}
+
+// byNameOf is a reverse lookup on the registry's pubkey→name map.
+func byNameOf(byPK map[string]string, name string) string {
+	for pk, n := range byPK {
+		if n == name {
+			return pk
+		}
+	}
+	return ""
 }
 
 func jobLabel(j Job) string {

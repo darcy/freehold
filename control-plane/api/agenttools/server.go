@@ -431,8 +431,9 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		channel = resolved
 	}
 	// The running agent defaults to the caller; an explicit name must exist
-	// (resolved per fire, so a rename keeps the job working).
-	agentName := ""
+	// (the row routes by the agent's PUBKEY — stable across renames — and
+	// carries the name for display, refreshed per fire).
+	agentName, agentPK := "", caller
 	for _, ai := range mustAgents(s.Tools) {
 		if ai.Pubkey == caller {
 			agentName = ai.Name
@@ -440,17 +441,16 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		}
 	}
 	if a.Agent != "" {
-		found := false
+		agentName, agentPK = "", ""
 		for _, ai := range mustAgents(s.Tools) {
 			if ai.Name == a.Agent {
-				found = true
+				agentName, agentPK = ai.Name, ai.Pubkey
 				break
 			}
 		}
-		if !found {
+		if agentName == "" {
 			return nil, fmt.Errorf("agent %q is not in the registry", a.Agent)
 		}
-		agentName = a.Agent
 	}
 	if agentName == "" {
 		return nil, fmt.Errorf("agent unknown: pass the name of a registered agent (the caller is not registered)")
@@ -470,7 +470,7 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		return nil, err
 	}
 	job := &Job{
-		ID: id, Owner: owner, Agent: agentName, Channel: channel,
+		ID: id, Owner: owner, Agent: agentName, AgentPubkey: agentPK, Channel: channel,
 		Cron: a.Cron, At: a.At, TZ: a.TZ, Label: a.Label,
 		Prompt: a.Prompt, NextRunAt: nt,
 	}
@@ -703,6 +703,16 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			s.textResult(w, id, fmt.Errorf("jobs are not bound on this server"), "")
 			return
 		}
+		// The same privacy boundary the console API enforces: the prompt and
+		// label ride only rows the caller OWNS or is the named agent of —
+		// every other caller (agent or operator peer) gets metadata only.
+		callerName := ""
+		for _, ai := range mustAgents(s.Tools) {
+			if ai.Pubkey == caller {
+				callerName = ai.Name
+				break
+			}
+		}
 		jobs := s.Jobs.Snapshot()
 		if a.Owner != "" {
 			filtered := jobs[:0]
@@ -712,6 +722,12 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 				}
 			}
 			jobs = filtered
+		}
+		for i := range jobs {
+			if jobs[i].Owner != caller && jobs[i].Agent != callerName {
+				jobs[i].Prompt = ""
+				jobs[i].Label = ""
+			}
 		}
 		b, _ := json.Marshal(jobs)
 		s.textResult(w, id, nil, string(b))

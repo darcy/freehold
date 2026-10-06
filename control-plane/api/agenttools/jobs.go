@@ -48,8 +48,13 @@ type Job struct {
 	// Empty = the agent's own job (a self-scheduled repo re-check): no human
 	// gets failure notes, and the agent itself reads it via list_jobs.
 	Owner string `json:"owner"`
-	// Agent is the agent NAME the job runs on, resolved per fire against the
-	// registry — a rename keeps the job working without a rewrite.
+	// AgentPubkey routes the fire — the agent's Nostr pubkey, stable across
+	// renames (a rename keeps the pubkey and changes the name). Resolved from
+	// the registry at create time; the row's Agent display name refreshes
+	// from the registry at each fire. Legacy rows with an empty pubkey fall
+	// back to resolving Agent by name.
+	AgentPubkey string `json:"agent_pubkey,omitempty"`
+	// Agent is the agent's display NAME (registry row), refreshed per fire.
 	Agent string `json:"agent"`
 	// Channel is the relay channel the fire lands in (the h-tag id). The
 	// agent's in-channel reply is the delivery.
@@ -82,6 +87,15 @@ func (j *Job) LastRun() *JobRun {
 	}
 	last := j.Runs[len(j.Runs)-1]
 	return &last
+}
+
+// routeKey is the in-flight gate's key: the routing pubkey when known, else
+// the stored name (legacy rows).
+func (j *Job) routeKey() string {
+	if j.AgentPubkey != "" {
+		return j.AgentPubkey
+	}
+	return j.Agent
 }
 
 // OpenRun returns the run still awaiting its agent's reply (nil = none).
