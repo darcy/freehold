@@ -134,7 +134,7 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 		return fmt.Errorf("uninstall won't touch the host: the door probe did not answer (got %q)", strings.TrimSpace(out.Stdout))
 	}
 
-	if err := common.DoorAction("revoke"); err != nil {
+	if err := common.DoorAction(nil, "revoke"); err != nil {
 		fmt.Printf("  (warning: door revoke skipped — %v)\n", err)
 	}
 

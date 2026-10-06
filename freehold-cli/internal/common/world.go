@@ -7,6 +7,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
@@ -109,10 +111,22 @@ func DoorPubkey() (string, error) {
 
 // DoorAction authorizes or revokes this box's public door key on the host door
 // through the console's operator-scoped /api/world-door (session-authed, no
-// relay roster).
-func DoorAction(action string) error {
+// relay roster). Profile-aware like every world verb: the key derives from the
+// ACTIVE profile's agent-ops seed — a pre-profile version derived the base
+// state's seed instead, so a multi-profile box's door authorize/revoke managed
+// a key no world verb ever used (live finding on casaq: a door re-seal left
+// the world's backup init Permission-denied, and the uninstall's revoke would
+// have left the profile's line stale on the host forever).
+func DoorAction(cmd *cobra.Command, action string) error {
 	if action != "authorize" && action != "revoke" {
 		return fmt.Errorf("unknown door action %q (authorize|revoke)", action)
+	}
+	// cmd is nil when the caller already negotiated the profile (the
+	// uninstall's RunE does) — the active profile is set either way.
+	if cmd != nil {
+		if _, nerr := NegotiateProfile(cmd, "door"); nerr != nil {
+			return nerr
+		}
 	}
 	pubkey, err := DoorPubkey()
 	if err != nil {
