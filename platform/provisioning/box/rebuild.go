@@ -1850,6 +1850,11 @@ func (e *Engine) stageBootstrap(role string) error {
 		"--hostname", hostname,
 		"--target", e.F.Target,
 		"--domain", e.F.RelayDomain,
+		// The provider-resolved substrate (the dir backend on a created
+		// cloud host, local-lvm on a LAN box): the self-stage's own flag
+		// default is the AUTHORS' host — never let it win.
+		"--storage", e.F.StorageName,
+		"--bridge", e.F.Bridge,
 		"--rootfs-gb", strconv.FormatUint(uint64(e.F.RootfsGB), 10),
 		"--memory-mb", strconv.FormatUint(uint64(e.F.MemoryMB), 10),
 		"--operator-pubkey", e.F.OperatorPubkey,
