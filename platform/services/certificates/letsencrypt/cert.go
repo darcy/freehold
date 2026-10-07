@@ -105,6 +105,11 @@ func (s *envScope) Stop() {
 
 // buildProvider constructs lego's challenge provider by name with the given env.
 func buildProvider(providerName string, env map[string]string) (challenge.Provider, error) {
+	if providerName == ManualProviderName {
+		// Manual DNS: no API to build — the shim hands the operator the record
+		// to create (Present fails with the instruction; the order persists).
+		return ManualProvider(), nil
+	}
 	scope := &envScope{}
 	scope.Start(env)
 	defer scope.Stop()

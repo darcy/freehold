@@ -65,3 +65,11 @@ func Supported() []string {
 	}
 	return out
 }
+
+// CanManage reports whether provider has a registered Manager — the cheap
+// capability check callers gate on before building one (an unmanaged provider's
+// credential still serves cert DNS-01; only record management is missing).
+func CanManage(provider string) bool {
+	_, ok := registry[provider]
+	return ok
+}

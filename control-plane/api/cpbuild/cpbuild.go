@@ -1403,9 +1403,12 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
 		// credential. The CP owns the cred and does DNS-01, so record
 		// management joins the CP build (it was box-side pre-split). No-op
-		// without an edge/proxy or a stored credential.
-		if err := spec.manageDomainDNS(); err != nil {
+		// without an edge/proxy or a stored credential; MANUAL DNS returns a
+		// report note (the records to create, or confirmation they resolve).
+		if note, err := spec.manageDomainDNS(); err != nil {
 			return "", fmt.Errorf("world-build manage DNS: %w", err)
+		} else if note != "" {
+			report = append(report, note)
 		}
 		// 1. The durable volume plane: re-ensure each tenant's dataset/LV onto
 		// the recorded pool (idempotent, guest-writable) and capture the

@@ -248,8 +248,13 @@ func (s *Spec) cloudflareRunners(store *state.StateStore) []capabilityRunner {
 			continue
 		}
 		provider, env, err := s.dnsCredFromStore(slot)
-		if err != nil || len(env) == 0 {
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "capability runners: no %s DNS credential yet — the %s door waits for hand-off\n", slot, zone)
+			continue
+		}
+		if provider == cert.ManualProviderName || len(env) == 0 {
+			// Manual DNS has no API to put behind a door (and an empty env map
+			// cannot open one): the zone's records are the operator's hands.
 			continue
 		}
 		seen[zone] = true

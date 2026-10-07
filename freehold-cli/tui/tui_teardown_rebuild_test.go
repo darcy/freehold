@@ -54,7 +54,7 @@ func TestNewFlowLabels(t *testing.T) {
 	if got := promptLabel(flowRebuild, 8); got != "deploy litellm gateway + CPA model? (y/n, blank = y)" {
 		t.Errorf("rebuild step8 label = %q", got)
 	}
-	if got := promptLabel(flowRebuild, 9); got != "DNS provider for the certs (e.g. route53; blank = reuse stored)" {
+	if got := promptLabel(flowRebuild, 9); got != "DNS for the certs: \"manual\" (you create the records) or a provider e.g. cloudflare (blank = reuse stored)" {
 		t.Errorf("rebuild step9 label = %q", got)
 	}
 	if got := promptLabel(flowRebuild, 10); !strings.Contains(got, "DNS env") {
