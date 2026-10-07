@@ -76,6 +76,17 @@ deliberate and the rules below hold regardless of it.
 *   **Compute's grants:** raw host access (`pve-ssh-root` today) and cluster-admin kube access.
     Its `create-lxc` skill creates a guest, installs a runner-client on it, and hands the door
     to the CPA to provision.
+*   **Kube slots** — a custom agent's kube access — ride the same machinery: one
+    namespace holding an SA bound to a full-access-within-the-namespace Role
+    (never cluster scope), optionally quota'd. Compute carves the slot through
+    `kube-api-root` (the carve is the department's audited leg, so a kube
+    cluster on a remote box needs no redesign); the CP verifies the slot,
+    reads its SA token and seals it to a dynamic `kube-api-<slot>` door (live
+    immediately, no console fill); the record is the spec the build re-creates
+    the slot from — and re-seals the token from — on every rebuild, exactly as
+    `doors.tf` does for the static doors. Retiring the door leaves the
+    namespace (its workloads are the grantee's; deletion is Compute's, and
+    cascades).
 
 ## Known gaps
 
@@ -112,7 +123,10 @@ deliberate and the rules below hold regardless of it.
     deauthorize).
 *   The transient uninstall can't destroy running guests (no stop-first).
 *   No per-guest or per-pod resource bounds (no `--cores`, no requests/limits, no quota).
-*   Create-device storage is deferred; "kube slot" provisioning is a prompt claim with no code.
+*   Create-device storage is deferred.
+*   A kube slot's token read is substrate-local (`pct exec` into the k3s
+    guest); a kube cluster on a remote box needs a credential-source seam
+    (the carve already rides Compute's door unchanged).
 *   The doors are intent-and-audit boundaries, not hard containment on a shared host.
 
 ## Future
@@ -121,8 +135,6 @@ deliberate and the rules below hold regardless of it.
     same orchestration, new `providers/<substrate>/`, and the formal interface widened to cover
     create, storage, snapshot, and teardown.
 *   **Runner-client in every guest**, kept fresh by `freehold update`.
-*   **Kube slots** (namespace + ResourceQuota) via the CPA's peer-fulfillment pattern, with
-    postcondition-gated readiness and budget-exceeded-as-escalation.
 *   **Terraform per kind**, the substrate moved off exec-first shell onto a real terraform provider (or a clone-based template), the relay stack
     as Terraform, and one-time infra migrations through the runner.
 *   Monitoring and a resource baseline; sleep/wake for idle agent pods; blue/green with a

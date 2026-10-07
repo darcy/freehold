@@ -1,6 +1,7 @@
 package cpbuild
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -45,7 +46,9 @@ func TestProvisionRunnerValidation(t *testing.T) {
 		{"leading dash", args("-rtx", "ssh", "a@h", "ai"), "kebab-case"},
 		{"missing kind", args("rtx-ssh-root", "", "a@h", "ai"), "kind"},
 		{"api kind without probe", args("rtx-smtp-root", "smtp", "https://smtp.local", "ai"), "require a probe"},
-		{"reserved kind", args("rtx-kube-root", "kubernetes", "https://k", "ai"), "reserved"},
+		{"reserved kind", args("rtx-local-root", "local", "x", "ai"), "reserved"},
+		{"kube door needs the prefix", args("yuvomi-kube-root", "kubernetes", "", "ai"), "kube doors are named"},
+		{"kube door needs a k3s guest", args("kube-api-yuvomi", "kubernetes", "", "ai"), "no k3s guest"},
 		{"reserved dns prefix", args("cloudflare-api-example-com", "unifi", "https://u", "ai"), "reserved"},
 		{"no grantee", args("rtx-ssh-root", "ssh", "a@h"), "grant_to is required"},
 		{"grants to the CPA", args("rtx-ssh-root", "ssh", "a@h", "freehold"), "the CPA holds no exec"},
@@ -629,5 +632,271 @@ func TestDynamicRunnersSelfHostedFromRecords(t *testing.T) {
 	runners := dynamicRunners(store)
 	if len(runners) != 1 || !runners[0].selfHosted || runners[0].host != "192.168.30.50" {
 		t.Fatalf("self-hosted mapping: %+v", runners)
+	}
+}
+
+// TestDynamicKubeSlotRecordMapping pins the record → staging-table mapping
+// for kube slots: the derived token coords + the standard verify arm ride
+// along, so the rebuild's re-stage re-seals exactly like a static door.
+func TestDynamicKubeSlotRecordMapping(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.InsertCapability("kube-api-yuvomi", state.CapabilityRecord{
+		Kind: "kubernetes", Address: "https://192.168.30.5:6443", Port: 8801,
+		Rosters: []string{"deployer"}, Origin: state.OriginAgent,
+		NS: "yuvomi", Quota: "cpu=4", CreatedAt: 6,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runners := dynamicRunners(store)
+	var r *capabilityRunner
+	for i := range runners {
+		if runners[i].name == "kube-api-yuvomi" {
+			r = &runners[i]
+		}
+	}
+	if r == nil {
+		t.Fatal("the kube slot record must map onto the staging table")
+	}
+	if r.tokenSecret != "yuvomi-door-token" || r.tokenNS != "yuvomi" ||
+		r.probe != kubernetesProbe || r.probeBody != kubernetesProbeBody ||
+		r.ns != "yuvomi" || r.quota != "cpu=4" || r.addr != "https://192.168.30.5:6443" {
+		t.Fatalf("kube slot mapping: %+v", r)
+	}
+}
+
+// fakeKubeExec fakes the box-runner exec the kube-slot legs run: the slot
+// apply succeeds, the SA read echoes the SA the command named (kubeSlotReady
+// compares against the derived name), the token read returns the base64
+// jsonpath shape doorToken decodes.
+func fakeKubeExec(token string) func(string, uint64, ...string) (string, error) {
+	return func(cmd string, _ uint64, _ ...string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "apply -f -"):
+			return "slot applied", nil
+		case strings.Contains(cmd, "get sa "):
+			rest := cmd[strings.Index(cmd, "get sa ")+len("get sa "):]
+			return strings.Fields(rest)[0], nil
+		case strings.Contains(cmd, "get secret"):
+			return base64.StdEncoding.EncodeToString([]byte(token)), nil
+		default:
+			return "", fmt.Errorf("unexpected exec: %s", cmd)
+		}
+	}
+}
+
+// openDoorSecret decrypts a door's sealed credential (aad = the name) — the
+// disk is the truth the flow must have sealed.
+func openDoorSecret(t *testing.T, cpState, name string) []byte {
+	t.Helper()
+	st, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := st.GetSecret(name)
+	if !ok || rec.CiphertextHex == "" {
+		t.Fatalf("door %s has no sealed credential", name)
+	}
+	blob, err := hex.DecodeString(rec.CiphertextHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idRaw, err := os.ReadFile(filepath.Join(runnerPackageDir(cpState, name), "identity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		t.Fatal(err)
+	}
+	key, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := crypto.Open(key, []byte(name), blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plain
+}
+
+// TestProvisionRunnerKubeSlotSealsTheToken pins the kube-slot flow: the slot
+// is Compute's audited carve (verified by the flow, never performed by it),
+// the CP reads the SA token from the slot and seals it — the door is live
+// with no console fill — and the standard SelfSubjectReview verify arm ships
+// without the agent sending one. The ns is required at first provision and
+// fixed thereafter.
+func TestProvisionRunnerKubeSlotSealsTheToken(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	reg, _ := testRegistry(t)
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold",
+		CpIP: "10.0.0.9", ProxyIP: "192.168.30.5", K3sVmid: 105,
+	}
+	spec.execHook = fakeKubeExec("fake-slot-token")
+	fn := BuildProvisionRunner(spec, reg)
+
+	// A kube door takes no address: the endpoint is CP-derived — an
+	// agent-stated one would hand the CP-sealed token to a server the agent
+	// controls.
+	if _, err := fn(agent.ProvisionArgs{
+		Name: "kube-api-yuvomi", Kind: "kubernetes", Address: "https://evil.example:6443",
+		GrantTo: []string{"deployer"}, NS: "yuvomi",
+	}); err == nil || !strings.Contains(err.Error(), "take no address") {
+		t.Fatalf("an explicit address must be refused on a kube door, got %v", err)
+	}
+
+	// A first provision must name the ns.
+	if _, err := fn(agent.ProvisionArgs{
+		Name: "kube-api-yuvomi", Kind: "kubernetes", GrantTo: []string{"deployer"},
+	}); err == nil || !strings.Contains(err.Error(), "ns is required") {
+		t.Fatalf("a first kube provision must name the ns, got %v", err)
+	}
+
+	// The flow: verify the carved slot, seal its token, record the slot. The
+	// hermetic stop is the relay sync — everything before it is on disk.
+	_, err := fn(agent.ProvisionArgs{
+		Name: "kube-api-yuvomi", Kind: "kubernetes", GrantTo: []string{"deployer"},
+		NS: "yuvomi", Quota: "cpu=4,memory=8Gi,pods=32",
+	})
+	if err != nil && !strings.Contains(err.Error(), "sync relay channel") {
+		t.Fatalf("the kube flow must reach the relay sync, got %v", err)
+	}
+	disk, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := disk.GetCapability("kube-api-yuvomi")
+	if !ok || rec.Kind != "kubernetes" || rec.NS != "yuvomi" ||
+		rec.Quota != "cpu=4,memory=8Gi,pods=32" || rec.Origin != state.OriginAgent ||
+		rec.Address != "https://192.168.30.5:6443" || rec.Port != 8800 {
+		t.Fatalf("kube slot record: %+v (ok=%v)", rec, ok)
+	}
+	if plain := openDoorSecret(t, cpState, "kube-api-yuvomi"); string(plain) != "fake-slot-token" {
+		t.Fatalf("the door must seal the slot's token, got %q", plain)
+	}
+	if sec, ok := disk.GetSecret("kube-api-yuvomi"); !ok ||
+		sec.Probe != kubernetesProbe || sec.ProbeBody != kubernetesProbeBody {
+		t.Fatalf("the slot's verify arm must ship unprompted: %+v (ok=%v)", sec, ok)
+	}
+
+	// A re-provision naming a DIFFERENT ns is refused — the ns is fixed.
+	if _, err := fn(agent.ProvisionArgs{
+		Name: "kube-api-yuvomi", Kind: "kubernetes", GrantTo: []string{"deployer"}, NS: "other",
+	}); err == nil || !strings.Contains(err.Error(), "is fixed") {
+		t.Fatalf("a changed ns must be refused, got %v", err)
+	}
+	// A re-provision with the ns omitted adopts (the record keeps it).
+	if _, err := fn(agent.ProvisionArgs{
+		Name: "kube-api-yuvomi", Kind: "kubernetes", GrantTo: []string{"deployer"},
+	}); err != nil && !strings.Contains(err.Error(), "sync relay channel") {
+		t.Fatalf("an ns-omitted re-provision must adopt, got %v", err)
+	}
+}
+
+// TestDynamicKubeSlotRestagesFromRecord pins the rebuild contract for a kube
+// slot: the build re-creates the slot from the record (the same role
+// doors.tf plays for the static doors) and re-seals the fresh token — an
+// adopt-only re-stage would strand the door on a dead CA.
+func TestDynamicKubeSlotRestagesFromRecord(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := runnerPackageDir(cpState, "kube-api-yuvomi")
+	if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
+		Name: "kube-api-yuvomi", Kind: "kubernetes", Address: "https://192.168.30.5:6443",
+		Secret: []byte("stale-ca-token"), RunnerDir: pkgDir,
+		Probe: kubernetesProbe, ProbeBody: kubernetesProbeBody,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("kube-api-yuvomi", state.CapabilityRecord{
+		Kind: "kubernetes", Address: "https://192.168.30.5:6443", Port: 8800,
+		Rosters: []string{"deployer"}, Origin: state.OriginAgent,
+		NS: "yuvomi", Quota: "cpu=4", CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold",
+		CpIP: "10.0.0.9", ProxyIP: "192.168.30.5", K3sVmid: 105,
+	}
+	spec.execHook = fakeKubeExec("fresh-ca-token")
+	r := capabilityRunner{name: "kube-api-yuvomi", kind: "kubernetes", port: 8800,
+		rosters: []string{"deployer"}, addr: "https://192.168.30.5:6443", dynamic: true,
+		ns: "yuvomi", quota: "cpu=4",
+		tokenSecret: "yuvomi-door-token", tokenNS: "yuvomi",
+		probe: kubernetesProbe, probeBody: kubernetesProbeBody}
+	// The hermetic stop is the relay sync — the re-create + re-seal ran first.
+	if err := spec.ensureCapabilityRunner(store, filepath.Join(spec.StateDir, "cp"), r, ""); err != nil &&
+		!strings.Contains(err.Error(), "sync relay channel") {
+		t.Fatalf("the re-stage must reach the relay sync, got %v", err)
+	}
+	if plain := openDoorSecret(t, cpState, "kube-api-yuvomi"); string(plain) != "fresh-ca-token" {
+		t.Fatalf("the rebuild must re-seal the fresh token, got %q", plain)
+	}
+}
+
+// TestOperatorKubeDoorAdoptsWithoutSlotStaging pins the provenance split in
+// the re-stage: an OPERATOR-provisioned kubernetes door (a console-filled
+// token, no slot spec on the record) keeps the adopt-only path — the build
+// never runs the slot apply or the token read against it, because its
+// credential has no build-time source to re-seal from.
+func TestOperatorKubeDoorAdoptsWithoutSlotStaging(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := runnerPackageDir(cpState, "ops-kube-door")
+	if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
+		Name: "ops-kube-door", Kind: "kubernetes", Address: "https://192.168.30.5:6443",
+		Secret: []byte("operator-filled-token"), RunnerDir: pkgDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("ops-kube-door", state.CapabilityRecord{
+		Kind: "kubernetes", Address: "https://192.168.30.5:6443", Port: 8800,
+		Rosters: []string{"deployer"}, Origin: state.OriginOperator, CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpaName: "freehold",
+		CpIP: "10.0.0.9", ProxyIP: "192.168.30.5", K3sVmid: 105,
+	}
+	var execs []string
+	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		execs = append(execs, cmd)
+		return "", fmt.Errorf("no exec may run against an adopt-only door")
+	}
+	var r capabilityRunner
+	for _, cand := range dynamicRunners(store) {
+		if cand.name == "ops-kube-door" {
+			r = cand
+		}
+	}
+	if r.name == "" || r.tokenSecret != "" || r.tokenNS != "" {
+		t.Fatalf("an NS-less kube record must map WITHOUT derived token coords: %+v", r)
+	}
+	if err := spec.ensureCapabilityRunner(store, filepath.Join(spec.StateDir, "cp"), r, ""); err != nil &&
+		!strings.Contains(err.Error(), "sync relay channel") {
+		t.Fatalf("the adopt-only re-stage must reach the relay sync, got %v", err)
+	}
+	for _, cmd := range execs {
+		if strings.Contains(cmd, "apply -f -") || strings.Contains(cmd, "get secret") {
+			t.Fatalf("an operator kube door must not be slot-staged: %s", cmd)
+		}
+	}
+	if plain := openDoorSecret(t, cpState, "ops-kube-door"); string(plain) != "operator-filled-token" {
+		t.Fatalf("the operator's filled token must survive the re-stage, got %q", plain)
 	}
 }

@@ -529,7 +529,11 @@ The operator asks in conversation, the department interviews, and the CPA stages
 runner: `provision_runner` mints a NEW capability door (never widens one), grants the
 requester onto it live, and re-applies the pod; `revoke_runner` takes it back, leg by leg,
 `[verified]` or `[UNVERIFIED]`. Credentials never ride chat — an api door provisions empty
-and the operator fills it on the door's console page. Governed by the `agent_grants` switch
+and the operator fills it on the door's console page; a **kube slot** (`kind=kubernetes`,
+named `kube-api-<slot>`) is the sealed-from-the-cluster exception: Compute carves the
+namespace-scoped slot through `kube-api-root` (its audited leg), the CP reads the SA token
+and seals it, and the build re-creates the slot from the record every rebuild. Governed by
+the `agent_grants` switch
 (`confirm` / `auto` / `off`) and guarded so the agent surface can only take back what the
 agent flow gave. The full model — the trust reasoning, the credential handling, the
 resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners and secrets").

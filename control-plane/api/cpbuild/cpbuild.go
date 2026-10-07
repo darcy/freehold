@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"freehold/agents"
@@ -90,42 +91,42 @@ func scriptMigrationTimeout(name string) time.Duration {
 const AgentToolsPort = config.AgentToolsPort
 
 type Spec struct {
-	Name           string
-	StateDir       string
-	RelayURL       string
-	RelayAuthURL   string
-	RelayWS        string
-	RelayPK        string
-	RelayHost      string
-	RelayIP        string
-	CpHost         string
-	CpIP           string
-	CpLxc          uint32
-	ProxyIP        string
-	LitellmIP      string
-	PlanePool      string
-	PlaneKind      string
-	ThinPool       string
-	SizeGB         uint64
-	PoolSizeGB     uint64
-	RootfsGB       uint32
-	MemoryMB       uint32
-	StorageName    string
-	RelayGW        string
-	Bridge         string
-	RelayLxc       uint32
-	RelayCompose   string
-	K3sVmid        uint32
+	Name         string
+	StateDir     string
+	RelayURL     string
+	RelayAuthURL string
+	RelayWS      string
+	RelayPK      string
+	RelayHost    string
+	RelayIP      string
+	CpHost       string
+	CpIP         string
+	CpLxc        uint32
+	ProxyIP      string
+	LitellmIP    string
+	PlanePool    string
+	PlaneKind    string
+	ThinPool     string
+	SizeGB       uint64
+	PoolSizeGB   uint64
+	RootfsGB     uint32
+	MemoryMB     uint32
+	StorageName  string
+	RelayGW      string
+	Bridge       string
+	RelayLxc     uint32
+	RelayCompose string
+	K3sVmid      uint32
 	// The freehold-subnet gateway (docs/NETWORK.md). GatewayCIDR is
 	// the internal subnet ("" = no gateway — guests ride the LAN bridge as
 	// before); GatewayVlan the in-host bridge tag; GatewayLxc the gateway
 	// guest's vmid. K3sIP is the k3s node's address — with a gateway the
 	// INTERNAL one (ProxyIP is then the gateway's LAN address, the edge);
 	// without one it mirrors ProxyIP.
-	GatewayCIDR string
-	GatewayVlan int
-	GatewayLxc  uint32
-	K3sIP       string
+	GatewayCIDR    string
+	GatewayVlan    int
+	GatewayLxc     uint32
+	K3sIP          string
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
@@ -183,6 +184,11 @@ type Spec struct {
 	// admin kubeconfig for migration staging (tests). It receives the k3s vmid
 	// and returns the raw in-guest kubeconfig.
 	kubeconfigFetch func(vmid uint32) (string, error)
+
+	// execHook, when set, replaces the co-located-runner exec for every
+	// execOut call (tests: the kube-slot carve + token read are hermetically
+	// fakeable). Same shape as execOut; nil = the real path.
+	execHook func(cmd string, timeoutS uint64, extraSecrets ...string) (string, error)
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -207,6 +213,9 @@ func (s *Spec) client() (*client.McpClient, error) {
 // so the target name is always first; extraSecrets add requested secrets by
 // name (the runner injects each as an env var + redacts it).
 func (s *Spec) execOut(cmd string, timeoutS uint64, extraSecrets ...string) (string, error) {
+	if s.execHook != nil {
+		return s.execHook(cmd, timeoutS, extraSecrets...)
+	}
 	mc, err := s.client()
 	if err != nil {
 		return "", err
@@ -1378,8 +1387,18 @@ func (s *Spec) worldCert() error {
 // staircases, then ADOPTED + the kube workloads OWNED by the embedded terraform
 // module (worldTerraform → kube-apply.sh); the overlay (agent-tools, DNS, the
 // CPA litellm key, caddy, cert) stays scripted but ordered here.
+// engineMu serializes the engine's registry-writing passes within one
+// process: a world-build and the boot-time reboot revive (reboot_reconcile.go)
+// each read-modify-write agent registry rows through their own
+// agenttools.OpenRegistry handle (per-instance mutex, whole-file saves), so
+// two concurrent passes could silently drop rows. The revive TryLocks (skip +
+// retry while a build holds it); a build blocks until the revive pass ends.
+var engineMu sync.Mutex
+
 func BuildWorldApply(spec *Spec) agent.WorldApply {
 	return func() (string, error) {
+		engineMu.Lock()
+		defer engineMu.Unlock()
 		var report []string
 		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
 		// credential. The CP owns the cred and does DNS-01, so record
@@ -1698,6 +1717,27 @@ func tenantFromName(name string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q", name)
 }
 
+// worldTeardownCfg assembles the CP-driven world teardown's scope: relay + k3s
+// go, the CP (+ its co-located runner) and the GATEWAY stay. The gateway is
+// the preserved CP's own default route, DNS resolver, and box→console path
+// (worldGateway: the CP build only owns the gateway's config, never its
+// lifecycle) — destroying it would orphan the very CP teardown preserves, and
+// nothing CP-side can re-create it. Gateway drops with `uninstall`, not
+// `teardown`.
+func worldTeardownCfg(spec *Spec) *teardown.Cfg {
+	return &teardown.Cfg{
+		Domain:      spec.RelayHost,
+		RunNTarget:  spec.RunnerTarget,
+		Managed:     []string{"relay", "k3s"},
+		Pool:        spec.PlanePool,
+		BackendKind: spec.PlaneKind,
+		Vmid: map[string]*uint32{
+			"relay": vmidPtr(spec.RelayLxc),
+			"k3s":   vmidPtr(spec.K3sVmid),
+		},
+	}
+}
+
 // BuildWorldTeardownApply returns the CP-owned world-teardown driver — the
 // BuildWorldApply mirror. It runs the shared teardown engine through the
 // co-located runner: terraform destroy (the kube layer — the LXCs carry no
@@ -1729,17 +1769,7 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 			return true, out
 		})
 		runner := &cpTeardownRunner{ExecRunner: er, c: mc, target: spec.RunnerTarget}
-		cfg := &teardown.Cfg{
-			Domain:      spec.RelayHost,
-			RunNTarget:  spec.RunnerTarget,
-			Managed:     []string{"relay", "k3s"}, // the CP + its co-located runner stay
-			Pool:        spec.PlanePool,
-			BackendKind: spec.PlaneKind,
-			Vmid: map[string]*uint32{
-				"relay": vmidPtr(spec.RelayLxc),
-				"k3s":   vmidPtr(spec.K3sVmid),
-			},
-		}
+		cfg := worldTeardownCfg(spec)
 		// Compute-only: cfg.Data stays false, so no dataset destroys run (the
 		// plane survives teardown; `uninstall --remove-data` drops it).
 		// The 4th arg is CONFIRM (Run's signature), not data.
@@ -2644,9 +2674,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
 				for _, ref := range joined {
-				// Best-effort: the created agent signs, so it lands on a
-				// channel it owns (a custom channel it created); the CPA is
-				// already the owner/member of #freehold — skip.
+					// Best-effort: the created agent signs, so it lands on a
+					// channel it owns (a custom channel it created); the CPA is
+					// already the owner/member of #freehold — skip.
 					if ref.id == relayFreeholdChannel {
 						continue
 					}
