@@ -1683,6 +1683,35 @@ func tenantFromName(name string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q", name)
 }
 
+// worldTeardownCfg assembles the CP-driven world teardown's scope: the world's
+// guests minus the CP (+ its co-located runner, which survives). The gateway
+// rides too — resolved by name when the world-config predates the gateway
+// record (an old deploy-cp or a cross-home re-render), so its uninstall/
+// teardown never leaks it — destroyed LAST, after the guests it routes for
+// (the role iteration is ordered).
+func worldTeardownCfg(spec *Spec) (*teardown.Cfg, error) {
+	if err := spec.resolveGuestVmids(); err != nil {
+		return nil, err
+	}
+	managed := []string{"relay", "k3s"}
+	vmid := map[string]*uint32{
+		"relay": vmidPtr(spec.RelayLxc),
+		"k3s":   vmidPtr(spec.K3sVmid),
+	}
+	if spec.GatewayLxc != 0 {
+		managed = append(managed, "gateway")
+		vmid["gateway"] = vmidPtr(spec.GatewayLxc)
+	}
+	return &teardown.Cfg{
+		Domain:      spec.RelayHost,
+		RunNTarget:  spec.RunnerTarget,
+		Managed:     managed,
+		Pool:        spec.PlanePool,
+		BackendKind: spec.PlaneKind,
+		Vmid:        vmid,
+	}, nil
+}
+
 // BuildWorldTeardownApply returns the CP-owned world-teardown driver — the
 // BuildWorldApply mirror. It runs the shared teardown engine through the
 // co-located runner: terraform destroy (the kube layer — the LXCs carry no
@@ -1714,16 +1743,9 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 			return true, out
 		})
 		runner := &cpTeardownRunner{ExecRunner: er, c: mc, target: spec.RunnerTarget}
-		cfg := &teardown.Cfg{
-			Domain:      spec.RelayHost,
-			RunNTarget:  spec.RunnerTarget,
-			Managed:     []string{"relay", "k3s"}, // the CP + its co-located runner stay
-			Pool:        spec.PlanePool,
-			BackendKind: spec.PlaneKind,
-			Vmid: map[string]*uint32{
-				"relay": vmidPtr(spec.RelayLxc),
-				"k3s":   vmidPtr(spec.K3sVmid),
-			},
+		cfg, err := worldTeardownCfg(spec)
+		if err != nil {
+			return "", err
 		}
 		// Compute-only: cfg.Data stays false, so no dataset destroys run (the
 		// plane survives teardown; `uninstall --remove-data` drops it).

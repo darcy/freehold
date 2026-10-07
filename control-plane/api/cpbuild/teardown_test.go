@@ -1,6 +1,8 @@
 package cpbuild
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -50,5 +52,54 @@ func TestTenantFromName(t *testing.T) {
 	}
 	if _, err := tenantFromName("nope"); err == nil {
 		t.Fatal("tenantFromName(nope) must error")
+	}
+}
+
+// TestWorldTeardownCfgManagesGateway pins the leak fix: the CP-driven teardown
+// manages the gateway too — resolved by name when the spec carries no recorded
+// gateway vmid (an old world-config, or a cross-home re-render) — and destroys
+// it LAST, after the guests it routes for. A host without the guest (flat-LAN
+// world) keeps the relay/k3s scope.
+func TestWorldTeardownCfgManagesGateway(t *testing.T) {
+	newSpec := func(list string) *Spec {
+		s := &Spec{Name: "librem", RelayHost: "relay.librem.example", RelayLxc: 100, K3sVmid: 102}
+		s.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+			if cmd != "pct list" {
+				return "", fmt.Errorf("unexpected cmd %q", cmd)
+			}
+			return list, nil
+		}
+		return s
+	}
+	withGateway := "VMID Status Name\n" +
+		"100  running librem-relay\n" +
+		"101  running librem-cp\n" +
+		"102  running librem-k3s\n" +
+		"109  running librem-gateway\n"
+	flatLan := "VMID Status Name\n" +
+		"100  running librem-relay\n" +
+		"101  running librem-cp\n" +
+		"102  running librem-k3s\n"
+
+	cfg, err := worldTeardownCfg(newSpec(withGateway))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Managed, []string{"relay", "k3s", "gateway"}) {
+		t.Fatalf("managed = %v, want [relay k3s gateway] (the gateway destroyed last)", cfg.Managed)
+	}
+	if gw := cfg.Vmid["gateway"]; gw == nil || *gw != 109 {
+		t.Fatalf("gateway vmid = %v, want 109 (adopted by name from a record-blind spec)", gw)
+	}
+
+	cfg, err = worldTeardownCfg(newSpec(flatLan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Managed, []string{"relay", "k3s"}) {
+		t.Fatalf("flat-LAN managed = %v, want [relay k3s]", cfg.Managed)
+	}
+	if gw, ok := cfg.Vmid["gateway"]; ok {
+		t.Fatalf("flat-LAN vmid map carries gateway = %v, want absent", gw)
 	}
 }

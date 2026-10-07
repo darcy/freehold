@@ -1,8 +1,10 @@
 package uninstall
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"freehold/contract/config"
@@ -91,5 +93,41 @@ func TestWipeLocalProfile(t *testing.T) {
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
 		t.Fatal("profile state dir not wiped")
+	}
+}
+
+// TestGatewayVmid pins the leak fix: a profile with no recorded [lxc.gateway]
+// still destroys the gateway by adopting the bootstrap-named <name>-gateway
+// from pct list; a recorded vmid short-circuits the probe; a host without the
+// guest (flat-LAN world) or a failed probe skips the gateway.
+func TestGatewayVmid(t *testing.T) {
+	u32 := func(v uint32) *uint32 { return &v }
+	list := func(rows ...string) string {
+		return "VMID Status Name\n" + strings.Join(rows, "\n") + "\n"
+	}
+	world := list("100 running librem-relay", "109 running librem-gateway")
+	cfg := func() *config.Config {
+		return &config.Config{Name: "librem", RelayURL: "https://relay.librem.example"}
+	}
+	probe := func(out string, err error) func() (string, error) {
+		return func() (string, error) { return out, err }
+	}
+
+	if gw := gatewayVmid(cfg(), probe(world, nil)); gw == nil || *gw != 109 {
+		t.Fatalf("unrecorded gateway = %v, want 109 (adopted by name)", gw)
+	}
+	rec := cfg()
+	rec.Lxc.Gateway.Vmid = u32(114)
+	called := false
+	if gw := gatewayVmid(rec, func() (string, error) { called = true; return "", nil }); gw == nil || *gw != 114 {
+		t.Fatalf("recorded gateway = %v, want 114", gw)
+	} else if called {
+		t.Fatal("a recorded vmid must short-circuit the probe")
+	}
+	if gw := gatewayVmid(cfg(), probe(list("100 running librem-relay"), nil)); gw != nil {
+		t.Fatalf("flat-LAN world = %v, want nil (no gateway guest)", gw)
+	}
+	if gw := gatewayVmid(cfg(), probe("", fmt.Errorf("door down"))); gw != nil {
+		t.Fatalf("failed probe = %v, want nil (skip, never block the uninstall)", gw)
 	}
 }
