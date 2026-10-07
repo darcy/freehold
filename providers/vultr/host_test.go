@@ -97,9 +97,9 @@ func TestVultrPrepareMintRunsPVEInstall(t *testing.T) {
 		case r.URL.Path == "/v2/plans":
 			w.Write([]byte(`{"plans":[{"id":"vc2-4c-8gb"}]}`))
 		case r.URL.Path == "/v2/os":
-			// The catalog the image derives from: Ubuntu lurks behind
-			// drifting ids — only the DEBIAN family entry may win.
-			w.Write([]byte(`{"os":[{"id":1743,"name":"Ubuntu 22.04 x64","arch":"x86_64","family":"ubuntu"},{"id":2440,"name":"Debian 13 x64","arch":"x86_64","family":"debian"},{"id":2151,"name":"Debian 11 x64","arch":"x86_64","family":"debian"}]}`))
+			// The catalog the image derives from — the REAL shape (arch
+			// "x64"; the drift trap: Ubuntu behind a memorable id).
+			w.Write([]byte(`{"os":[{"id":1743,"name":"Ubuntu 22.04 x64","arch":"x64","family":"ubuntu"},{"id":2625,"name":"Debian 13 x64 (trixie)","arch":"x64","family":"debian"},{"id":2136,"name":"Debian 12 x64 (bookworm)","arch":"x64","family":"debian"}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
 			creates++
 			var body map[string]any
@@ -112,7 +112,7 @@ func TestVultrPrepareMintRunsPVEInstall(t *testing.T) {
 			if body["label"] != "freehold-demo" || body["hostname"] != "freehold-demo" {
 				t.Errorf("create body label shape: %v", body)
 			}
-			if body["os_id"] != float64(2440) {
+			if body["os_id"] != float64(2625) {
 				t.Errorf("create body os_id must derive from the catalog: %v", body["os_id"])
 			}
 			w.Write([]byte(`{"instance":{"id":"i-9"}}`))

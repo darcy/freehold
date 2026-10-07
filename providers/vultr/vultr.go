@@ -221,7 +221,9 @@ func (c *Client) DebianOsID(ctx context.Context) (uint32, error) {
 		if !strings.EqualFold(o.Family, "debian") && !strings.Contains(strings.ToLower(o.Name), "debian") {
 			continue
 		}
-		if o.Arch != "" && o.Arch != "x86_64" {
+		// The catalog writes "x64" (live: Debian 13 x64 (trixie)); accept
+		// the x86_64 spelling too — anything else (arm) cannot serve.
+		if o.Arch != "" && o.Arch != "x64" && o.Arch != "x86_64" {
 			continue
 		}
 		ver := 0
