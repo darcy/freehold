@@ -144,6 +144,15 @@ assert_durable() { # ns claim
   esac
 }
 
+# provisioner_ok: the carve-out is only real if the provisioner's ACTIVE
+# config pins it — k3s's Addon controller re-applies the bundled
+# local-storage.yaml (default paths) and stomps a bare configmap apply back.
+# A swap under a default-root provisioner just re-binds the rootfs; refuse
+# to churn until the carve-out is actually in force (the retry re-runs).
+provisioner_ok() {
+  kubectl get cm local-path-config -n kube-system -o jsonpath='{.data.config\.json}' 2>/dev/null | grep -q "$DURABLE"
+}
+
 # ---- litellm-pg-data: pg_dump -> swap -> restore ---------------------------
 
 NS=litellm; CLAIM=litellm-pg-data; SEL=app=postgres; DEPLOY=postgres; SIZE=10Gi
@@ -180,19 +189,27 @@ if claim_exists "$NS" "$CLAIM"; then
   case "$PPATH" in
     "$DURABLE"/*) echo "litellm-pg-data: already on $PPATH";;
     *)
-      # capture needs a pod; a prior run's wait_gone timeout may have left none
-      if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-        echo "litellm-pg-data: no pod to capture from — bringing one up"
-        ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
-      fi
-      POD=$(first_pod "$NS" "$SEL")
       # capture FIRST — the dump on the CP's durable plane is the safety net.
-      # --clean: a re-restore over a PARTIAL prior restore drops and rebuilds
-      # instead of erroring, so the retry converges instead of trusting half a
-      # database.
-      kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG"
-      [ -s "$CAP_PG" ] && gzip -t "$CAP_PG" || { echo "FATAL: pg capture failed ($CAP_PG)"; exit 1; }
-      echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
+      # A SURVIVING capture is the pre-swap data and outranks the live db
+      # (a prior run already swapped: what's running now is the emptied
+      # volume — re-capturing it would overwrite the safety net with
+      # nothing). Only a first-ever run captures. --clean: a re-restore
+      # over a PARTIAL prior restore drops and rebuilds instead of erroring,
+      # so the retry converges instead of trusting half a database.
+      if [ -s "$CAP_PG" ]; then
+        echo "litellm-pg-data: capture survives ($CAP_PG) — the pre-swap data; not re-capturing"
+      else
+        # capture needs a pod; a prior run's wait_gone timeout may have left none
+        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+          echo "litellm-pg-data: no pod to capture from — bringing one up"
+          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+        fi
+        POD=$(first_pod "$NS" "$SEL")
+        kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG"
+        [ -s "$CAP_PG" ] && gzip -t "$CAP_PG" || { echo "FATAL: pg capture failed ($CAP_PG)"; exit 1; }
+        echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
+      fi
+      provisioner_ok || { echo "FATAL: the local-path provisioner's active config does not pin $DURABLE — a swap would re-bind the rootfs; fix the carve-out first (k3s-bringup re-runs on the next build)"; exit 1; }
       kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
       wait_gone "$NS" "$SEL"
       swap_claim "$NS" "$CLAIM"
@@ -256,14 +273,23 @@ if claim_exists "$NS" "$CLAIM"; then
   case "$PPATH" in
     "$DURABLE"/*) echo "caddy-data: already on $PPATH";;
     *)
-      if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-        echo "caddy-data: no pod to capture from — bringing one up"
-        ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+      # A SURVIVING capture is the pre-swap data and outranks the live
+      # /data (a prior run already swapped; re-capturing would overwrite
+      # the safety net with the emptied volume). Only a first-ever run
+      # captures.
+      if [ -s "$CAP_CADDY" ]; then
+        echo "caddy-data: capture survives ($CAP_CADDY) — the pre-swap data; not re-capturing"
+      else
+        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+          echo "caddy-data: no pod to capture from — bringing one up"
+          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+        fi
+        POD=$(first_pod "$NS" "$SEL")
+        kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY"
+        [ -s "$CAP_CADDY" ] && gzip -t "$CAP_CADDY" || { echo "FATAL: caddy capture failed ($CAP_CADDY)"; exit 1; }
+        echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY"
       fi
-      POD=$(first_pod "$NS" "$SEL")
-      kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY"
-      [ -s "$CAP_CADDY" ] && gzip -t "$CAP_CADDY" || { echo "FATAL: caddy capture failed ($CAP_CADDY)"; exit 1; }
-      echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY"
+      provisioner_ok || { echo "FATAL: the local-path provisioner's active config does not pin $DURABLE — a swap would re-bind the rootfs; fix the carve-out first (k3s-bringup re-runs on the next build)"; exit 1; }
       kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
       wait_gone "$NS" "$SEL"
       swap_claim "$NS" "$CLAIM"
