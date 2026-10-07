@@ -533,16 +533,29 @@ func (e *Engine) RunBootstrap() error {
 	// derive bumps to the next clean /24; --gateway-cidr is honored
 	// untouched; --gateway-vlan skips only the PROBE (a tagged L2 is its
 	// own domain — nothing to collide with), the derive itself still runs.
-	if e.F.Mint && e.F.GatewayCIDR == "" {
-		if e.F.GatewayVlan == 0 {
-			cidr, err := e.deriveGatewayCIDR()
-			if err != nil {
-				return err
+	if e.F.GatewayCIDR == "" {
+		switch {
+		case e.F.Mint:
+			if e.F.GatewayVlan == 0 {
+				cidr, err := e.deriveGatewayCIDR()
+				if err != nil {
+					return err
+				}
+				e.F.GatewayCIDR = cidr
+			} else {
+				e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
 			}
-			e.F.GatewayCIDR = cidr
-		} else {
+		case e.F.HostsGateway:
+			// A HALF-BUILT re-adopt (the config predates the gateway
+			// stage) has no recorded gateway — and a created cloud host's
+			// bridge is private: no LAN to collide with, the made-up /24
+			// is always safe. The stage below MUST run (the host's vmbr0
+			// + ruleset are the cp guest's birth prerequisites).
 			e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
 		}
+		// A full re-adopt rides the recorded gateway (seeded) — a
+		// pre-gateway flat-LAN world stays flat (no recorded gateway AND
+		// live LAN guests: forcing one mid-life would collide).
 	}
 
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
