@@ -233,7 +233,7 @@ func (c *Client) DebianOsID(ctx context.Context) (uint32, error) {
 		}
 	}
 	if bestID == 0 {
-		return 0, fmt.Errorf("the Vultr OS catalog lists no Debian x64 image — pick one by id with --host-answer os_id=<id>")
+		return 0, fmt.Errorf("the Vultr OS catalog lists no Debian x64 image — the PVE apt-route needs Debian; check the catalog with the account's os list")
 	}
 	return bestID, nil
 }

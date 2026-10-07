@@ -97,16 +97,12 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 	}
 
 	// The image: derived from the API's own OS catalog (the newest Debian
-	// x64). An os_id NEED was a trap — the ids drift (1743 is Ubuntu
-	// 22.04 on today's catalog), and the operator's answer can't be
-	// righter than the catalog; an explicit --host-answer os_id=<id>
-	// still wins for an exotic case.
-	osID := parseOsID(s.Answers["os_id"])
-	if osID == 0 {
-		osID, err = c.DebianOsID(ctx)
-		if err != nil {
-			return nil, err
-		}
+	// x64), ALWAYS — no answer path. The ids drift (1743 is Ubuntu 22.04
+	// on today's catalog) and a stale recorded answer would re-mint an
+	// Ubuntu host forever; the catalog is the only authority.
+	osID, err := c.DebianOsID(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// The ask is free-text — validate against the API's own catalog before
@@ -210,21 +206,6 @@ func (p HostProvider) Destroy(ctx context.Context, s *provisioning.HostSession, 
 		return err
 	}
 	return c.Destroy(ctx, id)
-}
-
-// parseOsID accepts a bare number; "" or garbage = the default.
-func parseOsID(s string) uint32 {
-	var n uint32
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return DefaultOsID
-		}
-		n = n*10 + uint32(c-'0')
-	}
-	if n == 0 {
-		return DefaultOsID
-	}
-	return n
 }
 
 // checkIn validates a free-text create field against the API's own catalog
