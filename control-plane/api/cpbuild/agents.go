@@ -319,21 +319,37 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 		if a.Name == "" || departments[a.Name] {
 			continue
 		}
-		channels, private := reconciledChannels(a)
-		if _, err := tools.CreateAgent(a.Name, a.Purpose, channels, private, a.Model); err != nil {
-			return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
+		if err := s.reassertAgentRow(reg, tools, a); err != nil {
+			return err
 		}
-		_ = reg.SetChannels(a.Name, channels, private)
-		// Re-assert the model choice: RegisterAgent resets the row, so the
-		// persisted alias has to ride back on (the pod was just re-applied
-		// with it).
-		_ = reg.SetModel(a.Name, a.Model)
-		// Re-assert grants for agents holding capability runners (the
-		// agent-provisioned dynamic doors re-assert alongside the departments';
-		// a no-op when the agent holds none).
-		if err := s.grantDepartmentRunner(a.Name, a.Pubkey); err != nil {
-			return fmt.Errorf("re-assert runner grants %s: %w", a.Name, err)
-		}
+	}
+	return nil
+}
+
+// reassertAgentRow re-applies one registry row's pod through the create flow
+// (idempotent: the identity is first-run-wins, channel joins are guarded, the
+// manifest is delete-then-apply) and re-asserts its channels, model choice and
+// capability-runner grants. The reconcile loop's per-row body, shared with the
+// boot-time reboot revive (reboot_reconcile.go).
+func (s *Spec) reassertAgentRow(reg *agenttools.Registry, tools *agent.Tools, a console.AgentInfo) error {
+	channels, private := reconciledChannels(a)
+	if _, err := tools.CreateAgent(a.Name, a.Purpose, channels, private, a.Model); err != nil {
+		return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
+	}
+	_ = reg.SetChannels(a.Name, channels, private)
+	// RegisterAgent (inside CreateAgent) RESET the row — re-assert purpose
+	// alongside channels/model, or the next re-apply ships an empty purpose
+	// and the system prompt silently loses the purpose paragraph.
+	_ = reg.SetPurpose(a.Name, a.Purpose)
+	// Re-assert the model choice: RegisterAgent resets the row, so the
+	// persisted alias has to ride back on (the pod was just re-applied
+	// with it).
+	_ = reg.SetModel(a.Name, a.Model)
+	// Re-assert grants for agents holding capability runners (the
+	// agent-provisioned dynamic doors re-assert alongside the departments';
+	// a no-op when the agent holds none).
+	if err := s.grantDepartmentRunner(a.Name, a.Pubkey); err != nil {
+		return fmt.Errorf("re-assert runner grants %s: %w", a.Name, err)
 	}
 	return nil
 }

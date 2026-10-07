@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"freehold/agents"
@@ -1363,8 +1364,18 @@ func (s *Spec) worldCert() error {
 // staircases, then ADOPTED + the kube workloads OWNED by the embedded terraform
 // module (worldTerraform → kube-apply.sh); the overlay (agent-tools, DNS, the
 // CPA litellm key, caddy, cert) stays scripted but ordered here.
+// engineMu serializes the engine's registry-writing passes within one
+// process: a world-build and the boot-time reboot revive (reboot_reconcile.go)
+// each read-modify-write agent registry rows through their own
+// agenttools.OpenRegistry handle (per-instance mutex, whole-file saves), so
+// two concurrent passes could silently drop rows. The revive TryLocks (skip +
+// retry while a build holds it); a build blocks until the revive pass ends.
+var engineMu sync.Mutex
+
 func BuildWorldApply(spec *Spec) agent.WorldApply {
 	return func() (string, error) {
+		engineMu.Lock()
+		defer engineMu.Unlock()
 		var report []string
 		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
 		// credential. The CP owns the cred and does DNS-01, so record
