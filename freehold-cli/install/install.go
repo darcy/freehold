@@ -816,9 +816,13 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("display-name", "", "Operator display name in Buzz (default \"Operator\"; published as the kind:0 profile that skips the desktop app's first-run onboarding)")
 	cmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	cmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
-	cmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for static guest IPs")
-	cmd.Flags().String("storage", "local-lvm", "PVE LXC storage")
-	cmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge")
+	// The substrate defaults (storage/bridge/relay-gw) belong to the
+	// PROVIDER (Defaults()) — the flags stay empty so an unset flag lets
+	// the provider govern (a flag default here would defeat it: vultr has
+	// no local-lvm).
+	cmd.Flags().String("relay-gw", "", "Gateway for static guest IPs (default: the provider's)")
+	cmd.Flags().String("storage", "", "LXC rootfs storage (default: the provider's)")
+	cmd.Flags().String("bridge", "", "LXC network bridge (default: the provider's)")
 	cmd.Flags().String("thin-pool", "", "Plane placement: existing pool to reuse, or a new name to carve")
 	cmd.Flags().String("plane-pool", "", "Select the storage backend to use by name (VG or zpool)")
 	cmd.Flags().Bool("confirm-shared-pool", false, "Consent to share a thin pool that already holds live volumes")
