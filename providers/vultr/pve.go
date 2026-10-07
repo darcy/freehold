@@ -33,6 +33,8 @@ case "$CODENAME" in
 esac
 curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-$CODENAME.gpg -o /etc/apt/trusted.gpg.d/proxmox-release-$CODENAME.gpg
 echo "deb http://download.proxmox.com/debian/pve $CODENAME pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
+# The index predates the PVE repo — refresh or proxmox-ve is unlocatable.
+apt-get update -qq
 apt-get -o Dpkg::Options::=--force-confold full-upgrade -y -qq
 apt-get -o Dpkg::Options::=--force-confold install -y -qq proxmox-ve postfix open-iscsi || apt-get -o Dpkg::Options::=--force-confold install -y -qq proxmox-ve postfix
 # pve-firewall ships 14 drop rules that PERSIST past a stop and silently
