@@ -335,6 +335,13 @@ func cmdServe(args []string) error {
 	// transport. serve READS it; it never writes it (build/teardown don't
 	// promote either). A missing file leaves a zero pin.
 	pin, _ := version.Read(*stateDir + "/" + version.FileName)
+	// The boot-time reboot revive: a hard stop/start of the k3s guest leaves
+	// every agent pod terminal (restartPolicy: Never, I5) — the CP re-asserts
+	// the reboot-killed ones as soon as the node answers, without waiting for
+	// a build. No-op on a CP-only restart (nothing dead).
+	if builder != nil {
+		go builder.ReviveRebootedAgents()
+	}
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,
 		Auth: auth, PublicOrigin: pubOrigin, RelayHost: *relayHost,

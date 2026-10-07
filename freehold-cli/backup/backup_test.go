@@ -1,7 +1,9 @@
 package backup
 
 import (
+	"encoding/base64"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +12,8 @@ import (
 	"freehold/freehold-cli/internal/common"
 	"freehold/providers/proxmox/drive"
 )
+
+func intPtr(i int) *int { return &i }
 
 func TestResticCmdPlumbsPasswordAndEnv(t *testing.T) {
 	got := ResticCmd("b2:fh-bucket:/repo", "init")
@@ -273,5 +277,95 @@ func TestSettleRepoArbiter(t *testing.T) {
 	d, err = settle(false, true, "boxpw", "hostpw", "b2:bucket", func(string) (bool, bool, error) { return true, true, nil })
 	if err != nil || d.password != "boxpw" || !d.push {
 		t.Fatalf("stale-host push: %v / %+v", err, d)
+	}
+}
+
+// TestRenderBackupScriptEmbedsTheVerbsOwnLine: the timer is a RENDER of
+// BackupArgs, never a fork — the script's restic line must be exactly what
+// `freehold backup run` executes (ResticCmd of the same args), guarded by
+// named-reason checks for the two preconditions (restic present, password
+// file present). No set -e: the silent env-source (a repo that needs no
+// env file) must not abort the script before restic runs.
+func TestRenderBackupScriptEmbedsTheVerbsOwnLine(t *testing.T) {
+	script := renderBackupScript("b2:bucket:p", "backup /freehold/cp /freehold/k8s --tag freehold")
+	want := ResticCmd("b2:bucket:p", "backup /freehold/cp /freehold/k8s --tag freehold")
+	if !strings.Contains(script, "\n"+want+"\n") {
+		t.Fatalf("script must embed the verb's own restic line verbatim:\n%s", script)
+	}
+	if !strings.Contains(script, hostPasswordFile) || !strings.Contains(script, "freehold backup init") {
+		t.Fatal("script must guard the password file with the named init reason")
+	}
+	if strings.Contains(script, "set -e") {
+		t.Fatal("no set -e: the silent env-source would abort restic-less runs")
+	}
+	if !strings.HasPrefix(script, "#!/bin/sh\n") {
+		t.Fatal("shebang required — the unit ExecStarts the file directly")
+	}
+}
+
+// TestRenderVerifyScriptRoundTrip: the weekly check fails loudly when the
+// repo doesn't answer AND when it answers empty (a repo that "works" but
+// holds nothing is a failed leg, not a passing one).
+func TestRenderVerifyScriptRoundTrip(t *testing.T) {
+	script := renderVerifyScript("b2:bucket:p")
+	// The full ResticCmd shape — b2:/s3: repos need the env file sourced
+	// (the backend credentials), not just the password file.
+	want := ResticCmd("b2:bucket:p", "snapshots --json")
+	if !strings.Contains(script, want) {
+		t.Fatalf("the round-trip must source the env + probe snapshots:\n%s", script)
+	}
+	for _, want := range []string{`grep -q '"time"'`, "holds no snapshots", "did not answer"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("verify script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+// TestRenderTimerCalendar: Persistent=true (a missed nightly run catches up
+// after downtime — the whole point of the off-site leg) and the operator's
+// calendar lands verbatim.
+func TestRenderTimerCalendar(t *testing.T) {
+	timer := renderTimer("nightly", "*-*-* 04:00:00")
+	if !strings.Contains(timer, "OnCalendar=*-*-* 04:00:00") || !strings.Contains(timer, "Persistent=true") {
+		t.Fatalf("timer shape:\n%s", timer)
+	}
+	if !atRe.MatchString("04:00") || atRe.MatchString("tomorrow") {
+		t.Fatal("--at validation broken")
+	}
+}
+
+// TestPushFileOverExecShape: the push is one base64-over-exec line (no
+// SSHUpload key juggling), mkdir -p'd, mode-chmodded.
+func TestPushFileOverExecShape(t *testing.T) {
+	var got string
+	pushFileOverExec(func(cmd string, _ uint64) (*client.ExecOutcome, error) {
+		got = cmd
+		return &client.ExecOutcome{ExitCode: intPtr(0)}, nil
+	}, "content", "/srv/nobackup/x.sh", "700")
+	if !strings.Contains(got, "mkdir -p /srv/nobackup") || !strings.Contains(got, "| base64 -d > /srv/nobackup/x.sh") || !strings.Contains(got, "chmod 700 /srv/nobackup/x.sh") {
+		t.Fatalf("push line: %s", got)
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.SplitN(strings.SplitN(got, "echo ", 2)[1], " | base64 -d", 2)[0])
+	if err != nil || string(dec) != "content" {
+		t.Fatalf("payload not round-trippable: %q %v", dec, err)
+	}
+}
+
+// TestRecordRepoCreatesTheStateHome: a first state write on a bare CP guest
+// (no ~/.freehold yet) must mkdir the home, not die with ENOENT — live
+// finding on casaq's verb surface.
+func TestRecordRepoCreatesTheStateHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "state")
+	t.Setenv("FREEHOLD_HOME", home)
+	if err := RecordRepo("b2:bucket:p"); err != nil {
+		t.Fatalf("record failed: %v", err)
+	}
+	b, err := os.ReadFile(home + "/restic-repo")
+	if err != nil || strings.TrimSpace(string(b)) != "b2:bucket:p" {
+		t.Fatalf("record missing/wrong: %q %v", b, err)
+	}
+	info, _ := os.Stat(home)
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("home not 0700: %v", info.Mode().Perm())
 	}
 }

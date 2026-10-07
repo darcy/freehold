@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
 	"freehold/control-plane/api/agent"
@@ -37,11 +38,14 @@ import (
 var runnerNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // reservedProvisionKinds are NOT agent-provisionable: kind=local is the
-// self-hosted enroll flow (hosted=self only), and kubernetes doors are
-// build-time static (their token is sourced fresh per build — an agent
-// shadowing one would go stale at the next rebuild).
+// self-hosted enroll flow (hosted=self only). kind=kubernetes WAS reserved
+// when its token had no build-time source to re-seal from — kube slots lifted
+// that: a dynamic kube door's record carries the slot (ns + quota), the build
+// re-creates the slot and re-seals the token every rebuild exactly as
+// doors.tf does for the static ones (kube_slot.go). The slot's CARVE stays
+// outside this flow — it is Compute's audited kube-api-root leg.
 var reservedProvisionKinds = map[string]bool{
-	"local": true, "kubernetes": true,
+	"local": true,
 }
 
 // BuildProvisionRunner binds the provision_runner flow to a Spec + the
@@ -82,7 +86,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			}
 		} else {
 			if reservedProvisionKinds[kind] {
-				return "", fmt.Errorf("provision_runner %s: kind %q is reserved (local = the hosted=self enroll flow; kubernetes doors are build-time static)", name, kind)
+				return "", fmt.Errorf("provision_runner %s: kind %q is reserved (local = the hosted=self enroll flow)", name, kind)
 			}
 			// host is a self-hosted-only field: accepted on a CP-guest door it
 			// would silently repoint the granted pods' exec surface elsewhere
@@ -90,6 +94,45 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			if host != "" {
 				return "", fmt.Errorf("provision_runner %s: host is a hosted=self field — a CP-guest door always dials the CP itself", name)
 			}
+		}
+		// Kube slots: kind=kubernetes provisions a namespace-scoped door —
+		// full access within one namespace, never cluster scope. The slot's
+		// CARVE is Compute's audited leg (kube-api-root, in conversation);
+		// this flow verifies the slot, reads its SA token and seals it, so
+		// the credential-blind property holds: the CP sources the token from
+		// the cluster, never from any agent's context, and the door is live
+		// with no console fill.
+		ns, quota := strings.TrimSpace(args.NS), strings.TrimSpace(args.Quota)
+		kube := kind == "kubernetes"
+		if kube {
+			if !strings.HasPrefix(name, kubeDoorNamePrefix) {
+				return "", fmt.Errorf("provision_runner %s: kube doors are named %s<slot> (e.g. kube-api-homelab) — what it reaches, how, at what level", name, kubeDoorNamePrefix)
+			}
+			if spec.K3sVmid == 0 {
+				return "", fmt.Errorf("provision_runner %s: no k3s guest is recorded — the world has no kube yet (a build brings it up)", name)
+			}
+			if ns != "" {
+				if err := validateKubeNS(ns); err != nil {
+					return "", fmt.Errorf("provision_runner %s: %w", name, err)
+				}
+			}
+			if quota != "" {
+				if _, err := parseKubeQuota(quota); err != nil {
+					return "", fmt.Errorf("provision_runner %s: %w", name, err)
+				}
+			}
+			// The standard verify arm — a SelfSubjectReview proves BOTH
+			// reachability and that the sealed token survived a CA rotation.
+			// Never agent-supplied for kube: the CP knows the API.
+			args.Probe = kubernetesProbe
+			args.ProbeBody = kubernetesProbeBody
+			// The endpoint is CP-derived, never agent-stated: the CP seals the
+			// token it read from the cluster, so an agent-chosen address would
+			// be a door that hands that token to a server the agent controls.
+			if strings.TrimSpace(args.Address) != "" {
+				return "", fmt.Errorf("provision_runner %s: kube doors take no address — the CP derives the k3s API route (https://<proxy>:6443)", name)
+			}
+			args.Address = "https://" + config.StripCIDR(spec.ProxyIP) + ":6443"
 		}
 		if strings.TrimSpace(args.Address) == "" {
 			return "", fmt.Errorf("provision_runner %s: address is required (user@host[:port] for ssh, the base URL for %s)", name, kind)
@@ -156,6 +199,34 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		}
 		if hasPrevRecord && !prevRecord.AgentProvisioned() {
 			return "", fmt.Errorf("provision_runner %s: this door was provisioned by the operator — grants onto it stay operator-scoped (the console)", name)
+		}
+		if hasPrevRecord && prevRecord.Kind != "" && prevRecord.Kind != kind {
+			return "", fmt.Errorf("provision_runner %s: kind %q is fixed — the door was provisioned as %q (a different kind is a NEW capability, new name)", name, kind, prevRecord.Kind)
+		}
+		if kube {
+			// The ns is FIXED at first provision; a re-provision may omit it
+			// (the record keeps it) but never change it — a different ns is a
+			// NEW slot and a new door. A restated quota updates the record (the
+			// spec the build re-creates the slot from after a k3s rebuild); the
+			// in-cluster apply of a resized quota is Compute's leg, same as the
+			// carve.
+			if ns == "" {
+				if !hasPrevRecord {
+					return "", fmt.Errorf("provision_runner %s: ns is required — the slot Compute carves (kube-api-root) that this door seals", name)
+				}
+				ns = prevRecord.NS
+			}
+			if hasPrevRecord && prevRecord.NS != "" && ns != prevRecord.NS {
+				return "", fmt.Errorf("provision_runner %s: ns %s is fixed (the slot was carved as %s) — a different ns is a NEW slot (new door, new name)", name, ns, prevRecord.NS)
+			}
+			if quota == "" && hasPrevRecord {
+				quota = prevRecord.Quota
+			}
+			for other, rec := range store.Capabilities() {
+				if other != name && rec.Kind == "kubernetes" && rec.NS == ns {
+					return "", fmt.Errorf("provision_runner %s: ns %s is already %s's slot — one slot per namespace; share the door (grant_to) instead of re-slicing it", name, ns, other)
+				}
+			}
 		}
 		if !selfHosted && kind != "ssh" && !runnerExists && strings.TrimSpace(args.Probe) == "" {
 			// The verify arm is data, not code: the requesting agent knows the
@@ -227,7 +298,8 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			// The sealed secret per kind: ssh mints its OWN keypair (the
 			// private half seals; the public line returns for the operator's
 			// one-time install); api doors seal the empty-shell "pending"
-			// placeholder for the console fill.
+			// placeholder for the console fill; kube slots seal the SA token
+			// read from the carved slot (Compute's audited leg put it there).
 			secret := []byte("pending")
 			if kind == "ssh" {
 				priv, _, err := crypto.GenerateSSHKeypair(name)
@@ -235,6 +307,16 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 					return "", fmt.Errorf("generate %s ssh keypair: %w", name, err)
 				}
 				secret = priv
+			}
+			if kube {
+				if err := spec.kubeSlotReady(ns); err != nil {
+					return "", kubeCarveMissing(ns, quota, err)
+				}
+				token, err := spec.kubeSlotToken(ns)
+				if err != nil {
+					return "", err
+				}
+				secret = token
 			}
 			if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
 				Name: name, Kind: kind, Address: strings.TrimSpace(args.Address),
@@ -300,6 +382,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			Kind: kind, Address: strings.TrimSpace(args.Address), Port: port,
 			Rosters: append([]string(nil), grantTo...), Origin: state.OriginAgent,
 			Hosted: hosted, Host: host,
+			NS: ns, Quota: quota,
 			CreatedAt: uint64(time.Now().Unix()),
 		}
 		if hasPrevRecord {
@@ -395,12 +478,20 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if pubLine != "" {
 			report += "\nSSH public key (install in the target's authorized_keys — the runner's self-check goes green once it is):\n" + pubLine
 		}
-		// Every door has its own console URL; an empty-shell door's link is
-		// how the operator fills the credential (never via any agent's chat).
-		link := doorLink(spec, name)
-		report += "\nDoor page: " + link
-		if kind != "ssh" && !selfHosted {
-			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals the credential and restarts the door; verify by exec-probe before claiming the capability is live."
+		if kube {
+			q := quota
+			if q == "" {
+				q = "none"
+			}
+			report += fmt.Sprintf("\nSlot ns %s (quota %s): carved by Compute through kube-api-root; the CP read its SA token and sealed it — the door is live, no console fill. Its record re-creates the slot and re-seals the token on every build (a k3s rebuild rotates the CA).", ns, q)
+		} else {
+			// Every door has its own console URL; an empty-shell door's link is
+			// how the operator fills the credential (never via any agent's chat).
+			link := doorLink(spec, name)
+			report += "\nDoor page: " + link
+			if kind != "ssh" && !selfHosted {
+				report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals the credential and restarts the door; verify by exec-probe before claiming the capability is live."
+			}
 		}
 		if selfHosted {
 			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked) — they verify the presented pubkeys and confirm the enrollment on the page, then fill the credential. The console seals it to the runner's own key and returns the package JSON; the GRANTEE writes it to the guest's state dir as secrets.json (through its own door exec) and restarts the unit there. Verify by exec-probe before claiming the capability is live."

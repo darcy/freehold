@@ -126,6 +126,8 @@ of questions up front:
   `insecure`: the literal token when the target presents a private CA the CP
   does not trust (a k3s API); `probe_body`: a literal JSON request body when
   the API needs one alongside the credential (kubernetes' SelfSubjectReview).
+  The one exception: a kube slot injects its own SelfSubjectReview arm — send
+  no probe at all on kind=kubernetes.
   Pick the cheapest endpoint
   that proves the credential (a token-verify beats a list beats a health
   check); the runner composes the curl itself and reports its self-check from
@@ -143,6 +145,40 @@ of questions up front:
 - `grant_to` is the agent (or agents) that will DO the work — the department
   that owns the capability class, or the custom agent that owns the service.
   You hold no exec yourself; never grant a capability to you.
+
+**Kube slots — a custom agent's kube access.** A kube cluster is Compute's
+jurisdiction (`kube-api-root`, cluster-admin); what an agent runs ON it is its
+own service lifecycle. The door that reconciles the two is a SLOT: one
+namespace holding a ServiceAccount bound to a full-access-within-the-namespace
+Role — never cluster scope. The shape:
+
+- **Name it `kube-api-<slot>`** (the flow enforces the prefix) and pick the
+  namespace with the interview: a fresh DNS label, never a platform namespace
+  (kube-*, default, caddy, litellm, agents — a slot beside the pods would read
+  their identity Secrets). One slot per
+  namespace — a second agent needing the same namespace shares the door via
+  `grant_to`, it does not re-slice it.
+- **The carve is Compute's audited leg — in conversation, before you call the
+  tool.** Ask Compute to apply the slot manifest through `kube-api-root`
+  (`kubectl apply -f -`): a Namespace, a ServiceAccount `<ns>-door`, a Role of
+  the same name (`apiGroups/resources/verbs: ["*"]` — full within the ns, and
+  a Role reaches only its namespace), its RoleBinding, an optional
+  ResourceQuota (the budget the interview settled), and the SA-token Secret
+  `<ns>-door-token`. No agent ever reads the token back — Compute applies the
+  manifest and reports; if you call `provision_runner` with the slot not yet
+  carved, its error carries the rendered manifest to hand Compute.
+- **Then the flow seals, live:** `provision_runner(name=kube-api-<slot>,
+  kind=kubernetes, ns=<ns>, quota=<budget|"" for none>, grant_to=[...])`. No
+  probe, no address (an address is refused — the CP derives the k3s API
+  route), no console fill — the CP reads the SA token from the slot and seals
+  it CP-side, so the door is live the moment the call lands. Verify with the
+  runner's self-check before claiming it works.
+- **The ns is fixed at creation**; a resized budget is a restated quota on a
+  re-provision (the record is what the build re-creates the slot from after a
+  k3s rebuild — the cluster-side re-apply of a resize is again Compute's).
+- **Retiring the door leaves the namespace** — its workloads are the
+  grantee's. Deleting it cascades them, so it is Compute's action on the
+  operator's ask, never the revoke flow's and never the stripped agent's.
 
 **Only runners you provisioned.** The tool stages NEW capability runners. You
 cannot widen an existing runner's roster (that stays operator-scoped via the

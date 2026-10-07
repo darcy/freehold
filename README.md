@@ -151,6 +151,9 @@ freehold backup init/run/snapshots  # restic off-site backup of the durable plan
                               #  /srv/data mounts to a repo URI (init settles the
                               #  repo password with the repo as arbiter; run also
                               #  ships the profile config; snapshots lists them)
+freehold backup install-timer # the host-side nightly backup + weekly repo-check
+                              #  systemd timers, rendered from the verb's own
+                              #  restic line (re-run after plane changes)
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"freehold/contract/config"
 	"freehold/freehold-cli/internal/common"
 )
 
@@ -16,7 +17,8 @@ var doorCmd = &cobra.Command{
 	Long: "door authorizes or revokes THIS box's public door key on the host door,\n" +
 		"through the CP's co-located runner. The box derives the door key from its\n" +
 		"agent-ops identity seed (the private half never leaves the box; only the\n" +
-		"public line is presented). authorize = a fresh box can run CP-lifecycle\n" +
+		"public line is presented) — the ACTIVE profile's seed, so pin --config on\n" +
+		"a multi-profile box. authorize = a fresh box can run CP-lifecycle\n" +
 		"verbs (bootstrap-cp/teardown-cp); revoke removes it.",
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -24,9 +26,12 @@ var doorCmd = &cobra.Command{
 		if len(args) == 0 {
 			return fmt.Errorf("door needs a subcommand: authorize|revoke")
 		}
-		return common.DoorAction(args[0])
+		return common.DoorAction(cmd, args[0])
 	},
 }
 
 // Command returns the door command for root registration.
-func Command() *cobra.Command { return doorCmd }
+func Command() *cobra.Command {
+	doorCmd.Flags().String("config", config.ConfigPath(), "Config path (default: the active profile's)")
+	return doorCmd
+}

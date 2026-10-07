@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"freehold/agents"
@@ -63,6 +64,24 @@ const (
 	migrationWaitDelay     = 5 * time.Second
 )
 
+// longMigrations lifts the bound for named data-mover scripts whose healthy
+// path legitimately exceeds the 5m lock budget — a pg_dump/restore over
+// kubectl exec scales with the gateway's request history, not with a handful
+// of curls. The lock-hold cost is accepted for these entries only; a hang
+// still dies at the lifted bound, and the script's own retry contract makes a
+// killed-but-healthy run resumable.
+var longMigrations = map[string]time.Duration{
+	"1799960000.sh": 20 * time.Minute,
+}
+
+// scriptMigrationTimeout resolves the bound for one script.
+func scriptMigrationTimeout(name string) time.Duration {
+	if t, ok := longMigrations[name]; ok {
+		return t
+	}
+	return migrationScriptTimeout
+}
+
 // AgentToolsPort is the CP's freehold-agent-tools MCP bind port. Any URL the
 // CPA pod bootstraps its stdio bridge from (the agent-tools `--self-url`, and
 // the CPA/agent manifests' bridge URL) MUST use this port — the pod curls
@@ -72,38 +91,39 @@ const (
 const AgentToolsPort = config.AgentToolsPort
 
 type Spec struct {
-	Name           string
-	StateDir       string
-	RelayURL       string
-	RelayAuthURL   string
-	RelayWS        string
-	RelayPK        string
-	RelayHost      string
-	RelayIP        string
-	CpHost         string
-	CpIP           string
-	CpLxc          uint32
-	ProxyIP        string
-	LitellmIP      string
-	PlanePool      string
-	PlaneKind      string
-	ThinPool       string
-	SizeGB         uint64
-	PoolSizeGB     uint64
-	RootfsGB       uint32
-	MemoryMB       uint32
-	StorageName    string
-	RelayGW        string
-	Bridge         string
-	RelayLxc       uint32
-	RelayCompose   string
-	K3sVmid        uint32
+	Name         string
+	StateDir     string
+	RelayURL     string
+	RelayAuthURL string
+	RelayWS      string
+	RelayPK      string
+	RelayHost    string
+	RelayIP      string
+	CpHost       string
+	CpIP         string
+	CpLxc        uint32
+	ProxyIP      string
+	LitellmIP    string
+	PlanePool    string
+	PlaneKind    string
+	ThinPool     string
+	SizeGB       uint64
+	PoolSizeGB   uint64
+	RootfsGB     uint32
+	MemoryMB     uint32
+	StorageName  string
+	RelayGW      string
+	Bridge       string
+	RelayLxc     uint32
+	RelayCompose string
+	K3sVmid      uint32
 	// The freehold-subnet gateway (docs/NETWORK.md). GatewayCIDR is
 	// the internal subnet ("" = no gateway — guests ride the LAN bridge as
 	// before); GatewayVlan the in-host bridge tag; GatewayLxc the gateway
 	// guest's vmid. K3sIP is the k3s node's address — with a gateway the
 	// INTERNAL one (ProxyIP is then the gateway's LAN address, the edge);
 	// without one it mirrors ProxyIP.
+<<<<<<< HEAD
 	GatewayCIDR string
 	GatewayVlan int
 	GatewayLxc  uint32
@@ -111,6 +131,12 @@ type Spec struct {
 	// nftables assert runs on the host itself.
 	HostedGateway bool
 	K3sIP         string
+=======
+	GatewayCIDR    string
+	GatewayVlan    int
+	GatewayLxc     uint32
+	K3sIP          string
+>>>>>>> origin/main
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
@@ -163,6 +189,16 @@ type Spec struct {
 	// latestRelease, when set, replaces the GitHub release fetch the release
 	// pulse stage makes (tests). It receives the running version tag.
 	latestRelease func(tag string) (*ghRelease, error)
+
+	// kubeconfigFetch, when set, replaces the runner exec that pulls the k3s
+	// admin kubeconfig for migration staging (tests). It receives the k3s vmid
+	// and returns the raw in-guest kubeconfig.
+	kubeconfigFetch func(vmid uint32) (string, error)
+
+	// execHook, when set, replaces the co-located-runner exec for every
+	// execOut call (tests: the kube-slot carve + token read are hermetically
+	// fakeable). Same shape as execOut; nil = the real path.
+	execHook func(cmd string, timeoutS uint64, extraSecrets ...string) (string, error)
 }
 
 // agentIdentityDir returns the agent-identity root (AgentIdentityDir or, when
@@ -187,6 +223,9 @@ func (s *Spec) client() (*client.McpClient, error) {
 // so the target name is always first; extraSecrets add requested secrets by
 // name (the runner injects each as an env var + redacts it).
 func (s *Spec) execOut(cmd string, timeoutS uint64, extraSecrets ...string) (string, error) {
+	if s.execHook != nil {
+		return s.execHook(cmd, timeoutS, extraSecrets...)
+	}
 	mc, err := s.client()
 	if err != nil {
 		return "", err
@@ -1367,18 +1406,6 @@ func (s *Spec) worldCert() error {
 	return nil
 }
 
-// worldLiteLLM seeds the CPA pod's litellm key CP-side. The kube workloads
-// (postgres + gateway manifests) and model registration are OWNED by the
-// terraform module now (worldTerraform "apply" → kube-apply.sh); this leg only
-// mints the CPA's gateway master-key Secret first-run-wins from the injected
-// env. Runs after the terraform step so the gateway is already reachable.
-func (s *Spec) worldLiteLLM() error {
-	if err := s.runSecrets(agent.AgentLiteLLMKeyScript(s.K3sVmid, s.CpaName), 60, "litellm"); err != nil {
-		return fmt.Errorf("seed CPA litellm key: %w", err)
-	}
-	return nil
-}
-
 // BuildWorldApply returns the CP's world-build/reconcile driver: it runs the
 // shared stage commands (internal/stages) through the co-located runner, so the
 // box can "login + trigger" the CP to (re)assert the world. Each step is
@@ -1386,8 +1413,18 @@ func (s *Spec) worldLiteLLM() error {
 // staircases, then ADOPTED + the kube workloads OWNED by the embedded terraform
 // module (worldTerraform → kube-apply.sh); the overlay (agent-tools, DNS, the
 // CPA litellm key, caddy, cert) stays scripted but ordered here.
+// engineMu serializes the engine's registry-writing passes within one
+// process: a world-build and the boot-time reboot revive (reboot_reconcile.go)
+// each read-modify-write agent registry rows through their own
+// agenttools.OpenRegistry handle (per-instance mutex, whole-file saves), so
+// two concurrent passes could silently drop rows. The revive TryLocks (skip +
+// retry while a build holds it); a build blocks until the revive pass ends.
+var engineMu sync.Mutex
+
 func BuildWorldApply(spec *Spec) agent.WorldApply {
 	return func() (string, error) {
+		engineMu.Lock()
+		defer engineMu.Unlock()
 		var report []string
 		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
 		// credential. The CP owns the cred and does DNS-01, so record
@@ -1530,15 +1567,6 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build terraform services: %w", err)
 			}
 			report = append(report, "terraform services applied (postgres/litellm/caddy)")
-		}
-		// 5. The litellm gateway — the CPA pod's litellm key seed (the kube
-		// workloads + model registration are owned by the terraform services
-		// phase above); the operator's provider key rides the runner, never argv.
-		if spec.K3sVmid != 0 && spec.LitellmIP != "" {
-			if err := spec.worldLiteLLM(); err != nil {
-				return "", fmt.Errorf("world-build litellm: %w", err)
-			}
-			report = append(report, "litellm gateway live")
 		}
 		// 7. The edge certs: durable-reuse gate (no LE order when the durable
 		// mirror has a valid cert) else an in-process resumable DNS-01 issue,
@@ -1715,6 +1743,27 @@ func tenantFromName(name string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q", name)
 }
 
+// worldTeardownCfg assembles the CP-driven world teardown's scope: relay + k3s
+// go, the CP (+ its co-located runner) and the GATEWAY stay. The gateway is
+// the preserved CP's own default route, DNS resolver, and box→console path
+// (worldGateway: the CP build only owns the gateway's config, never its
+// lifecycle) — destroying it would orphan the very CP teardown preserves, and
+// nothing CP-side can re-create it. Gateway drops with `uninstall`, not
+// `teardown`.
+func worldTeardownCfg(spec *Spec) *teardown.Cfg {
+	return &teardown.Cfg{
+		Domain:      spec.RelayHost,
+		RunNTarget:  spec.RunnerTarget,
+		Managed:     []string{"relay", "k3s"},
+		Pool:        spec.PlanePool,
+		BackendKind: spec.PlaneKind,
+		Vmid: map[string]*uint32{
+			"relay": vmidPtr(spec.RelayLxc),
+			"k3s":   vmidPtr(spec.K3sVmid),
+		},
+	}
+}
+
 // BuildWorldTeardownApply returns the CP-owned world-teardown driver — the
 // BuildWorldApply mirror. It runs the shared teardown engine through the
 // co-located runner: terraform destroy (the kube layer — the LXCs carry no
@@ -1746,17 +1795,7 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 			return true, out
 		})
 		runner := &cpTeardownRunner{ExecRunner: er, c: mc, target: spec.RunnerTarget}
-		cfg := &teardown.Cfg{
-			Domain:      spec.RelayHost,
-			RunNTarget:  spec.RunnerTarget,
-			Managed:     []string{"relay", "k3s"}, // the CP + its co-located runner stay
-			Pool:        spec.PlanePool,
-			BackendKind: spec.PlaneKind,
-			Vmid: map[string]*uint32{
-				"relay": vmidPtr(spec.RelayLxc),
-				"k3s":   vmidPtr(spec.K3sVmid),
-			},
-		}
+		cfg := worldTeardownCfg(spec)
 		// Compute-only: cfg.Data stays false, so no dataset destroys run (the
 		// plane survives teardown; `uninstall --remove-data` drops it).
 		// The 4th arg is CONFIRM (Run's signature), not data.
@@ -1877,10 +1916,28 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
 			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
+		// Cluster-bound scripts get a CP-local kubeconfig: staged beside the
+		// scripts only when something is pending (no runner round-trip on a
+		// converged world). A staging failure rides FREEHOLD_KUBECONFIG_ERROR —
+		// loud in the script that needs the cluster, invisible to the rest.
+		if pending, perr := migrations.PendingCount(root); perr == nil && pending > 0 {
+			if kc, kerr := s.stageMigrationKubeconfig(root); kerr == nil {
+				runEnv = append(runEnv, "KUBECONFIG="+kc)
+			} else {
+				runEnv = append(runEnv, "FREEHOLD_KUBECONFIG_ERROR="+kerr.Error())
+			}
+		}
 		run := func() ([]migrations.Result, error) {
-			return migrations.Run(root, func(_, path string) error {
-				return s.runMigrationScript(path, runEnv, migrationScriptTimeout, migrationWaitDelay)
+			res, err := migrations.Run(root, func(name, path string) error {
+				return s.runMigrationScript(path, runEnv, scriptMigrationTimeout(name), migrationWaitDelay)
 			})
+			// The staged admin kubeconfig is plaintext cluster-admin at rest on
+			// the backup=1 plane: it lives only for the duration of a pending
+			// queue and is re-staged (one runner round-trip) on the next
+			// pending run, so remove it now that the queue has drained or
+			// stopped. The markers and captures stay, of course.
+			os.Remove(filepath.Join(root, "kubeconfig"))
+			return res, err
 		}
 		if s.AgentRegistry == nil {
 			// No in-process registry to keep aligned (the console-executor build path,
@@ -1895,6 +1952,53 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 		})
 		return res, err
 	}
+}
+
+// stageMigrationKubeconfig gives the migration scripts a CP-local kubectl
+// path: the k3s admin kubeconfig, fetched through the co-located runner and
+// rewritten to the k3s node IP (the same rewrite the tf staging does), written
+// 0600 beside the migration scripts on the durable plane. The scripts run ON
+// the CP, which has no pct and no tf root — the API is their only cluster
+// surface. Best-effort by contract: a staging failure rides to the scripts as
+// FREEHOLD_KUBECONFIG_ERROR (migrationRunner), so a cluster-bound script fails
+// loudly naming the cause while cluster-free scripts still run. Only the
+// production fetch touches the runner + kubectl; the injected one is test-only.
+func (s *Spec) stageMigrationKubeconfig(root string) (string, error) {
+	if s.RunnerAddr == "" || s.RunnerTarget == "" {
+		return "", fmt.Errorf("no co-located runner to fetch the kubeconfig through")
+	}
+	var raw string
+	var err error
+	if s.kubeconfigFetch != nil {
+		raw, err = s.kubeconfigFetch(s.K3sVmid)
+	} else {
+		if err := s.ensureKubectl(); err != nil {
+			return "", err
+		}
+		if err := s.resolveGuestVmids(); err != nil {
+			return "", fmt.Errorf("resolve guest vmids: %w", err)
+		}
+		if s.K3sVmid == 0 {
+			return "", fmt.Errorf("no resolvable k3s vmid")
+		}
+		raw, err = s.runOut(fmt.Sprintf("pct exec %d -- cat /etc/rancher/k3s/k3s.yaml", s.K3sVmid), 60)
+	}
+	if err != nil {
+		return "", fmt.Errorf("fetch kubeconfig: %w", err)
+	}
+	kip := config.StripCIDR(s.k3sIP())
+	if kip == "" || kip == "-" {
+		return "", fmt.Errorf("no k3s node IP to rewrite the kubeconfig server")
+	}
+	rewritten := strings.Replace(raw, "https://127.0.0.1:6443", "https://"+kip+":6443", 1)
+	if !strings.Contains(rewritten, "https://"+kip+":6443") {
+		return "", fmt.Errorf("could not rewrite the kubeconfig server to https://%s:6443", kip)
+	}
+	path := filepath.Join(root, "kubeconfig")
+	if err := os.WriteFile(path, []byte(rewritten), 0o600); err != nil {
+		return "", fmt.Errorf("stage kubeconfig: %w", err)
+	}
+	return path, nil
 }
 
 // runMigrationScript runs one shipped script and returns its failure with output
@@ -2596,9 +2700,9 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
 				for _, ref := range joined {
-				// Best-effort: the created agent signs, so it lands on a
-				// channel it owns (a custom channel it created); the CPA is
-				// already the owner/member of #freehold — skip.
+					// Best-effort: the created agent signs, so it lands on a
+					// channel it owns (a custom channel it created); the CPA is
+					// already the owner/member of #freehold — skip.
 					if ref.id == relayFreeholdChannel {
 						continue
 					}
@@ -2622,6 +2726,22 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if aerr != nil {
 			return "", fmt.Errorf("create-agent %q: %w", name, aerr)
 		}
+		// The agent's own minted gateway virtual key: looked up (or minted,
+		// key_alias = the pod name) and seeded into the <pod>-litellm-key
+		// Secret BEFORE the pod applies — a pod referencing a missing Secret
+		// never comes Ready. The seed ensures the Secret matches the store's
+		// key, so a re-mint (a wiped gateway DB, an aborted remove's revoke)
+		// reaches the pod on the next reconcile. Skipped without a litellm
+		// base URL (a world without the gateway).
+		key, kerr := spec.ensureAgentLitellmKey(name)
+		if kerr != nil {
+			return "", fmt.Errorf("create-agent %q: %w", name, kerr)
+		}
+		if key != "" {
+			if err := spec.run(agent.AgentLiteLLMKeyScript(spec.K3sVmid, name, key), 60); err != nil {
+				return "", fmt.Errorf("%s litellm key secret: %w", name, err)
+			}
+		}
 		var manifest string
 		if name == spec.CpaName {
 			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ())
@@ -2635,7 +2755,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// asker (today the operator — the CP cannot see chat threads) +
 			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(spec.CpaName), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
