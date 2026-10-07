@@ -218,16 +218,29 @@ finish_pg() { # pod — restore from the capture if one is owed, verify the rest
   # Table count alone cannot tell a restored db from a PARTIAL one, so the
   # verified marker — not the count — gates the re-restore; --clean makes the
   # re-restore over a partial converge, and the marker lands only after the
-  # count verifies.
-  if pg_capture_valid "$CAP_PG" && [ ! -f "$CAP_PG.done" ]; then
+  # count verifies. The db's ACTUAL state outranks the marker: a green
+  # "no restore owed" over an EMPTY db was live-verified (casaq) — when the
+  # marker lies (the volume was replaced after a verified restore), the
+  # capture re-restores; a lying marker with NO usable capture is a loud
+  # FATAL, never a green exit.
+  tables=$(kubectl exec -n "$NS" "$pod" -- psql -U llmproxy -d litellm -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='public'")
+  if [ "$tables" != "0" ] && [ -f "$CAP_PG.done" ]; then
+    echo "litellm-pg-data: verified ($tables public tables)"
+    return 0
+  fi
+  if pg_capture_valid "$CAP_PG"; then
     echo "restoring litellm-pg-data from $CAP_PG"
     gunzip -c "$CAP_PG" | kubectl exec -i -n "$NS" "$pod" -- psql -U llmproxy -d litellm -v ON_ERROR_STOP=1 --quiet
     tables=$(kubectl exec -n "$NS" "$pod" -- psql -U llmproxy -d litellm -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='public'")
     [ "$tables" != "0" ] || { echo "FATAL: restore left an empty db"; exit 1; }
     touch "$CAP_PG.done"
     echo "litellm-pg-data: restored ($tables public tables)"
+  elif [ "$tables" != "0" ]; then
+    echo "litellm-pg-data: no restore owed — db untouched ($tables public tables)"
+  elif [ -f "$CAP_PG.done" ]; then
+    echo "FATAL: the restore is marked done but the db is empty and the capture is gone — no recoverable copy exists"; exit 1
   else
-    echo "litellm-pg-data: no restore owed — db untouched"
+    echo "litellm-pg-data: no restore owed — a fresh world's empty db is litellm's own business"
   fi
 }
 

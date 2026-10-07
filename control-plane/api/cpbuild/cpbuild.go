@@ -1997,6 +1997,11 @@ func (s *Spec) runMigrationScript(path string, env []string, timeout, waitDelay 
 	cmd.Env = env
 	cmd.WaitDelay = waitDelay
 	out, err := cmd.CombinedOutput()
+	// The output lands in the serve's stderr (the journal) on SUCCESS too:
+	// a marked-green migration whose steps silently didn't take was
+	// undiagnosable when only failures carried output — the live-fire on
+	// casaq needed the script's own echoes to reconstruct what ran.
+	fmt.Fprintf(os.Stderr, "migration %s output:\n%s\n", filepath.Base(path), strings.TrimSpace(string(out)))
 	if err != nil {
 		return fmt.Errorf("%s: %w: %s", path, err, strings.TrimSpace(string(out)))
 	}
