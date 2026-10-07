@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -152,11 +153,17 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 		"cp":    cfg.Lxc.Cp.Vmid,
 		"k3s":   cfg.Lxc.K3s.Vmid,
 	}
-	if cfg.Lxc.Gateway.Vmid != nil {
+	if gw := gatewayVmid(cfg, func() (string, error) {
+		out, err := common.ExecDirect(cfg.Runner.Addr, agentDir, cfg.Runner.Pubkey, cfg.Runner.Target, "pct list", []string{cfg.Runner.Target}, 30)
+		if err != nil {
+			return "", err
+		}
+		return out.Stdout, nil
+	}); gw != nil {
 		// The gateway is destroyed LAST (after the guests it routes for) —
 		// the role iteration is ordered, so it rides at the end.
 		managed = append(managed, "gateway")
-		vmid["gateway"] = cfg.Lxc.Gateway.Vmid
+		vmid["gateway"] = gw
 	}
 	tcfg := &worldteardown.Cfg{
 		Domain:        cfg.TenantSlug(),
@@ -181,6 +188,38 @@ func runUninstall(cfg *config.Config, configPath, host string, removeData bool) 
 		}
 	}
 	common.WarnOtherDoors(runner)
+	return nil
+}
+
+// gatewayVmid returns the gateway's vmid for teardown: the recorded one, else
+// adopt-by-name — a profile whose record predates the gateway (an old
+// world-config, or one rendered on another box/home) still destroys it by
+// matching the bootstrap-named <name>-gateway in pct list. Nil (skip the
+// gateway) when there is no record, the host has no such guest (flat-LAN
+// world), or the probe fails — never a hard failure; the probe rides the door
+// already verified by the caller.
+func gatewayVmid(cfg *config.Config, probe func() (string, error)) *uint32 {
+	if cfg.Lxc.Gateway.Vmid != nil {
+		return cfg.Lxc.Gateway.Vmid
+	}
+	name, err := bootstrap.LXCName(cfg.Name, cfg.RelayHost(), "gateway")
+	if err != nil {
+		return nil
+	}
+	out, err := probe()
+	if err != nil {
+		fmt.Printf("  (warning: could not probe for an unrecorded gateway LXC — it may be left behind: %v)\n", err)
+		return nil
+	}
+	for _, l := range strings.Split(out, "\n")[1:] {
+		cols := strings.Fields(l)
+		if len(cols) >= 2 && cols[len(cols)-1] == name {
+			if v, perr := strconv.ParseUint(cols[0], 10, 32); perr == nil {
+				vmid := uint32(v)
+				return &vmid
+			}
+		}
+	}
 	return nil
 }
 

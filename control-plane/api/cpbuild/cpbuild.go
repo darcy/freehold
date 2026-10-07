@@ -1683,6 +1683,27 @@ func tenantFromName(name string) (planebase.Tenant, error) {
 	return 0, fmt.Errorf("unknown tenant %q", name)
 }
 
+// worldTeardownCfg assembles the CP-driven world teardown's scope: relay + k3s
+// go, the CP (+ its co-located runner) and the GATEWAY stay. The gateway is
+// the preserved CP's own default route, DNS resolver, and box→console path
+// (worldGateway: the CP build only owns the gateway's config, never its
+// lifecycle) — destroying it would orphan the very CP teardown preserves, and
+// nothing CP-side can re-create it. Gateway drops with `uninstall`, not
+// `teardown`.
+func worldTeardownCfg(spec *Spec) *teardown.Cfg {
+	return &teardown.Cfg{
+		Domain:      spec.RelayHost,
+		RunNTarget:  spec.RunnerTarget,
+		Managed:     []string{"relay", "k3s"},
+		Pool:        spec.PlanePool,
+		BackendKind: spec.PlaneKind,
+		Vmid: map[string]*uint32{
+			"relay": vmidPtr(spec.RelayLxc),
+			"k3s":   vmidPtr(spec.K3sVmid),
+		},
+	}
+}
+
 // BuildWorldTeardownApply returns the CP-owned world-teardown driver — the
 // BuildWorldApply mirror. It runs the shared teardown engine through the
 // co-located runner: terraform destroy (the kube layer — the LXCs carry no
@@ -1714,17 +1735,7 @@ func BuildWorldTeardownApply(spec *Spec) agent.WorldApply {
 			return true, out
 		})
 		runner := &cpTeardownRunner{ExecRunner: er, c: mc, target: spec.RunnerTarget}
-		cfg := &teardown.Cfg{
-			Domain:      spec.RelayHost,
-			RunNTarget:  spec.RunnerTarget,
-			Managed:     []string{"relay", "k3s"}, // the CP + its co-located runner stay
-			Pool:        spec.PlanePool,
-			BackendKind: spec.PlaneKind,
-			Vmid: map[string]*uint32{
-				"relay": vmidPtr(spec.RelayLxc),
-				"k3s":   vmidPtr(spec.K3sVmid),
-			},
-		}
+		cfg := worldTeardownCfg(spec)
 		// Compute-only: cfg.Data stays false, so no dataset destroys run (the
 		// plane survives teardown; `uninstall --remove-data` drops it).
 		// The 4th arg is CONFIRM (Run's signature), not data.
