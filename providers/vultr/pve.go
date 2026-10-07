@@ -14,7 +14,7 @@ import "fmt"
 // an already-PVE host short-circuits (a re-adopt re-ensures cheaply).
 func PVEInstallScript() string {
 	return fmt.Sprintf(`set -e
-if command -v pct >/dev/null 2>&1 && command -v pvesm >/dev/null 2>&1 && [ -f /etc/pve/storage.cfg ]; then
+if command -v pct >/dev/null 2>&1 && command -v pvesm >/dev/null 2>&1 && pvesm status >/dev/null 2>&1; then
   echo pve-install-ok
   exit 0
 fi
@@ -38,6 +38,10 @@ case "$CODENAME" in
 esac
 curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-$CODENAME.gpg -o /etc/apt/trusted.gpg.d/proxmox-release-$CODENAME.gpg
 echo "deb http://download.proxmox.com/debian/pve $CODENAME pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
+# The no-subscription repo replaces the subscription-gated ones the PVE
+# packages ship (enterprise/ceph) — left in place, every later apt update
+# 401s and dies (a re-ensure, a guest docker install, anything).
+sed -i "s/^deb/# deb/" /etc/apt/sources.list.d/pve-enterprise.list /etc/apt/sources.list.d/ceph.list 2>/dev/null || true
 # The index predates the PVE repo — refresh or proxmox-ve is unlocatable.
 apt-get update -qq
 apt-get -o Dpkg::Options::=--force-confold full-upgrade -y -qq
