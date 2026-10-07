@@ -191,9 +191,12 @@ trust_capture() { [ -s "$1" ] && gzip -t "$1" 2>/dev/null; }
 # nothing. Match the WHOLE stream for the complete-dump footer: a complete
 # plain dump ends "-- PostgreSQL database dump complete" followed by a
 # trailing "--" and a blank line, so the LAST line alone never matches.
+# grep runs WITHOUT -q on purpose: -q exits on the first match and
+# SIGPIPEs gunzip (141) mid-stream, which pipefail turns into a false
+# negative for a valid dump; reading to EOF validates the whole payload.
 pg_capture_valid() {
   [ -s "$1" ] && gzip -t "$1" 2>/dev/null \
-    && gunzip -c "$1" 2>/dev/null | grep -q "PostgreSQL database dump complete"
+    && gunzip -c "$1" 2>/dev/null | grep "PostgreSQL database dump complete" > /dev/null
 }
 caddy_capture_valid() { [ -s "$1" ] && tar -tzf "$1" >/dev/null 2>&1; }
 
