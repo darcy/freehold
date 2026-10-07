@@ -251,35 +251,41 @@ if claim_exists "$NS" "$CLAIM"; then
       "$DURABLE"/*) echo "litellm-pg-data: already on $PPATH";;
       *)
         # capture FIRST — the dump on the CP's durable plane is the safety
-        # net. This branch is the claim PROVABLY still on its pre-swap
-        # rootfs volume (a completed swap binds under $DURABLE and lands in
-        # the durable case), so the live db is always at least as fresh as
-        # any surviving capture — and one left by a run that died BEFORE
-        # scale-0 (the heal FATAL) is stale while the world keeps writing.
-        # ALWAYS re-capture here, to a temp file moved atomically: a
-        # failed/killed re-capture must never truncate the surviving net.
+        # net. A capture records WHICH PV it came from ($CAP_PG.pv): when
+        # that PV is NOT the live one, the live claim was RE-SWAPPED since
+        # (the Addon stomp can re-bind a swapped claim outside the carve-out
+        # — the heal's check cannot rule it out) and the live volume is the
+        # emptied/restored one, NOT a data source: keep the capture, never
+        # dump the post-swap volume. Only when the capture is absent or was
+        # taken from THIS PV (provably pre-swap, live data at least as
+        # fresh) re-capture — to a temp file moved atomically, so a
+        # failed/killed re-capture never truncates the surviving net.
         # --clean: a re-restore over a PARTIAL prior restore drops and
         # rebuilds instead of erroring.
-        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-          echo "litellm-pg-data: no pod to capture from — bringing one up"
-          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+        if pg_capture_valid "$CAP_PG" && [ -f "$CAP_PG.pv" ] && [ "$(cat "$CAP_PG.pv")" != "$PV" ]; then
+          echo "litellm-pg-data: capture survives from PV $(cat "$CAP_PG.pv") — the live claim is a post-swap re-bind; not re-capturing the emptied volume"
+        else
+          if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+            echo "litellm-pg-data: no pod to capture from — bringing one up"
+            ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+          fi
+          POD=$(first_pod "$NS" "$SEL")
+          kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG.tmp"
+          if ! pg_capture_valid "$CAP_PG.tmp"; then
+            rm -f "$CAP_PG.tmp"
+            echo "FATAL: pg capture failed payload validation (the partial was discarded; any prior net survives) — the claim was not touched"
+            exit 1
+          fi
+          mv -f "$CAP_PG.tmp" "$CAP_PG"
+          printf '%s\n' "$PV" > "$CAP_PG.pv.tmp" && mv -f "$CAP_PG.pv.tmp" "$CAP_PG.pv"
+          echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG (from $PV)"
         fi
-        POD=$(first_pod "$NS" "$SEL")
-        kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG.tmp"
-        if ! pg_capture_valid "$CAP_PG.tmp"; then
-          rm -f "$CAP_PG.tmp"
-          echo "FATAL: pg capture failed payload validation (the partial was discarded; any prior net survives) — the claim was not touched"
-          exit 1
-        fi
-        mv -f "$CAP_PG.tmp" "$CAP_PG"
-        # The .done marker vouches for the volume the restore landed in —
-        # the swap below DESTROYS that volume, so the marker is void the
-        # moment the capture is replaced: without this, a retry after a
-        # restored-but-outside-carve-out run skips the restore and finishes
-        # green with an empty db.
-        rm -f "$CAP_PG.done"
-        echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
         heal_provisioner
+        # the .done marker vouches for the volume the restore landed in —
+        # the swap below DESTROYS that volume, so every swap voids it:
+        # without this, a retry after a restored-but-outside-carve-out run
+        # skips the restore and finishes green with an empty db.
+        rm -f "$CAP_PG.done"
         kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
         wait_gone "$NS" "$SEL"
         swap_claim "$NS" "$CLAIM"
@@ -361,23 +367,31 @@ if claim_exists "$NS" "$CLAIM"; then
     case "$PPATH" in
       "$DURABLE"/*) echo "caddy-data: already on $PPATH";;
       *)
-        # ALWAYS re-capture here — same reasoning as the pg branch: this is
-        # the claim provably still pre-swap, so the live /data is at least
-        # as fresh as any surviving capture. Atomic temp+move; payload
-        # completeness (tar -tzf), not just container validity.
-        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-          echo "caddy-data: no pod to capture from — bringing one up"
-          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+        # A capture records WHICH PV it came from ($CAP_CADDY.pv): a live
+        # claim on a DIFFERENT PV is a post-swap re-bind (the Addon stomp
+        # can re-bind outside the carve-out) — its /data is the emptied
+        # volume, not a data source: keep the capture, never re-capture it.
+        # Otherwise (provably pre-swap — the live /data is at least as
+        # fresh) re-capture; atomic temp+move; payload completeness
+        # (tar -tzf), not just container validity.
+        if caddy_capture_valid "$CAP_CADDY" && [ -f "$CAP_CADDY.pv" ] && [ "$(cat "$CAP_CADDY.pv")" != "$PV" ]; then
+          echo "caddy-data: capture survives from PV $(cat "$CAP_CADDY.pv") — the live claim is a post-swap re-bind; not re-capturing the emptied volume"
+        else
+          if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+            echo "caddy-data: no pod to capture from — bringing one up"
+            ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+          fi
+          POD=$(first_pod "$NS" "$SEL")
+          kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY.tmp"
+          if ! caddy_capture_valid "$CAP_CADDY.tmp"; then
+            rm -f "$CAP_CADDY.tmp"
+            echo "FATAL: caddy capture failed payload validation (the partial was discarded; any prior net survives; the caddy-edge mirror is a second resort) — the claim was not touched"
+            exit 1
+          fi
+          mv -f "$CAP_CADDY.tmp" "$CAP_CADDY"
+          printf '%s\n' "$PV" > "$CAP_CADDY.pv.tmp" && mv -f "$CAP_CADDY.pv.tmp" "$CAP_CADDY.pv"
+          echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY (from $PV)"
         fi
-        POD=$(first_pod "$NS" "$SEL")
-        kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY.tmp"
-        if ! caddy_capture_valid "$CAP_CADDY.tmp"; then
-          rm -f "$CAP_CADDY.tmp"
-          echo "FATAL: caddy capture failed payload validation (the partial was discarded; any prior net survives; the caddy-edge mirror is a second resort) — the claim was not touched"
-          exit 1
-        fi
-        mv -f "$CAP_CADDY.tmp" "$CAP_CADDY"
-        echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY"
         heal_provisioner
         kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
         wait_gone "$NS" "$SEL"
