@@ -123,20 +123,13 @@ type Spec struct {
 	// guest's vmid. K3sIP is the k3s node's address — with a gateway the
 	// INTERNAL one (ProxyIP is then the gateway's LAN address, the edge);
 	// without one it mirrors ProxyIP.
-<<<<<<< HEAD
-	GatewayCIDR string
-	GatewayVlan int
-	GatewayLxc  uint32
+	GatewayCIDR    string
+	GatewayVlan    int
+	GatewayLxc     uint32
 	// HostedGateway: the HOST is the gateway (api-vultr) — no guest, the
 	// nftables assert runs on the host itself.
 	HostedGateway bool
 	K3sIP         string
-=======
-	GatewayCIDR    string
-	GatewayVlan    int
-	GatewayLxc     uint32
-	K3sIP          string
->>>>>>> origin/main
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
