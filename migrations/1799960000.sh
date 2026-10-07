@@ -240,9 +240,14 @@ if claim_exists "$NS" "$CLAIM"; then
   if [ -z "$PPATH" ]; then
     # UNBOUND: a prior run died between the PVC create and its first
     # consumer. No volume = no data at risk — bring the consumer up so the
-    # claim binds, then finish from the capture.
+    # claim binds, then finish from the capture. A swap only ever runs
+    # behind a payload-validated capture, so a missing/corrupt one here is
+    # a BROKEN safety net — FATAL (the queue stops) instead of a green run
+    # over an empty db.
     echo "litellm-pg-data: claim unbound — bringing the consumer up to bind it"
     heal_provisioner
+    pg_capture_valid "$CAP_PG" || { echo "FATAL: litellm-pg-data's claim is unbound but its capture is missing or not a complete dump — no recoverable copy exists"; exit 1; }
+    rm -f "$CAP_PG.done"
     POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
     finish_pg "$POD"
     assert_durable "$NS" "$CLAIM"
@@ -357,9 +362,11 @@ if claim_exists "$NS" "$CLAIM"; then
   if [ -z "$PPATH" ]; then
     # UNBOUND: a prior run died between the PVC create and its first
     # consumer. No volume = no data at risk — bind it and finish from the
-    # capture.
+    # capture; a missing/corrupt capture here is a BROKEN safety net (the
+    # swap only ever runs behind one) — FATAL, never a green empty edge.
     echo "caddy-data: claim unbound — bringing the consumer up to bind it"
     heal_provisioner
+    caddy_capture_valid "$CAP_CADDY" || { echo "FATAL: caddy-data's claim is unbound but its capture is missing or not a complete archive — no recoverable copy exists"; exit 1; }
     write_back_caddy
     ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
     assert_durable "$NS" "$CLAIM"
