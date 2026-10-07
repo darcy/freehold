@@ -64,6 +64,24 @@ const (
 	migrationWaitDelay     = 5 * time.Second
 )
 
+// longMigrations lifts the bound for named data-mover scripts whose healthy
+// path legitimately exceeds the 5m lock budget — a pg_dump/restore over
+// kubectl exec scales with the gateway's request history, not with a handful
+// of curls. The lock-hold cost is accepted for these entries only; a hang
+// still dies at the lifted bound, and the script's own retry contract makes a
+// killed-but-healthy run resumable.
+var longMigrations = map[string]time.Duration{
+	"1799960000.sh": 20 * time.Minute,
+}
+
+// scriptMigrationTimeout resolves the bound for one script.
+func scriptMigrationTimeout(name string) time.Duration {
+	if t, ok := longMigrations[name]; ok {
+		return t
+	}
+	return migrationScriptTimeout
+}
+
 // AgentToolsPort is the CP's freehold-agent-tools MCP bind port. Any URL the
 // CPA pod bootstraps its stdio bridge from (the agent-tools `--self-url`, and
 // the CPA/agent manifests' bridge URL) MUST use this port — the pod curls
@@ -161,6 +179,11 @@ type Spec struct {
 	// latestRelease, when set, replaces the GitHub release fetch the release
 	// pulse stage makes (tests). It receives the running version tag.
 	latestRelease func(tag string) (*ghRelease, error)
+
+	// kubeconfigFetch, when set, replaces the runner exec that pulls the k3s
+	// admin kubeconfig for migration staging (tests). It receives the k3s vmid
+	// and returns the raw in-guest kubeconfig.
+	kubeconfigFetch func(vmid uint32) (string, error)
 
 	// execHook, when set, replaces the co-located-runner exec for every
 	// execOut call (tests: the kube-slot carve + token read are hermetically
@@ -1867,10 +1890,28 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 			"FREEHOLD_RELAY_AUTH_URL="+relayAuthURL,
 			"FREEHOLD_CPA_NAME="+s.cpaNameOrDefault(),
 		)
+		// Cluster-bound scripts get a CP-local kubeconfig: staged beside the
+		// scripts only when something is pending (no runner round-trip on a
+		// converged world). A staging failure rides FREEHOLD_KUBECONFIG_ERROR —
+		// loud in the script that needs the cluster, invisible to the rest.
+		if pending, perr := migrations.PendingCount(root); perr == nil && pending > 0 {
+			if kc, kerr := s.stageMigrationKubeconfig(root); kerr == nil {
+				runEnv = append(runEnv, "KUBECONFIG="+kc)
+			} else {
+				runEnv = append(runEnv, "FREEHOLD_KUBECONFIG_ERROR="+kerr.Error())
+			}
+		}
 		run := func() ([]migrations.Result, error) {
-			return migrations.Run(root, func(_, path string) error {
-				return s.runMigrationScript(path, runEnv, migrationScriptTimeout, migrationWaitDelay)
+			res, err := migrations.Run(root, func(name, path string) error {
+				return s.runMigrationScript(path, runEnv, scriptMigrationTimeout(name), migrationWaitDelay)
 			})
+			// The staged admin kubeconfig is plaintext cluster-admin at rest on
+			// the backup=1 plane: it lives only for the duration of a pending
+			// queue and is re-staged (one runner round-trip) on the next
+			// pending run, so remove it now that the queue has drained or
+			// stopped. The markers and captures stay, of course.
+			os.Remove(filepath.Join(root, "kubeconfig"))
+			return res, err
 		}
 		if s.AgentRegistry == nil {
 			// No in-process registry to keep aligned (the console-executor build path,
@@ -1885,6 +1926,53 @@ func (s *Spec) migrationRunner(root, consoleStateDir string) func() ([]migration
 		})
 		return res, err
 	}
+}
+
+// stageMigrationKubeconfig gives the migration scripts a CP-local kubectl
+// path: the k3s admin kubeconfig, fetched through the co-located runner and
+// rewritten to the k3s node IP (the same rewrite the tf staging does), written
+// 0600 beside the migration scripts on the durable plane. The scripts run ON
+// the CP, which has no pct and no tf root — the API is their only cluster
+// surface. Best-effort by contract: a staging failure rides to the scripts as
+// FREEHOLD_KUBECONFIG_ERROR (migrationRunner), so a cluster-bound script fails
+// loudly naming the cause while cluster-free scripts still run. Only the
+// production fetch touches the runner + kubectl; the injected one is test-only.
+func (s *Spec) stageMigrationKubeconfig(root string) (string, error) {
+	if s.RunnerAddr == "" || s.RunnerTarget == "" {
+		return "", fmt.Errorf("no co-located runner to fetch the kubeconfig through")
+	}
+	var raw string
+	var err error
+	if s.kubeconfigFetch != nil {
+		raw, err = s.kubeconfigFetch(s.K3sVmid)
+	} else {
+		if err := s.ensureKubectl(); err != nil {
+			return "", err
+		}
+		if err := s.resolveGuestVmids(); err != nil {
+			return "", fmt.Errorf("resolve guest vmids: %w", err)
+		}
+		if s.K3sVmid == 0 {
+			return "", fmt.Errorf("no resolvable k3s vmid")
+		}
+		raw, err = s.runOut(fmt.Sprintf("pct exec %d -- cat /etc/rancher/k3s/k3s.yaml", s.K3sVmid), 60)
+	}
+	if err != nil {
+		return "", fmt.Errorf("fetch kubeconfig: %w", err)
+	}
+	kip := config.StripCIDR(s.k3sIP())
+	if kip == "" || kip == "-" {
+		return "", fmt.Errorf("no k3s node IP to rewrite the kubeconfig server")
+	}
+	rewritten := strings.Replace(raw, "https://127.0.0.1:6443", "https://"+kip+":6443", 1)
+	if !strings.Contains(rewritten, "https://"+kip+":6443") {
+		return "", fmt.Errorf("could not rewrite the kubeconfig server to https://%s:6443", kip)
+	}
+	path := filepath.Join(root, "kubeconfig")
+	if err := os.WriteFile(path, []byte(rewritten), 0o600); err != nil {
+		return "", fmt.Errorf("stage kubeconfig: %w", err)
+	}
+	return path, nil
 }
 
 // runMigrationScript runs one shipped script and returns its failure with output
