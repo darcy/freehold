@@ -268,6 +268,12 @@ if claim_exists "$NS" "$CLAIM"; then
           exit 1
         fi
         mv -f "$CAP_PG.tmp" "$CAP_PG"
+        # The .done marker vouches for the volume the restore landed in —
+        # the swap below DESTROYS that volume, so the marker is void the
+        # moment the capture is replaced: without this, a retry after a
+        # restored-but-outside-carve-out run skips the restore and finishes
+        # green with an empty db.
+        rm -f "$CAP_PG.done"
         echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
         heal_provisioner
         kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
@@ -281,6 +287,7 @@ if claim_exists "$NS" "$CLAIM"; then
   fi
 elif pg_capture_valid "$CAP_PG"; then
   echo "litellm-pg-data: claim absent but a capture survives — a prior run died mid-swap; recreating"
+  heal_provisioner
   recreate_claim "$NS" "$CLAIM" "$SIZE"
   POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
   finish_pg "$POD"
@@ -379,6 +386,7 @@ if claim_exists "$NS" "$CLAIM"; then
   fi
 elif caddy_capture_valid "$CAP_CADDY"; then
   echo "caddy-data: claim absent but a capture survives — a prior run died mid-swap; recreating"
+  heal_provisioner
   recreate_claim "$NS" "$CLAIM" "$SIZE"
   write_back_caddy
   ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
