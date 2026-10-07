@@ -43,6 +43,9 @@ type HostSession struct {
 	DoorLine string
 	// Host is "root@<ip>" — set before ExecOnHost may run.
 	Host string
+	// World is the profile/world name — the material a created host's
+	// label is derived from (the provider owns the derivation).
+	World string
 	// CreatedID is the instance handle the provider set the MOMENT its
 	// create call succeeded — before any later step (the address wait, the
 	// host's SSH, the PVE install) can fail. A Prepare error with

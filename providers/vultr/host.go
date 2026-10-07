@@ -95,13 +95,24 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 	}
 
 	region, plan := s.Answers["region"], s.Answers["plan"]
+	// The instance label: the world's name — an unlabelled instance is
+	// unfindable in the console when the stranded-handle recovery points
+	// the operator at it.
 	label := s.Answers["label"]
+	if label == "" && s.World != "" {
+		label = "freehold-" + s.World
+	}
 	key, err := c.EnsureSSHKey(ctx, "freehold-door", s.DoorLine)
 	if err != nil {
 		return nil, fmt.Errorf("vultr ssh-key: %w", err)
 	}
 	s.Print("  creating the vultr host (%s %s)…\n", region, plan)
-	id, err := c.CreateInstance(ctx, region, plan, parseOsID(s.Answers["os_id"]), label, key)
+	body := map[string]any{"region": region, "plan": plan, "os_id": parseOsID(s.Answers["os_id"])}
+	if label != "" {
+		body["label"] = label
+		body["hostname"] = label
+	}
+	id, err := c.CreateInstance(ctx, body, key)
 	if err != nil {
 		return nil, fmt.Errorf("vultr create: %w", err)
 	}

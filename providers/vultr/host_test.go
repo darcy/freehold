@@ -29,7 +29,10 @@ func stubClientFor(t *testing.T, h http.Handler) {
 func recordingSession(printed *[]string) (*provisioning.HostSession, *[]string) {
 	var scripts []string
 	s := &provisioning.HostSession{
-		Answers:  map[string]string{"VULTR_API_KEY": "tok", "region": "ewr", "plan": "vc2-4c-8gb", "label": "freehold-demo"},
+		// Mirrors production: the guided answers + the world name — the
+		// provider derives the label; no label answer is ever asked.
+		Answers:  map[string]string{"VULTR_API_KEY": "tok", "region": "ewr", "plan": "vc2-4c-8gb"},
+		World:    "demo",
 		DoorLine: "ssh-ed25519 AAA door",
 		Host:     "",
 		ExecOnHost: func(script string, timeoutSecs uint64) error {
@@ -81,6 +84,15 @@ func TestVultrPrepareMintRunsPVEInstall(t *testing.T) {
 			w.Write([]byte(`{"ssh_key":{"id":"k1"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
 			creates++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("create body: %v", err)
+			}
+			// The label is derived from the world (findable in the
+			// console when the stranded-handle recovery points at it).
+			if body["label"] != "freehold-demo" || body["hostname"] != "freehold-demo" {
+				t.Errorf("create body label shape: %v", body)
+			}
 			w.Write([]byte(`{"instance":{"id":"i-9"}}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/instances/i-9"):
 			w.Write([]byte(`{"instance":{"status":"active","main_ip":"203.0.113.9"}}`))

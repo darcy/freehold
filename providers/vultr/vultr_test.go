@@ -49,7 +49,7 @@ func TestCreateInstanceRequiresID(t *testing.T) {
 		w.Write([]byte(`{"instance":{"id":"i-1"}}`))
 	}))
 	defer srv.Close()
-	id, err := c.CreateInstance(context.Background(), "ewr", "vc2-4c-8gb", 0, "freehold-test", "k1")
+	id, err := c.CreateInstance(context.Background(), map[string]any{"region": "ewr", "plan": "vc2-4c-8gb", "label": "freehold-test"}, "k1")
 	if err != nil || id != "i-1" {
 		t.Fatalf("create: id=%q err=%v", id, err)
 	}

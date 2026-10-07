@@ -914,6 +914,7 @@ func buildSession(f *box.Flags, ui *installerUI) (*provisioning.HostSession, err
 		Answers:  answers,
 		DoorLine: line,
 		Host:     f.Host,
+		World:    f.Name,
 	}
 	session.ExecOnHost = func(script string, timeoutSecs uint64) error {
 		ip := strings.TrimPrefix(session.Host, "root@")

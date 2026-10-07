@@ -123,26 +123,20 @@ func (c *Client) EnsureSSHKey(ctx context.Context, name, pubkey string) (string,
 }
 
 // CreateInstance boots a Debian instance with the SSH key authorized at
-// birth, so the door works before any interactive step. Returns the id.
-func (c *Client) CreateInstance(ctx context.Context, region, plan string, osID uint32, label, sshKeyID string) (string, error) {
-	if osID == 0 {
-		osID = DefaultOsID
+// birth, so the door works before any interactive step. body carries the
+// create fields (region/plan/os_id/label…; a 0/absent os_id defaults);
+// returns the id.
+func (c *Client) CreateInstance(ctx context.Context, body map[string]any, sshKeyID string) (string, error) {
+	if v, ok := body["os_id"].(uint32); !ok || v == 0 {
+		body["os_id"] = DefaultOsID
+	}
+	if sshKeyID != "" {
+		body["sshkey_id"] = []string{sshKeyID}
 	}
 	var created struct {
 		Instance struct {
 			ID string `json:"id"`
 		} `json:"instance"`
-	}
-	body := map[string]any{
-		"region":    region,
-		"plan":      plan,
-		"os_id":     osID,
-		"label":     label,
-		"hostname":  label,
-		"enable_ipv6": false,
-	}
-	if sshKeyID != "" {
-		body["sshkey_id"] = []string{sshKeyID}
 	}
 	if err := c.do(ctx, http.MethodPost, "/v2/instances", body, &created); err != nil {
 		return "", err
