@@ -97,11 +97,10 @@ func RunWholeWorldTeardown(cfg *config.Config, configPath string, removeDNS, yes
 	fmt.Printf("  world teardown: %d internal DNS record(s) cleared; the CP + runner are preserved\n", res.DnsRemoved)
 	cfg.Lxc.Relay.Vmid, cfg.Lxc.Relay.Ip = nil, nil
 	cfg.Lxc.K3s.Vmid, cfg.Lxc.K3s.Ip = nil, nil
-	cfg.Lxc.Gateway.Vmid, cfg.Lxc.Gateway.Ip = nil, nil
 	if err := cfg.Save(configPath); err != nil {
 		return err
 	}
-	fmt.Println("cleared recorded relay/k3s/gateway coordinates (vmid + ip) — the next build re-creates them")
+	fmt.Println("cleared recorded relay/k3s coordinates (vmid + ip) — the next build re-creates them")
 	return nil
 }
 

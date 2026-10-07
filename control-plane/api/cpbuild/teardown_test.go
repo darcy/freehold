@@ -1,7 +1,6 @@
 package cpbuild
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -55,51 +54,25 @@ func TestTenantFromName(t *testing.T) {
 	}
 }
 
-// TestWorldTeardownCfgManagesGateway pins the leak fix: the CP-driven teardown
-// manages the gateway too — resolved by name when the spec carries no recorded
-// gateway vmid (an old world-config, or a cross-home re-render) — and destroys
-// it LAST, after the guests it routes for. A host without the guest (flat-LAN
-// world) keeps the relay/k3s scope.
-func TestWorldTeardownCfgManagesGateway(t *testing.T) {
-	newSpec := func(list string) *Spec {
-		s := &Spec{Name: "librem", RelayHost: "relay.librem.example", RelayLxc: 100, K3sVmid: 102}
-		s.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
-			if cmd != "pct list" {
-				return "", fmt.Errorf("unexpected cmd %q", cmd)
-			}
-			return list, nil
-		}
-		return s
-	}
-	withGateway := "VMID Status Name\n" +
-		"100  running librem-relay\n" +
-		"101  running librem-cp\n" +
-		"102  running librem-k3s\n" +
-		"109  running librem-gateway\n"
-	flatLan := "VMID Status Name\n" +
-		"100  running librem-relay\n" +
-		"101  running librem-cp\n" +
-		"102  running librem-k3s\n"
-
-	cfg, err := worldTeardownCfg(newSpec(withGateway))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(cfg.Managed, []string{"relay", "k3s", "gateway"}) {
-		t.Fatalf("managed = %v, want [relay k3s gateway] (the gateway destroyed last)", cfg.Managed)
-	}
-	if gw := cfg.Vmid["gateway"]; gw == nil || *gw != 109 {
-		t.Fatalf("gateway vmid = %v, want 109 (adopted by name from a record-blind spec)", gw)
-	}
-
-	cfg, err = worldTeardownCfg(newSpec(flatLan))
-	if err != nil {
-		t.Fatal(err)
-	}
+// TestWorldTeardownCfgKeepsGateway pins the CP-driven teardown's scope: relay
+// + k3s go; the CP, its co-located runner, and the GATEWAY stay — the gateway
+// is the preserved CP's default route, DNS resolver, and box→console path
+// (nothing CP-side can re-create it), so even a spec carrying a resolved
+// gateway vmid must not widen the managed set. The gateway drops with
+// `uninstall`, which adopts it by name on the box side.
+func TestWorldTeardownCfgKeepsGateway(t *testing.T) {
+	spec := &Spec{Name: "librem", RelayHost: "relay.librem.example", RelayLxc: 100, K3sVmid: 102, GatewayLxc: 109}
+	cfg := worldTeardownCfg(spec)
 	if !slices.Equal(cfg.Managed, []string{"relay", "k3s"}) {
-		t.Fatalf("flat-LAN managed = %v, want [relay k3s]", cfg.Managed)
+		t.Fatalf("managed = %v, want [relay k3s] (the preserved CP's route/resolver/access path survives)", cfg.Managed)
 	}
 	if gw, ok := cfg.Vmid["gateway"]; ok {
-		t.Fatalf("flat-LAN vmid map carries gateway = %v, want absent", gw)
+		t.Fatalf("vmid map carries gateway = %v, want absent (teardown keeps the gateway)", gw)
+	}
+	if got := cfg.Vmid["relay"]; got == nil || *got != 100 {
+		t.Fatalf("relay vmid = %v, want 100", got)
+	}
+	if got := cfg.Vmid["k3s"]; got == nil || *got != 102 {
+		t.Fatalf("k3s vmid = %v, want 102", got)
 	}
 }
