@@ -53,6 +53,11 @@ type HostSession struct {
 	// handle before surfacing the failure, so the stranded instance is
 	// always recoverable by tooling.
 	CreatedID string
+	// OnCreated fires the instant the create succeeds (CreatedID set) —
+	// the caller persists the handle HERE, not after Prepare returns: a
+	// process killed mid-prepare (a tool timeout, a crash) must not leave
+	// a billed instance no tooling can see.
+	OnCreated func(id string)
 	// ExecOnHost runs a script on the session's host over the DOOR key
 	// (the installer wires root SSH; ExecOnHost fails when the host does
 	// not answer). Never carries secrets other than the door key.

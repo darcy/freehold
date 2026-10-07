@@ -143,8 +143,11 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 		}
 		// The handle rides the session NOW — every later step can fail, and
 		// a billed instance with an unrecorded id is the one unrecoverable
-		// state.
+		// state. The callback persists it the same instant.
 		s.CreatedID = id
+		if s.OnCreated != nil {
+			s.OnCreated(id)
+		}
 		s.Print("  instance %s — waiting for an address…\n", id)
 		ip, werr := c.WaitActive(ctx, id, 8*time.Minute)
 		if werr != nil {

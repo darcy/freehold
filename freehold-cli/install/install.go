@@ -950,6 +950,17 @@ func buildSession(f *box.Flags, ui *installerUI) (*provisioning.HostSession, err
 		}
 		return nil
 	}
+	// The handle persists the INSTANT the create succeeds — a process
+	// killed mid-prepare (a tool timeout, a crash) must not leave a billed
+	// instance no tooling can see.
+	session.OnCreated = func(id string) {
+		f.HostID = id
+		if rerr := recordHostHandle(f, &provisioning.Host{ID: id}, uiOut(ui)); rerr != nil {
+			fmt.Fprintf(uiOut(ui), "  (the instance %s is LIVE AND BILLING and its handle could not be recorded: %v — note the id by hand)\n", id, rerr)
+		} else {
+			fmt.Fprintf(uiOut(ui), "  recorded: %s host %s (the handle survives a mid-install death)\n", f.Provider, id)
+		}
+	}
 	session.Print = func(format string, args ...any) { fmt.Fprintf(uiOut(ui), format, args...) }
 	if ui != nil {
 		session.Prompt = ui.Prompt
