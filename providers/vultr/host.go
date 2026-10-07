@@ -95,11 +95,11 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 	}
 
 	region, plan := s.Answers["region"], s.Answers["plan"]
-	// The instance label: the world's name — an unlabelled instance is
-	// unfindable in the console when the stranded-handle recovery points
-	// the operator at it.
-	label := s.Answers["label"]
-	if label == "" && s.World != "" {
+	// The instance label derives from the world's name — an unlabelled
+	// instance is unfindable in the console when the stranded-handle
+	// recovery points the operator at it.
+	label := ""
+	if s.World != "" {
 		label = "freehold-" + s.World
 	}
 	key, err := c.EnsureSSHKey(ctx, "freehold-door", s.DoorLine)

@@ -443,6 +443,12 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	}
 
 	hostDef := needDefault(prov, provisioning.NeedHost, recorded, seedHost, flags.Host)
+	if hostDef == "" || hostDef == needDefault(prov, provisioning.NeedHost, recorded, seedHost, "") {
+		// --host-answer host= seeds the ask the same way --host does.
+		if v := flags.HostAnswers[provisioning.NeedHost]; v != "" {
+			hostDef = v
+		}
+	}
 	relayDef, cpDef, proxyDef := "", "", ""
 	if seed != nil {
 		relayDef, cpDef = seed.RelayHost(), seed.CPHost()
@@ -845,10 +851,18 @@ func missingAnswers(prov provisioning.HostProvider, f *box.Flags) []string {
 	for _, need := range prov.Needs() {
 		switch need.Name {
 		case provisioning.NeedHost:
+			// The advertised --host-answer forms work: an explicit answer
+			// maps onto the core flag when the flag itself is unset.
+			if f.Host == "" && f.HostAnswers[need.Name] != "" {
+				f.Host = f.HostAnswers[need.Name]
+			}
 			if f.Host == "" {
 				missing = append(missing, "--host (or --host-answer host=…)")
 			}
 		case provisioning.NeedProxyIP:
+			if f.ProxyIP == "" && f.HostAnswers[need.Name] != "" {
+				f.ProxyIP = f.HostAnswers[need.Name]
+			}
 			if f.ProxyIP == "" {
 				missing = append(missing, "--proxy-ip (or --host-answer proxy_ip=…)")
 			}
