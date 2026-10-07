@@ -103,7 +103,7 @@ LP
   # the apply/restart above are best-effort (the addon re-asserts via the
   # manifest); VERIFY the active config so a silently-broken carve-out is a
   # LOUD bring-up failure, not unbacked PVs discovered by a later migration.
-  $K get cm local-path-config -n kube-system -o jsonpath='{.data.config\.json}' 2>/dev/null | grep -q /srv/data/k8s-volumes \
+  $K get cm local-path-config -n kube-system -o jsonpath="{.data.config\.json}" 2>/dev/null | grep -q /srv/data/k8s-volumes \
     || { echo "FATAL: the active local-path provisioner config does not pin /srv/data/k8s-volumes - PVs would land unbacked on the rootfs"; exit 1; }
 '
 echo "k3s bring-up reconciled"
