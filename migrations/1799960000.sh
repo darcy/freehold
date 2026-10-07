@@ -145,13 +145,40 @@ assert_durable() { # ns claim
 }
 
 # provisioner_ok: the carve-out is only real if the provisioner's ACTIVE
-# config pins it — k3s's Addon controller re-applies the bundled
-# local-storage.yaml (default paths) and stomps a bare configmap apply back.
-# A swap under a default-root provisioner just re-binds the rootfs; refuse
-# to churn until the carve-out is actually in force (the retry re-runs).
+# config pins it — the k3s Addon controller owns the configmap and re-applies
+# the bundled local-storage.yaml (default paths) on its own sync.
 provisioner_ok() {
   kubectl get cm local-path-config -n kube-system -o jsonpath='{.data.config\.json}' 2>/dev/null | grep -q "$DURABLE"
 }
+
+# heal_provisioner: re-apply the carve-out + restart the provisioner when the
+# active config lost it (the Addon stomp). The migration can do this itself —
+# it is all kubectl — and must: a swap under a default-root provisioner just
+# re-binds the rootfs. Idempotent; runs once per retry at most.
+heal_provisioner() {
+  provisioner_ok && return 0
+  echo "the local-path carve-out is not in force — re-applying it (+ provisioner restart)"
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: kube-system
+data:
+  config.json: |-
+    { "nodePathMap": [ { "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES", "paths": ["/srv/data/k8s-volumes"] } ] }
+EOF
+  kubectl rollout restart deploy/local-path-provisioner -n kube-system >/dev/null 2>&1 || true
+  sleep 5
+  provisioner_ok && return 0
+  echo "FATAL: the carve-out is still not in force after a re-apply - the bundled local-storage.yaml must carry the carve-out so the Addon stomp enforces it instead of the default; fix that before this migration can swap anything"
+  exit 1
+}
+
+# trust_capture: a capture is the safety net ONLY if it is a whole, valid
+# gzip - a mid-dump kill leaves a truncated file that passes a size check
+# and would then be trusted over the live db.
+trust_capture() { [ -s "$1" ] && gzip -t "$1" 2>/dev/null; }
 
 # ---- litellm-pg-data: pg_dump -> swap -> restore ---------------------------
 
@@ -172,7 +199,7 @@ finish_pg() { # pod — restore from the capture if one is owed, verify the rest
   # verified marker — not the count — gates the re-restore; --clean makes the
   # re-restore over a partial converge, and the marker lands only after the
   # count verifies.
-  if [ -s "$CAP_PG" ] && [ ! -f "$CAP_PG.done" ]; then
+  if trust_capture "$CAP_PG" && [ ! -f "$CAP_PG.done" ]; then
     echo "restoring litellm-pg-data from $CAP_PG"
     gunzip -c "$CAP_PG" | kubectl exec -i -n "$NS" "$pod" -- psql -U llmproxy -d litellm -v ON_ERROR_STOP=1 --quiet
     tables=$(kubectl exec -n "$NS" "$pod" -- psql -U llmproxy -d litellm -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='public'")
@@ -185,45 +212,65 @@ finish_pg() { # pod — restore from the capture if one is owed, verify the rest
 }
 
 if claim_exists "$NS" "$CLAIM"; then
-  PPATH=$(pv_path_of "$(pv_of "$NS" "$CLAIM")")
-  case "$PPATH" in
-    "$DURABLE"/*) echo "litellm-pg-data: already on $PPATH";;
-    *)
-      # capture FIRST — the dump on the CP's durable plane is the safety net.
-      # A SURVIVING capture is the pre-swap data and outranks the live db
-      # (a prior run already swapped: what's running now is the emptied
-      # volume — re-capturing it would overwrite the safety net with
-      # nothing). Only a first-ever run captures. --clean: a re-restore
-      # over a PARTIAL prior restore drops and rebuilds instead of erroring,
-      # so the retry converges instead of trusting half a database.
-      if [ -s "$CAP_PG" ]; then
-        echo "litellm-pg-data: capture survives ($CAP_PG) — the pre-swap data; not re-capturing"
-      else
-        # capture needs a pod; a prior run's wait_gone timeout may have left none
-        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-          echo "litellm-pg-data: no pod to capture from — bringing one up"
-          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+  PV=$(pv_of "$NS" "$CLAIM")
+  PPATH=""
+  if [ -n "$PV" ]; then
+    PPATH=$(pv_path_of "$PV")
+  fi
+  if [ -z "$PPATH" ]; then
+    # UNBOUND: a prior run died between the PVC create and its first
+    # consumer. No volume = no data at risk — bring the consumer up so the
+    # claim binds, then finish from the capture.
+    echo "litellm-pg-data: claim unbound — bringing the consumer up to bind it"
+    heal_provisioner
+    POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
+    finish_pg "$POD"
+    assert_durable "$NS" "$CLAIM"
+  else
+    case "$PPATH" in
+      "$DURABLE"/*) echo "litellm-pg-data: already on $PPATH";;
+      *)
+        # capture FIRST — the dump on the CP's durable plane is the safety
+        # net. A SURVIVING VALID capture is the pre-swap data and outranks
+        # the live db (a prior run already swapped: what runs now is the
+        # emptied volume — re-capturing would overwrite the safety net with
+        # nothing). A PARTIAL/CORRUPT capture (a mid-dump kill) is discarded
+        # and re-captured: the claim is still pre-swap, so the live data is
+        # intact. --clean: a re-restore over a PARTIAL prior restore drops
+        # and rebuilds instead of erroring, so the retry converges instead
+        # of trusting half a database.
+        if trust_capture "$CAP_PG"; then
+          echo "litellm-pg-data: capture survives ($CAP_PG) — the pre-swap data; not re-capturing"
+        else
+          [ -e "$CAP_PG" ] && { rm -f "$CAP_PG"; echo "litellm-pg-data: discarding a partial/corrupt capture — re-capturing from the live db (still pre-swap)"; }
+          # capture needs a pod; a prior run's wait_gone timeout may have left none
+          if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+            echo "litellm-pg-data: no pod to capture from — bringing one up"
+            ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+          fi
+          POD=$(first_pod "$NS" "$SEL")
+          kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG"
+          trust_capture "$CAP_PG" || { echo "FATAL: pg capture failed ($CAP_PG)"; exit 1; }
+          echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
         fi
-        POD=$(first_pod "$NS" "$SEL")
-        kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG"
-        [ -s "$CAP_PG" ] && gzip -t "$CAP_PG" || { echo "FATAL: pg capture failed ($CAP_PG)"; exit 1; }
-        echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
-      fi
-      provisioner_ok || { echo "FATAL: the local-path provisioner's active config does not pin $DURABLE — a swap would re-bind the rootfs; fix the carve-out first (k3s-bringup re-runs on the next build)"; exit 1; }
-      kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
-      wait_gone "$NS" "$SEL"
-      swap_claim "$NS" "$CLAIM"
-      ;;
-  esac
-  POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
-  finish_pg "$POD"
-  assert_durable "$NS" "$CLAIM"
-elif [ -s "$CAP_PG" ]; then
+        heal_provisioner
+        kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
+        wait_gone "$NS" "$SEL"
+        swap_claim "$NS" "$CLAIM"
+        ;;
+    esac
+    POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
+    finish_pg "$POD"
+    assert_durable "$NS" "$CLAIM"
+  fi
+elif trust_capture "$CAP_PG"; then
   echo "litellm-pg-data: claim absent but a capture survives — a prior run died mid-swap; recreating"
   recreate_claim "$NS" "$CLAIM" "$SIZE"
   POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
   finish_pg "$POD"
   assert_durable "$NS" "$CLAIM"
+elif [ -e "$CAP_PG" ]; then
+  echo "FATAL: litellm-pg-data's claim is gone and its capture is corrupt — no recoverable copy exists"; exit 1
 else
   echo "litellm-pg-data: claim absent and no capture — nothing to do"
 fi
@@ -269,41 +316,60 @@ EOF
 }
 
 if claim_exists "$NS" "$CLAIM"; then
-  PPATH=$(pv_path_of "$(pv_of "$NS" "$CLAIM")")
-  case "$PPATH" in
-    "$DURABLE"/*) echo "caddy-data: already on $PPATH";;
-    *)
-      # A SURVIVING capture is the pre-swap data and outranks the live
-      # /data (a prior run already swapped; re-capturing would overwrite
-      # the safety net with the emptied volume). Only a first-ever run
-      # captures.
-      if [ -s "$CAP_CADDY" ]; then
-        echo "caddy-data: capture survives ($CAP_CADDY) — the pre-swap data; not re-capturing"
-      else
-        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-          echo "caddy-data: no pod to capture from — bringing one up"
-          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+  PV=$(pv_of "$NS" "$CLAIM")
+  PPATH=""
+  if [ -n "$PV" ]; then
+    PPATH=$(pv_path_of "$PV")
+  fi
+  if [ -z "$PPATH" ]; then
+    # UNBOUND: a prior run died between the PVC create and its first
+    # consumer. No volume = no data at risk — bind it and finish from the
+    # capture.
+    echo "caddy-data: claim unbound — bringing the consumer up to bind it"
+    heal_provisioner
+    write_back_caddy
+    ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+    assert_durable "$NS" "$CLAIM"
+  else
+    case "$PPATH" in
+      "$DURABLE"/*) echo "caddy-data: already on $PPATH";;
+      *)
+        # A SURVIVING VALID capture is the pre-swap data and outranks the
+        # live /data (a prior run already swapped; re-capturing would
+        # overwrite the safety net with the emptied volume). A PARTIAL/
+        # CORRUPT capture is discarded and re-captured (the claim is still
+        # pre-swap; the caddy-edge mirror is a second resort).
+        if trust_capture "$CAP_CADDY"; then
+          echo "caddy-data: capture survives ($CAP_CADDY) — the pre-swap data; not re-capturing"
+        else
+          [ -e "$CAP_CADDY" ] && { rm -f "$CAP_CADDY"; echo "caddy-data: discarding a partial/corrupt capture — re-capturing from the live /data (still pre-swap)"; }
+          if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+            echo "caddy-data: no pod to capture from — bringing one up"
+            ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+          fi
+          POD=$(first_pod "$NS" "$SEL")
+          kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY"
+          trust_capture "$CAP_CADDY" || { echo "FATAL: caddy capture failed ($CAP_CADDY)"; exit 1; }
+          echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY"
         fi
-        POD=$(first_pod "$NS" "$SEL")
-        kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY"
-        [ -s "$CAP_CADDY" ] && gzip -t "$CAP_CADDY" || { echo "FATAL: caddy capture failed ($CAP_CADDY)"; exit 1; }
-        echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY"
-      fi
-      provisioner_ok || { echo "FATAL: the local-path provisioner's active config does not pin $DURABLE — a swap would re-bind the rootfs; fix the carve-out first (k3s-bringup re-runs on the next build)"; exit 1; }
-      kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
-      wait_gone "$NS" "$SEL"
-      swap_claim "$NS" "$CLAIM"
-      ;;
-  esac
-  write_back_caddy
-  ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
-  assert_durable "$NS" "$CLAIM"
-elif [ -s "$CAP_CADDY" ]; then
+        heal_provisioner
+        kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
+        wait_gone "$NS" "$SEL"
+        swap_claim "$NS" "$CLAIM"
+        ;;
+    esac
+    write_back_caddy
+    ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
+    assert_durable "$NS" "$CLAIM"
+  fi
+elif trust_capture "$CAP_CADDY"; then
   echo "caddy-data: claim absent but a capture survives — a prior run died mid-swap; recreating"
   recreate_claim "$NS" "$CLAIM" "$SIZE"
   write_back_caddy
   ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
   assert_durable "$NS" "$CLAIM"
+elif [ -e "$CAP_CADDY" ]; then
+  echo "FATAL: caddy-data's claim is gone and its capture is corrupt — no recoverable copy exists"; exit 1
 else
   echo "caddy-data: claim absent and no capture — nothing to do"
 fi
