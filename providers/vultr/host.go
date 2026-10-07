@@ -32,7 +32,7 @@ func (HostProvider) HostsGateway() bool { return true }
 func (HostProvider) Needs() []provisioning.HostNeed {
 	return []provisioning.HostNeed{
 		{Name: "VULTR_API_KEY", Label: "Vultr API key (used for this install; never stored)", Secret: true},
-		{Name: "region", Label: "Vultr region", Default: DefaultRegion},
+		{Name: "region", Label: "Vultr region (the datacenter id — ewr, lax, ams, …)", Default: DefaultRegion},
 		{Name: "plan", Label: "Vultr plan (the whole world lives on this host)", Default: DefaultPlan},
 		{Name: "os_id", Label: "Vultr os_id (Debian release)", Default: fmt.Sprintf("%d", DefaultOsID)},
 	}
@@ -94,7 +94,16 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 		}
 	}
 
-	region, plan := s.Answers["region"], s.Answers["plan"]
+	region, plan := strings.ToLower(strings.TrimSpace(s.Answers["region"])), strings.TrimSpace(s.Answers["plan"])
+	// The ask is free-text — validate against the API's own catalog before
+	// spending anything: a continent group name ("AMER") or a typo'd plan
+	// is a 400 "Invalid datacenter." deep in the create otherwise.
+	if bad := checkIn(ctx, c, "region", region, c.Regions); bad != "" {
+		return nil, fmt.Errorf("%s", bad)
+	}
+	if bad := checkIn(ctx, c, "plan", plan, c.Plans); bad != "" {
+		return nil, fmt.Errorf("%s", bad)
+	}
 	// The instance label derives from the world's name — an unlabelled
 	// instance is unfindable in the console when the stranded-handle
 	// recovery points the operator at it.
@@ -200,4 +209,25 @@ func parseOsID(s string) uint32 {
 		return DefaultOsID
 	}
 	return n
+}
+
+// checkIn validates a free-text create field against the API's own catalog
+// (Regions/Plans): a wrong answer is an actionable error naming the valid
+// set, never a 400 deep in the create call. "" = valid.
+func checkIn(ctx context.Context, c *Client, what, want string, list func(context.Context) ([]string, error)) string {
+	if want == "" {
+		return what + " is empty — the guided flow's default (or --host-answer " + what + "=…) supplies it"
+	}
+	got, err := list(ctx)
+	if err != nil {
+		// The catalog is unreachable (a local network hiccup, a rate
+		// limit) — not the operator's mistake; let the create try anyway.
+		return ""
+	}
+	for _, id := range got {
+		if id == want {
+			return ""
+		}
+	}
+	return fmt.Sprintf("invalid vultr %s %q — the API knows: %s", what, want, strings.Join(got, ", "))
 }

@@ -162,6 +162,43 @@ func (c *Client) Instance(ctx context.Context, id string) (status, ip string, er
 	return got.Instance.Status, got.Instance.MainIP, nil
 }
 
+// Regions lists the valid datacenter ids (lowercase: ewr, lax, …). The
+// region ask is free-text; the create 400s ("Invalid datacenter.") on a
+// continent group name — the API's own list is the authority.
+func (c *Client) Regions(ctx context.Context) ([]string, error) {
+	var got struct {
+		Regions []struct {
+			ID   string `json:"id"`
+			City string `json:"city"`
+		} `json:"regions"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v2/regions?per_page=500", nil, &got); err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, r := range got.Regions {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
+}
+
+// Plans lists the valid plan ids (vc2-…, voc-…, …).
+func (c *Client) Plans(ctx context.Context) ([]string, error) {
+	var got struct {
+		Plans []struct {
+			ID string `json:"id"`
+		} `json:"plans"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v2/plans?per_page=500", nil, &got); err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, p := range got.Plans {
+		ids = append(ids, p.ID)
+	}
+	return ids, nil
+}
+
 // WaitActive polls until the instance is active AND its IPv4 is assigned
 // (Vultr reports 0.0.0.0 until the IP lands). Returns the main IP.
 func (c *Client) WaitActive(ctx context.Context, id string, timeout time.Duration) (string, error) {

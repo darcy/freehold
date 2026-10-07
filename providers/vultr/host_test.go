@@ -81,7 +81,21 @@ func TestVultrPrepareMintRunsPVEInstall(t *testing.T) {
 		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodGet:
 			w.Write([]byte(`{"ssh_keys":[]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/ssh-keys":
+			// Pin the WIRE SHAPE: Vultr's create takes the key as
+			// `ssh_key` (the field its own list decode reads) — a wrong
+			// field passes hermetic stubs and 400s against the real API.
+			var kb map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&kb); err != nil {
+				t.Errorf("ssh-key create body: %v", err)
+			}
+			if kb["ssh_key"] != "ssh-ed25519 AAA door" || kb["name"] == "" {
+				t.Errorf("ssh-key create body shape: %v", kb)
+			}
 			w.Write([]byte(`{"ssh_key":{"id":"k1"}}`))
+		case r.URL.Path == "/v2/regions":
+			w.Write([]byte(`{"regions":[{"id":"ewr"},{"id":"lax"}]}`))
+		case r.URL.Path == "/v2/plans":
+			w.Write([]byte(`{"plans":[{"id":"vc2-4c-8gb"}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
 			creates++
 			var body map[string]any
@@ -182,10 +196,19 @@ func TestVultrPreparePostCreateFailureCarriesHandle(t *testing.T) {
 				t.Errorf("ssh-key create body shape: %v", body)
 			}
 			w.Write([]byte(`{"ssh_key":{"id":"k1"}}`))
+		case r.URL.Path == "/v2/regions":
+			// The catalog the create validates against.
+			w.Write([]byte(`{"regions":[{"id":"ewr","city":"New Jersey"},{"id":"lax","city":"Los Angeles"}]}`))
+		case r.URL.Path == "/v2/plans":
+			w.Write([]byte(`{"plans":[{"id":"vc2-4c-8gb"},{"id":"voc-m-1c-8gb-50s"}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
 			w.Write([]byte(`{"instance":{"id":"i-stranded"}}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/instances/i-stranded"):
 			w.Write([]byte(`{"instance":{"status":"active","main_ip":"203.0.113.11"}}`))
+		case r.URL.Path == "/v2/regions":
+			w.Write([]byte(`{"regions":[{"id":"ewr"}]}`))
+		case r.URL.Path == "/v2/plans":
+			w.Write([]byte(`{"plans":[{"id":"vc2-4c-8gb"}]}`))
 		default:
 			// This box's port-watcher probes new listeners with GET /
 			// (observed live) — environment noise, not the client.
@@ -208,6 +231,31 @@ func TestVultrPreparePostCreateFailureCarriesHandle(t *testing.T) {
 	}
 	if s.CreatedID != "i-stranded" {
 		t.Fatalf("the handle must survive the failure: %q", s.CreatedID)
+	}
+}
+
+func TestVultrPrepareValidatesRegionAgainstCatalog(t *testing.T) {
+	// The live-fire finding: a continent group name ("AMER") is not a
+	// datacenter id — the create 400s "Invalid datacenter." deep in the
+	// API. The validation fails BEFORE the create, naming the valid set.
+	stubClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"ssh_keys":[]}`))
+		case r.URL.Path == "/v2/regions":
+			w.Write([]byte(`{"regions":[{"id":"ewr"},{"id":"lax"},{"id":"dfw"}]}`))
+		default:
+			t.Errorf("an invalid region must fail before the create: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	s, scripts := recordingSession(nil)
+	s.Answers["region"] = "AMER"
+	_, err := (HostProvider{}).Prepare(context.Background(), s, "")
+	if err == nil || !strings.Contains(err.Error(), "invalid vultr region") || !strings.Contains(err.Error(), "ewr") {
+		t.Fatalf("the region error must name the valid set: %v", err)
+	}
+	if len(*scripts) != 0 {
+		t.Fatal("no create must be attempted on an invalid region")
 	}
 }
 
