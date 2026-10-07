@@ -22,11 +22,19 @@ func ThinPoolOf(cfg *config.Config) string {
 
 // RemoveManagedDNS deletes the world's freehold-managed RELAY A record on the
 // provider recorded in config.Dns.Manager (teardown --remove-dns). The CP's
-// record is deliberately KEPT: teardown is CP-preserving.
+// record is deliberately KEPT: teardown is CP-preserving. MANUAL DNS never had
+// API access — the operator is told what to delete instead.
 func RemoveManagedDNS(cfg *config.Config) error {
 	m := cfg.Dns.Manager
 	if m == nil || !m.Managed {
 		fmt.Println("  (no freehold-managed DNS recorded — nothing to remove)")
+		return nil
+	}
+	if m.Provider == cert.ManualProviderName {
+		fmt.Println("  manual DNS — delete this record in your DNS console (freehold never had API access):")
+		if h := cfg.RelayHost(); h != "" {
+			fmt.Printf("    %s  A  %s\n", h, m.IP)
+		}
 		return nil
 	}
 	secretHex, err := EncSecretFromDir(filepath.Join(FreeholdHome(), "control-plane", "agent-ops"))
