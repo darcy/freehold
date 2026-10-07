@@ -210,7 +210,7 @@ finish_pg() { # pod — restore from the capture if one is owed, verify the rest
   local i=0
   until kubectl exec -n "$NS" "$pod" -- pg_isready -U llmproxy -q >/dev/null 2>&1; do
     sleep 2; i=$((i + 2))
-    [ "$i" -lt 180 ] || { echo "FATAL: postgres never accepted connections"; exit 1; }
+    [ "$i" -lt 480 ] || { echo "FATAL: postgres never accepted connections"; exit 1; }
   done
   # A capture exists only if THIS migration made one (or a partial run did):
   # no capture means nothing was ever moved here, and a fresh world's empty
