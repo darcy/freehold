@@ -188,11 +188,12 @@ trust_capture() { [ -s "$1" ] && gzip -t "$1" 2>/dev/null; }
 # Payload completeness, not container validity: when the dump STREAM dies
 # mid-flight, gzip still finalizes a VALID gzip of a PARTIAL dump (and
 # pipefail kills the run before any check), so container validity proves
-# nothing. A complete pg_dump ends with a known footer; a complete tar
-# lists fully.
+# nothing. Match the WHOLE stream for the complete-dump footer: a complete
+# plain dump ends "-- PostgreSQL database dump complete" followed by a
+# trailing "--" and a blank line, so the LAST line alone never matches.
 pg_capture_valid() {
   [ -s "$1" ] && gzip -t "$1" 2>/dev/null \
-    && gunzip -c "$1" 2>/dev/null | tail -n 1 | grep -q "PostgreSQL database dump complete"
+    && gunzip -c "$1" 2>/dev/null | grep -q "PostgreSQL database dump complete"
 }
 caddy_capture_valid() { [ -s "$1" ] && tar -tzf "$1" >/dev/null 2>&1; }
 
