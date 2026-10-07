@@ -175,7 +175,11 @@ func TestVultrPreparePostCreateFailureCarriesHandle(t *testing.T) {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/instances/i-stranded"):
 			w.Write([]byte(`{"instance":{"status":"active","main_ip":"203.0.113.11"}}`))
 		default:
-			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+			// This box's port-watcher probes new listeners with GET /
+			// (observed live) — environment noise, not the client.
+			if r.Method != http.MethodGet || r.URL.Path != "/" {
+				t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+			}
 		}
 	}))
 	s, scripts := recordingSession(nil)
