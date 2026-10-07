@@ -19,15 +19,20 @@ echo "Migrate pre-carve-out local-path PVs onto the durable plane"
 # The captures stay on the CP's durable plane as the permanent safety net.
 # Every step is retry-safe from ANY kill point (the queue's own timeout kills
 # a slow-but-healthy run; the next bring-up resumes it):
-#   - the capture re-runs while the claim is still on the rootfs (data
-#     intact), bringing the deployment up first if a prior run left it down;
-#   - a claim ABSENT with a capture present is a run that died between the
+#   - the capture ALWAYS re-runs while the claim is still on the rootfs (the
+#     live db is provably at least as fresh as any surviving capture — and
+#     one left by a run that died before scale-0 is stale), to a temp file
+#     moved atomically after payload validation, so a failed/killed
+#     re-capture never truncates the surviving net;
+#   - a claim ABSENT with a valid capture is a run that died between the
 #     PVC delete and the recreate — the claim is re-applied at its
 #     terraform-pinned size and the tail finishes from the capture;
 #   - a durable claim finishes its interrupted tail from the surviving
 #     capture: an empty db re-restores (--clean converges a partial), the
 #     caddy capture re-extracts (tar overwrite is idempotent);
-#   - a deployment left at 0 is scaled back up before anything needs a pod.
+#   - a deployment left at 0 is scaled back up before anything needs a pod;
+#   - a claim left UNBOUND (died between create and first consumer) binds
+#     and finishes the same way — no volume means no data at risk.
 # Any OTHER claim stranded outside the carve-out is reported, not touched:
 # it gets its own migration, not a surprise inside this one.
 
@@ -180,6 +185,17 @@ EOF
 # and would then be trusted over the live db.
 trust_capture() { [ -s "$1" ] && gzip -t "$1" 2>/dev/null; }
 
+# Payload completeness, not container validity: when the dump STREAM dies
+# mid-flight, gzip still finalizes a VALID gzip of a PARTIAL dump (and
+# pipefail kills the run before any check), so container validity proves
+# nothing. A complete pg_dump ends with a known footer; a complete tar
+# lists fully.
+pg_capture_valid() {
+  [ -s "$1" ] && gzip -t "$1" 2>/dev/null \
+    && gunzip -c "$1" 2>/dev/null | tail -n 1 | grep -q "PostgreSQL database dump complete"
+}
+caddy_capture_valid() { [ -s "$1" ] && tar -tzf "$1" >/dev/null 2>&1; }
+
 # ---- litellm-pg-data: pg_dump -> swap -> restore ---------------------------
 
 NS=litellm; CLAIM=litellm-pg-data; SEL=app=postgres; DEPLOY=postgres; SIZE=10Gi
@@ -199,7 +215,7 @@ finish_pg() { # pod — restore from the capture if one is owed, verify the rest
   # verified marker — not the count — gates the re-restore; --clean makes the
   # re-restore over a partial converge, and the marker lands only after the
   # count verifies.
-  if trust_capture "$CAP_PG" && [ ! -f "$CAP_PG.done" ]; then
+  if pg_capture_valid "$CAP_PG" && [ ! -f "$CAP_PG.done" ]; then
     echo "restoring litellm-pg-data from $CAP_PG"
     gunzip -c "$CAP_PG" | kubectl exec -i -n "$NS" "$pod" -- psql -U llmproxy -d litellm -v ON_ERROR_STOP=1 --quiet
     tables=$(kubectl exec -n "$NS" "$pod" -- psql -U llmproxy -d litellm -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='public'")
@@ -231,28 +247,28 @@ if claim_exists "$NS" "$CLAIM"; then
       "$DURABLE"/*) echo "litellm-pg-data: already on $PPATH";;
       *)
         # capture FIRST — the dump on the CP's durable plane is the safety
-        # net. A SURVIVING VALID capture is the pre-swap data and outranks
-        # the live db (a prior run already swapped: what runs now is the
-        # emptied volume — re-capturing would overwrite the safety net with
-        # nothing). A PARTIAL/CORRUPT capture (a mid-dump kill) is discarded
-        # and re-captured: the claim is still pre-swap, so the live data is
-        # intact. --clean: a re-restore over a PARTIAL prior restore drops
-        # and rebuilds instead of erroring, so the retry converges instead
-        # of trusting half a database.
-        if trust_capture "$CAP_PG"; then
-          echo "litellm-pg-data: capture survives ($CAP_PG) — the pre-swap data; not re-capturing"
-        else
-          [ -e "$CAP_PG" ] && { rm -f "$CAP_PG"; echo "litellm-pg-data: discarding a partial/corrupt capture — re-capturing from the live db (still pre-swap)"; }
-          # capture needs a pod; a prior run's wait_gone timeout may have left none
-          if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-            echo "litellm-pg-data: no pod to capture from — bringing one up"
-            ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
-          fi
-          POD=$(first_pod "$NS" "$SEL")
-          kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG"
-          trust_capture "$CAP_PG" || { echo "FATAL: pg capture failed ($CAP_PG)"; exit 1; }
-          echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
+        # net. This branch is the claim PROVABLY still on its pre-swap
+        # rootfs volume (a completed swap binds under $DURABLE and lands in
+        # the durable case), so the live db is always at least as fresh as
+        # any surviving capture — and one left by a run that died BEFORE
+        # scale-0 (the heal FATAL) is stale while the world keeps writing.
+        # ALWAYS re-capture here, to a temp file moved atomically: a
+        # failed/killed re-capture must never truncate the surviving net.
+        # --clean: a re-restore over a PARTIAL prior restore drops and
+        # rebuilds instead of erroring.
+        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+          echo "litellm-pg-data: no pod to capture from — bringing one up"
+          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
         fi
+        POD=$(first_pod "$NS" "$SEL")
+        kubectl exec -n "$NS" "$POD" -- pg_dump --clean --if-exists -U llmproxy -d litellm | gzip > "$CAP_PG.tmp"
+        if ! pg_capture_valid "$CAP_PG.tmp"; then
+          rm -f "$CAP_PG.tmp"
+          echo "FATAL: pg capture failed payload validation (the partial was discarded; any prior net survives) — the claim was not touched"
+          exit 1
+        fi
+        mv -f "$CAP_PG.tmp" "$CAP_PG"
+        echo "captured $(du -h "$CAP_PG" | cut -f1) -> $CAP_PG"
         heal_provisioner
         kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
         wait_gone "$NS" "$SEL"
@@ -263,14 +279,14 @@ if claim_exists "$NS" "$CLAIM"; then
     finish_pg "$POD"
     assert_durable "$NS" "$CLAIM"
   fi
-elif trust_capture "$CAP_PG"; then
+elif pg_capture_valid "$CAP_PG"; then
   echo "litellm-pg-data: claim absent but a capture survives — a prior run died mid-swap; recreating"
   recreate_claim "$NS" "$CLAIM" "$SIZE"
   POD=$(ensure_up "$NS" "$DEPLOY" "$SEL")
   finish_pg "$POD"
   assert_durable "$NS" "$CLAIM"
 elif [ -e "$CAP_PG" ]; then
-  echo "FATAL: litellm-pg-data's claim is gone and its capture is corrupt — no recoverable copy exists"; exit 1
+  echo "FATAL: litellm-pg-data's claim is gone and its capture is not a complete dump — no recoverable copy exists"; exit 1
 else
   echo "litellm-pg-data: claim absent and no capture — nothing to do"
 fi
@@ -334,24 +350,23 @@ if claim_exists "$NS" "$CLAIM"; then
     case "$PPATH" in
       "$DURABLE"/*) echo "caddy-data: already on $PPATH";;
       *)
-        # A SURVIVING VALID capture is the pre-swap data and outranks the
-        # live /data (a prior run already swapped; re-capturing would
-        # overwrite the safety net with the emptied volume). A PARTIAL/
-        # CORRUPT capture is discarded and re-captured (the claim is still
-        # pre-swap; the caddy-edge mirror is a second resort).
-        if trust_capture "$CAP_CADDY"; then
-          echo "caddy-data: capture survives ($CAP_CADDY) — the pre-swap data; not re-capturing"
-        else
-          [ -e "$CAP_CADDY" ] && { rm -f "$CAP_CADDY"; echo "caddy-data: discarding a partial/corrupt capture — re-capturing from the live /data (still pre-swap)"; }
-          if [ -z "$(pod_names "$NS" "$SEL")" ]; then
-            echo "caddy-data: no pod to capture from — bringing one up"
-            ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
-          fi
-          POD=$(first_pod "$NS" "$SEL")
-          kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY"
-          trust_capture "$CAP_CADDY" || { echo "FATAL: caddy capture failed ($CAP_CADDY)"; exit 1; }
-          echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY"
+        # ALWAYS re-capture here — same reasoning as the pg branch: this is
+        # the claim provably still pre-swap, so the live /data is at least
+        # as fresh as any surviving capture. Atomic temp+move; payload
+        # completeness (tar -tzf), not just container validity.
+        if [ -z "$(pod_names "$NS" "$SEL")" ]; then
+          echo "caddy-data: no pod to capture from — bringing one up"
+          ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
         fi
+        POD=$(first_pod "$NS" "$SEL")
+        kubectl exec -n "$NS" "$POD" -- tar -czf - -C /data . > "$CAP_CADDY.tmp"
+        if ! caddy_capture_valid "$CAP_CADDY.tmp"; then
+          rm -f "$CAP_CADDY.tmp"
+          echo "FATAL: caddy capture failed payload validation (the partial was discarded; any prior net survives; the caddy-edge mirror is a second resort) — the claim was not touched"
+          exit 1
+        fi
+        mv -f "$CAP_CADDY.tmp" "$CAP_CADDY"
+        echo "captured $(du -h "$CAP_CADDY" | cut -f1) -> $CAP_CADDY"
         heal_provisioner
         kubectl scale deploy "$DEPLOY" -n "$NS" --replicas=0
         wait_gone "$NS" "$SEL"
@@ -362,14 +377,14 @@ if claim_exists "$NS" "$CLAIM"; then
     ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
     assert_durable "$NS" "$CLAIM"
   fi
-elif trust_capture "$CAP_CADDY"; then
+elif caddy_capture_valid "$CAP_CADDY"; then
   echo "caddy-data: claim absent but a capture survives — a prior run died mid-swap; recreating"
   recreate_claim "$NS" "$CLAIM" "$SIZE"
   write_back_caddy
   ensure_up "$NS" "$DEPLOY" "$SEL" >/dev/null
   assert_durable "$NS" "$CLAIM"
 elif [ -e "$CAP_CADDY" ]; then
-  echo "FATAL: caddy-data's claim is gone and its capture is corrupt — no recoverable copy exists"; exit 1
+  echo "FATAL: caddy-data's claim is gone and its capture is not a complete archive — no recoverable copy exists"; exit 1
 else
   echo "caddy-data: claim absent and no capture — nothing to do"
 fi
