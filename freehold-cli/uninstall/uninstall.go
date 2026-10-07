@@ -55,9 +55,36 @@ var uninstallCmd = &cobra.Command{
 		if cfg == nil {
 			return fmt.Errorf("no config at %s", configPath)
 		}
-		host, verr := resolveUninstall(cfg, hostFlag)
+		host, verr := resolveUninstall(cfg, hostFlag, destroyHost)
 		if verr != nil {
 			return verr
+		}
+		// --destroy-host on a created-host world: the host dies with
+		// everything on it, so the world teardown is best-effort. The
+		// gates BELOW assume a fully-built world (a recorded CP vmid, a
+		// RUNNING serve) — a half-installed world has neither, and
+		// stopping the bill needs the API, never host access. So: the
+		// teardown rides ONLY when the serve actually answers; otherwise
+		// the destroy runs straight.
+		if destroyHost && cfg.HostProvider.ID != "" {
+			serveAlive := cfg.Runner.Addr != "" && cfg.Runner.Pubkey != "" && serveAlive(cfg)
+			if serveAlive {
+				if err := runUninstall(cfg, configPath, host, removeData, false); err != nil {
+					fmt.Printf("  (the world teardown failed — destroying the host anyway: %v)\n", err)
+				}
+			} else {
+				fmt.Println("  no world to tear down (a half-installed host, or the runner is not serving) — destroying the instance directly; the API needs no host access")
+			}
+			running, derr := destroyHostViaProvider(cfg, yes, true)
+			if derr != nil {
+				return derr
+			}
+			if !running {
+				wipeLocalProfile(configPath, config.Current())
+			} else {
+				fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
+			}
+			return nil
 		}
 		if !yes {
 			extra := ""
@@ -77,32 +104,6 @@ var uninstallCmd = &cobra.Command{
 			if err := common.ConfirmDestructive("uninstall"); err != nil {
 				return err
 			}
-		}
-		// --destroy-host on a created-host world: the host dies with
-		// everything on it, so the world teardown is best-effort. A
-		// HALF-INSTALLED world (the host was created but the pipeline
-		// never reached deploy-cp — no runner coords, no PVE) or a dead
-		// door goes STRAIGHT to the API destroy: stopping the bill needs
-		// the API, never host access.
-		if destroyHost && cfg.HostProvider.ID != "" {
-			hasWorld := cfg.Runner.Addr != "" && cfg.Runner.Pubkey != ""
-			if hasWorld && doorAlive(cfg, host) {
-				if err := runUninstall(cfg, configPath, host, removeData, false); err != nil {
-					fmt.Printf("  (the world teardown failed — destroying the host anyway: %v)\n", err)
-				}
-			} else {
-				fmt.Println("  no world to tear down (a half-installed host, or the door is dead) — destroying the instance directly; the API needs no host access")
-			}
-			running, derr := destroyHostViaProvider(cfg, yes, true)
-			if derr != nil {
-				return derr
-			}
-			if !running {
-				wipeLocalProfile(configPath, config.Current())
-			} else {
-				fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
-			}
-			return nil
 		}
 		// A default uninstall on a created-host world KEEPS the profile as
 		// the instance's handle — so the box's door + substrate keys stay
@@ -213,13 +214,16 @@ func init() {
 }
 
 // resolveUninstall checks the preconditions and resolves the host for DISPLAY.
-func resolveUninstall(cfg *config.Config, hostFlag string) (string, error) {
+// The recorded CP vmid matters for the teardown path (destroying guests by
+// id); --destroy-host does not need it — the instance's destruction removes
+// the guests wholesale.
+func resolveUninstall(cfg *config.Config, hostFlag string, destroyHost bool) (string, error) {
 	host := cfg.Host
 	if hostFlag != "" {
 		host = hostFlag
 	}
 	if cfg.Runner.Addr != "" && cfg.Runner.Pubkey != "" {
-		if cfg.Lxc.Cp.Vmid == nil {
+		if cfg.Lxc.Cp.Vmid == nil && !destroyHost {
 			return "", fmt.Errorf("uninstall needs the recorded CP LXC vmid (the profile has none — the CP may already be gone; re-install or run `teardown` from the build box)")
 		}
 		return host, nil
@@ -228,6 +232,15 @@ func resolveUninstall(cfg *config.Config, hostFlag string) (string, error) {
 		return "", fmt.Errorf("uninstall needs --host (no local runner and no recorded host to reach the host directly)")
 	}
 	return host, nil
+}
+
+// serveAlive probes the runner's serve quietly — the served-runner path the
+// world teardown drives. A half-installed world has no serve; the teardown
+// cannot run and the destroy goes straight.
+func serveAlive(cfg *config.Config) bool {
+	agentDir := filepath.Join(common.FreeholdHome(), "control-plane", "agent-ops")
+	out, err := common.ExecDirect(cfg.Runner.Addr, agentDir, cfg.Runner.Pubkey, cfg.Runner.Target, "echo freehold-door-ok", []string{cfg.Runner.Target}, 30)
+	return err == nil && out != nil && strings.Contains(out.Stdout, "freehold-door-ok")
 }
 
 // doorAlive quietly probes the box's access to the host (the same probe
