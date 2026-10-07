@@ -452,9 +452,11 @@ func (s *Spec) certExpiryFromDurable(slot string) string {
 // manageDomainDNS upserts the public A records (relay/cp -> proxy) on the CP's
 // stored DNS credential (the server-side home of the box's manageDomainDNS).
 // Best-effort at build time: no edge, no proxy IP, or no stored relay cred is a
-// no-op. It returns a report note for MANUAL DNS — the build has no API
-// access, so the operator is shown the records to create (or confirmation they
-// already resolve); a later build re-checks.
+// no-op. MANUAL DNS returns a report note — the build has no API access, so
+// the operator is shown the records to create (or confirmation they already
+// resolve); a later build re-checks. A provider with no registered Manager
+// (e.g. a full-registry flag-path credential) is skipped with a note — its
+// credential still serves cert DNS-01; only record management is missing.
 func (s *Spec) manageDomainDNS() (string, error) {
 	if s.ProxyIP == "" || s.RelayHost == "" {
 		return "", nil
@@ -466,6 +468,9 @@ func (s *Spec) manageDomainDNS() (string, error) {
 	}
 	if provider == cert.ManualProviderName {
 		return s.manualDNSNote(), nil
+	}
+	if !dnsman.CanManage(provider) {
+		return "DNS: no A-record manager for " + provider + " — skipped (the credential still serves cert DNS-01)", nil
 	}
 	m, err := dnsman.For(provider, env)
 	if err != nil {
