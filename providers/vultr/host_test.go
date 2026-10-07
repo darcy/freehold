@@ -161,8 +161,11 @@ func TestVultrPrepareReAdoptAlive(t *testing.T) {
 	if host.ID != "i-live" || host.IP != "203.0.113.5" {
 		t.Fatalf("host: %+v", host)
 	}
-	if len(*scripts) != 0 {
-		t.Fatalf("a live re-adopt must not re-install PVE: %v", *scripts)
+	// "alive" is not "ready": the re-adopt still runs the (idempotent) PVE
+	// ensure — an installed host short-circuits inside the script. Two
+	// scripts: the sshd probe, then the ensure.
+	if len(*scripts) != 2 || !strings.Contains((*scripts)[1], "pve-install-ok") {
+		t.Fatalf("a live re-adopt must ensure PVE through the transport: %v", *scripts)
 	}
 }
 

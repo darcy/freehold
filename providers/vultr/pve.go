@@ -10,9 +10,14 @@ import "fmt"
 // and a `local` dir storage with rootdir content. LXC-only: no VM will ever
 // boot here (cloud instances have no nested virt) — the appliance needs none.
 //
-// No apostrophes (the script may ride a single-quoted sh -c). Idempotent.
+// No apostrophes (the script may ride a single-quoted sh -c). Idempotent:
+// an already-PVE host short-circuits (a re-adopt re-ensures cheaply).
 func PVEInstallScript() string {
 	return fmt.Sprintf(`set -e
+if command -v pct >/dev/null 2>&1 && command -v pvesm >/dev/null 2>&1 && [ -f /etc/pve/storage.cfg ]; then
+  echo pve-install-ok
+  exit 0
+fi
 HN=$(hostname -s)
 IP=$(ip -4 -o addr show scope global | awk "{print \$4}" | head -1 | cut -d/ -f1)
 if grep -qE "^127\.0\.1\.1" /etc/hosts; then

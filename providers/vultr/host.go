@@ -80,13 +80,17 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 	if err != nil {
 		return nil, err
 	}
+	// The re-adopt resolves id+ip (or the mint creates them) — then BOTH
+	// ride the same install phase: "alive" is not "ready", and the PVE
+	// ensure is idempotent (an installed host short-circuits).
+	var hostID, hostIP string
 	if existingID != "" {
 		status, ip, gerr := c.Instance(ctx, existingID)
 		switch {
 		case gerr == nil && status == "active" && ip != "" && ip != "0.0.0.0":
 			s.Host = "root@" + ip
 			s.Print("  vultr instance %s alive at %s — re-adopting it\n", existingID, ip)
-			return &provisioning.Host{ID: existingID, IP: ip}, nil
+			hostID, hostIP = existingID, ip
 		case gerr != nil && strings.Contains(gerr.Error(), "HTTP 404"):
 			s.Print("  vultr instance %s is gone — re-creating it\n", existingID)
 		case gerr != nil:
@@ -95,69 +99,72 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 			return nil, fmt.Errorf("vultr instance %s exists but has no address yet (status %q, still settling) — retry in a minute", existingID, status)
 		}
 	}
+	if hostID == "" {
+		// The image: derived from the API's own OS catalog (the newest Debian
+		// x64), ALWAYS — no answer path. The ids drift (1743 is Ubuntu 22.04
+		// on today's catalog) and a stale recorded answer would re-mint an
+		// Ubuntu host forever; the catalog is the only authority.
+		osID, derr := c.DebianOsID(ctx)
+		if derr != nil {
+			return nil, derr
+		}
 
-	// The image: derived from the API's own OS catalog (the newest Debian
-	// x64), ALWAYS — no answer path. The ids drift (1743 is Ubuntu 22.04
-	// on today's catalog) and a stale recorded answer would re-mint an
-	// Ubuntu host forever; the catalog is the only authority.
-	osID, err := c.DebianOsID(ctx)
-	if err != nil {
-		return nil, err
+		// The ask is free-text — validate against the API's own catalog before
+		// spending anything: a continent group name ("AMER") or a typo'd plan
+		// is a 400 "Invalid datacenter." deep in the create otherwise.
+		region := strings.ToLower(strings.TrimSpace(s.Answers["region"]))
+		plan := strings.TrimSpace(s.Answers["plan"])
+		if bad := checkIn(ctx, c, "region", region, c.Regions); bad != "" {
+			return nil, fmt.Errorf("%s", bad)
+		}
+		if bad := checkIn(ctx, c, "plan", plan, c.Plans); bad != "" {
+			return nil, fmt.Errorf("%s", bad)
+		}
+		// The instance label derives from the world's name — an unlabelled
+		// instance is unfindable in the console when the stranded-handle
+		// recovery points the operator at it.
+		label := ""
+		if s.World != "" {
+			label = "freehold-" + s.World
+		}
+		key, kerr := c.EnsureSSHKey(ctx, "freehold-door", s.DoorLine)
+		if kerr != nil {
+			return nil, fmt.Errorf("vultr ssh-key: %w", kerr)
+		}
+		s.Print("  creating the vultr host (%s %s, Debian os_id %d)…\n", region, plan, osID)
+		body := map[string]any{"region": region, "plan": plan, "os_id": osID}
+		if label != "" {
+			body["label"] = label
+			body["hostname"] = label
+		}
+		id, cerr := c.CreateInstance(ctx, body, key)
+		if cerr != nil {
+			return nil, fmt.Errorf("vultr create: %w", cerr)
+		}
+		// The handle rides the session NOW — every later step can fail, and
+		// a billed instance with an unrecorded id is the one unrecoverable
+		// state.
+		s.CreatedID = id
+		s.Print("  instance %s — waiting for an address…\n", id)
+		ip, werr := c.WaitActive(ctx, id, 8*time.Minute)
+		if werr != nil {
+			return nil, fmt.Errorf("instance %s: %w", id, werr)
+		}
+		hostID, hostIP = id, ip
+		s.Host = "root@" + ip
 	}
-
-	// The ask is free-text — validate against the API's own catalog before
-	// spending anything: a continent group name ("AMER") or a typo'd plan
-	// is a 400 "Invalid datacenter." deep in the create otherwise.
-	region := strings.ToLower(strings.TrimSpace(s.Answers["region"]))
-	plan := strings.TrimSpace(s.Answers["plan"])
-	if bad := checkIn(ctx, c, "region", region, c.Regions); bad != "" {
-		return nil, fmt.Errorf("%s", bad)
-	}
-	if bad := checkIn(ctx, c, "plan", plan, c.Plans); bad != "" {
-		return nil, fmt.Errorf("%s", bad)
-	}
-	// The instance label derives from the world's name — an unlabelled
-	// instance is unfindable in the console when the stranded-handle
-	// recovery points the operator at it.
-	label := ""
-	if s.World != "" {
-		label = "freehold-" + s.World
-	}
-	key, err := c.EnsureSSHKey(ctx, "freehold-door", s.DoorLine)
-	if err != nil {
-		return nil, fmt.Errorf("vultr ssh-key: %w", err)
-	}
-	s.Print("  creating the vultr host (%s %s, Debian os_id %d)…\n", region, plan, osID)
-	body := map[string]any{"region": region, "plan": plan, "os_id": osID}
-	if label != "" {
-		body["label"] = label
-		body["hostname"] = label
-	}
-	id, err := c.CreateInstance(ctx, body, key)
-	if err != nil {
-		return nil, fmt.Errorf("vultr create: %w", err)
-	}
-	// The handle rides the session NOW — every later step can fail, and a
-	// billed instance with an unrecorded id is the one unrecoverable state.
-	s.CreatedID = id
-	s.Print("  instance %s — waiting for an address…\n", id)
-	ip, err := c.WaitActive(ctx, id, 8*time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("instance %s: %w", id, err)
-	}
-	s.Host = "root@" + ip
-	s.Print("  instance live at %s — waiting for sshd, then installing PVE (apt route; this takes minutes)…\n", ip)
+	s.Print("  instance live at %s — waiting for sshd, then installing PVE (apt route; this takes minutes)…\n", hostIP)
 	// Vultr reports "active" before sshd answers its first boot (and
 	// ExecOnHost does one dial, no retry) — poll until the host answers,
 	// and fail the Prepare (naming the id) when it never does: limping
 	// into the install would just fail there.
 	if err := waitSSH(ctx, s, sshdWaitTimeout); err != nil {
-		return nil, fmt.Errorf("instance %s: %w", id, err)
+		return nil, fmt.Errorf("instance %s: %w", hostID, err)
 	}
 	if err := s.ExecOnHost(PVEInstallScript(), 1800); err != nil {
-		return nil, fmt.Errorf("pve install on instance %s: %w", id, err)
+		return nil, fmt.Errorf("pve install on instance %s: %w", hostID, err)
 	}
-	return &provisioning.Host{ID: id, IP: ip}, nil
+	return &provisioning.Host{ID: hostID, IP: hostIP}, nil
 }
 
 // sshdWaitTimeout is how long Prepare waits for the host's first sshd
