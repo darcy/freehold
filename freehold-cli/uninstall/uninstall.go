@@ -78,12 +78,21 @@ var uninstallCmd = &cobra.Command{
 				return err
 			}
 		}
-		// --destroy-host on a created-host world whose door is ALREADY dead
-		// (a prior uninstall that kept the profile): the world teardown
-		// already ran; skip it and go straight to the destroy — stopping
-		// the bill needs the API, never host access.
-		if destroyHost && cfg.HostProvider.ID != "" && !doorAlive(cfg, host) {
-			fmt.Println("  the host door is dead (a prior uninstall?) — skipping the world teardown; destroying the instance removes everything on it")
+		// --destroy-host on a created-host world: the host dies with
+		// everything on it, so the world teardown is best-effort. A
+		// HALF-INSTALLED world (the host was created but the pipeline
+		// never reached deploy-cp — no runner coords, no PVE) or a dead
+		// door goes STRAIGHT to the API destroy: stopping the bill needs
+		// the API, never host access.
+		if destroyHost && cfg.HostProvider.ID != "" {
+			hasWorld := cfg.Runner.Addr != "" && cfg.Runner.Pubkey != ""
+			if hasWorld && doorAlive(cfg, host) {
+				if err := runUninstall(cfg, configPath, host, removeData, false); err != nil {
+					fmt.Printf("  (the world teardown failed — destroying the host anyway: %v)\n", err)
+				}
+			} else {
+				fmt.Println("  no world to tear down (a half-installed host, or the door is dead) — destroying the instance directly; the API needs no host access")
+			}
 			running, derr := destroyHostViaProvider(cfg, yes, true)
 			if derr != nil {
 				return derr
@@ -99,7 +108,7 @@ var uninstallCmd = &cobra.Command{
 		// the instance's handle — so the box's door + substrate keys stay
 		// authorized: the kept profile's whole value is that a re-adopt or
 		// a --destroy-host re-entry still works.
-		keepHostAccess := cfg.HostProvider.ID != "" && !destroyHost
+		keepHostAccess := cfg.HostProvider.ID != ""
 		if cfg.Runner.Addr == "" || cfg.Runner.Pubkey == "" {
 			if err := runUninstallTransient(cfg, host, removeData, keepHostAccess); err != nil {
 				return err

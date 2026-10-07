@@ -24,6 +24,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl gnupg >/dev/null
 CODENAME=$(. /etc/os-release && echo $VERSION_CODENAME)
+# The apt route needs DEBIAN (the release key + repo are Debian's) — a
+# wrong-image instance (an os_id drift, e.g. Ubuntu 22.04 behind id 1743)
+# fails here with the reason instead of a 404 deep in the key fetch.
+case "$CODENAME" in
+  bullseye|bookworm|trixie) ;;
+  *) echo "the host is $CODENAME, not a Debian release - destroy this instance and re-run (the provider picks the newest Debian image from the catalog)" >&2; exit 1 ;;
+esac
 curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-$CODENAME.gpg -o /etc/apt/trusted.gpg.d/proxmox-release-$CODENAME.gpg
 echo "deb http://download.proxmox.com/debian/pve $CODENAME pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
 apt-get -o Dpkg::Options::=--force-confold full-upgrade -y -qq

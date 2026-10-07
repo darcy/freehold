@@ -30,11 +30,13 @@ func (HostProvider) AccessMode() string { return "api-vultr" }
 func (HostProvider) HostsGateway() bool { return true }
 
 func (HostProvider) Needs() []provisioning.HostNeed {
+	// NO os_id ask: the image must be Debian (PVE installs on it via the
+	// apt route) and the newest one comes from the API's own catalog —
+	// the os ids drift, so an operator's guess is always worse.
 	return []provisioning.HostNeed{
 		{Name: "VULTR_API_KEY", Label: "Vultr API key (used for this install; never stored)", Secret: true},
 		{Name: "region", Label: "Vultr region (the datacenter id — ewr, lax, ams, …)", Default: DefaultRegion},
 		{Name: "plan", Label: "Vultr plan (the whole world lives on this host)", Default: DefaultPlan},
-		{Name: "os_id", Label: "Vultr os_id (Debian release)", Default: fmt.Sprintf("%d", DefaultOsID)},
 	}
 }
 
@@ -94,10 +96,24 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 		}
 	}
 
-	region, plan := strings.ToLower(strings.TrimSpace(s.Answers["region"])), strings.TrimSpace(s.Answers["plan"])
+	// The image: derived from the API's own OS catalog (the newest Debian
+	// x64). An os_id NEED was a trap — the ids drift (1743 is Ubuntu
+	// 22.04 on today's catalog), and the operator's answer can't be
+	// righter than the catalog; an explicit --host-answer os_id=<id>
+	// still wins for an exotic case.
+	osID := parseOsID(s.Answers["os_id"])
+	if osID == 0 {
+		osID, err = c.DebianOsID(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// The ask is free-text — validate against the API's own catalog before
 	// spending anything: a continent group name ("AMER") or a typo'd plan
 	// is a 400 "Invalid datacenter." deep in the create otherwise.
+	region := strings.ToLower(strings.TrimSpace(s.Answers["region"]))
+	plan := strings.TrimSpace(s.Answers["plan"])
 	if bad := checkIn(ctx, c, "region", region, c.Regions); bad != "" {
 		return nil, fmt.Errorf("%s", bad)
 	}
@@ -115,8 +131,8 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 	if err != nil {
 		return nil, fmt.Errorf("vultr ssh-key: %w", err)
 	}
-	s.Print("  creating the vultr host (%s %s)…\n", region, plan)
-	body := map[string]any{"region": region, "plan": plan, "os_id": parseOsID(s.Answers["os_id"])}
+	s.Print("  creating the vultr host (%s %s, Debian os_id %d)…\n", region, plan, osID)
+	body := map[string]any{"region": region, "plan": plan, "os_id": osID}
 	if label != "" {
 		body["label"] = label
 		body["hostname"] = label

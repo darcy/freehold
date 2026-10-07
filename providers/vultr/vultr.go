@@ -199,6 +199,45 @@ func (c *Client) Plans(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// DebianOsID picks the NEWEST Debian x64 image from the API's own OS
+// catalog: the host is about to become PVE via the apt route, so the image
+// must be Debian — and an os_id guess is exactly how an Ubuntu 22.04
+// arrives with a Debian name on it (the catalog drifts). Sorted by the
+// release number in the name ("Debian 12 x64").
+func (c *Client) DebianOsID(ctx context.Context) (uint32, error) {
+	var got struct {
+		OS []struct {
+			ID     uint32 `json:"id"`
+			Name   string `json:"name"`
+			Arch   string `json:"arch"`
+			Family string `json:"family"`
+		} `json:"os"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v2/os?per_page=500", nil, &got); err != nil {
+		return 0, err
+	}
+	bestID, bestVer := uint32(0), 0
+	for _, o := range got.OS {
+		if !strings.EqualFold(o.Family, "debian") && !strings.Contains(strings.ToLower(o.Name), "debian") {
+			continue
+		}
+		if o.Arch != "" && o.Arch != "x86_64" {
+			continue
+		}
+		ver := 0
+		if _, err := fmt.Sscanf(o.Name, "Debian %d", &ver); err != nil && ver == 0 {
+			continue
+		}
+		if ver > bestVer {
+			bestVer, bestID = ver, o.ID
+		}
+	}
+	if bestID == 0 {
+		return 0, fmt.Errorf("the Vultr OS catalog lists no Debian x64 image — pick one by id with --host-answer os_id=<id>")
+	}
+	return bestID, nil
+}
+
 // WaitActive polls until the instance is active AND its IPv4 is assigned
 // (Vultr reports 0.0.0.0 until the IP lands). Returns the main IP.
 func (c *Client) WaitActive(ctx context.Context, id string, timeout time.Duration) (string, error) {
