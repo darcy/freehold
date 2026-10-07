@@ -337,6 +337,10 @@ func (s *Spec) reassertAgentRow(reg *agenttools.Registry, tools *agent.Tools, a 
 		return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
 	}
 	_ = reg.SetChannels(a.Name, channels, private)
+	// RegisterAgent (inside CreateAgent) RESET the row — re-assert purpose
+	// alongside channels/model, or the next re-apply ships an empty purpose
+	// and the system prompt silently loses the purpose paragraph.
+	_ = reg.SetPurpose(a.Name, a.Purpose)
 	// Re-assert the model choice: RegisterAgent resets the row, so the
 	// persisted alias has to ride back on (the pod was just re-applied
 	// with it).

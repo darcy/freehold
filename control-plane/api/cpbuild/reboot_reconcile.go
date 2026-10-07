@@ -2,6 +2,7 @@ package cpbuild
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -125,10 +126,21 @@ func (s *Spec) agentPodList() (podList, error) {
 	return pods, nil
 }
 
+// errEngineBusy marks a probe skipped because a world-build holds the engine
+// lock (cpbuild.go engineMu) — retried on the next probe, never counted as a
+// failure.
+var errEngineBusy = errors.New("world-build engine busy")
+
 // reconcileRebootedAgents is one revive pass: read the node's boot time and
 // the agent pods, re-assert every reboot-killed agent through the registry.
-// Agents already alive or gone from the registry are skipped.
+// Agents already alive or gone from the registry are skipped. Takes the
+// engine lock non-blocking: a world-build mid-flight owns the registry rows
+// this pass would write, so the pass skips and the probe loop retries.
 func (s *Spec) reconcileRebootedAgents() error {
+	if !engineMu.TryLock() {
+		return errEngineBusy
+	}
+	defer engineMu.Unlock()
 	if err := s.resolveK3sVmid("reboot-reconcile", ""); err != nil {
 		return err
 	}
@@ -180,6 +192,10 @@ func (s *Spec) ReviveRebootedAgents() {
 	deadline := time.Now().Add(rebootGiveUp)
 	for {
 		if err := s.reconcileRebootedAgents(); err != nil {
+			if errors.Is(err, errEngineBusy) {
+				time.Sleep(rebootProbeEvery)
+				continue
+			}
 			if time.Now().After(deadline) {
 				log.Printf("reboot-reconcile: gave up after %v (%v) — the next build/world_build reconciles the agents", rebootGiveUp, err)
 				return
