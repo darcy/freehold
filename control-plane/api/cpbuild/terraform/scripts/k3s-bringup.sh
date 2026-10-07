@@ -75,6 +75,19 @@ UNIT
   # wildcard (DEFAULT_PATH_FOR_NON_LISTED_NODES), NOT "k3s" - the node is named
   # by hostname, and a wrong node name makes the provisioner fail with "no node
   # was specified" (nothing binds).
+  #
+  # The carve-out is DURABLE only in the BUNDLED manifest: the configmap is
+  # owned by the k3s Addon controller (objectset.rio.cattle.io, owner
+  # local-storage), which re-applies local-storage.yaml on its own sync and
+  # stomps a bare configmap apply back to the default root - live-verified on
+  # a rebuild where every fresh PV then landed on the k3s rootfs (unbacked).
+  # Patch the MANIFEST so the stomps of the addon enforce the carve-out; the
+  # configmap apply below stays for the immediate effect (manifest change +
+  # restart race), and the rollout restart makes the provisioner read it now.
+  MANIFESTS=/var/lib/rancher/k3s/server/manifests
+  if [ -f "$MANIFESTS/local-storage.yaml" ]; then
+    sed -i "s|/var/lib/rancher/k3s/storage|/srv/data/k8s-volumes|g" "$MANIFESTS/local-storage.yaml"
+  fi
   cat > /tmp/lp.yaml <<LP
 apiVersion: v1
 kind: ConfigMap
@@ -87,5 +100,10 @@ data:
 LP
   $K apply -f /tmp/lp.yaml || true
   $K rollout restart deploy/local-path-provisioner -n kube-system 2>/dev/null || true
+  # the apply/restart above are best-effort (the addon re-asserts via the
+  # manifest); VERIFY the active config so a silently-broken carve-out is a
+  # LOUD bring-up failure, not unbacked PVs discovered by a later migration.
+  $K get cm local-path-config -n kube-system -o jsonpath='{.data.config\.json}' 2>/dev/null | grep -q /srv/data/k8s-volumes \
+    || { echo "FATAL: the active local-path provisioner config does not pin /srv/data/k8s-volumes - PVs would land unbacked on the rootfs"; exit 1; }
 '
 echo "k3s bring-up reconciled"
