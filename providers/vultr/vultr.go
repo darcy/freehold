@@ -112,7 +112,8 @@ func (c *Client) EnsureSSHKey(ctx context.Context, name, pubkey string) (string,
 			ID string `json:"id"`
 		} `json:"ssh_key"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/v2/ssh-keys", map[string]string{"name": name, "key": key}, &created); err != nil {
+	// The body field is `ssh_key` (the same name the list decode reads).
+	if err := c.do(ctx, http.MethodPost, "/v2/ssh-keys", map[string]string{"name": name, "ssh_key": key}, &created); err != nil {
 		return "", err
 	}
 	if created.SSHKey.ID == "" {

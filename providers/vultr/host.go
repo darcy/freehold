@@ -53,7 +53,7 @@ var clientForBuilder = defaultClientFor
 func defaultClientFor(s *provisioning.HostSession) (*Client, error) {
 	tok := strings.TrimSpace(s.Answers["VULTR_API_KEY"])
 	if tok == "" {
-		return nil, fmt.Errorf("the vultr provider needs its API key (prompt it, or set VULTR_API_KEY for headless runs)")
+		return nil, fmt.Errorf("the vultr provider needs its API key (the guided flow prompts for it; a headless run reads VULTR_API_KEY from the env)")
 	}
 	return &Client{Token: tok}, nil
 }

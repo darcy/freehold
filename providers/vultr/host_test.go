@@ -2,6 +2,7 @@ package vultr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,16 @@ func TestVultrPreparePostCreateFailureCarriesHandle(t *testing.T) {
 		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodGet:
 			w.Write([]byte(`{"ssh_keys":[]}`))
 		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodPost:
+			// Pin the WIRE SHAPE: Vultr's create takes the key as `ssh_key`
+			// (the field name its own list decode uses) — a wrong field
+			// passes hermetic stubs and 400s against the real API.
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("ssh-key create body: %v", err)
+			}
+			if body["ssh_key"] != "ssh-ed25519 AAA door" || body["name"] == "" {
+				t.Errorf("ssh-key create body shape: %v", body)
+			}
 			w.Write([]byte(`{"ssh_key":{"id":"k1"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
 			w.Write([]byte(`{"instance":{"id":"i-stranded"}}`))
