@@ -1,6 +1,7 @@
 // Package certcred holds the DNS provider credential engine shared by the
 // `build` and `dns-cred` commands: sealing/reusing per-slot credentials, the
-// interactive provider picker, and the pre-verify.
+// Manual/Automated interactive ask, and the pre-verify. The flag path
+// (`dns-cred --provider <name>`) remains the full lego-registry surface.
 package certcred
 
 import (
@@ -163,7 +164,7 @@ func (e *Engine) PromptDNSCred(slot, host, reuseFrom string) (string, map[string
 		return "", nil, fmt.Errorf("no %s DNS provider credential stored and interactive collection is disabled (--non-interactive); run without --non-interactive once to store it", slot)
 	}
 
-	provider, err := e.PromptProvider()
+	provider, err := e.PromptDNSMode()
 	if err != nil {
 		return "", nil, err
 	}
@@ -171,11 +172,14 @@ func (e *Engine) PromptDNSCred(slot, host, reuseFrom string) (string, map[string
 	if err != nil {
 		return "", nil, err
 	}
-	if host != "" {
+	if host != "" && provider != cert.ManualProviderName {
 		fmt.Fprintf(e.Out, "  · pre-verifying %s credentials (throwaway TXT round-trip)…\n", provider)
 		if err := cert.Verify(host, provider, env); err != nil {
 			return "", nil, fmt.Errorf("DNS provider pre-verify failed — fix the credential and try again: %w", err)
 		}
+	}
+	if provider == cert.ManualProviderName {
+		fmt.Fprintf(e.Out, "  · manual DNS: the build will stop and print the exact records to create — create them, then re-run `freehold build` (it resumes the order and finishes)\n")
 	}
 	if err := cert.SaveCreds(path, provider, env, seal, pub, "cert-dns-"+slot); err != nil {
 		return "", nil, fmt.Errorf("storing DNS credential: %w", err)
@@ -183,15 +187,30 @@ func (e *Engine) PromptDNSCred(slot, host, reuseFrom string) (string, map[string
 	return provider, env, nil
 }
 
-// PromptProvider runs the interactive provider picker over lego's registry.
-func (e *Engine) PromptProvider() (string, error) {
-	return RunProviderPicker(cert.Providers())
+// PromptDNSMode asks Manual vs Automated (Cloudflare) — the interactive
+// surface. `dns-cred --provider <name>` remains the full-registry path for
+// any other lego provider.
+func (e *Engine) PromptDNSMode() (string, error) {
+	ans, err := e.Prompt("DNS for the certs — 1) automated (Cloudflare API token) or 2) manual (you create the records yourself)? [1/2, blank = 1]")
+	if err != nil {
+		return "", err
+	}
+	switch strings.ToLower(strings.TrimSpace(ans)) {
+	case "2", "manual", "m":
+		return cert.ManualProviderName, nil
+	default:
+		return "cloudflare", nil
+	}
 }
 
-// PromptProviderEnv collects the provider's credential fields.
+// PromptProviderEnv collects the provider's credential fields. Manual needs
+// none — its sealed record is a marker with an empty env map.
 func (e *Engine) PromptProviderEnv(provider string) (map[string]string, error) {
 	names := cert.ProviderEnvNames(provider)
 	env := map[string]string{}
+	if provider == cert.ManualProviderName {
+		return env, nil
+	}
 	if len(names) == 0 {
 		fmt.Fprintln(e.Out, "  this provider has no enumerated env fields — paste KEY=VAL entries (one per line; empty line to finish):")
 		for {

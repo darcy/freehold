@@ -76,8 +76,9 @@ func sanitizePodName(name string) string {
 
 // KeySecretFor returns the name of the litellm-key k8s Secret an agent's pod
 // reads its OPENAI_COMPAT_API_KEY from: the sanitized pod name + "-litellm-key".
-// stageLitellm seeds the CPA's with this name; a created agent either gets its
-// own seeded secret or reuses the CPA's gateway key secret.
+// Every agent owns its own Secret — the build seeds it with the agent's own
+// minted gateway virtual key (key_alias = the pod name), never the shared
+// gateway master.
 func KeySecretFor(agentName string) string {
 	return sanitizePodName(agentName) + "-litellm-key"
 }
@@ -184,10 +185,9 @@ type RunnerCoords struct {
 // The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
 // points the buzz-agent harness at litellmBaseURL with litellmModel and an API
 // key (OPENAI_COMPAT_API_KEY from the `<pod>-litellm-key` Secret by
-// secretKeyRef). TODAY that key is the litellm gateway's admin master key
-// (litellm's /key/generate still needs a bootstrap virtual key before scoped
-// keys can be minted — see AGENTS.md "Known gaps"); the key NEVER rides the
-// manifest.
+// secretKeyRef). That key is the agent's OWN minted gateway virtual key
+// (key_alias = the pod name, minted by the CP at create time and held sealed
+// in the CP's litellm store); the key NEVER rides the manifest.
 //
 // The nsec also NEVER rides the manifest: it comes from the `<pod>-identity`
 // Secret (a `secretKeyRef`), which the deploy step writes ONLY when absent —
@@ -296,10 +296,9 @@ func tzPodBits(tz, image string) (envLine, initBlock, mountLine, volume string) 
 // The reasoning model rides litellm as an OpenAI-compatible endpoint: the pod
 // points the buzz-agent harness at litellmBaseURL with litellmModel and an API
 // key (OPENAI_COMPAT_API_KEY from the `<pod>-litellm-key` Secret by
-// secretKeyRef). TODAY that key is the litellm gateway's admin master key
-// (litellm's /key/generate still needs a bootstrap virtual key before scoped
-// keys can be minted — see AGENTS.md "Known gaps"); the key NEVER rides the
-// manifest.
+// secretKeyRef). That key is the agent's OWN minted gateway virtual key
+// (key_alias = the pod name, minted by the CP at create time and held sealed
+// in the CP's litellm store); the key NEVER rides the manifest.
 //
 // When agentToolsURL is set, the pod's MCP command is the freehold-agent-tools
 // stdio bridge (agentBridgeBootstrap): it aggregates buzz-dev-mcp's message
@@ -531,28 +530,39 @@ func CPAIdentityScript(k3sVmid uint32, nsecSecretHex, ownerPub string) string {
 }
 
 // AgentLiteLLMKeyScript seeds the agents-namespace Secret the pod's
-// OPENAI_COMPAT_API_KEY references (first-run-wins, like the identity secret).
-// The value comes from the runner-injected $LITELLM env (requested by name in
-// the exec) — never a shell literal, so no credential crosses the audited
-// command.
-func AgentLiteLLMKeyScript(k3sVmid uint32, agentName string) string {
+// OPENAI_COMPAT_API_KEY references, with the agent's own minted gateway
+// virtual key (generated CP-side at create time — the caller passes it, and
+// it rides this script as a shell literal, the same generated-material shape
+// as the identity Secret's nsec; it never rides the persisted manifest).
+// The CP's sealed store is the single source for the key, so the Secret is
+// ENSURED to match it: created when absent, left alone when it already holds
+// the store's key, and rotated when it holds anything else — the gateway
+// master (worlds predating per-agent keys), or a key dead at the gateway
+// (a wiped Postgres, an aborted remove's revoke). Rotation is what makes a
+// re-mint reach the pod without hand-deleting Secrets.
+func AgentLiteLLMKeyScript(k3sVmid uint32, agentName, litellmKey string) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-litellm-key"
 	return fmt.Sprintf(`set -euo pipefail
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 EX="pct exec %d -- sh -c"
 $EX "$K create ns agents 2>/dev/null || true"
-$EX "$K get secret %s -n agents >/dev/null 2>&1 || $K create secret generic %s -n agents --from-literal=key=\"$LITELLM\""
+# Anything but the CP store's current key (absent, the legacy gateway
+# master, a dead/revoked key) is replaced; a match is a no-op.
+cur=$($EX "$K get secret %s -n agents -o jsonpath='{.data.key}'" 2>/dev/null | base64 -d || true)
+if [ "$cur" != %s ]; then
+  $EX "$K delete secret %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
+  $EX "$K create secret generic %s -n agents --from-literal=key=%s"
+fi
 echo AGENT_LITELLM_KEY_OK`,
-		k3sVmid, secret, secret)
+		k3sVmid, secret, shQ(litellmKey), secret, secret, shQ(litellmKey))
 }
 
 // AgentRetireScript deletes an agent's derived k8s objects (pod, service,
 // prompt ConfigMap, identity + litellm-key secrets) inside the k3s LXC — the
 // object half of taking an agent away (update_agent's rename and manage_agent's
 // remove). The durable workspace dir is deliberately NOT touched: it is data,
-// not an object. --ignore-not-found keeps every line idempotent, and a missing
-// litellm-key secret is expected (custom agents share the CPA's).
+// not an object. --ignore-not-found keeps every line idempotent.
 func AgentRetireScript(k3sVmid uint32, agentName string) string {
 	pod := sanitizePodName(agentName)
 	return fmt.Sprintf(`set -euo pipefail

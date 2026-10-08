@@ -347,6 +347,8 @@ func DestroyTenantBackend(exec ExecFunc, kind planebase.BackendKind, backend, do
 		return DestroyTenantDataset(exec, backend, domain, tenant)
 	case planebase.KindLvmThin:
 		return DestroyLvmTenant(exec, backend, domain, tenant)
+	case planebase.KindDir:
+		return DestroyDirTenant(exec, domain, tenant)
 	default:
 		return false, fmt.Errorf("unknown storage backend kind %q", kind)
 	}

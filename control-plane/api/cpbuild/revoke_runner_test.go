@@ -401,6 +401,42 @@ func TestRevokeRunnerRetiredNameIsRefusedToBothFlows(t *testing.T) {
 	}
 }
 
+// TestRevokeRunnerKubeSlotRetireLeavesTheNamespace pins the kube-slot close
+// out: retiring the door retires the DOOR — the slot namespace STAYS (its
+// workloads are the grantee's), and the report hands its deletion to Compute,
+// never to the agent that just lost the door.
+func TestRevokeRunnerKubeSlotRetireLeavesTheNamespace(t *testing.T) {
+	root := t.TempDir()
+	cpState := filepath.Join(root, "control-plane")
+	store, err := state.Open(cpState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertCapability("kube-api-yuvomi", state.CapabilityRecord{
+		Kind: "kubernetes", Address: "https://192.168.30.5:6443", Port: 8800,
+		Rosters: []string{"deployer"}, Origin: state.OriginAgent,
+		NS: "yuvomi", Quota: "cpu=4", CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := testRegistry(t)
+
+	report, err := BuildRevokeRunner(revokeSpec(t, root), reg)(agent.RetireArgs{Name: "kube-api-yuvomi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report, "slot namespace yuvomi STAYS") || !strings.Contains(report, "kubectl delete ns yuvomi") {
+		t.Fatalf("the retire must hand the namespace close-out to Compute: %s", report)
+	}
+	disk := reopen(t, root)
+	if _, ok := disk.GetCapability("kube-api-yuvomi"); ok {
+		t.Fatal("the capability record must be gone")
+	}
+	if _, retired := disk.GetRetired("kube-api-yuvomi"); !retired {
+		t.Fatal("the retirement guard must be recorded")
+	}
+}
+
 // TestRevokeRunnerWholeRetireErasesTheCredential is the reason the retire goes
 // through the audited revoke verb rather than a bare state edit: "revoked" as a
 // status is a label, whereas a CP that still holds the sealed package can still
@@ -613,8 +649,8 @@ func TestRevokeRunnerFatalKeepsTheAuditReport(t *testing.T) {
 	for _, want := range []string{
 		"FAILED — the call stopped mid-flight",                         // the header: not a completed removal
 		"drop [ai] from the door's recorded roster FAILED (disk full)", // the reason
-		"[verified] roster",                                            // the leg that DID land
-		"[UNVERIFIED] coords",                                          // the leg that did not
+		"[verified] roster",   // the leg that DID land
+		"[UNVERIFIED] coords", // the leg that did not
 		"verdict:",
 	} {
 		if !strings.Contains(err.Error(), want) {

@@ -13,6 +13,9 @@
 #   creates/mounts/chowns each LV if absent; idempotent. No destroy action:
 #   the durable plane survives teardown by design (the --data path is separate).
 set -euo pipefail
+# A dir-backend world (the VPS hosts) has no VG to carve from — its plane is
+# host dirs the box's ensure stage already made. Nothing to do here.
+[ "${PLANE_KIND:-}" = "dir" ] && { echo "plane: dir backend — nothing to carve"; exit 0; }
 DOM="$1"; VG="${2:-pve}"; POOL="${3:-}"; LVSIZE="${4:-8}"; POOLSIZE="${5:-40}"
 BASE="/freehold/${DOM}"
 [ -n "$POOL" ] && POOL_ARG="-T ${VG}/${POOL}" || POOL_ARG=""

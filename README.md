@@ -97,18 +97,25 @@ freehold build       # ANY box (login-gated): trigger the console's /api/world-b
 freehold teardown    # drop the WORLD (the inverse of build): relay/k3s + the CP-side
                      #  agent-tools process go, internal DNS clears — the CP, its runner,
                      #  the durable plane, and the certs all STAY; data is kept
-freehold uninstall [--remove-data]  # drop the CP too (this box's doors + local state go;
+freehold uninstall [--remove-data] [--destroy-host]  # drop the CP too (this box's doors + local state go;
                      #  --remove-data also drops the durable plane). Runs from the build box
                      #  or, for a thin box / dead CP, over direct root SSH; --remove-data
-                     #  still needs the build box
+                     #  still needs the build box. --destroy-host (api-vultr worlds, needs
+                     #  VULTR_API_KEY) destroys the cloud instance — a default uninstall
+                     #  leaves it RUNNING AND BILLING (the profile is kept as its handle)
 freehold            # the TUI dashboard
 ```
 
 `freehold install` (guided) or `install --non-interactive` (headless) requires
-`--name` + `--host`: the profile name scopes the config + state to
-`profiles/<name>/` and prefixes the guest LXCs `<name>-<role>`; the host is
-recorded in the profile so `uninstall --name` can resolve it. A fresh plane also
-needs the relay/CP domains + proxy IP (the guided flow prompts for them) and
+`--name`, and `--host` unless the host provider creates it: the profile name
+scopes the config + state to `profiles/<name>/` and prefixes the guest LXCs
+`<name>-<role>`; the host is recorded in the profile so `uninstall --name` can
+resolve it. The PROVIDER owns its needs and asks them in the guided flow —
+proxmox (the default) names your box and the edge's LAN address; `--provider
+vultr` prompts for the API key (no-echo, never stored) + region/plan, creates
+the instance, and derives the host + edge IP from it (headless: the key and
+answers ride the env / `--host-answer name=value`). A fresh plane also
+needs the relay/CP domains (the guided flow prompts for them) and
 the operator identity: `--operator-pubkey` (headless; `--operator-identity`
 seeds this box's login ledger from a keypair dir, verified against the
 pubkey — the guided flow pastes or mints it). An
@@ -131,9 +138,10 @@ freehold build                # trigger the CP's world-build (co-located runner)
 freehold teardown             # CP-preserving world teardown
 freehold update               # update the world's CP (release assets / ref / dev),
                               #  run pending migrations, repin the version
-freehold uninstall [--remove-data]  # remove the CP + world + this box's doors (data kept;
+freehold uninstall [--remove-data] [--destroy-host]  # remove the CP + world + this box's doors (data kept;
                               #  --remove-data drops the durable plane); a thin box / dead CP
-                              #  uninstalls over direct root SSH
+                              #  uninstalls over direct root SSH; --destroy-host destroys
+                              #  a vultr world's instance (default: left running + billing)
 freehold snapshot [label]     # snapshot the whole durable plane under one name
                               #  (--list / --rm / snapshot rollback — guarded,
                               #  guests stop, the CP comes back via the update flow)
@@ -143,6 +151,9 @@ freehold backup init/run/snapshots  # restic off-site backup of the durable plan
                               #  /srv/data mounts to a repo URI (init settles the
                               #  repo password with the repo as arbiter; run also
                               #  ships the profile config; snapshots lists them)
+freehold backup install-timer # the host-side nightly backup + weekly repo-check
+                              #  systemd timers, rendered from the verb's own
+                              #  restic line (re-run after plane changes)
 freehold door authorize       # authorize this box's door key on the host (DOOR_SPEC)
 freehold door revoke          # remove this box's door key from the host door
 freehold exec <target> "cmd"  # exec through a local runner, or (thin box, no

@@ -40,7 +40,8 @@ A world converges on one `freehold build`.
 
 ## Next
 
-*   **Agents deploy via Kubernetes** — kube slots, skill schema, readiness postconditions,
+*   **Agents deploy via Kubernetes** — kube slots (the door layer ships —
+    `docs/COMPUTE.md`), skill schema, readiness postconditions,
     the department check-in hook (`docs/COMPUTE.md`, `docs/FREEHOLD.md`).
 *   **A VPS provider** and the gateway on a cloud host (`docs/COMPUTE.md`, `docs/NETWORK.md`).
 *   **Backup scheduling** (`docs/DATA.md`); **Network's first skills** (`docs/NETWORK.md`);

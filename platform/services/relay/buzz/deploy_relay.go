@@ -12,8 +12,10 @@ import (
 	"freehold/platform/provisioning/deploy"
 )
 
-// DefaultBufRef is the pinned block/buzz ref to fetch.
-const DefaultBufRef = "f956e6fe06a76e50cbd8fba1a162482e752e7f1a"
+// DefaultBufRef is the pinned block/buzz ref to fetch. On main past
+// 1972b7d the compose's minio images moved to pgsty/silo+mc (Docker Hub,
+// sha-pinned) — quay's minio repo went private and every pull 401s.
+const DefaultBufRef = "1972b7d256a5d0bb90eea6ef78e93d6b55bb1a12"
 
 // checkDocker passes the B1 gate: docker + compose must exist on the target
 // (or inside its LXC).
@@ -118,6 +120,18 @@ func InstallCmd(spec *RelayDeploySpec) string {
 			"(grep -q \"^BUZZ_MEDIA_SERVER_DOMAIN=\" .env && "+
 			"sed -i \"s|^BUZZ_MEDIA_SERVER_DOMAIN=.*|BUZZ_MEDIA_SERVER_DOMAIN=%s|\" .env || "+
 			"echo \"BUZZ_MEDIA_SERVER_DOMAIN=%s\" >> .env) && "+
+			// the pinned bundle's .env.example ships a placeholder CORS allowlist
+			// (BUZZ_CORS_ORIGINS=https://buzz.example.com). Left in place it
+			// rejects the desktop webview's preflight (origin tauri://localhost /
+			// http://tauri.localhost) — the invite mint/claim/policy fetches are
+			// webview-issued and CORS-bound, while WS and the Rust bridge never
+			// apply CORS, so ONLY invite links break. Empty = the relay's own
+			// default (build_cors_layer returns permissive when unset); auth is
+			// unaffected — every mutating route still requires a signed NIP-98
+			// header.
+			"(grep -q \"^BUZZ_CORS_ORIGINS=\" .env && "+
+			"sed -i \"s/^BUZZ_CORS_ORIGINS=.*/BUZZ_CORS_ORIGINS=/\" .env || "+
+			"echo \"BUZZ_CORS_ORIGINS=\" >> .env) && "+
 			pairEnv+
 			"for k in BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET POSTGRES_PASSWORD "+
 			"REDIS_PASSWORD BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY; do "+

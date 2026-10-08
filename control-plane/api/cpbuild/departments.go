@@ -60,6 +60,12 @@ type capabilityRunner struct {
 	// (the credential fields seal as extra named secrets).
 	dnsZone string
 	dnsEnv  map[string]string
+	// kube-slot doors only (dynamic, kind=kubernetes): the slot's namespace
+	// + its optional ResourceQuota. The record IS the spec — the build
+	// re-creates the slot from it every rebuild (the same role doors.tf plays
+	// for the static kube doors; a k3s rebuild wipes the cluster).
+	ns    string
+	quota string
 	// addr overrides the ssh target address (dynamic runners: the operator's
 	// box, not the PVE host the co-located runner owns).
 	addr string
@@ -242,8 +248,13 @@ func (s *Spec) cloudflareRunners(store *state.StateStore) []capabilityRunner {
 			continue
 		}
 		provider, env, err := s.dnsCredFromStore(slot)
-		if err != nil || len(env) == 0 {
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "capability runners: no %s DNS credential yet — the %s door waits for hand-off\n", slot, zone)
+			continue
+		}
+		if provider == cert.ManualProviderName || len(env) == 0 {
+			// Manual DNS has no API to put behind a door (and an empty env map
+			// cannot open one): the zone's records are the operator's hands.
 			continue
 		}
 		seen[zone] = true
@@ -273,11 +284,24 @@ func dynamicRunners(store *state.StateStore) []capabilityRunner {
 	var out []capabilityRunner
 	for name, rec := range store.Capabilities() {
 		rosters := append([]string(nil), rec.Rosters...)
-		out = append(out, capabilityRunner{
+		r := capabilityRunner{
 			name: name, kind: rec.Kind, port: rec.Port,
 			rosters: rosters, addr: rec.Address, dynamic: true,
 			selfHosted: rec.SelfHosted(), host: rec.Host,
-		})
+			ns: rec.NS, quota: rec.Quota,
+		}
+		if rec.Kind == "kubernetes" && rec.NS != "" {
+			// A kube record that CARRIES a slot is a kube slot (the
+			// agent-provisioned flow is the only writer of NS): its derived
+			// coords match a static door's. An operator-provisioned
+			// kubernetes door (console-filled token, no slot spec) keeps the
+			// adopt-only path — its credential has no build-time source.
+			r.tokenSecret = kubeDoorToken(rec.NS)
+			r.tokenNS = rec.NS
+			r.probe = kubernetesProbe
+			r.probeBody = kubernetesProbeBody
+		}
+		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out
@@ -374,11 +398,28 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 			}
 		}
 	} else if r.dynamic {
-		// Adopt-only: the record is the spec, the package holds the operator's
-		// credential, and no build-time source exists to re-seal from. The
-		// channel sync + (re)start below are the re-assert. A self-hosted
-		// runner has no package here at all — its identity lives on the
-		// target; the sync below re-asserts its rosters the same way.
+		if r.kind == "kubernetes" && r.ns != "" {
+			// A kube SLOT's record IS its build-time source: the build
+			// re-creates the slot from the record (the same role doors.tf
+			// plays for the static kube doors — a k3s rebuild wipes the
+			// cluster AND rotates the CA) and re-seals the fresh token.
+			// Adopt-only would strand the door on a dead CA. An operator-
+			// provisioned kubernetes door (no ns) keeps the adopt-only path
+			// below — its token has no build-time source to re-seal from.
+			if err := s.applyKubeSlot(r.ns, r.quota); err != nil {
+				return err
+			}
+			if err := s.reSealRotating(store, pkgDir, r, hostAddr); err != nil {
+				return err
+			}
+		} else {
+			// Adopt-only: the record is the spec, the package holds the
+			// operator's credential, and no build-time source exists to
+			// re-seal from. The channel sync + (re)start below are the
+			// re-assert. A self-hosted runner has no package here at all —
+			// its identity lives on the target; the sync below re-asserts its
+			// rosters the same way.
+		}
 	} else {
 		// ssh credentials are the runner's identity — stable; re-authorize the
 		// SAME key if the host lost it. Everything else rotates (a k3s rebuild
@@ -394,42 +435,8 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 				return err
 			}
 		} else {
-			c, err := s.runnerCredential(r, hostAddr)
-			if err != nil {
+			if err := s.reSealRotating(store, pkgDir, r, hostAddr); err != nil {
 				return err
-			}
-			// Preserve the primary record's kind/address (AddSecret stamps
-			// "extra"); the package is the truth, the record mirrors it.
-			before, _ := store.GetSecret(r.name)
-			if _, err := provisioner.AddSecret(store, r.name, r.name, c.secret); err != nil {
-				return fmt.Errorf("re-seal credential: %w", err)
-			}
-			if rec, ok := store.GetSecret(r.name); ok {
-				rec.Kind = before.Kind
-				rec.Address = c.addr
-				if r.probe != "" && rec.Probe != r.probe {
-					// The table is the operator's truth: a door predating the
-					// parameterized probe (or a moved arm) re-stamps on build.
-					rec.Probe = r.probe
-					rec.ProbeBody = r.probeBody
-					if err := setTargetProbe(store, r.name, r.probe, r.probeBody); err != nil {
-						return fmt.Errorf("stage %s verify arm: %w", r.name, err)
-					}
-				}
-				store.InsertSecret(r.name, rec)
-				if err := store.Save(); err != nil {
-					return err
-				}
-			}
-			if c.addr != pkgTargetAddr(pkgDir, r.name) {
-				if err := setTargetAddress(store, r.name, c.addr); err != nil {
-					return fmt.Errorf("move target address: %w", err)
-				}
-			}
-			for _, name := range sortedNames(c.extras) {
-				if _, err := provisioner.AddSecret(store, r.name, name, c.extras[name]); err != nil {
-					return fmt.Errorf("re-seal extra %s: %w", name, err)
-				}
 			}
 		}
 	}
@@ -472,6 +479,52 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	return nil
 }
 
+// reSealRotating is the build-time re-seal for every rotating-credential door
+// (non-ssh): the credential is sourced fresh (kube tokens from the cluster,
+// API keys from their source) and sealed again — the runner restarts below
+// and loads it. Extracted so the static table and dynamic kube slots share
+// the exact path.
+func (s *Spec) reSealRotating(store *state.StateStore, pkgDir string, r capabilityRunner, hostAddr string) error {
+	c, err := s.runnerCredential(r, hostAddr)
+	if err != nil {
+		return err
+	}
+	// Preserve the primary record's kind/address (AddSecret stamps
+	// "extra"); the package is the truth, the record mirrors it.
+	before, _ := store.GetSecret(r.name)
+	if _, err := provisioner.AddSecret(store, r.name, r.name, c.secret); err != nil {
+		return fmt.Errorf("re-seal credential: %w", err)
+	}
+	if rec, ok := store.GetSecret(r.name); ok {
+		rec.Kind = before.Kind
+		rec.Address = c.addr
+		if r.probe != "" && rec.Probe != r.probe {
+			// The table is the operator's truth: a door predating the
+			// parameterized probe (or a moved arm) re-stamps on build.
+			rec.Probe = r.probe
+			rec.ProbeBody = r.probeBody
+			if err := setTargetProbe(store, r.name, r.probe, r.probeBody); err != nil {
+				return fmt.Errorf("stage %s verify arm: %w", r.name, err)
+			}
+		}
+		store.InsertSecret(r.name, rec)
+		if err := store.Save(); err != nil {
+			return err
+		}
+	}
+	if c.addr != pkgTargetAddr(pkgDir, r.name) {
+		if err := setTargetAddress(store, r.name, c.addr); err != nil {
+			return fmt.Errorf("move target address: %w", err)
+		}
+	}
+	for _, name := range sortedNames(c.extras) {
+		if _, err := provisioner.AddSecret(store, r.name, name, c.extras[name]); err != nil {
+			return fmt.Errorf("re-seal extra %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // runnerCred is a capability runner's resolved credential material.
 type runnerCred struct {
 	addr    string
@@ -507,7 +560,14 @@ func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred
 		if err != nil {
 			return runnerCred{}, err
 		}
-		return runnerCred{addr: "https://" + config.StripCIDR(s.ProxyIP) + ":6443", secret: token}, nil
+		addr := "https://" + config.StripCIDR(s.ProxyIP) + ":6443"
+		if r.addr != "" {
+			// A dynamic kube slot's recorded address wins (a remote-cluster
+			// door states its own endpoint; a same-cluster one derives the
+			// gateway route).
+			addr = r.addr
+		}
+		return runnerCred{addr: addr, secret: token}, nil
 	case "litellm":
 		master, provider, _, _, err := s.litellmDoorKeys()
 		if err != nil {
@@ -669,6 +729,18 @@ func (s *Spec) doorToken(secret, ns string) ([]byte, error) {
 	return raw, nil
 }
 
+// litellmStorePath is the CP litellm store's ONE home: the CONSOLE's
+// world-secrets (the build's PutSecret lands there), never the Spec's own
+// StateDir — the two differ on the agent-tools server, whose litellm readers
+// (the per-agent key mint on every create/pod re-apply, the litellm door
+// keys, the rename re-key) must find the same store the build seeded — and
+// whose writes must not mint a second store under the agent-tools root. The
+// same invariant as sealedOwnerPath.
+func (s *Spec) litellmStorePath() (root, path string) {
+	root = s.consoleStateRoot()
+	return root, filepath.Join(root, "world-secrets", "litellm.json")
+}
+
 // litellmDoorKeys opens the CP's durable litellm store in memory and returns
 // the gateway master key, the provider key, and the operator's first-build
 // provider choice (prefix + model — the build's picker recorded them as
@@ -677,11 +749,11 @@ func (s *Spec) doorToken(secret, ns string) ([]byte, error) {
 // that predates the choice rode the freehold default (fireworks glm), which
 // the curated table recovers.
 func (s *Spec) litellmDoorKeys() (master, provider []byte, prefix, model string, err error) {
-	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	root, path := s.litellmStorePath()
 	if !cert.CredExists(path) {
 		return nil, nil, "", "", fmt.Errorf("no CP litellm store at %s yet — the litellm-api-admin door waits for the services phase", path)
 	}
-	secret, err := s.consoleEncSecret()
+	secret, err := s.consoleEncSecretAt(root)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
@@ -705,6 +777,17 @@ func (s *Spec) litellmDoorKeys() (master, provider []byte, prefix, model string,
 		}
 	}
 	return []byte(m), []byte(p), prefix, model, nil
+}
+
+// freshGatewayNoModels is the error litellm's /model/info answers with when
+// the gateway has no models registered at all — the fresh-world shape this
+// stage exists to fill.
+const freshGatewayNoModels = "LLM Model List not loaded"
+
+// isFreshGatewayNoModels reports whether err is litellm's empty-model 500
+// (the body rides litellmGet's error text).
+func isFreshGatewayNoModels(err error) bool {
+	return err != nil && strings.Contains(err.Error(), freshGatewayNoModels)
 }
 
 // litellmModel is one registration on the gateway: its name and the
@@ -779,9 +862,18 @@ func (s *Spec) stageLitellmAliases() error {
 
 	// Registered names: /model/info returns a bare list on older litellm and
 	// {"data": [...]} on newer ones (the main-stable tag floats); parse both.
+	// A FRESH gateway has zero models and answers 500 with the "LLM Model
+	// List not loaded" error — that is an empty registry, not a failure: this
+	// stage is the only registration path, so the first build rides through
+	// it. Any other /model/info failure stays loud.
 	var raw json.RawMessage
 	if err := s.litellmGet(client, origin, master, "/model/info", &raw); err != nil {
-		return fmt.Errorf("list gateway models: %w", err)
+		if !isFreshGatewayNoModels(err) {
+			return fmt.Errorf("list gateway models: %w", err)
+		}
+		// The 500 means zero registered: parse an empty list, not the nil
+		// body (litellmGet returned before decoding).
+		raw = json.RawMessage("[]")
 	}
 	models, err := parseLitellmModels(raw)
 	if err != nil {
@@ -822,6 +914,206 @@ func (s *Spec) stageLitellmAliases() error {
 		}
 	}
 	return nil
+}
+
+// litellmAgentKeyEnvKey is the CP litellm store's env key holding one agent's
+// minted virtual key, keyed by the agent's sanitized pod name — the same
+// derived name the agent's k8s Secret and the gateway's key_alias use.
+func litellmAgentKeyEnvKey(pod string) string {
+	return "agentkey-" + pod
+}
+
+// litellmStoreEnv opens the CP's durable litellm store in memory and returns
+// its path (console-rooted — litellmStorePath), the console sealing secret,
+// and the env map, so callers can add entries (per-agent keys) and re-seal.
+// Plaintext lives in memory only.
+func (s *Spec) litellmStoreEnv() (path string, secret []byte, env map[string]string, err error) {
+	root, storePath := s.litellmStorePath()
+	path = storePath
+	if !cert.CredExists(path) {
+		return "", nil, nil, fmt.Errorf("no CP litellm store at %s yet", path)
+	}
+	if secret, err = s.consoleEncSecretAt(root); err != nil {
+		return "", nil, nil, err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	if _, env, err = cert.LoadCreds(path, open, secret); err != nil {
+		return "", nil, nil, fmt.Errorf("open CP litellm store: %w", err)
+	}
+	return path, secret, env, nil
+}
+
+// saveLitellmStoreEnv re-seals the store's env map to the console identity
+// (the mirror of litellmStoreEnv — the CP is the durable owner; only
+// ciphertext lands on disk). The read-modify-write is not cross-process
+// locked, matching state.json's own last-write-wins: a concurrent writer can
+// orphan at worst one mint, and the seed's ensure-matches-store-key
+// semantics rotate the pod onto the store's key on the next reconcile.
+func (s *Spec) saveLitellmStoreEnv(path string, secret []byte, env map[string]string) error {
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	return cert.SaveCreds(path, "litellm", env, crypto.Seal, pub, "litellm")
+}
+
+// ensureAgentLitellmKey returns the agent's own gateway virtual key: the
+// minted, pod-aliased credential its pod's OPENAI_COMPAT_API_KEY Secret
+// holds, minted on first use (POST /key/generate with key_alias = the pod
+// name and models restricted to the alias set — a compromised pod cannot
+// call the raw upstream, and an update_agent model switch stays inside the
+// set) and persisted in the CP's litellm store so a rebuild re-seeds the SAME
+// key instead of minting orphans. The gateway returns the raw token only
+// once, so the store is the single source: an entry present is returned
+// verbatim, never re-minted. A world without a litellm base URL returns ""
+// (the caller skips the seed); a gateway refusal fails the create loudly —
+// a pod referencing a missing Secret never comes Ready.
+func (s *Spec) ensureAgentLitellmKey(name string) (string, error) {
+	if s.LitellmBaseURL == "" {
+		return "", nil
+	}
+	pod := agent.PodName(name)
+	path, secret, env, err := s.litellmStoreEnv()
+	if err != nil {
+		return "", err
+	}
+	envKey := litellmAgentKeyEnvKey(pod)
+	if k := env[envKey]; k != "" {
+		return k, nil
+	}
+	master := env["master"]
+	if master == "" {
+		return "", fmt.Errorf("CP litellm store is missing the master key")
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"key_alias": pod,
+		"models":    agent.LiteLLMAliases,
+		"metadata":  map[string]string{"agent": name},
+	})
+	if err != nil {
+		return "", err
+	}
+	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
+	req, err := http.NewRequest(http.MethodPost, origin+"/key/generate", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+master)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("mint litellm key for %s: %w", name, err)
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("mint litellm key for %s: HTTP %d: %s", name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	key, err := parseLitellmKey(respBody)
+	if err != nil {
+		return "", fmt.Errorf("mint litellm key for %s: %w", name, err)
+	}
+	env[envKey] = key
+	if err := s.saveLitellmStoreEnv(path, secret, env); err != nil {
+		return "", fmt.Errorf("persist %s litellm key: %w", pod, err)
+	}
+	return key, nil
+}
+
+// revokeAgentLitellmKey deletes the agent's gateway virtual key — by its
+// stored TOKEN (the record holds the raw sk- value; the gateway's key_alias
+// drifts stale after a rename, so the alias is not a reliable delete
+// handle) — and drops the store record. Treated as ensure-revoked: 200 or
+// 404 both clear the record, so a gateway that lost its DB cannot wedge a
+// remove. A world without litellm, or a key never minted, is a no-op.
+func (s *Spec) revokeAgentLitellmKey(name string) error {
+	if s.LitellmBaseURL == "" {
+		return nil
+	}
+	pod := agent.PodName(name)
+	path, secret, env, err := s.litellmStoreEnv()
+	if err != nil {
+		return err
+	}
+	envKey := litellmAgentKeyEnvKey(pod)
+	token := env[envKey]
+	if token == "" {
+		return nil
+	}
+	master := env["master"]
+	if master == "" {
+		return fmt.Errorf("CP litellm store is missing the master key")
+	}
+	body, err := json.Marshal(map[string]interface{}{"keys": []string{token}})
+	if err != nil {
+		return err
+	}
+	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
+	req, err := http.NewRequest(http.MethodPost, origin+"/key/delete", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+master)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("revoke litellm key for %s: %w", name, err)
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("revoke litellm key for %s: HTTP %d: %s", name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	delete(env, envKey)
+	return s.saveLitellmStoreEnv(path, secret, env)
+}
+
+// moveLitellmKeyRecord re-keys a renamed agent's minted-key record to the new
+// pod's derived name — the same key (and its spend history) follows the
+// rename, since the identity (pubkey) does. The gateway-side key_alias keeps
+// the OLD pod name (a cosmetic /key/update the AI department can run; spend
+// follows the token, and revoke deletes by the stored token, so nothing
+// functional drifts). A world without a store, or a key never minted, is a
+// no-op (the create under the new name mints fresh).
+func (s *Spec) moveLitellmKeyRecord(oldPod, newPod string) error {
+	_, path := s.litellmStorePath()
+	if !cert.CredExists(path) {
+		return nil
+	}
+	_, secret, env, err := s.litellmStoreEnv()
+	if err != nil {
+		return err
+	}
+	oldKey, newKey := litellmAgentKeyEnvKey(oldPod), litellmAgentKeyEnvKey(newPod)
+	v, ok := env[oldKey]
+	if !ok || v == "" {
+		return nil
+	}
+	delete(env, oldKey)
+	env[newKey] = v
+	return s.saveLitellmStoreEnv(path, secret, env)
+}
+
+// parseLitellmKey decodes /key/generate's body: {"key": "sk-…"} on all
+// current shapes, with {"data": {"key": …}} accepted for the floating
+// main-stable tag (the same both-shapes tolerance parseLitellmModels applies
+// to /model/info).
+func parseLitellmKey(body []byte) (string, error) {
+	var direct struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(body, &direct); err == nil && direct.Key != "" {
+		return direct.Key, nil
+	}
+	var wrapped struct {
+		Data struct {
+			Key string `json:"key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Data.Key != "" {
+		return wrapped.Data.Key, nil
+	}
+	return "", fmt.Errorf("unrecognized /key/generate shape: neither {\"key\": …} nor {\"data\": {\"key\": …}}")
 }
 
 // litellmGet issues an authenticated GET against the gateway's admin origin

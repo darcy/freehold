@@ -135,12 +135,21 @@ var createLxcSkill string
 //go:embed data/skills/snapshot.md
 var snapshotSkill string
 
+// backblazeSkill is data's off-site runbook (skills/backblaze.md): the restic
+// backup verbs + the host-side timer ON the CP guest through the
+// cp-local-root door, the restore drill, and the rules (init never runs from
+// the agent, retention is the operator's). Composed onto data's prompt; the
+// file stays the canonical text.
+//
+//go:embed data/skills/backblaze.md
+var backblazeSkill string
+
 // departmentPrompts maps a reserved department identity name to its embedded
 // system prompt. The names are reserved: a create_agent naming one of them
 // selects that department's prompt rather than the custom template.
 var departmentPrompts = map[string]string{
 	"network": networkPrompt,
-	"data":    dataPrompt + "\n\n" + strings.TrimRight(snapshotSkill, "\n"),
+	"data":    dataPrompt + "\n\n" + strings.TrimRight(snapshotSkill, "\n") + "\n\n" + strings.TrimRight(backblazeSkill, "\n"),
 	"compute": computePrompt + "\n\n" + strings.TrimRight(createLxcSkill, "\n"),
 	"ai":      aiPrompt,
 }

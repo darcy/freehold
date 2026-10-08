@@ -58,11 +58,15 @@ var dnsCredCmd = &cobra.Command{
 			}
 		}
 		if provider != "" {
-			if !cert.IsProvider(provider) {
+			if provider != cert.ManualProviderName && !cert.IsProvider(provider) {
 				return fmt.Errorf("unknown DNS provider %q", provider)
 			}
-			if err := cert.Verify(domain, provider, env); err != nil {
-				return fmt.Errorf("pre-verify failed for %s: %w", provider, err)
+			if provider != cert.ManualProviderName {
+				if err := cert.Verify(domain, provider, env); err != nil {
+					return fmt.Errorf("pre-verify failed for %s: %w", provider, err)
+				}
+			} else {
+				fmt.Println("  · manual DNS: the build will stop and print the exact records to create — create them, then re-run `freehold build`")
 			}
 			_, _, pub, err := cc.CertIdent()
 			if err != nil {
@@ -98,7 +102,7 @@ var dnsCredCmd = &cobra.Command{
 func init() {
 	dnsCredCmd.Flags().String("domain", "", "Host the pre-verify targets (default: relay host from the recorded config, or the cp host with --slot cp)")
 	dnsCredCmd.Flags().String("slot", "relay", "Credential slot: relay | cp")
-	dnsCredCmd.Flags().String("provider", "", "DNS provider name (lego registry) — omit for the interactive picker")
+	dnsCredCmd.Flags().String("provider", "", "DNS provider name (lego registry, or \"manual\") — omit for the interactive ask")
 	dnsCredCmd.Flags().String("env", "", "Provider env as KEY=VAL,KEY=VAL (omit/empty for auto-detecting providers like route53)")
 	dnsCredCmd.Flags().String("config", config.DefaultPath(), "Config path to read the host from")
 }

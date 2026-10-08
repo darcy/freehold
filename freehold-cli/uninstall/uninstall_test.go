@@ -1,8 +1,10 @@
 package uninstall
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"freehold/contract/config"
@@ -18,37 +20,37 @@ func TestResolveUninstall(t *testing.T) {
 		Runner: config.RunnerRef{Addr: "127.0.0.1:8787", Pubkey: "aa"},
 		Lxc:    config.LxcSpec{Cp: config.LxcGuest{Vmid: &vmid}},
 	}
-	if h, err := resolveUninstall(base, "root@host.flag"); err != nil || h != "root@host.flag" {
+	if h, err := resolveUninstall(base, "root@host.flag", false); err != nil || h != "root@host.flag" {
 		t.Fatalf("--host must win: h=%q err=%v", h, err)
 	}
-	if h, err := resolveUninstall(base, ""); err != nil || h != "root@host.recorded" {
+	if h, err := resolveUninstall(base, "", false); err != nil || h != "root@host.recorded" {
 		t.Fatalf("recorded host must be used: h=%q err=%v", h, err)
 	}
 	noHost := *base
 	noHost.Host = ""
-	if h, err := resolveUninstall(&noHost, ""); err != nil || h != "" {
+	if h, err := resolveUninstall(&noHost, "", false); err != nil || h != "" {
 		t.Fatalf("host is optional: h=%q err=%v", h, err)
 	}
 	thin := *base
 	thin.Runner = config.RunnerRef{}
-	if h, err := resolveUninstall(&thin, ""); err != nil || h != "root@host.recorded" {
+	if h, err := resolveUninstall(&thin, "", false); err != nil || h != "root@host.recorded" {
 		t.Fatalf("thin box with a host must resolve transiently: h=%q err=%v", h, err)
 	}
 	nowhere := *base
 	nowhere.Runner = config.RunnerRef{}
 	nowhere.Host = ""
-	if _, err := resolveUninstall(&nowhere, ""); err == nil {
+	if _, err := resolveUninstall(&nowhere, "", false); err == nil {
 		t.Fatal("no runner and no host must refuse")
 	}
 	noCp := *base
 	noCp.Lxc = config.LxcSpec{}
-	if _, err := resolveUninstall(&noCp, ""); err == nil {
+	if _, err := resolveUninstall(&noCp, "", false); err == nil {
 		t.Fatal("a missing CP vmid must refuse on the local-runner path")
 	}
 	noCpThin := *base
 	noCpThin.Runner = config.RunnerRef{}
 	noCpThin.Lxc = config.LxcSpec{}
-	if _, err := resolveUninstall(&noCpThin, ""); err != nil {
+	if _, err := resolveUninstall(&noCpThin, "", false); err != nil {
 		t.Fatalf("transient path must not require the CP vmid: %v", err)
 	}
 }
@@ -91,5 +93,58 @@ func TestWipeLocalProfile(t *testing.T) {
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
 		t.Fatal("profile state dir not wiped")
+	}
+}
+
+// TestGatewayVmid pins the leak fix: a profile with no recorded [lxc.gateway]
+// still destroys the gateway by adopting the bootstrap-named <name>-gateway
+// from pct list; a recorded vmid short-circuits the probe; a host without the
+// guest (flat-LAN world) or a failed probe skips the gateway.
+func TestGatewayVmid(t *testing.T) {
+	u32 := func(v uint32) *uint32 { return &v }
+	list := func(rows ...string) string {
+		return "VMID Status Name\n" + strings.Join(rows, "\n") + "\n"
+	}
+	world := list("100 running librem-relay", "109 running librem-gateway")
+	cfg := func() *config.Config {
+		return &config.Config{Name: "librem", RelayURL: "https://relay.librem.example"}
+	}
+	probe := func(out string, err error) func() (string, error) {
+		return func() (string, error) { return out, err }
+	}
+
+	if gw := gatewayVmid(cfg(), probe(world, nil)); gw == nil || *gw != 109 {
+		t.Fatalf("unrecorded gateway = %v, want 109 (adopted by name)", gw)
+	}
+	rec := cfg()
+	rec.Lxc.Gateway.Vmid = u32(114)
+	called := false
+	if gw := gatewayVmid(rec, func() (string, error) { called = true; return "", nil }); gw == nil || *gw != 114 {
+		t.Fatalf("recorded gateway = %v, want 114", gw)
+	} else if called {
+		t.Fatal("a recorded vmid must short-circuit the probe")
+	}
+	if gw := gatewayVmid(cfg(), probe(list("100 running librem-relay"), nil)); gw != nil {
+		t.Fatalf("flat-LAN world = %v, want nil (no gateway guest)", gw)
+	}
+	if gw := gatewayVmid(cfg(), probe("", fmt.Errorf("door down"))); gw != nil {
+		t.Fatalf("failed probe = %v, want nil (skip, never block the uninstall)", gw)
+	}
+}
+
+// --destroy-host relaxes the CP-vmid requirement: the instance's
+// destruction removes the guests wholesale (a half-installed world has no
+// recorded vmid to demand).
+func TestResolveUninstallDestroyHostRelaxesVmid(t *testing.T) {
+	noCp := &config.Config{
+		Host:   "root@host.recorded",
+		Runner: config.RunnerRef{Addr: "127.0.0.1:8787", Pubkey: "aa"},
+		Lxc:    config.LxcSpec{},
+	}
+	if _, err := resolveUninstall(noCp, "", false); err == nil {
+		t.Fatal("without --destroy-host the missing CP vmid must refuse")
+	}
+	if h, err := resolveUninstall(noCp, "", true); err != nil || h != "root@host.recorded" {
+		t.Fatalf("--destroy-host must proceed without a vmid: h=%q err=%v", h, err)
 	}
 }

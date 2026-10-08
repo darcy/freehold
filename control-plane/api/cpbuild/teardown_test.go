@@ -1,6 +1,7 @@
 package cpbuild
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -50,5 +51,28 @@ func TestTenantFromName(t *testing.T) {
 	}
 	if _, err := tenantFromName("nope"); err == nil {
 		t.Fatal("tenantFromName(nope) must error")
+	}
+}
+
+// TestWorldTeardownCfgKeepsGateway pins the CP-driven teardown's scope: relay
+// + k3s go; the CP, its co-located runner, and the GATEWAY stay — the gateway
+// is the preserved CP's default route, DNS resolver, and box→console path
+// (nothing CP-side can re-create it), so even a spec carrying a resolved
+// gateway vmid must not widen the managed set. The gateway drops with
+// `uninstall`, which adopts it by name on the box side.
+func TestWorldTeardownCfgKeepsGateway(t *testing.T) {
+	spec := &Spec{Name: "librem", RelayHost: "relay.librem.example", RelayLxc: 100, K3sVmid: 102, GatewayLxc: 109}
+	cfg := worldTeardownCfg(spec)
+	if !slices.Equal(cfg.Managed, []string{"relay", "k3s"}) {
+		t.Fatalf("managed = %v, want [relay k3s] (the preserved CP's route/resolver/access path survives)", cfg.Managed)
+	}
+	if gw, ok := cfg.Vmid["gateway"]; ok {
+		t.Fatalf("vmid map carries gateway = %v, want absent (teardown keeps the gateway)", gw)
+	}
+	if got := cfg.Vmid["relay"]; got == nil || *got != 100 {
+		t.Fatalf("relay vmid = %v, want 100", got)
+	}
+	if got := cfg.Vmid["k3s"]; got == nil || *got != 102 {
+		t.Fatalf("k3s vmid = %v, want 102", got)
 	}
 }

@@ -25,7 +25,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
         │  signed, addressable, audited
         │  NO LLM, NO router, NO key vault in either
         ▼
-   Target: pct LXC (relay/CP) | qm VM (VPS host) | k8s (MVP only)
+   Target: pct LXC (relay/CP/gateway) | pct LXC on a VPS host | k8s (MVP only)
         │
         └──backups──► freehold snapshot (the plane) · freehold export (the data bundle)
                       · freehold backup (restic → sftp/B2/any URI) | PBS | TrueNAS
@@ -255,7 +255,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (CP bootstrap); `freehold build` runs the world through the CP:
     door → runner → durable plane → boot the CP LXC → **`install`** (box one)
     = the CP only (console + co-located runner) — no secrets are collected.
-    `freehold install` requires **`--name` + `--host`**: it scopes the
+    `freehold install` requires **`--name`**, and **`--host` unless the host
+    provider creates it**: it scopes the
     config + state to `profiles/<name>/` instead of the base home, records the
     host + access mode in that profile, and names the guest LXCs
     `<name>-<relay|cp|k3s>`. A life-cycle gate **mints** when no profile exists,
@@ -401,9 +402,20 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `providers/proxmox/` is the Proxmox VE substrate: guest create/exec/list,
     LVM/ZFS/thin-pool storage, the PVE `local-lvm` pointer discipline, and the
     pct stage/DNS command builders (`providers/proxmox/drive/` holds the
-    storage driver). A provider is substrate ops, not a lifecycle — there is no
-    `provider.Install()`; the composition roots (`freehold-cli/`,
+    storage driver). `providers/vultr/` is the created-host substrate: the
+    Vultr API client + the PVE-on-Debian install (a cloud instance has no
+    nested virt — LXC-only). A provider is substrate ops, not a lifecycle —
+    there is no `provider.Install()`; the composition roots (`freehold-cli/`,
     `control-plane/`) decide the sequence and inject the provider.
+*   **The HOST-provisioner seam** (`platform/provisioning` + `providers/registry`):
+    each substrate declares what its host needs from the operator (`Needs()` —
+    the credential prompted no-echo, the plain answers, the substrate
+    defaults) and owns the host lifecycle (`Prepare`/`InstallDoorKey`/
+    `Destroy`) — the reached-host shape (proxmox: the operator's box, the
+    paste-gate door) and the created-host shape (vultr: the instance born
+    with the door key + PVE installed, destroyed via the API) are the two
+    implementations. The installer asks the registry's provider generically —
+    no substrate names or asks live there.
 
 *   **`platform/migrations/`** enumerates the CP's shipped migration scripts
     (`<stateDir>/migrations/scripts/<epoch>.sh`) and tracks completion with
@@ -529,7 +541,11 @@ The operator asks in conversation, the department interviews, and the CPA stages
 runner: `provision_runner` mints a NEW capability door (never widens one), grants the
 requester onto it live, and re-applies the pod; `revoke_runner` takes it back, leg by leg,
 `[verified]` or `[UNVERIFIED]`. Credentials never ride chat — an api door provisions empty
-and the operator fills it on the door's console page. Governed by the `agent_grants` switch
+and the operator fills it on the door's console page; a **kube slot** (`kind=kubernetes`,
+named `kube-api-<slot>`) is the sealed-from-the-cluster exception: Compute carves the
+namespace-scoped slot through `kube-api-root` (its audited leg), the CP reads the SA token
+and seals it, and the build re-creates the slot from the record every rebuild. Governed by
+the `agent_grants` switch
 (`confirm` / `auto` / `off`) and guarded so the agent surface can only take back what the
 agent flow gave. The full model — the trust reasoning, the credential handling, the
 resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners and secrets").
@@ -800,7 +816,6 @@ funnel for substrate and service work (`pct`, `qm`, `zfs`, `lvm`, `systemctl`,
 | Kind | Example target | Connector | State |
 | --- | --- | --- | --- |
 | `pct` LXC | relay (`<name>-relay`) | `pve` | `lxc.<role>` |
-| `qm` KVM | VPS host (`vps:<id>`) | `ssh` (KeyPath) | `vm.<id>` |
 | `pct` LXC | k3s (`<name>-k3s`) | `k8s` | `lxc.k3s` |
 | `pct` LXC | control plane | `local` | `cp.<role>` |
 | `vm` | … | `api` | `provider.<name>` |

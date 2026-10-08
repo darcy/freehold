@@ -163,6 +163,14 @@ func (r *Resume) Begin() (*pendingOrder, error) {
 	return po, nil
 }
 
+// instructional marks a provider whose Present returns the record to create
+// as an instruction error (the manual shim) instead of placing anything. Its
+// order is persisted ON the failure so the retry resumes the same order — and
+// thus the same per-order TXT value the operator was shown. A failed API
+// provider's Present must NOT persist: the resume path never re-places, so a
+// persisted-but-never-placed order would wait on a record nobody will create.
+type instructional interface{ Instructional() bool }
+
 // place presents the DNS-01 challenge for a pending order and persists the
 // resumable state. It does NOT wait for propagation — the caller (worldCert)
 // places EVERY slot's challenge first, then waits for all of them, so challenge
@@ -185,10 +193,16 @@ func (r *Resume) place(po *pendingOrder) error {
 	if err != nil {
 		return err
 	}
-	if err := r.Provider.Present(r.Domain, chlg.Token, keyAuth); err != nil {
-		return fmt.Errorf("present challenge: %w", err)
-	}
+	perr := r.Provider.Present(r.Domain, chlg.Token, keyAuth)
 	info := dns01.GetChallengeInfo(r.Domain, keyAuth)
+	if perr != nil {
+		if m, ok := r.Provider.(instructional); ok && m.Instructional() {
+			if err := r.persist(po, info.EffectiveFQDN, info.Value); err != nil {
+				return err
+			}
+		}
+		return fmt.Errorf("present challenge: %w", perr)
+	}
 	return r.persist(po, info.EffectiveFQDN, info.Value)
 }
 
@@ -283,7 +297,8 @@ func (r *Resume) PropagationWait(po *pendingOrder) error {
 		return fmt.Errorf("resume propagation: order %s has no placed challenge recorded", po.orderURL)
 	}
 	if err := waitAuthoritativePropagation(st.ChallengeName+".", st.ChallengeValue, 3*time.Minute); err != nil {
-		return fmt.Errorf("dns-01 propagation: %w", err)
+		return fmt.Errorf("dns-01 propagation: %w — expected %s TXT %q (manual DNS: create it in your console, then re-run `freehold build`)",
+			err, st.ChallengeName, st.ChallengeValue)
 	}
 	return nil
 }

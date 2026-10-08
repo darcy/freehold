@@ -193,6 +193,21 @@ func TestDataPromptComposesSnapshotSkill(t *testing.T) {
 	}
 }
 
+// TestDataPromptComposesBackblazeSkill: data's prompt also carries the
+// off-site runbook — the restic leg, the timer render, and the rule that
+// init/credentials never pass through the agent.
+func TestDataPromptComposesBackblazeSkill(t *testing.T) {
+	got := SystemPrompt("data", "the data plane", "", "")
+	for _, want := range []string{"The backblaze skill", "backup run", "install-timer", "never runs from you", "restore latest"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("data's composed prompt lacks %q", want)
+		}
+	}
+	if other, _ := DepartmentPrompt("ai"); strings.Contains(other, "install-timer") {
+		t.Errorf("ai's prompt must not carry data's backblaze skill")
+	}
+}
+
 func TestSystemPromptFallsBackToCustomTemplate(t *testing.T) {
 	got := SystemPrompt("waldo", "look after the garden", "", "")
 	if !strings.Contains(got, "You are waldo") || !strings.Contains(got, "look after the garden") {

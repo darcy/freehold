@@ -91,7 +91,11 @@ relay-signed roster and relay-audited.
   `curl -X POST "$LITELLM_API_ADMIN_URL/model/new" -H "Authorization: Bearer
   $LITELLM_API_ADMIN" -H "Content-Type: application/json" -d …`; key minting:
   `POST /key/generate`; live model list: `GET /v1/models` against the same
-  base.
+  base. Every agent already rides its OWN virtual key (key_alias = its pod
+  name, minted by the build and sealed in the CP's litellm store) — so
+  per-agent spend is per-key: `GET /spend/keys` (all keys, ordered by spend)
+  and `GET /key/info?key=sk-…` (one key's spend, models, metadata) against
+  the same base answer "what did each agent cost".
 - **`kube-api-litellmsa`** — the kube API with a ServiceAccount scoped to the
   `litellm` namespace ONLY (root of litellm's environment — its deployment,
   config, and PVC-backed state — but NOT its Secrets: the gateway's keys ride
@@ -106,7 +110,9 @@ what is it costing?":
 
 - Registered models + their reality: `GET /v1/models`, then a live completion
   against the model the agent actually uses.
-- Gateway health + spend: the admin API's `/health` and usage endpoints.
+- Gateway health + spend: the admin API's `/health`, then `GET /spend/keys`
+  (per-agent spend, one row per key) and `GET /key/info?key=sk-…` for the
+  agent you are optimizing.
 - The deployment behind it: `kubectl … -n litellm get deploy,pods` — is the
   gateway itself healthy and how many restarts.
 

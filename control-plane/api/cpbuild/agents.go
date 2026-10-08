@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/state"
 	"freehold/platform/provisioning/planebase"
+	cert "freehold/platform/services/certificates/letsencrypt"
 	dnsman "freehold/platform/services/externaldns/cloudflare"
 )
 
@@ -319,21 +321,37 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 		if a.Name == "" || departments[a.Name] {
 			continue
 		}
-		channels, private := reconciledChannels(a)
-		if _, err := tools.CreateAgent(a.Name, a.Purpose, channels, private, a.Model); err != nil {
-			return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
+		if err := s.reassertAgentRow(reg, tools, a); err != nil {
+			return err
 		}
-		_ = reg.SetChannels(a.Name, channels, private)
-		// Re-assert the model choice: RegisterAgent resets the row, so the
-		// persisted alias has to ride back on (the pod was just re-applied
-		// with it).
-		_ = reg.SetModel(a.Name, a.Model)
-		// Re-assert grants for agents holding capability runners (the
-		// agent-provisioned dynamic doors re-assert alongside the departments';
-		// a no-op when the agent holds none).
-		if err := s.grantDepartmentRunner(a.Name, a.Pubkey); err != nil {
-			return fmt.Errorf("re-assert runner grants %s: %w", a.Name, err)
-		}
+	}
+	return nil
+}
+
+// reassertAgentRow re-applies one registry row's pod through the create flow
+// (idempotent: the identity is first-run-wins, channel joins are guarded, the
+// manifest is delete-then-apply) and re-asserts its channels, model choice and
+// capability-runner grants. The reconcile loop's per-row body, shared with the
+// boot-time reboot revive (reboot_reconcile.go).
+func (s *Spec) reassertAgentRow(reg *agenttools.Registry, tools *agent.Tools, a console.AgentInfo) error {
+	channels, private := reconciledChannels(a)
+	if _, err := tools.CreateAgent(a.Name, a.Purpose, channels, private, a.Model); err != nil {
+		return fmt.Errorf("reconcile created agent %s: %w", a.Name, err)
+	}
+	_ = reg.SetChannels(a.Name, channels, private)
+	// RegisterAgent (inside CreateAgent) RESET the row — re-assert purpose
+	// alongside channels/model, or the next re-apply ships an empty purpose
+	// and the system prompt silently loses the purpose paragraph.
+	_ = reg.SetPurpose(a.Name, a.Purpose)
+	// Re-assert the model choice: RegisterAgent resets the row, so the
+	// persisted alias has to ride back on (the pod was just re-applied
+	// with it).
+	_ = reg.SetModel(a.Name, a.Model)
+	// Re-assert grants for agents holding capability runners (the
+	// agent-provisioned dynamic doors re-assert alongside the departments';
+	// a no-op when the agent holds none).
+	if err := s.grantDepartmentRunner(a.Name, a.Pubkey); err != nil {
+		return fmt.Errorf("re-assert runner grants %s: %w", a.Name, err)
 	}
 	return nil
 }
@@ -434,24 +452,29 @@ func (s *Spec) certExpiryFromDurable(slot string) string {
 // manageDomainDNS upserts the public A records (relay/cp -> proxy) on the CP's
 // stored DNS credential (the server-side home of the box's manageDomainDNS).
 // Best-effort at build time: no edge, no proxy IP, or no stored relay cred is a
-// no-op; a provider other than Cloudflare is reported and skipped.
-func (s *Spec) manageDomainDNS() error {
+// no-op. MANUAL DNS returns a report note — the build has no API access, so
+// the operator is shown the records to create (or confirmation they already
+// resolve); a later build re-checks. A provider with no registered Manager
+// (e.g. a full-registry flag-path credential) is skipped with a note — its
+// credential still serves cert DNS-01; only record management is missing.
+func (s *Spec) manageDomainDNS() (string, error) {
 	if s.ProxyIP == "" || s.RelayHost == "" {
-		return nil
+		return "", nil
 	}
 	provider, env, err := s.dnsCredFromStore("relay")
 	if err != nil {
 		// No credential stored yet (manual DNS) — nothing to manage.
-		return nil
+		return "", nil
 	}
-	if provider != "cloudflare" {
-		// A non-Cloudflare credential is valid for cert DNS-01; A-record
-		// management is Cloudflare-only, so skip it rather than fail the build.
-		return nil
+	if provider == cert.ManualProviderName {
+		return s.manualDNSNote(), nil
+	}
+	if !dnsman.CanManage(provider) {
+		return "DNS: no A-record manager for " + provider + " — skipped (the credential still serves cert DNS-01)", nil
 	}
 	m, err := dnsman.For(provider, env)
 	if err != nil {
-		return err
+		return "", err
 	}
 	ip := s.ProxyIP
 	for _, host := range []string{s.RelayHost, s.CpHost} {
@@ -459,8 +482,58 @@ func (s *Spec) manageDomainDNS() error {
 			continue
 		}
 		if err := m.UpsertA(host, ip); err != nil {
-			return fmt.Errorf("manage DNS for %s: %w", host, err)
+			return "", fmt.Errorf("manage DNS for %s: %w", host, err)
 		}
 	}
-	return nil
+	return "", nil
+}
+
+// manualDNSNote verifies the manual A records resolve to the proxy IP, and
+// returns either the confirmation or the exact records to create (the report
+// is the only surface that reaches the operator — the build is a single
+// request whose output prints at the end).
+func (s *Spec) manualDNSNote() string {
+	hosts := []string{s.RelayHost}
+	if s.CpHost != "" {
+		hosts = append(hosts, s.CpHost)
+	}
+	var missing, verified []string
+	for _, h := range hosts {
+		if manualAResolves(h, s.ProxyIP) {
+			verified = append(verified, h)
+		} else {
+			missing = append(missing, h)
+		}
+	}
+	switch {
+	case len(missing) == 0:
+		return "MANUAL DNS: A records verified — " + strings.Join(hosts, ", ") + " -> " + s.ProxyIP
+	case len(verified) == 0:
+		lines := []string{"MANUAL DNS — create these A records in your DNS console (a later `freehold build` re-checks):"}
+		for _, h := range missing {
+			lines = append(lines, "    "+h+"  A  "+s.ProxyIP)
+		}
+		return strings.Join(lines, "\n")
+	default:
+		lines := []string{"MANUAL DNS — " + strings.Join(verified, ", ") + " verified; still to create (a later `freehold build` re-checks):"}
+		for _, h := range missing {
+			lines = append(lines, "    "+h+"  A  "+s.ProxyIP)
+		}
+		return strings.Join(lines, "\n")
+	}
+}
+
+// manualAResolves reports whether host resolves (recursively — fine for an
+// A-record existence check; the value comparison catches a stale cache) to ip.
+func manualAResolves(host, ip string) bool {
+	addrs, err := net.LookupHost(strings.TrimSuffix(host, "."))
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if a == ip {
+			return true
+		}
+	}
+	return false
 }

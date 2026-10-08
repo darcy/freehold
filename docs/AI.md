@@ -32,12 +32,24 @@ AI owns the gateway directly; the runtime is what all agents share.
     (`stageLitellmAliases`, straight from the store — terraform deploys the gateway but
     registers no model): `Code` (coding agents), `General` (the default for custom
     agents), `Freehold` (the core agents — the CPA + departments, pinned),
-    `ExtraThinking` (complex architecture / deep thinking). A pod's model resolves by
+    `ExtraThinking`     (complex architecture / deep thinking). A pod's model resolves by
     class (`litellmModelFor`): core identities run the core alias; a custom agent runs
     its persisted choice, defaulting to `General` — and an agent's choice rides its
     registry row, so a rebuild re-applies the same alias. Retargeting the aliases or
     adding providers is the AI department's `litellm-api-admin` work, never a build side
     effect.
+*   **Keys and spend.** Every agent rides its OWN gateway virtual key —
+    `key_alias` = its pod name, `models` restricted to the alias set — minted
+    by the create flow at first apply and persisted sealed in the CP's
+    litellm store (`agentkey-<pod>`), so a rebuild re-seeds the same key
+    instead of minting orphans; no pod holds the gateway master key. A
+    removed agent's key is revoked by its stored token (the gateway's
+    key_alias drifts stale after a rename; spend follows the token); a
+    rename re-keys the record
+    under the new pod name, so the same key — and its spend history —
+    follows the identity. The gateway logs spend per key in its Postgres;
+    per-agent spend is visible through the `litellm-api-admin` door
+    (`GET /spend/keys`, `GET /key/info`).
 *   **The pod.** A bare Pod in the `agents` namespace: its own Nostr identity (Secret), a
     workspace on the durable plane (`/srv/data/k8s-volumes/agent-home/<pod>`), a prompt
     mounted from a ConfigMap and re-read on every spawn, and a tool bridge fetched from the
@@ -155,12 +167,13 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     | `dnsmasq-local-root` | local (CP guest) | 8796 | network |
     | `cp-local-root` | local (CP guest) | 8797 | data |
     | `cloudflare-api-<zone>` | api, one per stored DNS zone | from 8798 | network |
-    | dynamic (`provision_runner`) | ssh / any api kind (verify arm as data) / local | from 8800 | per grant |
+    | dynamic (`provision_runner`) | ssh / any api kind (verify arm as data) / kube slots (`kube-api-<slot>`) / local | from 8800 | per grant |
 
 *   **Grants on the fly.** The CPA can provision capability mid-conversation:
     `provision_runner` stages a NEW runner (keypair, sealed credential, private audit
     channel, a systemd unit on the CP guest), records it as a dynamic capability
-    (re-staged adopt-only on every build), grants the named agents onto its roster live,
+    (re-staged on every build — adopt-only, except a kube slot's record, whose slot is
+    re-created and whose token is re-sealed), grants the named agents onto its roster live,
     and re-applies the grantees' pods with the new coords. It can also enroll a runner
     RESIDENT on a target the agent itself provisioned (`hosted=self`: the guest holds the
     runner-client, `runner enroll` mints the identity ON the guest, pods dial its LAN
@@ -173,7 +186,14 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     agent names the probe (`"<METHOD> <path> [auth] [want] [insecure]"`, e.g. `GET
     /user/tokens/verify bearer`), it ships in the door's package (with its optional
     `probe_body`), and the runner composes its self-check curl
-    from it — a new service kind is a probe, never a rebuild. Confirmation is governed by
+    from it — a new service kind is a probe, never a rebuild. A **kube slot**
+    (`kind=kubernetes`, named `kube-api-<slot>`) is the exception that still holds the
+    rule: the slot (a namespace, its ns-admin ServiceAccount + Role, an optional quota,
+    the token Secret) is carved by COMPUTE through `kube-api-root` — the department's
+    audited leg, never the CPA's — and the CP then reads the SA token from the slot and
+    seals it CP-side, so the door is live with no console fill; the record re-creates the
+    slot and re-seals the token on every rebuild, the same role `doors.tf` plays for the
+    static kube doors. Confirmation is governed by
     `agent_grants` on the CP state —
     `confirm` (default: in-thread yes, or a DM), `auto`, or `off` (the server-side kill
     switch, `freehold-console grants-mode`) — but the discipline itself is the granting
@@ -244,7 +264,11 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 
 ## Known gaps
 
-*   Every pod holds the gateway's **master key** — no scoped per-agent keys.
+*   A gateway whose Postgres was wiped (a full teardown of the k3s state)
+    invalidates every minted agent key: the pods 401 until the CP store's
+    `agentkey-<pod>` records are cleared — the next reconcile then mints
+    fresh and the seed rotates every pod's Secret onto the new key, no
+    hand-deleted Secrets.
 *   One model — the aliases all point at the operator's first-build provider
     choice, so every alias routes to the same underlying model today; adding providers or
     per-alias variety is AI's `litellm-api-admin` work. Aliases are ensured only for the
@@ -270,8 +294,9 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 
 ## Future
 
-*   Scoped per-agent LiteLLM keys and budgets; multi-model management (the default
-    alias set exists; variety behind the aliases does not).
+*   Per-agent LiteLLM **budgets** (the per-agent keys and spend tracking are
+    live; a `max_budget` cap and rotation policy are not); multi-model
+    management (the default alias set exists; variety behind the aliases does not).
 *   **Local AI hosting:** a GPU box (RTX 3090, DGX Spark) as a LiteLLM upstream, provisioned
     and tuned by AI through a door, with telemetry.
 *   **Agent workspaces + git/GitHub:** a workspace LXC per agent, commits verified durable in
