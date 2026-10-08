@@ -911,6 +911,25 @@ func (s *Spec) durableFullchain(k3sVmid uint32, slot string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 }
 
+// resolveCaddyPVDir is the shared sh snippet that resolves the caddy-data
+// PVC's backing dir inside the k3s guest. A fresh world's services phase can
+// lag the k3s API by seconds: an EMPTY $PDIR here once silently misdirected
+// the cert write onto the guest rootfs at /tls/<slot> (set -e never tripped;
+// the mirror looked fine; the pod then crashlooped on the missing cert and
+// the PV migration died waiting for a never-ready caddy). Bound the race,
+// then fail LOUDLY — the next build re-seeds, never a green install with the
+// cert on the rootfs.
+const resolveCaddyPVDir = `PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+i=0
+while [ -z "$PDIR" ] && [ "$i" -lt 9 ]; do
+  sleep 10
+  PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+  [ -n "$PV" ] && PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+  i=$((i + 1))
+done
+[ -n "$PDIR" ] || { echo "FATAL: caddy-data PVC never resolved (k3s API up? services applied?)"; exit 1; }`
+
 // durableKeyPresent reports whether the durable mirror also holds a non-empty
 // key.pem (a fullchain alone is not enough to serve TLS).
 func (s *Spec) durableKeyPresent(k3sVmid uint32, slot string) bool {
@@ -925,8 +944,7 @@ func (s *Spec) seedCaddyCertFromDurable(k3sVmid uint32, slot string) error {
 pct exec %d -- bash -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
-PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+` + resolveCaddyPVDir + `
 DIR=$PDIR/tls/%s
 SRC=%s
 mkdir -p "$DIR"
@@ -1260,8 +1278,7 @@ pct push %d /tmp/fh-key-%s.pem /tmp/key-%s.pem
 pct exec %d -- sh -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
-PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+` + resolveCaddyPVDir + `
 DIR=$PDIR/tls/%s
 DUR=%s
 mkdir -p "$DIR" "$DUR"
