@@ -1679,7 +1679,11 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// not here, so the world_migrate tool gets it too.
 				report = spec.appendMigrations(report)
 				report = spec.appendMemoryPlane(report)
-				report = spec.appendAgentToolsAudience(report)
+				rep, aerr := spec.appendAgentToolsAudience(report)
+				report = append(report, rep...)
+				if aerr != nil {
+					return "", fmt.Errorf("world-build agent-tools coords: %w", aerr)
+				}
 			} else {
 				// Console executor: write the files, then reload the serve process.
 				// The serve is deliberately left RUNNING across this whole block: the
@@ -1703,7 +1707,11 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// process that comes up loads their result as its starting state.
 				report = spec.appendMigrations(report)
 				report = spec.appendMemoryPlane(report)
-				report = spec.appendAgentToolsAudience(report)
+				rep, aerr := spec.appendAgentToolsAudience(report)
+				report = append(report, rep...)
+				if aerr != nil {
+					return "", fmt.Errorf("world-build agent-tools coords: %w", aerr)
+				}
 				if err := spec.startAgentTools(); err != nil {
 					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
 				}
@@ -2104,26 +2112,29 @@ func (s *Spec) appendMigrations(report []string) []string {
 // dead audience, so every CP tool call fails signature verify while the
 // world otherwise looks healthy. Detection only — the repair (restore the
 // durable agent-tools state from backup, or a deliberate re-point + pod
-// re-create) is an operator decision, never an auto-write.
-func (s *Spec) appendAgentToolsAudience(report []string) []string {
+// re-create) is an operator decision, never an auto-write. The
+// pre-recording write FAILS the stage on a persistence error (the same
+// fail-loud contract as the cert seed): a green build whose restarted
+// console 503s world-migrate is exactly the defect this stage heals.
+func (s *Spec) appendAgentToolsAudience(report []string) ([]string, error) {
 	audience, aerr := s.agentToolsAudience()
 	if aerr != nil {
 		// The durable identity is unreadable — the very failure the line
 		// exists to surface. Say so; never misattribute another identity as
 		// the "live" audience.
-		return append(report, "WARN: agent-tools: "+aerr.Error()+" — pods' bridge audience is undeterminable; restore the durable agent-tools state from backup")
+		return append(report, "WARN: agent-tools: "+aerr.Error()+" — pods' bridge audience is undeterminable; restore the durable agent-tools state from backup"), nil
 	}
 	if audience == "" {
-		return report
+		return report, nil
 	}
 	if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), state.StateFile)); os.IsNotExist(err) {
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (no console state — nothing recorded to compare)")
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (no console state — nothing recorded to compare)"), nil
 	} else if err != nil {
-		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error()), nil
 	}
 	store, err := state.Open(s.consoleStateRoot())
 	if err != nil {
-		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error()), nil
 	}
 	rec := store.AgentToolsPubkey()
 	if rec == nil || *rec == "" {
@@ -2136,25 +2147,25 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 		// CP-guest form the box config itself records (the LAN dial both the
 		// console and login boxes reach).
 		if s.CpIP == "" {
-			return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — no cp IP to record the coords against)")
+			return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — no cp IP to record the coords against)"), nil
 		}
 		u := fmt.Sprintf("http://%s:%s", s.CpIP, AgentToolsPort)
 		if err := store.SetAgentToolsURL(&u); err != nil {
-			return append(report, "WARN: agent-tools: pre-recording write failed (url): "+err.Error())
+			return report, fmt.Errorf("pre-recording agent-tools write (url): %w", err)
 		}
 		if err := store.SetAgentToolsPubkey(&audience); err != nil {
-			return append(report, "WARN: agent-tools: pre-recording write failed (pubkey; the url landed): "+err.Error())
+			return report, fmt.Errorf("pre-recording agent-tools write (pubkey; the url landed): %w", err)
 		}
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" recorded to the console state")
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" recorded to the console state"), nil
 	}
 	switch {
 	case *rec == audience:
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" matches the console record")
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" matches the console record"), nil
 	default:
 		return append(report, "WARN: agent-tools: AUDIENCE DRIFT — the live identity is "+agenttools.ShortHex(audience)+
 			" but the console/box profile records "+agenttools.ShortHex(*rec)+
 			": every existing agent pod signs the stale pubkey and every CP tool call fails signature verify. "+
-			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods.")
+			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods."), nil
 	}
 }
 
