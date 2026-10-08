@@ -432,6 +432,7 @@ func TestSafeNext(t *testing.T) {
 		"":                                 "",
 		"/x":                               "/x",
 		"//evil.com":                       "",
+		`/\evil.com`:                       "",
 		"https://app.cp.example.com/y":     "https://app.cp.example.com/y",
 		"https://cp.example.com/z":         "https://cp.example.com/z",
 		"https://evil.com":                 "",

@@ -721,6 +721,11 @@ func IsCommunityMemberAuth(dialURL, authURL string, authSecret []byte, relayPubk
 		return false, fmt.Errorf("relay pubkey or member pubkey missing")
 	}
 	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
+		// limit 1, newest-first (NIP-01): the relay's list is ONE
+		// replaceable event republished on every membership change, so the
+		// newest IS the current list. Deliberately NO freshness bound — a
+		// quiet relay's list is legitimately old (it only re-emits on a
+		// change), and bounding it would lock out exactly the calm worlds.
 		"kinds": []interface{}{wire.KINDNip43Membership}, "authors": []interface{}{relayPubkey}, "limit": 1,
 	}})
 	if err != nil {

@@ -341,7 +341,9 @@ func (s *Server) safeNext(next string) string {
 	if next == "" {
 		return ""
 	}
-	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
+	// A path on this origin — but not "//host" and not "/\host": browsers
+	// normalize the backslash form to "//host", so both are open redirects.
+	if strings.HasPrefix(next, "/") && (len(next) < 2 || (next[1] != '/' && next[1] != '\\')) {
 		return next
 	}
 	if s.PublicOrigin == nil || *s.PublicOrigin == "" {
